@@ -193,7 +193,8 @@ describe("where a thread click lands", () => {
 
 describe("open beside", () => {
   it("from one pane, two columns: pane 2", () => {
-    expect(besideTarget(defaultWorkspace(), [1])).toEqual({ preset: "cols2", pane: 2 });
+    // A split since WP-G2: pane 2 goes right after pane 1.
+    expect(besideTarget(defaultWorkspace(), [1])).toEqual({ preset: "cols2", pane: 2, source: 1 });
   });
 
   it("the next drawn pane to the right of the focused one", () => {
@@ -202,7 +203,7 @@ describe("open beside", () => {
   });
 
   it("from the right of two columns, a third column", () => {
-    expect(besideTarget(shaped(["chat", "chat"], "cols2", 2), [1, 2])).toEqual({ preset: "cols3", pane: 3 });
+    expect(besideTarget(shaped(["chat", "chat"], "cols2", 2), [1, 2])).toEqual({ preset: "cols3", pane: 3, source: 2 });
   });
 
   it("from the last pane of a grid, round to the first", () => {
@@ -276,12 +277,36 @@ describe("eight panes (WP-G1)", () => {
     expect(sidebarPanes(w, [1, 5, 2], 5)).toEqual([1, 5, 2]);
   });
 
-  it("opens beside into the pane ⊞ would bring back there, by id", () => {
+  it("opens beside by a split into a free id, so the panes ⊞ hid keep what they showed (WP-G2)", () => {
     const one = setPreset(parseWorkspace(JSON.stringify({ preset: "cols3", order: [1, 5, 2],
                                                           panes: [{ view: "chat" }, { view: "chat" }] })), "single");
     expect(one.kept).toEqual([5, 2]);
-    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 5 });
+    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 3, source: 1 });
     const two = setPreset(one, "cols2");
-    expect(besideTarget(focusPane(two, 5), [1, 5])).toEqual({ preset: "cols3", pane: 2 });
+    expect(besideTarget(focusPane(two, 5), [1, 5])).toEqual({ preset: "cols3", pane: 3, source: 5 });
+  });
+
+  it("takes the oldest hidden pane with no unsaved edit when every id is used, never a dirty one", () => {
+    // Eight panes, ⊞ to one: 2…8 hidden, 8 the oldest.
+    const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
+    expect(one.kept).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 8, source: 1 });
+    expect(besideTarget(one, [1], [8, 7])).toEqual({ preset: "cols2", pane: 6, source: 1 });
+    // All of them dirty: ⊞'s grow, as before (the window then refuses to switch a dirty pane).
+    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 2 });
+  });
+});
+
+describe("with pane 1 closed (WP-G2): the fallbacks are the first pane in reading order (U36/U37)", () => {
+  // Only pane 3 left, showing a file; nothing drawn yet (no window to fit).
+  const w = { ...defaultWorkspace(), preset: "single" as const, order: [3 as PaneNo], focused: 3 as PaneNo };
+
+  it("a chat with nothing drawn lands in that pane, which switches to chat", () => {
+    expect(chatTarget(w, [], null)).toEqual({ pane: 3, switches: true });
+  });
+
+  it("Open beside with nothing drawn splits after that pane", () => {
+    expect(besideTarget(w, [])).toMatchObject({ preset: "cols2", source: 3 });
+    expect(besideTarget(w, []).pane).not.toBe(3);
   });
 });

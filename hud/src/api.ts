@@ -215,7 +215,7 @@ export const api = {
   // always an id (`in`), never a path. The socket itself is in
   // components/Terminal.tsx, built from `location` with a fresh ticket.
   terminals: () => req<unknown>("/terminals").then(parseRows),
-  createTerminal: (body: { in: InSpec; cols?: number; rows?: number }) =>
+  createTerminal: (body: { in: InSpec; cols?: number; rows?: number; readable?: boolean }) =>
     req<unknown>("/terminals", json(body)).then((r) => {
       const row = parseRow(r);
       if (!row) throw new ApiError(500, "the daemon answered without a terminal");

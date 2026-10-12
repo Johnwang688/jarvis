@@ -809,7 +809,7 @@ that is why every attach is announced (`terminal_attached`, below).
   a profile that `exec`s another shell configures `"bash"` and never marks,
   so it has no `sudo -k` either, and the HUD says so. `integrated`: the
   shell has marked a command (bash only).
-- `POST /terminals` `{in, cols?, rows?}` → 201 `row`. `in` is `"home"`,
+- `POST /terminals` `{in, cols?, rows?, readable?}` → 201 `row`. `in` is `"home"`,
   `{"thread": id}` (that thread's own folder, `cwd`), `{"project": id}` (its
   root) or `{"task": id}` (its worktree if it exists, else the root it was
   started under). **The folder is resolved from ids, never from a path
@@ -827,7 +827,10 @@ that is why every attach is announced (`terminal_attached`, below).
   running it under its own name would run something the owner did not
   name. The startup file must fit 8 KiB (a pipe's capacity even under
   `pipe-user-pages-soft`), is written without blocking, and a short write
-  is a 409, never a cut file or a wedged route.
+  is a 409, never a cut file or a wedged route. `readable` (a boolean,
+  default true; 2026-10-11, WP-G2) sets the "Jarvis can read" switch before
+  the shell runs, so a split's copy of a terminal Jarvis may not read is
+  never readable, not even for the round trip a `PATCH` would take.
 - `PATCH /terminals/{id}` `{readable: bool}` → `row`. Exactly that key.
 - `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
   use, 30 seconds, valid for this terminal only**; it is spent the moment it
@@ -1042,6 +1045,14 @@ What the HUD does with the terminal contract above (code in
   reads "no integration" at once. Both say sudo may cache there.
 - **`readable`**: each terminal's bar carries the "Jarvis can read" switch,
   `PATCH /terminals/{id}` with exactly `{readable}`.
+- **Split and × (WP-G2, 2026-10-11)**: splitting a pane that shows a terminal
+  is one `POST /terminals` with the `in` the source was opened with (the
+  window's remembered spec) and, unless the source's row says it is
+  readable, `readable: false` — the copy is unreadable from its first byte,
+  and a source the window does not know fails closed. A refused create (the cap's 409) leaves the copy on
+  the picker with the daemon's sentence; nothing retries. × on a pane showing
+  a terminal sends **nothing**: no `DELETE`, no new ticket — the socket stays
+  attached and the terminal becomes the panel's selected tab.
 - **`busy`**: × reads a `GET /terminals` sent after the click (never one
   already on its way) and, when the foreground process is not the shell,
   asks before `DELETE`; if the listing fails it asks anyway, saying it could
@@ -1128,7 +1139,8 @@ own server and is unaffected.
   (`keptOrigin`) and **dropped from storage** when it no longer passes; the
   parser keeps only a grant that is exactly the stored URL's origin on a
   non-default loopback port. Disabled under an approval card (and inert
-  behind its veil).
+  behind its veil). A split copies a Preview pane's URL, judged again
+  on load, and **never** its keep-origin grant (WP-G2).
 - **Why it is safe**: scripts plus same-origin amount to no sandbox only
   when the framed page is the parent's origin. The port check refuses the
   HUD's origin up front, and `frame-ancestors 'none'` on every HUD and API
