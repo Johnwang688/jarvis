@@ -611,14 +611,20 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
    hovering or focusing the tab brings × back. The dot is a zero-width item
    drawn over ×'s box (× goes transparent, never display:none, so it stays
    where it was and clickable), so becoming dirty moves nothing. Never amber
-   or red: those are "pending" and "error". */
+   or red: those are "pending" and "error". A save on its way (ED-2: a slow
+   disk, or a second Ctrl+S waiting for it) holds the same slot as a hollow
+   ring until it answers, dirty or not. */
 .edtab-dot { display: none; }
-.edtab-dot.on {
+.edtab-dot.on, .edtab-dot.saving {
   display: block; position: relative; flex: 0 0 0; width: 0; height: 8px; margin-right: -5px; pointer-events: none;
 }
 .edtab-dot.on::before {
   content: ""; position: absolute; top: 0; left: 5px; width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-2);
+}
+.edtab-dot.saving::before {
+  content: ""; position: absolute; top: 0; left: 5px; width: 8px; height: 8px; border-radius: 50%;
+  box-sizing: border-box; background: transparent; border: 1.5px solid var(--text-2);
 }
 .edtab-x {
   flex: 0 0 18px; width: 18px; padding: 0; text-align: center; line-height: 14px; border: none; background: none;
@@ -626,9 +632,11 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 }
 .edtab-x:hover { color: var(--text); background: var(--bg-3); }
 .edtab:not(.on):not(:hover) .edtab-x { visibility: hidden; }
-.edtab-dot.on + .edtab-x { opacity: 0; }
-.edtab:hover .edtab-dot.on::before, .edtab:focus-visible .edtab-dot.on::before { display: none; }
-.edtab:hover .edtab-dot.on + .edtab-x, .edtab:focus-visible .edtab-dot.on + .edtab-x { opacity: 1; visibility: visible; }
+.edtab-dot.on + .edtab-x, .edtab-dot.saving + .edtab-x { opacity: 0; }
+.edtab:hover .edtab-dot.on::before, .edtab:focus-visible .edtab-dot.on::before,
+.edtab:hover .edtab-dot.saving::before, .edtab:focus-visible .edtab-dot.saving::before { display: none; }
+.edtab:hover .edtab-dot.on + .edtab-x, .edtab:focus-visible .edtab-dot.on + .edtab-x,
+.edtab:hover .edtab-dot.saving + .edtab-x, .edtab:focus-visible .edtab-dot.saving + .edtab-x { opacity: 1; visibility: visible; }
 /* Amber: it waits on the owner's decision. HUD chrome, never syntax. */
 .toolbar.conflictbar { background: var(--amber-soft); border-bottom-color: var(--amber-line); flex-wrap: wrap; }
 .toolbar.conflictbar .msg { color: var(--amber); font-size: 12px; }

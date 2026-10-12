@@ -381,6 +381,7 @@ export function FileTab(props: {
     return {
       dirty: b.dirty,
       conflict: !!b.conflict,
+      saving: b.saving,
       mark: b.kind === "env" ? "env" : b.kind === "withheld" ? "withheld" : b.editable ? null : "readonly",
     };
   };
@@ -461,7 +462,9 @@ export function FileTab(props: {
           <button
             type="button"
             data-testid="file-save"
-            disabled={!view || !editable || !view.dirty || view.saving}
+            // Not disabled while a save is out: a press then is the one
+            // follow-up save (`buffers.save`), as Ctrl+S is (#49, LOW-2).
+            disabled={!view || !editable || !view.dirty}
             onClick={() => void save()}
           >
             Save
@@ -474,6 +477,10 @@ export function FileTab(props: {
             conflict={view.conflict}
             dirty={view.dirty}
             comparing={!!comparing}
+            // Keep mine and Save to recreate must stay disabled while a save
+            // is out: pressed then, `buffers.save` would make them the one
+            // follow-up, which saves against the buffer's etag and drops the
+            // `expected` they pass (delta review of PR #49, LOW-2).
             busy={view.saving}
             onCompare={() => void toggleCompare()}
             onKeep={() => {
@@ -617,6 +624,8 @@ function StatusBar(props: { view: BufferView }) {
       <span>{v.encoding === "utf-8-bom" ? "UTF-8 with BOM" : v.encoding ? "UTF-8" : "not text"}</span>
       <span data-testid="editor-eol" className={v.eol === "mixed" ? "warnish" : undefined}>{eol}</span>
       {v.kind === "env" ? <span>env file · only you can read it</span> : null}
+      {/* A write on its way (a slow disk: /mnt/c), or a second Ctrl+S waiting for it. */}
+      {v.saving ? <span data-testid="editor-saving" role="status">saving…</span> : null}
     </div>
   );
 }

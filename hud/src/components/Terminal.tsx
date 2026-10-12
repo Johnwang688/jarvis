@@ -1369,22 +1369,34 @@ export class TermManager {
     this.changed();
   }
 
-  /** Exited: the same folder again, in the same place. */
+  /**
+   * Whether Jarvis may read terminal `id`, for a terminal made in its place:
+   * only when it is known to be readable — its live row, else the last row
+   * its session saw. Unknown fails closed (review 2 of PR #47: a restart or
+   * "New terminal here" made a copy of an unreadable terminal readable).
+   */
+  readableOf(id: string): boolean {
+    return (this.row(id) ?? this.sessions.get(id)?.lastRow ?? null)?.readable === true;
+  }
+
+  /** Exited: the same folder again, in the same place, with the same switch. */
   async restart(id: string) {
     if (this.blocked) return;
     const spec = this.specOf(id);
     const pane = this.place.get(id) as PaneNo | undefined;
+    const readable = this.readableOf(id);
     await this.close(id);
-    await this.create(spec, pane ?? "panel");
+    await this.create(spec, pane ?? "panel", undefined, { readable });
   }
 
-  /** Ended with Jarvis (or gone): a new one where it was. */
+  /** Ended with Jarvis (or gone): a new one where it was, with the same switch. */
   async newHere(id: string) {
     if (this.blocked) return;
     const spec = this.specOf(id);
     const pane = this.place.get(id) as PaneNo | undefined;
+    const readable = this.readableOf(id);
     this.gone(id);
-    await this.create(spec, pane ?? "panel");
+    await this.create(spec, pane ?? "panel", undefined, { readable });
   }
 
   async setReadable(id: string, readable: boolean) {

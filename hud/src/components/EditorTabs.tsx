@@ -11,6 +11,8 @@ export interface TabInfo {
   mark?: "env" | "withheld" | "readonly" | null;
   loading?: boolean;
   conflict?: boolean;
+  /** A save is on its way (or a second one waits for it): a hollow dot. */
+  saving?: boolean;
 }
 
 const base = (path: string) => path.slice(path.lastIndexOf("/") + 1) || path;
@@ -43,9 +45,10 @@ export function EditorTabs(props: {
             className={"edtab" + (active ? " on" : "") + (preview ? " preview" : "") + (i.conflict ? " conflict" : "")}
             data-testid={`editor-tab-${path}`}
             data-dirty={String(i.dirty)}
+            data-saving={String(!!i.saving)}
             data-preview={String(preview)}
             data-active={String(active)}
-            title={path + (i.mark === "env" ? " · Jarvis can't read this file" : "") + (i.dirty ? " · unsaved changes" : "")}
+            title={path + (i.mark === "env" ? " · Jarvis can't read this file" : "") + (i.saving ? " · saving…" : i.dirty ? " · unsaved changes" : "")}
             onClick={() => props.onActivate(path)}
             onDoubleClick={() => props.onPin(path)}
             onAuxClick={(e) => {
@@ -68,12 +71,14 @@ export function EditorTabs(props: {
             {i.mark === "env" ? <span className="edtab-mark" aria-label="Jarvis can't read this file">🔒</span> : null}
             <span className="edtab-name">{label}</span>
             {/* Dirty: the dot stands where × is, and hovering or focusing the
-                tab brings × back (VS Code's; theme.css swaps them). */}
+                tab brings × back (VS Code's; theme.css swaps them). Saving
+                (ED-2): the same slot holds a hollow ring until the write
+                answers, dirty or not. */}
             <span
-              className={"edtab-dot" + (i.dirty ? " on" : "")}
-              role={i.dirty ? "img" : undefined}
-              aria-label={i.dirty ? "unsaved changes" : undefined}
-              title={i.dirty ? "Unsaved changes" : undefined}
+              className={"edtab-dot" + (i.dirty ? " on" : "") + (i.saving ? " saving" : "")}
+              role={i.dirty || i.saving ? "img" : undefined}
+              aria-label={i.saving ? "saving" : i.dirty ? "unsaved changes" : undefined}
+              title={i.saving ? "saving…" : i.dirty ? "Unsaved changes" : undefined}
             />
             <button
               type="button"

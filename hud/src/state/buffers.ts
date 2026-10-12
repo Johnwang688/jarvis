@@ -106,7 +106,8 @@ export interface WriteResult {
 /** What the registry needs from the world: the three routes and a model maker. */
 export interface BufferDeps {
   read(projectId: string, path: string): Promise<FileRead>;
-  write(projectId: string, body: WriteBody): Promise<WriteResult>;
+  /** `signal` aborts a write that has not answered by WRITE_TIMEOUT_MS. */
+  write(projectId: string, body: WriteBody, signal?: AbortSignal): Promise<WriteResult>;
   stat(projectId: string, paths: string[]): Promise<{ files: Record<string, StatRow> }>;
   makeModel(text: string, abs: string, kind: Kind): Promise<TextModel>;
   now(): number;
@@ -127,11 +128,20 @@ interface Buf {
   saved: number;
   conflict: Conflict | null;
   saving: boolean;
+  /** The save on its way, if any: a second Ctrl+S waits on it. */
+  inflight: Promise<SaveOutcome> | null;
+  /** Ctrl+S pressed again while `inflight` was out: the one follow-up save. */
+  again: Promise<SaveOutcome> | null;
   refs: Set<string>;
   wasDirty: boolean;
   sub: { dispose(): void } | null;
   /** A programmatic change (a reload in place) is under way: not an edit. */
   applying: boolean;
+  /**
+   * Bumped by every reload in place (Reload, Discard and reload, Take theirs,
+   * the poll's): a save sent before it says nothing about the text after it.
+   */
+  gen: number;
 }
 
 /** A buffer as the window and the tests see it: never its text. */
@@ -169,6 +179,10 @@ export const refOf = (pane: number | string, path: string) => `${pane}|${path}`;
 export const paneOfRef = (ref: string) => ref.slice(0, ref.indexOf("|"));
 
 const SAVE_NOTE = "saved";
+
+/** How long a save's write may stay unanswered before it is given up on. */
+export const WRITE_TIMEOUT_MS = 90_000;
+const WRITE_TIMEOUT_NOTE = "the save didn't answer; your text is still here, press Ctrl+S to try again";
 
 export class Buffers {
   private deps: BufferDeps | null = null;
@@ -326,7 +340,10 @@ export class Buffers {
     return {
       abs: b.abs, projectId: b.projectId, path: b.path, kind: b.kind, editable: b.editable,
       readonly: b.readonly, etag: b.etag,
-      encoding: b.encoding, eol: b.eol, dirty: this.dirtyOf(b), saving: b.saving, conflict: b.conflict,
+      // Saving while a write is out *or* a second Ctrl+S waits for one: the
+      // tab and the status say "saving…" until the last of them answers.
+      encoding: b.encoding, eol: b.eol, dirty: this.dirtyOf(b), saving: b.saving || !!b.again,
+      conflict: b.conflict,
       refs: [...b.refs], language: b.model?.getLanguageId?.() ?? null,
       modelEol: b.model?.getEOL ? (b.model.getEOL() === "\r\n" ? "CRLF" : "LF") : null,
     };
@@ -412,7 +429,8 @@ export class Buffers {
       etag: typeof r.etag === "string" ? r.etag : null,
       encoding: r.encoding ?? null, eol: r.eol ?? null,
       model, saved: model ? model.getAlternativeVersionId() : 0, conflict: null, saving: false,
-      refs: new Set(), wasDirty: false, sub: null, applying: false,
+      inflight: null, again: null,
+      refs: new Set(), wasDirty: false, sub: null, applying: false, gen: 0,
     };
     if (model) {
       // Said the moment it changes (App's guards read it in the same event
@@ -481,26 +499,103 @@ export class Buffers {
    * Save `abs` against the etag it was read or last saved as (or `expected`:
    * the disk's, for Keep mine; null, to create a file that is gone). A 409 is
    * the conflict bar, never a retry; nothing is ever forced.
+   *
+   * One write at a time per buffer: a second PUT while the first is on its
+   * way would carry the same stale etag, and its 409 would raise a conflict
+   * bar against the owner's own write. But a second Ctrl+S is never dropped
+   * (review of PR #49, LOW-2 — on a slow disk, `/mnt/c`, "type A, save, type
+   * B, save" used to put only A on disk while the owner believed both were
+   * there): it waits for the first, and once that answers, **exactly one**
+   * follow-up save runs against the etag *that answer returned*. Any further
+   * presses join the same follow-up. The first one's 409 or error runs none
+   * (the bar, or the notice, says why), and a buffer with nothing new since
+   * the first was sent needs none — a double Ctrl+S is still one PUT. A
+   * follow-up saves with the buffer's own etag, whatever `expected` it was
+   * pressed with. Nor does one run once the buffer was reloaded in place
+   * since it was queued: Discard and reload (or Take theirs) threw that text
+   * away, and saving it then wrote the reload's stale text back over the
+   * first save (delta review of PR #49, MED-1).
    */
-  async save(abs: string, opts: { expected?: string | null } = {}): Promise<SaveOutcome> {
+  save(abs: string, opts: { expected?: string | null } = {}): Promise<SaveOutcome> {
     const b = this.bufs.get(abs);
-    // One save at a time per buffer: a second Ctrl+S while the first is on
-    // its way would send the same stale etag, and its 409 would raise a
-    // conflict bar against the owner's own write.
-    if (!b || !b.model || b.saving || !b.editable) return "skipped";
+    if (!b || !b.model || !b.editable) return Promise.resolve("skipped");
+    if (b.inflight) {
+      // A follow-up drops `expected`. Keep mine and Save to recreate pass one
+      // and rely on the conflict bar disabling them while a save is out
+      // (`busy`, the view's `saving`); enabled then, a press would save
+      // against the buffer's etag instead of the disk the owner was shown.
+      if (!b.again) {
+        b.again = this.followUp(b, b.inflight, b.gen);
+        this.emit();
+      }
+      return b.again;
+    }
+    const sent = this.send(b, abs, opts).finally(() => {
+      if (b.inflight === sent) b.inflight = null;
+    });
+    b.inflight = sent;
+    return sent;
+  }
+
+  /** The one follow-up: after `first` answers (its `inflight` already cleared). */
+  private async followUp(b: Buf, first: Promise<SaveOutcome>, gen: number): Promise<SaveOutcome> {
+    let outcome: SaveOutcome;
+    try {
+      outcome = await first;
+    } catch {
+      outcome = "error";
+    }
+    b.again = null;
+    const still = this.bufs.get(b.abs) === b && b.gen === gen;
+    if (outcome !== "saved" || !still || !this.dirtyOf(b)) {
+      this.emit();
+      return outcome;
+    }
+    return this.save(b.abs);
+  }
+
+  private async send(b: Buf, abs: string, opts: { expected?: string | null }): Promise<SaveOutcome> {
+    if (!b.model) return "skipped";
     const deps = this.need();
     const version = b.model.getAlternativeVersionId();
     // Read once, here; the file's byte-order mark, if it had one, put back.
     const content = (b.encoding === "utf-8-bom" ? BOM : "") + b.model.getValue();
     const expected = "expected" in opts ? opts.expected ?? null : b.etag;
+    const gen = b.gen;
     b.saving = true;
     this.emit();
+    // A write that never answers would hold `saving` — and with it the poll
+    // for this file — forever (delta review of PR #49, LOW-1): it is aborted
+    // after WRITE_TIMEOUT_MS and ends as an error, the text kept. The race
+    // ends it even if the transport ignores the signal.
+    const ctl = new AbortController();
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        ctl.abort();
+        reject(new Error("timeout"));
+      }, WRITE_TIMEOUT_MS);
+    });
     try {
-      const r = await deps.write(b.projectId, { path: b.path, content, expected_etag: expected });
+      const r = await Promise.race([
+        deps.write(b.projectId, { path: b.path, content, expected_etag: expected }, ctl.signal),
+        timeout,
+      ]);
       b.saving = false;
       // A late answer lands only on the buffer it was sent from: one dropped
       // and read again meanwhile is another buffer, never marked saved by it.
       if (this.bufs.get(abs) !== b) return "saved";
+      // Nor on text it never carried: a reload in place meanwhile (Discard
+      // and reload, Take theirs) holds the disk as it was read, and its etag.
+      // The poll then sees the write that landed and reloads it; marking this
+      // version saved instead left the reload's text reading dirty, saved by
+      // the follow-up over the write (delta review of PR #49, MED-1).
+      if (b.gen !== gen) {
+        this.emit();
+        return "saved";
+      }
       b.etag = r.etag;
       b.saved = version;
       b.wasDirty = this.dirtyOf(b);
@@ -511,6 +606,11 @@ export class Buffers {
       return "saved";
     } catch (e: any) {
       b.saving = false;
+      if (timedOut) {
+        this.emit();
+        this.notice(abs, WRITE_TIMEOUT_NOTE);
+        return "error";
+      }
       if (e?.status === 409) {
         // The daemon says what is on disk now: an etag, or null for gone. An
         // answer without one (a daemon from before ED-2), or with one that is
@@ -536,6 +636,8 @@ export class Buffers {
       this.emit();
       this.notice(abs, e?.message || "save failed");
       return "error";
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -584,6 +686,7 @@ export class Buffers {
       return false;
     }
     this.apply(b, unBOM(r.content ?? ""), r.eol ?? null);
+    b.gen += 1;
     b.etag = typeof r.etag === "string" ? r.etag : null;
     b.kind = parseKind(r.kind);
     b.editable = editableOf(b.kind, r.editable);
@@ -666,6 +769,11 @@ export class Buffers {
       for (const [projectId, bufs] of groups) {
         for (let i = 0; i < bufs.length; i += 100) {
           const chunk = bufs.slice(i, i + 100);
+          // A stat that crossed a save says nothing about the buffer: it may
+          // have read the disk before the write landed, and once the save's
+          // answer moved the etag that reads as someone else's write — a
+          // conflict bar against the owner's own save on a slow disk.
+          const asked = new Map(chunk.map((b) => [b, { etag: b.etag, saving: b.saving || !!b.again }]));
           let rows: Record<string, StatRow>;
           try {
             rows = (await this.deps.stat(projectId, chunk.map((b) => b.path))).files || {};
@@ -674,8 +782,11 @@ export class Buffers {
           }
           for (const b of chunk) {
             if (this.bufs.get(b.abs) !== b) continue;
+            const was = asked.get(b)!;
+            if (was.saving || was.etag !== b.etag) continue;
             const row = rows[b.path];
-            switch (pollAction({ etag: b.etag, dirty: this.dirtyOf(b), saving: b.saving, conflict: b.conflict }, row)) {
+            const saving = b.saving || !!b.again;
+            switch (pollAction({ etag: b.etag, dirty: this.dirtyOf(b), saving, conflict: b.conflict }, row)) {
               case "reload":
                 await this.reload(b.abs, { onlyIfClean: true, toast: true });
                 break;
