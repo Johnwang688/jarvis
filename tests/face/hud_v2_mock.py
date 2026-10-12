@@ -1412,6 +1412,9 @@ class MockDaemon:
             return handler._err(404, "route not found")
         rel = q.get("path", [""])[0]
         self.git_base_calls = getattr(self, "git_base_calls", 0) + 1
+        # A slow repository, on cue (`base_delay`, seconds: git on /mnt/c).
+        if repo and repo.get("base_delay"):
+            time.sleep(float(repo["base_delay"]))
         if w["kinds"].get(rel) == "env":
             return handler._err(403, "an env file: its committed text is not served here (the gutter is off for it).")
         if rel in w["protected"] or w["kinds"].get(rel) in ("gate", "withheld"):
@@ -1431,8 +1434,11 @@ class MockDaemon:
         text = repo.get("base", {}).get(rel)
         if text is None:
             return handler._json({"path": rel, "state": "new", "head": repo.get("head"), "text": None})
-        return handler._json({"path": rel, "state": "ok", "head": repo.get("head"), "text": text,
-                              "size": len(text.encode()), "renamed": False, **extra})
+        try:
+            return handler._json({"path": rel, "state": "ok", "head": repo.get("head"), "text": text,
+                                  "size": len(text.encode()), "renamed": False, **extra})
+        except (BrokenPipeError, ConnectionResetError):
+            return None  # the window dropped it (aborted) while a slow answer was on its way
 
     # -- the editor's navigation (ED-7) ----------------------------------------
 

@@ -45,7 +45,11 @@ The Diff follow-ups (2026-10-12) added:
     rows is in the DOM, and typing in the chat box beside it costs under
     15 ms a character (~100 ms with every row drawn); the last row is reached
     by scrolling, at 100% and 160%; the keys move the selection, which holds
-    and moves while its row is scrolled out of the window;
+    and moves while its row is scrolled out of the window; at 160% Page Down
+    and End clip nothing of their row (review of PR #73, NIT);
+  - **a held key** (review of PR #73, MED): ↓ held over 60 rows against a
+    `git/base` that takes 0.5 s sends a handful of requests, not 60, and the
+    last row's diff shows promptly;
   - **clear task**: in the 2×2 grid with a Task pane, the Task pane's header
     unpicks the task, and the Diff pane shows its project's changes again
     (disabled under a card); a task picked again holds it again;
@@ -154,7 +158,7 @@ def scm_checks(browser, mock, base, check, until, guard, init_script, only: str 
         for section, ws in ((_list_checks, WS), (_sides_checks, WS), (_env_checks, WS), (_link_checks, WS),
                             (_live_checks, WS), (_swap_checks, WS), (_open_checks, WS), (_mode_checks, WS),
                             (_task_pane_checks, WS_TASK), (_card_checks, WS), (_empty_checks, WS),
-                            (_scale_checks, WS_SCALE), (_clear_task_checks, WS_GRID4),
+                            (_scale_checks, WS_SCALE), (_hold_checks, WS), (_clear_task_checks, WS_GRID4),
                             (_settings_checks, WS), (_midcompute_checks, WS)):
             if only and only not in section.__name__:
                 continue
@@ -494,14 +498,23 @@ def _empty_checks(page, mock, check, until, requests):
 # ---------------------------------------------------------------------------
 # The Diff follow-ups (2026-10-12)
 
-def _in_view(page, list_sel: str, row_sel: str) -> bool:
-    """The row is drawn and wholly inside the list's scrolled view."""
+def _in_view(page, list_sel: str, row_sel: str, tol: float = 1.0) -> bool:
+    """The row is drawn and wholly inside the list's scrolled view (to `tol` drawn px)."""
     lb = page.locator(list_sel).bounding_box()
     loc = page.locator(row_sel)
     rb = loc.bounding_box() if loc.count() == 1 else None
     if not lb or not rb:
         return False
-    return rb["y"] >= lb["y"] - 1 and rb["y"] + rb["height"] <= lb["y"] + lb["height"] + 1
+    return rb["y"] >= lb["y"] - tol and rb["y"] + rb["height"] <= lb["y"] + lb["height"] + tol
+
+
+def _clip(page, list_sel: str, row_sel: str) -> float:
+    """How many drawn px of the row the list's edges cut off (0: none)."""
+    lb = page.locator(list_sel).bounding_box()
+    rb = page.locator(row_sel).bounding_box() if page.locator(row_sel).count() == 1 else None
+    if not lb or not rb:
+        return float("inf")
+    return max(0.0, lb["y"] - rb["y"]) + max(0.0, rb["y"] + rb["height"] - lb["y"] - lb["height"])
 
 
 def _scale_checks(page, mock, check, until, requests):
@@ -605,8 +618,86 @@ def _scale_checks(page, mock, check, until, requests):
         until(lambda: page.locator(row(SCALE_N - 1)).count() > 0, timeout=4)
         check("…and at 160% the last row is reached by scrolling, in view",
               _in_view(page, rows_sel, row(SCALE_N - 1)))
+        # Review of PR #73, NIT: at 160% End and Page Down clipped ~0.8 drawn px
+        # of the row they scrolled to (`clientHeight` is rounded). Keys keep a
+        # narrow pane's list open (a click folds it to show the diff).
+        page.locator(rows_sel).focus()
+        page.keyboard.press("Home")
+        until(lambda: path() == name(0), timeout=4)
+        page.keyboard.press("PageDown")
+        until(lambda: path() != name(0), timeout=4)
+        at = int(path()[-8:-3])
+        down = _clip(page, rows_sel, row(at))
+        page.keyboard.press("End")
+        until(lambda: path() == name(SCALE_N - 1), timeout=4)
+        end = _clip(page, rows_sel, row(SCALE_N - 1))
+        check("at 160% Page Down and End scroll their row wholly into view (no part-pixel clipped)",
+              down < 0.05 and end < 0.05 and page.locator(rows_sel).is_visible(),
+              f"Page Down clipped {down:.3f} px, End {end:.3f} px")
     finally:
         _set_storage(page, zoom="100")
+        w["git"] = g
+
+
+def _hold_checks(page, mock, check, until, requests):
+    """Review of PR #73, MED: holding ↓ started a `git/base` request (and a
+    read) for every row passed, with no settle and no abort; against a slow
+    repository (the owner's VEX projects on /mnt/c) the last row's diff came
+    4 s late at 500 ms a request. A key now moves the highlight at once and
+    reads once the keys settle; a request no longer waited for is aborted.
+    Held here at ~33 repeats a second over 60 rows, `git/base` taking 0.5 s."""
+    w = mock.world
+    g = w["git"]
+    n = 61
+    name = lambda i: f"r{i:02d}.txt"  # noqa: E731
+    files = {k: dict(v) for k, v in w["files"].items()}
+    files.update({name(i): {"content": f"row {i} now\n", "mtime": 1757900300 + i} for i in range(n)})
+    path = lambda: page.locator(_in("scm-path")).inner_text()  # noqa: E731
+    try:
+        w["git"] = {"head": "c0ffee1", "branch": "main", "dirs": {}, "base_delay": 0.5,
+                    "base": {name(i): f"row {i} then\n" for i in range(n)},
+                    "files": {name(i): "modified" for i in range(n)}}
+        _fresh(page, mock, until, ws=WS, keep_files=files)
+        _pick(page, until, name(0))
+        check("setup: the first row diffed against a slow HEAD", _diffed(page, until, "row 0 then", "row 0 now"))
+        start = len(requests)
+        t0 = time.time()
+        for _ in range(n - 1):
+            page.keyboard.press("ArrowDown")
+            time.sleep(0.03)
+        held = time.time() - t0
+        until(lambda: path() == name(n - 1), timeout=3)
+        t1 = time.time()
+        shown = _diffed(page, until, f"row {n - 1} then", f"row {n - 1} now", timeout=12)
+        late = time.time() - t1
+        time.sleep(0.3)
+        bases = [u for u in requests[start:] if "/git/base" in u]
+        reads = [u for u in requests[start:] if "/file?" in u]
+        print(f"    held ↓ over {n - 1} rows in {held:.2f} s: {len(bases)} git/base and {len(reads)} reads sent; "
+              f"the last row's diff {late:.2f} s after the last key")
+        check("holding ↓ over 60 rows asks HEAD about a handful of rows, not 60",
+              len(bases) <= 3 and len(reads) <= 3, f"{len(bases)} git/base, {len(reads)} reads")
+        check("…and the last row's diff shows promptly (one slow request, not a queue of them)",
+              bool(shown) and late < 2.0, f"{late:.2f} s")
+        check("…the highlight followed every key at once (the row passed is the one shown)",
+              path() == name(n - 1) and "sel" in (page.locator(_in(f"scm-{name(n - 1)}")).get_attribute("class") or ""))
+        # Clicks read at once; one clicked away from before HEAD answered is
+        # dropped (aborted), not left holding a connection ahead of the next.
+        failed: list[str] = []
+        listener = lambda r: failed.append(f"{r.url} {r.failure}")  # noqa: E731
+        page.on("requestfailed", listener)
+        try:
+            page.locator(_in(f"scm-{name(n - 3)}")).click()
+            time.sleep(0.1)
+            page.locator(_in(f"scm-{name(n - 2)}")).click()
+            shown = _diffed(page, until, f"row {n - 2} then", f"row {n - 2} now", timeout=6)
+            time.sleep(0.3)
+        finally:
+            page.remove_listener("requestfailed", listener)
+        dropped = [f for f in failed if "/git/base" in f and f"path={name(n - 3)}" in f]
+        check("a row clicked away from before HEAD answers: its request is aborted, the next row diffed",
+              bool(dropped) and bool(shown), "; ".join(failed[:3]) or "nothing aborted")
+    finally:
         w["git"] = g
 
 

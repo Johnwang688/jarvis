@@ -215,6 +215,12 @@ export const SCM_ROW_PX = 24;
 export const SCM_OVERSCAN = 12;
 /** Rows drawn while the list has no height to measure (hidden, or not laid out yet). */
 export const SCM_UNMEASURED_ROWS = 40;
+/**
+ * A key moves the highlight at once; the row's two sides are read only once
+ * the keys have rested this long (a click reads at once). Held ↓ repeats
+ * every ~30 ms, so a held key reads nothing until it is let go.
+ */
+export const SCM_KEY_SETTLE_MS = 150;
 
 /** The rows to draw, `[first, last)`, for a list scrolled to `scrollTop` with `viewPx` in view. */
 export function scmWindow(count: number, scrollTop: number, viewPx: number,

@@ -52,6 +52,7 @@ vi.mock("../api", () => ({
 }));
 
 import { ProjectDiff } from "./ProjectDiff";
+import { SCM_KEY_SETTLE_MS } from "../lib/scm";
 import { gitStatus } from "../state/gitStatus";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -163,7 +164,55 @@ describe("the change list at scale", () => {
       list.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", ctrlKey: true, bubbles: true }));
     });
     expect(path()).toBe("src/f00000.py");
-    expect(picked).toEqual(["src/f00000.py", "src/f00001.py", "src/f19999.py", "src/f19998.py", "src/f00000.py"]);
+    // The keys moved the highlight five times in a breath: nothing was read
+    // yet, and the right side says it is waiting (review of PR #73, MED).
+    expect(picked).toEqual([]);
+    expect(world.asked.filter((a) => a.includes("src/f"))).toEqual([]);
+    expect(host.querySelector('[data-testid="scm-settling"]')).not.toBeNull();
+    // Settled: the last row, once.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, SCM_KEY_SETTLE_MS + 60));
+    });
+    await flush();
+    expect(picked).toEqual(["src/f00000.py"]);
+    // HEAD's side for it once, then (allowed) its read once.
+    expect(world.asked.filter((a) => a.includes("src/f"))).toEqual(["base:src/f00000.py", "read:src/f00000.py"]);
+    expect(host.querySelector('[data-testid="scm-settling"]')).toBeNull();
+    // A click reads at once.
+    act(() => (host.querySelector('[data-testid="scm-src/f00003.py"]') as HTMLElement).click());
+    await flush();
+    expect(picked).toEqual(["src/f00000.py", "src/f00003.py"]);
+    expect(world.asked.filter((a) => a.startsWith("base:src/f"))).toEqual(["base:src/f00000.py", "base:src/f00003.py"]);
+  });
+
+  it("tells a screen reader each option's place in the whole list, and which is selected", async () => {
+    const host = document.createElement("div");
+    const root = createRoot(host);
+    unmount = () => act(() => root.unmount());
+    act(() => root.render(createElement(ProjectDiff, {
+      projectId: "p-big", root: "/w", drawn: true, blocked: false, onOpen: () => {},
+    })));
+    await flush();
+    const list = host.querySelector('[data-testid="scm-rows"]') as HTMLElement;
+    const second = host.querySelector('[data-testid="scm-src/f00001.py"]') as HTMLElement;
+    expect(second.getAttribute("aria-setsize")).toBe("20000");
+    expect(second.getAttribute("aria-posinset")).toBe("2");
+    expect(list.getAttribute("aria-activedescendant")).toBeNull();
+    act(() => second.click());
+    await flush();
+    expect(list.getAttribute("aria-activedescendant")).toBe(second.id);
+    expect(second.id).not.toBe("");
+    act(() => {
+      list.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
+    const third = host.querySelector('[data-testid="scm-src/f00002.py"]') as HTMLElement;
+    expect(list.getAttribute("aria-activedescendant")).toBe(third.id);
+    expect(third.getAttribute("aria-selected")).toBe("true");
+    // The selection's row not drawn (End, nothing scrolled in jsdom): no dangling id.
+    act(() => {
+      list.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }));
+    });
+    expect(list.getAttribute("aria-activedescendant")).toBeNull();
   });
 
   it("under a card the keys move nothing", async () => {
