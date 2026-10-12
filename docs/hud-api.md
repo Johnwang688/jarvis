@@ -1471,3 +1471,27 @@ when nothing is served, when the build was installed with uncommitted
 changes, and when `hud/` changed between its commit and the checkout's HEAD
 (`git diff --quiet <commit> HEAD -- hud`, so a Python-only merge is quiet).
 
+## Additions 2026-10-11 (tree-sitter colour — ED-5)
+
+Editor plan `docs/plans/2026-10-09-hud-editor-plan.md` §2.6. No new route;
+two things change on the wire.
+
+**The policy's `script-src` is `'self' 'wasm-unsafe-eval'`** (one header,
+`hud_api.content_security_policy`, as ED-4 set out): WebAssembly may compile
+in the page and in a worker — a worker takes its policy from its own
+script's `/assets/*` response — and nothing else is widened: `eval`, `new
+Function` and a string `setTimeout` are still refused, and a response may
+narrow it away (`script-src 'self'`). The syntax worker is the only code
+that compiles WebAssembly, and only the runtime and the grammars its loader's
+map names (`hud/src/lib/syntax/assets.ts`), fetched from `/assets/` on the
+HUD's origin; any other URL is refused before a request is made.
+
+**`/assets/*.wasm`** — the tree-sitter runtime and thirteen grammars, under
+their Vite content-hashed names — are served like every other installed
+asset (hash-checked on every read, `jarvis hud install`), as
+`application/wasm` with the full policy. They are fetched only when a file of
+their language first opens.
+
+The HUD's test hooks for it are read-only and not an API:
+`window.__hudSyntax.states()`, `.probe(url)` (asks the loader's gate, never
+fetches) and `.loaded()` (the grammars compiled).
