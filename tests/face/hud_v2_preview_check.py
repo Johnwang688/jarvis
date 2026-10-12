@@ -310,7 +310,7 @@ def _served_under_checks(page, mock, check, until):
     from jarvis.v2.hud_api import content_security_policy
     check("the mock HUD sends the daemon's frame headers (hud_api.frame_headers): DENY and the full CSP",
           got == ["DENY", content_security_policy()] and got[1].endswith("frame-ancestors 'none'")
-          and "script-src 'self';" in got[1], str(got))
+          and "script-src 'self' 'wasm-unsafe-eval';" in got[1], str(got))
 
 
 def _card_checks(page, mock, check, until):

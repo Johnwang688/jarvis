@@ -411,6 +411,11 @@ export class SyntaxEngine {
   stats() {
     return { docs: this.docs.size, injected: this.injected.size, grammars: this.assets.size };
   }
+
+  /** The grammars compiled and ready, by name (tests: every grammar loads under the CSP). */
+  loaded(): GrammarName[] {
+    return [...this.assets.keys()].sort();
+  }
 }
 
 // ---- predicates the worker evaluates -------------------------------------

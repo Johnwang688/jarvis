@@ -72,6 +72,7 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
   const byId = new Map<string, Track>();
   const waiting = new Map<number, (r: Reply | null) => void>();
   const probes = new Map<number, (r: { ok: boolean; error?: string }) => void>();
+  const asks = new Map<number, (names: string[]) => void>();
   const changed = new monaco.Emitter<void>();
   const redraws = new Set<() => void>();
 
@@ -88,6 +89,8 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
     waiting.clear();
     probes.forEach((resolve) => resolve({ ok: false, error: "no syntax worker" }));
     probes.clear();
+    asks.forEach((resolve) => resolve([]));
+    asks.clear();
     changed.fire();
     redraw();
   }
@@ -125,6 +128,10 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
       const resolve = probes.get(m.req);
       probes.delete(m.req);
       resolve?.({ ok: !!m.ok, ...(m.error ? { error: String(m.error) } : {}) });
+    } else if (m.t === "loaded") {
+      const resolve = asks.get(m.req);
+      asks.delete(m.req);
+      resolve?.(Array.isArray(m.names) ? m.names.map(String) : []);
     }
   }
 
@@ -259,9 +266,26 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
       new Promise((resolve) => {
         const req = ++seq;
         probes.set(req, resolve);
+        setTimeout(() => {
+          if (probes.delete(req)) resolve({ ok: false, error: "no answer from the syntax worker" });
+        }, REPLY_TIMEOUT_MS);
         if (!post({ t: "probe", req, url })) {
           probes.delete(req);
           resolve({ ok: false, error: "no syntax worker" });
+        }
+      }),
+    /** The grammars the worker has compiled so far, by name; none if it never started. */
+    loaded: (): Promise<string[]> =>
+      new Promise((resolve) => {
+        if (!worker) return resolve([]);
+        const req = ++seq;
+        asks.set(req, resolve);
+        setTimeout(() => {
+          if (asks.delete(req)) resolve([]);
+        }, REPLY_TIMEOUT_MS);
+        if (!post({ t: "loaded", req })) {
+          asks.delete(req);
+          resolve([]);
         }
       }),
   };

@@ -1372,7 +1372,7 @@ decision C-1 (the decisions file wins).
 `Content-Security-Policy` header WP-E's frame rule rides in
 (`hud_api.content_security_policy`, `hud_api.HUD_POLICY`):
 
-    default-src 'none'; script-src 'self'; worker-src 'self';
+    default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';
     connect-src 'self'; style-src 'self' 'unsafe-inline';
     img-src 'self' data:; font-src 'self' data:; media-src 'self';
     frame-src http://localhost:* http://*.localhost:* http://127.0.0.1:* http://0.0.0.0:*;
@@ -1382,9 +1382,9 @@ decision C-1 (the decisions file wins).
 — the page, every `/assets/*` file (a worker takes its policy from its own
 script's response), JSON, SSE, errors and the terminal's `101`. No inline
 script, no script from another origin, no `eval`, no `blob:` worker, no
-plugin, no `<base>`, no form posted anywhere. **No `'wasm-unsafe-eval'`
-yet**: nothing in the HUD compiles WebAssembly; ED-5 adds it together with
-the test that loads every grammar under the policy. `connect-src 'self'`
+plugin, no `<base>`, no form posted anywhere. `'wasm-unsafe-eval'` came
+with ED-5 (below): WebAssembly compiles, JavaScript from a string still does
+not. `connect-src 'self'`
 covers the same-origin `ws://` terminal socket in Chromium (CSP3). A CSP host
 source cannot name an IPv6 literal or a 127/8 address other than 127.0.0.1,
 so the Preview judge refuses `[::1]` and `127.0.0.2` with a sentence naming

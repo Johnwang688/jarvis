@@ -15,11 +15,13 @@
 //   {t: "tokens", id, req, version, first, last}
 //   {t: "close", id}
 //   {t: "probe", req, url}      — the loader's gate, asked about one URL (tests)
+//   {t: "loaded", req}          — which grammars are compiled (tests)
 // Messages out:
 //   {t: "state", id, version, state, reason?}
 //   {t: "tokens", req, id, version, data, state, reason?, truncatedAt?, stale?}
 //   {t: "changed", id}           — colour may have changed with no edit: ask again
 //   {t: "probe", req, ok, error?}
+//   {t: "loaded", req, names}
 
 import { Language, Parser, Query } from "web-tree-sitter";
 import { fetchShipped, QUERIES, RUNTIME_URL, shippedUrl, WASM_URLS } from "./assets";
@@ -32,7 +34,8 @@ type In =
   | { t: "change"; id: string; version: number; changes: Change[] }
   | { t: "tokens"; id: string; req: number; version: number; first: number; last: number }
   | { t: "close"; id: string }
-  | { t: "probe"; req: number; url: string };
+  | { t: "probe"; req: number; url: string }
+  | { t: "loaded"; req: number };
 
 const post = (m: unknown, transfer: Transferable[] = []) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(m, transfer);
 
@@ -45,7 +48,12 @@ function start(): Promise<SyntaxEngine> {
     const wasmBinary = await fetchShipped(RUNTIME_URL);
     await Parser.init({
       wasmBinary,
+      // Emscripten names its own .wasm even when handed the bytes (it never
+      // fetches it then: `wasmBinary` is the runtime). Answered with the
+      // gate's own URL for it; any other name — a side module's dependency —
+      // is refused, so nothing is located by name.
       locateFile: (path: string) => {
+        if (path === "web-tree-sitter.wasm") return shippedUrl(RUNTIME_URL, self.location.href);
         throw new Error(`the syntax worker loads nothing by name (${path})`);
       },
     } as never);
@@ -105,6 +113,13 @@ async function handle(m: In) {
     } catch (err) {
       post({ t: "probe", req: m.req, ok: false, error: err instanceof Error ? err.message : String(err) });
     }
+    return;
+  }
+  if (m.t === "loaded") {
+    // Read-only: what has compiled so far; never starts the runtime itself.
+    // A runtime that failed to start has compiled nothing.
+    const names = engine ? await engine.then((e) => e.loaded(), () => []) : [];
+    post({ t: "loaded", req: m.req, names });
     return;
   }
   const e = await start();

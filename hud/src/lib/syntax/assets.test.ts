@@ -68,7 +68,7 @@ describe("nothing in the syntax code fetches or compiles another way", () => {
     expect([...w.matchAll(/Language\.load\(/g)]).toHaveLength(1);
     expect(w).toMatch(/Language\.load\(await fetchShipped\(WASM_URLS\[g\]\)\)/);
     expect(w).toMatch(/wasmBinary = await fetchShipped\(RUNTIME_URL\)/);
-    expect(w).toMatch(/locateFile: \(path: string\) => \{\s*throw/);
+    expect(w).toMatch(/locateFile: \(path: string\) => \{\s*if \(path === "web-tree-sitter\.wasm"\) return shippedUrl\(RUNTIME_URL, self\.location\.href\);\s*throw/);
     for (const s of [w, code(engineSource), code(clientSource)]) {
       expect(s).not.toMatch(/importScripts|WebAssembly\.(compile|instantiate)|new Function|\beval\(/);
     }
