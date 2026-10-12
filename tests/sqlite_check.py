@@ -11,14 +11,16 @@ Run:  .venv/bin/python tests/sqlite_check.py
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jarvis import runtime
+from jarvis import config, runtime
 from jarvis import tools
 from jarvis.tools.sqlite import query_sqlite
 
@@ -66,7 +68,25 @@ def main() -> int:
             refused = query_sqlite(str(Path(tmp) / name), "SELECT 1")
             assert "credential" in refused.lower() and "FAKE-SQLITE" not in refused, (name, refused)
 
-    print("ok  sqlite: read-only enforced by engine, caps, protected names, dispatch")
+        # The HUD Browser's History is a SQLite file in a credential folder
+        # (review of PR #69): refused as written and through a symlink, with
+        # a temp BROWSER_DIR and HOME, never the owner's.
+        profile = Path(tmp) / "browser" / "profiles" / "p-00000000" / "Default"
+        profile.mkdir(parents=True)
+        history = sqlite3.connect(profile / "History")
+        history.execute("CREATE TABLE urls (url TEXT)")
+        history.execute("INSERT INTO urls VALUES ('https://bank.example/BROWSERSECRET')")
+        history.commit()
+        history.close()
+        (Path(tmp) / "visits.db").symlink_to(profile / "History")
+        with patch.dict(os.environ, {"HOME": str(Path(tmp) / "home")}), \
+                patch.object(config, "BROWSER_DIR", Path(tmp) / "browser"):
+            for target in (profile / "History", Path(tmp) / "visits.db"):
+                refused = query_sqlite(str(target), "SELECT url FROM urls")
+                assert "credential folder" in refused and "BROWSERSECRET" not in refused, (target, refused)
+            assert "300" in query_sqlite(str(db), "SELECT count(*) FROM rules")
+
+    print("ok  sqlite: read-only enforced by engine, caps, protected names, credential folders, dispatch")
     print("\nall sqlite checks passed")
     return 0
 

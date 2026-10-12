@@ -40,7 +40,7 @@ ancestor (so a symlinked parent cannot carry the folder somewhere else):
   (`$HOME`, `/mnt/c/Users/johnw`) — a root itself included;
 * `config.PROJECT_WORK_DIR` itself (it holds projects; it is not one);
 * any component starting with `.`;
-* `config.V2_CREDENTIAL_DIRS`, `config.V2_DATA_DIR`, `config.REPO_ROOT` and
+* `config.credential_dirs()` (the Browser's folder among them), `config.V2_DATA_DIR`, `config.REPO_ROOT` and
   `/mnt/c/Users/johnw/AppData` — inside them, or a folder that contains them;
 * under `/mnt/<drive>`, a name Windows cannot hold (`CON`, `NUL`, `COM1`, …,
   `<>:"\\|?*`, a trailing dot or space);
@@ -178,7 +178,7 @@ def roots() -> list[Path]:
 
 
 def _protected() -> list[Path]:
-    out = [_expand(d) for d in config.V2_CREDENTIAL_DIRS]
+    out = [_expand(d) for d in config.credential_dirs()]
     out += [Path(os.path.normpath(str(config.V2_DATA_DIR))),
             Path(os.path.normpath(str(config.REPO_ROOT))), Path(APPDATA)]
     return out
