@@ -1,32 +1,48 @@
 import { describe, expect, it } from "vitest";
 import {
-  absUnder, baseSide, diffMode, readSide, rowShows, SCM_LETTER, scmRows, scmSummary, wholeUntracked,
+  absUnder, baseSide, diffMode, diffWhy, readSide, rowShows, SCM_LETTER, scmRows, scmSummary, wholeUntracked,
 } from "./scm";
 
 const P = ["p1", "p2"];
 const T = ["k1"];
 const mode = (o: Partial<Parameters<typeof diffMode>[0]>) =>
-  diffMode({ pin: null, projectIds: P, taskId: null, taskFocus: false, taskIds: T, follow: "p1", ...o });
+  diffMode({ pin: null, projectIds: P, taskId: null, taskFocus: false, taskShown: false, taskIds: T, follow: "p1", ...o });
 
 describe("which mode a Diff pane is in", () => {
   it("with no task, the chat's project's uncommitted changes", () => {
     expect(mode({})).toEqual({ kind: "project", projectId: "p1", pinned: false });
   });
   it("a task the window is about shows its diff, as before", () => {
-    expect(mode({ taskId: "k1", taskFocus: true })).toEqual({ kind: "task", taskId: "k1" });
+    expect(mode({ taskId: "k1", taskFocus: true })).toEqual({ kind: "task", taskId: "k1", why: "focus" });
   });
   it("a task picked before a thread no longer decides: the chat's project", () => {
     expect(mode({ taskId: "k1", taskFocus: false })).toEqual({ kind: "project", projectId: "p1", pinned: false });
   });
   it("a task that is gone is not shown", () => {
     expect(mode({ taskId: "gone", taskFocus: true })).toEqual({ kind: "project", projectId: "p1", pinned: false });
+    expect(mode({ taskId: "gone", taskShown: true })).toEqual({ kind: "project", projectId: "p1", pinned: false });
   });
   it("a pin beats the chat's project; a task picked beats the pin", () => {
     expect(mode({ pin: "p2" })).toEqual({ kind: "project", projectId: "p2", pinned: true });
     expect(mode({ pin: "p2", taskId: "k1", taskFocus: false })).toEqual({ kind: "project", projectId: "p2", pinned: true });
     // A File pane pins its project when it opens a file; switched to Diff, a
     // task picked must still show the task (hud_v2_csp_check's single pane).
-    expect(mode({ pin: "p2", taskId: "k1", taskFocus: true })).toEqual({ kind: "task", taskId: "k1" });
+    expect(mode({ pin: "p2", taskId: "k1", taskFocus: true })).toEqual({ kind: "task", taskId: "k1", why: "focus" });
+  });
+  it("never another task than a drawn Task pane: while one shows a task, the Diff shows it (review of PR #67, L3)", () => {
+    // A thread picked since (taskFocus false): the Task pane still shows k1, so does the Diff.
+    expect(mode({ taskId: "k1", taskFocus: false, taskShown: true })).toEqual({ kind: "task", taskId: "k1", why: "pane" });
+    // Over a pin too.
+    expect(mode({ pin: "p2", taskId: "k1", taskShown: true })).toEqual({ kind: "task", taskId: "k1", why: "pane" });
+    // The Task pane shows nothing: the rest of the rule.
+    expect(mode({ taskId: null, taskShown: true })).toEqual({ kind: "project", projectId: "p1", pinned: false });
+  });
+  it("the caption says why", () => {
+    expect(diffWhy(mode({ taskId: "k1", taskShown: true }))).toBe("the Task pane's task");
+    expect(diffWhy(mode({ taskId: "k1", taskFocus: true }))).toBe("the task picked last");
+    expect(diffWhy(mode({ pin: "p2" }))).toBe("this pane's project");
+    expect(diffWhy(mode({}))).toBe("the chat's project");
+    expect(diffWhy(mode({ follow: null }))).toBe("");
   });
   it("a pin whose project went away follows again", () => {
     expect(mode({ pin: "archived" })).toEqual({ kind: "project", projectId: "p1", pinned: false });

@@ -21,7 +21,7 @@
 //  - **Under a card** every control here is disabled (and inert, behind the
 //    veil); the diff editor is read-only on both sides whatever happens.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import { buffers } from "../state/buffers";
 import { gitStatus, type GitStatusStore } from "../state/gitStatus";
@@ -46,7 +46,7 @@ function useGitStatus(projectId: string | null, store: GitStatusStore = gitStatu
   };
 }
 
-export function ProjectDiff(props: {
+export interface ProjectDiffProps {
   projectId: string;
   /** Where the project's folder resolves (`treeRoot`): an open buffer's `abs` is under it. */
   root: string | null;
@@ -59,9 +59,30 @@ export function ProjectDiff(props: {
   blocked: boolean;
   /** Open in the editor (ED-7's `placeFile`: never over this view or a VEX view). */
   onOpen: (path: string) => void;
-}) {
-  const { ver, data, error } = useGitStatus(props.drawn ? props.projectId : null);
-  const rows = useMemo(() => scmRows(data), [ver, data]);
+}
+
+/**
+ * Equal when every prop but the callbacks is: a callback is read through a
+ * ref (the latest one), so a new closure is not a change. Typing in a chat
+ * box redraws the window, and App hands this pane fresh closures each time —
+ * without this the whole list redrew per keystroke (17 ms at 2,000 changed
+ * files, 132 ms at the status's 20,000 cap; review of PR #67, M1).
+ */
+function sameDiffProps(a: ProjectDiffProps, b: ProjectDiffProps): boolean {
+  return a.projectId === b.projectId && a.root === b.root && a.drawn === b.drawn && a.narrow === b.narrow
+    && a.filePath === b.filePath && a.blocked === b.blocked;
+}
+
+export const ProjectDiff = memo(function ProjectDiff(props: ProjectDiffProps) {
+  // The latest callbacks, for handlers that outlive the render that made them.
+  const calls = useRef({ onSelect: props.onSelect, onOpen: props.onOpen });
+  calls.current = { onSelect: props.onSelect, onOpen: props.onOpen };
+  const watched = props.drawn ? props.projectId : null;
+  const { ver, data, error } = useGitStatus(watched);
+  // By the status's version, never the answer object: a poll that saw nothing
+  // new hands back a fresh object with the same states.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const rows = useMemo(() => scmRows(data), [ver, watched]);
   const [sel, setSel] = useState(props.filePath ?? "");
   const [listOpen, setListOpen] = useState(false);
   const [nonce, setNonce] = useState(0);
@@ -82,7 +103,7 @@ export function ProjectDiff(props: {
     setListOpen(false);
     // Picking it again asks again: a file not open in the editor is read once.
     setNonce((n) => n + 1);
-    props.onSelect?.(r.path);
+    calls.current.onSelect?.(r.path);
   };
 
   return (
@@ -125,7 +146,7 @@ export function ProjectDiff(props: {
           <span className="path" data-testid="scm-path">{sel || "no file selected"}</span>
           {row && row.state !== "deleted" && !row.folder ? (
             <button type="button" data-testid="scm-open" disabled={props.blocked}
-                    title="Open this file in the editor" onClick={() => !props.blocked && props.onOpen(row.path)}>
+                    title="Open this file in the editor" onClick={() => !props.blocked && calls.current.onOpen(row.path)}>
               Open
             </button>
           ) : null}
@@ -158,7 +179,7 @@ export function ProjectDiff(props: {
       </div>
     </div>
   );
-}
+}, sameDiffProps);
 
 function Note(props: { testid: string; text: string }) {
   return <div className="pad muted" data-testid={props.testid}>{props.text}</div>;
@@ -293,21 +314,51 @@ function ScmFile(props: {
  * HEAD's text on the left, the working file on the right, read-only on both
  * sides. `live` is an open buffer's own model: borrowed — this view never
  * disposes it, and lets go of it the moment the registry is about to.
+ *
+ * **No diff computation outlives its models** (review of PR #67, L1): the
+ * editor's view model is this view's own (`createViewModel`), and it is
+ * disposed — which cancels a diff the worker is still computing — before any
+ * model goes. Handed `{original, modified}`, Monaco 0.57 keeps a reference to
+ * the view model it makes that nothing ever releases, so its computation was
+ * never cancelled: swapping the read copy for the buffer while a diff was on
+ * its way threw `no diff result available`, uncaught.
+ *
+ * **A borrowed model that went away is never drawn as an empty side** (the
+ * review's NIT): one disposed before Monaco loaded, or let go of while shown,
+ * shows "…" until the pane reads the file instead — an empty right side reads
+ * as the whole file deleted.
  */
 function ScmDiffEditor(props: { path: string; before: string; after: string | null; live: any | null }) {
   const host = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState(false);
+  const [waiting, setWaiting] = useState(false);
 
   useEffect(() => {
     let dead = false;
     let ed: any = null;
+    let vm: any = null;
     let original: any = null;
     let modified: any = null;
     let watch: { dispose(): void } | null = null;
+    setWaiting(false);
+    // The view model first (its dispose cancels a diff in flight), then the
+    // editor lets go of it, then nothing the worker might still be asked about
+    // remains.
+    const letGo = () => {
+      vm?.dispose();
+      vm = null;
+      ed?.setModel(null);
+    };
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
-        const live = props.live && !props.live.isDisposed() ? props.live : null;
+        if (props.live && props.live.isDisposed()) {
+          // Gone between the render and Monaco's arrival: the pane reads the
+          // file next; until then, nothing that looks like an empty file.
+          setWaiting(true);
+          return;
+        }
+        const live = props.live;
         ed = monaco.editor.createDiffEditor(host.current, {
           theme: "jarvis",
           automaticLayout: true,
@@ -323,20 +374,26 @@ function ScmDiffEditor(props: { path: string; before: string; after: string | nu
         original = monaco.editor.createModel(props.before, live?.getLanguageId?.(), diffUri(monaco, props.path, "original"));
         if (live) {
           // The registry drops a buffer no tab holds: let go of its model
-          // first, so nothing here shows a disposed model.
-          watch = live.onWillDispose?.(() => ed?.setModel(null)) ?? null;
+          // first, so nothing here shows — or computes against — a disposed
+          // model, and say "…" until the pane reads the file.
+          watch = live.onWillDispose?.(() => {
+            letGo();
+            if (!dead) setWaiting(true);
+          }) ?? null;
         } else {
           modified = monaco.editor.createModel(props.after ?? "", undefined, diffUri(monaco, props.path, "modified"));
         }
-        ed.setModel({ original, modified: live ?? modified });
+        vm = ed.createViewModel({ original, modified: live ?? modified });
+        ed.setModel(vm);
       })
       .catch(() => setFailed(true));
     return () => {
       dead = true;
       watch?.dispose();
-      // The editor first, so nothing still shows the models it lets go of;
-      // the buffer's model is the registry's and stays.
-      ed?.setModel(null);
+      // The view model and the editor first, so nothing still shows or
+      // computes against the models let go of; the buffer's model is the
+      // registry's and stays.
+      letGo();
       ed?.dispose();
       original?.dispose();
       modified?.dispose();
@@ -346,9 +403,16 @@ function ScmDiffEditor(props: { path: string; before: string; after: string | nu
   if (failed) {
     return (
       <pre className="editorhost" data-testid="scm-fallback" style={{ overflow: "auto", padding: 8 }}>
-        {props.live ? "" : props.after}
+        {props.live ? (props.live.isDisposed() ? "…" : props.live.getValue()) : props.after}
       </pre>
     );
   }
-  return <div className="editorhost" data-testid="scm-editor" data-live={props.live ? "true" : "false"} ref={host} />;
+  return (
+    <>
+      {waiting ? <div className="pad muted" data-testid="scm-waiting">…</div> : null}
+      {/* Kept mounted while waiting: the next effect builds into it. */}
+      <div className="editorhost" data-testid="scm-editor" data-live={props.live ? "true" : "false"} ref={host}
+           style={waiting ? { display: "none" } : undefined} />
+    </>
+  );
 }

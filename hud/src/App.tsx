@@ -45,7 +45,7 @@ import type { EditorShortcut } from "./lib/layout";
 import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
 import { ProjectDiff } from "./components/ProjectDiff";
-import { diffMode, type DiffMode } from "./lib/scm";
+import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
 import { daemonPortsNow } from "./state/daemonPorts";
@@ -2550,13 +2550,15 @@ export default function App() {
     return n;
   };
   /**
-   * What a Diff pane shows (lib/scm `diffMode`): its pinned project's
-   * uncommitted changes, else the task the window is about, else the chat's
-   * project's uncommitted changes.
+   * What a Diff pane shows (lib/scm `diffMode`): the task a drawn Task pane
+   * shows (a Diff pane never shows another), else the task the window is
+   * about, else its pinned project's uncommitted changes, else the chat's.
    */
+  // A drawn Task pane shows the window's task (`taskShown`, above): a Diff pane shows that one.
+  const taskInPane = !!task && taskShown;
   const diffModeOf = (spec: PaneSpec): DiffMode => diffMode({
     pin: spec.projectId, projectIds: state.projects.map((p) => p.id),
-    taskId: state.taskId, taskFocus: state.taskFocus, taskIds: state.tasks.map((t) => t.id),
+    taskId: state.taskId, taskFocus: state.taskFocus, taskShown: taskInPane, taskIds: state.tasks.map((t) => t.id),
     follow: activeProjectId,
   });
   const diffHeading = (mode: DiffMode): string =>
@@ -2844,7 +2846,13 @@ export default function App() {
         return (
           <div className="diffpane">
             {mode.kind !== "none" ? (
-              <div className="diffhead" data-testid="diff-mode" data-mode={mode.kind}>{diffHeading(mode)}</div>
+              // What it shows, and why (review of PR #67, L3): the Task pane's
+              // task, the task picked last, this pane's project or the chat's.
+              <div className="diffhead" data-testid="diff-mode" data-mode={mode.kind}
+                   data-why={mode.kind === "task" ? mode.why : mode.pinned ? "pin" : "chat"}>
+                <span data-testid="diff-mode-what">{diffHeading(mode)}</span>
+                <span className="muted" data-testid="diff-mode-why"> · {diffWhy(mode)}</span>
+              </div>
             ) : null}
             {mode.kind === "project" ? (
               <ProjectDiff
@@ -2973,8 +2981,10 @@ export default function App() {
           // The Diff pane's project (2026-10-12): a task picked shows its diff
           // (Follow); else the pinned project's uncommitted changes, else the
           // chat's. Picking a project here takes the window off the task, as
-          // picking a thread does, so the choice shows at once. Disabled under
-          // a card (and inert).
+          // picking a thread does, so the choice shows at once — except while
+          // a drawn Task pane shows the task: the Diff then shows that task
+          // (it never shows another, review of PR #67 L3), and the picker is
+          // off and says so. Disabled under a card (and inert).
           <select
             className="panepick"
             data-testid={`pane-${n}-diff-project`}
@@ -2982,8 +2992,10 @@ export default function App() {
               const mode = diffModeOf(spec);
               return mode.kind === "project" && mode.pinned ? mode.projectId : "";
             })()}
-            disabled={blocked}
-            title="Whose changes this pane shows: a project's uncommitted changes, or the selected task's"
+            disabled={blocked || taskInPane}
+            title={taskInPane
+              ? "A Task pane shows a task, so this pane shows that task's diff: switch the Task pane away to see a project's uncommitted changes"
+              : "Whose changes this pane shows: a project's uncommitted changes, or the selected task's"}
             onChange={(e) => {
               const id = e.target.value || null;
               if (id && live.current.taskFocus) patch({ taskFocus: false });
@@ -2991,7 +3003,7 @@ export default function App() {
             }}
           >
             <option value="">
-              {state.taskFocus && task ? `Follow · task ${task.id.slice(0, 6)}`
+              {(state.taskFocus || taskInPane) && task ? `Follow · task ${task.id.slice(0, 6)}`
                 : `Follow chat${activeProjectId ? ` · ${projectName(activeProjectId)}` : ""}`}
             </option>
             {state.projects.map((p) => (

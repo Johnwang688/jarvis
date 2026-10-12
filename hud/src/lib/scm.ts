@@ -2,12 +2,15 @@
 // doesn't work right now it just says to select a Task"). Pure, so the rules
 // are testable without a repository or a window.
 //
-//  - **Which mode a Diff pane is in** (`diffMode`): while a task is what the
-//    window is about (picked more recently than a thread — the rule File and
-//    Preview panes follow), that task's diff, exactly as before; else the
-//    uncommitted changes of the pane's pinned project (a pane's pin is its
-//    own: a File pane that opened a file and became a Diff pane keeps it);
-//    else those of the project the chat is in; else nothing to show.
+//  - **Which mode a Diff pane is in** (`diffMode`): **a Diff pane never
+//    shows another task than a drawn Task pane** — while one is drawn and
+//    shows a task, the Diff shows that task's diff (review of PR #67, L3);
+//    else, while a task is what the window is about (picked more recently
+//    than a thread — the rule File and Preview panes follow), that task's
+//    diff, exactly as before; else the uncommitted changes of the pane's
+//    pinned project (a pane's pin is its own: a File pane that opened a file
+//    and became a Diff pane keeps it); else those of the project the chat is
+//    in; else nothing to show. `why` says which, for the pane's caption.
 //  - **The rows** (`scmRows`): a project's `git/status` (ED-9), one row per
 //    changed file — modified, added, untracked, renamed, deleted, conflict —
 //    and per folder git reported untracked whole; ignored entries are never
@@ -22,29 +25,42 @@
 import { isEnvName } from "./fileIcons";
 
 export type DiffMode =
-  | { kind: "task"; taskId: string }
+  /** `pane`: a drawn Task pane shows it; `focus`: it was picked more recently than a thread. */
+  | { kind: "task"; taskId: string; why: "pane" | "focus" }
   | { kind: "project"; projectId: string; pinned: boolean }
   | { kind: "none" };
 
 /**
  * What a Diff pane shows. `pin` is the pane's own project (the picker in its
- * header), `follow` the project the window is about (the chat's). A task
- * picked wins over the pin, so a task click always shows its diff in a drawn
- * Diff pane (`workspace.show` relies on it); picking a project in the pane's
- * picker takes the window off the task (App).
+ * header), `follow` the project the window is about (the chat's),
+ * `taskShown` whether a drawn Task pane shows the window's task. A task
+ * wins over the pin, so a task click always shows its diff in a drawn Diff
+ * pane (`workspace.show` relies on it), and a Diff pane never shows another
+ * task than a drawn Task pane; picking a project in the pane's picker takes
+ * the window off the task (App) — while no Task pane holds it.
  */
 export function diffMode(a: {
   pin: string | null;
   projectIds: readonly string[];
   taskId: string | null;
   taskFocus: boolean;
+  taskShown: boolean;
   taskIds: readonly string[];
   follow: string | null;
 }): DiffMode {
-  if (a.taskFocus && a.taskId && a.taskIds.includes(a.taskId)) return { kind: "task", taskId: a.taskId };
+  const task = a.taskId && a.taskIds.includes(a.taskId) ? a.taskId : null;
+  if (task && a.taskShown) return { kind: "task", taskId: task, why: "pane" };
+  if (task && a.taskFocus) return { kind: "task", taskId: task, why: "focus" };
   if (a.pin && a.projectIds.includes(a.pin)) return { kind: "project", projectId: a.pin, pinned: true };
   if (a.follow && a.projectIds.includes(a.follow)) return { kind: "project", projectId: a.follow, pinned: false };
   return { kind: "none" };
+}
+
+/** Why the pane shows what it shows: the caption's second half. */
+export function diffWhy(mode: DiffMode): string {
+  if (mode.kind === "task") return mode.why === "pane" ? "the Task pane's task" : "the task picked last";
+  if (mode.kind === "project") return mode.pinned ? "this pane's project" : "the chat's project";
+  return "";
 }
 
 export type ScmState = "modified" | "added" | "untracked" | "renamed" | "deleted" | "conflict";
