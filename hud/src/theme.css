@@ -589,6 +589,48 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   color: var(--text-2) !important;
   background: var(--bg-3) !important;
 }
+
+/* The File pane's tabs, conflict bar, locks and status line (ED-2). */
+.edtabs {
+  display: flex; flex: 0 0 auto; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--border);
+  background: var(--bg-0); scrollbar-width: thin;
+}
+.edtab {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; max-width: 220px;
+  padding: 4px 6px 4px 10px; font-size: 12px; color: var(--text-2); cursor: pointer; user-select: none;
+  border-right: 1px solid var(--border); border-top: 2px solid transparent;
+}
+.edtab:hover { background: var(--hover); }
+.edtab.on { background: var(--bg-1); color: var(--text); border-top-color: var(--accent); }
+.edtab.preview .edtab-name { font-style: italic; }
+.edtab.conflict .edtab-name { color: var(--amber); }
+.edtab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.edtab-mark { font-size: 10px; }
+.edtab-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; }
+.edtab-dot.on { background: var(--text-2); }
+/* A save on its way (a slow disk): a hollow ring until it answers. */
+.edtab-dot.saving { box-sizing: border-box; background: transparent; border: 1.5px solid var(--text-2); }
+.edtab-x { padding: 0 4px; line-height: 14px; border: none; background: none; color: var(--text-muted); }
+.edtab-x:hover { color: var(--text); background: var(--bg-3); }
+.edtab:not(.on):not(:hover) .edtab-x { visibility: hidden; }
+.edtab.on .edtab-dot.on + .edtab-x, .edtab .edtab-dot.on + .edtab-x { visibility: visible; }
+/* Amber: it waits on the owner's decision. HUD chrome, never syntax. */
+.toolbar.conflictbar { background: var(--amber-soft); border-bottom-color: var(--amber-line); flex-wrap: wrap; }
+.toolbar.conflictbar .msg { color: var(--amber); font-size: 12px; }
+.toolbar.warn { flex-wrap: wrap; }
+.chip.edlock, .chip.edro {
+  font: 10.5px var(--mono); color: var(--text-2); border: 1px solid var(--border-strong);
+  border-radius: 10px; padding: 1px 8px; white-space: nowrap; flex: 0 0 auto;
+}
+.edbody { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.edbody.mdsplit { flex-direction: row; }
+.edstatus {
+  display: flex; gap: 14px; flex: 0 0 auto; padding: 2px 10px; border-top: 1px solid var(--border);
+  font: 10.5px var(--mono); color: var(--text-muted);
+}
+.edstatus .warnish { color: var(--text); }
+.tree-row.withheld { color: var(--text-muted); cursor: default; }
+.tree-row .treemark { margin-left: auto; font: 9.5px var(--mono); color: var(--text-muted); }
 /* A File pane's own project picker (decisions E-13), in its header. */
 select.panepick { max-width: 170px; flex: 0 1 auto; min-width: 0; }
 .mdsplit { display: flex; flex: 1 1 auto; min-height: 0; }

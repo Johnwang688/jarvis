@@ -46,7 +46,7 @@ sys.path.insert(0, str(REPO))
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from tests.face.hud_v2_mock import DIST, MockDaemon  # noqa: E402
+from tests.face.hud_v2_mock import DIST, MockDaemon, etag_of  # noqa: E402
 
 # Overridable, so two worktrees can run the suite at once.
 PORT = int(os.environ.get("HUD_V2_CHECK_PORT", "8479"))
@@ -946,12 +946,12 @@ def monaco_key_checks(page, mock):
     until(lambda: suggest.count() == 0, timeout=3)
 
     puts = len(mock.sent("PUT", "/projects/p1/file"))
-    mtime = mock.world["files"]["calc.py"]["mtime"]
+    etag = etag_of(mock.world["files"]["calc.py"]["content"])
     seen = _pressed(page, "Control+s")
     body = until(lambda: len(mock.sent("PUT", "/projects/p1/file")) > puts or None, timeout=4)
     sent = mock.sent("PUT", "/projects/p1/file")[-1] if body else {}
-    check("Ctrl+S in the editor saves it, with what the editor holds",
-          bool(body) and sent.get("content", "").endswith("\nre") and sent.get("expected_mtime") == mtime, str(sent))
+    check("Ctrl+S in the editor saves it, with what the editor holds, against the bytes it was read as",
+          bool(body) and sent.get("content", "").endswith("\nre") and sent.get("expected_etag") == etag, str(sent))
     check("and its keydown's default (Chrome's Save page as) is prevented", seen.get("prevented") is True, str(seen))
     until(lambda: "saved" in page.locator('[data-testid="file-note"]').inner_text(), timeout=3)
     check("and the save says so", "saved" in page.locator('[data-testid="file-note"]').inner_text())
@@ -1088,10 +1088,11 @@ def file_checks(page, mock):
     until(lambda: not page.locator('[data-testid="file-save"]').is_disabled())
     check("save arms once the file is dirty",
           not page.locator('[data-testid="file-save"]').is_disabled())
+    read_as = etag_of(mock.world["files"]["calc.py"]["content"])
     page.locator('[data-testid="file-save"]').click()
     body = until(lambda: mock.sent("PUT", "/projects/p1/file") or None)
-    check("save sends the expected mtime",
-          bool(body) and body[-1].get("expected_mtime") == 1757900002,
+    check("save sends the etag it was read as (ED-2: a content precondition, not an mtime)",
+          bool(body) and body[-1].get("expected_etag") == read_as and "expected_mtime" not in body[-1],
           str(body[-1] if body else None))
     until(lambda: page.locator('[data-testid="file-note"]').count() > 0)
     check("a successful save says so",
@@ -1100,18 +1101,21 @@ def file_checks(page, mock):
     if mono:
         monaco_key_checks(page, mock)
 
-    # Now a stale write: the mock has moved the mtime on.
-    mock.world["files"]["calc.py"]["mtime"] = 999999
+    # Now a stale write: an agent writes the file under an unsaved edit. The
+    # save (or the poll first) brings the conflict bar; nothing is clobbered.
     edit(" more")
     until(lambda: not page.locator('[data-testid="file-save"]').is_disabled())
+    mock.disk_write("calc.py", "# an agent wrote this\n")
     page.locator('[data-testid="file-save"]').click()
-    until(lambda: "reload" in page.locator('[data-testid="file-note"]').inner_text())
-    check("a 409 prompts a reload rather than clobbering",
-          "reload" in page.locator('[data-testid="file-note"]').inner_text(),
-          page.locator('[data-testid="file-note"]').inner_text())
+    bar = page.locator('[data-testid="editor-conflict"]')
+    until(lambda: bar.count() > 0, timeout=6)
+    check("a stale write brings the conflict bar rather than clobbering",
+          bar.count() == 1 and bar.get_attribute("data-state") == "changed"
+          and mock.world["files"]["calc.py"]["content"] == "# an agent wrote this\n",
+          f"{bar.count()} {mock.world['files']['calc.py']['content']!r}")
 
-    # An unsaved edit is never dropped without a word (ED-1): Reload, or
-    # opening another file, over one asks first, and "keep editing" keeps it.
+    # An unsaved edit is never dropped without a word (ED-1): Reload over one
+    # asks first, and "keep editing" keeps it.
     ask = page.locator('[data-testid="file-discard-ask"]')
     page.locator('[data-testid="file-reload"]').click()
     until(lambda: ask.count() > 0, timeout=2)
@@ -1124,19 +1128,43 @@ def file_checks(page, mock):
           ask.count() == 0 and not page.locator('[data-testid="file-save"]').is_disabled()
           and page.locator('[data-testid="file-path"]').inner_text() == "calc.py")
 
-    # A protected credential file: no content, ever.
+    # Another file opens in a tab of its own (ED-2): the edit stays in its tab.
     page.locator('[data-testid="file-.env"]').click()
-    until(lambda: ask.count() > 0, timeout=2)
-    check("opening another file over an unsaved edit asks first, and nothing has moved yet",
-          ask.count() == 1 and page.locator('[data-testid="file-path"]').inner_text() == "calc.py"
-          and ".env" in ask.inner_text())
-    if ask.count():
-        page.locator('[data-testid="file-discard-yes"]').click()
+    until(lambda: page.locator('[data-testid="file-path"]').inner_text() == ".env", timeout=4)
+    calc_tab = page.locator('[data-testid="editor-tab-calc.py"]')
+    check("opening another file over an unsaved edit opens a tab, and the edit stays in its own",
+          calc_tab.count() == 1 and calc_tab.get_attribute("data-dirty") == "true"
+          and page.locator('[data-testid="editor-tab-.env"]').count() == 1)
+    # An env file is the owner's to edit, and says Jarvis can't read it.
+    lock = page.locator('[data-testid="editor-lock"]')
+    until(lambda: lock.count() > 0, timeout=4)
+    check("an env file opens with the lock: Jarvis can't read this file",
+          lock.count() == 1 and "Jarvis can't read" in lock.inner_text())
+    check("and Add to chat is disabled for it", page.locator('[data-testid="add-to-chat"]').is_disabled())
+
+    # A withheld credential file: no content, ever.
+    page.locator('[data-testid="file-google_token.json"]').click()
     until(lambda: page.locator('[data-testid="file-withheld"]').count() > 0)
     withheld = page.locator('[data-testid="file-withheld"]')
     check("a protected file is shown as withheld", withheld.count() == 1)
     check("with no content", "withheld" in withheld.inner_text())
     check("and cannot be saved", page.locator('[data-testid="file-save"]').is_disabled())
+
+    # Close calc.py's tab, throwing its edit away: the last tab on an unsaved
+    # edit asks Save / Don't save / Cancel.
+    calc_tab.click()
+    until(lambda: page.locator('[data-testid="file-path"]').inner_text() == "calc.py", timeout=3)
+    page.locator('[data-testid="editor-tab-close-calc.py"]').click()
+    close_ask = page.locator('[data-testid="editor-close-ask"]')
+    until(lambda: close_ask.count() > 0, timeout=2)
+    check("closing the last tab on an unsaved edit asks Save / Don't save / Cancel",
+          close_ask.count() == 1 and calc_tab.count() == 1)
+    if close_ask.count():
+        page.locator('[data-testid="close-discard"]').click()
+    until(lambda: calc_tab.count() == 0, timeout=3)
+    check("and Don't save closes it, the file on disk untouched",
+          calc_tab.count() == 0 and mock.world["files"]["calc.py"]["content"] == "# an agent wrote this\n"
+          and not any(b["dirty"] for b in page.evaluate("window.__hud.buffers()")))
 
     # Markdown opens rendered, with a toggle back to the split editor.
     page.locator('[data-testid="file-README.md"]').click()
@@ -3122,6 +3150,16 @@ def main():
                                    guard, FAKE_RECOGNIZER)
             finally:
                 task_mock.stop()
+
+            # The editor's buffers, tabs and guarded save (ED-2): a context and
+            # a mock of their own — the mock writes files behind the editor.
+            from tests.face.hud_v2_editor_check import editor_checks
+            editor_mock = MockDaemon(0).start()
+            try:
+                editor_checks(browser, editor_mock, f"http://127.0.0.1:{editor_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                editor_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)

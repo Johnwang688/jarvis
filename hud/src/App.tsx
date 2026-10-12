@@ -18,7 +18,7 @@
 // Input that belongs to a thread — typed words, a steer, a hand-back, a first
 // send, a transcript — stays with that thread.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, subscribe } from "./api";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
@@ -29,7 +29,9 @@ import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
-import { monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
+import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
+import { buffers, PlainModel } from "./state/buffers";
+import { writtenPaths } from "./lib/buffers";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
@@ -94,6 +96,32 @@ const MIC_TIGHT_H = 560;
 /** One value per pane, all null: the window's per-pane refs start here. */
 const perPane = nonePerPane;
 
+/** The editor's change poll (ED-2, plan §2.4): every 2 s while the window is visible. */
+const BUFFER_POLL_MS = 2000;
+
+// The window's one buffer registry talks to the daemon through the API and
+// makes Monaco models — or, when Monaco cannot load, the fallback's shim, so
+// the save path stays reachable.
+buffers.configure({
+  read: (projectId, path) => api.readFile(projectId, path),
+  write: (projectId, body, signal) => api.writeFile(projectId, body, signal),
+  stat: (projectId, paths) => api.statFiles(projectId, paths),
+  makeModel: (text, abs, kind) => makeModel(text, abs, kind).catch(() => new PlainModel(text)),
+  now: () => Date.now(),
+});
+
+const PROVIDER_LABEL: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
+
+/** Who a thread is, for the editor's "changed on disk by …" toast. */
+function writerOf(threadId: string | undefined, at: { threads: { id: string; provider: string; task_id: string | null; title: string }[]; tasks: { id: string; thread_ids: string[] }[] }): string {
+  const thread = threadId ? at.threads.find((t) => t.id === threadId) : undefined;
+  const task = threadId
+    ? at.tasks.find((k) => k.id === thread?.task_id || k.thread_ids.includes(threadId)) : undefined;
+  const who = thread ? PROVIDER_LABEL[thread.provider] || thread.provider : "an agent";
+  if (task) return `${who} · task ${task.id.slice(0, 6)}`;
+  return thread?.title ? `${who} · ${thread.title}` : who;
+}
+
 export default function App() {
   const { state, dispatch } = useStore();
   // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts; the
@@ -120,26 +148,25 @@ export default function App() {
   // wake recognizer's effect, which stops it.
   const [crashed, setCrashed] = useState(false);
   const crashedRef = useRef(false);
-  // File panes holding an unsaved edit (FileTab's `onDirty`): such a buffer
-  // is never closed behind the owner's back — "follow chat" waits, a project
-  // that goes away keeps the pane pinned until the owner discards the edit,
-  // closing the window asks (2026-10-09, the minimal guard), and since WP-B
-  // nothing switches the pane to another view — a tab, a sidebar click, a
-  // chat landing there — until the edit is saved or discarded.
+  // File panes holding an unsaved edit: such a buffer is never closed behind
+  // the owner's back — "follow chat" waits, a project that goes away keeps
+  // the pane pinned until the owner discards the edit, closing the window
+  // asks (2026-10-09, the minimal guard), and since WP-B nothing switches the
+  // pane to another view — a tab, a sidebar click, a chat landing there —
+  // until the edit is saved or discarded.
   //
-  // The ref is the truth the guards read (`mayShow`, the project picker, the
-  // archive path), written at once by `markDirty` — FileTab calls it from the
-  // editor's own change event — and the state follows for drawing. A ref
-  // copied from the state at render time lagged a frame behind the edit, and
-  // a project picked in that frame dropped it (review of PR #43).
-  const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
-  const dirtyNow = useRef<Record<number, boolean>>({});
-  const markDirty = useCallback((pane: PaneNo, dirty: boolean) => {
-    if (!!dirtyNow.current[pane] === dirty) return;
-    dirtyNow.current = { ...dirtyNow.current, [pane]: dirty };
-    setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty }));
-  }, []);
-  const anyDirty = Object.values(dirtyPanes).some(Boolean);
+  // Since ED-2 the truth is the buffer registry (`state/buffers.ts`): a pane
+  // "holds an unsaved edit" when it holds the last view of a dirty buffer —
+  // one no other pane has open (split-panes plan G-3): letting go of a view
+  // another pane still shows loses nothing. It is read where it is needed
+  // (`dirtyNow`), never copied a frame behind: the registry says so in the
+  // keystroke's own change event (#43's M1), and this render follows.
+  useSyncExternalStore(buffers.subscribe, buffers.version);
+  const dirtyNow = useCallback((pane: PaneNo) => buffers.paneLoses(pane), []);
+  const dirtyPanes: Partial<Record<PaneNo, boolean>> = {};
+  for (const n of PANE_NOS) if (buffers.paneLoses(n)) dirtyPanes[n] = true;
+  // Any unsaved edit at all — a buffer no tab holds any more included.
+  const anyDirty = buffers.anyDirty();
   useEffect(() => {
     if (!anyDirty) return;
     const ask = (e: BeforeUnloadEvent) => {
@@ -149,6 +176,22 @@ export default function App() {
     window.addEventListener("beforeunload", ask);
     return () => window.removeEventListener("beforeunload", ask);
   }, [anyDirty]);
+  // The change poll (ED-2, plan §2.4): every 2 s while the window is visible,
+  // and the moment it is shown or focused again. inotify cannot see a write
+  // made from Windows on the 9p `/mnt/c` mount, where VEX projects live.
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === "visible") void buffers.poll();
+    };
+    const t = setInterval(tick, BUFFER_POLL_MS);
+    window.addEventListener("focus", tick);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", tick);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, []);
   // A refused switch away from an unsaved edit says why, briefly, in a pane
   // the owner can see (by where it is shown): the File pane itself when it
   // is drawn, else the focused pane, naming the File pane — Open beside can
@@ -797,7 +840,13 @@ export default function App() {
         case "text":
           for (const n of mine) dispatch({ type: "settle", pane: n, text: data.text || "" });
           break;
-        case "tool_started":
+        case "tool_started": {
+          // A running turn's write tool named a file (any thread, a task's
+          // included): if that file is open and reloads in place, the toast
+          // says who wrote it. Absolute paths only — a relative one is judged
+          // from the thread's own folder, never matched by its tail.
+          const cwd = tid ? at.threads.find((t) => t.id === tid)?.cwd : null;
+          for (const p of writtenPaths(data.name, data.args, cwd)) buffers.noteTouch(p, writerOf(tid, at));
           for (const n of mine) {
             chatPatch(n, { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" });
             dispatch({
@@ -806,6 +855,7 @@ export default function App() {
             });
           }
           break;
+        }
         case "tool_finished":
           for (const n of mine) {
             chatPatch(n, { status: "THINKING", orb: "thinking" });
@@ -1057,6 +1107,24 @@ export default function App() {
     [dispatch],
   );
 
+  // ---- the editor --------------------------------------------------------------
+
+  /**
+   * "Add to chat" from a File pane (ED-2, the minimal half of ED-7's "Add
+   * selection to chat"): the excerpt goes into the selected chat's box,
+   * unsent (decisions W-6). With no chat on screen it is refused with a
+   * sentence — never sent, never anywhere else. An env file never gets here
+   * (FileTab asks `jarvisMayRead` first).
+   */
+  const addToChat = useCallback((text: string): string | null => {
+    const at = live.current;
+    const n = at.selectedChat;
+    if (n === null) return "No chat is open to add it to.";
+    const had = at.chats[n].input;
+    dispatch({ type: "input", pane: n, text: had && !had.endsWith("\n") ? `${had}\n${text}` : had + text });
+    return null;
+  }, [dispatch]);
+
   // ---- placing a view in a pane ----------------------------------------------
 
   /**
@@ -1068,7 +1136,7 @@ export default function App() {
   const mayShow = useCallback((pane: PaneNo, next: View): boolean => {
     const { ws, fit } = layoutNow.current;
     const spec = ws.panes[pane - 1];
-    if (spec.view !== "file" || next === "file" || !dirtyNow.current[pane]) return true;
+    if (spec.view !== "file" || next === "file" || !dirtyNow(pane)) return true;
     const shownIn: PaneNo = fit.panes.includes(pane) ? pane : fit.panes.includes(ws.focused) ? ws.focused : fit.panes[0];
     setRefused((r) => ({ ...r, [shownIn]: { at: Date.now(), pane } }));
     return false;
@@ -1228,7 +1296,7 @@ export default function App() {
   // ---- split and close (WP-G2, plan §3.4–§3.6) --------------------------------
 
   /** The panes holding an unsaved edit, by id. */
-  const dirtyIds = (): PaneNo[] => PANE_NOS.filter((n) => dirtyNow.current[n]);
+  const dirtyIds = (): PaneNo[] => PANE_NOS.filter((n) => dirtyNow(n));
   /**
    * The panes ⊞ hid whose compose row holds unsent words, files or words
    * handed back: a split takes an empty hidden pane before one of these, and
@@ -1269,7 +1337,9 @@ export default function App() {
     if (spec.view === "terminal" && spec.terminalId && layoutNow.current.fit.panes.includes(n)) {
       terminals.releaseToPanel(spec.terminalId);
     }
-    markDirty(n, false);
+    // Its tabs let go of their buffers; an edit only it held was given up
+    // (× asked first; a pane a split takes back holds none).
+    buffers.releasePane(n, { discard: true });
     setRefused((r) => {
       if (!r[n] && !Object.values(r).some((x) => x?.pane === n)) return r;
       const next = { ...r };
@@ -1283,10 +1353,11 @@ export default function App() {
       delete next[n];
       return next;
     });
-  }, [dispatch, markDirty]);
+  }, [dispatch]);
 
   /**
-   * What × asks before it closes (G-9): a File pane's unsaved edit, and a
+   * What × asks before it closes (G-9): a File pane's unsaved edit only it
+   * holds (ED-2: a file another pane also has open loses nothing), and a
    * compose row's unsent words — they belong to no thread, so they cannot be
    * parked. Words in a thread's box are parked, so that × does not ask.
    * The pane's conversation is judged **whatever it shows** (review 2 of
@@ -1296,14 +1367,17 @@ export default function App() {
    */
   const closeQuestion = useCallback((n: PaneNo): string | null => {
     const spec = layoutNow.current.ws.panes[n - 1];
-    const edit = spec.view === "file" && dirtyNow.current[n];
+    const losing = spec.view === "file" ? buffers.paneLosing(n) : [];
     const chat = live.current.chats[n];
     const unsent = !shownThread(chat, pendingThread.current[n])
       && (!!chat.input.trim() || chat.files.length > 0 || chat.restore.length > 0);
-    if (edit && unsent) {
-      return "This file has an unsaved edit, and this pane's new thread an unsent message. Close the pane and lose both?";
+    if (losing.length) {
+      const names = losing.map((b) => b.path).join(", ");
+      const edits = `${names} ${losing.length === 1 ? "has an" : "have"} unsaved edit${losing.length === 1 ? "" : "s"}`;
+      // Save keeps the edits; the words go with the pane either way, and say so.
+      if (unsent) return `${edits}, and this pane's new thread an unsent message, which closing loses. Save before closing?`;
+      return `${edits}. Save before closing?`;
     }
-    if (edit) return "This file has an unsaved edit. Close the pane and lose it?";
     return unsent ? "Discard the unsent message?" : null;
   }, []);
 
@@ -1341,15 +1415,15 @@ export default function App() {
    * it, focused. A chat's copy is a new compose row in the source's project,
    * written before the layout changes; a terminal's is a new terminal in the
    * folder the source was opened in, unreadable to Jarvis if the source is.
-   * Refused under a card, past eight, when the next shape would not be drawn
-   * whole, and from a File pane holding an unsaved edit (S-8: save first).
+   * Refused under a card, past eight, and when the next shape would not be
+   * drawn whole. A File pane's copy holds the same buffers (ED-2), so one
+   * holding an unsaved edit splits too.
    */
   const splitFrom = useCallback((source: PaneNo, opts: { focus?: boolean } = {}): PaneNo | null => {
     if (blockedNow.current) return null;
     const lay = layoutNow.current;
     const spec = lay.ws.panes[source - 1];
     const dirty = dirtyIds();
-    if (spec.view === "file" && dirty.includes(source)) return null;
     if (!lay.splitVerdict(dirty).ok) return null;
     const id = allocate(lay.ws, dirty, holdingIds());
     if (id === null) return null;
@@ -1432,8 +1506,12 @@ export default function App() {
       // The task view it showed is empty now: the status line says why.
       if (taskGone && !displaced) chatPatch(activePane(at), { status });
       // A File or Preview pane pinned to it follows the chat again — except
-      // one holding an unsaved edit, which waits for the owner to discard it.
-      view.unpinProject(id, PANE_NOS.filter((n) => dirtyNow.current[n]));
+      // the ones holding an unsaved edit no pane outside them holds, which
+      // wait for the owner to discard it. Asked of the pinned panes together
+      // (`panesHolding`): pane by pane, two panes sharing one edit each let
+      // go and the edit lost every tab (review of PR #49, H2).
+      const pinned = PANE_NOS.filter((n) => layoutNow.current.ws.panes[n - 1].projectId === id);
+      view.unpinProject(id, buffers.panesHolding(pinned).map((k) => Number(k) as PaneNo));
       if (displaced || taskGone) placeChat(chatPaneNow());
       void refreshThreads();
       void refreshTasks();
@@ -2101,6 +2179,8 @@ export default function App() {
       monacoModels,
       monacoEditors,
       monacoLanguage,
+      // The editor's buffers (ED-2), read-only: never any text.
+      buffers: () => buffers.snapshot(),
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy, splitFrom]);
 
@@ -2164,6 +2244,17 @@ export default function App() {
   };
   /** The pane's pinned project went away (archived, deleted). */
   const pinGone = (spec: PaneSpec) => !!spec.projectId && !state.projects.some((p) => p.id === spec.projectId);
+  // The File panes pinned to a project that went away which hold an unsaved
+  // edit no pane outside that project's panes holds: they stay on it, with
+  // the gone prompt. Asked of the panes on the project together — two panes
+  // sharing the edit each hold a view another pane also shows, so a per-pane
+  // last-view rule let both go and the edit lost its every tab (review of PR
+  // #49, H2).
+  const goneHeld: Partial<Record<PaneNo, boolean>> = {};
+  for (const pid of new Set(ws.panes.filter(pinGone).map((p) => p.projectId as string))) {
+    const on = PANE_NOS.filter((k) => ws.panes[k - 1].projectId === pid);
+    for (const k of buffers.panesHolding(on)) goneHeld[Number(k) as PaneNo] = true;
+  }
   /**
    * A File or Preview pane's project: its pin while that project exists, else
    * the chat's. A File pane whose pinned project went away while it held an
@@ -2171,7 +2262,7 @@ export default function App() {
    * would remount it and drop the edit; the header asks first instead.
    */
   const paneProject = (spec: PaneSpec, pane: PaneNo): string | null =>
-    spec.projectId && (!pinGone(spec) || (spec.view === "file" && dirtyPanes[pane]))
+    spec.projectId && (!pinGone(spec) || (spec.view === "file" && goneHeld[pane]))
       ? spec.projectId : activeProjectId;
   const pinnedElsewhere = (spec: PaneSpec, pane: PaneNo) =>
     (spec.view === "file" || spec.view === "preview") && paneProject(spec, pane) !== activeProjectId;
@@ -2257,20 +2348,19 @@ export default function App() {
           </div>
         );
       case "file": {
-        // Keyed by its project: a save can only ever go where the file was read.
+        // Keyed by its project: its tabs are paths there, and a buffer saves
+        // through the project it was read through (state/buffers.ts).
         const pid = paneProject(spec, n);
         return (
           <FileTab
             key={pid ?? "none"}
+            pane={n}
             projectId={pid}
-            // The file it had open is read again on mount — only in the project it was opened in.
-            filePath={spec.projectId && spec.projectId === pid ? spec.filePath : undefined}
+            tabs={spec.projectId && spec.projectId === pid ? spec.editors ?? null : null}
+            onTabs={(id, tabs) => view.setEditors(n, id, tabs)}
             narrow={info.narrow}
-            onOpened={(id, path) => {
-              view.pin(n, id);
-              view.setFilePath(n, path);
-            }}
-            onDirty={(dirty) => markDirty(n, dirty)}
+            blocked={blocked}
+            onAddToChat={addToChat}
           />
         );
       }
@@ -2313,7 +2403,7 @@ export default function App() {
               : `pane ${slotOf(ws, refusal.pane)} has an unsaved edit · save or reload it first`}
           </span>
         ) : null}
-        {dirty && pinGone(spec) ? (
+        {spec.view === "file" && goneHeld[n] && pinGone(spec) ? (
           // The one remount nothing can avoid: ask before it drops the edit.
           <span className="chip panepin warn" data-testid={`pane-${n}-gone`}
                 title="The project this file was read from is gone; the unsaved edit is kept here until you discard it">
@@ -2323,7 +2413,11 @@ export default function App() {
               className="quiet"
               data-testid={`pane-${n}-discard`}
               onClick={() => {
-                markDirty(n, false);
+                // The owner threw the edit away: the pane's holds go, and with
+                // them every buffer of this pane's no other pane holds — one
+                // another pane on the gone project still holds stays, with its
+                // own prompt there.
+                buffers.releasePane(n, { discard: true });
                 view.pin(n, null);
               }}
             >
@@ -2345,7 +2439,7 @@ export default function App() {
               ? "Save or reload the file first: another project closes it"
               : "The project this pane's files come from"}
             onChange={(e) => {
-              if (dirtyNow.current[n]) {
+              if (dirtyNow(n)) {
                 setRefused((r) => ({ ...r, [n]: { at: Date.now(), pane: n } }));
                 return;
               }
@@ -2397,14 +2491,13 @@ export default function App() {
     );
   };
 
-  // The split button's state, shared by every pane (it depends on the count),
-  // except a File pane with an unsaved edit: save first (decisions S-8).
+  // The split button's state, shared by every pane (it depends on the count).
+  // A File pane with an unsaved edit splits too since ED-2: the copy holds
+  // the same buffers, edit and all (decisions S-8's "save first" was for two
+  // copies of one file that could diverge).
   const verdict = view.splitVerdict(PANE_NOS.filter((n) => dirtyPanes[n]));
   const paneCount = orderOf(ws).length;
-  const splitFor = (n: PaneNo) => {
-    if (ws.panes[n - 1].view === "file" && dirtyPanes[n]) return { ok: false, title: splitTitle("dirty", paneCount) };
-    return { ok: verdict.ok, title: splitTitle(verdict.why, paneCount) };
-  };
+  const splitFor = (_n: PaneNo) => ({ ok: verdict.ok, title: splitTitle(verdict.why, paneCount) });
 
   const paneContext = (spec: PaneSpec, info: PaneInfo): string => {
     switch (spec.view) {
@@ -2490,7 +2583,7 @@ export default function App() {
       {/* A render error in here — the title bar, the shell, the orb — shows a
           Reload prompt in their place and goes no further: the card below is
           outside it, so it stays up and answerable (components/Boundary.tsx). */}
-      <WorkspaceBoundary onCrash={onCrash}>
+      <WorkspaceBoundary onCrash={onCrash} blocked={blocked}>
       <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
       <div
         id="shell"
@@ -2580,6 +2673,7 @@ export default function App() {
             splitFor={splitFor}
             onSplit={(n) => void splitFrom(n)}
             closeQuestion={closeQuestion}
+            closeSave={(n) => (buffers.paneLosing(n).length ? () => buffers.savePane(n) : null)}
             onClose={closePane}
           />
         </div>

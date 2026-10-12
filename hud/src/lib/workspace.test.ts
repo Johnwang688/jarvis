@@ -6,7 +6,7 @@ import {
   defaultPane, defaultWorkspace, dropColumn, dropRow, setFilePath, splitPane, splitTitle, splitVerdict,
   equalSplit, fitWorkspace, focusPane, forgetTerminal, gridTemplate, loadWorkspace, maxPanelHeight, moveColEdge,
   inWorkspace, orderOf, paneAt, paneSequence, parseWorkspace, pinPane, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
-  setPanel, setPreset, setPreviewUrl, setSplit, setView, show, slotOf, slotWidths, unpinProject,
+  setEditors, setPanel, setPreset, setPreviewUrl, setSplit, setView, show, slotOf, slotWidths, unpinProject,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 import LEGACY_FITS from "./workspace.legacy-fits.json";
@@ -749,6 +749,56 @@ describe("parsing order, kept, bottom and filePath (§3.2)", () => {
   });
 });
 
+describe("a File pane's tabs (ED-2, PaneSpec.editors)", () => {
+  const stored = (panes: unknown[]) => parseWorkspace(JSON.stringify({ preset: "cols2", panes }));
+
+  it("are read field by field, and only with a pinned project", () => {
+    const w = stored([{ view: "chat" }, { view: "file", projectId: "p1",
+      editors: { paths: ["a.py", "src/b.ts"], active: "src/b.ts", preview: "src/b.ts" } }]);
+    expect(w.panes[1].editors).toEqual({ paths: ["a.py", "src/b.ts"], active: "src/b.ts", preview: "src/b.ts" });
+    const bad = stored([{ view: "chat" }, { view: "file", projectId: "p1", editors: { paths: ["a.py"], active: 9, preview: "x" } }]);
+    expect(bad.panes[1].editors).toEqual({ paths: ["a.py"], active: "a.py", preview: null });
+    expect(bad.panes[1].projectId).toBe("p1");
+    // No project: the paths would mean nothing.
+    expect(stored([{ view: "chat" }, { view: "file", editors: { paths: ["a.py"] } }]).panes[1].editors).toBeUndefined();
+    expect(stored([{ view: "chat" }, { view: "file", projectId: "p1", editors: "a.py" }]).panes[1].editors).toBeUndefined();
+  });
+
+  it("take a WP-G2 filePath as one tab", () => {
+    const w = stored([{ view: "chat" }, { view: "file", projectId: "p1", filePath: "calc.py" }]);
+    expect(w.panes[1].editors).toEqual({ paths: ["calc.py"], active: "calc.py", preview: null });
+  });
+
+  it("round-trip through storage, and never hold text", () => {
+    const s = memory();
+    const w = setEditors(defaultWorkspace(), 3, "p1", { paths: ["a.py"], active: "a.py", preview: null });
+    saveWorkspace(w, s);
+    expect(loadWorkspace(s).panes[2].editors).toEqual({ paths: ["a.py"], active: "a.py", preview: null });
+    expect(JSON.stringify(loadWorkspace(s))).not.toContain("content");
+  });
+
+  it("setEditors pins the pane to their project in the same step; null clears them, the pin kept", () => {
+    let w = setEditors(defaultWorkspace(), 3, "p1", { paths: ["a.py"], active: "a.py", preview: "a.py" });
+    expect(w.panes[2]).toMatchObject({ projectId: "p1", editors: { paths: ["a.py"] } });
+    expect(setEditors(w, 3, "p1", { paths: ["a.py"], active: "a.py", preview: "a.py" })).toBe(w);
+    w = setEditors(w, 3, "p1", null);
+    expect(w.panes[2].projectId).toBe("p1");
+    expect(w.panes[2].editors).toBeUndefined();
+  });
+
+  it("a pin to another project, Follow chat or a project gone drops them — except a pane kept for an unsaved edit", () => {
+    const w = setEditors(defaultWorkspace(), 3, "p1", { paths: ["a.py"], active: "a.py", preview: null });
+    expect(pinPane(w, 3, "p2").panes[2].editors).toBeUndefined();
+    expect(pinPane(w, 3, null).panes[2].editors).toBeUndefined();
+    expect(pinPane(w, 3, "p1")).toBe(w);
+    expect(unpinProject(w, "p1").panes[2].editors).toBeUndefined();
+    expect(unpinProject(w, "p1", [3]).panes[2].editors).toEqual({ paths: ["a.py"], active: "a.py", preview: null });
+    // And another project's tabs were never this one's.
+    expect(setEditors(w, 3, "p2", { paths: ["z.py"], active: "z.py", preview: null }).panes[2])
+      .toMatchObject({ projectId: "p2", editors: { paths: ["z.py"] } });
+  });
+});
+
 describe("⊞: fewer panes hide, more panes bring them back (plan G-2)", () => {
   const eight = () => {
     let w = setPreset(defaultWorkspace(), "grid8");
@@ -1168,7 +1218,8 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
   it("copies what a pane shows (decisions S-2, plan §3.5)", () => {
     const base = { projectId: "p1", terminalId: "t1", previewUrl: "http://localhost:5173/x", keepOrigin: "http://localhost:5173",
                    filePath: "src/a.ts" };
-    expect(copySpec({ ...base, view: "file" })).toEqual({ view: "file", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
+    // A File pane's files are its tabs (ED-2): a stray filePath is not what it copies.
+    expect(copySpec({ ...base, view: "file" })).toEqual({ view: "file", projectId: "p1", terminalId: null });
     expect(copySpec({ ...base, view: "diff" })).toEqual({ view: "diff", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
     // The keep-origin grant is the owner's choice for one pane: never copied (WP-E).
     expect(copySpec({ ...base, view: "preview" })).toEqual({
@@ -1178,6 +1229,10 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     // A chat and a terminal start empty: the window fills them (a compose row, a new terminal).
     expect(copySpec({ ...base, view: "chat" })).toEqual({ view: "chat", projectId: null, terminalId: null });
     expect(copySpec({ ...base, view: "terminal" })).toEqual({ view: "terminal", projectId: null, terminalId: null });
+    // A File pane's tabs (ED-2): the copy holds the same buffers; its preview tab is pinned there.
+    const tabs = { paths: ["a.py", "b.py"], active: "b.py", preview: "b.py" };
+    expect(copySpec({ view: "file", projectId: "p1", terminalId: null, editors: tabs })).toEqual({
+      view: "file", projectId: "p1", terminalId: null, editors: { paths: ["a.py", "b.py"], active: "b.py", preview: null } });
     // An empty pane copies empty.
     expect(copySpec({ view: "file", projectId: null, terminalId: null })).toEqual({ view: "file", projectId: null, terminalId: null });
     expect(copySpec({ view: "preview", projectId: null, terminalId: null })).toEqual({ view: "preview", projectId: null, terminalId: null });
@@ -1213,7 +1268,6 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     expect(splitTitle("max", 8)).toBe("Eight panes is the most");
     expect(splitTitle("room", 6)).toBe("No room for 7 panes in this window: widen it, zoom out (Ctrl+-) or close a pane");
     expect(splitTitle("hidden-edit", 1)).toBe("A hidden pane has an unsaved edit: show it from ⊞ first");
-    expect(splitTitle("dirty", 1)).toBe("Save or reload first to split this file");
   });
 
   it("remembers the file a File or Diff pane has open, and forgets it when the pane moves project", () => {

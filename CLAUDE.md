@@ -1505,7 +1505,138 @@ short for either side) and the E-13 checks in `_workspace_checks` (a project
 picked in the same breath as a keystroke). Every one that guards a behaviour
 fails on origin/main, on the reviewed head (18381b9) or with its fix reverted
 (PR body). Monaco's `getValue()` per keystroke (the change event hands the
-whole text to React) is left for ED-2's buffers.
+whole text to React) was left for ED-2's buffers, which removed it (below).
+
+**Buffers, tabs and the guarded save, ED-2 (2026-10-11; plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.3–§2.4, decisions E-7/E-8/E-13;
+the owner's `.env*` rule; contract in `docs/hud-api.md`).** **A file's text
+lives in the buffer registry, outside React** (`hud/src/state/buffers.ts`,
+rules in `lib/buffers.ts`): **one Monaco model per file on disk, keyed by
+`abs`** (where the read route says it resolves), so one file reached from two
+projects is one buffer and the same file in two panes shares the text, the
+dirty dot and the undo stack (each pane keeps its view state, in memory). A
+buffer saves through the project it was read through. **Unmounting a view
+never loses an edit**: a pane holds a reference per tab (`<pane>|<path>`); a
+model goes when no tab holds it **and it is clean** — a dirty one nobody holds
+stays (and `beforeunload` asks) until it is reopened or the owner discards it
+(`releasePane(n, {discard})`, the project-gone "discard edit"). **The text is
+read once, at save** (`getValue()` never per keystroke). **Dirty is
+`getAlternativeVersionId() !== saved`**, said from the edit's own change event
+and only when it moves, so App's guards (`dirtyNow(pane)` =
+`buffers.paneLoses`, `mayShow`, the E-13 picker, `unpinProject`'s keep, ×'s
+question and `allocate`) read
+it in the keystroke's breath (#43's M1), and undo back to the saved text reads
+clean. **A pane "holds an unsaved edit" only when it holds the last view of a
+dirty buffer** (`buffers.paneLoses`; split-panes plan G-3): a view another
+pane still shows may switch away, re-pin or close without asking. **Tabs** (`PaneSpec.editors {paths, active, preview}`, relative to the
+pinned project, per-field fallback, only with a pin; `pinPane`/`unpinProject`
+drop them; `setEditors` pins and sets in one step; a WP-G2 `filePath` with no
+tabs reads as one): a single click opens an italic preview tab the next one
+replaces, a double click or an edit pins it (a narrow pane opens every file
+pinned and folds its tree at once), middle-click or × closes, the last
+tab on an unsaved edit asks Save / Don't save / Cancel. Past 40 tabs the
+oldest **clean** one closes; with every other tab dirty nothing opens and the
+pane says why (a dirty tab is never closed unasked). Reload over an edit
+still asks; opening another file just opens a tab. **One editor per pane**
+(`PaneEditor`), its model swapped, created at the first buffer and kept.
+**Saving is by content**: `expected_etag` (null: must not exist), 409 with the
+disk's etag, never a force; `expected_mtime` is accepted one more release.
+**The poll** (`buffers.poll`, App, every 2 s while visible and on focus):
+clean + moved → reload in place (`minimalEdit`, one undo stop each side, EOL
+followed), toast naming the writer (a `tool_started` of a **write** tool only
+— Write/Edit/MultiEdit/NotebookEdit, `apply_patch`, `write_file`/`edit_file`
+— through `writtenPaths` → `noteTouch`, **absolute paths only**, a relative
+one resolved from the thread's `cwd`, never matched by its tail); dirty +
+moved or a 409 → the amber `ConflictBar` (Compare —
+`CompareEditor`, the disk read-only left via a `jarvis-disk:` model, the
+buffer itself right, `useInlineViewWhenSpaceIsLimited: false`; Keep mine
+against the shown etag; Take theirs asks once, undoable); gone → Save to
+recreate / Close. **`jarvis/v2/editor_policy.py` is the one classifier**
+(gate → withheld → safety → env → binary → text; see `docs/hud-api.md`), and
+**every editor file route is owner-only, reads included** (E-7) — so tests
+that read a file go through the HUD listener with the HUD's Origin
+(`hud_backend_check.owner`). **Env files**: kind `env`, a lock "Jarvis can't
+read this file", Add to chat disabled (`jarvisMayRead`), model language
+`dotenv` (word suggestions draw only on same-language models, so a secret is
+never offered in a file Jarvis can read), and the text in no request but its
+own save, never localStorage or `__hud.buffers()`. **Add to chat** exists in
+its smallest form (selection or line → `path:Lx-y` + fence into the selected
+chat's box, unsent; W-6) so the env rule has something to disable; ED-7
+extends it, and anything new that carries a buffer's text toward Jarvis must
+ask `jarvisMayRead` first. Polling mock: `mock.disk_write`/`disk_delete`
+write behind the editor; the mock's `files/stat` and etag 409s follow the
+daemon's. The headless checks type no spaces (they were written while
+Space was still push-to-talk; #40 moved it to Ctrl+D). Test hook:
+`__hud.buffers()` (no text).
+Free checks: `lib/buffers.test.ts`, `state/buffers.test.ts`,
+`workspace.test.ts` (tabs), `tests/v2/editor_files_check.py` (the name rule,
+the kinds, etag/409/stat, owner-only, env content kept off the bus, logs,
+API listener, diffs, preview and attachments; real Chromium for the owner's
+own page) and `tests/face/hud_v2_editor_check.py` (run by `hud_v2_check` on a
+`MockDaemon(0)` of its own, or alone, under `hud_v2_check.guard` — no CSP
+violation).
+
+**ED-2's review round (2026-10-11, PR #49; each check failing on f869543).**
+The rules the two reviews left, in one place:
+- **An env file is never demoted** (MED1): `editor_policy.classify_bytes`
+  keeps a non-UTF-8 env file `env` (UTF-16LE from PowerShell 5.1, Latin-1)
+  with `Verdict.writable=False`; every read carries **`editable`**, and the
+  HUD's editability is `editableOf(kind, editable)` — the read's word and an
+  editable kind, both, never the kind alone — so the lock, closed Add to chat
+  and `dotenv` stay while the file is read-only (`editor-readonly-reason` too).
+- **The gate's readable exemption is the editor's own, and only for a gate
+  path that resolves to itself** (LOW2, `Policy._readable_gate`): not a
+  symlink anywhere on its way, not a protected/env name or login file, not in
+  a credential folder other than `~/.config/jarvis`. `hud_api.protected` (an
+  `@path`, the preview origin, a diff) asks `withheld_anywhere`, which has no
+  exemption — the allowlist is no longer attachable by `@path`.
+  `files._protected_state_paths()` is the unresolved list it reads.
+- **Withheld widened** (LOW3): `~/.docker/config.json` (and
+  `$DOCKER_CONFIG`), `~/.kube/config` (and `$KUBECONFIG`), `~/.npmrc` (and
+  `$NPM_CONFIG_USERCONFIG`), `~/.pypirc` as login files; v2's session
+  carriers (`V2_DATA_DIR/claude`, `V2_DATA_DIR/codex`) as credential folders;
+  a dropped file named like a store (`editor_policy.credential_name`) is never
+  attached. **The preview origin refuses any path with a hidden component
+  inside the project except `.well-known`, and anything under Jarvis's config
+  and data folders** (`hud_api._not_a_page`, `editor_policy.jarvis_dirs`): it
+  answers any loopback client, `fetch_page` included.
+- The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
+  file by name, LOW4); a save's unexpected `OSError` is 500 and a
+  `PermissionError` 403, never the dispatcher's 409 (the conflict bar); a tree
+  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED.
+- **`Buffers.releasePane` touches only buffers this pane held** (H1): × on any
+  pane used to discard every edit no tab held. **A project going away asks
+  the panes on it together** (H2, `panesLose`/`panesHolding`): two panes
+  sharing an edit each read "another pane holds it", both unpinned and the
+  edit lost every tab; now each one holding it stays pinned with
+  `pane-N-gone`, and FileTab stays keyed by the gone project (`goneHeld`).
+- Compare re-reads once per new conflict etag (M2, `rereadFor`; it looped at
+  ~340 GET/s while the disk disagreed with the poll, unbounded when hidden).
+  Loads dedupe by `abs` after the read (L1, `making`), and `makeModel` never
+  disposes a model at its URI — a second goes beside it under a query. An
+  unknown kind is `unknown`: read-only, closed to Jarvis (L2). The crash
+  prompt has **Save N unsaved files** (`hud-crashed-save`, `saveAll`; disabled
+  and inert under a card, L3). A reload in place says nothing while it runs
+  (`applying`, L4 — it used to read dirty for a moment and pin a preview
+  tab). A save's late answer lands only on its own buffer; a 409 whose etag
+  is not one asks the poll route and, still unknown, tells the owner; one
+  write at a time per buffer (a double Ctrl+S sends one PUT).
+- **A Ctrl+S during a save is never dropped** (delta review, LOW-2; the
+  owner's VEX projects live on `/mnt/c`, where writes are slow): it waits for
+  the first, then **exactly one** follow-up save runs against the etag *that
+  answer returned* — further presses join it, a first 409 or error runs none
+  (the bar), and nothing new since the first means no second PUT. The tab's
+  dot is a hollow ring and the status says **saving…** (`editor-saving`,
+  `data-saving`) until the last answers; Save stays pressable meanwhile. A
+  poll whose stat crossed a save (sent while saving, or the etag moved under
+  it) is ignored — it read the disk before the write landed. The preview
+  origin refuses a hidden path in its own words, "hidden path: not served on
+  the preview origin" (NIT-1); a credential and Jarvis's own folders stay
+  "protected file".
+Checks: `editor_files_check`'s `Review*` classes, the `review of PR #49`
+blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
+`_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
+`uneditable` and on-cue `stat_etags`).
 
 **The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
 One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
@@ -1767,7 +1898,8 @@ face keeps Space.
 **Split and close, WP-G2 (2026-10-11, design §18; plan
 `docs/plans/2026-10-10-hud-split-panes-plan.md` §3.4–§3.6, decisions file
 beside it wins: S-2 a split is a copy, S-6 a terminal's copy is a new shell in
-its folder, S-7 a task's copy is its diff, S-8 a dirty file is saved first).**
+its folder, S-7 a task's copy is its diff, S-8 a dirty file is saved first —
+lifted by ED-2's shared buffers, below).**
 The owner asked for the × several times. Every pane's strip has a **split
 button** (`pane-<id>-split`, the title bar's `.tb-icon` — the rules were
 lifted off `#titlebar` — an outline with one divider), in the single layout
@@ -1781,13 +1913,14 @@ lowest free id, else the oldest hidden pane holding nothing, else the oldest
 whose compose row holds unsent words (`holding` — **its words are parked for
 the next new thread, `ORPHAN_DRAFT`**, never dropped: a hidden pane cannot
 ask; review of PR #47, H1), never one with an unsaved edit; `copySpec`
-copies a file or diff (project and `filePath`), a preview's URL — **never
+copies a file pane's project and tabs (`editors`, ED-2: the same buffers), a
+diff's project and `filePath`, a preview's URL — **never
 its keep-origin grant** — turns a task into its diff, and leaves a chat or a
 terminal for App to fill; `splitVerdict` refuses past eight (`max`), when
 the next shape would not be drawn whole even with the side panes and panel
 folded (`room`, so at 1280×800 six panes cannot become seven), and when every
-free id is a hidden dirty pane. A dirty File pane's split is disabled ("Save
-or reload first"). `{focus: false}` (the browser amendment's dev-server pane,
+free id is a hidden dirty pane. A dirty File pane splits like any other since
+ED-2: the copy holds the same buffers, edit and all. `{focus: false}` (the browser amendment's dev-server pane,
 §D.2) moves neither `ws.focused`, DOM focus nor the selected chat
 (`__hud.split(source, {focus})` is its test hook). **App does what a pane
 held** (`releasePane`): a thread's unsent words and files are parked under
@@ -1820,17 +1953,22 @@ switched to File keeps its chat, and × releases it too (review 2, MED-1) —
 and Discard drops them for good; a terminal goes back to the panel as its
 selected tab (`releaseToPanel`) — **no DELETE, no new ticket, the shell lives
 on**. × asks first, in an inline strip (`pane-<id>-close-ask`, focus on
-Keep, never a modal), for an unsaved edit or a compose row's unsent words;
+Keep/Cancel, never a modal), for a compose row's unsent words (Discard and
+close / Keep) or an unsaved edit **no other pane holds**
+(`buffers.paneLosing`; Save / Don't save / Cancel — `pane-<id>-close-save`,
+`-close-discard`, `-close-keep` — Save closing only once every edit is on
+disk; with both, one question names both and says the words go either way);
 the strip is dropped when the question no longer holds (the words were sent
 or cleared, a file edit joined them — a switch of view alone keeps it, the
-words still being the pane's) and Discard re-asks at the click, so it never answers a
-question nobody asked; Keep is not `disabled` under a card (inert covers it),
-so focus comes back to it. **Focus after a close goes where the mic is**
-(W-6): the selected chat while it is another drawn pane — closing a File pane
-never hands the mic, or dropped files, to the chat that slides into its slot
-(review of PR #47, M1) — else, the selected chat closing, the chat selected
-before it, else the pane now in that slot (else the slot before); always the
-pane itself, never its box, so a held Enter cannot send. **One click closes one pane**: a × click within 400 ms
+words still being the pane's) and Discard re-asks at the click, so it never
+answers a question nobody asked; Keep/Cancel is not `disabled` under a card
+(inert covers it), so focus comes back to it. **Focus after a close goes where
+the mic is** (W-6): the selected chat while it is another drawn pane — closing
+a File pane never hands the mic, or dropped files, to the chat that slides
+into its slot (review of PR #47, M1) — else, the selected chat closing, the
+chat selected before it, else the pane now in that slot (else the slot
+before); always the pane itself, never its box, so a held Enter cannot send.
+**One click closes one pane**: a × click within 400 ms
 of a close, or the second of a double-click, does nothing (3 over 2's top-
 right × sits exactly where 2×2's lands). A split's chat copy is a compose row
 in the source's project, written before the layout changes; a terminal's is
@@ -1843,10 +1981,11 @@ Restart and "New terminal here" keep the old terminal's switch the same way
 PR #47, LOW-1). A
 reused id mounts fresh: Workspace unmounts a pane neither drawn nor `kept`,
 and `useLayout` bumps the incarnation on a close and when a split takes back
-a hidden pane (else its old FileTab stayed). File panes store their open
-file (`filePath`, dropped when the pin moves project) and reopen it on mount;
-a save tells the other File panes (`lib/filesync.ts`): a clean one on that
-file re-reads, a dirty one says "changed on disk"; Diff panes seed their file.
+a hidden pane (else its old FileTab stayed). File panes store their tabs
+(ED-2's `editors`; a WP-G2 `filePath` reads as one tab) and reopen them on
+mount; two File panes on one file share its buffer, so G2's save-and-reload
+messages (`lib/filesync.ts`) are gone; Diff panes store and seed their file
+(`filePath`).
 Open beside's two grow cases are splits now (a free id, so a pane ⊞ hid keeps
 what it showed). **A stored WP-A/WP-B value's panes 2–4 are `kept`** when its
 preset does not draw them (it has no `order` or `kept`), so a split takes a
@@ -1861,13 +2000,14 @@ panel's row drop unrecorded, U35 no side refit, U36/U37 fallbacks to id 1)
 each have a test now. Under a card every split, × and question button is
 disabled and inert, and the eight-pane card check asserts it at 160% and
 70%. Free checks: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
-`filesync.test.ts`, the layout suite's `_split_checks`,
+the layout suite's `_split_checks`,
 `_split_close_one_checks` and `_split_file_checks`, the multichat suite's
 `_split_close_chat_checks`, `_split_close_selected_checks` and the
 `_rv47_*` review checks (each failing on bf09633), the terminal suite's
 `_split_close_terminal_checks`, the preview suite's `_split_checks` and
 `tests/v2/terminal_check.py`'s unreadable-from-the-first-byte case; the PR's
-mutation tables show each failing with its mutation. Not done: WP-G3's shared buffer (S-8 says save first) and WP-H's
+mutation tables show each failing with its mutation. WP-G3's shared buffer
+arrived with ED-2. Not done: WP-H's
 thinking line.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
@@ -3361,6 +3501,25 @@ jarvis/
   names: `.env`, `.env.local`, `google_token.json`, and `onshape_keys.json`
   (JSON values pulled by sensitive key names) — `.env.example` stays
   readable on purpose.
+
+  **The owner's `.env*` rule (2026-10-11, `docs/plans/2026-10-11-env-files.md`):
+  the owner edits every `.env*` file in the HUD, Jarvis reads none of them
+  and writes only `*.example`.** A **credential env file** is `.env` or
+  `.env.<anything>`, at any depth, except a name ending `.example`;
+  case-insensitive (Windows drives are); a name Windows would trim (trailing
+  dots or spaces) judged both ways; symlinks resolved both ways (a symlink
+  *named* `.env.example` that reaches `.env` is credential, and one *named*
+  `.env` is credential whatever it points at), a symlink it cannot follow is
+  credential. **One function, `secrets.is_env_credential(path)`** (and
+  `is_env_credential_name` for a bare name), and every caller asks it —
+  nothing keeps a copy. **ED-2 built the owner's half**: the editor's routes
+  serve and save such a file only to the owner (`editor_policy` kind `env`,
+  owner-only routes, the API listener 403), and `hud_api.protected` — what a
+  diff, the preview origin and an `@path` or dropped attachment refuse — asks
+  it too. **ENV-1 owes Jarvis's half on the same function**: v1's
+  `read_file`/`grep_files`/write tools, the shells (DENY for a write), the
+  scrub's search for values, Claude's hook and Codex's grants — until it
+  lands, `PROTECTED_NAMES` still covers only `.env` and `.env.local` for v1.
 
 ## Testing
 
