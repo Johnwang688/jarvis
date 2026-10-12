@@ -331,8 +331,14 @@ export class VexStore {
         }
         terminals.gone(brain);
         paused = true;
-        await this.refreshStatus();
-        if (this.status?.brain) {
+        // The daemon frees the port once the program's end has been read:
+        // asked again for a moment rather than once.
+        for (let i = 0; i < 15; i++) {
+          await this.refreshStatus();
+          if (!this.status?.brain && this.status?.device !== "brain") break;
+          await sleep(200);
+        }
+        if (this.status?.brain || this.status?.device === "brain") {
           this.say(projectId, "The brain terminal could not be paused; close it, then download.");
           return;
         }
@@ -366,12 +372,7 @@ export class VexStore {
       });
     } finally {
       this.patchRun(projectId, { busy: null });
-      if (paused) {
-        // The brain terminal again — not behind a card.
-        if (this.mayAct()) void this.openBrain();
-        else this.brainNote = "The brain terminal was paused for the download; open it again when you are ready.";
-        this.changed();
-      }
+      if (paused) void this.resumeBrain();
     }
   }
 
@@ -401,6 +402,26 @@ export class VexStore {
   }
 
   // -- the brain terminal and device info ---------------------------------------
+
+  /**
+   * The brain terminal again after a download paused it — never behind a
+   * card. The download's program may have ended a moment before the daemon
+   * frees the device, so a "one device action at a time" is asked again.
+   */
+  private async resumeBrain(): Promise<void> {
+    const paused = "The brain terminal was paused for the download; open it again when you are ready.";
+    for (let i = 0; i < 10; i++) {
+      if (!this.mayAct()) break;
+      await this.refreshStatus();
+      if (!this.status?.device) {
+        await this.openBrain();
+        if (!this.brainNote) return;
+      }
+      await sleep(300);
+    }
+    this.brainNote = paused;
+    this.changed();
+  }
 
   async openBrain(): Promise<void> {
     if (!this.mayAct() || this.brainBusy) return;

@@ -58,6 +58,16 @@ export function VexView(props: {
     window.addEventListener("focus", again);
     return () => window.removeEventListener("focus", again);
   }, [pid]);
+  // Setup is often run in one of the HUD's own terminals, where the window
+  // never loses focus: while it is not set up, the status is asked again.
+  const unconfigured = !!vex.status && !vex.status.configured;
+  useEffect(() => {
+    if (!unconfigured) return;
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") void vex.refreshStatus();
+    }, 4000);
+    return () => clearInterval(t);
+  }, [unconfigured]);
 
   if (!pid) return <div className="pad muted" data-testid="vex-none">Pick a project.</div>;
   const d = vex.detection(pid);
@@ -103,7 +113,13 @@ function Body(props: {
           <div>{setup.headline}</div>
           <code className="vexcmd" data-testid="vex-setup-command">{SETUP_COMMAND}</code>
           {setup.detail ? <div className="muted small" data-testid="vex-setup-detail">{setup.detail}</div> : null}
-          <div className="muted small">Then come back here: this view checks again when the window gets focus.</div>
+          <div className="muted small">
+            This view checks again by itself every few seconds.{" "}
+            <button type="button" className="quiet" data-testid="vex-setup-recheck" disabled={blocked}
+                    onClick={() => void vex.refreshStatus()}>
+              Check now
+            </button>
+          </div>
         </div>
       ) : vex.statusError ? (
         <div className="pad err small" data-testid="vex-status-error">{vex.statusError}</div>

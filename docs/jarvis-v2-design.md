@@ -2337,7 +2337,7 @@ brain terminal again. **Under an approval card every VEX control is disabled
 and inert, and the store refuses; a card that comes up between the click and
 a step drops the rest of the chain** — nothing is built or sent behind it —
 and the view says so. With no `vex.json` the view says the one command to
-run, `jarvis vex setup`, and checks again when the window gets focus. Device
+run, `jarvis vex setup`, and checks again every few seconds and on focus. Device
 info and every error message are drawn as text. A `vex_device` record this
 window cannot match to its own click is said in the view. Not yet: a Python
 project's download (VX-1's spike), device info until the owner records the

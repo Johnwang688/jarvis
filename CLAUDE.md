@@ -1297,7 +1297,7 @@ beside the terminals' hold) makes the store refuse, and a card that comes up
 between the click and any step drops the rest of the chain** (a card count,
 as `ownerOpened`) — nothing builds or downloads behind it; a crash
 (`vex.crash()`) stops it too. No `vex.json`: the view names `jarvis vex
-setup` and checks again on window focus. `vex_device` records this window
+setup` and checks again every 4 s and on focus. `vex_device` records this window
 did not start are said in the view. **Known**: on a reload, a window with no
 chat drawn puts the conversation in the focused pane (WP-B's boot rule), so a
 lone VEX pane comes back as chat — keep the VEX view beside a chat. Free
