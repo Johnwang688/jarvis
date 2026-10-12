@@ -650,8 +650,16 @@ def _guard_card_checks(page, mock, check, until):
     until(lambda: page.locator(SHIELD).get_attribute("data-up") == "false", timeout=2)
     check("setup: the pointer is over the page (its shield stepped aside)",
           page.locator(SHIELD).get_attribute("data-up") == "false")
+    # The pointer leaves the window from inside the page (to another screen):
+    # the HUD hears nothing, so "over it" still holds when the card comes.
+    page.mouse.move(x, 2000)
+    page.wait_for_timeout(100)
     _approval(mock, "guard1")
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(100)
+    up = page.locator(SHIELD).get_attribute("data-up") if _count(page, SHIELD) else None
+    check("setup: under the card the pointer still reads as over the page (only the card rule can refuse it)",
+          up == "false" or _count(page, STOLEN) > 0, str(up))
     until(lambda: _count(page, STOLEN) > 0, timeout=5)
     page.wait_for_timeout(200)
     check("R-1: under a card, a frame that grabs focus is removed, pointer over it or not",
