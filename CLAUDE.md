@@ -1638,6 +1638,80 @@ blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
 `_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
 `uneditable` and on-cue `stat_etags`).
 
+**The editor's navigation, ED-7 (2026-10-11; plan §2.8, §2.10; contract in
+`docs/hud-api.md`).** The owner replaces VS Code with this at the lab, so:
+**quick open** (Ctrl+P), **the palette** (Ctrl+Shift+P, F1), **find in
+files** (Ctrl+Shift+F), **explorer ops** (right-click: new file, new folder,
+rename, delete; `+`/`+▸` in the tree column's head), **the status bar**
+(`EditorStatus`: Ln/Col and selections, language, indentation, encoding, EOL,
+saved/unsaved, and ED-2's `saving…` — `data-queued` when a second Ctrl+S waits:
+`BufferView.queued`) and **Add selection to chat** extended (every selection,
+from the palette and Monaco's context menu — `jarvis.addSelectionToChat`,
+shown only under the `jarvisMayAddToChat` context key, i.e. `jarvisMayRead`).
+- **Backend** (`jarvis/v2/editor_nav.py`, three routes in `hud_api.route`,
+  **`owner_only` before the body is read**): `GET …/files` (`git ls-files`
+  through `gitops._git`, else a walk; dotfiles in; never a credential folder,
+  the gate's state, a withheld file, `SKIP_DIRS`, a symlinked folder or a
+  symlink out; 50k/20 deep/5 s), `POST …/search` (refused on the Inbox; 2,000
+  matches, 10 s; `.gitignore` respected unless `ignore: false`; hidden files
+  searched) and `POST …/fs`. **No copy of any rule**: `editor_policy` judges,
+  `hud_api.scope` places, `folders` names Windows names, `trash.Trash.put`
+  deletes (a project-owned `Trash`, so Jarvis's retention purge never empties
+  the owner's deletes). `_policy_for(root)` narrows the policy's credential
+  folders to the ones that can matter under the root — a speed-up, not a
+  second rule. A folder is renamed or deleted only if it holds nothing the
+  editor refuses: absolute anchors (gate files, credential folders, login
+  files, the HUD roots, Jarvis's SELF_PROTECTED) **and** a walk of ≤20,000
+  entries that never follows a symlink or enters `SKIP_DIRS`. A rename never
+  replaces; **an env file keeps an env name** (403 otherwise); a new env file
+  is 0600. One fs op at a time on its own lock, not the daemon's (a Recycle
+  Bin move takes PowerShell a while).
+- **Find in files and `grep_files` share one core and one filter**
+  (`tools/search.py`: `refused()`, `Hit`, `_rg_record`, `_python_hits`,
+  `search_bounded`). `refused` = `is_protected` **or `is_env_credential`** —
+  so `grep_files` now refuses `.env.production` and the rest on both backends
+  (ENV-1's grep half). The route adds `editor_policy`'s withheld/gate/env on
+  top (two layers: dropping either alone keeps parity; dropping both breaks
+  it, and `editor_nav_check`'s parity test says so). `_rg_args`' new options
+  are keyword-only with defaults that leave `grep_files`' argv unchanged
+  (files_check asserts it).
+- **Keys**: `shortcutFor` returns `quickOpen`/`palette`/`findInFiles`;
+  `useLayout(blocked, onEditorKey)` takes them in **the one capture handler**,
+  prevents the default (no print dialog) and **stops propagation** (Monaco's
+  F1 never opens its own quick command); a Ctrl+K chord's second key stays
+  Monaco's; in a terminal **Ctrl+P is readline's** (`terminalTakesKey`); under
+  a card they are swallowed, and `navBusy` refuses too. Quick open and the
+  palette are **`state.picker`** values, so push-to-talk refuses and the mic
+  claims nothing while one is open; Space types a space; a layout effect
+  closes both when a card arrives; FileTab closes its menu and prompt on
+  `blocked`. Targets: the focused File pane, else the first drawn one, else
+  the focused pane becomes one (`mayShow`); App talks to a File pane by
+  **`fileAsk`** (open at a line, search, palette file commands), acted on once
+  per nonce and cleared after the commit.
+- **Rename keeps the edit**: `Buffers.renamed(fromAbs, toAbs, kind)` moves the
+  buffer (same model: text, dirty, undo), rewrites every hold's path relative
+  to its own project and returns the moves; App's `onRenamed` renames the tabs
+  of every pane on the project (`renameTabs`, prefix-aware for folders) and of
+  any other pane the moves name; the model's language follows
+  (`monaco.relanguage`). A delete leaves an unsaved edit in its tab (the poll
+  says gone; Save recreates); the prompt says so first.
+- **Find in files never prefills from an env buffer** (`dotenv` model) — its
+  text goes in no request but its own save.
+Free checks: `tests/v2/editor_nav_check.py` (19 + 1: parity on both
+backends, listing, search bounds/gitignore/never-withheld, fs refusals,
+trash, owner-only), `fuzzy.test.ts`, `commands.test.ts` (no download or
+device entry, keys), the ED-7 blocks in `state/buffers.test.ts` and
+`lib/buffers.test.ts`, and `tests/face/hud_v2_editor_nav_check.py` (80, a
+`MockDaemon(0)` of its own; `ONLY=card` runs one section; run by
+`hud_v2_check` after the editor section). Guard removals that bite: owner_only,
+the classifier refusal, the folder walk, the anchors (an install root under
+`node_modules`), rename-replaces, the env rename, unlink-for-trash, the
+listing's filter, the route's two search filters together, and in the HUD the
+card close, the key guards (both), FileTab's blocked effect.
+Not done: replace in files (cut), a "dev servers" list, symbol search (cut),
+Ctrl+PageUp/Down as keys (palette only), and a tab on the same file through
+*another* project's pane that never mounted keeps its old path.
+
 **The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
 One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
 is the table: rows keyed by **nvim-treesitter capture names** (`LEGEND` —
