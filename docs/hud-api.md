@@ -1899,6 +1899,41 @@ folds are computed in that worker from the tree it already holds. No new
 many fold answers from the tree were handed to Monaco for that model (every
 other answer is indentation folding).
 
+
+## Additions 2026-10-12 (editor settings and `.editorconfig` — ED-8)
+
+Editor plan §2.8. **No new route.** The editor settings are the window's own
+(localStorage `jarvis.hud.editor`: `{fontFamily, fontSize, tabSize,
+insertSpaces, wordWrap, wordWrapMarkdown, minimap, stickyScroll, whitespace,
+bracketPairs, cursorStyle, vim}`, each field checked alone on load); nothing
+about them reaches the daemon.
+
+**`.editorconfig` uses ED-2's owner-only routes**, as the editor's buffer
+opens a file at `<dir>/<name>` in project `{id}`:
+- `POST /projects/{id}/files/stat {"paths": ["<dir>/.editorconfig",
+  "<parent>/.editorconfig", …, ".editorconfig"]}` — the file's folder and
+  each folder above it **up to the project's root, never above** (at most 32,
+  within the route's 100), once per folder every 3 s at most;
+- `GET /projects/{id}/file?path=<dir>/.editorconfig` for each that stat says
+  exists as `kind: "text"` — once per etag, every one on the walk; they are
+  applied nearest first, stopping at one whose preamble says `root = true`. A
+  withheld, non-text, missing or refused answer is no configuration, and one
+  whose stat `size` is over 64 KB is never read. A path's resolution is kept
+  per (path, each config's folder and etag), so restored tabs ask nothing
+  twice. Judging happens in the window, one resolution per task, under a
+  5 ms clock; a config that runs it out of time twice, or is over a cap,
+  configures nothing until its etag changes.
+
+Neither sends any file's content. What the files say sets the buffer's
+indentation and, for a file with no line break, the line ending its new
+lines take; **a save never carries anything `.editorconfig` asked for** — no
+trimmed whitespace, final newline or converted line endings.
+
+Test hook, read-only and not an API: `window.__hud.editorSettings()` →
+`{settings, stored, editors: [{uri, fontFamily, fontSize, wordWrap, minimap,
+stickyScroll, renderWhitespace, bracketPairs, cursorStyle, vim, model:
+{insertSpaces, tabSize, indentSize, eol}}]}` — never any text.
+
 ## Additions 2026-10-12 (chat titles)
 
 The owner: "right now each chat just displays its id … keep the id in the
