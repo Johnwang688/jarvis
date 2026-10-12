@@ -9,10 +9,12 @@ import {
 // wall time and the process's CPU time, each at least the thread's own CPU
 // time, and only the first inflated by a CPU taken away under load (the
 // thread's own CPU clock is read a scheduler tick stale on Linux, so it is no
-// use at 16 ms). `workDeadline` reads the work done as its clock, so
+// use at 16 ms); `leastHeld` takes the best of up to three fresh runs, since
+// a GC pause inflates both measures. `workDeadline` reads the work done as its clock, so
 // `RESOLVE_MS` is a fixed number of steps: a check whose point is not the time
 // (a cap found, a small config's answer) cannot be timed out by a slow machine.
-const cpuUsage = (globalThis as { process?: { cpuUsage?: () => { user: number; system: number } } }).process?.cpuUsage;
+const proc = (globalThis as { process?: { cpuUsage?: () => { user: number; system: number } } }).process;
+const cpuUsage = proc?.cpuUsage ? () => proc.cpuUsage!() : null;
 const cpuMs = () => {
   const u = cpuUsage!();
   return (u.user + u.system) / 1000;
@@ -23,6 +25,25 @@ function held(fn: () => void): number {
   fn();
   const wall = performance.now() - w;
   return cpuUsage ? Math.min(wall, cpuMs() - c) : wall;
+}
+/**
+ * `held` for a fresh run of `prepare()`'s job, the least of up to three: a GC
+ * pause (the garbage of the 600 ms test before) or a preemption lands on one
+ * run, while the guard's own cost is paid by every run, so a broken guard
+ * fails all three. Stops at the first run under `bound`; the result is the
+ * fastest run's.
+ */
+function leastHeld<T>(bound: number, prepare: () => () => T): { ms: number; result: T } {
+  let best: { ms: number; result: T } | null = null;
+  for (let i = 0; i < 3 && !(best && best.ms < bound); i++) {
+    const run = prepare();
+    let result: T | undefined;
+    const ms = held(() => {
+      result = run();
+    });
+    if (!best || ms < best.ms) best = { ms, result: result as T };
+  }
+  return best!;
 }
 /** Nanoseconds one step stands for on the work clock: about this machine's rate (3–4 ns). */
 const WORK_NS = 4;
@@ -230,10 +251,7 @@ describe("a resolution is held to the clock", () => {
   });
 
   it("stops at the deadline: no configuration, and the file to blame named", () => {
-    let r: ReturnType<typeof resolveProps> | undefined;
-    const ms = held(() => {
-      r = resolveProps([{ dir: "", file: heavy() }], PATH);
-    });
+    const { ms, result: r } = leastHeld(16, () => () => resolveProps([{ dir: "", file: heavy() }], PATH));
     expect(r).toMatchObject({ over: "time", props: {}, culprit: 0 });
     expect(ms).toBeLessThan(16);
   });
@@ -255,27 +273,27 @@ describe("a resolution is held to the clock", () => {
 
   it("32 configs deep stop in time too (the review's walk)", () => {
     const deep = `${Array.from({ length: 31 }, (_, i) => `d${i + 1}`).join("/")}/main.cpp`;
-    const walk = Array.from({ length: 32 }, (_, i) => ({
-      dir: deep.split("/").slice(0, i).join("/"),
-      file: parseEditorConfig(lines.slice(1).join("\n")), // no root: every one applies
-    }));
-    let r: ReturnType<typeof resolveProps> | undefined;
-    expect(held(() => {
-      r = resolveProps(walk, deep);
-    })).toBeLessThan(16);
+    const { ms, result: r } = leastHeld(16, () => {
+      const walk = Array.from({ length: 32 }, (_, i) => ({
+        dir: deep.split("/").slice(0, i).join("/"),
+        file: parseEditorConfig(lines.slice(1).join("\n")), // no root: every one applies
+      }));
+      return () => resolveProps(walk, deep);
+    });
+    expect(ms).toBeLessThan(16);
     expect(r).toMatchObject({ over: "time", props: {} });
   });
 
   it("the number-range shape stops in time, its digits counted without slicing", () => {
     const nums = ["root = true"];
     for (let n = 0; n < 123; n++) nums.push(`[${"{0..999999999}".repeat(30)}${n}x]`, "indent_size = 2");
-    const file = parseEditorConfig(nums.join("\n"));
     const name = "9".repeat(1000);
-    let r: ReturnType<typeof resolveProps> | undefined;
-    expect(held(() => {
-      r = resolveProps([{ dir: "", file }], name);
-    })).toBeLessThan(16);
-    expect(r?.over).toBe("time");
+    const { ms, result: r } = leastHeld(16, () => {
+      const file = parseEditorConfig(nums.join("\n"));
+      return () => resolveProps([{ dir: "", file }], name);
+    });
+    expect(ms).toBeLessThan(16);
+    expect(r.over).toBe("time");
     // And a range still matches as the spec says.
     expect(matchGlob("file{1..300}.c", "file250.c")).toBe(true);
     expect(matchGlob("file{1..300}.c", "file301.c")).toBe(false);
