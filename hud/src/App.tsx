@@ -2945,16 +2945,25 @@ export default function App() {
             ))}
           </select>
         ) : spec.view === "diff" ? (
-          // The Diff pane's project (2026-10-12): pinned, it shows that
-          // project's uncommitted changes; Follow shows the task the window is
-          // about, else the chat's project. Disabled under a card (and inert).
+          // The Diff pane's project (2026-10-12): a task picked shows its diff
+          // (Follow); else the pinned project's uncommitted changes, else the
+          // chat's. Picking a project here takes the window off the task, as
+          // picking a thread does, so the choice shows at once. Disabled under
+          // a card (and inert).
           <select
             className="panepick"
             data-testid={`pane-${n}-diff-project`}
-            value={spec.projectId && !pinGone(spec) ? spec.projectId : ""}
+            value={(() => {
+              const mode = diffModeOf(spec);
+              return mode.kind === "project" && mode.pinned ? mode.projectId : "";
+            })()}
             disabled={blocked}
             title="Whose changes this pane shows: a project's uncommitted changes, or the selected task's"
-            onChange={(e) => view.pin(n, e.target.value || null)}
+            onChange={(e) => {
+              const id = e.target.value || null;
+              if (id && live.current.taskFocus) patch({ taskFocus: false });
+              view.pin(n, id);
+            }}
           >
             <option value="">
               {state.taskFocus && task ? `Follow · task ${task.id.slice(0, 6)}`

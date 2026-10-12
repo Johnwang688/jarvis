@@ -245,13 +245,6 @@ describe("what each pane shows", () => {
     expect(show(t, "task", [1, 2])).toBe(t);
   });
 
-  it("a diff pane pinned to a project shows its uncommitted changes, so a task click goes elsewhere", () => {
-    const w = pinPane(setView(setPreset(defaultWorkspace(), "cols2"), 2, "diff"), 2, "p2");
-    const after = show({ ...w, focused: 1 }, "task", [1, 2]);
-    expect(after.panes[0].view).toBe("task");
-    expect(after.panes[1]).toEqual(w.panes[1]);
-  });
-
   it("switches one pane's view and keeps its own pin, URL and terminal for when it comes back", () => {
     let w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
     w = pinPane(w, 2, "p2");

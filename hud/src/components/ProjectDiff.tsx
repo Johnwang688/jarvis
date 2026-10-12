@@ -65,6 +65,14 @@ export function ProjectDiff(props: {
   const [sel, setSel] = useState(props.filePath ?? "");
   const [listOpen, setListOpen] = useState(false);
   const [nonce, setNonce] = useState(0);
+  // The file the pane had (a reload, a split's copy, another project's pick
+  // while following the chat) is kept only if this list has it once it arrives.
+  const seeded = useRef(!!props.filePath);
+  useEffect(() => {
+    if (!seeded.current || !data) return;
+    seeded.current = false;
+    if (sel && !rows.some((r) => r.path === sel)) setSel("");
+  }, [data, rows, sel]);
 
   const row = rows.find((r) => r.path === sel) ?? null;
   const showList = !props.narrow || listOpen || !sel;

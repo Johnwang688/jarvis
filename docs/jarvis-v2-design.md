@@ -1762,9 +1762,7 @@ title bar.
   chat in another pane swapped the two panes' **whole specs**. A sidebar
   click goes to the pane already showing
   that kind of thing, else to the focused pane — a task click leaves a drawn
-  task or diff pane following the selection (since 2026-10-12, a diff pane
-  pinned to a project shows that project's uncommitted changes and does not
-  count). "Read" means shown in any
+  task or diff pane following the selection. "Read" means shown in any
   drawn pane. The profile select rides the chat pane's header (the focused
   pane's when no chat is drawn), so the single layout is unchanged.
 - **A File pane is one project's.** `FileTab` used to save to whatever
@@ -2882,11 +2880,13 @@ pane says so and offers Open, and nothing about it is asked of the daemon.
 Open puts the file in the editor where every other open does (a drawn File
 pane on the project, else a split beside — never over this view or a VEX
 view). It is **read-only**: no staging, reverting or committing here. Which
-it shows: a pane pinned to a project (its header's picker, as the File
-pane's) shows that project; else a task picked more recently than a thread
-shows the task's diff, as before; else the chat's project. A pinned Diff
-pane no longer counts as following a task, so a task click then shows the
-task elsewhere. Under a card its picker, Open and ↻ are disabled. The list
+it shows: a task picked more recently than a thread shows the task's diff,
+exactly as before (so a task click always shows in a drawn Diff pane); else
+the project the pane is pinned to (its header's picker, as the File pane's;
+a File pane that opened a file keeps its pin when it becomes a Diff pane);
+else the chat's project. Picking a project in that picker takes the window
+off the task, as picking a thread does. Under a card its picker, Open and ↻
+are disabled. The list
 is ED-9's status poll (only while the pane is drawn); HEAD's text is ED-9's
 base route, which now also answers for a file deleted from the working tree.
 

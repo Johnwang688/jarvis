@@ -256,6 +256,12 @@ def _open_checks(page, mock, check, until, requests):
           page.locator(_pane(2, _tid("file-path"))).inner_text() == "notes.txt")
     check("…and the Diff pane stays a Diff pane",
           page.locator(_pane(D)).get_attribute("data-view") == "diff" and page.locator(_in("scm")).count() == 1)
+    _boot(page, mock, None, until, reload=True)
+    until(lambda: page.locator(_in("scm-path")).count() > 0
+          and page.locator(_in("scm-path")).inner_text() == "notes.txt", timeout=6)
+    check("the file picked is the pane's: it is picked again after a reload",
+          page.locator(_in("scm-path")).inner_text() == "notes.txt"
+          and _diffed(page, until, "", "a"))
 
 
 def _mode_checks(page, mock, check, until, requests):
@@ -274,17 +280,23 @@ def _mode_checks(page, mock, check, until, requests):
           "task" in picker.locator("option").first.inner_text() and picker.locator("option").count() >= 3)
     picker.select_option("p2")
     until(lambda: mode.get_attribute("data-mode") == "project", timeout=4)
-    check("a project picked in the pane shows its uncommitted changes, over the task",
+    check("a project picked in the pane shows its uncommitted changes (the window leaves the task)",
           mode.inner_text().strip() == "Uncommitted changes in schoolwork"
-          and page.locator(_in("scm")).get_attribute("data-project") == "p2")
-    picker.select_option("")
+          and page.locator(_in("scm")).get_attribute("data-project") == "p2"
+          and picker.input_value() == "p2")
+    page.locator(_tid("task-k1")).click()
     until(lambda: mode.get_attribute("data-mode") == "task", timeout=4)
-    check("Follow gives the task back", mode.get_attribute("data-mode") == "task")
+    check("a task picked again beats the pin: its diff, Follow shown",
+          mode.get_attribute("data-mode") == "task" and picker.input_value() == "")
     expand(page, until, "p1", "thread-t1")
     page.locator(_tid("thread-t1")).click()
     until(lambda: mode.get_attribute("data-mode") == "project", timeout=4)
-    check("a thread picked: the chat's project's uncommitted changes again",
-          mode.inner_text().strip() == "Uncommitted changes in jarvis")
+    check("a thread picked: the pinned project's uncommitted changes again",
+          mode.inner_text().strip() == "Uncommitted changes in schoolwork" and picker.input_value() == "p2")
+    picker.select_option("")
+    until(lambda: mode.inner_text().strip() == "Uncommitted changes in jarvis", timeout=4)
+    check("Follow: the chat's project's uncommitted changes",
+          mode.inner_text().strip() == "Uncommitted changes in jarvis" and picker.input_value() == "")
 
 
 def _card_checks(page, mock, check, until, requests):

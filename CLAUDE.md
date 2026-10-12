@@ -2877,15 +2877,19 @@ review round, the source's project check (both new cases) and the recheck
 owner: "the Diff doesn't work right now it just says to select a Task", and
 yes to VS Code's Source Control view; design §18; contract in
 `docs/hud-api.md`).** No new route: ED-9's `git/status` and `git/base` and
-ED-2's read. **The mode** is `lib/scm.ts` `diffMode`: a pane pinned to a
-live project (its header's `pane-N-diff-project` picker, E-13's shape) shows
-that project's uncommitted changes; else a task picked more recently than a
-thread (`taskFocus`, the rule File and Preview follow) shows the task's diff
-exactly as before (`DiffTab`); else the chat's project's; else a sentence.
-**A pinned Diff pane does not follow a task** — `workspace.show("task")`
-counts only an unpinned one, so a task click then switches the focused pane
-instead of doing nothing visible. The heading (`diff-mode`, `data-mode`)
-says which. **The list** (`components/ProjectDiff.tsx`, `scmRows`): ED-9's
+ED-2's read. **The mode** is `lib/scm.ts` `diffMode`: a task picked more
+recently than a thread (`taskFocus`, the rule File and Preview follow) shows
+the task's diff exactly as before (`DiffTab`) — **the task beats the pin**,
+because a pane's `projectId` is shared by its views (a File pane pins its
+project when it opens a file, and keeps the pin when switched to Diff; with
+the pin first, `hud_v2_csp_check`'s task click showed uncommitted changes),
+and `workspace.show("task")` relies on a drawn Diff pane following the task;
+else the pane's pinned live project (its header's `pane-N-diff-project`
+picker, E-13's shape) shows that project's uncommitted changes; else the
+chat's project's; else a sentence. **Picking a project in that picker sets
+`taskFocus` false** (as picking a thread does), so the choice shows at once;
+the picker reads Follow while a task is shown. The heading (`diff-mode`,
+`data-mode`) says which. **The list** (`components/ProjectDiff.tsx`, `scmRows`): ED-9's
 one status poller, subscribed only while the pane is drawn; modified/added/
 untracked/renamed/deleted/conflict files and untracked folders, each with
 its letter (M A U R D C) in the explorer's `data-git` colours and
@@ -2911,10 +2915,10 @@ not in HEAD either is still 404). **Open** is `toFilePane` → `placeFile` →
 `askFile(open)` — never over the Diff pane or a VEX view. Read-only: no
 staging, reverting, committing or discarding (SCM actions are out of
 scope). Under a card the picker, Open and ↻ are disabled and a row click
-does nothing. Free checks: `lib/scm.test.ts` (17), `workspace.test.ts`'s
-pinned-diff case, `tests/v2/editor_git_check.py` (deletions answered,
-judged and 404 when absent from HEAD) and `tests/face/hud_v2_scm_check.py`
-(51, a `MockDaemon(0)` of its own after the git section of `hud_v2_check`;
+does nothing. Free checks: `lib/scm.test.ts` (17), `tests/v2/editor_git_check.py`
+(deletions answered, judged and 404 when absent from HEAD),
+`hud_v2_csp_check`'s single-pane task diff and `tests/face/hud_v2_scm_check.py`
+(53, a `MockDaemon(0)` of its own after the git section of `hud_v2_check`;
 the mock's `git/base` answers deletions and `states`). Guard removal: with
 `rowShows`' env rule dropped, the headless check sees a `git/base?path=.env`
 request and the vitest fails. Not done: SCM actions; a file not open in the

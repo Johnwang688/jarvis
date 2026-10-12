@@ -2,11 +2,12 @@
 // doesn't work right now it just says to select a Task"). Pure, so the rules
 // are testable without a repository or a window.
 //
-//  - **Which mode a Diff pane is in** (`diffMode`): a pane pinned to a
-//    project shows that project's uncommitted changes; else, while a task is
-//    what the window is about (picked more recently than a thread — the rule
-//    File and Preview panes follow), that task's diff, as before; else the
-//    uncommitted changes of the project the chat is in; else nothing to show.
+//  - **Which mode a Diff pane is in** (`diffMode`): while a task is what the
+//    window is about (picked more recently than a thread — the rule File and
+//    Preview panes follow), that task's diff, exactly as before; else the
+//    uncommitted changes of the pane's pinned project (a pane's pin is its
+//    own: a File pane that opened a file and became a Diff pane keeps it);
+//    else those of the project the chat is in; else nothing to show.
 //  - **The rows** (`scmRows`): a project's `git/status` (ED-9), one row per
 //    changed file — modified, added, untracked, renamed, deleted, conflict —
 //    and per folder git reported untracked whole; ignored entries are never
@@ -27,7 +28,10 @@ export type DiffMode =
 
 /**
  * What a Diff pane shows. `pin` is the pane's own project (the picker in its
- * header), `follow` the project the window is about (the chat's).
+ * header), `follow` the project the window is about (the chat's). A task
+ * picked wins over the pin, so a task click always shows its diff in a drawn
+ * Diff pane (`workspace.show` relies on it); picking a project in the pane's
+ * picker takes the window off the task (App).
  */
 export function diffMode(a: {
   pin: string | null;
@@ -37,8 +41,8 @@ export function diffMode(a: {
   taskIds: readonly string[];
   follow: string | null;
 }): DiffMode {
-  if (a.pin && a.projectIds.includes(a.pin)) return { kind: "project", projectId: a.pin, pinned: true };
   if (a.taskFocus && a.taskId && a.taskIds.includes(a.taskId)) return { kind: "task", taskId: a.taskId };
+  if (a.pin && a.projectIds.includes(a.pin)) return { kind: "project", projectId: a.pin, pinned: true };
   if (a.follow && a.projectIds.includes(a.follow)) return { kind: "project", projectId: a.follow, pinned: false };
   return { kind: "none" };
 }

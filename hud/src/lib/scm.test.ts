@@ -21,13 +21,15 @@ describe("which mode a Diff pane is in", () => {
   it("a task that is gone is not shown", () => {
     expect(mode({ taskId: "gone", taskFocus: true })).toEqual({ kind: "project", projectId: "p1", pinned: false });
   });
-  it("a pin wins, over a task too", () => {
+  it("a pin beats the chat's project; a task picked beats the pin", () => {
     expect(mode({ pin: "p2" })).toEqual({ kind: "project", projectId: "p2", pinned: true });
-    expect(mode({ pin: "p2", taskId: "k1", taskFocus: true })).toEqual({ kind: "project", projectId: "p2", pinned: true });
+    expect(mode({ pin: "p2", taskId: "k1", taskFocus: false })).toEqual({ kind: "project", projectId: "p2", pinned: true });
+    // A File pane pins its project when it opens a file; switched to Diff, a
+    // task picked must still show the task (hud_v2_csp_check's single pane).
+    expect(mode({ pin: "p2", taskId: "k1", taskFocus: true })).toEqual({ kind: "task", taskId: "k1" });
   });
   it("a pin whose project went away follows again", () => {
     expect(mode({ pin: "archived" })).toEqual({ kind: "project", projectId: "p1", pinned: false });
-    expect(mode({ pin: "archived", taskId: "k1", taskFocus: true })).toEqual({ kind: "task", taskId: "k1" });
   });
   it("nothing to follow: nothing to show", () => {
     expect(mode({ follow: null })).toEqual({ kind: "none" });
