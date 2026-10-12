@@ -1280,8 +1280,9 @@ settings parse, or are malformed/PROS so the view can say why; App's
 pin, else the active chat's), and switching a pane to it **pins** it, so a
 build or download never follows the chat to another robot. Build / Rebuild
 / Clean show ✓ or the errors list; **an error click opens the file at its
-line** (`openAt`: a drawn File pane on that project, else a split beside the
-view, else the VEX pane itself; FileTab's `goto` sets the cursor after
+line** (`openAt`, through ED-7's `placeFile`: a drawn File pane on that
+project, else a split beside the view, else a sentence — since the ED-7
+merge never the VEX pane itself; FileTab's `goto` sets the cursor after
 PaneEditor's own model swap; an error outside the project is text). The
 build, a download and the brain terminal are VX-1's **program terminals in
 the WP-D panel** (`terminals.showProgram`; one that ended has no Restart or
@@ -1758,8 +1759,17 @@ shown only under the `jarvisMayAddToChat` context key, i.e. `jarvisMayRead`).
   palette are **`state.picker`** values, so push-to-talk refuses and the mic
   claims nothing while one is open; Space types a space; a layout effect
   closes both when a card arrives; FileTab closes its menu and prompt on
-  `blocked`. Targets: the focused File pane, else the first drawn one, else
-  the focused pane becomes one (`mayShow`); App talks to a File pane by
+  `blocked`. Targets: the focused File pane, else a drawn File pane on the
+  focused pane's project, else **`placeFile`** — VX-2's `openAt` rule, one
+  function for both since the lead merge: a split beside the focused pane
+  (focus stays put), else the focused pane only when it shows File or chat
+  (`mayShow`), else a sentence ("No room to open …"). **A file never replaces
+  a VEX view** (nor a terminal, Preview or Diff): with a VEX view focused,
+  Ctrl+P opens the file beside it. Quick open and the palette **close when
+  focus leaves them** (VS Code's way; `PickList`'s `onLeave`) — left open,
+  the palette's veil covered the VEX view's Download button. Neither ever
+  offers a download or a device entry (`hud_v2_vex_check`'s
+  `_ed7_beside_checks`). App talks to a File pane by
   **`fileAsk`** (open at a line, search, palette file commands), acted on once
   per nonce and cleared after the commit.
 - **Rename keeps the edit**: `Buffers.renamed(fromAbs, toAbs, kind)` moves the
@@ -1812,7 +1822,7 @@ Free checks: `tests/v2/editor_nav_check.py` (39: parity on both
 backends, listing, search bounds/gitignore/never-withheld, fs refusals,
 trash, owner-only), `fuzzy.test.ts`, `commands.test.ts` (no download or
 device entry, keys), the ED-7 blocks in `state/buffers.test.ts` and
-`lib/buffers.test.ts`, and `tests/face/hud_v2_editor_nav_check.py` (80, a
+`lib/buffers.test.ts`, and `tests/face/hud_v2_editor_nav_check.py` (82, a
 `MockDaemon(0)` of its own; `ONLY=card` runs one section; run by
 `hud_v2_check` after the editor section). Guard removals that bite: owner_only,
 the classifier refusal, the folder walk, the anchors (an install root under

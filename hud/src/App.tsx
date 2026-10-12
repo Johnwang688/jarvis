@@ -1612,29 +1612,54 @@ export default function App() {
    */
   const [fileGoto, setFileGoto] = useState<Partial<Record<PaneNo, FileGoto>>>({});
   const gotoSeq = useRef(0);
-  const openAt = useCallback((from: PaneNo, projectId: string, path: string, line: number, col: number) => {
-    if (blockedNow.current || crashedRef.current) return;
+
+  /**
+   * **Where a file opens**, the one rule for every way one is opened — ED-7's
+   * quick open, find in files and palette, VX-2's build-error click: a drawn
+   * File pane on that project (`from` itself first, when it is one); else a
+   * new pane beside `from` (a split: what `from` shows stays — a VEX view is
+   * never replaced, nor a terminal, a task or a preview); else `from` itself,
+   * **only when it is a File or chat pane** (and `mayShow` lets it go). Null
+   * when there is nowhere: the caller says so. The pane is pinned to
+   * `projectId`; never under a card.
+   */
+  const placeFile = useCallback((from: PaneNo, projectId: string): PaneNo | null => {
+    if (blockedNow.current || crashedRef.current) return null;
     const lay = layoutNow.current;
     const at = live.current;
     const projectOf = (n: PaneNo) => stripProject(at, lay.ws.panes[n - 1], n);
-    let target: PaneNo | null = lay.fit.panes.find((n) =>
-      lay.ws.panes[n - 1].view === "file" && projectOf(n) === projectId) ?? null;
-    let tabs = target !== null && lay.ws.panes[target - 1].projectId === projectId
-      ? lay.ws.panes[target - 1].editors ?? NO_TABS : NO_TABS;
-    if (target === null) {
-      const id = splitFrom(from, { focus: false });
-      if (id !== null) {
-        view.setView(id, "file");
-        target = id;
-      }
+    const fileOn = (n: PaneNo) => lay.ws.panes[n - 1].view === "file" && projectOf(n) === projectId;
+    if (lay.fit.panes.includes(from) && fileOn(from)) return from;
+    const drawn = lay.fit.panes.find(fileOn);
+    if (drawn !== undefined) return drawn;
+    const id = splitFrom(from, { focus: false });
+    if (id !== null) {
+      view.setEditors(id, projectId, null);
+      view.setView(id, "file");
+      return id;
     }
-    if (target === null) {
-      if (!mayShow(from, "file")) return;
+    const v = lay.ws.panes[from - 1].view;
+    if ((v === "file" || v === "chat") && mayShow(from, "file")) {
+      if (lay.ws.panes[from - 1].projectId !== projectId) view.pin(from, projectId);
       view.setView(from, "file");
-      target = from;
-      const spec = lay.ws.panes[from - 1];
-      tabs = spec.projectId === projectId ? spec.editors ?? NO_TABS : NO_TABS;
+      return from;
     }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitFrom, mayShow]);
+
+  const openAt = useCallback((from: PaneNo, projectId: string, path: string, line: number, col: number) => {
+    if (blockedNow.current || crashedRef.current) return;
+    const lay = layoutNow.current;
+    const target = placeFile(from, projectId);
+    if (target === null) {
+      dispatch({ type: "patch", patch: { error: `No room to open ${path} beside this view: close a pane, or switch one to Files.` } });
+      return;
+    }
+    const spec = lay.ws.panes[target - 1];
+    // A pane just made by the split has no tabs yet; one already showing the
+    // project keeps its own.
+    const tabs = spec.view === "file" && spec.projectId === projectId ? spec.editors ?? NO_TABS : NO_TABS;
     // Pinned, never the preview: the owner asked for this file. Past the tab
     // cap only a clean tab closes — and every tab counts as holding an edit
     // here, so a full pane says so in FileTab rather than losing one.
@@ -1645,7 +1670,7 @@ export default function App() {
     setFileGoto((g) => ({ ...g, [pane]: { path, line, col, n } }));
     focusPaneElement(pane);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitFrom, mayShow]);
+  }, [placeFile]);
   const gotoDone = useCallback((pane: PaneNo, n: number) => {
     setFileGoto((g) => {
       if (g[pane]?.n !== n) return g;
@@ -2477,33 +2502,39 @@ export default function App() {
   // ---- quick open, the palette, find in files (ED-7) ----------------------------
 
   /**
-   * Where the editor's navigation lands: the focused pane when it is a File
-   * pane, else the first File pane drawn (in slot order), else the focused
-   * pane, which becomes one when something is opened (unless it holds an
-   * unsaved edit — `mayShow`). Its project is the pane's own (`paneProject`).
+   * What the editor's navigation is about: the focused pane when it is a File
+   * pane (its project); else the focused pane's own project (a chat's
+   * conversation's, a VEX view's pin) and a drawn File pane on it, if there
+   * is one; else nothing is decided until something is opened — then
+   * `placeFile` decides (a split beside the focused pane, which is never
+   * replaced unless it is a File or chat pane).
    */
   const fileTarget = (): { pane: PaneNo; projectId: string | null; switchTo: boolean } => {
-    const isFile = (n: PaneNo) => ws.panes[n - 1].view === "file";
-    const pane = fit.panes.includes(ws.focused) && isFile(ws.focused) ? ws.focused : fit.panes.find(isFile);
-    if (pane) return { pane, projectId: paneProject(ws.panes[pane - 1], pane), switchTo: false };
-    return { pane: focusedDrawn, projectId: paneProject(ws.panes[focusedDrawn - 1], focusedDrawn), switchTo: true };
+    const f = focusedDrawn;
+    const spec = ws.panes[f - 1];
+    if (spec.view === "file") return { pane: f, projectId: paneProject(spec, f), switchTo: false };
+    const projectId = stripProjectNow(f) ?? (spec.view === "vex" ? null : activeProjectId);
+    const drawn = fit.panes.find((n) => ws.panes[n - 1].view === "file" && paneProject(ws.panes[n - 1], n) === projectId);
+    if (drawn !== undefined && projectId) return { pane: drawn, projectId, switchTo: false };
+    return { pane: f, projectId, switchTo: true };
   };
   const activePathOf = (n: PaneNo): string | null => {
     const spec = ws.panes[n - 1];
     return spec.view === "file" ? spec.editors?.active ?? null : null;
   };
-  /** Make the target a File pane on its project, focused: false when it may not. */
-  const toFilePane = (t: { pane: PaneNo; projectId: string | null; switchTo: boolean }): boolean => {
+  /** The File pane to act in, placed by the one rule (`placeFile`), focused; null when there is none. */
+  const toFilePane = (t: { pane: PaneNo; projectId: string | null; switchTo: boolean }): PaneNo | null => {
     if (!t.projectId) {
       patch({ error: "Pick a project first: the editor works in a project." });
-      return false;
+      return null;
     }
-    if (t.switchTo) {
-      if (!mayShow(t.pane, "file")) return false;
-      view.setView(t.pane, "file");
+    const n = t.switchTo ? placeFile(t.pane, t.projectId) : t.pane;
+    if (n === null) {
+      patch({ error: "No room to open a file beside this view: close a pane, or switch one to Files." });
+      return null;
     }
-    view.focus(t.pane);
-    return true;
+    view.focus(n);
+    return n;
   };
   /** Another dialog is open, or the window crashed: ED-7's keys do nothing. */
   const navBusy = () => !!live.current.picker || threadModel.overlayOpen || crashedRef.current
@@ -2557,8 +2588,9 @@ export default function App() {
         if (text.length <= 200) query = text;
       }
     }
-    if (!toFilePane(t)) return;
-    askFile(t.pane, { kind: "search", query });
+    const pane = toFilePane(t);
+    if (pane === null) return;
+    askFile(pane, { kind: "search", query });
   };
   editorKeyRef.current = (what) => {
     if (what === "findInFiles") openFindInFiles();
@@ -3192,13 +3224,15 @@ export default function App() {
           onOpen={(path, line, col) => {
             const at = nav;
             closeNav(false);
-            if (at && toFilePane(at)) askFile(at.pane, { kind: "open", path, line, col });
+            const pane = at ? toFilePane(at) : null;
+            if (pane !== null) askFile(pane, { kind: "open", path, line, col });
           }}
           onClose={() => closeNav(true)}
+          onLeave={() => closeNav(false)}
         />
       ) : null}
       {state.picker === "palette" && nav ? (
-        <Palette entries={paletteList} onRun={runEntry} onClose={() => closeNav(true)} />
+        <Palette entries={paletteList} onRun={runEntry} onClose={() => closeNav(true)} onLeave={() => closeNav(false)} />
       ) : null}
       {state.picker === "model" ? (
         <ModelPicker

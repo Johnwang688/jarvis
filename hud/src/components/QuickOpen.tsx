@@ -52,10 +52,15 @@ function PickList(props: {
   note?: string | null;
   onPick: (index: number) => void;
   onClose: () => void;
+  /** Focus left the box for something else on the page: close, giving nothing focus back. */
+  onLeave?: () => void;
 }) {
   const [sel, setSel] = useState(0);
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const onLeave = useRef(props.onLeave);
+  onLeave.current = props.onLeave;
   useEffect(() => input.current?.focus(), []);
   useEffect(() => setSel(0), [props.query]);
   const n = props.rows.length;
@@ -67,7 +72,7 @@ function PickList(props: {
     <div className="pickerveil quickveil" data-testid={props.testid} onMouseDown={(e) => {
       if (e.target === e.currentTarget) props.onClose();
     }}>
-      <div className="picker quick" role="dialog" aria-label={props.placeholder}>
+      <div className="picker quick" role="dialog" aria-label={props.placeholder} ref={box}>
         <input
           ref={input}
           className="quickinput"
@@ -77,6 +82,16 @@ function PickList(props: {
           spellCheck={false}
           autoComplete="off"
           onChange={(e) => props.onQuery(e.target.value)}
+          // Like VS Code's quick input, it closes when focus moves to
+          // something else on the page (a click into a field, a pane taking
+          // focus): a box left open over the window would sit on top of what
+          // the owner went back to. The window losing focus keeps it.
+          onBlur={() => setTimeout(() => {
+            if (!document.hasFocus()) return;
+            const at = document.activeElement;
+            if (!at || at === document.body || box.current?.contains(at)) return;
+            onLeave.current?.();
+          }, 0)}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown" || e.key === "ArrowUp") {
               e.preventDefault();
@@ -147,6 +162,7 @@ export function QuickOpen(props: {
   activePath: string | null;
   onOpen: (path: string, line: number | null, col: number | null) => void;
   onClose: () => void;
+  onLeave?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [list, setList] = useState<FileList | null>(null);
@@ -202,6 +218,7 @@ export function QuickOpen(props: {
       rows={rows}
       note={note}
       onClose={props.onClose}
+      onLeave={props.onLeave}
       onPick={(i) => {
         const path = picks[i];
         if (path) props.onOpen(path, where.line, where.col);
@@ -214,6 +231,7 @@ export function Palette(props: {
   entries: Entry[];
   onRun: (key: string) => void;
   onClose: () => void;
+  onLeave?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const ranked = useMemo(() => filterEntries(query, props.entries), [query, props.entries]);
@@ -231,6 +249,7 @@ export function Palette(props: {
       }))}
       note={ranked.length ? null : "No command matches."}
       onClose={props.onClose}
+      onLeave={props.onLeave}
       onPick={(i) => {
         const e = ranked[i];
         if (e) props.onRun(e.item.key);
