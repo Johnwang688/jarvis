@@ -383,6 +383,134 @@ def scrub_rule_checks(root: Path) -> None:
         os.chdir(previous)
     print("ok  scrub: a .env.preview's settings left alone (README intact); its secret key, "
           "DSN password and 40-char token withheld; .env still scrubbed whole")
+    delta_review_checks(root)
+
+
+# --- the delta review of 4043ad1 (PR #60): pinned, every spelling -----------------
+#
+# Refused: each spelling main refused that 4043ad1 allowed (LOW-A, fix 4), and
+# each the lead asked to close (fixes 1, 2, 3, 5, LOW-B's shell form).
+DELTA_REFUSED = [
+    # LOW-A — refused on main, allowed at 4043ad1.
+    "find . -name '*.local' -exec cat {} +", "shopt -s dotglob; cat *.local",
+    "find -name '*env*' -exec cat", "find . -name '*env*' -exec cat {} +",
+    "find . -name '*.local'", "rg -g '*.local' KEY",
+    # Fix 1: a line that turns dotglob on judges every glob word exactly.
+    "shopt -s dotglob; cat *custom*", "bash -O dotglob -c 'cat *custom*'",
+    "GLOBIGNORE=x; cat *.custom", "zsh -c 'cat *custom*(D)'", "setopt GLOB_DOTS; cat *.custom",
+    "cat *(D)", "ls *(D)",
+    # Fix 2: a name pattern that names env and can match one, its files read.
+    "find . -name '*.env.production' -exec cat {} +",
+    "find . -name '*.env.prod' -print0 | xargs -0 cat", "grep -r KEY --include='*.env.prod' .",
+    "rg --hidden -g '*.env*' API_KEY", "fd -H -g '*.env*' -x cat",
+    "grep -r API_KEY --include='*.env*' .", "find . -name '*.env*' -exec cat {} +",
+    "find . -name '*.env.local' -exec cat {} +", "grep -r KEY --include=*.env* .",
+    "zip -r o.zip . -i '*.env.prod'",
+    # Fix 3: a glued short option's value.
+    "rg --hidden -g'.e?v*' KEY", "rg --hidden -g.e?v* KEY .", "rg -g.e?v* KEY .",
+    # Fix 4 (option A): patterns a program expands itself.
+    "git grep --no-index KEY -- '.e?v*'", "git grep --no-index -h KEY -- '.e?v*'",
+    "tar --wildcards -xOf b '.e?v*'", "tar --wildcards -xOf b.tar '.e?v*'", "zip -i '.e?v*'",
+    "zip -r o.zip . -i '.e?v*'", "git grep KEY -- '.e?v.custom'", "git ls-files -- '.e?v.c*'",
+    "tar --wildcards -xOf b.tar '.e?v.custom'", "unzip -p a.zip '.e?v.custom'",
+    "7z e a.7z '.e?v.custom'",
+    # Fix 5: strings another program runs as a command line.
+    "node -e \"require('child_process').execSync('cat .e?v.custom')\"",
+    "node --eval \"require('child_process').execSync('cat .e?v.custom')\"",
+    "perl -e 'system(\"cat .e?v.custom\")'", "perl -e 'print `cat .e?v.custom`'",
+    "env -S 'cat .e?v.custom'", "env -S'cat .e?v.custom'", "watch 'cat .e?v.custom'",
+    "watch -n1 'cat .e?v.custom'", "ssh h 'cat .e?v.custom'", "bash <<< 'cat .e?v.custom'",
+    "python3 <<< \"import os; os.system('cat .e?v.custom')\"",
+    "sh -c \"find . -name '.e?v*' -exec cat {} +\"",
+    # The delta review's LOW-1 list, refused at 4043ad1 and kept.
+    "cat .e?v.custom", "cat .[e]nv.custom", "cat .*.custom", "cat .e*.custom", "cat [.]env.custom",
+    "cat .E?V.CUSTOM", "find . -name '.e?v*' -exec cat {} +", "find . -iname '.E*' -exec cat {} +",
+    "rg -g '.e?v*' --hidden KEY", "rg --glob='.e?v*' --hidden KEY",
+    "grep -r KEY --include='.e?v*' .", "grep -r KEY --include .e?v* .", "fd -H -g '.e?v*' -x cat",
+    "sh -c 'cat .e?v.custom'", "bash -lc \"cat .e*.custom\"", "eval 'cat .e?v.custom'",
+    "find . -type f -exec sh -c 'cat .e?v.custom' \\;",
+    "python3 -c \"import os; os.system('cat .e?v.custom')\"", "cat .e{n,x}v.custom",
+    "printf '%s\\n' .e?v* | xargs cat", "find . -path './.e?v*' -exec cat {} +",
+    "su u -c 'cat .e?v.custom'", "git -c alias.x='!cat .e?v.custom' x",
+    # Main's floor on a word bash does not expand.
+    "echo '*.local'", "grep '.*env.*' log",
+]
+# Allowed: the review's ordinary list, and lines each fix must not catch.
+DELTA_ALLOWED = [
+    "rm -f *.orig", "find . -name '*.orig' -delete", "rm -f *.bak", "ls *.bak",
+    "ls .git/hooks/*.sample", "rm *.test", "ls *test*", "find . -name '*test*'",
+    "find src -name '*.test*'", "find . -name '*template*'", "ls *dev*", "ls *prod*", "ls *2*",
+    "rg -g '*test*' foo", "grep -rl foo --include='*test*' .", "ls *.local", "cat *.production",
+    "pkill -f '.*daemon2'", "grep -E '.*error.*' log.txt", "jq '.items[] | .name' x.json",
+    "find . -name '*.env.ts'", "git log --grep='.*fix'", "ls .git*", "ls -d .bash*",
+    "cat .env.example", "cat .env.*.example",
+    # Not dot-led: bash's `?` never matches a leading dot (the review's 21st spelling).
+    "cat ?env.custom",
+    # Fix 2 needs `env` in the pattern (or main's names): these read no more
+    # than `grep -r foo .`, the stated limit.
+    "find . -name '*.py' -exec grep -l foo {} +", "grep -r foo --include='*.py' .",
+    "rg -g '*.py' foo", "rg --hidden -g '*.py' foo", "find . -name '*.ts' | xargs wc -l",
+    "find . -name '*.custom' -exec cat {} +", "grep -r KEY --include='*.custom' .",
+    "rg --hidden -g '*.custom' KEY", "fd -H -g '*.custom' -x cat",
+    "find . -name '*.env.ts' -delete",
+    # Fix 5 reads string literals that hold a command line, not a program's regexes.
+    "perl -ne 'print if /(.*)foo/' x.txt", "perl -pe 's/.*: //' x.txt",
+    "node -e \"console.log(/.*foo/.test('a b'))\"", "grep -e '.* failed' log",
+    "watch 'ls -la'", "ssh h 'ls *.log'", "ssh h 'tail -f /var/log/syslog'",
+    "env -S 'python3 -u'", "bash <<< 'echo hi'",
+    # Fix 4 judges only dot-led (or main's) patterns.
+    "git grep -n '.*TODO' -- src", "git ls-files -- '*.py'", "tar --wildcards -xf b.tar '*.py'",
+    "zip -r o.zip . -x '*.pyc'", "unzip -l a.zip",
+    # Fix 1 needs dotglob; `$(date)` is not a zsh qualifier; a glued `-g` without a glob.
+    "echo $(date) && ls *.py", "gcc -g3 -o x x.c", "npm install -g pnpm",
+    "git commit -m 'fix: date $(date)'", "timeout 5 git grep foo",
+]
+
+
+def delta_review_checks(root: Path) -> None:
+    from jarvis.tools.secrets import secret_values
+
+    for command in DELTA_REFUSED:
+        assert protected_in_command(command), f"want refused: {command}"
+    for command in DELTA_ALLOWED:
+        assert protected_in_command(command) is None, f"want allowed: {command}"
+    print(f"ok  delta review: {len(DELTA_REFUSED)} spellings refused, "
+          f"{len(DELTA_ALLOWED)} ordinary lines allowed")
+
+    # LOW-C: the selective scrub, both directions.
+    withheld = {
+        "SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/T0FAKE/B0FAKE/fakeFAKEfake1234",
+        "DISCORD_WEBHOOK": "https://discord.com/api/webhooks/123456/fakeTOKENfake",
+        "SOME_CALLBACK": "https://api.example.com/v1/cb/a1B2c3D4e5F6g7H8i9J0",
+        "APIKEY": "fk12ab34cd", "SECRETKEY": "fk98zy76xw",
+        "PASSPHRASE": "correct horse battery staple", "SMTP_PW": "fakepw7788",
+        "ADMIN_PIN": "48291357", "OTP_SEED": "JBSWYDPEHPKPXPQR", "ACCESSTOKEN": "abcd1234",
+        "SEEDPHRASE": "apple banana cherry", "REDIS_PASSWORD_URL": "redis://:fakepw@cache:6379",
+    }
+    passing = {
+        "AUTH_TOKEN_TTL": "3600", "SESSION_TIMEOUT": "1800", "PASSWORD_LENGTH": "12",
+        "TOKEN_URL": "https://auth.example.com/oauth/token", "KEY_NAME": "prod-key",
+        "SECRET_PATH": "/etc/app/secrets", "PIN_ENABLED": "false", "EMAIL_FROM": "noreply@example.com",
+        "DOCS_URL": "https://github.com/acme/app/tree/main/docs", "KEYBOARD_LAYOUT": "dvorak",
+        "MAPPING_FILE": "config/map.json", "TOKENIZER_MODEL": "bert", "LOG_LEVEL": "debug",
+    }
+    delta = root / "delta"
+    delta.mkdir()
+    (delta / ".env.production").write_text(
+        "".join(f"{k}={v}\n" for k, v in {**withheld, **passing}.items()), encoding="utf-8")
+    previous = Path.cwd()
+    os.chdir(delta)
+    try:
+        values = set(secret_values())
+        for key, value in withheld.items():
+            assert value in values, f"want withheld: {key}"
+        for key, value in passing.items():
+            assert value not in values, f"want passing: {key}"
+        assert "expires in 3600 seconds" in scrub("expires in 3600 seconds")
+    finally:
+        os.chdir(previous)
+    print(f"ok  scrub (delta review): {len(withheld)} webhook URLs, joined keys, PINs and "
+          f"seeds withheld; {len(passing)} settings (AUTH_TOKEN_TTL=3600 …) left alone")
 
 
 if __name__ == "__main__":

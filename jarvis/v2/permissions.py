@@ -117,7 +117,13 @@ READ_TOOLS = frozenset({
 # The arguments that hold a glob over file names (Glob's `pattern`, Grep's
 # `glob` filter): judged by the glob rule, never as a path. Grep's `pattern`
 # is a regular expression over contents and is not a file name at all.
-_GLOB_KEYS = {"Glob": ("pattern",), "Grep": ("glob",), "grep_files": ("glob",)}
+# The file-name globs of a read tool that reads what it selects (ENV-1).
+# Claude's Glob is not here: it returns names, never contents (delta review
+# NIT), so `**/.*` and `**/*.env*` list files and are allowed, as on main.
+_GLOB_KEYS = {"Grep": ("glob",), "grep_files": ("glob",)}
+# Tools whose glob and path also get the raw-line check the shell gets
+# (delta review LOW-B: `glob: "*.env*"` as `--include='*.env*'`).
+_RAW_CHECKED = frozenset({"Grep", "grep_files"})
 
 _PROTECTED_BRANCHES = ("main", "master", "prod*", "production*", "release*")
 _PROD_MARKER = re.compile(r"(?<![A-Za-z])(prod|production|live)(?![A-Za-z])", re.I)
@@ -296,10 +302,13 @@ def denied_file(target: str, cwd: str | None = None, *, folder: bool = False) ->
 def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
     """Why a read tool's call may not run, or None (ENV-1): a path it reads
     that is, or leads to, a credential file — a bundle or a credential env
-    file, by `secrets.is_credential` — or a dot-led file-name glob that can
-    match a credential env name (`secrets.env_glob_reaches`, exact; ENV-1
-    review MED-1: `**/*test*` or `**/*.bak` is allowed, `**/.env*` is not).
-    What a search over a whole folder then reads is beyond what a pre-tool
+    file, by `secrets.is_credential` — or, for Grep (which reads what it
+    selects), a file-name glob judged as the shell's `rg --hidden -g` value
+    is (`secrets.pattern_reaches`, plus the raw-line check on the glob and
+    the path: `**/*test*` and `*.custom` are allowed, `**/.env*`, `*.env*`
+    and `*.local` are not). Claude's Glob returns names only, so its pattern
+    is not judged (its `path` is). What a search over a whole folder then
+    reads is beyond what a pre-tool
     hook sees: Jarvis never sees Claude's tool results, so there is no scrub
     on that side (the plan's stated limit) — the class of `grep -r foo .`."""
     for key in ("file_path", "notebook_path", "path"):
@@ -310,20 +319,32 @@ def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
                 return v1_secrets.refusal(path.name)
             if v1_secrets.env_glob_reaches(path.name):
                 return v1_secrets.refusal(path.name)
+            if tool in _RAW_CHECKED:
+                named = v1_secrets.raw_names_in(value)
+                if named:
+                    return v1_secrets.refusal(named)
     for key in _GLOB_KEYS.get(tool, ()):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
-            # Every component of a pattern like `**/.env.*` or `{a,b}/.env`
-            # is a file name that may match; brace lists are expanded first
-            # (bash's reading, `protected_state._brace_expand`), and one too
-            # large to expand is refused.
+            # Judged as `rg --hidden -g VALUE` is in the shell (Claude's Grep
+            # runs ripgrep over hidden files and reads what it selects):
+            # the raw-line check on the whole value, then every component of
+            # a pattern like `**/.env.*` or `{a,b}/.env` as a file-name
+            # pattern a program expands — main's floor, the dot-led exact
+            # test, or naming `env` and able to match (`*.env*`). Brace lists
+            # are expanded first (bash's reading,
+            # `protected_state._brace_expand`), and one too large to expand
+            # is refused.
+            named = v1_secrets.raw_names_in(value)
+            if named:
+                return v1_secrets.refusal(named)
             variants = protected_state._brace_expand(value)
             if variants is None:
                 return v1_secrets.refusal(value[:80])
             for variant in variants:
                 for part in variant.split("/"):
                     if part and (v1_secrets.is_protected(part)
-                                 or v1_secrets.env_glob_reaches(part)):
+                                 or v1_secrets.pattern_reaches(part, True)):
                         return v1_secrets.refusal(part)
     return None
 

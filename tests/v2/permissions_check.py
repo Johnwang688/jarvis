@@ -1074,8 +1074,17 @@ def env_file_checks():
             ("NotebookRead", {"notebook_path": str(project / ".env.qa")}),
             ("Grep", {"pattern": "KEY", "path": str(prod)}),
             ("Grep", {"pattern": "KEY", "path": str(project), "glob": "{*.ts,.env.*}"}),
-            ("Glob", {"pattern": "**/.env*"}),
-            ("Glob", {"pattern": "config/.ENV.Prod"}),
+            ("Grep", {"pattern": "KEY", "glob": "**/.env*"}),
+            ("Grep", {"pattern": "KEY", "glob": "config/.ENV.Prod"}),
+            # Delta review LOW-B: Grep reads what its glob selects, hidden
+            # files included — `*.env*` is `rg --hidden -g '*.env*'`.
+            ("Grep", {"pattern": "API_KEY", "glob": "*.env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/*.local"}),
+            ("Grep", {"pattern": "API_KEY", "path": "app/.env.prod/"}),
+            # …and the raw-line check the shell gives the same strings
+            # (`grep -r KEY app/.env.prod/conf`, `rg -g '!.env.production'`).
+            ("Grep", {"pattern": "API_KEY", "path": "app/.env.prod/conf"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "!.env.production"}),
             ("read_file", {"path": str(prod)}),
             ("grep_files", {"pattern": "KEY", "path": str(prod)}),
             ("Write", {"file_path": str(prod), "content": "x"}),
@@ -1106,6 +1115,9 @@ def env_file_checks():
             ("Write", {"file_path": str(project / "config" / ".env.staging.example"), "content": "x"}),
             ("Edit", {"file_path": ".env.example", "old_string": "=", "new_string": "=x"}),
             ("Glob", {"pattern": "**/*.ts"}),
+            # Delta review NIT: Glob returns names only, never contents.
+            ("Glob", {"pattern": "**/.env*"}), ("Glob", {"pattern": "config/.ENV.Prod"}),
+            ("Glob", {"pattern": "**/.*"}), ("Glob", {"pattern": "**/*.env*"}),
             ("Grep", {"pattern": "KEY", "path": str(project)}),   # a folder search: the stated limit
             ("Grep", {"pattern": ".env.production", "path": str(project / "src")}),  # a regex, not a file
             bash("cp .env.example .env.local.example.new.example"),
@@ -1187,10 +1199,14 @@ def env_file_checks():
             eq(permit("Grep", {"pattern": "x", "glob": value}, brief), Decision.ALLOW,
                f"Grep glob {value}")
         for pattern in ("**/.e?v.*", "**/.[e]nv.custom", "**/.*.custom", "src/{a,.env}.*",
-                        "**/.ENV*"):
-            eq(permit("Glob", {"pattern": pattern}, brief), Decision.DENY, f"Glob {pattern}")
-        eq(permit("Grep", {"pattern": "x", "glob": ".env.*"}, brief), Decision.DENY,
-           "Grep glob .env.*")
+                        "**/.ENV*", ".env.*", "*.env*", "*.local", "*env*", "**/*.env.ts"):
+            eq(permit("Grep", {"pattern": "x", "glob": pattern}, brief), Decision.DENY,
+               f"Grep glob {pattern}")
+            # Glob lists names, never contents (delta review NIT).
+            eq(permit("Glob", {"pattern": pattern}, brief), Decision.ALLOW, f"Glob {pattern}")
+        for value in ("*.custom", "**/*.py", "**/*.ts", "*.json", "**/*.json"):
+            eq(permit("Grep", {"pattern": "x", "glob": value}, brief), Decision.ALLOW,
+               f"Grep glob {value} (as main; the stated limit of a folder search)")
         # NIT 5: a Codex `also_commands` line is judged in the brief's folder.
         eq(permit("shell", {"command": "true"}, brief, widening="terminal input",
                   also_commands=("echo x > settings.txt",)),

@@ -2253,23 +2253,57 @@ depth, any case, a Windows-trimmed name both ways — not a name ending
   **Globs are judged structurally** (PR #60 review, MED-1;
   `secrets.env_glob_reaches`). Only a **dot-led** pattern can reach one,
   because bash does not expand `*`, `?` or `[…]` onto a leading dot
-  (dotglob is not modelled — a shell with it on is a stated limit). A
+  unless the line turns dotglob on (below). A
   dot-led pattern is then intersected **exactly** with the name rule (a
   small automaton: the `.env` prefix, Windows' trim, a `.example` ending
   watched by KMP, over the characters that matter plus one stand-in), so
   `cat .e?v.custom`, `.[e]nv.custom`, `.*.custom` and `cp x .e*.custom` are
-  caught and `*.production`, `*.local`, `*test*`, `*.py` are not. Braces are
-  expanded first (`protected_state._brace_expand`; one too large refuses),
-  and a pattern past 512 characters refuses. The test is applied only where
-  a glob is one: a word bash expands (an unquoted `*?[{`), a file-name
-  pattern option's value quoted or not (`find -name/-iname/-path/-ipath/
-  -wholename/-lname`, `rg -g/--glob/--iglob`, `grep --include/--exclude`,
-  fd's `-g`), and the string of an `eval` or a shell's `-c`. **A quoted
-  regex is not a glob** (`grep '.*error'`, `pkill -f '.*daemon2'`, a jq
-  filter). The bundles keep main's glob match (`glob_reaches`). The exact
-  test's cost, measured: a dot-led glob that *can* spell a credential env
-  name is refused even when no such file is meant — `ls -la ~/.*rc.d`
-  (`.env.rc.d`), `rm -f .*.swp.bak.txt`, Claude's Glob `**/.*rc.json`.
+  caught and `ls *.local`, `*test*`, `*.py` are not. Braces are expanded
+  first (`protected_state._brace_expand`; one too large refuses), and a
+  pattern past 512 characters refuses. The bundles keep main's glob match
+  on every word (`_bundle_glob`). **The delta review of 4043ad1** (PR #60,
+  every spelling pinned in `secrets_check`'s `DELTA_REFUSED`/
+  `DELTA_ALLOWED`) set the rule **nothing main refused is let through**, and
+  filled the gaps by context (`_judge_segment`, per command of the line):
+  - **A word bash does not expand** (quoted) keeps main's glob rule over
+    `.env`/`.env.local` (`main_env_glob`: `echo '*.local'`). Only an
+    unquoted bash word is held to the dot-led argument, so `ls *.local`
+    (bash cannot expand it onto `.env.local`) is the one line main refused
+    that this allows — deliberately, in the review's own ordinary list.
+  - **A line that turns dotglob on** — `shopt -s dotglob`, `bash -O
+    dotglob`, `GLOBIGNORE`, zsh's `globdots` (any case or underscores) or a
+    `(D)` qualifier glued to a glob — has every glob word judged by the
+    exact test alone (`shopt -s dotglob; cat *.local`, `ls *(D)`) (fix 1).
+  - **A pattern a program expands itself** matches a leading dot with `*`:
+    a name-pattern option's value, quoted or not (`find -name/-iname/-path/
+    -ipath/-wholename/-lname`, `rg -g/--glob/--iglob` and a glued
+    `-g.e?v*`, `grep --include/--exclude`, fd's `-g`), a git pathspec after
+    `--`, a `tar --wildcards` (bsdtar always), `zip -i/-x`, `unzip` or `7z`
+    member (fix 4, the lead's option A: these, not every quoted word). It
+    is refused by `pattern_reaches`: main's rule over the two names
+    (`find . -name '*.local' -exec cat`, `*env*`), the dot-led exact test,
+    or — when it names `env` and the command reads what it selects (an
+    `-exec`/`-ok`/fd `-x` action, `xargs` on the line, a content search, an
+    archiver) — the exact test alone (`find -name '*.env.production' -exec
+    cat`) (fix 2). **"Reads content" alone does not refuse**, against the
+    lead's wording: it would refuse `grep -r foo --include='*.py' .` and
+    `find -name '*.py' -exec grep`, which read no more than `grep -r foo .`
+    (the stated limit) — so `find . -name '*.custom' -exec cat` stays
+    allowed, as on main.
+  - **A string another program runs as a command line** — `-c` (any
+    cluster), `eval`, `env -S` (glued too), `watch`, `ssh host`, a
+    here-string to a shell — is judged piece by piece and then as a line of
+    its own (up to 3 deep); an interpreter's inline program (`node -e`/`-p`/
+    `--eval`, `perl -e`/`-ne`, `ruby -e`, `php -r`, a here-string to one) by
+    its string literals that hold a command line, never its regexes (fix 5).
+  **A quoted regex is not a glob** (`grep '.*error'`, `pkill -f
+  '.*daemon2'`, a jq filter) unless main's rule over the two names catches
+  it, as on main (`grep '.*env.*' log`). The exact test's cost, measured: a
+  dot-led glob that *can* spell a credential env name is refused even when
+  no such file is meant — `ls -la ~/.*rc.d` (`.env.rc.d`), `rm -f
+  .*.swp.bak.txt`, Grep's `glob: "**/.*rc.json"`. Not refused, as on main:
+  `cat ?env.custom` (bash's `?` never matches a leading dot), a remote
+  `rsync h:'.e?v*'`, `find -regex`, fd's regex positional, `find -name "$P"`.
 - **Shell writes are DENY in `rules.decide`** — never run, never asked, under
   an allowlist entry and mode "all" — through `protected_state`'s own parse
   of where a line writes, not a copy: a redirect target, a `_WRITERS` stem's
@@ -2319,13 +2353,32 @@ depth, any case, a Windows-trimmed name both ways — not a name ending
   `.env.production` used to redact the word "production" from every tool
   result; a README that mentions it comes back whole now, while
   `STRIPE_SECRET_KEY`, a `DATABASE_URL` with a password and a 40-character
-  token under a plain key are still redacted.
+  token under a plain key are still redacted. **The delta review (LOW-C)
+  widened it**: a joined key name counts — a part ending in KEY, SECRET,
+  PASS, TOKEN, PW, PWD, PIN or SEED, or starting with SECRET, PASS, SEED or
+  PRIVATE (`APIKEY`, `SECRETKEY`, `PASSPHRASE`, `SMTP_PW`, `ADMIN_PIN`,
+  `OTP_SEED`, `SEEDPHRASE`; never a middle: `MAPPING`, `KEYBOARD`,
+  `TOKENIZER` are settings), and under a secret-named key a number counts;
+  **a key ending in a setting's suffix** (`_TTL`, `_TIMEOUT`, `_EXPIRES`,
+  `_EXPIRY`, `_LENGTH`, `_SIZE`, `_COUNT`, `_URL`, `_HOST`, `_PORT`,
+  `_PATH`, `_ENABLED`, `_DRIVER`, `_TYPE`, `_NAME`) with a plain value is a
+  setting (`AUTH_TOKEN_TTL=3600` used to redact every "3600"); and **a
+  webhook URL is a secret** — a known webhook host (`hooks.slack.com`,
+  Discord's `/api/webhooks/`, `hooks.zapier.com`, Office's webhook hosts,
+  Telegram's `/bot…`) or a path segment of 16+ characters mixing letters and
+  digits.
 - **v2 layer 1.** `READ_TOOLS` (Claude's Read, NotebookRead, Grep, Glob, LS;
   `read_file`/`grep_files`) are judged by `denied_read`: a path that is or
-  leads to a credential file, or a file-name glob (Glob's `pattern`, Grep's
-  `glob`, each brace variant and `/` component) that could reach one by the
-  same structural test (`**/.e?v.*` refused; `**/*test*`, `**/*.bak`,
-  `*.json` allowed) — relative paths placed in the brief's folder.
+  leads to a credential file, and **Grep's `glob`** (each brace variant and
+  `/` component) judged as the shell judges `rg --hidden -g` — Claude's Grep
+  reads hidden files — by `secrets.pattern_reaches`, plus the shell's
+  raw-line check (`secrets.raw_names_in`) on the glob and the path, so the
+  layers agree (delta review LOW-B: `glob: "*.env*"`, `*.local`,
+  `!.env.production`, `**/.e?v.*` refused; `**/*test*`, `*.custom`,
+  `*.json` allowed). **Claude's Glob pattern is not judged** (delta review
+  NIT): Glob returns names, never contents, so `**/.*` and `**/*.env*` are
+  allowed, as on main; its `path` is. Relative paths are placed in the
+  brief's folder.
   `denied_file` refuses a credential env file through its symlinks (so
   Write/Edit/MultiEdit/NotebookEdit, Codex's `apply_patch` paths and the
   fast path's write tools). Bash goes through `rules.decide` +

@@ -1155,8 +1155,10 @@ def env_hook_checks() -> None:
             ("Grep", {"pattern": "API_KEY", "path": prod}),
             ("Grep", {"pattern": "API_KEY", "path": str(project), "glob": ".env*"}),
             ("Grep", {"pattern": "API_KEY", "glob": "**/.e?v.*"}),
-            ("Glob", {"pattern": "**/.env.*"}),
-            ("Glob", {"pattern": ".env.p*", "path": str(project)}),
+            # Delta review LOW-B: Claude's Grep reads hidden files, so a glob
+            # naming env files is `rg --hidden -g '*.env*'`.
+            ("Grep", {"pattern": "API_KEY", "glob": "*.env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "*.local", "path": str(project)}),
             ("Write", {"file_path": prod, "content": "X=1"}),
             ("Write", {"file_path": str(project / "deep" / ".env.local"), "content": "X=1"}),
             ("Edit", {"file_path": prod, "old_string": "a", "new_string": "b"}),
@@ -1173,6 +1175,9 @@ def env_hook_checks() -> None:
             ("Grep", {"pattern": "API_KEY", "path": str(project)}),   # a folder: the stated limit
             # ENV-1 review, MED-1: ordinary file-name globs (refused at 153920d).
             ("Glob", {"pattern": "**/*test*"}), ("Glob", {"pattern": "**/*.bak"}),
+            # Delta review NIT: Glob returns names, never contents.
+            ("Glob", {"pattern": "**/.env.*"}), ("Glob", {"pattern": ".env.p*", "path": str(project)}),
+            ("Glob", {"pattern": "**/.*"}), ("Glob", {"pattern": "**/*.env*"}),
             ("Grep", {"pattern": "API_KEY", "glob": "*test*"}),
             ("Grep", {"pattern": "API_KEY", "glob": "**/*.production"}),
             ("Bash", {"command": "cat .env.example"}),
