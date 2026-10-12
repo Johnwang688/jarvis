@@ -4692,11 +4692,16 @@ jarvis/
   `--ignore-submodules=dirty` / `--no-recurse-submodules` on the command line
   of the status and diff family and fetch/pull/push (a `.gitmodules` `ignore =`
   beats the `-c`, never the flag); `judge()` refuses every `submodule` form and
-  any option that goes back in; and since `add -A`, `describe --dirty`, `rm`
+  any option that goes back in; and since `add -A`, `describe --dirty`/`--broken`, `rm`
   and three `.gitmodules`-overridden reports still go in whatever the pins say,
   every checked-out submodule's own config, nested ones too, is held to the
   superproject's rule — unreadable, not resolving to its own directory, or more
-  than 64 / 4 deep fails closed (`_submodule_risk`). Output has
+  than 64 / 4 deep fails closed (`_submodule_risk`). **`gh` gets the same
+  pins** as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+  (`_config_env`): `gh pr create` runs its own plain `git status`, which ran
+  the repository's fsmonitor and went into a submodule to run its (review of
+  #65). Judge reads option words, never a message's value, so
+  `commit -m "--submodule docs"` is a commit. Output has
   URL userinfo redacted. **A commit that names or carries a protected
   credential is taken back** (`reset --soft`, nothing lost) before the tool
   returns, and a push is refused if anything outgoing does. The way out — name
@@ -4726,7 +4731,7 @@ jarvis/
   the trap fires under plain git. Not covered, said plainly: the owner's own
   global git configuration and credential helpers (they run on push/fetch),
   including a filter it defines that a submodule's attributes name, which runs
-  where git's internals still go into a submodule (`add -A`, `rm` of one);
+  where git's internals still go into a submodule (`add -A`, `describe --dirty`/`--broken`, `rm` of one);
   an `include.path` / `includeIf` *already* in that global config that points
   at a file an agent can write (the agent cannot create one — writes to the
   global config and `git config` writes are both refused — but one the owner
@@ -5338,10 +5343,10 @@ jarvis/
   a recorder and `gh` a stand-in script, every config path and HOME a temp
   dir, nothing through a shell. Two layers because they fail differently.
   **`judge()` is pure, so its verdicts are tables** (placeholder names only):
-  62 reads that run in every context, 53 routine writes that run only in an
+  62 reads that run in every context, 57 routine writes that run only in an
   own worktree on an own branch (and are refused in the owner's checkout,
-  and for the branch-moving half off an own branch), 7 reviewed forms, and
-  238 refusals grouped by what each protects — including every abbreviation
+  and for the branch-moving half off an own branch), 8 reviewed forms, and
+  241 refusals grouped by what each protects — including every abbreviation
   of the dangerous long options, an alias that tries to be a subcommand,
   unknown remotes, credential names, and the "shape" cases (global options,
   non-lists, oversize). **The runner is exercised against real git** in a
@@ -5378,7 +5383,11 @@ jarvis/
   go into the submodule on main, none here (fsmonitor and the hook were
   already held off by the propagated `-c`); dropping the pins, only the
   command-line flags, the config read, or judge's option refusal each fails
-  its own check. Run after touching `gitops.py`, `tools/gitctl.py`,
+  its own check. `gh_git_checks` (review of #65): a stand-in `gh` that runs
+  `git status` from PATH, as gh does, runs neither the repository's nor the
+  submodule's fsmonitor through `open_pull_request`, and runs both in
+  gitops' environment without the pins; dropping `_gh`'s pins fails it.
+  Run after touching `gitops.py`, `tools/gitctl.py`,
   `tools/files.py`'s protection, or `run_readonly`.
 - `tests/tasks_check.py` — free checks for attended background tasks, with
   `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's

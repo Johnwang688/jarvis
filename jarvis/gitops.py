@@ -66,7 +66,7 @@ which the agent can write; the command line is not) — and the `-c` pins
 travel into any git that git itself starts (`GIT_CONFIG_PARAMETERS`), so a
 submodule's hooks and fsmonitor are off as well. And because some of git's
 own internals still go in whatever the pins say (`add -A`, `describe
---dirty`, `rm` of a submodule, and — when `.gitmodules` sets `ignore` —
+--dirty`/`--broken`, `rm` of a submodule, and — when `.gitmodules` sets `ignore` —
 commit's status, `stash apply`'s and checkout's change report), every
 checked-out submodule's own config is read like the superproject's, nested
 ones too, and a program-naming key there, or a submodule that cannot be
@@ -163,15 +163,21 @@ _SUBMODULE_FLAGS: dict[str, tuple[str, ...]] = {
 }
 
 
+# git's global options that take the next word as their value (the `=` forms
+# are one word). Internal callers pass `-c core.quotePath=false`; the tool's
+# own requests never start with an option (`_shape`).
+_GLOBAL_VALUE_OPTIONS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace",
+                                   "--config-env", "--attr-source"})
+
+
 def _with_submodule_flags(args) -> list[str]:
-    """`args` with `_SUBMODULE_FLAGS` added right after the subcommand. The
-    subcommand is the first word that is not a global option; `-c` and `-C`
-    take the word after them (callers pass `-c core.quotePath=false`)."""
+    """`args` with `_SUBMODULE_FLAGS` added right after the subcommand: the
+    first word that is neither a global option nor the value of one."""
     args = list(args)
     i = 0
     while i < len(args):
         token = args[i]
-        if token in ("-c", "-C"):
+        if token in _GLOBAL_VALUE_OPTIONS:
             i += 2
         elif token.startswith("-"):
             i += 1
@@ -267,6 +273,40 @@ _SUBMODULE_OPTIONS = ("submodule", "ignore-submodules", "no-ignore-submodules",
                       "no-recurse-submodules")
 _SUBMODULE_OK = frozenset({"--no-recurse-submodules", "--ignore-submodules",
                            "--ignore-submodules=all", "--ignore-submodules=dirty"})
+
+
+# The short options that take a value in the subcommands that carry a message,
+# and the long ones whose value is free text, so `commit -m "--submodule docs"`
+# is words, not an option (review of PR #65). git accepts no submodule option in
+# any of these (measured: each is "unknown option"), so a value misread here
+# cannot hide one that does something.
+_MESSAGE_VALUE_SHORTS = {"commit": "mFcCt", "tag": "mFu", "merge": "mFsX", "notes": "mFcC",
+                         "stash": "m"}
+_MESSAGE_VALUE_LONGS = frozenset({"--message", "--file"})
+
+
+def _option_words(sub: str, tokens: list[str]) -> list[str]:
+    """`tokens` without the values of a message's -m/-F (and the other
+    value-taking short options of that subcommand, separate or ending a
+    cluster)."""
+    shorts = _MESSAGE_VALUE_SHORTS.get(sub)
+    if shorts is None:
+        return tokens
+    out: list[str] = []
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+            continue
+        out.append(token)
+        if token in _MESSAGE_VALUE_LONGS:
+            skip = True
+        elif token.startswith("-") and not token.startswith("--") and len(token) > 1:
+            for j, letter in enumerate(token[1:], start=1):
+                if letter in shorts:
+                    skip = j == len(token) - 1      # glued to its value, or the next word is
+                    break
+    return out
 
 
 def _submodule_hit(tokens: list[str]) -> str:
@@ -942,7 +982,7 @@ def judge(args: list[str], ctx: RepoContext) -> Ruling:
         name = _long_name(hit)
         full = next(f for f in _PROGRAM_LONG if f == name or f.startswith(name))
         return _refuse(f"'{hit}' {_PROGRAM_LONG[full]}, and this tool decides that, not the caller")
-    hit = _submodule_hit(options)
+    hit = _submodule_hit(_option_words(sub, options))
     if hit:
         return _refuse(f"'{hit}' would take git into a submodule, another repository whose own "
                        "configuration decides what runs there; this tool never goes into one")
@@ -996,6 +1036,21 @@ def gh_binary() -> str | None:
 def _env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(_ENV_PINS)
+    return env
+
+
+def _config_env() -> dict[str, str]:
+    """`_HARDENING`'s `-c` pins as git's own environment form (command scope,
+    like `-c`), for a program that starts git itself: `gh pr create` runs a
+    plain `git status`, which went into a submodule and ran its fsmonitor (and
+    the superproject's — review of PR #65). Every git that gh starts is pinned
+    as ours are: hooks and fsmonitor off, the submodule pins, `ext::` refused."""
+    pairs = [_HARDENING[i + 1] for i, token in enumerate(_HARDENING[:-1]) if token == "-c"]
+    env = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for n, pair in enumerate(pairs):
+        key, _, value = pair.partition("=")
+        env[f"GIT_CONFIG_KEY_{n}"] = key
+        env[f"GIT_CONFIG_VALUE_{n}"] = value
     return env
 
 
@@ -1084,7 +1139,7 @@ def _risky_config(cwd: Path) -> str:
 #
 # The pins keep the status and diff family, recursion and submodule diffs out of
 # submodules, but some of git's own internals go in whatever they say (`add -A`,
-# `describe --dirty`, `rm` of a submodule, and under a `.gitmodules` `ignore =`
+# `describe --dirty`/`--broken`, `rm` of a submodule, and under a `.gitmodules` `ignore =`
 # commit's status, `stash apply`'s and checkout's change report — measured
 # against git 2.53). So every checked-out submodule's own config is held to
 # the superproject's rule. Git enters exactly the gitlinks in the index whose
@@ -1141,6 +1196,8 @@ def _submodule_risk(top: Path, prefix: str = "", depth: int = 0,
         if not own:
             return f"the submodule at '{label}' does not resolve to a repository of its own directory"
         key = _config_risk(where, _SUBMODULE_OWN_KEYS)
+        # Defence only: a config git cannot read fails `rev-parse` above first,
+        # so this is reached by a listing that fails on its own (a timeout).
         if key is None:
             return f"the submodule at '{label}' has a git config that could not be read"
         if key:
@@ -1428,6 +1485,7 @@ def _gh(cwd: Path, args: list[str]) -> tuple[int, str]:
     if gh is None:
         return 127, "gh (the GitHub CLI) is not installed"
     env = _env()
+    env.update(_config_env())
     env.update({"GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat", "NO_COLOR": "1",
                 "GH_NO_UPDATE_NOTIFIER": "1", "GH_SPINNER_DISABLED": "1", "GH_EDITOR": "true",
                 "GH_BROWSER": "true", "BROWSER": "true"})

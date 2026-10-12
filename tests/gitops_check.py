@@ -107,6 +107,10 @@ ROUTINE = {
         ["push"], ["push", "origin"], ["push", "-u", "origin", "jarvis/feat"],
         ["push", "origin", "HEAD"], ["push", "origin", "HEAD:jarvis/feat"],
         ["push", "--dry-run"], ["push", "-u"],
+        # a message is words, even one that looks like a submodule option (review of PR #65)
+        ["commit", "-m", "--submodule docs"], ["commit", "-am", "--submodule docs"],
+        ["commit", "--message", "--submodule=diff is now refused"],
+        ["merge", "-m", "--ignore-submodules=none", "x"],
     ],
 }
 
@@ -115,6 +119,7 @@ REVIEWED = [
     ["tag", "v1"], ["tag", "-a", "v1", "-m", "x"], ["branch", "-m", "jarvis/a", "jarvis/b"],
     ["branch", "-u", "origin/main"], ["branch", "--set-upstream-to=origin/main"],
     ["notes", "add", "-m", "x"], ["update-index", "--assume-unchanged", "f"],
+    ["tag", "-a", "v1", "-m", "--submodule=diff"],
 ]
 
 # Refused even in an own worktree on an own branch. Grouped by what each is
@@ -222,6 +227,9 @@ REFUSED = {
         ["push", "--recurse-submodules=on-demand"], ["push", "--recurse-submodules=check"],
         ["checkout", "--recurse-submodules", "main"], ["switch", "--recurse-submodules", "main"],
         ["reset", "--recurse-submodules", "HEAD~1"], ["rm", "--recurse-submodules", "f"],
+        # an option word next to a message is still an option, and `-m` is a flag to diff
+        ["commit", "-m", "x", "--submodule=diff"], ["diff", "-m", "--submodule=diff"],
+        ["log", "-m", "--ignore-submodules=none"],
     ],
     "the shape of the request": [
         [], [""], ["-C", "/tmp", "status"], ["-c", "core.pager=x", "status"],
@@ -715,6 +723,14 @@ def submodule_flag_checks() -> None:
         (["show", "HEAD:f.txt"], ["show", dirty, "HEAD:f.txt"]),
         (["-c", "core.quotePath=false", "diff", "x"], ["-c", "core.quotePath=false", "diff", dirty, "x"]),
         (["-c", "diff", "ls-files"], ["-c", "diff", "ls-files"]),     # a -c value is not the subcommand
+        # every global option git reads a separate value for (review of PR #65), and the = forms
+        (["--git-dir", "status", "log"], ["--git-dir", "status", "log", dirty]),
+        (["--git-dir=/x/.git", "status"], ["--git-dir=/x/.git", "status", dirty]),
+        (["--work-tree", "diff", "status"], ["--work-tree", "diff", "status", dirty]),
+        (["--namespace", "show", "fetch"], ["--namespace", "show", "fetch", norec]),
+        (["--config-env", "a.b=HOME", "diff"], ["--config-env", "a.b=HOME", "diff", dirty]),
+        (["--attr-source", "HEAD", "show"], ["--attr-source", "HEAD", "show", dirty]),
+        (["-C", "/x", "--no-pager", "status"], ["-C", "/x", "--no-pager", "status", dirty]),
         (["fetch", "origin"], ["fetch", norec, "origin"]), (["pull", "--ff-only"], ["pull", norec, "--ff-only"]),
         (["push", "origin", "HEAD:refs/heads/jarvis/x"], ["push", norec, "origin", "HEAD:refs/heads/jarvis/x"]),
         (["commit", "-m", "status"], ["commit", "-m", "status"]), (["rev-parse", "HEAD"], ["rev-parse", "HEAD"]),
@@ -725,6 +741,12 @@ def submodule_flag_checks() -> None:
                 "status.submoduleSummary=false", "diff.submodule=short", "diff.ignoreSubmodules=dirty"):
         i = gitops._HARDENING.index(pin)
         assert gitops._HARDENING[i - 1] == "-c", pin
+    # The same pins in git's environment form, for the git that gh starts.
+    env = gitops._config_env()
+    pairs = [f"{env[f'GIT_CONFIG_KEY_{n}']}={env[f'GIT_CONFIG_VALUE_{n}']}"
+             for n in range(int(env["GIT_CONFIG_COUNT"]))]
+    assert pairs == [gitops._HARDENING[i + 1] for i, t in enumerate(gitops._HARDENING) if t == "-c"], pairs
+    assert "core.hooksPath=/dev/null" in pairs and "core.fsmonitor=false" in pairs
     print("ok  submodules: the status and diff family get --ignore-submodules=dirty and fetch/pull/push "
           "--no-recurse-submodules after the subcommand; six recursion and summary pins in every call")
 
@@ -934,6 +956,15 @@ def submodule_config_checks() -> None:
         assert out.startswith("Refused") and "submodule at 'sub'" in out, out
         dotgit.write_text(pointer, encoding="utf-8")
         assert "[exit 0]" in run(str(wt), ["status"])
+        # A config listing that fails on its own (a broken config fails rev-parse first,
+        # so this branch is defence only; reached here by making the listing fail).
+        real_risk = gitops._config_risk
+        gitops._config_risk = lambda cwd, skip=frozenset(): None if skip else real_risk(cwd, skip)
+        try:
+            out = run(str(wt), ["status"])
+        finally:
+            gitops._config_risk = real_risk
+        assert out.startswith("Refused") and "could not be read" in out, out
 
         # Nested: a repository inside the submodule, its config read too.
         inner = s.path / "inner"
@@ -1105,6 +1136,40 @@ def push_and_pr_checks() -> None:
           "bad requests push nothing")
 
 
+def gh_git_checks() -> None:
+    """`gh pr create` runs git itself (a plain `git status` for its "uncommitted
+    change(s)" warning). Every git it starts carries the hardening's pins through
+    GIT_CONFIG_COUNT, so neither the repository's fsmonitor nor a submodule's runs
+    (review of PR #65). The stand-in gh runs that `git status`, from PATH as gh does."""
+    with world() as w:
+        s = Sub(w)
+        wt, run = s.wt, gitops.run
+        (wt / "feature.txt").write_text("feature\n", encoding="utf-8")
+        run(str(wt), ["add", "feature.txt"])
+        assert "[exit 0]" in run(str(wt), ["commit", "-m", "add the feature"])
+        top, top_prog = trap(w, "fsmonitor-repo")
+        sub, sub_prog = trap(w, "fsmonitor-submodule")
+        w.sh("config", "core.fsmonitor", str(top_prog))     # pinned, not refused, like any fsmonitor
+        s.config("core.fsmonitor", str(sub_prog))
+        stand_in = w.fakebin / "gh"
+        stand_in.write_text("#!/bin/sh\ngit status --porcelain >/dev/null 2>&1\n"
+                            "printf '%s\\n' https://example.invalid/pull/9\n", encoding="utf-8")
+        stand_in.chmod(0o755)
+        os.environ["JARVIS_GH"] = str(stand_in)
+        s.touch()
+        out = gitops.open_pull_request(str(wt), "Add the feature", "body")
+        assert "opened a pull request" in out and "pull/9" in out, out
+        assert not fired(top), "the git that gh started ran the repository's fsmonitor"
+        assert not fired(sub), "the git that gh started went into the submodule and ran its fsmonitor"
+        # Sanity: the same stand-in, in gitops' environment without the pins, runs both.
+        s.touch()
+        subprocess.run([str(stand_in)], cwd=str(wt), env=gitops._env(), stdin=subprocess.DEVNULL,
+                       capture_output=True, check=True)
+        assert fired(top) and fired(sub), "sanity: the stand-in's git status ran no fsmonitor"
+    print("ok  gh: every git that gh starts carries the pins — no fsmonitor in the repository or a "
+          "submodule — against the same git unpinned, which runs both")
+
+
 def review_checks() -> None:
     with world() as w:
         wt = made(gitops.create_worktree(str(w.owner), "feat"))
@@ -1267,6 +1332,7 @@ def main() -> int:
     submodule_config_checks()
     credential_checks()
     push_and_pr_checks()
+    gh_git_checks()
     review_checks()
     dispatch_and_tool_checks()
     agent_wiring_checks()
