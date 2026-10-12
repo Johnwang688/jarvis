@@ -2020,8 +2020,8 @@ ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
 | Route | Body | Answer |
 |---|---|---|
 | `GET /browser` | — | `/status` → `browser` (below) plus `profiles: [{id, label, created}]` and `settings` |
-| `GET /browser/settings` | — | `{lan}` |
-| `PATCH /browser/settings` | exactly `{lan: bool}` | `{lan}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
+| `GET /browser/settings` | — | `{lan, local_servers}` |
+| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool}`, at least one | `{lan, local_servers}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
 | `GET /browser/tabs` | — | `[{tab_id, profile, ctx, url, title}]` — the title cleaned to one line of 120; `[]` while nothing runs |
 | `POST /browser/tabs` | `{profile?, ctx?, url?}` | **201** `{tab_id, profile, ctx, loaded, error?}` |
 | `DELETE /browser/tabs/<id>` | — | `{tab_id, closed: true}` |
@@ -2045,6 +2045,15 @@ ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
   16 KiB, and **one of Jarvis's own ports** (`refused_ports`) in any loopback
   spelling (`localhost`, `*.localhost`, `127.1`, `0x7f000001`, `[::1]`,
   `[::ffff:127.0.0.1]`, `0.0.0.0`, a trailing dot …).
+- **A URL on this machine opens its port** (review of PR #69, the lead's
+  decision): a `url` naming this machine in any loopback spelling, sent to
+  `POST /browser/tabs` or `…/navigate`, opens that port in the gate from
+  then until the Browser stops (never one of `refused_ports`). Loopback is
+  otherwise closed like the LAN: a page's own move, `…/history`, and anything
+  that is not these two owner routes never open a port. `local_servers: true`
+  in the settings opens every loopback port that is not Jarvis's.
+- **An unknown field** in any body (here and on every other route) is
+  **400** `unknown fields (N)`: the count, never the names.
 - **`loaded: false`** with **`error`** — Chrome's `net::ERR_…` code only,
   never its message (it names the URL) — when a load fails; a connection the
   gate refused reads `net::ERR_SOCKS_CONNECTION_FAILED`. Navigation answers
@@ -2061,21 +2070,28 @@ ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
 **`GET /status`** gains:
 
 - **`browser`**: `{available, running, version, instances: [{profile, tabs,
-  contexts}], tabs, tab_cap, lan, landing_guard, gate}` — `gate` is
-  `{port, connections, allowed, failed, open, refused: {class: count}}` while
-  running, else null. Profile ids only: **no URL, title or label**.
+  contexts}], tabs, tab_cap, lan, local_servers, loopback_opened,
+  landing_guard, gate}` — `loopback_opened` is how many loopback ports the
+  owner opened (never which); `gate` is `{port, connections, allowed,
+  failed, open, refused: {class: count}}` while running, else null. Profile
+  ids only: **no URL, title or label**.
 - **`refused_ports`**: every port the Browser's gate refuses on this machine
   — `config.control_ports()` (8402, 8404, 8405, 8406, configured and
   default), this daemon's `hud_port` and `api_port`, and 8403 unless it is
   this daemon's `workshop_port`. The HUD's Direct (Preview) judge reads it.
 
 **The gate** refuses, for every connection Chrome makes, Jarvis's ports and
-its own on every address; a name that resolves to loopback; private
-addresses unless `lan` is true; multicast, reserved and unresolvable
-destinations. It counts each refusal by class (`jarvis_port`, `own_port`,
-`name_to_loopback`, `private_network`, `not_a_host`, `unresolvable`,
+its own on every address; a name that resolves to loopback; a loopback port
+the owner has not opened (unless `local_servers`); private addresses unless
+`lan` is true; a name answering with another kind of address than the one
+it was first allowed on; multicast, reserved and unresolvable destinations;
+a lookup past the per-domain cap. It counts each refusal by class
+(`jarvis_port`, `own_port`, `name_to_loopback`, `loopback_closed`,
+`private_network`, `rebinding`, `not_a_host`, `unresolvable`, `dns_busy`,
 `bad_request`, `unsupported`, `busy`) and logs nothing else about it.
-**Nothing about browsing goes on the bus** in BR-1a.
+Chrome sends no UDP at all (no QUIC; WebRTC held to proxied transports, so
+no ICE candidate, STUN or mDNS). **Nothing about browsing goes on the bus**
+in BR-1a.
 
 ## Additions 2026-10-12 (File reads as the editor, Preview is the Browser — BR-3a)
 

@@ -2899,8 +2899,14 @@ gate** in the daemon that resolves a name once and connects to the address
 it judged: Jarvis's own ports (the control ports, the HUD and API ports,
 8403 unless it is this daemon's workshop) are refused on every address in
 every spelling, a public name that resolves to loopback is refused, the LAN
-only with the owner's switch (`browser.json`, off), and only literals and
-`localhost` reach a dev server. Typed URLs pass a **judge** first (http,
+only with the owner's switch (`browser.json`, off), and **this machine like
+the LAN**: a loopback port only once the owner opened it in a tab (the
+lead's decision on PR #69's review; a page or an agent never opens one), and
+then only by a literal or `localhost`. A name keeps the kind of address it
+was first allowed on. Chrome sends no UDP at all — no QUIC, WebRTC held to
+proxied transports and its mDNS responder off — checked by its effect, a
+packet sniffer in a private network namespace seeing nothing leave but on
+loopback. Typed URLs pass a **judge** first (http,
 https or about:blank; no user name, no `file:` and friends, which never
 touch the network), and wherever a page lands is judged again and replaced
 with an explanation when refused. Its folder (`~/.local/share/jarvis/
@@ -2910,7 +2916,9 @@ component updates and sign-in and sync (BD-5), and drops automation, the
 DevTools port, extensions and permission prompts; Chrome's environment is
 built from nothing. Every `/browser` route is owner-only on the HUD
 listener, and no URL, title or profile label reaches `/status`, the bus or
-the log. `/status` gains `browser` and `refused_ports`.
+the log. `/status` gains `browser` and `refused_ports`. The same review
+closed v1's file tools (`read_file`, `grep_files` and the write tools) to
+every credential folder, the Browser's profile included.
 
 **Editor settings, `.editorconfig` and vim (2026-10-12, ED-8 of the editor
 plan, §2.8; decisions E-9, E-11).** A File pane's ⚙, or "Editor Settings…" in
