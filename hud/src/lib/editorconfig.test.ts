@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  candidateDirs, configPath, deadline, globCost, GLOB_TOKENS_MAX, GLOB_TOTAL_MAX, matchGlob, overrideOf,
+  candidateDirs, CHECK_STEPS, configPath, deadline, globCost, GLOB_TOKENS_MAX, GLOB_TOTAL_MAX, matchGlob, overrideOf,
   parseEditorConfig, RESOLVE_MS, resolveProps, SECTIONS_MAX, type ConfigFile, type Deadline,
 } from "./editorconfig";
 
@@ -243,6 +243,32 @@ describe("a resolution is held to the clock", () => {
     const c = { reads: 0 };
     return { c, d: deadline(RESOLVE_MS, () => c.reads++) };
   };
+
+  // The guard's strength is pinned, not timed (review of PR #72, LOW 1): the
+  // checks below bound how long a job held the thread, and the least-of-runs
+  // that makes them hold under load also lets a longer deadline through (at
+  // 20 ms every one passed). So the deadline's length, how often the clock is
+  // read, and that it is the real clock are asserted directly.
+  it("the guard's strength: a 5 ms deadline on the real clock, looked at every 256 steps", () => {
+    expect(RESOLVE_MS).toBe(5);
+    expect(CHECK_STEPS).toBe(256);
+    const now = 1000;
+    expect(deadline(undefined, () => now).until - now).toBe(5);
+    const before = performance.now();
+    const real = deadline();
+    const after = performance.now();
+    expect(real.until).toBeGreaterThanOrEqual(before + 5);
+    expect(real.until).toBeLessThanOrEqual(after + 5);
+    // The clock is looked at every few hundred steps of work (on average at
+    // least every 512: a large step can carry a look past 256).
+    const looks = { n: 0 };
+    const d = deadline(1e9, () => (looks.n++, 0));
+    const file = parseEditorConfig("root = true\n[*]\nindent_size = 4\n[*.{c,h,cpp}]\nindent_size = 2\n[src/**/vendor/**]\nindent_size = unset\n");
+    const r = resolveProps([{ dir: "", file }], `src/${"deep/".repeat(40)}robot.cpp`, d);
+    expect(r.over).toBeNull();
+    expect(d.total).toBeGreaterThan(4096);
+    expect(looks.n).toBeGreaterThanOrEqual(d.total / 512);
+  });
 
   it("the shape is what the review built: 123 sections of 64 alternatives", () => {
     const file = heavy();
