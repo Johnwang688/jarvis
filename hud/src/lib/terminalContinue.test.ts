@@ -112,6 +112,37 @@ describe("what is held while the new shell starts", () => {
     expect(h.parts).toEqual([]);
   });
 
+  it("a held line is typed, never run: keys up to the first Enter, never it nor anything after (PR #64 L6)", () => {
+    const h = new HeldInput();
+    for (const k of ["m", "a", "k", "e", "\r", "l", "s", "\r"]) h.key(enc(k));
+    const out = h.release();
+    expect(out.parts).toEqual(["m", "a", "k", "e"].map((k) => ({ key: enc(k) })));
+    expect(out.stopped).toBe("enter");
+    expect(out.withheld).toBe(4);                                         // ⏎ l s ⏎
+    const just = new HeldInput();
+    just.key(enc("\r"));
+    expect(just.release()).toEqual({ parts: [], stopped: "enter", withheld: 1 });
+  });
+
+  it("a held paste with a line break is not sent at all, nor anything after it; one without is", () => {
+    const h = new HeldInput();
+    h.key(enc("x"));
+    h.paste("echo one");
+    h.paste("echo two\nrm -rf build");
+    h.key(enc("y"));
+    const out = h.release();
+    expect(out.parts).toEqual([{ key: enc("x") }, { paste: "echo one" }]);
+    expect(out.stopped).toBe("paste");
+    expect(out.withheld).toBe("echo two\nrm -rf build".length + 1);
+    const cr = new HeldInput();
+    cr.paste("make\r");
+    expect(cr.release()).toEqual({ parts: [], stopped: "paste", withheld: 5 });
+    const plain = new HeldInput();
+    plain.key(enc("\x1b[A"));
+    plain.paste("ls -la");
+    expect(plain.release()).toEqual({ parts: [{ key: enc("\x1b[A") }, { paste: "ls -la" }], stopped: null, withheld: 0 });
+  });
+
   it("refused outright (a card came up): this and everything after", () => {
     const h = new HeldInput();
     h.key(enc("a"));
@@ -202,6 +233,53 @@ describe("the old text kept for a continuation", () => {
     const s = snapshotText(fakeBuffer(rows), 7 * 3 + 2 * 2);              // three 7-byte lines and two line ends
     expect(s).toBe("line 47\r\nline 48\r\nline 49");
     expect(new TextEncoder().encode(snapshotText(fakeBuffer(rows), 30)).length).toBeLessThanOrEqual(30);
+  });
+
+  it("one wrapped line longer than the limit keeps its tail, cut inside it, rather than losing everything (L3)", () => {
+    const rows = [{ cells: text("$ cat big") },
+                  { cells: text("a".repeat(10), { fg: [P16, 1] }) },
+                  ...Array.from({ length: 199 }, (_, i) => ({ cells: text(String(i % 10).repeat(10), { fg: [P16, 1] }),
+                                                               wrapped: true }))];
+    const s = snapshotText(fakeBuffer(rows), 100);
+    expect(new TextEncoder().encode(s).length).toBeLessThanOrEqual(100);
+    expect(s.length).toBeGreaterThan(0);
+    expect(s.endsWith("8888888888\x1b[0m")).toBe(true);                    // the bottom row
+    expect(s.startsWith("\x1b[0;31m")).toBe(true);                         // a cut row starts in its own colour
+    expect(s).not.toContain("$ cat big");
+    expect(onlySgr(s)).toBe(true);
+  });
+
+  it("is walked from the bottom and stops at the limit: a full truecolour scrollback reads only its tail (L2)", () => {
+    const COLS = 250;
+    const ROWS = 10_000;
+    let calls = 0;
+    const base = fakeBuffer([], COLS);
+    const cell = base.getNullCell() as SnapCell & Record<string, unknown>;
+    let at = 0;
+    const colour = () => 0x010101 * (at % 200);
+    Object.assign(cell, {
+      getChars: () => "x", getFgColorMode: () => RGB, getFgColor: colour, isFgDefault: () => false,
+      isFgRGB: () => true,
+    });
+    const buf: SnapBuffer = {
+      length: ROWS,
+      getNullCell: () => cell,
+      getLine: () => ({
+        isWrapped: false, length: COLS,
+        getCell: (x) => {
+          calls++;
+          at = x;
+          return cell;
+        },
+      }),
+    };
+    const t0 = performance.now();
+    const s = snapshotText(buf);
+    const ms = performance.now() - t0;
+    expect(new TextEncoder().encode(s).length).toBeLessThanOrEqual(PREFIX_MAX);
+    expect(s.length).toBeGreaterThan(PREFIX_MAX / 2);
+    expect(calls).toBeLessThan(ROWS * COLS * 2 / 10);                      // a tenth of the rows, at most
+    expect(ms).toBeLessThan(1500);                                         // generous: it was 1.9 s on a real buffer
   });
 
   it("with the separator: plain text, no escape, the whole at most PREFIX_MAX", () => {

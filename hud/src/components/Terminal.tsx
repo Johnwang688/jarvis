@@ -98,12 +98,15 @@ export interface PasteNotice {
   /**
    * dropped: the program was not reading; lost: the socket closed mid-paste;
    * stopped: a Ctrl-C ended it; unsent: typed or pasted while the terminal
-   * was connecting (or not running here), so it went nowhere.
+   * was connecting (or not running here), so it went nowhere; continued: a
+   * continuation typed what was held but ran nothing (`stopped`).
    */
-  kind: "dropped" | "lost" | "stopped" | "unsent";
+  kind: "dropped" | "lost" | "stopped" | "unsent" | "continued";
   bytes: number;
   /** For "unsent": still connecting, or not running in this window. */
   why?: "connecting" | "offline";
+  /** For "continued": the held line stopped at its Enter, or a paste with a line break was kept back. */
+  stopped?: "enter" | "paste";
   /** An `input_resume` is out (or being retried). */
   resuming: boolean;
   /** The daemon's last word on a refused resume. */
@@ -300,7 +303,7 @@ export class TermSession {
       this.holdPaste(text);
       return;
     }
-    if (this.mgr.mayContinue(this)) {
+    if (!this.continueError && this.mgr.mayContinue(this)) {   // after a refusal only Continue here retries
       this.startContinue({ paste: text });
       return;
     }
@@ -788,8 +791,12 @@ export class TermSession {
       if (this.gesture) this.holdKey(bytes);
       return;
     }
-    // A typing key in a terminal that ended with Jarvis continues it there.
-    if (this.state === "ended" && this.gesture && continuesOn(bytes) && this.mgr.mayContinue(this)) {
+    // A typing key in a terminal that ended with Jarvis continues it there —
+    // until a continuation was refused: then only Continue here tries again
+    // (review L5: at the cap every key asked, and a slot freed mid-line gave
+    // the new shell the line's tail).
+    if (this.state === "ended" && this.gesture && !this.continueError && continuesOn(bytes)
+        && this.mgr.mayContinue(this)) {
       this.startContinue({ key: bytes });
       return;
     }
@@ -801,6 +808,10 @@ export class TermSession {
     }
     if (this.gesture && this.paste?.kind === "unsent") {
       this.paste = null;                      // typing reaches the shell again: the notice has done its job
+      this.mgr.changed();
+    }
+    if (this.gesture && this.paste?.kind === "continued" && bytes.some((b) => b === 0x0d)) {
+      this.paste = null;                      // the owner ran the line, having seen the new prompt
       this.mgr.changed();
     }
     this.deliver(bytes);
@@ -902,7 +913,7 @@ export class TermSession {
   /** "Continue here": the owner's click, with nothing typed yet. */
   continueHere() {
     if (this.mgr.blocked || this.held || !this.mgr.mayContinue(this)) return;
-    this.startContinue(null);
+    this.startContinue(null);                 // the one way to try again after a refusal (review L5)
   }
 
   /**
@@ -926,45 +937,63 @@ export class TermSession {
 
   /**
    * A key while the continuation starts: held in order, or refused — past
-   * 4 KiB, a key that does not type, or a card since the hold began — and
-   * then everything after it too (never spliced), said with the `unsent` notice.
+   * 4 KiB, a key that does not type, or a card since the hold began. **A
+   * refusal drops the whole hold** (PR #64 review M1): nothing after it is
+   * kept and nothing before it is sent, and all of it is said with the
+   * `unsent` notice.
    */
   private holdKey(bytes: Uint8Array) {
     const held = this.held;
     if (!held) return;
-    const before = held.dropped;
+    const was = { closed: held.closed, dropped: held.dropped };
     if (this.mgr.cardCount !== this.heldCards || this.mgr.crashed) held.refuse(bytes.length);
     else held.key(bytes);
-    if (held.dropped > before) this.noteUnsent(held.dropped - before);
+    this.sayRefused(held, was);
   }
 
   private holdPaste(text: string) {
     const held = this.held;
     if (!held) return;
-    const before = held.dropped;
+    const was = { closed: held.closed, dropped: held.dropped };
     if (this.mgr.cardCount !== this.heldCards || this.mgr.crashed) held.refuse(encodeInput(text).length);
     else held.paste(text);
-    if (held.dropped > before) this.noteUnsent(held.dropped - before);
+    this.sayRefused(held, was);
+  }
+
+  /** What a refusal costs, said: at the first one, everything held so far as well. */
+  private sayRefused(held: HeldInput, was: { closed: boolean; dropped: number }) {
+    const refused = held.dropped - was.dropped;
+    if (!refused) return;
+    this.noteUnsent(refused + (was.closed ? 0 : held.bytes));
   }
 
   /**
-   * The new shell's replay has been parsed: what was held goes, in order,
-   * through this socket's gate — a paste through xterm, so it is bracketed
-   * as the *new* shell asked. Nothing at all if a card came up since the hold
-   * began, or the window crashed: then it is said instead.
+   * The new shell's replay has been parsed: what was held goes through this
+   * socket's gate, a paste through xterm (bracketed as the *new* shell asked)
+   * — **typed, never run** (`HeldInput.release`): the keys up to the first
+   * Enter, and a paste only without a line break; the notice says the line is
+   * waiting at a new local shell's prompt. Nothing at all if anything was
+   * refused while held (M1), a card came up since the hold began, the window
+   * crashed, or nobody can see the terminal any more (review L1): then it is
+   * said instead.
    */
   private flushHeld() {
     const held = this.held;
     if (!held) return;
     this.held = null;
-    if (this.mgr.blocked || this.mgr.crashed || this.mgr.cardCount !== this.heldCards
-        || this.state !== "attached" || !this.term) {
-      if (held.bytes) this.noteUnsent(held.bytes);
+    if (held.closed || this.mgr.blocked || this.mgr.crashed || this.mgr.cardCount !== this.heldCards
+        || this.state !== "attached" || !this.term || !this.mgr.visible(this.id)) {
+      if (held.bytes && !held.closed) this.noteUnsent(held.bytes);
       return;
     }
-    for (const part of held.parts) {
+    const out = held.release();
+    for (const part of out.parts) {
       if ("key" in part) this.deliver(part.key);
       else this.term.paste(part.paste);
+    }
+    if (out.stopped) {
+      this.paste = { kind: "continued", bytes: out.withheld, resuming: false, refused: "", stopped: out.stopped };
+      this.mgr.changed();
     }
   }
 
@@ -973,7 +1002,16 @@ export class TermSession {
     const held = this.held;
     if (!held) return;
     this.held = null;
-    if (held.bytes) this.noteUnsent(held.bytes);
+    if (held.bytes && !held.closed) this.noteUnsent(held.bytes);
+  }
+
+  /**
+   * Nobody can see this terminal any more while it starts — the panel was
+   * closed, its pane switched away, it went back to a hidden panel (review
+   * L1): what was held is dropped, and said, as auto-open drops its terminal.
+   */
+  dropHiddenHold() {
+    this.dropHeld();
   }
 
   /** The daemon refused the new shell (six already open…): said in the strip, nothing kept. */
@@ -1245,6 +1283,7 @@ export class TermManager {
     }
     // In the order first seen: an ended tab stays where it was, and its continuation takes its place.
     const order = new Map(out.map((r) => [r.id, this.rank(r.id)]));
+    for (const id of Array.from(this.ranks.keys())) if (!order.has(id)) this.ranks.delete(id);   // review N2
     return out.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
   }
 
@@ -1295,7 +1334,19 @@ export class TermManager {
   selectTab(id: string) {
     this.prefs = { ...this.prefs, active: id };
     savePrefs(this.prefs);
+    this.dropHiddenHolds();
     this.changed();
+  }
+
+  /**
+   * A continuation whose terminal nobody can see any more (the panel closed,
+   * another tab chosen, its pane switched away or dropped) sends nothing of
+   * what was typed for it: held input goes into a terminal only while it is
+   * on screen (PR #64 review L1). Asked after every change of where
+   * terminals are drawn.
+   */
+  private dropHiddenHolds() {
+    for (const s of this.sessions.values()) if (s.continuing && !this.visible(s.id)) s.dropHiddenHold();
   }
 
   /**
@@ -1381,6 +1432,7 @@ export class TermManager {
       this.unseenExits.clear();
       void this.refresh();
     }
+    this.dropHiddenHolds();
     this.changed();
   }
 
@@ -1404,6 +1456,7 @@ export class TermManager {
     if (same) return;
     this.place = place;
     for (const id of place.keys()) this.unseenExits.delete(id);
+    this.dropHiddenHolds();
     this.changed();
   }
 
@@ -1455,7 +1508,7 @@ export class TermManager {
   specOf(id: string): InSpec {
     const kept = this.prefs.specs[id];
     if (kept) return kept;
-    const row = this.row(id) ?? this.sessions.get(id)?.lastRow;
+    const row = this.row(id);
     return row?.project_id ? { project: row.project_id } : "home";
   }
 
@@ -1651,7 +1704,8 @@ export class TermManager {
   mayContinue(s: TermSession): boolean {
     return mayContinue({
       state: s.state, program: this.isProgram(s.id), mine: this.claimed.has(s.id),
-      known: !!this.prefs.specs[s.id] || !!(this.row(s.id) ?? s.lastRow), crashed: this.crashed,
+      // Only a remembered `in`, never a guess from the row (review N1).
+      known: !!this.prefs.specs[s.id], crashed: this.crashed,
     });
   }
 
@@ -2017,7 +2071,15 @@ function PasteStrip(props: { s: TermSession; blocked: boolean }) {
         : p.kind === "unsent"
           ? `This terminal ${p.why === "offline" ? "is not running here" : "was still connecting"}, so what you `
             + `typed or pasted (${kib(p.bytes)}) was not sent.`
-          : `Ctrl-C stopped the paste: the rest of it (${kib(p.bytes)}) was not sent.`;
+          : p.kind === "continued"
+            // A held line is typed, never run (PR #64 review L6): the prompt it was typed at is gone.
+            ? (p.stopped === "paste"
+              ? `Continued in a new local shell: your paste has a line break, so it was not sent (${kib(p.bytes)}`
+                + " with anything after it). Check the prompt, then paste it again."
+              : "Continued in a new local shell: your line is typed but not run"
+                + (p.bytes > 1 ? `, and what you typed after its Enter (${kib(p.bytes - 1)}) was not sent` : "")
+                + ". Check the prompt, then press Enter.")
+            : `Ctrl-C stopped the paste: the rest of it (${kib(p.bytes)}) was not sent.`;
   return (
     <div className="termnote" data-testid="term-paste-notice" data-kind={p.kind} data-held={s.heldAt ? "true" : undefined}
          role="status">
@@ -2104,10 +2166,14 @@ function StateStrip(props: { s: TermSession; now: number; blocked: boolean; onCh
             {s.endedWhy === "ended"
               ? "Jarvis restarted; this terminal ended."
               : "This terminal has ended (Jarvis restarted, or it was closed)."}
-            {goOn ? " Type to continue in a new shell here." : ""}
+            {goOn && !s.continueError ? " Type to continue in a new shell here." : ""}
           </span>
           {s.continueError ? (
-            <span className="err" data-testid="term-continue-error">{s.continueError}</span>
+            // After a refusal typing continues nothing; only the button tries again (review L5).
+            <span className="err" data-testid="term-continue-error">
+              A new shell could not be started here: {s.continueError.replace(/[.\s]+$/, "")}.
+              {goOn ? " Continue here tries again." : ""}
+            </span>
           ) : null}
           {goOn ? (
             <button type="button" data-testid="term-continue" disabled={blocked}

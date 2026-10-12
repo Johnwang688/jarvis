@@ -450,10 +450,11 @@ export function continuesOn(bytes: Uint8Array): boolean {
  * Jarvis (or is gone with it) — never one that exited on its own, which
  * keeps Restart — it is a shell, not a program terminal (VX-1), this tab
  * showed it (never one another window holds), where it was opened is known
- * (a remembered `in`, or its row: a program terminal has neither once a
- * reload forgot its row, so it never becomes a shell), and the window is not
- * crashed. A card is checked where the owner acts: the strip still says
- * what typing would do.
+ * — a remembered `in`, never a guess from its row: a task's or a thread's
+ * terminal whose `in` was pushed out of the 24 kept would land in the project
+ * root rather than its worktree (PR #64 review N1), and a program terminal
+ * never has one — and the window is not crashed. A card is checked where the
+ * owner acts: the strip still says what typing would do.
  */
 export function mayContinue(
   t: { state: string; program: boolean; mine: boolean; known: boolean; crashed: boolean },
@@ -491,8 +492,10 @@ type HeldPart = { key: Uint8Array } | { paste: string };
  * until the new shell's replay has been parsed. At most `HELD_MAX` bytes; a
  * paste that does not fit whole is dropped whole. **Never spliced**: once
  * anything is refused — past the cap, a key that does not type, a card that
- * came up — everything after it is refused too, so the shell never runs a
- * line with a hole in it. `dropped` is said (the `unsent` notice).
+ * came up — everything after it is refused too, and the session sends none of
+ * what came before it either (PR #64 review M1: `make deploy⏎` then Ctrl+C
+ * used to run the line). All of it is said (the `unsent` notice). What is sent
+ * when nothing was refused is `release()`: typed, never run.
  */
 export class HeldInput {
   parts: HeldPart[] = [];
@@ -523,6 +526,43 @@ export class HeldInput {
   refuse(bytes: number) {
     this.closed = true;
     this.dropped += bytes;
+  }
+
+  /**
+   * What goes to the new shell once its replay is parsed, when nothing was
+   * refused (a refusal drops the whole hold: `TermSession.flushHeld`). **A
+   * held line is typed, never run** (the lead's decision, PR #64 review L6):
+   * until the first key the screen showed the old context's prompt
+   * (`pi@robot:~$`, `>>>`, a root shell), and an Enter typed at it would run
+   * that line in a fresh local shell in the project folder. So keys go up to
+   * the first line end (CR or LF) — never it, nor anything after — and a
+   * paste holding a line break is not sent at all, nor anything after it.
+   * `withheld` is every byte not sent.
+   */
+  release(): { parts: HeldPart[]; stopped: "enter" | "paste" | null; withheld: number } {
+    const parts: HeldPart[] = [];
+    let stopped: "enter" | "paste" | null = null;
+    let withheld = 0;
+    for (const p of this.parts) {
+      if (stopped) {
+        withheld += "key" in p ? p.key.length : utf8Length(p.paste);
+      } else if ("key" in p) {
+        const at = p.key.findIndex((b) => b === 0x0d || b === 0x0a);
+        if (at < 0) {
+          parts.push(p);
+          continue;
+        }
+        if (at > 0) parts.push({ key: p.key.slice(0, at) });
+        withheld += p.key.length - at;
+        stopped = "enter";
+      } else if (/[\r\n]/.test(p.paste)) {
+        withheld += utf8Length(p.paste);
+        stopped = "paste";
+      } else {
+        parts.push(p);
+      }
+    }
+    return { parts, stopped, withheld };
   }
 
   private add(part: HeldPart, n: number): boolean {
@@ -616,56 +656,82 @@ function blankCell(c: SnapCell): boolean {
  * width), trailing blanks and empty lines dropped, every line ending in the
  * default look. So it carries no query to answer, no mode, no alternate
  * screen, no title and no link — whatever the old program left the terminal
- * in. The tail, at most `max` bytes, cut at a line's start.
+ * in. The tail, at most `max` bytes, cut at a line's start — or, when the
+ * last line alone is longer, inside it (PR #64 review L3: one long wrapped
+ * line used to lose the whole text).
+ *
+ * **Walked from the bottom, and stopped at the cap** (review L2): built top
+ * down, a full scrollback (10,000 rows of 250 truecolour columns) took 1.9 s
+ * on the keydown and ~88 M characters before it was trimmed.
  */
 export function snapshotText(buf: SnapBuffer, max = PREFIX_MAX): string {
   const cell = buf.getNullCell();
-  const lines: string[] = [];
-  let cur = "";
-  let sgr = "";
-  for (let y = 0; y < buf.length; y++) {
+  const lines: string[] = [];                         // logical lines, bottom up
+  let total = 0;                                      // their bytes, joined by "\r\n"
+  let group: string[] = [];                           // the logical line being read: its rows, bottom up
+  let groupBytes = 0;
+  for (let y = buf.length - 1; y >= 0; y--) {
     const line = buf.getLine(y);
     if (!line) continue;
     const next = y + 1 < buf.length ? buf.getLine(y + 1) : undefined;
-    const ends = !(next && next.isWrapped);
-    let end = line.length;
-    if (ends) {
-      while (end > 0) {
-        const c = line.getCell(end - 1, cell);
-        if (c && !blankCell(c)) break;
-        end--;
-      }
+    const row = rowText(line, cell, !(next && next.isWrapped));
+    const n = utf8Length(row);
+    const sep = lines.length ? 2 : 0;
+    if (total + sep + groupBytes + n > max) {
+      // The last line alone is too long: its tail, from a row's start (each row starts and ends plain).
+      if (!lines.length && groupBytes) lines.push(group.reverse().join(""));
+      group = [];
+      break;
     }
-    for (let x = 0; x < end; x++) {
-      const c = line.getCell(x, cell);
-      if (!c || c.getWidth() === 0) continue;         // the second half of a wide character
-      const s = sgrOf(c);
-      if (s !== sgr) {
-        cur += s ? `\x1b[0;${s}m` : "\x1b[0m";
-        sgr = s;
-      }
-      // A cell never holds a control character; dropped anyway, so nothing but our SGR is ever an escape.
-      // eslint-disable-next-line no-control-regex
-      cur += c.getChars().replace(/[\u0000-\u001f\u007f-\u009f]/g, "") || " ";
-    }
-    if (ends) {
-      if (sgr) cur += "\x1b[0m";
-      sgr = "";
-      lines.push(cur);
-      cur = "";
+    group.push(row);
+    groupBytes += n;
+    if (!line.isWrapped) {                            // the row a logical line starts on
+      const text = group.reverse().join("");
+      group = [];
+      groupBytes = 0;
+      if (!lines.length && !text) continue;           // empty lines below the text
+      total += sep + utf8Length(text);
+      lines.push(text);
     }
   }
-  if (cur) lines.push(sgr ? cur + "\x1b[0m" : cur);
-  while (lines.length && lines[lines.length - 1] === "") lines.pop();
-  let total = 0;
-  let from = lines.length;
-  while (from > 0) {
-    const n = utf8Length(lines[from - 1]) + (from < lines.length ? 2 : 0);
-    if (total + n > max) break;
-    total += n;
-    from--;
+  // The top row continued a line that scrolled off: what is left of it.
+  if (group.length) {
+    const text = group.reverse().join("");
+    if (text || lines.length) lines.push(text);
   }
-  return lines.slice(from).join("\r\n");
+  return lines.reverse().join("\r\n");
+}
+
+/**
+ * One row's cells as text and SGR, starting and ending in the default look,
+ * so any row boundary is a place the text may start. Trailing blanks are
+ * dropped only where a logical line ends (`trim`): a wrapped row's spaces are
+ * the middle of its line.
+ */
+function rowText(line: SnapLine, cell: SnapCell, trim: boolean): string {
+  let end = line.length;
+  if (trim) {
+    while (end > 0) {
+      const c = line.getCell(end - 1, cell);
+      if (c && !blankCell(c)) break;
+      end--;
+    }
+  }
+  let out = "";
+  let sgr = "";
+  for (let x = 0; x < end; x++) {
+    const c = line.getCell(x, cell);
+    if (!c || c.getWidth() === 0) continue;           // the second half of a wide character
+    const s = sgrOf(c);
+    if (s !== sgr) {
+      out += s ? `\x1b[0;${s}m` : "\x1b[0m";
+      sgr = s;
+    }
+    // A cell never holds a control character; dropped anyway, so nothing but our SGR is ever an escape.
+    // eslint-disable-next-line no-control-regex
+    out += c.getChars().replace(/[\u0000-\u001f\u007f-\u009f]/g, "") || " ";
+  }
+  return sgr ? out + "\x1b[0m" : out;
 }
 
 /** HH:MM, 24-hour, local. */

@@ -2184,10 +2184,20 @@ def _continue_checks(page, mock, base, check, until, fake):
     check("and nothing typed reaches the new shell before its replay", fake.sent(nxt) == b"", repr(fake.sent(nxt)))
     page.keyboard.press("Enter")                # joins what is held
     fake.finish_waiting(nxt, allow=True)
-    until(lambda: "\nhi" in _text(page, nxt), timeout=5)
-    page.wait_for_timeout(300)
-    check("once the replay is parsed, exactly what was typed goes, in order — and none of the replay's answers",
-          fake.sent(nxt) == b"echo hi\r", repr(fake.sent(nxt)))
+    until(lambda: fake.sent(nxt) == b"echo hi", timeout=5)
+    page.wait_for_timeout(400)
+    note = page.locator(_sel(nxt, '[data-testid="term-paste-notice"]'))
+    check("once the replay is parsed, the line goes typed but not run: no Enter, none of the replay's answers "
+          "(PR #64 L6: the prompt it was typed at is gone)",
+          fake.sent(nxt) == b"echo hi" and "\nhi" not in _text(page, nxt), repr(fake.sent(nxt)))
+    check("and the notice says so: a new local shell, check the prompt, then press Enter",
+          note.count() == 1 and note.get_attribute("data-kind") == "continued"
+          and "typed but not run" in note.inner_text() and "press Enter" in note.inner_text(),
+          note.inner_text()[:160] if note.count() else "no notice")
+    page.keyboard.press("Enter")
+    until(lambda: "\nhi" in _text(page, nxt), timeout=4)
+    check("the owner's own Enter then runs it, and the notice goes",
+          fake.sent(nxt) == b"echo hi\r" and note.count() == 0, repr(fake.sent(nxt)))
     text = _text(page, nxt)
     sep = SEPARATOR.search(text)
     check("the old text stays above a separator, the new shell below it",
@@ -2220,13 +2230,64 @@ def _continue_checks(page, mock, base, check, until, fake):
     until(lambda: _state(page, nxt) == "ended", timeout=4)
     nxt2 = _next_id(mock)
     fake.ring[nxt2] = bytearray(b"\x1b[?2004h$ ")
-    _paste(page, nxt, "echo pasted\x1b[201~\x9bX\n")
+    _paste(page, nxt, "echo pasted\x1b[201~\x9bX")
     until(lambda: _state(page, nxt2) == "attached" and fake.sent(nxt2), timeout=5)
     page.wait_for_timeout(200)
     check("a paste continues it, made inert (no ESC, no C1) and bracketed as the new shell asked",
-          fake.sent(nxt2) == b"\x1b[200~echo pasted[201~X\r\x1b[201~", repr(fake.sent(nxt2)))
+          fake.sent(nxt2) == b"\x1b[200~echo pasted[201~X\x1b[201~", repr(fake.sent(nxt2)))
     check("and the text from before both restarts is still above two separators",
           "old-marker" in _text(page, nxt2) and len(SEPARATOR.findall(_text(page, nxt2))) == 2)
+    # A held paste with a line break is never sent (L6): it would run at a prompt nobody has seen.
+    fake.end(nxt2)
+    until(lambda: _state(page, nxt2) == "ended", timeout=4)
+    nl = _next_id(mock)
+    _paste(page, nxt2, "make deploy\n")
+    until(lambda: _state(page, nl) == "attached", timeout=5)
+    page.wait_for_timeout(500)
+    note = page.locator(_sel(nl, '[data-testid="term-paste-notice"]'))
+    check("a paste with a line break continues it but is not sent at all; the notice says to paste it again",
+          fake.sent(nl) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "continued"
+          and "paste it again" in note.inner_text(), f"{fake.sent(nl)!r} {note.inner_text()[:160] if note.count() else ''}")
+    # Any refusal while held drops the whole hold (M1): `make deploy⏎` then Ctrl+C runs nothing.
+    fake.end(nl)
+    until(lambda: _state(page, nl) == "ended", timeout=4)
+    m1 = _next_id(mock)
+    fake.hold.add(m1)
+    _focus_term(page, nl)
+    page.keyboard.type("make deploy")
+    page.keyboard.press("Enter")
+    page.keyboard.press("Control+c")
+    until(lambda: _state(page, m1) == "waiting", timeout=4)
+    fake.finish_waiting(m1, allow=True)
+    until(lambda: _state(page, m1) == "attached", timeout=5)
+    page.wait_for_timeout(600)
+    note = page.locator(_sel(m1, '[data-testid="term-paste-notice"]'))
+    check("review M1: a refused key while held (Ctrl+C after Enter) sends nothing at all, and all of it is said",
+          fake.sent(m1) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent"
+          and "(13 bytes)" in note.inner_text(),
+          f"{fake.sent(m1)!r} {note.inner_text()[:160] if note.count() else 'no notice'}")
+    # Nobody can see it any more (L1): the panel closed while it starts, nothing held goes.
+    fake.end(m1)
+    until(lambda: _state(page, m1) == "ended", timeout=4)
+    l1 = _next_id(mock)
+    fake.hold.add(l1)
+    _focus_term(page, m1)
+    page.keyboard.type("ls")
+    until(lambda: _state(page, l1) == "waiting", timeout=4)
+    page.keyboard.press("Control+Backquote")
+    until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=3)
+    fake.finish_waiting(l1, allow=True)
+    until(lambda: fake.of(l1)[-1].get("replayed_at") is not None, timeout=5)
+    page.wait_for_timeout(600)
+    check("review L1: the panel closed while it started — nothing held reaches the hidden shell",
+          fake.sent(l1) == b"", repr(fake.sent(l1)))
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(l1)), timeout=4)
+    note = page.locator(_sel(l1, '[data-testid="term-paste-notice"]'))
+    check("and reopened, the terminal says what was not sent",
+          note.count() == 1 and note.get_attribute("data-kind") == "unsent" and fake.sent(l1) == b"",
+          note.inner_text()[:160] if note.count() else "no notice")
+    nxt2 = l1
 
     # Under a card nothing continues: keys and a paste go to the card, the button is off.
     fake.end(nxt2)
@@ -2260,11 +2321,18 @@ def _continue_checks(page, mock, base, check, until, fake):
 
     # Six already open: the refusal in the strip, nothing held.
     mock.terminal_refuse = "6 terminals are open; close one first"
+    n0 = len(posts())
     page.keyboard.type("ab")
     until(lambda: page.locator(_sel(nxt2, '[data-testid="term-continue-error"]')).count() > 0, timeout=4)
     check("six already open: the refusal is said in the strip, and it stays ended",
           "6 terminals are open" in page.locator(_sel(nxt2, '[data-testid="term-continue-error"]')).inner_text()
           and _state(page, nxt2) == "ended")
+    page.keyboard.type("cd")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(nxt2, '[data-testid="term-ended"]')).inner_text()
+    check("review L5: after a refusal typing asks no more — one request for the whole line — and the strip "
+          "says only Continue here tries again", len(posts()) == n0 + 1 and "Continue here tries again" in strip
+          and "Type to continue" not in strip, f"{len(posts()) - n0} posts; {strip}")
     mock.__dict__.pop("terminal_refuse", None)
     n = len(posts())
     nxt3 = _next_id(mock)
