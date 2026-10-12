@@ -113,6 +113,12 @@ export function NewVexProject(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, configured]);
 
+  // New inputs: how the last request ended no longer describes them.
+  useEffect(() => {
+    setRequest((r) => (r && r.state !== "asking" ? null : r));
+    setError("");
+  }, [key]);
+
   // A request on its way: read how it ended (the card is the owner's).
   useEffect(() => {
     if (!request) return;
