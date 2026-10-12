@@ -127,7 +127,9 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _rv47_loose_unlisted_checks, _rv47_ask_strip_checks,
                         # review 2 of PR #47 (c3c928f)
                         _rv47b_close_other_view_checks, _rv47b_park_said_checks, _rv47b_thread_park_said_checks,
-                        _rv47b_send_held_named_checks):
+                        _rv47b_send_held_named_checks,
+                        # review 3 of PR #47 (9a093f9): words parked for the next new thread
+                        _rv47c_close_orphan_checks, _rv47c_archive_orphan_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -2336,6 +2338,74 @@ def _rv47b_send_held_named_checks(page, mock, check, until):
           bool(until(lambda: _box(page, 1).input_value() == "words whose send fails at /send", timeout=3)),
           repr(_box(page, 1).input_value()))
     _box(page, 1).fill("")
+
+
+# ---------------------------------------------------------------------------
+# Review 3 of PR #47 (9a093f9), MED: words parked under `compose:*` were taken
+# up by a pane nobody could see, and the window said they were "back, in this
+# new thread's box". Each failed on 1181a1c.
+
+# A chat and a File pane drawn; panes 5–8 hidden by ⊞, each holding a compose row.
+CHAT_FILE_KEPT = json.dumps({"preset": "cols2", "order": [1, 2], "kept": [5, 6, 7, 8], "focused": 1,
+                             "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"},
+                                       {"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "chat"}]})
+
+PARK = "w => window.__hud.dispatch({type: 'park', key: 'compose:*', text: w, projectId: 'p1'})"
+
+
+def _rv47c_close_orphan_checks(page, mock, check, until):
+    """(a) × on a pane gives the closed pane no compose row, so it takes up no
+    parked words; the next New thread, on screen, does, and says so."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 2, "t1")
+    page.evaluate(PARK, "orphan words A")
+    page.locator('[data-testid="pane-1-close"]').click()
+    until(lambda: _order(page) == [2], timeout=2)
+    time.sleep(0.5)                               # the effect that gave the closed pane a row runs after the render
+    drafts, closed = _state(page, "drafts"), _chat(page, 1)
+    check("review 3 #47 MED (a): × on pane 1 leaves the parked words parked, and the closed pane holds nothing",
+          drafts.get("compose:*", {}).get("text") == "orphan words A" and closed["input"] == ""
+          and closed["compose"] is None, f"drafts {drafts}, closed pane {closed['input']!r}")
+    check("review 3 #47 MED (a): and the window never says they are back",
+          "are back" not in _state(page, "error"), _state(page, "error"))
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: "orphan words A" in _box(page, 2).input_value(), timeout=3)
+    check("review 3 #47 MED (a): New thread in the pane on screen takes them up, and says so",
+          _box(page, 2).input_value() == "orphan words A" and "compose:*" not in _state(page, "drafts")
+          and "are back, in this new thread's box" in _state(page, "error"), _state(page, "error"))
+    _box(page, 2).fill("")
+
+
+def _rv47c_archive_orphan_checks(page, mock, check, until):
+    """(b) A project archived re-aims every compose row in it, hidden ones
+    included, with a new id: no re-aim takes up parked words."""
+    page.evaluate("localStorage.setItem('jarvis.hud.lastProject', 'p1')")
+    _fresh(page, mock, until, CHAT_FILE_KEPT)
+    until(lambda: all((_chat(page, n)["compose"] or {}).get("projectId") == "p1" for n in (5, 6, 7, 8)), timeout=4)
+    _open(page, until, 1, "t3", "p2")
+    check("setup: pane 1 on t3 (schoolwork), panes 5–8 hidden with compose rows in jarvis",
+          _order(page) == [1, 2] and _chat(page, 1)["threadId"] == "t3")
+    page.evaluate(PARK, "orphan words B")
+    try:
+        mock.emit("project_archived", {"project_id": "p1"}, project_id="p1")
+        until(lambda: all((_chat(page, n)["compose"] or {}).get("projectId") != "p1" for n in (5, 6, 7, 8)),
+              timeout=4)
+        time.sleep(0.3)
+        boxes = {n: _chat(page, n)["input"] for n in (5, 6, 7, 8)}
+        check("review 3 #47 MED (b): the re-aimed hidden panes take up nothing; the words stay parked",
+              not any(boxes.values()) and _state(page, "drafts").get("compose:*", {}).get("text") == "orphan words B",
+              f"{boxes} {_state(page, 'drafts')}")
+        check("review 3 #47 MED (b): and the window never says they are back",
+              "are back" not in _state(page, "error"), _state(page, "error"))
+        page.locator('[data-testid="new-thread"]').click()
+        until(lambda: "orphan words B" in _box(page, 1).input_value(), timeout=3)
+        check("review 3 #47 MED (b): the next New thread, in pane 1, takes them up and says so",
+              _box(page, 1).input_value() == "orphan words B"
+              and "are back, in this new thread's box" in _state(page, "error"), _state(page, "error"))
+        _box(page, 1).fill("")
+    finally:
+        mock.emit("project_restored", {"project_id": "p1"}, project_id="p1")
+        page.evaluate("localStorage.setItem('jarvis.hud.lastProject', 'p1')")
 
 
 if __name__ == "__main__":

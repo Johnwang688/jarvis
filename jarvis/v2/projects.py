@@ -258,6 +258,28 @@ def impact(daemon, project_id: str) -> dict:
 
 # -- projects -------------------------------------------------------------------
 
+def resolved_root(root: str) -> str | None:
+    """Where a project's folder resolves: the root `hud_api.scope` reads every
+    editor path under, so a file's `abs` (the read route's) sits below it even
+    when `root` goes through a symlink. None when there is nothing to resolve
+    or it cannot be resolved — the HUD then falls back to `root`."""
+    if not isinstance(root, str) or not root or "\x00" in root:
+        return None
+    try:
+        return str(Path(root).resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def project_view(project: Project) -> dict:
+    """A project as the routes that answer with one send it: the record, plus
+    `root_real` (`resolved_root`). Display data only — never stored, never on
+    the bus, and refused if sent back (POST and PATCH name their fields)."""
+    data = to_json(project)
+    data["root_real"] = resolved_root(project.root)
+    return data
+
+
 def create_project(daemon, name, root, **values) -> Project:
     """Make one project record and announce it. Shared by `POST /projects` and
     Discord's `/project new` (B2), so both number a colliding name the same way

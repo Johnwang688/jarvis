@@ -23,12 +23,15 @@
 // this file" — nothing here sends its text anywhere but its own save, and
 // "Add to chat" is disabled for it.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import type { Tree, TreeEntry } from "../types";
 import { CompareEditor, PaneEditor } from "./Editor";
 import { ConflictBar } from "./ConflictBar";
 import { EditorTabs, type TabInfo } from "./EditorTabs";
+import { Chevron, FileIcon } from "./FileIcon";
+import { DirtyDot, useDirtyMarks } from "./DirtyMark";
+import { NO_MARKS, rowDot, type Marks } from "../lib/dirtyMarks";
 import { Markdown } from "./Markdown";
 import { isMarkdown } from "../lib/monaco";
 import {
@@ -40,13 +43,20 @@ function join(dir: string, name: string) {
   return dir ? `${dir}/${name}` : name;
 }
 
-function Node(props: {
+// Memoized, with props that hold still (a stable `onOpen`, `marks` changing
+// only when the dirty set does): the tree redraws when a buffer goes clean or
+// dirty or the selection moves — never per keystroke, and never because the
+// window redrew around it (typing in a chat box redraws App).
+const Node = memo(function Node(props: {
   projectId: string;
   dir: string;
   depth: number;
   onOpen: (path: string, pin: boolean) => void;
   selected: string;
+  /** Which rows wear the unsaved-changes dot (lib/dirtyMarks.ts). */
+  marks?: Marks;
 }) {
+  const marks = props.marks ?? NO_MARKS;
   const [tree, setTree] = useState<Tree | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [err, setErr] = useState("");
@@ -78,9 +88,10 @@ function Node(props: {
                 title={withheld ? "A credential folder: its contents are never listed here" : undefined}
                 onClick={() => !withheld && setOpen({ ...open, [path]: !isOpen })}
               >
-                <span className="tw">{withheld ? "·" : isOpen ? "▾" : "▸"}</span>
+                <span className="tw">{withheld ? "·" : <Chevron open={isOpen} />}</span>
                 <span className="nm">{e.name}</span>
                 {withheld ? <span className="treemark">withheld</span> : null}
+                {!withheld && rowDot(marks, path, "dir", isOpen) ? <DirtyDot folder testid={`dirty-${path}`} /> : null}
               </div>
               {isOpen ? (
                 <Node
@@ -89,6 +100,7 @@ function Node(props: {
                   depth={props.depth + 1}
                   onOpen={props.onOpen}
                   selected={props.selected}
+                  marks={props.marks}
                 />
               ) : null}
             </div>
@@ -104,14 +116,16 @@ function Node(props: {
             onClick={() => props.onOpen(path, false)}
             onDoubleClick={() => props.onOpen(path, true)}
           >
-            <span className="tw">{e.policy === "env" ? "🔒" : "·"}</span>
+            <span className="tw" />
+            <FileIcon name={e.name} policy={e.policy} />
             <span className="nm">{e.name}</span>
+            {marks.file(path) ? <DirtyDot testid={`dirty-${path}`} /> : null}
           </div>
         );
       })}
     </>
   );
-}
+});
 
 const READONLY_LABEL: Record<string, string> = {
   gate: "read-only: permission state",
@@ -134,11 +148,15 @@ export function FileTab(props: {
   blocked?: boolean;
   /** "Add to chat": the selected chat's box gets this text, unsent. A sentence back is a refusal. */
   onAddToChat?: (text: string) => string | null;
+  /** The project's folder: a file read through another project is marked dirty here too. */
+  root?: string | null;
 }) {
   // Read once, at mount: App keys this component by its project.
   const [pid] = useState(props.projectId);
   const pane = props.pane;
   useSyncExternalStore(buffers.subscribe, buffers.version);
+  // The tree's unsaved-changes dots: redrawn when a buffer goes clean or dirty, never per keystroke.
+  const marks = useDirtyMarks(pid, props.root);
   const tabs = props.tabs ?? NO_TABS;
   // The latest tabs, written ahead of the render that brings them back: two
   // gestures between renders must not undo each other.
@@ -284,6 +302,12 @@ export function FileTab(props: {
     setTabs(next);
   };
 
+  // The tree's handle on `open`: one function for the pane's life, so the
+  // memoized tree is not redrawn by a new closure every render.
+  const openLatest = useRef(open);
+  openLatest.current = open;
+  const onTreeOpen = useCallback((path: string, pin: boolean) => openLatest.current(path, pin), []);
+
   const close = (path: string, discard = false) => {
     setAsk(null);
     if (discard) discarding.current.add(path);
@@ -381,7 +405,7 @@ export function FileTab(props: {
   return (
     <div className="split">
       <div className="filetree" data-testid="filetree" style={showTree ? undefined : { display: "none" }}>
-        <Node projectId={pid} dir="" depth={0} onOpen={open} selected={active || ""} />
+        <Node projectId={pid} dir="" depth={0} onOpen={onTreeOpen} selected={active || ""} marks={marks} />
       </div>
       <div className="editorwrap">
         <EditorTabs

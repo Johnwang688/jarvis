@@ -1735,23 +1735,27 @@ def _handler(daemon):
                 if method == "GET":
                     # Archived projects are hidden from every list (decisions B1);
                     # the HUD's Archive view reads them from /archive.
-                    return 200, [to_json(p) for p in safe_list(stores.projects) if not p.archived]
+                    # `root_real` beside each root: where it resolves, which a
+                    # File pane's tree finds a file's `abs` under (#50).
+                    from .projects import project_view
+                    return 200, [project_view(p) for p in safe_list(stores.projects) if not p.archived]
                 if method == "POST":
                     body = _no_channel_field(self._body())
                     body = _object(body, ("name", "root", "profile", "routing", "extra_dirs",
                                           "always_ask"), ("name", "root"))
                     # One create path for the HUD and Discord's `/project new`
                     # (B2): a colliding name is numbered, never refused.
-                    from .projects import create_project
+                    from .projects import create_project, project_view
                     values = dict(body)
                     created = create_project(daemon, values.pop("name"), values.pop("root"),
                                              **values)
-                    return 201, to_json(created)
+                    return 201, project_view(created)
             if len(parts) == 2 and parts[0] == "projects":
                 with daemon._lock:
                     project = daemon.require(stores.projects, parts[1])
                     if method == "GET":
-                        return 200, to_json(project)
+                        from .projects import project_view
+                        return 200, project_view(project)
                     if method == "PATCH":
                         daemon._active()
                         body = _no_channel_field(self._body())
@@ -1816,7 +1820,7 @@ def _handler(daemon):
                                                 "data": {"project_id": project.id, "changed": changed,
                                                          "project": to_json(project), "by": by,
                                                          "previous": previous}})
-                        return 200, to_json(project)
+                        return 200, edits.project_view(project)
             if parts in (["threads"], ["tasks"]):
                 store = stores.threads if parts[0] == "threads" else stores.tasks
                 if method == "GET":

@@ -1639,6 +1639,43 @@ blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
 `_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
 `uneditable` and on-cue `stat_etags`).
 
+**The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
+for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
+dot (`--text-2`, `DirtyDot`, "unsaved changes" with a tooltip), and so does a
+collapsed folder holding one at any depth — an open folder never does, its
+child does (`lib/dirtyMarks.ts`, `rowDot`). **Dirty is the buffer's**, so
+every pane's tree on that project marks it, opened there or not, and a file
+read through another project is found under this one's root by its `abs` —
+**the root as it resolves**: every project the daemon answers with carries
+`root_real` (`projects.resolved_root`, display only, refused if sent back),
+and the tree looks under it (`treeRoot`), so a root reached through a
+symlink still matches. On
+a tab the dot stands where × is and hover or focus brings × back (theme.css;
+× only goes transparent, so it never moves and stays clickable); **while a
+save is out (ED-2) the same slot holds a hollow ring**, dirty or not, named
+"saving", and hover still brings × back. **The tree
+never redraws per keystroke**: `useDirtyMarks` subscribes with a string key
+of the dirty paths (the registry speaks on clean↔dirty and on a save's
+saving/queued changes, and the key ignores the latter), and
+the tree's `Node` is memoized with a stable `onOpen`, so a chat box's typing
+no longer redraws it either — `FileTab.test.ts` counts the tree's row renders
+through twenty window redraws, twenty keystrokes and a held save (dropping
+`memo(` or the stable `onOpen` fails it). Each file row has a 16px inline-SVG icon after
+the twistie's room (`components/FileIcon.tsx`; the rule is
+`lib/fileIcons.ts`: whole name, then the longest extension, case-insensitive;
+`.env*` or `policy: "env"` the lock); a folder is its chevron alone. **Icons
+are drawn in currentColor from six theme tokens** (`ICON_TOKENS`: the four
+`--syn-*`, `--text-2`, `--text-muted`) — never a hex and never amber or red,
+so VS Code's yellow `{}` and orange HTML are deliberately not copied. Free
+checks: `fileIcons.test.ts` (mapping, the colour rule from theme.css's own
+text, every icon rendering aria-hidden with no `<text>`), `dirtyMarks.test.ts`,
+`DirtyMark.test.ts` (one redraw per transition, none per keystroke or for
+another project's file), `FileTab.test.ts` (the memo), `hud_backend_check`'s
+`test_projects_say_where_their_root_resolves` and
+`tests/face/hud_v2_editor_marks_check.py` (a `MockDaemon(0)` of its own, after
+the editor section of `hud_v2_check`; the saving ring, and a linked project
+whose mock `root_real` is p1's folder — it fails with `treeRoot` ignoring it).
+
 **The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
 One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
 is the table: rows keyed by **nvim-treesitter capture names** (`LEGEND` —
@@ -2026,11 +2063,17 @@ thread anywhere and says so (review of PR #47, M2); one that fails at
 2 of PR #47, LOW-2). **A park is never silent** (review 2, MED-2/NIT-3): a
 release that parks words says where — the thread, by title, or the next new
 thread with the project they were written in — and how many files past eight
-were left out. **Any new compose row takes `ORPHAN_DRAFT` up** (a new
-`Compose.id`: New thread, a split's copy), even from a pane already composing
+were left out. **Only a new thread the owner starts takes `ORPHAN_DRAFT` up**
+— New thread and a split's copy, the only patches carrying `takeOrphan:
+true` (review 3 of PR #47: any new `Compose.id` used to, so a pane × closed,
+an undrawn one or one re-aimed by a project's archive took the words and the
+window called them "back, in this new thread's box"); a pane × closed or
+never drawn gets no compose row at all until it is drawn (`inWorkspace`).
+It takes them even from a pane already composing
 — after the words it has — says so, and names the project they were written
 in when the row is in another (`Draft.projects`); the row keeps its own
-project. A compose row's unsent
+project. Notices arriving together (within `NOTICE_BREATH_MS`, one handler
+and its effects) **join** on the one error line rather than replace it. A compose row's unsent
 words are asked about (G-9) **whatever view the pane shows** — a pane
 switched to File keeps its chat, and × releases it too (review 2, MED-1) —
 and Discard drops them for good; a terminal goes back to the panel as its
