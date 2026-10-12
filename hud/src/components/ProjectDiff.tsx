@@ -5,7 +5,10 @@
 //
 //  - **The list** is ED-9's `git/status`, through its one poller
 //    (state/gitStatus.ts): watched only while the pane is drawn, so a hidden
-//    Diff pane asks nothing; it redraws only when the status changed.
+//    Diff pane asks nothing; it redraws only when the status changed. It is
+//    **windowed** (`ScmList`): only the rows in view are in the DOM, so the
+//    status's 20,000 rows cost a keystroke elsewhere nothing; ↑ ↓, Page
+//    Up/Down, Home, End and Enter move the selection.
 //  - **The left side** is HEAD's text from `git/base` (empty for a file HEAD
 //    does not hold), in a `jarvis-diff:` model this view makes and disposes.
 //  - **The right side** is the file as the editor would show it: **the live
@@ -20,17 +23,24 @@
 //    named otherwise) is refused by `git/base` before any read.
 //  - **Under a card** every control here is disabled (and inert, behind the
 //    veil); the diff editor is read-only on both sides whatever happens.
+//  - **The owner's editor settings** (ED-8's `displayOptions`: font, size,
+//    whitespace, bracket colours, sticky scroll) draw the diff, live on a
+//    change, as they draw the task diff and Compare.
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import { buffers } from "../state/buffers";
 import { gitStatus, type GitStatusStore } from "../state/gitStatus";
 import { diffUri, loadMonaco, type Monaco } from "../lib/monaco";
 import {
-  absUnder, baseSide, ENV_NOTE, FOLDER_NOTE, readSide, rowShows, scmRows, scmSummary, SCM_WORDS,
-  type ScmRow, type Side,
+  absUnder, baseSide, ENV_NOTE, FOLDER_NOTE, readSide, revealTop, rowShows, scmKeyStep, scmRows, scmSummary,
+  scmWindow, SCM_ROW_PX, SCM_WORDS, type ScmRow, type Side,
 } from "../lib/scm";
 import { FileIcon } from "./FileIcon";
+// ED-8: the diff draws text as the owner's editor settings say, live.
+import { displayOptions } from "../lib/editorSettings";
+import { editorSettings, onEditorSettings } from "../state/editorSettings";
+import { reapplyEditorConfig } from "../state/editorconfig";
 
 /** A project's git status, watched while `projectId` is set (the pane is drawn). */
 function useGitStatus(projectId: string | null, store: GitStatusStore = gitStatus) {
@@ -97,37 +107,23 @@ export const ProjectDiff = memo(function ProjectDiff(props: ProjectDiffProps) {
 
   const row = rows.find((r) => r.path === sel) ?? null;
   const showList = !props.narrow || listOpen || !sel;
-  const pick = (r: ScmRow) => {
-    if (props.blocked) return;
+  const blocked = useRef(props.blocked);
+  blocked.current = props.blocked;
+  // Stable for the memoized list: a pick reads the latest props through refs.
+  const pick = useCallback((r: ScmRow) => {
+    if (blocked.current) return;
     setSel(r.path);
     setListOpen(false);
     // Picking it again asks again: a file not open in the editor is read once.
     setNonce((n) => n + 1);
     calls.current.onSelect?.(r.path);
-  };
+  }, []);
 
   return (
     <div className="split" data-testid="scm" data-project={props.projectId}>
       <div className="filetree" data-testid="scmlist" style={showList ? undefined : { display: "none" }}>
         <div className="pad small muted" data-testid="scm-summary">{scmSummary(data, rows, error)}</div>
-        <div className="treebody">
-          {rows.map((r) => (
-            <div
-              key={r.path}
-              className={"tree-row scmrow" + (sel === r.path ? " sel" : "")}
-              data-testid={`scm-${r.path}`}
-              data-git={r.state}
-              data-env={r.env ? "true" : undefined}
-              aria-disabled={props.blocked || undefined}
-              title={`${r.path}: ${SCM_WORDS[r.state]}${r.env ? " · an env file, not diffed here" : ""}`}
-              onClick={() => pick(r)}
-            >
-              {r.folder ? <span className="ficon" aria-hidden="true" /> : <FileIcon name={r.path} />}
-              <span className="nm">{r.folder ? `${r.path}/` : r.path}</span>
-              <span className="scmletter" data-testid={`scm-letter-${r.path}`}>{r.letter}</span>
-            </div>
-          ))}
-        </div>
+        <ScmList rows={rows} sel={sel} blocked={props.blocked} onPick={pick} />
       </div>
       <div className="editorwrap">
         <div className="toolbar">
@@ -180,6 +176,139 @@ export const ProjectDiff = memo(function ProjectDiff(props: ProjectDiffProps) {
     </div>
   );
 }, sameDiffProps);
+
+/**
+ * The changed files, **windowed** (the Diff follow-ups, 2026-10-12): only the
+ * rows in view, and `SCM_OVERSCAN` either side, are in the DOM, in a spacer
+ * as tall as every row (`SCM_ROW_PX` each, pinned here). 20,000 rows drawn
+ * whole made every keystroke anywhere in the window cost ~100 ms of style
+ * work; the list's own state (where it is scrolled) redraws only the list.
+ *
+ * **Keys** (the list takes focus on a click, or Tab): ↑ ↓, Page Up/Down, Home
+ * and End move the selection and bring it into view; Enter reads the selected
+ * row again. The selection is a path, never a drawn row, so a row scrolled
+ * out of the window stays selected (its diff stays shown) and the keys move
+ * from it. A file the pane had (a reload) is brought into view when the rows
+ * first arrive. Under a card nothing moves (and the list is inert).
+ */
+const ScmList = memo(function ScmList(props: {
+  rows: ScmRow[];
+  sel: string;
+  blocked: boolean;
+  /** Stable: the pane reads its latest state through refs. */
+  onPick: (r: ScmRow) => void;
+}) {
+  const { rows, sel } = props;
+  const body = useRef<HTMLDivElement>(null);
+  // Where the list is scrolled and how much of it is in view, in whole rows
+  // (so a scroll redraws only when it crosses a row); the window itself is
+  // computed from it each render, so new rows never draw a stale window.
+  const [pos, setPos] = useState({ top: 0, view: 0 });
+  const count = useRef(rows.length);
+  count.current = rows.length;
+  const where = useMemo(() => new Map(rows.map((r, i) => [r.path, i])), [rows]);
+  // Bring the selection into view once, when rows first arrive (a reload's
+  // file; a key reveals its own row) — never on a poll, which would pull the
+  // list back from wherever the owner scrolled it.
+  const reveal = useRef(true);
+
+  const measure = useCallback(() => {
+    const el = body.current;
+    if (!el) return;
+    const top = Math.floor(el.scrollTop / SCM_ROW_PX) * SCM_ROW_PX;
+    const view = Math.ceil(el.clientHeight / SCM_ROW_PX) * SCM_ROW_PX;
+    setPos((p) => (p.top === top && p.view === view ? p : { top, view }));
+  }, []);
+  const tryReveal = useCallback(() => {
+    const el = body.current;
+    // Not laid out (hidden in a narrow pane): asked again once it has a height.
+    if (!reveal.current || !el || !count.current || el.clientHeight <= 0) return;
+    reveal.current = false;
+    const i = where.get(sel);
+    if (i === undefined) return;
+    const top = revealTop(i, el.scrollTop, el.clientHeight);
+    if (top !== null) el.scrollTop = top;
+    measure();
+  }, [where, sel, measure]);
+
+  useLayoutEffect(() => {
+    measure();
+    tryReveal();
+  }, [rows, sel, measure, tryReveal]);
+
+  // The pane resized, folded, or the list was shown again: what is in view changed.
+  useEffect(() => {
+    const el = body.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      measure();
+      tryReveal();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measure, tryReveal]);
+
+  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (props.blocked || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const el = body.current;
+    const page = el && el.clientHeight > 0 ? Math.floor(el.clientHeight / SCM_ROW_PX) - 1 : 10;
+    const at = where.get(sel) ?? -1;
+    const next = scmKeyStep(e.key, at, rows.length, page);
+    if (next === null) return;
+    // The list moves the selection itself: the browser's own scroll for the
+    // same key would fight it.
+    e.preventDefault();
+    e.stopPropagation();
+    if (el && el.clientHeight > 0) {
+      const top = revealTop(next, el.scrollTop, el.clientHeight);
+      if (top !== null) el.scrollTop = top;
+      measure();
+    }
+    if (next === at && e.key !== "Enter") return;
+    props.onPick(rows[next]);
+  };
+
+  const { first, last } = scmWindow(rows.length, pos.top, pos.view);
+  return (
+    <div
+      className="treebody scmbody"
+      ref={body}
+      data-testid="scm-rows"
+      data-count={rows.length}
+      data-first={first}
+      data-last={last}
+      role="listbox"
+      aria-label="Changed files"
+      tabIndex={0}
+      onScroll={measure}
+      onKeyDown={onKey}
+    >
+      <div className="scmspace" style={{ height: rows.length * SCM_ROW_PX }}>
+        <div className="scmwin" style={{ top: first * SCM_ROW_PX }}>
+          {rows.slice(first, last).map((r) => (
+            <div
+              key={r.path}
+              className={"tree-row scmrow" + (sel === r.path ? " sel" : "")}
+              style={{ height: SCM_ROW_PX }}
+              role="option"
+              aria-selected={sel === r.path}
+              data-testid={`scm-${r.path}`}
+              data-git={r.state}
+              data-env={r.env ? "true" : undefined}
+              aria-disabled={props.blocked || undefined}
+              title={`${r.path}: ${SCM_WORDS[r.state]}${r.env ? " · an env file, not diffed here" : ""}`}
+              onClick={() => props.onPick(r)}
+            >
+              {r.folder ? <span className="ficon" aria-hidden="true" /> : <FileIcon name={r.path} />}
+              <span className="nm">{r.folder ? `${r.path}/` : r.path}</span>
+              <span className="scmletter" data-testid={`scm-letter-${r.path}`}>{r.letter}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+});
 
 function Note(props: { testid: string; text: string }) {
   return <div className="pad muted" data-testid={props.testid}>{props.text}</div>;
@@ -340,6 +469,7 @@ function ScmDiffEditor(props: { path: string; before: string; after: string | nu
     let original: any = null;
     let modified: any = null;
     let watch: { dispose(): void } | null = null;
+    let unsettings = () => {};
     setWaiting(false);
     // The view model first (its dispose cancels a diff in flight), then the
     // editor lets go of it, then nothing the worker might still be asked about
@@ -368,8 +498,14 @@ function ScmDiffEditor(props: { path: string; before: string; after: string | nu
           // HEAD on the left, the working file on the right, even in a narrow
           // pane: never folded into one inline view (as Compare).
           useInlineViewWhenSpaceIsLimited: false,
-          fontSize: 12,
+          // The owner's editor settings (ED-8): how text is drawn, as the
+          // task diff and Compare draw it — and live, on a settings change.
+          ...displayOptions(editorSettings()),
           minimap: { enabled: false },
+        });
+        unsettings = onEditorSettings((s) => {
+          ed?.updateOptions(displayOptions(s));
+          reapplyEditorConfig();
         });
         original = monaco.editor.createModel(props.before, live?.getLanguageId?.(), diffUri(monaco, props.path, "original"));
         if (live) {
@@ -390,6 +526,7 @@ function ScmDiffEditor(props: { path: string; before: string; after: string | nu
     return () => {
       dead = true;
       watch?.dispose();
+      unsettings();
       // The view model and the editor first, so nothing still shows or
       // computes against the models let go of; the buffer's model is the
       // registry's and stays.
