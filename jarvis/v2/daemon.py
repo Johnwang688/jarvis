@@ -1577,7 +1577,9 @@ def _object(value, allowed, required=()):
     if not isinstance(value, dict):
         raise APIError(400, "body must be a JSON object")
     if value.keys() - set(allowed):
-        raise APIError(400, "unknown fields: " + ", ".join(sorted(value.keys() - set(allowed))))
+        # The count, never the names: they are the client's own text, and an
+        # APIError's message is logged (review of PR #69).
+        raise APIError(400, f"unknown fields ({len(value.keys() - set(allowed))})")
     if set(required) - value.keys():
         raise APIError(400, "missing fields: " + ", ".join(sorted(set(required) - value.keys())))
     return value

@@ -10,14 +10,21 @@ string; URLs travel only in JSON bodies, and nothing a route answers with a
 refusal ever contains one.
 
     GET    /browser                          state: running, profiles, tabs, settings
-    GET    /browser/settings                 {lan}
-    PATCH  /browser/settings                 {lan}  (browser.json, protected state)
+    GET    /browser/settings                 {lan, local_servers}
+    PATCH  /browser/settings                 {lan?, local_servers?}  (browser.json, protected)
     GET    /browser/tabs                     [{tab_id, profile, ctx, url, title}]
     POST   /browser/tabs                     {profile?, ctx?, url?} -> 201 {tab_id, ...}
     DELETE /browser/tabs/<id>
     POST   /browser/tabs/<id>/navigate       {url}  (the URL judge first)
     POST   /browser/tabs/<id>/history        {action: back | forward | reload}
     POST   /browser/profiles/<id>/forget     {}  ("Sign out of everything")
+
+A URL the owner opens on this machine (`localhost`, `127.0.0.1` …) with
+`POST /browser/tabs` or `…/navigate` opens that loopback port in the gate for
+this host's lifetime: loopback is closed like the LAN until then (review of
+PR #69). History, a page's own moves and any agent never open one. BR-8b's
+auto-open goes through the window, and the window drives these routes, so a
+dev server it opens counts as the owner's.
 
 The stream, input, dialogs, downloads and the tab strip are BR-1b's; profile
 management is BR-1c's.
@@ -60,20 +67,26 @@ def route(handler, daemon, parts, query):
             if method == "GET":
                 return 200, load_settings()
             if method == "PATCH":
-                body = _object(handler._body(), ("lan",), ("lan",))
+                body = _object(handler._body(), ("lan", "local_servers"))
+                if not body:
+                    _fail(400, "missing fields: lan or local_servers")
                 return 200, save_settings(body)
+        # `owner=True` below is the owner's own navigation (this route is the
+        # owner's only): it opens the URL's loopback port in the gate, as
+        # nothing a page or an agent does ever can (MED 2 of PR #69's review).
         if parts == ["browser", "tabs"]:
             if method == "GET":
                 return 200, host.tabs()
             if method == "POST":
                 body = _object(handler._body(), ("profile", "ctx", "url"))
-                return 201, host.open_tab(body.get("profile"), body.get("url"), body.get("ctx"))
+                return 201, host.open_tab(body.get("profile"), body.get("url"), body.get("ctx"),
+                                          owner=True)
         if len(parts) == 3 and parts[1] == "tabs" and method == "DELETE":
             return 200, host.close_tab(parts[2])
         if len(parts) == 4 and parts[1] == "tabs" and method == "POST":
             if parts[3] == "navigate":
                 body = _object(handler._body(), ("url",), ("url",))
-                return 200, host.navigate(parts[2], body["url"])
+                return 200, host.navigate(parts[2], body["url"], owner=True)
             if parts[3] == "history":
                 body = _object(handler._body(), ("action",), ("action",))
                 return 200, host.history(parts[2], body["action"])

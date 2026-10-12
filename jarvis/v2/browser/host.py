@@ -34,11 +34,23 @@ helper the deb ships), Safe Browsing and component updates, sign-in and sync
 `--enable-automation`, `--no-sandbox`, `--disable-background-networking`,
 `--disable-component-update`, `--disable-popup-blocking` and the rest of the
 test-harness list. Added: the SOCKS gate with loopback **not** bypassed,
-`MAP * ~NOTFOUND` so Chrome itself never resolves a name, no QUIC, no UDP
-around the proxy, no extensions, no permission prompts (denied), no media
-router (it searches the LAN on its own), and `--mute-audio` (sound is off
-until BR-10). DevTools only over Playwright's private pipe: never
-`--remote-debugging-port`.
+`MAP * ~NOTFOUND` so Chrome itself never resolves a name (defense in depth),
+no QUIC, WebRTC held to proxied transports
+(`--webrtc-ip-handling-policy=disable_non_proxied_udp`, so no candidate, no
+UDP, no STUN — review of PR #69 measured 158 datagrams and mDNS under the
+first cut's non-existent `--force-…` spelling), no WebRTC mDNS responder
+(`WebRtcHideLocalIpsWithMdns` off: with nothing gathered there is nothing to
+hide, and the responder joins 224.0.0.251 on every interface the moment a
+page makes an `RTCPeerConnection` — measured, an IGMP join on the LAN), no
+extensions, no permission prompts (denied), no media router (cast and DIAL
+search the LAN on their own), and `--mute-audio` (sound is off until BR-10).
+DevTools only over Playwright's private pipe: never `--remote-debugging-port`.
+
+**This machine is closed like the LAN** (the lead's decision on PR #69):
+a loopback port is reachable through the gate only after the owner opened a
+pane on it — `open_tab`/`navigate` with `owner=True`, which only the
+owner-only routes pass — and only for this host's lifetime
+(`loopback_open`). A page's or an agent's navigation never opens one.
 
 **A clean environment** (`chrome_environment`): built from nothing, not
 filtered from the daemon's — `HOME` is `BROWSER_DIR/home`, so everything
@@ -109,7 +121,10 @@ EXPLANATION = (
     "<p>Only http, https and about:blank pages open here, and never Jarvis's own ports.</p>")
 
 # The settings `browser.json` holds and their defaults (B-5: the LAN off).
-SETTINGS_DEFAULTS = {"lan": False}
+# `local_servers` is off too: on, it opens every loopback port that is not
+# Jarvis's, not only the ones the owner opened in a pane — the owner's
+# switch, never a default.
+SETTINGS_DEFAULTS = {"lan": False, "local_servers": False}
 
 
 class BrowserRefused(Exception):
@@ -133,12 +148,25 @@ def launch_args(user_data_dir: Path, gate_port: int, *, private: bool) -> list[s
         # Plan §4 layer 2: every connection through the gate, loopback too.
         f"--proxy-server=socks5://127.0.0.1:{gate_port}",
         "--proxy-bypass-list=<-loopback>",
-        # Chrome never resolves a name itself: the gate does, once.
+        # Chrome never resolves a name itself: the gate does, once. Defense
+        # in depth — with a SOCKS5 proxy every name already goes to the gate
+        # — kept so a path that skipped the proxy would find no DNS either.
         "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
+        # No UDP leaves around the gate: no QUIC, and WebRTC may use only a
+        # proxied transport — a SOCKS proxy carries no UDP, so it gathers no
+        # candidate and sends no STUN or ICE check. The switch is the pref's
+        # own (`webrtc.ip_handling_policy` in Chrome's command-line pref
+        # table); `--force-webrtc-…`, which the first cut used, does not
+        # exist, and 158 datagrams went straight out (review of PR #69).
         "--disable-quic",
-        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-        # Cast discovery searches the LAN by itself, around any proxy.
-        "--disable-features=MediaRouter,DialMediaRouteProvider",
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+        # Cast and DIAL discovery search the LAN by mDNS and SSDP, around any
+        # proxy; WebRTC's mDNS responder (which names host candidates — none
+        # are gathered here) joins the mDNS group on every interface as soon
+        # as a page makes an RTCPeerConnection. One `--disable-features`:
+        # Chrome keeps only the last of a repeated switch.
+        "--disable-features=MediaRouter,DialMediaRouteProvider,CastMediaRouteProvider,"
+        "WebRtcHideLocalIpsWithMdns",
         "--disable-extensions",
         "--deny-permission-prompts",
         "--mute-audio",
@@ -324,11 +352,38 @@ def _names_dir(arg: str, folder: str) -> bool:
     return False
 
 
+# The programs a Browser Chrome tree runs: the browser and its helpers, and
+# the crash handler beside it. Nothing else is ever signalled.
+CHROME_PROGRAMS = ("chrome", "chrome_crashpad_handler")
+
+
+def _runs_chrome(pid: str) -> bool:
+    """`/proc/<pid>/exe` is the Chrome the host launches (or its crash
+    handler), in Chrome's own install folder — measured readable for every
+    process of the tree, renderers in their sandbox included. A binary
+    replaced by an upgrade while running reads "… (deleted)"."""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return False
+    if exe.endswith(" (deleted)"):
+        exe = exe[: -len(" (deleted)")]
+    path = Path(exe)
+    try:
+        home = CHROME_PATH.resolve().parent
+    except OSError:
+        return False
+    return path.parent == home and path.name in CHROME_PROGRAMS
+
+
 def chrome_pids(folder: Path) -> list[int]:
-    """Every process whose command line names `folder` (or a path inside it)
-    as a whole path: a profile's Chrome tree — its zygotes, renderers and
-    crash handler included. Matched on the folder's exact path, so another
-    profile's or another daemon's Chrome is never matched."""
+    """Every Chrome process whose command line names `folder` (or a path
+    inside it) as a whole path: a profile's Chrome tree — its zygotes,
+    renderers and crash handler included. Matched on the folder's exact path,
+    so another profile's or another daemon's Chrome is never matched, **and**
+    on the program it runs (`_runs_chrome`), so a process that only names
+    the folder — a shell, an editor, a `grep` — is never signalled (review of
+    PR #69)."""
     text = str(folder)
     out = []
     for name in os.listdir("/proc"):
@@ -339,7 +394,7 @@ def chrome_pids(folder: Path) -> list[int]:
                 argv = handle.read().split(b"\0")
         except OSError:
             continue
-        if any(_names_dir(part.decode("utf-8", "replace"), text) for part in argv):
+        if any(_names_dir(part.decode("utf-8", "replace"), text) for part in argv) and _runs_chrome(name):
             out.append(int(name))
     return out
 
@@ -409,7 +464,13 @@ class BrowserHost:
         self._resolver = resolver
         self._connector = connector
         self._lock = threading.Lock()
-        self._start_lock = threading.Lock()
+        # Held for the whole of a start, and by `stop()`, so a stop can never
+        # land between the gate and the loop thread and leave one running
+        # (review of PR #69). Re-entrant: a failed start stops under it.
+        self._start_lock = threading.RLock()
+        # Loopback ports the owner opened in a pane (MED 2 of the review):
+        # the only loopback ports the gate admits, for this host's lifetime.
+        self._opened_ports: set[int] = set()
         self._started = False
         self._stopped = False
         self._thread: threading.Thread | None = None
@@ -437,6 +498,26 @@ class BrowserHost:
     def _gate_refused(self) -> frozenset[int]:
         return self.refused_ports()
 
+    def loopback_open(self, port: int) -> bool:
+        """Whether the gate admits a loopback connection to `port`: the owner
+        opened a pane on it in this host's lifetime, or turned on
+        `local_servers` in `browser.json`. Jarvis's ports are refused before
+        this is asked, and a name that resolves to loopback never gets here."""
+        with self._lock:
+            if port in self._opened_ports:
+                return True
+        return bool(load_settings().get("local_servers"))
+
+    def _open_loopback(self, url: str | None) -> None:
+        """The owner asked for `url` in a pane: if it is on this machine, its
+        port is open from now on (never one of Jarvis's ports). Only an owner
+        route reaches this; a page's or an agent's navigation never does."""
+        port = policy.loopback_port(url) if url else None
+        if port is None or port in self.refused_ports():
+            return
+        with self._lock:
+            self._opened_ports.add(port)
+
     # -- lifecycle ------------------------------------------------------------------
 
     def _ensure_started(self) -> None:
@@ -457,6 +538,7 @@ class BrowserHost:
             self._sweep_private(root / "private")
             self._ensure_main()
             gate = Gate(refused=self._gate_refused, lan=lambda: load_settings()["lan"],
+                        loopback=self.loopback_open,
                         resolver=self._resolver, connector=self._connector)
             gate.start()
             self._gate = gate
@@ -504,11 +586,22 @@ class BrowserHost:
 
     def stop(self, timeout: float = STOP_TIMEOUT_S) -> None:
         """Close every Chrome, the Playwright driver and the gate. Final: the
-        Browser does not start again in this daemon."""
+        Browser does not start again in this daemon. A start in progress is
+        waited for (`_start_lock`, bounded), so it cannot leave its gate,
+        loop or driver behind."""
+        locked = self._start_lock.acquire(timeout=LAUNCH_TIMEOUT_S + 5)
+        try:
+            self._stop(timeout)
+        finally:
+            if locked:
+                self._start_lock.release()
+
+    def _stop(self, timeout: float) -> None:
         with self._lock:
             if self._stopped:
                 return
             self._stopped = True
+            self._opened_ports.clear()
             loop, thread = self._loop, self._thread
         deadline = time.monotonic() + timeout
         if loop is not None and not loop.is_closed():
@@ -736,6 +829,12 @@ class BrowserHost:
             url = frame.url
         except Exception:  # noqa: BLE001
             return
+        if not url:
+            # A frame that has not navigated yet — a pop-up or a `_blank`
+            # tab handed to us before its first load — has landed nowhere.
+            # Its first real landing comes through `framenavigated` and is
+            # judged then (review of PR #69: judging "" blanked every pop-up).
+            return
         try:
             policy.judge_url(url, refused=self.refused_ports(), landed=True)
         except policy.URLRefused as refusal:
@@ -753,7 +852,10 @@ class BrowserHost:
 
     # -- tabs (thread-safe entry points) ------------------------------------------------
 
-    def open_tab(self, profile=None, url=None, ctx=None) -> dict:
+    def open_tab(self, profile=None, url=None, ctx=None, *, owner: bool = False) -> dict:
+        """A new tab, at `url` when given (judged first). `owner=True` — only
+        the owner-only route passes it — also opens the URL's loopback port,
+        if it has one (`loopback_open`)."""
         target = policy.judge_url(url, refused=self.refused_ports()) if url is not None else None
         if ctx is not None and (not isinstance(ctx, str) or not CTX_ID.fullmatch(ctx)):
             raise BrowserRefused(400, "ctx must be eight lowercase hex characters")
@@ -761,6 +863,8 @@ class BrowserHost:
         profile_id = self._profile_id(profile)
         if ctx is not None and profile_id != PRIVATE:
             raise BrowserRefused(400, "only a Private tab has a ctx")
+        if owner:
+            self._open_loopback(target)
         return self._call(self._open_tab(profile_id, ctx, target), LAUNCH_TIMEOUT_S + NAV_TIMEOUT_S)
 
     async def _open_tab(self, profile: str, ctx: str | None, url: str | None) -> dict:
@@ -812,14 +916,18 @@ class BrowserHost:
         with self._lock:
             return self._started and not self._stopped
 
-    def navigate(self, tab_id, url) -> dict:
+    def navigate(self, tab_id, url, *, owner: bool = False) -> dict:
+        """Load `url` in a tab, judged first. `owner=True` (the owner-only
+        route) also opens its loopback port; nothing else ever does."""
         target = policy.judge_url(url, refused=self.refused_ports())
         if not self._running():
             raise BrowserRefused(404, "no such tab")
-        return self._call(self._navigate(tab_id, target), NAV_TIMEOUT_S + 5)
+        return self._call(self._navigate(tab_id, target, owner), NAV_TIMEOUT_S + 5)
 
-    async def _navigate(self, tab_id, url) -> dict:
+    async def _navigate(self, tab_id, url, owner: bool = False) -> dict:
         tab = self._tab(tab_id)
+        if owner:
+            self._open_loopback(url)
         return {"tab_id": tab.id, **(await self._goto(tab, url))}
 
     def history(self, tab_id, action) -> dict:
@@ -931,8 +1039,12 @@ class BrowserHost:
             snapshot = dict(self._snapshot)
             running = self._started and not self._stopped
             guarded = self._guarded
+            opened = len(self._opened_ports)
         gate = self._gate.stats() if self._gate is not None and running else None
+        settings = load_settings()
         return {"available": CHROME_PATH.exists(), "running": running,
                 "version": snapshot.get("version"), "instances": snapshot["instances"],
                 "tabs": snapshot["tabs"], "tab_cap": max(1, config.BROWSER_TAB_CAP),
-                "lan": load_settings()["lan"], "landing_guard": guarded, "gate": gate}
+                "lan": settings["lan"], "local_servers": settings["local_servers"],
+                # How many loopback ports the owner opened — never which.
+                "loopback_opened": opened, "landing_guard": guarded, "gate": gate}

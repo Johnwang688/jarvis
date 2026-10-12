@@ -2273,7 +2273,7 @@ class Backend(unittest.TestCase):
         self.events_all()
 
         # Refusals first: each a 400 naming the problem, none writes anything.
-        for bad, words in (({"provider": "claude", "model": "claude-sonnet-5-5", "extra": 1}, "unknown fields: extra"),
+        for bad, words in (({"provider": "claude", "model": "claude-sonnet-5-5", "extra": 1}, "unknown fields (1)"),
                            ({"provider": "claude"}, "missing fields: model"),
                            ({"model": "claude-sonnet-5-5"}, "missing fields: provider"),
                            ({"provider": "fast", "model": "test/model"}, "Model picker"),

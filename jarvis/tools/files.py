@@ -273,6 +273,60 @@ def _resolve(path: str) -> Path:
     return Path(path).expanduser().resolve()
 
 
+# Credential folders (`config.credential_dirs()`: ~/.ssh, ~/.aws, ~/.config/gh,
+# ~/.config/jarvis, ~/.gnupg and the HUD Browser's profile folder) are closed
+# to v1's file tools, reads included (review of PR #69: the Browser profile's
+# History, Web Data and Sessions were readable by the fast path's read_file
+# and grep_files). v2 already refuses them (`permissions._credential_dirs`,
+# `editor_policy.credential_dirs`). The one exception keeps an older rule: the
+# gate's own state files — the allowlist, models.json … — stay readable
+# config, but only by their own path, never through a symlink.
+_credential_dir_cache: dict[tuple, list[Path]] = {}
+
+
+def _credential_roots() -> list[Path]:
+    key = (config.credential_dirs(), os.environ.get("HOME", ""))
+    found = _credential_dir_cache.get(key)
+    if found is None:
+        found = []
+        for raw in key[0]:
+            base = Path(os.path.abspath(os.path.expanduser(raw)))
+            found.append(base)
+            try:
+                real = base.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if real != base:
+                found.append(real)
+        _credential_dir_cache.clear()
+        _credential_dir_cache[key] = found
+    return found
+
+
+def _credential_folder(path: str | Path) -> bool:
+    """True if `path`, as written or where it resolves, is a credential
+    folder or lies inside one — unless it is one of the gate's state files
+    named by its own, un-symlinked path."""
+    try:
+        lexical = Path(os.path.abspath(os.path.expanduser(str(path))))
+        resolved = lexical.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if resolved == lexical and lexical in {Path(os.path.abspath(p)) for p in _protected_state_paths()}:
+        return False
+    for root in _credential_roots():
+        for candidate in (lexical, resolved):
+            if candidate == root or root in candidate.parents:
+                return True
+    return False
+
+
+def _credential_folder_refusal(path: str | Path) -> str:
+    return (f"Error: {Path(str(path)).name} is in a credential folder (SSH, cloud and Git "
+            "logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis "
+            "does not read or write. Ask the owner for what you need instead.")
+
+
 def _strip_numbering(text: str, strict: bool = True) -> str | None:
     """`text` with read_file's line-number prefixes removed, or None.
 
@@ -322,6 +376,8 @@ def read_file(
     # (`is_credential` also follows every symlink hop of the name: ENV-1).
     if is_credential(path) or is_credential(target):
         return refusal(target.name)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     if not target.exists():
         return f"Error: {target} does not exist."
     if target.is_dir():
@@ -385,6 +441,8 @@ def write_file(
         return write_refusal(Path(path).name)
     if is_credential(path) or is_credential(target):
         return refusal(target.name)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     if target.exists():
         stamp = _seen.get(str(target))
         current = target.stat().st_mtime
@@ -442,6 +500,8 @@ def edit_file(
         return write_refusal(Path(path).name)
     if is_credential(path) or is_credential(target):
         return refusal(target.name)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     if not target.exists():
         return f"Error: {target} does not exist. Use write_file to create it."
     if target.is_dir():

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Annotated, Callable, Iterable
 
 from . import tool
+from .files import _credential_folder
 from .secrets import is_env_credential, is_protected
 
 MODES = ("content", "files", "count")
@@ -62,9 +63,12 @@ def refused(path: str | Path) -> bool:
     `grep_files` (both backends, every mode) and the HUD's find in files
     (`jarvis/v2/editor_nav.py`, ED-7) both ask this and nothing else keeps a
     copy, so the two refuse exactly the same files — a parity the ED-7 suite
-    pins. The HUD's route refuses more on top (`editor_policy`'s credential
-    folders and login files), never less."""
-    return is_protected(path) or is_env_credential(path)
+    pins. The HUD's route refuses more on top (`editor_policy`'s withheld
+    files and login files), never less. Since the review of PR #69 it also
+    refuses everything in a credential folder (`config.credential_dirs()`,
+    the HUD Browser's profile among them; `files._credential_folder`, the one
+    definition), which the HUD's route already withheld."""
+    return is_protected(path) or is_env_credential(path) or _credential_folder(path)
 
 
 @dataclass

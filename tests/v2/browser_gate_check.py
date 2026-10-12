@@ -209,10 +209,13 @@ class Base(unittest.TestCase):
         self.addCleanup(self.dev.close)
         self.workshop = Listener()
         self.addCleanup(self.workshop.close)
+        # The loopback ports the owner opened in a pane (the host's allowance).
+        self.opened = {self.dev.port, self.workshop.port}
         self.gate = self.make_gate()
 
     def make_gate(self, **kw):
         hud, api = self.stand_ins["hud"].port, self.stand_ins["api"].port
+        kw.setdefault("loopback", lambda port: port in self.opened)
         gate = G.Gate(refused=lambda: P.refused_ports(hud_port=hud, api_port=api,
                                                      workshop_port=self.workshop.port),
                       lan=lambda: self.lan[0], resolver=self.resolver, connector=self.connector, **kw)
@@ -329,6 +332,89 @@ class GateRefusals(Base):
         self.assertEqual(code(self.gate.port, "127.0.0.2", self.dev.port), G.REP_REFUSED)
         time.sleep(0.2)
         self.assertGreaterEqual(self.dev.accepts, len(names) + len(addresses))
+
+    def test_loopback_is_closed_until_the_owner_opens_a_port(self):
+        # The lead's decision on PR #69 (MED 2): this machine is closed like
+        # the LAN. A port nobody opened is refused in every spelling, with the
+        # LAN switch on or off; opening one opens that port only.
+        closed, other = Listener(), Listener()
+        self.addCleanup(closed.close)
+        self.addCleanup(other.close)
+        sent = 0
+        for lan in (False, True):
+            self.lan[0] = lan
+            for name in ("127.0.0.1", "localhost", "foo.localhost", "::1", "0.0.0.0", "127.1"):
+                with self.subTest(name=name, lan=lan):
+                    self.assertEqual(code(self.gate.port, name, closed.port), G.REP_NOT_ALLOWED)
+                    sent += 1
+            self.assertEqual(code(self.gate.port, "::1", closed.port, atyp=4), G.REP_NOT_ALLOWED)
+            sent += 1
+        time.sleep(0.2)
+        self.assertEqual(closed.accepts, 0)
+        self.assertEqual(self.gate.stats()["refused"].get(P.LOOPBACK_CLOSED), sent)
+        self.opened.add(closed.port)             # the owner opened a pane on it
+        self.assertEqual(code(self.gate.port, "localhost", closed.port), G.REP_OK)
+        self.assertEqual(code(self.gate.port, "127.0.0.1", other.port), G.REP_NOT_ALLOWED)
+        time.sleep(0.2)
+        self.assertGreater(closed.accepts, 0)
+        self.assertEqual(other.accepts, 0)
+
+    def test_a_name_keeps_the_address_class_it_first_resolved_to(self):
+        # Rebinding with the LAN switch on: a public name later answering a
+        # private address, and a private name later answering a public one.
+        self.lan[0] = True
+        self.resolver.table["pin.example"] = lambda nth: ["93.184.216.34"] if nth == 1 else ["192.168.1.5"]
+        self.resolver.table["lanpin.example"] = lambda nth: ["192.168.1.6"] if nth == 1 else ["93.184.216.35"]
+        self.assertEqual(code(self.gate.port, "pin.example", 80), G.REP_REFUSED)       # allowed; no network
+        self.assertEqual(code(self.gate.port, "pin.example", 80), G.REP_NOT_ALLOWED)   # rebound: refused
+        self.assertEqual(code(self.gate.port, "PIN.example.", 80), G.REP_NOT_ALLOWED)  # any spelling
+        self.assertEqual(code(self.gate.port, "lanpin.example", 80), G.REP_REFUSED)
+        self.assertEqual(code(self.gate.port, "lanpin.example", 80), G.REP_NOT_ALLOWED)
+        self.assertEqual(self.connector.seen, [("93.184.216.34", 80), ("192.168.1.6", 80)])
+        self.assertEqual(self.gate.stats()["refused"].get(P.REBINDING), 3)
+
+    def test_a_black_holed_domain_cannot_starve_other_lookups(self):
+        # A page aims lookups at a name server that never answers: one domain
+        # holds at most two resolver threads, the rest are refused at once,
+        # and another site still resolves at once.
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def black_hole(nth):
+            release.wait(30)
+            return None
+        names = [f"n{i}.blackhole.test" for i in range(40)]
+        for name in names:
+            self.resolver.table[name] = black_hole
+        self.resolver.table["ok.example"] = ["93.184.216.34"]
+        replies = {}
+
+        def ask(name):
+            replies[name] = code(self.gate.port, name, 80)
+        threads = [threading.Thread(target=ask, args=(n,)) for n in names]
+        for t in threads:
+            t.start()
+        time.sleep(0.5)
+        started = time.monotonic()
+        self.assertEqual(code(self.gate.port, "ok.example", 80), G.REP_REFUSED)
+        self.assertLess(time.monotonic() - started, 2.0, "another site waited on the black hole")
+        self.assertIn(("93.184.216.34", 80), self.connector.seen)
+        release.set()
+        for t in threads:
+            t.join(15)
+        self.assertEqual(set(replies.values()), {G.REP_HOST_UNREACHABLE})
+        self.assertGreaterEqual(self.gate.stats()["refused"].get(P.DNS_BUSY, 0), 38)
+        # The same name asked twice at once is one lookup.
+        slow = threading.Event()
+        self.resolver.table["twice.example"] = lambda nth: (slow.wait(2), ["93.184.216.36"])[1]
+        pair = [threading.Thread(target=code, args=(self.gate.port, "twice.example", 80)) for _ in range(2)]
+        for t in pair:
+            t.start()
+        time.sleep(0.3)
+        slow.set()
+        for t in pair:
+            t.join(10)
+        self.assertEqual(self.resolver.calls.count("twice.example"), 1)
 
     def test_the_workshop_is_admitted_only_as_the_reported_one(self):
         self.assertEqual(code(self.gate.port, "127.0.0.1", self.workshop.port), G.REP_OK)
@@ -497,6 +583,43 @@ class Protocol(Base):
         for message in records:
             for secret in ("secret-host-name", "another-secret-name", "10.11.12.13"):
                 self.assertNotIn(secret, message)
+
+
+class NoToolReachesTheBrowser(unittest.TestCase):
+    """No tool, MCP tool or fast-path module may reach the owner's Browser:
+    only the daemon builds the host, and only the browser package itself
+    names its engine or its gate (`terminal_check`'s rule, for the Browser;
+    review of PR #69). `hud_api` mounts `browser.routes`, which are
+    owner-only."""
+
+    REPO = Path(__file__).resolve().parents[2]
+    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/browser/__init__.py", "jarvis/v2/browser/host.py",
+               "jarvis/v2/browser/gate.py", "jarvis/v2/browser/policy.py",
+               "jarvis/v2/browser/routes.py"}
+    NEEDLES = __import__("re").compile(
+        r"browser\.(host|gate)\b|browser\s+import\s+[^\n]*\b(host|gate)\b"
+        r"|\bBrowserHost\b|\bGate\(|['\"]/browser\b"
+        r"|\.browser\.(open_tab|navigate|history|close_tab|tabs|forget|close_profile|loopback_open)\b")
+
+    def test_only_the_daemon_and_the_browser_package_name_it(self):
+        hits = []
+        for path in sorted((self.REPO / "jarvis").rglob("*.py")):
+            rel = str(path.relative_to(self.REPO))
+            if rel in self.ALLOWED:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for match in self.NEEDLES.finditer(text):
+                if rel == "jarvis/v2/hud_api.py" and match.group(0) in ("'/browser", '"/browser'):
+                    continue
+                hits.append(f"{rel}: {match.group(0)}")
+        self.assertEqual(hits, [], "a module outside the daemon reaches the owner's Browser")
+
+    def test_the_daemon_builds_it_and_hud_api_mounts_only_the_routes(self):
+        daemon = (self.REPO / "jarvis/v2/daemon.py").read_text()
+        self.assertIn("from .browser.host import BrowserHost", daemon)
+        hud = (self.REPO / "jarvis/v2/hud_api.py").read_text()
+        self.assertIn("from .browser import routes as _browser", hud)
+        self.assertNotRegex(hud, r"browser\.(host|gate)|BrowserHost")
 
 
 if __name__ == "__main__":

@@ -12,8 +12,21 @@ to the Browser's own thread). What it proves:
   context. **Every stand-in's accept counter stays 0**, while the same pages
   aimed at an ordinary listener reach it by every one of the twelve ways
   (the sanity half: the attacks really fire, through the gate);
+- **loopback is closed until the owner opens a port** (review of PR #69,
+  MED 2): a "public" page (`pub.test`, which the suite's resolver answers
+  with a public address and its connector carries back to the fixture)
+  cannot reach a CORS-permissive loopback server, nor can the attacks; once
+  the owner opens `http://localhost:<p>/` in a tab, that port works and
+  another loopback port is still refused;
+- **no UDP leaves Chrome** (review of PR #69, HIGH): WebRTC gathers no ICE
+  candidate and a loopback UDP sink hears nothing (STUN, TURN over UDP, a
+  remote host candidate, WebTransport). Run inside a private network
+  namespace with `JARVIS_NETNS_SNIFF=1`, an AF_PACKET sniffer also proves
+  that no packet at all (mDNS, IGMP, DNS) leaves on an interface but `lo`;
 - the refused schemes and a user name in the address, typed; the landing
-  guard replacing a page that lands where the judge refuses;
+  guard replacing a page that lands where the judge refuses; pop-ups landing
+  on their own allowed page (MED 1), and a pop-up sent to Jarvis's port
+  still replaced;
 - every route owner-only and on a strict Host: the API listener, a write
   with no Origin, a foreign Origin;
 - the folder: 0700 throughout, `profiles.json` 0600, on every credential
@@ -28,15 +41,25 @@ to the Browser's own thread). What it proves:
 **Hard rules** (the brief's): one Chrome instance at a time, at most 3 tabs
 (`BROWSER_TAB_CAP=3`), `BROWSER_DIR` a temp folder, local fixture servers on
 ephemeral ports only, and never 8402, 8403 or 8405. The gate's resolver is
-injected and answers no name, and its connector refuses every address but
+injected and answers only `pub.test` (a public address the connector carries
+back to loopback), and its connector refuses every other address but
 loopback: nothing reaches DNS or the network, Chrome's own background
 traffic included. Run it under the memory cap:
 
     systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 \\
         env PYTHONPATH=. .venv/bin/python tests/v2/owner_browser_check.py
+
+and, for the sniffer, inside a user + network + mount namespace with only
+`lo` and a dummy interface (the review's `netns_setup.sh`):
+
+    systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 \\
+        unshare --user --net --mount --keep-caps sh netns_setup.sh <dir> \\
+        env JARVIS_NETNS_SNIFF=1 PYTHONPATH=. .venv/bin/python tests/v2/owner_browser_check.py
 """
 from __future__ import annotations
 
+import asyncio
+import html
 import http.client
 import json
 import logging
@@ -71,6 +94,8 @@ from browser_gate_check import Listener  # noqa: E402
 
 LIVE_PORTS = {8402, 8403, 8405}
 MARK = "MARKERz7q"          # in every fixture title and path: must never reach a log or the bus
+PUB = "93.184.216.34"       # what the suite's resolver says `pub.test` is (never dialled)
+SNIFF = os.environ.get("JARVIS_NETNS_SNIFF") == "1"
 PSS_LIMIT = 1.5 * 1024 ** 3
 WAYS = ("iframe", "img", "fetch", "xhr", "ws", "form", "sw", "open")
 NAV_WAYS = ("302", "meta", "loc")
@@ -102,9 +127,102 @@ class Fake:
         pass
 
 
+class UdpSink:
+    """A UDP socket on 127.0.0.1 and ::1 (one port) that counts datagrams."""
+
+    def __init__(self):
+        self.datagrams = 0
+        self._lock = threading.Lock()
+        self._socks = []
+        for _ in range(40):
+            s4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s4.bind(("127.0.0.1", 0))
+            port = s4.getsockname()[1]
+            s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                s6.bind(("::1", port))
+            except OSError:
+                s4.close()
+                s6.close()
+                continue
+            break
+        else:
+            raise RuntimeError("no UDP port free on both loopbacks")
+        self.port = port
+        for s in (s4, s6):
+            self._socks.append(s)
+            threading.Thread(target=self._read, args=(s,), daemon=True).start()
+
+    def _read(self, s):
+        while True:
+            try:
+                s.recvfrom(65535)
+            except OSError:
+                return
+            with self._lock:
+                self.datagrams += 1
+
+    def close(self):
+        for s in self._socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+class Sniffer:
+    """Every packet sent on any interface (AF_PACKET, PACKET_OUTGOING): only
+    inside the private network namespace, where the suite holds CAP_NET_RAW.
+    Ambient capabilities are dropped first, so Chrome starts with none."""
+
+    def __init__(self):
+        import ctypes
+        self.packets: list[tuple] = []
+        self.label = "setup"                  # the test running when a packet was sent
+        self._lock = threading.Lock()
+        self._sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(3))
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(47, 4, 0, 0, 0) != 0:          # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL
+            raise OSError(ctypes.get_errno(), "could not clear ambient capabilities")
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        import ipaddress
+        while True:
+            try:
+                data, addr = self._sock.recvfrom(65535)
+            except OSError:
+                return
+            if addr[2] != 4:                          # PACKET_OUTGOING only
+                continue
+            proto, dst, dport = None, None, None
+            if addr[1] == 0x0800 and len(data) >= 20:
+                off, proto, dst = (data[0] & 0xF) * 4, data[9], str(ipaddress.IPv4Address(data[16:20]))
+            elif addr[1] == 0x86DD and len(data) >= 40:
+                off, proto, dst = 40, data[6], str(ipaddress.IPv6Address(data[24:40]))
+            else:
+                continue
+            if proto in (6, 17) and len(data) >= off + 4:
+                dport = int.from_bytes(data[off + 2:off + 4], "big")
+            elif proto == 2 and len(data) >= off + 16 and data[off] == 0x22:
+                # An IGMPv3 report: name the first group it joins or leaves.
+                dport = str(ipaddress.IPv4Address(data[off + 12:off + 16]))
+            with self._lock:
+                self.packets.append((addr[0], proto, dst, dport, self.label))
+
+    def snapshot(self):
+        with self._lock:
+            return list(self.packets)
+
+    def close(self):
+        self._sock.close()
+
+
 class Sanity(Listener):
-    """An ordinary local server: answers every request with a tiny 200 and
-    records which way (`?w=`) each one came by."""
+    """An ordinary local server: answers every request with a tiny 200 that
+    any origin may read (CORS and Private/Local Network Access preflights
+    included) and records which way (`?w=`) each one came by."""
 
     def __init__(self):
         self.ways: set[str] = set()
@@ -137,9 +255,65 @@ class Sanity(Listener):
                     with self._lock:
                         self.ways.add(way)
                 conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                             b"Access-Control-Allow-Origin: *\r\n"
+                             b"Access-Control-Allow-Methods: *\r\nAccess-Control-Allow-Headers: *\r\n"
+                             b"Access-Control-Allow-Private-Network: true\r\n"
+                             b"Access-Control-Allow-Local-Network: true\r\n"
                              b"Content-Length: 2\r\nConnection: close\r\n\r\nok")
             except OSError:
                 pass
+
+
+# A page reading a loopback server it was not served from: a CORS read and a
+# no-cors POST (the shapes Local Network Access is about).
+LNA_PAGE = """<!doctype html><title>lna</title><script>
+const T = __T__;
+window.__r = {};
+const settle = () => { if ('cors' in __r && 'post' in __r) __r.done = true; };
+fetch(`http://${T}/hit?w=lna-cors`).then(r => r.text())
+  .then(t => { __r.cors = 'read:' + t; settle(); }).catch(() => { __r.cors = 'err'; settle(); });
+fetch(`http://${T}/hit?w=lna-post`, {method: 'POST', mode: 'no-cors', body: 'x'})
+  .then(() => { __r.post = 'sent'; settle(); }).catch(() => { __r.post = 'err'; settle(); });
+</script>"""
+
+# Every UDP way out of a page the review found or thought of: STUN and TURN
+# over UDP to a loopback sink, a remote host candidate there (connectivity
+# checks), a local peer pair with a data channel (host candidates, which
+# Chrome announces over mDNS), TURN over TCP to a Jarvis stand-in and to a
+# closed loopback port, and WebTransport (QUIC).
+RTC_PAGE = """<!doctype html><title>rtc</title><script>
+const U = __U__, S = __S__, C = __C__;
+window.__r = {cands: [], states: [], err: null, wt: [], done: false};
+(async () => {
+ try {
+  const ice = [
+   {urls: `stun:127.0.0.1:${U}`}, {urls: `stun:[::1]:${U}`},
+   {urls: `turn:127.0.0.1:${U}?transport=udp`, username: 'u', credential: 'p'},
+   {urls: `turn:127.0.0.1:${S}?transport=tcp`, username: 'u', credential: 'p'},
+   {urls: `turn:127.0.0.1:${C}?transport=tcp`, username: 'u', credential: 'p'},
+  ];
+  const a = new RTCPeerConnection({iceServers: ice});
+  const b = new RTCPeerConnection();
+  a.onicecandidate = e => { if (e.candidate && e.candidate.candidate) { __r.cands.push(e.candidate.candidate); b.addIceCandidate(e.candidate).catch(() => {}); } };
+  b.onicecandidate = e => { if (e.candidate && e.candidate.candidate) { __r.cands.push(e.candidate.candidate); a.addIceCandidate(e.candidate).catch(() => {}); } };
+  a.oniceconnectionstatechange = () => __r.states.push(a.iceConnectionState);
+  a.createDataChannel('x');
+  await a.setLocalDescription(await a.createOffer());
+  await b.setRemoteDescription(a.localDescription);
+  await b.setLocalDescription(await b.createAnswer());
+  await a.setRemoteDescription(b.localDescription);
+  for (const ip of ['127.0.0.1', '::1']) {
+   try { await a.addIceCandidate({candidate: `candidate:9 1 udp 2122260223 ${ip} ${U} typ host`, sdpMid: '0', sdpMLineIndex: 0}); }
+   catch (e) { __r.err = 'add'; }
+  }
+ } catch (e) { __r.err = String(e).slice(0, 80); }
+ for (const h of ['127.0.0.1', '[::1]']) {
+  try { const w = new WebTransport(`https://${h}:${U}/`); w.ready.catch(() => __r.wt.push(h)); w.closed.catch(() => {}); }
+  catch (e) { __r.wt.push(h + ' threw'); }
+ }
+ setTimeout(() => { __r.done = true; }, 6000);
+})();
+</script>"""
 
 
 def fixture_handler(state):
@@ -194,6 +368,19 @@ window.__done = true;
   e.waitUntil(fetch({json.dumps(hit('sw'))}, {{mode: 'no-cors'}}).catch(() => {{}}));
   self.skipWaiting();
 }});""", "application/javascript")
+            if path == "/lna":
+                return self._send(200, LNA_PAGE.replace("__T__", json.dumps(target)))
+            if path == "/popups":
+                u = q.get("u", "")
+                return self._send(200, f"""<!doctype html><title>{MARK} popups</title>
+<button id=b1 onclick='window.open({json.dumps(u)})'>open</button>
+<a id=b2 target=_blank href="{html.escape(u, quote=True)}">blank</a>
+<a id=b3 target=_blank rel=noopener href="{html.escape(u, quote=True)}">noopener</a>""")
+            if path == "/rtc":
+                page = RTC_PAGE
+                for key in ("u", "s", "c"):
+                    page = page.replace(f"__{key.upper()}__", str(int(q.get(key, "0"))))
+                return self._send(200, page)
             if path == "/redirect":
                 return self._send(302, "", headers=[("Location", hit("302"))])
             if path == "/meta":
@@ -255,8 +442,20 @@ def deny_every_name(name, port):
     raise socket.gaierror(socket.EAI_NONAME, "the suite resolves nothing")
 
 
+def suite_resolve(name, port):
+    """`pub.test` is a public address; nothing else resolves."""
+    if name == "pub.test":
+        return [PUB]
+    raise socket.gaierror(socket.EAI_NONAME, "the suite resolves nothing else")
+
+
 async def loopback_only(address, port):
+    """Loopback as asked; the suite's public address carried back to the
+    same port on 127.0.0.1 (so a "public" page is the fixture, served from
+    an address the gate judges public); anything else refused."""
     import ipaddress
+    if address == PUB:
+        return await G.default_connect("127.0.0.1", port)
     if P.address_class(ipaddress.ip_address(address)) != "loopback":
         raise ConnectionRefusedError("the suite never leaves loopback")
     return await G.default_connect(address, port)
@@ -287,7 +486,10 @@ class OwnerBrowser(unittest.TestCase):
                                      "LC_ALL": "C.UTF-8"}))
         cls.stand_ins = {name: Listener() for name in
                          ("FACE_PORT", "DAEMON_PORT", "DESKTOP_PORT", "SPOTIFY_AUTH_PORT")}
-        cls.sanity = Sanity()
+        cls.sanity = Sanity()            # opened by the owner in test_08
+        cls.closed = Sanity()            # a loopback port nobody opens
+        cls.udp = UdpSink()
+        cls.sniffer = Sniffer() if SNIFF else None
         values = dict(V2_DATA_DIR=cls.root / "data", ALLOWLIST_PATH=cls.root / "cfg" / "allow.json",
                       MODELS_PATH=cls.root / "cfg" / "models.json",
                       PROVIDER_DEFAULTS_PATH=cls.root / "cfg" / "provider_defaults.json",
@@ -324,7 +526,7 @@ class OwnerBrowser(unittest.TestCase):
 
         cls.daemon = Daemon(Stores(), {name: Fake(name) for name in PN},
                             lambda *_: (lambda *_: None), 0)
-        cls.daemon.browser = H.BrowserHost(cls.daemon, resolver=deny_every_name, connector=loopback_only)
+        cls.daemon.browser = H.BrowserHost(cls.daemon, resolver=suite_resolve, connector=loopback_only)
         cls.daemon.bus.observe(cls.records.append)
         cls.daemon.start()
         cls.ports = {"api": cls.daemon.port, "hud": cls.daemon.face_port}
@@ -348,14 +550,20 @@ class OwnerBrowser(unittest.TestCase):
                 except OSError:
                     pass
             cls.fixture.shutdown()
-            for listener in (*cls.stand_ins.values(), cls.sanity):
+            for listener in (*cls.stand_ins.values(), cls.sanity, cls.closed, cls.udp):
                 listener.close()
+            if cls.sniffer is not None:
+                cls.sniffer.close()
             for p in reversed(cls.patches):
                 p.stop()
             cls.tmp.cleanup()
             print("\nmeasured:", json.dumps(cls.measured), file=sys.stderr)
             if left:
                 raise AssertionError(f"{len(left)} Chrome processes were left running")
+
+    def setUp(self):
+        if self.sniffer is not None:
+            self.sniffer.label = self._testMethodName
 
     # -- requests -----------------------------------------------------------------
 
@@ -509,9 +717,11 @@ class OwnerBrowser(unittest.TestCase):
         self.assertEqual(len(browser), 1, "one browser process")
         argv = argvs[browser[0]]
         self.assertEqual(argv[1:], H.launch_args(profile, self.host._gate.port, private=False))
+        # What the flags *do* is test_04b's (no UDP leaves Chrome): a flag
+        # Chrome does not know is ignored without a word, which is how the
+        # first round shipped `--force-webrtc-ip-handling-policy`.
         for flag in ("--headless", f"--user-data-dir={profile}", "--proxy-bypass-list=<-loopback>",
-                     f"--proxy-server=socks5://127.0.0.1:{self.host._gate.port}", "--disable-quic",
-                     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-extensions",
+                     f"--proxy-server=socks5://127.0.0.1:{self.host._gate.port}", "--disable-extensions",
                      "--deny-permission-prompts", "--mute-audio"):
             self.assertIn(flag, argv)
         for every in argvs.values():
@@ -537,6 +747,31 @@ class OwnerBrowser(unittest.TestCase):
                        "DISPLAY", "JARVIS_"):
             self.assertNotIn(secret, blob)
         self.assertEqual(env.get("LC_ALL"), "C.UTF-8", "the locale passes")
+
+    def test_04b_no_udp_leaves_chrome(self):
+        """WebRTC and WebTransport, effect not flags (review of PR #69, HIGH:
+        `--force-webrtc-ip-handling-policy` does not exist, and with it every
+        ICE candidate was gathered and STUN reached a loopback sink). With
+        `--webrtc-ip-handling-policy=disable_non_proxied_udp` behind a SOCKS
+        proxy nothing is gathered and nothing is sent; the sniffer (in a
+        private network namespace) adds that no mDNS or IGMP left either."""
+        tab = self.main_tab
+        stand_in = self.stand_ins["FACE_PORT"].port
+        before = (self.udp.datagrams, self.closed.accepts)
+        self.owner("POST", f"/browser/tabs/{tab}/navigate", {
+            "url": f"http://127.0.0.1:{self.fx}/rtc?u={self.udp.port}&s={stand_in}&c={self.closed.port}"})
+        page = self.page(tab)
+        self.assertTrue(self.wait(lambda: self.run_on(page.evaluate("window.__r && window.__r.done")), 20))
+        result = json.loads(self.run_on(page.evaluate("JSON.stringify(window.__r)")))
+        time.sleep(1.0)
+        self.measured["webrtc_candidates"] = len(result["cands"])
+        self.measured["udp_datagrams"] = self.udp.datagrams - before[0]
+        self.assertIsNone(result["err"], result)
+        self.assertEqual(result["cands"], [], "WebRTC gathered ICE candidates")
+        self.assertEqual(self.udp.datagrams, before[0], "a datagram reached the loopback UDP sink")
+        self.assertEqual(sorted(result["wt"]), ["127.0.0.1", "[::1]"], "WebTransport failed both ways")
+        self.assertEqual(self.stand_in_accepts(), {})
+        self.assertEqual(self.closed.accepts, before[1])
 
     # -- 2: typed, owner-only, refused schemes -------------------------------------------
 
@@ -604,8 +839,57 @@ class OwnerBrowser(unittest.TestCase):
 
     # -- 3: the twelve ways (typed above) ----------------------------------------------
 
-    def test_08_the_ways_reach_an_ordinary_server(self):
-        # The sanity half: every way really fires, through the gate.
+    def lna(self, tab_id, target):
+        """A "public" page (`pub.test`, a public address to the gate) reading
+        `target`; what it got."""
+        self.owner("POST", f"/browser/tabs/{tab_id}/navigate",
+                   {"url": f"http://pub.test:{self.fx}/lna?t={target}"})
+        page = self.page(tab_id)
+        self.assertTrue(self.wait(lambda: self.run_on(page.evaluate("window.__r && window.__r.done")), 10))
+        return json.loads(self.run_on(page.evaluate("JSON.stringify(window.__r)")))
+
+    def test_08_loopback_is_closed_until_the_owner_opens_it(self):
+        """Review of PR #69, MED 2 (the lead's decision): a page from the
+        internet read a CORS-permissive service on this machine through the
+        gate. Loopback is closed like the LAN until the owner opens a port."""
+        tab = self.main_tab
+        gate = self.host._gate
+        closed_before = gate.stats()["refused"].get(P.LOOPBACK_CLOSED, 0)
+        self.assertEqual(self.host.status()["loopback_opened"], 1, "the fixture's port, from test_02")
+        # Not yet opened: neither a public page nor every way from a loopback page reaches it.
+        self.assertEqual(self.lna(tab, f"127.0.0.1:{self.sanity.port}"), {"cors": "err", "post": "err",
+                                                                         "done": True})
+        self.assertEqual(self.lna(tab, f"localhost:{self.sanity.port}")["cors"], "err")
+        self.attack(tab, f"127.0.0.1:{self.sanity.port}")
+        time.sleep(0.5)
+        self.assertEqual(self.sanity.accepts, 0, "a page reached a loopback port nobody opened")
+        self.assertGreater(gate.stats()["refused"].get(P.LOOPBACK_CLOSED, 0), closed_before + 5)
+        # A page's own move to it does not open it either (only the owner's routes do).
+        self.owner("POST", f"/browser/tabs/{tab}/navigate",
+                   {"url": f"http://127.0.0.1:{self.fx}/loc?t=127.0.0.1:{self.sanity.port}"})
+        time.sleep(1.0)
+        self.assertEqual(self.sanity.accepts, 0)
+        # Nor does a navigation that is not the owner's (BR-2's tools will
+        # call `navigate` without `owner=True`).
+        self.host.navigate(tab, f"http://127.0.0.1:{self.sanity.port}/hit?w=agent")
+        self.assertEqual(self.sanity.accepts, 0)
+        self.assertEqual(self.host.status()["loopback_opened"], 1)
+        # The owner opens it in a tab: that port works, from a public page too.
+        self.owner("POST", f"/browser/tabs/{tab}/navigate", {"url": f"http://localhost:{self.sanity.port}/"})
+        self.assertGreaterEqual(self.sanity.accepts, 1)
+        self.assertEqual(self.run_on(self.page(tab).evaluate("document.body.innerText")), "ok")
+        self.assertEqual(self.host.status()["loopback_opened"], 2)
+        self.assertEqual(self.lna(tab, f"127.0.0.1:{self.sanity.port}"),
+                         {"cors": "read:ok", "post": "sent", "done": True})
+        # Another loopback port is still refused, by every way.
+        self.assertEqual(self.lna(tab, f"127.0.0.1:{self.closed.port}")["cors"], "err")
+        self.attack(tab, f"localhost:{self.closed.port}")
+        time.sleep(0.5)
+        self.assertEqual(self.closed.accepts, 0, "a page reached a loopback port nobody opened")
+
+    def test_08b_the_ways_reach_an_ordinary_server(self):
+        # The sanity half: every way really fires, through the gate, to the
+        # loopback port the owner opened in test_08.
         allowed_before = self.host._gate.stats()["allowed"]
         for spelling in ("127.0.0.1", "localhost"):
             self.sanity.ways.clear()
@@ -645,6 +929,64 @@ class OwnerBrowser(unittest.TestCase):
         self.assertTrue(self.wait(explained, 10))
         self.assertEqual(self.page(tab).url, "about:blank")
 
+    def popup(self, tab, url, button):
+        """Click `button` on a page that opens `url` in a new tab; the new
+        tab's row, after it settled."""
+        from urllib.parse import quote
+        self.owner("POST", f"/browser/tabs/{tab}/navigate",
+                   {"url": f"http://127.0.0.1:{self.fx}/popups?u={quote(url, safe='')}"})
+        self.run_on(self.page(tab).click(f"#{button}"))      # a user gesture
+        self.assertTrue(self.wait(lambda: self.other_tabs(tab), 10), "no pop-up was opened")
+        time.sleep(2.0)
+        rows = [r for r in self.owner("GET", "/browser/tabs") if r["tab_id"] != tab]
+        self.assertEqual(len(rows), 1, rows)
+        return rows[0]
+
+    def test_10b_popups_land_where_they_were_sent(self):
+        """Review of PR #69, MED 1: a pop-up is handed over before its first
+        load, with an empty URL, and the guard judged "" and blanked every
+        one. Its first real landing is what is judged."""
+        tab = self.main_tab
+        self.close_others(tab)
+        target = f"http://127.0.0.1:{self.fx}/{MARK}/page"
+        for button in ("b1", "b2", "b3"):        # window.open, target=_blank, rel=noopener
+            with self.subTest(button=button):
+                guarded = self.host.status()["landing_guard"]
+                row = self.popup(tab, target, button)
+                self.assertEqual((row["url"], row["title"]), (target, f"{MARK} page"))
+                self.assertEqual(self.host.status()["landing_guard"], guarded, "a pop-up was replaced")
+                self.close_others(tab)
+        # A pop-up sent to Jarvis's port: the gate refuses it, so it lands on
+        # Chrome's own error page and the stand-in hears nothing.
+        stand_in = self.stand_ins["DESKTOP_PORT"].port
+        for button in ("b1", "b3"):
+            with self.subTest(jarvis_port=button):
+                row = self.popup(tab, f"http://127.0.0.1:{stand_in}/hit?w=popup", button)
+                self.assertEqual(row["url"], "chrome-error://chromewebdata/")
+                self.close_others(tab)
+        self.assertEqual(self.stand_in_accepts(), {})
+        # A pop-up is still judged where it lands next: moved past the judge
+        # (straight to Chrome, as in test_10), the guard replaces it.
+        for button in ("b1", "b3"):
+            with self.subTest(moved=button):
+                row = self.popup(tab, target, button)
+                guarded = self.host.status()["landing_guard"]
+                popup = self.page(row["tab_id"])
+                try:
+                    self.run_on(popup.goto(f"data:text/html,<title>{MARK} popup landed</title>"))
+                except Exception:  # noqa: BLE001 - the guard may interrupt the navigation
+                    pass
+                self.assertTrue(self.wait(lambda: self.host.status()["landing_guard"] > guarded, 10))
+
+                def explained():
+                    try:
+                        return "does not open this kind of address" in self.run_on(popup.content())
+                    except H.BrowserRefused:          # caught mid-navigation: ask again
+                        return False
+                self.assertTrue(self.wait(explained, 10))
+                self.assertEqual(popup.url, "about:blank")
+                self.close_others(tab)
+
     def test_11_history(self):
         tab = self.main_tab
         self.owner("POST", f"/browser/tabs/{tab}/navigate", {"url": f"http://127.0.0.1:{self.fx}/{MARK}/page"})
@@ -656,6 +998,7 @@ class OwnerBrowser(unittest.TestCase):
         self.assertEqual(self.ask("POST", "/browser/tabs/NOTANID/navigate", {"url": "about:blank"})[0], 400)
 
     def test_12_the_tab_cap(self):
+        self.close_others(self.main_tab)
         rows = [self.owner("POST", "/browser/tabs", {}) for _ in range(2)]
         status, payload = self.ask("POST", "/browser/tabs", {})
         self.assertEqual(status, 409, payload)
@@ -726,10 +1069,14 @@ class OwnerBrowser(unittest.TestCase):
     # -- 6: settings -------------------------------------------------------------------
 
     def test_15_settings_are_the_owners_and_protected(self):
-        self.assertEqual(self.owner("GET", "/browser/settings"), {"lan": False})
+        self.assertEqual(self.owner("GET", "/browser/settings"), {"lan": False, "local_servers": False})
         self.assertEqual(self.ask("PATCH", "/browser/settings", {"lan": "yes"})[0], 400)
-        self.assertEqual(self.ask("PATCH", "/browser/settings", {"sound": True})[0], 400)
-        self.assertEqual(self.owner("PATCH", "/browser/settings", {"lan": True}), {"lan": True})
+        self.assertEqual(self.ask("PATCH", "/browser/settings", {})[0], 400)
+        # An unknown key is counted, never echoed (review of PR #69, NIT).
+        status, payload = self.ask("PATCH", "/browser/settings", {"sound": True, f"{MARK}key": 1})
+        self.assertEqual((status, payload), (400, {"error": "unknown fields (2)"}))
+        self.assertEqual(self.owner("PATCH", "/browser/settings", {"lan": True}),
+                         {"lan": True, "local_servers": False})
         path = config.BROWSER_SETTINGS_PATH
         self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
         self.assertTrue(self.ask("GET", "/status", listener="api")[1]["browser"]["lan"])
@@ -778,6 +1125,21 @@ class OwnerBrowser(unittest.TestCase):
                 self.assertNotIn(needle, bus)
                 self.assertNotIn(needle, logs)
 
+    @unittest.skipUnless(SNIFF, "needs the private network namespace (JARVIS_NETNS_SNIFF=1)")
+    def test_19_nothing_left_on_any_interface_but_loopback(self):
+        """In a namespace with `lo` and a dummy interface holding a default
+        route, every packet sent anywhere but `lo` would be the suite's
+        Chrome leaving the machine: mDNS (224.0.0.251:5353) and IGMP from
+        WebRTC's host candidates, DNS, anything. The kernel's own IPv6
+        neighbour and multicast-listener messages (ICMPv6) are not Chrome's."""
+        packets = self.sniffer.snapshot()
+        self.assertTrue(any(p[0] == "lo" for p in packets), "the sniffer saw nothing at all")
+        away = [p for p in packets if p[0] != "lo" and p[1] != 58]
+        udp = [p for p in packets if p[1] == 17]
+        self.measured["sniffed_packets"] = len(packets)
+        self.assertEqual(away, [], "a packet left on an interface other than lo")
+        self.assertEqual(udp, [], "a UDP datagram was sent")
+
 
 class Folder(unittest.TestCase):
     """The engine refuses a folder that is not private. No Chrome starts."""
@@ -822,6 +1184,87 @@ class Folder(unittest.TestCase):
         (self.root / "browser").mkdir(mode=0o700)
         (self.root / "browser" / "profiles.json").write_text("{not json")
         self.refused("profiles.json is unreadable")
+
+
+class Lifecycle(unittest.TestCase):
+    """`stop()` during a start (review of PR #69, LOW): it used to find
+    nothing to stop and return, and the start then left its gate, its loop
+    thread and its driver running behind a stopped Browser. No Chrome: the
+    start is held inside `_ensure_main` and Playwright is a stand-in."""
+
+    def test_stop_waits_for_a_start_in_progress(self):
+        tmp = tempfile.TemporaryDirectory(prefix="obl-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name, value in dict(BROWSER_DIR=root / "browser",
+                                BROWSER_SETTINGS_PATH=root / "browser.json").items():
+            guard = patch.object(config, name, value)
+            guard.start()
+            self.addCleanup(guard.stop)
+        host = H.BrowserHost(None, resolver=deny_every_name, connector=loopback_only)
+        entered, release = threading.Event(), threading.Event()
+        real_main = host._ensure_main
+
+        def held_main():
+            entered.set()
+            release.wait(10)
+            real_main()
+
+        async def no_playwright():
+            await asyncio.sleep(0)
+
+        host._ensure_main = held_main
+        host._start_playwright = no_playwright
+        outcome = {}
+
+        def start():
+            try:
+                host._ensure_started()
+                outcome["start"] = "started"
+            except H.BrowserRefused as refusal:
+                outcome["start"] = refusal.status
+        starter = threading.Thread(target=start)
+        starter.start()
+        self.assertTrue(entered.wait(10))
+        stopper = threading.Thread(target=host.stop)
+        stopper.start()
+        time.sleep(0.5)
+        self.assertTrue(stopper.is_alive(), "stop() did not wait for the start in progress")
+        release.set()
+        starter.join(15)
+        stopper.join(15)
+        self.assertFalse(starter.is_alive() or stopper.is_alive())
+        self.assertEqual(outcome["start"], "started")
+        self.assertIsNotNone(host._gate)
+        self.assertFalse(host._gate._thread.is_alive(), "the gate outlived stop()")
+        self.assertFalse(host._thread.is_alive(), "the Browser's loop outlived stop()")
+        self.assertFalse(host.status()["running"])
+        with self.assertRaises(H.BrowserRefused):
+            host._ensure_started()
+
+
+class Pids(unittest.TestCase):
+    """`chrome_pids` names a process only if it runs the launched Chrome
+    (review of PR #69, LOW): a process that merely carries the folder in its
+    command line is not ours to signal."""
+
+    def test_a_decoy_with_the_folder_in_its_argv_is_left_alone(self):
+        tmp = tempfile.TemporaryDirectory(prefix="obp-")
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name) / "profile"
+        folder.mkdir(mode=0o700)
+        import subprocess
+        decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                                  f"--user-data-dir={folder}", "--type=renderer"])
+        self.addCleanup(decoy.wait)
+        self.addCleanup(decoy.kill)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and f"--user-data-dir={folder}" not in proc_argv(decoy.pid):
+            time.sleep(0.05)
+        self.assertIn(f"--user-data-dir={folder}", proc_argv(decoy.pid))
+        self.assertEqual(H.chrome_pids(folder), [])
+        H.stop_pids(folder, timeout=1.0)
+        self.assertIsNone(decoy.poll(), "stop_pids signalled a process that is not Chrome")
 
 
 if __name__ == "__main__":

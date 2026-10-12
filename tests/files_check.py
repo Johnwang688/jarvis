@@ -658,6 +658,79 @@ def grep_protected_checks(tmp: Path) -> None:
     print(f"ok  grep_files: context lines, single-file paths and count mode all filtered — {ran}")
 
 
+def credential_folder_checks(tmp: Path) -> None:
+    """v1's file tools refuse every credential folder (review of PR #69).
+
+    `config.credential_dirs()` — ~/.ssh, ~/.aws, ~/.config/gh,
+    ~/.config/jarvis, ~/.gnupg and the HUD Browser's profile folder — was
+    closed to v2's tools but not to v1's: the Browser profile's History, Web
+    Data and Sessions were readable by the fast path's read_file and
+    grep_files. Now read_file, write_file, edit_file and grep_files (both
+    backends) refuse anything in one, as written or through a symlink; the
+    gate's own state files keep their old rule and stay readable config.
+    HOME and `BROWSER_DIR` point at temp folders for the check, so it never
+    looks at the owner's own."""
+    from unittest.mock import patch
+
+    home = tmp / "cred-home"
+    profile = tmp / "browser-dir" / "profiles" / "p-00000000" / "Default"
+    profile.mkdir(parents=True)
+    (profile / "History").write_text("visited https://bank.example/account BROWSERSECRET\n")
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    (ssh / "id_test").write_text("SSHSECRET key material\n")
+    jarvis_cfg = home / ".config" / "jarvis"
+    jarvis_cfg.mkdir(parents=True)
+    (jarvis_cfg / "allowlist.json").write_text('[{"tool": "run_readonly", "prefix": "ls"}]')
+    (jarvis_cfg / "other.json").write_text('{"note": "JARVISCFGSECRET"}')
+    outside = tmp / "outside"
+    outside.mkdir()
+    (outside / "notes.txt").write_text("an ordinary note\n")
+    link = outside / "history-link.txt"
+    link.symlink_to(profile / "History")
+
+    with patch.dict(os.environ, {"HOME": str(home)}), \
+            patch.object(config, "BROWSER_DIR", tmp / "browser-dir"), \
+            patch.object(config, "ALLOWLIST_PATH", jarvis_cfg / "allowlist.json"):
+        for target in (profile / "History", ssh / "id_test", jarvis_cfg / "other.json", link,
+                       "~/.ssh/id_test"):
+            out = call("read_file", path=str(target))
+            assert "credential folder" in out and "SECRET" not in out, f"read {target}: {out}"
+            out = call("write_file", path=str(target), content="overwritten")
+            assert out.startswith("Error:"), f"write {target}: {out}"
+            out = call("edit_file", path=str(target), old_string="SECRET", new_string="X")
+            assert out.startswith("Error:"), f"edit {target}: {out}"
+        new = profile / "planted.txt"
+        out = call("write_file", path=str(new), content="planted")
+        assert out.startswith("Error:") and not new.exists(), out
+        assert "BROWSERSECRET" in (profile / "History").read_text(), "History was rewritten"
+        # The gate's own state stays readable config, by its own path only.
+        assert "run_readonly" in call("read_file", path=str(jarvis_cfg / "allowlist.json"))
+
+        real_which = search_mod.shutil.which
+        have_rg = real_which("rg") is not None
+        for root in (tmp / "browser-dir", home, outside, profile / "History", link):
+            for mode in ("content", "files", "count"):
+                kwargs = dict(pattern="SECRET", path=str(root), mode=mode)
+                with_rg = call("grep_files", **kwargs) if have_rg else None
+                search_mod.shutil.which = lambda name: None
+                try:
+                    with_py = call("grep_files", **kwargs)
+                finally:
+                    search_mod.shutil.which = real_which
+                for out, label in ((with_rg, "ripgrep"), (with_py, "fallback")):
+                    if out is None:
+                        continue
+                    body = "" if out.startswith("No matches") else out
+                    for bit in ("BROWSERSECRET", "SSHSECRET", "JARVISCFGSECRET", "History", "id_test"):
+                        assert bit not in body, f"{label} leaked {bit} for {kwargs}:\n{out}"
+        found = call("grep_files", pattern="ordinary", path=str(outside))
+        assert "notes.txt" in found, found
+    ran = "both backends" if have_rg else "fallback only (rg not installed)"
+    print(f"ok  credential folders: read, write, edit and grep refused, symlinks too; "
+          f"the gate's state readable — {ran}")
+
+
 def backend_parity_checks(tmp: Path) -> None:
     """Both backends must answer identically, or the tool has two behaviours.
 
@@ -720,6 +793,7 @@ def main() -> int:
         numbering_guard_checks(tmp)
         grep_checks(tmp)
         grep_protected_checks(tmp)
+        credential_folder_checks(tmp)
         rg_args_checks()
         gitignore_checks(tmp)
         backend_parity_checks(tmp)

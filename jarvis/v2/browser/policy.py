@@ -20,6 +20,11 @@ network.
    CONNECT the gate judges. Chrome sends every host as a name, IP literals
    included (measured, Chrome 155), so the gate parses literals itself,
    resolves real names exactly once and connects to the address it judged.
+   This machine is closed like the LAN: a loopback port is reachable only
+   once the owner opened it in a pane (`judge_address`), and a name keeps
+   the address class it first resolved to for the host's lifetime
+   (`gate.Gate`'s pins), so rebinding gets nowhere with the LAN on either.
+   WebRTC sends no UDP at all (`host.launch_args`).
 3. **The landing guard** (`host.py`): wherever a page's main frame lands,
    judged again by `judge_url(..., landed=True)`, and replaced with an
    explanation when it is refused.
@@ -58,6 +63,9 @@ UNRESOLVABLE = "unresolvable"
 BAD_REQUEST = "bad_request"
 UNSUPPORTED = "unsupported"
 BUSY = "busy"
+LOOPBACK_CLOSED = "loopback_closed"
+REBINDING = "rebinding"
+DNS_BUSY = "dns_busy"
 
 # The judge's sentences. Fixed text: a refusal is logged by the daemon's
 # handler (`APIError`), and no URL may reach a log line (plan §4).
@@ -223,19 +231,43 @@ def judge_port(port: int, *, refused: frozenset[int], own: int | None = None) ->
     return None
 
 
-def judge_address(ip, *, via: str, lan: bool) -> str | None:
+def judge_address(ip, *, via: str, lan: bool, loopback_open: bool = False) -> str | None:
     """The refusal class for one candidate address, or None to allow it.
 
-    `via` is how the host was named (`host_kind`): a loopback address is
-    allowed only when it was asked for as a literal or as `localhost` — a
-    *name* that resolves to loopback is DNS rebinding onto the owner's own
-    services and is refused whatever the LAN switch says. A private address
-    is allowed only with the LAN switch on (B-5)."""
+    `via` is how the host was named (`host_kind`). **Loopback is closed like
+    the LAN** (the lead's decision on PR #69, MED 2: "private network closed"
+    includes this machine): behind the proxy Chrome's own Local Network
+    Access protection no longer applies, so any public page could CSRF — and,
+    with a permissive CORS answer, read — every local service. A loopback
+    address is allowed only when it was asked for as a literal or as
+    `localhost` **and** `loopback_open` (the owner opened that port in a
+    Browser pane, `BrowserHost.loopback_open`); a *name* that resolves to
+    loopback is DNS rebinding onto the owner's own services and is refused
+    whatever else is true. A private address is allowed only with the LAN
+    switch on (B-5)."""
     kind = address_class(ip)
     if kind == NOT_A_HOST:
         return NOT_A_HOST
     if kind == "loopback":
-        return None if via in ("literal", "loopback_name") else NAME_TO_LOOPBACK
+        if via not in ("literal", "loopback_name"):
+            return NAME_TO_LOOPBACK
+        return None if loopback_open else LOOPBACK_CLOSED
     if kind == "private":
         return None if lan else PRIVATE_NETWORK
     return None
+
+
+def loopback_port(url: str) -> int | None:
+    """The port of a URL whose host names this machine (any loopback
+    spelling `config._names_this_machine` knows), or None. What an owner's
+    navigation opens (`BrowserHost`); never a refused port's caller's
+    business — the gate refuses Jarvis's ports first."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in SCHEMES or not config._names_this_machine(host):
+        return None
+    return port or (443 if parts.scheme.lower() == "https" else 80)

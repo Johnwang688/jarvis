@@ -5,9 +5,19 @@ Chrome is launched with `--proxy-server=socks5://127.0.0.1:<this port>` and
 `--proxy-bypass-list=<-loopback>`, so every TCP connection it makes — a page,
 a redirect, a frame, fetch, XHR, a WebSocket, a worker, a service worker,
 prefetch and Chrome's own background traffic — arrives here as a SOCKS5
-CONNECT, loopback included. (QUIC is off and WebRTC may not send UDP that
-does not go through a proxy, so nothing leaves around it.) For each one the
-gate:
+CONNECT, loopback included. Nothing leaves around it: QUIC is off
+(`--disable-quic`), WebRTC may send no UDP that does not go through a proxy
+(`--webrtc-ip-handling-policy=disable_non_proxied_udp` — a SOCKS proxy
+carries no UDP, so WebRTC gathers no candidate and sends no STUN or ICE
+check; review of PR #69: the first launch named a flag Chrome does not have,
+and 158 datagrams went straight out), WebRTC's mDNS responder is off (it
+joined the mDNS group on every interface for any `RTCPeerConnection`), the
+media router's LAN discovery is off, and `MAP * ~NOTFOUND` keeps Chrome from
+sending a DNS query of its own (defense in depth: with the proxy every name
+is sent to the gate anyway). Measured in a private network namespace with an
+AF_PACKET sniffer: nothing leaves on any interface but `lo`
+(`owner_browser_check`, `JARVIS_NETNS_SNIFF=1`).
+For each connection the gate:
 
 - refuses Jarvis's own ports (`policy.refused_ports`: BR-0's control ports,
   the HUD and API ports the daemon reports, the workshop's 8403 unless it is
@@ -25,8 +35,21 @@ gate:
 - refuses a name that resolves to loopback (rebinding onto the owner's own
   services), private-network addresses unless the owner's LAN switch is on
   (B-5), multicast and reserved space, and unresolvable names;
-- allows public addresses and every other loopback port (dev servers),
-  then pipes bytes both ways.
+- **closes this machine like the LAN** (the lead's decision on PR #69, MED
+  2): behind a proxy Chrome's Local Network Access check no longer protects
+  loopback, so a loopback port is reachable only after the owner opened it
+  in a pane (`loopback(port)`, the host's per-port allowance), and every
+  other is `loopback_closed`;
+- **pins each name's address class** for its lifetime: a name first
+  resolved to public addresses never later connects to a private one, and
+  one first resolved private (the LAN switch on) stays private — rebinding
+  on a later answer is `rebinding`;
+- resolves through a bounded pool: one lookup per name in flight (others
+  wait for it), at most `DOMAIN_LOOKUPS` per registrable-looking domain
+  (`dns_busy` past that), `RESOLVE_TIMEOUT_S` each — a page aiming lookups at
+  a black-holed name server cannot starve every other tab;
+- allows public addresses and the loopback ports the owner opened, then
+  pipes bytes both ways.
 
 It logs and counts the class of each refusal, never a host, a port or a URL.
 It binds loopback only and asks no credentials: any program running as the
@@ -42,7 +65,7 @@ import ipaddress
 import logging
 import socket
 import threading
-from collections import Counter
+from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
@@ -51,8 +74,15 @@ from . import policy
 LOG = logging.getLogger("jarvis.v2.browser.gate")
 
 HANDSHAKE_TIMEOUT_S = 10.0
-RESOLVE_TIMEOUT_S = 10.0
+RESOLVE_TIMEOUT_S = 5.0
 CONNECT_TIMEOUT_S = 15.0
+# DNS on worker threads: a getaddrinfo the gate has stopped waiting for still
+# holds its thread until glibc gives up, so the pool is sized for the worst
+# case and each domain may hold only a few of its threads at once.
+DNS_WORKERS = 32
+DOMAIN_LOOKUPS = 2
+# Names whose address class is pinned, oldest forgotten first.
+PIN_CAP = 8192
 # Once one direction of a piped connection has ended, the other must keep
 # moving: a server that never answers a half-close is dropped after this.
 HALF_CLOSED_IDLE_S = 60.0
@@ -108,19 +138,27 @@ class Gate:
     Playwright loop and a busy page never delays the gate's judgement.
 
     `refused()` returns the port set to refuse (read per connection);
-    `lan()` the LAN switch (read per connection). `resolver(name, port) ->
+    `lan()` the LAN switch, and `loopback(port)` whether the owner opened
+    that loopback port (both read per connection). `resolver(name, port) ->
     [address]` is called at most once per connection, on a worker thread;
     `connector(address, port) -> (reader, writer)` is awaited for each
     allowed address in turn."""
 
     def __init__(self, *, refused: Callable[[], frozenset[int]] = frozenset,
-                 lan: Callable[[], bool] = lambda: False, resolver=None, connector=None,
-                 max_connections: int = MAX_CONNECTIONS):
+                 lan: Callable[[], bool] = lambda: False,
+                 loopback: Callable[[int], bool] = lambda port: False,
+                 resolver=None, connector=None, max_connections: int = MAX_CONNECTIONS):
         self._refused = refused
         self._lan = lan
+        self._loopback = loopback
         self._resolver = resolver or default_resolve
         self._connector = connector or default_connect
         self._max = max_connections
+        # name -> "public" | "private", the class it first resolved to.
+        self._pins: OrderedDict[str, str] = OrderedDict()
+        # name -> the lookup in flight (gate loop only); domain -> threads busy.
+        self._lookups: dict[str, asyncio.Future] = {}
+        self._domain_busy: Counter = Counter()
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._thread: threading.Thread | None = None
@@ -150,7 +188,8 @@ class Gate:
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
-        self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="jarvis-browser-dns")
+        self._executor = ThreadPoolExecutor(max_workers=DNS_WORKERS,
+                                            thread_name_prefix="jarvis-browser-dns")
         try:
             self._server = loop.run_until_complete(
                 asyncio.start_server(self._client, "127.0.0.1", 0, limit=2 * CHUNK))
@@ -310,22 +349,35 @@ class Gate:
         kind, literal = policy.host_kind(name)
         if kind == "bad":
             raise Refusal(policy.BAD_REQUEST)
+        key = name.lower().rstrip(".")
         if kind == "literal":
             candidates = [literal]
         elif kind == "loopback_name":
             candidates = [ipaddress.IPv4Address("127.0.0.1"), ipaddress.IPv6Address("::1")]
         else:
-            candidates = await self._resolve(name, port)
+            candidates = await self._resolve(key, port)
         lan = bool(self._lan())
+        loopback_open = bool(self._loopback(port))
+        pinned = self._pins.get(key) if kind == "name" else None
         allowed, first = [], None
         for ip in candidates:
-            reason = policy.judge_address(ip, via=kind, lan=lan)
+            reason = policy.judge_address(ip, via=kind, lan=lan, loopback_open=loopback_open)
+            if reason is None and pinned is not None and policy.address_class(ip) != pinned:
+                reason = policy.REBINDING
             if reason is None:
                 allowed.append(ip)
             elif first is None:
                 first = reason
         if not allowed:
             raise Refusal(first or policy.UNRESOLVABLE)
+        if kind == "name" and pinned is None:
+            # The first answer this name was allowed on decides its class
+            # for the gate's lifetime; a mixed answer keeps that class only.
+            pin = policy.address_class(allowed[0])
+            allowed = [ip for ip in allowed if policy.address_class(ip) == pin]
+            self._pins[key] = pin
+            while len(self._pins) > PIN_CAP:
+                self._pins.popitem(last=False)
         for ip in allowed:
             try:
                 return await self._connector(str(ip), port)
@@ -335,11 +387,47 @@ class Gate:
 
     async def _resolve(self, name: str, port: int) -> list:
         """The name's addresses, from one call to the resolver. Never called
-        again for this connection: what is judged is what is connected to."""
+        again for this connection: what is judged is what is connected to.
+
+        Bounded (review of PR #69): connections asking for the same name at
+        once share one lookup; a domain (its last two labels) may hold at
+        most `DOMAIN_LOOKUPS` worker threads — counted until the resolver
+        really returns, not until the gate stops waiting — and is refused
+        `dns_busy` past that; and the gate waits `RESOLVE_TIMEOUT_S`."""
         loop = asyncio.get_running_loop()
+        future = self._lookups.get(name)
+        if future is None:
+            domain = ".".join(name.split(".")[-2:])
+            with self._lock:
+                if self._domain_busy[domain] >= DOMAIN_LOOKUPS:
+                    busy = True
+                else:
+                    busy = False
+                    self._domain_busy[domain] += 1
+            if busy:
+                raise Refusal(policy.DNS_BUSY, REP_HOST_UNREACHABLE)
+
+            def lookup():
+                try:
+                    return self._resolver(name, port)
+                finally:
+                    with self._lock:
+                        self._domain_busy[domain] -= 1
+                        if self._domain_busy[domain] <= 0:
+                            del self._domain_busy[domain]
+
+            future = loop.run_in_executor(self._executor, lookup)
+            self._lookups[name] = future
+
+            def finished(done, n=name):
+                if self._lookups.get(n) is done:
+                    del self._lookups[n]
+                if not done.cancelled():
+                    done.exception()        # retrieved: nobody may be waiting any more
+
+            future.add_done_callback(finished)
         try:
-            found = await asyncio.wait_for(
-                loop.run_in_executor(self._executor, self._resolver, name, port), RESOLVE_TIMEOUT_S)
+            found = await asyncio.wait_for(asyncio.shield(future), RESOLVE_TIMEOUT_S)
         except (OSError, asyncio.TimeoutError, UnicodeError, ValueError):
             raise Refusal(policy.UNRESOLVABLE, REP_HOST_UNREACHABLE) from None
         out = []
