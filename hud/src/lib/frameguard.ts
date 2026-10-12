@@ -31,11 +31,18 @@ export function frameKey(pane: number, tab: number): string {
   return `${pane}:${tab}`;
 }
 
-/** The latest key pressed in the HUD (never a lone modifier). */
-export interface KeyMark {
-  /** Tab or Shift+Tab, with no Ctrl, Alt or Meta. */
-  tab: boolean;
+/**
+ * The latest key pressed in the HUD, when it was Tab or Shift+Tab (review of
+ * PR #78, M1). A Tab counts only if it moved focus — a keydown something
+ * cancelled (Monaco indents, a card cycles its own buttons) moved none — and
+ * only for the frame focus landed in, read just after the key's own task.
+ */
+export interface TabMark {
   at: number;
+  /** The keydown was cancelled: it moved no focus. Read when judged (final once dispatched). */
+  prevented: () => boolean;
+  /** Where focus landed: undefined until read, then that frame, or null for anything else. */
+  landed?: unknown;
 }
 
 /** Keys that only modify another: pressing one is not "the owner typed something". */
@@ -44,15 +51,21 @@ export function isModifierKey(key: string): boolean {
     || key === "CapsLock" || key === "Fn" || key === "OS";
 }
 
-/** What a keydown leaves as the latest key, or null for a lone modifier (it leaves the mark as it was). */
-export function keyMark(e: { key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean }, at: number): KeyMark | null {
-  if (isModifierKey(e.key)) return null;
-  return { tab: e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey, at };
+/** Tab or Shift+Tab, with no Ctrl, Alt or Meta. */
+export function isTabKey(e: { key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean }): boolean {
+  return e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey;
 }
 
-/** The latest key was Tab or Shift+Tab, at most TAB_MS ago. */
-export function tabGesture(last: KeyMark | null, now: number): boolean {
-  return !!last && last.tab && now - last.at >= 0 && now - last.at <= TAB_MS;
+/**
+ * Did the owner's Tab put the keyboard in `frame`? A Tab at most TAB_MS ago,
+ * not cancelled, and either still in its own task (where it landed is not
+ * read yet, so the frame gaining focus now is where it landed) or landed in
+ * exactly this frame.
+ */
+export function tabGesture(t: TabMark | null, frame: unknown, now: number): boolean {
+  if (!t || now - t.at < 0 || now - t.at > TAB_MS) return false;
+  if (t.prevented()) return false;
+  return t.landed === undefined || t.landed === frame;
 }
 
 /** The owner's own load of one frame: when they asked, and when that frame fired `load`. */

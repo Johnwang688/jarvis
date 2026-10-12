@@ -585,7 +585,10 @@ document.getElementById("origin").textContent = String(self.origin);
 #   /focus-timer  calls window.focus() and its input's focus() every `every`
 #                 ms (400), starting `after` ms (0) after it loads;
 #   /focus-load   focuses once on its `load` event;
-#   /focus-none   never focuses itself (it only logs keys).
+#   /focus-none   never focuses itself (it only logs keys; `grab()` from a test);
+#   /focus-pointer grabs on the first pointer event it sees (move, over, wheel);
+#   /focus-reload reloads itself every 400 ms and grabs once, `grab` ms (4000)
+#                 after its first load (`t0` rides in the query).
 # `?delay=N` holds the response N ms (at most 5000), so a page can arrive
 # while the owner is typing.
 FOCUS_PAGE = """<!doctype html><meta charset="utf-8"><title>mock focus page</title>
@@ -595,7 +598,7 @@ const q = new URLSearchParams(location.search);
 let n = 0;
 document.addEventListener("keydown", (e) => {
   n += 1;
-  new Image().src = "/keys?p=" + encodeURIComponent(location.pathname) + "&n=" + n + "&k=" + encodeURIComponent(e.key);
+  new Image().src = "/keys?p=" + encodeURIComponent(location.pathname + location.search) + "&n=" + n + "&k=" + encodeURIComponent(e.key);
 }, true);
 const grab = () => { window.focus(); document.getElementById("i").focus(); };
 const mode = %(mode_js)s;
@@ -604,6 +607,18 @@ if (mode === "focus-load") window.addEventListener("load", grab);
 if (mode === "focus-timer") window.addEventListener("load", () => {
   setTimeout(() => { grab(); setInterval(grab, Number(q.get("every") || 400)); }, Number(q.get("after") || 0));
 });
+if (mode === "focus-pointer") {
+  let done = false;
+  const once = () => { if (!done) { done = true; grab(); } };
+  for (const t of ["pointermove", "pointerover", "mousemove", "wheel"]) addEventListener(t, once, true);
+}
+if (mode === "focus-reload") {
+  const t0 = Number(q.get("t0") || Date.now());
+  if (Date.now() - t0 >= Number(q.get("grab") || 4000)) grab();
+  else setTimeout(() => {
+    const u = new URL(location.href); u.searchParams.set("t0", String(t0)); location.replace(u.toString());
+  }, 400);
+}
 </script>
 """
 
@@ -1349,7 +1364,8 @@ class MockDaemon:
                     self.send_header("Cache-Control", "no-store")
                     self.end_headers()
                     return
-                if route in ("/focus-mount", "/focus-timer", "/focus-load", "/focus-none"):
+                if route in ("/focus-mount", "/focus-timer", "/focus-load", "/focus-none", "/focus-pointer",
+                             "/focus-reload"):
                     args = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
                     try:
                         delay = min(max(int(args.get("delay", "0")), 0), 5000)

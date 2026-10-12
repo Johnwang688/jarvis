@@ -91,7 +91,8 @@ def browser_checks(browser, mock, base, check, until, guard, init_script):
                         _workshop_hijack_checks, _served_under_checks, _split_checks, _rename_checks,
                         _guard_mount_checks, _guard_timer_checks, _guard_hidden_checks, _guard_card_checks,
                         _guard_frame_to_frame_checks, _guard_parked_pointer_checks, _guard_gesture_checks,
-                        _guard_reload_checks):
+                        _guard_reload_checks, _guard_refocus_checks, _guard_giveback_checks, _guard_tab_checks,
+                        _guard_typing_pointer_checks, _guard_survivor_checks):
             # `BROWSER_ONLY=guard` runs just the sections whose name holds it.
             if os.environ.get("BROWSER_ONLY") and os.environ["BROWSER_ONLY"] not in section.__name__:
                 continue
@@ -485,6 +486,8 @@ INPUT1 = _pane(1, '[data-testid="input"]')
 STOLEN = _pane(2, '[data-testid="browser-stolen"]')
 RELOAD = _pane(2, '[data-testid="browser-stolen-reload"]')
 SHIELD = _pane(2, '[data-testid="browser-shield"]')
+FRAME3 = _pane(3, '[data-testid="browser-frame"]')
+STOLEN3 = _pane(3, '[data-testid="browser-stolen"]')
 
 
 def _focus_url(mock, mode: str, **q) -> str:
@@ -644,6 +647,7 @@ def _guard_card_checks(page, mock, check, until):
     keys = len(mock.dev_keys)
     _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-timer", after=2500)})
     until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _blur(page)
     x, y = _centre(page, FRAME)
     page.mouse.move(x - 20, y - 20)
     page.mouse.move(x, y)
@@ -681,7 +685,7 @@ def _guard_card_checks(page, mock, check, until):
 def _guard_frame_to_frame_checks(page, mock, check, until):
     """The keyboard already in a page the owner clicked into (so the HUD
     window is already blurred and no `blur` fires): another page grabbing it
-    is removed, and focus returns to the HUD element the owner last used."""
+    is removed, and focus goes to nothing that types (review of PR #78, H1)."""
     keys = len(mock.dev_keys)
     plain = _focus_url(mock, "focus-none")
     url = _focus_url(mock, "focus-timer", after=3500)
@@ -711,42 +715,270 @@ def _guard_frame_to_frame_checks(page, mock, check, until):
     check("R-1: the page in pane 3 grabbing the keyboard from pane 2's is removed",
           _count(page, frame3) == 0 and _count(page, _pane(3, '[data-testid="browser-stolen"]')) == 1)
     check("R-1: the page in pane 2 is untouched", _count(page, FRAME) == 1)
-    check("R-1: focus returns to the HUD element the owner last used (the chat box)",
-          _active_testid(page) == "input", str(_active_testid(page)))
+    check("H1: focus goes to the notice, not back to the chat box the owner left for the page",
+          _active_testid(page) == "browser-stolen", str(_active_testid(page)))
     page.keyboard.type("cd", delay=30)
     page.wait_for_timeout(300)
-    check("R-1: the next keys land there", box.input_value() == "cd", repr(box.input_value()))
+    check("H1: the next keys land in no box", box.input_value() == "", repr(box.input_value()))
     check("R-1: and the grabbing page's server received none",
           not any("focus-timer" in k for k in mock.dev_keys[keys:]), str(mock.dev_keys[keys:]))
 
 
 def _guard_parked_pointer_checks(page, mock, check, until):
     """A pointer left resting over a page stops counting at the owner's first
-    key in the HUD (a decision narrower than the plan's stated limit)."""
+    key in the HUD (a decision narrower than the plan's stated limit). With
+    nothing focused, so it is the key rule and not M2's text-control rule."""
     keys = len(mock.dev_keys)
     _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-timer", after=1500)})
     until(lambda: _count(page, FRAME) > 0, timeout=4)
-    _away(page)
-    box = page.locator(INPUT1)
-    box.click()
-    box.fill("")
+    _blur(page)
     x, y = _centre(page, FRAME)
     page.mouse.move(x - 20, y - 20)
     page.mouse.move(x, y)
     until(lambda: page.locator(SHIELD).get_attribute("data-up") == "false", timeout=2)
     check("setup: the pointer rests over the page (its shield stepped aside)",
           page.locator(SHIELD).get_attribute("data-up") == "false")
-    text = _letters(50, start=3)
-    page.keyboard.type(text[:1])
+    page.keyboard.press("x")
     check("the owner's first key in the HUD brings the shield back",
           page.locator(SHIELD).get_attribute("data-up") == "true" if _count(page, SHIELD) else False)
-    page.keyboard.type(text[1:], delay=60)
+    page.keyboard.type(_letters(40, start=3), delay=60)
     until(lambda: _count(page, STOLEN) > 0, timeout=4)
     page.wait_for_timeout(200)
     check("R-1: a page grabbing focus under a parked pointer while the owner types is removed",
           _count(page, FRAME) == 0 and _count(page, STOLEN) == 1)
-    check("R-1: the chat box holds every key", box.input_value() == text, repr(box.input_value()))
     check("R-1: the page's server received none", mock.dev_keys[keys:] == [], str(mock.dev_keys[keys:][:5]))
+
+
+def _blur(page):
+    """Nothing in the HUD has the keyboard (no text control: M2's rule is off)."""
+    page.evaluate("document.activeElement && document.activeElement.blur && document.activeElement.blur()")
+
+
+def _three(page, mock, until, a: str, b: str):
+    raw = json.dumps({"preset": "cols3", "focused": 1,
+                      "panes": [{"view": "chat"}, {"view": "browser", "browserUrl": a},
+                                {"view": "browser", "browserUrl": b}, {"view": "task"}]})
+    page.set_viewport_size({"width": 2400, "height": 1000})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, raw)
+    _boot(page, mock, None, until, reload=True)
+    until(lambda: _count(page, FRAME) > 0 and _count(page, FRAME3) > 0, timeout=5)
+    page.wait_for_timeout(300)
+
+
+def _grab(page, sel: str, delay_ms: int = 0):
+    """The page in `sel` takes the keyboard by itself, after `delay_ms` (never
+    inside Playwright's own call: the guard may remove the frame mid-call)."""
+    page.locator(sel).first.element_handle().content_frame().evaluate(f"setTimeout(grab, {delay_ms})")
+
+
+def _click_into(page, until, sel: str = None) -> bool:
+    x, y = _centre(page, sel or FRAME)
+    page.mouse.move(x - 10, y)
+    page.mouse.click(x, y)
+    return bool(until(lambda: _active_frame(page) == ("2:0" if sel in (None, FRAME) else "3:0"), timeout=3))
+
+
+def _guard_refocus_checks(page, mock, check, until):
+    """H1, the reviewer's exact scenario: a draft in the chat box, the owner
+    clicks into page A and types a login, page B grabs. The owner's next keys
+    — a password and Enter — must not land in the chat box and be sent."""
+    _three(page, mock, until, _focus_url(mock, "focus-none", who="XA"), _focus_url(mock, "focus-none", who="XB"))
+    _away(page)
+    box = page.locator(INPUT1)
+    box.click()
+    box.fill("")
+    page.keyboard.type("draft question", delay=20)
+    check("setup: a click put the keyboard in page A", _click_into(page, until), str(_active_frame(page)))
+    page.keyboard.type("username", delay=40)
+    calls = len(mock.calls)
+    keys = len(mock.dev_keys)
+    _grab(page, FRAME3)
+    until(lambda: _count(page, STOLEN3) > 0, timeout=3)
+    page.wait_for_timeout(100)
+    where = _active_testid(page)
+    page.keyboard.type("hunter2", delay=60)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(600)
+    posts = [(p, b) for m, p, b in mock.calls[calls:] if m == "POST"]
+    check("H1: B is removed, and focus goes to its notice, not the chat box", _count(page, FRAME3) == 0
+          and where == "browser-stolen", f"focus={where}")
+    check("H1: nothing is sent: no POST carries the owner's next keys",
+          "hunter2" not in json.dumps([b for _, b in posts]), str(posts[:3]))
+    check("H1: the chat box's draft is unchanged", box.input_value() == "draft question", repr(box.input_value()))
+    check("H1: and B's server received none", not any("XB" in k for k in mock.dev_keys[keys:]), str(mock.dev_keys[keys:]))
+
+
+def _guard_giveback_checks(page, mock, check, until):
+    """H2: a card answered gives page A the keyboard back — through its
+    window, never an element focus — so B grabbing 600 ms later is seen."""
+    _three(page, mock, until, _focus_url(mock, "focus-none", who="GA"), _focus_url(mock, "focus-none", who="GB"))
+    _away(page)
+    check("setup: a click put the keyboard in page A", _click_into(page, until), str(_active_frame(page)))
+    _approval(mock, "guard3")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(200)
+    check("setup: the card gave page A the keyboard back", _active_frame(page) == "2:0", str(_active_frame(page)))
+    keys = len(mock.dev_keys)
+    _grab(page, FRAME3, 600)
+    page.wait_for_timeout(900)
+    page.keyboard.type("secret", delay=50)
+    page.wait_for_timeout(300)
+    check("H2: B grabbing 600 ms after the give-back is removed",
+          _count(page, FRAME3) == 0 and _count(page, STOLEN3) == 1, f"stolen={_count(page, STOLEN3)}")
+    check("H2: and gets none of the owner's keys", not any("GB" in k for k in mock.dev_keys[keys:]),
+          str(mock.dev_keys[keys:]))
+
+
+def _guard_tab_checks(page, mock, check, until):
+    """M1: a Tab counts only when it moved focus, and only into the frame it
+    moved it into."""
+    # Monaco indents with Tab (the keydown is cancelled); the page grabs 120 ms later.
+    url = _focus_url(mock, "focus-none", who="TM")
+    raw = json.dumps({"preset": "cols3", "focused": 3,
+                      "panes": [{"view": "chat"}, {"view": "browser", "browserUrl": url},
+                                {"view": "file", "projectId": "p1",
+                                 "editors": {"paths": [".env"], "active": ".env", "preview": None}},
+                                {"view": "task"}]})
+    page.set_viewport_size({"width": 2400, "height": 1000})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, raw)
+    _boot(page, mock, None, until, reload=True)
+    lines3 = _pane(3, '[data-testid="editor"] .view-lines')
+    until(lambda: page.locator(_pane(3, '[data-testid="editor"][data-language]')).count() > 0, timeout=10)
+    until(lambda: _count(page, FRAME) > 0, timeout=5)
+    _away(page)
+    page.locator(lines3).click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("KEY=", delay=40)
+    keys = len(mock.dev_keys)
+    page.keyboard.press("Tab")
+    _grab(page, FRAME, 120)
+    page.wait_for_timeout(250)
+    page.keyboard.type("supersecretvalue", delay=40)
+    page.wait_for_timeout(300)
+    check("M1: Monaco's Tab indent is no gesture: the page grabbing 120 ms later is removed",
+          _count(page, FRAME) == 0 and _count(page, STOLEN) == 1, f"stolen={_count(page, STOLEN)}")
+    check("M1: and the value typed after it reaches the editor, not the page",
+          mock.dev_keys[keys:] == [] and "supersecretvalue" in page.locator(lines3).inner_text(),
+          str(mock.dev_keys[keys:][:3]))
+
+    # Tab in the chat box moves focus to Send; the page grabs 100 ms later.
+    _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-none", who="TS")})
+    until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _away(page)
+    box = page.locator(INPUT1)
+    box.click()
+    box.fill("")
+    page.keyboard.type("ab", delay=40)
+    page.keyboard.press("Tab")
+    landed = _active_testid(page)
+    keys = len(mock.dev_keys)
+    _grab(page, FRAME, 100)
+    page.wait_for_timeout(250)
+    page.keyboard.type("xyz", delay=40)
+    page.wait_for_timeout(300)
+    check("M1: a Tab that moved focus to Send is no gesture: the page grabbing 100 ms later is removed",
+          _count(page, FRAME) == 0 and _count(page, STOLEN) == 1 and mock.dev_keys[keys:] == [],
+          f"tab landed on {landed}; stolen={_count(page, STOLEN)} keys={mock.dev_keys[keys:][:3]}")
+
+    # Tab into page A; page B grabs within 300 ms.
+    _three(page, mock, until, _focus_url(mock, "focus-none", who="TA"), _focus_url(mock, "focus-none", who="TB"))
+    _away(page)
+    page.locator(_pane(2, '[data-testid="browser-url"]')).click()
+    for _ in range(8):
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(40)
+        if _active_frame(page):
+            break
+    check("setup: a Tab put the keyboard in page A", _active_frame(page) == "2:0", str(_active_frame(page)))
+    keys = len(mock.dev_keys)
+    _grab(page, FRAME3, 30)
+    page.wait_for_timeout(250)
+    page.keyboard.type("secret", delay=40)
+    page.wait_for_timeout(300)
+    check("M1: a Tab into page A is no gesture for page B grabbing within 300 ms: B is removed",
+          _count(page, FRAME3) == 0 and _count(page, STOLEN3) == 1
+          and not any("TB" in k for k in mock.dev_keys[keys:]), f"stolen={_count(page, STOLEN3)}")
+
+
+def _guard_typing_pointer_checks(page, mock, check, until):
+    """M2: while a HUD text control has the keyboard, only a press on a page
+    gives it the keyboard; a pointer crossing it never does."""
+    keys = len(mock.dev_keys)
+    _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-pointer")})
+    until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _away(page)
+    box = page.locator(INPUT1)
+    box.click()
+    box.fill("")
+    page.keyboard.type("hello ", delay=50)
+    x, y = _centre(page, FRAME)
+    sx, sy = _centre(page, '[data-testid="sidebar"]')
+    page.mouse.move(x - 300, y)
+    page.mouse.move(x + 300, y, steps=8)
+    page.mouse.move(sx, sy, steps=4)
+    page.keyboard.type("my secret words", delay=50)
+    page.wait_for_timeout(400)
+    check("M2: a pointer crossing a page mid-typing never gives it the keyboard: the box keeps every key",
+          box.input_value() == "hello my secret words" and mock.dev_keys[keys:] == [],
+          f"box={box.input_value()!r} keys={mock.dev_keys[keys:][:3]}")
+    check("M2: the page never held the keyboard", _active_frame(page) is None, str(_active_frame(page)))
+
+    # Click then type, from the chat box: the click puts the keyboard in the page.
+    _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-none", who="CT")})
+    until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _away(page)
+    box = page.locator(INPUT1)
+    box.click()
+    box.fill("")
+    page.keyboard.type("ab", delay=40)
+    keys = len(mock.dev_keys)
+    x, y = _centre(page, FRAME)
+    page.mouse.move(x - 10, y)
+    page.mouse.click(x, y)
+    until(lambda: _active_frame(page) == "2:0", timeout=3)
+    page.keyboard.type("xyz", delay=40)
+    until(lambda: len(mock.dev_keys) - keys >= 3, timeout=3)
+    check("M2: from the chat box, a click puts the keyboard in the page and the keys typed after reach it",
+          _active_frame(page) == "2:0" and len(mock.dev_keys) - keys == 3 and box.input_value() == "ab"
+          and _count(page, STOLEN) == 0, f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
+
+
+def _guard_survivor_checks(page, mock, check, until):
+    """The review's two surviving mutants: a page reloading itself must not
+    keep the owner's load alive; a page the owner once clicked into must not
+    re-grab from the chat box later."""
+    _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-none")})
+    until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _away(page)
+    url_box = page.locator(_pane(2, '[data-testid="browser-url"]'))
+    url_box.click()
+    url_box.fill(_focus_url(mock, "focus-reload", grab=4000))
+    url_box.press("Enter")
+    page.wait_for_timeout(5500)
+    check("LOW: a page reloading itself does not keep the owner's load alive: its grab at 4 s is removed",
+          _count(page, FRAME) == 0 and _count(page, STOLEN) == 1, f"stolen={_count(page, STOLEN)}")
+
+    _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-none", who="LA")})
+    until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _away(page)
+    check("setup: a click put the keyboard in the page", _click_into(page, until), str(_active_frame(page)))
+    page.keyboard.type("in", delay=40)
+    _away(page)
+    box = page.locator(INPUT1)
+    box.click()
+    box.fill("")
+    keys = len(mock.dev_keys)
+    _grab(page, FRAME, 600)
+    page.keyboard.type(_letters(20), delay=60)
+    page.wait_for_timeout(300)
+    check("LOW: a page the owner once clicked into, re-grabbing after they left it, is removed",
+          _count(page, STOLEN) == 1 and mock.dev_keys[keys:] == [] and box.input_value() == _letters(20),
+          f"stolen={_count(page, STOLEN)} keys={mock.dev_keys[keys:][:3]} box={box.input_value()!r}")
 
 
 def _guard_gesture_checks(page, mock, check, until):
@@ -799,9 +1031,11 @@ def _guard_gesture_checks(page, mock, check, until):
           _active_frame(page) == "2:0" and _count(page, STOLEN) == 0 and len(mock.dev_keys) - keys == 2,
           f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
 
-    # The pointer over a page that grabs focus on a timer.
+    # The pointer over a page that grabs focus on a timer (no text control
+    # has the keyboard: with one, only a click counts — M2, below).
     _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-timer", after=800)})
     until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _blur(page)
     x, y = _centre(page, FRAME)
     page.mouse.move(x - 20, y - 20)
     page.mouse.move(x, y)

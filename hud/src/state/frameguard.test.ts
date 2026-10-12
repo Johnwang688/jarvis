@@ -19,6 +19,7 @@ interface Made {
   shield: HTMLElement;
   host: HTMLElement;
   stolen: number;
+  focusNotice: boolean | null;
   off: () => void;
 }
 
@@ -31,10 +32,10 @@ function frameIn(pane: number, opts: { drawn?: boolean; register?: boolean } = {
   frame.src = "about:blank";
   (frame as any).getClientRects = () => [{ width: 10, height: 10 }];
   const shield = document.createElement("div");
-  const made: Made = { frame, shield, host, stolen: 0, off: () => {} };
+  const made: Made = { frame, shield, host, stolen: 0, focusNotice: null, off: () => {} };
   made.off = registerFrame({
     frame, shield, host, key: `${pane}:0`, pane, slot: () => pane,
-    drawn: () => opts.drawn ?? true, onStolen: () => { made.stolen += 1; },
+    drawn: () => opts.drawn ?? true, onStolen: (n) => { made.stolen += 1; made.focusNotice = n; },
   });
   host.append(frame, shield);
   section.append(host);
@@ -90,17 +91,28 @@ describe("a frame that takes focus with no gesture", () => {
     expect(frameGuardProbe().frames).toEqual([]);
   });
 
-  it("with nothing focused before, gives focus to the selected chat's box", () => {
+  it("with nothing that lost focus to it, focuses nothing that types, and asks the notice to take focus (H1)", () => {
     const f = frameIn(2);
     f.frame.focus();
     expect(f.frame.isConnected).toBe(false);
-    expect(document.activeElement).toBe(box());
+    expect(document.activeElement).toBe(document.body);
+    expect(f.focusNotice).toBe(true);
+  });
+
+  it("gives focus back only to what lost it to this theft, never to an element that had it earlier (H1)", () => {
+    box().focus();
+    const other = document.querySelector('[data-testid="other"]') as HTMLElement;
+    other.focus(); // the box had it, then the button
+    const f = frameIn(2);
+    f.frame.focus();
+    expect(document.activeElement).toBe(other);
+    expect(f.focusNotice).toBe(false);
   });
 });
 
 describe("the owner's gestures", () => {
   it("the pointer over the frame (seen on its shield) lets it keep focus", () => {
-    box().focus();
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus(); // no text control has the keyboard
     const f = frameIn(2);
     pointer("pointermove", f.shield);
     expect(f.shield.style.pointerEvents).toBe("none");
@@ -128,15 +140,51 @@ describe("the owner's gestures", () => {
     expect(f.frame.isConnected).toBe(false);
   });
 
-  it("a key typed in the HUD stops a resting pointer counting", () => {
+  it("while a text control has the keyboard, a move or a wheel over a page never counts (M2)", () => {
     box().focus();
     const f = frameIn(2);
     pointer("pointermove", f.shield);
-    key("a");
+    pointer("wheel", f.shield);
     expect(f.shield.style.pointerEvents).toBe("auto");
     f.frame.focus();
     expect(f.frame.isConnected).toBe(false);
     expect(document.activeElement).toBe(box());
+  });
+
+  it("while a text control has the keyboard, a press puts the keyboard in the page, from the HUD (M2)", () => {
+    box().focus();
+    const f = frameIn(2);
+    let focused = 0;
+    Object.defineProperty(f.frame, "contentWindow", { value: { focus: () => { focused += 1; } } });
+    const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+    f.shield.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    expect(focused).toBe(1);
+    expect(f.shield.style.pointerEvents).toBe("none");
+    f.frame.focus();
+    expect(f.frame.isConnected).toBe(true);
+  });
+
+  it("focus arriving on a text control brings a resting pointer's shield back (M2)", () => {
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus();
+    const f = frameIn(2);
+    pointer("pointermove", f.shield);
+    expect(f.shield.style.pointerEvents).toBe("none");
+    box().focus();
+    expect(f.shield.style.pointerEvents).toBe("auto");
+  });
+
+  it("a key typed in the HUD stops a resting pointer counting", () => {
+    const other = document.querySelector('[data-testid="other"]') as HTMLElement;
+    other.focus();
+    const f = frameIn(2);
+    pointer("pointermove", f.shield);
+    expect(f.shield.style.pointerEvents).toBe("none");
+    key("a");
+    expect(f.shield.style.pointerEvents).toBe("auto");
+    f.frame.focus();
+    expect(f.frame.isConnected).toBe(false);
+    expect(document.activeElement).toBe(other);
   });
 
   it("the window losing focus to another program stops a pointer last seen over a page counting", () => {
@@ -164,6 +212,49 @@ describe("the owner's gestures", () => {
     t += TAB_MS + 1;
     g.frame.focus();
     expect(g.frame.isConnected).toBe(false);
+  });
+
+  it("a Tab something cancelled (Monaco indenting) is no gesture (M1)", () => {
+    box().focus();
+    const f = frameIn(2);
+    const stop = (e: Event) => e.preventDefault();
+    window.addEventListener("keydown", stop);
+    key("Tab", { cancelable: true });
+    window.removeEventListener("keydown", stop);
+    t += 120;
+    f.frame.focus();
+    expect(f.frame.isConnected).toBe(false);
+  });
+
+  it("a Tab counts only for the frame it landed in (M1)", async () => {
+    box().focus();
+    const f = frameIn(2);
+    key("Tab"); // it lands on the chat box's neighbour, not a frame
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus();
+    await new Promise((r) => setTimeout(r, 5));
+    t += 100;
+    f.frame.focus();
+    expect(f.frame.isConnected).toBe(false);
+
+    box().focus();
+    const a = frameIn(2);
+    const b = frameIn(3);
+    key("Tab");
+    a.frame.focus(); // the Tab's own move into A
+    expect(a.frame.isConnected).toBe(true);
+    await new Promise((r) => setTimeout(r, 5));
+    t += 50;
+    b.frame.focus(); // B grabs within TAB_MS
+    expect(b.frame.isConnected).toBe(false);
+  });
+
+  it("where a Tab landed is the first place focus went, so a grab right after it is no Tab (M1)", () => {
+    box().focus();
+    const b = frameIn(3);
+    key("Tab");
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus(); // the Tab's own move
+    b.frame.focus(); // B grabs in the same breath
+    expect(b.frame.isConnected).toBe(false);
   });
 
   it("the owner's own load, until LOAD_GRACE_MS after the frame's load", () => {
@@ -276,17 +367,20 @@ describe("the HUD giving focus back after a card", () => {
 });
 
 describe("frame to frame", () => {
-  it("a frame grabbing focus from one the owner put it in goes; focus returns to the HUD element last used", () => {
+  it("a frame grabbing focus from one the owner put it in goes, and focus goes to nothing that types (H1)", () => {
+    box().value = "a draft";
     box().focus();
     const a = frameIn(2);
     const b = frameIn(3);
-    pointer("pointermove", a.shield);
+    const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+    a.shield.dispatchEvent(down); // the owner clicks into page A from the chat box
     a.frame.focus();
     expect(document.activeElement).toBe(a.frame);
     b.frame.focus();
     expect(b.frame.isConnected).toBe(false);
     expect(a.frame.isConnected).toBe(true);
-    expect(document.activeElement).toBe(box());
+    expect(document.activeElement).not.toBe(box());
+    expect(b.focusNotice).toBe(true);
   });
 
   it("the check alone (the belt) catches a frame that took focus with no event", () => {
@@ -300,8 +394,8 @@ describe("frame to frame", () => {
     expect(f.frame.isConnected).toBe(false);
   });
 
-  it("a held frame that stops being drawn gives the keyboard back, and is not removed", () => {
-    box().focus();
+  it("a held frame that stops being drawn loses the keyboard to nothing that types, and is not removed", () => {
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus();
     let drawn = true;
     const section = document.querySelector('[data-testid="pane-2"]')!;
     const host = document.createElement("div");
@@ -318,6 +412,6 @@ describe("frame to frame", () => {
     drawn = false;
     check();
     expect(frame.isConnected).toBe(true);
-    expect(document.activeElement).toBe(box());
+    expect(document.activeElement).toBe(document.body);
   });
 });

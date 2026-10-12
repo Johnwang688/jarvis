@@ -36,7 +36,7 @@
 // its `load`; a stored URL restored at mount and a terminal's "Open in
 // Browser" are not. Reload loads the same URL again, judged again.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { judgeBrowserUrl, judgeKeepOrigin, keptOrigin, originOf, sandboxFor, workshopUrl } from "../lib/browser";
 import { frameKey } from "../lib/frameguard";
 import { noPointerFocus } from "../lib/talkkey";
@@ -81,6 +81,17 @@ export function BrowserTab(props: {
   // The frame guard removed this tab's page: it took the keyboard (memory
   // only, never stored — the tab and its URL stay).
   const [stolen, setStolen] = useState(false);
+  // When a theft gave focus back to nothing (the keyboard was taken from
+  // another page, review of PR #78 H1), the notice's container takes it —
+  // never its Reload button, and never a box an Enter would send from.
+  const notice = useRef<HTMLDivElement>(null);
+  const noticeWants = useRef(false);
+  useLayoutEffect(() => {
+    if (!stolen || !noticeWants.current) return;
+    noticeWants.current = false;
+    const a = document.activeElement;
+    if (!a || a === document.body) notice.current?.focus({ preventScroll: true });
+  }, [stolen]);
   // Every load asked for is a fresh frame (FrameHost), the same URL included.
   const [load, setLoad] = useState(0);
   const restored = useRef(false);
@@ -210,7 +221,7 @@ export function BrowserTab(props: {
       {src && stolen ? (
         // HUD chrome, React text only: never the page's words, never a card's
         // colours or buttons. Under a card it is disabled (and inert).
-        <div className="pad stolen" data-testid="browser-stolen" role="status">
+        <div className="pad stolen" data-testid="browser-stolen" role="status" tabIndex={-1} ref={notice}>
           <span>This page took the keyboard</span>
           <span aria-hidden="true">·</span>
           <button
@@ -235,7 +246,10 @@ export function BrowserTab(props: {
           sandbox={sandboxFor(!!grant)}
           keepOrigin={!!grant}
           load={load}
-          onStolen={() => setStolen(true)}
+          onStolen={(focusNotice) => {
+            noticeWants.current = focusNotice;
+            setStolen(true);
+          }}
         />
       ) : (
         <div className="pad muted">Nothing loaded.</div>

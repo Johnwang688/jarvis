@@ -36,8 +36,8 @@ export function FrameHost(props: {
   keepOrigin: boolean;
   /** Bumped by every load the pane asks for: a fresh frame each time. */
   load: number;
-  /** The guard removed this frame: it took the keyboard. */
-  onStolen: () => void;
+  /** The guard removed this frame: it took the keyboard (`focusNotice`: nothing got focus back). */
+  onStolen: (focusNotice: boolean) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const latest = useRef(props);
@@ -57,6 +57,17 @@ export function FrameHost(props: {
     // first navigation must already run under the flags.
     frame.setAttribute("sandbox", props.sandbox);
     frame.setAttribute("src", props.src);
+    // Never an element focus (review of PR #78, H2): after `iframe.focus()`
+    // the parent's activeElement stays on this frame even once another frame
+    // takes the keyboard, and the guard goes blind. Every caller — the card's
+    // give-back among them — gets the page's own window focus instead.
+    frame.focus = (() => {
+      try {
+        frame.contentWindow?.focus();
+      } catch {
+        // A frame mid-teardown: nothing to focus.
+      }
+    }) as typeof frame.focus;
     const shield = document.createElement("div");
     shield.className = "frameshield";
     shield.setAttribute("data-testid", "browser-shield");
@@ -69,7 +80,7 @@ export function FrameHost(props: {
       pane: props.pane,
       slot: () => latest.current.slot,
       drawn: () => latest.current.drawn && (latest.current.active ?? true),
-      onStolen: () => latest.current.onStolen(),
+      onStolen: (focusNotice) => latest.current.onStolen(focusNotice),
     });
     el.append(frame, shield);
     return () => {

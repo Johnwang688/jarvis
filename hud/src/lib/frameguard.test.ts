@@ -2,8 +2,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  LOAD_GRACE_MS, LOAD_WAIT_MS, TAB_MS, frameKey, isModifierKey, judgeFocus, keyMark, loadGrantLive, tabGesture,
-  type FocusFacts,
+  LOAD_GRACE_MS, LOAD_WAIT_MS, TAB_MS, frameKey, isModifierKey, isTabKey, judgeFocus, loadGrantLive, tabGesture,
+  type FocusFacts, type TabMark,
 } from "./frameguard";
 
 const none: FocusFacts = { cardUp: false, drawn: true, pointerOver: false, tab: false, ownLoad: false, restore: false };
@@ -38,25 +38,39 @@ describe("judgeFocus", () => {
 describe("Tab", () => {
   const ev = (key: string, mods: Partial<{ ctrlKey: boolean; altKey: boolean; metaKey: boolean }> = {}) =>
     ({ key, ctrlKey: false, altKey: false, metaKey: false, ...mods });
+  const A = { name: "A" };
+  const B = { name: "B" };
+  const mark = (at: number, prevented = false, landed?: unknown): TabMark => ({ at, prevented: () => prevented, landed });
 
-  it("counts Tab and Shift+Tab within TAB_MS, and nothing older", () => {
-    const m = keyMark(ev("Tab"), 1000);
-    expect(tabGesture(m, 1000)).toBe(true);
-    expect(tabGesture(m, 1000 + TAB_MS)).toBe(true);
-    expect(tabGesture(m, 1000 + TAB_MS + 1)).toBe(false);
-    expect(tabGesture(m, 999)).toBe(false);
+  it("counts a Tab within TAB_MS, and nothing older", () => {
+    const m = mark(1000);
+    expect(tabGesture(m, A, 1000)).toBe(true);
+    expect(tabGesture(m, A, 1000 + TAB_MS)).toBe(true);
+    expect(tabGesture(m, A, 1000 + TAB_MS + 1)).toBe(false);
+    expect(tabGesture(m, A, 999)).toBe(false);
+    expect(tabGesture(null, A, 0)).toBe(false);
   });
 
-  it("is not Tab with Ctrl, Alt or Meta, nor any other key", () => {
-    expect(tabGesture(keyMark(ev("Tab", { ctrlKey: true }), 0), 0)).toBe(false);
-    expect(tabGesture(keyMark(ev("Tab", { altKey: true }), 0), 0)).toBe(false);
-    expect(tabGesture(keyMark(ev("Tab", { metaKey: true }), 0), 0)).toBe(false);
-    expect(tabGesture(keyMark(ev("a"), 0), 0)).toBe(false);
-    expect(tabGesture(null, 0)).toBe(false);
+  it("never counts a Tab something cancelled (Monaco indenting): it moved no focus (M1)", () => {
+    expect(tabGesture(mark(0, true), A, 10)).toBe(false);
   });
 
-  it("leaves the mark as it was for a lone modifier (Shift before Tab)", () => {
-    expect(keyMark(ev("Shift"), 5)).toBeNull();
+  it("counts only for the frame the Tab landed in, once that is known (M1)", () => {
+    expect(tabGesture(mark(0, false, A), A, 10)).toBe(true);
+    expect(tabGesture(mark(0, false, A), B, 10)).toBe(false);
+    expect(tabGesture(mark(0, false, null), A, 10)).toBe(false); // it landed on a HUD control
+  });
+
+  it("is Tab or Shift+Tab only: never with Ctrl, Alt or Meta, nor any other key", () => {
+    expect(isTabKey(ev("Tab"))).toBe(true);
+    expect(isTabKey(ev("Tab", { ctrlKey: true }))).toBe(false);
+    expect(isTabKey(ev("Tab", { altKey: true }))).toBe(false);
+    expect(isTabKey(ev("Tab", { metaKey: true }))).toBe(false);
+    expect(isTabKey(ev("a"))).toBe(false);
+  });
+
+  it("a lone modifier is not a key (Shift before Tab)", () => {
+    expect(isModifierKey("Shift")).toBe(true);
     expect(isModifierKey("Control")).toBe(true);
     expect(isModifierKey("Tab")).toBe(false);
   });
