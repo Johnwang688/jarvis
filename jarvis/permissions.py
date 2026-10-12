@@ -219,11 +219,18 @@ def protected_state_verdict(command: str, cwd: str | None = None) -> rules.Verdi
     reach the allowlist — is ASK: those change what he runs on rather than
     what runs unasked, the owner can see and undo the effect, and restoring a
     backup is a legitimate request.
+
+    A write that provably lands on a **credential env file** is DENY too
+    (ENV-1, the owner's `.env*` rule: Jarvis writes only `*.example`); one
+    that only might (a glob, an unknown ending) is ASK.
     """
     touch = protected_state.command_touch(command, cwd)
     if touch is None:
         return None
-    if touch.certain and touch.path in protected_state.gate_paths():
+    # The allowlist, and since ENV-1 a credential env file (the owner's
+    # `.env*` rule; here the folder is known, so a write behind a symlink
+    # counts too): refused, never asked.
+    if protected_state.denies(touch):
         return rules.Verdict(rules.DENY, protected_state.refusal(touch))
     return rules.Verdict(rules.ASK, protected_state.ask_reason(touch))
 

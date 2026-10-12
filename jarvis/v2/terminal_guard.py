@@ -6,10 +6,11 @@ A read is the last `lines` lines of a terminal's normal buffer
 it never says what matched, where, or which rule:
 
 1. **Exact known values.** The text holds a value from
-   `secrets.secret_values()` (every `.env` value and token bundle Jarvis can
-   reach), or one from the terminal folder's own `.env`, `.env.local` and
-   `.env.*` files and its parents' (not `.env.example`, `.env.sample`,
-   `.env.template`), or the base64 of one (any alignment, standard or URL-safe
+   `secrets.secret_values()` (every credential env file's value and token
+   bundle Jarvis can reach), or one from the terminal folder's own credential
+   env files and its parents' (`secrets.env_files_in`: `.env`, `.env.local`,
+   every `.env.*` but a name ending `.example` — the owner's `.env*` rule,
+   ENV-1), or the base64 of one (any alignment, standard or URL-safe
    alphabet) or its URL-encoding.
 2. **Known credential formats** (`jarvis.credential_patterns`) — and a
    private key's block: a read that starts inside a `-----BEGIN … PRIVATE
@@ -177,11 +178,18 @@ def holds_value(text: str, forms) -> bool:
 
 # -- what counts as a credential file here -----------------------------------------------
 
-# `.env.*` is protected for rule 3 here (and its values count for rule 1),
-# beyond v1's `secrets.is_protected`: `.env.production` is exactly the output
-# the owner asked to be denied. Templates stay readable.
-ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
-_ENV_VARIANT = re.compile(r"(?<![\w.\-])\.env\.(?!(?:example|sample|template)(?![\w.\-]))[\w\-][\w.\-]*")
+# Every credential env file is protected for rule 3 here (and its values
+# count for rule 1): v1's `secrets.is_protected` asks the owner's `.env*`
+# rule since ENV-1, so `.env.production` — exactly the output the owner asked
+# to be denied — and `.env.sample`/`.env.template` (the owner's answer Q-1:
+# only `.example` names are open) are credential; `.env.example` stays
+# readable. `_ENV_VARIANT` only marks where a variant is named, for the
+# fail-closed scan (`_HAZARDS`); whether a name is credential is the rule's.
+_ENV_VARIANT = re.compile(r"(?<![\w.\-])\.env\.(?!example(?![\w.\-]))[\w\-][\w.\-]*",
+                          re.IGNORECASE)                 # the rule is (ENV-1 review, LOW-2)
+# A dot-led glob in a word (`cat .e?v.custom`, `ls .*.x`): it can reach a
+# credential env file though no hint is spelled out, so it is never skipped.
+_DOT_GLOB = re.compile(r"(?:^|[\s'\"=:/(<>|;&])\.[^\s/'\"]*[*?\[]")
 
 CREDENTIAL_FILE = re.compile(
     r"(?:^|/)(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.netrc|_netrc|\.git-credentials|\.pgpass"
@@ -195,12 +203,12 @@ _HINTS = (".env", "token.json", "keys.json", "id_rsa", "id_dsa", "id_ecdsa", "id
 
 
 def protected_name(name: str) -> bool:
-    """A path whose contents are a credential: v1's protected names, `.env.*`
-    but the templates, and the `CREDENTIAL_FILE` paths."""
+    """A path whose contents are a credential: v1's protected names (every
+    credential env file among them, by the owner's `.env*` rule) and the
+    `CREDENTIAL_FILE` paths."""
     name = name.strip("\"'")
     base = PurePosixPath(name).name
-    return (v1_secrets.is_protected(base) or (base.startswith(".env.") and base not in ENV_TEMPLATES)
-            or bool(CREDENTIAL_FILE.search(name)))
+    return v1_secrets.is_protected(base) or bool(CREDENTIAL_FILE.search(name))
 
 
 # One compression suffix: `zcat id_rsa.gz` prints the key.
@@ -230,10 +238,13 @@ _RAW_PROTECTED = re.compile(
 def protected_in(text: str) -> bool:
     """Does a command line name a credential file anywhere (a glob onto one
     included)? Regular expressions first; v1's tokenising check only for a
-    line with a glob in it."""
-    if not any(hint in text for hint in _HINTS):
+    line with a glob in it. The hints are matched case-folded, as the env
+    rule is (`.ENV.PRODUCTION`; ENV-1 review, LOW-2), and a dot-led glob is
+    never skipped."""
+    folded = text.casefold()
+    if not any(hint in folded for hint in _HINTS) and not _DOT_GLOB.search(text):
         return False
-    if _RAW_PROTECTED.search(text) or _ENV_VARIANT.search(text):
+    if _RAW_PROTECTED.search(text) or v1_secrets.env_credential_in_text(text):
         return True
     return any(c in text for c in "*?[") and v1_secrets.protected_in_command(text) is not None
 
@@ -252,7 +263,7 @@ SECRET_PRINTERS = {
                    "+php -i",
     "credential files": "cat, less, head, tail, bat (+ the other readers in READERS, decompressing "
                         "ones included, + git show/diff/blame/cat-file/log/grep) of a protected "
-                        "path — secrets.is_protected, + .env.* but the templates, + the "
+                        "path — secrets.is_protected (every credential env file, ENV-1), + the "
                         "CREDENTIAL_FILE paths, + either with a compression suffix — named as an "
                         "operand, after `REV:`, as a file: URL, or as an input redirection (but "
                         "into a counter: wc, the checksums); + an interpreter given inline source "
@@ -939,6 +950,11 @@ def _simple(tokens: list[str], depth: int, ctx: _Context) -> bool:
             return True
         if ctx.protected and (any(_dynamic(a) for a in operands) or not operands):
             return True                                    # `for f in .env; do cat "$f"`
+        # A glob operand onto a credential file (`cat .e?v.custom`): judged as
+        # the word bash expands — the operands are unquoted already, so
+        # re-quoting them for the line check would hide the glob (ENV-1 review).
+        if any(v1_secrets.glob_reaches(PurePosixPath(a).name) for a in operands):
+            return True
         return v1_secrets.protected_in_command(" ".join(shlex.quote(a) for a in args)) is not None
     if prog in INTERPRETERS or prog in _POWERSHELLS:
         return _interpreter_prints(prog, args, depth, ctx)
@@ -1229,9 +1245,13 @@ _HAZARDS = (
 def last_hazard_end(text: str) -> int:
     """Where the last thing `could_print` looks for ends in `text`, or -1."""
     last = -1
+    folded = None
     for pattern, needles in _HAZARDS:
         if needles is not None and not any(needle in text for needle in needles):
-            continue
+            # Case-folded too: `.ENV.PROD` is the env variant (LOW-2).
+            folded = text.casefold() if folded is None else folded
+            if not any(needle in folded for needle in needles):
+                continue
         for match in pattern.finditer(text):
             last = max(last, match.end())
     for match in _keyword_vars(text):

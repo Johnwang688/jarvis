@@ -90,6 +90,8 @@ class Event:
     #   reviewer_declined: {"tool", "args", "command": str|None, "reason": str}
     #   question: {"req_id", "text", "options": list[str]}
     #   usage: {"input", "output", "cached", "cost_usd": float|None, "provider_reported": dict}
+    #     (Claude also: "cost_total": float|None, the CLI's running total its
+    #     `cost_usd` was measured against, which the daemon saves on the thread)
     #   turn_finished: {"stop": "end"|"max_turns"|"interrupted"|"error"}
     #   error: {"message": str, "fatal": bool}
 

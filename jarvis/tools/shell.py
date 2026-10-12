@@ -169,10 +169,11 @@ def run_command(
     if protected:
         return refusal(protected)
 
-    # The allowlist is refused here as well as in dispatch()'s verdict, so the
-    # refusal holds on a path that never consults one (an approver of None,
-    # which dispatch() treats as "run unguarded"). One detector, two callers —
-    # see jarvis/protected_state.py.
+    # The allowlist — and since ENV-1 a write onto a credential env file,
+    # symlinks included — is refused here as well as in dispatch()'s verdict,
+    # so the refusal holds on a path that never consults one (an approver of
+    # None, which dispatch() treats as "run unguarded"). One detector, two
+    # callers — see jarvis/protected_state.py.
     gate_write = protected_state.refused(command)
     if gate_write is not None:
         return f"Refused: {protected_state.refusal(gate_write)}."

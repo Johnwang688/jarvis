@@ -309,7 +309,7 @@ def _resolve_at_paths(text: str) -> tuple[list[dict], list[str]]:
     for token in _AT_PATH.findall(text or ""):
         raw = token.rstrip(".,;:!?)\"'")
         path = Path(raw).expanduser()
-        if secrets_mod.is_protected(path):
+        if secrets_mod.is_credential(path):
             notes.append(f"[{raw} holds live credentials — not attached]")
             continue
         if not path.is_file():

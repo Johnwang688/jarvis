@@ -125,7 +125,9 @@ class LedgerChecks(unittest.TestCase):
 
     def test_ceiling_kinds_and_status_fallback(self):
         self.assertIsNone(self.ledger.ceiling_hit(self.task))
-        self.usage(P.CLAUDE, input=20, cost_usd=.8)
+        # Claude's event as the provider sends it since 2026-10-12: one
+        # result's own dollars, with the running total beside them.
+        self.usage(P.CLAUDE, input=20, cost_usd=.8, cost_total=.8)
         self.usage(P.FAST, cost_usd=.2)
         for kind, limit in [("usd", 1), ("tokens", 20), ("hours", 1)]:
             self.task.ceilings = {kind: limit}
@@ -140,6 +142,38 @@ class LedgerChecks(unittest.TestCase):
         self.task.ceilings = {"tokens": 100}
         self.task.status.tokens = 100
         self.assertIn("tokens", self.ledger.ceiling_hit(self.task))
+
+    def test_ceiling_reads_recounted_threads_not_pre_fix_claude_rows(self):
+        """Review of PR #63 (LOW-1): before 2026-10-12 each Claude row held the
+        CLI's running total, so the rows of a three-turn task add up to every
+        earlier turn again, and the task's saved status is the same inflated
+        sum. The daemon recounts the thread at start; the ceiling reads it."""
+        claude = self.threads[P.CLAUDE]
+        self.task.thread_ids = [claude.id]
+        for running in (.1, .3, .6):                     # pre-fix rows: no cost_total
+            self.usage(P.CLAUDE, input=1, cost_usd=running)
+        self.task.status.cost_usd = 1.0                  # saved before the recount
+        claude.cost_usd = .6                             # what the recount left
+        self.stores.threads.save(claude)
+        self.task.ceilings = {"usd": .9}
+        self.assertIsNone(self.ledger.ceiling_hit(self.task),
+                          "1.0 of re-counted history never trips a 0.9 ceiling")
+        reloaded = UsageLedger(self.stores, clock=lambda: self.now)
+        self.assertIsNone(reloaded.ceiling_hit(self.task), "nor after the rows reload from disk")
+        self.assertEqual(reloaded.totals(provider=P.CLAUDE)["work_tokens"], 3, "the rows' tokens still count")
+
+        # Since the fix: a row is one result's own, and it counts.
+        self.usage(P.CLAUDE, input=1, cost_usd=.5, cost_total=1.1)
+        claude.cost_usd = 1.1
+        self.stores.threads.save(claude)
+        self.assertIn("usd", self.ledger.ceiling_hit(self.task))
+        self.task.thread_ids = []
+        self.task.status.cost_usd = 0
+        self.task.ceilings = {"usd": .5}
+        self.assertIn("usd", self.ledger.ceiling_hit(self.task),
+                      "a post-fix Claude row's dollars reach the ceiling on their own")
+        self.task.ceilings = {"usd": .51}
+        self.assertIsNone(self.ledger.ceiling_hit(self.task), "and the pre-fix rows' do not")
 
     def test_invalid_usage_does_not_write(self):
         for value in (-1, float("nan"), True, "1"):

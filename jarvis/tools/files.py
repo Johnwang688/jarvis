@@ -26,7 +26,7 @@ from typing import Annotated
 
 from .. import config
 from . import tool
-from .secrets import is_protected, refusal
+from .secrets import is_credential, is_env_credential, refusal, write_refusal
 
 _seen: dict[str, float] = {}
 
@@ -314,8 +314,9 @@ def read_file(
     """
     target = _resolve(path)
     # Checked before .exists() so the refusal is the same whether or not the
-    # file is there, and against both spellings so a symlink cannot launder it.
-    if is_protected(path) or is_protected(target):
+    # file is there, and against both spellings so a symlink cannot launder it
+    # (`is_credential` also follows every symlink hop of the name: ENV-1).
+    if is_credential(path) or is_credential(target):
         return refusal(target.name)
     if not target.exists():
         return f"Error: {target} does not exist."
@@ -375,7 +376,10 @@ def write_file(
     target = _resolve(path)
     if _self_protected(target):
         return _protect_refusal(target)
-    if is_protected(path) or is_protected(target):
+    if is_env_credential(path) or is_env_credential(target):
+        # The owner's `.env*` rule (ENV-1): Jarvis writes only `*.example`.
+        return write_refusal(Path(path).name)
+    if is_credential(path) or is_credential(target):
         return refusal(target.name)
     if target.exists():
         stamp = _seen.get(str(target))
@@ -429,7 +433,10 @@ def edit_file(
     target = _resolve(path)
     if _self_protected(target):
         return _protect_refusal(target)
-    if is_protected(path) or is_protected(target):
+    if is_env_credential(path) or is_env_credential(target):
+        # The owner's `.env*` rule (ENV-1): Jarvis writes only `*.example`.
+        return write_refusal(Path(path).name)
+    if is_credential(path) or is_credential(target):
         return refusal(target.name)
     if not target.exists():
         return f"Error: {target} does not exist. Use write_file to create it."

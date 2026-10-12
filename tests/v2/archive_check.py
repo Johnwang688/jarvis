@@ -187,9 +187,8 @@ class Base(unittest.TestCase):
         project = project or self.project
         thread = self.daemon.open_thread(project.id, Role.CHAT, PN.FAST, Brief(Role.CHAT, project.root))
         if title:
-            stored = self.stores.threads.get(thread.id)
-            stored.title = title
-            self.stores.threads.save(stored)
+            # `set_title` is the one writer of a title (a save keeps the stored one).
+            self.stores.threads.set_title(thread.id, title, "owner")
             self.daemon._sessions[thread.id].thread.title = title
         return thread
 
@@ -514,9 +513,7 @@ class Threads(Base):
                          "scratch (1)")
         # … and restore renumbers it if the name was taken behind the API's back.
         self.daemon.close_thread(other.id)
-        clash = self.stores.threads.get(other.id)
-        clash.title = "SCRATCH"
-        self.stores.threads.save(clash)
+        self.stores.threads.set_title(other.id, "SCRATCH", "owner")
         self.assertEqual(self.owner("POST", f"/threads/{thread.id}/restore")["title"], "scratch (1)")
         self.owner("POST", f"/threads/{thread.id}/archive")
         folder = self.stores.threads.path(thread.id).parent

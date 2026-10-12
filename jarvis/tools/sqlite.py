@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Annotated
 
 from . import tool
-from .secrets import is_protected, refusal
+from .secrets import is_credential, refusal
 
 MAX_ROWS = 200
 MAX_CHARS = 20_000
@@ -39,7 +39,7 @@ def query_sqlite(
     rather than paging through everything.
     """
     path = Path(db_path).expanduser()
-    if is_protected(path):
+    if is_credential(path):
         return refusal(path.name)
     if not path.is_file():
         return f"Error: no database file at {path}"
