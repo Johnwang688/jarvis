@@ -317,7 +317,15 @@ function paneOf(key: string): Element | null {
 }
 
 function onBlur(e: FocusEvent) {
-  if (e.target === window) check();
+  if (e.target instanceof Node) return; // an element's own blur; only the window's counts
+  // The window lost focus to another program, not to a frame: the owner left
+  // it, so a pointer last seen over a page no longer counts (headed, the HUD
+  // never hears the pointer leave a frame).
+  const a = document.activeElement;
+  if (!(a instanceof HTMLIFrameElement && entries.has(a))) {
+    for (const entry of Array.from(entries.values())) setOver(entry, false);
+  }
+  check();
 }
 
 function onFocusIn(e: FocusEvent) {
@@ -358,6 +366,9 @@ function onPointer(e: Event) {
 }
 
 function onVisibility() {
+  if (document.visibilityState === "hidden") {
+    for (const entry of Array.from(entries.values())) setOver(entry, false);
+  }
   check();
 }
 

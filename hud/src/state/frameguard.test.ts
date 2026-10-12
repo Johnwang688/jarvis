@@ -139,6 +139,16 @@ describe("the owner's gestures", () => {
     expect(document.activeElement).toBe(box());
   });
 
+  it("the window losing focus to another program stops a pointer last seen over a page counting", () => {
+    box().focus();
+    const f = frameIn(2);
+    pointer("pointermove", f.shield);
+    window.dispatchEvent(new FocusEvent("blur"));
+    expect(f.shield.style.pointerEvents).toBe("auto");
+    f.frame.focus();
+    expect(f.frame.isConnected).toBe(false);
+  });
+
   it("Tab or Shift+Tab within TAB_MS, and not after", () => {
     box().focus();
     const f = frameIn(2);
