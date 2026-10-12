@@ -59,6 +59,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -1282,22 +1283,115 @@ class Device(DaemonBase):
         self.assertIsNone(self.owner("GET", "/vex/status")["device"], "the refusal released it")
         self.owner("DELETE", f"/terminals/{building}")
 
-    def test_device_info_waits_on_the_spike_then_reads_as_text_with_a_timeout(self):
-        status, body = self.request("POST", "/vex/device/info", {})
-        self.assertEqual(status, 409)
-        self.assertIn("vexcom --help", body["error"])
-        with patch.object(vex, "INFO_FLAG", "--test-info"):
-            text = self.owner("POST", "/vex/device/info")["text"]
-            self.assertIn("<b onmouseover=x>BLUE-1</b>", text)      # markup is text; the HUD draws text
-            self.assertNotIn("\x1b", text)
-            (self.world.vexcom_dir / "HOLD_INFO").write_text("")
-            with patch.object(vex, "INFO_TIMEOUT_S", 1.0), patch.object(vex, "KILL_GRACE_S", 0.3):
-                status, body = self.request("POST", "/vex/device/info", {})
+    # -- device reads: `vexcom --json` and `vexcom --programs` (the owner's `vexcom --help`) ---
+
+    def test_device_info_runs_vexcom_json_exactly_and_answers_pretty_text(self):
+        answer = self.owner("POST", "/vex/device/info")
+        call = self.world.calls("vexcom")[-1]
+        self.assertEqual(call["argv"], ["--json"], "exactly `vexcom --json`, nothing added")
+        self.assertEqual(Path(call["cwd"]).resolve(), self.world.vexcom_dir.resolve())
+        self.assertEqual(call["wslenv"], "")
+        self.assertEqual((answer["read"], answer["exit_code"]), ("system", 0))
+        text = answer["text"]
+        self.assertIn('\n      "vexos": "1.1.5",\n', text, "pretty-printed, two-space indent")
+        self.assertIn('"name": "<b onmouseover=x>BLUE-1</b>"', text)   # markup is text
+        self.assertNotIn("\x1b", text, "a JSON string's escape stays spelled out, never raw")
+        self.assertIn('"team": "1234A\\u001b[31m red"', text)
+        self.assertIsNone(self.owner("GET", "/vex/status")["device"], "released")
+        self.assertEqual([t for t in self.owner("GET", "/terminals") if t["program"] == "vex-info"],
+                         [], "a device-info read leaves no terminal behind")
+
+    def test_programs_read_runs_vexcom_programs_exactly(self):
+        answer = self.owner("POST", "/vex/device/info", {"read": "programs"})
+        self.assertEqual(self.world.calls("vexcom")[-1]["argv"], ["--programs"])
+        self.assertEqual((answer["read"], answer["exit_code"]), ("programs", 0))
+        self.assertIn("<img src=x onerror=y>skills", answer["text"])
+        self.assertNotIn("\x1b", answer["text"])
+        self.assertIsNone(self.owner("GET", "/vex/status")["device"])
+
+    def test_a_device_read_is_only_one_of_the_table(self):
+        for body in ({"read": "erase"}, {"read": "--write"}, {"read": "--json"}, {"read": ["system"]},
+                     {"read": None}, {"read": "system", "flag": "--erase"}):
+            with self.subTest(body=body):
+                self.request("POST", "/vex/device/info", body, status=400)
+        Path(config.VEX_PATH).unlink()       # the 400 comes before anything is looked up
+        self.request("POST", "/vex/device/info", {"read": "erase"}, status=400)
+        self.assertEqual(self.world.calls("vexcom"), [])
+        self.assertEqual(vex.DEVICE_READS, {"system": "--json", "programs": "--programs"},
+                         "only the reads the owner's `vexcom --help` lists")
+
+    def test_verify_tools_runs_before_the_device_read_is_spawned(self):
+        order = []
+        real_verify, real_create = vex.verify_tools, self.daemon.terminals.create_program
+
+        def verify(cfg, program, also=()):
+            order.append(("verify", program, tuple(also)))
+            return real_verify(cfg, program, also)
+
+        def create(argv, **kw):
+            order.append(("spawn", kw["program"]))
+            return real_create(argv, **kw)
+
+        with patch.object(vex, "verify_tools", verify), \
+                patch.object(self.daemon.terminals, "create_program", create):
+            self.owner("POST", "/vex/device/info")
+            self.owner("POST", "/vex/device/info", {"read": "programs"})
+        self.assertEqual(order, [("verify", "vexcom", ()), ("spawn", "vex-info")] * 2)
+
+    def test_a_device_read_holds_the_device_and_waits_its_turn(self):
+        # Refused while a download runs …
+        self.build()
+        hold = self.world.vexcom_dir / "HOLD"
+        hold.write_text("")
+        sending = self.download()["terminal_id"]
+        eventually(lambda: self.world.calls("vexcom"), what="download started")
+        for body in ({}, {"read": "programs"}):
+            status, answer = self.request("POST", "/vex/device/info", body)
             self.assertEqual(status, 409)
-            self.assertIn("did not answer", body["error"])
+            self.assertIn("download is running", answer["error"])
+        hold.unlink()
+        self.ended(sending)
+        eventually(lambda: self.owner("GET", "/vex/status")["device"] is None, what="released")
+        # … and while the brain terminal holds the port.
+        brain = self.owner("POST", "/vex/brain")["terminal_id"]
+        eventually(lambda: len(self.world.calls("vexcom")) == 2, what="brain started")
+        status, answer = self.request("POST", "/vex/device/info", {})
+        self.assertEqual(status, 409)
+        self.assertIn("brain terminal", answer["error"])
+        self.owner("DELETE", f"/terminals/{brain}")
+        eventually(lambda: self.owner("GET", "/vex/status")["device"] is None, what="released")
+        self.assertEqual([c["argv"] for c in self.world.calls("vexcom")][1:], [["--user"]],
+                         "neither refused read ran")
+        # While a read runs, it holds the device: no download, brain or second read.
+        (self.world.vexcom_dir / "HOLD_INFO").write_text("")
+        result = {}
+        reader = threading.Thread(target=lambda: result.update(
+            answer=self.request("POST", "/vex/device/info", {})))
+        reader.start()
+        try:
+            eventually(lambda: self.owner("GET", "/vex/status")["device"] == "info", what="reading")
+            self.assertIn("device-info read is running", self.download(status=409)["error"])
+            status, answer = self.request("POST", "/vex/brain", {})
+            self.assertEqual(status, 409)
+            self.assertIn("device-info read is running", answer["error"])
+            status, answer = self.request("POST", "/vex/device/info", {"read": "programs"})
+            self.assertEqual(status, 409)
+        finally:
             (self.world.vexcom_dir / "HOLD_INFO").unlink()
-            self.assertIsNone(self.owner("GET", "/vex/status")["device"])
-            self.assertIn("BLUE-1", self.owner("POST", "/vex/device/info")["text"])
+            reader.join(15)
+        self.assertEqual(result["answer"][0], 200)
+        self.assertIsNone(self.owner("GET", "/vex/status")["device"], "released at its end")
+        self.ended(self.download()["terminal_id"])
+
+    def test_device_info_times_out_and_releases(self):
+        (self.world.vexcom_dir / "HOLD_INFO").write_text("")
+        with patch.object(vex, "INFO_TIMEOUT_S", 1.0), patch.object(vex, "KILL_GRACE_S", 0.3):
+            status, body = self.request("POST", "/vex/device/info", {})
+        self.assertEqual(status, 409)
+        self.assertIn("did not answer", body["error"])
+        (self.world.vexcom_dir / "HOLD_INFO").unlink()
+        self.assertIsNone(self.owner("GET", "/vex/status")["device"])
+        self.assertIn("BLUE-1", self.owner("POST", "/vex/device/info")["text"])
         self.assertEqual([t for t in self.owner("GET", "/terminals") if t["program"] == "vex-info"],
                          [], "a device-info read leaves no terminal behind")
 
@@ -1438,13 +1532,13 @@ class Fingerprints(DaemonBase):
         self.build()
         self.tamper(self.world.vexcom)
         for method, path, body in (("POST", f"/projects/{self.project.id}/vex/download",
-                                    {"slot": 1, "name": "a"}), ("POST", "/vex/brain", {})):
-            with self.subTest(path=path):
+                                    {"slot": 1, "name": "a"}), ("POST", "/vex/brain", {}),
+                                   ("POST", "/vex/device/info", {}),
+                                   ("POST", "/vex/device/info", {"read": "programs"})):
+            with self.subTest(path=path, body=body):
                 status, answer = self.request(method, path, body)
                 self.assertEqual(status, 409)
                 self.assertIn("changed since", answer["error"])
-        with patch.object(vex, "INFO_FLAG", "--test-info"):
-            self.assertEqual(self.request("POST", "/vex/device/info", {})[0], 409)
         self.assertEqual(self.world.calls("vexcom"), [])
         self.assertIsNone(self.owner("GET", "/vex/status")["device"], "every refusal released it")
 
@@ -1568,6 +1662,38 @@ class SettingsNames(DaemonBase):
                 self.assertIn("letters, digits", body["error"])
                 self.assertIsNone(vex.binary(self.folder, name))
         self.assertEqual(self.world.calls("vexcom"), [])
+
+
+class DeviceText(unittest.TestCase):
+    """A device read's output: JSON pretty-printed, everything else as it came,
+    and nothing a JSON string carries can put a control back in the text."""
+
+    def test_json_is_pretty_printed_with_the_lines_before_it_kept(self):
+        raw = b'\x1b[32mvexcom 1.0.2b2\x1b[0m\r\n{"a": 1, "b": ["x", {"c": null}]}\r\n'
+        self.assertEqual(vex.device_text(raw),
+                         'vexcom 1.0.2b2\n{\n  "a": 1,\n  "b": [\n    "x",\n    {\n      "c": null\n'
+                         '    }\n  ]\n}')
+
+    def test_a_json_string_cannot_bring_back_a_control_or_an_invisible(self):
+        raw = json.dumps({"name": "A\u001b[31mB‮C​D\u0007E", "html": "<i>x</i>"}).encode()
+        text = vex.device_text(raw)
+        # Controls stay escaped (`\u001b`, as JSON writes them); a bidi override
+        # or a zero-width space, which JSON would write raw, is removed.
+        self.assertFalse(any(ord(ch) < 32 and ch != "\n" or vex.untrusted.unseen(ch) and ch != "\n"
+                             for ch in text), repr(text))
+        self.assertEqual(json.loads(text), {"name": "A\x1b[31mBCD\x07E", "html": "<i>x</i>"})
+
+    def test_text_that_is_not_json_comes_back_as_text(self):
+        for raw, want in ((b"slot 1: override\nslot 3: {skills}\n", "slot 1: override\nslot 3: {skills}\n"),
+                          (b"{not json\n", "{not json\n"), (b"", "")):
+            with self.subTest(raw=raw):
+                self.assertEqual(vex.device_text(raw), want)
+
+    def test_deep_or_huge_json_never_raises(self):
+        deep = b"[" * 100_000 + b"]" * 100_000        # under the parse cap: RecursionError
+        self.assertEqual(len(vex.device_text(deep)), vex.INFO_TEXT_CAP)     # left as text, capped
+        big = b'{"x": "' + b"a" * (vex.INFO_PARSE_CAP + 10) + b'"}'
+        self.assertTrue(vex.device_text(big).endswith('aaa"}'))
 
 
 class DeviceHolders(unittest.TestCase):

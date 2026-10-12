@@ -6,7 +6,9 @@ owner's VS Code VEX extension already downloaded, **run in place through WSL
 interop** (V-1, V-5). Nothing is copied, bundled or committed: VEX's licence
 forbids redistribution and decompiling, so the only `vexcom` flags used here
 are the ones DishPy's MIT source uses (`--name --slot --write --progress` for
-a download, `--user` for the brain's user port). Which files those are is
+a download, `--user` for the brain's user port) and two reads the owner's own
+`vexcom --help` lists (`--json`, system info; `--programs`; `DEVICE_READS`).
+Which files those are is
 `config.VEX_PATH` (`vex.json`), written only by the human-run `jarvis vex
 setup` (`vex_setup.py`) and refused to every agent write tool
 (`tools/files._protected_state`). **Every path in it is re-checked at each
@@ -56,9 +58,8 @@ tool in its AppData folder is not covered by the fingerprint; `verify_tools`).
 
 **Spike items** (the owner runs them once; the plan's §2.9): the build's
 `P=`/`T=` against VS Code's own build log, whether stopping the Linux side of
-an interop process ends `make.exe` on Windows, VEX's Python download flag
-(Python download is refused until then), and the device-info flag from
-`vexcom --help` (`INFO_FLAG`, None until recorded: the route says so).
+an interop process ends `make.exe` on Windows, and VEX's Python download flag
+(Python download is refused until then).
 """
 from __future__ import annotations
 
@@ -109,6 +110,7 @@ KILL_GRACE_S = 2.0
 RECORDS_KEPT = 32
 ERRORS_KEPT = 200
 INFO_TEXT_CAP = 16 * 1024
+INFO_PARSE_CAP = 256 * 1024
 ACTIONS = ("build", "rebuild", "clean")
 SLOTS = range(1, 9)
 # The name a program gets on the brain (plan §2.9): never starts with `-`, so
@@ -117,9 +119,10 @@ SLOTS = range(1, 9)
 DOWNLOAD_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,19}", re.ASCII)
 # A project name that reaches `make` as `P=` and cmd.exe recipes as $(PROJECT).
 PROJECT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}", re.ASCII)
-# The device-info flag comes from `vexcom --help`, which the owner runs once
-# (spike); until it is recorded here, the route answers that it waits on it.
-INFO_FLAG: str | None = None
+# The device reads, from the owner's `vexcom --help` (vexcom 1.0.2b2): `--json`
+# "system info in json format" and `-p --programs` "shows programs". Every
+# other option it lists writes, runs, erases or updates firmware; none is here.
+DEVICE_READS = {"system": "--json", "programs": "--programs"}
 TEMPLATE_FILE = re.compile(r"(cpp|py)_v5_vsc_([a-z0-9_]+)\.zip", re.ASCII)
 TEMPLATE_ENTRIES = 200
 TEMPLATE_ENTRY_CAP = 1024 * 1024
@@ -704,11 +707,16 @@ def brain_argv(cfg: VexConfig) -> list[str]:
     return [cfg.vexcom, "--user"]
 
 
-def info_argv(cfg: VexConfig) -> list[str]:
-    if not INFO_FLAG:
-        raise VexError("Device info waits on one step of the setup spike: run `vexcom --help` "
-                       "once and record its device-info option (design §18)")
-    return [cfg.vexcom, INFO_FLAG]
+def check_read(read) -> str:
+    if not isinstance(read, str) or read not in DEVICE_READS:
+        raise ValueError(f"read must be one of {', '.join(DEVICE_READS)}")
+    return read
+
+
+def info_argv(cfg: VexConfig, read: str = "system") -> list[str]:
+    """A device read, exactly: `vexcom --json` (system info) or `vexcom
+    --programs` (the programs on the brain)."""
+    return [cfg.vexcom, DEVICE_READS[check_read(read)]]
 
 
 # -- output ----------------------------------------------------------------------------------
@@ -750,10 +758,34 @@ def parse_errors(text: str, root_windows: str | None = None) -> list[dict]:
     return out
 
 
+def _visible(text: str) -> str:
+    return "".join(ch for ch in text if ch in "\n\t" or not (ord(ch) < 32 or untrusted.unseen(ch)))
+
+
+def _pretty_json(text: str) -> str:
+    """`vexcom --json` output pretty-printed (two-space indent), from the first
+    line that opens a JSON value to the end, the lines before it kept. Text
+    that does not parse comes back as it came."""
+    lines = text.split("\n")
+    start = next((i for i, line in enumerate(lines) if line.lstrip()[:1] in ("{", "[")), None)
+    if start is None:
+        return text
+    body = "\n".join(lines[start:]).strip()
+    if len(body) > INFO_PARSE_CAP:
+        return text
+    try:
+        pretty = json.dumps(json.loads(body), indent=2, ensure_ascii=False)
+    except (ValueError, RecursionError):
+        return text
+    return "\n".join(lines[:start] + [pretty])
+
+
 def device_text(data: bytes) -> str:
-    text = plain(data)
-    text = "".join(ch for ch in text if ch in "\n\t" or not (ord(ch) < 32 or untrusted.unseen(ch)))
-    return text[-INFO_TEXT_CAP:]
+    """A device read's output as text: escapes and controls removed, JSON
+    pretty-printed, markup left as characters (the HUD draws it as text). A
+    JSON string's own escapes (`\\u001b`) are removed after the parse too."""
+    text = _pretty_json(_visible(plain(data)))
+    return _visible(text)[-INFO_TEXT_CAP:]
 
 
 # -- the binary and its freshness --------------------------------------------------------------
@@ -1653,9 +1685,12 @@ class Vex:
 
     # -- device info --------------------------------------------------------------------
 
-    def info(self) -> dict:
+    def info(self, read: str = "system") -> dict:
+        """One device read (`DEVICE_READS`): system info, or the programs on
+        the brain. Both are the `info` device action."""
+        check_read(read)                    # a 400 before anything is looked up
         cfg = load_config()
-        argv = info_argv(cfg)
+        argv = info_argv(cfg, read)
         release, bind = self._reserve_device("info")
         done = threading.Event()
 
@@ -1685,10 +1720,10 @@ class Vex:
             pass
         if release():                       # only if the exit hook never ran
             LOG.warning("vex device info: released after its terminal closed without an exit")
-        LOG.info("vex device info read (exit %s)", code)
+        LOG.info("vex device %s read (exit %s)", read, code)
         if not answered:
             raise VexError(f"vexcom did not answer in {int(INFO_TIMEOUT_S)} s")
-        return {"text": text, "exit_code": code}
+        return {"text": text, "exit_code": code, "read": read}
 
     # -- new project (the backend VX-3's dialog uses) ------------------------------------
 
@@ -1827,8 +1862,11 @@ def route(handler, daemon, parts, query):
             return 200, vex.build(parts[2])
         if parts == ["vex", "device", "info"] and method == "POST":
             _object(query, ())
-            _object(handler._body(), ())
-            return 200, vex.info()
+            body = _object(handler._body(), ("read",))
+            try:
+                return 200, vex.info(body.get("read", "system"))
+            except ValueError as exc:
+                raise _api(400, str(exc)) from None
         if parts == ["vex", "brain"] and method == "POST":
             _object(query, ())
             _object(handler._body(), ())
