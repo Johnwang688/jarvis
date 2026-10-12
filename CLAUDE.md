@@ -2579,6 +2579,69 @@ v2 `permissions_check` (`env_file_checks`), `claude_provider_check`
 (`env_hook_checks`, the real `build_permit` behind the hook) and
 `terminal_text_check`; all fail on 283d45c, and 17 guard removals each bite.
 
+**The Browser's action rules and reviewer, BR-9a (2026-10-12; amendment 1 to
+the Browser plan, §B.3–§B.5, decisions BD-1..BD-4). Pure, and not wired yet:
+BR-9b calls them from `hud_browser_act`'s gate.** Two modules in
+`jarvis/v2/browser/`. **`act_rules.pre_judge(Facts) → PreVerdict`** answers
+REFUSE, ASK(category), ALLOW or CLASSIFY with no model call. `Facts` (frozen)
+holds the action, key, text, `nav_url`, the page's `url`, the target
+`Element` and its `Form` — attributes only, **no field for a value** — the
+upload path and project folder, and every state fact as a plain boolean or
+number that **defaults to the value that refuses** (a `Facts` nobody filled
+in is refused; a NaN refuses). Order: H12 (desk, depth, sub-agent), H11, H5
+(Private needs its own drive switch), H6, H3, H4 (paused, or owner input
+under `OWNER_QUIET_S` = 5 s), H9, H10's 200 per tab-hour; a valid action
+(`press` takes named keys only, a printable character is refused; at most
+10,000 characters to type); H7 (the URL judge's fact, plus a belt: http(s)
+only, Jarvis's ports, an ambiguous authority and userinfo refused); **H1**
+(type, select, Backspace/Delete/Space into `type=password`, an `autocomplete`
+token current-/new-password, one-time-code, webauthn or **any `cc-*`
+anywhere in the token list**, the label words on name, id, label,
+placeholder, aria-label and accessible name, a numeric 4–8 field labelled
+just "code", four or more one-character boxes, or any field in a
+`PAYMENT_FRAME_HOSTS` frame — clicking into one is not refused); **H2**
+(text, a navigate address, a clicked link or a submitted form's action
+holding a `secrets.secret_values()` value in `terminal_guard.value_forms`'
+spellings, or a `credential_patterns` shape); **H8** (`upload_refusal`: a
+regular file under the project folder lexically and resolved, at most 50 MB,
+not `secrets.is_credential`, not `editor_policy`'s withheld, not the gate's
+state, not in Jarvis's own folders, not under `.git`; the resolved path is
+`PreVerdict.path`, the one to upload). Then the ASK floors (every upload; a
+click on anything but a text field, Enter, or Space on a button in a form —
+or beside a field — holding a password, OTP or payment field;
+`ASK_URL_SHAPES` on the address, link or submit's action, a host's own
+shapes first; `chrome:` pages as account_security; `EXECUTABLE_EXTENSIONS`
+links), the turn's 40 judged actions (floors and CLASSIFY count, the ALLOW
+tier does not), the ALLOW tier (scroll, back, forward, the nav keys,
+Backspace/Delete on a known ordinary target, at most 64 characters with no
+line break into `type=search`, `role=searchbox` or a GET form's field —
+never beside a sensitive field), else CLASSIFY. **Linear**: no regex is built
+from page text, labels are normalised by C-level passes (camelCase split for
+`name`/`id` only, which fail closed past 1024 characters), address segments
+go into sets; a 1 MB label or a 100,000-character address is judged in about
+25 ms. Every refusal reason is a fixed `R_*` sentence.
+**`act_review.judge(facts, owner_words) → ActVerdict(verdict, category,
+reason, source)`** is `command_review`'s shape: the owner's words (≤ 500)
+outside, everything else in one `untrusted.fence` with a tag per call,
+capped as §B.5 says; a flagged context, or a credential value or shape
+anywhere in the request, means no call and ask (source `guard`); JSON only,
+exactly three keys; **every failure is ask** (category `unjudged`); a
+sensitive category's allow becomes ask; `JARVIS_BROWSER_REVIEW_AUTOALLOW=0`
+turns allow into ask and leaves deny; only ordinary allows are cached (15
+min, 512), keyed by profile, origin, digit-blind path shape, action, key and
+digests of the text, destination, target, form action **and the owner's
+words**. **The call is `max_retries=1, stream=False`**: `llm.chat`'s
+`max_retries` is its attempt count, so the amendment's `max_retries=0`
+would send nothing and every action would ask. The model is
+`models.tier("browser_review")` once a config defines that tier (BD-4),
+else the review tier. `act_review.decide(pre, verdict)` is the gate's
+outcome: a floor is never lowered, and CLASSIFY with no answer asks. Free
+suites: `tests/v2/browser_act_rules_check.py` (49) and
+`tests/v2/browser_act_review_check.py` (25), with `llm.chat` raising
+throughout and `secrets._JARVIS_ROOT` a temp folder; 21 guard removals each
+fail their suite in a scratch copy (the PR lists them). Left for BR-9b: the
+wiring, the `browser_review` tier, and SELF_PROTECTED for both modules.
+
 **The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
 for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
 dot (`--text-2`, `DirtyDot`, "unsaved changes" with a tooltip), and so does a
