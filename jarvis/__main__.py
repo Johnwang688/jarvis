@@ -351,6 +351,16 @@ def cmd_desktop(args) -> int:
     return 0
 
 
+def cmd_vex(args) -> int:
+    # Human-only, like `jarvis desktop setup`: which VEX executables the HUD's
+    # Build, Download and brain terminal run is the owner's choice, made here.
+    # There is deliberately no `jarvis vex download`: sending code to a robot
+    # is only ever the owner's click in the HUD (decision V-2).
+    from .v2 import vex_setup
+
+    return vex_setup.run()
+
+
 def cmd_route(args) -> int:
     from .v2.router import cli
     return cli(args)
@@ -872,6 +882,11 @@ def main() -> int:
     desktop.add_argument("--wait", type=float, default=0.0,
                          help="seconds to wait for the bridge to connect")
     desktop.set_defaults(func=cmd_desktop)
+
+    vexcmd = sub.add_parser(
+        "vex", help="find VS Code's VEX tools for the HUD's VEX view (human-only)")
+    vexcmd.add_argument("action", choices=["setup"])
+    vexcmd.set_defaults(func=cmd_vex)
 
     hud = sub.add_parser("hud", help="open the v2 HUD (starts the daemon if needed), "
                                      "or `jarvis hud install` to build and install it (human-only)")

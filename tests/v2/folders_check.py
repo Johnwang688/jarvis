@@ -322,13 +322,19 @@ class StateChecks(Harness):
 
 class ReachabilityChecks(unittest.TestCase):
     def test_only_the_confirmation_handler_calls_make_project_folder(self):
-        allowed = {REPO / "jarvis" / "v2" / "folders.py",
-                   REPO / "jarvis" / "v2" / "discord" / "project_commands.py"}
+        # One confirmation handler, `projects.confirm_folder`, which Discord's
+        # `/project new` and the HUD's new VEX project (VX-1) both call.
+        allowed = {REPO / "jarvis" / "v2" / "folders.py", REPO / "jarvis" / "v2" / "projects.py"}
         callers = [p for p in (REPO / "jarvis").rglob("*.py")
                    if "make_project_folder" in p.read_text(encoding="utf-8")]
         self.assertEqual(set(callers), allowed)
-        handler = (REPO / "jarvis" / "v2" / "discord" / "project_commands.py").read_text()
+        handler = (REPO / "jarvis" / "v2" / "projects.py").read_text()
         self.assertEqual(handler.count("make_project_folder("), 1)
+        body = handler[handler.index("def confirm_folder("):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("make_project_folder(", body, "the call is inside confirm_folder")
+        for surface in ("discord/project_commands.py", "vex.py"):
+            self.assertIn("confirm_folder(", (REPO / "jarvis" / "v2" / surface).read_text())
 
     def test_one_mkdir_in_folders_py_and_no_parents(self):
         tree = ast.parse((REPO / "jarvis" / "v2" / "folders.py").read_text(encoding="utf-8"))

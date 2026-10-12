@@ -688,6 +688,16 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             touch = protected_state.command_touch(command, cwd)
             if touch is not None:
                 match = ("gate-state", protected_state.ask_reason(touch))
+        if match is None and command.strip():
+            # A line that may run VEX's device tool (the robot's download)
+            # and cannot be told — a program that is only an expansion, read
+            # from input, or behind an option the table does not know — or
+            # one too complex to judge: never the provider's reviewer's call
+            # under AUTO (VX-1, `rules.vex_uncoverable`). A line that
+            # certainly names or runs it was refused at layer 1.
+            unsure = rules.vex_uncoverable(command)
+            if unsure:
+                match = ("vex-device", unsure)
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
