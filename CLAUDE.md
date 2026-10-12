@@ -1403,7 +1403,9 @@ is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
 offer | wait (under a card; 30 s) | skip (off, the WP-E judge
 `judgeBrowserUrl` or Jarvis's control ports, an origin already opened or shown, one per 10 s per terminal,
 three a minute); the query and fragment are dropped; a Browser pane already
-showing a page counts as busy. `annotate.ts`: the
+showing a page counts as busy. (Amendment 2, 2026-10-12, replaces `focused`
+and `offer` with a tab in a drawn Browser pane, else a prompt, and the 30 s
+wait with "until the card goes"; AO-3 rewrites it.) `annotate.ts`: the
 whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
 colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
 the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).
@@ -5993,6 +5995,16 @@ Two findings worth keeping:
   (invariant 7). cad-bench holds `skill_list` and `skill_read`,
   so the CAD skill it measures can load. runtime.py and toolgroups.py are
   **not** SELF_PROTECTED: the owner declined it (answer 3).
+- **Auto-opened dev servers are Direct only, and never open a port in the
+  Remote browser's gate (2026-10-12, the lead's decision L2,
+  `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`).** Since the
+  owner asked for servers that Jarvis, Claude and Codex start to open too,
+  an agent can trigger an auto-open. Counting one as the owner's own
+  navigation would hand agents a lever on the gate. Only the owner's typed
+  URL, click or "Open in Remote" opens a loopback port there. This
+  **reverses** the note PR #69 carries in the BR-1a paragraph and its
+  decisions bullet ("BR-8b's auto-open … counts as the owner's opening"),
+  which go when #69 merges (amendment 2 §M).
 
 - **Agents that cannot ask get a typed git tool, not a broader shell
   (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach

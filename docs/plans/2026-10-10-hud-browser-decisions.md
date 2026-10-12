@@ -51,3 +51,31 @@ This governs the plan amendment.
 The plan changes above are worked out in `2026-10-11-hud-browser-plan-amendment-1.md` (driving, profiles, auto-open, seeing, sound, and the re-cut work packages). Its §J decisions BD-1 to BD-4, BD-6, BD-7, BD-9 and BD-11 are adopted as recommended. BD-5 (Chrome sign-in and sync) is answered: on. BD-8 waits for M3, and BD-10 for BR-1a's review.
 
 **B-3 done (2026-10-11):** the owner installed Google Chrome stable through apt (`google-chrome --version` reports 155.0.8059.39).
+
+## Amendment 2 (2026-10-12): dev servers from any source
+
+**The owner, 2026-10-12:** "Can you have Jarvis/claude/codex auto open localhost servers when they are started? If there is 8 panels all taken already then have them open a new tab in a browser panel. If no browser panels are open then have it ask which panel to open in or if I don't want to open it"
+
+The lead's decisions, worked out in `2026-10-12-hud-browser-plan-amendment-2.md` (its §0 has them in full):
+
+- **L1, sources.**
+  - The owner's HUD terminals, through BR-8a's banners.
+  - Servers an agent starts (a chat or a task, on any provider), found as new loopback listeners. Each must be:
+    - owned by the owner's uid;
+    - working in that thread's folder;
+    - started during its turn or a grace period after it;
+    - not a HUD terminal's, and not Jarvis's own;
+    - answering HTTP on `/`.
+  - Servers the owner starts outside Jarvis are not included.
+- **L2, Direct only.** An auto-opened server uses WP-E's sandboxed frame and never gets keep-origin. **Auto-open never opens a port in the Remote browser's gate**, which reverses the note that BR-8b's auto-open counts as an owner-route navigation.
+- **L3, placement.**
+  1. A new pane beside the source, with `{focus:false}`.
+  2. Else a new tab in a drawn Browser pane.
+  3. Else a non-blocking prompt: "Open in pane [1]…[8] · Don't open". It expires when the server stops.
+- **L4, tabs.** Browser panes get tabs in Direct mode, migrated from `browserUrl`, and BR-3b reuses the strip.
+- **L5, one window.** The window showing the source acts. Otherwise the most recently focused window claims it through an owner-only route. With no window open, a quiet notice appears in the next window to load.
+- **L6, the gentle rules.** Nothing happens under a card; it waits until the card goes. Focus and the mic never move. One entry per port; a rate limit; the `auto_open` switch covers every source.
+- **L7, what leaves memory.** Only a loopback URL and the source's id. Never terminal text or tool output.
+- **L8, stated limits.** An agent can put a sandboxed page in front of the owner, and some servers are missed.
+
+**Superseded:** amendment 1's §D.2 placement ("No room: the focused pane switches to Browser", the offer chip in the terminal's bar), BD-7, and the BR-8b rows of its §G and §H. AO-3 replaces BR-8b. BR-2's 30-second wait under a card becomes "until the card goes" (amendment 2, AD-14).
