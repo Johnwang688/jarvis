@@ -562,13 +562,22 @@ def _kinds_checks(page, mock, check, until):
           reason.count() == 1 and "permission state" in reason.inner_text()
           and host.get_attribute("data-readonly") == "true"
           and "permission state" in (reason.get_attribute("title") or ""))
+    # Monaco draws the file a frame or more after it holds it (data-language):
+    # under load `before` was read from an empty view, and the check then
+    # compared "" with the file's own text. Wait until the file is drawn.
+    gate_text = mock.world["files"]["allowlist.json"]["content"].strip()
+    until(lambda: _text(page, 2).strip() == gate_text, timeout=10)
     before = _text(page, 2)
     page.locator(_lines(2)).click()
     page.keyboard.type("x")
     time.sleep(0.2)
+    # The buffer's own dirty flag too: it is set in the keystroke's change
+    # event, so a late frame cannot hide an edit the view has not drawn yet.
+    gate_buf = _buf(page, "allowlist.json") or {}
     check("typing changes nothing and Save stays off",
-          _text(page, 2) == before and page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled(),
-          repr(_text(page, 2)))
+          before.strip() == gate_text and _text(page, 2) == before and gate_buf.get("dirty") is False
+          and page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled(),
+          repr(_text(page, 2)) + f" dirty={gate_buf.get('dirty')!r}")
     check("Add to chat stays open for it (Jarvis may read the gate's state)",
           not page.locator(_pane(2, '[data-testid="add-to-chat"]')).is_disabled())
     # Mixed line endings are said, with what a save would do.

@@ -976,7 +976,8 @@ that is why every attach is announced (`terminal_attached`, below).
     then a close when the terminal is closed; `{"type": "exit", "code",
     "reason": "ended"}` then close 1001 when Jarvis stops (terminals do not
     survive a restart, W-3); `input_dropped`, `input_resumed` and
-    `input_resume_refused` (above).
+    `input_resume_refused` (above); `{"type": "dev_url", "url"}` when a dev
+    server announces itself in the live output (BR-8a, below).
   - Window → server: `{"type": "resize", "cols", "rows"}` (same ranges;
     anything else is ignored), `{"type": "input_resume"}` (above) and the
     takeover answer below. Unknown messages are ignored.
@@ -2009,6 +2010,56 @@ three dots but have the main display be the title". No new route.
   "New thread" (`turns` 0) or "Untitled", and the id is the ⋯ menu's "Copy
   id" (`tmenu-copyid`, the id shown in `tmenu-id`). A title is text.
 
+## Additions 2026-10-12 (dev servers in HUD terminals — BR-8a)
+
+The daemon half of "a dev server started in a HUD terminal opens in a
+Browser pane by itself" (Browser plan amendment 1 §D.1; decisions B-2).
+BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
+
+- **`{"type": "dev_url", "url": "http://localhost:5173/"}`**, a text frame on
+  a terminal's attach socket, **that terminal's socket only**, after the
+  binary output that carried the announcement. The window that holds the
+  terminal hears it; another window, the bus, `/events`, the listing, a log
+  line, Discord and the disk never do, and the "Jarvis can read" switch is
+  unrelated (Jarvis never sees it). Sent only for **live** output: a
+  reattach's replay never sends one, and an announcement made while no
+  window is attached is dropped (and not remembered, so the server's next
+  announcement — a restart — is sent to whichever window holds it then).
+- **What is read**: a shell terminal's output (never a program terminal's),
+  only a command's own — the prompt and the typed command line are skipped
+  by the shell's signed OSC 133 marks (`B` to `C` in bash; `B` to the end of
+  that line in a shell that marks no command) — never the alternate screen,
+  with escape sequences stripped by `terminal_text`'s grammar, one line of
+  at most 512 bytes at a time (a longer one is dropped whole).
+- **What `url` is**: from one of the known announcement shapes
+  (`devurl.SHAPES`: `Local:`, `Loopback:`, `Running on`, `Listening on`,
+  `Serving HTTP on … (…)`, `Starting development server at`, `open your
+  browser on`, `available at`, `Server address:`, `Development Server (…)`,
+  `waiting on`, Jupyter's URL line, and the like), **loopback** `http`/`https`
+  with an **explicit port**: `localhost`, `127.0.0.0/8`, `[::1]`, `0.0.0.0` or
+  `[::]` — **always sent as `localhost`**, the port and path kept, so the host
+  is always one the window's frame policy names (PR #70 review); never a user
+  name or password,
+  never one of Jarvis's ports (`config.control_ports()`, 8403 and the
+  configured workshop port, and the daemon's own HUD, API and preview ports
+  as bound); the query and fragment dropped (a Jupyter `?token=` never
+  travels); the path percent-encoded; at most 512 characters. The window
+  judges it again (WP-E's Preview judge) before opening anything.
+- **How often**: once per origin per terminal among the last four sent
+  (`localhost:3000`, `127.0.0.1:3000` and `[::1]:3000` are one server: Puma
+  prints two of them); at most one frame a second and four a minute per
+  terminal. A URL counts as sent only once the socket has taken its frame:
+  one a closing or lagging socket refused is offered again at the server's
+  next announcement.
+- **The switch: `auto_open`** in `browser.json`, beside BR-1a's `lan` and
+  `local_servers` — read and changed through BR-1a's owner-only `GET`/`PATCH
+  /browser/settings` (the table in the next section; one contract for all
+  three). **On by default**. While it is off, no byte of terminal output
+  reaches the sniffer.
+- **Auto-open never opens a port in the Remote gate** (amendment 2): the
+  window loads the URL only in a Direct frame, and a loopback port opens to
+  the Remote browser only through the owner's own navigation.
+
 ## Additions 2026-10-12 (the Browser's engine — BR-1a)
 
 The owner's built-in Browser, backend only (plan
@@ -2026,8 +2077,8 @@ ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
 | Route | Body | Answer |
 |---|---|---|
 | `GET /browser` | — | `/status` → `browser` (below) plus `profiles: [{id, label, created}]` and `settings` |
-| `GET /browser/settings` | — | `{lan, local_servers}` |
-| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool}`, at least one | `{lan, local_servers}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
+| `GET /browser/settings` | — | `{lan, local_servers, auto_open}` |
+| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool, auto_open?: bool}`, at least one, each a boolean (else **400** `<key> must be a boolean`) | `{lan, local_servers, auto_open}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
 | `GET /browser/tabs` | — | `[{tab_id, profile, ctx, url, title}]` — the title cleaned to one line of 120; `[]` while nothing runs |
 | `POST /browser/tabs` | `{profile?, ctx?, url?}` | **201** `{tab_id, profile, ctx, loaded, error?}` |
 | `DELETE /browser/tabs/<id>` | — | `{tab_id, closed: true}` |
@@ -2060,6 +2111,16 @@ ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
   in the settings opens every loopback port that is not Jarvis's.
 - **An unknown field** in any body (here and on every other route) is
   **400** `unknown fields (N)`: the count, never the names.
+- **The settings** (`browser.json`, `config.BROWSER_SETTINGS_PATH`, env
+  `JARVIS_BROWSER_SETTINGS`): `lan` (off), `local_servers` (off) and BR-8a's
+  `auto_open` (on). A missing, unreadable or malformed file, or a value that
+  is not a boolean, reads as the default; an edit by hand lands within a
+  second (the gate asks per connection, re-`stat`ing at most once a second).
+  `jarvis/v2/browser/settings.py` is the file's one reader and one writer;
+  the routes, the engine, the gate, `/status` and the terminals all ask the
+  daemon's `BrowserSettings`. **An embedded or test daemon keeps the
+  settings in memory**: only daemon2's `main()` attaches the owner's file
+  (a suite that wants a file attaches its own temp path).
 - **`loaded: false`** with **`error`** — Chrome's `net::ERR_…` code only,
   never its message (it names the URL) — when a load fails; a connection the
   gate refused reads `net::ERR_SOCKS_CONNECTION_FAILED`. Navigation answers
