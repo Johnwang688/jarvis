@@ -83,6 +83,10 @@ def git_checks(browser, mock, base, check, until, guard, init_script):
         }
         keep = {k: dict(v) for k, v in w["files"].items()}
         _boot(page, mock, base, until)
+        # Markdown is word-wrapped by default since ED-8, and a wrapped line
+        # draws its gutter mark on each of its rows; these checks count marks
+        # per line, so README.md is drawn unwrapped here.
+        page.evaluate("localStorage.setItem('jarvis.hud.editor', JSON.stringify({ wordWrapMarkdown: 'off' }))")
         for section in (_explorer_checks, _gutter_checks, _head_checks, _env_checks):
             _fresh(page, mock, until, ws=TWO, keep_files=keep)
             try:

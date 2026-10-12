@@ -1137,6 +1137,42 @@ What the HUD does with the terminal contract above (code in
   the picker with the daemon's sentence; nothing retries. × on a pane showing
   a terminal sends **nothing**: no `DELETE`, no new ticket — the socket stays
   attached and the terminal becomes the panel's selected tab.
+- **Continuing after Jarvis restarted (2026-10-12, the owner's option (a))**:
+  no route changed. A terminal that ended with Jarvis (`exit` with `reason:
+  "ended"`, or a ticket answered 404) and that this tab showed reads
+  "Jarvis restarted; this terminal ended. Type to continue in a new shell
+  here." with **Continue here** beside **New terminal here**. A typing key
+  (printable text, Enter, Backspace, Tab, an arrow), a paste or Continue
+  here is one ordinary `POST /terminals` with the `in` it was opened with
+  and, unless its row (kept current from every listing and `PATCH`) says it
+  is readable, `readable: false`. The new terminal takes the old one's
+  place everywhere the window tracks it (its panel tab position, its pane,
+  the selected tab, `jarvis.hud.terminals`, `jarvis.hud.terminals.mine`)
+  and attaches into **the same xterm**. On that attach and every later one
+  the window writes, after the RIS and before the replay, the old text —
+  rebuilt from xterm's cells (characters and SGR colours only, at most
+  1 MiB, never the old bytes, so nothing in it is a query, a mode or an
+  alternate screen) — and a separator, `── restarted HH:MM ──`, plain
+  text (the old text walked from the bottom, stopped at the cap; one longer
+  line keeps its tail). Keys and pastes made while it starts are held
+  (4 KiB, a paste that does not fit is dropped whole) and, once the new
+  replay has been parsed, **typed, never run** (PR #64 review L6): keys up
+  to the first Enter, never it nor anything after, and no paste holding a
+  line break — the notice says the line waits at a new local shell's
+  prompt (check it, then press Enter, or paste again). **Any refusal drops
+  the whole hold** (a key that does not type, past 4 KiB, a card raised
+  meanwhile, the terminal no longer on screen — the panel closed, another
+  tab, its pane switched away), said with the `unsent` notice. Never under
+  a card, after a crash, on a load, a restored panel or a reattach, for a
+  terminal this tab did not show (another window's), one whose `in` is not
+  remembered (never guessed from its row), a shell that exited on its own
+  (Restart and Close as before) or a program terminal; Ctrl+D and the HUD's
+  own keys never continue one. Six already open: the daemon's 409 sentence
+  in the strip, nothing held, and from then on only Continue here tries
+  again. **The old text is memory only**: a page reload loses it, and
+  nothing of it is written to disk or sent anywhere. The switch comes from
+  this window's last-seen row, which another window can leave stale (a
+  limit that predates this; it needs a daemon event).
 - **`busy`**: × reads a `GET /terminals` sent after the click (never one
   already on its way) and, when the foreground process is not the shell,
   asks before `DELETE`; if the listing fails it asks anyway, saying it could
@@ -1898,6 +1934,41 @@ folds are computed in that worker from the tree it already holds. No new
 `.wasm`, no policy change. `window.__hudSyntax.states()` gains `folds`: how
 many fold answers from the tree were handed to Monaco for that model (every
 other answer is indentation folding).
+
+
+## Additions 2026-10-12 (editor settings and `.editorconfig` — ED-8)
+
+Editor plan §2.8. **No new route.** The editor settings are the window's own
+(localStorage `jarvis.hud.editor`: `{fontFamily, fontSize, tabSize,
+insertSpaces, wordWrap, wordWrapMarkdown, minimap, stickyScroll, whitespace,
+bracketPairs, cursorStyle, vim}`, each field checked alone on load); nothing
+about them reaches the daemon.
+
+**`.editorconfig` uses ED-2's owner-only routes**, as the editor's buffer
+opens a file at `<dir>/<name>` in project `{id}`:
+- `POST /projects/{id}/files/stat {"paths": ["<dir>/.editorconfig",
+  "<parent>/.editorconfig", …, ".editorconfig"]}` — the file's folder and
+  each folder above it **up to the project's root, never above** (at most 32,
+  within the route's 100), once per folder every 3 s at most;
+- `GET /projects/{id}/file?path=<dir>/.editorconfig` for each that stat says
+  exists as `kind: "text"` — once per etag, every one on the walk; they are
+  applied nearest first, stopping at one whose preamble says `root = true`. A
+  withheld, non-text, missing or refused answer is no configuration, and one
+  whose stat `size` is over 64 KB is never read. A path's resolution is kept
+  per (path, each config's folder and etag), so restored tabs ask nothing
+  twice. Judging happens in the window, one resolution per task, under a
+  5 ms clock; a config that runs it out of time twice, or is over a cap,
+  configures nothing until its etag changes.
+
+Neither sends any file's content. What the files say sets the buffer's
+indentation and, for a file with no line break, the line ending its new
+lines take; **a save never carries anything `.editorconfig` asked for** — no
+trimmed whitespace, final newline or converted line endings.
+
+Test hook, read-only and not an API: `window.__hud.editorSettings()` →
+`{settings, stored, editors: [{uri, fontFamily, fontSize, wordWrap, minimap,
+stickyScroll, renderWhitespace, bracketPairs, cursorStyle, vim, model:
+{insertSpaces, tabSize, indentSize, eol}}]}` — never any text.
 
 ## Additions 2026-10-12 (chat titles)
 

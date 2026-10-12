@@ -68,3 +68,6 @@ plan disagree, this file wins.**
   - **E-11 (vim keybindings) is affected.** Vim's Ctrl+D (half a page down) would be taken by push-to-talk, since the
     window takes Ctrl+D before Monaco sees it. If vim mode is ever turned on, the owner has to decide: push-to-talk
     wins in the editor (vim loses Ctrl+D), or vim mode keeps Ctrl+D in the editor (push-to-talk is the orb there).
+  - **Decided 2026-10-12 (the owner): push-to-talk keeps Ctrl+D in the editor, vim mode included.** Vim loses its
+    half-page-down. Built that way in ED-8 (`monaco-vim` 0.4.4 works on Monaco 0.57; `:w` is the buffer's guarded
+    save).

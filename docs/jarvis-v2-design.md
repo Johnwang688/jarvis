@@ -2122,6 +2122,28 @@ fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
 
+**A terminal that ended with Jarvis continues where it was (2026-10-12, the
+owner's option (a)).** The owner typed into a terminal whose history was
+still on screen after a restart and got only "New terminal here". Now a
+typing key there, a paste or **Continue here** starts a new shell in the same
+folder, with the same "Jarvis can read" switch (off when unknown), in the
+same place and the same xterm, under the old text and a `── restarted HH:MM
+──` line; what was typed waits (4 KiB) until the new shell's replay has been
+parsed, and is then **typed, never run** (the lead's decision on review):
+the keys up to the first Enter, and no paste with a line break, because the
+line was typed at the old context's prompt (a robot's shell, `>>>`, a root
+shell) and must not run in a fresh local one; the window says so. Any
+refusal while held — a key that does not type, past 4 KiB, a card, the
+terminal leaving the screen — drops all of it. The old text is rebuilt from
+xterm's cells (characters and colours, the last 1 MiB, read from the bottom),
+kept in this page's memory only, and written back after the RIS of every
+later attach of the new terminal. Running programs do not survive —
+only their text — and a page reload loses the text: real survival would need
+a pty host outside the daemon, which would reverse W-3 (option (b), not
+taken). Only the owner's gesture in that terminal continues it: never a
+card, a crash, a load, a reattach, another window's terminal, a shell that
+exited on its own, a program terminal, Ctrl+D or a HUD key. No route changed.
+
 **Jarvis can read a terminal (2026-10-10, WP-F; decisions W-2).**
 `terminal_read(terminal, lines=200)` returns the last lines (at most 1000) of
 one terminal's **normal buffer** as plain text — escape sequences stripped,
@@ -2889,6 +2911,32 @@ DevTools port, extensions and permission prompts; Chrome's environment is
 built from nothing. Every `/browser` route is owner-only on the HUD
 listener, and no URL, title or profile label reaches `/status`, the bus or
 the log. `/status` gains `browser` and `refused_ports`.
+
+**Editor settings, `.editorconfig` and vim (2026-10-12, ED-8 of the editor
+plan, §2.8; decisions E-9, E-11).** A File pane's ⚙, or "Editor Settings…" in
+the palette, opens one dialog for every editor in the window: font family
+(names only — nothing that could end a CSS value), size, tab size, spaces or
+tabs, word wrap (Markdown wraps by its own setting, on), minimap (off), sticky
+scroll, whitespace, bracket-pair colours, cursor style and vim keys (off).
+A change applies to every open editor as it is made and is kept in the
+window's storage, each setting checked alone, so a bad stored value costs
+only itself. Auto-save and format on save stay off (E-9). A project's
+`.editorconfig` — read through the editor's own owner-only routes, from the
+file's folder up to the project's root and never above, stopping at `root =
+true` — sets a matching file's indentation and the line ending a file with
+no line break takes for its new lines; it never touches a file's existing
+line endings and **never rewrites anything on save**, whatever its
+`trim_trailing_whitespace` or `insert_final_newline` say. An `.editorconfig`
+is project content an agent can write, so judging one **never holds the
+window**: one file's judgement is one task, stopped by a 5 ms clock, and a
+config that runs out of time twice, or is past a limit no real config
+reaches, configures nothing until its content changes. Vim (E-11) is
+`monaco-vim` 0.4.4, loaded only when switched on, with its mode and `:`
+command line under the editor; `:w` saves that editor's buffer through ED-2's
+guarded save. **Push-to-talk keeps Ctrl+D in the editor in vim mode too —
+the owner's decision (2026-10-12)**; vim loses its half-page-down. Under an
+approval card the dialog closes and the ⚙ is disabled with the rest of the
+window.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
