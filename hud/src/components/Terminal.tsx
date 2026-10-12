@@ -1074,6 +1074,16 @@ export class TermManager {
     this.changed();
   }
 
+  /**
+   * The pane showing terminal `id` was closed (WP-G2, plan §3.6): the
+   * terminal goes back to the panel as its selected tab. The shell lives on —
+   * no DELETE — its session stays attached, and the panel is left open or
+   * closed as it was.
+   */
+  releaseToPanel(id: string) {
+    this.selectTab(id);
+  }
+
   get dot(): boolean {
     return !this.panelOpen && this.unseenExits.size > 0;
   }
@@ -1202,14 +1212,21 @@ export class TermManager {
    * A new terminal, shown in the panel or in a pane. Null when refused (said
    * in `error`). `place`, asked once the daemon has made it: false leaves it
    * in the list, shown nowhere and opening nothing (`ownerOpened`).
+   * `readable: false` (a split of a terminal Jarvis may not read, WP-G2): the
+   * daemon makes it with the switch off — a copy never widens what Jarvis
+   * can read, not even for a round trip.
    */
-  async create(spec: InSpec, where: "panel" | PaneNo, place?: () => boolean): Promise<string | null> {
+  async create(
+    spec: InSpec, where: "panel" | PaneNo, place?: () => boolean, opts: { readable?: boolean } = {},
+  ): Promise<string | null> {
     if (this.blocked) return null;
     this.creations++;
     this.error = "";
     let row: TerminalRow;
     try {
-      row = await api.createTerminal({ in: spec });
+      // Unreadable from its first byte: the daemon makes it with the switch
+      // off (review of PR #47), never readable for a round trip.
+      row = await api.createTerminal({ in: spec, ...(opts.readable === false ? { readable: false } : {}) });
     } catch (e: any) {
       this.error = e?.message || "the terminal could not be opened";
       this.changed();

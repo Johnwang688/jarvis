@@ -246,7 +246,8 @@ class Backend(unittest.TestCase):
             self.assertEqual(response.status, status, content[:500])
             result = json.loads(content) if response.getheader("Content-Type", "").startswith("application/json") else content
             if status >= 400:
-                self.assertEqual(set(result), {"error"})
+                # A save's 409 also says which bytes are on disk now (ED-2).
+                self.assertEqual(set(result) - ({"etag"} if status == 409 else set()), {"error"})
                 self.assertNotIn("never-expose-this", result["error"])
             self.headers = dict(response.getheaders())
             return result
@@ -254,7 +255,9 @@ class Backend(unittest.TestCase):
             conn.close()
 
     def getfile(self, name, **kw):
-        return self.request("GET", self.url + "/file?" + urlencode({"path": name}), **kw)
+        """The editor's read: the HUD's own request (every editor file route is
+        owner-only, reads included — E-7)."""
+        return self.owner("GET", self.url + "/file?" + urlencode({"path": name}), **kw)
 
     def thread(self, provider=P.FAST, task_id=None):
         return self.daemon.open_thread(self.project.id, Role.CHAT, provider,
@@ -653,17 +656,23 @@ class Backend(unittest.TestCase):
     def test_tree_depth_scope_and_platform(self):
         (self.project_root / "nested").mkdir()
         (self.project_root / "nested" / "a.txt").write_text("a")
-        first = self.request("GET", self.url + "/tree?depth=1")
+        # Owner-only, reads included (E-7): never the API listener.
+        self.request("GET", self.url + "/tree?depth=1", status=403)
+        first = self.owner("GET", self.url + "/tree?depth=1")
         self.assertNotIn("nested/a.txt", [x["name"] for x in first["entries"]])
-        second = self.request("GET", self.url + "/tree?depth=2")
+        second = self.owner("GET", self.url + "/tree?depth=2")
         names = [x["name"] for x in second["entries"]]
         self.assertIn("nested/a.txt", names)
         self.assertNotIn("leak", names)
         self.assertFalse(set(names) & H.SKIP_DIRS)
         for row in second["entries"]:
-            self.assertEqual(set(row), {"name", "kind", "size", "mtime"})
-        self.request("GET", self.url + "/tree?depth=-1", status=400)
-        self.request("GET", self.url + "/tree?path=missing", status=404)
+            # `policy` only on a row the editor treats specially (ED-2).
+            self.assertTrue({"name", "kind", "size", "mtime"} <= set(row) <= {"name", "kind", "size", "mtime", "policy"},
+                            row)
+        flags = {row["name"]: row.get("policy") for row in second["entries"]}
+        self.assertEqual((flags[".env"], flags["alias.txt"], flags["hello.txt"]), ("env", "env", None))
+        self.owner("GET", self.url + "/tree?depth=-1", status=400)
+        self.owner("GET", self.url + "/tree?path=missing", status=404)
         self.assertEqual(self.request("GET", self.url + "/platform"), {"platform": "wsl", "note": None})
         self.project.root = "/mnt/c/Users/owner"
         self.stores.projects.save(self.project)
@@ -673,25 +682,37 @@ class Backend(unittest.TestCase):
 
     def test_file_read_write_conflict_and_caps(self):
         value = self.getfile("hello.txt")
-        self.assertEqual(set(value), {"path", "content", "mtime", "size", "protected"})
-        self.assertEqual(value["content"], "hello\n")
-        saved = self.request("PUT", self.url + "/file", dict(path="hello.txt", content="changed", expected_mtime=value["mtime"]))
+        self.assertEqual(set(value), {"path", "abs", "content", "etag", "mtime", "mtime_ns", "size", "encoding",
+                                      "eol", "kind", "editable", "readonly", "protected"})
+        self.assertEqual((value["content"], value["kind"], value["readonly"]), ("hello\n", "text", None))
+        saved = self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="changed", expected_etag=value["etag"]))
         self.assertIsInstance(saved["mtime"], float)
         self.assertEqual((self.project_root / "hello.txt").read_text(), "changed")
-        self.request("PUT", self.url + "/file", dict(path="hello.txt", content="bad", expected_mtime=value["mtime"]), status=409)
-        self.request("PUT", self.url + "/file", dict(path="new.txt", content="new", expected_mtime=None))
+        conflict = self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="bad", expected_etag=value["etag"]),
+                              status=409)
+        self.assertEqual(conflict["etag"], saved["etag"])
+        # `expected_mtime` still works for one release.
+        legacy = self.getfile("hello.txt")
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="bad", expected_mtime=value["mtime"]), status=409)
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="changed", expected_mtime=legacy["mtime"]))
+        self.owner("PUT", self.url + "/file", dict(path="new.txt", content="new", expected_etag=None))
         self.assertEqual(self.getfile(str(self.extra / "extra.txt"))["content"], "extra")
+        # An env file is the owner's to edit (2026-10-11), and nobody else's to read.
         for path in (".env", "alias.txt"):
-            self.assertEqual(self.getfile(path), {"protected": True})
-            self.request("PUT", self.url + "/file", dict(path=path, content="bad", expected_mtime=None), status=403)
+            env = self.getfile(path)
+            self.assertEqual((env["kind"], env["content"]), ("env", "SECRET=never-expose-this\n"))
+            self.request("GET", self.url + "/file?" + urlencode({"path": path}), status=403)
+            self.request("PUT", self.url + "/file", dict(path=path, content="bad", expected_etag=env["etag"]), status=403)
+        self.assertEqual((self.project_root / ".env").read_text(), "SECRET=never-expose-this\n")
         for path in ("../other/private.txt", "leak/private.txt", str(self.other / "private.txt"), ".git/config"):
             self.getfile(path, status=403)
-            self.request("PUT", self.url + "/file", dict(path=path, content="bad", expected_mtime=None), status=403)
+            self.owner("PUT", self.url + "/file", dict(path=path, content="bad", expected_etag=None), status=403)
         self.getfile("missing", status=404)
-        self.request("GET", self.url + "/file", status=400)
-        self.request("PUT", self.url + "/file", {"path": "hello.txt"}, status=400)
-        self.request("PUT", self.url + "/file", dict(path="hello.txt", content=4, expected_mtime=0), status=400)
-        self.request("PUT", self.url + "/file", dict(path="hello.txt", content="x" * (H.FILE_CAP + 1), expected_mtime=0), status=413)
+        self.owner("GET", self.url + "/file", status=400)
+        self.owner("PUT", self.url + "/file", {"path": "hello.txt"}, status=400)
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content=4, expected_etag=None), status=400)
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="x" * (H.FILE_CAP + 1), expected_etag=None),
+                   status=413)
         (self.project_root / "big").write_bytes(b"x" * (H.FILE_CAP + 1))
         self.getfile("big", status=413)
         self.assertFalse(list(self.project_root.glob(".*.tmp")))
@@ -701,11 +722,19 @@ class Backend(unittest.TestCase):
             path = self.project_root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("guard")
-            self.request("PUT", self.url + "/file", dict(path=name, content="bad", expected_mtime=path.stat().st_mtime), status=403)
+            self.owner("PUT", self.url + "/file", dict(path=name, content="bad", expected_etag=H.editor_policy.etag(b"guard")),
+                       status=403)
+            self.owner("PUT", self.url + "/file", dict(path=name, content="bad", expected_mtime=path.stat().st_mtime),
+                       status=403)
+            self.assertEqual(path.read_text(), "guard")
         for name in ("allowlist.json", "models.json", "routing.json"):
             path = self.extra / name
             path.write_text("{}")
-            self.request("PUT", self.url + "/file", dict(path=str(path), content="bad", expected_mtime=path.stat().st_mtime), status=403)
+            self.owner("PUT", self.url + "/file", dict(path=str(path), content="bad", expected_etag=H.editor_policy.etag(b"{}")),
+                       status=403)
+            self.owner("PUT", self.url + "/file", dict(path=str(path), content="bad", expected_mtime=path.stat().st_mtime),
+                       status=403)
+            self.assertEqual(path.read_text(), "{}")
 
     def test_diff_committed_working_tree_rename_delete_and_untracked(self):
         task = self.stores.tasks.create(self.project.id, "edit files")

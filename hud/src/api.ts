@@ -18,9 +18,12 @@ import { parseRow, parseRows, type InSpec } from "./lib/terminal";
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The error's whole body: `{"error": str}`, and on a save's 409 the disk's `etag` (ED-2). */
+  body: Record<string, unknown> | null;
+  constructor(status: number, message: string, body: Record<string, unknown> | null = null) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -37,7 +40,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     // Every error is `{"error": str}`; never a stack trace, never a credential.
-    throw new ApiError(res.status, (body && body.error) || `HTTP ${res.status}`);
+    throw new ApiError(res.status, (body && body.error) || `HTTP ${res.status}`,
+      body && typeof body === "object" && !Array.isArray(body) ? body : null);
   }
   return body as T;
 }
@@ -148,8 +152,16 @@ export const api = {
     ),
   readFile: (projectId: string, path: string) =>
     req<FileRead>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`),
-  writeFile: (projectId: string, body: { path: string; content: string; expected_mtime: number }) =>
-    req<{ mtime: number }>(`/projects/${projectId}/file`, put(body)),
+  // The editor's save (ED-2): against the bytes it was read or saved as
+  // (`expected_etag`; null means the file must not exist). 409 carries the
+  // disk's etag in `ApiError.body`.
+  writeFile: (projectId: string, body: { path: string; content: string; expected_etag: string | null }) =>
+    req<{ etag: string; abs: string; mtime: number; mtime_ns: number; size: number }>(
+      `/projects/${projectId}/file`, put(body)),
+  // Where each open file stands (ED-2's change poll): at most 100 paths.
+  statFiles: (projectId: string, paths: string[]) =>
+    req<{ files: Record<string, import("./lib/buffers").StatRow> }>(
+      `/projects/${projectId}/files/stat`, json({ paths })),
 
   // --- diff ---------------------------------------------------------------
   diff: (taskId: string) => req<Diff>(`/tasks/${taskId}/diff`),
@@ -215,7 +227,7 @@ export const api = {
   // always an id (`in`), never a path. The socket itself is in
   // components/Terminal.tsx, built from `location` with a fresh ticket.
   terminals: () => req<unknown>("/terminals").then(parseRows),
-  createTerminal: (body: { in: InSpec; cols?: number; rows?: number }) =>
+  createTerminal: (body: { in: InSpec; cols?: number; rows?: number; readable?: boolean }) =>
     req<unknown>("/terminals", json(body)).then((r) => {
       const row = parseRow(r);
       if (!row) throw new ApiError(500, "the daemon answered without a terminal");
