@@ -25,8 +25,8 @@
 // header, capped, and never `document.title`; a link opens only for http(s),
 // and only on Ctrl+click; there is no clipboard addon (no OSC 52). A link to
 // a server on this machine (a dev server's `Local:` line) opens a small menu
-// instead — "Open in Preview" or "Open in a browser tab" (WP-E) — and the
-// Preview half is judged like a typed URL: never one of the daemon's ports. xterm
+// instead — "Open in Browser" or "Open in a Chrome tab" (WP-E) — and the
+// Browser half is judged like a typed URL: never one of the daemon's ports. xterm
 // answers some output — a cursor-position, device or colour query — through
 // the owner's own input channel, so **a reattach sends nothing until its
 // replay has been parsed** (the ring's old queries are answered into a
@@ -50,7 +50,7 @@ import {
   SPECS_KEPT, type InSpec, type ReadNote, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
-import { judgePreviewUrl } from "../lib/preview";
+import { judgeBrowserUrl } from "../lib/browser";
 import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
 import { useDaemonPorts } from "../state/daemonPorts";
@@ -963,8 +963,8 @@ export class TermManager {
   forgetTerminal: (id: string) => void = () => {};
   focusPane: (pane: PaneNo) => void = () => {};
   showPanel: () => void = () => {};
-  /** Load a URL in a Preview pane (App's click rule); false when it did not. */
-  openPreview: (url: string) => boolean = () => false;
+  /** Load a URL in a Browser pane (App's click rule); false when it did not. */
+  openBrowser: (url: string) => boolean = () => false;
 
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
@@ -1489,15 +1489,15 @@ export class TermManager {
     this.changed();
   }
 
-  /** The link menu's "Open in Preview": a Preview pane, by the click rule (App). */
-  linkToPreview() {
+  /** The link menu's "Open in Browser": a Browser pane, by the click rule (App). */
+  linkToPane() {
     const menu = this.linkMenu;
     this.closeLinkMenu();
-    if (menu && !this.blocked) this.openPreview(menu.url);
+    if (menu && !this.blocked) this.openBrowser(menu.url);
   }
 
-  /** The link menu's "Open in a browser tab". */
-  linkToBrowser() {
+  /** The link menu's "Open in a Chrome tab". */
+  linkToTab() {
     const menu = this.linkMenu;
     this.closeLinkMenu();
     if (menu && !this.blocked) window.open(menu.url, "_blank", "noopener,noreferrer");
@@ -2114,8 +2114,8 @@ export function TerminalToasts(props: { blocked: boolean }) {
 
 /**
  * Where a Ctrl+clicked link to a server on this machine opens (WP-E): in a
- * Preview pane (a drawn one, else the focused pane — App's click rule) or in
- * a browser tab. "Open in Preview" is judged like a typed URL with the ports
+ * Browser pane (a drawn one, else the focused pane — App's click rule) or in
+ * a Chrome tab. "Open in Browser" is judged like a typed URL with the ports
  * the daemon reported, so a link to the HUD or the API is refused here, with
  * the reason. Placed at the click (screen px through `toCss`); Escape or a
  * click elsewhere closes it, and a card closes it (TermManager.setBlocked).
@@ -2153,7 +2153,7 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
       document.removeEventListener("keydown", esc, true);
     };
   }, [menu, mgr]);
-  const verdict = !menu || status === "pending" ? null : judgePreviewUrl(menu.url, ports);
+  const verdict = !menu || status === "pending" ? null : judgeBrowserUrl(menu.url, ports);
   // Never wider than the window (less 4px a side), so it can always be placed inside it.
   const width = menuWidth(toCss(window.innerWidth, props.zoom));
   useLayoutEffect(() => {
@@ -2190,11 +2190,11 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
         ref={verdict?.ok ? first : undefined}
         role="menuitem"
         className="lm-row"
-        data-testid="term-link-preview"
+        data-testid="term-link-pane"
         disabled={!verdict?.ok}
-        onClick={() => mgr.linkToPreview()}
+        onClick={() => mgr.linkToPane()}
       >
-        <span className="lm-label">Open in Preview</span>
+        <span className="lm-label">Open in Browser</span>
       </button>
       {verdict && !verdict.ok ? (
         <div className="lm-note" data-testid="term-link-refused">{verdict.reason}</div>
@@ -2204,10 +2204,10 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
         ref={verdict?.ok ? undefined : first}
         role="menuitem"
         className="lm-row"
-        data-testid="term-link-browser"
-        onClick={() => mgr.linkToBrowser()}
+        data-testid="term-link-tab"
+        onClick={() => mgr.linkToTab()}
       >
-        <span className="lm-label">Open in a browser tab</span>
+        <span className="lm-label">Open in a Chrome tab</span>
       </button>
     </div>
   );

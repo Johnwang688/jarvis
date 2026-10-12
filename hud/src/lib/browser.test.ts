@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  API_PORT, DEFAULT_PORTS, FACE_PORT, SANDBOX, WORKSHOP_PORT, daemonPortsFrom, judgeKeepOrigin, judgePreviewUrl,
+  API_PORT, DEFAULT_PORTS, FACE_PORT, SANDBOX, WORKSHOP_PORT, daemonPortsFrom, judgeKeepOrigin, judgeBrowserUrl,
   keptOrigin, originOf, sandboxFor, storableKeepOrigin, workshopPortFrom, workshopUrl, type DaemonPorts,
-} from "./preview";
+} from "./browser";
 
 /** A daemon on ephemeral ports (a test's), served to a window on its HUD port, frame-hardened. */
 const PORTS: DaemonPorts = { hud: 41001, api: 41002, workshop: 41003, self: 41001, frameHardened: true };
 
-describe("preview URL policy", () => {
+describe("Browser URL policy", () => {
   it("refuses the HUD's own origin, in every spelling", () => {
     // The HUD is the approval surface: an iframe that could reach /approvals
     // would let an agent approve itself.
@@ -17,7 +17,7 @@ describe("preview URL policy", () => {
       "http://foo.localhost:8402/",
       "http://127.0.0.2:8402/x",
     ]) {
-      const v = judgePreviewUrl(bad);
+      const v = judgeBrowserUrl(bad);
       expect(v.ok).toBe(false);
       expect(v.reason).toMatch(/HUD/);
     }
@@ -25,34 +25,34 @@ describe("preview URL policy", () => {
 
   it("refuses a loopback host the HUD's CSP cannot frame, with the spelling that works (ED-4)", () => {
     for (const bad of ["http://[::1]:5173/", "http://127.0.0.2:5173/app?x=1", "http://127.1.2.3:3000/"]) {
-      const v = judgePreviewUrl(bad, PORTS);
+      const v = judgeBrowserUrl(bad, PORTS);
       expect(v.ok).toBe(false);
       expect(v.reason).toMatch(/frames only localhost/);
       expect(v.reason).toMatch(/http:\/\/localhost:\d+\//);
     }
     for (const good of ["http://localhost:5173/", "http://127.0.0.1:5173/", "http://app.localhost:5173/",
                         "http://0.0.0.0:5173/", "https://localhost:5173/"]) {
-      expect(judgePreviewUrl(good, PORTS).ok).toBe(true);
+      expect(judgeBrowserUrl(good, PORTS).ok).toBe(true);
     }
   });
 
   it("refuses the daemon's API listener too (WP-E), default and reported", () => {
     for (const bad of ["http://127.0.0.1:8405/", "http://localhost:8405/status"]) {
-      const v = judgePreviewUrl(bad);
+      const v = judgeBrowserUrl(bad);
       expect(v.ok).toBe(false);
       expect(v.reason).toMatch(/API/);
     }
-    const v = judgePreviewUrl("http://127.0.0.1:41002/", PORTS);
+    const v = judgeBrowserUrl("http://127.0.0.1:41002/", PORTS);
     expect(v.ok).toBe(false);
     expect(v.reason).toMatch(/API/);
   });
 
   it("refuses the reported HUD port and this window's own port", () => {
-    expect(judgePreviewUrl("http://localhost:41001/", PORTS).ok).toBe(false);
-    expect(judgePreviewUrl("http://localhost:41009/", { ...PORTS, self: 41009 }).ok).toBe(false);
+    expect(judgeBrowserUrl("http://localhost:41001/", PORTS).ok).toBe(false);
+    expect(judgeBrowserUrl("http://localhost:41009/", { ...PORTS, self: 41009 }).ok).toBe(false);
     // The defaults stay refused whatever a daemon reports: they are the owner's live daemon.
-    expect(judgePreviewUrl("http://localhost:8402/", PORTS).ok).toBe(false);
-    expect(judgePreviewUrl("http://localhost:8405/", PORTS).ok).toBe(false);
+    expect(judgeBrowserUrl("http://localhost:8402/", PORTS).ok).toBe(false);
+    expect(judgeBrowserUrl("http://localhost:8405/", PORTS).ok).toBe(false);
   });
 
   it("accepts the workshop origin and localhost dev servers", () => {
@@ -61,18 +61,18 @@ describe("preview URL policy", () => {
       "http://localhost:5173/",
       "http://localhost:3000/some/path?q=1",
     ])
-      expect(judgePreviewUrl(ok).ok).toBe(true);
-    expect(judgePreviewUrl("http://127.0.0.1:41003/p/p1/index.html", PORTS).ok).toBe(true);
+      expect(judgeBrowserUrl(ok).ok).toBe(true);
+    expect(judgeBrowserUrl("http://127.0.0.1:41003/p/p1/index.html", PORTS).ok).toBe(true);
   });
 
   it("refuses anything that is not local", () => {
     for (const bad of ["https://example.com/", "http://192.168.1.10:8080/"])
-      expect(judgePreviewUrl(bad).ok).toBe(false);
+      expect(judgeBrowserUrl(bad).ok).toBe(false);
   });
 
   it("refuses a URL carrying a user name or password, as a terminal link is", () => {
     for (const bad of ["http://u:p@localhost:5173/", "http://u@localhost:5173/", "http://:p@127.0.0.1:3000/"]) {
-      const v = judgePreviewUrl(bad, PORTS);
+      const v = judgeBrowserUrl(bad, PORTS);
       expect(v.ok, bad).toBe(false);
       expect(v.reason).toMatch(/user name or password/);
       expect(judgeKeepOrigin(bad, PORTS).ok, bad).toBe(false);
@@ -81,12 +81,12 @@ describe("preview URL policy", () => {
 
   it("refuses schemes that are not pages", () => {
     for (const bad of ["javascript:alert(1)", "data:text/html,<b>x</b>", "file:///etc/passwd"])
-      expect(judgePreviewUrl(bad).ok).toBe(false);
+      expect(judgeBrowserUrl(bad).ok).toBe(false);
   });
 
   it("says what is wrong rather than failing silently", () => {
-    expect(judgePreviewUrl("").reason).toBeTruthy();
-    expect(judgePreviewUrl("not a url").reason).toBeTruthy();
+    expect(judgeBrowserUrl("").reason).toBeTruthy();
+    expect(judgeBrowserUrl("not a url").reason).toBeTruthy();
   });
 
   it("builds a workshop path on the separate origin", () => {
