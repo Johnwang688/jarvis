@@ -2342,11 +2342,23 @@ and an attacker's are refused.
 
 **Restart and rebuild from the CLI (2026-10-11).** `jarvis restart` (alias
 `jarvis daemon2 restart`) restarts systemd's `jarvis-daemon2` — refused while a
-turn runs unless `--force`, then it waits for a new daemon to answer `/status`
-and reports it — and `jarvis hud rebuild [--pull] [--restart]` runs `npm ci`
-when the lock file moved, installs through `jarvis hud install`'s own path and
-checks `/status` serves the new build; both are the owner's and DENY for every
-agent (`jarvis/v2/owner_ops.py`).
+turn runs or a broker approval waits (`/status` → `approvals_pending`) unless
+`--force`, and refused the same way when systemd says the daemon is up but it
+does not answer `/status` twice ("can't check" is never "nothing running");
+then it waits for a new daemon to answer `/status` and reports it. Typed in a
+HUD terminal, which lives in the daemon's own cgroup, it checks there and hands
+the restart itself to a transient unit (`systemd-run --user`), so the restart
+does not kill the command doing it. `jarvis hud rebuild [--pull] [--restart]`
+refuses an uncommitted `hud/` (an untracked or ignored `hud/.npmrc` included)
+**before** `npm ci` runs package.json's scripts, runs `npm ci` when the lock
+file moved, installs through `jarvis hud install`'s own path and checks
+`/status` serves the new build. Both warn of uncommitted Python in the
+daemon's checkout. Both are the owner's and DENY for every agent
+(`jarvis/v2/owner_ops.py`), as is changing the daemon's unit through
+`systemctl` or D-Bus, and — the owner's choice the same day — killing it by a
+`pkill -f`/`killall -r`/`pgrep -f`-fed `kill` pattern that matches its command
+line at `daemon2` (`pkill -f jarvis` stays ALLOW; a literal `kill <pid>` and
+kills by process name are not seen).
 
 **Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
 to talk button? change it to Ctrl + D just like it is in claude." It was

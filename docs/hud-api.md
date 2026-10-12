@@ -1353,7 +1353,13 @@ Separately, **Jarvis's own CLI is never auto-approved** in any spelling:
 `python -m jarvis…`, the venv's python, `uv run`/`poetry run`/`pipx run
 jarvis` are ASK in `rules.decide`, as bare `jarvis` always was. The same detector refuses `jarvis hud rebuild`,
 `jarvis restart` and `jarvis daemon2 restart` (2026-10-11, `v2/owner_ops.py`),
-and a `systemctl` verb that changes `jarvis-daemon2`. A shell write **into** the install root (`cp`, `rsync`, a
+a `systemctl` verb (or a systemd D-Bus call) that changes `jarvis-daemon2` —
+reads, `reset-failed` and `daemon-reload` stay untouched, and `systemctl
+--user set-/unset-/import-environment` are asked — and, the owner's choice the
+same day, a `pkill -f`, `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose
+pattern matches the daemon's command line at `daemon2` (`pkill -f jarvis`
+stays ALLOW; a literal `kill <pid>` and kills by process name are not seen).
+A shell write **into** the install root (`cp`, `rsync`, a
 redirect) is asked, never auto-approved or covered by an allowlist entry. A
 shell can still write there in a form nobody sees — the accepted shell gap.
 
@@ -1366,4 +1372,15 @@ daemon2 logs the same at start-up, and **warns** in dev mode, on a fallback,
 when nothing is served, when the build was installed with uncommitted
 changes, and when `hud/` changed between its commit and the checkout's HEAD
 (`git diff --quiet <commit> HEAD -- hud`, so a Python-only merge is quiet).
+
+## Additions 2026-10-11 (`jarvis restart` and `jarvis hud rebuild` — PR #48)
+
+**`GET /status` gains `approvals_pending`**: the number of broker approvals
+waiting on the owner (`PendingApprovals.pending()`, a turn's and the escape
+hatch's, which asks after its turn has finished), an integer ≥ 0 beside
+`turns_running`; 0 when the broker cannot be read. It is read before the
+daemon's own lock (the broker has one of its own). `jarvis restart` and
+`jarvis hud rebuild --restart` refuse, exit 3, while it or `turns_running` is
+non-zero (a restart denies what waits), unless `--force`. Read-only, open like
+the rest of `/status`; the HUD does not use it.
 

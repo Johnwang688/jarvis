@@ -1070,11 +1070,12 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 # reads that environment at its next start). Neither: `reset-failed` (a
 # recovery verb that stops nothing) and every read.
 #
-# Not seen, and not decided here — the owner's call (review of PR #48, M2):
-# a `kill` of its pid, and `pkill`/`killall` matching it, which the owner's
-# 2026-08-09 matrix (rules_check) keeps ALLOW as ordinary process control.
-# `pkill -9 -f 'jarvis daemon2'` is in effect a restart (Restart=on-failure
-# brings it back in 5 s); a plain SIGTERM stops it until `jarvis restart`.
+# Killing the daemon's process is the kill rule's, below (the owner's
+# decision on review M2): a pattern that matches its command line at
+# `daemon2` is DENY; a literal `kill <pid>` and kills by process name are not
+# seen. `pkill -9 -f 'jarvis daemon2'` is in effect a restart
+# (Restart=on-failure brings it back in 5 s); a plain SIGTERM stops it until
+# `jarvis restart`.
 DAEMON_UNIT = "jarvis-daemon2"
 _DAEMON_UNIT_NAMES = (DAEMON_UNIT, DAEMON_UNIT + ".service")
 # The prefilter's words: a line that changes the unit names one of these (or

@@ -1673,7 +1673,8 @@ def gate_state_complexity_checks() -> None:
 # `jarvis hud rebuild` asked, and `systemctl --user restart jarvis-daemon2`
 # was ALLOW: it ran with nobody asked on every human-backed surface. (A
 # `pkill -f jarvis` still matches the daemon and stays ALLOW — the owner's
-# 2026-08-09 matrix above; not decided here.)
+# 2026-08-09 matrix above; a pattern that matches it at `daemon2` is the
+# owner's kill rule, `review_48_checks` below.)
 
 OWNER_OPS_DENY = (
     'jarvis restart',
