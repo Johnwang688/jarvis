@@ -832,6 +832,12 @@ class MockDaemon:
                             "readonly": (READONLY.get(kind) if editable or kind != "env"
                                          else READONLY["env"] + " And read-only here: it holds NUL bytes.")})
 
+                # /projects/{id}/git/base|status (ED-9). The real refusals are
+                # the daemon's (tests/v2/editor_git_check.py); these mirror
+                # their shape. No `git` in the world: not a repository.
+                if len(parts) == 4 and parts[0] == "projects" and parts[2] == "git":
+                    return mock.git_route(parts[3], q, self)
+
                 # /threads/{id}/transcript|log
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "transcript":
                     return self._json({"messages": w["transcripts"].get(parts[1], [])})
@@ -1385,6 +1391,38 @@ class MockDaemon:
 
     def disk_delete(self, rel: str):
         self.world["files"].pop(rel, None)
+
+    # -- the editor's git (ED-9) -----------------------------------------------
+    #
+    # `world["git"]` (absent: not a repository): {"head", "branch", "base":
+    # {rel: HEAD's text}, "files": {rel: state}, "dirs": {rel: state}}.
+    # `git_base_calls` counts the base reads, for the suite.
+
+    def git_route(self, verb: str, q: dict, handler):
+        w = self.world
+        repo = w.get("git")
+        if verb == "status":
+            if not repo:
+                return handler._json({"repo": False, "head": None, "branch": None, "files": {}, "dirs": {},
+                                      "truncated": False})
+            return handler._json({"repo": True, "head": repo.get("head"), "branch": repo.get("branch", "main"),
+                                  "files": dict(repo.get("files", {})), "dirs": dict(repo.get("dirs", {})),
+                                  "truncated": False})
+        if verb != "base":
+            return handler._err(404, "route not found")
+        rel = q.get("path", [""])[0]
+        self.git_base_calls = getattr(self, "git_base_calls", 0) + 1
+        if rel in w["protected"] or w["kinds"].get(rel) in ("env", "gate", "withheld"):
+            return handler._err(403, "its committed text is not served here (the gutter is off for it).")
+        if rel not in w["files"]:
+            return handler._err(404, "file not found")
+        if not repo:
+            return handler._json({"path": rel, "state": "no_repo", "head": None, "text": None})
+        text = repo.get("base", {}).get(rel)
+        if text is None:
+            return handler._json({"path": rel, "state": "new", "head": repo.get("head"), "text": None})
+        return handler._json({"path": rel, "state": "ok", "head": repo.get("head"), "text": text,
+                              "size": len(text.encode()), "renamed": False})
 
     # -- the editor's navigation (ED-7) ----------------------------------------
 
