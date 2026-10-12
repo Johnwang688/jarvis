@@ -5093,6 +5093,29 @@ jarvis/
   already paid for, is in `swecompare/RUNBOOK.md`.
 - Context-management tests are synthetic and free — no API, fully repeatable.
   Prefer that pattern for new logic.
+- **A check must hold under load** (2026-10-12, the flaky-test fix). The lead
+  runs several suites at once, and a check that fails only when the CPU is
+  busy hides real failures. Four rules, each from a flake this fixed:
+  - **Bind port 0** and read the port back. A fixed port fails when another
+    run holds it (attach/cancel shared 8476).
+  - **Wait for the state, never for a time.** Read a value only after the
+    thing that sets it has happened: Monaco's text after it is drawn, a
+    banner after it appears, a worker's back-off after it records it (move
+    a fake clock only then), the error page a refused load commits before
+    the next goto. In one `evaluate`, set a probe and fire the render that
+    trips it.
+  - **Time work, not the wall.** A real-clock bound measures how long the
+    work held the thread: the least of its wall time and the process's CPU
+    time (`held` in the `.editorconfig` vitests). The thread's own CPU clock
+    is a tick stale on Linux. A check of a guard's logic runs on a clock
+    made of the work done (`workDeadline`). Keep the tight bound, not a
+    generous one.
+  - **Count the HUD's fault, not the test's.** The terminal suite's
+    fresh-ticket check still judges every socket's ticket. A fresh one for
+    a terminal the test removed meanwhile is counted apart.
+  To reproduce, widen the window: `taskset` with busy loops, Chromium's
+  `Emulation.setCPUThrottlingRate`, late animation frames, or a sleep where
+  the race is. "Passes alone" proves nothing.
 - `tests/context_check.py` — free synthetic checks for `context.py`, and the
   one CLAUDE.md claimed existed for months but did not, which is how the
   cut-point orphan bug survived in the compaction path (it only fires past
