@@ -2436,8 +2436,18 @@ spec (`*`, `**`, `**/` as zero or more folders, `?`, `[…]`/`[!…]`, nested
 `{a,b}`, `{n..m}`, `\` escapes, a slash-less glob at any depth, a slash inside
 brackets literal) and **are matched by a table over tokens × path, never a
 backtracking regex**: an `.editorconfig` is agent-writable project content,
-and `[*a*a*a*a*a*a*a*a*b]` as a regex hangs the window on a long name (brace
-alternatives ≤ 64, nesting ≤ 16, paths ≤ 1024). **Vim (E-11, yes)**:
+and `[*a*a*a*a*a*a*a*a*b]` as a regex hangs the window on a long name. **Per
+glob is not enough** (review of PR #59, MED: 123 maximal sections took a
+689 ms long task per file open, a 1 KB path 11.6 s): **one resolution has
+one work budget** (`MATCH_BUDGET`, ~10 ms — every section's compile, read
+in one linear pass, and its tokens × path match, across every file on the
+walk, charged before it runs), and past it the file has **no configuration
+at all, never a partial one**, said once in the console by path. Caps: 64
+alternatives, 512 tokens in **each** (not the first alone, review LOW) and
+4,096 in all per glob, braces 16 deep, 128 sections per file
+(`tooMany`: none), paths ≤ 1024. Resolutions are cached by (project, path,
+each config's folder and etag), parsed files by etag, and a config the stat
+says is over 64 KB is never downloaded. **Vim (E-11, yes)**:
 `monaco-vim` **0.4.4, pinned exactly**, MIT, audited (no network, storage,
 `eval` or `innerHTML`; its status line is text nodes and one input), loaded
 in a lazy chunk of its own only when the setting is on (101 KB, 31 KB gzip).
@@ -2447,14 +2457,19 @@ build, not the UMD `browser` export) — **the dynamic import split Monaco's
 lazy chunk in two** (`monacoBundle` + `editor.api`, 3.65 MB together as
 before). **`:w` is that editor's own guarded save** (`adapter.save`, per
 editor; monaco-vim's global `commands.save` is never set, and never
-`addCommand`), and does nothing under a card. Each File pane draws vim's
+`addCommand`), and does nothing under a card. **`:colorscheme` is a no-op**
+and the adapter's `theme` option never reaches Monaco's window-wide
+`setTheme` (it took every editor off Graphite, an unknown name to the light
+`vs`); **`u`, Ctrl+R, `:undo` and `:redo` do nothing on a read-only editor**
+(monaco-vim calls the model's `undo()` past the editor's read-only); a
+settings change keeps vim's cursor. Each File pane draws vim's
 status line (`editor-vim-status`) below its editor. **Push-to-talk keeps
 Ctrl+D in the editor, vim or not — the owner's decision (2026-10-12)**: the
 window takes it before Monaco, so vim's half-page-down is gone; the HUD's
 other window keys (Ctrl+B, Ctrl+P, zoom) are the HUD's in vim too. Test
 hook, read-only: `window.__hud.editorSettings()` (stored, in force, each
 File editor's raw options, vim, its model's indentation and EOL — never
-text). Sizes: first paint +17 KB. Free checks: `lib/editorSettings.test.ts`,
+text). Sizes: first paint +20 KB (685,073 → 705,426 B). Free checks: `lib/editorSettings.test.ts`,
 `lib/editorconfig.test.ts` (the parser, the spec's glob table, the
 linear-time and cap cases), `state/editorconfig.test.ts` (the walk, root, cache, refusals,
 timeout, the prepare hook leaving a buffer clean) and
@@ -2462,7 +2477,11 @@ timeout, the prepare hook leaving a buffer clean) and
 run by `hud_v2_check` after the navigation section, or alone, `ONLY=vim`).
 Shown to bite in a scratch copy, 7 of 7: the font unchecked, EOL set on a
 file with endings, `prepare` not awaited, `:w` as one window-wide hook, vim
-keeping Ctrl+D, the dialog left up under a card, no alternatives cap. Not
+keeping Ctrl+D, the dialog left up under a card, no alternatives cap; and the
+review round's 8 of 8: no work budget (the 123-section file's vitest), the
+token cap on the first alternative only, no section cap, no resolution cache,
+the size cap not read, `:colorscheme` reaching `setTheme`, vim's undo past
+read-only, and a settings change rewriting vim's cursor. Not
 done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
 edit to `.editorconfig` reaches files opened after it (3 s), not those open.
 

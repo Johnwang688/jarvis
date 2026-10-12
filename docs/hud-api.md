@@ -1820,7 +1820,9 @@ opens a file at `<dir>/<name>` in project `{id}`:
 - `GET /projects/{id}/file?path=<dir>/.editorconfig` for each that stat says
   exists as `kind: "text"`, nearest first, stopping at one whose preamble says
   `root = true`. A withheld, non-text, missing or refused answer is no
-  configuration.
+  configuration, and one whose stat `size` is over 64 KB is never read. A
+  file's content is read once per etag; a path's resolution is kept per
+  (path, each config's folder and etag), so restored tabs ask nothing twice.
 
 Neither sends any file's content. What the files say sets the buffer's
 indentation and, for a file with no line break, the line ending its new
