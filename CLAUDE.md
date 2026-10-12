@@ -1754,7 +1754,7 @@ the worker never started in a real browser — vitest could not see it).
 Test hooks, read-only: `window.__hudSyntax.states()` (each model's grammar,
 state, reason and `served` count), `.probe(url)` (asks the gate about a URL,
 never fetches) and `.loaded()` (grammars compiled), each answering within
-10 s even with a dead worker. Sizes: first paint 569,834 B (+168),
+10 s even with a dead worker. Sizes: first paint 613,246 B (+168),
 `monacoBundle` 3,648,370 B (+5 KB), the worker 213 KB, ~9.9 MB of `.wasm`
 loaded per language on first sight. ED-3's "bold on `void`" note stands:
 `void` is `type.builtin`, `--syn-type`, not bold. Free checks: `lib/syntax/
