@@ -11,6 +11,8 @@ export interface TabInfo {
   mark?: "env" | "withheld" | "readonly" | null;
   loading?: boolean;
   conflict?: boolean;
+  /** A save is on its way (or a second one waits for it): a hollow dot. */
+  saving?: boolean;
 }
 
 const base = (path: string) => path.slice(path.lastIndexOf("/") + 1) || path;
@@ -43,6 +45,7 @@ export function EditorTabs(props: {
             className={"edtab" + (active ? " on" : "") + (preview ? " preview" : "") + (i.conflict ? " conflict" : "")}
             data-testid={`editor-tab-${path}`}
             data-dirty={String(i.dirty)}
+            data-saving={String(!!i.saving)}
             data-preview={String(preview)}
             data-active={String(active)}
             title={path + (i.mark === "env" ? " · Jarvis can't read this file" : "")}
@@ -67,7 +70,9 @@ export function EditorTabs(props: {
           >
             {i.mark === "env" ? <span className="edtab-mark" aria-label="Jarvis can't read this file">🔒</span> : null}
             <span className="edtab-name">{label}</span>
-            <span className={"edtab-dot" + (i.dirty ? " on" : "")} aria-label={i.dirty ? "unsaved" : undefined} />
+            <span className={"edtab-dot" + (i.dirty ? " on" : "") + (i.saving ? " saving" : "")}
+                  title={i.saving ? "saving…" : undefined}
+                  aria-label={i.saving ? "saving" : i.dirty ? "unsaved" : undefined} />
             <button
               type="button"
               className="edtab-x quiet"

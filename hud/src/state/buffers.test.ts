@@ -1,6 +1,8 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api";
-import { Buffers, PlainModel, refOf, type BufferDeps, type TextModel, type WriteBody } from "./buffers";
+import {
+  Buffers, PlainModel, refOf, WRITE_TIMEOUT_MS, type BufferDeps, type TextModel, type WriteBody,
+} from "./buffers";
 import type { FileRead } from "../types";
 
 /**
@@ -575,18 +577,84 @@ describe("the review of PR #49 (each failing on f869543)", () => {
     expect(b.isDirty("/w/a.py")).toBe(false);
   });
 
-  it("double Ctrl+S: the second save waits for the first — no second PUT on a stale etag, no false conflict", async () => {
+  it("Ctrl+S during a save waits for the first, then saves once more against the etag it returned (#49 LOW-2)", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;                                         // a slow disk: /mnt/c
+    const first = b.save("/w/a.py");
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");
+    const third = b.save("/w/a.py");                       // a third press joins the same follow-up
+    expect(third).toBe(second);
+    await Promise.resolve();
+    expect(w.writes).toHaveLength(1);                      // nothing else on its way yet: never a stale etag
+    expect(b.get("/w/a.py")!.saving).toBe(true);
+    w.hold = false;
+    w.release();
+    expect(await first).toBe("saved");
+    expect(await second).toBe("saved");
+    expect(w.writes).toHaveLength(2);                      // exactly one follow-up
+    expect(w.writes[1]).toMatchObject({ content: "one\nAB", expected_etag: tagOf("one\nA") });
+    expect(w.files.get("/w/a.py")).toBe("one\nAB");
+    expect(b.get("/w/a.py")!.conflict).toBeNull();
+    expect(b.isDirty("/w/a.py")).toBe(false);
+    expect(b.get("/w/a.py")!.saving).toBe(false);
+  });
+
+  it("double Ctrl+S with nothing typed between: one PUT, no false conflict", async () => {
     await b.open("p1", "a.py", "1|a.py");
     model("/w/a.py").type("x");
     w.hold = true;
     const first = b.save("/w/a.py");
-    expect(await b.save("/w/a.py")).toBe("skipped");
+    const second = b.save("/w/a.py");
     w.hold = false;
     w.release();
-    expect(await first).toBe("saved");
+    expect([await first, await second]).toEqual(["saved", "saved"]);
     expect(w.writes).toHaveLength(1);
     expect(b.get("/w/a.py")!.conflict).toBeNull();
     expect(b.isDirty("/w/a.py")).toBe(false);
+  });
+
+  it("a first save that 409s runs no follow-up: the conflict bar, and the edit kept", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;
+    const first = b.save("/w/a.py");
+    w.files.set("/w/a.py", "theirs\n");                   // someone else wrote it first
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");
+    w.hold = false;
+    w.release();
+    expect([await first, await second]).toEqual(["conflict", "conflict"]);
+    expect(w.writes).toHaveLength(1);
+    expect(w.files.get("/w/a.py")).toBe("theirs\n");
+    expect(b.get("/w/a.py")!.conflict).toMatchObject({ state: "changed", etag: tagOf("theirs\n") });
+    expect(b.isDirty("/w/a.py")).toBe(true);
+    expect(b.get("/w/a.py")!.saving).toBe(false);
+  });
+
+  it("a poll whose stat crossed a save raises no conflict against the owner's own write", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    let answerStat: () => void = () => {};
+    const stat = w.deps.stat;
+    // The stat reads the disk before the slow write lands, and answers after it.
+    w.deps.stat = async (projectId, paths) => {
+      const before = await stat(projectId, paths);
+      await new Promise<void>((resolve) => (answerStat = resolve));
+      return before;
+    };
+    w.hold = true;
+    const saving = b.save("/w/a.py");
+    const polled = b.poll();
+    await Promise.resolve();
+    w.hold = false;
+    w.release();
+    expect(await saving).toBe("saved");
+    model("/w/a.py").type("B");                            // typing on after the save
+    answerStat();
+    await polled;
+    expect(b.get("/w/a.py")!.conflict).toBeNull();
   });
 
   it("a late save answer never lands on a newer buffer for the same file", async () => {
@@ -700,5 +768,109 @@ describe("ED-7: a rename from the explorer", () => {
     await b.open("p1", "b.py", refOf(1, "b.py"));
     b.renamed("/w/b.py", "/w/b2.py", "gate");
     expect(b.get("/w/b2.py")!.kind).toBe("text");
+  });
+});
+
+describe("the delta review of PR #49 (each failing on 62fc44d)", () => {
+  it("MED-1 P1: Discard and reload during a slow save, Ctrl+S queued: the disk keeps A, never reverted", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;                                         // a slow disk: /mnt/c
+    const first = b.save("/w/a.py");
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");                      // the follow-up, queued
+    expect(await b.reload("/w/a.py")).toBe(true);          // Discard and reload: reads O, the write not landed
+    expect(model("/w/a.py").getValue()).toBe("one\n");
+    w.hold = false;
+    w.release();                                           // the write lands
+    expect(await first).toBe("saved");
+    await second;
+    expect(w.writes).toHaveLength(1);                      // the follow-up wrote nothing
+    expect(w.files.get("/w/a.py")).toBe("one\nA");
+    await b.poll();                                        // and the buffer follows the disk
+    expect(model("/w/a.py").getValue()).toBe("one\nA");
+    expect(b.isDirty("/w/a.py")).toBe(false);
+  });
+
+  it("MED-1 P2: Discard and reload during a slow save, nothing queued: the poll brings the buffer to A", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;
+    const first = b.save("/w/a.py");
+    expect(await b.reload("/w/a.py")).toBe(true);
+    w.hold = false;
+    w.release();
+    expect(await first).toBe("saved");
+    expect(w.files.get("/w/a.py")).toBe("one\nA");
+    await b.poll();
+    expect(model("/w/a.py").getValue()).toBe("one\nA");
+    expect(b.isDirty("/w/a.py")).toBe(false);
+    expect(b.get("/w/a.py")!.etag).toBe(tagOf("one\nA"));
+    expect(b.get("/w/a.py")!.conflict).toBeNull();
+  });
+
+  it("MED-1 P3: a follow-up queued before Discard and reload never saves what is typed after it", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    const write = w.deps.write;
+    let answer: () => void = () => {};
+    let slow = true;
+    w.deps.write = async (projectId, body, signal) => {
+      const r = await write(projectId, body, signal);      // lands on disk at once…
+      if (slow) {
+        slow = false;
+        await new Promise<void>((resolve) => (answer = resolve));  // …and the first answers late
+      }
+      return r;
+    };
+    const first = b.save("/w/a.py");
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");                      // the follow-up, for B
+    expect(await b.reload("/w/a.py")).toBe(true);          // Discard and reload reads A
+    expect(model("/w/a.py").getValue()).toBe("one\nA");
+    model("/w/a.py").type("C");                            // typed after it: never Ctrl+S'd
+    answer();
+    expect(await first).toBe("saved");
+    await second;
+    expect(w.writes).toHaveLength(1);
+    expect(w.files.get("/w/a.py")).toBe("one\nA");
+    expect(b.isDirty("/w/a.py")).toBe(true);
+  });
+
+  it("LOW-1: a write that never answers ends as an error after the timeout; the text kept, the poll back", async () => {
+    vi.useFakeTimers();
+    try {
+      await b.open("p1", "a.py", "1|a.py");
+      model("/w/a.py").type("x");
+      const notes: string[] = [];
+      b.onNotice((_abs, t) => notes.push(t));
+      const write = w.deps.write;
+      let signal: AbortSignal | undefined;
+      w.deps.write = (_p, _body, s) => {
+        signal = s;
+        return new Promise(() => {});                      // the PUT never answers
+      };
+      const saving = b.save("/w/a.py");
+      expect(b.get("/w/a.py")!.saving).toBe(true);
+      await vi.advanceTimersByTimeAsync(WRITE_TIMEOUT_MS - 1);
+      expect(b.get("/w/a.py")!.saving).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(b.get("/w/a.py")!.saving).toBe(false);
+      expect(await saving).toBe("error");
+      expect(signal?.aborted).toBe(true);
+      expect(notes).toContain("the save didn't answer; your text is still here, press Ctrl+S to try again");
+      expect(model("/w/a.py").getValue()).toBe("one\nx");
+      expect(b.isDirty("/w/a.py")).toBe(true);
+      w.files.set("/w/a.py", "theirs\n");                  // the poll is no longer held off
+      await b.poll();
+      expect(b.get("/w/a.py")!.conflict).toMatchObject({ state: "changed", etag: tagOf("theirs\n") });
+      w.deps.write = write;                                // and Ctrl+S tries again
+      w.files.set("/w/a.py", "one\n");
+      await b.poll();
+      expect(await b.save("/w/a.py")).toBe("saved");
+      expect(w.files.get("/w/a.py")).toBe("one\nx");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

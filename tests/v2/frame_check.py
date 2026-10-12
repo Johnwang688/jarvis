@@ -326,6 +326,9 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
         ("GET", "/terminals/deadbeef/attach", None), ("DELETE", "/terminals/deadbeef", None),
+        ("GET", "/vex/status", None), ("GET", "/vex/builds/deadbeef", None),
+        ("POST", "/vex/brain", {"bogus": 1}), ("GET", f"/projects/{p}/vex", None),
+        ("POST", f"/projects/{p}/vex/build", {"bogus": 1}),
     ]
 
 
@@ -647,7 +650,7 @@ class Status(Base):
 
 class Coverage(Base):
     ROUTE_FILES = ("jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/projects.py",
-                   "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py")
+                   "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py", "jarvis/v2/vex.py")
 
     def families(self) -> set[str]:
         """Every first path segment a route module matches on."""

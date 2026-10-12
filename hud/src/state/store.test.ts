@@ -416,7 +416,7 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
                              restore: [{ text: "handed back", files: [], nonce: 4 }] } });
     s = reduce(s, { type: "release_chat", pane: 8, keep: true });
     expect(s.chats[8]).toEqual(emptyChat());
-    expect(s.drafts["compose:*"]).toEqual({ text: "precious unsent words\nhanded back", files: [file] });
+    expect(s.drafts["compose:*"]).toEqual({ text: "precious unsent words\nhanded back", files: [file], projects: ["p1"] });
     // The split's own new compose row in that pane takes them up.
     s = reduce(s, { type: "chat", pane: 8, patch: { compose: { projectId: "p2" } } });
     expect([s.chats[8].input, s.chats[8].files]).toEqual(["precious unsent words\nhanded back", [file]]);
@@ -436,6 +436,45 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
     expect(s.chats[5].input).toBe("");
     s = reduce(s, { type: "chat", pane: 6, patch: { compose: { projectId: "p1" } } });
     expect(s.chats[6].input).toBe("orphan");
+  });
+
+  it("New thread in a pane already composing takes the parked words up, after its own (review 2 of PR #47, MED-2)", () => {
+    const projects = [{ id: "p1", name: "jarvis" }, { id: "p2", name: "schoolwork" }] as any;
+    let s = withChats({ 1: { compose: { projectId: "p1", id: "x1" }, input: "mine" },
+                        8: { compose: { projectId: "p2", id: "x8" }, input: "orphaned" } }, { projects });
+    s = reduce(s, { type: "release_chat", pane: 8, keep: true });
+    expect(s.drafts["compose:*"]).toEqual({ text: "orphaned", files: [], projects: ["p2"] });
+    expect(s.error).toContain("kept for the next new thread you start");
+    expect(s.error).toContain("schoolwork");
+    // The project chip moves the row (same id): not a new thread, nothing taken.
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p2", id: "x1" } } });
+    expect(s.chats[1].input).toBe("mine");
+    expect(s.drafts["compose:*"]).toBeDefined();
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    expect(s.chats[1].input).toBe("mine\norphaned");
+    expect(s.chats[1].compose?.projectId).toBe("p1");
+    expect(s.drafts["compose:*"]).toBeUndefined();
+    expect(s.error).toContain("are back");
+    expect(s.error).toContain("written in schoolwork");
+    expect(s.error).toContain("This new thread is in jarvis");
+  });
+
+  it("a release that parks says where, and how many files past eight were left out (MED-2, NIT-3)", () => {
+    const f = (n: number, tag: string) =>
+      Array.from({ length: n }, (_, i) => ({ name: `${tag}${i}`, mime: "text/plain", data_b64: "YQ==" })) as any;
+    const threads = [{ id: "t2", title: "second chat", project_id: "p1" }] as any;
+    let s = withChats({ 2: { threadId: "t2", input: "for t2", files: f(8, "b") } },
+                      { threads, drafts: { t2: { text: "", files: f(3, "p") } } });
+    s = reduce(s, { type: "release_chat", pane: 2 });
+    expect(s.drafts.t2.files).toHaveLength(8);
+    expect(s.error).toContain("“second chat”");
+    expect(s.error).toContain("3 files were left out");
+    // Nothing to park: nothing said.
+    s = reduce(withChats({ 2: { threadId: "t2" } }, { threads }), { type: "release_chat", pane: 2 });
+    expect(s.error).toBe("");
+    // A × that asked (no keep) drops a compose row's words, silently.
+    s = reduce(withChats({ 2: { compose: { projectId: "p1", id: "c2" }, input: "gone" } }), { type: "release_chat", pane: 2 });
+    expect([s.drafts, s.error]).toEqual([{}, ""]);
   });
 
   it("a turn no pane tracks is left loose, once", () => {

@@ -71,7 +71,7 @@ export function EditorStatus(props: { view: BufferView; editor: any | null }) {
 
   const writes = v.modelEol || "LF";
   const eol = v.eol === "mixed" ? `mixed (saving writes ${writes} throughout)` : v.eol || writes;
-  const state = v.saving ? "saving…" : v.conflict ? (v.conflict.state === "gone" ? "deleted on disk" : "changed on disk")
+  const state = v.conflict ? (v.conflict.state === "gone" ? "deleted on disk" : "changed on disk")
     : v.dirty ? "● unsaved" : v.editable ? "saved" : "read-only";
   return (
     <div className="edstatus" data-testid="editor-status" data-eol={v.eol ?? ""} data-state={state}>
@@ -83,6 +83,8 @@ export function EditorStatus(props: { view: BufferView; editor: any | null }) {
         </span>
       ) : null}
       <span data-testid="status-state" className={v.dirty ? "warnish" : undefined}>{state}</span>
+      {/* A write on its way (a slow disk: /mnt/c), or a second Ctrl+S waiting for it (ED-2). */}
+      {v.saving ? <span data-testid="editor-saving" role="status">saving…</span> : null}
       <span className="grow" />
       {indent ? <span data-testid="status-indent">{indent}</span> : null}
       <span data-testid="status-enc">{v.encoding === "utf-8-bom" ? "UTF-8 with BOM" : v.encoding ? "UTF-8" : "not text"}</span>

@@ -519,7 +519,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                         _hold_checks,
                         _read_note_checks, _integration_checks, _osc_link_checks, _preview_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
-                        _flood_checks, _chat_panes_checks, _split_close_terminal_checks, _crash_checks):
+                        _flood_checks, _chat_panes_checks, _split_close_terminal_checks,
+                        _rv47b_copy_readable_checks, _crash_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -2089,6 +2090,46 @@ def _ended_checks(page, mock, base, check, until, fake):
     check("and 'Choose another' lets it choose", _visible(page, '[data-testid="pane-2-terminal-pick"]'))
     page.set_viewport_size({"width": 1280, "height": 800})
     _store(page, ws=None)
+
+
+def _rv47b_copy_readable_checks(page, mock, base, check, until, fake):
+    """Review 2 of PR #47, LOW-1: Restart and "New terminal here" make a
+    terminal in the old one's place with the old one's switch — one Jarvis
+    could not read is replaced by one he cannot read either, made that way
+    by `POST /terminals`, never PATCHed off afterwards."""
+    if _created(mock):
+        _attached(page, until, _created(mock)[-1][0], timeout=4)
+    tid = _fresh(page, mock, base, until, fake)
+    posts = lambda: [b for (m, p, b) in mock.calls if m == "POST" and p == "/terminals"]  # noqa: E731
+
+    def switch_off(t):
+        sw = page.locator(_sel(t, '[data-testid="term-readable"]'))
+        sw.click()
+        until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+
+    def made_unreadable(what, n):
+        until(lambda: len(posts()) > n, timeout=3)
+        new = _created(mock)[-1][0]
+        _attached(page, until, new)
+        body = posts()[-1]
+        check(f"review 2 #47 LOW-1: {what} of a terminal Jarvis could not read makes one he cannot read, from its first byte",
+              body.get("readable") is False and fake._row(new)["readable"] is False
+              and mock.sent("PATCH", f"/terminals/{new}") == []
+              and page.locator(_sel(new, '[data-testid="term-readable"]')).get_attribute("aria-pressed") == "false",
+              f"{body} {mock.sent('PATCH', f'/terminals/{new}')}")
+        return new
+
+    switch_off(tid)
+    fake.exit(tid, 3)
+    until(lambda: _state(page, tid) == "exited", timeout=3)
+    n = len(posts())
+    page.locator(_sel(tid, '[data-testid="term-restart"]')).click()
+    tid = made_unreadable("Restart", n)
+    fake.end(tid)
+    until(lambda: _state(page, tid) == "ended", timeout=4)
+    n = len(posts())
+    page.locator(_sel(tid, '[data-testid="term-new-here"]')).click()
+    made_unreadable("'New terminal here'", n)
 
 
 def _flood_checks(page, mock, base, check, until, fake):

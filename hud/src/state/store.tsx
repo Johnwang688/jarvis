@@ -30,6 +30,13 @@ export type OrbState =
   | "idle" | "listening" | "transcribing" | "thinking"
   | "composing" | "tool" | "approval" | "speaking" | "error";
 
+/** Unsent words and files a conversation left behind (`State.drafts`). */
+export interface Draft {
+  text: string;
+  files: Attachment[];
+  projects?: string[];
+}
+
 export interface State {
   projects: Project[];
   platforms: Record<string, { platform: string; note: string | null }>;
@@ -58,8 +65,11 @@ export interface State {
   /** Unsent words and staged files a conversation left behind when its pane
    * moved to another one, by `draftKey` (a thread id, or a pane's compose
    * row): they come back when a pane takes that conversation up again, and
-   * are never left in a box now showing another thread (review of PR #27). */
-  drafts: Record<string, { text: string; files: Attachment[] }>;
+   * are never left in a box now showing another thread (review of PR #27).
+   * `projects`: the projects of the compose rows whose words wait under
+   * `ORPHAN_DRAFT`, so the new thread that takes them up can say which they
+   * were written in (review 2 of PR #47). */
+  drafts: Record<string, Draft>;
   /** The last compose row id minted (`Compose.id`, `c<n>`): kept here so the
    * reducer stays pure. */
   composeSeq: number;
@@ -137,8 +147,9 @@ export type Action =
    * else to its parked draft — never to whatever the pane they were dropped
    * on shows by then (re-review of PR #27). */
   | { type: "stage"; key: string; files: Attachment[] }
-  /** Words for a conversation no pane shows: kept with its parked draft. */
-  | { type: "park"; key: string; text: string; files?: Attachment[] }
+  /** Words for a conversation no pane shows: kept with its parked draft
+   * (`projectId`: the compose row's, for words parked under `ORPHAN_DRAFT`). */
+  | { type: "park"; key: string; text: string; files?: Attachment[]; projectId?: string | null }
   /** Two panes' conversations change places (a thread opened in one while the other held it off screen). */
   | { type: "chat_swap"; a: PaneNo; b: PaneNo }
   /** The selected chat changed (`front`: the owner selected it, so it heads
@@ -154,9 +165,11 @@ export type Action =
    * compose row's box were asked about on a × and are dropped; a hidden pane
    * could not ask, so with `keep` they — and words handed back to it — are
    * parked for the next new thread (`ORPHAN_DRAFT`; review of PR #47). A
-   * turn it tracked is left `loose` for the next pane that opens the thread.
-   * The pane leaves the selection order; a capture status stays until the
-   * selection moves on (`select` carries it to the next chat).
+   * park is never silent: the window's error line says where the words went,
+   * and how many files past `MAX_FILES` were left out (review 2 of PR #47).
+   * A turn it tracked is left `loose` for the next pane that opens the
+   * thread. The pane leaves the selection order; a capture status stays
+   * until the selection moves on (`select` carries it to the next chat).
    */
   | { type: "release_chat"; pane: PaneNo; keep?: boolean }
   /** A turn running in a thread no pane shows (a first send whose pane was closed meanwhile). */
@@ -174,20 +187,75 @@ function withChat(s: State, pane: PaneNo, next: ChatState): State {
  * one's key and the new one's parked draft (if any) comes back — a draft is
  * never left in a box that now shows another thread.
  */
-function reconverse(s: State, pane: PaneNo, was: ChatState, next: ChatState): { next: ChatState; drafts: State["drafts"] } {
-  if (sameConversation(was, next, pane)) return { next, drafts: s.drafts };
+function reconverse(
+  s: State, pane: PaneNo, was: ChatState, next: ChatState,
+): { next: ChatState; drafts: State["drafts"]; notice?: string } {
+  // A new thread being started: a compose row that has opened nothing yet.
+  const fresh = !next.threadId && !!next.compose && !next.compose.openedId;
+  if (sameConversation(was, next, pane)) {
+    // New thread while composing keeps the words, as it always did — and, a
+    // new row (a new compose id), it also takes up words no pane's row holds
+    // any more, added to what the box has (review 2 of PR #47: it returned
+    // here, so they waited for a new thread that never came).
+    const renewed = fresh && !was.threadId && !!was.compose && next.compose!.id !== was.compose.id;
+    if (renewed && s.drafts[ORPHAN_DRAFT]) return takeOrphan(s, next, { ...s.drafts });
+    return { next, drafts: s.drafts };
+  }
   const drafts = { ...s.drafts };
   const out = draftKey(was, pane);
   if (out && (was.input || was.files.length)) drafts[out] = { text: was.input, files: was.files };
-  let into = draftKey(next, pane);
+  const into = draftKey(next, pane);
   // A new compose row with nothing of its own parked takes up words no pane's
   // row holds any more (review of PR #47): the next new thread, wherever.
-  if (into && !drafts[into] && !next.threadId && next.compose && !next.compose.openedId && drafts[ORPHAN_DRAFT]) {
-    into = ORPHAN_DRAFT;
+  if (into && !drafts[into] && fresh && drafts[ORPHAN_DRAFT]) {
+    return takeOrphan(s, { ...next, input: "", files: [] }, drafts);
   }
   const parked = into ? drafts[into] : undefined;
   if (into && parked) delete drafts[into];
   return { next: { ...next, input: parked?.text ?? "", files: parked?.files ?? [] }, drafts };
+}
+
+/** A parked draft's projects with one more, once each (undefined: none). */
+function withProject(had: string[] | undefined, id: string | null | undefined): string[] | undefined {
+  if (!id) return had;
+  return had?.includes(id) ? had : [...(had ?? []), id];
+}
+
+/** A project's name for a sentence, or a plain stand-in when it is gone. */
+function projectName(s: State, id: string | null | undefined): string {
+  return (id && s.projects.find((p) => p.id === id)?.name) || "a project no longer listed";
+}
+
+/** "1 file was" / "3 files were": for the notices below. */
+function filesLeftOut(n: number): string {
+  return n ? ` ${n} file${n === 1 ? " was" : "s were"} left out: a message holds ${MAX_FILES}.` : "";
+}
+
+/**
+ * The words parked under `ORPHAN_DRAFT` go into `next`'s box (a new compose
+ * row), after anything already in it, and the window says so (review 2 of
+ * PR #47) — naming the project they were written in when the new thread is
+ * in another. The row keeps the project it was opened in (a split's copy is
+ * its source's, S-2; New thread names one), so nothing moves under the owner;
+ * the project chip is one click away. Files past `MAX_FILES` are left out,
+ * and said to be.
+ */
+function takeOrphan(
+  s: State, next: ChatState, drafts: State["drafts"],
+): { next: ChatState; drafts: State["drafts"]; notice: string } {
+  const o = drafts[ORPHAN_DRAFT];
+  delete drafts[ORPHAN_DRAFT];
+  const text = next.input && o.text ? `${next.input}\n${o.text}` : next.input || o.text;
+  const all = [...next.files, ...o.files];
+  const files = all.slice(0, MAX_FILES);
+  const were = o.projects ?? [];
+  const now = next.compose?.projectId ?? null;
+  const elsewhere = were.some((p) => p !== now);
+  const wrote = elsewhere ? ` (written in ${were.map((p) => projectName(s, p)).join(" and ")})` : "";
+  const where = elsewhere ? ` This new thread is in ${projectName(s, now)}; its project chip can move it.` : "";
+  const notice = `Words you had not sent${wrote} are back, in this new thread's box.${where}`
+    + filesLeftOut(all.length - files.length);
+  return { next: { ...next, input: text, files }, drafts, notice };
 }
 
 /** The orb for a pane's turn, as the reducers below leave it. */
@@ -215,6 +283,8 @@ export function reduce(s: State, a: Action): State {
       let next = { ...withChat(s, a.pane, moved.next), drafts: moved.drafts, composeSeq };
       if (orb !== undefined && a.pane === s.selectedChat) next = { ...next, orb };
       if (error !== undefined) next = { ...next, error };
+      // Words taken up from a pane that let them go are never back unsaid.
+      if (moved.notice) next = { ...next, error: moved.notice };
       return next;
     }
 
@@ -223,7 +293,10 @@ export function reduce(s: State, a: Action): State {
       if (!a.text && !add.length) return s;
       const had = s.drafts[a.key];
       const text = had?.text && a.text ? `${had.text}\n${a.text}` : a.text || had?.text || "";
-      return { ...s, drafts: { ...s.drafts, [a.key]: { text, files: [...(had?.files ?? []), ...add] } } };
+      const draft: Draft = { text, files: [...(had?.files ?? []), ...add] };
+      const projects = withProject(had?.projects, a.projectId);
+      if (projects) draft.projects = projects;
+      return { ...s, drafts: { ...s.drafts, [a.key]: draft } };
     }
 
     case "input": {
@@ -407,26 +480,47 @@ export function reduce(s: State, a: Action): State {
       const c = s.chats[a.pane];
       const drafts = { ...s.drafts };
       const thread = shownThread(c);
-      const park = (key: string, text: string, files: Attachment[]) => {
+      let dropped = 0;
+      const park = (key: string, text: string, files: Attachment[], projectId: string | null = null) => {
         if (!text && !files.length) return;
         const had = drafts[key];
-        drafts[key] = {
+        const all = [...(had?.files ?? []), ...files];
+        dropped += Math.max(0, all.length - MAX_FILES);
+        const draft: Draft = {
           text: had?.text && text ? `${had.text}\n${text}` : text || had?.text || "",
-          files: [...(had?.files ?? []), ...files].slice(0, MAX_FILES),
+          files: all.slice(0, MAX_FILES),
         };
+        const projects = withProject(had?.projects, projectId);
+        if (projects) draft.projects = projects;
+        drafts[key] = draft;
       };
-      if (thread) park(thread, c.input, c.files);
-      else if (a.keep && c.compose) {
-        park(ORPHAN_DRAFT, c.input, c.files);
-        for (const r of c.restore) park(ORPHAN_DRAFT, r.text, r.files);
+      // Where the words went is said, never left for the owner to discover
+      // (review 2 of PR #47): the error line, as a failed send says it.
+      let notice = "";
+      const unsent = !!c.input || c.files.length > 0 || c.restore.length > 0;
+      if (thread) {
+        park(thread, c.input, c.files);
+        if (unsent) {
+          const title = s.threads.find((t) => t.id === thread)?.title;
+          notice = `What you had not sent waits with ${title ? `“${title}”` : "its thread"}: it is back in the box when you open that thread.`;
+        }
+      } else if (a.keep && c.compose) {
+        const projectId = c.compose.projectId;
+        park(ORPHAN_DRAFT, c.input, c.files, projectId);
+        for (const r of c.restore) park(ORPHAN_DRAFT, r.text, r.files, projectId);
+        if (unsent) {
+          notice = `A hidden pane was reused, and what you had not sent in it (a new thread in ${projectName(s, projectId)})`
+            + " is kept for the next new thread you start.";
+        }
       }
+      if (notice) notice += filesLeftOut(dropped);
       const loose = { ...s.loose };
       // A placeholder (`local-N`, a first send whose thread does not exist
       // yet) is no thread: nothing can open it.
       if (c.busy && c.turnThreadId && !c.turnThreadId.startsWith("local-")) loose[c.turnThreadId] = c.status;
       const keep = a.pane === s.selectedChat && CAPTURE_STATUSES.has(c.status) ? c.status : "";
       return {
-        ...s, drafts, loose,
+        ...s, drafts, loose, ...(notice ? { error: notice } : {}),
         chats: { ...s.chats, [a.pane]: { ...emptyChat(), status: keep } },
         selectedOrder: s.selectedOrder.filter((n) => n !== a.pane),
       };

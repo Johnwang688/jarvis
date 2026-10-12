@@ -154,10 +154,12 @@ export const api = {
     req<FileRead>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`),
   // The editor's save (ED-2): against the bytes it was read or saved as
   // (`expected_etag`; null means the file must not exist). 409 carries the
-  // disk's etag in `ApiError.body`.
-  writeFile: (projectId: string, body: { path: string; content: string; expected_etag: string | null }) =>
+  // disk's etag in `ApiError.body`. `signal` gives up on a write that never
+  // answers (the registry's WRITE_TIMEOUT_MS).
+  writeFile: (projectId: string, body: { path: string; content: string; expected_etag: string | null },
+    signal?: AbortSignal) =>
     req<{ etag: string; abs: string; mtime: number; mtime_ns: number; size: number }>(
-      `/projects/${projectId}/file`, put(body)),
+      `/projects/${projectId}/file`, { ...put(body), signal }),
   // Where each open file stands (ED-2's change poll): at most 100 paths.
   statFiles: (projectId: string, paths: string[]) =>
     req<{ files: Record<string, import("./lib/buffers").StatRow> }>(

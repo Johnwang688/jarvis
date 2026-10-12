@@ -340,16 +340,19 @@ ROSTER_WRITES = ("models.select(", "models.set_effort(", "models.remove(", "mode
 
 def guarded_text(path: Path) -> str:
     """A tool file's source as the no-tool guards read it. One exemption:
-    `files._protected_state` names the roster, the chat defaults and routing
-    in order to *refuse* writes to them (PR #15 review), so its body is left
-    out; anything else in the tools that names them still fails."""
+    `files._protected_state` and the path list it resolves,
+    `files._protected_state_paths` (ED-2), name the roster, the chat defaults
+    and routing in order to *refuse* writes to them (PR #15 review), so their
+    bodies are left out; anything else in the tools that names them still
+    fails."""
     import inspect
     from jarvis.tools import files
     text = path.read_text(encoding="utf-8")
     if path.resolve() == Path(files.__file__).resolve():
-        body = inspect.getsource(files._protected_state)
-        assert body in text, "files._protected_state moved; the exemption must follow it"
-        text = text.replace(body, "")
+        for fn in (files._protected_state_paths, files._protected_state):
+            body = inspect.getsource(fn)
+            assert body in text, f"files.{fn.__name__} moved; the exemption must follow it"
+            text = text.replace(body, "")
     return text
 
 
