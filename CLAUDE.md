@@ -1756,8 +1756,11 @@ v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
 (so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
 install` — and since 2026-10-11 `jarvis hud rebuild`, `jarvis restart` and
 `jarvis daemon2 restart` (below) — DENY, judged on the **command word** after wrappers and runners
-(`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
-`ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
+(`env -S` here, and since 2026-10-12 everything in rules' one table through
+`rules.starts`: `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`, `npx`,
+`npm exec`/`-c`, `pnpm`, `yarn`, `bun x`/`exec`, `ssh`, `xargs` with input
+that may complete it — every reading of an option the table does not know),
+`python -m jarvis`, a line's
 own `$VAR` or `ln -s` alias, the installer module, Python source that
 *invokes* it, and shells/`eval`/here-documents/substitutions bash would run
 — never on a line that only mentions it (`echo`, `grep`, a commit message,
@@ -2665,6 +2668,24 @@ boundary is still filesystem permissions. Free checks: `secrets_check`
 v2 `permissions_check` (`env_file_checks`), `claude_provider_check`
 (`env_hook_checks`, the real `build_permit` behind the hook) and
 `terminal_text_check`; all fail on 283d45c, and 17 guard removals each bite.
+
+**Command-safety follow-ups (2026-10-12; the detail is *Program runners are
+judged by what they start* in Safety design).** One table of what runs
+another program (`rules.starts`), read by `decide`, the owner-op detector,
+the gate-state write detector, the vex walk and **v2's layer 2**: an
+always-ask rule now matches the program a runner or wrapper starts (`npx
+vercel --prod`, `uv run git push --force …`, `env -u X git push origin
+main`), layer 1 refuses owner ops and gate or credential env writes behind
+one (`npx jarvis hud install`, `npm exec -c 'cp … <allowlist>'`), and layer
+4 no longer auto-allows `uv run rm -rf build`. A reader hazard is a certain
+write only of what it writes (PR #24's follow-ups). gitops: `ls-remote -o`
+and pull's `--cleanup` take the next word (PR #65's round-3 leftovers).
+Free checks: `rules_check` `runner_checks` (19 refused by `decide`, 11 gate
+writes refused, 48 asked that main allowed, 37 of main's verdicts kept —
+through `decide`, `static_verdict` and real `dispatch` under an allowlist
+entry for every stem, modes ask and all, never run) and
+`hazard_certainty_checks`; v2 `permissions_check` `runner_checks`;
+`gitops_check` `unnamed_repository_checks`. 16 guard removals each bite.
 
 **The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
 for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
@@ -4290,10 +4311,11 @@ jarvis/
   (`permissions.allows` asks `rules.vex_uncoverable`), and always-ask at v2's
   layer 2 under every profile. A glob past the caps (256 characters, 64 of
   `*?[`, 512 glob words a line) is **too complex to judge** the same way, and
-  the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). Not
-  general runner unwrapping: `uv run rm -rf ~` is judged as before — and an
-  allowlist entry for `uv` or `npx` covers `uv run vexbuild`, by the general
-  stem-entry rule (an entry is a yes to everything the stem runs). The
+  the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). The
+  runner table it reads is now every reader's (`rules.starts`; *Program
+  runners* below), so `uv run rm -rf ~` is no longer judged as `uv` — and an
+  allowlist entry for `uv` or `npx` still covers `uv run vexbuild`, by the
+  general stem-entry rule (an entry is a yes to everything the stem runs). The
   here-document lexer recognises an operator only where bash does — never in
   quotes, a comment, `${…}` or arithmetic (`$((1<<2))`, `((x<<=1))`,
   `$[…]`), and a backtick's own here-document ends at its backtick —
@@ -4707,7 +4729,10 @@ jarvis/
   one answers — "two backends, two answers" again, the `grep_files` lesson.
   `rules.AUDITED_IMPLEMENTATIONS` names what was read, and `rules_check`
   prints `AUDIT NOT VERIFIED FOR <stem>` (informational, like files_check's
-  PARITY NOT VERIFIED) when a binary reports something else. `jq`, `tree` and
+  PARITY NOT VERIFIED) when a binary reports something else. **That check
+  sees PATH binaries only**: Claude Code's shell functions (grep → ugrep, find
+  → bfs) are never reached by an argv probe, so their entries rest on the
+  hand audit alone, and the check's output says so (2026-10-12). `jq`, `tree` and
   `bat` are not installed and come from their documentation. Recorded, not
   listed: `diff -l` runs the fixed `pr`, `sort -T` writes temporary files it
   deletes, `file -p` restores an atime.
@@ -4734,6 +4759,68 @@ jarvis/
   time: **two implementations of one idea drift, and the more permissive copy
   decides** — so the redirect grammar, the reader-hazard table and the
   continuation rule each have exactly one home now.
+
+  **Program runners are judged by what they start** (2026-10-12, the
+  command-safety follow-ups). `uv run rm -rf ~/projects`, `npm exec -c '…'`,
+  `npx`, `pnpm exec`/`dlx`, `yarn exec`/`dlx`, `bun x`/`exec`, `poetry run`
+  and `pipx run` scored the ALLOW of the runner's own stem, so a human-backed
+  gate ran them with nobody asked; only the vex reading and the owner-op
+  detector read through a runner, each with its own table. Now **one table**
+  says what runs another program — rules' `_WRAPPER_OPTS` and `_RUNNER_SPECS`
+  (each runner's options and values; ssh in `_REMOTE_OPTS`), read through
+  `rules.starts` — and every reader asks it: the vex walk, `decide`
+  (`_judge_started`), the owner-op detector (`protected_state._peel_runner`;
+  its own `_RUNNERS` copy is gone, and it knew neither npx, npm, pnpm, yarn nor
+  bun, so `npx jarvis hud install` was ALLOW), the gate-state write detector
+  (`_started_touches`) and v2's always-ask stems (`rules.started_commands`:
+  `npx vercel --prod` is a production deploy). The rules in `decide`, judged
+  beside the old `unwrap` reading with the worse winning, so the table can
+  only add a refusal there:
+  - a **wrapper** (`env`, `nohup`, `timeout`, `xargs` …) is judged by what it
+    runs, its options now read from the table — `env -u NAME`, `exec -a
+    NAME` and `xargs -a FILE` take a value, and `env -u ls rm -rf ~` used to be
+    the ALLOW of `ls` (and `env -u ls cp x <allowlist>` ran unasked);
+  - a **runner** keeps its own verdict unless what it starts is refused or
+    asks **for a reason of its own** (`rm`, `git push`, `python -c`, a reader
+    in a writing form, Jarvis's CLI); a program that is merely unknown asks
+    nothing more, so `npx create-vite` and `npx some-package` stay as main
+    judged them (`rules._UNLISTED` is the identity-compared verdict for
+    "unknown");
+  - a **command line** a runner hands a shell (`npm exec -c`/`--call`, `bun
+    exec`, pnpm's shell mode) is judged as a line by the same rule
+    (`_line_verdict`);
+  - a program word only known when it runs (`uv run ${CC}foo`), or an option
+    the table does not know that leaves the program unclear (`uv run
+    --frobnicate x pytest`), **asks, never allows**.
+  **The allowlist's stem rule is unchanged**: `command_targets` still uses
+  `unwrap`, so an entry for `uv` or `npx` is a yes to whatever it runs
+  (`uv run rm -rf build` is covered by a `uv` entry) — DENY still wins first.
+  `python -m runpy` runs a *module*, not a program: `decide` has no per-module
+  rule but Jarvis's own (`runs_jarvis`, which peels it), so nothing moved
+  there. Differential against 481eb35 over 32,480 strings (the usual corpus
+  from both trees plus a runner × command cross-product): of main's own
+  29,023 corpus strings, 5 moved — 3 stricter and the 2 below; every other
+  move is a runner line, ALLOW→ASK where the program asks on its own, or
+  ALLOW/ASK→DENY for an owner op, a credential env write or a gate write
+  behind one; of 25 unknown programs behind npx, 24 kept main's verdict (the
+  25th is `${X}y`).
+
+  **A reader hazard is a certain write only of what it writes** (same day,
+  PR #24's follow-up 1). Any hazard used to make every operand a certain
+  write, so `grep --pager=less x <allowlist>` — or an abbreviation another
+  grep reads otherwise (`--p`, `--q`, `--con=`), `less --save-marks`, `rg
+  --pre`, `find … -exec cat` — was DENY for a file it only reads. `Hazard`
+  now carries `operands` (it writes what it is given: `sed -i`, `find
+  -delete`, or `find -exec` of a writer, shell or interpreter) and `writes`
+  (a named output: `sort -o F`, `tree -o F`, `ss -D F`, `less -o F`, `find
+  -fprint F`, ugrep's `--save-config=F`, a sed `w F`, `uniq`/`xxd`'s output
+  operand; a long option abbreviated below three letters is not one); the
+  rest is an uncertain touch, asked and never covered. The two loosenings the
+  differential found are this: `find . -name .env -exec cat {} \;` and `find
+  . -name '.env*' -exec grep KEY {} +` were DENY as "writes onto a credential
+  env file" and are ASK; the secrets layer still refuses both in `run_command`
+  and at v2's layer 1. `ug`'s `--no-config` counts only before `--`
+  (follow-up 3).
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model
@@ -4922,7 +5009,11 @@ jarvis/
   (`commit -m -- --gpg-sign` signed with the global `gpg.program`), so every
   reading is judged and they must agree, else refused (`_readings`); after a
   `--`, fetch, pull, ls-remote and remote still read their words as the
-  repository (`fetch -- <url>` reached a repository no remote names); `-S` is
+  repository (`fetch -- <url>` reached a repository no remote names), and
+  so does the word after an option that takes one (`ls-remote -o <word>
+  <url>`, pull's `--cleanup <mode> <url>`; both older than #65, fixed
+  2026-10-12, with a real-git check that plain git reaches such a URL and the
+  tool refuses before git runs); `-S` is
   refused in merge, cherry-pick, revert, rebase, pull and am as in commit
   (`--gpg-sign` everywhere already); and the value-letter tables hold no
   letter git reads as a flag (rebase's `-m` hid `-x <cmd>`, fetch's `-m`
@@ -5878,6 +5969,13 @@ Two findings worth keeping:
   and tests opt in with `runtime.tools_bound(names)` or
   `runtime.unconfined()`, in code only. Details in *A toolset is a boundary*
   (Safety design).
+- **A runner is judged by what it starts; an allowlist entry for its stem is
+  still a yes to what it runs (2026-10-12).** `decide`, the owner ops, the
+  gate-state check and v2's always-ask rules read through `uv run`, `npx`,
+  `npm exec -c` and their kin from one table (`rules.starts`); the
+  allowlist's stems (`command_targets`, `unwrap`) deliberately do not, so a
+  `uv` entry covers `uv run rm -rf build` as it always did. A DENY still
+  wins before any entry is read.
 - **Killing the v2 daemon by pattern is DENY for agents (2026-10-11, the
   owner's "yes add the daemon2 kill rule" on PR #48).** A `pkill -f`,
   `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose pattern matches the
