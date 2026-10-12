@@ -968,19 +968,20 @@ def _unwrap(tokens: list[str]) -> list[str]:
     return _unwrap_reading(tokens)[0]
 
 
-def unwrap_sure(tokens: list[str]) -> list[str] | None:
+def unwrap_sure(tokens: list[str], peeled: list | None = None) -> list[str] | None:
     """`unwrap`, or None when which program runs cannot be told: an option the
     table does not know may or may not take the next word, `env -S` splits
     past its bound, or the wrappers nest past `PROGRAM_DEPTH`. `run_readonly`
-    runs nothing it cannot tell, and `command_targets` covers nothing."""
-    tokens, sure = _unwrap_reading(list(tokens))
+    runs nothing it cannot tell, and `command_targets` covers nothing.
+    `peeled`, when given, receives the stem of each wrapper taken off."""
+    tokens, sure = _unwrap_reading(list(tokens), peeled)
     return tokens if sure else None
 
 
 _SIMPLE_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
 
 
-def _unwrap_reading(tokens: list[str]) -> tuple[list[str], bool]:
+def _unwrap_reading(tokens: list[str], peeled: list | None = None) -> tuple[list[str], bool]:
     """(the command inside its wrappers, whether it is the only reading).
 
     **The wrappers' options are read from the one table** (`_WRAPPER_OPTS`,
@@ -1012,6 +1013,8 @@ def _unwrap_reading(tokens: list[str]) -> tuple[list[str], bool]:
             return tokens, sure and not (started and started.strings)
         if not started.sure:
             sure = False
+        if peeled is not None:
+            peeled.append(stem)
         tokens = list(started.programs[0])
     return tokens, False
 

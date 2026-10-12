@@ -2990,6 +2990,12 @@ def unwrap_checks() -> None:
         with recorded() as ran:
             out = shell.run_readonly("env --frobnicate ls cat notes.txt")
         assert out.startswith("Error") and not ran, out
+        # xargs hands its program names from a file no check sees.
+        for command in ("xargs -a list cat README.md", "env -S 'xargs -a list cat'",
+                        "nohup xargs -a list cat"):
+            with recorded() as ran:
+                out = shell.run_readonly(command)
+            assert out.startswith("Error") and not ran, (command, out)
         # Ordinary wrapper use: still read, run, and covered as before.
         config.ALLOWLIST_PATH.write_text(json.dumps([{"tool": "run_command", "prefix": "pytest"}]))
         assert permissions.allows("run_command", {"command": "env -u FOO pytest -x"})

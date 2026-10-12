@@ -115,9 +115,16 @@ def run_readonly(
     # The wrappers' options are read from rules' one table (review of PR #75,
     # HIGH 3): `env -u ls rm -rf build` used to be judged as `ls` and run
     # here — rm and all. A line whose program cannot be told is not run.
-    sure = rules.unwrap_sure(tokens)
+    peeled: list[str] = []
+    sure = rules.unwrap_sure(tokens, peeled)
     if sure is None:
         return ("Error: which program this runs cannot be told from its wrappers' options. "
+                "Use run_command.")
+    # xargs hands its program arguments from a file (`-a list`) this check
+    # never sees: `xargs -a list cat` reads whatever `list` names. Here,
+    # with no pipe and no input, that is the only thing xargs adds.
+    if "xargs" in peeled:
+        return ("Error: xargs passes its program arguments this check cannot see. "
                 "Use run_command.")
     tokens = sure
     if not tokens:
