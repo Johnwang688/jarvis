@@ -1601,6 +1601,21 @@ def route(handler, daemon, parts, query):
         # and the attach socket also needs a single-use ticket.
         from . import terminals as _terminals
         return _terminals.route(handler, daemon, parts, query)
+    # The editor's git (ED-9): HEAD's text for the gutter and the explorer's
+    # colours. The owner's, like every editor route (E-7), checked before
+    # anything else — the project is not even looked up for anyone else.
+    if len(parts) == 4 and parts[0] == "projects" and parts[2] == "git":
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        from . import editor_git
+        if parts[3] == "base" and method == "GET":
+            project = daemon.require(stores.projects, parts[1])
+            _object(query, ("path",), ("path",))
+            return 200, editor_git.base(project, query["path"])
+        if parts[3] == "status" and method == "GET":
+            project = daemon.require(stores.projects, parts[1])
+            _object(query, ())
+            return 200, editor_git.status(project)
     # VEX V5 (VX-1): build, download, the brain terminal, new projects.
     # Owner-only, the HUD listener only; mounted before `/projects/...` so
     # `/projects/{id}/vex...` reaches it.

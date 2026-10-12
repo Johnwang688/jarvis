@@ -35,6 +35,8 @@ import { EditorTabs, type TabInfo } from "./EditorTabs";
 import { Chevron, FileIcon } from "./FileIcon";
 import { DirtyDot, useDirtyMarks } from "./DirtyMark";
 import { NO_MARKS, rowDot, type Marks } from "../lib/dirtyMarks";
+import { useGitMarks } from "./GitMarks";
+import { GIT_WORDS, NO_GIT, type GitMarks } from "../lib/gitMarks";
 import { Markdown } from "./Markdown";
 import { isMarkdown } from "../lib/monaco";
 import {
@@ -68,8 +70,11 @@ const Node = memo(function Node(props: {
   onMenu: (e: React.MouseEvent, target: MenuTarget) => void;
   /** Which rows wear the unsaved-changes dot (lib/dirtyMarks.ts). */
   marks?: Marks;
+  /** Each row's git state (ED-9, lib/gitMarks.ts): changing only when a status does. */
+  git?: GitMarks;
 }) {
   const marks = props.marks ?? NO_MARKS;
+  const git = props.git ?? NO_GIT;
   const [tree, setTree] = useState<Tree | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [err, setErr] = useState("");
@@ -101,6 +106,7 @@ const Node = memo(function Node(props: {
                 className={cls + (withheld ? " withheld" : "")}
                 data-testid={`dir-${path}`}
                 data-policy={e.policy}
+                data-git={(!withheld && git.folder(path)) || undefined}
                 title={withheld ? "A credential folder: its contents are never listed here" : undefined}
                 onClick={() => !withheld && setOpen({ ...open, [path]: !isOpen })}
                 onContextMenu={(ev) => props.onMenu(ev, { path, dir: true, policy: e.policy })}
@@ -120,6 +126,7 @@ const Node = memo(function Node(props: {
                   version={props.version}
                   onMenu={props.onMenu}
                   marks={props.marks}
+                  git={props.git}
                 />
               ) : null}
             </div>
@@ -131,7 +138,9 @@ const Node = memo(function Node(props: {
             className={cls + (props.selected === path ? " sel" : "") + (withheld ? " withheld" : "")}
             data-testid={`file-${path}`}
             data-policy={e.policy}
-            title={e.policy === "env" ? "Jarvis can't read this file" : withheld ? "withheld" : undefined}
+            data-git={(!withheld && git.file(path)) || undefined}
+            title={e.policy === "env" ? "Jarvis can't read this file" : withheld ? "withheld"
+              : git.file(path) ? GIT_WORDS[git.file(path)!] : undefined}
             onClick={() => props.onOpen(path, false)}
             onDoubleClick={() => props.onOpen(path, true)}
             onContextMenu={(ev) => props.onMenu(ev, { path, dir: false, policy: e.policy })}
@@ -220,6 +229,8 @@ export function FileTab(props: {
   useSyncExternalStore(buffers.subscribe, buffers.version);
   // The tree's unsaved-changes dots: redrawn when a buffer goes clean or dirty, never per keystroke.
   const marks = useDirtyMarks(pid, props.root);
+  // Its git colours (ED-9): redrawn when a status changes, never per keystroke.
+  const git = useGitMarks(pid);
   const tabs = props.tabs ?? NO_TABS;
   // The latest tabs, written ahead of the render that brings them back: two
   // gestures between renders must not undo each other.
@@ -768,7 +779,7 @@ export function FileTab(props: {
         ) : null}
         <div className="treebody" style={side === "files" ? undefined : { display: "none" }}
              onContextMenu={(e) => openMenu(e, { path: "", dir: true })}>
-          <Node projectId={pid} dir="" depth={0} onOpen={onTreeOpen} selected={active || ""} marks={marks}
+          <Node projectId={pid} dir="" depth={0} onOpen={onTreeOpen} selected={active || ""} marks={marks} git={git}
                 version={treeVersion} onMenu={openMenu} />
         </div>
         <SearchView projectId={pid} ask={searchAsk} visible={side === "search"} blocked={props.blocked}
@@ -954,6 +965,10 @@ export function FileTab(props: {
               }}
               mayAddToChat={!!view && jarvisMayRead(view.kind) && !!props.onAddToChat}
               onAddToChat={addToChat}
+              // The git gutter (ED-9): text and the safety layer only — never
+              // an env file, a withheld one or the gate's state.
+              git={view && (view.kind === "text" || view.kind === "safety")
+                ? { projectId: view.projectId, path: view.path } : null}
             />
             {md && model && !read && !comparing ? (
               <div className="mdrender" data-testid="md-preview">
