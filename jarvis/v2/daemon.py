@@ -36,6 +36,7 @@ from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
                        PermissionCallback, Provider, SessionHandle, SessionLost, SteerRefused,
                        Usage, UserMessage)
 from .stores import ProjectArchived, Stores, StoreError, _validate, _write_bytes
+from . import running_cost
 from . import worktrees
 
 LOG = logging.getLogger(__name__)
@@ -232,6 +233,10 @@ class Daemon:
         # reads it. None means no Discord on this daemon.
         self.discord = None
         self.discord_error: str | None = None   # why start_discord failed (class name)
+        # Chat titles (titles.py): attached and started by daemon2's `main()`,
+        # never by `start()`, so no test or embedded daemon calls a model.
+        # Stopped here by `stop()`.
+        self.titles = None
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -305,6 +310,10 @@ class Daemon:
             # above and never reaches this, so it cannot delete the live
             # daemon's carriers (PR #35 review).
             self._sweep_carriers()
+            # Before any session opens (a session saves its own copy of a
+            # thread): Claude thread costs counted before 2026-10-12 summed
+            # the CLI's running totals. Once per thread, from its own log.
+            running_cost.recount_threads(self.stores, ProviderName.CLAUDE, log=LOG)
             self.started_at = time.monotonic()
             for listener in servers:
                 listener.daemon_threads = True
@@ -466,9 +475,12 @@ class Daemon:
             brief = self._chat_brief(provider, brief)
         with self._lock:
             self._active()
+            # A Claude thread opened now counts each result's own cost from
+            # its first turn: born marked, the start-up recount never reads it.
+            recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
                                                model=brief.model, effort=brief.effort, task_id=brief.task_id,
-                                               cwd=brief.cwd)
+                                               cwd=brief.cwd, cost_recount=recounted)
         try:
             self._open(thread, brief)
         except BaseException:
@@ -1194,6 +1206,12 @@ class Daemon:
                 else:
                     thread.tokens += usage.work_tokens
                     thread.cost_usd += usage.cost_usd or 0
+                # Claude's running total, saved so a resumed CLI (which
+                # continues from its transcript's total) is measured from it.
+                if "cost_total" in data:
+                    running = running_cost.figure(data.get("cost_total"))
+                    if running is not None:
+                        thread.provider_cost_total = running
                 thread.updated = utcnow()
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
@@ -1447,6 +1465,9 @@ class Daemon:
         # session from here on (plan §1.4).
         self.callers.revoke_all()
         self.schedules.stop()
+        titles = self.titles
+        if titles is not None:
+            titles.stop()                       # its Codex session ends with the metadata cancel
         deadline = time.monotonic() + STOP_TIMEOUT
         with self._lock:
             if self._stopping:
@@ -1479,6 +1500,8 @@ class Daemon:
                     job.start()
                     jobs.append(job)
         self._stop_codex_metadata(deadline)
+        if titles is not None and not titles.join(min(3.0, max(0, deadline - time.monotonic()))):
+            LOG.warning("Chat titler still running at shutdown; it writes nothing now")
         for job in jobs:
             job.join(max(0, deadline - time.monotonic()))
         with self._lock:
@@ -2262,6 +2285,11 @@ def main() -> int:
             # Reporter subscribes, then the runner serves, then the gateway.
             discord = start_discord(daemon)
         daemon.runner.serve()                   # idempotent if Discord served it
+        # Chat titles: after the surfaces, so the Discord mirror hears every
+        # `thread_updated` a title publishes (titles.py).
+        from .titles import Titler
+        daemon.titles = Titler(daemon)
+        daemon.titles.start()
         purger.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
         _log_hud_served()

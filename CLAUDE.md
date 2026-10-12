@@ -606,6 +606,36 @@ which `hud_api.check_origin`'s strict Host test (and
 runs a real port-0 daemon and real headless Chromium and reads the headers
 where the daemon receives them; its same-origin read fails on main.
 
+**A Claude thread's cost is the CLI's running total, counted once
+(2026-10-12; `jarvis/v2/running_cost.py`).** `ResultMessage.total_cost_usd`
+is the CLI process's running total for the conversation, not the turn's, and a
+resumed CLI continues from the total its transcript saved (the 2.1.295 CLI's
+own field text: "read the latest result rather than summing across results").
+The provider passed it through as each turn's cost and the daemon summed it,
+so thread 447ff25e read $109.97 for $23.22. Now every result's USAGE carries
+what that result added (`running_cost.step`: a new session measured from 0, a
+resume from `Thread.provider_cost_total`, which the daemon saves from the
+event's `cost_total`, and zeroed by the CLI's `ConversationResetMessage`; a
+positive figure below the baseline is a total that started again from zero; a
+missing figure stays `None`, and so does a zero below a positive baseline,
+which the baseline outlives), so a steer's, a background notice's, a stopped
+and a `/compact` turn's result each count once. Tokens need none of it
+(`usage` is per turn). **History:** a Claude thread the daemon opens is born
+`cost_recount: 1`; one from before the fix (0) is recounted once at daemon
+start (`recount_threads`) from its own log — derived with `step` from the
+pre-fix running totals, while a record carrying `cost_total` keeps its logged
+delta (the provider saw a `/clear` the log never records; review of PR #63) —
+only when the logged figures add up to the stored total, and marked 1; one
+whose log is unreadable or does not add up is marked -1, its cost left as it
+was, said once. Never a Codex or fast-path thread. The ledger's pre-fix Claude
+rows are not rewritten: `ceiling_hit` leaves out a Claude row's dollars
+without `per_result` (each held a running total) and reads the task's threads
+as stored now rather than a status saved before the recount; the HUD's daily
+`equivalent_usd` still includes them for the day of the deploy. Free checks:
+`tests/v2/running_cost_check.py`, `running_cost_checks`/`daemon_cost_checks`
+in `claude_provider_check.py` and the ledger suite's
+`test_ceiling_reads_recounted_threads_not_pre_fix_claude_rows`.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
@@ -634,6 +664,76 @@ under the box and keeps the words, and the mock calls the daemon's
 Free checks: `tests/face/hud_v2_task_check.py` (own mock), `TaskView.test.ts`,
 `taskQuestions.test.ts`, `api.test.ts`. The other task verbs (steer, cancel,
 resume, start) still swallow a refusal in `App.tsx`.
+
+**Chat titles (2026-10-12; `jarvis/v2/titles.py`, design §18, contract in
+`docs/hud-api.md`).** The owner: "each chat just displays its id … keep the
+id in the three dots but have the main display be the title and have the
+title wrap". A `Titler` (one worker thread, started by daemon2's `main()` —
+**never `Daemon.start`, so no test daemon calls a model** — stopped by
+`Daemon.stop`) queues a chat thread at its first owner `user_message`
+(`origin: owner`, via hud/discord/dm, typed words present; the bus observer
+only queues an id) and, `BACKFILL_DELAY_S` after start, every untitled chat
+(archived included) with an owner message in its log. Role `chat` only,
+never a task's thread. **The words are the log's `typed`, never an inlined
+file** (a pre-PR C record, `text` only, is cut at its first fence), capped at
+2000, between v1's delimiters and labelled data. **Model**: Codex
+`config.TITLE_CODEX_MODEL` (`gpt-6-luna`, `JARVIS_TITLE_CODEX_MODEL`) at
+effort low when Codex is in the roster, the catalog lists it and its probe
+passes, through **`CodexProvider.one_shot`** — `account_metadata`'s shape
+(`MetadataBusy` before the probe, one 20 s deadline, the lock released in a
+nested `finally`, `cancel_metadata()` ends it) in a private `_titles` home
+(`codex_config.prepare_title`: read-only sandbox, approvals never, web search
+disabled, no MCP servers, no skills), a fresh empty temp cwd, an ephemeral
+thread with **`environments: []`** (experimental in 0.153.4 and 0.161.0:
+"empty disables environment access" — the closest the app-server has to a
+tool-less turn; read from the generated schema, never run live), and any
+tool item or `item/<tool>/…` notification, server request but a clock read,
+unhonoured model or wider sandbox is an error **and nothing from that turn
+is used**, agent text before it included. **The limit, stated**: if a
+ChatGPT-auth turn ignores `environments: []`, a read-only command can run
+before the turn is refused; its output is discarded. A busy lock waits in the queue (`CODEX_BUSY_TRIES` × 30
+s, others go ahead), then OpenRouter; so does any Codex failure or an
+unusable answer. **OpenRouter**: `models.tier("orchestrator")` with no tools
+and `max_tokens` 1000, **never a Chinese-hosted vendor** (`titles.cn_hosted`
+by id prefix; the configured orchestrator instead, else no title).
+`clean_title`: first non-empty line, invisible characters out, a "Title:"
+label, markdown, quotes and trailing punctuation off, more than 12 words is
+an answer and is refused. The words are `secrets.scrub`bed before they leave
+and the title before it is written. Nothing usable — or a write that raised —
+is tried once more at the next owner message (`ATTEMPTS`). **The write is
+rename's** (`projects._write_title`): `projects.auto_title` writes only if,
+**under `daemon._lock`, the thread and its live session's copy still have no
+title** — a rename before or during generation wins — unique in the project,
+onto the session's copy, and the same `thread_updated` (now with
+`title_source`), so the HUD and the Discord thread follow.
+`Thread.title_source` is `""`/`"auto"`/`"owner"`; a rename sets `"owner"`.
+**`ThreadStore.set_title` is the one writer of `title`/`title_source`**
+(`_write_title`, a restore's renumbering); `save` keeps the stored ones
+whatever the caller holds, as it keeps `surface` — a session copy read in
+`resume_thread`'s window used to put an older automatic title back over the
+owner's rename (review L1). **Tests that set a title use `set_title`**; a
+`save` with a new title is silently a no-op. **A chat archived in the HUD
+(the thread or its project) is never renamed on Discord** (review M1: Discord
+refuses with 50083, the poster unarchived to retry and never re-archived, so
+the backfill would have reopened every archived chat there): the mirror's
+`_renamed` updates only the sidecar's name and marks `rename_pending`, and
+`thread_restored` (after its "Restored." post) or `project_restored` applies
+it. Logs name the thread and the route, never the title or the words.
+**No tool can set or regenerate a title** (`titles_check` `NoTool`, by name
+and by what tool modules call); `PATCH /threads/{id}` is not `owner_only`, as
+before — an API client's rename counts as the owner's. HUD: the row's name
+is `threadLabel` (`lib/threadTitle.ts`) — the title, wrapping and clamped at
+three lines (`.nm.ttl`, the whole title its tooltip; a pinned model's badge
+gives way), or "New thread" (no turns) / "Untitled", muted italic, **never
+the id**, which is the ⋯ menu's **Copy id** (`tmenu-copyid`); a split's chat
+header and the Archive view (its id the tooltip; `quotedName` in sentences)
+name a chat the same way. Free checks: `tests/v2/titles_check.py` (35, with
+a stand-in app-server over real pipes for `one_shot`), the mirror's
+`…waits_for_its_restore` pair in `discord_mirror_check`,
+`threadTitle.test.ts`, `tests/face/hud_v2_titles_check.py` (19, its own
+`MockDaemon(0)`, run by `hud_v2_check` after the editor-marks section).
+Guard removals that bite: the owner guard in `auto_title`, the session-copy
+update, `save` keeping the stored title, the mirror's archived skip.
 
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the

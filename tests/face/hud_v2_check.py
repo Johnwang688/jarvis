@@ -3219,6 +3219,16 @@ def main():
             finally:
                 marks_mock.stop()
 
+            # Chat titles (2026-10-12): the row's title, wrapped and clamped,
+            # Copy id in ⋯, and a title arriving live — a mock of their own.
+            from tests.face.hud_v2_titles_check import titles_checks
+            titles_mock = MockDaemon(0).start()
+            try:
+                titles_checks(browser, titles_mock, f"http://127.0.0.1:{titles_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                titles_mock.stop()
+
             # The git gutter and the explorer's git colours (ED-9): a mock of
             # their own, whose world gains a repository for the run.
             from tests.face.hud_v2_git_check import git_checks

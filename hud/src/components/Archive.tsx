@@ -22,6 +22,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { ArchiveView as View, ArchivedProject, ChatMessage, Project, ProjectImpact, Thread } from "../types";
 import { archiveSummary, deletedNotice, deleteSummary, plural } from "../lib/projects";
+import { quotedName, threadLabel } from "../lib/threadTitle";
 
 /** Escape closes; Enter is swallowed before any focused button sees it. */
 function useConfirmKeys(onClose: () => void) {
@@ -195,7 +196,7 @@ export function ArchiveView(props: {
         props.onDeleted();
       }, (r) => deletedNotice(name, r));
     } else {
-      const name = `“${pending.thread.title || pending.thread.id}”`;
+      const name = quotedName(pending.thread);
       act(api.deleteThread(pending.thread.id), () => {
         setPending(null);
         props.onDeleted();
@@ -211,14 +212,18 @@ export function ArchiveView(props: {
 
   const threadRow = (t: Thread, inProject: boolean) => (
     <div className="prow arow" key={t.id} data-testid={`archived-thread-${t.id}`}>
-      <span className="nm">{t.title || t.id}</span>
+      {/* Chat titles: the title (or New thread/Untitled), the id its tooltip. */}
+      <span className={"nm" + (threadLabel(t).untitled ? " untitled" : "")}
+            data-testid={`archived-thread-name-${t.id}`} title={`id ${t.id}`}>
+        {threadLabel(t).text}
+      </span>
       <span className="sub">{plural(t.turns, "turn")}</span>
       <button type="button" data-testid={`archive-open-${t.id}`} onClick={() => read(t)}>Open</button>
       {inProject ? null : (
         <>
           <button type="button" data-testid={`archive-restore-thread-${t.id}`} disabled={busy}
                   onClick={() => act(api.restoreThread(t.id), props.onRestored,
-                                     `Restored “${t.title || t.id}”.`)}>
+                                     `Restored ${quotedName(t)}.`)}>
             Restore
           </button>
           <button type="button" className="danger" data-testid={`archive-delete-thread-${t.id}`} disabled={busy}
@@ -234,7 +239,9 @@ export function ArchiveView(props: {
   if (reading) {
     body = (
       <div className="pad col" data-testid="archive-transcript">
-        <div className="muted small">Read-only · {reading.thread.title || reading.thread.id}</div>
+        <div className="muted small" title={`id ${reading.thread.id}`}>
+          Read-only · {threadLabel(reading.thread).text}
+        </div>
         {reading.messages.length === 0 ? <div className="muted small">nothing was said in it</div> : null}
         {reading.messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
@@ -246,12 +253,12 @@ export function ArchiveView(props: {
   } else if (pending) {
     const lines = pending.kind === "project"
       ? (pending.impact ? deleteSummary(pending.impact, days) : ["reading what this touches…"])
-      : [`“${pending.thread.title || pending.thread.id}” and its transcript go to the trash.`,
+      : [`${quotedName(pending.thread)} and its transcript go to the trash.`,
          ...(days ? [`The trash keeps it for ${days} days.`] : [])];
     body = (
       <div className="pad col" data-testid="delete-confirm">
         <div className="err">
-          Delete permanently: {pending.kind === "project" ? pending.project.name : pending.thread.title || pending.thread.id}
+          Delete permanently: {pending.kind === "project" ? pending.project.name : quotedName(pending.thread)}
         </div>
         <div className="small" data-testid="delete-summary">
           {lines.map((l) => <div key={l}>{l}</div>)}

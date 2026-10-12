@@ -360,6 +360,7 @@ def handle(h, mock, method, path, body) -> bool:
             taken = [t["title"] for t in w["threads"] if t["project_id"] == thread["project_id"]
                      and t["id"] != thread["id"] and t.get("title")]
             thread["title"] = unique_name(" ".join(str(body["title"]).split()), taken)
+            thread["title_source"] = "owner"       # chat titles: a rename is the owner's
             h._json(thread)
             return True
         return False
