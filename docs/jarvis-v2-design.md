@@ -2778,6 +2778,22 @@ an env file, which never reaches the worker — Monaco folds by indentation, as
 before; and the fold query has the colour queries' 250 ms budget (twice over
 it, that file folds by indentation from then on).
 
+**Chat titles (2026-10-12).** The owner: "right now each chat just displays
+its id. we should keep the id in the three dots but have the main display be
+the title and have the title wrap after a certain length." A chat names
+itself from the owner's first message (`jarvis/v2/titles.py`): Codex
+`gpt-6-luna` at effort low when Codex is healthy and the account lists it,
+in a tool-less, read-only, one-turn app-server that never waits on the login
+lock (a busy lock is tried again over ~90 s, then OpenRouter); else the
+default OpenRouter model. Chats from before are titled by a backfill at
+start-up. A title is written only onto an empty one, so **a rename always
+wins**, before or during generation, and it follows to the chat's Discord
+thread like a rename. In the sidebar the title **wraps**, clamped at three
+lines with the whole title as its tooltip; an untitled chat reads "New
+thread" (or "Untitled" for an older one the backfill has not reached), muted
+and italic, never its id — the id is "Copy id" in the row's ⋯ menu. A split's
+chat header names it the same way. No agent can set or regenerate a title.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

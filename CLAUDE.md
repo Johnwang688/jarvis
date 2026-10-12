@@ -635,6 +635,60 @@ Free checks: `tests/face/hud_v2_task_check.py` (own mock), `TaskView.test.ts`,
 `taskQuestions.test.ts`, `api.test.ts`. The other task verbs (steer, cancel,
 resume, start) still swallow a refusal in `App.tsx`.
 
+**Chat titles (2026-10-12; `jarvis/v2/titles.py`, design §18, contract in
+`docs/hud-api.md`).** The owner: "each chat just displays its id … keep the
+id in the three dots but have the main display be the title and have the
+title wrap". A `Titler` (one worker thread, started by daemon2's `main()` —
+**never `Daemon.start`, so no test daemon calls a model** — stopped by
+`Daemon.stop`) queues a chat thread at its first owner `user_message`
+(`origin: owner`, via hud/discord/dm, typed words present; the bus observer
+only queues an id) and, `BACKFILL_DELAY_S` after start, every untitled chat
+(archived included) with an owner message in its log. Role `chat` only,
+never a task's thread. **The words are the log's `typed`, never an inlined
+file** (a pre-PR C record, `text` only, is cut at its first fence), capped at
+2000, between v1's delimiters and labelled data. **Model**: Codex
+`config.TITLE_CODEX_MODEL` (`gpt-6-luna`, `JARVIS_TITLE_CODEX_MODEL`) at
+effort low when Codex is in the roster, the catalog lists it and its probe
+passes, through **`CodexProvider.one_shot`** — `account_metadata`'s shape
+(`MetadataBusy` before the probe, one 20 s deadline, the lock released in a
+nested `finally`, `cancel_metadata()` ends it) in a private `_titles` home
+(`codex_config.prepare_title`: read-only sandbox, approvals never, web search
+disabled, no MCP servers, no skills), a fresh empty temp cwd, an ephemeral
+thread with **`environments: []`** (experimental in 0.153.4 and 0.161.0:
+"empty disables environment access" — the closest the app-server has to a
+tool-less turn; read from the generated schema, never run live), and any
+tool item, server request but a clock read, unhonoured model or wider
+sandbox is an error. A busy lock waits in the queue (`CODEX_BUSY_TRIES` × 30
+s, others go ahead), then OpenRouter; so does any Codex failure or an
+unusable answer. **OpenRouter**: `models.tier("orchestrator")` with no tools
+and `max_tokens` 1000, **never a Chinese-hosted vendor** (`titles.cn_hosted`
+by id prefix; the configured orchestrator instead, else no title).
+`clean_title`: first non-empty line, invisible characters out, a "Title:"
+label, markdown, quotes and trailing punctuation off, more than 12 words is
+an answer and is refused. Nothing usable is tried once more at the next owner
+message (`ATTEMPTS`). **The write is rename's** (`projects._write_title`):
+`projects.auto_title` writes only if, **under `daemon._lock`, the thread and
+its live session's copy still have no title** — a rename before or during
+generation wins — unique in the project, onto the session's copy, saved, and
+the same `thread_updated` (now with `title_source`), so the HUD and the
+Discord thread follow. `Thread.title_source` is `""`/`"auto"`/`"owner"`; a
+rename sets `"owner"`. **`ThreadStore.save` never blanks a stored title**
+(as it keeps `surface`): a session copy read before a title landed cannot
+undo it. Logs name the thread and the route, never the title or the words.
+**No tool can set or regenerate a title** (`titles_check` `NoTool`, by name
+and by what tool modules call); `PATCH /threads/{id}` is not `owner_only`, as
+before — an API client's rename counts as the owner's. HUD: the row's name
+is `threadLabel` (`lib/threadTitle.ts`) — the title, wrapping and clamped at
+three lines (`.nm.ttl`, the whole title its tooltip; a pinned model's badge
+gives way), or "New thread" (no turns) / "Untitled", muted italic, **never
+the id**, which is the ⋯ menu's **Copy id** (`tmenu-copyid`); a split's chat
+header names an untitled chat the same way. Free checks:
+`tests/v2/titles_check.py` (31, with a stand-in app-server over real pipes
+for `one_shot`), `threadTitle.test.ts`, `tests/face/hud_v2_titles_check.py`
+(17, its own `MockDaemon(0)`, run by `hud_v2_check` after the editor-marks
+section). Guard removals that bite: the owner guard in `auto_title`, the
+session-copy update, the store's never-blank rule.
+
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or
