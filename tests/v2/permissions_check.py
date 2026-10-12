@@ -1042,6 +1042,177 @@ def hud_build_deny_checks():
             config.HUD_DIST = real
 
 
+def env_file_checks():
+    """ENV-1, the owner's `.env*` rule at layer 1: no provider's file tool
+    reads or writes a credential env file (`*.example` only), no shell line
+    writes one, and no Codex grant that is or holds one is approvable. On
+    main: Claude's read tools were not judged at all, `.env.production` was
+    writable, and a grant on a folder holding one was approvable."""
+    from jarvis.v2 import permissions as perms
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_file, denied_grant, denied_read
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        project = box.root / "proj"
+        (project / "src").mkdir(parents=True)
+        (project / "src" / "app.ts").write_text("x\n")
+        prod = project / ".env.production"
+        prod.write_text("API_KEY=FAKE-ENV1-V2\n")
+        (project / ".env.example").write_text("API_KEY=\n")
+        (project / "settings.txt").symlink_to(".env.production")
+        (project / ".env.local.example").symlink_to(".env.production")
+        brief = brief_for(P.AUTO, cwd=project)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+
+        refused = [
+            ("Read", {"file_path": str(prod)}),
+            ("Read", {"file_path": ".env.staging"}),                 # placed in the brief's folder
+            ("Read", {"file_path": str(project / "settings.txt")}),
+            ("Read", {"file_path": str(project / ".env.local.example")}),
+            ("NotebookRead", {"notebook_path": str(project / ".env.qa")}),
+            ("Grep", {"pattern": "KEY", "path": str(prod)}),
+            ("Grep", {"pattern": "KEY", "path": str(project), "glob": "{*.ts,.env.*}"}),
+            ("Grep", {"pattern": "KEY", "glob": "**/.env*"}),
+            ("Grep", {"pattern": "KEY", "glob": "config/.ENV.Prod"}),
+            # Delta review LOW-B: Grep reads what its glob selects, hidden
+            # files included — `*.env*` is `rg --hidden -g '*.env*'`.
+            ("Grep", {"pattern": "API_KEY", "glob": "*.env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/*.local"}),
+            ("Grep", {"pattern": "API_KEY", "path": "app/.env.prod/"}),
+            # …and the raw-line check the shell gives the same strings
+            # (`grep -r KEY app/.env.prod/conf`, `rg -g '!.env.production'`).
+            ("Grep", {"pattern": "API_KEY", "path": "app/.env.prod/conf"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "!.env.production"}),
+            ("read_file", {"path": str(prod)}),
+            ("grep_files", {"pattern": "KEY", "path": str(prod)}),
+            ("Write", {"file_path": str(prod), "content": "x"}),
+            ("Write", {"file_path": str(project / "settings.txt"), "content": "x"}),
+            ("Write", {"file_path": str(project / ".env.local.example"), "content": "x"}),
+            ("Edit", {"file_path": ".env.sample", "old_string": "a", "new_string": "b"}),
+            ("MultiEdit", {"file_path": str(project / ".env.dev"), "edits": []}),
+            ("NotebookEdit", {"notebook_path": str(project / ".env.test")}),
+            ("apply_patch", {"paths": [str(project / "src" / "x.ts"), str(prod)]}),
+            ("write_file", {"path": str(project / ".env.preview"), "content": "x"}),
+            ("edit_file", {"path": str(prod), "old_string": "a", "new_string": "b"}),
+            bash("cat .env.production"),
+            bash("echo X=1 > .env.staging"),
+            bash("cp src/app.ts .env.production"),
+            bash("echo X=1 > settings.txt"),                          # a symlink, in the brief's folder
+            ("shell", {"command": ["bash", "-lc", "sed -i s/a/b/ .env.local"]}),
+        ]
+        for tool, args in refused:
+            before = len(asker.seen)
+            eq(permit(tool, args, brief), Decision.DENY, f"{tool} {args} is refused")
+            eq(len(asker.seen), before, f"{tool}'s refusal is never put to the owner")
+        eq(prod.read_text(), "API_KEY=FAKE-ENV1-V2\n", "the credential env file is untouched")
+        layers = {d["layer"] for d in box.decisions if d["decision"] == "deny"}
+        eq(layers, {"deny"}, "every refusal is layer 1's")
+
+        allowed = [
+            ("Read", {"file_path": str(project / ".env.example")}),
+            ("Write", {"file_path": str(project / "config" / ".env.staging.example"), "content": "x"}),
+            ("Edit", {"file_path": ".env.example", "old_string": "=", "new_string": "=x"}),
+            ("Glob", {"pattern": "**/*.ts"}),
+            # Delta review NIT: Glob returns names only, never contents.
+            ("Glob", {"pattern": "**/.env*"}), ("Glob", {"pattern": "config/.ENV.Prod"}),
+            ("Glob", {"pattern": "**/.*"}), ("Glob", {"pattern": "**/*.env*"}),
+            ("Grep", {"pattern": "KEY", "path": str(project)}),   # a folder search: the stated limit
+            ("Grep", {"pattern": ".env.production", "path": str(project / "src")}),  # a regex, not a file
+            bash("cp .env.example .env.local.example.new.example"),
+        ]
+        for tool, args in allowed:
+            eq(permit(tool, args, brief), Decision.ALLOW, f"{tool} {args} is not refused")
+
+        # A write that only may land on one is asked, whatever the profile.
+        line = "cp src/app.ts $JARVIS_ENV1_UNSET.env"
+        before = len(asker.seen)
+        eq(permit(*bash(line), brief), Decision.ALLOW, "the owner said yes")
+        eq(len(asker.seen), before + 1, "a maybe-write onto an env file is asked under AUTO")
+        ok("env-file" in asker.seen[-1].reason, f"as the env-file rule ({asker.seen[-1].reason})")
+
+        # denied_read / denied_file directly.
+        ok(denied_read("Read", {"file_path": ".env.production"}, str(project)) is not None,
+           "a relative read is placed in the folder it runs in")
+        eq(denied_read("Read", {"file_path": str(project / ".env.example")}), None,
+           ".env.example is readable")
+        ok(denied_file(str(project / ".env.local.example")) is not None,
+           "an .example name that leads to a credential env file is refused")
+        eq(denied_file(str(project / ".env.example")), None, ".env.example is writable")
+
+        # Codex grants: a grant that is or holds one, read or write.
+        clean = box.root / "clean"
+        (clean / "venv" / ".env" / "bin").mkdir(parents=True)    # a virtualenv named .env: a folder
+        (clean / "venv" / ".env" / "bin" / "activate").write_text("x\n")
+        (clean / ".env.example").write_text("x\n")
+        linked = box.root / "linked"
+        linked.mkdir()
+        (linked / "conf").symlink_to(prod)
+        for grant, access in ((project, "write"), (project, "read"), (prod, "write"),
+                              (project / "src" / "..", "write"), (linked, "write"),
+                              (project / ".env.local.example", "read")):
+            why = denied_grant(str(grant), access)
+            ok(why is not None and "credential env file" in why, f"{access} grant on {grant} ({why})")
+        for access in ("write", "read"):
+            eq(denied_grant(str(clean), access), None, f"a {access} grant on a folder with none")
+            eq(denied_grant(str(project / "src"), access), None, f"a {access} grant on src/")
+        # ENV-1 review, NIT 1: a virtualenv named `.env` is a folder, judged
+        # by what it holds — a write grant on it is not refused for its name.
+        for access in ("write", "read"):
+            eq(denied_grant(str(clean / "venv" / ".env"), access), None,
+               f"a {access} grant on a virtualenv folder named .env")
+        saved = perms.GRANT_SCAN_ENTRIES
+        perms.GRANT_SCAN_ENTRIES = 2
+        try:
+            why = denied_grant(str(clean), "write")
+            ok(why is not None and "could not check" in why,
+               f"past the bound, a grant nobody will be asked about is refused ({why})")
+            # ENV-1 review, NIT 2: through the permit a widening reaches the
+            # owner, so a folder too large to walk is asked about, saying so.
+            before = len(asker.seen)
+            eq(permit("apply_patch", {"paths": [str(clean / "x.ts")]}, brief,
+                      widening="write grant", grants=(("write", str(clean)),)),
+               Decision.ALLOW, "past the bound a widening goes to the owner (who says yes)")
+            eq(len(asker.seen), before + 1, "it was asked")
+            headline = asker.seen[-1].headline
+            ok("could not check" in headline and "credential env files" in headline,
+               f"and the card says the folder was not checked ({headline})")
+            strict = brief_for(P.STRICT, cwd=project)
+            eq(build_permit(context(strict), asker)(
+                "apply_patch", {"paths": [str(clean / "x.ts")]}, strict,
+                widening="write grant", grants=(("write", str(clean)),)),
+               Decision.DENY, "strict still refuses the widening")
+        finally:
+            perms.GRANT_SCAN_ENTRIES = saved
+        eq(permit("apply_patch", {"paths": [str(project / "src" / "x.ts")]}, brief,
+                  widening="write grant", grants=(("write", str(project)),)),
+           Decision.DENY, "a widening whose grant holds a credential env file is refused unasked")
+
+        # ENV-1 review, MED-1: Claude's Glob and Grep on ordinary file-name
+        # globs are allowed (refused at layer 1 at 153920d); a dot-led one that
+        # can match a credential env name is refused.
+        for pattern in ("**/*test*", "src/**/*.test*", "**/*template*", "**/*.bak", "**/*dev*",
+                        "**/*.{ts,tsx}", "**/.github/*.yml", "**/*.local"):
+            eq(permit("Glob", {"pattern": pattern}, brief), Decision.ALLOW, f"Glob {pattern}")
+        for value in ("*test*", "*.production", "*.bak"):
+            eq(permit("Grep", {"pattern": "x", "glob": value}, brief), Decision.ALLOW,
+               f"Grep glob {value}")
+        for pattern in ("**/.e?v.*", "**/.[e]nv.custom", "**/.*.custom", "src/{a,.env}.*",
+                        "**/.ENV*", ".env.*", "*.env*", "*.local", "*env*", "**/*.env.ts"):
+            eq(permit("Grep", {"pattern": "x", "glob": pattern}, brief), Decision.DENY,
+               f"Grep glob {pattern}")
+            # Glob lists names, never contents (delta review NIT).
+            eq(permit("Glob", {"pattern": pattern}, brief), Decision.ALLOW, f"Glob {pattern}")
+        for value in ("*.custom", "**/*.py", "**/*.ts", "*.json", "**/*.json"):
+            eq(permit("Grep", {"pattern": "x", "glob": value}, brief), Decision.ALLOW,
+               f"Grep glob {value} (as main; the stated limit of a folder search)")
+        # NIT 5: a Codex `also_commands` line is judged in the brief's folder.
+        eq(permit("shell", {"command": "true"}, brief, widening="terminal input",
+                  also_commands=("echo x > settings.txt",)),
+           Decision.DENY, "an also-command writing through a symlink in the brief's folder")
+
+
 def installed_hud_deny_checks():
     """C-1 (ED-4): the installed HUD is what the daemon serves, so it is what
     BR-0's one check refuses — `config.HUD_DIST` is the install root. Every
@@ -1683,6 +1854,7 @@ def discord_checks():
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
+                    env_file_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
                     review_48_round2_checks, review_48_delta_checks, daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
