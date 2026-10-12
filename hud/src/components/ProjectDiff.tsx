@@ -306,6 +306,9 @@ function ScmDiffEditor(props: { path: string; before: string; after: string | nu
           readOnly: true,
           originalEditable: false,
           renderSideBySide: true,
+          // HEAD on the left, the working file on the right, even in a narrow
+          // pane: never folded into one inline view (as Compare).
+          useInlineViewWhenSpaceIsLimited: false,
           fontSize: 12,
           minimap: { enabled: false },
         });
