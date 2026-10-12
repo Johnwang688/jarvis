@@ -3,7 +3,7 @@ import {
   applyEditorConfig, editorConfigFor, forgetEditorConfig, overrideFor, reapplyEditorConfig, resolutionStats,
   resolveFor, TIMEOUT_MS, type EditorConfigDeps,
 } from "./editorconfig";
-import { deadline } from "../lib/editorconfig";
+import { deadline, globCost } from "../lib/editorconfig";
 import { Buffers, type BufferDeps, type TextModel } from "./buffers";
 import type { FileRead } from "../types";
 
@@ -53,6 +53,15 @@ class Model {
   isDisposed() {
     return this.dead;
   }
+}
+
+/** The heaviest glob the per-glob caps allow, ending in `tag`: 64 alternatives, the most tokens each. */
+function heavyGlob(tag: string): string {
+  for (let k = 40; k > 0; k--) {
+    const g = `${"{a,b}".repeat(6)}${"*x".repeat(k)}y${tag}`;
+    if (globCost(g)) return g;
+  }
+  throw new Error("no glob fits the caps");
 }
 
 beforeEach(() => forgetEditorConfig());
@@ -247,7 +256,7 @@ describe("caching by content, and the size cap before a read", () => {
   });
 
   it("a path left with no configuration is said once, by path, never with content", async () => {
-    const heavy = Array.from({ length: 123 }, (_, n) => `[${"{a,b}".repeat(6)}${"*x".repeat(27)}y${n}]\nindent_size = 2`);
+    const heavy = Array.from({ length: 123 }, (_, n) => `[${heavyGlob(String(n))}]\nindent_size = 2`);
     const w = world2({ ".editorconfig": { text: `root = true\n${heavy.join("\n")}`, etag: "d".repeat(32) } });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -268,9 +277,9 @@ describe("caching by content, and the size cap before a read", () => {
 // The lead's structural backstop (review of PR #59, round 3): a real clock,
 // poison, and one resolution per macrotask.
 describe("the window is never held", () => {
-  /** A config of 123 sections as heavy as the caps allow (the review's shape). */
-  const heavyText = (salt: string) => Array.from({ length: 123 }, (_, n) =>
-    `[${"{a,b}".repeat(6)}${"*x".repeat(27)}y${salt}${n}]\nindent_size = 2`).join("\n");
+  /** A config of 123 sections as heavy as the caps allow (the review's shape): every glob just inside them. */
+  const heavyText = (salt: string) => Array.from({ length: 123 }, (_, n) => heavyGlob(`${salt}${n}`))
+    .map((g) => `[${g}]\nindent_size = 2`).join("\n");
   /** 32 folders deep, a heavy config in each, and `count` files at the bottom. */
   function deepWorld(count: number) {
     const dirs = Array.from({ length: 31 }, (_, i) => `d${i + 1}`);

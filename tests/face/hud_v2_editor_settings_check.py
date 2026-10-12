@@ -88,9 +88,17 @@ if (!window.__longTasks) {
 DEEP_DIRS = [f"d{i}" for i in range(1, 32)]  # 31 folders below the root: 32 configs on every walk
 
 
+def _heavy_glob(tag: str) -> str:
+    """The heaviest glob the editor's caps allow: 64 alternatives (`{a,b}` six
+    times) of at most 64 tokens each — `**/`, six letters, `*x` k times, `y`
+    and the tag — so 64 × 64 = the 4,096-token total exactly."""
+    k = (64 - 1 - 6 - 1 - len(tag)) // 2
+    return f"{'{a,b}' * 6}{'*x' * k}y{tag}"
+
+
 def _heavy_config(salt: str) -> str:
     """123 sections as heavy as the editor's caps allow (the review's shape)."""
-    rows = [f"[{'{a,b}' * 6}{'*x' * 27}y{salt}{n}]\nindent_size = 2" for n in range(123)]
+    rows = [f"[{_heavy_glob(f'{salt}_{n}')}]\nindent_size = 2" for n in range(123)]
     return "\n".join(rows) + "\n"
 
 
@@ -507,7 +515,15 @@ def _long_task_checks(page, mock, check, until):
         check("setup: the browser reports long tasks", page.evaluate("Array.isArray(window.__longTasks)"))
         for i, c in enumerate(configs):
             w["files"][c] = {"content": _heavy_config(str(i)), "mtime": 1757900600}
-        tasks, ms = _open_tabs_at_once(page, mock, until, paths)
+        said: list[str] = []
+        listen = lambda m: said.append(m.text) if ".editorconfig not applied" in m.text else None  # noqa: E731
+        page.on("console", listen)
+        try:
+            tasks, ms = _open_tabs_at_once(page, mock, until, paths)
+        finally:
+            page.remove_listener("console", listen)
+        check("setup: the configs were judged — and stopped (\"took too long\" said in the console)",
+              any("took too long" in s for s in said), str(said[:2]))
         print(f"    long tasks without configs {base}, with 32 heavy configs {tasks}; "
               f"tabs ready in {base_ms:.0f} ms without, {ms:.0f} ms with")
         check("32 heavy configs deep and 20 tabs at once: no task of 100 ms or more",
