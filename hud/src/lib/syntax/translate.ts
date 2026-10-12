@@ -12,7 +12,7 @@
 //  - keeps what web-tree-sitter evaluates itself (`#eq?`, `#match?`,
 //    `#any-of?` and their `not-`/`any-` forms, `#set!`) and what the syntax
 //    worker evaluates (`#has-ancestor?`, `#has-parent?` and their `not-`
-//    forms, `#offset!` on an injection's content);
+//    forms, `#offset!` on an injection's content, `#trim!` on a fold);
 //  - takes out `#set! @capture key value` (nvim's per-capture metadata —
 //    `url`, `bo.commentstring` — which web-tree-sitter refuses to compile and
 //    nothing here reads), keeping the pattern;
@@ -58,10 +58,16 @@ export const NATIVE = new Set([
   "is?", "is-not?", "set!",
 ]);
 
-/** Predicates and directives the syntax worker evaluates (lib/syntax/worker.ts). */
+/**
+ * Predicates and directives the syntax worker evaluates (lib/syntax/engine.ts;
+ * `#trim!` in lib/syntax/folds.ts, ED-6).
+ */
 export const WORKER = new Set([
-  "has-ancestor?", "not-has-ancestor?", "has-parent?", "not-has-parent?", "offset!",
+  "has-ancestor?", "not-has-ancestor?", "has-parent?", "not-has-parent?", "offset!", "trim!",
 ]);
+
+/** The nvim query files the HUD bundles per language: colour and injections (ED-5), folds (ED-6). */
+export type QueryKind = "highlights" | "injections" | "folds";
 
 /** Lua-pattern predicates, and what each becomes. */
 export const LUA = new Map([
@@ -412,7 +418,7 @@ export interface Built extends Omit<Translated, "kept"> {
  */
 export function buildQuery(
   lang: string,
-  kind: "highlights" | "injections",
+  kind: QueryKind,
   read: (lang: string, kind: string) => string | null,
   compiles: (text: string) => string | null,
 ): Built {

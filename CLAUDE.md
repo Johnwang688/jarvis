@@ -2295,7 +2295,61 @@ the policy without `'wasm-unsafe-eval'` (12 of 39 fail), the gate returning
 any URL (5), and the size budget dropped (2). `hud_v2_editor_theme_check`
 now reads spans only after the worker has answered for the file, and
 accepts `"vex.h"` as one string and `@property` as `@` + `property`.
-Not yet: ED-6's folding from `folds.scm`.
+Folding from the tree is ED-6, below.
+
+**Folding and sticky scroll from the tree, ED-6 (2026-10-12; plan §2.6
+"Folding from the tree", the ED-6 package in §3).** nvim-treesitter's
+`folds.scm` for every grammar ED-5 ships is vendored at the same pin
+(f603a2f4; 15 files, the inline grammar has none) and built like the other
+queries (`vendor-queries.mjs` now does three kinds; `translate.WORKER` gained
+`#trim!`); **`vendor/nvim-treesitter/manifest.json` records every vendored
+nvim file's size and SHA-256** with the commit, and vitest fails on a
+difference or an unlisted file. `lib/syntax/folds.ts` (pure) turns a folds
+query's `@fold` matches into Monaco ranges as Neovim's fold expression
+reads them — a quantified capture (`(preproc_include)+`) is one fold, first
+node to last; `#trim!` drops trailing blank lines (Markdown sections); a
+node ending at column 0 ends a line earlier; two lines at least — plus **one
+VS Code rule: the node's own closer stays in view** (a `}`, `]`, `)`, end
+tag or JSX closing element at most `CLOSER_DEPTH` = 3 last-children down,
+past a `;`/`,`, that starts the fold's last line), so `class A {` folds with
+its `};` below, while a Python `def` ending in a multi-line call folds whole
+rather than leaving a lone `)`. Ranges sharing a start keep the widest.
+`SyntaxEngine.folds(id, version)` runs the query over the whole tree and
+**shares one `matchMs` (250 ms) between the query and reading its matches**
+(near 1 MiB, 40k folds took ~200 ms to read, more than the query); over it
+answers null, twice running the document folds by indentation from then
+on; a stale tree (a reparse over budget) still answers from the edited old
+tree; answers are cached per version and tree (Monaco's folding and its
+sticky scroll both ask). Host language only: a fence is one fold. The worker
+takes `{t: "folds", id, req, version}`; the client registers a
+`FoldingRangeProvider` for exactly `COVERED_LANGUAGES` beside the tokens
+provider, matched by request number, the same `REPLY_TIMEOUT_MS` (a silent
+worker is dead, as for tokens), and **null means indentation**: Monaco's
+folding and sticky scroll fall back to the indentation provider whenever
+every provider answers null, so the provider answers null on Monarch (large
+file, slow parse/edits, grammar failed, no worker), for an answer whose
+version the model has passed, and when the query was over budget — never
+`[]`, which would mean "no folds". `dotenv` has no provider and never reaches
+the worker. **Sticky scroll follows the tree's folds** with no change of its
+own: with no document symbol provider (E-1), Monaco's `outlineModel` falls
+through to the folding providers. `__hudSyntax.states()` gains `folds`
+(answers from the tree handed to Monaco). Sizes: first paint unchanged,
+`monacoBundle` +936 B, the worker +10.6 KB. Free checks:
+`lib/syntax/folds.test.ts` (a C++ class, a Python function, a Markdown
+section, where folds end, CRLF, every grammar, versions, the stale tree, the
+budget both halves, the cache), the folds half of `client.test.ts` (stand-in
+Monaco: registration, kinds, request numbers, stale and null answers, Monarch,
+the size budget, a silent worker) and `vendor.test.ts` (the manifest, every
+folds query compiles and captures only `@fold`), and `_fold_checks` in
+`tests/face/hud_v2_syntax_check.py` (the margin's fold controls in a C++
+file are the tree's — 1, 4, 6, 7, 13 — not indentation's 5 and 15; folding
+the class keeps `};`; sticky scroll holds `void autonomousRoutine(int
+side,`, where indentation would hold `{`; a Markdown heading folds; a file
+past the size budget folds by indentation). With the provider unregistered,
+7 of those fail (sticky shows `{`); the null/`[]`, version, both budget and
+off-after-two guards each fail their vitest when removed. Not done: region
+markers (`// #region`) — the indentation provider honours them, tree folds
+do not.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort

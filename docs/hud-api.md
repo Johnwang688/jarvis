@@ -1790,3 +1790,14 @@ their language first opens.
 The HUD's test hooks for it are read-only and not an API:
 `window.__hudSyntax.states()`, `.probe(url)` (asks the loader's gate, never
 fetches) and `.loaded()` (the grammars compiled).
+
+
+## Additions 2026-10-12 (folding from the tree — ED-6)
+
+Editor plan §2.6, "Folding from the tree". No route and nothing on the wire
+changes: the fold queries (nvim-treesitter's `folds.scm`, vendored at ED-5's
+pin) are bundled text inside the syntax worker's own `/assets/` script, and
+folds are computed in that worker from the tree it already holds. No new
+`.wasm`, no policy change. `window.__hudSyntax.states()` gains `folds`: how
+many fold answers from the tree were handed to Monaco for that model (every
+other answer is indentation folding).
