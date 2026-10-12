@@ -32,6 +32,7 @@ import { FileTab } from "./components/FileTab";
 import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { buffers, PlainModel } from "./state/buffers";
 import { writtenPaths } from "./lib/buffers";
+import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
@@ -2361,6 +2362,7 @@ export default function App() {
             narrow={info.narrow}
             blocked={blocked}
             onAddToChat={addToChat}
+            root={pid ? treeRoot(state.projects.find((p) => p.id === pid)) : null}
           />
         );
       }
