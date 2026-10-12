@@ -2791,11 +2791,14 @@ colours names the same way — modified glacier, added and untracked sage, a
 merge conflict lavender, ignored dimmed — and a folder takes the strongest
 state inside it. HEAD's text and the status come from two owner-only routes
 (`docs/hud-api.md`) that refuse what the editor withholds, every env file and
-the gate's state, by path and by the name git has for a renamed file, and that
-refuse a repository whose own config names a program; the status never goes
-into a submodule. The status is polled every 3 s per project while something
-shows it (the daemon caches it 2 s); a poll that sees nothing new redraws
-nothing, and typing never redraws the tree.
+the gate's state, by path and by the name git has for a renamed file (which
+must also lie in the project), and that refuse a repository whose own config
+names a program; the status never goes into a submodule. The status is polled
+every 3 s per project while something shows it (the daemon caches it 2 s); a
+poll that sees nothing new redraws nothing, and typing never redraws the
+tree. A file in another repository than the project's — a nested robot repo,
+a file reached through the Inbox — checks its own HEAD every 10 s while the
+window is visible, so a commit there clears its marks.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

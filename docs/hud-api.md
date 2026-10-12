@@ -1812,17 +1812,24 @@ names a program for git to run, or moves where it works**
   the gate's state, anything `editor_policy` withholds (no gate exemption)
   and every credential env file (`secrets.is_env_credential`) are **403**,
   as written or where they resolve — **and so is a file whose name in git is
-  one of those**: a staged rename or copy (`git diff-index --cached -M
-  HEAD`) serves its source's HEAD text, so the source is judged too (`git mv
-  .env notes.txt` makes `notes.txt` a 403; its text is never sent). HEAD's
-  blob is read **by object id** (`git cat-file blob <oid>`), so no
-  path-based attribute (textconv, a filter, an eol conversion) applies; its
-  size is read from `ls-tree -l` first and capped at the editor's own read
-  cap (2 MiB). `state`: `ok` (with `text`, decoded as UTF-8; CRLF reads as
-  LF), `new` (HEAD does not hold it: untracked or newly added — no gutter),
-  `no_repo`, `no_head` (no commit yet), `binary` (a NUL in the first 8 KiB
-  or bytes that are not UTF-8 — no gutter), `too_large`, `not_a_file` (a
-  symlink, a submodule, a folder in HEAD) or `unavailable` (git could not
+  one of those**: a staged rename (`git diff-index --cached -M HEAD`, which
+  reports no copies — a staged copy is `new`) serves its source's HEAD text,
+  so the source is judged too (`git mv .env notes.txt` makes `notes.txt` a
+  403; its text is never sent). **The source must also be in the project**,
+  placed as `hud_api.scope` places a path (under one of its roots, no
+  `SKIP_DIRS` or `.git` component): a file moved in from outside the
+  project, or out of `node_modules`, answers `new` and nothing of its source
+  is sent. HEAD's blob is read **by object id** (`git cat-file blob <oid>`),
+  so no path-based attribute (textconv, a filter, an eol conversion) applies;
+  its size is read from `ls-tree -l` first and capped at the editor's own
+  read cap (2 MiB), and its bytes are judged by the editor's own rule
+  (`editor_policy.is_text`, a strict UTF-8 decode). `state`: `ok` (with
+  `text`, as stored — CRLF kept, a byte-order mark kept; the window compares
+  lines), `new` (HEAD does not hold it: untracked, newly added, a copy, or a
+  rename from outside the project — no gutter), `no_repo`, `no_head` (no
+  commit yet), `binary` (a NUL in the first 8 KiB or bytes that are not UTF-8
+  — no gutter; a U+FFFD the file holds is text), `too_large`, `not_a_file`
+  (a symlink, a submodule, a folder in HEAD) or `unavailable` (git could not
   say). `head` is HEAD's commit id; `text` is null unless `state` is `ok`.
   404 when the file is not there; 403 for a path outside the project.
 - `GET /projects/{id}/git/status` → `{"repo", "head", "branch", "files":
@@ -1847,9 +1854,12 @@ names a program for git to run, or moves where it works**
 The window's half (`hud/src/lib/linediff.ts`, `lib/gitMarks.ts`,
 `state/gitGutter.ts`, `state/gitStatus.ts`): the gutter diffs HEAD's text
 against the **buffer** (Myers, bounded), only for a `text` or `safety`
-buffer — never an env file — and asks for HEAD's text again only when the
-status poll's `head` moves; the status is polled every 3 s per project while
-a tree or a gutter shows it. Rules in CLAUDE.md's ED-9 paragraph.
+buffer — never an env file — and asks for HEAD's text again when the status
+poll's `head` moves, and every 10 s while the window is visible for a file
+whose base `head` is not the project's (a nested repository, the Inbox, an
+extra folder: the poll cannot see that HEAD move); the status is polled
+every 3 s per project while a tree or a gutter shows it. Rules in CLAUDE.md's
+ED-9 paragraph.
 
 ## Additions 2026-10-12 (folding from the tree — ED-6)
 
