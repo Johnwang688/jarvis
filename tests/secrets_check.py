@@ -240,7 +240,7 @@ def env_rule_checks(root: Path) -> None:
         "cat .env.production", "cat<.env.staging", "sh -c 'cat .env.production'",
         'bash -c "cat .env.staging"', "env sh -c 'cat .env.production'",
         "python -c \"print(open('.env.staging').read())\"", "F=.env.production; cat $F",
-        "cat $(echo .env.staging)", "cat .ENV.PRODUCTION", "cat .env.p*", "cat .env.[sp]*",
+        "cat $(echo .env.staging)", "cat .ENV.PRODUCTION", "cat .env.p*", "cat .env.[sp]*", "cat .env.zz?",
         "head -1 ./x/../.env.staging", "node --env-file=.env.production -p 1",
         "docker compose --env-file .env.production up", "grep -r KEY --include=*.production .",
         "cp .env.production notes.txt", "cat .env.sample", "cat .env.example.bak",
@@ -258,7 +258,7 @@ def env_rule_checks(root: Path) -> None:
         assert protected_in_command(command) is None, command
     assert env_credential_in_text("x .env.local.example y") is None
     assert env_credential_in_text("--env-file=.env.prod") == ".env.prod"
-    assert glob_reaches(".env.p*") and glob_reaches("*.production") and glob_reaches(".e??")
+    assert glob_reaches(".env.zz?") and glob_reaches(".env.p*") and glob_reaches("*.production") and glob_reaches(".e??")
     assert not glob_reaches("*.py") and not glob_reaches(".env.*.example") and not glob_reaches("*")
     print(f"ok  shell: {len(smuggled)} spellings of a credential env file refused in both tools")
 
@@ -291,6 +291,14 @@ def env_rule_checks(root: Path) -> None:
     leak = dispatch("run_readonly", json.dumps({"command": f"grep -rn -C1 API_KEY {root}"}))
     assert STAGING not in leak.text and ".env.staging" not in leak.text, leak.text
     assert "were withheld" in leak.text, leak.text
+    # A file made, or rewritten, right after the last scrub (within one
+    # timestamp tick) is read at once: nothing is cached by mtime.
+    qa = "qa-FAKEVALUE-made-in-the-same-tick"
+    (root / ".env.qa").write_text(f"QA_KEY={qa}\n", encoding="utf-8")
+    assert qa not in scrub(f"x {qa}"), "a new env file's value was missed"
+    qa2 = "qa-FAKEVALUE-rewritten-same-tick"
+    (root / ".env.qa").write_text(f"QA_KEY={qa2}\n", encoding="utf-8")
+    assert qa2 not in scrub(f"x {qa2}"), "a rewritten env file's value was missed"
     # A FIFO named like one cannot hang the scrub (it is now read by listing).
     os.mkfifo(root / ".env.fifo")
     assert scrub("nothing secret here") == "nothing secret here"

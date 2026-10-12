@@ -1065,8 +1065,8 @@ def refused(command: str, cwd: str | Path | None = None) -> Touch | None:
 def refusal(touch: Touch) -> str:
     if touch.env:
         return (f"{touch.why}: a credential env file is the owner's, edited in the HUD's "
-                "editor; Jarvis never writes one, asked or not (only names ending in "
-                ".example, like .env.example, are Jarvis's to write)")
+                "editor; Jarvis never reads or writes one, asked or not (only names ending "
+                "in .example, like .env.example, are Jarvis's to write)")
     return (f"{touch.why}: {touch.name} is the approval gate's own allowlist, and "
             "a command that writes it would decide what runs without anyone "
             "being asked. Only the owner changes it, by hand")

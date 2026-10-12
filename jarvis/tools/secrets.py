@@ -369,26 +369,25 @@ def _read_regular(path: Path) -> str | None:
     try:
         if not _stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        data = os.read(fd, _MAX_FILE_BYTES)
+        chunks, size = [], 0
+        while size < _MAX_FILE_BYTES:
+            chunk = os.read(fd, _MAX_FILE_BYTES - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
     except OSError:
         return None
     finally:
         os.close(fd)
-    return data.decode("utf-8", errors="replace")
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def _values_in(path: Path) -> tuple[str, ...]:
-    """Credential-looking values in one env file, cached until it changes."""
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        _cache.pop(path, None)
-        return ()
-
-    cached = _cache.get(path)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
-
+    """Credential-looking values in one env file, read afresh every time
+    (ENV-1): a cache keyed on the file's mtime served stale values for a
+    rewrite made within one timestamp tick, and these files are small (read
+    at most `_MAX_FILE_BYTES`)."""
     text = _read_regular(path)
     if text is None:
         return ()
@@ -403,9 +402,7 @@ def _values_in(path: Path) -> tuple[str, ...]:
             values.add(value)
 
     # Longest first, so a value that contains another is replaced whole.
-    ordered = tuple(sorted(values, key=len, reverse=True))
-    _cache[path] = (mtime, ordered)
-    return ordered
+    return tuple(sorted(values, key=len, reverse=True))
 
 
 _SENSITIVE_KEY = re.compile(r"token|secret|password|key", re.IGNORECASE)
@@ -454,30 +451,20 @@ def _json_values(path: Path) -> tuple[str, ...]:
     return ordered
 
 
-_listing_cache: dict[Path, tuple[int, tuple[Path, ...]]] = {}
-
-
 def env_files_in(directory: Path) -> tuple[Path, ...]:
     """Every credential env file directly in `directory`, by the one name
     rule (`.env`, `.env.local`, `.env.production`, … — never `.env.example`),
-    sorted; cached until the folder's own mtime moves (adding or removing a
-    file moves it). A folder that cannot be listed holds none we can see."""
-    try:
-        stamp = directory.stat().st_mtime_ns
-    except OSError:
-        _listing_cache.pop(directory, None)
-        return ()
-    cached = _listing_cache.get(directory)
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
+    sorted. Listed afresh on every call: a cache keyed on the folder's mtime
+    missed a file made within one timestamp tick of the listing (measured:
+    `.env.fifo` made right after `.env.staging` was not seen), and a value
+    the scrub does not know is a value that reaches the transcript. A folder
+    that cannot be listed holds none we can see."""
     try:
         with os.scandir(directory) as entries:
-            found = tuple(sorted(directory / entry.name for entry in entries
-                                 if is_env_credential_name(entry.name)))
+            return tuple(sorted(directory / entry.name for entry in entries
+                                if is_env_credential_name(entry.name)))
     except OSError:
         return ()
-    _listing_cache[directory] = (stamp, found)
-    return found
 
 
 def secret_values() -> list[str]:

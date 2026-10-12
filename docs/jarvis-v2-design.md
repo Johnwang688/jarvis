@@ -356,9 +356,12 @@ Five layers, evaluated in this order for every tool call from every provider.
 The first layer to answer wins.
 
 1. **DENY** — v1 `rules.py`'s never-approvable set (sudo, dd, `rm -rf` at a
-   root, fork bombs, raw block writes) and the secrets layer (`.env`, token
-   bundles, the allowlist file). Not approvable by anyone, from any path,
-   including the escape hatch.
+   root, fork bombs, raw block writes, and since ENV-1 a shell write onto a
+   credential env file) and the secrets layer (every credential env file —
+   `.env`, `.env.<anything>`, not `*.example` — token bundles, the allowlist
+   file), for file tools, read tools (Claude's Read, Grep, Glob,
+   NotebookRead) and sandbox grants that are or hold one alike. Not
+   approvable by anyone, from any path, including the escape hatch.
 2. **ALWAYS-ASK** — a short, explicit list that goes to the owner regardless
    of the reviewer: prod deploys (`vercel --prod`, `gh release`, anything
    the project marks as a deploy), prod database migrations, pushes to
@@ -2630,7 +2633,8 @@ another file, and its text goes nowhere but its own save: not the bus, a log,
 localStorage, an `@path` attachment, a diff or the preview origin (which
 also refuse withheld files now — the preview origin had served a key out of
 the Inbox's `.ssh`). The Jarvis-side refusals of env files (v1 tools, the
-shell, the scrub, Claude's hook, Codex's grants) are ENV-1's, on this rule.
+shell, the scrub, Claude's hook, Codex's grants, terminal_read) are ENV-1's,
+on this rule, built 2026-10-12 (CLAUDE.md's ENV-1 paragraph).
 "Add to chat" is here in its smallest form (the selection or the line, as
 `path:Lx-y` and a fence, into the selected chat's box, unsent) so the env
 rule has something to disable; ED-7 extends it.
