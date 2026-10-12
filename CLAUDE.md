@@ -1598,7 +1598,9 @@ over it" is read from a **transparent shield** over every frame
 the owner's pointer is there, and it steps aside; a pointer event anywhere
 else in the HUD brings it back, and so does **any key typed in the HUD**
 (decision: a pointer parked over a page stops counting at the owner's first
-key, narrower than §F's stated limit). The gestures: the pointer over it;
+key, narrower than §F's stated limit), and so does the window losing focus
+to another program or being hidden (the HUD never hears the pointer leave a
+frame, so one that left the window from inside a page would else count on). The gestures: the pointer over it;
 Tab or Shift+Tab as the latest key within `TAB_MS` 300; the owner's own
 load — Load, Enter in the URL box, Project root, the keep-origin switch,
 Reload — claimed by the first frame made after it, live until 2 s after

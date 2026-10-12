@@ -31,7 +31,10 @@
 //     the first key (narrower than the plan's stated limit). A pointer that
 //     has not moved since never drops the shield again (raising or dropping
 //     it under a still pointer fires no `pointermove`, measured), so the
-//     owner's first wheel or click there can be eaten by the shield.
+//     owner's first wheel or click there can be eaten by the shield;
+//   - the window losing focus to another program (not to a frame), or being
+//     hidden, brings them back too: a pointer that left the window from
+//     inside a page was never heard leaving.
 //
 // **On theft** (synchronously, in the handler): the iframe element is removed
 // (the only thing that returns the keyboard), focus goes back to the HUD
