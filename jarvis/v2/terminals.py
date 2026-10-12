@@ -1254,7 +1254,7 @@ class Terminals:
         return read
 
     def create(self, folder: str, *, project_id: str | None, label: str,
-               cols: int = 80, rows: int = 24) -> Terminal:
+               cols: int = 80, rows: int = 24, readable: bool = True) -> Terminal:
         if not _size_ok(cols, rows):
             raise ValueError("cols must be 2-1000 and rows 1-500")
         shell = resolve_shell()
@@ -1275,6 +1275,7 @@ class Terminals:
             try:
                 terminal = Terminal(tid, shell=shell.name, folder=folder, project_id=project_id,
                                     label=label, cols=cols, rows=rows, nonce=nonce, integration=kind)
+                terminal.readable = readable        # before the shell runs, or any reader sees it
             except BaseException:
                 if rc_fd is not None:
                     os.close(rc_fd)
@@ -1738,16 +1739,21 @@ def route(handler, daemon, parts, query):
         if method == "GET":
             return 200, terminals.listing()
         if method == "POST":
-            body = _object(handler._body(), ("in", "cols", "rows"), ("in",))
+            body = _object(handler._body(), ("in", "cols", "rows", "readable"), ("in",))
             cols, rows = body.get("cols", 80), body.get("rows", 24)
             if not _size_ok(cols, rows):
                 _fail(400, "cols must be an integer 2-1000 and rows 1-500")
+            # The "Jarvis can read" switch from the first byte (WP-G2: a split's
+            # copy of a terminal Jarvis may not read is made with it off).
+            readable = body.get("readable", True)
+            if not isinstance(readable, bool):
+                _fail(400, "readable must be a boolean")
             folder, project_id, label = resolve_folder(daemon, body["in"])
             if not os.path.isabs(folder) or not Path(folder).is_dir():
                 _fail(409, f"the folder {folder} does not exist any more")
             try:
                 terminal = terminals.create(folder, project_id=project_id, label=label,
-                                            cols=cols, rows=rows)
+                                            cols=cols, rows=rows, readable=readable)
             except TerminalError as exc:
                 _fail(409, str(exc))
             return 201, terminal.row()

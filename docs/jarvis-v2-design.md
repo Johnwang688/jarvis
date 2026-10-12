@@ -2316,14 +2316,14 @@ owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
 layouts"). Ten shapes now: WP-A's six plus 3 over 2, 3×2, 4 over 3 and 4×2
 (decisions S-1); ⊞ offers eight tiles, four to a row, 3×2 and 4×2 among them,
 with "Layout · N panes" at the head and no tile checked while a 5- or 7-pane
-shape is current (it then opens on the first tile, never on a toggle row). 5 and 7 are reached by split and close (WP-G2, not yet
-built; `LADDER` is the shape per count, three being three columns, S-3) or a
+shape is current (it then opens on the first tile, never on a toggle row). 5 and 7 are reached by split and close (WP-G2,
+below; `LADDER` is the shape per count, three being three columns, S-3) or a
 stored value. Every pane can show chat, task, file, diff, preview or a
 terminal (panes 5–8 default to chat), and the chats, terminals and dirty
 guards of WP-B and WP-D work in all eight.
 
 - **Ids are not slots.** A pane keeps its id for life — `pane-<id>`, its React
-  key (with a render-only incarnation WP-G2's close will bump), `chats[id]`,
+  key (with a render-only incarnation WP-G2's close bumps), `chats[id]`,
   its dirty flag — and `ws.order` lists the ids drawn in reading order; `kept`
   holds the ones ⊞ hid. Everything the owner reads is the **slot**: "New
   thread · N", the panel's "in pane N", the refusal chip, aria labels and
@@ -2532,6 +2532,132 @@ until the first file of a covered language opens: first paint grows by 168 bytes
 the worker is 213 KB, and the grammars (about 10 MB in all) load one by one
 as their languages first appear. Not yet: folding and sticky scroll from the
 tree (ED-6).
+
+**Buffers, tabs and the guarded save (2026-10-11, ED-2 of the editor plan,
+§2.3–§2.4; decisions E-7, E-8, E-13; the owner's `.env*` rule,
+`docs/plans/2026-10-11-env-files.md`).** A file's text lives in a buffer
+registry outside React (`hud/src/state/buffers.ts`): one Monaco model per
+file on disk, keyed by the absolute path the read route now returns, so one
+file reached from two projects (the Inbox is rooted at `~`) is one buffer, and
+the same file in two panes shares the text, the dirty dot and the undo stack
+while each pane keeps its own cursor and scroll. A view that unmounts never
+takes an edit with it, and the text is read once, at save — never per
+keystroke (#43's L3). Dirty is "not the version last read or saved" (the
+model's alternative version id), so undoing back to the saved text reads
+clean. Each File pane has tabs (`PaneSpec.editors {paths, active, preview}`,
+stored with per-field fallback, re-read from disk after a reload; unsaved
+text is never stored, and `beforeunload` asks while anything is dirty): a
+single click opens an italic preview tab the next single click replaces, a
+double click or an edit pins it, middle-click or × closes, and the last tab
+on an unsaved edit asks Save / Don't save / Cancel. One editor per pane, its
+model swapped. **Saving is guarded by content, not by mtime**: a read returns
+an `etag` (the first 128 bits of SHA-256), a save sends `expected_etag`
+(`null`: must not exist), and the daemon hashes the disk again under its lock
+and answers 409 with the current etag — an mtime missed a same-size rewrite
+on the 9p `/mnt/c` mount (or one `utime`d back) and called a bare `touch` a
+conflict. **The HUD polls** (`POST …/files/stat`, every 2 s while visible and
+on focus, hashing again only when the stat moved, because inotify cannot see
+a write made from Windows): a clean buffer whose file moved reloads in place
+as one undo step, with a toast naming the writer when the activity feed saw a
+running turn's tool call name the file; an edited one gets an amber conflict
+bar — Compare (the disk read-only on the left, the buffer on the right, side
+by side even in a narrow pane), Keep mine (saved against the disk etag the
+bar was shown, so a write meanwhile brings the bar back), Take theirs (asks
+once; Ctrl+Z brings the edit back); a gone file offers Save to recreate or
+Close. There is no force-save anywhere. **One classifier,
+`jarvis/v2/editor_policy.py`**, decides what the editor may do: withheld (a
+credential bundle, anything in a credential folder, Claude's and Codex's
+login files, git's credential store, `.netrc` — no content, ever; a withheld
+folder is never listed, except the gate's own files inside
+`~/.config/jarvis`), read-only (the gate's state, the safety layer and the
+served HUD build, bytes that are not UTF-8 — which a save never overwrites),
+the owner's env files, and text. **Every editor file route is owner-only,
+reads included** (E-7: the HUD's listener and its own page). **The owner
+edits `.env*` files here, and Jarvis never reads them**: `secrets.is_env_credential`
+is the one name rule (`.env` or `.env.<anything>` at any depth, not ending
+`.example`, case-insensitive, symlinks resolved both ways); such a buffer
+carries a lock — "Jarvis can't read this file" — Add to chat is disabled for
+it, its model has a language of its own so its words are never suggested in
+another file, and its text goes nowhere but its own save: not the bus, a log,
+localStorage, an `@path` attachment, a diff or the preview origin (which
+also refuse withheld files now — the preview origin had served a key out of
+the Inbox's `.ssh`). The Jarvis-side refusals of env files (v1 tools, the
+shell, the scrub, Claude's hook, Codex's grants) are ENV-1's, on this rule.
+"Add to chat" is here in its smallest form (the selection or the line, as
+`path:Lx-y` and a fence, into the selected chat's box, unsent) so the env
+rule has something to disable; ED-7 extends it.
+
+**ED-2's review round (2026-10-11, PR #49).** An env file is never demoted
+to `binary`: one that is not UTF-8 (UTF-16 from PowerShell 5.1 on `/mnt/c`,
+Latin-1) stays `env`, read-only, and every read now says `editable`, which
+the HUD follows rather than the kind. The gate's readable exemption holds
+only for a gate path that resolves to itself and is no credential by another
+rule, and only in the editor's own routes — an `@path`, a diff and the preview
+origin have none (a `models.json` symlinked to a key had made the key
+readable through all three). Withheld now also covers docker's, kube's,
+npm's and PyPI's credential stores and v2's session carriers, and **the
+preview origin refuses any dotfile path but `.well-known` and anything in
+Jarvis's own folders** — it answers every loopback client. In the window: a
+pane's × lets go of that pane's buffers only; a project going away keeps
+every pane on it that holds an edit no pane outside them holds (two panes
+sharing one edit used to let go together and orphan it); past 40 tabs only a
+clean one closes; Compare re-reads once per new conflict, never in a loop;
+one file reached through two projects at once is one model; a kind the window
+does not know is read-only and closed to Jarvis; the crash prompt can save
+every unsaved edit; a reload in place never reads as an edit; and the "changed
+on disk by …" toast names only a write tool, by absolute path.
+
+**Split and close (2026-10-11, WP-G2 of
+`docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions S-2, S-6–S-8).**
+The owner asked for a × on every pane, more than once, and a VS Code split
+button. Every pane's strip now carries both: the split button
+(the title bar's icon button, an outline with one divider) in every layout,
+the × whenever more than one pane is drawn. A split adds a **copy of the
+pane right after it** and focuses it, on the ladder's shape for the new
+count (2 columns, 3 columns, 2×2, 3 over 2, 3×2, 4 over 3, 4×2); a × removes
+exactly that pane and the rest reflow onto the ladder's shape for one fewer.
+⊞ still hides and restores; × discards — the pane's spec goes back to its
+default, and an id a later split reuses mounts fresh.
+
+- **What a copy shows**: a chat, a new thread in the same project (a thread
+  is open in one pane only); a file, its tabs on the same buffers (since
+  ED-2, below: one text, dirty dot and undo stack for both, so a pane with
+  an unsaved edit splits too — S-8's "save first" was for two copies that
+  could diverge); a diff, the same task and file; a task, that task's
+  diff (S-7); a preview, the same URL, judged again, never the keep-origin
+  grant; a terminal, a new shell in the folder the source was opened in
+  (S-6), unreadable to Jarvis if the source is — switched off before it is
+  ever shown (`POST /terminals` takes `readable`). Split is refused at
+  eight, when the next shape would not be drawn whole in this window (at
+  1280×800, six cannot become seven), and when the only ids left are hidden
+  panes holding unsaved edits. A split takes a free id first, then an empty
+  hidden pane, then one whose compose row holds unsent words, which wait for
+  the next new thread; a stored pre-G1 workspace's panes 2–4 count as
+  hidden, so a split never writes over them.
+- **What × keeps**: a thread's turn keeps running, its sidebar dot stays,
+  and the pane that next opens that thread has its Stop; words in its box and
+  words a Stop handed back wait for the thread; a composing chat's unsent
+  words and a File pane's unsaved edit — one no other pane holds — are asked
+  about first, inline, never in a modal (for an edit: Save / Don't save /
+  Cancel, as closing the last tab on one asks; the question goes when it no
+  longer holds); a terminal goes back to the panel, alive, attached, as the
+  selected tab. A compose pane closed while its first message opens the
+  thread leaves that turn for the pane that opens the thread next, Stop and
+  all. Focus goes where the mic is: the selected chat while it is still
+  drawn, else the chat selected before it, else the pane now in that slot —
+  never the page, and never a chat that merely slid into the closed slot.
+  One click closes one pane, even when a double-click's second click lands
+  on the × that moved under the pointer.
+- **Nothing assumes pane 1**: after it is closed, the window's chat falls
+  back to the pane in slot 1, the header ids and Ctrl+Alt+1 follow the slot,
+  and a reload keeps the order.
+- **Under a card** every split, × and close question is disabled and inert,
+  the card keeps focus and stays on top at 160% and 70% over eight panes.
+- **Free checks**: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
+  and sections of the layout, multichat, terminal and preview suites; each
+  was shown to fail against its mutation (the PR's table). WP-G3's shared
+  buffer came with ED-2's buffers (its `filesync` went with it); not built:
+  WP-H's thinking line.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

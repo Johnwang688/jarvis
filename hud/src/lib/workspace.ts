@@ -40,6 +40,7 @@
 
 import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./layout";
 import { originOf, storableKeepOrigin } from "./preview";
+import { parseTabs, sameTabs, type Tabs } from "./buffers";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
@@ -144,6 +145,13 @@ export interface PaneSpec {
   keepOrigin?: string;
   /** File and Diff: the open file, relative to the pane's project (read and written by WP-G2). */
   filePath?: string;
+  /**
+   * A File pane's tabs (ED-2): paths relative to its pinned project, the
+   * active one and the preview tab. Only with a pinned project; dropped when
+   * the pin moves (the paths were the old project's). Re-read from disk on
+   * load — unsaved text is never stored.
+   */
+  editors?: Tabs;
 }
 
 /**
@@ -265,6 +273,8 @@ export function clampPanelHeight(h: unknown): number {
 }
 
 const ID_MAX = 200;
+/** How many panes a workspace stored before WP-G1 held (`Panes` was a 4-tuple). */
+const LEGACY_PANES = 4;
 const URL_MAX = 2048;
 export const PATH_MAX = 1024;
 
@@ -286,6 +296,12 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
   if (typeof v.filePath === "string" && v.filePath && v.filePath.length <= PATH_MAX) {
     spec.filePath = v.filePath;
   }
+  // Tabs belong to a pinned project; a WP-G2 `filePath` with none stored is
+  // one tab.
+  const tabs = spec.projectId
+    ? parseTabs(v.editors) ?? (spec.filePath && spec.view === "file" ? parseTabs({ paths: [spec.filePath] }) : null)
+    : null;
+  if (tabs) spec.editors = tabs;
   return spec;
 }
 
@@ -345,8 +361,15 @@ export function parseWorkspace(raw: unknown): Workspace {
   const preset = isPreset(v.preset) ? v.preset : "single";
   const n = SHAPES[preset].panes;
   const order = parseOrder(v.order, n) ?? PANE_NOS.slice(0, n);
-  const kept = parseKept(v.kept, order);
   const rawPanes = Array.isArray(v.panes) ? v.panes : [];
+  // A WP-A or WP-B value has no `order` and no `kept`: its four panes were
+  // positions, and the ones its preset did not draw were hidden, specs kept.
+  // They are `kept` here (review of PR #47), so a split takes a free id rather
+  // than writing over what pane 3 showed, and a grow still brings them back
+  // first, in the order they always came back.
+  const legacy = v.order === undefined && v.kept === undefined;
+  const kept = !legacy ? parseKept(v.kept, order)
+    : PANE_NOS.filter((id) => id <= LEGACY_PANES && id <= rawPanes.length && !order.includes(id));
   const panes = PANE_NOS.map((id) => parsePane(rawPanes[id - 1], id));
   const rawSplits = isObj(v.splits) ? v.splits : {};
   const splits = {} as Record<Preset, Split>;
@@ -441,10 +464,54 @@ export function show(ws: Workspace, view: View, drawn: readonly PaneNo[]): Works
   return setView(ws, target, view);
 }
 
-/** Pin a File or Preview pane to a project (null: follow the chat again). */
+/** A spec moved to another project: its tabs (ED-2) and its open file (WP-G2) were the old project's, so they go. */
+function repinned(p: PaneSpec, projectId: string | null): PaneSpec {
+  const next = { ...p, projectId };
+  delete next.editors;
+  delete next.filePath;
+  return next;
+}
+
+/** Pin a File or Preview pane to a project (null: follow the chat again). Its tabs were the old project's: they go. */
 export function pinPane(ws: Workspace, pane: PaneNo, projectId: string | null): Workspace {
   if (ws.panes[pane - 1].projectId === projectId) return ws;
-  const panes = ws.panes.map((p, i) => (i === pane - 1 ? { ...p, projectId } : p)) as Panes;
+  const panes = ws.panes.map((p, i) => (i === pane - 1 ? repinned(p, projectId) : p)) as Panes;
+  return { ...ws, panes };
+}
+
+/**
+ * A File pane's tabs (ED-2), and the project they are in: pinning a pane that
+ * follows the chat to the project its first file came from, in one step with
+ * the tab. Null or no paths clears the tabs and keeps the pin.
+ */
+export function setEditors(ws: Workspace, pane: PaneNo, projectId: string, tabs: Tabs | null): Workspace {
+  const cur = ws.panes[pane - 1];
+  const next = tabs && tabs.paths.length ? parseTabs(tabs) : null;
+  if (cur.projectId === projectId && sameTabs(cur.editors ?? null, next)) return ws;
+  const spec: PaneSpec = cur.projectId === projectId ? { ...cur } : repinned(cur, projectId);
+  if (next) spec.editors = next;
+  else delete spec.editors;
+  const panes = ws.panes.map((p, i) => (i === pane - 1 ? spec : p)) as Panes;
+  return { ...ws, panes };
+}
+
+/**
+ * The file a Diff pane has open (WP-G2), relative to its task's diff; empty
+ * or null forgets it. It is read again when the pane mounts (a reload, a
+ * split's copy). Too long a path is not kept. A File pane's files are its
+ * tabs (`setEditors`, ED-2): a stored `filePath` on one is read as one tab.
+ */
+export function setFilePath(ws: Workspace, pane: PaneNo, path: string | null): Workspace {
+  const cur = ws.panes[pane - 1].filePath ?? "";
+  const next = path && path.length <= PATH_MAX ? path : "";
+  if (cur === next) return ws;
+  const panes = ws.panes.map((p, i) => {
+    if (i !== pane - 1) return p;
+    const spec = { ...p };
+    if (next) spec.filePath = next;
+    else delete spec.filePath;
+    return spec;
+  }) as Panes;
   return { ...ws, panes };
 }
 
@@ -456,7 +523,7 @@ export function pinPane(ws: Workspace, pane: PaneNo, projectId: string | null): 
 export function unpinProject(ws: Workspace, projectId: string, keep: readonly PaneNo[] = []): Workspace {
   const hit = (p: PaneSpec, i: number) => p.projectId === projectId && !keep.includes((i + 1) as PaneNo);
   if (!ws.panes.some(hit)) return ws;
-  return { ...ws, panes: ws.panes.map((p, i) => (hit(p, i) ? { ...p, projectId: null } : p)) as Panes };
+  return { ...ws, panes: ws.panes.map((p, i) => (hit(p, i) ? repinned(p, null) : p)) as Panes };
 }
 
 /**
@@ -550,6 +617,161 @@ export function setPanel(ws: Workspace, panel: Partial<Workspace["panel"]>): Wor
 export function resetWorkspace(ws: Workspace): Workspace {
   const d = defaultWorkspace();
   return { ...setPreset({ ...ws, order: orderOf(ws) }, "single"), splits: d.splits, panel: d.panel };
+}
+
+// ---- split and close (WP-G2) ----------------------------------------------------
+//
+// Split adds a copy of a pane right after it in reading order; × removes
+// exactly that pane. Both always land on the ladder shape for the new count
+// (plan G-3): rows2 and main2 are ⊞'s alone. ⊞ hides panes (`kept`, specs
+// kept to come back); × discards one (its spec back to the default), and the
+// window mounts that id fresh if a later split reuses it (the incarnation in
+// useLayout).
+
+/** The most panes a workspace draws. */
+export const MAX_PANES = PANE_NOS.length;
+
+/**
+ * The id a split takes (plan §3.4): the lowest id neither drawn nor hidden;
+ * else the oldest hidden (`kept`) pane that holds nothing; else the oldest
+ * one whose only content can be kept elsewhere (`holding`: a compose row's
+ * unsent words, which the caller parks for the next new thread — review of
+ * PR #47); else none — every id is drawn, or hidden with an unsaved edit
+ * (`dirty`, by id) that a split must never throw away. The caller closes
+ * the hidden pane it takes first.
+ */
+export function allocate(
+  ws: Pick<Workspace, "order" | "kept">, dirty: readonly PaneNo[] = [], holding: readonly PaneNo[] = [],
+): PaneNo | null {
+  const free = PANE_NOS.find((n) => !ws.order.includes(n) && !ws.kept.includes(n));
+  if (free !== undefined) return free;
+  // `kept` is most recently hidden first: the oldest is the last.
+  const oldest = (ok: (n: PaneNo) => boolean) => [...ws.kept].reverse().find(ok) ?? null;
+  return oldest((n) => !dirty.includes(n) && !holding.includes(n)) ?? oldest((n) => !dirty.includes(n));
+}
+
+/**
+ * Pane `id` shows `spec`, right after `source` in reading order, and the
+ * shape is the ladder's for one pane more. It takes focus (G-4) unless
+ * `focus` is false — a split the owner did not ask for (a dev server the
+ * window opens itself) never moves where they are working. `id` leaves
+ * `kept` if ⊞ had hidden it. Nothing changes at eight panes, for an id
+ * already drawn, or for a source that is not drawn.
+ */
+export function splitPane(
+  ws: Workspace, source: PaneNo, id: PaneNo, spec: PaneSpec, opts: { focus?: boolean } = {},
+): Workspace {
+  const order = orderOf(ws);
+  const at = order.indexOf(source);
+  if (at < 0 || order.includes(id) || order.length >= MAX_PANES || !isPaneNo(id)) return ws;
+  const next = [...order.slice(0, at + 1), id, ...order.slice(at + 1)];
+  const panes = ws.panes.map((p, i) => (i === id - 1 ? { ...spec } : p)) as Panes;
+  return {
+    ...ws,
+    preset: LADDER[next.length],
+    order: next,
+    kept: ws.kept.filter((n) => n !== id),
+    panes,
+    focused: opts.focus === false && order.includes(ws.focused) ? ws.focused : id,
+  };
+}
+
+/**
+ * × on pane `id` (plan §3.6): it leaves `order`, its spec goes back to the
+ * default, and the shape is the ladder's for one pane fewer. `kept` and every
+ * preset's edges are untouched. Focus, when it was on the closed pane, goes to
+ * `then` when that is still drawn — the window passes the chat selected
+ * before the closed one, so the owner's last choice keeps the microphone
+ * (decisions W-6) — else to the pane now in that slot, else the slot before.
+ * The last pane is never closed, and neither is one that is not drawn.
+ */
+export function closePane(ws: Workspace, id: PaneNo, then: PaneNo | null = null): Workspace {
+  const order = orderOf(ws);
+  const at = order.indexOf(id);
+  if (at < 0 || order.length <= 1) return ws;
+  const next = order.filter((n) => n !== id);
+  const panes = ws.panes.map((p, i) => (i === id - 1 ? defaultPane(id) : p)) as Panes;
+  const focused = ws.focused !== id && next.includes(ws.focused) ? ws.focused
+    : then !== null && next.includes(then) ? then : next[Math.min(at, next.length - 1)];
+  return { ...ws, preset: LADDER[next.length], order: next, kept: ws.kept.filter((n) => n !== id), panes, focused };
+}
+
+/**
+ * What a split shows in the new pane (decisions S-2, plan §3.5): a copy of
+ * the pane split from. A file keeps its project and its tabs — on the same
+ * buffers (ED-2) — and a diff its project and the open file;
+ * a preview its URL and project — never the keep-origin grant, which is the
+ * owner's choice for one pane (WP-E); a task view becomes that task's diff
+ * (S-7); a chat or a terminal pane starts empty here and the window fills it
+ * (a new compose row in the source's project, a new terminal in the folder
+ * the source was opened in).
+ */
+export function copySpec(spec: PaneSpec): PaneSpec {
+  const out: PaneSpec = { view: spec.view, projectId: null, terminalId: null };
+  switch (spec.view) {
+    case "file":
+      // Its tabs, on the same buffers (ED-2): the copy shares each file's
+      // text, dirty dot and undo stack, and the preview tab is pinned there.
+      out.projectId = spec.projectId;
+      if (spec.editors) out.editors = { ...spec.editors, paths: [...spec.editors.paths], preview: null };
+      break;
+    case "diff":
+      out.projectId = spec.projectId;
+      if (spec.filePath) out.filePath = spec.filePath;
+      break;
+    case "preview":
+      out.projectId = spec.projectId;
+      if (spec.previewUrl) out.previewUrl = spec.previewUrl;
+      break;
+    case "task":
+      out.view = "diff";
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
+export type SplitWhy = "" | "max" | "room" | "hidden-edit";
+
+/**
+ * Whether one more pane can be drawn (plan G-5): never past eight; never when
+ * the ladder's next shape would not be drawn whole in this window, even with
+ * the side panes and the panel folded for it (a button whose result the owner
+ * cannot see); and never when every free id is a hidden pane holding an
+ * unsaved edit. It depends only on the count, so every pane's button shares
+ * it. A window already dropping panes can still split when the next shape
+ * fits (three columns drawn as two at 900 px can become 2×2, 720 wide).
+ */
+export function splitVerdict(
+  layout: PaneLayout, ws: Workspace, available: number, availableH: number,
+  prefer: Side | null = null, preferPanel = false, dirty: readonly PaneNo[] = [],
+): { ok: boolean; why: SplitWhy } {
+  const order = orderOf(ws);
+  if (order.length >= MAX_PANES) return { ok: false, why: "max" };
+  // Words a hidden compose row holds are parked, never lost: only an unsaved edit blocks.
+  const id = allocate(ws, dirty);
+  const probe = id ?? PANE_NOS.find((n) => !order.includes(n))!;
+  const trial = splitPane({ ...ws, order }, order[order.length - 1], probe, defaultPane(probe));
+  if (fitWorkspace(layout, trial, available, availableH, prefer, preferPanel).dropped > 0) {
+    return { ok: false, why: "room" };
+  }
+  if (id === null) return { ok: false, why: "hidden-edit" };
+  return { ok: true, why: "" };
+}
+
+/** The split button's title: what it does, or why it cannot (plan §3.4). */
+export function splitTitle(why: SplitWhy, count: number): string {
+  switch (why) {
+    case "max":
+      return "Eight panes is the most";
+    case "room":
+      return `No room for ${count + 1} panes in this window: widen it, zoom out (Ctrl+-) or close a pane`;
+    case "hidden-edit":
+      return "A hidden pane has an unsaved edit: show it from ⊞ first";
+    default:
+      return "Split: a copy of this pane beside it";
+  }
 }
 
 // ---- edges --------------------------------------------------------------------

@@ -26,6 +26,9 @@ SKILL = Path(__file__).resolve().parents[1] / "skills" / "self-improve" / "SKILL
 
 
 def guard_checks() -> None:
+    # The editor's one classifier (ED-2) decides which credentials the HUD
+    # serves: frozen like the terminal read guard (review of PR #49).
+    assert "jarvis/v2/editor_policy.py" in SELF_PROTECTED
     for rel in sorted(SELF_PROTECTED):
         out = tools.dispatch(
             "write_file",

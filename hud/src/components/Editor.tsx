@@ -15,106 +15,154 @@
 //    Chrome's "Save page as" from ever opening). Under a card no editor has
 //    focus, so no editor command can run.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  diffUri, editorsBlocked, fileUri, loadMonaco, onEditorsBlocked, type Monaco,
+  diffUri, editorsBlocked, loadMonaco, onEditorsBlocked, type Monaco,
 } from "../lib/monaco";
+import type { TextModel } from "../state/buffers";
 
-export function CodeEditor(props: {
-  /** The project the file was read through: part of the model's URI. */
-  projectId: string;
+/** A Monaco model, as opposed to the fallback's shim. */
+const isMonacoModel = (m: TextModel | null): boolean => !!m && typeof m.pushEditOperations === "function";
+
+/**
+ * A File pane's one editor (ED-2): created once, its model swapped as the
+ * pane's tabs change. The models belong to the buffer registry
+ * (`state/buffers.ts`) — two panes on one file share one, so the text, the
+ * dirty dot and the undo stack are shared — and each pane keeps its own view
+ * state (cursor, selection, scroll, folds) per buffer, in memory.
+ *
+ * It reads the text only on Ctrl+S (through `onSave`): nothing here copies
+ * the buffer per keystroke (#43's L3).
+ */
+export function PaneEditor(props: {
+  /** The active buffer's model; null shows nothing (no file, or withheld). */
+  model: TextModel | null;
+  /** Which buffer it is (its absolute path): the key its view state is kept under. */
+  viewKey: string | null;
   path: string;
-  value: string;
-  readOnly?: boolean;
-  onChange: (value: string) => void;
-  /** Ctrl+S in this editor, with its text. */
-  onSave?: (value: string) => void;
+  readOnly: boolean;
+  /** Ctrl+S in this editor. */
+  onSave: () => void;
+  /** Kept mounted but not drawn (markdown read view, compare). */
+  hidden?: boolean;
+  /** The live editor, for the selection ("Add to chat"); null once it is gone. */
+  editorRef?: (ed: any | null) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<any>(null);
+  const shown = useRef<{ key: string | null; model: TextModel | null }>({ key: null, model: null });
+  const views = useRef(new Map<string, any>());
   const [failed, setFailed] = useState(false);
+  const [ready, setReady] = useState(false);
   const [language, setLanguage] = useState<string | null>(null);
   const [locked, setLocked] = useState(editorsBlocked());
-  const onChange = useRef(props.onChange);
-  onChange.current = props.onChange;
+  const [, setTick] = useState(0);
   const onSave = useRef(props.onSave);
   onSave.current = props.onSave;
-  const readOnly = useRef(!!props.readOnly);
-  readOnly.current = !!props.readOnly;
+  const readOnly = useRef(props.readOnly);
+  readOnly.current = props.readOnly;
+  const editorRef = useRef(props.editorRef);
+  editorRef.current = props.editorRef;
+  const plain = !!props.model && !isMonacoModel(props.model);
 
+  // The editor, once Monaco is here; never rebuilt for a new model.
   useEffect(() => {
     let dead = false;
-    let model: any = null;
     let unhold = () => {};
     let saveKey: { dispose(): void } | null = null;
-    setLanguage(null);
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
-        model = monaco.editor.createModel(props.value, undefined, fileUri(monaco, props.projectId, props.path));
         const ed = monaco.editor.create(host.current, {
-          model,
+          model: null,
           theme: "jarvis",
           automaticLayout: true,
           minimap: { enabled: false },
           fontSize: 12,
           readOnly: readOnly.current || editorsBlocked(),
           scrollBeyondLastLine: false,
+          // Words from documents of the same language only: an env file's
+          // model is `dotenv`, so its values are never offered elsewhere.
+          wordBasedSuggestions: "matchingDocuments",
         });
         editor.current = ed;
-        ed.onDidChangeModelContent(() => onChange.current(ed.getValue()));
-        // Ctrl+S saves *this* editor. An action, never `addCommand`: in 0.57
-        // `addCommand` is a global keybinding with no condition, so the last
-        // editor created took Ctrl+S for every editor, and outlived itself —
-        // a disposed editor's text is "", and its FileTab's `save` still
-        // named that file (review of PR #43: Ctrl+S in a Diff wrote the file
-        // blank). An action's keybinding holds only while this editor has
-        // focus (Monaco scopes it by `editorId`), and is disposed with it.
+        // Ctrl+S saves *this* editor's buffer (an action, scoped to this
+        // editor's focus and disposed with it — never a global command:
+        // #43's H1).
         saveKey = ed.addAction({
           id: "jarvis.saveFile",
           label: "Save",
           keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
           run: () => {
             if (dead || !ed.getModel()) return;
-            onSave.current?.(ed.getValue());
+            onSave.current();
           },
         });
         unhold = onEditorsBlocked((b) => {
           ed.updateOptions({ readOnly: b || readOnly.current });
           setLocked(b);
         });
-        setLanguage(model.getLanguageId());
+        editorRef.current?.(ed);
+        setReady(true);
       })
       .catch(() => setFailed(true));
     return () => {
       dead = true;
       unhold();
       saveKey?.dispose();
+      editorRef.current?.(null);
+      // The editor only: the models are the registry's.
+      editor.current?.setModel(null);
       editor.current?.dispose();
       editor.current = null;
-      model?.dispose();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.projectId, props.path]);
+  }, []);
 
-  useEffect(() => {
+  // Swap the model, keeping each buffer's view state for this pane.
+  useLayoutEffect(() => {
     const ed = editor.current;
-    if (ed && ed.getValue() !== props.value) ed.setValue(props.value);
-  }, [props.value]);
+    if (!ed) return;
+    const next = isMonacoModel(props.model) && !props.model!.isDisposed() ? props.model : null;
+    const was = shown.current;
+    if (was.model === next && was.key === props.viewKey) return;
+    if (was.key && was.model && !was.model.isDisposed()) views.current.set(was.key, ed.saveViewState());
+    ed.setModel(next);
+    if (next && props.viewKey) {
+      const state = views.current.get(props.viewKey);
+      if (state) ed.restoreViewState(state);
+    }
+    shown.current = { key: props.viewKey, model: next };
+    setLanguage(next?.getLanguageId?.() ?? null);
+  }, [props.model, props.viewKey, ready]);
 
   useEffect(() => {
-    editor.current?.updateOptions({ readOnly: !!props.readOnly || editorsBlocked() });
-  }, [props.readOnly]);
+    editor.current?.updateOptions({ readOnly: props.readOnly || editorsBlocked() });
+  }, [props.readOnly, ready]);
 
-  if (failed) {
+  // The fallback textarea redraws when its shim model changes.
+  useEffect(() => {
+    if (!plain || !props.model) return;
+    const sub = props.model.onDidChangeContent(() => setTick((t) => t + 1));
+    return () => sub.dispose();
+  }, [plain, props.model]);
+
+  if (failed || plain) {
+    if (!props.model) return <div className="editorhost" data-testid="editor-fallback-empty" />;
     return (
       <textarea
         className="editorhost"
         data-testid="editor-fallback"
-        value={props.value}
+        style={props.hidden ? { display: "none" } : undefined}
+        value={props.model.getValue()}
         readOnly={props.readOnly || locked}
-        onKeyDown={(e) => e.stopPropagation()}
-        onChange={(e) => props.onChange(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+            e.preventDefault();
+            props.onSave();
+          }
+        }}
+        onChange={(e) => props.model?.setValue?.(e.target.value)}
       />
     );
   }
@@ -123,13 +171,95 @@ export function CodeEditor(props: {
       className="editorhost"
       data-testid="editor"
       data-path={props.path}
-      // Set once Monaco holds this file: what a test waits on, so it never
-      // types into an editor that is going away or not there yet.
+      // Set once Monaco shows this buffer: what a test waits on, so it never
+      // types into an editor that is not showing the file yet.
       data-language={language ?? undefined}
-      data-readonly={String(!!props.readOnly || locked)}
+      data-readonly={String(props.readOnly || locked)}
+      style={props.hidden ? { display: "none" } : undefined}
       ref={host}
     />
   );
+}
+
+/**
+ * Compare (ED-2's conflict bar): the disk's text on the left, read-only, and
+ * the buffer itself on the right — its own model, so what is merged here is
+ * the edit that Keep mine saves.
+ */
+export function CompareEditor(props: { model: TextModel; disk: string; path: string; readOnly: boolean; onSave: () => void }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [failed, setFailed] = useState(false);
+  const [locked, setLocked] = useState(editorsBlocked());
+  const onSave = useRef(props.onSave);
+  onSave.current = props.onSave;
+  const readOnly = useRef(props.readOnly);
+  readOnly.current = props.readOnly;
+
+  useEffect(() => {
+    if (!isMonacoModel(props.model)) {
+      setFailed(true);
+      return;
+    }
+    let dead = false;
+    let ed: any = null;
+    let original: any = null;
+    let unhold = () => {};
+    let saveKey: { dispose(): void } | null = null;
+    loadMonaco()
+      .then((monaco: Monaco) => {
+        if (dead || !host.current) return;
+        ed = monaco.editor.createDiffEditor(host.current, {
+          theme: "jarvis",
+          automaticLayout: true,
+          readOnly: readOnly.current || editorsBlocked(),
+          originalEditable: false,
+          renderSideBySide: true,
+          // Side by side even in a narrow pane: the disk's text on the left,
+          // the buffer on the right, never folded into one inline view.
+          useInlineViewWhenSpaceIsLimited: false,
+          fontSize: 12,
+          minimap: { enabled: false },
+        });
+        original = monaco.editor.createModel(
+          props.disk, props.model.getLanguageId?.(), monaco.Uri.from({ scheme: "jarvis-disk", path: `/${props.path}`, query: `disk=${Date.now()}` }),
+        );
+        ed.setModel({ original, modified: props.model });
+        const mod = ed.getModifiedEditor();
+        mod.updateOptions({ wordBasedSuggestions: "matchingDocuments" });
+        saveKey = mod.addAction({
+          id: "jarvis.saveFile",
+          label: "Save",
+          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+          run: () => {
+            if (!dead) onSave.current();
+          },
+        });
+        unhold = onEditorsBlocked((b) => {
+          ed.updateOptions({ readOnly: b || readOnly.current });
+          setLocked(b);
+        });
+      })
+      .catch(() => setFailed(true));
+    return () => {
+      dead = true;
+      unhold();
+      saveKey?.dispose();
+      // The diff editor and the disk's side; the buffer's model stays.
+      ed?.setModel(null);
+      ed?.dispose();
+      original?.dispose();
+    };
+  }, [props.model, props.disk, props.path]);
+
+  if (failed) {
+    return (
+      <div className="mdsplit" data-testid="editor-compare-fallback">
+        <pre className="editorhost" style={{ overflow: "auto", padding: 8 }}>{props.disk}</pre>
+        <pre className="editorhost" style={{ overflow: "auto", padding: 8 }}>{props.model.getValue()}</pre>
+      </div>
+    );
+  }
+  return <div className="editorhost" data-testid="editor-compare" data-readonly={String(props.readOnly || locked)} ref={host} />;
 }
 
 export function DiffEditor(props: { path: string; before: string; after: string }) {

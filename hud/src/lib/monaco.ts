@@ -41,6 +41,15 @@ function registerExtras(monaco: Monaco) {
     const ini = await import("monaco-editor/languages/definitions/ini/ini");
     monaco.languages.setLanguageConfiguration("toml", ini.conf as any);
   });
+  // A credential env file (ED-2, the owner's `.env*` rule) gets a language of
+  // its own, set on its model and never detected: Monaco's word suggestions
+  // draw only on documents of the same language, so a key in `.env.production`
+  // is never offered while typing in a file Jarvis can read. INI's tokenizer
+  // fits `KEY=value` and `#` comments.
+  monaco.languages.register({ id: ENV_LANGUAGE, aliases: ["dotenv"] });
+  monaco.languages.registerTokensProviderFactory(ENV_LANGUAGE, {
+    create: async () => (await import("monaco-editor/languages/definitions/ini/ini")).language as any,
+  });
   // JSON's Monaco language came with its language service, which E-1 leaves
   // out — so without this a `.json` file would be plain text. A small Monarch
   // definition: strings, numbers, the three literals, `//` and `/* */`
@@ -179,15 +188,27 @@ export function editorKeyRules(m: MonacoKeys): { keybinding: number; command: st
 
 let serial = 0;
 
+/** The language an env file's model is given (and nothing else is). */
+export const ENV_LANGUAGE = "dotenv";
+
 /**
- * A File view's model URI: `file:///<project>/<path>`, so Monaco's registry
- * picks the language from the extension, the file name or a shebang line.
- * The query keeps two panes holding the same file on two models until ED-2's
- * buffers share one (by absolute path, which the read route does not return
- * yet).
+ * A buffer's model (ED-2, `state/buffers.ts`): one per file on disk, its URI
+ * the file's absolute path, so Monaco's registry picks the language from the
+ * extension, the file name or a shebang line. An env file is `dotenv`.
  */
-export function fileUri(monaco: Monaco, projectId: string, path: string) {
-  return monaco.Uri.from({ scheme: "file", path: `/${projectId}/${path}`, query: `editor=${++serial}` });
+export async function makeModel(text: string, abs: string, kind: string) {
+  const monaco = await loadMonaco();
+  let uri = abs.startsWith("/")
+    ? monaco.Uri.file(abs)
+    : monaco.Uri.from({ scheme: "jarvis-buffer", path: `/${abs}` });
+  // Never dispose a model already at this URI: it may be a live buffer's (two
+  // reads of one file through two projects used to make two models here, and
+  // the second disposed the first under its tab — "Model is disposed!",
+  // review of PR #49, L1). The registry makes one per file; should a second
+  // ever be asked for, it goes beside the first, under its own query (the
+  // language still comes from the path).
+  if (monaco.editor.getModel(uri)) uri = uri.with({ query: `b=${++serial}` });
+  return monaco.editor.createModel(text, kind === "env" ? ENV_LANGUAGE : undefined, uri);
 }
 
 /** A diff side's model URI. Its own scheme, so a leak is countable. */
