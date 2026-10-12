@@ -120,6 +120,25 @@ export function closeTab(t: Tabs, path: string): Tabs {
   return { paths, active, preview: t.preview === path ? null : t.preview };
 }
 
+/** `path` itself or anything under it, renamed to `to` (ED-7): `from` → `to`, `from/x` → `to/x`. */
+export function renamedPath(path: string, from: string, to: string): string | null {
+  if (path === from) return to;
+  return path.startsWith(`${from}/`) ? to + path.slice(from.length) : null;
+}
+
+/**
+ * A pane's tabs after the explorer renamed or moved `from` to `to` (a file or
+ * a folder): each tab on it follows, in place, still active or preview.
+ */
+export function renameTabs(t: Tabs, from: string, to: string): Tabs {
+  const map = (p: string | null) => (p === null ? null : renamedPath(p, from, to) ?? p);
+  const paths = t.paths.map((p) => map(p)!);
+  // Two tabs on one path after a rename cannot happen (a rename never lands
+  // on something that exists); should one, the first is kept.
+  const unique = paths.filter((p, i) => paths.indexOf(p) === i);
+  return { paths: unique, active: map(t.active), preview: map(t.preview) };
+}
+
 export function sameTabs(a: Tabs | null | undefined, b: Tabs | null | undefined): boolean {
   if (!a || !b) return !a && !b;
   return a.active === b.active && a.preview === b.preview && a.paths.length === b.paths.length

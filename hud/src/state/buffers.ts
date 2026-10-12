@@ -110,6 +110,8 @@ export interface BufferDeps {
   stat(projectId: string, paths: string[]): Promise<{ files: Record<string, StatRow> }>;
   makeModel(text: string, abs: string, kind: Kind): Promise<TextModel>;
   now(): number;
+  /** A renamed buffer's model takes the language of its new name (ED-7). */
+  relanguage?(model: TextModel, abs: string, kind: Kind): void;
 }
 
 interface Buf {
@@ -473,6 +475,58 @@ export class Buffers {
     b.model?.dispose();
     this.bufs.delete(b.abs);
     for (const [k, v] of [...this.byKey]) if (v === b.abs) this.byKey.delete(k);
+  }
+
+  // ---- renaming (ED-7) ---------------------------------------------------------
+
+  /**
+   * The explorer renamed or moved `fromAbs` to `toAbs` (a file, or a folder:
+   * every buffer under it). Each buffer follows **with its text, its unsaved
+   * edit and its undo stack** — the model is the same object — and every
+   * tab's hold follows its path, so a pane's tabs can be renamed after it
+   * (`renameTabs`) and find the same buffer under the new name. Returns, per
+   * hold, the pane and the path it had and has, relative to that pane's own
+   * project (one file reached from two projects is one buffer with two
+   * relative paths). `kind` is the renamed file's new kind (a file renamed to
+   * `.env.local` becomes an env file: the lock, Add to chat closed).
+   */
+  renamed(fromAbs: string, toAbs: string, kind?: string | null): { pane: string; from: string; to: string }[] {
+    const moves: { pane: string; from: string; to: string }[] = [];
+    if (!fromAbs || !toAbs || fromAbs === toAbs) return moves;
+    const follow = (abs: string, rel: string, newAbs: string): string => {
+      // `rel` is relative to a root that `abs` ends in; the same root, after.
+      if (!abs.endsWith(`/${rel}`)) return rel;
+      const root = abs.slice(0, abs.length - rel.length - 1);
+      return newAbs.startsWith(`${root}/`) ? newAbs.slice(root.length + 1) : rel;
+    };
+    for (const buf of [...this.bufs.values()]) {
+      const tail = buf.abs === fromAbs ? "" : buf.abs.startsWith(`${fromAbs}/`) ? buf.abs.slice(fromAbs.length) : null;
+      if (tail === null) continue;
+      const oldAbs = buf.abs;
+      const newAbs = toAbs + tail;
+      this.bufs.delete(oldAbs);
+      for (const [k, v] of [...this.byKey]) if (v === oldAbs) this.byKey.delete(k);
+      const refs = new Set<string>();
+      for (const r of buf.refs) {
+        const pane = paneOfRef(r);
+        const rel = r.slice(pane.length + 1);
+        const next = follow(oldAbs, rel, newAbs);
+        refs.add(refOf(pane, next));
+        if (next !== rel) moves.push({ pane, from: rel, to: next });
+      }
+      buf.refs = refs;
+      buf.path = follow(oldAbs, buf.path, newAbs);
+      buf.abs = newAbs;
+      if (tail === "" && kind) {
+        const k = parseKind(kind);
+        if (k !== buf.kind && (k === "text" || k === "env")) buf.kind = k;
+      }
+      this.bufs.set(newAbs, buf);
+      this.byKey.set(`${buf.projectId}\u0000${buf.path}`, newAbs);
+      if (buf.model) this.deps?.relanguage?.(buf.model, newAbs, buf.kind);
+    }
+    if (moves.length || this.bufs.has(toAbs)) this.emit();
+    return moves;
   }
 
   // ---- saving ----------------------------------------------------------------

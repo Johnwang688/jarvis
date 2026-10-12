@@ -227,3 +227,16 @@ describe("the rest", () => {
     expect(chatExcerpt("a.md", "````\nhi", 1, 2)).toBe("a.md:L1-2\n`````\n````\nhi\n`````\n");
   });
 });
+
+describe("ED-7: renameTabs", () => {
+  it("a file's tab and a folder's tabs follow in place", async () => {
+    const { renameTabs, renamedPath } = await import("./buffers");
+    const t = { paths: ["a.py", "src/x.cpp", "src/deep/y.cpp", "srcx/z"], active: "src/x.cpp", preview: "src/deep/y.cpp" };
+    expect(renameTabs(t, "src", "lib")).toEqual({
+      paths: ["a.py", "lib/x.cpp", "lib/deep/y.cpp", "srcx/z"], active: "lib/x.cpp", preview: "lib/deep/y.cpp" });
+    expect(renameTabs(t, "a.py", "b.py").paths[0]).toBe("b.py");
+    expect(renameTabs({ paths: [], active: null, preview: null }, "a", "b")).toEqual({ paths: [], active: null, preview: null });
+    expect(renamedPath("src", "src", "lib")).toBe("lib");
+    expect(renamedPath("srcx", "src", "lib")).toBeNull();
+  });
+});

@@ -577,6 +577,9 @@ export function inTerminal(target: EventTarget | null): boolean {
  */
 export function terminalTakesKey(shortcut: string | null, key: string): boolean {
   if (shortcut === "toggleLeft" || shortcut === "toggleRight") return true;
+  // Ctrl+P is readline's previous line (ED-7 leaves it to the shell); the
+  // palette and find in files (Ctrl+Shift+P, Ctrl+Shift+F, F1) stay the HUD's.
+  if (shortcut === "quickOpen") return true;
   return shortcut === "zoomOut" && key === "_";
 }
 

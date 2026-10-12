@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   DEFAULT_LAYOUT, PANE, ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN, dragWidth, inMonaco, isZoom, keyWidth,
-  loadLayout, loadZoom, saveLayout, saveZoom, shortcutFor, stepZoom, toCss,
+  loadLayout, loadZoom, saveLayout, saveZoom, shortcutFor, stepZoom, toCss, isEditorShortcut, type EditorShortcut,
   type Fitted, type PaneLayout, type Side,
 } from "../lib/layout";
 import {
@@ -135,7 +135,7 @@ export function focusPaneElement(pane: PaneNo, frames = 10) {
  * that has not moved, which is how a click meant for DENY lands on something
  * else.
  */
-export function useLayout(blocked = false): LayoutControl {
+export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) => void): LayoutControl {
   // Applied in the initializer too, so a window reopened at 140% does not
   // draw its first frame at 100% and then jump.
   const [zoom, setZoomState] = useState(() => {
@@ -178,6 +178,8 @@ export function useLayout(blocked = false): LayoutControl {
   now.current = { fit, ws, layout, available, availableH, prefer, preferPanel };
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
+  const editorKeyRef = useRef(onEditorKey);
+  editorKeyRef.current = onEditorKey;
 
   const setZoom = useCallback((level: number) => setZoomState(isZoom(level) ? level : ZOOM_DEFAULT), []);
   const zoomBy = useCallback((dir: 1 | -1) => setZoomState((z) => stepZoom(z, dir)), []);
@@ -319,6 +321,17 @@ export function useLayout(blocked = false): LayoutControl {
       if (inTerminal(e.target) && (save || terminalTakesKey(what, e.key))) return;
       if (step.second || save || !what) {
         e.preventDefault();
+        return;
+      }
+      if (isEditorShortcut(what)) {
+        // Quick open, the palette, find in files (ED-7): never Chrome's print
+        // dialog, and stopped here so Monaco never sees them (its F1 would
+        // open its own quick command over ours). A pending chord's second
+        // key was left to Monaco above; under a card nothing opens (above).
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.repeat) return;
+        editorKeyRef.current?.(what);
         return;
       }
       if (what === "toggleLeft" || what === "toggleRight") {

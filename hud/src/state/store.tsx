@@ -81,7 +81,10 @@ export interface State {
   /** A refused thread move, shown beside the tree it was reverted in. */
   moveError: string;
   picker: null | "model" | "voice" | "avatar" | "route" | "settings" | "newProject" | "newTask" | "schedule"
-    | "editProject" | "archiveProject" | "archive";
+    | "editProject" | "archiveProject" | "archive"
+    // ED-7: quick open and the command palette. Pickers like the rest:
+    // push-to-talk refuses and the mic claims nothing while one is open.
+    | "quickOpen" | "palette";
   /** Archived projects' names, from `/archive`: `/projects` hides them, but
    * the backend still counts them when it numbers a name (decisions B4). */
   archivedNames: string[];

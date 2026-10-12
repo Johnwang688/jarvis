@@ -644,3 +644,61 @@ describe("the review of PR #49 (each failing on f869543)", () => {
     expect(notes).toEqual(["changed on disk — reloaded"]);
   });
 });
+
+describe("ED-7: a rename from the explorer", () => {
+  it("the buffer follows with its edit, its undo stack and every hold", async () => {
+    await b.open("p1", "a.py", refOf(2, "a.py"));
+    await b.open("inbox", "w/a.py", refOf(4, "w/a.py"));
+    const m = model("/w/a.py");
+    m.type("edit");
+    expect(b.isDirty("/w/a.py")).toBe(true);
+    // The disk moves; then the registry is told.
+    w.files.set("/w/c.py", w.files.get("/w/a.py")!);
+    w.files.delete("/w/a.py");
+    const moves = b.renamed("/w/a.py", "/w/c.py", "text");
+    expect(moves.sort((x, y) => x.pane.localeCompare(y.pane))).toEqual([
+      { pane: "2", from: "a.py", to: "c.py" }, { pane: "4", from: "w/a.py", to: "w/c.py" }]);
+    expect(b.get("/w/a.py")).toBeNull();
+    const v = b.get("/w/c.py")!;
+    expect(v.dirty).toBe(true);
+    expect(v.path).toBe("c.py");
+    expect(v.refs.sort()).toEqual(["2|c.py", "4|w/c.py"]);
+    expect(b.model("/w/c.py")).toBe(m);
+    // A tab on the new name finds the same buffer, with no read.
+    const reads = w.reads.length;
+    const again = await b.open("p1", "c.py", refOf(2, "c.py"));
+    expect(again.abs).toBe("/w/c.py");
+    expect(w.reads.length).toBe(reads);
+    // Its save writes the new name, against the etag it was read as.
+    expect(await b.save("/w/c.py")).toBe("saved");
+    expect(w.files.get("/w/c.py")).toBe("one\nedit");
+    expect(w.files.has("/w/a.py")).toBe(false);
+    // The old name's release is nobody's.
+    b.release("/w/a.py", refOf(2, "a.py"));
+    expect(b.get("/w/c.py")!.refs.length).toBe(2);
+  });
+
+  it("a folder's buffers all follow; others stay", async () => {
+    w.files.set("/w/src/x.cpp", "x\n");
+    w.files.set("/w/src/deep/y.cpp", "y\n");
+    await b.open("p1", "src/x.cpp", refOf(1, "src/x.cpp"));
+    await b.open("p1", "src/deep/y.cpp", refOf(1, "src/deep/y.cpp"));
+    await b.open("p1", "a.py", refOf(1, "a.py"));
+    model("/w/src/deep/y.cpp").type("!");
+    const moves = b.renamed("/w/src", "/w/lib");
+    expect(moves.map((x) => x.to).sort()).toEqual(["lib/deep/y.cpp", "lib/x.cpp"]);
+    expect(b.get("/w/lib/deep/y.cpp")!.dirty).toBe(true);
+    expect(b.get("/w/a.py")!.path).toBe("a.py");
+    expect(b.renamed("/w/srcx", "/w/q")).toEqual([]);
+  });
+
+  it("a file renamed to an env name becomes an env file", async () => {
+    await b.open("p1", "a.py", refOf(1, "a.py"));
+    b.renamed("/w/a.py", "/w/.env.local", "env");
+    expect(b.get("/w/.env.local")!.kind).toBe("env");
+    // A kind it cannot turn into is never taken.
+    await b.open("p1", "b.py", refOf(1, "b.py"));
+    b.renamed("/w/b.py", "/w/b2.py", "gate");
+    expect(b.get("/w/b2.py")!.kind).toBe("text");
+  });
+});

@@ -21,6 +21,19 @@ import {
 } from "../lib/monaco";
 import type { TextModel } from "../state/buffers";
 
+/**
+ * Every File pane's live editor (ED-7): the palette lists the actions of the
+ * one that had focus when it opened, and runs them there.
+ */
+const live = new Set<any>();
+let lastFocused: any = null;
+
+/** The File pane editor that has, or last had, keyboard focus and is still alive. */
+export function focusedEditor(): any | null {
+  for (const ed of live) if (ed.hasTextFocus?.()) return ed;
+  return lastFocused && live.has(lastFocused) ? lastFocused : null;
+}
+
 /** A Monaco model, as opposed to the fallback's shim. */
 const isMonacoModel = (m: TextModel | null): boolean => !!m && typeof m.pushEditOperations === "function";
 
@@ -47,6 +60,9 @@ export function PaneEditor(props: {
   hidden?: boolean;
   /** The live editor, for the selection ("Add to chat"); null once it is gone. */
   editorRef?: (ed: any | null) => void;
+  /** "Add Selection to Chat" in the editor's own context menu (ED-7); off for an env file. */
+  mayAddToChat?: boolean;
+  onAddToChat?: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<any>(null);
@@ -63,6 +79,9 @@ export function PaneEditor(props: {
   readOnly.current = props.readOnly;
   const editorRef = useRef(props.editorRef);
   editorRef.current = props.editorRef;
+  const onAddToChat = useRef(props.onAddToChat);
+  onAddToChat.current = props.onAddToChat;
+  const mayAdd = useRef<{ set(v: boolean): void } | null>(null);
   const plain = !!props.model && !isMonacoModel(props.model);
 
   // The editor, once Monaco is here; never rebuilt for a new model.
@@ -70,6 +89,8 @@ export function PaneEditor(props: {
     let dead = false;
     let unhold = () => {};
     let saveKey: { dispose(): void } | null = null;
+    let addKey: { dispose(): void } | null = null;
+    let focusSub: { dispose(): void } | null = null;
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
@@ -98,6 +119,26 @@ export function PaneEditor(props: {
             onSave.current();
           },
         });
+        // "Add Selection to Chat" in the context menu (ED-7): shown only while
+        // the buffer is one Jarvis may read (`jarvisMayRead`; never an env
+        // file), and run through the pane's own Add to chat, which asks again.
+        const may = ed.createContextKey("jarvisMayAddToChat", false);
+        mayAdd.current = may;
+        addKey = ed.addAction({
+          id: "jarvis.addSelectionToChat",
+          label: "Add Selection to Chat",
+          precondition: "jarvisMayAddToChat",
+          contextMenuGroupId: "9_cutcopypaste",
+          contextMenuOrder: 9,
+          run: () => {
+            if (dead || editorsBlocked()) return;
+            onAddToChat.current?.();
+          },
+        });
+        live.add(ed);
+        focusSub = ed.onDidFocusEditorText(() => {
+          lastFocused = ed;
+        });
         unhold = onEditorsBlocked((b) => {
           ed.updateOptions({ readOnly: b || readOnly.current });
           setLocked(b);
@@ -110,6 +151,13 @@ export function PaneEditor(props: {
       dead = true;
       unhold();
       saveKey?.dispose();
+      addKey?.dispose();
+      focusSub?.dispose();
+      mayAdd.current = null;
+      if (editor.current) {
+        live.delete(editor.current);
+        if (lastFocused === editor.current) lastFocused = null;
+      }
       editorRef.current?.(null);
       // The editor only: the models are the registry's.
       editor.current?.setModel(null);
@@ -138,6 +186,10 @@ export function PaneEditor(props: {
   useEffect(() => {
     editor.current?.updateOptions({ readOnly: props.readOnly || editorsBlocked() });
   }, [props.readOnly, ready]);
+
+  useEffect(() => {
+    mayAdd.current?.set(!!props.mayAddToChat);
+  }, [props.mayAddToChat, ready]);
 
   // The fallback textarea redraws when its shim model changes.
   useEffect(() => {
