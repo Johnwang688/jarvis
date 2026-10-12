@@ -351,6 +351,16 @@ def cmd_desktop(args) -> int:
     return 0
 
 
+def cmd_vex(args) -> int:
+    # Human-only, like `jarvis desktop setup`: which VEX executables the HUD's
+    # Build, Download and brain terminal run is the owner's choice, made here.
+    # There is deliberately no `jarvis vex download`: sending code to a robot
+    # is only ever the owner's click in the HUD (decision V-2).
+    from .v2 import vex_setup
+
+    return vex_setup.run()
+
+
 def cmd_route(args) -> int:
     from .v2.router import cli
     return cli(args)
@@ -926,6 +936,11 @@ def build_parser() -> argparse.ArgumentParser:
                          help="seconds to wait for the bridge to connect")
     desktop.set_defaults(func=cmd_desktop)
 
+    vexcmd = sub.add_parser(
+        "vex", help="find VS Code's VEX tools for the HUD's VEX view (human-only)")
+    vexcmd.add_argument("action", choices=["setup"])
+    vexcmd.set_defaults(func=cmd_vex)
+
     hud = sub.add_parser(
         "hud",
         help="open the v2 HUD (starts the daemon if needed), or `install`/`rebuild` it (human-only)",
@@ -940,7 +955,8 @@ def build_parser() -> argparse.ArgumentParser:
             "daemon only when Python changed."),
         epilog=(
             "rebuild exit codes: 0 installed and served; 1 refused or failed; 3 a turn is\n"
-            "running, so nothing was restarted; 4 installed but not verified.\n"
+            "running or an approval waiting (or that could not be checked), so nothing was\n"
+            "restarted; 4 installed but not verified (or the restart handed off).\n"
             "Owner-only: Jarvis is refused install and rebuild in every spelling."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     hud.add_argument("action", nargs="?", choices=["open", "install", "rebuild"], default="open",
@@ -965,12 +981,13 @@ def build_parser() -> argparse.ArgumentParser:
     hud.set_defaults(func=cmd_hud)
 
     restart_help = ("restart the v2 daemon (systemd's jarvis-daemon2) and report on it; "
-                    "refused while a turn runs unless --force (human-only)")
+                    "refused while a turn runs or an approval waits unless --force (human-only)")
     restart_epilog = ("Open HUD terminals end with the old daemon; press Ctrl+R in the HUD "
                       "afterwards. Exit codes: 0 restarted and answering; 1 refused or failed; "
-                      "3 a turn is running, nothing restarted; 4 restarted but no new daemon "
-                      "answered /status in time. Owner-only: Jarvis is refused it in every "
-                      "spelling.")
+                      "3 a turn is running or an approval waiting (or the daemon did not answer, "
+                      "so that could not be checked), nothing restarted; 4 restarted but no new "
+                      "daemon answered /status in time, or handed off from a HUD terminal. "
+                      "Owner-only: Jarvis is refused it in every spelling.")
     restart = sub.add_parser("restart", help=restart_help, description=restart_help,
                              epilog=restart_epilog)
     restart.add_argument("--force", action="store_true",

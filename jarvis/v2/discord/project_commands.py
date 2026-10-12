@@ -13,9 +13,9 @@ and what it may do follows from that:
   and as a HUD card. One-shot, never Always, never by voice (a typed or tapped
   answer only), and a timeout denies. After the yes the check runs again; if
   the folder changed meanwhile the owner is asked again about what is there
-  now. Then the folder (`make_project_folder`, called from here and nowhere
-  else), the project (`projects.create_project`, PR #4's numbering) and the
-  channel: a new one under Jarvis when asked from the DM, *this* channel when
+  now — `projects.confirm_folder`, the one confirmation handler, which the
+  HUD's new VEX project shares (VX-1). Then the folder, the project
+  (`projects.create_project`, PR #4's numbering) and the channel: a new one under Jarvis when asked from the DM, *this* channel when
   asked from an unlinked one. A linked channel refuses.
 * **`/project link`** links the unlinked channel it is typed in (B1's
   `validate_link`), at once — the owner's own action (D4).
@@ -50,7 +50,6 @@ from .linker import LinkError
 LOG = logging.getLogger(__name__)
 
 NAME_MAX = 100
-MAX_ASKS = 3
 ORIGIN_NEW = "Discord: new project"
 ORIGIN_UNLINK = "Discord: /project unlink"
 MODAL_ID = "jv:project:new"
@@ -176,42 +175,13 @@ class ProjectCommands:
 
     def _make_folder(self, check, name, channel_id, reply):
         """Ask when needed, make the folder, and ask again if it changed after
-        the yes. -> the path, or None once the owner has been told why not."""
-        approval, forced = None, False
-        for _ in range(MAX_ASKS):
-            if check.needs_confirmation or forced:
-                verb = "Create" if check.action == "create" else "Use"
-                reply.send(f"{verb} `{check.path}` ({check.describe()}) for project "
-                           f"**{name}**? Approve or Deny on the request below.")
-                request = ApprovalRequest(
-                    tool=folders.TOOL, args=check.approval_args(name),
-                    reason=f"{verb} {check.path} as the folder of project {name}",
-                    origin=ORIGIN_NEW, allowlistable=False, discord_channel_id=channel_id)
-                decision = self._ask(request)
-                if decision is not Decision.ALLOW:
-                    reply.send(f"Not approved, so nothing was made (`{check.path}`).")
-                    return None
-                approval = folders.approved(request, decision)
-            try:
-                return folders.make_project_folder(check, approval)
-            except folders.FolderChanged as exc:
-                # Re-read the project roots too: what appeared may be another
-                # project's folder, made while this one was being decided.
-                try:
-                    check = folders.check_project_folder(exc.check.raw,
-                                                         taken_roots=self._taken_roots())
-                except folders.FolderRefused as refused:
-                    reply.send(f"`{exc.check.path}` changed while you were deciding, and "
-                               f"now {refused}. Nothing was made.")
-                    return None
-                approval, forced = None, True
-                reply.send(f"`{check.path}` changed while you were deciding: it is now "
-                           f"{check.describe()}. Asking again.")
-            except folders.FolderRefused as exc:
-                reply.send(f"I can't use that folder any more: {exc}. Nothing was made.")
-                return None
-        reply.send(f"`{check.path}` kept changing, so nothing was made.")
-        return None
+        the yes (`projects.confirm_folder`, the one confirmation handler the
+        HUD's new VEX project shares). -> the path, or None once the owner has
+        been told why not."""
+        from ..projects import confirm_folder
+        return confirm_folder(self.surface.approvals, check, name, origin=ORIGIN_NEW,
+                              say=reply.send, taken_roots=self._taken_roots,
+                              channel_id=channel_id)
 
     def _channel_for(self, project, where, channel_id) -> str:
         """Link this channel (from an unlinked one) or make one (from the DM).

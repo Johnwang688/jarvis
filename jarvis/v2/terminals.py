@@ -127,6 +127,18 @@ that reaches a terminal, refused or not, publishes `terminal_read` with
 exactly `{terminal_id, lines, at, refused}`: never output, a command or a
 reason. The `terminal_read` tool (jarvis/v2/tools/terminal_read.py) imports
 this one function and nothing else from here.
+
+**Program terminals (VX-1).** `Terminals.create_program` runs one program —
+a VEX build, download, device-info read or the brain's user port — on a PTY
+the same way, so its output lives in the same ring, reattaches the same way
+and closes with the same routes. **Only `jarvis/v2/vex.py` creates one**,
+from its own argv tables, after checking the executable against `vex.json`;
+no route takes an argv, a program name or a path. They count apart from the
+shells (at most six of each), get no startup file, start from
+`program_environment()` (the shell allowlist with `WSLENV` emptied, so
+nothing of the daemon's crosses into a Windows program), refuse typed input
+but a lone Ctrl-C unless `input_ok`, and tell `vex.py` when they end
+(`on_exit`, once, after the output is read to EOF).
 """
 from __future__ import annotations
 
@@ -160,6 +172,7 @@ from . import terminal_guard, terminal_text, ws
 LOG = logging.getLogger(__name__)
 
 TERMINAL_CAP = 6
+PROGRAM_CAP = 6                # program terminals (VX-1), counted apart from shells
 RING_BYTES = 1 << 20
 TICKET_TTL_S = 30.0
 TAKEOVER_TIMEOUT_S = 20.0
@@ -324,6 +337,18 @@ def launcher(shell: Shell) -> tuple[list[str], str]:
             prefix.append(f"--argv0={shell.name}")
         prefix.append("--")
     return prefix, shell.path
+
+
+def program_environment(*, source=None, env_file: Path | None = None) -> dict:
+    """The environment a program terminal starts from (VX-1): the shell's
+    allowlist, and **`WSLENV` emptied**, so no Linux variable crosses into a
+    Windows program through interop — the Windows side gets its own
+    environment and nothing of the daemon's."""
+    env = clean_environment("/bin/sh", source=source, env_file=env_file)
+    env.pop("SHELL", None)
+    env.pop("COLORTERM", None)
+    env["WSLENV"] = ""
+    return env
 
 
 def _dotenv_names(path: Path) -> set[str]:
@@ -688,14 +713,24 @@ class _Takeover:
 
 class Terminal:
     def __init__(self, tid: str, *, shell: str, folder: str, project_id: str | None,
-                 label: str, cols: int, rows: int, nonce: str, integration: str = "none"):
+                 label: str, cols: int, rows: int, nonce: str, integration: str = "none",
+                 program: str | None = None, input_ok: bool = True, title: str | None = None):
         self.id = tid
         self.shell = shell
         self.folder = folder
         self.project_id = project_id
         self.label = label
         self.integration = integration
-        self.title = f"{os.path.basename(shell)} · {label}"
+        # A program terminal (VX-1) runs one program from an argv table in
+        # `vex.py`, never a shell: `program` names which ("vex-build", …).
+        # `input_ok` False refuses typed input but a lone Ctrl-C.
+        self.program = program
+        self.input_ok = input_ok
+        self.title = title or f"{os.path.basename(shell)} · {label}"
+        # Called once, with this terminal, after its program has exited and
+        # its output has been read to the end (or on finish). vex.py's only.
+        self.on_exit = None
+        self._exit_fired = False
         self.created = utcnow()
         self.cols, self.rows = cols, rows
         self.readable = True
@@ -794,6 +829,9 @@ class Terminal:
                     self._check_exit(wait=True)
                     break
             self._check_exit()
+        # Every byte the program wrote has been read (EOF), so a hook that
+        # parses the ring sees all of it.
+        self._fire_exit()
 
     def _output(self, data: bytes) -> None:
         with self._lock:
@@ -833,6 +871,30 @@ class Terminal:
             if attached is not None:
                 attached.send_text(json.dumps({"type": "exit", "code": code}))
         LOG.info("terminal %s exited (code %d)", self.id, code)
+
+    def _fire_exit(self) -> None:
+        """`on_exit`, once, outside every lock — only after the exit has been
+        recorded."""
+        with self._lock:
+            if self._exit_fired or not self.exited:
+                return
+            self._exit_fired = True
+            hook = self.on_exit
+        if hook is not None:
+            try:
+                hook(self)
+            except Exception as exc:  # noqa: BLE001 — a hook never breaks the terminal
+                LOG.warning("terminal %s: exit hook failed (%s)", self.id, type(exc).__name__)
+
+    def signal_program(self, sig: int) -> None:
+        """Send `sig` to every live process in this terminal's session, without
+        detaching the window or forgetting the terminal (a program terminal's
+        timeout: its output stays readable)."""
+        for pid in self._members():
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
 
     # -- input and size ------------------------------------------------------------
 
@@ -933,7 +995,8 @@ class Terminal:
                 "shown": self._attachment is not None, "exited": self.exited,
                 "exit_code": self.exit_code, "readable": self.readable,
                 "busy": self.busy(), "integration": self.integration,
-                "integrated": self._marks.integrated, "marked": self._marks.marked}
+                "integrated": self._marks.integrated, "marked": self._marks.marked,
+                "program": self.program, "input": self.input_ok}
 
     def history(self) -> History:
         """The ring and its command spans, for WP-F (`read_for_tool`). No
@@ -1115,6 +1178,7 @@ class Terminal:
         if not self.exited and self._proc is not None and self._proc.returncode is not None:
             code = self._proc.returncode
             self.exited, self.exit_code = True, code if code >= 0 else 128 - code
+        self._fire_exit()
 
 
 def _size_ok(cols, rows) -> bool:
@@ -1199,7 +1263,7 @@ class Terminals:
         with self._lock:
             if self._stopped:
                 raise TerminalError("Jarvis is stopping")
-            if len(self._terminals) >= TERMINAL_CAP:
+            if sum(t.program is None for t in self._terminals.values()) >= TERMINAL_CAP:
                 raise TerminalError(f"{TERMINAL_CAP} terminals are open; close one first")
             tid = secrets.token_hex(4)
             while tid in self._terminals:
@@ -1232,6 +1296,49 @@ class Terminals:
                 raise
             self._terminals[tid] = terminal
         LOG.info("terminal %s opened in %s", tid, label)
+        return terminal
+
+    def create_program(self, argv: list[str], *, folder: str, label: str, program: str,
+                       title: str, project_id: str | None = None, input_ok: bool = False,
+                       on_exit=None, cols: int = 80, rows: int = 24) -> Terminal:
+        """A program terminal (VX-1): one program on a PTY, its output in the
+        ring like a shell's, attached and closed by the same routes.
+
+        **Only `jarvis/v2/vex.py` calls this** (`tests/v2/vex_check.py` greps
+        for it), with an argv from its own tables whose executable it checked
+        against `vex.json` the moment before; no route takes an argv, a
+        program or a path. No startup file, no marks, the program
+        environment (`program_environment`: nothing of the daemon's crosses
+        into a Windows program), and HUP/INT/QUIT/TERM/TSTP at their defaults.
+        `on_exit(terminal)` runs once when the program has ended and its
+        output has been read to the end."""
+        if not _size_ok(cols, rows):
+            raise ValueError("cols must be 2-1000 and rows 1-500")
+        if not argv or not all(isinstance(a, str) for a in argv) or not os.path.isabs(argv[0]):
+            raise TerminalError("a program terminal needs an absolute program")
+        env_prog, signals, _argv0 = _env_probe()
+        prefix = [env_prog, f"--default-signal={_RESET_SIGNALS}", "--"] if env_prog and signals else []
+        with self._lock:
+            if self._stopped:
+                raise TerminalError("Jarvis is stopping")
+            if sum(t.program is not None for t in self._terminals.values()) >= PROGRAM_CAP:
+                raise TerminalError(f"{PROGRAM_CAP} program terminals are open; close one first")
+            tid = secrets.token_hex(4)
+            while tid in self._terminals:
+                tid = secrets.token_hex(4)
+            terminal = Terminal(tid, shell=argv[0], folder=folder, project_id=project_id,
+                                label=label, cols=cols, rows=rows, nonce=secrets.token_hex(16),
+                                program=program, input_ok=input_ok, title=title)
+            # Set before the program starts: one that ends at once still
+            # reaches its hook.
+            terminal.on_exit = on_exit
+            try:
+                terminal.spawn([*prefix, *argv], program_environment())
+            except BaseException:
+                terminal.finish()               # the wake pipe
+                raise
+            self._terminals[tid] = terminal
+        LOG.info("terminal %s opened for %s in %s", tid, program, label)
         return terminal
 
     def get(self, tid: str) -> Terminal:
@@ -1392,7 +1499,10 @@ class Terminals:
                 if not terminal.holds(sock):
                     break
                 if kind == ws.BINARY:
-                    if latched and data != CTRL_C:
+                    if not terminal.input_ok and data != CTRL_C:
+                        _send(sock, "input_refused", bytes=len(data),
+                              reason="this program takes no typed input; Ctrl-C or close stops it")
+                    elif latched and data != CTRL_C:
                         _send(sock, "input_dropped", bytes=len(data), latched=True,
                               reason=_LATCHED)
                     elif not terminal.queue_input(data):
