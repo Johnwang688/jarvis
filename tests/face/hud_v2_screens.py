@@ -27,7 +27,7 @@ BASE = f"http://127.0.0.1:{PORT}"
 
 # The workspace (2026-10-09): a preset and what each pane shows.
 COLS2 = {"preset": "cols2", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "file"}, {"view": "task"}]}
-GRID4 = {"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}],
+GRID4 = {"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}],
          "panel": {"open": True}}
 
 SHOTS = [

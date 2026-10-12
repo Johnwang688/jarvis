@@ -11,7 +11,7 @@ every response. Two halves, and the second is the one that matters:
    and a real same-origin `ws://` opens with no violation; Monaco mounts — the
    real editor, not its textarea fallback — and starts its `editor.worker`;
    the avatar `<img>` draws; the microphone runs (getUserMedia, AudioContext)
-   and a dictated clip reaches `POST /stt`; a loopback Preview frame loads.
+   and a dictated clip reaches `POST /stt`; a loopback Browser frame loads.
    Every `securitypolicyviolation` fails the run (`hud_v2_check.watch_csp`,
    which now watches every context of every HUD suite).
 
@@ -29,7 +29,7 @@ every response. Two halves, and the second is the one that matters:
 
 Run alone (after `cd hud && npm ci && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_csp_check.py
-It also runs inside `hud_v2_check.py`, after the preview section.
+It also runs inside `hud_v2_check.py`, after the browser section.
 """
 from __future__ import annotations
 

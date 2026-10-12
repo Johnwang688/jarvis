@@ -901,7 +901,7 @@ the focused one; "read" is any drawn pane. **A File pane pins its project** when
 keyed by it — it used to save to whatever project was current at save time.
 An unsaved edit is never dropped silently: "follow chat" waits, a gone
 project keeps the pane pinned until "discard edit", and closing the window
-asks. Preview keeps its URL per pane, re-judged on load. The bottom panel
+asks. Preview (the Browser since BR-3a, below WP-E; the File pane reads as the editor) keeps its URL per pane, re-judged on load. The bottom panel
 (⬓, Ctrl+`) holds the terminals (WP-D, below). **Under
 a card every title-bar, fold and rail button is disabled**, the layout menu
 closes, and **the card takes focus** off a preview frame, Monaco or anything
@@ -978,7 +978,7 @@ thread meanwhile stays a new thread. **An SSE event with a
 chat pane most recently clicked — a pointer or keyboard focus into it,
 Ctrl+Alt+N, a sidebar click that opens a thread there. It is kept as an order
 (`selectedOrder`, `selectedChatOf`), so a chat pane the layout drops gives way
-to the one selected before it; clicking a Preview, File or other pane never
+to the one selected before it; clicking a Preview (Browser since BR-3a), File (editor) or other pane never
 changes it; one chat drawn is the selected one, and with none drawn there is
 none. Ambiguous means: a dictated transcript (AUTO sends, REVIEW fills the
 box — **to the selected chat as it is when the transcript lands**, so
@@ -1437,11 +1437,11 @@ is its own server, untouched.
 **fails if a route module gains a first path segment it does not walk**,
 and fails if any status line but `ws.py`'s is written by hand. `/status`
 gains `hud_port`, `api_port` and `frame_hardened` (the handler class's own
-flag, beside `end_headers`). **The Preview pane** (`lib/preview.ts`) refuses
+flag, beside `end_headers`). **The Preview pane** (the **Browser** since BR-3a, `lib/browser.ts`; below) refuses
 the HUD's and API's ports — as reported **and** 8402/8405, the live
 daemon — and the window's own, and restores nothing until `/status`
 answers (`state/daemonPorts.ts`, read once per page). **"Keep its origin"**
-(`preview-keep-origin`) adds `allow-same-origin`, the only flag ever added
+(`preview-keep-origin`, `browser-keep-origin` since BR-3a) adds `allow-same-origin`, the only flag ever added
 to `allow-scripts allow-forms` (never top navigation, popups or downloads):
 off by default, per pane, offered only for a loopback port that is none of
 the daemon's three nor the window's own, and only while `/status` says
@@ -1452,20 +1452,107 @@ every load and **dropped from storage** when it no longer passes; disabled
 and inert under a card. Safe because scripts plus same-origin are no sandbox
 only for a page on the parent's origin, which the port check refuses and
 `frame-ancestors` keeps a frame from becoming. **A Ctrl+clicked loopback
-link in a terminal opens a menu** (`term-link-menu`): Open in Preview — a
+link in a terminal opens a menu** (`term-link-menu`): Open in Preview (Open in Browser, `term-link-pane`, since BR-3a) — a
 drawn Preview pane, else the focused pane, by the sidebar's click rule;
-refused with the reason for the daemon's ports — or Open in a browser tab;
+refused with the reason for the daemon's ports — or Open in a browser tab (Open in a Chrome tab, `term-link-tab`);
 other links still open a tab directly. It is measured and placed by
 `placeMenu` (`lib/terminal.ts`): below the click, else **above** it — a dev
 server's `Local:` line is usually the panel terminal's last row, where it
 used to open below the window — and clamped on both axes, zoom-aware; its
 Escape listener is a layout effect that ignores Escape once a card is up.
-`judgePreviewUrl` refuses userinfo, as `judgeLink` does. xterm finds a link only when the
+`judgePreviewUrl` (`judgeBrowserUrl` since BR-3a) refuses userinfo, as `judgeLink` does. xterm finds a link only when the
 pointer enters a new cell, so a test that clicks the same cell twice must
 move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+
+**The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
+§B.9, §D.2, §G; the decisions file wins).** Four new files under `hud/src/lib/`,
+each with its vitest; **nothing imports them yet** — BR-3b (Remote mode),
+BR-4 (annotate), BR-8b (auto-open) and BR-9c (driving) wire them in.
+`remote.ts`: keys and the pointer to CDP `Input.dispatch*` shapes (**AltGr is
+the character it typed, never Ctrl+Alt**: `@` on a German layout arrives as
+Ctrl+Alt+@), `routeKeyDown` (held under a card and left to bubble, so Escape
+denies; the HUD's keys; the pane's own F5/Ctrl+R/Ctrl+L/Alt+←→; a paste is
+never a key, its text goes as `insertText`; copy and cut forwarded and
+marked), **`browserTakesKey`** — the page gets every key but Ctrl+D
+(push-to-talk), the zoom keys, Ctrl+Alt+1–8 (the plan's "Ctrl+Alt+N"), Ctrl+B,
+Ctrl+Alt+B and Ctrl+`; Ctrl+P, Ctrl+Shift+P, F1 and Ctrl+Shift+F are the
+page's, as Ctrl+P is the shell's; BR-3b owes it an exception in `useLayout`'s
+capture handler, beside `terminalTakesKey`'s — and **a lone modifier is never
+sent** (review of PR #66: push-to-talk's Ctrl, pressed before its D, reached the
+page and paused a driving agent; `modifiers` carries the state), `HeldKeys`
+and `HeldButtons` (a keyup only where its keydown went; nothing released under
+a card — they wait for `releaseAll(false)`; **a press a card cut off is let
+go off the page, never as a click**: a held-button move to `OFF_PAGE` (-1,-1),
+then the release there, every event `clickCount: 0` — released where it was
+pressed, Chrome would click what the owner never finished pressing),
+`pasteMessages` (`cleanPaste`, then ≤ 16 KiB per `{t:"text"}` once
+JSON-escaped, never between a CR and its LF), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
+16 Mpx), pointer positions **divided by the zoom** (`toCss`) before they are
+page points, wheel deltas (screen px ÷ zoom, lines 40 px, pages a viewport,
+Shift sideways, capped), a **generation-tagged, latest-only `FramePipe`** (a
+frame of an older socket, even one still decoding, is never drawn or acked)
+and `cleanTitle` (Cc/Cf/Zl/Zp, tags, variation selectors, U+034F and fillers out; one
+line, capped by code point). `drive.ts`: the daemon's `{t:"agent", kind:
+driver|action|paused|list}` frames (shapes proposed in its header for BR-1b),
+the banner (never Authorize/Approve/Deny), the newest 20 actions, the target's
+outline (a reattach's `driver` or running `list` restarts the banner), Resume
+refused under a card, and **`isTakeover`** (a pointer move is not, a drag is;
+a lone modifier and the socket's own messages never; an unknown kind of input
+is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
+offer | wait (under a card; 30 s) | skip (off, the WP-E judge
+`judgeBrowserUrl` or Jarvis's control ports, an origin already opened or shown, one per 10 s per terminal,
+three a minute); the query and fragment are dropped; a Browser pane already
+showing a page counts as busy. `annotate.ts`: the
+whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
+colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
+the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).
+**A trap found building it:** the Write tool decodes `\uXXXX` in what it
+writes, so a regex meant to name U+2028 held the character and stopped
+parsing; write `\u{…}`, or fix escapes afterwards with a script.
+
+**File reads as the editor, Preview is the Browser, BR-3a (2026-10-12; the
+owner: "also rename "File" to "Editor" and "Preview" to "Browser""; browser
+plan `docs/plans/2026-10-10-hud-browser-plan.md` §7, cut by amendment 1 to
+the rename and the migration; design §18; contract in `docs/hud-api.md`).**
+**The Browser changes in name and id both**: view `"browser"`,
+`PaneSpec.browserUrl` (`keepOrigin` unchanged), `setBrowserUrl`,
+`openBrowser`/`BrowserRequest`/`browserAsk` in App, `BrowserTab.tsx`,
+`lib/browser.ts` (`judgeBrowserUrl`), `.browserframe`, test ids `tab-browser`
+and `browser-*`, and the terminal link menu's `term-link-pane` ("Open in
+Browser") and `term-link-tab` ("Open in a Chrome tab"; WP-E's
+`term-link-browser` collided). Which links get the menu is unchanged —
+loopback only; B-11's any-http(s) waits for Remote mode — and so is every
+rule of WP-E's. **The stored layout migrates as it parses**, under the same
+`jarvis.hud.workspace` key (`parsePane`, `storedView`): `view: "preview"`
+reads as `"browser"`, `previewUrl` as `browserUrl` (only when no valid
+`browserUrl` is stored), and a `keepOrigin` is kept only while it is still
+exactly that URL's origin (`storableKeepOrigin`; the frame judges it again on
+load). A save is a parse, so it writes the new names only; a rolled-back HUD
+shows that pane's default view and loses its URL. **The editor changes in
+name only**: its view id stays `"file"` — a stored `"file"` pane, `tab-file`,
+`pane-N-…` and every editor suite are untouched — and **`VIEW_LABEL`** beside
+`PANE_VIEWS` (`lib/workspace.ts`) is the one label table, drawn by the
+strip's buttons, its compact `<select>` and the pane's `aria-label` (`Pane N:
+editor`); the CSS capitalises it. Owner-visible sentences moved with it: the
+palette's "Show Files" is "Show Editor", "No room to open …" says "switch one
+to the editor", the judge says "Refused: the Browser only loads local
+servers." **Python is left alone**: `preview_route`, `preview_only` and
+`workshop_port` name the workshop listener (8403), which the docs now call
+"the workshop origin". Not done here: WP-E's `DirectFrame` split (BR-3b's,
+with Remote mode). `hud_v2_preview_check.py` is
+**`hud_v2_browser_check.py`** (`browser_checks`), and its `_rename_checks`
+seed a pre-rename layout with the Preview pane in pane 1 (default chat, so a
+dropped view migration shows), check its URL and grant come back and the
+save writes only new names, an old grant for another origin is dropped, and a
+stored `"file"` pane opens as the editor with its tabs. Both of the plan's
+mutations bite: dropping the migration fails four `workspace.test.ts` cases
+and the headless section, carrying `keepOrigin` across an origin mismatch
+fails the grant case. A stored seed in any suite may still say `"preview"`
+(it migrates); new ones should not.
 
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
@@ -1805,7 +1892,7 @@ dist); never install into the owner's real root. **Every context of every
 headless HUD suite runs under `hud_v2_check.watch_csp`**: a CSP violation
 anywhere fails the run, because a CSP breaks quietly (Monaco even falls back
 to a textarea). `tests/face/hud_v2_csp_check.py` (run by `hud_v2_check` after
-the preview section, on a `MockDaemon(0)` of its own) proves the HUD's needs
+the browser section, on a `MockDaemon(0)` of its own) proves the HUD's needs
 work under it — SSE, the terminal socket, Monaco and its worker, the avatar,
 the mic and `/stt`, a loopback frame — and that an inline or remote script,
 `eval`, a `blob:` worker, WebAssembly, a cross-origin fetch, socket, image,
@@ -2772,7 +2859,7 @@ table agree, every capture and Monarch token resolved through Monaco's own
 `TokenTheme`, every warm Monaco default pinned), `monarchRefine.test.ts`
 (Monaco's own Monarch compiler and lexer on the installed definitions), and
 `tests/face/hud_v2_editor_theme_check.py` (a `MockDaemon(0)` of its own, run
-by `hud_v2_check` after the preview section, or alone: a C++ and a Python
+by `hud_v2_check` after the browser section, or alone: a C++ and a Python
 file's rendered tokens against the page's `:root` tokens, Monaco's `.mtkN`
 colour map, every `--vscode-*` colour it publishes, bracket pairs, find in
 the accent, control characters off Monaco's red box, and the approval card's
@@ -2961,9 +3048,11 @@ is load-bearing**: `_risky_config` reads the superproject's config only, and
 a status that recurses runs `git status` inside the submodule, which obeys
 *its* config — measured: a submodule's `filter.x.clean` ran on a superproject
 status through `gitops._git` (a same-size, mtime-moved file forces the
-hash). **The same hole is open in the `git` tool** (`gitops.run(path,
-["status"])` and `["diff"]` each ran a submodule's filter, measured in-process;
-`gitops.py` is SELF_PROTECTED: reported, not fixed here). A base read inside a submodule is refused anyway
+hash). **The same hole was open in the `git` tool** (`gitops.run(path,
+["status"])` and `["diff"]` each ran a submodule's filter, measured in-process)
+until 2026-10-12 (PR #65), when `gitops` itself was kept out of submodules (see *Agents
+that cannot ask* in Safety design); the editor's own flag stays, since its
+`_risky` reads the superproject's config only. A base read inside a submodule is refused anyway
 (its config sets `core.worktree`). The owner's global config (a git-lfs
 filter) still runs on a status, as in gitops. **The window**:
 `lib/linediff.ts` is Myers in linear space (middle snake, explicit stack, never
@@ -3325,7 +3414,7 @@ typing target (`isTypingTarget`) says once, on the selected chat's line,
 meanwhile clears it before paint, so ANSWER THE AUTHORIZATION is the line.
 Free checks: `talkkey.test.ts` (`TalkHold`),
 `editorkeys.test.ts` (the shared tracker), `monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal and
-preview sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
+browser sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
 `_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`;
 `TALK_PROBE` also counts a Ctrl+D that gets past the window, which must be
 none), and the ported checks in the terminal (`\x04` reaches the PTY; nothing
@@ -4828,7 +4917,40 @@ jarvis/
   gc, the `ext::` transport and implicit bare repositories off; diffs run with
   `--no-ext-diff --no-textconv`; and a repository whose *own* config names a
   program or moves where git works (`core.sshCommand`, a filter/textconv/merge
-  driver, `url.*.insteadOf`, `include.path` …) is refused outright. Output has
+  driver, `url.*.insteadOf`, `include.path` …) is refused outright. **Git is
+  kept out of submodules** (2026-10-12, PR #65): inside one it obeys *that*
+  repository's config, and on main a submodule's own filter ran through the
+  tool on `status`, `diff`, `add -A`, `commit -a` and `rm`, its textconv on
+  `log -p`/`show` under a global `diff.submodule=diff`, and a global
+  `push.recurseSubmodules` published its commits to its own remote. Every
+  `_git` call now carries recursion-off, `status.submoduleSummary=false`,
+  `diff.submodule=short` and `diff.ignoreSubmodules=dirty` pins (they travel
+  into any git that git starts, as `hooksPath` and `fsmonitor` already did) and
+  `--ignore-submodules=dirty` / `--no-recurse-submodules` on the command line
+  of the status and diff family and fetch/pull/push (a `.gitmodules` `ignore =`
+  beats the `-c`, never the flag); `judge()` refuses every `submodule` form and
+  any option that goes back in; and since `add -A`, `describe --dirty`/`--broken`, `rm`
+  and three `.gitmodules`-overridden reports still go in whatever the pins say,
+  every checked-out submodule's own config, nested ones too, is held to the
+  superproject's rule — unreadable, not resolving to its own directory, or more
+  than 64 / 4 deep fails closed (`_submodule_risk`). **`gh` gets the same
+  pins** as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+  (`_config_env`): `gh pr create` runs its own plain `git status`, which ran
+  the repository's fsmonitor and went into a submodule to run its (review of
+  #65). Judge reads option words, never a message's value, so
+  `commit -m "--submodule docs"` is a commit — only where git takes `-m`'s
+  value (commit, tag, merge, notes add/append/edit; never stash, where `stash
+  list|show -p -m --submodule=diff` is an option, measured). **The parser
+  follows git's own reading** (delta review of #65, git 2.53): a `--` after
+  an option word may be that option's value with options going on after it
+  (`commit -m -- --gpg-sign` signed with the global `gpg.program`), so every
+  reading is judged and they must agree, else refused (`_readings`); after a
+  `--`, fetch, pull, ls-remote and remote still read their words as the
+  repository (`fetch -- <url>` reached a repository no remote names); `-S` is
+  refused in merge, cherry-pick, revert, rebase, pull and am as in commit
+  (`--gpg-sign` everywhere already); and the value-letter tables hold no
+  letter git reads as a flag (rebase's `-m` hid `-x <cmd>`, fetch's `-m`
+  hid `-P`). Output has
   URL userinfo redacted. **A commit that names or carries a protected
   credential is taken back** (`reset --soft`, nothing lost) before the tool
   returns, and a push is refused if anything outgoing does. The way out — name
@@ -4856,7 +4978,9 @@ jarvis/
   tables for the verdicts, a real repository under a temp HOME for the
   properties that are about how git is *run*, each with a sanity half proving
   the trap fires under plain git. Not covered, said plainly: the owner's own
-  global git configuration and credential helpers (they run on push/fetch);
+  global git configuration and credential helpers (they run on push/fetch),
+  including a filter it defines that a submodule's attributes name, which runs
+  where git's internals still go into a submodule (`add -A`, `describe --dirty`/`--broken`, `rm` of one);
   an `include.path` / `includeIf` *already* in that global config that points
   at a file an agent can write (the agent cannot create one — writes to the
   global config and `git config` writes are both refused — but one the owner
@@ -5468,10 +5592,10 @@ jarvis/
   a recorder and `gh` a stand-in script, every config path and HOME a temp
   dir, nothing through a shell. Two layers because they fail differently.
   **`judge()` is pure, so its verdicts are tables** (placeholder names only):
-  59 reads that run in every context, 49 routine writes that run only in an
+  66 reads that run in every context, 68 routine writes that run only in an
   own worktree on an own branch (and are refused in the owner's checkout,
-  and for the branch-moving half off an own branch), 7 reviewed forms, and
-  ~200 refusals grouped by what each protects — including every abbreviation
+  and for the branch-moving half off an own branch), 8 reviewed forms, and
+  289 refusals grouped by what each protects — including every abbreviation
   of the dangerous long options, an alias that tries to be a subcommand,
   unknown remotes, credential names, and the "shape" cases (global options,
   non-lists, oversize). **The runner is exercised against real git** in a
@@ -5490,7 +5614,34 @@ jarvis/
   files stay writable. **Verified to bite** by an in-process mutation sweep
   (disable each protection, the matching check must fail) — 14 of 15 at
   first, the 15th being a mutation that did not mutate, now a structural
-  assertion. Run after touching `gitops.py`, `tools/gitctl.py`,
+  assertion. **Submodules** (2026-10-12, PR #65), against a real submodule cloned from
+  a local bare repository into a tool-made worktree, every trap a script that
+  writes one marker: `submodule_pin_checks` puts the drivers in the owner's
+  global config, named only by the submodule's attributes (so the config check
+  has nothing to refuse and only the pins are tested) — status, diff,
+  diff-files/-index and commit -a never run its filter, a `.gitmodules`
+  `ignore = none` included; log -p, show and diff A B never run its textconv
+  under `diff.submodule=diff`; fetch, switch, grep and push never recurse (the
+  push neither publishes the submodule's commit nor runs its pre-push hook);
+  its own fsmonitor never runs — each against plain git that does.
+  `submodule_config_checks`: a program in the submodule's own config, or a
+  nested repository's, refuses every subcommand (add -A, describe --dirty and
+  rm, which no pin keeps out, among them); a moved `core.worktree`, a broken
+  config, a `.git` file pointing nowhere and the limits fail closed; a clean
+  submodule and an unchecked-out gitlink are not refused. 16 of the scenarios
+  go into the submodule on main, none here (fsmonitor and the hook were
+  already held off by the propagated `-c`); dropping the pins, only the
+  command-line flags, the config read, or judge's option refusal each fails
+  its own check. `gh_git_checks` (review of #65): a stand-in `gh` that runs
+  `git status` from PATH, as gh does, runs neither the repository's nor the
+  submodule's fsmonitor through `open_pull_request`, and runs both in
+  gitops' environment without the pins; dropping `_gh`'s pins fails it.
+  The delta review's tables (a `--` that may be an option's value, signing,
+  a flag read as taking a value, a repository named after `--`, stash's
+  `-m`) and `signing_checks` (a trap `gpg.program` that plain git runs on
+  `commit -m -- --gpg-sign`); each of its five fixes, removed, fails its rows,
+  and a `judge()` differential against 5d5362b over 520,460 verdicts moved
+  27,183, every one toward REFUSE, none looser. Run after touching `gitops.py`, `tools/gitctl.py`,
   `tools/files.py`'s protection, or `run_readonly`.
 - `tests/tasks_check.py` — free checks for attended background tasks, with
   `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's
