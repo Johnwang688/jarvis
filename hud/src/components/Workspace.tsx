@@ -134,6 +134,12 @@ export function Workspace(props: {
   onSplit?: (pane: PaneNo) => void;
   /** × first asks this (an unsaved edit, unsent words): the question, or null to close at once. */
   closeQuestion?: (pane: PaneNo) => string | null;
+  /**
+   * For a question about unsaved edits (ED-2): saving them, true once all are
+   * saved — the question then offers Save / Don't save / Cancel, as closing
+   * the last tab on one does. Null for a question with nothing to save.
+   */
+  closeSave?: (pane: PaneNo) => (() => Promise<boolean>) | null;
   onClose?: (pane: PaneNo) => void;
 }) {
   const v = props.view;
@@ -160,7 +166,7 @@ export function Workspace(props: {
     if (!ws.order.includes(n) && !ws.kept.includes(n) && !fit.panes.includes(n)) ever.current.delete(n);
   }
   // × that asks first (an unsaved edit, unsent words): which pane, and what it asks.
-  const [asking, setAsking] = useState<{ pane: PaneNo; question: string } | null>(null);
+  const [asking, setAsking] = useState<{ pane: PaneNo; question: string; save: (() => Promise<boolean>) | null } | null>(null);
   // The last close: a click on × this soon after one (a double-click, the
   // second click landing on the × that moved under the pointer) closes nothing.
   const lastClose = useRef(0);
@@ -173,7 +179,7 @@ export function Workspace(props: {
     if (props.blocked || e.detail > 1 || Date.now() - lastClose.current < CLOSE_GUARD_MS) return;
     const question = props.closeQuestion?.(n) ?? null;
     if (question) {
-      setAsking({ pane: n, question });
+      setAsking({ pane: n, question, save: props.closeSave?.(n) ?? null });
       return;
     }
     closeNow(n);
@@ -359,6 +365,22 @@ export function Workspace(props: {
               {asking && asking.pane === n ? (
                 <div className="closeask" data-testid={`pane-${n}-close-ask`} role="group" aria-label="Close this pane?">
                   <span>{asking.question}</span>
+                  {asking.save ? (
+                    <button type="button" data-testid={`pane-${n}-close-save`} disabled={props.blocked}
+                            onClick={() => {
+                              const save = asking.save;
+                              if (props.blocked || !save) return;
+                              // Closed only once every edit is on disk; a
+                              // conflict stays in the pane, which stays open.
+                              void save().then((ok) => {
+                                if (ok) closeNow(n);
+                                else setAsking(null);
+                              });
+                            }}
+                            {...buttonKeys}>
+                      Save
+                    </button>
+                  ) : null}
                   <button type="button" data-testid={`pane-${n}-close-discard`} disabled={props.blocked}
                           onClick={() => {
                             // Asked again at the click: only the question shown is answered.
@@ -366,13 +388,13 @@ export function Workspace(props: {
                             closeNow(n);
                           }}
                           {...buttonKeys}>
-                    Discard and close
+                    {asking.save ? "Don't save" : "Discard and close"}
                   </button>
                   {/* Not disabled under a card (the veil makes it inert): a disabled button drops
                       focus to the page before the card can record it, so focus could not come back. */}
                   <button type="button" data-testid={`pane-${n}-close-keep`}
                           onClick={() => setAsking(null)} {...buttonKeys}>
-                    Keep
+                    {asking.save ? "Cancel" : "Keep"}
                   </button>
                 </div>
               ) : null}

@@ -40,6 +40,7 @@
 
 import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./layout";
 import { originOf, storableKeepOrigin } from "./preview";
+import { parseTabs, sameTabs, type Tabs } from "./buffers";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
@@ -144,6 +145,13 @@ export interface PaneSpec {
   keepOrigin?: string;
   /** File and Diff: the open file, relative to the pane's project (read and written by WP-G2). */
   filePath?: string;
+  /**
+   * A File pane's tabs (ED-2): paths relative to its pinned project, the
+   * active one and the preview tab. Only with a pinned project; dropped when
+   * the pin moves (the paths were the old project's). Re-read from disk on
+   * load — unsaved text is never stored.
+   */
+  editors?: Tabs;
 }
 
 /**
@@ -288,6 +296,12 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
   if (typeof v.filePath === "string" && v.filePath && v.filePath.length <= PATH_MAX) {
     spec.filePath = v.filePath;
   }
+  // Tabs belong to a pinned project; a WP-G2 `filePath` with none stored is
+  // one tab.
+  const tabs = spec.projectId
+    ? parseTabs(v.editors) ?? (spec.filePath && spec.view === "file" ? parseTabs({ paths: [spec.filePath] }) : null)
+    : null;
+  if (tabs) spec.editors = tabs;
   return spec;
 }
 
@@ -450,24 +464,42 @@ export function show(ws: Workspace, view: View, drawn: readonly PaneNo[]): Works
   return setView(ws, target, view);
 }
 
-/** A spec in another project: the open file was the old project's, so it goes. */
-function moved(p: PaneSpec, projectId: string | null): PaneSpec {
+/** A spec moved to another project: its tabs (ED-2) and its open file (WP-G2) were the old project's, so they go. */
+function repinned(p: PaneSpec, projectId: string | null): PaneSpec {
   const next = { ...p, projectId };
+  delete next.editors;
   delete next.filePath;
   return next;
 }
 
-/** Pin a File or Preview pane to a project (null: follow the chat again). The open file is the old project's: it is forgotten. */
+/** Pin a File or Preview pane to a project (null: follow the chat again). Its tabs were the old project's: they go. */
 export function pinPane(ws: Workspace, pane: PaneNo, projectId: string | null): Workspace {
   if (ws.panes[pane - 1].projectId === projectId) return ws;
-  const panes = ws.panes.map((p, i) => (i === pane - 1 ? moved(p, projectId) : p)) as Panes;
+  const panes = ws.panes.map((p, i) => (i === pane - 1 ? repinned(p, projectId) : p)) as Panes;
   return { ...ws, panes };
 }
 
 /**
- * The file a File or Diff pane has open (WP-G2), relative to its project or
- * its task's diff; empty or null forgets it. It is read again when the pane
- * mounts (a reload, a split's copy). Too long a path is not kept.
+ * A File pane's tabs (ED-2), and the project they are in: pinning a pane that
+ * follows the chat to the project its first file came from, in one step with
+ * the tab. Null or no paths clears the tabs and keeps the pin.
+ */
+export function setEditors(ws: Workspace, pane: PaneNo, projectId: string, tabs: Tabs | null): Workspace {
+  const cur = ws.panes[pane - 1];
+  const next = tabs && tabs.paths.length ? parseTabs(tabs) : null;
+  if (cur.projectId === projectId && sameTabs(cur.editors ?? null, next)) return ws;
+  const spec: PaneSpec = cur.projectId === projectId ? { ...cur } : repinned(cur, projectId);
+  if (next) spec.editors = next;
+  else delete spec.editors;
+  const panes = ws.panes.map((p, i) => (i === pane - 1 ? spec : p)) as Panes;
+  return { ...ws, panes };
+}
+
+/**
+ * The file a Diff pane has open (WP-G2), relative to its task's diff; empty
+ * or null forgets it. It is read again when the pane mounts (a reload, a
+ * split's copy). Too long a path is not kept. A File pane's files are its
+ * tabs (`setEditors`, ED-2): a stored `filePath` on one is read as one tab.
  */
 export function setFilePath(ws: Workspace, pane: PaneNo, path: string | null): Workspace {
   const cur = ws.panes[pane - 1].filePath ?? "";
@@ -491,7 +523,7 @@ export function setFilePath(ws: Workspace, pane: PaneNo, path: string | null): W
 export function unpinProject(ws: Workspace, projectId: string, keep: readonly PaneNo[] = []): Workspace {
   const hit = (p: PaneSpec, i: number) => p.projectId === projectId && !keep.includes((i + 1) as PaneNo);
   if (!ws.panes.some(hit)) return ws;
-  return { ...ws, panes: ws.panes.map((p, i) => (hit(p, i) ? moved(p, null) : p)) as Panes };
+  return { ...ws, panes: ws.panes.map((p, i) => (hit(p, i) ? repinned(p, null) : p)) as Panes };
 }
 
 /**
@@ -666,7 +698,8 @@ export function closePane(ws: Workspace, id: PaneNo, then: PaneNo | null = null)
 
 /**
  * What a split shows in the new pane (decisions S-2, plan §3.5): a copy of
- * the pane split from. A file or a diff keeps its project and the open file;
+ * the pane split from. A file keeps its project and its tabs — on the same
+ * buffers (ED-2) — and a diff its project and the open file;
  * a preview its URL and project — never the keep-origin grant, which is the
  * owner's choice for one pane (WP-E); a task view becomes that task's diff
  * (S-7); a chat or a terminal pane starts empty here and the window fills it
@@ -677,6 +710,11 @@ export function copySpec(spec: PaneSpec): PaneSpec {
   const out: PaneSpec = { view: spec.view, projectId: null, terminalId: null };
   switch (spec.view) {
     case "file":
+      // Its tabs, on the same buffers (ED-2): the copy shares each file's
+      // text, dirty dot and undo stack, and the preview tab is pinned there.
+      out.projectId = spec.projectId;
+      if (spec.editors) out.editors = { ...spec.editors, paths: [...spec.editors.paths], preview: null };
+      break;
     case "diff":
       out.projectId = spec.projectId;
       if (spec.filePath) out.filePath = spec.filePath;
@@ -723,7 +761,7 @@ export function splitVerdict(
 }
 
 /** The split button's title: what it does, or why it cannot (plan §3.4). */
-export function splitTitle(why: SplitWhy | "dirty", count: number): string {
+export function splitTitle(why: SplitWhy, count: number): string {
   switch (why) {
     case "max":
       return "Eight panes is the most";
@@ -731,8 +769,6 @@ export function splitTitle(why: SplitWhy | "dirty", count: number): string {
       return `No room for ${count + 1} panes in this window: widen it, zoom out (Ctrl+-) or close a pane`;
     case "hidden-edit":
       return "A hidden pane has an unsaved edit: show it from ⊞ first";
-    case "dirty":
-      return "Save or reload first to split this file";
     default:
       return "Split: a copy of this pane beside it";
   }
