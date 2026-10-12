@@ -1444,7 +1444,9 @@ def runner_checks():
         config.ALLOWLIST_PATH.write_text(json.dumps(
             [{"tool": "run_command", "prefix": s} for s in ("npx", "pnpm", "uv", "nohup", "rm")]))
         for line in ("npx --x " * 60 + "rm -rf ~/x", "pnpm --x exec " * 40 + "rm -rf ~/x",
-                     "nohup " * 13 + "rm -rf build"):
+                     "nohup " * 13 + "rm -rf build",
+                     # past `decide`'s budget alone: only `runners_unsure` asks it
+                     "uv run --x y --x y " * 2 + "w " * 2000 + "jarvis restart"):
             asker = Asker(Decision.DENY)
             permit = build_permit(context(brief), asker)
             eq(permit(*bash(line), brief), Decision.DENY, f"too complex: the owner's no holds ({line[:24]}…)")

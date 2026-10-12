@@ -983,6 +983,13 @@ def _started_touches(lead: list[str], parsed: bool, segment: str, local: _State,
         key = (program, hops + 1, local.cwd, tuple(sorted(local.variables.items())))
         one = walked.get(key)
         if one is None:
+            try:
+                rules.charge(len(program))      # judging a reading costs its words
+            except rules.TooComplex:
+                seen.touches += inner.touches
+                seen.touches.append(_opaque("what its wrappers and runners start is too complex "
+                                            "to judge"))
+                return False
             one = _Seen()
             words, chdir, more = _peel(list(program), local)
             if words:

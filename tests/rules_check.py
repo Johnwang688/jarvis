@@ -3064,14 +3064,24 @@ def cost_checks() -> None:
                    ("v2", lambda line: v2.always_ask_match("Bash", {"command": line})),
                    ("readonly", lambda line: shell.run_readonly(line)))
         count = 0
-        for runner in COST_RUNNERS:
-            for depth in (60, 1000):
-                line = (runner + " ") * depth + "rm -rf ~/x"
+        lines = [(runner + " ") * depth + "rm -rf ~/x"
+                 for runner in COST_RUNNERS for depth in (60, 1000)]
+        # Wide as well as deep: many options the table does not know before
+        # each program, so every level offers ~25 readings (only the budget
+        # bounds the words judged here; the per-call cap and the memo do not).
+        lines += [("uv run " + "--x y " * 25) * 80 + "rm -rf ~/x",
+                  ("npx " + "--x w " * 20) * 60 + "rm -rf ~/x",
+                  ("npx " + "--x " * 30) * 100 + "rm -rf ~/x",
+                  ("pnpm " + "--x " * 25 + "exec ") * 50 + "rm -rf ~/x"]
+        for line in lines:
+            runner, depth = line[:24], len(line)        # (for the messages: its head, its length)
+            if line:
                 count += 1
                 for name, read in readers:
                     took = None
                     for _ in range(2):          # the faster of two: a busy machine is not a regression
                         rules._runners_unsure_cached.cache_clear()
+                        rules._vex_line_cached.cache_clear()
                         start = time.perf_counter()
                         with recorded() as ran, _deadline(3):
                             value = read(line)
@@ -3093,12 +3103,27 @@ def cost_checks() -> None:
             assert rules.decide(line).decision == rules.ASK, line
             assert v2.always_ask_match("Bash", {"command": line}) is not None or \
                 rules.runners_unsure(line), line
+        # One past `decide`'s budget alone (its owner-op reading spends the
+        # same budget), which no other check would keep the `uv` entry off.
+        alone = "uv run --x y --x y " * 2 + "w " * 2000 + "jarvis restart"
+        assert rules.runners_unsure(alone) and S.command_touch(alone, cwd) is None
+        assert not rules.vex_uncoverable(alone) and not S.kill_unsure(alone)
+        assert rules.decide(alone).decision == rules.ASK
+        assert not permissions.allows("run_command", {"command": alone}), "an entry covered it"
         # L2: past `_peel_runner`'s hops the owner ops are too complex to
         # judge — asked, never the ALLOW main gave `nohup` x13 + an op.
         for line in ("nohup " * 13 + "jarvis restart", "timeout 5 " * 13 + "jarvis hud install"):
             assert rules.decide(line).decision != rules.ALLOW, (line, rules.decide(line))
+            # ...and the peel says so itself rather than stopping quietly.
+            raised = False
+            try:
+                S._peel_runner(rules._tokens(line), S._Owner())
+            except rules.TooComplex:
+                raised = True
+            assert raised, f"_peel_runner stopped quietly past its caps: {line[:30]}"
         config.ALLOWLIST_PATH.write_text("[]")
-    print(f"ok  cost: {len(COST_RUNNERS)} runner forms nested 60 and 1,000 deep ({count} lines) "
+    print(f"ok  cost: {len(COST_RUNNERS)} runner forms nested 60 and 1,000 deep, and 4 wide ones "
+          f"({count} lines) "
           f"judged by 7 readers each in under {COST_LIMIT * 1000:.0f} ms (slowest "
           f"{slowest[0] * 1000:.0f} ms, {slowest[1]}); never ALLOW, never an exception, never "
           "covered past the budget")

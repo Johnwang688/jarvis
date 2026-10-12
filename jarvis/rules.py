@@ -3224,6 +3224,7 @@ class _Walk:
         self.bodies: list[str] = []     # every here-document body set aside, for the backstop
         self.flagged: list[str] = []    # a here-document reading flagged unsure
         self.seen: set = set()          # readings already walked
+        self.words = 0                  # words of readings walked (`WORK_CAP`)
 
     def _spend(self, depth: int) -> None:
         self.spent += 1
@@ -3297,6 +3298,12 @@ class _Walk:
         wrapper = stem in _WRAPPER_OPTS
         sure = certain and (len(started.programs) + (wrapper and started.open_end)) == 1
         for program in started.programs:
+            # Walking a reading costs its words; past `WORK_CAP` the line is
+            # too complex to judge (review of PR #75, HIGH 1). The walk's own
+            # budget, not the line's: the vex reading is cached per line.
+            self.words += len(program)
+            if self.words > WORK_CAP:
+                raise _TooComplex
             program = list(program)
             if started.module and _VEX_MODULE.fullmatch(program[0]):
                 self.modules = True
@@ -3768,6 +3775,11 @@ def _judge_started(words: list[str], redirects: list, depth: int) -> Verdict | N
         key = (program, depth + 1, shape, started.joined)
         verdict = work.memo.get(key) if work is not None else None
         if verdict is None:
+            try:
+                charge(len(program))        # judging a reading costs its words
+            except _TooComplex:
+                exhaust()
+                return Verdict(ASK, RUNNERS_TOO_COMPLEX)
             if started.joined:
                 verdict = _line_verdict(" ".join(program), depth + 1)
             else:
