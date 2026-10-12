@@ -44,6 +44,8 @@ import { commandOf, paletteEntries, type CommandContext, type CommandId, type Ed
 import type { EditorShortcut } from "./lib/layout";
 import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
+import { ProjectDiff } from "./components/ProjectDiff";
+import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
 import { BrowserTab, type BrowserRequest } from "./components/BrowserTab";
 import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
@@ -2547,6 +2549,27 @@ export default function App() {
     view.focus(n);
     return n;
   };
+  /**
+   * What a Diff pane shows (lib/scm `diffMode`): the task a drawn Task pane
+   * shows (a Diff pane never shows another), else the task the window is
+   * about, else its pinned project's uncommitted changes, else the chat's.
+   */
+  // A drawn Task pane shows the window's task (`taskShown`, above): a Diff pane shows that one.
+  const taskInPane = !!task && taskShown;
+  const diffModeOf = (spec: PaneSpec): DiffMode => diffMode({
+    pin: spec.projectId, projectIds: state.projects.map((p) => p.id),
+    taskId: state.taskId, taskFocus: state.taskFocus, taskShown: taskInPane, taskIds: state.tasks.map((t) => t.id),
+    follow: activeProjectId,
+  });
+  const diffHeading = (mode: DiffMode): string =>
+    mode.kind === "project" ? `Uncommitted changes in ${projectName(mode.projectId)}`
+      : mode.kind === "task" ? `Task ${mode.taskId.slice(0, 6)}${task?.brief ? ` · ${task.brief}` : ""}` : "";
+  /** "Open" on a Diff pane's changed file: where `placeFile` says — never over the Diff or a VEX view. */
+  const openFromDiff = (n: PaneNo, projectId: string, path: string) => {
+    if (blockedNow.current || crashedRef.current) return;
+    const pane = toFilePane({ pane: n, projectId, switchTo: true });
+    if (pane !== null) askFile(pane, { kind: "open", path });
+  };
   /** Another dialog is open, or the window crashed: ED-7's keys do nothing. */
   const navBusy = () => !!live.current.picker || threadModel.overlayOpen || crashedRef.current
     || live.current.approvals.length > 0;
@@ -2817,11 +2840,41 @@ export default function App() {
           />
         );
       }
-      case "diff":
+      case "diff": {
+        // A task's diff as before, or a project's uncommitted changes (lib/scm).
+        const mode = diffModeOf(spec);
         return (
-          <DiffTab taskId={state.taskId} narrow={info.narrow} filePath={spec.filePath}
-                   onSelect={(path) => view.setFilePath(n, path)} />
+          <div className="diffpane">
+            {mode.kind !== "none" ? (
+              // What it shows, and why (review of PR #67, L3): the Task pane's
+              // task, the task picked last, this pane's project or the chat's.
+              <div className="diffhead" data-testid="diff-mode" data-mode={mode.kind}
+                   data-why={mode.kind === "task" ? mode.why : mode.pinned ? "pin" : "chat"}>
+                <span data-testid="diff-mode-what">{diffHeading(mode)}</span>
+                <span className="muted" data-testid="diff-mode-why"> · {diffWhy(mode)}</span>
+              </div>
+            ) : null}
+            {mode.kind === "project" ? (
+              <ProjectDiff
+                key={mode.projectId}
+                projectId={mode.projectId}
+                root={treeRoot(state.projects.find((p) => p.id === mode.projectId))}
+                drawn={info.drawn}
+                narrow={info.narrow}
+                filePath={spec.filePath}
+                blocked={blocked}
+                onSelect={(path) => view.setFilePath(n, path)}
+                onOpen={(path) => openFromDiff(n, mode.projectId, path)}
+              />
+            ) : mode.kind === "task" ? (
+              <DiffTab taskId={mode.taskId} narrow={info.narrow} filePath={spec.filePath}
+                       onSelect={(path) => view.setFilePath(n, path)} />
+            ) : (
+              <div className="pad muted" data-testid="diff-none">Pick a project, or a task, to see its changes.</div>
+            )}
+          </div>
         );
+      }
       case "browser":
         return (
           <BrowserTab
@@ -2924,6 +2977,39 @@ export default function App() {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+        ) : spec.view === "diff" ? (
+          // The Diff pane's project (2026-10-12): a task picked shows its diff
+          // (Follow); else the pinned project's uncommitted changes, else the
+          // chat's. Picking a project here takes the window off the task, as
+          // picking a thread does, so the choice shows at once — except while
+          // a drawn Task pane shows the task: the Diff then shows that task
+          // (it never shows another, review of PR #67 L3), and the picker is
+          // off and says so. Disabled under a card (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-diff-project`}
+            value={(() => {
+              const mode = diffModeOf(spec);
+              return mode.kind === "project" && mode.pinned ? mode.projectId : "";
+            })()}
+            disabled={blocked || taskInPane}
+            title={taskInPane
+              ? "A Task pane shows a task, so this pane shows that task's diff: switch the Task pane away to see a project's uncommitted changes"
+              : "Whose changes this pane shows: a project's uncommitted changes, or the selected task's"}
+            onChange={(e) => {
+              const id = e.target.value || null;
+              if (id && live.current.taskFocus) patch({ taskFocus: false });
+              view.pin(n, id);
+            }}
+          >
+            <option value="">
+              {(state.taskFocus || taskInPane) && task ? `Follow · task ${task.id.slice(0, 6)}`
+                : `Follow chat${activeProjectId ? ` · ${projectName(activeProjectId)}` : ""}`}
+            </option>
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
         ) : pinnedElsewhere(spec, n) ? (
           <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
             in: {projectName(paneProject(spec, n))}
@@ -2982,8 +3068,11 @@ export default function App() {
         return chat.compose ? `New thread in ${projectName(chat.compose.projectId)}` : "";
       }
       case "task":
-      case "diff":
         return task?.brief || "";
+      case "diff": {
+        const mode = diffModeOf(spec);
+        return mode.kind === "task" ? task?.brief || "" : diffHeading(mode);
+      }
       case "file":
         return `in: ${projectName(paneProject(spec, info.pane))}`;
       case "vex":

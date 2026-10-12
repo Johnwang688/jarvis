@@ -1412,17 +1412,27 @@ class MockDaemon:
             return handler._err(404, "route not found")
         rel = q.get("path", [""])[0]
         self.git_base_calls = getattr(self, "git_base_calls", 0) + 1
-        if rel in w["protected"] or w["kinds"].get(rel) in ("env", "gate", "withheld"):
+        if w["kinds"].get(rel) == "env":
+            return handler._err(403, "an env file: its committed text is not served here (the gutter is off for it).")
+        if rel in w["protected"] or w["kinds"].get(rel) in ("gate", "withheld"):
             return handler._err(403, "its committed text is not served here (the gutter is off for it).")
-        if rel not in w["files"]:
+        # A file deleted from the working tree still answers what HEAD holds
+        # (`deleted: true`); nothing on disk and nothing in HEAD is 404.
+        deleted = rel not in w["files"]
+        if deleted and not (repo and rel in repo.get("base", {})):
             return handler._err(404, "file not found")
         if not repo:
             return handler._json({"path": rel, "state": "no_repo", "head": None, "text": None})
+        extra = {"deleted": True} if deleted else {}
+        # `states` (on cue): binary, too_large, not_a_file, as the daemon says them.
+        state = repo.get("states", {}).get(rel)
+        if state:
+            return handler._json({"path": rel, "state": state, "head": repo.get("head"), "text": None, **extra})
         text = repo.get("base", {}).get(rel)
         if text is None:
             return handler._json({"path": rel, "state": "new", "head": repo.get("head"), "text": None})
         return handler._json({"path": rel, "state": "ok", "head": repo.get("head"), "text": text,
-                              "size": len(text.encode()), "renamed": False})
+                              "size": len(text.encode()), "renamed": False, **extra})
 
     # -- the editor's navigation (ED-7) ----------------------------------------
 

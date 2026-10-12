@@ -3239,6 +3239,16 @@ def main():
             finally:
                 git_mock.stop()
 
+            # The Diff pane's uncommitted changes (2026-10-12): a mock of its
+            # own, whose world gains a repository for the run.
+            from tests.face.hud_v2_scm_check import scm_checks
+            scm_mock = MockDaemon(0).start()
+            try:
+                scm_checks(browser, scm_mock, f"http://127.0.0.1:{scm_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                scm_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
             guard_loopback(ctx)

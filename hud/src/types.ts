@@ -212,6 +212,8 @@ export interface GitBase {
   text: string | null;
   size?: number;
   renamed?: boolean;
+  /** Not on disk (deleted from the working tree): `text` is what HEAD holds. */
+  deleted?: boolean;
 }
 
 export interface SearchQuery {

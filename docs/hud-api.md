@@ -1899,6 +1899,12 @@ names a program for git to run, or moves where it works**
   (a symlink, a submodule, a folder in HEAD) or `unavailable` (git could not
   say). `head` is HEAD's commit id; `text` is null unless `state` is `ok`.
   404 when the file is not there; 403 for a path outside the project.
+  **Since 2026-10-12** (the Diff pane's uncommitted changes, below) a file
+  **deleted from the working tree** — nothing at all at the path, not even a
+  broken link — answers what HEAD holds, with `"deleted": true`; it is
+  judged exactly as a file that is there (every refusal above, before git
+  runs), and a path HEAD does not hold either is still 404 (so are a folder,
+  a broken link and anything else there that is not a file).
 - `GET /projects/{id}/git/status` → `{"repo", "head", "branch", "files":
   {rel: state}, "dirs": {rel: state}, "truncated", "note"?}`: the explorer's
   colours. `git status --porcelain=v2 -z --branch --untracked-files=normal
@@ -2034,3 +2040,30 @@ origin**).
   `aria-label` (`Pane N: editor`) read it, and the strip's CSS capitalises
   it. The palette's "Show Files" is "Show Editor", and "No room to open …"
   says "switch one to the editor".
+
+## Additions 2026-10-12 (the Diff pane's uncommitted changes)
+
+No new route. A Diff pane with no task to show lists its project's
+uncommitted changes from ED-9's two owner-only routes and the editor's read:
+
+- `GET /projects/{id}/git/status` (unchanged) is the list, through the one
+  status poller (`state/gitStatus.ts`), watched only while the pane is
+  drawn. `ignored` entries are not listed; a folder in `dirs` reported
+  `untracked` is one row; `""` untracked (the whole project folder) is said
+  in a sentence.
+- `GET /projects/{id}/git/base?path=` is the left side, asked again when the
+  status's `head` moves. It now answers a **deleted** file too (`"deleted":
+  true`, above).
+- `GET /projects/{id}/file?path=` (ED-2's read, unchanged) is the right side
+  when no buffer holds the file — asked only after `git/base` answered
+  without a refusal, so a file that is an env file only where it resolves is
+  never read for a diff (`hud_v2_scm_check`'s `link.txt` pins the order:
+  with the read no longer waiting on HEAD's answer it is sent). When a
+  buffer holds it, the right side is that buffer's own Monaco model and
+  nothing is read.
+- **An env file by name** (`.env`, `.env.*`, never `.env.example`) is listed
+  and **never asked about**: no `git/base`, no read. A `git/base` 403 naming
+  an env file shows the same sentence and stops there.
+
+Rules in CLAUDE.md's "The Diff pane shows the project's uncommitted changes"
+paragraph.
