@@ -36,6 +36,7 @@ It also runs inside `hud_v2_check.py`, after the editor-scheme section.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -96,7 +97,8 @@ FILES = {"spin.cpp": CPP, "notes.md": NOTES, "fences.md": FENCES, "big.py": BIG}
 
 def syntax_checks(browser, mock, base, check, until, guard_live, init_script):
     """`guard_live(ctx)` refuses the live daemon's ports; CSP violations are
-    watched here, into this section's own list, and checked at the end."""
+    watched here — the document's events and, for the syntax worker's own
+    scope, the console — into this section's own list, checked at the end."""
     from tests.face.hud_v2_check import watch_csp
 
     print("\neditor: tree-sitter colour (ED-5)")
@@ -115,7 +117,22 @@ def syntax_checks(browser, mock, base, check, until, guard_live, init_script):
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     workers: list = []
-    page.on("worker", lambda w: workers.append(w.url))
+    # A violation inside a worker (a blocked WebAssembly compile) fires in the
+    # worker's own scope, where `watch_csp`'s document listener never hears
+    # it; Chromium reports it on the console, which the page and each worker
+    # relay here.
+    said = re.compile(r"(?i)Content Security Policy|Refused to (compile|load|create|execute|connect|instantiate)")
+
+    def console(m):
+        if said.search(m.text or ""):
+            violations.append(f"console: {m.text[:200]}")
+
+    def worker(w):
+        workers.append(w.url)
+        w.on("console", console)
+
+    page.on("console", console)
+    page.on("worker", worker)
     page.set_default_timeout(5000)
     try:
         _boot(page, mock, base, until)
