@@ -4747,7 +4747,19 @@ jarvis/
   (`_config_env`): `gh pr create` runs its own plain `git status`, which ran
   the repository's fsmonitor and went into a submodule to run its (review of
   #65). Judge reads option words, never a message's value, so
-  `commit -m "--submodule docs"` is a commit. Output has
+  `commit -m "--submodule docs"` is a commit — only where git takes `-m`'s
+  value (commit, tag, merge, notes add/append/edit; never stash, where `stash
+  list|show -p -m --submodule=diff` is an option, measured). **The parser
+  follows git's own reading** (delta review of #65, git 2.53): a `--` after
+  an option word may be that option's value with options going on after it
+  (`commit -m -- --gpg-sign` signed with the global `gpg.program`), so every
+  reading is judged and they must agree, else refused (`_readings`); after a
+  `--`, fetch, pull, ls-remote and remote still read their words as the
+  repository (`fetch -- <url>` reached a repository no remote names); `-S` is
+  refused in merge, cherry-pick, revert, rebase, pull and am as in commit
+  (`--gpg-sign` everywhere already); and the value-letter tables hold no
+  letter git reads as a flag (rebase's `-m` hid `-x <cmd>`, fetch's `-m`
+  hid `-P`). Output has
   URL userinfo redacted. **A commit that names or carries a protected
   credential is taken back** (`reset --soft`, nothing lost) before the tool
   returns, and a push is refused if anything outgoing does. The way out — name
@@ -5389,10 +5401,10 @@ jarvis/
   a recorder and `gh` a stand-in script, every config path and HOME a temp
   dir, nothing through a shell. Two layers because they fail differently.
   **`judge()` is pure, so its verdicts are tables** (placeholder names only):
-  62 reads that run in every context, 57 routine writes that run only in an
+  66 reads that run in every context, 68 routine writes that run only in an
   own worktree on an own branch (and are refused in the owner's checkout,
   and for the branch-moving half off an own branch), 8 reviewed forms, and
-  241 refusals grouped by what each protects — including every abbreviation
+  289 refusals grouped by what each protects — including every abbreviation
   of the dangerous long options, an alias that tries to be a subcommand,
   unknown remotes, credential names, and the "shape" cases (global options,
   non-lists, oversize). **The runner is exercised against real git** in a
@@ -5433,7 +5445,12 @@ jarvis/
   `git status` from PATH, as gh does, runs neither the repository's nor the
   submodule's fsmonitor through `open_pull_request`, and runs both in
   gitops' environment without the pins; dropping `_gh`'s pins fails it.
-  Run after touching `gitops.py`, `tools/gitctl.py`,
+  The delta review's tables (a `--` that may be an option's value, signing,
+  a flag read as taking a value, a repository named after `--`, stash's
+  `-m`) and `signing_checks` (a trap `gpg.program` that plain git runs on
+  `commit -m -- --gpg-sign`); each of its five fixes, removed, fails its rows,
+  and a `judge()` differential against 5d5362b over 520,460 verdicts moved
+  27,183, every one toward REFUSE, none looser. Run after touching `gitops.py`, `tools/gitctl.py`,
   `tools/files.py`'s protection, or `run_readonly`.
 - `tests/tasks_check.py` — free checks for attended background tasks, with
   `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's

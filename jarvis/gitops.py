@@ -275,14 +275,41 @@ _SUBMODULE_OK = frozenset({"--no-recurse-submodules", "--ignore-submodules",
                            "--ignore-submodules=all", "--ignore-submodules=dirty"})
 
 
-# The short options that take a value in the subcommands that carry a message,
-# and the long ones whose value is free text, so `commit -m "--submodule docs"`
-# is words, not an option (review of PR #65). git accepts no submodule option in
-# any of these (measured: each is "unknown option"), so a value misread here
-# cannot hide one that does something.
-_MESSAGE_VALUE_SHORTS = {"commit": "mFcCt", "tag": "mFu", "merge": "mFsX", "notes": "mFcC",
-                         "stash": "m"}
+# The short options whose next word is their value, in the subcommands that
+# carry a message, so `commit -m "--submodule docs"` is words, not an option
+# (review of PR #65). Measured on git 2.53 by argv in a temp repository, a word
+# that is no option of anything put after each letter, and checked against the
+# command's own `-h` table:
+#   commit  -m -F -c -C -t take the next word (and --message, --file); -U does
+#           too, but its value is a number, so it is left as a flag;
+#   tag     -m -F -u take it in create, list (-l) and delete (-d) modes alike;
+#   merge   -m -F -s -X take it, with --abort and --continue too;
+#   notes   -m -F -c -C take it in add, append and edit only. In copy, show,
+#           list, merge, remove, prune and get-ref git refuses the switch
+#           outright, so nothing is skipped there; `--ref <ref>` comes first.
+# Not stash (delta review of PR #65): `stash list` hands its options to `git
+# log` and `stash show` to the diff machinery, and there -m is a flag
+# (measured), so in `stash show -p -m --submodule=diff` the last word is an
+# option — and stash push/save, the only stash actions with a message, are
+# refused anyway. git accepts no submodule option at all in commit, tag, merge
+# or notes add/append/edit (measured: 36 of 36 refused), so a value misread
+# here cannot hide one that does something.
+_MESSAGE_VALUE_SHORTS = {"commit": "mFcCt", "tag": "mFu", "merge": "mFsX", "notes": "mFcC"}
 _MESSAGE_VALUE_LONGS = frozenset({"--message", "--file"})
+_NOTES_MESSAGE_ACTIONS = frozenset({"add", "append", "edit"})
+
+
+def _notes_action(tokens: list[str]) -> str:
+    """The notes action: the first word that is not `--ref <ref>` or an option."""
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif token == "--ref":
+            skip = True
+        elif not token.startswith("-"):
+            return token.lower()
+    return ""
 
 
 def _option_words(sub: str, tokens: list[str]) -> list[str]:
@@ -290,7 +317,7 @@ def _option_words(sub: str, tokens: list[str]) -> list[str]:
     value-taking short options of that subcommand, separate or ending a
     cluster)."""
     shorts = _MESSAGE_VALUE_SHORTS.get(sub)
-    if shorts is None:
+    if shorts is None or (sub == "notes" and _notes_action(tokens) not in _NOTES_MESSAGE_ACTIONS):
         return tokens
     out: list[str] = []
     skip = False
@@ -320,6 +347,14 @@ def _submodule_hit(tokens: list[str]) -> str:
     return ""
 
 _BUILTIN_STRATEGIES = frozenset({"ort", "recursive", "resolve", "octopus", "ours", "subtree"})
+
+# The short options of the history-writing commands read as taking the next
+# word. Checked against each command's own `-h` table (git 2.53): no letter
+# git reads as a flag is here — rebase's -m (--merge) and cherry-pick's -x
+# were, and hid the word after them (delta review of PR #65). A letter the
+# command does not accept at all may stay: git refuses the line on it.
+_HISTORY_VALUE_SHORTS = {"merge": "smFXxC", "rebase": "sFXxC", "pull": "smFXxC",
+                         "cherry-pick": "mFXC", "revert": "mFXC"}
 
 
 def _long_name(token: str) -> str:
@@ -386,12 +421,49 @@ def _values(options, *names: str) -> list[str]:
     return [value or "" for name, value in options if name in names]
 
 
-def _split(rest: list[str]) -> tuple[list[str], list[str]]:
-    """(tokens before `--`, pathspecs after it). Nothing after `--` is an option."""
+_SEPARATORS = ("--", "--end-of-options")
+MAX_VALUE_SEPARATORS = 8
+_VALUE = "<value>"   # stands in for a `--` read as an option's value
+
+
+def _may_take_next(token: str) -> bool:
+    """Whether git could read the word after `token` as its value: any option
+    word but a long one whose value is glued on with `=`."""
+    if token in _SEPARATORS or token == "-" or not token.startswith("-"):
+        return False
+    return "=" not in token if token.startswith("--") else True
+
+
+def _readings(rest: list[str]) -> list[tuple[list[str], list[str]]] | None:
+    """Every way git may split `rest` into option words and pathspecs, as
+    (options, paths); None past the bound.
+
+    A `--` (or `--end-of-options`) ends the options unless the word before it
+    is an option that takes a value: then git hands it to that option and
+    options go on after it (delta review of PR #65, measured on git 2.53:
+    `commit -m -- --gpg-sign` signed with the global gpg.program, and `merge
+    -m -- -s evil x` reads `-s evil`). Which options of which subcommand take a
+    value is not modelled here, so a `--` after any option word may be either,
+    every reading is judged, and `judge` refuses unless they agree — when the
+    parser cannot tell, it fails closed. In a reading where a `--` is a value,
+    it is replaced by a word that is no option and names nothing."""
+    ends: list[int | None] = []
     for i, token in enumerate(rest):
-        if token in ("--", "--end-of-options"):
-            return rest[:i], rest[i + 1:]
-    return rest, []
+        if token not in _SEPARATORS:
+            continue
+        ends.append(i)
+        if not (i and _may_take_next(rest[i - 1])):
+            break                     # nothing before it could take it: options end here
+        if len(ends) > MAX_VALUE_SEPARATORS:
+            return None
+    else:
+        ends.append(None)             # every `--` may be a value: options never end
+    readings = []
+    for end in ends:
+        head = rest if end is None else rest[:end]
+        readings.append(([_VALUE if t in _SEPARATORS else t for t in head],
+                         [] if end is None else rest[end + 1:]))
+    return readings
 
 
 def _shape(args) -> str:
@@ -598,6 +670,13 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
     if sub in _READS:
         return Ruling(READ)
 
+    if sub in ("fetch", "pull", "ls-remote", "remote") and paths:
+        # After `--` these still read a repository and refspecs (measured on git
+        # 2.53: `fetch -- <path>`, `pull -- <path>` and `ls-remote -- <path>`
+        # each reached a repository no remote names), so those words are judged
+        # as positionals: only a configured remote is contacted.
+        rest = [*rest, *paths]
+
     if sub == "grep":
         options, _ = _parse(rest, "efABCm", {"max-depth", "threads", "context",
                                              "after-context", "before-context", "max-count"})
@@ -733,16 +812,24 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
         return _judge_checkout(rest, paths, ctx)
 
     if sub in ("merge", "cherry-pick", "revert", "rebase", "pull"):
-        # `-s` is --strategy for merge, rebase and pull, and --signoff (no
-        # value) for cherry-pick and revert, where the strategy is spelled out.
-        shorts = "smFXxC" if sub in ("merge", "rebase", "pull") else "mFXxC"
+        # The short options whose next word is their value, from each command's
+        # own `-h` table (git 2.53). A flag read as taking one hides the word
+        # after it: `rebase -m -x <cmd>` (rebase's -m is --merge) ran the
+        # command, and `cherry-pick -x -S` would sign. `-s` is --strategy for
+        # merge, rebase and pull and --signoff (a flag) for cherry-pick and
+        # revert; pull's `-j`/`--jobs` take a value only glued on.
+        shorts = _HISTORY_VALUE_SHORTS[sub]
         options, _ = _parse(rest, shorts, {
             "strategy", "strategy-option", "message", "file", "into-name", "cleanup",
             "onto", "exec", "mainline", "depth", "deepen", "shallow-since",
-            "shallow-exclude", "server-option", "jobs"})
+            "shallow-exclude", "server-option"})
         problem = _strategy_problem(options, short=sub in ("merge", "rebase", "pull"))
         if problem:
             return _refuse(problem)
+        # -S[<keyid>] signs with the owner's key, as in commit; --gpg-sign and
+        # its abbreviations are refused for every subcommand (_PROGRAM_LONG).
+        if _has(options, "-S"):
+            return _refuse("-S signs with the owner's key")
         if sub == "rebase":
             if _has(options, "-i", "-x", "--interactive", "--edit-todo", "--update-refs") or \
                     _long_hit(rest, ("interactive", "edit-todo", "update-refs")):
@@ -757,6 +844,8 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
                                           "resolvemsg", "quoted-cr", "empty"})
         if _has(options, "-i", "--interactive") or _long_hit(rest, ("interactive", "directory")):
             return _refuse("interactive am needs a terminal, and --directory moves where the patch is applied")
+        if _has(options, "-S"):
+            return _refuse("-S signs with the owner's key")
         return Ruling(OWN, check="commits")
 
     if sub == "apply":
@@ -871,9 +960,13 @@ def _judge_checkout(rest: list[str], paths: list[str], ctx: RepoContext) -> Ruli
 
 
 def _judge_fetch(rest: list[str], ctx: RepoContext, *, pull: bool) -> Ruling:
-    options, positionals = _parse(rest, "ojsXm", {
-        "depth", "deepen", "shallow-since", "shallow-exclude", "refmap", "server-option",
-        "jobs", "negotiation-tip", "filter", "strategy", "strategy-option", "upload-pack"})
+    # From each command's `-h` table (git 2.53): fetch's -j/--jobs take the next
+    # word and its -m is --multiple (a flag, which used to hide the word after
+    # it: `fetch -m -P` pruned tags); pull's -j/--jobs take a value only glued.
+    longs = {"depth", "deepen", "shallow-since", "shallow-exclude", "refmap", "server-option",
+             "negotiation-tip", "filter", "strategy", "strategy-option", "upload-pack"}
+    options, positionals = _parse(rest, "osXm" if pull else "ojsX",
+                                  longs if pull else longs | {"jobs"})
     if _long_hit(rest, ("prune-tags", "update-head-ok", "refmap"), exact_ok={"prune"}) or \
             _has(options, "-P", "-u"):
         return _refuse("--prune-tags deletes local tags, and --update-head-ok/--refmap "
@@ -884,7 +977,7 @@ def _judge_fetch(rest: list[str], ctx: RepoContext, *, pull: bool) -> Ruling:
         rebase = _values(options, "--rebase")
         if any(v.startswith("i") for v in rebase if v):
             return _refuse("interactive rebase needs a terminal")
-    if not pull and _has(options, "--multiple", "--all"):
+    if not pull and _has(options, "-m", "--multiple", "--all"):
         for name in positionals:
             problem = _remote_problem(name, ctx)
             if problem:
@@ -970,13 +1063,9 @@ def _place(ruling: Ruling, sub: str, ctx: RepoContext) -> Ruling:
     return ruling
 
 
-def judge(args: list[str], ctx: RepoContext) -> Ruling:
-    """The verdict for one git invocation. Pure: no git runs."""
-    problem = _shape(args)
-    if problem:
-        return _refuse(problem)
-    sub, rest = args[0], list(args[1:])
-    options, paths = _split(rest)
+def _judge_reading(sub: str, rest: list[str], options: list[str], paths: list[str],
+                   ctx: RepoContext) -> Ruling:
+    """The verdict for one reading of where the options end (`_readings`)."""
     hit = _long_hit(options, _PROGRAM_LONG, _PROGRAM_EXACT_OK)
     if hit:
         name = _long_name(hit)
@@ -986,12 +1075,34 @@ def judge(args: list[str], ctx: RepoContext) -> Ruling:
     if hit:
         return _refuse(f"'{hit}' would take git into a submodule, another repository whose own "
                        "configuration decides what runs there; this tool never goes into one")
-    named ="" if _only_unstages(sub, options) else _protected_named(sub, rest)
+    named = "" if _only_unstages(sub, options) else _protected_named(sub, rest)
     if named:
         from .tools.secrets import refusal
 
         return _refuse(refusal(named).removeprefix("Error: "))
-    ruling = _place(_judge_sub(sub, options, paths, ctx), sub, ctx)
+    return _place(_judge_sub(sub, options, paths, ctx), sub, ctx)
+
+
+def judge(args: list[str], ctx: RepoContext) -> Ruling:
+    """The verdict for one git invocation. Pure: no git runs."""
+    problem = _shape(args)
+    if problem:
+        return _refuse(problem)
+    sub, rest = args[0], list(args[1:])
+    readings = _readings(rest)
+    if readings is None:
+        return _refuse(f"more than {MAX_VALUE_SEPARATORS} '--' words that may each be an option's "
+                       "value or the end of the options")
+    rulings = [_judge_reading(sub, rest, options, paths, ctx) for options, paths in readings]
+    refused = next((r for r in rulings if r.kind == REFUSE), None)
+    if refused:
+        return refused
+    ruling = rulings[0]
+    shape = (ruling.kind, ruling.argv, ruling.network, ruling.check, ruling.remote)
+    if any((r.kind, r.argv, r.network, r.check, r.remote) != shape for r in rulings[1:]):
+        return _refuse("a '--' here may be the value of the option before it or the end of the "
+                       "options, and the two readings are judged differently; leave the '--' out "
+                       "or put the option's value right after it with '='")
     if ruling.kind == READ and not ruling.argv:
         # A diff driver or textconv program is configuration, and the
         # repository's own is refused up front; the owner's global one is

@@ -78,7 +78,9 @@ READS = [
     ["ls-remote", "origin"], ["format-patch", "--stdout", "HEAD~1"],
     ["diff", "--no-ext-diff"], ["diff", "--text"], ["symbolic-ref", "HEAD"],
     ["clean", "-n"], ["clean", "--dry-run", "-d"], ["version"], ["count-objects", "-v"],
-    ["log", "--oneline", "--", "--output"],    # after `--` it is a pathspec, not an option
+    ["log", "--", "--output"],                 # after a `--` nothing could take, it is a pathspec
+    ["log", "-p", "--", "f.txt"], ["stash", "show", "-p"], ["stash", "list", "-p"],
+    ["ls-remote", "--", "origin"],
 ]
 
 # Routine writes. Each is {where it may run: kind}. In the owner's checkout (or
@@ -93,6 +95,7 @@ ROUTINE = {
         ["branch", "jarvis/other"], ["apply", "x.patch"], ["stash", "apply"],
         ["bisect", "start"], ["fetch"], ["fetch", "origin"], ["fetch", "--all"],
         ["fetch", "-p", "origin"], ["fetch", "origin", "main"], ["fetch", "--no-recurse-submodules"],
+        ["fetch", "-m", "origin"], ["fetch", "-j", "4", "origin"], ["fetch", "--", "origin"],
     ],
     # these move the current branch: only while it is under jarvis/
     "own": [
@@ -111,6 +114,12 @@ ROUTINE = {
         ["commit", "-m", "--submodule docs"], ["commit", "-am", "--submodule docs"],
         ["commit", "--message", "--submodule=diff is now refused"],
         ["merge", "-m", "--ignore-submodules=none", "x"],
+        # a `--` that is a message and the end of options alike, judged the same either way
+        ["commit", "-m", "--", "f.txt"], ["commit", "-m", "msg", "--", "f.txt"],
+        # signing switched off, and the flags git reads as flags (delta review of PR #65)
+        ["merge", "--no-gpg-sign", "x"], ["cherry-pick", "--no-gpg-sign", "abc123"],
+        ["revert", "--no-gpg-sign", "HEAD"], ["rebase", "--no-gpg-sign", "main"],
+        ["rebase", "-m", "origin/main"], ["cherry-pick", "-x", "abc123"],
     ],
 }
 
@@ -230,6 +239,49 @@ REFUSED = {
         # an option word next to a message is still an option, and `-m` is a flag to diff
         ["commit", "-m", "x", "--submodule=diff"], ["diff", "-m", "--submodule=diff"],
         ["log", "-m", "--ignore-submodules=none"],
+        # ...and to `stash list` (git log) and `stash show` (diff): delta review of PR #65
+        ["stash", "show", "-p", "-m", "--submodule=diff"], ["stash", "list", "-p", "-m", "--submodule=diff"],
+        ["stash", "show", "-pm", "--submodule=diff"], ["stash", "list", "-pm", "--submodule=diff"],
+        ["stash", "list", "-p", "-m", "--ignore-submodules=none"],
+        ["notes", "show", "-m", "--submodule=diff"],   # notes show takes no -m: no value to skip
+    ],
+    # A `--` right after an option that takes a value is that value, and options go
+    # on after it (git 2.53: `commit -m -- --gpg-sign` signed). Which options take a
+    # value is not modelled, so both readings are judged and must agree; delta review.
+    "a '--' that may be an option's value": [
+        ["commit", "-m", "--", "--gpg-sign"], ["commit", "-m", "--", "-S"],
+        ["merge", "-m", "--", "-s", "evil", "x"], ["commit", "-F", "--", "--gpg-sign"],
+        ["commit", "--message", "--", "--gpg-sign"], ["commit", "-am", "--", "--gpg-sign"],
+        ["commit", "-m", "--end-of-options", "--gpg-sign"],
+        ["commit", "-m", "--", "-m", "--", "--gpg-sign"], ["tag", "-a", "v1", "-m", "--", "-s"],
+        ["diff", "--stat", "--", "--output=x"], ["log", "--grep", "--", "--output=x"],
+        ["log", "--oneline", "--", "--output"],     # --oneline takes nothing, but that is not modelled
+        ["push", "-u", "--", "origin", "main"],
+        ["commit", *["-m", "--"] * 9, "-S"],         # past the bound
+    ],
+    # -S[<keyid>] and --gpg-sign sign with the owner's key wherever git takes them;
+    # --no-gpg-sign stays (delta review of PR #65).
+    "signs with the owner's key": [
+        ["merge", "-S", "x"], ["merge", "-Skeyid", "x"], ["merge", "--gpg-sign", "x"],
+        ["merge", "--gpg", "x"], ["merge", "-nS", "x"], ["cherry-pick", "-S", "abc123"],
+        ["cherry-pick", "-x", "-S", "abc123"], ["cherry-pick", "-xS", "abc123"],
+        ["revert", "-S", "HEAD"], ["revert", "-sS", "HEAD"], ["rebase", "-S", "main"],
+        ["rebase", "-m", "-S", "main"], ["rebase", "--gpg-sign=key", "main"], ["am", "-S", "m.mbox"],
+        ["pull", "-S"], ["pull", "-j", "-S"], ["pull", "--gpg-sign"], ["pull", "--gpg-s"],
+    ],
+    # A flag read as taking a value hid the word after it (from each command's -h).
+    "a flag read as taking a value": [
+        ["rebase", "-m", "-x", "touch x"],          # rebase's -m is --merge
+        ["fetch", "-m", "-P", "origin"],            # fetch's -m is --multiple
+        ["fetch", "-m", "origin", "evil"],          # ...so every word is a remote
+    ],
+    # After `--` fetch, pull and ls-remote still read the repository (measured: each
+    # reached a repository no remote names); only configured remotes are contacted.
+    "a repository named after '--'": [
+        ["fetch", "--", "https://example.invalid/r"], ["fetch", "--", "evil", "main"],
+        ["pull", "--", "https://example.invalid/r"], ["pull", "--ff-only", "--", "evil"],
+        ["ls-remote", "--", "https://example.invalid/r"], ["remote", "show", "--", "evil"],
+        ["fetch", "origin", "--", "x:y"],
     ],
     "the shape of the request": [
         [], [""], ["-C", "/tmp", "status"], ["-c", "core.pager=x", "status"],
@@ -998,6 +1050,32 @@ def submodule_config_checks() -> None:
           "refuses every subcommand before git runs; unreadable, misplaced or too many fail closed")
 
 
+def signing_checks() -> None:
+    """A signature runs the owner's signing program (here a trap as the global
+    config's gpg.program). Plain git takes a `--` after `-m` as the message and
+    signs on the option after it; the tool never runs it (delta review of PR #65)."""
+    with world() as w:
+        wt = made(gitops.create_worktree(str(w.owner), "feat"))
+        mark = w.markers / "gpg-ran"
+        prog = w.markers / "gpg.sh"
+        prog.write_text(f"#!/bin/sh\ntouch '{mark}'\nexit 1\n", encoding="utf-8")
+        prog.chmod(0o755)
+        add_global(w, f"[gpg]\n\tprogram = {prog}\n")
+        w.sh("commit", "--allow-empty", "-m", "--", "--gpg-sign", cwd=wt, check=False)
+        assert fired(mark), "sanity: plain git did not take the '--' as the message and sign"
+        w.sh("branch", "jarvis/side", cwd=wt)
+        for args in (["commit", "--allow-empty", "-m", "--", "--gpg-sign"],
+                     ["commit", "--allow-empty", "-am", "--", "-S"],
+                     ["commit", "--allow-empty", "-m", "--end-of-options", "-S"],
+                     ["merge", "-S", "jarvis/side"], ["merge", "-m", "--", "-S", "jarvis/side"],
+                     ["cherry-pick", "-x", "-S", "HEAD"], ["revert", "-S", "HEAD"],
+                     ["rebase", "-m", "-S", "jarvis/side"]):
+            out = gitops.run(str(wt), args)
+            assert out.startswith("Refused") and not fired(mark), (args, out)
+    print("ok  signing: -S and --gpg-sign refused in commit, merge, cherry-pick, revert and rebase, "
+          "a '--' taken as a message included — against plain git, which signs")
+
+
 def credential_checks() -> None:
     with world() as w:
         wt = made(gitops.create_worktree(str(w.owner), "feat"))
@@ -1330,6 +1408,7 @@ def main() -> int:
     submodule_flag_checks()
     submodule_pin_checks()
     submodule_config_checks()
+    signing_checks()
     credential_checks()
     push_and_pr_checks()
     gh_git_checks()
