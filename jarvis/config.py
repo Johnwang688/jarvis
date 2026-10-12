@@ -566,6 +566,18 @@ DISCORD_GUILD_PATH = Path(
     )
 )
 
+# The HUD Browser's switches (Browser plan §4, amendment 1 §D.2/§F;
+# `jarvis/v2/browser/settings.py`): `auto_open` — "Open dev servers
+# automatically", BR-8a — and, later, the LAN and sound switches. Changed only
+# by the owner's `PATCH /browser/settings`; gate state, in
+# `tools/files._protected_state`, so no agent may flip one. Read by daemon2's
+# `main()`, never by a test or embedded daemon (which keep theirs in memory).
+BROWSER_SETTINGS_PATH = Path(
+    os.environ.get(
+        "JARVIS_BROWSER_SETTINGS", Path.home() / ".config" / "jarvis" / "browser.json"
+    )
+)
+
 # Where `/project new` may make or adopt a project folder (v2 B2,
 # `jarvis/v2/folders.py`; decisions O3, O4). A folder must sit strictly *below*
 # one of these, never be one, and pass every refusal in folders.py. Written as

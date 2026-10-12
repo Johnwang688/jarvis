@@ -167,7 +167,7 @@ from urllib.parse import unquote_to_bytes
 
 from jarvis import config, untrusted
 from .model import utcnow
-from . import terminal_guard, terminal_text, ws
+from . import devurl, terminal_guard, terminal_text, ws
 
 LOG = logging.getLogger(__name__)
 
@@ -588,8 +588,14 @@ class Marks:
         # profile that `exec`s another shell configures "bash" and marks
         # nothing, so no `sudo -k` either.
         self.marked = False
+        # The signed marks the last `feed` finished, in order, as (the stream
+        # offset just past the mark, its letter): what the dev-server sniffer
+        # (BR-8a, devurl.py) needs to tell a command's output from the prompt
+        # and the typed line. Rebuilt every feed.
+        self.events: list[tuple[int, bytes]] = []
 
     def feed(self, data: bytes) -> None:
+        self.events = []
         buf = self._carry + data
         base = self._offset - len(self._carry)
         self._offset += len(data)
@@ -645,6 +651,8 @@ class Marks:
         nonce = values.get(b"jarvis")
         if nonce is None or not hmac.compare_digest(nonce, self._nonce):
             return
+        if kind in (b"A", b"B", b"C", b"D"):
+            self.events.append((end, kind))
         open_span = self._open()
         if kind == b"A":
             if open_span is not None:           # a prompt with no D: it ended there
@@ -739,6 +747,11 @@ class Terminal:
         self._alt = terminal_text.AltTracker()  # the alternate screen, at the ring's start
         self._ring = Ring(on_drop=self._alt.feed)
         self._marks = Marks(nonce)
+        # Dev servers announced here (BR-8a, devurl.py): set by
+        # `Terminals.create` for a shell, with the owner's "open dev servers
+        # automatically" switch (`browser.json` → `auto_open`). Memory only.
+        self._sniffer: devurl.DevUrlSniffer | None = None
+        self._dev_on = None
         self._lock = threading.Lock()           # ring, marks, attachment, state
         self._io_lock = threading.RLock()       # the master fd's life
         self._attachment: ws.WebSocket | None = None
@@ -835,6 +848,7 @@ class Terminal:
 
     def _output(self, data: bytes) -> None:
         with self._lock:
+            start = self._ring.end
             self._ring.append(data)
             was_marked = self._marks.marked
             self._marks.feed(data)
@@ -848,6 +862,34 @@ class Terminal:
                 # The startup file is running: the window drops its "no
                 # integration" note. Sent once, after the bytes that carried it.
                 attached.send_text(json.dumps({"type": "marked"}))
+            if self._sniffer is not None:
+                self._sniff(data, start, attached)
+
+    def _sniff(self, data: bytes, start: int, attached) -> None:
+        """Dev servers this live output announces (BR-8a, devurl.py), told
+        to the attached window as `{"type": "dev_url", "url"}` after the bytes
+        that carried them — to that socket and nowhere else: no bus record, no
+        log line, nothing on disk. Off (`auto_open` false), the sniffer is
+        told the marks' letters and never fed a byte. No window attached: the
+        URL is dropped, and not remembered. The caller holds `_lock`."""
+        sniffer, events = self._sniffer, self._marks.events
+        if not self._dev_on():
+            for _, kind in events:
+                sniffer.mark(kind)
+            sniffer.pause()
+            return
+        found, pos = [], 0
+        for end, kind in events:
+            cut = max(pos, min(len(data), end - start))
+            found += sniffer.feed(data[pos:cut])
+            found += sniffer.mark(kind)
+            pos = cut
+        found += sniffer.feed(data[pos:])
+        if attached is None:
+            return
+        for url in dict.fromkeys(found):
+            if sniffer.admit(url):
+                attached.send_text(json.dumps({"type": "dev_url", "url": url}))
 
     def _check_exit(self, wait: bool = False) -> None:
         proc = self._proc
@@ -1207,17 +1249,33 @@ def _control_type(raw: bytes):
 class Terminals:
     """The daemon's terminals, their tickets, and the attach sessions.
 
-    `publish` is the daemon bus's: the only record it is ever handed is
-    `terminal_attached` with the terminal's id and the time."""
+    `publish` is the daemon bus's: the records it is ever handed are
+    `terminal_attached` (the terminal's id and the time) and `terminal_read`
+    (ids, a count, a time, whether it was refused).
 
-    def __init__(self, *, clock=time.monotonic, publish=None):
+    `auto_open` (BR-8a) is the owner's "open dev servers automatically"
+    switch, read per chunk of output (`BrowserSettings.auto_open`); None
+    sniffs nothing. `own_ports` gives the daemon's bound listeners, which a
+    dev-server URL may never name (beside `devurl.jarvis_ports()`)."""
+
+    def __init__(self, *, clock=time.monotonic, publish=None, auto_open=None, own_ports=None):
         self._lock = threading.Lock()
         self._terminals: dict[str, Terminal] = {}
         self._tickets: dict[str, tuple[str, float]] = {}
         self._clock = clock
         self._publish = publish
+        self._auto_open = auto_open
+        self._own_ports = own_ports
         self._rc_text: dict[str, bytes] = {}
         self._stopped = False
+
+    def _refused_ports(self) -> set[int]:
+        """Ports a dev-server URL may never name: Jarvis's, default and
+        configured, and this daemon's listeners as bound."""
+        ports = set(devurl.jarvis_ports())
+        if self._own_ports is not None:
+            ports |= {p for p in self._own_ports() if isinstance(p, int) and p > 0}
+        return ports
 
     def _rc_pipe(self, nonce: str, kind: str) -> int:
         """The read end of a pipe holding this terminal's startup file, with
@@ -1276,6 +1334,9 @@ class Terminals:
                 terminal = Terminal(tid, shell=shell.name, folder=folder, project_id=project_id,
                                     label=label, cols=cols, rows=rows, nonce=nonce, integration=kind)
                 terminal.readable = readable        # before the shell runs, or any reader sees it
+                if self._auto_open is not None:     # before the shell runs: its first bytes count
+                    terminal._sniffer = devurl.DevUrlSniffer(self._refused_ports)
+                    terminal._dev_on = self._auto_open
             except BaseException:
                 if rc_fd is not None:
                     os.close(rc_fd)

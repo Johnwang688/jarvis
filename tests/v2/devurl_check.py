@@ -1,0 +1,489 @@
+"""Dev servers announced in HUD terminals, the pure half (BR-8a; Browser plan
+amendment 1 §D.1, §H): `jarvis/v2/devurl.py`, and the owner's switch that
+gates it, `jarvis/v2/browser/settings.py` (`browser.json`).
+
+Free and hermetic: no terminal, no daemon, no network. Every path is a temp
+one; HOME is a temp folder for the whole run, so nothing here can read or
+write the owner's `~/.config/jarvis`. The wiring (the frame on the attached
+socket, nothing on the bus or in a log) is `terminal_check.py`'s `DevUrls`.
+
+Written to fail against `main` before BR-8a: neither module existed.
+"""
+from __future__ import annotations
+
+import collections
+import json
+import os
+from pathlib import Path
+import random
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+# A temp HOME before `jarvis.config` is imported, so every path it derives
+# (the allowlist, models.json, browser.json …) is a temp one.
+_HOME = tempfile.mkdtemp(prefix="devurl-home-")
+os.environ["HOME"] = _HOME
+for _name in [n for n in os.environ if n.startswith("JARVIS_")]:
+    del os.environ[_name]
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from jarvis import config  # noqa: E402
+from jarvis.v2 import devurl as D  # noqa: E402
+from jarvis.v2.browser import settings as S  # noqa: E402
+
+NONE: frozenset[int] = frozenset()
+
+
+def sgr(*codes: int) -> bytes:
+    return b"\x1b[" + b";".join(str(c).encode() for c in codes) + b"m"
+
+
+# What each tool prints (from their own source and output), one per `SHAPES`
+# row, and the URL the window should get. Escape codes where the tool uses
+# them: Vite colours the port apart from the host.
+VITE = (b"\x1b[2J\x1b[3J\x1b[H\r\n  " + sgr(32) + sgr(1) + b"VITE" + sgr(22) + b" v5.4.0" + sgr(39)
+        + b"  " + sgr(2) + b"ready in " + sgr(0) + sgr(1) + b"312" + sgr(22) + sgr(2) + sgr(0)
+        + b" ms" + sgr(22) + b"\r\n\r\n  " + sgr(32) + "➜".encode() + sgr(39) + b"  "
+        + sgr(1) + b"Local" + sgr(22) + b":   " + sgr(36) + b"http://localhost:" + sgr(1) + b"5173"
+        + sgr(22) + b"/" + sgr(39) + b"\r\n  " + sgr(32) + "➜".encode() + sgr(39) + b"  "
+        + sgr(1) + b"Network" + sgr(22) + b": " + sgr(2) + b"use " + sgr(22) + sgr(1) + b"--host"
+        + sgr(22) + sgr(2) + b" to expose" + sgr(22) + b"\r\n")
+BANNERS: list[tuple[str, bytes, str]] = [
+    ("local", VITE, "http://localhost:5173/"),
+    ("local", b"   \xe2\x96\xb2 Next.js 15.0.3\r\n   - Local:        http://localhost:3000\r\n"
+              b"   - Network:      http://192.168.1.20:3000\r\n", "http://localhost:3000/"),
+    ("local", b"Compiled successfully!\r\n\r\nYou can now view app in the browser.\r\n\r\n"
+              b"  Local:            http://localhost:3000\r\n  On Your Network:  http://10.0.0.4:3000\r\n",
+     "http://localhost:3000/"),
+    ("local", " astro  v4.16.0 ready in 210 ms\r\n\r\n┃ Local    http://localhost:4321/\r\n"
+              "┃ Network  use --host to expose\r\n".encode(), "http://localhost:4321/"),
+    ("local", "│   Storybook 8.3 for react-vite started   │\r\n│   Local:            "
+              "http://localhost:6006/   │\r\n".encode(), "http://localhost:6006/"),
+    ("local", b"\r\n  You can now view your Streamlit app in your browser.\r\n\r\n"
+              b"  Local URL: http://localhost:8501\r\n  Network URL: http://10.0.0.4:8501\r\n",
+     "http://localhost:8501/"),
+    ("local", "   ┌──┐\r\n   │   Serving!   │\r\n"
+              "   │   - Local:    http://localhost:3000       │\r\n".encode(),
+     "http://localhost:3000/"),
+    ("next (older)", b"ready - started server on 0.0.0.0:3000, url: http://localhost:3000\r\n",
+     "http://localhost:3000/"),
+    ("angular", b"** Angular Live Development Server is listening on localhost:4200, open your "
+                b"browser on http://localhost:4200/ **\r\n", "http://localhost:4200/"),
+    ("webpack-dev-server", b"<i> [webpack-dev-server] Project is running at:\r\n"
+                           b"<i> [webpack-dev-server] Loopback: http://localhost:8080/\r\n",
+     "http://localhost:8080/"),
+    ("running at", b"Server running at http://localhost:1234\r\n", "http://localhost:1234/"),
+    ("python -m http.server", b"Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...\r\n",
+     "http://localhost:8000/"),
+    ("python -m http.server", b"Serving HTTP on :: port 8001 (http://[::]:8001/) ...\r\n",
+     "http://localhost:8001/"),
+    ("running on", b" * Serving Flask app 'app'\r\n * Debug mode: on\r\n"
+                   b" * Running on http://127.0.0.1:5000\r\nPress CTRL+C to quit\r\n",
+     "http://127.0.0.1:5000/"),
+    ("running on", b"INFO:     Uvicorn running on " + sgr(1) + b"http://127.0.0.1:8000" + sgr(0)
+                   + b" (Press CTRL+C to quit)\r\n", "http://127.0.0.1:8000/"),
+    ("running on", b"* Running on local URL:  http://127.0.0.1:7860\r\n", "http://127.0.0.1:7860/"),
+    ("django", b"Django version 5.1, using settings 'site.settings'\r\n"
+               b"Starting development server at http://127.0.0.1:8000/\r\nQuit the server with CONTROL-C.\r\n",
+     "http://127.0.0.1:8000/"),
+    ("listening on", b"* Listening on http://127.0.0.1:3000\r\n* Listening on http://[::1]:3000\r\n",
+     "http://127.0.0.1:3000/"),
+    ("hugo", b"Web Server is available at http://localhost:1313/ (bind address 127.0.0.1)\r\n",
+     "http://localhost:1313/"),
+    ("jekyll", b"    Server address: http://127.0.0.1:4000/\r\n  Server running... press ctrl-c to stop.\r\n",
+     "http://127.0.0.1:4000/"),
+    ("php -S", b"[Mon Oct 12 10:00:00 2026] PHP 8.3.6 Development Server (http://localhost:8080) started\r\n",
+     "http://localhost:8080/"),
+    ("expo", "› Metro waiting on exp://10.0.0.4:8081\r\n› Web is waiting on "
+             "http://localhost:8081\r\n".encode(), "http://localhost:8081/"),
+    ("serving on", b"INFO    -  [10:00:00] Serving on http://127.0.0.1:8000/\r\n", "http://127.0.0.1:8000/"),
+    ("eleventy", b"[11ty] Server at http://localhost:8080/\r\n", "http://localhost:8080/"),
+    ("jupyter", b"[I 2026-10-12 10:00:00.000 ServerApp] Jupyter Server 2.14.2 is running at:\r\n"
+                b"[I 2026-10-12 10:00:00.000 ServerApp] http://localhost:8888/tree?token=abc0123456789def\r\n"
+                b"[I 2026-10-12 10:00:00.000 ServerApp]     http://127.0.0.1:8888/tree?token=abc0123456789def\r\n",
+     "http://localhost:8888/tree"),
+]
+
+
+def run(sniffer: D.DevUrlSniffer, chunks) -> list[str]:
+    found: list[str] = []
+    for chunk in chunks:
+        if isinstance(chunk, tuple):            # a mark, between chunks
+            found += sniffer.mark(chunk[0])
+        else:
+            found += sniffer.feed(chunk)
+    return found
+
+
+def sent(chunks) -> list[str]:
+    """What a terminal would send: found, then admitted (a second apart, so
+    only de-duplication decides). Puma's two lines are one server."""
+    now = [0.0]
+
+    def clock():
+        now[0] += D.RATE_GAP_S
+        return now[0]
+    sniffer = D.DevUrlSniffer(lambda: NONE, clock=clock)
+    return [url for url in run(sniffer, chunks) if sniffer.admit(url)]
+
+
+def split_every_byte(data: bytes) -> list[bytes]:
+    return [data[i:i + 1] for i in range(len(data))]
+
+
+class Shapes(unittest.TestCase):
+    def test_every_row_of_the_table_gives_one_cleaned_url(self):
+        names = {name for name, _ in D.SHAPES}
+        covered = set()
+        for name, banner, url in BANNERS:
+            with self.subTest(banner=banner[:50]):
+                self.assertEqual(sent([banner]), [url])
+                # And the row that found it is the one the table says.
+                lines = [line for line in banner.replace(b"\r", b"").split(b"\n") if b"://" in line]
+                plain = [D._SGR.sub(b"", line).decode() for line in lines]
+                hit = next(n for line in plain for n, shape in D.SHAPES
+                           if (m := shape.search(line)) and D.clean(m.group("url")))
+                self.assertEqual(hit, name)
+                covered.add(name)
+        self.assertEqual(covered, names, "every row of SHAPES has a banner here")
+
+    def test_split_anywhere_with_escapes_found_once(self):
+        rng = random.Random(7)
+        for name, banner, url in BANNERS:
+            with self.subTest(banner=banner[:40]):
+                self.assertEqual(sent(split_every_byte(banner)), [url])
+                for _ in range(20):
+                    cuts = sorted(rng.sample(range(1, len(banner)), min(4, len(banner) - 1)))
+                    chunks = [banner[a:b] for a, b in zip([0, *cuts], [*cuts, len(banner)])]
+                    self.assertEqual(sent(chunks), [url])
+
+    def test_escapes_in_every_form(self):
+        cases = [
+            # Colour around the port, in the 8-bit C1 form.
+            (b"  Local:   http://localhost:\xc2\x9b1m5174\xc2\x9b22m/\r\n", "http://localhost:5174/"),
+            # A C0 control inside a CSI is executed and the CSI goes on.
+            (b"  Local:   http://localhost:\x1b[1\x07m5175/\r\n", "http://localhost:5175/"),
+            # Cursor forward is a gap; a title (OSC) and a hyperlink's target draw nothing.
+            (b"Local:\x1b[3Chttp://localhost:5176/\r\n", "http://localhost:5176/"),
+            (b"\x1b]0;Local: http://localhost:9999/\x07  Local: http://localhost:5177/\r\n",
+             "http://localhost:5177/"),
+            (b"  Local: \x1b]8;;http://localhost:9998/\x1b\\http://localhost:5178/\x1b]8;;\x1b\\\r\n",
+             "http://localhost:5178/"),
+            # A progress line overwritten by CR, then the banner.
+            (b"building 40%\rbuilding 90%\r  Local: http://localhost:5179/\n", "http://localhost:5179/"),
+        ]
+        for data, url in cases:
+            with self.subTest(data=data):
+                self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), [data]), [url])
+                self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), split_every_byte(data)), [url])
+
+    def test_what_is_drawn_over_is_not_read(self):
+        for data in (
+            b"  Local: http://localhost:51\b\b73/\r\n",          # backspaced
+            b"  Local: http://localhost:5180/\x1b[4D9999\r\n",     # cursor back, overwritten
+            b"  Local: http://localhost:5181/\x1b[2P\r\n",         # characters deleted
+            b"\x1b]0;  Local: http://localhost:5182/\x07\r\n",     # a title only
+            b"\x1b[?1049h  Local: http://localhost:5183/\r\n\x1b[?1049l",   # the alternate screen
+        ):
+            with self.subTest(data=data):
+                self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), [data]), [])
+
+    def test_the_alternate_screen_ends_with_a_prompt_or_its_exit(self):
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        self.assertEqual(run(sniffer, [b"\x1b[?1049h", (b"A",), (b"C",),
+                                       b"  Local: http://localhost:5184/\r\n"]), ["http://localhost:5184/"])
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        self.assertEqual(run(sniffer, [b"\x1b[?1049hvim\x1b[?1049l\r\n  Local: http://localhost:5185/\n"]),
+                         ["http://localhost:5185/"])
+
+
+class Cleaning(unittest.TestCase):
+    def test_a_jupyter_token_and_any_fragment_never_travel(self):
+        self.assertEqual(D.clean("http://localhost:8888/tree?token=abc123#x"), "http://localhost:8888/tree")
+        self.assertEqual(D.clean("http://localhost:8888/lab/?token=abc"), "http://localhost:8888/lab/")
+        self.assertEqual(D.clean("http://localhost:3000/#/route"), "http://localhost:3000/")
+        found = run(D.DevUrlSniffer(lambda: NONE), [b"     or http://127.0.0.1:8888/?token=abc0123456789\r\n"])
+        self.assertEqual(found, ["http://127.0.0.1:8888/"])
+        self.assertNotIn("token", json.dumps(found))
+
+    def test_only_loopback_with_an_explicit_port(self):
+        good = {
+            "http://localhost:3000": "http://localhost:3000/",
+            "https://LOCALHOST:3443/app": "https://localhost:3443/app",
+            "http://127.0.0.1:5000/": "http://127.0.0.1:5000/",
+            "http://127.4.5.6:5001/": "http://127.4.5.6:5001/",
+            "http://[::1]:3000/": "http://[::1]:3000/",
+            "http://0.0.0.0:8000/": "http://localhost:8000/",
+            "http://[::]:8000/": "http://localhost:8000/",
+            "http://localhost:3000/café": "http://localhost:3000/caf%C3%A9",
+            "http://localhost:3000/).": "http://localhost:3000/",
+        }
+        for raw, want in good.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(D.clean(raw), want)
+        for raw in ("http://192.168.1.5:5173/", "http://10.0.0.4:3000", "http://example.com:3000/",
+                    "http://foo.localhost:3000/", "http://127.1:3000/", "http://2130706433:3000/",
+                    "http://[::ffff:127.0.0.1]:3000/", "http://localhost/", "http://localhost:/",
+                    "http://localhost:0/", "http://localhost:70000/", "http://user:pw@localhost:3000/",
+                    "http://user@localhost:3000/", "ftp://localhost:21/", "file:///etc/passwd",
+                    "exp://localhost:8081", "javascript://localhost:3000/"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(D.clean(raw))
+
+    def test_jarvis_ports_are_never_announced(self):
+        refused = set(D.jarvis_ports())
+        self.assertTrue({8402, 8403, 8404, 8405, 8406} <= refused)
+        with patch.object(config, "FACE_PORT", 18402), patch.object(config, "WORKSHOP_PORT", 18403):
+            moved = D.jarvis_ports()
+        self.assertTrue({18402, 18403, 8402, 8403} <= moved, "configured and default")
+        for port in sorted(refused):
+            for host in ("localhost", "127.0.0.1", "[::1]", "0.0.0.0"):
+                line = f"  Local: http://{host}:{port}/".encode() + b"\r\n"
+                with self.subTest(port=port, host=host):
+                    self.assertEqual(run(D.DevUrlSniffer(), [line]), [])
+        # And whatever the caller adds (the daemon's listeners as bound).
+        sniffer = D.DevUrlSniffer(lambda: {31337})
+        self.assertEqual(run(sniffer, [b"  Local: http://localhost:31337/\r\n"]), [])
+        self.assertEqual(run(sniffer, [b"  Local: http://localhost:31338/\r\n"]), ["http://localhost:31338/"])
+
+    def test_what_is_not_an_announcement_is_not_read(self):
+        for line in (b"  Network: http://192.168.1.5:5173/", b"curl http://localhost:3000",
+                     b"see http://localhost:3000 for details", b"  Local: http://example.com:3000/",
+                     b"GET http://localhost:3000/api 200", b"localhost:3000 is up"):
+            with self.subTest(line=line):
+                self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), [line + b"\r\n"]), [])
+
+
+class Marks(unittest.TestCase):
+    """Only a command's output: the prompt and the typed line are skipped."""
+
+    def test_the_typed_line_between_b_and_c_is_never_read(self):
+        typed = b"curl http://localhost:3000 # Local: http://localhost:3001/\r\n"
+        output = b"  Local: http://localhost:5190/\r\n"
+        session = [(b"A",), b"fake$ ", (b"B",), typed, (b"C",), output, (b"D",),
+                   (b"A",), b"fake$ ", (b"B",), b"echo  Local: http://localhost:3002/\r\n", (b"C",),
+                   b"Local: http://localhost:5191/\r\n", (b"D",), (b"A",), b"fake$ "]
+        self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), session),
+                         ["http://localhost:5190/", "http://localhost:5191/"])
+
+    def test_a_line_split_across_chunks_is_found_once(self):
+        data = b"  Local: http://localhost:5192/\r\n"
+        for cut in range(1, len(data)):
+            with self.subTest(cut=cut):
+                chunks = [(b"A",), b"$ ", (b"B",), b"npm run dev\r\n", (b"C",), data[:cut], data[cut:]]
+                self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), chunks), ["http://localhost:5192/"])
+
+    def test_bash_skips_from_b_to_c_even_across_lines(self):
+        # Once a C mark has come, B..C is the typed line whatever it holds (a
+        # continuation line, readline moving down a wrapped line).
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        run(sniffer, [(b"A",), (b"B",), b"true\r\n", (b"C",), (b"D",)])
+        self.assertEqual(sniffer.mode, D.READ)
+        self.assertEqual(run(sniffer, [(b"A",), b"$ ", (b"B",)]), [])
+        self.assertEqual(sniffer.mode, D.SKIP)
+        self.assertEqual(run(sniffer, [b"echo x \\\r\n> Local: http://localhost:3003/\r\n"]), [])
+
+    def test_a_shell_that_marks_no_command_skips_only_the_typed_line(self):
+        # The POSIX startup file marks A and B, never C: after B the typed
+        # line runs to its line feed, and what follows is the command's.
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        found = run(sniffer, [(b"A",), b"$ ", (b"B",), b"echo Local: http://localhost:3004/\r\n",
+                              b"Local: http://localhost:5193/\r\n", (b"A",), b"$ ", (b"B",)])
+        self.assertEqual(found, ["http://localhost:5193/"])
+        self.assertEqual(sniffer.mode, D.SKIP_LINE)
+
+    def test_no_marks_at_all_reads_everything(self):
+        self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), [b"$ npm run dev\r\n  Local: http://localhost:5194/\r\n"]),
+                         ["http://localhost:5194/"])
+
+    def test_output_with_no_newline_before_the_prompt_still_counts(self):
+        self.assertEqual(run(D.DevUrlSniffer(lambda: NONE),
+                             [(b"C",), b"Local: http://localhost:5195/", (b"D",), (b"A",)]),
+                         ["http://localhost:5195/"])
+
+    def test_paused_output_is_not_read_and_the_line_it_resumes_in_is_dropped(self):
+        # The terminal feeds nothing while auto-open is off; it pauses the
+        # sniffer instead. Fed again mid-line, that line was not seen whole.
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        run(sniffer, [b"  Local: http://local"])
+        sniffer.pause()
+        self.assertEqual(run(sniffer, [b"ocal: http://localhost:5197/\r\n  Local: http://localhost:5198/\r\n"]),
+                         ["http://localhost:5198/"])
+        self.assertEqual(sniffer.held(), 0)
+
+
+class Bounds(unittest.TestCase):
+    def assert_small(self, sniffer: D.DevUrlSniffer):
+        self.assertLessEqual(len(sniffer._line), D.LINE_CAP)
+        self.assertLessEqual(len(sniffer._carry), D.CARRY_CAP)
+        self.assertLessEqual(sniffer.held(), D.LINE_CAP + D.CARRY_CAP)
+        self.assertLessEqual(len(sniffer._recent), D.RECENT)
+        self.assertLessEqual(len(sniffer._sent), D.RATE_MAX)
+        sizes = {k: len(v) for k, v in vars(sniffer).items()
+                 if isinstance(v, (bytes, bytearray, list, dict, set, frozenset, collections.deque))}
+        self.assertEqual(set(sizes), {"_line", "_carry", "_recent", "_sent"}, sizes)
+
+    def test_ten_megabytes_leave_at_most_a_line_and_four_urls(self):
+        rng = random.Random(3)
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        pieces = [b"x" * 3000, b"\x1b[" + b"1;" * 200, b"\x1b]0;" + b"t" * 5000, b"\r\n",
+                  b"\x1b[31merror\x1b[0m: something\r\n", os.urandom(512), b"Local: http://localhost:",
+                  b"\x1bP" + b"d" * 700 + b"\x1b\\", b"\xc2", b"\x9b?1049h", b"\x1b[?1049l"]
+        fed = 0
+        while fed < 10_000_000:
+            chunk = b"".join(rng.choice(pieces) for _ in range(40))
+            sniffer.feed(chunk)
+            fed += len(chunk)
+            self.assert_small(sniffer)
+        # One endless line: dropped whole, never kept.
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        for _ in range(160):
+            sniffer.feed(b"Local: http://localhost:5199/" + b"y" * 65_000)
+            self.assert_small(sniffer)
+        self.assertEqual(sniffer.feed(b"\r\n"), [])
+
+    def test_a_line_longer_than_the_cap_is_dropped_whole(self):
+        long_line = b"  Local: http://localhost:5200/" + b" " * D.LINE_CAP + b"\r\n"
+        self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), [long_line]), [])
+        self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), [b"a\r\n" + long_line + b"b\r\n"]), [])
+        self.assertEqual(run(D.DevUrlSniffer(lambda: NONE), split_every_byte(long_line)), [])
+
+    def test_a_flood_is_cheap(self):
+        colour = b"\x1b[32mok\x1b[0m test \x1b[1mname\x1b[22m passed in \x1b[33m3ms\x1b[0m\r\n" * 120_000
+        lines = b"line of output with no address in it at all\r\n" * 220_000
+        for data in (colour, lines, os.urandom(4_000_000)):
+            sniffer = D.DevUrlSniffer(lambda: NONE)
+            started = time.perf_counter()
+            for i in range(0, len(data), 65536):
+                sniffer.feed(data[i:i + 65536])
+            self.assertLess(time.perf_counter() - started, 2.0, len(data))
+
+
+class Admit(unittest.TestCase):
+    def setUp(self):
+        self.now = 1000.0
+        self.sniffer = D.DevUrlSniffer(lambda: NONE, clock=lambda: self.now)
+
+    def test_one_frame_per_origin_loopback_hosts_folded(self):
+        self.assertTrue(self.sniffer.admit("http://127.0.0.1:3000/"))
+        self.now += 10
+        for again in ("http://127.0.0.1:3000/", "http://[::1]:3000/", "http://localhost:3000/other"):
+            self.assertFalse(self.sniffer.admit(again), again)
+        self.assertTrue(self.sniffer.admit("https://localhost:3000/"), "another scheme is another origin")
+
+    def test_rate_limited_per_terminal(self):
+        self.assertTrue(self.sniffer.admit("http://localhost:4001/"))
+        self.assertFalse(self.sniffer.admit("http://localhost:4002/"), "within RATE_GAP_S")
+        self.now += D.RATE_GAP_S
+        self.assertTrue(self.sniffer.admit("http://localhost:4002/"))
+        for port in (4003, 4004):
+            self.now += D.RATE_GAP_S
+            self.assertTrue(self.sniffer.admit(f"http://localhost:{port}/"))
+        self.now += D.RATE_GAP_S
+        self.assertFalse(self.sniffer.admit("http://localhost:4005/"), f"{D.RATE_MAX} a window")
+        self.now = 1000.0 + D.RATE_WINDOW_S
+        self.assertTrue(self.sniffer.admit("http://localhost:4005/"))
+
+    def test_the_last_four_are_remembered(self):
+        for port in (4101, 4102, 4103, 4104, 4105):
+            self.now += D.RATE_WINDOW_S
+            self.assertTrue(self.sniffer.admit(f"http://localhost:{port}/"))
+        self.now += D.RATE_WINDOW_S
+        self.assertTrue(self.sniffer.admit("http://localhost:4101/"), "the oldest was let go")
+        self.assertFalse(self.sniffer.admit("http://localhost:4105/"))
+
+    def test_found_is_not_sent_until_admitted(self):
+        found = self.sniffer.feed(b"  Local: http://localhost:4201/\r\n")
+        self.assertEqual(found, ["http://localhost:4201/"])
+        self.assertEqual(len(self.sniffer._recent), 0, "finding remembers nothing")
+        self.assertEqual(self.sniffer.feed(b"  Local: http://localhost:4201/\r\n"), found)
+
+
+class Settings(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.now = 50.0
+        self.path = self.root / ".config" / "jarvis" / "browser.json"
+
+    def settings(self) -> S.BrowserSettings:
+        return S.BrowserSettings(self.path, clock=lambda: self.now)
+
+    def test_on_by_default_and_memory_only_without_a_file(self):
+        memory = S.BrowserSettings()
+        self.assertIs(memory.auto_open(), True)
+        self.assertEqual(memory.update(auto_open=False), {"auto_open": False})
+        self.assertIs(memory.auto_open(), False)
+        self.assertIsNone(memory.path)
+        self.assertIs(self.settings().auto_open(), True)              # no file yet
+        self.assertFalse(self.path.exists())
+
+    def test_saved_owner_only_keeping_what_it_does_not_know(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"auto_open": True, "lan": True, "sound": False}))
+        settings = self.settings()
+        self.assertEqual(settings.update(auto_open=False), {"auto_open": False})
+        self.assertEqual(json.loads(self.path.read_text()), {"auto_open": False, "lan": True, "sound": False})
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], ["browser.json"], "no temp left")
+        for bad in ({"auto_open": "no"}, {"auto_open": 1}, {"other": True}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                settings.update(**bad)
+
+    def test_a_hand_edit_lands_within_a_second(self):
+        settings = self.settings()
+        self.assertIs(settings.auto_open(), True)
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"auto_open": false}')
+        self.assertIs(settings.auto_open(), True, "not looked at again yet")
+        self.now += S.RECHECK_S
+        self.assertIs(settings.auto_open(), False)
+        self.path.unlink()
+        self.now += S.RECHECK_S
+        self.assertIs(settings.auto_open(), True, "gone: the default")
+
+    def test_what_cannot_be_read_is_the_default(self):
+        self.path.parent.mkdir(parents=True)
+        target = self.root / "elsewhere.json"
+        target.write_text('{"auto_open": false}')
+        for setup in (lambda: self.path.write_text("not json"),
+                      lambda: self.path.write_text('{"auto_open": "false"}'),
+                      lambda: self.path.write_text('[false]'),
+                      lambda: self.path.write_text('{"auto_open": false, "pad": "' + "x" * S.FILE_CAP + '"}'),
+                      lambda: self.path.symlink_to(target),
+                      lambda: os.mkfifo(self.path)):
+            with self.subTest(setup=setup):
+                if self.path.exists() or self.path.is_symlink():
+                    self.path.unlink()
+                setup()
+                started = time.monotonic()
+                self.assertIs(self.settings().auto_open(), True)
+                self.assertLess(time.monotonic() - started, 2.0, "a FIFO never hangs the read")
+                self.path.unlink()
+
+    def test_browser_json_is_gate_state(self):
+        from jarvis import permissions, rules
+        from jarvis.tools import files
+        home = self.root / "home"
+        allow = home / ".config" / "jarvis" / "allowlist.json"
+        allow.parent.mkdir(parents=True)
+        target = allow.parent / "browser.json"
+        with patch.dict(os.environ, {"HOME": str(home)}), \
+                patch.object(config, "ALLOWLIST_PATH", allow), \
+                patch.object(config, "BROWSER_SETTINGS_PATH", self.root / "moved" / "browser.json"):
+            protected = files._protected_state()
+            self.assertIn(target.resolve(), protected, "by name beside the allowlist")
+            self.assertIn((self.root / "moved" / "browser.json").resolve(), protected, "where config puts it")
+            refusal = files.write_file(str(target), '{"auto_open": false}')
+            self.assertFalse(target.exists(), refusal)
+            verdict = permissions.static_verdict(f"cp /tmp/x {target}")
+            self.assertNotEqual(verdict.decision, rules.ALLOW, verdict)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

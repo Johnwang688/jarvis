@@ -263,8 +263,17 @@ class Daemon:
         # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
         # the HUD listener; they end with the daemon. On the bus they are one
         # lifecycle record, `terminal_attached` (an id and a time), never output.
+        # The Browser's switches (`browser.json`, browser/settings.py): in
+        # memory here; daemon2's `main()` attaches the owner's file. While
+        # `auto_open` is on, a terminal's live output is read for a dev
+        # server's URL (BR-8a, devurl.py), told only to that terminal's own
+        # socket — never this bus, a log line or the disk.
+        from .browser.settings import BrowserSettings
+        self.browser_settings = BrowserSettings()
         from .terminals import Terminals
-        self.terminals = Terminals(publish=self.bus.publish)
+        self.terminals = Terminals(publish=self.bus.publish,
+                                   auto_open=self.browser_settings.auto_open,
+                                   own_ports=lambda: (self.port, self.face_port, self.workshop_port))
         # VEX V5 (VX-1, vex.py): its builds, downloads and brain terminal run
         # as program terminals above; owner-only routes; the bus carries only
         # an id-only `vex_device` record per device action.
@@ -2272,6 +2281,13 @@ def main() -> int:
     daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals)
     if approvals is not None:
         holder["daemon"] = daemon
+    # The owner's Browser switches (`browser.json`): here, not in the
+    # constructor or `start`, so no embedded or test daemon reads the owner's
+    # file. Nothing about it may stop the daemon: a failure keeps the defaults.
+    try:
+        daemon.browser_settings.attach(config.BROWSER_SETTINGS_PATH)
+    except Exception as exc:     # noqa: BLE001
+        LOG.warning("browser settings not attached (%s); using the defaults", type(exc).__name__)
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)

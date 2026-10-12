@@ -1601,6 +1601,11 @@ def route(handler, daemon, parts, query):
         # and the attach socket also needs a single-use ticket.
         from . import terminals as _terminals
         return _terminals.route(handler, daemon, parts, query)
+    if parts[0] == "browser":
+        # The Browser's switches (`browser.json`; BR-8a's `auto_open`):
+        # owner-only, the HUD listener only, a strict loopback Host.
+        from .browser import settings as _browser_settings
+        return _browser_settings.route(handler, daemon, parts, query)
     # The editor's git (ED-9): HEAD's text for the gutter and the explorer's
     # colours. The owner's, like every editor route (E-7), checked before
     # anything else — the project is not even looked up for anyone else.
