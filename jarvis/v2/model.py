@@ -124,6 +124,14 @@ class Thread:
     # Discord thread's own id. Changed only by `ThreadStore.set_surface`;
     # `ThreadStore.save` keeps whatever is stored.
     surface: str | None = None
+    # Claude (2026-10-12): the CLI's own running cost total for this thread's
+    # session, as its last result left it. A resumed CLI continues from the
+    # total its transcript saved, so a resume measures from this and counts
+    # only what it adds (`running_cost.step`). None until a figure is seen.
+    provider_cost_total: float | None = None
+    # 1 once the daemon has checked this Claude thread's cost against its log
+    # (`running_cost.recount_threads`); never set on any other provider's.
+    cost_recount: int = 0
 
 
 @dataclass

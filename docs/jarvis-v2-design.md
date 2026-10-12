@@ -576,8 +576,14 @@ model selector, re-homed).
 The UsageLedger keeps, per provider: tokens per task and per day (uncached
 input plus output, the firm's `work_tokens`), dollars where reported
 (OpenRouter, BYOK upstream cost — the v1 lesson: a number that arrives as
-zero is not zero), and the provider's own signals. From those it publishes
-one of four states, shown on the HUD's SYSTEMS panel and in `status`:
+zero is not zero), and the provider's own signals. Every usage event carries
+what that one result spent: Claude's figure arrives as the CLI's running total
+for the conversation (continued, not restarted, by a resume), so the provider
+turns it into a per-result delta before it reaches the ledger or a thread's
+total (2026-10-12, `running_cost.py`); Codex's cumulative counters are
+differenced the same way against the session's baseline. From those it
+publishes one of four states, shown on the HUD's SYSTEMS panel and in
+`status`:
 
 - **available.**
 - **over threshold** — above the project's or global `no_new_work` fraction
