@@ -16,9 +16,17 @@
 //   - a paste (Ctrl+V, Shift+Insert): never forwarded as a key — the native
 //     paste event's text goes as `insertText`, so a page never reads the
 //     owner's clipboard and the remote Chrome's own clipboard is never pasted;
+//   - a lone modifier (Ctrl, Alt, Shift, Meta, AltGr): never sent. The Ctrl
+//     of push-to-talk, pressed before its D, would otherwise reach the page
+//     and pause a driving agent; every key and pointer event carries the
+//     modifiers' state anyway;
 //   - everything else, forwarded as CDP key events. Copy and cut are
 //     forwarded too (a page's own handlers run) and marked, so the pane can
 //     ask the daemon for the selection (§8.7).
+// **BR-3b must give `browserTakesKey` its exception in `useLayout`'s capture
+// handler** (components/Layout.tsx), beside `terminalTakesKey`'s: today that
+// handler takes Ctrl+P, Ctrl+Shift+P, F1 and Ctrl+Shift+F for the HUD
+// everywhere but a terminal, so without it they would never reach the page.
 // **AltGr is a character, never Ctrl+Alt.** Windows reports AltGr as Ctrl+Alt
 // (with `getModifierState("AltGraph")` on Chrome), so `@` on a German layout
 // arrives as Ctrl+Alt+@. Sent as such, with no text, the owner could not type
@@ -37,6 +45,7 @@
 
 import { ZOOM_DEFAULT, isZoom, shortcutFor, toCss, type Shortcut } from "./layout";
 import { isTalkKey, type KeyLike } from "./talkkey";
+import { CHUNK, cleanPaste } from "./terminal";
 
 // ---- keys ---------------------------------------------------------------------
 
@@ -267,14 +276,35 @@ export type KeyRoute =
   | { kind: "pane"; action: PaneAction }
   /** Let the native paste event fire; its text goes to the page as `insertText`. */
   | { kind: "paste" }
-  /** Mid-composition, a dead key or an unidentified key: nothing is sent (IME is a follow-up). */
+  /**
+   * A lone modifier (its state rides on the next key or pointer event), or
+   * mid-composition, a dead key or an unidentified key: nothing is sent (IME
+   * is a follow-up).
+   */
   | { kind: "drop" }
   /** Sent to the page; the pane prevents its default. Copy and cut also ask for the selection. */
   | { kind: "forward"; event: CdpKeyEvent; clip: "copy" | "cut" | null };
 
+/**
+ * The modifier keys. A lone press or release of one is never sent (review of
+ * PR #66): pressed the usual way — Ctrl first, then D — push-to-talk's Ctrl
+ * is a keydown of its own, which is neither the talk key nor a HUD shortcut,
+ * so it would reach the page and count as taking over from a driving agent
+ * (amendment §B.9: the HUD's keys never reach the page and never count). The
+ * page still learns them: every key and pointer event carries `modifiers`.
+ */
+export const MODIFIER_KEYS: ReadonlySet<string> = new Set([
+  "Control", "Alt", "Shift", "Meta", "AltGraph", "OS", "Super", "Hyper", "Fn", "FnLock",
+]);
+
+export function isModifierKey(key: unknown): boolean {
+  return typeof key === "string" && MODIFIER_KEYS.has(key);
+}
+
 export function routeKeyDown(e: KeyEventLike, blocked: boolean): KeyRoute {
   if (blocked) return { kind: "held" };
   if (!browserTakesKey(e)) return { kind: "hud" };
+  if (isModifierKey(e.key)) return { kind: "drop" };
   if (e.isComposing || e.key === "Process" || e.key === "Dead" || e.key === "Unidentified" || !e.key) {
     return { kind: "drop" };
   }
@@ -287,9 +317,15 @@ export function routeKeyDown(e: KeyEventLike, blocked: boolean): KeyRoute {
 
 /**
  * The keys whose keydown reached the page, so only their keyup does (a keyup
- * whose keydown was the HUD's — the D of a push-to-talk — is never sent), and
- * so a window that loses focus mid-press can let them all go: a page that
- * tracks held keys must not keep Shift down for ever.
+ * whose keydown was the HUD's — the D of a push-to-talk — is never sent, nor
+ * a lone modifier's), and so a window that loses focus mid-press can let them
+ * all go: a page that tracks held keys must not keep a key down for ever.
+ *
+ * **Nothing is sent under a card** (review of PR #66): a card taking focus is
+ * itself a blur, so BR-3b's blur handler calls `releaseAll(blocked)` with a
+ * card up — which sends nothing and keeps every key, as `released` does for a
+ * keyup under a card. BR-3b calls `releaseAll(false)` once the card goes (and
+ * on a later blur), and the page's keys come up then.
  */
 export class HeldKeys {
   private down = new Map<string, CdpKeyEvent>();
@@ -299,19 +335,24 @@ export class HeldKeys {
   }
 
   pressed(e: KeyEventLike, sent: CdpKeyEvent) {
+    if (isModifierKey(e.key)) return;
     this.down.set(HeldKeys.id(e), sent);
   }
 
-  /** The keyup to send, or null when its keydown never reached the page. Never under a card. */
+  /**
+   * The keyup to send, or null when its keydown never reached the page. Under
+   * a card: null, and the key is kept for `releaseAll` once the card goes.
+   */
   released(e: KeyEventLike, blocked: boolean): CdpKeyEvent | null {
     const id = HeldKeys.id(e);
-    if (!this.down.has(id)) return null;
+    if (isModifierKey(e.key) || !this.down.has(id) || blocked) return null;
     this.down.delete(id);
-    return blocked ? null : cdpKey(e, "up");
+    return cdpKey(e, "up");
   }
 
-  /** A keyup for every key still down (focus left the pane), and forget them. */
-  releaseAll(): CdpKeyEvent[] {
+  /** A keyup for every key still down, and forget them — or, under a card, nothing (they wait). */
+  releaseAll(blocked: boolean): CdpKeyEvent[] {
+    if (blocked) return [];
     const out = [...this.down.values()].map((d) => ({
       type: "keyUp" as const, modifiers: 0, key: d.key, code: d.code,
       windowsVirtualKeyCode: d.windowsVirtualKeyCode, nativeVirtualKeyCode: d.nativeVirtualKeyCode,
@@ -407,6 +448,48 @@ export function routeMouse(kind: "down" | "up" | "move", e: MouseLike, at: PageP
 }
 
 /**
+ * The mouse buttons the page holds down (review of PR #66): a press it got and
+ * no release yet. A drag a card cut off — its release dropped under the card —
+ * or one whose release landed outside the window would leave the page's
+ * button down. `releaseAll(false)` sends a release for each, at the last point
+ * the page saw; under a card it sends nothing and keeps them, as `HeldKeys`
+ * does. BR-3b calls it when the card goes, and on blur.
+ */
+export class HeldButtons {
+  private down = new Set<CdpMouseEvent["button"]>();
+  private at = { x: 0, y: 0 };
+
+  /** Every mouse event the page was sent. */
+  sent(ev: CdpMouseEvent) {
+    if (ev.type === "mouseWheel") return;
+    this.at = { x: ev.x, y: ev.y };
+    if (ev.button === "none") return;
+    if (ev.type === "mousePressed") this.down.add(ev.button);
+    else if (ev.type === "mouseReleased") this.down.delete(ev.button);
+  }
+
+  /** A release for every button still down, and forget them — or, under a card, nothing (they wait). */
+  releaseAll(blocked: boolean): CdpMouseEvent[] {
+    if (blocked) return [];
+    const bit = { none: 0, left: 1, right: 2, middle: 4, back: 8, forward: 16 } as const;
+    let buttons = [...this.down].reduce((n, b) => n | bit[b], 0);
+    const out = [...this.down].map((button) => {
+      buttons &= ~bit[button];
+      return {
+        type: "mouseReleased" as const, x: this.at.x, y: this.at.y, modifiers: 0, button, buttons,
+        clickCount: 1, pointerType: "mouse" as const,
+      };
+    });
+    this.down.clear();
+    return out;
+  }
+
+  get size(): number {
+    return this.down.size;
+  }
+}
+
+/**
  * The owner's input as the pane sends it on its socket (BR-1b turns each into
  * one CDP call): a key, a pointer or wheel event, or text — a paste, or an
  * IME's commit — for `Input.insertText`. The socket's other messages (a frame
@@ -417,6 +500,46 @@ export type InputMsg =
   | { t: "key"; e: CdpKeyEvent }
   | { t: "mouse"; e: CdpMouseEvent }
   | { t: "text"; text: string };
+
+/** One paste message's text, at most, as UTF-8 once JSON-escaped (ws.py takes 64 KiB a message). */
+export const PASTE_CHUNK = CHUNK;
+
+/** A code point's size inside a JSON string, as UTF-8: its escape's length, or its encoding's. */
+function jsonBytes(cp: string): number {
+  const esc = JSON.stringify(cp).slice(1, -1);
+  if (esc !== cp) return esc.length;                    // an ASCII escape: \n, \", \\, \u001f, a lone surrogate
+  const c = cp.codePointAt(0)!;
+  return c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+}
+
+/**
+ * The owner's paste, as the `{t:"text"}` messages `Input.insertText` takes
+ * (§8.7: the text comes from the HUD's own paste event, never the page's
+ * clipboard). Made inert as a control stream the way a terminal paste is
+ * (`cleanPaste`, lib/terminal.ts: ESC and the C1 controls go; tabs and line
+ * ends stay), then cut at code points into chunks of at most 16 KiB each once
+ * JSON-escaped — well under the socket's 64 KiB message cap, whatever the text
+ * holds. An empty paste is no message.
+ */
+export function pasteMessages(text: unknown): { t: "text"; text: string }[] {
+  if (typeof text !== "string") return [];
+  const clean = cleanPaste(text);
+  const out: { t: "text"; text: string }[] = [];
+  let cur = "";
+  let size = 0;
+  for (const cp of clean) {
+    const n = jsonBytes(cp);
+    if (size + n > PASTE_CHUNK && cur) {
+      out.push({ t: "text", text: cur });
+      cur = "";
+      size = 0;
+    }
+    cur += cp;
+    size += n;
+  }
+  if (cur) out.push({ t: "text", text: cur });
+  return out;
+}
 
 // ---- coordinates ----------------------------------------------------------------
 
@@ -623,7 +746,9 @@ export const FRAME_MAX_BYTES = 8 * 1024 * 1024;
  *     behind it: a slow window shows the newest picture, never a backlog;
  *   - each frame drawn — or one that failed to decode — is acked on its own
  *     generation (the daemon sends the next frame only after an ack); one
- *     from an older generation is never acked;
+ *     from an older generation is never acked, and **neither is one replaced
+ *     while another decoded**: an ack names the newest frame handled, so the
+ *     daemon must read it as "up to here", never wait on each id it sent;
  *   - a decode or a draw that throws never stalls it, and every bitmap is
  *     disposed, drawn or not.
  */
@@ -721,9 +846,10 @@ export const TITLE_CAP = 120;
 // What is never drawn from a page's text: C0/C1 controls, format characters
 // (zero-width, bidi embeddings, overrides and isolates, tags, the BOM) and the
 // line and paragraph separators — `untrusted.UNSEEN_CATEGORIES`, Cc Cf Zl Zp —
-// plus the variation selectors and the Hangul fillers, which draw nothing.
+// plus the variation selectors, the combining grapheme joiner (U+034F) and
+// the Hangul fillers, which draw nothing.
 const UNSEEN = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
-const VANISH = /[\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u115F\u1160\u3164\uFFA0]/gu;
+const VANISH = /[\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u{34F}\u115F\u1160\u3164\uFFA0]/gu;
 
 /**
  * Text a page chose — a title, an address, a dialog's words, a file name —

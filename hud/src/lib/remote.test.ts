@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  FRAME_MAX_BYTES, FramePipe, HeldKeys, LINE_PX, MAX_DEVICE_PIXELS, MOD, VIEW_MAX, WHEEL_MAX, backingSize,
-  browserTakesKey, cdpKey, cdpMouse, cdpWheel, cleanTitle, clientToPage, clipKey, frameDest, isAltGraph,
-  normalizeWheel, pageToCanvas, paneKeyAction, placeFrame, routeKeyDown, routeMouse, viewportFor, virtualKeyOf,
-  type Frame, type KeyEventLike,
+  FRAME_MAX_BYTES, FramePipe, HeldButtons, HeldKeys, LINE_PX, MAX_DEVICE_PIXELS, MOD, PASTE_CHUNK, VIEW_MAX,
+  WHEEL_MAX, backingSize, browserTakesKey, cdpKey, cdpMouse, cdpWheel, cleanTitle, clientToPage, clipKey, frameDest,
+  isAltGraph, normalizeWheel, pageToCanvas, paneKeyAction, pasteMessages, placeFrame, routeKeyDown, routeMouse,
+  viewportFor, virtualKeyOf, type Frame, type InputMsg, type KeyEventLike,
 } from "./remote";
+import { isTakeover } from "./drive";
 
 /** A keydown as Chrome on Windows reports it. */
 const key = (k: string, over: Partial<KeyEventLike> = {}): KeyEventLike => ({
@@ -169,24 +170,182 @@ describe("held keys", () => {
     expect(held.released(a, false)).toBeNull();
   });
 
-  it("under a card a keyup is not sent, and the key is forgotten", () => {
+  it("a lone modifier is never held", () => {
     const held = new HeldKeys();
-    const s = key("Shift", { code: "ShiftLeft", shiftKey: true });
-    held.pressed(s, cdpKey(s, "down"));
-    expect(held.released(s, true)).toBeNull();
+    const c = key("Control", { code: "ControlLeft", ctrlKey: true });
+    held.pressed(c, cdpKey(c, "down"));
     expect(held.size).toBe(0);
+    expect(held.released(key("Control", { code: "ControlLeft" }), false)).toBeNull();
+  });
+
+  // Review of PR #66 (LOW 2): a card taking focus is a blur, and nothing may reach the page under it.
+  it("under a card nothing is released; the keys wait until the card goes", () => {
+    const held = new HeldKeys();
+    const enter = key("Enter", { code: "Enter" });
+    const a = key("a", { code: "KeyA" });
+    held.pressed(enter, cdpKey(enter, "down"));
+    held.pressed(a, cdpKey(a, "down"));
+    expect(held.releaseAll(true)).toEqual([]);                 // the card took focus: a blur
+    expect(held.released(a, true)).toBeNull();                 // A came up under the card
+    expect(held.size).toBe(2);
+    const ups = held.releaseAll(false);                         // the card went
+    expect(ups.map((u) => [u.type, u.code, u.modifiers])).toEqual([["keyUp", "Enter", 0], ["keyUp", "KeyA", 0]]);
+    expect(held.releaseAll(false)).toEqual([]);
   });
 
   it("losing focus lets every key go", () => {
     const held = new HeldKeys();
-    for (const k of [key("Shift", { code: "ShiftLeft" }), key("Control", { code: "ControlLeft", ctrlKey: true })]) {
+    for (const k of [key("a", { code: "KeyA" }), key("ArrowLeft", { code: "ArrowLeft", shiftKey: true })]) {
       held.pressed(k, cdpKey(k, "down"));
     }
-    const ups = held.releaseAll();
+    const ups = held.releaseAll(false);
     expect(ups.map((u) => [u.type, u.code, u.modifiers])).toEqual([
-      ["keyUp", "ShiftLeft", 0], ["keyUp", "ControlLeft", 0],
+      ["keyUp", "KeyA", 0], ["keyUp", "ArrowLeft", 0],
     ]);
-    expect(held.releaseAll()).toEqual([]);
+    expect(held.releaseAll(false)).toEqual([]);
+  });
+});
+
+/**
+ * Keys as BR-3b will run them through: each keydown routed, a forwarded one
+ * held and sent; each keyup released through `HeldKeys`. What reached the
+ * page, and whether any of it took over from a driving agent.
+ */
+function typeThrough(steps: ["down" | "up", KeyEventLike][], blocked = false) {
+  const held = new HeldKeys();
+  const sent: InputMsg[] = [];
+  for (const [phase, e] of steps) {
+    if (phase === "down") {
+      const r = routeKeyDown(e, blocked);
+      if (r.kind === "forward") {
+        held.pressed(e, r.event);
+        sent.push({ t: "key", e: r.event });
+      }
+    } else {
+      const up = held.released(e, blocked);
+      if (up) sent.push({ t: "key", e: up });
+    }
+  }
+  return { sent, tookOver: sent.some((m) => isTakeover(m)) };
+}
+
+const CTRL = (down: boolean, over: Partial<KeyEventLike> = {}) => key("Control", { code: "ControlLeft", ctrlKey: down, ...over });
+const ALT = (down: boolean, over: Partial<KeyEventLike> = {}) => key("Alt", { code: "AltLeft", altKey: down, ctrlKey: true, ...over });
+
+describe("a HUD chord pressed the usual way, modifier first (review of PR #66, MED)", () => {
+  it("push-to-talk: Ctrl down, D down, D up, Ctrl up — nothing reaches the page, nothing takes over", () => {
+    const r = typeThrough([
+      ["down", CTRL(true)],
+      ["down", ctrl("d", { code: "KeyD" })],
+      ["down", ctrl("d", { code: "KeyD", repeat: true })],
+      ["up", ctrl("d", { code: "KeyD" })],
+      ["up", CTRL(false)],
+    ]);
+    expect(r.sent).toEqual([]);
+    expect(r.tookOver).toBe(false);
+  });
+
+  it("Ctrl+Alt+2, Ctrl+= and Ctrl+B: nothing reaches the page either", () => {
+    expect(typeThrough([
+      ["down", CTRL(true)], ["down", ALT(true)], ["down", ctrl("2", { code: "Digit2", altKey: true })],
+      ["up", ctrl("2", { code: "Digit2", altKey: true })], ["up", ALT(false)], ["up", CTRL(false)],
+    ]).sent).toEqual([]);
+    expect(typeThrough([
+      ["down", CTRL(true)], ["down", ctrl("=", { code: "Equal" })], ["up", ctrl("=", { code: "Equal" })], ["up", CTRL(false)],
+    ]).sent).toEqual([]);
+    expect(typeThrough([
+      ["down", CTRL(true)], ["down", ctrl("b", { code: "KeyB" })], ["up", ctrl("b", { code: "KeyB" })], ["up", CTRL(false)],
+    ]).sent).toEqual([]);
+  });
+
+  it("a lone modifier of any kind is dropped; the key it modifies still goes, carrying it", () => {
+    for (const k of ["Control", "Alt", "Shift", "Meta", "AltGraph"]) {
+      expect(routeKeyDown(key(k, { ctrlKey: k === "Control", altKey: k === "Alt", shiftKey: k === "Shift" }), false))
+        .toEqual({ kind: "drop" });
+    }
+    const r = typeThrough([
+      ["down", key("Shift", { code: "ShiftLeft", shiftKey: true })],
+      ["down", key("A", { code: "KeyA", shiftKey: true })],
+      ["up", key("A", { code: "KeyA", shiftKey: true })],
+      ["up", key("Shift", { code: "ShiftLeft" })],
+    ]);
+    expect(r.sent.map((m) => m.t === "key" && [m.e.type, m.e.key, m.e.modifiers])).toEqual([
+      ["keyDown", "A", MOD.shift], ["keyUp", "A", MOD.shift],
+    ]);
+    expect(r.tookOver).toBe(true);                               // typing is the owner's input
+  });
+
+  it("AltGr: the Ctrl Windows makes up for it and the AltGr key itself go nowhere; the character does", () => {
+    const r = typeThrough([
+      ["down", CTRL(true)],
+      ["down", key("AltGraph", { code: "AltRight", ctrlKey: true, altKey: true })],
+      ["down", altGr("@", "KeyQ")],
+      ["up", altGr("@", "KeyQ")],
+      ["up", key("AltGraph", { code: "AltRight", ctrlKey: true })],
+      ["up", CTRL(false)],
+    ]);
+    expect(r.sent.map((m) => m.t === "key" && [m.e.type, m.e.key, m.e.text ?? null, m.e.modifiers])).toEqual([
+      ["keyDown", "@", "@", 0], ["keyUp", "@", null, 0],
+    ]);
+  });
+});
+
+describe("held mouse buttons (review of PR #66, LOW 2)", () => {
+  const m = (over = {}) => ({ button: 0, buttons: 1, detail: 1, ...over });
+
+  it("a drag a card cut off is released when the card goes, at the last point the page saw", () => {
+    const held = new HeldButtons();
+    held.sent(cdpMouse("down", m(), { x: 10, y: 10 }));
+    held.sent(cdpMouse("move", m(), { x: 40, y: 25 }));
+    held.sent(cdpWheel({ deltaX: 0, deltaY: 100, deltaMode: 0, ...m() }, { x: 99, y: 99 }, 100, 600)!);
+    // The card came up: the release was dropped under it, and the blur releases nothing.
+    expect(routeMouse("up", m({ buttons: 0 }), { x: 40, y: 25, inside: true }, true)).toEqual({ kind: "held" });
+    expect(held.releaseAll(true)).toEqual([]);
+    expect(held.size).toBe(1);
+    expect(held.releaseAll(false)).toEqual([{
+      type: "mouseReleased", x: 40, y: 25, modifiers: 0, button: "left", buttons: 0, clickCount: 1, pointerType: "mouse",
+    }]);
+    expect(held.releaseAll(false)).toEqual([]);
+  });
+
+  it("a release the page got lets the button go; two buttons come up one by one", () => {
+    const held = new HeldButtons();
+    held.sent(cdpMouse("down", m(), { x: 1, y: 1 }));
+    held.sent(cdpMouse("up", m({ buttons: 0 }), { x: 1, y: 1 }));
+    expect(held.size).toBe(0);
+    held.sent(cdpMouse("down", m(), { x: 2, y: 2 }));
+    held.sent(cdpMouse("down", m({ button: 2, buttons: 3 }), { x: 2, y: 2 }));
+    expect(held.releaseAll(false).map((e) => [e.button, e.buttons])).toEqual([["left", 2], ["right", 0]]);
+  });
+});
+
+describe("pasteMessages (review of PR #66, LOW 3)", () => {
+  const bytes = (m: { t: "text"; text: string }) => new TextEncoder().encode(JSON.stringify(m)).length;
+
+  it("strips what a terminal paste strips: ESC and the C1 controls, never tabs or line ends", () => {
+    expect(pasteMessages("a\u{1b}[201~b\u{9b}31mc\td\r\ne")).toEqual([{ t: "text", text: "a[201~b31mc\td\r\ne" }]);
+    expect(pasteMessages("")).toEqual([]);
+    expect(pasteMessages("\u{1b}")).toEqual([]);
+    expect(pasteMessages(42)).toEqual([]);
+  });
+
+  it("100 KiB goes as 7 messages, in order, nothing lost", () => {
+    const text = "0123456789abcdef".repeat(6400);                  // 100 KiB
+    const out = pasteMessages(text);
+    expect(out.length).toBe(7);
+    expect(out.map((m) => m.text).join("")).toBe(text);
+    for (const m of out) expect(m.text.length).toBeLessThanOrEqual(PASTE_CHUNK);
+  });
+
+  it("every message stays under the socket's 64 KiB, whatever the text, and no character is cut in half", () => {
+    for (const text of ["\u{1}".repeat(40_000), '"\\'.repeat(30_000), "é".repeat(40_000), "😀".repeat(20_000)]) {
+      const out = pasteMessages(text);
+      expect(out.map((m) => m.text).join("")).toBe(text);
+      for (const m of out) {
+        expect(bytes(m)).toBeLessThanOrEqual(PASTE_CHUNK + 32);
+        expect(m.text).not.toMatch(/^[\u{DC00}-\u{DFFF}]|[\u{D800}-\u{DBFF}]$/u);
+      }
+    }
   });
 });
 
@@ -420,6 +579,7 @@ describe("cleanTitle", () => {
     expect(cleanTitle("x\u2028y\u2029z\u0085w")).toBe("x y z w");
     expect(cleanTitle("\u3164\u115F")).toBe("");
     expect(cleanTitle("  many    spaces  ")).toBe("many spaces");
+    expect(cleanTitle("Pay\u{34F}Pal")).toBe("PayPal");                // the combining grapheme joiner (review of PR #66)
   });
 
   it("is capped without cutting a character in half", () => {

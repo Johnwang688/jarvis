@@ -73,15 +73,34 @@ describe("the banner", () => {
   const driving = () => feed(feed(DRIVE_IDLE, { t: "agent", kind: "driver", thread_id: "th1", provider: "fast" }, T0),
     act({ outcome: "done" }), T0);
 
-  it("is up from the first action until 30 s after the last", () => {
-    const before = feed(DRIVE_IDLE, { t: "agent", kind: "driver", thread_id: "th1", provider: "fast" }, T0);
-    expect(bannerOf(before, T0, slots({ th1: 2 }))).toBeNull();
+  it("is up from the agent taking the tab until 30 s after its last action", () => {
+    expect(bannerOf(DRIVE_IDLE, T0, slots({ th1: 2 }))).toBeNull();
+    const taken = feed(DRIVE_IDLE, { t: "agent", kind: "driver", thread_id: "th1", provider: "fast" }, T0);
+    expect(bannerOf(taken, T0, slots({ th1: 2 }))?.text).toBe("Driven by the chat in pane 2 (fast path)");
     const s = driving();
     expect(bannerOf(s, T0 + 1000, slots({ th1: 2 }))).toEqual({
       text: "Driven by the chat in pane 2 (fast path)", paused: false, canStop: true, canResume: false,
     });
     expect(bannerOf(s, T0 + LINGER_MS, slots({ th1: 2 }))).not.toBeNull();
     expect(bannerOf(s, T0 + LINGER_MS + 1, slots({ th1: 2 }))).toBeNull();
+  });
+
+  // Review of PR #66 (LOW 1): a reload mid-drive hears driver, list and paused, but no action.
+  it("comes back after a reattach, with its Stop and the outline", () => {
+    let s = feed(DRIVE_IDLE, { t: "agent", kind: "driver", thread_id: "t1", provider: "claude" }, T0);
+    s = feed(s, { t: "agent", kind: "list", actions: [act({ id: "x1", outcome: "done" }), act({ id: "x2" })] }, T0);
+    s = feed(s, { t: "agent", kind: "paused", paused: false, by: null }, T0);
+    expect(bannerOf(s, T0 + 1, slots({ t1: 3 }))).toEqual({
+      text: "Driven by the chat in pane 3 (Claude)", paused: false, canStop: true, canResume: false,
+    });
+    expect(outlineOf(s, T0 + 1)).toEqual({ x: 10, y: 20, width: 80, height: 24 });
+    // A list alone, with an action under way, outlines it too.
+    const listOnly = feed(DRIVE_IDLE, { t: "agent", kind: "list", actions: [act({ outcome: "asking" })] }, T0);
+    expect(outlineOf(listOnly, T0 + 1)).not.toBeNull();
+    expect(bannerOf(listOnly, T0 + 1, slots({}))?.canStop).toBe(true);
+    // A new driver never moves an earlier clock forward: a stale drive stays stale.
+    const old = feed(DRIVE_IDLE, act({ outcome: "done" }), T0);
+    expect(feed(old, { t: "agent", kind: "driver", thread_id: "t1", provider: null }, T0 + 5 * LINGER_MS).lastAt).toBe(T0);
   });
 
   it("goes when the turn ends, but never while an action still runs", () => {
@@ -186,6 +205,17 @@ describe("isTakeover", () => {
     }
     expect(isTakeover(null)).toBe(false);
     expect(isTakeover({ t: "touch" })).toBe(true);
+  });
+
+  // Review of PR #66 (MED): push-to-talk's Ctrl, pressed before its D, is not the owner taking over.
+  it("a lone modifier does not, down or up", () => {
+    for (const k of ["Control", "Alt", "Shift", "Meta", "AltGraph"]) {
+      for (const phase of ["down", "up"] as const) {
+        expect(isTakeover({ t: "key", e: cdpKey({ key: k, code: "", ctrlKey: k === "Control", altKey: false }, phase) }))
+          .toBe(false);
+      }
+    }
+    expect(isTakeover({ t: "key", e: cdpKey({ key: "a", code: "KeyA", ctrlKey: true, altKey: false }, "down") })).toBe(true);
   });
 });
 

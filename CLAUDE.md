@@ -1319,7 +1319,7 @@ so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "d
 
 **The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
-§B.9, §D.2, §G; the decisions file wins). Four new files under `hud/src/lib/`,
+§B.9, §D.2, §G; the decisions file wins).** Four new files under `hud/src/lib/`,
 each with its vitest; **nothing imports them yet** — BR-3b (Remote mode),
 BR-4 (annotate), BR-8b (auto-open) and BR-9c (driving) wire them in.
 `remote.ts`: keys and the pointer to CDP `Input.dispatch*` shapes (**AltGr is
@@ -1330,22 +1330,29 @@ never a key, its text goes as `insertText`; copy and cut forwarded and
 marked), **`browserTakesKey`** — the page gets every key but Ctrl+D
 (push-to-talk), the zoom keys, Ctrl+Alt+1–8 (the plan's "Ctrl+Alt+N"), Ctrl+B,
 Ctrl+Alt+B and Ctrl+`; Ctrl+P, Ctrl+Shift+P, F1 and Ctrl+Shift+F are the
-page's, as Ctrl+P is the shell's — `HeldKeys` (a keyup only where its keydown
-went), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
+page's, as Ctrl+P is the shell's; BR-3b owes it an exception in `useLayout`'s
+capture handler, beside `terminalTakesKey`'s — and **a lone modifier is never
+sent** (review of PR #66: push-to-talk's Ctrl, pressed before its D, reached the
+page and paused a driving agent; `modifiers` carries the state), `HeldKeys`
+and `HeldButtons` (a keyup only where its keydown went; nothing released under
+a card — they wait for `releaseAll(false)`), `pasteMessages` (`cleanPaste`,
+then ≤ 16 KiB per `{t:"text"}` once JSON-escaped), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
 16 Mpx), pointer positions **divided by the zoom** (`toCss`) before they are
 page points, wheel deltas (screen px ÷ zoom, lines 40 px, pages a viewport,
 Shift sideways, capped), a **generation-tagged, latest-only `FramePipe`** (a
 frame of an older socket, even one still decoding, is never drawn or acked)
-and `cleanTitle` (Cc/Cf/Zl/Zp, tags, variation selectors and fillers out; one
+and `cleanTitle` (Cc/Cf/Zl/Zp, tags, variation selectors, U+034F and fillers out; one
 line, capped by code point). `drive.ts`: the daemon's `{t:"agent", kind:
 driver|action|paused|list}` frames (shapes proposed in its header for BR-1b),
 the banner (never Authorize/Approve/Deny), the newest 20 actions, the target's
-outline, Resume refused under a card, and **`isTakeover`** (a pointer move is
-not, a drag is; the socket's own messages never; an unknown kind of input
+outline (a reattach's `driver` or running `list` restarts the banner), Resume
+refused under a card, and **`isTakeover`** (a pointer move is not, a drag is;
+a lone modifier and the socket's own messages never; an unknown kind of input
 is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
-offer | wait (under a card; 30 s) | skip (off, the WP-E judge, an origin
-already opened or shown, one per 10 s per terminal, three a minute); a
-Browser pane already showing a page counts as busy. `annotate.ts`: the
+offer | wait (under a card; 30 s) | skip (off, the WP-E judge or Jarvis's
+control ports, an origin already opened or shown, one per 10 s per terminal,
+three a minute); the query and fragment are dropped; a Browser pane already
+showing a page counts as busy. `annotate.ts`: the
 whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
 colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
 the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).

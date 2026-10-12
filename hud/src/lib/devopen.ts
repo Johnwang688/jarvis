@@ -25,12 +25,20 @@
 //     terminal, three a minute per window — is spent.
 // It opens Direct: a loopback URL the judge allows always does (B-2).
 //
+// Two of the daemon's own filters (§D.1) are applied here too, so the HUD
+// never leans on the daemon alone (review of PR #66): Jarvis's control ports
+// are refused — `config.control_ports()` (8402, 8404, 8405, 8406, as `/status`
+// reports them once BR-1a adds `refused_ports`, else those defaults), plus the
+// daemon's reported HUD, API and workshop ports, which the WP-E judge alone
+// lets through in part (8404 and 8406, the workshop) — and the query and
+// fragment are dropped, so a Jupyter `?token=` never reaches a pane.
+//
 // The state is the page's, in memory only (a ref in App): what was opened, when,
 // and the one URL waiting. A reload forgets it, as it forgets every terminal
 // socket's history; the daemon's sniffer reads live output only, so a reload's
 // ring replay never sends a URL again.
 
-import { judgePreviewUrl, originOf, type DaemonPorts } from "./preview";
+import { API_PORT, FACE_PORT, WORKSHOP_PORT, judgePreviewUrl, originOf, type DaemonPorts } from "./preview";
 import type { PaneNo, View } from "./workspace";
 
 /** One open per terminal in this long. */
@@ -78,6 +86,8 @@ export interface DevWindow {
   blocked: boolean;
   /** The daemon's ports as `/status` reported them, and this window's own (the judge's input). */
   ports: Partial<DaemonPorts>;
+  /** `/status` → `refused_ports` (`config.control_ports()`), when the daemon reports it; else CONTROL_PORTS. */
+  controlPorts?: readonly number[];
   /** Every pane in the workspace: drawn, and hidden by ⊞. */
   panes: readonly PaneShows[];
   /** The panes drawn now, in reading order. */
@@ -103,6 +113,35 @@ export function isBrowserView(view: string): boolean {
   return view === "preview" || view === "browser";
 }
 
+/** `config.control_ports()`'s defaults: the face/HUD, the desktop bridge, the daemon's API, the Spotify callback. */
+export const CONTROL_PORTS: readonly number[] = [FACE_PORT, 8404, API_PORT, 8406];
+
+/**
+ * Every port a dev URL is never opened on: Jarvis's control ports as reported
+ * and at their defaults (the owner's live daemon, whatever a window was told),
+ * and the daemon's reported HUD, API and workshop ports and this window's own.
+ */
+function refusedPorts(w: DevWindow): Set<number> {
+  const out = new Set<number>(CONTROL_PORTS);
+  for (const p of Array.isArray(w.controlPorts) ? w.controlPorts : []) if (Number.isInteger(p)) out.add(p);
+  for (const p of [w.ports.hud, w.ports.api, w.ports.workshop ?? WORKSHOP_PORT, w.ports.self]) {
+    if (typeof p === "number") out.add(p);
+  }
+  return out;
+}
+
+/** A URL's port, or its scheme's default. */
+function portOf(url: string): number {
+  const u = new URL(url);
+  return Number(u.port || (u.protocol === "https:" ? 443 : 80));
+}
+
+/** The URL without its query and fragment: a dev server's token never travels. */
+function withoutQuery(url: string): string {
+  const u = new URL(url);
+  return `${u.origin}${u.pathname}`;
+}
+
 function recordAct(s: DevOpenState, origin: string, terminalId: string, now: number): DevOpenState {
   const opened = [...s.opened.filter((o) => o !== origin), origin].slice(-OPENED_KEPT);
   const acts = [...s.acts.filter((a) => now - a.at < WINDOW_MS), { terminalId, at: now }];
@@ -120,7 +159,7 @@ export function autoOpenPlan(s: DevOpenState, w: DevWindow, now: number): { stat
   if (now - p.at > WAIT_MS || now < p.at) return drop("expired");
   if (!w.enabled) return drop("off");
   const verdict = judgePreviewUrl(p.url, w.ports);
-  if (!verdict.ok) return drop("refused");
+  if (!verdict.ok || refusedPorts(w).has(portOf(verdict.url))) return drop("refused");
   if (w.blocked) return { state: s, plan: { kind: "wait" } };
   const origin = originOf(verdict.url);
   if (!origin) return drop("refused");
@@ -131,7 +170,7 @@ export function autoOpenPlan(s: DevOpenState, w: DevWindow, now: number): { stat
   if (recent.some((a) => a.terminalId === p.terminalId && now - a.at < PER_TERMINAL_MS)) return drop("rate");
 
   const state = recordAct(s, origin, p.terminalId, now);
-  const url = verdict.url;
+  const url = withoutQuery(verdict.url);
   const holder = w.panes.find((pane) => pane.view === "terminal" && pane.terminalId === p.terminalId
     && w.drawn.includes(pane.id));
   if (w.canSplit) {

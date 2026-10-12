@@ -35,9 +35,10 @@
 // it at once): a pointer press or release, the wheel, a key, a paste or an
 // IME commit, a dialog or file-chooser answer. A pointer move does not — but
 // a drag does (a move with a button held changes the page). The HUD's own
-// keys never reach the page (`remote.browserTakesKey`), so they never count.
+// keys never reach the page (`remote.browserTakesKey`), so they never count,
+// and neither does a lone modifier — it is as often the first half of one.
 
-import { cleanTitle, type InputMsg } from "./remote";
+import { cleanTitle, isModifierKey, type InputMsg } from "./remote";
 
 export const ACTIONS = ["navigate", "back", "forward", "click", "type", "press", "scroll", "select", "upload"] as const;
 export type ActionKind = (typeof ACTIONS)[number];
@@ -196,9 +197,13 @@ export function driveReducer(s: DriveState, ev: DriveEvent): DriveState {
     case "agent": {
       const m = ev.msg;
       switch (m.kind) {
+        // A driver, or a replayed list with an action still under way, starts
+        // the banner's clock when none runs (review of PR #66): after a reload
+        // mid-drive the pane hears `driver` and `list` but no `action`, and
+        // the owner must still see the banner and its Stop.
         case "driver":
           if (m.threadId === null) return { ...s, driving: false };
-          return { ...s, threadId: m.threadId, provider: m.provider, driving: true };
+          return { ...s, threadId: m.threadId, provider: m.provider, driving: true, lastAt: s.lastAt ?? ev.now };
         case "action": {
           const at = s.actions.findIndex((a) => a.id === m.action.id);
           const actions = at >= 0
@@ -208,8 +213,10 @@ export function driveReducer(s: DriveState, ev: DriveEvent): DriveState {
         }
         case "paused":
           return { ...s, paused: m.paused, pausedBy: m.paused ? m.by : null };
-        case "list":
-          return { ...s, actions: keepLast(m.actions.slice()) };
+        case "list": {
+          const live = m.actions.some((a) => a.phase === "running" || a.phase === "asking");
+          return { ...s, actions: keepLast(m.actions.slice()), lastAt: live ? s.lastAt ?? ev.now : s.lastAt };
+        }
       }
       return s;
     }
@@ -324,6 +331,10 @@ const CONTROL: ReadonlySet<string> = new Set(["ack", "resize", "resume", "stop",
 export function isTakeover(msg: InputMsg | { t: string; [k: string]: unknown } | null | undefined): boolean {
   if (!msg || typeof msg !== "object" || typeof msg.t !== "string") return false;
   if (CONTROL.has(msg.t)) return false;
+  // A lone modifier is never the owner taking over (review of PR #66): it is
+  // as often the first half of a HUD key — push-to-talk's Ctrl, Ctrl+Alt+2's
+  // Ctrl and Alt — and `routeKeyDown` never sends one anyway.
+  if (msg.t === "key" && isModifierKey((msg as { e?: { key?: unknown } }).e?.key)) return false;
   if (msg.t === "mouse") {
     const e = (msg as { e?: { type?: unknown; buttons?: unknown } }).e;
     if (e && e.type === "mouseMoved") return typeof e.buttons === "number" && e.buttons !== 0;

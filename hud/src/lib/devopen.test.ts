@@ -75,6 +75,27 @@ describe("what is skipped", () => {
     }
   });
 
+  // Review of PR #66: the WP-E judge lets 8404, 8406 and the workshop through; §D.1 refuses them.
+  it("Jarvis's control ports, at their defaults and as reported, and the workshop", () => {
+    for (const url of ["http://localhost:8404/", "http://127.0.0.1:8406/callback", "http://localhost:18403/p/x/"]) {
+      expect(plan(url).plan).toEqual({ kind: "skip", why: "refused" });
+    }
+    expect(plan("http://localhost:19404/", win({ controlPorts: [19402, 19404, 19405, 19406] })).plan)
+      .toEqual({ kind: "skip", why: "refused" });
+    expect(plan("http://localhost:8404/", win({ controlPorts: [19404] })).plan).toEqual({ kind: "skip", why: "refused" });
+    // No workshop reported: its default is refused.
+    expect(plan("http://localhost:8403/", win({ ports: { hud: 18402, api: 18405 } })).plan)
+      .toEqual({ kind: "skip", why: "refused" });
+    expect(plan("http://localhost:19404/").plan.kind).toBe("split");
+  });
+
+  it("never carries a query or a fragment: a Jupyter token stays in the terminal", () => {
+    expect(plan("http://localhost:8888/lab?token=abc123#cell").plan)
+      .toEqual({ kind: "split", source: 1, url: "http://localhost:8888/lab" });
+    expect(plan("http://127.0.0.1:5000/?x=1", win({ canSplit: false })).plan)
+      .toEqual({ kind: "focused", pane: 1, url: "http://127.0.0.1:5000/" });
+  });
+
   it("an origin opened before in this page, or one a pane already shows, drawn or hidden", () => {
     const first = plan("http://localhost:5173/");
     expect(first.plan.kind).toBe("split");
