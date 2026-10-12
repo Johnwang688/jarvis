@@ -1957,6 +1957,107 @@ and the headless section, carrying `keepOrigin` across an origin mismatch
 fails the grant case. A stored seed in any suite may still say `"preview"`
 (it migrates); new ones should not.
 
+**Dev servers an agent started, AO-1a (2026-10-12; plan
+`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §B and §D.4, review
+decisions R-2 and R-7; the decisions file wins).** Pure and **not wired yet**:
+AO-1b's watcher (`devservers.py`), routes and daemon hooks use it.
+`jarvis/v2/devlisten.py`:
+- **Rows.** `parse_rows` reads `/proc/net/tcp`/`tcp6`: LISTEN rows only, the
+  kernel's native word order, binds on `127.0.0.1`, `0.0.0.0`, `::1`, `::` and
+  `::ffff:127.0.0.1`. Another 127/8 address is kept as `odd_loopback`, to be
+  counted and refused; a LAN bind is dropped.
+- **Ports first.** `cheap_refusal` (rules 1-2) runs before anything about a
+  process is read. `port_rules` is `policy.refused_ports` plus the daemon's
+  HUD, API, workshop, gate and bound ports; then the seven service ports, and
+  the ephemeral range read from `ip_local_port_range` (inclusive; fallback
+  32768-60999). A socket owned by another uid (the daemon's uid is passed in)
+  and a bind class that is neither loopback nor wildcard are refused there too.
+- **Facts.** `ProcReader` reads over an injectable `/proc` and cgroup root and
+  counts every read in `Work` (counts only, for `/status`). **It never reads
+  `cwd`, `cmdline` or `exe`.** It fails closed on EACCES, a vanished pid, a
+  start time that changed, or a parent younger than its child.
+  - **The ancestor walk** reads `stat` only, at most `ANCESTRY_MAX` = 64. A
+    chain still going past that is `truncated`, and rule 6 refuses it as a
+    terminal's: fail closed, never attributed.
+  - **The fd scan is bounded.** `socket_owners` makes at most `FD_SCAN_MAX` =
+    50,000 readlinks a scan (a pid's folder is walked lazily, so a process
+    with a million fds costs no more). Past it the scan stops, counts the pids
+    it left in `Work.fd_skipped`, and answers `complete` False;
+    `attribute(scan_complete=False)` then answers pending ("scan") and
+    attributes nothing this poll. `scan_complete` has no default, so a
+    caller that forgets the scan's answer fails rather than trusting it.
+  - **A shared socket fails closed:** if any holder is Jarvis's own, a
+    terminal's, or a pid whose facts could not be read (it could be either),
+    the listener is refused, whatever another holder's tag says.
+- **The origin tag is the attribution (R-2).** There is no folder rule, and an
+  untagged process is refused. `/proc/<pid>/environ` is read only for the
+  owning pid (the earliest-started pid passing rules 4-7), only after rules
+  1-7, `O_NONBLOCK`, at most 128 KiB. The bytes go into a bytearray searched
+  raw for `JARVIS_ORIGIN_TAG=` at an entry's start (exactly 32 lowercase hex,
+  NUL-ended), which is zeroed in a `finally`. They are never decoded, logged
+  or raised with: a read error is `unreadable` with no message, and **the
+  module logs nothing**. A found tag and `untagged` are cached per `(pid,
+  start)`; **a failed read (`unreadable`) is never cached**, so the next poll
+  reads again. **Limit, stated: a cached tag outlives an `exec` of the same
+  pid** — `exec` keeps the start time, so a process that execs a program with
+  another environment is still judged by the one first read. A pid reused by
+  another process has another start time and is read afresh.
+- **Turn windows.** `Sessions` holds the tags (live, then `GRACE_S` 600 s
+  after close) and the turn windows, which only Claude and Codex turns open: a
+  listener counts if first seen in `[start, end + 600 s]` from a process
+  started at or after `start − 2 s`.
+- **`attribute()`** applies rules 1-11 in order. It answers attributed, a
+  refusal class, or pending: `scan` for an incomplete fd scan, `life` for
+  rule 10's two sightings 2 s apart, `probe` for rule 11.
+  - **A socket several processes hold fails closed.** If any holder is
+    refused as Jarvis's own (rule 5) or as a terminal's (rule 6), the listener
+    is refused with that class, even when another holder carries a live tag.
+    Only with no such holder does the earliest-started pid passing rules 4-7
+    own it (this replaced "earliest passing pid owns it" in all cases).
+  - Rules 7 and 9 are judged at the listener's first sighting, so a verdict
+    waiting on its probe cannot turn `stale_tag` as the clock passes the
+    session's grace.
+- **The probe's rules.** `parse_response` judges at most 4 KiB, and only the
+  status class and booleans survive:
+  - a page is a 3xx; a 2xx that is `text/html`, or untyped with markup; any
+    other status only `text/html` with markup;
+  - `X-Frame-Options` DENY/SAMEORIGIN (any token of a comma list), or an
+    enforced `frame-ancestors` without `*` or `http://localhost:*` in any
+    comma-joined policy, is `no_frame` (a 3xx too); the last `Content-Type`
+    wins;
+  - the header block ends at the earlier of CRLF-CRLF and LF-LF, an obs-fold
+    continuation (a line starting with a space or tab) is joined onto the
+    previous header with one space, and markup needs a tag name that ends
+    (`<header` and `<htmlx` are not `<head` or `<html`);
+  - a silent close or a TLS alert asks for one TLS probe.
+
+  `probe_address` (127.0.0.1 or `::1`, with the port judged again) and
+  `probe_request` (one plain `GET /`) are its other rules.
+- **`arbitrate()`** takes the claims within 600 ms of the first: the
+  earliest that `shows` the source, else the newest `focused_at`, ties to the
+  earliest. A later claim, or a window's second, loses. A malformed claim (a
+  field of the wrong type or out of range, or not a `Claim`) is dropped, never
+  raised on and never the one that opens the window.
+
+Free suite: `tests/v2/devlisten_check.py`, 258 checks over fixture `/proc`
+trees, plus a read-only parse of the real `/proc/net` tables.
+- A fake key in a fixture `environ` appears in no return value, exception,
+  log record or counter.
+- A monitor shows that the module opens no `cmdline`, `cwd` or `exe`, and no
+  real `environ`.
+- Work is counted, not timed: a steady poll reads 2 files, and one candidate
+  costs one fd scan.
+
+All 24 mutations bite: every one in §H's AO-1a table, plus the review's
+guards. The review round (PR #76) ran 53 guard removals against the fixed
+module, each failing the suite: the review's own 20 (13 already bit; the seven
+it had survived are the buffer zeroing, a read cut at the cap reported
+whole, the tag-cache key's start, rule 7's per-window conjunction,
+comma-joined CSPs, X-Frame-Options lists and the last `Content-Type`),
+`environ` opened following a symlink, `find_tag` taking a later occurrence,
+and every guard of the fixes above. A grep pin allows only `daemon`,
+`hud_api`, `terminals` and `devservers` to name the module.
+
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
 wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
