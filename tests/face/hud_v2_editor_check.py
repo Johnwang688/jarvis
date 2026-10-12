@@ -173,7 +173,7 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
                         # The review of PR #49, each failing on f869543.
                         _rv49_env_not_utf8_checks, _rv49_project_gone_checks, _rv49_compare_loop_checks,
                         _rv49_two_projects_checks, _rv49_crash_save_checks, _rv49_double_save_checks,
-                        _rv49_save_again_checks):
+                        _rv49_save_again_checks, _rv49_close_both_checks):
             _fresh(page, mock, until, keep_files=keep)
             try:
                 section(page, mock, check, until)
@@ -895,6 +895,35 @@ def _rv49_save_again_checks(page, mock, check, until):
               and page.locator(_pane(2, '[data-testid="editor-conflict"]')).count() == 0)
     finally:
         mock.world.pop("put_delays", None)
+
+
+def _rv49_close_both_checks(page, mock, check, until):
+    """× on a File pane holding an edit only it has, whose chat (a compose
+    row: #47 review 2 judges it whatever the pane shows) holds unsent words:
+    one question naming both, with Save / Don't save / Cancel."""
+    pane = page.locator(_pane(2))
+    page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
+    until(lambda: pane.get_attribute("data-view") == "chat", timeout=3)
+    box = page.locator(_pane(2, '[data-testid="input"]'))
+    until(lambda: box.count() == 1, timeout=3)
+    box.fill("words-for-a-new-thread")
+    page.locator(_pane(2, '[data-testid="tab-file"]')).click()
+    until(lambda: pane.get_attribute("data-view") == "file", timeout=3)
+    check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
+    check("setup: an edit only pane 2 holds", _type(page, until, 2, "\n#both"))
+    time.sleep(0.5)  # past ×'s 400 ms guard after the last click
+    page.locator('[data-testid="pane-2-close"]').click()
+    ask = page.locator('[data-testid="pane-2-close-ask"]')
+    until(lambda: ask.count() == 1, timeout=3)
+    text = ask.inner_text() if ask.count() else ""
+    check("× asks one question about both the unsaved edit and the unsent words",
+          "calc.py has an unsaved edit" in text and "unsent message" in text
+          and page.locator('[data-testid="pane-2-close-save"]').count() == 1, text)
+    page.locator('[data-testid="pane-2-close-keep"]').click()
+    until(lambda: ask.count() == 0, timeout=2)
+    check("…and Cancel keeps the pane, the edit and the words",
+          page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "true"
+          and page.evaluate("window.__hud.workspace().ws.order").count(2) == 1)
 
 
 def main():
