@@ -7,6 +7,10 @@ gate and its navigation policy.
 - `host.py`: Chrome itself, one instance per profile plus the Private one,
   driven by Playwright's async API on its own thread; the landing guard.
 - `routes.py`: `/browser…`, owner-only on the HUD listener.
+- `stream.py` (BR-1b): a tab's ticketed socket — its frames, the owner's
+  input and its validation, the approval hold, takeover, the agent channel.
+- `files.py` (BR-1b): downloads saved and served owner-only, uploads judged
+  by BR-9a's H8 rule.
 
 Design: docs/plans/2026-10-10-hud-browser-plan.md, its amendment 1 and its
 decisions file (which wins). Fully separate from v1's `jarvis.browser`.

@@ -2920,6 +2920,37 @@ the log. `/status` gains `browser` and `refused_ports`. The same review
 closed v1's file tools (`read_file`, `grep_files` and the write tools) to
 every credential folder, the Browser's profile included.
 
+**The Browser's stream and the owner's input (2026-10-12, BR-1b of the
+browser plan, §2 "The stream", §3, §8; amendment 1 §B.8–§B.9).** Backend
+only; BR-3b draws it. A HUD window sees one tab over a socket of its own —
+the terminal's pattern: a single-use 30 s ticket for that tab from an
+owner-only route, and a tab another window shows is asked for first — as a
+JPEG screencast, **one frame in flight and the newest next**, so a slow
+window never falls behind; a tab no window shows is not streamed. The
+owner's keys, pointer, wheel and pasted text go back in BR-2's shapes and
+become real CDP input events; every message is held to its shape and bounds
+by the daemon, whatever the window sent. **While any approval card is up,
+nothing reaches a page**: input is dropped (the window hears `held`), the
+owner's own navigation routes answer 409, and the moment a card is raised
+everything queued is dropped, so nothing sent before or during it is ever
+delivered after. A press a card cut off ends with no click anywhere: Chrome
+would click the page's root for a release outside it (measured), so the
+daemon ends such a press as a pointer move with no button down. The page's
+dialogs (alert, confirm, prompt, leave-page) go to the window and are
+answered there, dismissed after 60 s or at once when no window shows the
+tab. A pop-up opens as a tab and its opener's window is told, to place it in
+the same pane; past the cap of 12 tabs in all the pop-up is refused rather
+than an older tab closed. Downloads are saved owner-only (0600, a folder of
+their own, a cleaned name) in the profile's private folder and offered to
+the window as an attachment that can never run on the HUD's origin; an
+executable is held until the owner's card (BR-9b). A page's file chooser is
+answered only through an owner-only route with files the owner picked in a
+project, judged by BR-9a's upload rule. The owner's input pauses a driving
+agent before it is delivered and is timestamped for BR-9b's gate; the
+banner's channel (`driver`, `action`, `paused`, `list`) is there for BR-9c.
+On the bus, only `browser_attached` (a tab id and a time); no URL, title,
+typed text or frame reaches the bus or the log.
+
 **Editor settings, `.editorconfig` and vim (2026-10-12, ED-8 of the editor
 plan, §2.8; decisions E-9, E-11).** A File pane's ⚙, or "Editor Settings…" in
 the palette, opens one dialog for every editor in the window: font family

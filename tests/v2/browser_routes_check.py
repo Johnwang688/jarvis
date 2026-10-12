@@ -150,6 +150,7 @@ let i = 0; (function f() {{ d.style.background = 'hsl(' + (i++ % 360) + ',60%,50
 <button id=a style="left:10px;top:10px" onclick="alert('hello {MARK}'); __r.push('alert-done')">a</button>
 <button id=c style="left:10px;top:60px" onclick="__r.push('confirm:' + confirm('sure?'))">c</button>
 <button id=p style="left:10px;top:110px" onclick="__r.push('prompt:' + prompt('name?', 'def'))">p</button>
+<button id=n style="left:10px;top:160px" onclick="location = '/input'">n</button>
 <script>window.__r = [];</script>""",
     "/upload": f"""<!doctype html><title>{MARK} upload</title>
 <input type=file id=f multiple style="position:absolute;left:10px;top:10px;width:300px;height:60px">
@@ -1071,6 +1072,21 @@ class BrowserStream(unittest.TestCase):
                                              and m["kind"] == "confirm"][1:], what="a second confirm")[-1]
             window.wait_for("dialog_closed", timeout=6, id=dialog["id"], by="timeout")
         self.wait(lambda: (self.js(tab, "__r") or [])[-1:] == ["confirm:false"], what="timed out")
+        # beforeunload: stay (dismiss), then leave (accept).
+        self.js(tab, "onbeforeunload = e => { e.preventDefault(); e.returnValue = 'x'; }")
+        click(window, 60, 180)
+        dialog = window.until(lambda w: [m for m in w.messages if m.get("t") == "dialog"
+                                         and m["kind"] == "beforeunload"], what="beforeunload")[-1]
+        window.send({"t": "dialog", "id": dialog["id"], "accept": False})
+        window.wait_for("dialog_closed", id=dialog["id"])
+        time.sleep(0.5)
+        self.assertTrue(self.page(tab).url.endswith("/dialogs"), "a dismissed beforeunload stays")
+        click(window, 60, 180)
+        dialog = window.until(lambda w: [m for m in w.messages if m.get("t") == "dialog"
+                                         and m["kind"] == "beforeunload"][1:], what="beforeunload again")[-1]
+        window.send({"t": "dialog", "id": dialog["id"], "accept": True})
+        self.wait(lambda: self.page(tab).url.endswith("/input"), what="an accepted beforeunload leaves")
+        self.navigate(tab, "/dialogs")
         window.close()
         self.wait(lambda: not self.host._tabs[tab].stream.attached(), 5, "the window let go")
         # With no window showing the tab, nobody could answer: dismissed at once.
