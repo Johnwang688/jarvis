@@ -13,13 +13,15 @@
 //   {t: "open", id, grammar, text, version, styledAs}
 //   {t: "change", id, version, changes: [{offset, length, text}]}
 //   {t: "tokens", id, req, version, first, last}
+//   {t: "folds", id, req, version}                       — ED-6
 //   {t: "close", id}
 //   {t: "probe", req, url}      — the loader's gate, asked about one URL (tests)
 //   {t: "loaded", req}          — which grammars are compiled (tests)
 // Messages out:
 //   {t: "state", id, version, state, reason?}
 //   {t: "tokens", req, id, version, data, state, reason?, truncatedAt?, stale?}
-//   {t: "changed", id}           — colour may have changed with no edit: ask again
+//   {t: "folds", req, id, version, ranges, state, reason?, stale?}  — ranges null: fold by indentation
+//   {t: "changed", id}           — colour (or folds) may have changed with no edit: ask again
 //   {t: "probe", req, ok, error?}
 //   {t: "loaded", req, names}
 
@@ -33,6 +35,7 @@ type In =
   | { t: "open"; id: string; grammar: GrammarName; text: string; version: number; styledAs: string }
   | { t: "change"; id: string; version: number; changes: Change[] }
   | { t: "tokens"; id: string; req: number; version: number; first: number; last: number }
+  | { t: "folds"; id: string; req: number; version: number }
   | { t: "close"; id: string }
   | { t: "probe"; req: number; url: string }
   | { t: "loaded"; req: number };
@@ -61,10 +64,12 @@ function start(): Promise<SyntaxEngine> {
       load: async (g: GrammarName): Promise<GrammarAssets> => {
         const language = await Language.load(await fetchShipped(WASM_URLS[g]));
         const q = QUERIES[g];
+        const some = (text: string) => /\(/.test(text.replace(/;[^\n]*/g, ""));
         return {
           language,
           highlights: new Query(language, q.highlights),
-          injections: /\(/.test(q.injections.replace(/;[^\n]*/g, "")) ? new Query(language, q.injections) : null,
+          injections: some(q.injections) ? new Query(language, q.injections) : null,
+          folds: some(q.folds) ? new Query(language, q.folds) : null,
         };
       },
       changed: (id) => post({ t: "changed", id }),
@@ -157,6 +162,16 @@ async function handle(m: In) {
       post({ t: "tokens", req: m.req, id: m.id, ...r }, r.data ? [r.data.buffer] : []);
       return;
     }
+    case "folds": {
+      await opening.get(m.id);
+      clearTimeout(coalesce.get(m.id));
+      coalesce.delete(m.id);
+      const r = e.folds(m.id, m.version);
+      if (r.stale) scheduleRetry(e, m.id);
+      if (r.state === "basic" && r.reason === "slow edits") post({ t: "state", id: m.id, version: r.version, state: "basic", reason: r.reason });
+      post({ t: "folds", req: m.req, id: m.id, ...r });
+      return;
+    }
     case "close":
       clearTimers(m.id);
       opening.delete(m.id);
@@ -172,6 +187,7 @@ self.addEventListener("message", (ev: MessageEvent<In>) => {
   const m = ev.data;
   queue = queue.then(() => handle(m)).catch((err) => {
     if (m && m.t === "tokens") post({ t: "tokens", req: m.req, id: m.id, version: -1, data: null, state: "basic", reason: "grammar failed" });
+    if (m && m.t === "folds") post({ t: "folds", req: m.req, id: m.id, version: -1, ranges: null, state: "basic", reason: "grammar failed" });
     console.error("syntax worker:", err instanceof Error ? err.message : err);
   });
 });

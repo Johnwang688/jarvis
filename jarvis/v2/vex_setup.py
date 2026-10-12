@@ -22,8 +22,9 @@ Build, Download and brain terminal run. It:
    a `jarvis` package planted in the project folder never runs), whose stem
    the gate asks about unless the owner allowlists exactly it.
 
-Nothing is copied, bundled or run: no VEX program is started here, and
-`vexcom --help` (the device-info flag, a spike item) is the owner's to run.
+Nothing is copied, bundled or run: no VEX program is started here (the
+device reads' flags, `vex.DEVICE_READS`, came from the owner's own
+`vexcom --help`).
 After the extension updates, its version folders change: run this again.
 """
 from __future__ import annotations

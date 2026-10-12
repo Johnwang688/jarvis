@@ -28,7 +28,7 @@ import { terminals } from "../components/Terminal";
 import {
   BUILD_FIRST_STEPS, DeviceLedger, LAST_BUILDS_KEY, chainCancellable, isVexId, needsBuildFirst, nameRefusal,
   parseDeviceRecord, parseLastBuilds, slotRefusal, stillStale, type BuildView, type ChainView, type Detection,
-  type DeviceAction, type VexStatus,
+  type DeviceAction, type DeviceRead, type VexStatus,
 } from "../lib/vex";
 
 const POLL_MS = 600;
@@ -98,8 +98,9 @@ function saveLast(v: Record<string, string>) {
 export class VexStore {
   status: VexStatus | null = null;
   statusError = "";
-  info: { text: string; exit_code: number | null } | null = null;
-  infoBusy = false;
+  info: { text: string; exit_code: number | null; read: DeviceRead } | null = null;
+  /** The device read on its way, if any (one at a time: the daemon's device reservation). */
+  infoBusy: DeviceRead | null = null;
   infoNote = "";
   brainBusy = false;
   brainNote = "";
@@ -571,21 +572,22 @@ export class VexStore {
     }
   }
 
-  async readInfo(): Promise<void> {
+  /** System info (`vexcom --json`) or the programs on the brain (`vexcom --programs`). */
+  async readInfo(read: DeviceRead = "system"): Promise<void> {
     if (!this.mayAct() || this.infoBusy || this.chain) return;
-    this.infoBusy = true;
+    this.infoBusy = read;
     this.infoNote = "";
     this.changed();
     this.ledger.expect("info", Date.now());
     try {
-      const r = await api.vexInfo();
+      const r = await api.vexInfo(read);
       this.info = { text: typeof r?.text === "string" ? r.text.slice(0, 64 * 1024) : "",
-                    exit_code: typeof r?.exit_code === "number" ? r.exit_code : null };
+                    exit_code: typeof r?.exit_code === "number" ? r.exit_code : null, read };
     } catch (e: any) {
       this.ledger.withdraw("info");
       this.infoNote = e?.message || "the device could not be read";
     } finally {
-      this.infoBusy = false;
+      this.infoBusy = null;
       this.changed();
     }
   }

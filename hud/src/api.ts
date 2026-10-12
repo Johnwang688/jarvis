@@ -278,7 +278,8 @@ export const api = {
   vexDownload: (projectId: string, body: { slot: number; name: string }) =>
     req<{ terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/download`, json(body)),
   vexBrain: () => req<{ terminal_id: string; started: boolean }>("/vex/brain", json({})),
-  vexInfo: () => req<{ text: string; exit_code: number | null }>("/vex/device/info", json({})),
+  vexInfo: (read: "system" | "programs" = "system") =>
+    req<{ text: string; exit_code: number | null; read?: string }>("/vex/device/info", json({ read })),
   // A new VEX project (VX-3): the template list is the daemon's, and the
   // folder shown is the daemon's answer to the body Create sends.
   vexTemplates: () => req<unknown>("/vex/templates").then(parseTemplates),

@@ -1180,7 +1180,8 @@ wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
 new projects with the Windows `vexcom.exe` and toolchain the owner's VS Code
 VEX extension downloaded, **run in place through WSL interop — nothing
 copied, bundled or committed**, and **never decompiled**: the only `vexcom`
-flags are DishPy's (`--name --slot --write --progress`, `--user`). **Tests
+flags are DishPy's (`--name --slot --write --progress`, `--user`) and the
+two reads the owner's `vexcom --help` lists (`--json`, `--programs`). **Tests
 never run a real VEX tool or touch a device** — `tests/v2/vex_fake/` holds
 a fake `make.exe` and `vexcom.exe`. Which executables run is
 **`config.VEX_PATH` (`~/.config/jarvis/vex.json`)**, written only by the
@@ -1260,9 +1261,18 @@ of `discord/project_commands.py`; still the single caller of
 whole before anyone is asked, and written through directory fds (each folder
 opened `O_DIRECTORY | O_NOFOLLOW` relative to the last, the file `O_EXCL |
 O_NOFOLLOW` relative to its folder; what remains is the new folder's own path,
-resolved once after the yes). The log gets lifecycle lines only. Not yet, said
-by the routes: device info (flag from the owner's `vexcom --help`) and Python
-download (spike). Agents' task worktrees are on the Linux filesystem, so
+resolved once after the yes). The log gets lifecycle lines only. **Device
+reads** (2026-10-12, from the owner's own `vexcom --help`, vexcom 1.0.2b2):
+`POST /vex/device/info {read?}` runs exactly `vexcom --json` ("system info in
+json format", the default `system`) or `vexcom --programs` (`programs`) —
+`vex.DEVICE_READS`, the only two; every other option it lists writes, runs,
+erases or updates firmware — through the same `verify_tools`, the one-device
+reservation (both are the `info` action) and the 10 s timeout; any other
+`read` is a 400 before anything is looked up. JSON output is pretty-printed
+as text (a JSON string's control characters stay escaped, invisibles are
+removed). The output shapes in `tests/v2/vex_fake/` are guesses: only a
+real brain shows vexcom's. Not yet, said by the routes: Python download
+(spike). Agents' task worktrees are on the Linux filesystem, so
 `vexbuild` builds only in a chat's own project folder. Tests point every
 `config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree, with a
 non-empty `WSLENV`. `tests/v2/vex_check.py` (111 checks); 69 guards of round 1
@@ -1315,7 +1325,11 @@ without a reload. **A VEX view never follows the chat**: a pane whose pinned
 project is gone says "Pick a project". **A lone VEX pane survives a reload**
 (the boot never puts the chat over a VEX view; a window with no chat drawn is
 WP-B's refused-with-a-sentence case). `vex_device` records this window did
-not start are said in the view. **The daemon's freshness rule** (`vex.py`
+not start are said in the view. **Read device info** (`vexcom --json`) and
+**List programs** (`vexcom --programs`) are one device read at a time, off
+under a card and during a chain; the answer is drawn as text in a `<pre>`
+(markup in it is characters), headed by which read it was and a non-zero
+exit. **The daemon's freshness rule** (`vex.py`
 `Vex._fresh`, review M2 and its delta review): **sources** are only what a
 build compiles or obeys (`SOURCE_SUFFIXES`: C/C++ sources and headers,
 assembly, make files — a notes file or an editor backup never counts, which
@@ -2317,7 +2331,61 @@ the policy without `'wasm-unsafe-eval'` (12 of 39 fail), the gate returning
 any URL (5), and the size budget dropped (2). `hud_v2_editor_theme_check`
 now reads spans only after the worker has answered for the file, and
 accepts `"vex.h"` as one string and `@property` as `@` + `property`.
-Not yet: ED-6's folding from `folds.scm`.
+Folding from the tree is ED-6, below.
+
+**Folding and sticky scroll from the tree, ED-6 (2026-10-12; plan §2.6
+"Folding from the tree", the ED-6 package in §3).** nvim-treesitter's
+`folds.scm` for every grammar ED-5 ships is vendored at the same pin
+(f603a2f4; 15 files, the inline grammar has none) and built like the other
+queries (`vendor-queries.mjs` now does three kinds; `translate.WORKER` gained
+`#trim!`); **`vendor/nvim-treesitter/manifest.json` records every vendored
+nvim file's size and SHA-256** with the commit, and vitest fails on a
+difference or an unlisted file. `lib/syntax/folds.ts` (pure) turns a folds
+query's `@fold` matches into Monaco ranges as Neovim's fold expression
+reads them — a quantified capture (`(preproc_include)+`) is one fold, first
+node to last; `#trim!` drops trailing blank lines (Markdown sections); a
+node ending at column 0 ends a line earlier; two lines at least — plus **one
+VS Code rule: the node's own closer stays in view** (a `}`, `]`, `)`, end
+tag or JSX closing element at most `CLOSER_DEPTH` = 3 last-children down,
+past a `;`/`,`, that starts the fold's last line), so `class A {` folds with
+its `};` below, while a Python `def` ending in a multi-line call folds whole
+rather than leaving a lone `)`. Ranges sharing a start keep the widest.
+`SyntaxEngine.folds(id, version)` runs the query over the whole tree and
+**shares one `matchMs` (250 ms) between the query and reading its matches**
+(near 1 MiB, 40k folds took ~200 ms to read, more than the query); over it
+answers null, twice running the document folds by indentation from then
+on; a stale tree (a reparse over budget) still answers from the edited old
+tree; answers are cached per version and tree (Monaco's folding and its
+sticky scroll both ask). Host language only: a fence is one fold. The worker
+takes `{t: "folds", id, req, version}`; the client registers a
+`FoldingRangeProvider` for exactly `COVERED_LANGUAGES` beside the tokens
+provider, matched by request number, the same `REPLY_TIMEOUT_MS` (a silent
+worker is dead, as for tokens), and **null means indentation**: Monaco's
+folding and sticky scroll fall back to the indentation provider whenever
+every provider answers null, so the provider answers null on Monarch (large
+file, slow parse/edits, grammar failed, no worker), for an answer whose
+version the model has passed, and when the query was over budget — never
+`[]`, which would mean "no folds". `dotenv` has no provider and never reaches
+the worker. **Sticky scroll follows the tree's folds** with no change of its
+own: with no document symbol provider (E-1), Monaco's `outlineModel` falls
+through to the folding providers. `__hudSyntax.states()` gains `folds`
+(answers from the tree handed to Monaco). Sizes: first paint unchanged,
+`monacoBundle` +936 B, the worker +10.6 KB. Free checks:
+`lib/syntax/folds.test.ts` (a C++ class, a Python function, a Markdown
+section, where folds end, CRLF, every grammar, versions, the stale tree, the
+budget both halves, the cache), the folds half of `client.test.ts` (stand-in
+Monaco: registration, kinds, request numbers, stale and null answers, Monarch,
+the size budget, a silent worker) and `vendor.test.ts` (the manifest, every
+folds query compiles and captures only `@fold`), and `_fold_checks` in
+`tests/face/hud_v2_syntax_check.py` (the margin's fold controls in a C++
+file are the tree's — 1, 4, 6, 7, 13 — not indentation's 5 and 15; folding
+the class keeps `};`; sticky scroll holds `void autonomousRoutine(int
+side,`, where indentation would hold `{`; a Markdown heading folds; a file
+past the size budget folds by indentation). With the provider unregistered,
+7 of those fail (sticky shows `{`); the null/`[]`, version, both budget and
+off-after-two guards each fail their vitest when removed. Not done: region
+markers (`// #region`) — the indentation provider honours them, tree folds
+do not.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
