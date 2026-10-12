@@ -307,9 +307,7 @@ def mouse(kind, x, y, *, button="left", buttons=None, count=1):
 
 
 def click(window, x, y):
-    window.settled()
     window.send(mouse("mousePressed", x, y))
-    window.settled()
     window.send(mouse("mouseReleased", x, y))
 
 
@@ -319,7 +317,7 @@ def wheel(x, y, dy):
                                  "pointerType": "mouse"}}
 
 
-def type_keys(window, text, *, pace=True):
+def type_keys(window, text, *, pace=False):
     for ch in text:
         code = f"Key{ch.upper()}" if ch.isalpha() else ("Digit" + ch if ch.isdigit() else "")
         vk = ord(ch.upper())
@@ -989,6 +987,19 @@ class BrowserStream(unittest.TestCase):
         # message resets the connection; either way the socket is gone.
         self.assertIn(window.closed, (1009, "dropped"))
         self.assertNotIn("x" * 100, self.js(tab, "t.value"))
+
+    def test_05b_a_burst_is_never_dropped(self):
+        """Unpaced input, as a window sends a burst: every key lands and no
+        `input_dropped` is said while no dialog is open (PR #77 delta review:
+        an arrival check on the in-flight CDP call dropped 190 of 200)."""
+        tab = self.tab
+        self.navigate(tab, "/input")
+        window = self.attached(tab)
+        click(window, 250, 320)
+        text = "abcdefghij" * 10        # 200 events: under INPUT_QUEUE_MAX, whose refusal is its own rule
+        type_keys(window, text)
+        self.wait(lambda: self.js(tab, "t.value") == text, timeout=30, what="the whole burst")
+        self.assertFalse([m for m in window.messages if m.get("t") == "input_dropped"])
 
     # -- 5: the hold --------------------------------------------------------------------------------
 

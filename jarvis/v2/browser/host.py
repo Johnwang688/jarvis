@@ -816,8 +816,7 @@ class BrowserHost:
         tab_id = self._new_id(self._tabs)
         tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
                    stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab),
-                                    blocked=lambda: bool(tab.dialogs) or (tab.input_task is not None
-                                                                         and not tab.input_task.done())),
+                                    blocked=lambda: bool(tab.dialogs)),   # on arrival: a dialog only
                    cdp_lock=asyncio.Lock(), cast_lock=asyncio.Lock(), wakeup=asyncio.Event())
         self._tabs[tab.id] = tab
         page.on("framenavigated", lambda frame: self._landed(tab, frame))
@@ -1431,7 +1430,12 @@ class BrowserHost:
         if self.input_held():
             tab.stream.hold_through()
             return
-        if tab.stream.input_blocked():
+        # A dialog, or an earlier event Chrome has not answered within
+        # DELIVER_WAIT_S (the pump only gets here after that wait), drops this
+        # one: nothing banked behind a stuck page lands later, perhaps under a
+        # card. Judged here, never on arrival, where every event of an
+        # ordinary burst finds its predecessor still in flight (PR #77 delta).
+        if tab.dialogs or (tab.input_task is not None and not tab.input_task.done()):
             tab.stream.drop_blocked_input()
             return
         hold_count = tab.stream.hold_count

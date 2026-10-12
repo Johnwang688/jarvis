@@ -566,7 +566,10 @@ and `owner_state(tab_id)` are BR-9b's to drive. **Dialogs** go to the window
 (`{t:"dialog", id, kind, message, default}`, cleaned to 1000) and are
 answered there; dismissed after `DIALOG_TIMEOUT_S` (60), and at once with no
 window attached, with automatic dismissal waiting under a card. An open
-dialog or unanswered CDP input drops further input to that tab, with one
+dialog drops further input to that tab on arrival, and in the pump so does an
+earlier event Chrome has not answered within `DELIVER_WAIT_S` (never on
+arrival: every event of an ordinary burst finds its predecessor in flight,
+which dropped 190 of 200 keys — PR #77 delta review), with one
 `input_dropped` notice; nothing is banked for later. **Pop-ups** open as tabs and the
 opener's window hears
 `{t:"popup", tab_id}` (the listing carries `opener`); **the cap stays 12 in
