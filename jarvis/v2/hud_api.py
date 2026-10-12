@@ -1325,13 +1325,13 @@ def _not_a_page(project, raw, target) -> str | None:
     transcripts), wherever the project is."""
     roots = [Path(project.root).resolve()] + [Path(p).expanduser().resolve() for p in project.extra_dirs]
     for path in (Path(raw), Path(target)):
-        rel = next((path.relative_to(r) for r in roots if path.is_relative_to(r)), None)
-        if rel is None:
+        root = next((r for r in roots if path.is_relative_to(r)), None)
+        if root is None:
             return PROTECTED_PAGE
         lexical = Path(os.path.abspath(path))
         if any(p == d or p.is_relative_to(d) for d in editor_policy.jarvis_dirs() for p in (lexical, path.resolve())):
             return PROTECTED_PAGE
-        if any(part.startswith(".") and part != ".well-known" for part in rel.parts):
+        if editor_policy.hidden_component(path, root):
             return HIDDEN_PAGE
     return None
 

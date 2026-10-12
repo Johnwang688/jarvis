@@ -223,6 +223,16 @@ def _under(path: Path, directory: Path) -> bool:
     return path == directory or directory in path.parents
 
 
+def hidden_component(path: Path, root: Path) -> bool:
+    """Does `path` have a hidden component below `root` — a name starting
+    with `.` (`.git` and `.GIT`, `.docker/config.json`, `.npmrc`, a tool's
+    dotfolder), `.well-known` excepted? `path` must lie in `root`
+    (`ValueError` otherwise). What the preview origin (`hud_api._not_a_page`)
+    and the Browser's uploads (`act_rules.upload_refusal`) both refuse."""
+    rel = Path(path).relative_to(root)
+    return any(part.startswith(".") and part != ".well-known" for part in rel.parts)
+
+
 class Policy:
     """One request's view of the rules: the resolved sets are read once, so a
     tree of a thousand entries does not resolve the gate's paths a thousand

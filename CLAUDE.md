@@ -869,8 +869,9 @@ ChatGPT-auth turn ignores `environments: []`, a read-only command can run
 before the turn is refused; its output is discarded. A busy lock waits in the queue (`CODEX_BUSY_TRIES` × 30
 s, others go ahead), then OpenRouter; so does any Codex failure or an
 unusable answer. **OpenRouter**: `models.tier("orchestrator")` with no tools
-and `max_tokens` 1000, **never a Chinese-hosted vendor** (`titles.cn_hosted`
-by id prefix; the configured orchestrator instead, else no title).
+and `max_tokens` 1000, **never a Chinese-hosted vendor** (`models.cn_hosted`
+by id prefix — moved from `titles` in BR-9a, one list with the Browser's
+reviewer; the configured orchestrator instead, else no title).
 `clean_title`: first non-empty line, invisible characters out, a "Title:"
 label, markdown, quotes and trailing punctuation off, more than 12 words is
 an answer and is refused. The words are `secrets.scrub`bed before they leave
@@ -2473,7 +2474,8 @@ The rules the two reviews left, in one place:
   a dropped file named like a store (`editor_policy.credential_name`) is never
   attached. **The preview origin refuses any path with a hidden component
   inside the project except `.well-known`, and anything under Jarvis's config
-  and data folders** (`hud_api._not_a_page`, `editor_policy.jarvis_dirs`): it
+  and data folders** (`hud_api._not_a_page`, which asks
+  `editor_policy.hidden_component` and `editor_policy.jarvis_dirs`): it
   answers any loopback client, `fetch_page` included.
 - The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
   file by name, LOW4); a save's unexpected `OSError` is 500 and a
@@ -2840,6 +2842,100 @@ boundary is still filesystem permissions. Free checks: `secrets_check`
 v2 `permissions_check` (`env_file_checks`), `claude_provider_check`
 (`env_hook_checks`, the real `build_permit` behind the hook) and
 `terminal_text_check`; all fail on 283d45c, and 17 guard removals each bite.
+
+**The Browser's action rules and reviewer, BR-9a (2026-10-12; amendment 1 to
+the Browser plan, §B.3–§B.5, decisions BD-1..BD-4). Pure, and not wired yet:
+BR-9b calls them from `hud_browser_act`'s gate.** Two modules in
+`jarvis/v2/browser/`. **`act_rules.pre_judge(Facts) → PreVerdict`** answers
+REFUSE, ASK(category), ALLOW or CLASSIFY with no model call. `Facts` (frozen)
+holds the action, key, text, `nav_url`, the page's `url`, the target
+`Element` and its `Form` — attributes only, **no field for a value** — the
+upload path and project folder. **Every state fact defaults to None and only
+an explicit value passes** (review of PR #71, MED 2): a flag must be the
+exact bool it needs, a number a finite non-negative int or float — `None`,
+`"no"`, a str number, a negative count, NaN and infinity all refuse, so a
+fact the caller forgot refuses (`STATE_FACTS` names them; the suite unsets
+each in turn) — and `pre_judge` turns any exception into a refusal. Order:
+H12 (desk, depth, sub-agent), H11, H5 (Private needs its own drive switch),
+H6, H3, H4 (paused; an `owner_input_age_s`, whenever one is given, must be
+valid and at least `OWNER_QUIET_S` = 5 s, `owner_has_input=True` needs one,
+and `owner_has_input=False` beside one is a contradiction that refuses — the
+delta review's regression), H9, H10's counts, H7's fact; a valid action
+(`press` takes named keys only, a printable character is refused; at most
+10,000 characters to type and 8 KB to select; `type`/`select` need a
+target); H7's belt (a navigate address: http(s) only, at most 8 KB,
+Jarvis's ports, an ambiguous authority, userinfo; a link or a submitted
+form's action: at most 8 KB, Jarvis's ports, an ambiguous authority); **H1** (type, select, Backspace/Delete/Space into `type=password`,
+an `autocomplete` token current-/new-password, one-time-code, webauthn or
+**any `cc-*` anywhere in the token list**, the label words and their joined
+spellings on name, id, label, placeholder, aria-label and accessible name
+(English only), a numeric 4–8 field labelled just "code", four or more
+one-character boxes, any field in a `PAYMENT_FRAME_HOSTS` frame, or a focused
+<iframe> showing one — clicking into one is not refused); **H2** (text, a
+navigate address, a clicked link or a submitted form's action holding a
+`secrets.secret_values()` or caller's value in `terminal_guard.value_forms`'
+spellings, or a `credential_patterns` shape); **H8** (`upload_refusal`: a
+regular file with one name on disk, under the project folder lexically and
+resolved, at most 50 MB, not `secrets.is_credential`, not `editor_policy`'s
+withheld, not the gate's state, not in Jarvis's own folders, and no hidden
+component but `.well-known` — `editor_policy.hidden_component`, the preview
+origin's own rule, moved there from `hud_api._not_a_page` so both call one
+function in a SELF_PROTECTED module; `PreVerdict.path` is what was judged, and **BR-9b must judge again
+after the card and upload a private copy opened `O_NOFOLLOW`**). Then the
+ASK floors (every upload; a click on anything but a text field or on
+anything that submits, Enter, or Space on such a control, in a form — or
+beside a field — holding a password, OTP or payment field;
+`ASK_URL_SHAPES` on the route of the address, link or submit's action — the
+path, the fragment (`#/login`) and route-query values (`?route=checkout/…`),
+decoded and lower-cased, a host's own shapes first; `chrome:` pages as
+account_security; links ending in an `EXECUTABLE_EXTENSIONS` name by
+`executable_name`, which `executable_download` shares; an editing key or Enter
+with no target named, as `no_target`), the turn's 40 judged actions (floors
+and CLASSIFY count, the ALLOW tier does not), the ALLOW tier (scroll, back,
+forward; **the nav keys only on a known target that is no frame and is in no
+form and beside no field holding a password, OTP or card** — with autofill
+on, ArrowDown or Tab in a card field accepts a saved card, MED 3, for BR-9b
+to confirm in real Chrome; **Backspace/Delete only in a text field** — on a
+mail row, a file, a grid cell or a button they delete the selection, the
+review's HIGH; at most 64 characters with no line break into `type=search`,
+`role=searchbox` or a GET form's field — never beside a sensitive field),
+else CLASSIFY. **Linear**: no regex is built from page text, labels are
+normalised by C-level passes (camelCase split for `name`/`id` only, which
+fail closed past 1024 characters), route segments go into sets; a 1 MB label
+is judged in a few tens of ms, and the URL matchers stay linear on 100,000
+characters though the rules refuse past 8 KB unread. Every refusal reason is
+a fixed `R_*` sentence.
+**`act_review.judge(facts, owner_words, *, extra_values) →
+ActVerdict(verdict, category, reason, source)`** is `command_review`'s shape:
+the owner's words (≤ 500) outside, everything else in one `untrusted.fence`
+with a tag per call, capped as §B.5 says; a flagged context, or a credential
+value (the caller's too) or shape anywhere in the request, means no call and
+ask (source `guard`); **never a Chinese-hosted model** (MED 4: the review
+tier follows the owner's selection, so a model `models.cn_hosted` names falls
+back to the configured orchestrator, and if that is CN-hosted too, no call
+and ask); JSON only, exactly three keys, each once; **every failure is ask**
+(category `unjudged`); only `ordinary` is ever allowed;
+`JARVIS_BROWSER_REVIEW_AUTOALLOW=0` turns allow into ask and leaves deny;
+only ordinary allows are cached (15 min, 512), **keyed by the profile, the
+owner's words and a digest of everything the model saw plus every text,
+address, element and form in full** (MED 1: a narrower key reused an "OK"
+after "saved" under "Delete this repository", a Download link for another
+href and a top-page button in an ad frame). **The call is `max_retries=1,
+stream=False`**: `llm.chat`'s `max_retries` is its attempt count, so the
+amendment's `max_retries=0` would send nothing and every action would ask.
+The model is `models.tier("browser_review")` once a config defines that tier
+(BD-4), else the review tier. `act_review.decide(pre, verdict)` is the gate's
+outcome: anything but exactly one of the four kinds refuses, a floor is never
+lowered, the belts apply again, and CLASSIFY with no answer asks. Free
+suites: `tests/v2/browser_act_rules_check.py` (62) and
+`tests/v2/browser_act_review_check.py` (34), with `llm.chat` raising
+throughout and `secrets._JARVIS_ROOT` a temp folder; 47 guard removals each
+fail their suite in a scratch copy (the PR lists them). The two moved
+functions are pinned where they are used: `hud_backend_check`'s
+`OneHiddenRule` and `titles_check`'s `OneVendorList` patch the one function
+and see the verdict move, so a copy fails them. Left for BR-9b: the
+wiring, the `browser_review` tier, SELF_PROTECTED for both modules, and the
+re-check and private copy for uploads.
 
 **The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
 for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
@@ -3297,6 +3393,86 @@ round's: the clock removed (eight vitests, and in Chromium four ~10 s long
 tasks) and poison removed (three vitests). Not
 done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
 edit to `.editorconfig` reaches files opened after it (3 s), not those open.
+
+**The Diff pane shows the project's uncommitted changes (2026-10-12; the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view; design §18; contract in
+`docs/hud-api.md`).** No new route: ED-9's `git/status` and `git/base` and
+ED-2's read. **The mode** is `lib/scm.ts` `diffMode`: **a Diff pane never
+shows another task than a drawn Task pane** (review of PR #67, L3) — while
+one is drawn and shows the window's task, the Diff shows that task's diff,
+over a pin and after a thread is picked, and its picker is off, saying why;
+else a task picked more
+recently than a thread (`taskFocus`, the rule Editor and Browser panes follow) shows
+the task's diff exactly as before (`DiffTab`) — **the task beats the pin**,
+because a pane's `projectId` is shared by its views (a File pane pins its
+project when it opens a file, and keeps the pin when switched to Diff; with
+the pin first, `hud_v2_csp_check`'s task click showed uncommitted changes),
+and `workspace.show("task")` relies on a drawn Diff pane following the task;
+else the pane's pinned live project (its header's `pane-N-diff-project`
+picker, E-13's shape) shows that project's uncommitted changes; else the
+chat's project's; else a sentence. **Picking a project in that picker sets
+`taskFocus` false** (as picking a thread does), so the choice shows at once;
+the picker reads Follow while a task is shown. The caption (`diff-mode`,
+`data-mode`, `data-why`) says what and why — `diff-mode-what` and
+`diff-mode-why`: the Task pane's task, the task picked last, this pane's
+project or the chat's project (`diffWhy`). **The list** (`components/ProjectDiff.tsx`, `scmRows`): ED-9's
+one status poller, subscribed only while the pane is drawn; **`ProjectDiff`
+is `memo(...)` with a comparator that reads its callbacks through a ref**
+(App hands it fresh closures every render) and its rows follow the status's
+version, never the answer object — unmemoized, a chat keystroke redrew the
+list, 17 ms at 2,000 changed files and 132 ms at the 20,000 cap (review M1;
+`ProjectDiff.test.ts` counts row renders); modified/added/
+untracked/renamed/deleted/conflict files and untracked folders, each with
+its letter (M A U R D C) in the explorer's `data-git` colours and
+`FileIcon`; `ignored` never; truncation and no repository/no changes said
+in a sentence. **The sides**: HEAD from `git/base` in a `jarvis-diff:`
+model this view makes and disposes; the right side **is the open buffer's
+own model** when one holds the file (found by project and path, by
+`root_real`, or by the read's `abs`) — borrowed, never copied, held or
+disposed here, released on the model's `onWillDispose` so a File pane that
+lets the buffer go never leaves a disposed model on screen (the view falls
+back to a read, saying "…" meanwhile — and one disposed before Monaco
+loaded is "…" too, never an empty side that reads as a deletion) — else
+ED-2's read in a `jarvis-diff:` model; a deletion's
+right side is empty; binary/too_large/not_a_file say so. **No diff
+computation outlives its models** (review L1): the editor's view model is
+the view's own (`createViewModel`) and is disposed — cancelling a diff the
+worker is still computing — before any model goes. Handed `{original,
+modified}`, Monaco 0.57 keeps a reference to the view model it makes that
+nothing releases, so its computation was never cancelled, and a row picked
+then opened and edited at once threw `no diff result available`, uncaught.
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` still pass
+`{original, modified}`; not changed here. Both sides
+read-only, side by side even in a narrow pane; ↻ reads again; the right
+side of an unopened file is re-read when the status moves. **Env files are
+listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
+`isEnvName`) to a sentence with Open — no `git/base`, no read, no model;
+`git/base` runs before any read, so an env file by resolution is refused
+there (a 403 naming an env file shows the same sentence) and never read;
+and a live buffer of kind `env` is never put in a diff. **`git/base` now
+answers a file deleted from the working tree** (`deleted: true`; nothing at
+the path, not even a broken link; judged exactly as before, before git runs;
+not in HEAD either is still 404). **Open** is `toFilePane` → `placeFile` →
+`askFile(open)` — never over the Diff pane or a VEX view. Read-only: no
+staging, reverting, committing or discarding (SCM actions are out of
+scope). Under a card the picker, Open and ↻ are disabled and a row click
+does nothing. Free checks: `lib/scm.test.ts` (19), `components/ProjectDiff.test.ts`
+(M1's render counts), `tests/v2/editor_git_check.py`
+(deletions answered, judged and 404 when absent from HEAD),
+`hud_v2_csp_check`'s single-pane task diff and `tests/face/hud_v2_scm_check.py`
+(65, a `MockDaemon(0)` of its own after the git section of `hud_v2_check`;
+the mock's `git/base` answers deletions and `states`; L1's swap with no wait,
+L2's `link.txt` whose HEAD text is refused as an env file and is never read,
+L3's chat · Task · Diff layout). Guard removals, each shown to bite: with
+`rowShows`' env rule dropped, the headless check sees a `git/base?path=.env`
+request and the vitest fails; `memo(` dropped or callbacks compared, 63 row
+renders where 3 are right; the owned view model dropped, `no diff result
+available`; `baseOk` dropped from the read's condition, a `/file?path=link.txt`
+read; the Task pane left out of the mode, the Diff follows the chat. Not
+done: SCM actions; a file not open in the
+editor that changes on disk while the project's git states stay the same is
+re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort

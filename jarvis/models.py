@@ -629,6 +629,20 @@ def selected() -> str:
         return ""  # a corrupt roster must never take the loop down with it
 
 
+# The routing policy (CLAUDE.md, 2026-07-30): no personal data to models from
+# these vendors. One list, for every caller that sends personal data where the
+# owner's selection could point it (chat titles, the Browser's reviewer).
+CN_VENDORS = ("qwen/", "deepseek/", "moonshotai/", "z-ai/", "zhipuai/", "thudm/", "baidu/",
+              "minimax/", "inclusionai/", "bytedance/", "bytedance-seed/", "tencent/",
+              "stepfun/", "stepfun-ai/", "01-ai/", "xiaomi/", "meituan/", "baichuan/",
+              "alibaba/", "kwaipilot/")
+
+
+def cn_hosted(model: str) -> bool:
+    """Is this OpenRouter model id from a Chinese-hosted vendor (by prefix)?"""
+    return (model or "").strip().lower().startswith(CN_VENDORS)
+
+
 def tier(name: str) -> str:
     """The model for one tier, honoring the owner's selection.
 
