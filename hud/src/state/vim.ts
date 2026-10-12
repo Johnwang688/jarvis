@@ -26,13 +26,48 @@ export interface VimHandle {
   dispose(): void;
 }
 
+let neutralised = false;
+
+/**
+ * What vim must not do in this window, set once on its shared tables (review
+ * of PR #59):
+ *  - **`:colorscheme <x>` does nothing.** monaco-vim sets it with Monaco's
+ *    `setTheme`, which is window-wide: every editor would leave the Graphite
+ *    scheme (ED-3), and an unknown name falls back to the light `vs` theme,
+ *    red strings and all.
+ *  - **`u`, Ctrl+R, `:undo` and `:redo` do nothing on a read-only editor**
+ *    (a read-only kind, or any editor under an approval card): monaco-vim
+ *    calls the model's `undo()`/`redo()` directly, past the editor's
+ *    read-only option.
+ */
+function neutralise(VimMode: any) {
+  if (neutralised) return;
+  neutralised = true;
+  const Vim = VimMode.Vim;
+  Vim.defineEx("colorscheme", "colo", () => {});
+  const guarded = (op: "undo" | "redo") => (cm: any) => {
+    if (editorsBlocked() || cm?.getOption?.("readOnly")) return;
+    cm?.editor?.getModel?.()?.[op]?.();
+  };
+  VimMode.commands.undo = guarded("undo");
+  VimMode.commands.redo = guarded("redo");
+  Vim.defineEx("undo", "u", guarded("undo"));
+  Vim.defineEx("redo", "red", guarded("redo"));
+}
+
 /**
  * Attach vim to `ed`, its status line in `node`; `save` is what `:w` runs.
  * Rejects if the library cannot load (the editor then stays as it was).
  */
 export async function attachVim(ed: any, node: HTMLElement, save: () => void): Promise<VimHandle> {
-  const { initVimMode } = await import("monaco-vim");
+  const { initVimMode, VimMode } = await import("monaco-vim");
+  neutralise(VimMode);
   const adapter: any = initVimMode(ed, node);
+  // Its `theme` option is Monaco's window-wide `setTheme`: never from here.
+  const setOption = adapter.setOption.bind(adapter);
+  adapter.setOption = (key: string, value: unknown) => {
+    if (key !== "theme") setOption(key, value);
+  };
   // `:w` / `:write` (any argument ignored): this editor's buffer, never another's.
   adapter.save = () => {
     if (editorsBlocked() || !ed.getModel?.()) return;

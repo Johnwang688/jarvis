@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  applyEditorConfig, editorConfigFor, forgetEditorConfig, overrideFor, reapplyEditorConfig, TIMEOUT_MS,
+  applyEditorConfig, editorConfigFor, forgetEditorConfig, overrideFor, reapplyEditorConfig, resolveFor, TIMEOUT_MS,
   type EditorConfigDeps,
 } from "./editorconfig";
 import { Buffers, type BufferDeps, type TextModel } from "./buffers";
@@ -202,5 +202,61 @@ describe("the buffer registry's prepare hook", () => {
     const v = await b.open("p1", "a.c", "2|a.c");
     expect(v.dirty).toBe(false);
     expect(v.kind).toBe("text");
+  });
+});
+
+// The review of PR #59: what is cached, and what is never fetched.
+describe("caching by content, and the size cap before a read", () => {
+  /** Files with an etag and a size each, as the real stat answers. */
+  function world2(files: Record<string, { text: string; etag: string; size?: number }>) {
+    const reads: string[] = [];
+    const deps: EditorConfigDeps = {
+      stat: async (_id, paths) => ({
+        files: Object.fromEntries(paths.map((p) => [p, p in files
+          ? { etag: files[p].etag, kind: "text", size: files[p].size ?? files[p].text.length } as any
+          : { gone: true }])),
+      }),
+      read: async (_id, path): Promise<FileRead> => {
+        reads.push(path);
+        return { path, content: files[path].text, kind: "text", protected: false };
+      },
+    };
+    return { deps, reads, files };
+  }
+
+  it("restored tabs on one file resolve once per configuration content", async () => {
+    const w = world2({ ".editorconfig": { text: "[*.c]\nindent_style = tab\n", etag: "a".repeat(32) } });
+    const first = await resolveFor(w.deps, "p1", "src/main.c", 1000);
+    const again = await resolveFor(w.deps, "p1", "src/main.c", 5000); // past the folder cache: stat again
+    expect(again).toBe(first); // the same resolution, not matched again
+    expect(w.reads).toEqual([".editorconfig"]); // and the same content not read again
+    w.files[".editorconfig"] = { text: "[*.c]\nindent_style = space\n", etag: "b".repeat(32) };
+    const changed = await resolveFor(w.deps, "p1", "src/main.c", 9000);
+    expect(changed).not.toBe(first);
+    expect(changed.props.indent_style).toBe("space");
+    expect(w.reads).toEqual([".editorconfig", ".editorconfig"]);
+  });
+
+  it("a file the stat says is over 64 KB is never downloaded", async () => {
+    const w = world2({ ".editorconfig": { text: "[*]\nindent_size = 2\n", etag: "c".repeat(32), size: 64 * 1024 + 1 } });
+    expect(await editorConfigFor(w.deps, "p1", "a.c")).toEqual({});
+    expect(w.reads).toEqual([]);
+  });
+
+  it("an over-budget resolution is said once, by path, and configures nothing", async () => {
+    const heavy = Array.from({ length: 123 }, (_, n) => `[${"{a,b}".repeat(6)}${"*x".repeat(27)}y${n}]\nindent_size = 2`);
+    const w = world2({ ".editorconfig": { text: `root = true\n${heavy.join("\n")}`, etag: "d".repeat(32) } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const path = `src/${"robot_drive_subsystem_controller_".repeat(8)}.py`;
+      const r = await resolveFor(w.deps, "p1", path, 1000);
+      expect(r).toMatchObject({ over: "budget", props: {} });
+      await resolveFor(w.deps, "p1", path, 1000);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain(path);
+      expect(String(warn.mock.calls[0][0])).not.toContain("{a,b}");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

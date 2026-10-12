@@ -162,7 +162,11 @@ export function PaneEditor(props: {
         reapplyEditorConfig();
         trackEditor(ed, { vim: false });
         unsettings = onEditorSettings((s) => {
-          ed.updateOptions(editorOptions(s, { markdown: markdown.current }));
+          const opts = editorOptions(s, { markdown: markdown.current });
+          // While vim drives the editor its cursor is vim's (a block in
+          // normal mode); the setting comes back when vim is turned off.
+          if (vim.current) delete opts.cursorStyle;
+          ed.updateOptions(opts);
           reapplyEditorConfig();
         });
         editorRef.current?.(ed);

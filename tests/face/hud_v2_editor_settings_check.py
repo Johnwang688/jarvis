@@ -114,7 +114,8 @@ def settings_checks(browser, mock, base, check, until, guard, init_script, only:
     keep = {k: dict(v) for k, v in mock.world["files"].items()}
     try:
         _boot(page, mock, base, until)
-        for section in (_apply_checks, _garbage_checks, _editorconfig_checks, _card_checks, _vim_checks):
+        for section in (_apply_checks, _garbage_checks, _editorconfig_checks, _card_checks, _vim_checks,
+                        _vim_review_checks):
             if only and only not in section.__name__:
                 continue
             _store(page, None)
@@ -376,6 +377,75 @@ def _vim_checks(page, mock, check, until):
     page.keyboard.type("q")
     check("and a key types again", bool(until(lambda: _text(page, 2).startswith("q#v"), timeout=2)), _text(page, 2)[:20])
     check("the probe says no editor is vim's", not any(e["vim"] for e in _probe(page)["editors"]))
+    page.evaluate("localStorage.removeItem('jarvis.dictation')")
+
+
+def _theme_of(page, n: int) -> dict:
+    return page.evaluate("""n => {
+      const ed = document.querySelector(`[data-testid="pane-${n}"] .monaco-editor`);
+      const bg = document.querySelector(`[data-testid="pane-${n}"] .monaco-editor-background`);
+      return { cls: ed ? ed.className : '', bg: bg ? getComputedStyle(bg).backgroundColor : '' };
+    }""", n)
+
+
+def _vim_review_checks(page, mock, check, until):
+    """The review of PR #59: `:colorscheme` never leaves Graphite, a settings
+    change keeps vim's cursor, and vim's undo does nothing on a read-only file."""
+    page.evaluate("localStorage.setItem('jarvis.dictation', 'off')")
+    _boot(page, mock, None, until, reload=True)
+    check("setup: calc.py opens in pane 2", _open(page, until, 2, "calc.py", double=True))
+    check("setup: allowlist.json (read-only) opens in pane 3", _open(page, until, 3, "allowlist.json", double=True))
+    _open_dialog(page, until)
+    page.locator('[data-testid="es-vim"]').check()
+    page.keyboard.press("Escape")
+    status = page.locator(_pane(2, '[data-testid="editor-vim-status"]'))
+    until(lambda: status.count() == 1 and "NORMAL" in status.inner_text(), timeout=8)
+    before = _theme_of(page, 2)
+    check("setup: the editor wears the Graphite scheme (a dark base)", "vs-dark" in before["cls"].split(), str(before))
+    page.locator(_lines(2)).click()
+    page.keyboard.type(":colorscheme vs")
+    page.keyboard.press("Enter")
+    time.sleep(0.3)
+    after = _theme_of(page, 2)
+    other = _theme_of(page, 3)
+    check(":colorscheme vs changes nothing, in this editor or any other",
+          after["bg"] == before["bg"] and "vs-dark" in after["cls"].split() and "vs" not in after["cls"].split()
+          and "vs-dark" in other["cls"].split() and other["bg"] == before["bg"],
+          f"{before} → {after}; pane 3 {other}")
+    # A settings change while vim drives the editor keeps vim's block cursor.
+    page.locator(_lines(2)).click()
+    page.keyboard.press("Escape")
+    until(lambda: (_editor(page, "calc.py") or {}).get("cursorStyle") == "block", timeout=3)
+    _open_dialog(page, until)
+    page.locator('[data-testid="es-font-size"]').select_option("14")
+    e = _editor(page, "calc.py") or {}
+    check("a settings change keeps vim's normal-mode block cursor (and still applies)",
+          e.get("cursorStyle") == "block" and e.get("fontSize") == 14, str(e))
+    page.keyboard.press("Escape")
+    # Vim's u on a read-only file: an agent's write reloads it in place (one
+    # undo step), and u must not take the file back to the old text.
+    mock.disk_write("allowlist.json", '["agent"]\n')
+    check("setup: the read-only file reloads in place with the new text",
+          bool(until(lambda: '"agent"' in _text(page, 3), timeout=10)), _text(page, 3))
+    page.locator(_lines(3)).click()
+    page.keyboard.press("Escape")
+    page.keyboard.press("u")
+    page.keyboard.type(":undo")
+    page.keyboard.press("Enter")
+    time.sleep(0.3)
+    check("vim's u and :undo do nothing on a read-only editor",
+          '"agent"' in _text(page, 3) and (_buf(page, "allowlist.json") or {}).get("dirty") is False,
+          _text(page, 3) + " " + str(_buf(page, "allowlist.json")))
+    page.locator(_lines(2)).click()
+    page.keyboard.press("Escape")
+    page.keyboard.press("x")
+    until(lambda: (_buf(page, "calc.py") or {}).get("dirty") is True, timeout=2)
+    page.keyboard.press("u")
+    check("while u still undoes in an editable one",
+          bool(until(lambda: (_buf(page, "calc.py") or {}).get("dirty") is False, timeout=2)))
+    _open_dialog(page, until)
+    page.locator('[data-testid="es-vim"]').uncheck()
+    page.keyboard.press("Escape")
     page.evaluate("localStorage.removeItem('jarvis.dictation')")
 
 

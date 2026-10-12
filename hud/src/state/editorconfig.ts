@@ -24,7 +24,7 @@ import type { FileRead } from "../types";
 import type { StatRow } from "../lib/buffers";
 import {
   candidateDirs, configPath, FILE_MAX, overrideOf, parseEditorConfig, resolveProps,
-  type ConfigFile, type Override,
+  type ConfigFile, type Override, type Resolved,
 } from "../lib/editorconfig";
 
 export interface EditorConfigDeps {
@@ -39,24 +39,54 @@ export const TIMEOUT_MS = 2500;
 
 interface Entry {
   at: number;
-  /** The stat's answer for this folder's `.editorconfig`: there and readable as text. */
-  exists: Promise<boolean>;
-  /** The parsed file, read the first time someone needs it. */
-  file: Promise<ConfigFile | null> | null;
+  /** The stat's answer for this folder's `.editorconfig`: its etag when it is there and readable as text. */
+  etag: Promise<string | null>;
 }
 
+/** Folders' stat answers, kept `CACHE_MS`. */
 const cache = new Map<string, Entry>();
+/** Parsed files by (project, folder, etag): a file is read once per content. */
+const parsed = new Map<string, Promise<ConfigFile | null>>();
+/**
+ * Resolutions by (project, path, every config's folder and etag): restored
+ * tabs, and the same file opened again, never redo the matching (review of
+ * PR #59).
+ */
+const resolved = new Map<string, Resolved>();
+/** Resolutions already said to be over their budget: said once each. */
+const warned = new Set<string>();
+const PARSED_MAX = 256;
+const RESOLVED_MAX = 2048;
 const keyOf = (projectId: string, dir: string) => `${projectId}\u0000${dir}`;
 
-/** Tests only: forget every folder's answer. */
+function remember<V>(map: Map<string, V>, key: string, value: V, max: number) {
+  if (map.size >= max) map.clear();
+  map.set(key, value);
+}
+
+/** Tests only: forget every folder's answer, every parse and every resolution. */
 export function forgetEditorConfig() {
   cache.clear();
+  parsed.clear();
+  resolved.clear();
+  warned.clear();
 }
 
 /** The properties `.editorconfig` gives `path` in `projectId` (`{}` when none apply). */
 export async function editorConfigFor(
   deps: EditorConfigDeps, projectId: string, path: string, now = Date.now(),
 ): Promise<Record<string, string>> {
+  return (await resolveFor(deps, projectId, path, now)).props;
+}
+
+/**
+ * The resolution for `path`: its properties, or why it has none (a file of too
+ * many sections, the work budget spent — `lib/editorconfig.ts`). An over-budget
+ * resolution is said once in the console, by name, never with any content.
+ */
+export async function resolveFor(
+  deps: EditorConfigDeps, projectId: string, path: string, now = Date.now(),
+): Promise<Resolved> {
   const dirs = candidateDirs(path);
   const missing = dirs.filter((d) => {
     const e = cache.get(keyOf(projectId, d));
@@ -68,24 +98,45 @@ export async function editorConfigFor(
       () => ({} as Record<string, StatRow>),
     );
     for (const d of missing) {
-      const exists = rows.then((files) => {
+      const etag = rows.then((files) => {
         const row = files[configPath(d)];
-        return !!row && !row.gone && !row.error && row.kind === "text" && typeof row.etag === "string";
+        if (!row || row.gone || row.error || row.kind !== "text" || typeof row.etag !== "string") return null;
+        // A file over the cap is never downloaded (the real stat says its size).
+        const size = (row as { size?: unknown }).size;
+        if (typeof size === "number" && size > FILE_MAX) return null;
+        return row.etag;
       });
-      cache.set(keyOf(projectId, d), { at: now, exists, file: null });
+      cache.set(keyOf(projectId, d), { at: now, etag });
     }
   }
-  const found: { dir: string; file: ConfigFile }[] = [];
+  const found: { dir: string; file: ConfigFile; etag: string }[] = [];
   for (const d of dirs) { // nearest first
     const e = cache.get(keyOf(projectId, d));
-    if (!e || !(await e.exists)) continue;
-    if (!e.file) e.file = readConfig(deps, projectId, configPath(d));
-    const file = await e.file;
+    const etag = e ? await e.etag : null;
+    if (!etag) continue;
+    const pkey = `${keyOf(projectId, d)}\u0000${etag}`;
+    let p = parsed.get(pkey);
+    if (!p) {
+      p = readConfig(deps, projectId, configPath(d));
+      remember(parsed, pkey, p, PARSED_MAX);
+    }
+    const file = await p;
     if (!file) continue;
-    found.push({ dir: d, file });
-    if (file.root) break;
+    found.push({ dir: d, file, etag });
+    if (file.root || file.tooMany) break;
   }
-  return resolveProps(found.reverse(), path);
+  found.reverse();
+  const rkey = [projectId, path, ...found.map((f) => `${f.dir}@${f.etag}`)].join("\u0000");
+  const known = resolved.get(rkey);
+  if (known) return known;
+  const r = resolveProps(found, path);
+  remember(resolved, rkey, r, RESOLVED_MAX);
+  if (r.over && !warned.has(rkey)) {
+    warned.add(rkey);
+    console.warn(`.editorconfig not applied to ${path}: ${r.over === "sections"
+      ? "a file there has too many sections" : "its sections are too much work to match"}`);
+  }
+  return r;
 }
 
 async function readConfig(deps: EditorConfigDeps, projectId: string, path: string): Promise<ConfigFile | null> {
