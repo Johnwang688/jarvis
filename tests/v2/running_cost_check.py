@@ -137,9 +137,16 @@ def recount_thread_checks() -> None:
         check(sum("recounted" in line for line in lines.messages) == 1, "and none for the unchanged")
 
         before = {t: raw(t) for t in (claude, right)}
-        check(recount_threads(stores, m.ProviderName.CLAUDE, log=_logger(Lines())) == [],
-              "a second run changes nothing")
+        read, real_read = [], stores.threads.read_log
+        stores.threads.read_log = lambda thread_id: read.append(thread_id) or real_read(thread_id)
+        try:
+            check(recount_threads(stores, m.ProviderName.CLAUDE, log=_logger(Lines())) == [],
+                  "a second run changes nothing")
+        finally:
+            stores.threads.read_log = real_read
         check(all(raw(t) == data for t, data in before.items()), "and rewrites nothing it marked")
+        check(claude not in read and right not in read and codex not in read and fast not in read,
+              f"and reads no marked thread's log, nor any other provider's (read {sorted(read)})")
 
 
 def _logger(handler: logging.Handler) -> logging.Logger:

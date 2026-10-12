@@ -606,6 +606,26 @@ which `hud_api.check_origin`'s strict Host test (and
 runs a real port-0 daemon and real headless Chromium and reads the headers
 where the daemon receives them; its same-origin read fails on main.
 
+**A Claude thread's cost is the CLI's running total, counted once
+(2026-10-12; `jarvis/v2/running_cost.py`).** `ResultMessage.total_cost_usd`
+is the CLI process's running total for the conversation, not the turn's, and a
+resumed CLI continues from the total its transcript saved (the 2.1.295 CLI's
+own field text: "read the latest result rather than summing across results").
+The provider passed it through as each turn's cost and the daemon summed it,
+so thread 447ff25e read $109.97 for $23.22. Now every result's USAGE carries
+what that result added (`running_cost.step`: a new session measured from 0, a
+resume from `Thread.provider_cost_total`, which the daemon saves from the
+event's `cost_total`; a figure below that is a total that started again from
+zero; a zeroed or missing one is no reading and stays `None`), so a steer's,
+a background notice's, a stopped and a `/compact` turn's result each count
+once. Tokens need none of it (`usage` is per turn). Once per Claude thread,
+at daemon start, `recount_threads` puts a pre-fix total right from its own log
+and marks it (`cost_recount`) — only when the logged figures add up to the
+stored total; never a Codex or fast-path thread. Not recounted: the ledger's
+per-day rows and a finished task's stored status. Free checks:
+`tests/v2/running_cost_check.py` and `running_cost_checks`/`daemon_cost_checks`
+in `claude_provider_check.py`.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
