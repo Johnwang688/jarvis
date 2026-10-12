@@ -66,6 +66,15 @@ since the v1 face and the v2 daemon are separate processes.
 - `GET /projects/{id}/platform` → `{"platform": "wsl"|"windows", "note":
   str|null}` — `windows` when the root is under `/mnt/<drive>/`, with the
   9p caution as the note.
+- Every project the routes answer with (`GET /projects`, `GET`/`PATCH
+  /projects/{id}`, `POST /projects`) carries **`root_real`** beside `root`
+  (#50, 2026-10-11): where the root resolves (`projects.resolved_root`, the
+  root the file routes read under), or `null` when it cannot be resolved.
+  A file's `abs` sits under it even when `root` goes through a symlink, so
+  a File pane's tree finds a buffer read through another project
+  (`lib/dirtyMarks.ts` `treeRoot`, falling back to `root`). Display data
+  only: never stored, never on the bus, and 400 if sent back on a POST or
+  PATCH.
 
 ## Files (scoped: project root + `extra_dirs`; anything else 403)
 
