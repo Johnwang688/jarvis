@@ -36,6 +36,7 @@ from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
                        PermissionCallback, Provider, SessionHandle, SessionLost, SteerRefused,
                        Usage, UserMessage)
 from .stores import ProjectArchived, Stores, StoreError, _validate, _write_bytes
+from . import running_cost
 from . import worktrees
 
 LOG = logging.getLogger(__name__)
@@ -305,6 +306,10 @@ class Daemon:
             # above and never reaches this, so it cannot delete the live
             # daemon's carriers (PR #35 review).
             self._sweep_carriers()
+            # Before any session opens (a session saves its own copy of a
+            # thread): Claude thread costs counted before 2026-10-12 summed
+            # the CLI's running totals. Once per thread, from its own log.
+            running_cost.recount_threads(self.stores, ProviderName.CLAUDE, log=LOG)
             self.started_at = time.monotonic()
             for listener in servers:
                 listener.daemon_threads = True
@@ -1194,6 +1199,12 @@ class Daemon:
                 else:
                     thread.tokens += usage.work_tokens
                     thread.cost_usd += usage.cost_usd or 0
+                # Claude's running total, saved so a resumed CLI (which
+                # continues from its transcript's total) is measured from it.
+                if "cost_total" in data:
+                    running = running_cost.figure(data.get("cost_total"))
+                    if running is not None:
+                        thread.provider_cost_total = running
                 thread.updated = utcnow()
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,

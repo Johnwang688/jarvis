@@ -1495,14 +1495,15 @@ def usage_checks() -> None:
         handle = provider.start(thread(), brief(), allow)
         client = FakeClient.instances[0]
         eq(provider.usage(handle).cost_usd, None, "a session with no turn has no cost")
-        for _ in range(2):
-            client.script = [result_message()]
+        # The CLI's figure is its running total (2026-10-12): 0.25, then 0.5.
+        for running in (0.25, 0.5):
+            client.script = [result_message(total_cost_usd=running)]
             drain(provider, handle)
         total = provider.usage(handle)
-        eq(total.input_tokens, 200, "input tokens sum")
+        eq(total.input_tokens, 200, "input tokens sum (they are per turn)")
         eq(total.output_tokens, 40, "output tokens sum")
         eq(total.cached_tokens, 80, "cached tokens sum")
-        eq(round(total.cost_usd, 4), 0.5, "the equivalent cost sums")
+        eq(round(total.cost_usd, 4), 0.5, "the equivalent cost is the last running total")
         eq(total.work_tokens, (200 - 80) + 40, "work_tokens is §8.3's figure")
         provider.close(handle)
 
@@ -2573,6 +2574,288 @@ def context_full_review_checks() -> None:
         provider.close(handle)
 
 
+def unechoed_steer_resend_checks() -> None:
+    """Delta review of PR #57 (its P16): a steer written during the turn that
+    overflowed, never echoed, may have been folded into it — work a second
+    run would repeat. `_read`'s `work = turn_work or any(g == generation ...)`
+    is the only thing that says so; with that term dropped the message was
+    sent again after the compaction."""
+    print("\n-- a conversation past the context window: an unechoed steer of the turn")
+    provider = claude.ClaudeProvider()
+    gate, compacting = threading.Event(), threading.Event()
+    with timings(STEER_QUIET_S=0.3, STEER_HOLD_MAX_S=1.0), \
+            steer_fake([PromptEcho(), Pause(gate), too_long(), too_long_result(), Pause(compacting),
+                        *compacted(),
+                        # what a wrong re-send would read
+                        PromptEcho(), assistant("would be a repeat"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        check(accepting(handle), "unechoed steer: the turn takes steers")
+        provider.steer(handle, UserMessage(text="the steer"))
+        gate.set()
+
+        def release():  # the compaction's frames only once /compact is written
+            wait_for(lambda: len(client.queries) >= 3, timeout=6)
+            compacting.set()
+
+        threading.Thread(target=release, daemon=True).start()
+        box: dict = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", list(stream)), daemon=True)
+        worker.start()
+        worker.join(8)
+        events = box.get("events") or []
+        eq(sent_texts(client), ["go", "the steer", "/compact"],
+           "unechoed steer: compacted, the message never sent again")
+        eq(text_of(events), [], "unechoed steer: nothing is read as an answer")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_COMPACTED_SEND_AGAIN], "unechoed steer: the owner is told to send it again")
+        compacting.set()
+        provider.close(handle)
+
+
+# --- cost: the CLI's running total, each result counted once (2026-10-12) ----
+
+
+def costs(events) -> list:
+    """The `cost_usd` of every USAGE, in order."""
+    return [e.data["cost_usd"] for e in events if e.kind is EventKind.USAGE]
+
+
+def same_costs(got, want, label: str) -> None:
+    ok = len(got) == len(want) and all(
+        (g is None and w is None) or (g is not None and w is not None and abs(g - w) < 1e-9)
+        for g, w in zip(got, want))
+    check(ok, f"{label} (got {got!r}, want {want!r})")
+
+
+def near(value, want) -> bool:
+    return value is not None and abs(value - want) < 1e-9
+
+
+def saved_thread(total) -> Thread:
+    """A thread whose Claude session exists, with the running total its last
+    result left (`None`: nothing saved)."""
+    t = thread(session_id=SESSION_ID)
+    t.provider_cost_total = total
+    return t
+
+
+def turn_costs(provider, handle, client, *turns) -> list:
+    """One send per turn on the plain fake — a running total, or the turn's
+    whole script as a list; -> the USAGE costs."""
+    out = []
+    for turn in turns:
+        client.script = list(turn) if isinstance(turn, list) else [result_message(total_cost_usd=turn)]
+        out += costs(drain(provider, handle))
+    return out
+
+
+def running_cost_checks() -> None:
+    """2026-10-12: thread 447ff25e read $109.97 for $23.22. The CLI's
+    `total_cost_usd` is its running total for the conversation ("read the
+    latest result rather than summing across results"), and a resumed CLI
+    continues from the total its transcript saved; the provider passed it
+    through as each turn's cost, and the daemon summed it."""
+    print("\n-- cost: each result adds what it spent, once")
+    from claude_agent_sdk import ConversationResetMessage
+
+    provider = claude.ClaudeProvider()
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        got = turn_costs(provider, handle, client, 0.10, 0.25, 0.45)
+        same_costs(got, [0.10, 0.15, 0.20], "three turns on one CLI process: each adds only its own")
+        check(near(sum(got), 0.45) and near(provider.usage(handle).cost_usd, 0.45),
+              f"three turns sum to the last running total, never to the 0.80 of the totals "
+              f"(got {sum(got)!r})")
+        client.script = [result_message(total_cost_usd=0.50)]
+        usage = [e for e in drain(provider, handle) if e.kind is EventKind.USAGE][0]
+        check(near(usage.data["cost_total"], 0.50), "USAGE carries the running total as cost_total")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.resume(saved_thread(0.45), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.55, 0.70), [0.10, 0.15],
+                   "resumed, the CLI restored its total: only what it adds counts, never the history")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.resume(saved_thread(0.45), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.03, 0.08), [0.03, 0.05],
+                   "resumed, the total started again from zero: counted from its own zero")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.resume(saved_thread(None), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 2.00, 2.10), [None, 0.10],
+                   "resumed with nothing saved: the first figure is the baseline, never counted whole")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.10, [result_message(total_cost_usd=None)], 0.20),
+                   [0.10, None, 0.10], "a missing figure stays missing, and the baseline holds")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.30, 0.0, 0.35), [0.30, None, 0.05],
+                   "a zeroed figure (a crash or startup error) is no reading")
+        reset = ConversationResetMessage(new_conversation_id="c2", uuid="u-reset", session_id=SESSION_ID)
+        same_costs(turn_costs(provider, handle, client, [reset, result_message(total_cost_usd=0.40)]),
+                   [0.40], "after the CLI's conversation reset the total starts from nothing")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stopped = result_message(total_cost_usd=0.10, terminal_reason="aborted_streaming")
+        same_costs(turn_costs(provider, handle, client, [stopped], 0.12), [0.10, 0.02],
+                   "a stopped turn's result counts, once")
+        provider.close(handle)
+
+    # A steer the CLI ran as its own turn, then a background notice's turn.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), assistant("first"), result_message(total_cost_usd=0.10),
+                     Echo(), assistant("the steer's answer"), result_message(total_cost_usd=0.18)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="first"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="then this"))
+        gate.set()
+        first = list(stream)
+        same_costs(costs(first), [0.10, 0.08], "a steer's own CLI turn: its result counted once")
+        client.script.extend([notice_replay(), notice_result(total_cost_usd=0.20), PromptEcho(),
+                              assistant("x"), result_message(total_cost_usd=0.30)])
+        second = drain_bounded(provider, handle, "next") or []
+        same_costs(costs(second), [0.02, 0.10], "a background notice's turn: its result counted once")
+        check(near(provider.usage(handle).cost_usd, 0.30),
+              "steer and notice: the session's sum is the last running total")
+        provider.close(handle)
+
+    # The overflowing turn, `/compact`, and the message sent again.
+    with steer_fake([PromptEcho(), too_long(),
+                     result_message(is_error=True, result="Prompt is too long", usage=dict(ZERO_USAGE),
+                                    total_cost_usd=0.40),
+                     SystemMessage(subtype="compact_boundary", data={"compact_metadata": {"trigger": "manual"}}),
+                     result_message(num_turns=0, duration_api_ms=0, total_cost_usd=0.45),
+                     PromptEcho(), assistant("answer"), result_message(total_cost_usd=0.60)]):
+        handle = provider.start(thread(), brief(), allow)
+        events = drain_bounded(provider, handle, "go") or []
+        same_costs(costs(events), [0.40, 0.05, 0.15],
+                   "context full: the overflow, the compaction and the answer, each once")
+        provider.close(handle)
+
+    # A model switch resumes the same conversation in a new process.
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.10), [0.10], "before a switch")
+        provider.set_model(handle, "claude-sonnet-5-5", "low")
+        second = FakeClient.instances[-1]
+        check(second is not client, "a model switch connects a new client")
+        same_costs(turn_costs(provider, handle, second, 0.25), [0.15],
+                   "after a model switch the restored total is not counted again")
+        provider.close(handle)
+
+
+def daemon_cost_checks() -> None:
+    """End to end on a real daemon over the real provider: a Claude thread's
+    `cost_usd` is the CLI's last running total across turns, a restart (a
+    resumed CLI that restores its total) and one that restores nothing; the
+    running total is saved on the thread; and a thread counted before the fix
+    is recounted once, at start."""
+    print("\n-- cost: a Claude thread's total on a real daemon")
+    from jarvis.v2 import daemon as daemon_mod
+    from jarvis.v2.stores import Stores
+
+    def run(daemon, thread_id, text):
+        daemon.send(thread_id, UserMessage(text=text))
+        return wait_for(lambda: (daemon._sessions.get(thread_id) is not None
+                                 and daemon._sessions[thread_id].worker is None), timeout=10)
+
+    with _temp_config() as root:
+        from jarvis import config
+
+        project_root = root / "project"
+        project_root.mkdir()
+        stores = Stores(config.V2_DATA_DIR)
+        project = stores.projects.create("p", str(project_root))
+        # A thread from before the fix: the log holds the CLI's running totals,
+        # the record their sum.
+        old = stores.threads.create(project.id, Role.CHAT, ProviderName.CLAUDE,
+                                    provider_session_id=SESSION_ID, cost_usd=0.1 + 0.3 + 0.6)
+        stores.threads.save(old)
+        for running in (0.1, 0.3, 0.6):
+            stores.threads._append(old.id, "log.jsonl", {"kind": "usage", "data": {
+                "input": 1, "output": 1, "cached": 0, "cost_usd": running}})
+
+        with fake():
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                recounted = stores.threads.get(old.id)
+                check(near(recounted.cost_usd, 0.6) and near(recounted.provider_cost_total, 0.6)
+                      and recounted.cost_recount == 1,
+                      f"start: a thread counted before the fix is recounted to its last total "
+                      f"(got {recounted.cost_usd!r})")
+                opened = daemon.open_thread(project.id, Role.IMPLEMENTER, ProviderName.CLAUDE,
+                                            Brief(Role.IMPLEMENTER, str(project_root),
+                                                  profile=PermissionProfile.ASK))
+                client = FakeClient.instances[-1]
+                for text, running in (("one", 0.10), ("two", 0.25), ("three", 0.45)):
+                    client.script = [result_message(total_cost_usd=running)]
+                    check(run(daemon, opened.id, text), f"turn {text} ends")
+                record = stores.threads.get(opened.id)
+                check(near(record.cost_usd, 0.45),
+                      f"three turns: the thread's total is the last running total, not 0.80 "
+                      f"(got {record.cost_usd!r})")
+                check(near(record.provider_cost_total, 0.45), "and the running total is saved on it")
+                logged = [r["data"] for r in stores.threads.read_log(opened.id) if r.get("kind") == "usage"]
+                same_costs([d["cost_usd"] for d in logged], [0.10, 0.15, 0.20],
+                           "the log's usage records carry each result's own cost")
+            finally:
+                daemon.stop()
+
+        # A restart: the resumed CLI continues from its transcript's total.
+        with fake([result_message(total_cost_usd=0.55)]):
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                check(run(daemon, opened.id, "four"), "after a restart: the turn ends")
+                record = stores.threads.get(opened.id)
+                check(near(record.cost_usd, 0.55),
+                      f"after a restart: the restored history is not counted again (got {record.cost_usd!r})")
+                check(near(stores.threads.get(old.id).cost_usd, 0.6),
+                      "and the recount is not repeated")
+            finally:
+                daemon.stop()
+
+        # A restart whose CLI restored nothing: its total starts at zero.
+        with fake([result_message(total_cost_usd=0.03)]):
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                check(run(daemon, opened.id, "five"), "a reset restart: the turn ends")
+                record = stores.threads.get(opened.id)
+                check(near(record.cost_usd, 0.58),
+                      f"a total that started again from zero is counted from its own zero "
+                      f"(got {record.cost_usd!r})")
+                check(near(record.provider_cost_total, 0.03), "and that total is the one saved")
+            finally:
+                daemon.stop()
+
+
 def main() -> int:
     # Hermetic: every client in this suite resolves to a fake executable in a
     # temp dir, never the owner's real `claude` (which nothing here may run).
@@ -2594,8 +2877,11 @@ def main() -> int:
     steering_checks()
     injected_turn_checks()
     context_full_checks()
+    unechoed_steer_resend_checks()
     error_checks()
     usage_checks()
+    running_cost_checks()
+    daemon_cost_checks()
     isolation_checks()
     skill_checks()
     secrets_checks()
