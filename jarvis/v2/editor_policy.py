@@ -16,7 +16,7 @@ The kinds, in the order they are decided (the first that matches wins):
 |            | allowlist, models.json, routing.json …), even inside         |                      |
 |            | `~/.config/jarvis` (E-8: "gate-state files stay readable")   |                      |
 | `withheld` | a credential bundle (`secrets.PROTECTED_NAMES` other than    | no content, ever     |
-|            | the env files), anything under `config.V2_CREDENTIAL_DIRS`   |                      |
+|            | the env files), anything under `config.credential_dirs()`   |                      |
 |            | or v2's session carriers (`V2_DATA_DIR/claude`, `/codex`),   |                      |
 |            | and the login files (Claude's, Codex's, git's, `.netrc`,     |                      |
 |            | docker's, kube's, `.npmrc`, `.pypirc`)                       |                      |
@@ -203,7 +203,7 @@ def credential_name(name: str) -> bool:
 
 
 def credential_dirs() -> list[Path]:
-    return [_resolve(Path(d)) for d in config.V2_CREDENTIAL_DIRS] + carrier_dirs()
+    return [_resolve(Path(d)) for d in config.credential_dirs()] + carrier_dirs()
 
 
 def jarvis_dirs() -> list[Path]:

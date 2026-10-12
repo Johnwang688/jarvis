@@ -270,6 +270,12 @@ class Daemon:
         # an id-only `vex_device` record per device action.
         from .vex import Vex
         self.vex = Vex(self)
+        # The owner's built-in Browser (BR-1a, browser/host.py): a
+        # daemon-owned Chrome behind a SOCKS gate, started lazily by the first
+        # owner-only `/browser` request that needs it, never by `start()`.
+        # On the bus and in the log it is nothing but classes and counts.
+        from .browser.host import BrowserHost
+        self.browser = BrowserHost(self)
         # Per-session jarvis-mcp caller tokens (callers.py, plan 2026-10-10
         # §1): minted in `_run_brief` for an owner's Claude or Codex chat that
         # is offered session tools, held only as digests, revoked whenever
@@ -365,6 +371,11 @@ class Daemon:
             approvals_pending = len(self.approvals.pending())
         except Exception:
             approvals_pending = 0
+        try:
+            browser = self.browser.status()
+        except Exception as exc:
+            browser = {"available": False, "running": False, "error": type(exc).__name__}
+        refused_ports = sorted(self.browser.refused_ports())
         with self._lock:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,
@@ -400,7 +411,16 @@ class Daemon:
                     "hud_state": hud["state"],
                     # The newer builds passed over because they failed
                     # verification ("fallback"), newest first.
-                    "hud_passed_over": hud.get("passed_over", [])}
+                    "hud_passed_over": hud.get("passed_over", []),
+                    # The Browser (BR-1a): whether Chrome is there and
+                    # running, its tabs by count, the gate's counters —
+                    # never a URL, a title or a profile's label.
+                    "browser": browser,
+                    # Every port the Browser's gate refuses on this machine
+                    # (`browser.policy.refused_ports`): BR-0's control ports,
+                    # this daemon's HUD and API ports, and 8403 unless it is
+                    # this daemon's workshop. The HUD's Direct judge reads it.
+                    "refused_ports": refused_ports}
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):
@@ -1510,6 +1530,10 @@ class Daemon:
             self._sessions.clear()
         self.terminals.finish_all(max(deadline, time.monotonic() + 0.2))
         self.vex.stop()
+        # The Browser's Chrome, its driver and its gate (BR-1a): after the
+        # terminals, before the listeners close. Its own bound, past the
+        # daemon's: a Chrome that will not close is killed by exact PID.
+        self.browser.stop()
         self.bus.close()
         for server, worker in self._listeners:
             server.shutdown()
@@ -1618,9 +1642,11 @@ def _log_path(path: str) -> str:
     """A request path for the daemon log. A terminal attach carries its
     ticket in the query string, so `/terminals` paths are logged without one;
     so are `/mcp` paths, whose credential is a header the relay never moves
-    into a query — but a confused client could (PR #35 review)."""
+    into a query — but a confused client could (PR #35 review) — and
+    `/browser` paths, which take no query but must never log a URL that a
+    confused client put in one (BR-1a)."""
     url = urlsplit(path)
-    return url.path if url.path.startswith(("/terminals", "/mcp")) else path
+    return url.path if url.path.startswith(("/terminals", "/mcp", "/browser")) else path
 
 
 def _handler(daemon):

@@ -522,6 +522,37 @@ V2_CREDENTIAL_DIRS: tuple[str, ...] = (
     "~/.ssh", "~/.aws", "~/.config/gh", "~/.config/jarvis", "~/.gnupg",
 )
 
+# The HUD's built-in Browser (BR-1a; docs/plans/2026-10-10-hud-browser-plan.md
+# §3 and amendment 1 §C). One folder holds everything the daemon-owned Chrome
+# keeps: `profiles.json`, one user-data-dir per profile (`profiles/<id>/`),
+# the Private instance's run folder, downloads, and Chrome's own HOME. The
+# owner's logins live here (and, with Chrome sync on — decision BD-5 — the
+# passwords Google syncs), so it is a credential folder: `credential_dirs()`
+# lists it wherever it is configured, it is made 0700, and the engine refuses
+# to start when it is a symlink or open to anyone else (`v2/browser/host.py`).
+BROWSER_DIR = Path(
+    os.environ.get("JARVIS_BROWSER_DIR")
+    or Path.home() / ".local" / "share" / "jarvis" / "browser"
+).expanduser()
+# The Browser's settings (B-5's LAN switch first; amendment 1 adds auto-open
+# and sound): changed only by the owner-only `PATCH /browser/settings`, and
+# protected state (`tools/files._protected_state`), so no agent can flip it.
+BROWSER_SETTINGS_PATH = Path(
+    os.environ.get("JARVIS_BROWSER_SETTINGS")
+    or Path.home() / ".config" / "jarvis" / "browser.json"
+).expanduser()
+# B-13: twelve tabs in all, across every profile and Private. The suites set
+# a lower number.
+BROWSER_TAB_CAP = int(os.environ.get("JARVIS_BROWSER_TAB_CAP", "12"))
+
+
+def credential_dirs() -> tuple[str, ...]:
+    """`V2_CREDENTIAL_DIRS` plus the Browser's folder (BR-1a), read at call
+    time: the folder can be moved by `JARVIS_BROWSER_DIR`, and a test that
+    repoints `BROWSER_DIR` must protect its own. What every credential-folder
+    check asks (v2 permissions, `folders`, `editor_policy`)."""
+    return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR))
+
 # Where context.py writes a tool result whole before truncating it in the
 # transcript, so the cut leaves a read_file-able pointer instead of a hole.
 # Beside sessions rather than in the repo: same character — bulk, machine-local,
