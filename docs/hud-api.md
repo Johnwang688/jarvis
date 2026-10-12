@@ -1554,10 +1554,12 @@ pattern matches the daemon's command line at `daemon2` (`pkill -f jarvis`
 stays ALLOW; a literal `kill <pid>` and kills by process name are not seen);
 since review 2 also a `kill` fed the daemon's PID by `systemctl show|status`
 of its unit, a D-Bus read of it, its cgroup's `cgroup.procs`, `lsof`/`fuser`
-on its ports or `ps | grep`, plus `fuser -k` on its ports and `pkill
---cgroup|--pidfile` naming its unit. A source is judged only when a fed
-`kill` is on the line, and a kill pattern whose matching cost cannot be
-bounded fails closed rather than freezing the daemon (`re` holds the GIL).
+on its ports, `ps | grep`, a grep over `/proc/*/cmdline` or `ss -p`/`netstat
+-p` on its ports, plus `fuser -k` on its ports and `pkill --cgroup|--pidfile`
+naming its unit. A source is judged only when a fed `kill` is on the line,
+and a kill pattern whose matching cost cannot be bounded is never matched
+(`re` holds the GIL): it is too complex to judge, so asked — never DENY,
+never covered by an allowlist entry, always-ask in v2.
 A shell write **into** the install root (`cp`, `rsync`, a
 redirect) is asked, never auto-approved or covered by an allowlist entry. A
 shell can still write there in a form nobody sees — the accepted shell gap.

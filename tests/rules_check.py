@@ -2018,12 +2018,15 @@ def review_48_checks() -> None:
         # The cheap filters never skip a line the full parse refuses.
         for command in REVIEW_48_DENY + REVIEW_48_ORDINARY:
             assert bool(S.owner_op(command)) == bool(S.owner_op(command, prefilter=False)), command
-    # No pattern hangs the permit: a pattern that could backtrack without
-    # bound is refused unmatched (Python's `re` has no timeout).
+    # No pattern hangs the permit, and none is refused for its cost alone: a
+    # pattern that could backtrack without bound is never matched — set aside
+    # when a literal it needs is not on the daemon's lines, asked otherwise
+    # (the delta review of PR #48; Python's `re` has no timeout).
     import time
     start = time.perf_counter()
-    for pattern in ("(.*)*x", "(.+)+x", "((.)*)*Q", "(a|ab)+c", ".*.*.*.*x"):
-        assert rules.decide(f"pkill -f '{pattern}'").decision == rules.DENY, pattern
+    for pattern in ("(.*)*x", "(.+)+x", "((.)*)*Q", "(a|ab)+c", ".*.*.*.*x", "(.*)*jarvis",
+                    "(.+)+daemon"):
+        assert rules.decide(f"pkill -f '{pattern}'").decision != rules.DENY, pattern
     assert time.perf_counter() - start < 2.0, "a pattern was matched with unbounded backtracking"
     print(f"ok  review of #48: {len(REVIEW_48_DENY)} spellings refused (never run, never asked, any "
           f"allowlist, mode all, no approver); {len(REVIEW_48_ORDINARY)} ordinary lines untouched; "
@@ -2042,11 +2045,8 @@ def review_48_checks() -> None:
 #   L-2  — a shell reserved word before the command.
 _UNIT_CGROUP = "/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service"
 REVIEW_48_2_DENY = (
-    # HIGH
-    "pkill -f '" + ".?" * 30 + "Z'",
-    "pkill -f '" + ".*.*" + ".?" * 12 + "Z'",
-    "killall -r '" + ".?" * 24 + "Z'",
-    "kill $(pgrep -f '" + ".?" * 30 + "Z')",
+    # HIGH (the pathological patterns are no longer refused for their cost:
+    # `REVIEW_48_DELTA_*` below)
     "pkill -f 'daemo.{0,1}2'",
     "pkill -f 'jarvis d{1,}aemon2'",
     # MED: systemctl and D-Bus
@@ -2195,6 +2195,111 @@ def review_48_round2_checks() -> None:
     print(f"ok  review 2 of #48: {len(REVIEW_48_2_DENY)} spellings refused (never run, never asked, "
           f"any allowlist, mode all, no approver); {len(REVIEW_48_2_ORDINARY)} ordinary lines "
           f"untouched; {len(REVIEW_48_2_VERDICTS)} of main's verdicts kept")
+
+
+# The delta review of PR #48 (each check fails on 92c225b). MED: a kill
+# pattern too costly to judge is asked — never refused, never covered by an
+# allowlist entry, always-ask in v2 — and one that cannot match the daemon is
+# told so cheaply, by a literal it needs (`node` in `node.*vite.*…`), whatever
+# its cost. These were ALLOW on main and DENY on 92c225b; they keep main's
+# verdicts (`kill $(…)` asks for its substitution, as it always did).
+REVIEW_48_DELTA_MAIN = {
+    "pkill -f 'node.*vite.*--port.*5173'": "allow",
+    "pkill -f 'gunicorn.*worker.*[0-9]+'": "allow",
+    "pkill -f 'python.*celery.*worker.*--concurrency.*4'": "allow",
+    "kill $(pgrep -f 'uvicorn.*app.*--reload.*8000')": "ask",
+    "pkill -f '" + ".?" * 30 + "Z'": "allow",
+    "killall -r '" + ".?" * 24 + "Z'": "ask",          # killall always asked
+    "pkill -f '.*.*.*.*x'": "allow",
+}
+# Too costly to judge, and nothing rules the daemon out: asked (each was DENY
+# on 92c225b).
+REVIEW_48_DELTA_ASK = (
+    "pkill -f '.*.*.*.*daemon2'",
+    "pkill -f 'python.*.*.*.*jarvis'",
+    "kill $(pgrep -f 'jarvis.*.*.*d')",
+    "killall -r 'python.*.*.*.*2'",
+    "ps aux | grep -E 'jarvis.*.*.*.*n' | awk '{print $2}' | xargs kill",
+)
+# LOW: three more PID sources feeding a kill — a grep over /proc/*/cmdline,
+# and `ss -p`/`netstat -p` filtered onto the daemon's port (each ALLOW or ASK
+# on 92c225b).
+REVIEW_48_DELTA_DENY = (
+    "grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs kill",
+    "grep -la 'jarvis daemon2' /proc/[0-9]*/cmdline | cut -d/ -f3 | xargs -r kill -9",
+    "for p in /proc/[0-9]*; do grep -q daemon2 $p/cmdline && kill ${p#/proc/}; done",
+    "ss -ltnp | grep 8405 | grep -o 'pid=[0-9]*' | cut -d= -f2 | xargs kill",
+    "ss -ltnpH 'sport = :8405' | grep -o 'pid=[0-9]*' | cut -d= -f2 | xargs kill",
+    "netstat -tlnp | grep :8405 | awk '{print $7}' | cut -d/ -f1 | xargs kill",
+)
+REVIEW_48_DELTA_ORDINARY = (
+    "grep -l vite /proc/*/cmdline | cut -d/ -f3 | xargs kill",
+    "grep -l daemon2 /proc/*/cmdline",
+    "ss -ltnp | grep 5173 | grep -o 'pid=[0-9]*' | cut -d= -f2 | xargs kill",
+    "netstat -tlnp | grep :3000 | awk '{print $7}' | cut -d/ -f1 | xargs kill",
+    "ss -ltnp | grep 8405",
+    "pgrep -f 'node.*vite.*--port.*5173'",
+)
+
+
+def review_48_delta_checks() -> None:
+    """The delta review of PR #48. `REVIEW_48_DELTA_MAIN` keeps main's
+    verdicts and nothing marks it unsure; `REVIEW_48_DELTA_ASK` is ASK in
+    `rules.decide`, `static_verdict` and `command_verdict`, never covered by
+    an allowlist entry for every stem on it (`permissions.allows`), and put
+    to the owner through real `dispatch` (not run on a no); `REVIEW_48_DELTA_DENY` is DENY
+    everywhere, never run or asked; `REVIEW_48_DELTA_ORDINARY` is never DENY."""
+    from jarvis import config, permissions
+    from jarvis import protected_state as S
+
+    stems = _OWNER_OPS_STEMS + ("lsof", "fuser", "ps", "grep", "awk", "cat", "cut", "ss", "netstat")
+    with gate_home():
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": stem} for stem in stems]))
+        before = config.ALLOWLIST_PATH.read_text()
+        for command, want in REVIEW_48_DELTA_MAIN.items():
+            got = rules.decide(command).decision
+            assert got == want, f"{command!r}: {got}, not main's {want}"
+            assert S.owner_op(command) is None and S.kill_unsure(command) is None, command
+        for command in REVIEW_48_DELTA_ASK:
+            assert S.owner_op(command) is None, f"refused, not asked: {command!r}"
+            assert S.kill_unsure(command), f"not marked too complex to judge: {command!r}"
+            verdict = rules.decide(command)
+            assert verdict.decision == rules.ASK, (command, verdict)
+            assert "too complex to judge" in verdict.reason, (command, verdict.reason)
+            assert permissions.static_verdict(command).decision == rules.ASK, command
+            assert permissions.command_verdict(
+                "run_command", {"command": command}).decision == rules.ASK, command
+            assert not permissions.allows("run_command", {"command": command}), \
+                f"an allowlist entry covers {command!r}"
+            asked: list[str] = []
+            with recorded() as ran:
+                out = tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}),
+                                     approve=permissions.gate(lambda t, a: asked.append(a) or False))
+            assert asked, f"not put to the owner: {command!r}"
+            assert not ran, f"ran on a no: {command!r}"
+        for command in REVIEW_48_DELTA_DENY:
+            assert S.owner_op(command), f"the detector misses {command!r}"
+            assert rules.decide(command).decision == rules.DENY, (command, rules.decide(command))
+            assert permissions.command_verdict(
+                "run_command", {"command": command}).decision == rules.DENY, command
+            asked = []
+            with recorded() as ran:
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}),
+                               approve=permissions.gate(lambda t, a: asked.append(a) or True))
+            assert not ran and not asked, command
+        for command in REVIEW_48_DELTA_ORDINARY:
+            assert S.owner_op(command) is None, f"an ordinary line is refused: {command!r}"
+            assert rules.decide(command).decision != rules.DENY, (command, rules.decide(command))
+            assert S.kill_unsure(command) is None, command
+        for command in (*REVIEW_48_DELTA_MAIN, *REVIEW_48_DELTA_ASK, *REVIEW_48_DELTA_DENY,
+                        *REVIEW_48_DELTA_ORDINARY):
+            assert S.owner_reading(command) == S.owner_reading(command, prefilter=False), command
+        assert config.ALLOWLIST_PATH.read_text() == before
+    print(f"ok  delta review of #48: {len(REVIEW_48_DELTA_MAIN)} costly patterns keep main's verdict, "
+          f"{len(REVIEW_48_DELTA_ASK)} too complex to judge are asked (never covered, never DENY), "
+          f"{len(REVIEW_48_DELTA_DENY)} /proc and socket sources refused, "
+          f"{len(REVIEW_48_DELTA_ORDINARY)} ordinary lines untouched")
 
 
 def _redos_patterns() -> list[str]:
@@ -2426,6 +2531,7 @@ def main() -> int:
     redos_checks()
     review_48_checks()
     review_48_round2_checks()
+    review_48_delta_checks()
     fails_against_old_code_checks()
     owner_op_checks()
     print("\nall rules checks passed")

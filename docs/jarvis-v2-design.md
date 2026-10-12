@@ -2445,8 +2445,9 @@ daemon's checkout. Both are the owner's and DENY for every agent
 `pkill -f`/`killall -r`/`pgrep -f`-fed `kill` pattern that matches its command
 line at `daemon2` (`pkill -f jarvis` stays ALLOW; a literal `kill <pid>` and
 kills by process name are not seen) or, since the re-review, by a `kill` fed
-its PID from its unit, cgroup or ports. A kill pattern whose matching cost
-cannot be bounded is refused unmatched, since `re` holds the GIL; `/status`
+its PID from its unit, cgroup, ports or `/proc`. A kill pattern whose
+matching cost cannot be bounded is never matched, since `re` holds the GIL:
+it is too complex to judge, so it is asked, never refused; `/status`
 reports the daemon's `pid`, and `jarvis restart` trusts a `/status` only from
 systemd's MainPID.
 

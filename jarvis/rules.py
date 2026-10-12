@@ -3385,7 +3385,7 @@ def _general_verdict(command: str) -> Verdict:
     # owner-only command goes), so v1's gate and v2's layer 1 — both of which
     # start from `decide` — refuse every spelling it sees.
     from . import protected_state
-    why = protected_state.owner_op(command)
+    why, unsure = protected_state.owner_reading(command)
     if why:
         return Verdict(DENY, why)
 
@@ -3395,6 +3395,11 @@ def _general_verdict(command: str) -> Verdict:
         inner = Verdict(ASK, "contains command substitution, which cannot be judged here")
     else:
         inner = Verdict(ALLOW)
+    # A kill whose pattern is too costly to judge against the v2 daemon is
+    # asked, never refused and never covered by an allowlist entry
+    # (`protected_state.kill_unsure`; the delta review of PR #48).
+    if unsure:
+        inner = Verdict(ASK, unsure)
 
     worst = inner
     for segment in segments(command):

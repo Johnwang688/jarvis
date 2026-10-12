@@ -1495,15 +1495,20 @@ def _dbus_op(tokens: list[str], state: "_Owner") -> str | None:
 #     ALLOW);
 #   * a `kill` **fed** PIDs on the same line — through `$(…)`, backticks,
 #     `<(…)`, a variable or `xargs` — by a source that yields the daemon's:
-#     `pgrep -f`/`pidof` with such a pattern, `ps` filtered by such a `grep`,
-#     and (review 2 of PR #48) `systemctl show|status` of its unit, a D-Bus
-#     read of it, its cgroup's `cgroup.procs`, `pgrep --cgroup|--pidfile`
-#     naming the unit, and `lsof`/`fuser` on one of its ports;
+#     `pgrep -f`/`pidof` with such a pattern, `ps` (or a grep over
+#     `/proc/*/cmdline` itself) filtered by such a `grep`, and (review 2 of
+#     PR #48) `systemctl show|status` of its unit, a D-Bus read of it, its
+#     cgroup's `cgroup.procs`, `pgrep --cgroup|--pidfile` naming the unit,
+#     `lsof`/`fuser` on one of its ports, and `ss -p`/`netstat -p` filtered
+#     onto one;
 #   * `pkill --cgroup|--pidfile` naming the unit, and `fuser -k` on one of its
 #     ports, which kill it outright.
-# A pattern only known when it runs counts as matching; one that will not
-# compile, or whose matching cost cannot be bounded (`_regex_work`), fails
-# closed. **A source is judged only when a fed `kill` is on the line**:
+# A pattern only known when it runs counts as matching, and so does one that
+# will not compile on a line naming `daemon2`. One whose matching cost
+# cannot be bounded (`_regex_work`) is never matched: it is too complex to
+# judge (`COSTLY`), which asks — never DENY (the delta review of PR #48) —
+# unless a literal it needs rules the daemon out first (`_required_runs`).
+# **A source is judged only when a fed `kill` is on the line**:
 # `pgrep -f daemon2` alone is a read and is never matched, and `pgrep -f
 # daemon2 && kill -9 4321` kills a literal PID nothing on the line fed it.
 # Matching by process *name* (`pkill python`, `killall python`, `pkill`
@@ -1553,7 +1558,7 @@ _POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "uppe
                   "lower": "a-z", "space": r"\s", "blank": r" \t", "punct": r"!-/:-@\[-`{-~",
                   "xdigit": "0-9A-Fa-f", "print": " -~", "graph": "!-~", "cntrl": r"\x00-\x1f\x7f",
                   "word": r"\w"}
-_PATTERN_CAP = 256
+_PATTERN_CAP = 1024        # past it a kill pattern is too complex to judge (asked)
 # What matching one pattern may cost, and every pattern on one line together,
 # in `_regex_work`'s units (review 2 of PR #48). Python's `re` has no timeout
 # and holds the GIL while it matches, so a match past these would freeze the
@@ -1656,18 +1661,41 @@ def _regex_node(op, av, n: int, cap: int) -> int:
     return cap
 
 
-def _regex_work(source: str, flags: int, runs: list[tuple[int, int]], cap: int) -> int:
-    """What matching `source` costs, bounded from above: per text of length
-    n, the choices it can try (`_regex_choices`) times the starts it is tried
-    at, summed over `runs` [(n, starts)], saturating at `cap`. Raises what
-    `re` raises on a pattern it will not compile."""
-    tree = _sre_parse.parse(source, flags)
+def _regex_work(tree, runs: list[tuple[int, int]], cap: int) -> int:
+    """What matching a parsed pattern costs, bounded from above: per text of
+    length n, the choices it can try (`_regex_choices`) times the starts it is
+    tried at, summed over `runs` [(n, starts)], saturating at `cap`."""
     total = 0
     for n, starts in runs:
         total += _regex_choices(tree, n, cap) * starts
         if total >= cap:
             return cap
     return total
+
+
+def _required_text(items, out: list[str], run: list[str]) -> None:
+    """The literal runs every match of a parsed pattern contains: consecutive
+    literal characters of its top-level sequence, a plain group's included
+    (`(ab)c` is `abc`). Anything else — a repeat, an alternation, a class, an
+    anchor, a lookaround — ends a run; it is never treated as text."""
+    for op, av in getattr(items, "data", items):
+        if op is _sre_c.LITERAL:
+            run.append(chr(av))
+        elif op is _sre_c.SUBPATTERN and not av[1] and not av[2]:
+            _required_text(av[-1], out, run)
+        else:
+            if run:
+                out.append("".join(run))
+                run.clear()
+
+
+def _required_runs(tree) -> list[str]:
+    out: list[str] = []
+    run: list[str] = []
+    _required_text(tree, out, run)
+    if run:
+        out.append("".join(run))
+    return out
 
 
 def _ere(pattern: str) -> str:
@@ -1704,45 +1732,95 @@ def _bre(pattern: str) -> str:
     return "".join(out)
 
 
+# What `_daemon_match` answers when a pattern's matching cost is past what is
+# judged here (`_regex_work` against the budgets) or it is too long to parse:
+# not "matches" and not "does not match" — **too complex to judge**, which is
+# ASK, never covered by an allowlist entry and always-ask in v2, and never
+# DENY (the delta review of PR #48: `pkill -f 'node.*vite.*--port.*5173'` and
+# every kill pattern with three unbounded quantifiers was an unapprovable
+# DENY, though it could never match the daemon).
+COSTLY = "too costly to judge"
+
+
+def _daemon_spans(full: bool = True) -> list[tuple[str, int, int]]:
+    """The daemon's command lines (or, not `full`, its process names) as a
+    process pattern reads them, each with the span of `daemon2` a selection
+    must reach — (-1, -1) where there is none."""
+    texts = _daemon_command_lines() if full else _DAEMON_NAMES
+    return [(t, t.find("daemon2"), t.find("daemon2") + 7) if "daemon2" in t else (t, -1, -1)
+            for t in texts]
+
+
+def _socket_spans() -> list[tuple[str, int, int]]:
+    """The daemon's listening sockets as `ss -ltnp` and `netstat -tlnp` print
+    them, each with the span of its port a selection must reach."""
+    out = []
+    for port in sorted(_daemon_ports()):
+        for text in (f'LISTEN 0 5 127.0.0.1:{port} 0.0.0.0:* users:(("python3",pid=4242,fd=5))',
+                     f"tcp 0 0 127.0.0.1:{port} 0.0.0.0:* LISTEN 4242/python3"):
+            at = text.find(f":{port}") + 1
+            out.append((text, at, at + len(str(port))))
+    return out
+
+
+def _holds(run: str, text: str, ci: bool) -> bool:
+    """Whether `text` holds the literal `run` (case-folded under IGNORECASE;
+    a non-ASCII run is assumed held, since `re`'s folding is not `lower()`'s)."""
+    if not ci:
+        return run in text
+    return not run.isascii() or run.lower() in text.lower()
+
+
 def _daemon_match(pattern: str, *, how: str, full: bool = True, icase: bool = False,
                   literal: bool = False, syntax: str = "ere", line: str = "",
-                  budget: list[int] | None = None) -> bool | None:
+                  budget: list[int] | None = None,
+                  spans: list[tuple[str, int, int]] | None = None):
     """Whether a process pattern matches the daemon: `how` is "overlap" (a
-    match on one of its command lines — `full`; else its process names, which
-    never hold the word — whose span overlaps `daemon2`), "exact" (a whole
-    one) or "anywhere". None when it cannot be told: an expansion only known
-    when it runs, a pattern too long or too costly to match (`_regex_work`
-    against `_REGEX_BUDGET` and the line's `budget`), or one that will not
-    compile on a line that names `daemon2` (one that will not compile anywhere
-    else selects nothing: the tool refuses it). Every caller fails closed on
-    None."""
+    match whose span overlaps the part of a text a selection must reach —
+    `daemon2` on its command lines, or a port, `spans`), "exact" (a whole
+    text) or "anywhere". True or False when it can be told; None when it
+    cannot and every caller fails closed — an expansion only known when it
+    runs, or a pattern that will not compile on a line that names `daemon2`
+    (one that will not compile anywhere else selects nothing: the tool
+    refuses it); and `COSTLY` when matching it would cost more than is judged
+    here — the caller asks rather than refusing.
+
+    Before any cost is counted, a text that lacks a literal run every match
+    of the pattern contains (`_required_runs`: `node` in `node.*vite`) is set
+    aside, so a pattern that cannot match the daemon is told so cheaply,
+    however costly matching it would be."""
     if _wild_word(pattern):
         return None
-    texts = _daemon_command_lines() if full else _DAEMON_NAMES
-    if how == "overlap" and not full:
-        return False
+    spans = spans if spans is not None else _daemon_spans(full)
+    if how == "overlap":
+        spans = [s for s in spans if s[1] >= 0]
+        if not spans:
+            return False
     if literal:
         source = re.escape(pattern)
     elif len(pattern) > _PATTERN_CAP:
-        return None
+        return COSTLY
     else:
         source = {"bre": lambda p: _ere(_bre(p)), "python": str}.get(syntax, _ere)(pattern)
     flags = re.IGNORECASE if icase else 0
-    if how == "overlap":
-        runs = [(len(t), t.find("daemon2") + 7) for t in texts if "daemon2" in t]
-    else:
-        runs = [(len(t), 1 if how == "exact" else len(t) + 1) for t in texts]
     if budget is not None:
         # Parsing costs too (about 2 µs a character): a line's patterns share
         # `_LINE_PATTERN_CHARS` of it, so a word that expands to 256 patterns
         # cannot buy a long parse.
         if len(source) > budget[1]:
-            return None
+            return COSTLY
         budget[1] -= len(source)
     try:
-        work = _regex_work(source, flags, runs, _REGEX_BUDGET + 1)
+        tree = _sre_parse.parse(source, flags)
+        ci = bool((flags | getattr(getattr(tree, "state", None), "flags", 0)) & re.IGNORECASE)
+        runs = _required_runs(tree)
+        spans = [s for s in spans if all(_holds(r, s[0], ci) for r in runs)]
+        if not spans:
+            return False
+        work = _regex_work(tree, [(len(t), end if how == "overlap" else 1 if how == "exact"
+                                   else len(t) + 1) for t, _, end in spans], _REGEX_BUDGET + 1)
         if work > _REGEX_BUDGET or (budget is not None and work > budget[0]):
-            return None
+            return COSTLY
         rx = re.compile(source, flags)
     except Exception:     # noqa: BLE001 — `re` refuses it (re.error, OverflowError, RecursionError)
         if "daemon2" in re.sub(r"[\\()\[\]{}|*+?.^$'\"]", "", line or pattern):
@@ -1750,7 +1828,7 @@ def _daemon_match(pattern: str, *, how: str, full: bool = True, icase: bool = Fa
         return False
     if budget is not None:
         budget[0] -= work
-    for text in texts:
+    for text, at, end in spans:
         if how == "exact":
             if rx.fullmatch(text):
                 return True
@@ -1759,29 +1837,47 @@ def _daemon_match(pattern: str, *, how: str, full: bool = True, icase: bool = Fa
             if rx.search(text):
                 return True
             continue
-        at = text.find("daemon2")
-        if at < 0:
-            continue
-        for start in range(at + 7):
+        for start in range(end):
             m = rx.match(text, start)
-            if m and m.start() < at + 7 and m.end() > at:
+            if m and m.start() < end and m.end() > at:
                 return True
     return False
 
 
 def _selects_daemon(pattern: str, *, full: bool, exact: bool = False, icase: bool = False,
                     inverse: bool = False, literal: bool = False, line: str = "",
-                    budget: list[int] | None = None) -> bool:
+                    budget: list[int] | None = None):
     """Whether a pkill/pgrep/killall/pidof pattern selects the daemon at
     `daemon2` (`_daemon_match`); `inverse` (pgrep -v) selects it when nothing
-    matches. Fails closed: what cannot be told selects it."""
-    if inverse:
-        found = _daemon_match(pattern, how="exact" if exact else "anywhere", full=full, icase=icase,
-                              literal=literal, line=line, budget=budget)
-        return True if found is None else not found
-    found = _daemon_match(pattern, how="exact" if exact else "overlap", full=full, icase=icase,
-                          literal=literal, line=line, budget=budget)
-    return True if found is None else found
+    matches. True, False, or `COSTLY`; what cannot be told selects it."""
+    found = _daemon_match(pattern, how=("exact" if exact else "anywhere" if inverse else "overlap"),
+                          full=full, icase=icase, literal=literal, line=line, budget=budget)
+    if found is None:
+        return True
+    if found == COSTLY:
+        return COSTLY
+    return (not found) if inverse else found
+
+
+def _too_complex(what: str) -> str:
+    return (f"it is too complex to judge whether {what} matches the v2 daemon "
+            f"(`jarvis daemon2`, the process that holds the owner's approvals): matching its "
+            f"pattern would cost more than is judged here, since Python's `re` cannot be stopped "
+            f"mid-match. Asked, never covered by an allowlist entry")
+
+
+def _judge_patterns(results, kills: "_Kills", what: str) -> bool:
+    """Whether one of `results` (`_selects_daemon` answers, read lazily)
+    selects the daemon. One that is `COSTLY` selects nothing; it marks the
+    line too complex to judge (`kills.unsure`), which asks."""
+    costly = False
+    for result in results:
+        if result is True:
+            return True
+        costly = costly or result == COSTLY
+    if costly and not kills.unsure:
+        kills.unsure = _too_complex(what)
+    return False
 
 
 def _proc_args(words: list[str], short: dict, long: dict, signals: bool,
@@ -1872,9 +1968,9 @@ def _pkill_op(tokens: list[str], state: "_Owner", appends: bool) -> str | None:
     if not operands:
         return _kill_why("`xargs pkill`, its pattern from the input") if appends and full else None
     kills = state.kills
-    if any(_selects_daemon(p, full=full, exact=bool({"x", "exact"} & seen),
-                           icase=bool({"i", "ignore-case"} & seen), line=kills.line, budget=kills.work)
-           for p in operands):
+    exact, icase = bool({"x", "exact"} & seen), bool({"i", "ignore-case"} & seen)
+    if _judge_patterns((_selects_daemon(p, full=full, exact=exact, icase=icase, line=kills.line,
+                                        budget=kills.work) for p in operands), kills, "`pkill -f`"):
         return _kill_why("`pkill -f`")
     return None
 
@@ -1893,8 +1989,9 @@ def _killall_op(tokens: list[str], state: "_Owner", appends: bool) -> str | None
     if not operands:
         return _kill_why("`xargs killall -r`, its pattern from the input") if appends else None
     kills = state.kills
-    if any(_selects_daemon(p, full=True, icase=bool({"I", "ignore-case"} & seen), line=kills.line,
-                           budget=kills.work) for p in operands):
+    icase = bool({"I", "ignore-case"} & seen)
+    if _judge_patterns((_selects_daemon(p, full=True, icase=icase, line=kills.line, budget=kills.work)
+                        for p in operands), kills, "`killall -r`"):
         return _kill_why("`killall -r`")
     return None
 
@@ -1941,9 +2038,9 @@ def _note_pid_source(stem: str, tokens: list[str], state: "_Owner", appends: boo
             if not words[i].startswith("-") or words[i] == "-":
                 names.append(words[i])
             i += 1
-        kills.sources.append(lambda: "`pidof`" if any(
-            _selects_daemon(name, full=True, literal=True, line=kills.line, budget=kills.work)
-            for name in names) else None)
+        kills.sources.append(lambda: "`pidof`" if _judge_patterns(
+            (_selects_daemon(name, full=True, literal=True, line=kills.line, budget=kills.work)
+             for name in names), kills, "a `pidof` feeding a `kill`") else None)
         return
     seen, operands, unknown, values = _proc_args(words, _PGREP_SHORT, _PGREP_LONG, signals=False)
     if {"h", "V", "help", "version"} & seen:
@@ -1959,14 +2056,31 @@ def _note_pid_source(stem: str, tokens: list[str], state: "_Owner", appends: boo
     exact, icase = bool({"x", "exact"} & seen), bool({"i", "ignore-case"} & seen)
     inverse = bool({"v", "inverse"} & seen)
     kills.sources.append(lambda: "`pgrep -f` with a pattern that matches its command line at `daemon2`"
-                         if any(_selects_daemon(p, full=full, exact=exact, icase=icase, inverse=inverse,
-                                                line=kills.line, budget=kills.work) for p in operands)
+                         if _judge_patterns(
+                             (_selects_daemon(p, full=full, exact=exact, icase=icase, inverse=inverse,
+                                              line=kills.line, budget=kills.work) for p in operands),
+                             kills, "a `pgrep -f` feeding a `kill`")
                          else None)
 
 
+# A file a grep reads that lists processes by their command lines: every
+# process's `/proc/<pid>/cmdline` (or `comm`, `status`, `stat`, `environ`),
+# by glob, by PID, behind a variable (`$p/cmdline`), or the whole of /proc
+# read recursively. `grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs
+# kill` is pgrep spelled long (the delta review of PR #48).
+_PROC_FILE = re.compile(r"(?:^|/)proc/+(?:[^/]*[*?\[\]][^/]*|\d+|\$[^/]*|\{[^/]*\})/+"
+                        r"(?:cmdline|comm|status|stat|environ)$")
+
+
+def _proc_listing(word: str) -> bool:
+    return (bool(_PROC_FILE.search(word)) or bool(re.fullmatch(r"/+proc/*", word))
+            or (_wild_word(word) and bool(re.search(r"/(?:cmdline|comm|status|stat)$", word))))
+
+
 def _note_grep(tokens: list[str], state: "_Owner") -> None:
-    """A `grep` on the line: kept with its patterns, for a `ps` it may filter
-    (`ps aux | grep daemon2 | awk '{print $2}' | xargs kill`)."""
+    """A `grep` on the line: kept with its patterns, for a process or socket
+    listing it may filter (`ps aux | grep daemon2 | awk '{print $2}' | xargs
+    kill`); one that reads `/proc/*/cmdline` itself is such a listing."""
     stem = rules._basename(tokens[0])
     words = _unit_words(tokens[1:], state) or tokens[1:]
     syntax = {"egrep": "ere", "fgrep": "fixed"}.get(stem, "bre")
@@ -2012,32 +2126,90 @@ def _note_grep(tokens: list[str], state: "_Owner") -> None:
                 invert = invert or letter == "v"
             continue
         operands.append(word)
+    files = operands if patterns else operands[1:]
     if not patterns and operands:
         patterns.append(operands[0])
     if patterns:
         state.kills.greps.append((patterns, syntax, icase, invert))
+    if any(_proc_listing(f) for f in files):
+        state.kills.listings.add("processes")
 
 
-def _ps_filtered_by_grep(kills: "_Kills") -> str | None:
-    """`ps` on the line, and greps that between them keep the daemon's line
-    and select it at `daemon2`: every grep keeps it (a match anywhere, or
-    none for `-v`), and one that is not `-v` matches it there. Fails closed."""
-    if not kills.ps or not kills.greps:
-        return None
+def _socket_source(stem: str, tokens: list[str], state: "_Owner") -> None:
+    """`ss -p` or `netstat -p` on the line — they print each socket's PID —
+    is a socket listing a grep may filter onto the daemon's port (`ss -ltnp |
+    grep :8405 | … | xargs kill`); `ss -p` with a filter naming one of its
+    ports (`sport = :8405`) is a source by itself."""
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    processes = any(w in ("--processes", "--program", "--programs")
+                    or (re.fullmatch(r"-[A-Za-z]+", w) and "p" in w[1:]) for w in words)
+    if not processes:
+        return
+    if stem == "ss":
+        ports = _daemon_ports()
+        for word in words:
+            if word.startswith("-"):
+                continue
+            named = {int(n) for n in re.findall(r"(?<![\d.])(\d{2,5})(?![\d.])", word)}
+            if _wild_word(word) or named & ports:
+                state.kills.sources.append(lambda: "`ss -p` filtered to the daemon's port")
+                return
+    state.kills.listings.add("sockets")
 
-    def matches(pattern, syntax, icase, how):
-        return _daemon_match(pattern, how=how, icase=icase, literal=syntax == "fixed",
-                             syntax=syntax, line=kills.line, budget=kills.work)
 
-    at_daemon2 = False
+def _grep_chain(kills: "_Kills", spans: list[tuple[str, int, int]]):
+    """Whether the line's greps, between them, pass on one of `spans`' texts
+    and select it at its span: every grep keeps it (a match anywhere, or none
+    for `-v`) and one that is not `-v` matches it there. True, False, or
+    `COSTLY` when only a pattern too costly to match stands between them and
+    an answer. What cannot be told keeps and selects (fails closed)."""
+    def tell(pattern, syntax, icase, how):
+        found = _daemon_match(pattern, how=how, icase=icase, literal=syntax == "fixed", syntax=syntax,
+                              line=kills.line, budget=kills.work, spans=spans)
+        return True if found is None else found
+
+    def any_of(results):
+        results = list(results)
+        if True in results:
+            return True
+        return COSTLY if COSTLY in results else False
+
+    sure_keep, sure_at, maybe_at = True, False, False
     for patterns, syntax, icase, invert in kills.greps:
-        found = [matches(p, syntax, icase, "anywhere") for p in patterns]
-        hit = None if None in found else any(found)
-        if hit is not None and hit == invert:
-            return None                              # this grep drops the daemon's line
-        if not invert and any(matches(p, syntax, icase, "overlap") is not False for p in patterns):
-            at_daemon2 = True
-    return "`ps` filtered by a `grep` that matches its command line at `daemon2`" if at_daemon2 else None
+        hit = any_of(tell(p, syntax, icase, "anywhere") for p in patterns)
+        if hit == COSTLY:
+            sure_keep = False
+        elif hit == invert:
+            return False                         # this grep drops the daemon's line
+        if not invert:
+            at = any_of(tell(p, syntax, icase, "overlap") for p in patterns)
+            sure_at = sure_at or at is True
+            maybe_at = maybe_at or at == COSTLY
+    if sure_keep and sure_at:
+        return True
+    return COSTLY if (sure_at or maybe_at) else False
+
+
+def _listings_filtered_by_grep(kills: "_Kills") -> str | None:
+    """A process or socket listing on the line (`ps`, a grep over
+    `/proc/*/cmdline`, `ss -p`, `netstat -p`) and greps that select the
+    daemon in it (`_grep_chain`): processes at `daemon2`, sockets at one of
+    its ports. One too costly to judge marks the line `kills.unsure`."""
+    if not kills.greps:
+        return None
+    for kind, spans, name in (
+            ("processes", _daemon_spans, "a process listing (`ps`, `/proc/*/cmdline`) filtered by a "
+                                         "`grep` that matches its command line at `daemon2`"),
+            ("sockets", _socket_spans, "a socket listing (`ss -p`, `netstat -p`) filtered by a `grep` "
+                                       "on the daemon's port")):
+        if kind not in kills.listings:
+            continue
+        found = _grep_chain(kills, spans())
+        if found is True:
+            return name
+        if found == COSTLY and not kills.unsure:
+            kills.unsure = _too_complex(f"a `grep` over {kind} feeding a `kill`")
+    return None
 
 
 def _note_systemctl_source(tokens: list[str], state: "_Owner") -> None:
@@ -2250,16 +2422,19 @@ class _Kills:
     """Per command line, shared by every level of it: a `kill` that sends a
     signal to PIDs fed to it, the PID sources on the line (each judged only
     when there is such a kill — a callable naming the source when it yields
-    the daemon's PIDs), `ps` and the greps that may filter it, the line,
-    whether it holds a kill word at all, and the regex budget its patterns
-    share."""
+    the daemon's PIDs), the process and socket listings on it and the greps
+    that may filter them, the line, whether it holds a kill word at all, the
+    regex budget its patterns share, and — when a kill's pattern was too
+    costly to judge and nothing on the line provably selects the daemon —
+    why it must be asked (`kill_unsure`)."""
     kill: bool = False
     sources: list = field(default_factory=list)
     line: str = ""
     armed: bool = False
-    ps: bool = False
+    listings: set = field(default_factory=set)
     greps: list = field(default_factory=list)
     work: list[int] = field(default_factory=lambda: [_LINE_REGEX_BUDGET, _LINE_PATTERN_CHARS])
+    unsure: str | None = None
 
 
 @dataclass
@@ -2752,7 +2927,10 @@ def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -
         _lsof_source(marked, state)
         return None
     if stem == "ps":
-        state.kills.ps = True
+        state.kills.listings.add("processes")
+        return None
+    if stem in ("ss", "netstat"):
+        _socket_source(stem, marked, state)
         return None
     if stem in ("grep", "egrep", "fgrep"):
         _note_grep(marked, state)
@@ -2873,7 +3051,7 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
             name = source()
             if name:
                 return _fed_why(name)
-        name = _ps_filtered_by_grep(state.kills)
+        name = _listings_filtered_by_grep(state.kills)
         if name:
             return _fed_why(name)
     return None
@@ -2970,23 +3148,41 @@ def _could_be_owner_op(command: str) -> bool:
     return "$" in flat and re.search(r"(?:^|[\s;&|(])[A-Za-z_]\w*=", flat) is not None
 
 
-def owner_op(command: str, *, prefilter: bool = True) -> str | None:
-    """Why this line runs an owner-only `jarvis` operation, or None — a
-    refusal, never an ask. `prefilter=False` turns both cheap tests off (the
-    line's and each segment's), for the test that holds them to the full
-    parse."""
+def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, str | None]:
+    """(why this line runs an owner-only operation — a refusal, never an ask —
+    or None; and, when it does not, why it must be asked whatever stands: a
+    kill on it whose pattern is too costly to judge against the daemon, and
+    nothing on it provably selects the daemon, or None). `prefilter=False`
+    turns both cheap tests off (the line's and each segment's), for the test
+    that holds them to the full parse."""
     if not command or not command.strip():
-        return None
+        return None, None
     if prefilter and not _could_be_owner_op(command):
-        return None
+        return None, None
     flat = command.replace("\\\n", "")
     for ch in ("'", '"', "\\"):
         flat = flat.replace(ch, "")
     kills = _Kills(line=command, armed="kill" in flat or "fuser" in flat)
     try:
-        return _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
+        why = _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
     except RecursionError:
-        return None
+        return None, None
+    return why, (None if why else kills.unsure)
+
+
+def owner_op(command: str, *, prefilter: bool = True) -> str | None:
+    """Why this line runs an owner-only `jarvis` operation, or None — a
+    refusal, never an ask (`owner_reading`)."""
+    return owner_reading(command, prefilter=prefilter)[0]
+
+
+def kill_unsure(command: str) -> str | None:
+    """Why no allowlist entry and no v2 profile may answer for this line
+    without asking: a kill on it is too costly to judge against the daemon
+    (`COSTLY`; the delta review of PR #48 — too complex to judge is ASK,
+    never DENY). `rules.decide` asks it through `owner_reading`;
+    `permissions.allows` and v2's layer 2 ask it here."""
+    return owner_reading(command)[1]
 
 
 def installs_hud(command: str, cwd: str | Path | None = None) -> str | None:

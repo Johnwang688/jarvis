@@ -1476,9 +1476,13 @@ unit and `fuser -k` on one of its ports, which kill it outright (review 2);
 and a `kill` **fed** PIDs on the same line — an operand only known when it
 runs (`$(…)`, backticks, `<(…)`, `$P`) or `xargs` input — by a source that
 yields the daemon's: `pgrep -f`/`pidof` with such a pattern (`kill $(pgrep
--f daemon2)`, `pgrep -f daemon2 | xargs kill -9`) and, since review 2, `ps`
-filtered by such a `grep` (every grep on the line keeps the daemon's line
-and one selects it at `daemon2`), `systemctl show` of the unit's
+-f daemon2)`, `pgrep -f daemon2 | xargs kill -9`) and, since review 2, a
+process listing filtered by such a `grep` (`ps`, or — since the delta
+review — a grep over `/proc/*/cmdline` itself, `grep -l daemon2
+/proc/*/cmdline | cut -d/ -f3 | xargs kill`; every grep on the line keeps the
+daemon's line and one selects it at `daemon2`), `ss -p`/`netstat -p`
+filtered onto one of its ports (by a grep, or `ss`'s own `sport = :8405`;
+delta review), `systemctl show` of the unit's
 MainPID/ControlPID/ExecMainPID (or of every property) and `systemctl status`
 of it or of the whole manager, a D-Bus read of the unit, its cgroup's
 `cgroup.procs`, `pgrep --cgroup|--pidfile` naming the unit, and `lsof
@@ -1487,19 +1491,30 @@ workshop's 8403, which daemon2 also binds). **A source is judged only when a
 fed kill is on the line** (review 2): `pgrep -f …` alone is a read and its
 pattern never runs, and `pgrep -f daemon2 && kill -9 4321` kills a literal
 PID nothing on the line fed it. A pattern only known at run time counts as
-matching; one that will not compile on a line that names `daemon2` fails
-closed, and so does **one whose matching cost cannot be bounded** (review 2,
-HIGH: the first round's guard counted only unbounded quantifiers, so `.?`
-thirty times took days — and `re` holds the GIL, so the whole daemon froze).
-`_regex_work` reads the pattern with `re`'s own parser and bounds the
-backtracking: a sequence multiplies, an alternation adds, an unbounded
-repeat counts as the text's length, `?` as 2, `{m,n}` as n−m+1, a repeat of
-something that itself chooses as (n−m+1)·inner^n (so `(.*)*` saturates), a
-back-reference or anything unknown without bound — times the starts it is
-tried at, against `_REGEX_BUDGET` (2^19 per pattern, about 10 ms at worst;
-it fits two unbounded quantifiers on the owner's checkout path,
-`node.*vite.*dev`, not on a much longer one), a per-line budget twice that,
-and 4096 characters parsed per line. **A quoted brace is the regex's**
+matching, and so does one that will not compile on a line that names
+`daemon2` (both fail closed). **A pattern whose matching cost cannot be
+bounded is never matched** (review 2, HIGH: the first round's guard counted
+only unbounded quantifiers, so `.?` thirty times took days — and `re` holds
+the GIL, so the whole daemon froze). `_regex_work` reads the pattern with
+`re`'s own parser and bounds the backtracking: a sequence multiplies, an
+alternation adds, an unbounded repeat counts as the text's length, `?` as 2,
+`{m,n}` as n−m+1, a repeat of something that itself chooses as
+(n−m+1)·inner^n (so `(.*)*` saturates), a back-reference or anything unknown
+without bound — times the starts it is tried at, against `_REGEX_BUDGET`
+(2^19 per pattern, about 10 ms at worst; two unbounded quantifiers fit on
+the owner's checkout path), a per-line budget twice that, and 4096
+characters parsed per line. **Past the budget a kill is too complex to
+judge, which is ASK — never DENY** (the delta review: the second round
+refused it, so every kill pattern with three unbounded quantifiers was an
+unapprovable DENY): `_daemon_match` answers `COSTLY`, the line is
+`protected_state.kill_unsure`, `rules.decide` asks with "too complex to
+judge", `permissions.allows` never covers it and v2's layer 2 always asks
+(rule `daemon-kill`). A provable match stays DENY. And before any cost is
+counted, a daemon line that lacks a literal run every match must contain
+(`_required_runs`: `node` in `node.*vite.*--port.*5173`) is set aside, so a
+pattern that cannot match the daemon is told so cheaply whatever its cost —
+`pkill -f 'node.*vite.*--port.*5173'`, `'gunicorn.*worker.*[0-9]+'` and
+their kin keep main's verdicts. **A quoted brace is the regex's**
 (review 2): `pkill -f 'daemo.{0,1}2'` was brace-expanded into `daemo.02` and
 `daemo.12` and allowed; `_mark_quoted` keeps quoted and escaped braces and
 commas from expansion, as bash does. **Untouched:** `pkill -f jarvis` and
@@ -1516,10 +1531,11 @@ daemon2` without `-f`) is left alone although `pkill python` reaches the
 daemon, since a process name never holds `daemon2` and refusing `pkill
 python` would refuse ordinary work; a pid looked up in one command and
 killed in a later one is two lines; other PID printers feeding a kill are
-not seen (`ps aux | awk '/daemon2/ {print $2}'`, `ss -ltnp`, `netstat -p`, a
-`/proc` scan, `lsof -t -c python`, `fuser -k` on a file the daemon holds
-open); and a kill pattern over the budget is DENY even when it would not
-have matched. Review 2's L-3 and L-5, recorded rather than fixed: a wrapper
+not seen (`ps aux | awk '/daemon2/ {print $2}'`, a `/proc` scan by awk or a
+script rather than grep, `ss`/`netstat` filtered by anything but grep or
+`ss`'s own filter, `lsof -t -c python`, `fuser -k` on a file the daemon holds
+open); and a kill pattern over the budget is asked even when it could not
+have matched, if no literal of it rules the daemon out. Review 2's L-3 and L-5, recorded rather than fixed: a wrapper
 the runner table does not peel (`taskset`, `chrt`, `prlimit`, `strace -f`,
 `script -c` …) hides the command behind it from the whole detector, and
 `systemctl --user preset-all`, which acts on every unit and can disable
@@ -1581,6 +1597,27 @@ tests, and the rest are round 1's (already so on 819e58a). Against 819e58a
 the only lines that loosened are the five over-refusals the NITs named —
 three D-Bus reads of the unit and two `pgrep -f daemon2` lines whose kill it
 does not feed — back to main's verdicts.
+
+**The delta review of 92c225b (PASS with fixes)**: MED, a kill pattern too
+costly to judge is asked, never refused — `COSTLY`, `kill_unsure`, the
+`daemon-kill` always-ask rule — and a literal it needs rules the daemon out
+before any cost is counted; LOW, a grep over `/proc/*/cmdline` and `ss
+-p`/`netstat -p` filtered onto the daemon's port are PID sources. Evidence:
+`rules_check` `review_48_delta_checks` (the review's four costly lines keep
+main's verdicts; five lines too complex to judge are ASK in `decide`,
+`static_verdict` and `command_verdict`, never covered by an allowlist entry
+for every stem on them, asked through real `dispatch` and not run on a no;
+the six new sources DENY; six ordinary lines untouched) and v2
+`permissions_check` `review_48_delta_checks` (always-ask under AUTO and
+STRICT with an allowlist entry for every stem; the sources layer-1 DENY) —
+48 v2 checks and every one of those lines fail on 92c225b. Three mutations
+bite: a costly answer selecting again, no literal prefilter (the review's
+lines ask instead of keeping main's verdicts) and no /proc listing. The
+differential against 6a2bfbe over 25,725 strings: 193 moved, all stricter
+(6 ALLOW→ASK, 80 ALLOW→DENY, 107 ASK→DENY), nothing looser, each a restart,
+rebuild or install spelling, the daemon's unit, a module runner or a kill;
+against 92c225b, the ten lines that loosened are the review's costly
+patterns, and the six that tightened are the new sources.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
@@ -4532,9 +4569,11 @@ Two findings worth keeping:
   daemon's command line at the word `daemon2`, and (review 2) a `kill` fed
   the daemon's PID by `systemctl show|status`, a D-Bus read, its cgroup,
   `lsof`/`fuser` on its ports or `ps | grep`, plus `fuser -k` on its ports
-  and `pkill --cgroup` naming its unit. A source is judged only when a fed
-  kill is on the line, and a kill pattern whose matching cost cannot be
-  bounded fails closed (`_regex_work`). `pkill -f jarvis` stays ALLOW (the
+  and `pkill --cgroup` naming its unit (and, since the delta review, a grep
+  over `/proc/*/cmdline` or `ss -p`/`netstat -p` on its ports). A source is
+  judged only when a fed kill is on the line, and a kill pattern whose
+  matching cost cannot be bounded is never matched: too complex to judge, so
+  asked, never DENY (`kill_unsure`). `pkill -f jarvis` stays ALLOW (the
   2026-08-09 matrix); a literal `kill <pid>` and kills by process name
   (`pkill python`) are not seen. Details with the restart commands above.
 - **Each agent's prompt names only the tools it holds (2026-10-11, owner's
