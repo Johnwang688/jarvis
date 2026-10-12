@@ -1736,9 +1736,20 @@ HTML `<script>`/`<style>`), capped at 256 KB of injected text per document.
 **Budgets fall back to Monarch, never to a broken file**: over 1 MiB of
 text ("syntax: basic (large file)", never sent to the worker), a first parse
 over 1 s ("slow parse"), two reparses cancelled at 250 ms running ("slow
-edits"), a grammar that fails to load ("grammar failed"); each editor shows
-the reason in a bottom-right corner (`data-testid="syntax-status"`) only
-while a covered file is on Monarch. **A grammar is code the worker runs, so
+edits"), a grammar that fails to load ("grammar failed"), **a worker that
+errors or leaves a token request unanswered for 10 s** (`REPLY_TIMEOUT_MS`:
+it is dead — terminated, every model on Monarch, "no worker", and the
+provider answers empty rather than null, which would leave tree-sitter's
+stale tokens drawn); each editor shows the reason in a bottom-right corner
+(`data-testid="syntax-status"`) only while a covered file is on Monarch.
+**Every `Query.matches` run is budgeted** (`matchMs`, 250 ms, through its
+`progressCallback`; a cancelled run's partial matches are never colour): a
+viewport chunk stops the answer at the lines before it, the whole-document
+injections query leaves fences their host's colour (twice running, off for
+that document), an injected range keeps its host's colour. **A fence's info
+string is a lookup key, so lookups read own keys only** (`Object.hasOwn`):
+` ```constructor ` or ` ```__proto__ ` loaded Object.prototype's names (review
+of PR #54). **A grammar is code the worker runs, so
 the HUD's policy gained `'wasm-unsafe-eval'`** — in `hud_api.HUD_POLICY`'s
 `script-src`, the one header, WebAssembly only (`eval`, `new Function` and a
 string `setTimeout` stay refused, and a response may narrow it away) — **and
@@ -1752,13 +1763,16 @@ answers its own runtime's name with the gate's URL (it is never fetched:
 throw for every name, which Emscripten calls even when handed the bytes, so
 the worker never started in a real browser — vitest could not see it).
 Test hooks, read-only: `window.__hudSyntax.states()` (each model's grammar,
-state, reason and `served` count), `.probe(url)` (asks the gate about a URL,
+state, reason, `served` count and `opens` — times its text was sent to the
+worker, 0 past the size budget: the worker's own size check would hide the
+client's), `.probe(url)` (asks the gate about a URL,
 never fetches) and `.loaded()` (grammars compiled), each answering within
 10 s even with a dead worker. Sizes: first paint 613,246 B (+168),
 `monacoBundle` 3,648,370 B (+5 KB), the worker 213 KB, ~9.9 MB of `.wasm`
 loaded per language on first sight. ED-3's "bold on `void`" note stands:
 `void` is `type.builtin`, `--syn-type`, not bold. Free checks: `lib/syntax/
-*.test.ts` (159; Node, the pinned runtime and real grammars) and
+*.test.ts` (167; Node, the pinned runtime and real grammars; `client.test.ts`
+on a stand-in Monaco and a silent worker) and
 `tests/face/hud_v2_syntax_check.py` (a `MockDaemon(0)` of its own, run by
 `hud_v2_check` after the editor-scheme section, or alone: a C++ call in
 `--syn-fn`, `void` `--syn-type`, a type name Monarch leaves plain drawn

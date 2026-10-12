@@ -16,6 +16,15 @@ export const BUDGETS = {
   maxCancels: 2,
   /** One token request: time, and captures collected, before it stops at the lines it has. */
   queryMs: 8,
+  /**
+   * Any one query run (`Query.matches`), cancelled past this through
+   * web-tree-sitter's `progressCallback`: a viewport chunk (the request stops
+   * at the lines before it), the whole-document injections query after an
+   * edit (fences keep their host's colour; twice running and that document's
+   * injections stay off), an injected range's highlights (that range keeps
+   * its host's colour).
+   */
+  matchMs: 250,
   maxCaptures: 20_000,
   /** Injected text parsed per document, in document order; past it a fence keeps its host's colour. */
   injectedChars: 256 * 1024,

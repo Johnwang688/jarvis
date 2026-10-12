@@ -84,7 +84,7 @@ export const COVERED_LANGUAGES: readonly string[] = Object.keys(FOR_LANGUAGE);
 /** The grammar for a model, from its Monaco language and its path. */
 export function grammarFor(languageId: string, path = ""): GrammarName | null {
   if (languageId === "typescript" && /\.tsx$/i.test(path)) return "tsx";
-  return FOR_LANGUAGE[languageId] ?? null;
+  return Object.hasOwn(FOR_LANGUAGE, languageId) ? FOR_LANGUAGE[languageId] : null;
 }
 
 /**
@@ -131,5 +131,7 @@ const ALIASES: Readonly<Record<string, GrammarName>> = {
 
 export function injectionGrammar(name: string): GrammarName | null {
   const key = name.trim().toLowerCase().replace(/^\{?\.?/, "").replace(/\}$/, "");
-  return ALIASES[key] ?? null;
+  // Own keys only: `constructor`, `toString` or `__proto__` (a fence's info
+  // string is the file's text) names no grammar, never Object.prototype's.
+  return Object.hasOwn(ALIASES, key) ? ALIASES[key] : null;
 }

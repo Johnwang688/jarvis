@@ -5,9 +5,9 @@
 import { decode } from "./flatten";
 import { Lines, type Change } from "./positions";
 import { TOKEN_MODIFIERS, TOKEN_TYPES } from "./legend";
-import { language, nodeEngine } from "./testkit";
+import { assets, language, nodeEngine } from "./testkit";
 import { workerPredicates, type SyntaxEngine } from "./engine";
-import type { GrammarName } from "./grammars";
+import { GRAMMAR_NAMES, grammarFor, injectionGrammar, type GrammarName } from "./grammars";
 import { Parser, Query } from "web-tree-sitter";
 
 interface Tok {
@@ -345,7 +345,10 @@ describe("budgets: you never see a broken file, only a quieter one", () => {
 
   it("a token request stops at the chunk where its time ran out, and says where", async () => {
     const clock = { t: 0, step: 0 };
-    const e = await nodeEngine({ now: () => (clock.t += clock.step) });
+    // Each look at this clock is 10 ms later, and a query run looks often
+    // (its progress callback): `matchMs` is out of the way here, as this is
+    // the request's own budget; the run's is the next describe's.
+    const e = await nodeEngine({ now: () => (clock.t += clock.step), budgets: { matchMs: 1e9 } });
     const src = "int f(int a) { return a; }\n".repeat(1000);
     await e.open("q", "cpp", src, 1, "cpp");
     clock.step = 10; // 8 ms budget: over after the first chunk
@@ -395,5 +398,139 @@ describe("budgets: you never see a broken file, only a quieter one", () => {
   it("a grammar that fails to load leaves the model on Monarch", async () => {
     const e = await nodeEngine({ load: () => Promise.reject(new Error("refused")) });
     expect(await e.open("f", "cpp", "int x;\n", 1, "cpp")).toEqual({ state: "basic", reason: "grammar failed" });
+  });
+});
+
+// ---- review of PR #54 -------------------------------------------------------
+
+/**
+ * `q` with a slow `matches()`: while `slow()` says so, each run moves the
+ * engine's clock past any budget and asks the run's own progress callback
+ * whether to stop (recorded in `stops`) — what a pathological query looks
+ * like to the engine, on demand.
+ */
+function slowQuery(q: Query, clock: { t: number }, slow: () => boolean, stops: boolean[]): Query {
+  return new Proxy(q, {
+    get(target, prop) {
+      if (prop === "matches") {
+        return (node: Parameters<Query["matches"]>[0], opts?: Parameters<Query["matches"]>[1]) => {
+          if (slow()) {
+            clock.t += 10_000;
+            stops.push(!!(opts?.progressCallback as ((s: { currentOffset: number }) => unknown) | undefined)?.({ currentOffset: 0 }));
+          }
+          return target.matches(node, opts);
+        };
+      }
+      const v = Reflect.get(target, prop);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+}
+
+describe("every query run has a budget (review of PR #54, LOW 2)", () => {
+  it("a viewport chunk whose query runs past matchMs is dropped: the answer stops at the lines before it", async () => {
+    const clock = { t: 0 };
+    let calls = 0;
+    const stops: boolean[] = [];
+    const e = await nodeEngine({
+      now: () => clock.t,
+      load: async (g) => {
+        const a = await assets(g);
+        return { ...a, highlights: slowQuery(a.highlights, clock, () => ++calls === 2, stops) };
+      },
+    });
+    const src = "int f(int a) { return a; }\n".repeat(200);
+    await e.open("vq", "cpp", src, 1, "cpp");
+    const r = e.tokens("vq", 1, 0, 199);
+    expect(stops).toEqual([true]); // the second chunk's run was told to stop
+    expect(r.truncatedAt).toBe(e.budgets.chunkLines - 1);
+    const ts = toks(r.data, src);
+    expect(ts.length).toBeGreaterThan(0);
+    expect(Math.max(...ts.map((t) => t.line))).toBe(e.budgets.chunkLines - 1);
+  });
+
+  it("the whole-document injections query past matchMs: fences keep their host's colour; twice running, it is not run again", async () => {
+    const clock = { t: 0 };
+    let slow = true, runs = 0;
+    const stops: boolean[] = [];
+    const e = await nodeEngine({
+      now: () => clock.t,
+      load: async (g) => {
+        const a = await assets(g);
+        if (g !== "markdown" || !a.injections) return a;
+        const inj = slowQuery(a.injections, clock, () => (runs++, slow), stops);
+        return { ...a, injections: inj };
+      },
+    });
+    await e.preload("python");
+    await e.preload("markdown_inline");
+    const src = "Text.\n\n```python\ndef f(x):\n    return x\n```\n";
+    await e.open("inj", "markdown", src, 1, "markdown");
+    let ts = toks(e.tokens("inj", 1, 0, 1e9).data, src);
+    expect(stops).toEqual([true]);
+    expect(ts.find((t) => t.text === "def")).toBeUndefined();
+    expect(ts.find((t) => t.text.includes("def f"))?.type).toBe("markup.raw.block");
+    // An edit: the query runs again, and is cancelled again (twice running).
+    e.change("inj", 2, [{ offset: 0, length: 4, text: "Note" }]);
+    ts = toks(e.tokens("inj", 2, 0, 1e9).data, src.replace("Text", "Note"));
+    expect(stops).toEqual([true, true]);
+    // From then on it is not run at all, however fast it would be now.
+    slow = false;
+    const before = runs;
+    e.change("inj", 3, [{ offset: 0, length: 4, text: "Text" }]);
+    ts = toks(e.tokens("inj", 3, 0, 1e9).data, src);
+    expect(runs).toBe(before);
+    expect(ts.find((t) => t.text === "def")).toBeUndefined();
+    expect(e.state("inj")?.state).toBe("ready"); // the document itself keeps its colour
+    expect(typeOf(ts, "```", 0)).toBe("markup.raw.block");
+  });
+
+  it("an injected range whose highlights run past matchMs keeps its host's colour", async () => {
+    const clock = { t: 0 };
+    const stops: boolean[] = [];
+    const e = await nodeEngine({
+      now: () => clock.t,
+      load: async (g) => {
+        const a = await assets(g);
+        return g === "python" ? { ...a, highlights: slowQuery(a.highlights, clock, () => true, stops) } : a;
+      },
+    });
+    await e.preload("python");
+    await e.preload("markdown_inline");
+    const src = "```python\ndef f(x):\n    return x\n```\n";
+    const { toks: ts } = await colour(e, "markdown", src, "markdown");
+    expect(stops).toEqual([true]);
+    expect(ts.find((t) => t.text === "def")).toBeUndefined();
+    expect(ts.find((t) => t.text.includes("def f"))?.type).toBe("markup.raw.block");
+  });
+});
+
+describe("a fence's info string names only a grammar the HUD ships (review of PR #54, NIT 1)", () => {
+  const PROTO = ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf", "__defineGetter__"];
+
+  it("injectionGrammar and grammarFor read own keys only", () => {
+    for (const name of PROTO) {
+      expect(injectionGrammar(name)).toBeNull();
+      expect(injectionGrammar(`{.${name}}`)).toBeNull();
+      expect(grammarFor(name)).toBeNull();
+    }
+    expect(injectionGrammar("py")).toBe("python");
+  });
+
+  it("fences tagged with Object.prototype's names load nothing and keep the host's colour", async () => {
+    const asked: string[] = [];
+    const e = await nodeEngine({
+      load: (g) => {
+        asked.push(g);
+        return assets(g);
+      },
+    });
+    const src = PROTO.map((n) => `\`\`\`${n}\nint x = 1;\n\`\`\`\n`).join("\n");
+    const { state, toks: ts } = await colour(e, "markdown", src, "markdown");
+    expect(state.state).toBe("ready");
+    await new Promise((r) => setTimeout(r, 50)); // any load it would have started
+    expect(asked.every((g) => (GRAMMAR_NAMES as string[]).includes(g))).toBe(true);
+    expect(asked.filter((g) => PROTO.includes(g))).toEqual([]);
+    expect(typeOf(ts, "int x = 1;")).toBe("markup.raw.block");
   });
 });

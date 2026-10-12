@@ -329,8 +329,12 @@ def _large_checks(page, mock, base, check, until, **_):
     check("a 1.2 MB file says \"syntax: basic (large file)\" in its editor",
           text == "syntax: basic (large file)" and corner.first.is_visible(), repr(text))
     s = _state(page, "big.py")
-    check("and stays on Monarch: it never reached the worker",
-          bool(s) and s["state"] == "basic" and s.get("reason") == "large file" and s["served"] == 0, str(s))
+    # `opens`: times the client sent the model's text to the worker. The
+    # worker would say "large file" too, so only this pins the client's own
+    # guard (review of PR #54, LOW 1): 1.2 MB never leaves the window.
+    check("and stays on Monarch: its text was never sent to the worker",
+          bool(s) and s["state"] == "basic" and s.get("reason") == "large file" and s["served"] == 0
+          and s.get("opens") == 0, str(s))
     lines = page.evaluate(SPANS, 2)
     tokens = _tokens(page)
     check("Monarch still colours it (a comment is italic --text-muted)",

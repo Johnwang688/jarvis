@@ -41,6 +41,12 @@ export interface SyntaxStatus {
   reason?: BasicReason | "no worker";
   /** Token answers with data, applied or not (tests wait on this). */
   served: number;
+  /**
+   * Times the model's whole text was sent to the worker (`open`). A model
+   * past `BUDGETS.maxChars` is never sent: 0 (tests pin the client's own
+   * guard, which the worker's would otherwise hide).
+   */
+  opens: number;
 }
 
 interface Track extends SyntaxStatus {
@@ -61,7 +67,13 @@ type Reply = {
   stale?: boolean;
 };
 
-const REPLY_TIMEOUT_MS = 10_000;
+/**
+ * A token request the worker has not answered in this long means the worker
+ * is wedged (it answers in order, so every later request would wait too): it
+ * is treated as dead, as on an error — every covered model goes back to
+ * Monarch and its editor says "syntax: basic (no worker)".
+ */
+export const REPLY_TIMEOUT_MS = 10_000;
 
 export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
   let worker: Worker | null = null;
@@ -163,7 +175,7 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
     const grammar = grammarFor(language, model.uri.path);
     if (!grammar) return null;
     const t: Track = {
-      id: `m${++ids}`, uri, language, grammar, model, state: "loading", served: 0, opened: false, subs: [],
+      id: `m${++ids}`, uri, language, grammar, model, state: "loading", served: 0, opens: 0, opened: false, subs: [],
     };
     tracks.set(uri, t);
     byId.set(t.id, t);
@@ -201,6 +213,7 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
       t: "open", id: t.id, grammar: t.grammar, text: t.model.getValue(), version: t.model.getVersionId(),
       styledAs: t.language,
     });
+    if (t.opened) t.opens++;
     if (!t.opened && !dead) setState(t, "basic", "no worker");
   }
 
@@ -217,7 +230,11 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
       const reply = new Promise<Reply | null>((resolve) => {
         waiting.set(req, resolve);
         setTimeout(() => {
-          if (waiting.delete(req)) resolve(null);
+          if (!waiting.delete(req)) return;
+          resolve(null);
+          // No answer: the worker is wedged. Monarch for every model, said in
+          // each editor's corner (fail() also asks Monaco to draw again).
+          fail();
         }, REPLY_TIMEOUT_MS);
       });
       if (!post({ t: "tokens", id: t.id, req, version, first: range.startLineNumber - 1, last: range.endLineNumber - 1 })) {
@@ -225,7 +242,11 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
         return { data: new Uint32Array(0) };
       }
       const r = await reply;
-      if (!r || model.isDisposed() || model.getVersionId() !== r.version) return null;
+      if (model.isDisposed()) return null;
+      // No answer (the worker failed or stopped answering): an empty answer,
+      // so nothing tree-sitter drew before stays on screen over Monarch.
+      if (!r) return { data: new Uint32Array(0) };
+      if (model.getVersionId() !== r.version) return null;
       if (r.state === "basic") return { data: new Uint32Array(0) };
       if (!r.data) return null;
       t.served++;
@@ -257,7 +278,8 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
   (window as any).__hudSyntax = {
     /** Every model tree-sitter has been asked about: its grammar and state. */
     states: (): SyntaxStatus[] =>
-      [...tracks.values()].map(({ uri, language, grammar, state, reason, served }) => ({ uri, language, grammar, state, reason, served })),
+      [...tracks.values()].map(({ uri, language, grammar, state, reason, served, opens }) =>
+        ({ uri, language, grammar, state, reason, served, opens })),
     /**
      * The worker's loader asked to fetch `url`: a shipped grammar's URL loads,
      * any other is refused before a request is made.

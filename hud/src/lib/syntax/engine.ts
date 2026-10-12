@@ -51,6 +51,8 @@ interface Doc {
   cancels: number;
   lines: Lines | null;
   injections: Injection[] | null;
+  /** Injections queries cancelled in a row; at `maxCancels` the document's injections stay off. */
+  injectionCancels: number;
 }
 
 export interface TokensResult {
@@ -127,7 +129,7 @@ export class SyntaxEngine {
     this.close(id);
     const doc: Doc = {
       id, grammar, modifier: modifierOf(styledAs), text, version, tree: null, dirty: false,
-      state: "loading", cancels: 0, lines: null, injections: null,
+      state: "loading", cancels: 0, lines: null, injections: null, injectionCancels: 0,
     };
     this.docs.set(id, doc);
     if (text.length > this.budgets.maxChars) return this.basic(doc, "large file");
@@ -263,7 +265,14 @@ export class SyntaxEngine {
     for (let l = first; l <= last; l += this.budgets.chunkLines) {
       const end = Math.min(l + this.budgets.chunkLines - 1, last);
       const from = lines.start(l), to = lines.end(end);
-      this.collect(doc, from, to, captures);
+      const had = captures.length;
+      if (!this.collect(doc, from, to, captures)) {
+        // A query run past `matchMs`: its matches are partial, so this chunk
+        // is dropped and the answer stops at the lines before it.
+        captures.length = had;
+        truncatedAt = done;
+        break;
+      }
       this.collectInjected(doc, from, to, captures);
       done = end;
       if (end < last && (this.now() > deadline || captures.length > this.budgets.maxCaptures)) {
@@ -275,12 +284,32 @@ export class SyntaxEngine {
     return { ...base, data, ...(truncatedAt !== undefined ? { truncatedAt } : {}) };
   }
 
-  /** The document's own captures over `[from, to)`. */
-  private collect(doc: Doc, from: number, to: number, out: Capture[]) {
+  /** The document's own captures over `[from, to)`; false when the query ran past its budget. */
+  private collect(doc: Doc, from: number, to: number, out: Capture[]): boolean {
     const a = this.assets.get(doc.grammar);
-    if (!a || !doc.tree) return;
-    const matches = a.highlights.matches(doc.tree.rootNode, queryRange(from, to));
+    if (!a || !doc.tree) return true;
+    const { matches, cancelled } = this.matches(a.highlights, doc.tree.rootNode, queryRange(from, to));
+    if (cancelled) return false;
     for (const m of matches) this.push(a.highlights, m, 0, doc.modifier, 0, out);
+    return true;
+  }
+
+  /**
+   * `query.matches(node, range)` within `matchMs` (web-tree-sitter's
+   * `progressCallback`: returning true cancels the run). `cancelled`: the
+   * budget stopped it, and its matches are partial — never used as colour.
+   */
+  private matches(query: Query, node: Node, range: { startIndex: number; endIndex: number } | null = null) {
+    const deadline = this.now() + this.budgets.matchMs;
+    let cancelled = false;
+    const matches = query.matches(node, {
+      ...(range ?? {}),
+      progressCallback: () => {
+        if (!cancelled && this.now() > deadline) cancelled = true;
+        return cancelled;
+      },
+    });
+    return { matches, cancelled };
   }
 
   private push(query: Query, m: QueryMatch, offset: number, modifier: number, depth: number, out: Capture[]) {
@@ -305,17 +334,28 @@ export class SyntaxEngine {
     if (doc.injections) return doc.injections;
     const a = this.assets.get(doc.grammar);
     const list: Injection[] = [];
-    if (a?.injections && doc.tree) {
+    if (a?.injections && doc.tree && doc.injectionCancels < this.budgets.maxCancels) {
+      // The whole document, after every edit: within `matchMs`, or none at
+      // all for this version (fences keep their host's colour) — and twice
+      // running, none for this document from then on.
+      const { matches, cancelled } = this.matches(a.injections, doc.tree.rootNode);
+      if (cancelled) {
+        doc.injectionCancels++;
+        doc.injections = [];
+        return doc.injections;
+      }
+      doc.injectionCancels = 0;
       const ts = new TsLines(doc.text);
-      for (const m of a.injections.matches(doc.tree.rootNode)) {
+      for (const m of matches) {
         if (!workerPredicates(a.injections, m)) continue;
         const props = m.setProperties ?? {};
         let name: string | null = null;
         const langCapture = m.captures.find((c) => c.name === "injection.language");
         if (langCapture) name = langCapture.node.text;
         else if (typeof props["injection.language"] === "string") name = props["injection.language"];
-        else if ("injection.self" in props || "injection.parent" in props) name = doc.grammar;
-        const grammar = name ? (name in GRAMMARS ? (name as GrammarName) : injectionGrammar(name)) : null;
+        else if (Object.hasOwn(props, "injection.self") || Object.hasOwn(props, "injection.parent")) name = doc.grammar;
+        // Own keys only: a fence tagged `constructor` or `__proto__` names no grammar.
+        const grammar = name ? (Object.hasOwn(GRAMMARS, name) ? (name as GrammarName) : injectionGrammar(name)) : null;
         if (!grammar) continue;
         const offsets = offsetsOf(a.injections, m);
         for (const c of m.captures) {
@@ -392,7 +432,9 @@ export class SyntaxEngine {
     if (tree) {
       const modifier = modifierOf(STYLED_AS[inj.grammar]);
       const tmp: Capture[] = [];
-      for (const m of a.highlights.matches(tree.rootNode)) this.push(a.highlights, m, 0, modifier, 1, tmp);
+      // Past `matchMs` the range keeps its host's colour (an empty answer, cached).
+      const { matches, cancelled } = this.matches(a.highlights, tree.rootNode);
+      if (!cancelled) for (const m of matches) this.push(a.highlights, m, 0, modifier, 1, tmp);
       for (const c of tmp) rel.push({ start: c.start, end: c.end, type: c.type, modifier: c.modifier, priority: c.priority, pattern: c.pattern });
       tree.delete();
     }
