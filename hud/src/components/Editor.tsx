@@ -17,9 +17,16 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  diffUri, editorsBlocked, loadMonaco, onEditorsBlocked, type Monaco,
+  diffUri, editorsBlocked, isMarkdown, loadMonaco, onEditorsBlocked, type Monaco,
 } from "../lib/monaco";
 import type { TextModel } from "../state/buffers";
+// ED-8: the editor settings, `.editorconfig`'s indentation kept through them, and vim.
+import { displayOptions, editorOptions } from "../lib/editorSettings";
+import {
+  editorSettings, onEditorSettings, trackEditor, untrackEditor, useEditorSettings,
+} from "../state/editorSettings";
+import { reapplyEditorConfig } from "../state/editorconfig";
+import { attachVim, type VimHandle } from "../state/vim";
 import { gitGutter } from "../state/gitGutter";
 import { gutterDecorations } from "../lib/linediff";
 
@@ -65,10 +72,15 @@ export function PaneEditor(props: {
   /** "Add Selection to Chat" in the editor's own context menu (ED-7); off for an env file. */
   mayAddToChat?: boolean;
   onAddToChat?: () => void;
+  /** Where vim's status line goes (ED-8): its mode and `:` command line. Vim attaches only with one. */
+  vimStatus?: HTMLElement | null;
   /** The git gutter (ED-9): the buffer's project and path there; null draws none. */
   git?: { projectId: string; path: string } | null;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const markdown = useRef(isMarkdown(props.path));
+  markdown.current = isMarkdown(props.path);
+  const vim = useRef<VimHandle | null>(null);
   const editor = useRef<any>(null);
   const shown = useRef<{ key: string | null; model: TextModel | null }>({ key: null, model: null });
   const views = useRef(new Map<string, any>());
@@ -95,6 +107,7 @@ export function PaneEditor(props: {
     let saveKey: { dispose(): void } | null = null;
     let addKey: { dispose(): void } | null = null;
     let focusSub: { dispose(): void } | null = null;
+    let unsettings = () => {};
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
@@ -102,8 +115,8 @@ export function PaneEditor(props: {
           model: null,
           theme: "jarvis",
           automaticLayout: true,
-          minimap: { enabled: false },
-          fontSize: 12,
+          // The owner's settings (ED-8): font, size, tabs, wrap, minimap (off) …
+          ...editorOptions(editorSettings(), { markdown: markdown.current }),
           readOnly: readOnly.current || editorsBlocked(),
           scrollBeyondLastLine: false,
           // Words from documents of the same language only: an env file's
@@ -147,6 +160,19 @@ export function PaneEditor(props: {
           ed.updateOptions({ readOnly: b || readOnly.current });
           setLocked(b);
         });
+        // A settings change reaches this editor in the call that made it
+        // (ED-8). Monaco's model service then recomputes every model's
+        // indentation, so `.editorconfig`'s is put back after.
+        reapplyEditorConfig();
+        trackEditor(ed, { vim: false });
+        unsettings = onEditorSettings((s) => {
+          const opts = editorOptions(s, { markdown: markdown.current });
+          // While vim drives the editor its cursor is vim's (a block in
+          // normal mode); the setting comes back when vim is turned off.
+          if (vim.current) delete opts.cursorStyle;
+          ed.updateOptions(opts);
+          reapplyEditorConfig();
+        });
         editorRef.current?.(ed);
         setReady(true);
       })
@@ -154,6 +180,10 @@ export function PaneEditor(props: {
     return () => {
       dead = true;
       unhold();
+      unsettings();
+      vim.current?.dispose();
+      vim.current = null;
+      if (editor.current) untrackEditor(editor.current);
       saveKey?.dispose();
       addKey?.dispose();
       focusSub?.dispose();
@@ -194,6 +224,46 @@ export function PaneEditor(props: {
   useEffect(() => {
     mayAdd.current?.set(!!props.mayAddToChat);
   }, [props.mayAddToChat, ready]);
+
+  // Markdown wraps by its own setting (ED-8): the word wrap follows the tab shown.
+  const md = isMarkdown(props.path);
+  useEffect(() => {
+    const s = editorSettings();
+    editor.current?.updateOptions({ wordWrap: md ? s.wordWrapMarkdown : s.wordWrap });
+  }, [md, ready]);
+
+  // Vim (ED-8, E-11): attached while the setting is on and there is a status
+  // line for it; `:w` is this editor's save. Taken off when the setting goes
+  // off, and the cursor the settings say comes back.
+  const vimOn = useEditorSettings().vim;
+  const vimNode = props.vimStatus ?? null;
+  useEffect(() => {
+    const ed = editor.current;
+    if (!ed || !vimOn || !vimNode) return;
+    let gone = false;
+    attachVim(ed, vimNode, () => onSave.current()).then(
+      (h) => {
+        if (gone || editor.current !== ed) h.dispose();
+        else {
+          vim.current = h;
+          trackEditor(ed, { vim: true });
+        }
+      },
+      () => {
+        /* the library would not load: the editor stays as it is */
+      },
+    );
+    return () => {
+      gone = true;
+      const h = vim.current;
+      vim.current = null;
+      if (!h) return;
+      h.dispose();
+      if (editor.current !== ed) return; // the editor went first (and took vim with it)
+      trackEditor(ed, { vim: false });
+      ed.updateOptions(editorOptions(editorSettings(), { markdown: markdown.current }));
+    };
+  }, [ready, vimOn, vimNode]);
 
   // The git gutter (ED-9, state/gitGutter.ts): this buffer's lines against
   // HEAD's, drawn in this editor's own decorations. The diff is the
@@ -282,6 +352,7 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
     let ed: any = null;
     let original: any = null;
     let unhold = () => {};
+    let unsettings = () => {};
     let saveKey: { dispose(): void } | null = null;
     loadMonaco()
       .then((monaco: Monaco) => {
@@ -295,8 +366,12 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
           // Side by side even in a narrow pane: the disk's text on the left,
           // the buffer on the right, never folded into one inline view.
           useInlineViewWhenSpaceIsLimited: false,
-          fontSize: 12,
+          ...displayOptions(editorSettings()),
           minimap: { enabled: false },
+        });
+        unsettings = onEditorSettings((s) => {
+          ed.updateOptions(displayOptions(s));
+          reapplyEditorConfig();
         });
         original = monaco.editor.createModel(
           props.disk, props.model.getLanguageId?.(), monaco.Uri.from({ scheme: "jarvis-disk", path: `/${props.path}`, query: `disk=${Date.now()}` }),
@@ -321,6 +396,7 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
     return () => {
       dead = true;
       unhold();
+      unsettings();
       saveKey?.dispose();
       // The diff editor and the disk's side; the buffer's model stays.
       ed?.setModel(null);
@@ -349,6 +425,7 @@ export function DiffEditor(props: { path: string; before: string; after: string 
     let ed: any = null;
     let original: any = null;
     let modified: any = null;
+    let unsettings = () => {};
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
@@ -357,8 +434,12 @@ export function DiffEditor(props: { path: string; before: string; after: string 
           automaticLayout: true,
           readOnly: true,
           renderSideBySide: true,
-          fontSize: 12,
+          ...displayOptions(editorSettings()),
           minimap: { enabled: false },
+        });
+        unsettings = onEditorSettings((s) => {
+          ed.updateOptions(displayOptions(s));
+          reapplyEditorConfig();
         });
         original = monaco.editor.createModel(props.before, undefined, diffUri(monaco, props.path, "original"));
         modified = monaco.editor.createModel(props.after, undefined, diffUri(monaco, props.path, "modified"));
@@ -367,6 +448,7 @@ export function DiffEditor(props: { path: string; before: string; after: string 
       .catch(() => setFailed(true));
     return () => {
       dead = true;
+      unsettings();
       // The editor first, so nothing still shows the models it lets go of.
       ed?.dispose();
       original?.dispose();
