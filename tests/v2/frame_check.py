@@ -158,6 +158,7 @@ class Base(unittest.TestCase):
                                 AVATAR_ENV="",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
+                                BROWSER_SETTINGS_PATH=self.root / "browser.json",
                                 TERMINAL_SHELL=str(FAKE_SHELL),
                                 # Never the owner's installed HUD (C-1, ED-4).
                                 HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
@@ -325,6 +326,7 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("GET", "/models", None), ("GET", "/models/catalog", None), ("POST", "/model", {"bogus": 1}),
         ("POST", "/models", {"bogus": 1}), ("POST", "/mute", {"muted": "yes"}),
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
+        ("GET", "/browser/settings", None), ("PATCH", "/browser/settings", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
         ("GET", "/terminals/deadbeef/attach", None), ("DELETE", "/terminals/deadbeef", None),
         ("GET", "/vex/status", None), ("GET", "/vex/builds/deadbeef", None),
@@ -658,7 +660,8 @@ class Status(Base):
 
 class Coverage(Base):
     ROUTE_FILES = ("jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/projects.py",
-                   "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py", "jarvis/v2/vex.py")
+                   "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py", "jarvis/v2/vex.py",
+                   "jarvis/v2/browser/settings.py")
 
     def families(self) -> set[str]:
         """Every first path segment a route module matches on."""

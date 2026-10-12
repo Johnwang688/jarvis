@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import websocket  # noqa: E402  (websocket-client, already a dependency)
 
 from jarvis import config  # noqa: E402
-from jarvis.v2 import terminals as T, ws as W  # noqa: E402
+from jarvis.v2 import devurl, terminals as T, ws as W  # noqa: E402
 from jarvis.v2.daemon import Daemon  # noqa: E402
 from jarvis.v2.model import ProviderName as PN  # noqa: E402
 from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, Usage  # noqa: E402
@@ -192,6 +192,7 @@ class Base(unittest.TestCase):
                                 MODELS_PATH=self.root / "models.json",
                                 PROVIDER_DEFAULTS_PATH=self.root / "provider_defaults.json",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
+                                BROWSER_SETTINGS_PATH=self.root / "browser.json",
                                 TERMINAL_SHELL=str(FAKE_SHELL)).items():
             guard = patch.object(config, name, value)
             guard.start()
@@ -1259,6 +1260,213 @@ class Leaks(Base):
         for path in self.root.rglob("*"):
             if path.is_file():
                 self.assertNotIn(marker.encode(), path.read_bytes(), path)
+
+
+_PROMPT_MARK = re.compile(rb"\]133;B;jarvis=[0-9a-f]+\x1b\\")
+
+
+class DevUrls(Base):
+    """BR-8a: a dev server's URL, read from a terminal's live output, is told
+    to the window attached to that terminal — as `{"type": "dev_url", "url"}`
+    on its socket — and to nothing else: no bus record, no log line, no file.
+    With the owner's `auto_open` off, no byte of output reaches the sniffer."""
+
+    def setUp(self):
+        super().setUp()
+        # One frame a second per terminal is devurl_check's to prove; here
+        # several servers announce themselves in quick succession.
+        guard = patch.object(devurl, "RATE_GAP_S", 0.0)
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    @staticmethod
+    def dev_urls(client):
+        return [m for m in client.messages if m.get("type") == "dev_url"]
+
+    def wait_dev_url(self, client, url):
+        client.until(lambda c: any(m.get("url") == url for m in self.dev_urls(c)),
+                     what=f"dev_url {url}")
+
+    @staticmethod
+    def prompts(client) -> int:
+        return len(_PROMPT_MARK.findall(bytes(client.output)))
+
+    def at_prompt(self, client, count=1):
+        client.until(lambda c: self.prompts(c) >= count, what="a prompt")
+
+    def run_line(self, client, line, expect=None):
+        """Type a line once the shell is at its prompt, and wait for the next
+        prompt: typed ahead, the tty would echo it inside the running
+        command's output, where it is output."""
+        self.at_prompt(client)
+        before = self.prompts(client)
+        client.type(line)
+        self.at_prompt(client, before + 1)
+        expect = line.partition(" ")[2] if expect is None else expect
+        self.assertIn("\n" + expect + "\n", client.text())
+
+    def session(self, tid=None):
+        tid, client = super().session(tid)
+        self.at_prompt(client)
+        return tid, client
+
+    def test_it_reaches_only_the_window_attached_to_that_terminal(self):
+        tid1, one = self.session()
+        tid2, two = self.session()
+        one.type("echo   Local:   http://localhost:24601/")
+        self.wait_dev_url(one, "http://localhost:24601/")
+        # After the bytes that carried it: the line is already on screen.
+        self.assertIn("  Local:   http://localhost:24601/\n", one.text())
+        one.drain(0.3)
+        two.drain(0.3)
+        self.assertEqual(self.dev_urls(one), [{"type": "dev_url", "url": "http://localhost:24601/"}])
+        self.assertEqual(self.dev_urls(two), [])
+        self.assertNotIn("dev_url", json.dumps(self.owner("GET", "/terminals")))
+
+    def test_the_prompt_and_the_typed_line_are_never_read(self):
+        tid, client = self.session()
+        # The first command (before any C mark) and a later one (after).
+        self.run_line(client, "# Local: http://localhost:24602/", "fake: #: command not found")
+        self.run_line(client, "curl http://localhost:24603", "fake: curl: command not found")
+        self.run_line(client, "#  * Running on http://127.0.0.1:24604", "fake: #: command not found")
+        self.run_line(client, "echo  Local: http://localhost:24605/")
+        self.wait_dev_url(client, "http://localhost:24605/")
+        client.drain(0.3)
+        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://localhost:24605/"])
+
+    def test_jarvis_ports_are_never_sent(self):
+        tid, client = self.session()
+        for port in sorted({self.daemon.face_port, self.daemon.port, self.daemon.workshop_port,
+                            8402, 8403, 8404, 8405, 8406}):
+            for host in ("localhost", "127.0.0.1", "[::1]", "0.0.0.0"):
+                self.run_line(client, f"echo  Local: http://{host}:{port}/")
+        self.run_line(client, "echo  Local: http://127.0.0.1:24606/")
+        self.wait_dev_url(client, "http://127.0.0.1:24606/")
+        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://127.0.0.1:24606/"])
+
+    def test_nothing_reaches_the_bus_a_log_or_a_file(self):
+        marker = "zq-devurl-" + secrets.token_hex(6)
+        url = f"http://localhost:24607/{marker}/"
+        events = self.daemon.bus.subscribe()
+        with capture_logs() as records:
+            tid, client = self.session()
+            client.type(f"echo  Local: {url}")
+            self.wait_dev_url(client, url)
+            self.owner("PATCH", "/browser/settings", {"auto_open": True})
+            self.owner("DELETE", f"/terminals/{tid}")
+        drained = []
+        while True:
+            try:
+                drained.append(events.get_nowait())
+            except Exception:
+                break
+        self.assertEqual([r["kind"] for r in drained], ["terminal_attached"], drained)
+        self.assertNotIn(marker, json.dumps(drained))
+        text = "\n".join(records)
+        self.assertIn(f"terminal {tid} closed", text)                           # the capture worked
+        self.assertIn("browser settings changed by the owner: auto_open on", text)
+        self.assertNotIn(marker, text)
+        self.assertNotIn("24607", text)
+        for path in self.root.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(marker.encode(), path.read_bytes(), path)
+
+    def test_with_auto_open_off_the_sniffer_is_never_fed(self):
+        self.assertEqual(self.owner("GET", "/browser/settings"), {"auto_open": True})
+        self.assertEqual(self.owner("PATCH", "/browser/settings", {"auto_open": False}),
+                         {"auto_open": False})
+        fed = []
+        real = devurl.DevUrlSniffer.feed
+
+        def counting(sniffer, data):
+            fed.append(len(data))
+            return real(sniffer, data)
+        with patch.object(devurl.DevUrlSniffer, "feed", counting):
+            tid, client = self.session()
+            self.run_line(client, "echo  Local: http://localhost:24608/")
+            client.drain(0.3)
+            self.assertEqual(self.dev_urls(client), [])
+            self.assertEqual(fed, [], "no byte of output reached the sniffer")
+            self.assertEqual(self.owner("GET", "/browser/settings"), {"auto_open": False})
+            # On again: the next announcement is read.
+            self.owner("PATCH", "/browser/settings", {"auto_open": True})
+            self.run_line(client, "echo  Local: http://localhost:24609/")
+            self.wait_dev_url(client, "http://localhost:24609/")
+        self.assertTrue(fed)
+        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://localhost:24609/"])
+
+    def test_a_replay_or_a_second_announcement_never_sends_it_again(self):
+        tid, client = self.session()
+        self.run_line(client, "echo  Local: http://localhost:24610/")
+        self.wait_dev_url(client, "http://localhost:24610/")
+        client.close()
+        again = self.connect(tid)
+        again.until(lambda c: "replayed" in c.kinds() and "24610" in c.text(), what="the replay")
+        self.at_prompt(again)
+        # The same server again (a restart): the same origin, and Puma's
+        # second line for it.
+        self.run_line(again, "echo  Local: http://127.0.0.1:24610/")
+        self.run_line(again, "echo * Listening on http://[::1]:24610")
+        self.run_line(again, "echo  Local: http://localhost:24611/")
+        self.wait_dev_url(again, "http://localhost:24611/")
+        self.assertEqual([m["url"] for m in self.dev_urls(again)], ["http://localhost:24611/"])
+
+    def test_the_switch_is_the_owners(self):
+        path = "/browser/settings"
+        self.assertEqual(self.owner("GET", path), {"auto_open": True})
+        for kw in ({"port": self.daemon.port}, {"port": self.daemon.workshop_port},
+                   {"origin": f"http://127.0.0.1:{self.daemon.workshop_port}"},
+                   {"origin": "http://evil.example"}, {"origin": "null"}, {"origin": None},
+                   {"host": f"evil.example:{self.daemon.face_port}"}):
+            with self.subTest(**{k: str(v) for k, v in kw.items()}):
+                status, _ = self.request("PATCH", path, {"auto_open": False}, **kw)
+                self.assertIn(status, (403, 404))
+                status, _ = self.request("GET", path, None, **kw)
+                self.assertIn(status, (403, 404))
+        for bad in ({"auto_open": "no"}, {"auto_open": 0}, {"bogus": True}, {}, [True]):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.request("PATCH", path, bad)[0], 400)
+        self.assertEqual(self.request("PATCH", path + "?x=1", {"auto_open": False})[0], 400)
+        self.assertEqual(self.request("POST", path, {"auto_open": False})[0], 404)
+        self.assertEqual(self.request("GET", "/browser/other")[0], 404)
+        self.assertEqual(self.owner("GET", path), {"auto_open": True})
+        self.assertFalse((self.root / "browser.json").exists(), "a test daemon writes no file")
+
+    def test_unattached_output_is_dropped_and_not_remembered(self):
+        terminal = T.Terminal("0000000e", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE, integration="posix")
+        self.addCleanup(terminal.finish)
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        line = b"  Local: http://localhost:24612/\r\n"
+        terminal._output(line)                                                  # no window
+
+        class Sock:
+            def __init__(self):
+                self.sent, self.closed = [], threading.Event()
+
+            def send_binary(self, data):
+                self.sent.append(("binary", bytes(data)))
+                return True
+
+            def send_text(self, text):
+                self.sent.append(("text", json.loads(text)))
+                return True
+        sock = Sock()
+        terminal._attachment = sock
+        # The typed line between B and C, and the C mark split across chunks.
+        c_mark = mark(b"C;cmdline_url=npm%20run%20dev")
+        terminal._output(mark(b"A") + b"$ " + mark(b"B") + b"echo Local: http://localhost:24613/\r\n"
+                         + c_mark[:9])
+        terminal._output(c_mark[9:] + line[:12])
+        terminal._output(line[12:] + mark(b"D;0"))
+        texts = [item for kind, item in sock.sent if kind == "text"]
+        self.assertEqual(texts, [{"type": "marked"},                           # the signed A
+                                 {"type": "dev_url", "url": "http://localhost:24612/"}])
+        self.assertEqual(sock.sent[-1][0], "text", "after the bytes that carried it")
+        # A mark without this terminal's nonce moves nothing.
+        terminal._output(mark(b"A", nonce="00" * 16) + b"  Local: http://localhost:24614/\r\n")
+        self.assertEqual(sock.sent[-1], ("text", {"type": "dev_url", "url": "http://localhost:24614/"}))
 
 
 class NoTool(Base):
