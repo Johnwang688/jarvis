@@ -470,7 +470,8 @@ class FrameHeaders(Base):
         self.assertEqual(len(names), len(set(names)), "no directive twice")
         got = {d[0]: d[1:] for d in directives}
         self.assertEqual(got["default-src"], ["'none'"])
-        self.assertEqual(got["script-src"], ["'self'"], "no inline, no eval, no wasm until ED-5")
+        self.assertEqual(got["script-src"], ["'self'", "'wasm-unsafe-eval'"],
+                         "no inline, no eval; WebAssembly compiles (ED-5's tree-sitter)")
         self.assertEqual(got["worker-src"], ["'self'"])
         self.assertEqual(got["connect-src"], ["'self'"])
         self.assertEqual(got["style-src"], ["'self'", "'unsafe-inline'"])
@@ -482,21 +483,27 @@ class FrameHeaders(Base):
         for name in ("base-uri", "form-action", "object-src", "frame-ancestors"):
             self.assertEqual(got[name], ["'none'"], name)
         self.assertEqual(names[-1], "frame-ancestors")
-        for word in ("'unsafe-eval'", "'wasm-unsafe-eval'", "'unsafe-hashes'", "blob:", " * ", "https:"):
+        for word in ("'unsafe-eval'", "'unsafe-hashes'", "blob:", " * ", "https:"):
             self.assertNotIn(word, f" {policy} ", word)
+        self.assertEqual(policy.count("'wasm-unsafe-eval'"), 1, "WebAssembly in script-src only")
 
     def test_a_response_may_only_narrow_the_policy(self):
         base = H.content_security_policy()
         self.assertEqual(H.content_security_policy("img-src 'self'"),
                          base.replace("img-src 'self' data:", "img-src 'self'"))
-        self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF'"), base, "keywords fold case")
+        self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF' 'WASM-UNSAFE-EVAL'"), base,
+                         "keywords fold case")
         self.assertEqual(H.content_security_policy("script-src 'none'"),
-                         base.replace("script-src 'self'", "script-src 'none'"))
+                         base.replace("script-src 'self' 'wasm-unsafe-eval'", "script-src 'none'"))
+        # A response may drop WebAssembly (ED-5) and keep its script.
+        self.assertEqual(H.content_security_policy("script-src 'self'"),
+                         base.replace("script-src 'self' 'wasm-unsafe-eval'", "script-src 'self'"))
         self.assertEqual(H.content_security_policy("connect-src 'none'; img-src 'none'"),
                          base.replace("connect-src 'self'", "connect-src 'none'")
                              .replace("img-src 'self' data:", "img-src 'none'"))
         for loosening in ("script-src 'self' 'unsafe-eval'", "script-src 'self' 'unsafe-inline'",
-                          "script-src 'self' 'wasm-unsafe-eval'", "script-src *", "script-src https:",
+                          "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'",
+                          "script-src 'wasm-unsafe-eval' 'unsafe-hashes'", "script-src *", "script-src https:",
                           "connect-src https://example.com", "connect-src ws:", "img-src 'self' blob:",
                           "img-src *", "default-src 'self'", "frame-src *", "frame-src http://example.com",
                           "worker-src blob:", "base-uri 'self'", "form-action 'self'", "object-src 'self'",

@@ -14,6 +14,11 @@ export default defineConfig({
     // warning is not a defect to chase here.
     chunkSizeWarningLimit: 6144,
   },
+  // Workers are ES modules (`new Worker(url, {type: "module"})`): the syntax
+  // worker's web-tree-sitter has code-split imports (its Node-only branches),
+  // which an IIFE worker cannot hold (ED-5). Monaco's editor.worker runs the
+  // same either way.
+  worker: { format: "es" },
   test: {
     globals: true,
     environment: "jsdom",
