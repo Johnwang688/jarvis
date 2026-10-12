@@ -1560,6 +1560,17 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+**Known gap, open (2026-10-12, review of PR #74; reproduced in Chrome 155):**
+a framed page can take the keyboard with no user activation.
+`el.focus()`/`window.focus()` inside the `allow-scripts allow-forms` frame
+moves focus out of the HUD's box, and later keys go to the page, which can
+send them to its own server: chat words, an editor's `.env` value, a
+password typed in a terminal. `inert`, `display: none`, re-focusing the box
+and `contentWindow.blur()` do not stop it, even from a hidden frame. Only
+removing the iframe in the parent's `blur` handler does. AO-2
+(`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §E.8) adds that
+guard for every Browser frame: a frame that gains focus without the owner's
+gesture is unmounted ("This page took the keyboard · Reload").
 
 **The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
@@ -6206,9 +6217,9 @@ Two findings worth keeping:
   an agent can trigger an auto-open. Counting one as the owner's own
   navigation would hand agents a lever on the gate. Only the owner's typed
   URL, click or "Open in Remote" opens a loopback port there. This
-  **reverses** the note PR #69 carries in the BR-1a paragraph and its
-  decisions bullet ("BR-8b's auto-open … counts as the owner's opening"),
-  which go when #69 merges (amendment 2 §M).
+  **reverses** the note BR-1a's review first carried: that BR-8b's auto-open
+  counted as the owner's opening. #69 merged with that note already
+  corrected, in the BR-1a paragraph and the "closed like the LAN" bullet.
 
 - **Agents that cannot ask get a typed git tool, not a broader shell
   (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach

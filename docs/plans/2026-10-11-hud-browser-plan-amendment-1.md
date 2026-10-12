@@ -587,7 +587,7 @@ Sound and video still have no sync, as §9 says.
 | BR-1c | profiles, Private, sign-in and sync off, per-profile forget | M, medium-high | after BR-1a, parallel with BR-1b | no |
 | BR-3a | rename and migration | S–M | **right after G1 merges** | yes |
 | BR-3b | Remote mode, profile chip, Private, see and drive switches | L, high | after BR-1b, BR-1c, BR-2, BR-3a | yes |
-| BR-8b | auto-open in the HUD (Direct mode only, so BR-3b is not needed). **Replaced by amendment 2's AO-1a, AO-1b, AO-2 and AO-3** | M, medium | after G2 and BR-8a; G2 or BR-8b adds `splitPane(..., {focus:false})` | yes (`App.tsx`, `workspace.ts`) |
+| BR-8b | auto-open in the HUD (Direct mode only, so BR-3b is not needed). **Replaced by amendment 2's AO-1a, AO-1b-i, AO-1b-ii, AO-2 and AO-3** | M, medium | after G2 and BR-8a; G2 or BR-8b adds `splitPane(..., {focus:false})` | yes (`App.tsx`, `workspace.ts`) |
 | BR-4 | annotate and Send to chat | M | after BR-3b | some |
 | BR-5 | `hud_browser_view` with refs, pane numbers, default on | M, medium-high | after #33, #34, BR-1b; the HUD half after BR-3b | backend |
 | BR-9b | driving backend on the fast path, **shipped with "Agents may drive" off** | L, high | after BR-5, BR-9a, MCP WP-1 | no |

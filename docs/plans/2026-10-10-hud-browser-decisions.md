@@ -62,7 +62,7 @@ The lead's decisions, worked out in `2026-10-12-hud-browser-plan-amendment-2.md`
   - The owner's HUD terminals, through BR-8a's banners.
   - Servers an agent starts (a chat or a task, on any provider), found as new loopback listeners. Each must be:
     - owned by the owner's uid;
-    - working in that thread's folder;
+    - working in that thread's folder (dropped at review: R-2 replaces it with the session's tag);
     - started during its turn or a grace period after it;
     - not a HUD terminal's, and not Jarvis's own;
     - answering HTTP on `/`.
@@ -75,7 +75,34 @@ The lead's decisions, worked out in `2026-10-12-hud-browser-plan-amendment-2.md`
 - **L4, tabs.** Browser panes get tabs in Direct mode, migrated from `browserUrl`, and BR-3b reuses the strip.
 - **L5, one window.** The window showing the source acts. Otherwise the most recently focused window claims it through an owner-only route. With no window open, a quiet notice appears in the next window to load.
 - **L6, the gentle rules.** Nothing happens under a card; it waits until the card goes. Focus and the mic never move. One entry per port; a rate limit; the `auto_open` switch covers every source.
-- **L7, what leaves memory.** Only a loopback URL and the source's id. Never terminal text or tool output.
+- **L7, what leaves memory.** Only a loopback URL and the source's id. Never terminal text or tool output. R-5 narrows it further: no port on the bus.
 - **L8, stated limits.** An agent can put a sandboxed page in front of the owner, and some servers are missed.
 
 **Superseded:** amendment 1's §D.2 placement ("No room: the focused pane switches to Browser", the offer chip in the terminal's bar), BD-7, and the BR-8b rows of its §G and §H. AO-3 replaces BR-8b. BR-2's 30-second wait under a card becomes "until the card goes" (amendment 2, AD-14).
+
+**Decided at the plan's review (the lead, 2026-10-12; amendment 2 §0.2):**
+- **R-1, no frame takes the keyboard.** The reviewer reproduced it in Chrome 155: a framed page can take keyboard focus with no user activation. A Browser frame that gains focus without an owner gesture is unmounted at once ("This page took the keyboard · Reload").
+  - An owner gesture is: the pointer over that frame; a Tab into it; or the owner's own load of that tab.
+  - A hidden or background frame gaining focus is always theft. So is any frame under a card.
+  - This covers **every** Browser frame, including the Direct pane on main today, and ships first in AO-2.
+- **R-2, a tag is required.** An agent-started listener must carry its session's origin tag and be in the daemon's cgroup. An untagged one is not attributed, so L1's folder rule is dropped. The cost: a child started with `env -i` is missed.
+- **R-3, blank kept panes.** Rule 1 may take a blank kept pane: a default spec, holding nothing. A kept pane holding anything is never taken.
+- **R-4, the owner's two questions, decided by the lead.**
+  - **Q-A1:** a server whose `/` is not a web page (JSON, an error page with no markup) does not open.
+  - **Q-A2:** in a Browser pane the owner isn't using, a new tab comes to the front.
+
+  The owner can overturn either.
+- **R-5, no port on the bus.** A bus record carries `id`, `state`, `source` and time only. The URL comes only from owner-only routes.
+- **R-6, the prompt.** It sits away from every input bar and ignores clicks for about 500 ms after it appears. A split waits while a pointer button is down.
+- **R-7, the smaller items.**
+  - `environ` is read only for the owning pid, after the cheap rules, as raw bytes never decoded, logged or raised with.
+  - The probe needs markup in the body for a non-2xx/3xx answer.
+  - Service ports are skipped (9222, 9229, 5678, 5432, 3306, 6379, 27017), and so are 127/8 binds other than 127.0.0.1.
+  - The HUD's `opened` set is keyed by entry id.
+  - The claim lease is renewed while a prompt or wait is live, and lapses when the window's SSE ends.
+  - Each auto-opened tab shows a visible "Opened for … · localhost:N".
+  - Tests count work rather than wall time, check an accept count of 0 for refused listeners, and cap live frames window-wide.
+- **R-8, polling and packaging.**
+  - Polling runs only during Claude or Codex turns, with a 600 s grace for slow binders.
+  - AO-1b is split so the watcher doesn't wait on #70.
+  - The owner is told that "Open in Browser" now opens a new tab.
