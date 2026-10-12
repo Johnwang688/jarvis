@@ -168,12 +168,6 @@ function drawnNow(entry: Entry): boolean {
   return cv ? cv.call(f, { visibilityProperty: true }) : true;
 }
 
-/** Tests only: what the guard would decide for a frame now, without acting. */
-export function verdictFor(frame: HTMLIFrameElement): Verdict | null {
-  const entry = entries.get(frame);
-  return entry ? decide(entry) : null;
-}
-
 function decide(entry: Entry): Verdict {
   const t = now();
   const grant = loads.get(entry.key);
