@@ -6,7 +6,10 @@
 //  - a model's language comes from Monaco's registry, by its URI (extension,
 //    file name, shebang), never from a table of ours;
 //  - a diff view's two models live under `jarvis-diff:` and are disposed with
-//    it (they used to leak two per file viewed);
+//    it (they used to leak two per file viewed); since the Diff follow-ups
+//    (2026-10-12) each diff view also owns its view model
+//    (`createViewModel`) and disposes it first, which cancels a diff the
+//    worker is still computing — Monaco never releases one it makes itself;
 //  - under an approval card every editor is read-only (`setEditorsBlocked`,
 //    from App). Focus is the card's own doing: it takes focus off whatever
 //    had it and makes everything behind it inert (Approvals.tsx), so Escape
@@ -350,10 +353,20 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
     }
     let dead = false;
     let ed: any = null;
+    let vm: any = null;
     let original: any = null;
+    let watch: { dispose(): void } | null = null;
     let unhold = () => {};
     let unsettings = () => {};
     let saveKey: { dispose(): void } | null = null;
+    // The view model first — its dispose cancels a diff the worker may still
+    // be computing — then the editor lets go of it. Once, whichever path
+    // comes first: `vm` is cleared as it goes.
+    const letGo = () => {
+      vm?.dispose();
+      vm = null;
+      ed?.setModel(null);
+    };
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
@@ -376,7 +389,14 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
         original = monaco.editor.createModel(
           props.disk, props.model.getLanguageId?.(), monaco.Uri.from({ scheme: "jarvis-disk", path: `/${props.path}`, query: `disk=${Date.now()}` }),
         );
-        ed.setModel({ original, modified: props.model });
+        // The buffer is the registry's: if it goes while shown, let go of it
+        // first, so nothing computes against a disposed model.
+        watch = (props.model as any).onWillDispose?.(() => letGo()) ?? null;
+        // A view model of our own (as ScmDiffEditor, review of PR #67 L1):
+        // Monaco never releases one it makes from `{original, modified}`, so
+        // a diff still computing when Compare closed was never cancelled.
+        vm = ed.createViewModel({ original, modified: props.model });
+        ed.setModel(vm);
         const mod = ed.getModifiedEditor();
         mod.updateOptions({ wordBasedSuggestions: "matchingDocuments" });
         saveKey = mod.addAction({
@@ -395,11 +415,13 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
       .catch(() => setFailed(true));
     return () => {
       dead = true;
+      watch?.dispose();
       unhold();
       unsettings();
       saveKey?.dispose();
-      // The diff editor and the disk's side; the buffer's model stays.
-      ed?.setModel(null);
+      // The view model, then the diff editor, then the disk's side; the
+      // buffer's model — its text, undo stack and dirty state — stays.
+      letGo();
       ed?.dispose();
       original?.dispose();
     };
@@ -423,6 +445,7 @@ export function DiffEditor(props: { path: string; before: string; after: string 
   useEffect(() => {
     let dead = false;
     let ed: any = null;
+    let vm: any = null;
     let original: any = null;
     let modified: any = null;
     let unsettings = () => {};
@@ -443,13 +466,23 @@ export function DiffEditor(props: { path: string; before: string; after: string 
         });
         original = monaco.editor.createModel(props.before, undefined, diffUri(monaco, props.path, "original"));
         modified = monaco.editor.createModel(props.after, undefined, diffUri(monaco, props.path, "modified"));
-        ed.setModel({ original, modified });
+        // A view model of our own (as ScmDiffEditor, review of PR #67 L1):
+        // Monaco never releases one it makes from `{original, modified}`, so
+        // a diff still computing when this closed was never cancelled, and
+        // threw `no diff result available` against the models disposed here.
+        vm = ed.createViewModel({ original, modified });
+        ed.setModel(vm);
       })
       .catch(() => setFailed(true));
     return () => {
       dead = true;
       unsettings();
-      // The editor first, so nothing still shows the models it lets go of.
+      // The view model first (its dispose cancels a diff in flight), then the
+      // editor, so nothing still shows or computes against the models it lets
+      // go of; each once.
+      vm?.dispose();
+      vm = null;
+      ed?.setModel(null);
       ed?.dispose();
       original?.dispose();
       modified?.dispose();

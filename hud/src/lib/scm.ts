@@ -21,6 +21,8 @@
 //  - **The sides** (`baseSide`, `readSide`): HEAD's text on the left, the
 //    file as the editor would show it on the right, or a sentence instead of
 //    a diff (binary, too large, not a regular file).
+//  - **The list at scale** (`scmWindow`, `revealTop`, `scmKeyStep`): windowed,
+//    with keys to move the selection — see the section below.
 
 import { isEnvName } from "./fileIcons";
 
@@ -195,6 +197,79 @@ export function readSide(kind: string | null | undefined, isProtected: boolean):
   if (kind === "text" || kind === "safety") return "show";
   if (kind === "binary") return "binary";
   return "withheld";
+}
+
+// ---- the list at scale (the Diff follow-ups, 2026-10-12) ----------------------
+//
+// `git/status` lists up to 20,000 entries, and a DOM of 20,000 rows made every
+// keystroke anywhere in the window cost 84–102 ms of style recalculation (the
+// review of PR #67; 9.8 ms with the list hidden). So the list is windowed:
+// only the rows in view, and `SCM_OVERSCAN` either side, are drawn, inside a
+// spacer as tall as every row. Rows are one fixed height, so where a row is
+// is arithmetic — no measuring. The units are the list's own CSS pixels
+// (`scrollTop`, `clientHeight`), which the HUD's zoom does not change.
+
+/** A change-list row's height in CSS px. ProjectDiff pins each row to it. */
+export const SCM_ROW_PX = 24;
+/** Rows drawn past each edge of the view, so a scroll shows rows already there. */
+export const SCM_OVERSCAN = 12;
+/** Rows drawn while the list has no height to measure (hidden, or not laid out yet). */
+export const SCM_UNMEASURED_ROWS = 40;
+/**
+ * A key moves the highlight at once; the row's two sides are read only once
+ * the keys have rested this long (a click reads at once). Held ↓ repeats
+ * every ~30 ms, so a held key reads nothing until it is let go.
+ */
+export const SCM_KEY_SETTLE_MS = 150;
+
+/** The rows to draw, `[first, last)`, for a list scrolled to `scrollTop` with `viewPx` in view. */
+export function scmWindow(count: number, scrollTop: number, viewPx: number,
+  row = SCM_ROW_PX, over = SCM_OVERSCAN): { first: number; last: number } {
+  if (count <= 0) return { first: 0, last: 0 };
+  const top = Math.min(count - 1, Math.max(0, Math.floor((Number.isFinite(scrollTop) ? scrollTop : 0) / row)));
+  const inView = viewPx > 0 ? Math.ceil(viewPx / row) + 1 : SCM_UNMEASURED_ROWS;
+  return { first: Math.max(0, top - over), last: Math.min(count, top + inView + over) };
+}
+
+/** The `scrollTop` that brings row `index` fully into view, or null when it already is (or nothing is measured). */
+export function revealTop(index: number, scrollTop: number, viewPx: number, row = SCM_ROW_PX): number | null {
+  if (index < 0 || viewPx <= 0) return null;
+  const top = index * row;
+  const bottom = top + row;
+  if (top < scrollTop) return top;
+  if (bottom > scrollTop + viewPx) return Math.max(0, bottom - viewPx);
+  return null;
+}
+
+/**
+ * Where a key moves the list's selection: the row index to pick, or null for
+ * a key the list does not take. `index` is the selected row's (-1: none);
+ * `pageRows` how many rows a page is. Enter picks the selected row again
+ * (it reads both sides again, as a click on it does).
+ */
+export function scmKeyStep(key: string, index: number, count: number, pageRows: number): number | null {
+  if (count <= 0) return null;
+  const last = count - 1;
+  const page = Math.max(1, pageRows);
+  const at = Math.min(index, last);
+  switch (key) {
+    case "ArrowDown":
+      return at < 0 ? 0 : Math.min(last, at + 1);
+    case "ArrowUp":
+      return at < 0 ? 0 : Math.max(0, at - 1);
+    case "Home":
+      return 0;
+    case "End":
+      return last;
+    case "PageDown":
+      return Math.min(last, Math.max(0, at) + page);
+    case "PageUp":
+      return Math.max(0, at - page);
+    case "Enter":
+      return at < 0 ? null : at;
+    default:
+      return null;
+  }
 }
 
 /** Where a project-relative path resolves, from the project's resolved root (for an open buffer's `abs`). */

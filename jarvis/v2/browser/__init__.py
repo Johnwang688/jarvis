@@ -9,6 +9,10 @@ gate and its navigation policy.
 - `routes.py`: `/browser…`, owner-only on the HUD listener.
 - `settings.py`: `browser.json`, the owner's switches (`lan`, `local_servers`,
   BR-8a's `auto_open`): the one reader and the one writer of that file.
+- `stream.py` (BR-1b): a tab's ticketed socket — its frames, the owner's
+  input and its validation, the approval hold, takeover, the agent channel.
+- `files.py` (BR-1b): downloads saved and served owner-only, uploads judged
+  by BR-9a's H8 rule.
 
 Design: docs/plans/2026-10-10-hud-browser-plan.md, its amendment 1 and its
 decisions file (which wins). Fully separate from v1's `jarvis.browser`.

@@ -2970,6 +2970,37 @@ the log. `/status` gains `browser` and `refused_ports`. The same review
 closed v1's file tools (`read_file`, `grep_files` and the write tools) to
 every credential folder, the Browser's profile included.
 
+**The Browser's stream and the owner's input (2026-10-12, BR-1b of the
+browser plan, §2 "The stream", §3, §8; amendment 1 §B.8–§B.9).** Backend
+only; BR-3b draws it. A HUD window sees one tab over a socket of its own —
+the terminal's pattern: a single-use 30 s ticket for that tab from an
+owner-only route, and a tab another window shows is asked for first — as a
+JPEG screencast, **one frame in flight and the newest next**, so a slow
+window never falls behind; a tab no window shows is not streamed. The
+owner's keys, pointer, wheel and pasted text go back in BR-2's shapes and
+become real CDP input events; every message is held to its shape and bounds
+by the daemon, whatever the window sent. **While any approval card is up,
+nothing reaches a page**: input is dropped (the window hears `held`), the
+owner's own navigation routes answer 409, and the moment a card is raised
+everything queued is dropped, so nothing sent before or during it is ever
+delivered after. A press a card cut off ends with no click anywhere: Chrome
+would click the page's root for a release outside it (measured), so the
+daemon ends such a press as a pointer move with no button down. The page's
+dialogs (alert, confirm, prompt, leave-page) go to the window and are
+answered there, dismissed after 60 s or at once when no window shows the
+tab. A pop-up opens as a tab and its opener's window is told, to place it in
+the same pane; past the cap of 12 tabs in all the pop-up is refused rather
+than an older tab closed. Downloads are saved owner-only (0600, a folder of
+their own, a cleaned name) in the profile's private folder and offered to
+the window as an attachment that can never run on the HUD's origin; an
+executable is held until the owner's card (BR-9b). A page's file chooser is
+answered only through an owner-only route with files the owner picked in a
+project, judged by BR-9a's upload rule. The owner's input pauses a driving
+agent before it is delivered and is timestamped for BR-9b's gate; the
+banner's channel (`driver`, `action`, `paused`, `list`) is there for BR-9c.
+On the bus, only `browser_attached` (a tab id and a time); no URL, title,
+typed text or frame reaches the bus or the log.
+
 **Editor settings, `.editorconfig` and vim (2026-10-12, ED-8 of the editor
 plan, §2.8; decisions E-9, E-11).** A File pane's ⚙, or "Editor Settings…" in
 the palette, opens one dialog for every editor in the window: font family
@@ -3051,6 +3082,27 @@ A file opened and edited while its diff is still being computed swaps to the
 buffer quietly (the computation is cancelled first), and a buffer that goes
 away while shown reads "…" until the file is read again, never as an empty
 side.
+
+**The Diff pane's follow-ups (2026-10-12).** The change list draws only the
+rows in view, so the status's 20,000-file cap costs typing elsewhere in the
+window nothing (about 2 ms a character beside it, where every row drawn cost
+~100 ms). It takes keys: ↑ ↓, Page Up/Down, Home and End move the selection
+and scroll it into view, Enter reads it again; a selection scrolled out of
+view stays selected, its diff still shown, and the keys move on from it; a
+reload scrolls the pane's file into view. A held key moves the highlight at
+once and reads only the row it stops on (after 150 ms of no keys), and a
+read no longer wanted is dropped, so on a slow repository the last row's
+diff is not stuck behind every row passed. A screen reader hears each row's
+place in the whole list and the selected row as the keys move. **The Task pane's header clears its
+task** ("task <id> · clear", off under a card): the 2×2 grid draws a Task
+pane, and while it shows a task every Diff pane shows that task's diff, so
+clearing is the way back to a project's uncommitted changes — a Diff pane
+still never shows another task than the Task pane. The task diff and Compare
+cancel a diff still being computed when they close, as the uncommitted
+changes' diff already did, and never touch the buffer Compare shows; and the
+uncommitted changes' diff is drawn with the owner's editor settings (font,
+size, whitespace, bracket colours, sticky scroll), live, as the task diff and
+Compare are.
 
 **The Browser's action rules and reviewer (2026-10-12, BR-9a; amendment 1 to
 the Browser plan, §B.3–§B.5).** Before an agent's click, keystroke or

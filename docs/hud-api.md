@@ -2071,8 +2071,9 @@ downloads and the tab strip are BR-1b's; profile management is BR-1c's.
 listener, and the HUD's own page — its Origin, or a same-origin GET with no
 Origin) plus a strict loopback `Host`, checked before a body is read, a tab
 is looked up or Chrome is started; anything else is **403**. No route takes
-a query string (**400**); a URL travels only in a JSON body, and no refusal
-ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
+a query string (**400**; BR-1b's socket attach takes its `ticket`, below); a
+URL travels only in a JSON body, and no refusal ever contains one. Nothing
+starts Chrome but `POST /browser/tabs`.
 
 | Route | Body | Answer |
 |---|---|---|
@@ -2220,3 +2221,156 @@ uncommitted changes from ED-9's two owner-only routes and the editor's read:
 
 Rules in CLAUDE.md's "The Diff pane shows the project's uncommitted changes"
 paragraph.
+
+The follow-ups (2026-10-12; CLAUDE.md "The Diff pane's follow-ups") change no
+route: the windowed list draws from the same `git/status` answer; a click
+picks a row at once (one `git/base`, then a read if allowed), and a key
+only once the keys have rested 150 ms, so a held key asks about the row it
+stops on and not every row passed; a `git/base` or read the pane no longer
+waits for is aborted (the request is cancelled in the browser; the daemon
+may still finish it); the Task pane's "clear" is window state
+only (`taskId`, `taskFocus`), and the diff views' settings and view models
+are Monaco's.
+
+## Additions 2026-10-12 (the Browser's stream, input, hold, dialogs, tabs and files — BR-1b)
+
+Backend only (plan `docs/plans/2026-10-10-hud-browser-plan.md` §2 "The
+stream", §3 "Downloads", §8, §11's BR-1b; amendment 1 §B.3 H3/H8, §B.4,
+§B.8, §B.9): what a HUD window needs to see and drive one tab. BR-3b draws
+it with BR-2's `remote.ts` and `drive.ts`. Every route below is BR-1a's
+owner-only rule (the HUD listener, its Origin or a same-origin GET with no
+Origin, a strict loopback Host); the API listener is **403**.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /browser/tabs/<id>/ticket` | `{}` | `{ticket, expires_in: 30}` — single use, this tab only |
+| `GET /browser/tabs/<id>/attach?ticket=` | — | **101**, the tab's socket (below); the one query any `/browser` route takes. **403** without the HUD's Origin or a fresh ticket for this tab, **404** for no such tab |
+| `POST /browser/tabs/<id>/activate` | `{}` | `{tab_id, active: true}` — "switch": the tab brought to the front in its Chrome |
+| `POST /browser/tabs/<id>/files` | `{chooser, files: [{project, path}]}` | `{tab_id, chooser, files: N}` — answers the page's open file chooser; `files: []` cancels it |
+| `GET /browser/downloads` | — | `{downloads: [{id, profile, name, size, held, at}], in_progress}`, newest first; `[]` before the Browser ever ran (nothing is made) |
+| `GET /browser/downloads/<id>` | — | the file: `application/octet-stream`, `Content-Disposition: attachment` (an ASCII fallback and `filename*=UTF-8''…`), `nosniff`, `no-store`, and the HUD's policy narrowed to `default-src 'none'` (nothing in it runs). **409** for a held executable; **403** for `Sec-Fetch-Dest` other than `document` or `empty` (never a script, style, frame or image) |
+| `DELETE /browser/downloads/<id>` | — | `{id, deleted: true}` |
+
+`GET /browser/tabs` rows gain **`opener`** (the tab that opened a pop-up, else
+null) and **`shown`** (a window streams it). `/status` → `browser` gains
+counts only: **`streams`** (tabs a window streams), **`downloading`** and
+**`popups_refused`**.
+
+**The hold** (plan §8.3, amendment H3). While **any** approval waits on the
+owner (`daemon.approvals.pending()`), nothing reaches a page:
+`…/navigate`, `…/history`, `POST /browser/tabs` with a `url` and `…/files`
+answer **409** "an approval card is waiting for you; nothing reaches the
+Browser until it is answered", and the socket drops every input (below).
+
+**Uploads** (`…/files`): only an answer to a chooser the page opened (its
+`id` from the socket's `filechooser`; **409** once answered, replaced, or
+older than 5 min); `project` is a project id (**404** unknown or archived),
+`path` relative to its root (**400** if absolute or `~`). Each file is
+judged by BR-9a's H8 rule, called (`act_rules.upload_refusal`): **403** with
+its sentence for a file outside the project or through a symlink out of it,
+a hidden component (`.git`, `.hidden/…`; never `.well-known`), credential or
+protected state (`.env*` but `.example`, the gate's files, Jarvis's folders),
+a file with a second name (a hard link), one that is not a regular file, or
+over 50 MB. At most 16 files and 50 MB in all (**413**). The bytes handed to
+Chrome are read through a descriptor opened `O_NOFOLLOW` that must still be
+the file judged: its descriptor realpath and device/inode must match H8's
+judgment (**409** if it changed). A chooser that takes one file
+refuses two (**400**).
+
+**Downloads** are saved to `BROWSER_DIR/downloads/<profile>/<id>/<name>`
+(the folder 0700, the file 0600), the name cleaned: the last path component
+only, control/format/invisible characters gone, `<>:"/\|?*` → `_`, no
+leading dot and no trailing dot or space, Windows-reserved base names
+(`CON`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, `PRN`, `AUX`, ignoring case
+and extension) prefixed with `_`, NFC, 200 UTF-8 bytes at most
+keeping the extension, `download` when nothing is left. **An executable is
+held** — by its name (`act_rules.executable_download`: `.exe`, `.msi`,
+`.sh`, `.deb`, `.AppImage`, `.com`, `.js`, `.py`, `.desktop`, `.command`,
+`.url` …; case-insensitive, including double extensions such as `x.pdf.exe`) or its first bytes (`MZ`, ELF, `#!`) — and
+never served until the owner's card, which BR-9b builds; it can be deleted.
+Private downloads go to `downloads/private/<ctx>/<id>/<name>`; that
+context's folder is removed when its last tab closes or Private Chrome stops.
+
+### The tab's socket
+
+RFC 6455 (`jarvis/v2/ws.py`, as the terminal's: masked client frames, 64 KiB
+messages, pings), at most 12 MiB queued to one window. Text messages are
+JSON objects with a `t`; **binary messages are frames**, daemon → window
+only.
+
+**A frame** is one binary message: an 8-byte header — the frame's id
+(uint32), the viewport it shows in CSS px, width then height (uint16 each),
+big-endian — then the JPEG. **Latest only, one in flight**: the next frame
+is sent only once the window acks (`{t:"ack", id}`, read as "everything up
+to `id`", BR-2's `FramePipe`); frames that arrive meanwhile replace each
+other in one slot. A window that attaches is sent the current picture at
+once (a page that does not repaint sends no new frame). A tab no window
+streams, or whose window says `{t:"visible", visible: false}`, is not cast.
+
+**Window → daemon** (anything else, or a field out of bounds, is answered
+`{t:"bad", reason}` — a fixed sentence — and acts on nothing; a binary
+message is refused; past 64 KiB the socket closes, 1009):
+
+| Message | Meaning |
+|---|---|
+| `{t:"key", e}` | `Input.dispatchKeyEvent`: `e` exactly BR-2's `CdpKeyEvent` — `type` `keyDown`/`rawKeyDown`/`keyUp`, `modifiers` 0–15, `key` 1–32 characters with no control, `code` alphanumeric ≤ 32, key codes 0–255, `text`/`unmodifiedText` ≤ 8 characters with no control but Enter's `\r`, `autoRepeat`/`isKeypad` booleans, `location` 0–3 |
+| `{t:"mouse", e}` | `Input.dispatchMouseEvent`: `e` exactly BR-2's `CdpMouseEvent` — the four types, `x`/`y` from -1 (BR-2's `OFF_PAGE`) to 4096, `button` one of six, `buttons` 0–31, `clickCount` 0–3, `pointerType: "mouse"`; `deltaX`/`deltaY` (both, ±5000) only on `mouseWheel` |
+| `{t:"text", text}` | `Input.insertText` (a paste or an IME commit): 1 byte–16 KiB of UTF-8, no control character but tab, CR and LF |
+| `{t:"dialog", id, accept, text?}` | answers a dialog; `text` (≤ 4 KiB) is a prompt's answer |
+| `{t:"ack", id}` | frames up to `id` drawn |
+| `{t:"resize", width, height, deviceScaleFactor?}` | the viewport (1–4096 each way, scale 0.25–8, ≤ 16 Mpx; BR-2's `viewportFor`); the frames follow |
+| `{t:"visible", visible}` | the pane is drawn or not |
+| `{t:"takeover", id, allow}` | this window's answer to `takeover_request` |
+| `{t:"resume"}` / `{t:"stop"}` | Resume Jarvis (refused under a card: `held`) / the banner's Stop |
+| `{t:"selection"}` | the page's selection, for Ctrl+C (answered `selection`) |
+| `{t:"focus"}`, `{t:"blur"}`, `{t:"ping"}`, `{t:"pong"}` | accepted; `ping` is answered `pong` |
+
+**Daemon → window:**
+
+| Message | Meaning |
+|---|---|
+| `{t:"attached", tab: {tab_id, profile, ctx, opener}}` | first, then the agent channel's state and anything still open (a location, a dialog, a chooser), then the current picture |
+| `{t:"waiting", timeout_s}` / `{t:"refused", reason}` / `{t:"taken"}` | the takeover question's three outcomes (for the asking window, a refusal; for the holder, `taken` and its socket closed) |
+| `{t:"takeover_request", id, timeout_s}` | another window asks for this tab; unanswered in 20 s is kept |
+| `{t:"location", url, title, security}` | the tab's address and title (cleaned, one line, 2048 and 120) and CDP's security state (`secure`, `insecure`, `neutral` …); on navigation and load |
+| `{t:"held"}` | input was dropped because a card is up (also sent the moment one is raised; at most once a second) |
+| `{t:"input_dropped", reason}` | input was dropped because more than 256 inputs waited, or this tab has an open dialog or an unanswered earlier CDP input. For the latter, one notice per blocked spell: `reason: "the page has a dialog open or an input still unanswered; this input was dropped"`. Nothing is queued for later |
+| `{t:"dialog", id, kind, message, default}` | `kind` `alert`/`confirm`/`prompt`/`beforeunload`; `message` and `default` cleaned to one line of 1000. Dismissed after 60 s, and at once if no window shows the tab; automatic dismissal waits while any approval card is pending |
+| `{t:"dialog_closed", id, by}` | `by` `owner` or `timeout` |
+| `{t:"filechooser", id, multiple}` / `{t:"filechooser_closed", id, files}` | the page asked for files; answered with `…/files` |
+| `{t:"popup", tab_id}` | the page opened a tab: add it beside this one (B-13) |
+| `{t:"popup_refused", reason}` | the cap (12 in all) is reached; no tab was closed |
+| `{t:"download", id, name, state, size?, held?}` | `state` `started`, `done`, `held` (an executable) or `failed` |
+| `{t:"selection", text}` | the selection (≤ 256 Ki characters), read in an isolated world; a password field gives `""` |
+| `{t:"agent", kind, …}` | amendment §B.9 in BR-2's `drive.ts` shapes: `driver {thread_id, provider}`, `action {id, at, action, target, text, outcome, rect?}` (target and text cleaned, 60), `paused {paused, by}`, `list {actions}` (the newest 50, in memory only) |
+| `{t:"closed", reason}` | the tab closed (`closed`) or the Browser stopped (`ended`); the socket closes |
+| `{t:"bad", reason}` / `{t:"pong"}` | as above |
+
+**Input and the hold.** Every input event is checked against the hold when
+it arrives and again on the Browser's thread immediately before it is sent;
+the moment a card is raised every tab's queued input is dropped, so **input
+sent before or during a card is never delivered after it**. A press whose
+release the page has not had when a card comes — and any release off the
+page — ends as a pointer move with no button down (Blink's own reset): no
+`mouseup`, no `click` anywhere. Chrome would otherwise fire `click` on the
+common ancestor (`<html>`) for a release at (-1, -1), whatever `clickCount`
+says (measured, Chrome 155). A socket that drops with a button down is let go
+the same way (not under a card). Key presses also record the hold count
+before dispatch: a keyup or char from a key held before a later card is
+dropped, so Space cannot activate a button or checkbox after it. No input
+is sent while a dialog is open or an earlier input to that tab is
+unanswered; those inputs are dropped with one `input_dropped` notice. A
+dialog timeout waits for all pending cards to resolve.
+
+**The owner taking over** (amendment §B.9): every input but a plain pointer
+move and a lone modifier, and every dialog or file-chooser answer, stamps the
+tab (BR-9b's H4 reads how long ago) and, while an agent holds it, pauses it
+**before** the input is queued: `{t:"agent", kind:"paused", paused: true,
+by: "owner"}`. BR-9b's gate reads it in-process (`BrowserHost.owner_state(tab_id)`:
+the hold, paused and by whom, seconds since the owner's last input); no route
+exposes it.
+
+**The bus** carries one record, **`browser_attached`** with exactly
+`{tab_id, at}`, per attach; nothing else about the Browser — no URL, title,
+typed text, dialog text, file name or frame — reaches the bus, the log or a
+thread log.

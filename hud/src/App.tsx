@@ -2994,7 +2994,7 @@ export default function App() {
             })()}
             disabled={blocked || taskInPane}
             title={taskInPane
-              ? "A Task pane shows a task, so this pane shows that task's diff: switch the Task pane away to see a project's uncommitted changes"
+              ? "A Task pane shows a task, so this pane shows that task's diff: clear the task in the Task pane's header, or switch that pane away, to see a project's uncommitted changes"
               : "Whose changes this pane shows: a project's uncommitted changes, or the selected task's"}
             onChange={(e) => {
               const id = e.target.value || null;
@@ -3010,6 +3010,28 @@ export default function App() {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+        ) : spec.view === "task" && task ? (
+          // The way out of a task (the Diff follow-ups, 2026-10-12): the
+          // default 2×2 grid draws a Task pane, and while one shows a task
+          // every Diff pane shows that task's diff (review of PR #67, L3) —
+          // nothing could take the window off it. Clearing unpicks the task
+          // everywhere, so no Diff pane ever shows another task than this one.
+          <span className="chip panepin" data-testid={`pane-${n}-task`} title={task.brief || task.id}>
+            task {task.id.slice(0, 6)}
+            <button
+              type="button"
+              className="quiet"
+              data-testid={`pane-${n}-task-clear`}
+              disabled={blocked}
+              title="Unpick this task: the Task pane shows none, and a Diff pane shows its project's uncommitted changes"
+              onClick={() => {
+                if (blockedNow.current || crashedRef.current) return;
+                patch({ taskId: null, taskFocus: false });
+              }}
+            >
+              clear
+            </button>
+          </span>
         ) : pinnedElsewhere(spec, n) ? (
           <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
             in: {projectName(paneProject(spec, n))}

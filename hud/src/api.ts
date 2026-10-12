@@ -152,8 +152,9 @@ export const api = {
     req<Tree>(
       `/projects/${projectId}/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
     ),
-  readFile: (projectId: string, path: string) =>
-    req<FileRead>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`),
+  // `signal` drops a read nobody waits for any more (the Diff pane's list).
+  readFile: (projectId: string, path: string, signal?: AbortSignal) =>
+    req<FileRead>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`, signal ? { signal } : undefined),
   // The editor's save (ED-2): against the bytes it was read or saved as
   // (`expected_etag`; null means the file must not exist). 409 carries the
   // disk's etag in `ApiError.body`. `signal` gives up on a write that never
@@ -180,8 +181,9 @@ export const api = {
 
   // --- the editor's git (ED-9): owner-only, like every file route ---------
   /** What HEAD holds for a file (the gutter's base). Refused for env, withheld and gate files. */
-  gitBase: (projectId: string, path: string) =>
-    req<import("./types").GitBase>(`/projects/${projectId}/git/base?path=${encodeURIComponent(path)}`),
+  gitBase: (projectId: string, path: string, signal?: AbortSignal) =>
+    req<import("./types").GitBase>(`/projects/${projectId}/git/base?path=${encodeURIComponent(path)}`,
+      signal ? { signal } : undefined),
   /** The explorer's colours; the daemon caches it for 2 s. */
   gitStatus: (projectId: string) =>
     req<import("./types").GitStatus>(`/projects/${projectId}/git/status`),

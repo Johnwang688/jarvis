@@ -440,7 +440,7 @@ from nothing — `HOME` is `BROWSER_DIR/home`, so Chrome's NSS store and font
 cache stay in the credential folder; locale variables only, no `JARVIS_*`,
 key, display, `PULSE_SERVER` or D-Bus. `TMPDIR` is left alone on purpose:
 Chrome's singleton socket lives there and a long path crashed it (measured).
-Downloads are off until BR-1b. **Routes** (`browser/routes.py`): every one
+Downloads are BR-1b's (below). **Routes** (`browser/routes.py`): every one
 `projects.owner_only` plus a strict loopback Host (its own copy — a module
 importing `terminals` fails `terminal_check`) and no query, checked before a
 body is read or Chrome started; a load reports a failure by its `net::ERR_…`
@@ -511,6 +511,117 @@ follow-up for BR-1c: count the panes per port and close it when the last one
 leaves). No idle stop or
 instance cap yet (BR-1c), and **BD-10's memory ceiling is not set** (BR-1c's):
 one tab ~365 MiB PSS, ~490 MiB after the attack pages, Private ~470 MiB.
+
+**The Browser's stream, input, hold, dialogs, tabs and files, BR-1b
+(2026-10-12; plan §2 "The stream", §3, §8, §11; amendment 1 §B.3 H3/H8,
+§B.4, §B.8–§B.9; contract in `docs/hud-api.md`).** Backend only; BR-3b draws
+it with BR-2's `remote.ts`/`drive.ts`. `browser/stream.py` (the socket, its
+messages, tickets, `TabStream`), `browser/files.py` (downloads, uploads) and
+the host's CDP half. **A socket per tab per window**, the terminal's pattern
+on `ws.py`: owner-only routes, a **single-use 30 s ticket bound to one tab**
+(`POST /browser/tabs/<id>/ticket`; the attach's `?ticket=` is the one query a
+`/browser` route takes), a tab another window shows taken only on its yes
+(20 s, else refused), and **every attach publishes `browser_attached` with
+exactly `{tab_id, at}`**. **Frames** are binary messages (an 8-byte header:
+uint32 id, uint16 CSS width and height, big-endian; then the JPEG,
+quality 70), **one in flight**: the next goes only after the window's `ack`
+("up to here", BR-2's `FramePipe`), and what Chrome sends meanwhile
+replaces one waiting slot — Chrome's own frames are acked at once, so it
+keeps capturing at the page's repaint rate and the newest picture is what
+goes next (a slow window costs Chrome's encoding, never a backlog); a window
+that attaches gets the current picture at once (`_last`, forgotten whenever
+the screencast stops, since an unwatched page can change); a tab no window
+streams, or a window that says `visible: false`, is not cast. **Every message
+is validated in the daemon** (`stream.parse`: exact fields, types, bounds —
+BR-2's `CdpKeyEvent`/`CdpMouseEvent`, text ≤ 16 KiB with no control but tab
+and line ends, x/y from BR-2's `OFF_PAGE` (-1) to 4096, wheel ±5000; a bad
+one is `{t:"bad", reason}`, a fixed sentence, and acts on nothing).
+**The hold** (H3): with any `daemon.approvals.pending()`, input is dropped on
+arrival and again on the Browser's thread immediately before each CDP event
+(`_pump`, one event at a time), `held` is sent, and **the moment a card is
+raised every tab's queue is dropped** (`BrowserHost._observe`, a bus observer
+on `approval_requested`, synchronous before the broker waits), with a
+`_drop_through` mark so a message received before the card is never sent
+after it — a dispatch-time check alone would have replayed input that sat in
+the queue through a card no input arrived during. The owner's `navigate`,
+`history`, `POST /browser/tabs` with a URL and `files` answer 409 under a
+card; Resume is refused (`held`). **A press a card cut off never clicks**, the
+daemon's rule and not only the window's: BR-2 assumed a release at
+`OFF_PAGE` with `clickCount: 0` fires no click, and **Chrome 155 fires
+`click` on `<html>`** (the common ancestor of the press and the release),
+`detail: 1`, whatever `clickCount` says — measured by the fixture BR-2 asked
+for. So a release of a button pressed before a hold (`tab.pressed` keeps the
+stream's `hold_count` at the press), and any release off the page, is sent
+as a pointer move with no button down (`_let_go`, Blink's own reset): no
+`mouseup`, no `click`, and the next click is ordinary; a socket that drops
+mid-press is let go the same way (never under a card). Keys also record
+the hold count before dispatch; a keyup or char from before a later card
+is dropped, so Space never activates after the card. **Owner input
+stamps** every tab it reaches (keys but a lone modifier, text, wheel, press,
+release, drag, dialog and chooser answers — never a plain move), and while
+an agent holds the tab pauses it **before** the event is queued
+(`{t:"agent", kind:"paused", by:"owner"}`); the `{t:"agent"}` channel
+(`driver`, `action` capped at 60, `paused`, `list` of 50, replayed on attach)
+and `owner_state(tab_id)` are BR-9b's to drive. **Dialogs** go to the window
+(`{t:"dialog", id, kind, message, default}`, cleaned to 1000) and are
+answered there; dismissed after `DIALOG_TIMEOUT_S` (60), and at once with no
+window attached, with automatic dismissal waiting under a card. An open
+dialog drops further input to that tab on arrival, and in the pump so does an
+earlier event Chrome has not answered within `DELIVER_WAIT_S` (never on
+arrival: every event of an ordinary burst finds its predecessor in flight,
+which dropped 190 of 200 keys — PR #77 delta review), with one
+`input_dropped` notice; nothing is banked for later. **Pop-ups** open as tabs and the
+opener's window hears
+`{t:"popup", tab_id}` (the listing carries `opener`); **the cap stays 12 in
+all** (decision B-13 "12 in all", which also bounds each profile's Chrome;
+the brief said per instance) and **past it the pop-up is refused**
+(`popup_refused`), never an older tab closed: an older tab may hold the
+owner's work, and a page could otherwise evict the owner's tabs one by one.
+`POST …/activate` brings a tab to the front. **Downloads**: Chrome writes
+into `downloads/<profile>/incoming/`; a finished one is copied by fd to
+`downloads/<profile>/<id>/<cleaned name>` (the folder 0700, made fresh, the
+file 0600 `O_EXCL|O_NOFOLLOW`; `files.clean_name`: last
+component, invisible and Windows-reserved characters out, no leading dot,
+200 UTF-8 bytes keeping the extension) and Playwright's copy deleted;
+listed and served
+owner-only (`GET /browser/downloads[/<id>]`, `application/octet-stream`,
+attachment, `nosniff`, the policy narrowed to `default-src 'none'`, and
+**refused for any `Sec-Fetch-Dest` but `document`/`empty`** — a downloaded
+HTML or script must never run on the HUD's origin, where it could POST
+`/approvals`); **an executable is held** (`act_rules.executable_download`, or
+its first bytes `MZ`/ELF/`#!`), 409 until BR-9b's card, deletable; executable
+suffixes also cover scripts and launchers (`.js`, `.py`, `.com`, `.url`,
+`.desktop` …), ignoring case and including `x.pdf.exe`; a Private
+download lives in `downloads/private/<ctx>/` and goes with its context or
+Private Chrome. **`set_files`**: a page's file
+chooser (`page.on("filechooser")`, so Playwright intercepts every one) is
+answered only by `POST …/files {chooser, files: [{project, path}]}`, each
+judged by **`act_rules.upload_refusal` (H8), called**, then read through an
+`O_NOFOLLOW` fd whose realpath and device/inode must match H8's judgment,
+and handed to Chrome
+as bytes (≤ 16 files, 50 MB in all). Ctrl+C's `{t:"selection"}` reads the
+selection in an isolated world (`jarvis-copy`; a password field gives "").
+`/status` → `browser` gains counts only (`streams`, `downloading`,
+`popups_refused`). Free suite: **`tests/v2/browser_routes_check.py`** (35:
+13 pure — every BR-2 shape parses, ~50 wrong shapes and bounds refused, names,
+tickets, a `../` name kept in its folder — and 22 on one real headless Chrome
+at 3 tabs, its resolver answering nothing and its connector loopback only:
+ticket and takeover, frames under a slow reader, keys/text/mouse/wheel at a
+logging page, the hold and no replay, the cut-off press, the agent channel,
+selection, dialogs with beforeunload, pop-ups and the cap, downloads, uploads,
+a Private tab, nothing on the bus or in the log, stop); `frame_check` walks
+the new routes and a served download's headers. Guard removals in scratch
+copies, 10 of 10 bite with a passing control: no hold, held input replayed,
+an unbounded backlog, a `../` name, no card-raised drop, a cut-off press
+released as is, a reusable ticket, downloads not owner-only, H8 not asked, a
+bad message delivered. Measured (Chrome 155, 1280×800 at DPR 1, quality 70):
+60 fps with an immediate ack on an animated page, ~6 KB a frame there; the
+tree's PSS 270–400 MiB through the suite. **Stated limits:** Chrome encodes
+at the repaint rate however slow the window (the M1 spike's question); no
+download size cap (a page can fill the disk the profile is on); the window's
+`takeover` answer is not in BR-2's `isTakeover`
+control list (BR-3b adds it); a page tracking a drag sees no `mouseup` for a
+press a card cut off.
 
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
@@ -3693,8 +3804,8 @@ worker is still computing — before any model goes. Handed `{original,
 modified}`, Monaco 0.57 keeps a reference to the view model it makes that
 nothing releases, so its computation was never cancelled, and a row picked
 then opened and edited at once threw `no diff result available`, uncaught.
-The task `DiffEditor` and `CompareEditor` in `Editor.tsx` still pass
-`{original, modified}`; not changed here. Both sides
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` own theirs too
+since the follow-ups (below). Both sides
 read-only, side by side even in a narrow pane; ↻ reads again; the right
 side of an unopened file is re-read when the status moves. **Env files are
 listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
@@ -3724,6 +3835,87 @@ read; the Task pane left out of the mode, the Diff follows the chat. Not
 done: SCM actions; a file not open in the
 editor that changes on disk while the project's git states stay the same is
 re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
+
+**The Diff pane's follow-ups (2026-10-12; PR #67's reviews; design §18).**
+**The change list is windowed** (`ProjectDiff.tsx` `ScmList`; the arithmetic
+is `lib/scm.ts` `scmWindow`/`revealTop`): only the rows in view, and
+`SCM_OVERSCAN` (12) either side, are in the DOM, in a spacer as tall as every
+row; **every row is `SCM_ROW_PX` (24) CSS px, pinned inline**, so where a row
+is needs no measuring, and `scrollTop` is the list's own CSS px (the HUD's
+zoom does not change it; checked at 160%). **How much is in view is the
+drawn height over `currentCSSZoom`** (`viewOf`), never `clientHeight`, which
+is rounded: at 160% a list 400.6 px tall read as 401, and End clipped 0.8
+drawn px of its row (review of PR #73, NIT). The window is
+computed each render from where the list is scrolled, kept in whole rows (a
+scroll redraws the list only when it crosses a row, and only the list: it is
+`memo`'d, with a stable pick). At git/status's 20,000 cap a DOM of every row
+made each chat keystroke beside it cost ~100 ms (the reviewer's measure;
+74–103 ms here), and drawing took 0.2–0.4 s; windowed it is ~2 ms, the same
+as no Diff pane. **Keys** (the list is a focusable `listbox`, focused by a
+row click or Tab): ↑ ↓, Page Up/Down, Home, End (`scmKeyStep`) move the
+selection and scroll it into view; Enter reads the selected row again. **A
+key moves the highlight at once and reads the row only once the keys have
+settled** (`SCM_KEY_SETTLE_MS`, 150 ms; the pane keeps `sel`, the highlight,
+apart from `shown`, the file read, and says "…" between); a click and Enter
+read at once, and a key pick never folds a narrow pane's list (a click
+does). **A read nobody waits for is aborted**: `api.gitBase`/`api.readFile`
+take a signal, aborted in `ScmFile`'s effect cleanup. Review of PR #73, MED:
+↓ held over 60 rows started 60 `git/base` requests and reads, and against a
+slow repository (the owner's VEX projects on /mnt/c) the last row's diff came
+4 s late at 0.5 s a request; now one request and one read go out, the diff
+0.65 s after the last key. **For a screen reader** each option carries an
+id, `aria-setsize` (the whole list) and `aria-posinset`, and the listbox's
+`aria-activedescendant` names the selected option whenever it is drawn (a
+key always draws it; no dangling id when it is scrolled away). **The
+selection is a path, never a drawn row**: scrolled out of the window it
+stays selected, its diff stays shown, and the keys move from it. A file the
+pane had (a reload) is scrolled into view once, when the rows first arrive —
+or, in a narrow pane where a picked file folds the list, once the list is
+shown again (ResizeObserver) — and never on a poll, which would pull the list
+back from where the owner scrolled it. **The way out of a Task pane's hold:
+the Task pane's header clears its task** (`pane-N-task` chip, `pane-N-task-clear`;
+`taskId: null`, `taskFocus: false`), disabled under a card. The default 2×2
+grid draws a Task pane (`DEFAULT_VIEWS` slot 4), and while it shows a task
+every Diff pane shows that task's diff (L3) with its picker off — nothing took
+the window off a task once one was picked. Of the brief's two ways out this
+is the simpler: `diffMode` is unchanged, and a Diff pane still never shows
+another task than a drawn Task pane (there is none to show). The held
+picker's title names it. **Every diff view owns its view model**: the task
+`DiffEditor` and `CompareEditor` (`Editor.tsx`) now do as `ScmDiffEditor`
+does since L1 — `createViewModel`, set on the editor, disposed first (which
+cancels a diff still waiting on the worker) and once on every path (`vm` is
+cleared as it goes), then `setModel(null)`, then the editor, then the
+models it made; Compare's right side is the buffer's model, which it never
+disposes, and it lets go of it on the model's `onWillDispose`. Its text,
+undo stack and dirty state are untouched (checked: edit kept, still dirty,
+Ctrl+Z still undoes it). **`ScmDiffEditor` draws with ED-8's
+`displayOptions`**, live on a settings change (`onEditorSettings`, then
+`reapplyEditorConfig()`, as the other two) — it had a fixed `fontSize: 12`.
+Free checks: `lib/scm.test.ts` (26), `components/ProjectDiff.test.ts` (4: the
+20,000-row window in jsdom and the keys past it, five keys read nothing until
+they settle and then the last row once, a click at once; the ARIA; nothing
+moved under a card) and `tests/face/hud_v2_scm_check.py` (now 110;
+`ONLY=<section>` runs one):
+`_scale_checks` (20,000 rows, a window drawn, chat typing under 15 ms a
+character, the last row reached, the keys, a selection held and moved out of
+the window, a reload's file revealed at 160%, and at 160% Page Down and End
+clipping nothing of a list 400.6 px tall), `_hold_checks` (↓ held at ~33 a
+second over 60 rows, the mock's `git/base` taking 0.5 s (`base_delay`): at
+most 3 requests and the last diff within 2 s; a row clicked away from before
+HEAD answered is aborted), `_clear_task_checks` (the 2×2
+grid with a Task pane), `_settings_checks` and `_midcompute_checks` (a
+40,000-line task-diff file keeps Monaco's one editor worker busy for its 5 s
+diff limit; a task diff, then Compare, is opened and closed while its own
+diff waits behind it — main's code threw `no diff result available` each
+time). Shown to bite in a scratch copy: every row drawn (the window and
+out-of-window checks fail; main's build also fails the typing check at
+74 ms); `clear` keeping the task id (three checks); the task diff or Compare
+back to `{original, modified}`, or the task diff's view model never
+disposed (`no diff result available`); the settings not live, or not used at
+all (12px where 16px was chosen); keys that never scroll (five checks); the
+review round's: no settle (60 `git/base`), neither settle nor abort (60, and
+the last diff 4.14 s late), no abort (the clicked-away request completes),
+the rounded `clientHeight` (End clips 0.812 px at 160%).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
