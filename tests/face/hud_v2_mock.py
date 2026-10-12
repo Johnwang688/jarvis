@@ -1007,6 +1007,7 @@ class MockDaemon:
                 if len(parts) == 2 and parts[0] == "approvals":
                     req_id = parts[1]
                     w["approvals"] = [r for r in w["approvals"] if r["req_id"] != req_id]
+                    mock_vex.approval_decided(mock, req_id, body)      # VX-3's project_folder card
                     return self._json({"ok": True})
                 if len(parts) == 3 and parts[0] == "schedules" and parts[2] == "run-now":
                     return self._json({"ok": True})

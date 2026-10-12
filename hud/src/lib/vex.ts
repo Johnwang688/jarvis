@@ -35,6 +35,8 @@ export interface VexStatus {
   extension_version: string | null;
   sdks: { cpp: string | null; python: string | null } | null;
   templates: boolean;
+  /** Where new projects go (`vex.json`'s `project_folder`, V-4): the New VEX project dialog's default. */
+  project_folder: string | null;
   /** The device action running now, if any. */
   device: DeviceAction | null;
   /** The brain terminal's id while it is open. */
@@ -105,6 +107,7 @@ export function parseStatus(raw: unknown): VexStatus | null {
     extension_version: strOrNull(raw.extension_version, 100),
     sdks,
     templates: raw.templates === true,
+    project_folder: strOrNull(raw.project_folder, 1000),
     device,
     brain: isVexId(raw.brain) ? raw.brain : null,
   };

@@ -62,6 +62,7 @@ import { threadLabel } from "./lib/threadTitle";
 import { HeldBack, nextNonce } from "./lib/giveback";
 import { useThreadModel } from "./components/ThreadModelControls";
 import { ProjectDialog } from "./components/Pickers";
+import { NewVexProject } from "./components/NewVexProject";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
 import { guildConfigured, ownerLine } from "./lib/discord";
@@ -2667,6 +2668,11 @@ export default function App() {
         return view.zoomBy(-1);
       case "view.zoomReset":
         return view.setZoom(100);
+      case "project.newVex":
+        // VX-3: the dialog only; nothing is made until the owner approves its card.
+        return later(() => {
+          if (!live.current.picker) patch({ picker: "newVexProject" });
+        });
     }
   };
   const paletteList: Entry[] = nav && state.picker === "palette" ? paletteEntries(nav.ctx, nav.actions) : [];
@@ -3307,6 +3313,22 @@ export default function App() {
               })
           }
           taken={projectNamesTaken(state.projects, null, state.archivedNames)}
+          onVex={() => patch({ picker: "newVexProject" })}
+          onClose={() => patch({ picker: null })}
+        />
+      ) : null}
+      {state.picker === "newVexProject" ? (
+        // VX-3: a VEX project from the extension's templates, through the
+        // `project_folder` card. Its controls are off under any card.
+        <NewVexProject
+          blocked={blocked}
+          onCreated={(id) => {
+            void refreshProjects(id).then(() => {
+              if (live.current.picker === "newVexProject") patch({ picker: null });
+              // A new project starts as a new thread in it, as New project's do.
+              if (!live.current.approvals.length) newThread(id);
+            });
+          }}
           onClose={() => patch({ picker: null })}
         />
       ) : null}
