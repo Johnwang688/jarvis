@@ -64,7 +64,7 @@ import { SPACE_HINT, SPACE_HINT_KEY, TalkHold, isTalkKey, isTypingTarget, wantsS
 import { inMonaco, maxWidth } from "./lib/layout";
 import { chordSecond } from "./lib/editorkeys";
 import {
-  PANE_NOS, SHAPES, allocate, closePane as closePaneOf, copySpec, orderOf, show as showOf, slotOf, splitTitle,
+  PANE_NOS, SHAPES, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, show as showOf, slotOf, splitTitle,
   type PaneNo, type PaneSpec, type View,
 } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -1434,7 +1434,12 @@ export default function App() {
       const projectId = (spec.view === "chat" ? chatProjectId(at.chats[source], at.threads) : null)
         ?? lastProject(at.projects, at.threads, loadLastProject());
       pendingThread.current[id] = null;
-      chatPatch(id, { threadId: null, compose: { projectId }, messages: [], loadedThread: null, draft: "", ops: [], status: "" });
+      // A new thread the owner started, drawn once the split lands: it takes
+      // up words no pane's row holds any more (`takeOrphan`).
+      chatPatch(id, {
+        threadId: null, compose: { projectId }, messages: [], loadedThread: null, draft: "", ops: [], status: "",
+        takeOrphan: true,
+      });
     }
     lay.split(source, id, copy, opts);
     if (spec.view === "terminal" && spec.terminalId) {
@@ -1492,6 +1497,8 @@ export default function App() {
         if (!gone) continue;
         displaced = true;
         if (pendingThread.current[n] && after.threadId === null) pendingThread.current[n] = null;
+        // A re-aim, in drawn and hidden panes alike, is not a new thread the
+        // owner started: it never takes up parked words (no `takeOrphan`).
         chatPatch(n, {
           threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [], status,
         });
@@ -1529,6 +1536,7 @@ export default function App() {
         const after = next[n - 1];
         if (!after.displaced) continue;
         pendingThread.current[n] = null;
+        // As in `projectGone`: a re-aim never takes up parked words.
         chatPatch(n, {
           threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [],
         });
@@ -1587,6 +1595,9 @@ export default function App() {
         draft: "",
         ops: [],
         status: chat.turnThreadId ? chat.status : "",
+        // The owner started it, in a pane on screen: it takes up words no
+        // pane's row holds any more.
+        takeOrphan: true,
       });
     },
     // `placeChat` is stable (a callback over refs).
@@ -1673,14 +1684,15 @@ export default function App() {
       );
       dispatch({ type: "patch", patch: { projects, threads, tasks, platforms } });
       // The window opens on a new thread in the last project worked in, as
-      // Claude Code opens on a new session — in every pane that shows chat,
-      // and in the pane the conversation is put on screen in. Nothing is sent
-      // until the owner speaks.
+      // Claude Code opens on a new session — in every pane of the workspace
+      // that shows chat (a free id gets one when it is drawn), and in the
+      // pane the conversation is put on screen in. Nothing is sent until the
+      // owner speaks.
       const lay = layoutNow.current;
       const pane = chatTarget(lay.ws, lay.fit.panes, live.current.selectedChat).pane;
       const projectId = lastProject(projects, threads, loadLastProject());
       for (const n of PANE_NOS) {
-        if (n === pane || lay.ws.panes[n - 1].view === "chat") {
+        if (n === pane || (inWorkspace(lay.ws, n) && lay.ws.panes[n - 1].view === "chat")) {
           dispatch({ type: "chat", pane: n, patch: { threadId: null, compose: { projectId } } });
         }
       }
@@ -1704,16 +1716,21 @@ export default function App() {
 
   // A pane that shows chat for the first time — a second chat pane, chosen
   // from its tabs or a preset — opens on a new thread in the last project
-  // worked in, as the window does.
+  // worked in, as the window does. Only a pane in the workspace (drawn, or
+  // hidden by ⊞): a pane × closed, or one no layout has drawn yet, holds no
+  // conversation until it is drawn (review 3 of PR #47 — a closed pane was
+  // given a row here at once). Never `takeOrphan`: words parked for the next
+  // new thread wait for one the owner starts.
   const emptyChatPanes = PANE_NOS.filter(
-    (n) => view.ws.panes[n - 1].view === "chat" && isEmptyChat(state.chats[n]),
+    (n) => inWorkspace(view.ws, n) && view.ws.panes[n - 1].view === "chat" && isEmptyChat(state.chats[n]),
   ).join(",");
   useEffect(() => {
     if (!booted || !emptyChatPanes) return;
     const at = live.current;
+    const { ws } = layoutNow.current;
     const projectId = lastProject(at.projects, at.threads, loadLastProject());
     for (const n of PANE_NOS) {
-      if (layoutNow.current.ws.panes[n - 1].view === "chat" && isEmptyChat(at.chats[n])) {
+      if (inWorkspace(ws, n) && ws.panes[n - 1].view === "chat" && isEmptyChat(at.chats[n])) {
         chatPatch(n, { compose: { projectId } });
       }
     }
