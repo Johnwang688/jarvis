@@ -52,6 +52,14 @@ export interface TerminalRow {
   integrated: boolean;
   /** What took: the startup file's first signed prompt mark arrived. */
   marked: boolean;
+  /**
+   * A program terminal (VX-1): `"vex-build"`, `"vex-download"`, `"vex-info"`
+   * or `"vex-brain"`; null for a shell. One ends with its program: no
+   * Restart or "New terminal here" (they would open a shell).
+   */
+  program: string | null;
+  /** Whether typed input reaches it (a build's does not; Ctrl-C always does). */
+  input: boolean;
 }
 
 /** Where a new terminal starts: resolved by the daemon from ids, never a path. */
@@ -94,6 +102,8 @@ export function parseRow(raw: unknown): TerminalRow | null {
     integration,
     integrated: v.integrated === true,
     marked: v.marked === true,
+    program: typeof v.program === "string" && /^[a-z-]{1,32}$/.test(v.program) ? v.program : null,
+    input: v.input !== false,
   };
 }
 
@@ -713,6 +723,7 @@ export function terminalSpecFor(view: string, at: {
   switch (view) {
     case "file":
     case "preview":
+    case "vex":
       return at.project ? { project: at.project } : chat();
     case "task":
     case "diff":

@@ -3161,6 +3161,17 @@ def main():
             finally:
                 editor_mock.stop()
 
+            # The VEX view (VX-2): a context and a mock of their own — its
+            # world gains VEX projects, builds and downloads are terminal rows
+            # there, and their sockets are played in the browser.
+            from tests.face.hud_v2_vex_check import vex_checks
+            vex_mock = MockDaemon(0).start()
+            try:
+                vex_checks(browser, vex_mock, f"http://127.0.0.1:{vex_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                vex_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
             guard_loopback(ctx)

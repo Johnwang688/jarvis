@@ -44,11 +44,13 @@ import { parseTabs, sameTabs, type Tabs } from "./buffers";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
-export type View = "chat" | "task" | "file" | "diff" | "preview" | "terminal";
+export type View = "chat" | "task" | "file" | "diff" | "preview" | "terminal" | "vex";
 /** What a pane offers. The terminal view (WP-D) shows one of the owner's
  * terminals, chosen per pane (`terminalId`); one terminal is drawn in one
- * place at a time (lib/terminal.ts, `placeTerminals`). */
-export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "preview", "terminal"];
+ * place at a time (lib/terminal.ts, `placeTerminals`). The VEX view (VX-2)
+ * is offered in the strip only when the pane's project is a VEX project
+ * (lib/vex.ts `offersVex`); it shows its pinned project. */
+export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "preview", "terminal", "vex"];
 
 export type Preset =
   | "single" | "cols2" | "rows2" | "cols3" | "main2" | "grid4" | "grid5" | "grid6" | "grid7" | "grid8";
@@ -722,6 +724,9 @@ export function copySpec(spec: PaneSpec): PaneSpec {
     case "preview":
       out.projectId = spec.projectId;
       if (spec.previewUrl) out.previewUrl = spec.previewUrl;
+      break;
+    case "vex":
+      out.projectId = spec.projectId;
       break;
     case "task":
       out.view = "diff";

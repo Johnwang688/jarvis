@@ -15,6 +15,7 @@ import type { RosterView } from "./lib/roster";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 import { parseActivity, type ActivityView } from "./lib/activity";
 import { parseRow, parseRows, type InSpec } from "./lib/terminal";
+import { parseBuild, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
 
 export class ApiError extends Error {
   status: number;
@@ -242,6 +243,28 @@ export const api = {
   closeTerminal: (id: string) =>
     req<{ ok: boolean; id: string; exit_code: number | null }>(`/terminals/${encodeURIComponent(id)}`,
       { method: "DELETE" }),
+
+  // --- VEX (VX-1's routes; owner-only; VX-2's view) --------------------------
+  // **No request names a program, a path or an argument**: the project is an
+  // id, a build an action word, a download a slot and a name. Download is
+  // sent only from the VEX view's button, on the owner's own click
+  // (lib/vex.ts `isExplicitClick`) — never from a key, a palette or a tool.
+  vexStatus: () => req<unknown>("/vex/status").then(parseVexStatus),
+  vexProject: (projectId: string) =>
+    req<unknown>(`/projects/${encodeURIComponent(projectId)}/vex`).then((r) => parseDetection(r, projectId)),
+  vexBuild: (projectId: string, action: "build" | "rebuild" | "clean") =>
+    req<{ build_id: string; terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/build`,
+      json({ action })),
+  vexBuildState: (buildId: string) =>
+    req<unknown>(`/vex/builds/${encodeURIComponent(buildId)}`).then((r) => {
+      const b = parseBuild(r);
+      if (!b) throw new ApiError(500, "the daemon answered without a build");
+      return b;
+    }),
+  vexDownload: (projectId: string, body: { slot: number; name: string }) =>
+    req<{ terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/download`, json(body)),
+  vexBrain: () => req<{ terminal_id: string; started: boolean }>("/vex/brain", json({})),
+  vexInfo: () => req<{ text: string; exit_code: number | null }>("/vex/device/info", json({})),
 
   // --- speech -------------------------------------------------------------
   async stt(blob: Blob): Promise<string> {
