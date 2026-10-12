@@ -503,12 +503,9 @@ That is about **250–350 MB before any tab**, then 50–300 MB per tab. The wor
 - **First choice: a split.** G2's `splitPane(ws, source, id, {view: "browser", browserUrl}, {focus: false})`, when `splitVerdict` is ok. The source is the pane showing that terminal, else the focused pane.
 - **No room:** the focused pane switches to Browser. The exceptions are a chat with words in its box or a running turn, a File pane with an unsaved edit, and the terminal that printed the URL. In those cases an offer chip appears in the terminal's bar instead: "Dev server at localhost:5173 · Open in Browser" (BD-7).
 - **It opens Direct**, by the loopback rule.
-- **If it ever opens Remote** (in the daemon's Chrome), it opens the way you
-  do: the window's own `POST /browser/tabs`, an owner-only route, which is
-  what opens that loopback port in the Browser's gate. Since PR #69's review
-  (the lead's decision) loopback is closed in the gate like the LAN until you
-  open a port, and only those routes open one. The daemon never opens a pane,
-  or a gate port, from `devurl` by itself.
+- **It never opens Remote, and never opens a port in the Browser's gate**
+  (amendment 2, L2): an agent can trigger auto-open, so counting it as the
+  owner's opening would hand agents a lever on the gate.
 
 **It never moves anything you are using.** It never moves DOM focus or `ws.focused`, and it never changes the selected chat (W-6).
 

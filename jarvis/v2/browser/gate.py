@@ -43,11 +43,20 @@ For each connection the gate:
 - **pins each name's address class** for its lifetime: a name first
   resolved to public addresses never later connects to a private one, and
   one first resolved private (the LAN switch on) stays private — rebinding
-  on a later answer is `rebinding`;
+  on a later answer is `rebinding`. A pin younger than `PIN_YOUNG_S` is never
+  forgotten to make room (a page cannot flush its own pin by resolving 8,192
+  other names); while the table is full of young pins, an unpinned name may
+  not reach private space (`pins_full`);
 - resolves through a bounded pool: one lookup per name in flight (others
-  wait for it), at most `DOMAIN_LOOKUPS` per registrable-looking domain
-  (`dns_busy` past that), `RESOLVE_TIMEOUT_S` each — a page aiming lookups at
-  a black-holed name server cannot starve every other tab;
+  share it), at most `DOMAIN_LOOKUPS` threads per domain (`domain_key`: the
+  registrable domain where a small suffix table can tell, else the name's
+  parent), a lookup past that **waiting** for a slot within its
+  `RESOLVE_TIMEOUT_S` (only then `dns_busy`), and a positive answer reused
+  for `CACHE_S` — still judged, and still held to the name's pin, like a
+  fresh one. A page aiming lookups at a black-holed name server cannot starve
+  every other tab, and a page with many subdomains of one site waits rather
+  than fails (delta review of PR #69: refusing at once failed 6 of 8 images
+  on one CDN, and every `*.co.uk` shared two slots);
 - allows public addresses and the loopback ports the owner opened, then
   pipes bytes both ways.
 
@@ -65,6 +74,7 @@ import ipaddress
 import logging
 import socket
 import threading
+import time
 from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -78,16 +88,86 @@ RESOLVE_TIMEOUT_S = 5.0
 CONNECT_TIMEOUT_S = 15.0
 # DNS on worker threads: a getaddrinfo the gate has stopped waiting for still
 # holds its thread until glibc gives up, so the pool is sized for the worst
-# case and each domain may hold only a few of its threads at once.
+# case and each domain may hold only a few of its threads at once; a lookup
+# past that waits for one of them, within its own RESOLVE_TIMEOUT_S.
 DNS_WORKERS = 32
-DOMAIN_LOOKUPS = 2
-# Names whose address class is pinned, oldest forgotten first.
+DOMAIN_LOOKUPS = 4
+SLOT_GRACE_S = 0.1
+# A positive answer is reused this long (and judged again each time).
+CACHE_S = 5.0
+CACHE_CAP = 1024
+# Names whose address class is pinned, oldest forgotten first — but never
+# one pinned less than PIN_YOUNG_S ago.
 PIN_CAP = 8192
+PIN_YOUNG_S = 30 * 60
 # Once one direction of a piped connection has ended, the other must keep
 # moving: a server that never answers a half-close is dropped after this.
 HALF_CLOSED_IDLE_S = 60.0
 MAX_CONNECTIONS = 256
 CHUNK = 64 * 1024
+
+# Two-label public suffixes under which the registrable domain is three
+# labels — the common ccTLD second levels and the hosting platforms whose
+# every customer is a subdomain. Not the Public Suffix List (no dependency):
+# what it misses under a TLD in STRUCTURED_TLDS is keyed on the name's
+# parent, and anywhere else on the last two labels, which only ever makes a
+# lookup wait for a slot, never refuses it early.
+MULTI_LABEL_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk", "net.uk", "ltd.uk", "plc.uk", "sch.uk", "nhs.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "ad.jp", "ed.jp", "gr.jp", "lg.jp",
+    "com.br", "net.br", "org.br", "gov.br", "edu.br",
+    "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz", "school.nz",
+    "co.za", "org.za", "gov.za", "ac.za", "net.za",
+    "co.in", "net.in", "org.in", "gov.in", "ac.in", "edu.in", "firm.in", "gen.in", "ind.in",
+    "co.kr", "or.kr", "go.kr", "ac.kr", "ne.kr",
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+    "com.tw", "net.tw", "org.tw", "edu.tw", "gov.tw",
+    "com.hk", "net.hk", "org.hk", "edu.hk", "gov.hk",
+    "com.sg", "net.sg", "org.sg", "edu.sg", "gov.sg",
+    "com.my", "net.my", "org.my", "edu.my", "gov.my",
+    "co.id", "or.id", "ac.id", "go.id", "web.id",
+    "co.th", "or.th", "ac.th", "go.th", "in.th",
+    "co.il", "org.il", "net.il", "ac.il", "gov.il",
+    "com.ar", "net.ar", "org.ar", "gob.ar", "edu.ar",
+    "com.mx", "net.mx", "org.mx", "gob.mx", "edu.mx",
+    "com.tr", "net.tr", "org.tr", "gov.tr", "edu.tr",
+    "com.ua", "net.ua", "org.ua", "gov.ua", "edu.ua",
+    "co.ke", "or.ke", "ac.ke", "go.ke",
+    "com.ng", "org.ng", "gov.ng", "edu.ng",
+    "com.pk", "org.pk", "gov.pk", "edu.pk",
+    "com.ph", "org.ph", "gov.ph", "edu.ph",
+    "com.vn", "net.vn", "org.vn", "gov.vn", "edu.vn",
+    "com.eg", "org.eg", "gov.eg", "edu.eg",
+    "com.sa", "org.sa", "gov.sa", "edu.sa",
+    # Hosting platforms: every customer is a subdomain of one of these.
+    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
+    "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "blogspot.com",
+    "cloudfront.net", "azurewebsites.net", "fly.dev", "onrender.com", "glitch.me",
+    "repl.co", "ngrok.io", "ngrok-free.app", "trycloudflare.com", "readthedocs.io",
+})
+# TLDs whose second level is often a public suffix: a name under one whose
+# last two labels are not in the table above is keyed on its parent.
+STRUCTURED_TLDS = frozenset({
+    "uk", "au", "jp", "br", "nz", "za", "in", "kr", "cn", "tw", "hk", "sg", "my", "id",
+    "th", "il", "ar", "mx", "tr", "ua", "ke", "ng", "pk", "ph", "vn", "eg", "sa",
+})
+
+
+def domain_key(name: str) -> str:
+    """Which domain a lookup for `name` counts against (`DOMAIN_LOOKUPS`):
+    the registrable domain where the suffix table can tell (`www.bbc.co.uk`
+    → `bbc.co.uk`, `a.b.example.com` → `example.com`), else — under a TLD
+    whose second level the table does not know — the name's parent."""
+    labels = name.lower().rstrip(".").split(".")
+    if len(labels) <= 2:
+        return ".".join(labels)
+    if ".".join(labels[-2:]) in MULTI_LABEL_SUFFIXES:
+        return ".".join(labels[-3:])
+    if labels[-1] in STRUCTURED_TLDS:
+        return ".".join(labels[1:])
+    return ".".join(labels[-2:])
+
 
 # RFC 1928 reply codes.
 REP_OK = 0x00
@@ -125,6 +205,11 @@ async def default_connect(address: str, port: int):
     return await asyncio.open_connection(sock=sock, limit=2 * CHUNK)
 
 
+def _wake(waiter: asyncio.Future) -> None:
+    if not waiter.done():
+        waiter.set_result(None)
+
+
 class Refusal(Exception):
     def __init__(self, reason: str, reply: int = REP_NOT_ALLOWED):
         super().__init__(reason)
@@ -154,11 +239,15 @@ class Gate:
         self._resolver = resolver or default_resolve
         self._connector = connector or default_connect
         self._max = max_connections
-        # name -> "public" | "private", the class it first resolved to.
-        self._pins: OrderedDict[str, str] = OrderedDict()
-        # name -> the lookup in flight (gate loop only); domain -> threads busy.
+        # name -> ("public" | "private", when): the class it was first allowed on.
+        self._pins: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        # name -> the lookup in flight (gate loop only); name -> (expires, addresses).
         self._lookups: dict[str, asyncio.Future] = {}
+        self._cache: OrderedDict[str, tuple[float, list]] = OrderedDict()
+        # domain -> threads busy (the workers' finally releases them), and the
+        # lookups waiting for one of them (gate loop futures).
         self._domain_busy: Counter = Counter()
+        self._slot_waiters: dict[str, list[asyncio.Future]] = {}
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._thread: threading.Thread | None = None
@@ -358,7 +447,8 @@ class Gate:
             candidates = await self._resolve(key, port)
         lan = bool(self._lan())
         loopback_open = bool(self._loopback(port))
-        pinned = self._pins.get(key) if kind == "name" else None
+        held = self._pins.get(key) if kind == "name" else None
+        pinned = held[0] if held is not None else None
         allowed, first = [], None
         for ip in candidates:
             reason = policy.judge_address(ip, via=kind, lan=lan, loopback_open=loopback_open)
@@ -375,9 +465,10 @@ class Gate:
             # for the gate's lifetime; a mixed answer keeps that class only.
             pin = policy.address_class(allowed[0])
             allowed = [ip for ip in allowed if policy.address_class(ip) == pin]
-            self._pins[key] = pin
-            while len(self._pins) > PIN_CAP:
-                self._pins.popitem(last=False)
+            if not self._pin(key, pin) and pin != "public":
+                # No room to remember it: an unpinned name could rebind
+                # later, so it may not reach private space now.
+                raise Refusal(policy.PINS_FULL)
         for ip in allowed:
             try:
                 return await self._connector(str(ip), port)
@@ -385,38 +476,41 @@ class Gate:
                 continue
         return None
 
-    async def _resolve(self, name: str, port: int) -> list:
-        """The name's addresses, from one call to the resolver. Never called
-        again for this connection: what is judged is what is connected to.
+    def _pin(self, name: str, kind: str) -> bool:
+        """Remember `name`'s class; False if the table is full of pins younger
+        than `PIN_YOUNG_S` (none is forgotten to make room for it)."""
+        now = time.monotonic()
+        while len(self._pins) >= PIN_CAP:
+            _, (_, when) = next(iter(self._pins.items()))
+            if now - when < PIN_YOUNG_S:
+                return False
+            self._pins.popitem(last=False)
+        self._pins[name] = (kind, now)
+        return True
 
-        Bounded (review of PR #69): connections asking for the same name at
-        once share one lookup; a domain (its last two labels) may hold at
-        most `DOMAIN_LOOKUPS` worker threads — counted until the resolver
-        really returns, not until the gate stops waiting — and is refused
-        `dns_busy` past that; and the gate waits `RESOLVE_TIMEOUT_S`."""
+    async def _resolve(self, name: str, port: int) -> list:
+        """The name's addresses, from one call to the resolver (or a fresh
+        cached answer). Never called again for this connection: what is
+        judged is what is connected to, and a cached answer is judged — pin
+        included — exactly like a new one.
+
+        Bounded (review of PR #69 and its delta review): connections asking
+        for the same name at once share one lookup; a domain (`domain_key`)
+        may hold at most `DOMAIN_LOOKUPS` worker threads — counted until the
+        resolver really returns, not until the gate stops waiting — and a
+        lookup past that **waits** for one; the whole wait, slot and answer,
+        is `RESOLVE_TIMEOUT_S` (`dns_busy` if no slot came, `unresolvable` if
+        no answer did)."""
         loop = asyncio.get_running_loop()
+        deadline = loop.time() + RESOLVE_TIMEOUT_S
+        cached = self._cache.get(name)
+        if cached is not None:
+            if cached[0] > loop.time():
+                return list(cached[1])
+            del self._cache[name]
         future = self._lookups.get(name)
         if future is None:
-            domain = ".".join(name.split(".")[-2:])
-            with self._lock:
-                if self._domain_busy[domain] >= DOMAIN_LOOKUPS:
-                    busy = True
-                else:
-                    busy = False
-                    self._domain_busy[domain] += 1
-            if busy:
-                raise Refusal(policy.DNS_BUSY, REP_HOST_UNREACHABLE)
-
-            def lookup():
-                try:
-                    return self._resolver(name, port)
-                finally:
-                    with self._lock:
-                        self._domain_busy[domain] -= 1
-                        if self._domain_busy[domain] <= 0:
-                            del self._domain_busy[domain]
-
-            future = loop.run_in_executor(self._executor, lookup)
+            future = asyncio.ensure_future(self._lookup(name, port, deadline))
             self._lookups[name] = future
 
             def finished(done, n=name):
@@ -427,18 +521,88 @@ class Gate:
 
             future.add_done_callback(finished)
         try:
-            found = await asyncio.wait_for(asyncio.shield(future), RESOLVE_TIMEOUT_S)
+            # A beat past the budget, so a lookup that never got a slot says
+            # `dns_busy` (its own deadline) rather than racing it to a timeout.
+            out = await asyncio.wait_for(asyncio.shield(future),
+                                         max(0.0, deadline - loop.time()) + SLOT_GRACE_S)
+        except Refusal:
+            raise
         except (OSError, asyncio.TimeoutError, UnicodeError, ValueError):
             raise Refusal(policy.UNRESOLVABLE, REP_HOST_UNREACHABLE) from None
+        if not out:
+            raise Refusal(policy.UNRESOLVABLE, REP_HOST_UNREACHABLE)
+        return list(out)
+
+    async def _lookup(self, name: str, port: int, deadline: float) -> list:
+        """One resolver call for `name`, once its domain has a free slot."""
+        loop = asyncio.get_running_loop()
+        domain = domain_key(name)
+        await self._take_slot(domain, deadline)
+
+        def lookup():
+            try:
+                return self._resolver(name, port)
+            finally:
+                self._give_slot(domain, loop)
+
+        try:
+            work = loop.run_in_executor(self._executor, lookup)
+        except BaseException:
+            self._give_slot(domain, loop)
+            raise
+        found = await work
         out = []
         for address in found or ():
             try:
                 out.append(ipaddress.ip_address(str(address)))
             except ValueError:
                 continue
-        if not out:
-            raise Refusal(policy.UNRESOLVABLE, REP_HOST_UNREACHABLE)
+        if out:
+            self._cache[name] = (loop.time() + CACHE_S, out)
+            self._cache.move_to_end(name)
+            while len(self._cache) > CACHE_CAP:
+                self._cache.popitem(last=False)
         return out
+
+    async def _take_slot(self, domain: str, deadline: float) -> None:
+        """One of `domain`'s `DOMAIN_LOOKUPS` slots, waiting for a lookup to
+        give one back; `dns_busy` if none comes before `deadline`."""
+        loop = asyncio.get_running_loop()
+        while True:
+            with self._lock:
+                if self._domain_busy[domain] < DOMAIN_LOOKUPS:
+                    self._domain_busy[domain] += 1
+                    return
+                waiter = loop.create_future()
+                self._slot_waiters.setdefault(domain, []).append(waiter)
+            try:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(waiter, remaining)
+            except asyncio.TimeoutError:
+                raise Refusal(policy.DNS_BUSY, REP_HOST_UNREACHABLE) from None
+            finally:
+                with self._lock:
+                    waiters = self._slot_waiters.get(domain)
+                    if waiters is not None and waiter in waiters:
+                        waiters.remove(waiter)
+                        if not waiters:
+                            del self._slot_waiters[domain]
+
+    def _give_slot(self, domain: str, loop) -> None:
+        """A slot back (from a worker thread): every waiter on the domain is
+        woken to try again, so none is lost to one that timed out meanwhile."""
+        with self._lock:
+            self._domain_busy[domain] -= 1
+            if self._domain_busy[domain] <= 0:
+                del self._domain_busy[domain]
+            waiters = self._slot_waiters.pop(domain, [])
+        for waiter in waiters:
+            try:
+                loop.call_soon_threadsafe(_wake, waiter)
+            except RuntimeError:            # the gate's loop has closed
+                pass
 
     async def _splice(self, client_r, client_w, up_r, up_w) -> None:
         """Bytes both ways until both directions end. A direction that ends

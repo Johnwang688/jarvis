@@ -22,9 +22,10 @@ refusal ever contains one.
 A URL the owner opens on this machine (`localhost`, `127.0.0.1` …) with
 `POST /browser/tabs` or `…/navigate` opens that loopback port in the gate for
 this host's lifetime: loopback is closed like the LAN until then (review of
-PR #69). History, a page's own moves and any agent never open one. BR-8b's
-auto-open goes through the window, and the window drives these routes, so a
-dev server it opens counts as the owner's.
+PR #69). History, a page's own moves and any agent never open one, and
+neither does auto-open (amendment 2, L2): it loads only in a Direct frame, and
+a loopback port opens to the Remote browser only through the owner's own
+navigation.
 
 The stream, input, dialogs, downloads and the tab strip are BR-1b's; profile
 management is BR-1c's.

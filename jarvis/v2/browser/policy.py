@@ -66,6 +66,7 @@ BUSY = "busy"
 LOOPBACK_CLOSED = "loopback_closed"
 REBINDING = "rebinding"
 DNS_BUSY = "dns_busy"
+PINS_FULL = "pins_full"
 
 # The judge's sentences. Fixed text: a refusal is logged by the daemon's
 # handler (`APIError`), and no URL may reach a log line (plan §4).

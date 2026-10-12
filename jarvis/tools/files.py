@@ -303,22 +303,46 @@ def _credential_roots() -> list[Path]:
     return found
 
 
+def credential_folder_judge():
+    """`_credential_folder` for many paths at once — a search: the folders
+    and the gate's own paths are read once, each directory's real path once,
+    and a path's own real path only when its last component is a symlink
+    (otherwise it is its directory's real path plus its name). String
+    prefixes, not `Path.parents`: a search judges every file it reads
+    (review of PR #69: 20k paths took 3.4 s against 0.31 s before)."""
+    roots = tuple(str(r) if str(r).endswith(os.sep) else str(r) + os.sep for r in _credential_roots())
+    own = frozenset(os.path.abspath(str(p)) for p in _protected_state_paths())
+    real_dirs: dict[str, str] = {}
+
+    def inside(p: str) -> bool:
+        p = p + os.sep
+        return any(p.startswith(r) for r in roots)
+
+    def judge(path: str | Path) -> bool:
+        try:
+            lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
+            head, tail = os.path.split(lexical)
+            if not tail or os.path.islink(lexical):
+                resolved = os.path.realpath(lexical)
+            else:
+                real = real_dirs.get(head)
+                if real is None:
+                    real = real_dirs[head] = os.path.realpath(head)
+                resolved = os.path.join(real, tail)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            return True
+        if resolved == lexical and lexical in own:
+            return False
+        return inside(lexical) or inside(resolved)
+
+    return judge
+
+
 def _credential_folder(path: str | Path) -> bool:
     """True if `path`, as written or where it resolves, is a credential
     folder or lies inside one — unless it is one of the gate's state files
     named by its own, un-symlinked path."""
-    try:
-        lexical = Path(os.path.abspath(os.path.expanduser(str(path))))
-        resolved = lexical.resolve()
-    except (OSError, RuntimeError, ValueError):
-        return True
-    if resolved == lexical and lexical in {Path(os.path.abspath(p)) for p in _protected_state_paths()}:
-        return False
-    for root in _credential_roots():
-        for candidate in (lexical, resolved):
-            if candidate == root or root in candidate.parents:
-                return True
-    return False
+    return credential_folder_judge()(path)
 
 
 def _credential_folder_refusal(path: str | Path) -> str:

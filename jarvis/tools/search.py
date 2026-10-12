@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Annotated, Callable, Iterable
 
 from . import tool
-from .files import _credential_folder
+from .files import credential_folder_judge
 from .secrets import is_env_credential, is_protected
 
 MODES = ("content", "files", "count")
@@ -67,8 +67,17 @@ def refused(path: str | Path) -> bool:
     files and login files), never less. Since the review of PR #69 it also
     refuses everything in a credential folder (`config.credential_dirs()`,
     the HUD Browser's profile among them; `files._credential_folder`, the one
-    definition), which the HUD's route already withheld."""
-    return is_protected(path) or is_env_credential(path) or _credential_folder(path)
+    definition), which the HUD's route already withheld.
+
+    A search asks `refuser()` once and that for every file, so the folders
+    are read once per search, not per file."""
+    return refuser()(path)
+
+
+def refuser() -> Callable[[str | Path], bool]:
+    """`refused`, for the files of one search."""
+    folder = credential_folder_judge()
+    return lambda path: is_protected(path) or is_env_credential(path) or folder(path)
 
 
 @dataclass
@@ -185,21 +194,23 @@ def _rg_hits(stdout: str, mode: str) -> list[Hit]:
     produces. A record we cannot attribute to a file is dropped — this is a
     credential filter, so "unrecognised" has to mean "withheld".
     """
+    judge = refuser()
     if mode == "files":
         # `--files-with-matches --null` NUL-*terminates* each path and emits no
         # newlines at all, so this stream is split differently from the others.
-        return [Hit(p) for p in stdout.split("\0") if p.strip() and not refused(p)]
+        return [Hit(p) for p in stdout.split("\0") if p.strip() and not judge(p)]
 
     out: list[Hit] = []
     verdicts: dict[str, bool] = {}
     for record in stdout.splitlines():
-        hit = _rg_record(record, mode, verdicts)
+        hit = _rg_record(record, mode, verdicts, judge)
         if hit is not None:
             out.append(hit)
     return out
 
 
-def _rg_record(record: str, mode: str, verdicts: dict[str, bool]) -> Hit | None:
+def _rg_record(record: str, mode: str, verdicts: dict[str, bool],
+               judge: Callable[[str], bool] | None = None) -> Hit | None:
     """One line of rg's content or count output, or None (unattributable, or refused)."""
     if not record.strip():
         return None
@@ -207,7 +218,7 @@ def _rg_record(record: str, mode: str, verdicts: dict[str, bool]) -> Hit | None:
     if not sep:
         return None
     if path not in verdicts:
-        verdicts[path] = refused(path)
+        verdicts[path] = (judge or refused)(path)
     if verdicts[path]:
         return None
     if mode == "count":
@@ -265,10 +276,11 @@ def _python_hits(
                 return [], True
 
     out: list[Hit] = []
+    judge = refuser()
     for target in targets:
         if deadline is not None and time.monotonic() > deadline:
             return out, True
-        if refused(target):
+        if judge(target):
             continue
         try:
             if target.stat().st_size > MAX_FILE_BYTES:
@@ -369,7 +381,8 @@ def _rg_json_args(pattern: str, root: str, *, glob: str, case_insensitive: bool,
     return args + ["--regexp", pattern, "--", root]
 
 
-def _rg_json_hit(raw: bytes, verdicts: dict[str, bool]) -> Hit | None:
+def _rg_json_hit(raw: bytes, verdicts: dict[str, bool],
+                 judge: Callable[[str], bool] | None = None) -> Hit | None:
     """One `--json` record as a hit, or None: not a match, unattributable (a
     credential filter: unrecognised means withheld) or refused by the one
     filter, `refused` — the same filter `grep_files` applies."""
@@ -387,7 +400,7 @@ def _rg_json_hit(raw: bytes, verdicts: dict[str, bool]) -> Hit | None:
         return None
     path = os.fsdecode(path_bytes)
     if path not in verdicts:
-        verdicts[path] = refused(path)
+        verdicts[path] = (judge or refused)(path)
     if verdicts[path]:
         return None
     if line_bytes.endswith(b"\n"):
@@ -487,10 +500,11 @@ def search_bounded(
     watcher.start()
     found = Found([])
     verdicts: dict[str, bool] = {}
+    judge = refuser()
     try:
         assert proc.stdout is not None
         for raw in proc.stdout:
-            hit = _rg_json_hit(raw, verdicts)
+            hit = _rg_json_hit(raw, verdicts, judge)
             if hit is None or (keep is not None and not keep(hit)):
                 continue
             if len(found.hits) >= limit:

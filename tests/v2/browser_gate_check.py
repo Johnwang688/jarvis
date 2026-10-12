@@ -359,9 +359,17 @@ class GateRefusals(Base):
         self.assertGreater(closed.accepts, 0)
         self.assertEqual(other.accepts, 0)
 
+    def no_cache(self):
+        """Every connection asks the resolver again (the cache would answer
+        the second one from the first)."""
+        guard = patch.object(G, "CACHE_S", 0.0)
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def test_a_name_keeps_the_address_class_it_first_resolved_to(self):
         # Rebinding with the LAN switch on: a public name later answering a
         # private address, and a private name later answering a public one.
+        self.no_cache()
         self.lan[0] = True
         self.resolver.table["pin.example"] = lambda nth: ["93.184.216.34"] if nth == 1 else ["192.168.1.5"]
         self.resolver.table["lanpin.example"] = lambda nth: ["192.168.1.6"] if nth == 1 else ["93.184.216.35"]
@@ -373,10 +381,27 @@ class GateRefusals(Base):
         self.assertEqual(self.connector.seen, [("93.184.216.34", 80), ("192.168.1.6", 80)])
         self.assertEqual(self.gate.stats()["refused"].get(P.REBINDING), 3)
 
+    def short_budget(self, seconds=1.5):
+        guard = patch.object(G, "RESOLVE_TIMEOUT_S", seconds)
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def ask_all(self, names, port=80):
+        """Each name asked at once on its own connection; {name: reply}."""
+        replies = {}
+
+        def ask(name):
+            replies[name] = code(self.gate.port, name, port)
+        threads = [threading.Thread(target=ask, args=(n,)) for n in names]
+        for t in threads:
+            t.start()
+        return replies, threads
+
     def test_a_black_holed_domain_cannot_starve_other_lookups(self):
         # A page aims lookups at a name server that never answers: one domain
-        # holds at most two resolver threads, the rest are refused at once,
-        # and another site still resolves at once.
+        # holds at most DOMAIN_LOOKUPS resolver threads, the rest wait out
+        # their budget and are refused, and another site still resolves at once.
+        self.short_budget()
         release = threading.Event()
         self.addCleanup(release.set)
 
@@ -387,23 +412,19 @@ class GateRefusals(Base):
         for name in names:
             self.resolver.table[name] = black_hole
         self.resolver.table["ok.example"] = ["93.184.216.34"]
-        replies = {}
-
-        def ask(name):
-            replies[name] = code(self.gate.port, name, 80)
-        threads = [threading.Thread(target=ask, args=(n,)) for n in names]
-        for t in threads:
-            t.start()
+        replies, threads = self.ask_all(names)
         time.sleep(0.5)
         started = time.monotonic()
         self.assertEqual(code(self.gate.port, "ok.example", 80), G.REP_REFUSED)
-        self.assertLess(time.monotonic() - started, 2.0, "another site waited on the black hole")
+        self.assertLess(time.monotonic() - started, 1.0, "another site waited on the black hole")
         self.assertIn(("93.184.216.34", 80), self.connector.seen)
-        release.set()
         for t in threads:
             t.join(15)
         self.assertEqual(set(replies.values()), {G.REP_HOST_UNREACHABLE})
-        self.assertGreaterEqual(self.gate.stats()["refused"].get(P.DNS_BUSY, 0), 38)
+        self.assertEqual(sum(1 for n in self.resolver.calls if n.endswith(".blackhole.test")),
+                         G.DOMAIN_LOOKUPS, "the black hole held more than its domain's threads")
+        self.assertGreaterEqual(self.gate.stats()["refused"].get(P.DNS_BUSY, 0), 40 - G.DOMAIN_LOOKUPS)
+        release.set()
         # The same name asked twice at once is one lookup.
         slow = threading.Event()
         self.resolver.table["twice.example"] = lambda nth: (slow.wait(2), ["93.184.216.36"])[1]
@@ -415,6 +436,109 @@ class GateRefusals(Base):
         for t in pair:
             t.join(10)
         self.assertEqual(self.resolver.calls.count("twice.example"), 1)
+
+    def test_many_names_in_one_domain_wait_for_a_slot_rather_than_fail(self):
+        # Delta review of PR #69: eight images on one CDN at 60–80 ms each,
+        # and six of eight were refused `dns_busy` at once. Now they wait.
+        busy, peak, lock = [0], [0], threading.Lock()
+
+        def slow(nth, i):
+            with lock:
+                busy[0] += 1
+                peak[0] = max(peak[0], busy[0])
+            time.sleep(0.3)
+            with lock:
+                busy[0] -= 1
+            return [f"93.184.216.{100 + i}"]
+        names = [f"i{i}.img.test" for i in range(8)]
+        for i, name in enumerate(names):
+            self.resolver.table[name] = lambda nth, i=i: slow(nth, i)
+        replies, threads = self.ask_all(names)
+        for t in threads:
+            t.join(15)
+        self.assertEqual(replies, {n: G.REP_REFUSED for n in names})      # all allowed; no network
+        self.assertEqual(self.gate.stats()["refused"].get(P.DNS_BUSY, 0), 0)
+        self.assertEqual(peak[0], G.DOMAIN_LOOKUPS, "one domain held more threads than its slots")
+
+    def test_a_site_under_a_shared_suffix_has_slots_of_its_own(self):
+        # Every `*.co.uk` used to share two slots (the last two labels): two
+        # hanging lookups under evil.co.uk refused www.bbc.co.uk at once.
+        self.short_budget()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        hang = lambda nth: (release.wait(30), None)[1]  # noqa: E731
+        names = [f"x{i}.evil.co.uk" for i in range(6)]
+        for name in names:
+            self.resolver.table[name] = hang
+        self.resolver.table["www.bbc.co.uk"] = ["93.184.216.40"]
+        replies, threads = self.ask_all(names)
+        time.sleep(0.3)
+        started = time.monotonic()
+        self.assertEqual(code(self.gate.port, "www.bbc.co.uk", 80), G.REP_REFUSED)
+        self.assertLess(time.monotonic() - started, 1.0, "bbc.co.uk waited on evil.co.uk")
+        release.set()
+        for t in threads:
+            t.join(15)
+        for name, key in (("www.bbc.co.uk", "bbc.co.uk"), ("a.b.evil.co.uk", "evil.co.uk"),
+                          ("me.github.io", "me.github.io"), ("x.me.github.io", "me.github.io"),
+                          ("a.b.example.com", "example.com"), ("example.com", "example.com"),
+                          ("shop.example.de", "example.de"), ("www.foo.ne.jp", "foo.ne.jp"),
+                          ("a.b.example.uk", "b.example.uk"), ("WWW.BBC.CO.UK.", "bbc.co.uk")):
+            with self.subTest(name=name):
+                self.assertEqual(G.domain_key(name), key)
+
+    def test_a_cached_answer_is_judged_like_a_new_one(self):
+        # A positive answer is reused for CACHE_S: one resolver call, every
+        # connection still judged — the LAN switch and the pin included.
+        self.lan[0] = True
+        self.resolver.table["cached.example"] = ["93.184.216.41"]
+        self.resolver.table["lan.example"] = ["192.168.1.8"]
+        self.resolver.table["mixed.example"] = ["93.184.216.42", "192.168.1.9"]
+        for _ in range(3):
+            self.assertEqual(code(self.gate.port, "cached.example", 80), G.REP_REFUSED)
+        self.assertEqual(self.resolver.calls.count("cached.example"), 1)
+        self.assertEqual(self.connector.seen.count(("93.184.216.41", 80)), 3)
+        self.assertEqual(code(self.gate.port, "lan.example", 80), G.REP_REFUSED)       # LAN on: allowed
+        self.lan[0] = False
+        self.assertEqual(code(self.gate.port, "lan.example", 80), G.REP_NOT_ALLOWED)   # cached, judged again
+        self.lan[0] = True
+        for _ in range(2):        # the pin (public) holds on the cached mixed answer too
+            self.assertEqual(code(self.gate.port, "mixed.example", 80), G.REP_REFUSED)
+        self.assertEqual(self.resolver.calls.count("lan.example") + self.resolver.calls.count("mixed.example"), 2)
+        self.assertNotIn(("192.168.1.9", 80), self.connector.seen)
+        with patch.object(G, "CACHE_S", 0.2):
+            self.resolver.table["brief.example"] = ["93.184.216.43"]
+            code(self.gate.port, "brief.example", 80)
+            time.sleep(0.3)
+            code(self.gate.port, "brief.example", 80)
+        self.assertEqual(self.resolver.calls.count("brief.example"), 2, "an expired answer was reused")
+
+    def test_a_young_pin_is_never_forgotten_to_make_room(self):
+        # Delta review of PR #69: after 8,193 other names the oldest pin was
+        # dropped, and a pinned-public name then reached a private address
+        # with the LAN switch on.
+        self.no_cache()
+        self.lan[0] = True
+        cap = patch.object(G, "PIN_CAP", 4)
+        cap.start()
+        self.addCleanup(cap.stop)
+        self.resolver.table["victim.example"] = lambda nth: ["93.184.216.50"] if nth == 1 else ["192.168.1.50"]
+        self.assertEqual(code(self.gate.port, "victim.example", 80), G.REP_REFUSED)    # pinned public
+        for i in range(6):                                                              # fill the table
+            self.resolver.table[f"f{i}.example"] = [f"93.184.216.{60 + i}"]
+            self.assertEqual(code(self.gate.port, f"f{i}.example", 80), G.REP_REFUSED)
+        self.assertEqual(code(self.gate.port, "victim.example", 80), G.REP_NOT_ALLOWED)  # still pinned
+        self.assertEqual(self.gate.stats()["refused"].get(P.REBINDING), 1)
+        # Full of young pins: an unpinned name may not reach private space.
+        self.resolver.table["fresh.example"] = ["192.168.1.51"]
+        self.assertEqual(code(self.gate.port, "fresh.example", 80), G.REP_NOT_ALLOWED)
+        self.assertEqual(self.gate.stats()["refused"].get(P.PINS_FULL), 1)
+        self.assertNotIn(("192.168.1.50", 80), self.connector.seen)
+        self.assertNotIn(("192.168.1.51", 80), self.connector.seen)
+        # Once pins are old enough, the oldest gives way again.
+        with patch.object(G, "PIN_YOUNG_S", 0.0):
+            self.assertEqual(code(self.gate.port, "fresh.example", 80), G.REP_REFUSED)
+        self.assertIn(("192.168.1.51", 80), self.connector.seen)
 
     def test_the_workshop_is_admitted_only_as_the_reported_one(self):
         self.assertEqual(code(self.gate.port, "127.0.0.1", self.workshop.port), G.REP_OK)

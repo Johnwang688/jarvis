@@ -21,13 +21,14 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import runtime  # noqa: E402
 from jarvis import config, tools  # noqa: E402
-from jarvis.tools import search as search_mod  # noqa: E402
+from jarvis.tools import files as v1_files, search as search_mod  # noqa: E402
 from jarvis.tools.files import SELF_PROTECTED  # noqa: E402
 
 
@@ -726,6 +727,37 @@ def credential_folder_checks(tmp: Path) -> None:
                         assert bit not in body, f"{label} leaked {bit} for {kwargs}:\n{out}"
         found = call("grep_files", pattern="ordinary", path=str(outside))
         assert "notes.txt" in found, found
+
+        # A search's own judge (`search.refuser`, the folders read once) and
+        # the single-path rule agree on every shape: a symlinked folder in,
+        # a symlinked file in, `..`, a missing path, the gate's state by its
+        # own path and through a symlink (delta review of PR #69).
+        dirlink = outside / "profile-link"
+        dirlink.symlink_to(profile, target_is_directory=True)
+        allowlink = outside / "allow-link.json"
+        allowlink.symlink_to(jarvis_cfg / "allowlist.json")
+        judge = search_mod.refuser()
+        shapes = {profile / "History": True, dirlink / "History": True, link: True,
+                  profile / ".." / "Default" / "History": True, ssh / "id_test": True,
+                  outside / "missing" / "x.txt": False, outside / "notes.txt": False,
+                  jarvis_cfg / "allowlist.json": False, allowlink: True, jarvis_cfg / "other.json": True}
+        for path, want in shapes.items():
+            assert judge(path) is want and search_mod.refused(path) is want \
+                and v1_files._credential_folder(path) is want, (path, want)
+        out = call("grep_files", pattern="SECRET", path=str(dirlink))
+        assert "BROWSERSECRET" not in out, out
+
+        # And it is cheap: 20,000 paths judged in under a second (the first
+        # cut took ~3 s, rebuilding the folders and resolving per file).
+        many = tmp / "many"
+        for d in range(200):
+            (many / f"d{d}").mkdir(parents=True)
+        paths = [str(many / f"d{d}" / f"f{f}.py") for d in range(200) for f in range(100)]
+        started = time.perf_counter()
+        judge = search_mod.refuser()
+        assert not any(judge(p) for p in paths)
+        took = time.perf_counter() - started
+        assert took < 1.0, f"20k paths took {took:.2f} s"
     ran = "both backends" if have_rg else "fallback only (rg not installed)"
     print(f"ok  credential folders: read, write, edit and grep refused, symlinks too; "
           f"the gate's state readable — {ran}")

@@ -362,12 +362,25 @@ Chrome off the control plane and his LAN:
   with no authentication; past 256 connections. A mixed DNS answer connects
   only to its allowed addresses, and **a name keeps the address class it
   was first allowed on** for the gate's lifetime (`rebinding`: public stays
-  public, private stays private; 8,192 names remembered). **Its DNS is
-  bounded** (PR #69's LOW): 5 s, 32 worker threads, connections asking for
-  one name at once share one lookup, and a domain (its last two labels) holds
-  at most two worker threads — counted until `getaddrinfo` really returns —
-  and is refused `dns_busy` past that, so a black-holed domain cannot starve
-  every other lookup. It logs and counts the class, never a host.
+  public, private stays private; 8,192 names remembered, and **a pin younger
+  than 30 min is never forgotten to make room** — the delta review flushed a
+  pinned-public name with 8,193 others and it then reached a private address
+  with the LAN on; while the table is full of young pins an unpinned name may
+  not reach private space, `pins_full`). **Its DNS is bounded and waits
+  rather than fails** (PR #69's LOW and delta review): 5 s for the whole
+  lookup, 32 worker threads, connections asking for one name at once share
+  one lookup, and a domain holds at most four worker threads — counted until
+  `getaddrinfo` really returns — a lookup past that **waiting** for one
+  within its 5 s (only then `dns_busy`): refusing at once had failed 6 of 8
+  images on one CDN. The domain is `gate.domain_key`: the registrable domain
+  where a small table of two-label public suffixes can tell (`co.uk`,
+  `com.au`, `co.jp`, `github.io`, `vercel.app` … — no Public Suffix List
+  dependency; `www.bbc.co.uk` no longer shares slots with `evil.co.uk`), the
+  name's parent under a ccTLD whose second level the table does not know, the
+  last two labels anywhere else. A positive answer is reused for 5 s (1,024
+  names), judged like a fresh one, pin and LAN switch included. A
+  black-holed domain cannot starve every other lookup. It logs and counts the
+  class, never a host.
 - **Loopback is closed like the LAN** (PR #69's MED 2, the lead's decision
   for the owner): a public page read a CORS-permissive service on this
   machine through the gate (Local Network Access does not see behind a
@@ -377,10 +390,10 @@ Chrome off the control plane and his LAN:
   port until it stops, never one of Jarvis's ports. A page's own move,
   history and any agent's `navigate` never open one; `browser.json` →
   `local_servers` (default off) opens every port that is not Jarvis's.
-  **BR-8b's auto-open of a dev server goes through the window, and the window
-  drives these routes, so it counts as the owner's opening** — BR-8b must keep
-  it that way. `/status` → `browser` → `loopback_opened` is a count, never
-  which.
+  **Auto-open never opens a port here** (amendment 2, decision L2): it loads
+  only in a Direct frame, and only the owner's own navigation through these
+  routes opens one. `/status` → `browser` → `loopback_opened` is a count,
+  never which.
 - **The landing guard** (`host.py`): every main-frame `framenavigated` is
   judged again (`landed=True`, which also admits `about:blank#…`, Chrome's
   error page and a `blob:` of an http(s) origin) and a refused one is
@@ -446,14 +459,19 @@ one tab, ~490 MiB after the attack pages and ~470 MiB for Private (RSS
 summed over its 14–19 processes 1.1–1.9 GiB, shared pages counted once per
 process), stop ~0.1 s. A first tab asked for twice at once starts one Chrome
 (`_start_lock`).
-**v1's file tools refuse every credential folder** (PR #69's LOW):
-`read_file`, `write_file`, `edit_file` and `grep_files` (both backends;
-`search.refused`) refuse anything in `config.credential_dirs()` — the
-Browser profile, `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.config/jarvis`,
-`~/.gnupg` — as written or where it resolves (`files._credential_folder`);
-the gate's own state files keep their rule and stay readable by their own,
-un-symlinked path. Before, the fast path's `read_file` could read the
-profile's History.
+**v1's file tools refuse every credential folder** (PR #69's LOW and delta
+review): `read_file`, `write_file`, `edit_file`, `grep_files` (both
+backends; `search.refused`) and `query_sqlite` refuse anything in
+`config.credential_dirs()` — the Browser profile, `~/.ssh`, `~/.aws`,
+`~/.config/gh`, `~/.config/jarvis`, `~/.gnupg` — as written or where it
+resolves (`files._credential_folder`); the gate's own state files keep their
+rule and stay readable by their own, un-symlinked path. Before, the fast
+path's `read_file` and `query_sqlite` could read the profile's History (a
+SQLite file). **A search judges with one `search.refuser()`**
+(`files.credential_folder_judge`): the folders and the gate's paths read
+once, each directory's real path once, a file's own only when it is a
+symlink — 20k paths in ~0.25 s, where calling the single-path rule per file
+took ~3 s; `files_check` holds it under 1 s and the two backends to parity.
 Free suites: `tests/v2/browser_gate_check.py` (no Chrome: the judge, every
 refusal family against stand-in listeners whose accept counters stay 0,
 rebinding through an injected resolver asked once, a name's class pinned,
@@ -485,8 +503,12 @@ mDNS onto the real LAN). **Stated limits:** the Playwright driver (a node
 process) inherits the daemon's environment, as v1's does; none of this is a
 boundary against a program running as the owner, which can read the profile
 or use the gate (no new lever: it could connect directly); the gate's name
-pins live in its memory (a restart forgets them); a loopback port the owner
-opened stays open to every page until the host stops. No idle stop or
+pins live in its memory (a restart forgets them); a public answer for an
+unpinned name is allowed while the pin table is full of young pins, so such a
+name could rebind once the pins age; **a loopback port the owner opened stays
+open to every page, every profile and Private, until the daemon stops** (a
+follow-up for BR-1c: count the panes per port and close it when the last one
+leaves). No idle stop or
 instance cap yet (BR-1c), and **BD-10's memory ceiling is not set** (BR-1c's):
 one tab ~365 MiB PSS, ~490 MiB after the attack pages, Private ~470 MiB.
 
@@ -6144,9 +6166,9 @@ Two findings worth keeping:
   (2026-10-12, the lead's call on PR #69's MED 2, recorded for the owner).**
   The gate admits a loopback port only after the owner opened it in a tab
   through the owner-only routes, for the host's lifetime; `local_servers` in
-  `browser.json` (off) opens them all. Pages and agents never open one;
-  BR-8b's auto-open counts because it goes through the window. Details in
-  the BR-1a paragraph.
+  `browser.json` (off) opens them all. Pages and agents never open one.
+  Auto-open never opens one (amendment 2, L2). Details in the BR-1a
+  paragraph.
 - **A toolset is enforced at dispatch, not only by what the request offers
   (2026-10-10).** An agent's bound toolset is the set it may call; naming a
   registered tool outside it is refused, dangerous or not. A deferred tool

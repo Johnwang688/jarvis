@@ -2090,11 +2090,13 @@ ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
 its own on every address; a name that resolves to loopback; a loopback port
 the owner has not opened (unless `local_servers`); private addresses unless
 `lan` is true; a name answering with another kind of address than the one
-it was first allowed on; multicast, reserved and unresolvable destinations;
-a lookup past the per-domain cap. It counts each refusal by class
-(`jarvis_port`, `own_port`, `name_to_loopback`, `loopback_closed`,
-`private_network`, `rebinding`, `not_a_host`, `unresolvable`, `dns_busy`,
-`bad_request`, `unsupported`, `busy`) and logs nothing else about it.
+it was first allowed on; a private answer for a name it has no room to pin;
+multicast, reserved and unresolvable destinations; a lookup that waited its
+whole 5 s for one of its domain's four resolver slots. It counts each refusal
+by class (`jarvis_port`, `own_port`, `name_to_loopback`, `loopback_closed`,
+`private_network`, `rebinding`, `pins_full`, `not_a_host`, `unresolvable`,
+`dns_busy`, `bad_request`, `unsupported`, `busy`) and logs nothing else about
+it.
 Chrome sends no UDP at all (no QUIC; WebRTC held to proxied transports, so
 no ICE candidate, STUN or mDNS). **Nothing about browsing goes on the bus**
 in BR-1a.
