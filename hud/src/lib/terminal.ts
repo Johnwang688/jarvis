@@ -449,12 +449,16 @@ export function continuesOn(bytes: Uint8Array): boolean {
  * Whether a terminal this window shows may be continued: it ended with
  * Jarvis (or is gone with it) — never one that exited on its own, which
  * keeps Restart — it is a shell, not a program terminal (VX-1), this tab
- * showed it (never one another window holds), and the window is not
+ * showed it (never one another window holds), where it was opened is known
+ * (a remembered `in`, or its row: a program terminal has neither once a
+ * reload forgot its row, so it never becomes a shell), and the window is not
  * crashed. A card is checked where the owner acts: the strip still says
  * what typing would do.
  */
-export function mayContinue(t: { state: string; program: boolean; mine: boolean; crashed: boolean }): boolean {
-  return t.state === "ended" && !t.program && t.mine && !t.crashed;
+export function mayContinue(
+  t: { state: string; program: boolean; mine: boolean; known: boolean; crashed: boolean },
+): boolean {
+  return t.state === "ended" && !t.program && t.mine && t.known && !t.crashed;
 }
 
 /**

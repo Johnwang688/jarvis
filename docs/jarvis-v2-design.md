@@ -2113,6 +2113,22 @@ fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
 
+**A terminal that ended with Jarvis continues where it was (2026-10-12, the
+owner's option (a)).** The owner typed into a terminal whose history was
+still on screen after a restart and got only "New terminal here". Now a
+typing key there, a paste or **Continue here** starts a new shell in the same
+folder, with the same "Jarvis can read" switch (off when unknown), in the
+same place and the same xterm, under the old text and a `── restarted HH:MM
+──` line; what was typed waits (4 KiB) until the new shell's replay has been
+parsed. The old text is rebuilt from xterm's cells (characters and colours,
+1 MiB), kept in this page's memory only, and written back after the RIS of
+every later attach of the new terminal. Running programs do not survive —
+only their text — and a page reload loses the text: real survival would need
+a pty host outside the daemon, which would reverse W-3 (option (b), not
+taken). Only the owner's gesture in that terminal continues it: never a
+card, a crash, a load, a reattach, another window's terminal, a shell that
+exited on its own, a program terminal, Ctrl+D or a HUD key. No route changed.
+
 **Jarvis can read a terminal (2026-10-10, WP-F; decisions W-2).**
 `terminal_read(terminal, lines=200)` returns the last lines (at most 1000) of
 one terminal's **normal buffer** as plain text — escape sequences stripped,

@@ -983,6 +983,35 @@ The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
 read-only (`backlog` among them).
 While typing is paused the notice cannot be dismissed: it holds the only
 way to resume.
+**A terminal that ended with Jarvis continues where it was** (2026-10-12,
+the owner's option (a); no route changed). A typing key there (printable,
+Enter, Backspace, Tab, an arrow — `lib/terminal.ts` `continuesOn`), a paste
+or **Continue here** is one `POST /terminals` with its remembered `in` and
+its switch (`readableCarry`: off when unknown, so never wider; a session's
+`lastRow` now follows every listing and `PATCH`). `TermManager.rekey` moves
+the session to the new id everywhere — panel tab position (first-seen
+`ranks`), pane (`renameTerminal`, every pane holding it), selected tab,
+remembered spec, `mine` — with `aliases` for the render a pane still holds
+the old id, and the panel's view keyed by its first id (`viewKey`), so the
+**same xterm** stays mounted and focused. The old text is rebuilt from
+**xterm's cells** (`snapshotText`: characters and SGR only, wrapped lines
+joined, 1 MiB tail), never the old bytes — so it holds no query, mode,
+alternate screen or title — and written after the RIS of **every** attach,
+before the replay, then `── restarted HH:MM ──` (plain text). Keys and pastes
+while it starts are `HeldInput` (4 KiB, a paste dropped whole, never spliced:
+after a refused part nothing is kept) and go after the replay is parsed; a
+card since the gesture (`cardCount`) or a crash (`abortPastes` sets
+`crashed`) drops them, said as `unsent`. **Only the owner's gesture in that
+terminal continues it** (`mayContinue`: ended, a shell, in this tab's `mine`,
+not crashed; never under a card, on a load, a restored panel or a reattach,
+for another window's, an exited shell or a program terminal; Ctrl+D and HUD
+keys never). **Memory only: a page reload loses the old text.** Running
+programs do not survive; real survival (a pty host) would reverse W-3.
+Free checks: `lib/terminalContinue.test.ts` (with a real, unopened xterm:
+the rebuilt text answers nothing and leaves no mode) and `_continue_checks`
+in `hud_v2_terminal_check.py`; guard removals that bite: a paste under a
+card, the held keys' card count, continuing without a gesture, the switch
+failing open, and a raw-byte prefix written after the replay window.
 
 **Jarvis reads a terminal, WP-F (2026-10-10; decisions W-2 is the spec;
 design §18; contract in `docs/hud-api.md`).** `terminal_read(terminal="",

@@ -2406,6 +2406,23 @@ def _continue_checks(page, mock, base, check, until, fake):
           len(posts()) == n and "Type to continue" not in strip
           and page.locator(_sel(prog, '[data-testid="term-continue"]')).count() == 0
           and page.locator(_sel(prog, '[data-testid="term-new-here"]')).count() == 0, strip)
+    # After a reload its row is forgotten: where it was opened is not known, so still never.
+    stale = json.dumps({"preset": "cols2", "focused": 2,
+                        "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": prog},
+                                  {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _store(page, ws=stale)
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _state(page, prog) == "ended", timeout=6)
+    n = len(posts())
+    _focus_term(page, prog)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(prog, '[data-testid="term-ended"]')).inner_text()
+    check("and after a reload, its row forgotten, still never: where it was opened is not known",
+          len(posts()) == n and "Type to continue" not in strip, strip)
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _store(page, ws=None)
     _reset(page, mock, base, until, fake)
 
 

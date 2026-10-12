@@ -1455,7 +1455,7 @@ export class TermManager {
   specOf(id: string): InSpec {
     const kept = this.prefs.specs[id];
     if (kept) return kept;
-    const row = this.row(id);
+    const row = this.row(id) ?? this.sessions.get(id)?.lastRow;
     return row?.project_id ? { project: row.project_id } : "home";
   }
 
@@ -1559,6 +1559,7 @@ export class TermManager {
    */
   async requestClose(id: string) {
     if (this.blocked) return;
+    id = this.resolve(id);                    // continued meanwhile: the terminal it is now
     const listed = await this.freshList();
     if (this.blocked) return;
     const row = this.row(id);
@@ -1574,6 +1575,7 @@ export class TermManager {
 
   async close(id: string) {
     if (this.blocked) return;
+    id = this.resolve(id);
     this.confirm = null;
     this.error = "";
     const s = this.sessions.get(id);
@@ -1647,8 +1649,10 @@ export class TermManager {
 
   /** Whether `s` may continue now (lib/terminal.ts, `mayContinue`), a card aside. */
   mayContinue(s: TermSession): boolean {
-    return mayContinue({ state: s.state, program: this.isProgram(s.id), mine: this.claimed.has(s.id),
-                         crashed: this.crashed });
+    return mayContinue({
+      state: s.state, program: this.isProgram(s.id), mine: this.claimed.has(s.id),
+      known: !!this.prefs.specs[s.id] || !!(this.row(s.id) ?? s.lastRow), crashed: this.crashed,
+    });
   }
 
   /**

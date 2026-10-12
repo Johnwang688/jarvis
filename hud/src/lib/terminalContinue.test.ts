@@ -33,9 +33,9 @@ describe("which keys continue an ended terminal", () => {
 });
 
 describe("which terminals continue", () => {
-  const ok = { state: "ended", program: false, mine: true, crashed: false };
+  const ok = { state: "ended", program: false, mine: true, known: true, crashed: false };
 
-  it("one that ended with Jarvis (or is gone with it), shown by this tab, a shell", () => {
+  it("one that ended with Jarvis (or is gone with it), shown by this tab, a shell whose folder is known", () => {
     expect(mayContinue(ok)).toBe(true);
   });
 
@@ -46,6 +46,10 @@ describe("which terminals continue", () => {
     expect(mayContinue({ ...ok, program: true })).toBe(false);
     expect(mayContinue({ ...ok, mine: false })).toBe(false);
     expect(mayContinue({ ...ok, crashed: true })).toBe(false);
+  });
+
+  it("nor one whose folder is not known (no remembered `in`, no row): a program terminal after a reload", () => {
+    expect(mayContinue({ ...ok, known: false })).toBe(false);
   });
 });
 
