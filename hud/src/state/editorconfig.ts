@@ -21,8 +21,10 @@
 //  - **poison**: a config file (by folder and etag) that spent the time, or
 //    is over a cap, configures nothing from then on, for any path, until its
 //    etag changes — every later resolution touching it is O(1). A time-out is
-//    a strike, and two strikes poison (one GC pause must not cost a real
-//    config its effect); a cap poisons at once;
+//    a strike, and two strikes in a row poison (one GC pause must not cost a
+//    real config its effect); a resolution that judges it in time starts its
+//    count again, so scattered time-outs on a busy machine never add up to
+//    poison; a cap poisons at once;
 //  - **no batching**: resolutions run one per macrotask through a queue that
 //    yields between items (`MessageChannel`, else `setTimeout`), so restored
 //    tabs never pile into one long task. A path's result is kept per (path,
@@ -259,10 +261,17 @@ function judge(walk: { dir: string; rec: ConfigRecord }[], path: string, d: Dead
     const rec = applying[r.culprit].rec;
     if (r.over === "time") strike(rec, "time");
     else rec.poisoned = r.over; // a cap: at once
+  } else if (r.over === null) {
+    // A config judged in time is not a slow one: its strikes start again.
+    // Without this, two time-outs days apart — a GC pause, a busy machine —
+    // poisoned the owner's real `.editorconfig` until its etag changed. Two
+    // in a row still poison, and a cap still poisons at once.
+    for (const a of applying) a.rec.strikes = 0;
   }
   return r;
 }
 
+/** A time-out blamed on `rec`: the `STRIKES`th in a row poisons it (a success in between starts the count again). */
 function strike(rec: ConfigRecord, why: string) {
   rec.strikes += 1;
   if (rec.strikes >= STRIKES) rec.poisoned = why;

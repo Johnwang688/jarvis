@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyEditorConfig, editorConfigFor, forgetEditorConfig, overrideFor, reapplyEditorConfig, resolutionStats,
-  resolveFor, TIMEOUT_MS, type EditorConfigDeps,
+  resolveFor, STRIKES, TIMEOUT_MS, type EditorConfigDeps,
 } from "./editorconfig";
 import { CHECK_STEPS, deadline, globCost, RESOLVE_MS, type Deadline } from "../lib/editorconfig";
 import { Buffers, type BufferDeps, type TextModel } from "./buffers";
@@ -494,5 +494,71 @@ describe("the window is never held", () => {
     expect(run.result.every((r) => r.steps < CHECK_STEPS)).toBe(true);
     expect(run.tasks).toHaveLength(40);
     expect(run.longest).toBeLessThan(5);
+  });
+});
+
+// Strikes count in a row (review of PR #72, LOW 3). A config judged in time
+// starts its count again. Before, strikes never reset, so two time-outs any
+// distance apart — a busy machine, a GC pause: a probe of 3,000 resolutions
+// of the real-world config on a loaded core timed out 2.4% of them — poisoned
+// the owner's real `.editorconfig` until its etag changed.
+describe("strikes count in a row", () => {
+  /** An ordinary project's config: ~20,000 steps on a deep path, so it looks at the clock. */
+  const REAL = [
+    "root = true", "[*]", "indent_style = space", "indent_size = 4", "end_of_line = lf",
+    "[*.{c,h,cpp,hpp,cc}]", "indent_size = 2", "[{Makefile,makefile,*.mk}]", "indent_style = tab",
+    "[*.{json,yml,yaml}]", "indent_size = 2", "[*.md]", "trim_trailing_whitespace = false",
+    "[src/**/vendor/**]", "indent_size = unset", "[lib/**.js]", "indent_size = 2",
+  ].join("\n");
+  /** A new path each time: a success is kept per path, and would answer without judging. */
+  const deep = (n: number) => `src/${"deep/".repeat(40)}robot${n}.cpp`;
+  /** A clock always past its deadline: the judgement times out at its first look (a busy machine). */
+  const late = () => {
+    let t = 0;
+    return deadline(RESOLVE_MS, () => (t += 100));
+  };
+  const quiet = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  it("two strikes poison", () => {
+    expect(STRIKES).toBe(2);
+  });
+
+  it("time-out, success, time-out: not poisoned — the config still applies", async () => {
+    const w = world({ ".editorconfig": REAL });
+    const warn = quiet();
+    try {
+      expect((await resolveFor(w.deps, "p1", deep(1), 1000, late)).over).toBe("time");
+      expect((await resolveFor(w.deps, "p1", deep(2), 1000, workDeadline)).over).toBeNull();
+      expect((await resolveFor(w.deps, "p1", deep(3), 1000, late)).over).toBe("time");
+      const next = await resolveFor(w.deps, "p1", deep(4), 1000, workDeadline);
+      expect(next.over).toBeNull();
+      expect(next.props).toMatchObject({ indent_style: "space", indent_size: "2" });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("time-out, time-out: poisoned, for any path", async () => {
+    const w = world({ ".editorconfig": REAL });
+    const warn = quiet();
+    try {
+      expect((await resolveFor(w.deps, "p1", deep(1), 1000, late)).over).toBe("time");
+      expect((await resolveFor(w.deps, "p1", deep(2), 1000, late)).over).toBe("time");
+      expect(await resolveFor(w.deps, "p1", "src/main.c", 1000, workDeadline))
+        .toMatchObject({ over: "poisoned", props: {}, steps: 0 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a cap poisons at once: no second strike needed", async () => {
+    const w = world({ ".editorconfig": `${REAL}\n[lib/${"{a,b}".repeat(7)}]\nindent_size = 3\n` });
+    const warn = quiet();
+    try {
+      expect((await resolveFor(w.deps, "p1", "src/main.c", 1000, workDeadline)).over).toBe("cap");
+      expect((await resolveFor(w.deps, "p1", "src/other.c", 1000, workDeadline)).over).toBe("poisoned");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
