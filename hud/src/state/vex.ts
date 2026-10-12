@@ -13,6 +13,12 @@
 // a step drops the rest of the chain** (a card count, as `ownerOpened`'s),
 // and the view says nothing was sent.
 //
+// **One chain per window** (VX-2 review, M1): while a download's chain runs,
+// for any project, no other download starts, every VEX view says what it is
+// doing ("Building override, then downloading to slot 3") with a Cancel that
+// stops its build and never sends the download, and the VEX panes' project
+// pickers are off — a chain never lands on a robot the view no longer shows.
+//
 // **Download is only the owner's click** on the labelled button (the button
 // asks lib/vex.ts `isExplicitClick`); this store has no other caller that
 // downloads, and no key, palette or tool reaches it.
@@ -20,8 +26,9 @@
 import { api } from "../api";
 import { terminals } from "../components/Terminal";
 import {
-  DeviceLedger, LAST_BUILDS_KEY, isVexId, needsBuildFirst, nameRefusal, parseDeviceRecord, parseLastBuilds,
-  slotRefusal, type BuildView, type Detection, type DeviceAction, type VexStatus,
+  DeviceLedger, LAST_BUILDS_KEY, STILL_STALE, chainCancellable, isVexId, needsBuildFirst, nameRefusal,
+  parseDeviceRecord, parseLastBuilds, slotRefusal, type BuildView, type ChainView, type Detection, type DeviceAction,
+  type VexStatus,
 } from "../lib/vex";
 
 const POLL_MS = 600;
@@ -29,6 +36,11 @@ const POLL_MS = 600;
 const BUILD_POLL_MAX_MS = 6 * 60_000;
 /** A download's is 3 minutes. */
 const DOWNLOAD_WAIT_MAX_MS = 4 * 60_000;
+/** A project's detection older than this is asked again (on focus, and by App's timer). */
+export const DETECT_STALE_MS = 30_000;
+
+/** Said when a download closed the brain terminal and it was not opened again. */
+const BRAIN_CLOSED = "The brain terminal was closed for the download";
 
 export interface ProjectRun {
   /** This window's last build of the project (or one remembered across a reload). */
@@ -42,13 +54,24 @@ export interface ProjectRun {
   downloaded: { slot: number; ok: boolean; code: number | null } | null;
 }
 
+/** The window's one running download chain (M1). */
+export interface Chain extends ChainView {
+  seq: number;
+  projectId: string;
+  /** The build-first's program terminal: what Cancel stops. */
+  buildTerminal: string | null;
+}
+
 export interface DeviceNotice {
   key: number;
   action: DeviceAction;
   at: string;
 }
 
-type Detected = { state: "ok"; d: Detection; at: number } | { state: "loading" } | { state: "error"; message: string };
+type Detected =
+  | { state: "ok"; d: Detection; at: number }
+  | { state: "loading" }
+  | { state: "error"; message: string; at: number };
 
 const blankRun = (): ProjectRun => ({ build: null, busy: null, note: "", noteTone: "info", downloaded: null });
 
@@ -85,6 +108,9 @@ export class VexStore {
   /** Every card that goes up counts: a chain step after a card came drops. */
   cards = 0;
   crashed = false;
+  /** The one download chain running in this window, whatever project it is for. */
+  chain: Chain | null = null;
+  private chainSeq = 0;
 
   private detections = new Map<string, Detected>();
   private runs = new Map<string, ProjectRun>();
@@ -181,13 +207,28 @@ export class VexStore {
       (e: any) => {
         // A refusal on a refresh keeps what was known.
         if (!first && this.detections.get(projectId)?.state === "ok") return;
-        this.detections.set(projectId, { state: "error", message: e?.message || "VEX detection failed" });
+        this.detections.set(projectId, { state: "error", message: e?.message || "VEX detection failed", at: Date.now() });
         this.changed();
       },
     );
     // A build this window ran before a reload: its record comes back.
     const id = this.last[projectId];
     if (id && !this.run(projectId).build && !this.polling.has(id)) void this.follow(projectId, id, false);
+  }
+
+  /**
+   * Ask again for the detections older than `maxAgeMs` (0: all of them): on
+   * the window's focus and on App's timer, so a project that becomes a VEX
+   * project — its settings file written by VS Code or by Jarvis — is offered
+   * the view without a reload (VX-2 review, L4).
+   */
+  refreshDetections(projectIds: string[], maxAgeMs: number) {
+    const now = Date.now();
+    for (const pid of projectIds) {
+      const d = this.detections.get(pid);
+      if (!d || d.state === "loading") continue;
+      if (now - d.at >= maxAgeMs) this.want(pid, true);
+    }
   }
 
   refreshStatus(): Promise<void> {
@@ -220,7 +261,8 @@ export class VexStore {
   }
 
   /** Start a build and follow it to its end; the record, or null when refused (said). */
-  private async runBuild(projectId: string, action: "build" | "rebuild" | "clean"): Promise<BuildView | null> {
+  private async runBuild(projectId: string, action: "build" | "rebuild" | "clean",
+                         onStarted?: (terminalId: string | null) => void): Promise<BuildView | null> {
     let started: { build_id: string; terminal_id: string };
     try {
       started = await api.vexBuild(projectId, action);
@@ -242,6 +284,7 @@ export class VexStore {
       },
     });
     if (isVexId(started.terminal_id)) void terminals.showProgram(started.terminal_id);
+    onStarted?.(isVexId(started.terminal_id) ? started.terminal_id : null);
     return this.follow(projectId, started.build_id, true);
   }
 
@@ -295,12 +338,20 @@ export class VexStore {
    * Download to the brain: **only the VEX view's labelled button calls
    * this, on the owner's own click** (`isExplicitClick`). One click's chain:
    * the brain terminal paused when it holds the port, Build first when the
-   * daemon says the program is missing or older than its sources, the
-   * download, then the brain terminal again. A card that comes up at any
-   * point drops the rest: nothing is sent behind it.
+   * daemon's refusal carries `build_first`, the download, then the brain
+   * terminal again. **One chain per window**: refused while any project's
+   * chain runs. A card that comes up at any point, a crash, or the owner's
+   * Cancel drops the rest: nothing is sent, and the brain terminal is not
+   * opened again by itself.
    */
-  async download(projectId: string, slot: number, name: string): Promise<void> {
+  async download(projectId: string, slot: number, name: string, label = ""): Promise<void> {
     if (!this.mayAct()) return;
+    if (this.chain) {
+      // One chain per window (M1): the view the click came from says why.
+      this.say(projectId, `A download is already running for ${this.chain.label || "another project"}: `
+        + "wait for it, or Cancel it, first.");
+      return;
+    }
     const refusal = slotRefusal(slot) ?? nameRefusal(name);
     if (refusal) {
       this.say(projectId, refusal);
@@ -308,10 +359,24 @@ export class VexStore {
     }
     const r = this.run(projectId);
     if (r.busy) return;
+    const chain: Chain = {
+      seq: ++this.chainSeq, projectId, label, slot, phase: "start", cancelled: false, buildTerminal: null,
+    };
+    this.chain = chain;
     const cards = this.cards;
-    const holds = () => !this.blocked && !this.crashed && this.cards === cards;
-    const dropped = (what: string) =>
-      this.say(projectId, `An approval card came up ${what}: nothing was downloaded. Click Download again when you are ready.`);
+    const holds = () => !this.blocked && !this.crashed && this.cards === cards && !chain.cancelled;
+    let droppedBy = "";
+    const dropped = (what: string) => {
+      droppedBy = chain.cancelled ? "the download was cancelled" : "an approval card came up";
+      this.say(projectId, chain.cancelled
+        ? "Cancelled: nothing was downloaded."
+        : `An approval card came up ${what}: nothing was downloaded. Click Download again when you are ready.`,
+      chain.cancelled ? "info" : "bad");
+    };
+    const phase = (p: Chain["phase"]) => {
+      chain.phase = p;
+      this.changed();
+    };
     this.patchRun(projectId, { busy: "download", note: "Downloading…", noteTone: "info", downloaded: null });
     let paused = false;
     try {
@@ -321,6 +386,7 @@ export class VexStore {
       if (brain) {
         // The brain terminal holds the brain's port: paused for the download,
         // opened again afterwards (plan §4.3 item 11).
+        phase("pause");
         try {
           await api.closeTerminal(brain);
         } catch (e: any) {
@@ -344,19 +410,35 @@ export class VexStore {
         }
       }
       if (!holds()) return dropped("before it started");
+      // A download request in flight cannot be called back: no Cancel from here
+      // until the daemon says Build first.
+      phase("download");
       let sent = await this.sendDownload(projectId, slot, name);
-      if (sent.refused && needsBuildFirst(sent.refused)) {
+      if (sent.refused && needsBuildFirst(sent.code)) {
+        // Nothing builds behind a card that came up while the daemon answered (L1).
+        if (!holds()) return dropped("before it built");
+        phase("build");
         this.say(projectId, "Building first…", "info");
-        const b = await this.runBuild(projectId, "build");
+        const b = await this.runBuild(projectId, "build", (tid) => {
+          chain.buildTerminal = tid;
+          if (chain.cancelled && tid) void this.stopBuild(tid);
+        });
+        if (!holds()) return dropped("while it built");
         if (!b) return;
         if (b.state !== "succeeded") {
           this.say(projectId, "The build did not succeed, so nothing was downloaded.");
           return;
         }
-        if (!holds()) return dropped("while it built");
+        phase("download");
         this.say(projectId, "Downloading…", "info");
         sent = await this.sendDownload(projectId, slot, name);
+        if (sent.refused && needsBuildFirst(sent.code)) {
+          // Still "older than its sources" after a build: said, never a loop.
+          this.say(projectId, STILL_STALE);
+          return;
+        }
       }
+      phase("download");
       if (sent.refused || !sent.terminal) {
         this.say(projectId, sent.refused || "the download could not start");
         return;
@@ -371,20 +453,49 @@ export class VexStore {
         noteTone: end.code === 0 ? "ok" : "bad",
       });
     } finally {
+      if (this.chain === chain) this.chain = null;
       this.patchRun(projectId, { busy: null });
-      if (paused) void this.resumeBrain();
+      if (paused) {
+        if (droppedBy) {
+          // A dropped chain never opens the brain terminal by itself (L6).
+          this.brainNote = `${BRAIN_CLOSED} and not opened again, since ${droppedBy}. `
+            + "Click \u201cOpen the brain terminal\u201d when you want it.";
+          this.changed();
+        } else {
+          void this.resumeBrain();
+        }
+      }
+    }
+  }
+
+  /** The owner's Cancel on the running chain: its build stopped, its download never sent. */
+  cancelChain() {
+    const c = this.chain;
+    if (!c || !chainCancellable(c) || this.blocked || this.crashed) return;
+    c.cancelled = true;
+    this.changed();
+    if (c.buildTerminal) void this.stopBuild(c.buildTerminal);
+  }
+
+  /** Stop a build's program: its terminal closed, as × does; the daemon's exit hook ends the build. */
+  private async stopBuild(terminalId: string): Promise<void> {
+    try {
+      await api.closeTerminal(terminalId);
+      terminals.gone(terminalId);
+    } catch {
+      /* already gone: the build has ended */
     }
   }
 
   private async sendDownload(projectId: string, slot: number, name: string):
-      Promise<{ terminal: string | null; refused: string }> {
+      Promise<{ terminal: string | null; refused: string; code: unknown }> {
     this.ledger.expect("download", Date.now());
     try {
       const r = await api.vexDownload(projectId, { slot, name });
-      return { terminal: isVexId(r?.terminal_id) ? r.terminal_id : null, refused: "" };
+      return { terminal: isVexId(r?.terminal_id) ? r.terminal_id : null, refused: "", code: null };
     } catch (e: any) {
       this.ledger.withdraw("download");
-      return { terminal: null, refused: e?.message || "the download could not start" };
+      return { terminal: null, refused: e?.message || "the download could not start", code: e?.body?.code ?? null };
     }
   }
 
@@ -409,9 +520,11 @@ export class VexStore {
    * frees the device, so a "one device action at a time" is asked again.
    */
   private async resumeBrain(): Promise<void> {
-    const paused = "The brain terminal was paused for the download; open it again when you are ready.";
+    const cards = this.cards;
+    const closed = `${BRAIN_CLOSED} and could not be opened again by itself. `
+      + "Click \u201cOpen the brain terminal\u201d when you want it.";
     for (let i = 0; i < 10; i++) {
-      if (!this.mayAct()) break;
+      if (!this.mayAct() || this.cards !== cards) break;
       await this.refreshStatus();
       if (!this.status?.device) {
         await this.openBrain();
@@ -419,12 +532,12 @@ export class VexStore {
       }
       await sleep(300);
     }
-    this.brainNote = paused;
+    this.brainNote = closed;
     this.changed();
   }
 
   async openBrain(): Promise<void> {
-    if (!this.mayAct() || this.brainBusy) return;
+    if (!this.mayAct() || this.brainBusy || this.chain) return;
     this.brainBusy = true;
     this.brainNote = "";
     this.changed();
@@ -444,7 +557,7 @@ export class VexStore {
   }
 
   async readInfo(): Promise<void> {
-    if (!this.mayAct() || this.infoBusy) return;
+    if (!this.mayAct() || this.infoBusy || this.chain) return;
     this.infoBusy = true;
     this.infoNote = "";
     this.changed();
@@ -487,6 +600,8 @@ if (typeof window !== "undefined") {
   (window as any).__hudVex = {
     blocked: () => vex.blocked,
     cards: () => vex.cards,
+    chain: () => (vex.chain ? { projectId: vex.chain.projectId, phase: vex.chain.phase, slot: vex.chain.slot,
+                                cancelled: vex.chain.cancelled } : null),
     run: (projectId: string) => {
       const r = vex.run(projectId);
       return { busy: r.busy, note: r.note, build: r.build ? r.build.state : null, downloaded: r.downloaded };

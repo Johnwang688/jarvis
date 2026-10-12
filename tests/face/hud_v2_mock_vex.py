@@ -17,8 +17,11 @@ The world's `vex` section (`state(mock)`):
   - `bin_fresh`: whether a download finds a program built after its
     sources — false answers the daemon's 409 "…; Build first" (a build that
     succeeds sets it);
-  - `download_refuse`: sentences the next downloads answer 409 with, in order;
-    `download_exit`: the download program's exit code;
+  - `stays_stale`: a build that succeeds leaves the program "older than its
+    sources" all the same (the HUD then says Rebuild instead of looping);
+  - `download_refuse`: sentences the next downloads answer 409 with, in order
+    (no `code`); `download_exit`: the download program's exit code;
+    `download_delay`: seconds each download waits before it answers;
   - `info` / `info_refuse`: what device info answers.
 
 Owner-only on the real daemon: a request with an `Origin` that is not the
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import re
 import secrets
+import time
 
 try:
     from tests.face import hud_v2_mock_terminals as mock_terminals
@@ -39,6 +43,7 @@ except ImportError:  # run as a script from tests/face
 DOWNLOAD_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,19}", re.ASCII)
 NOT_VEX = "not a VEX project (no .vscode/vex_project_settings.json)"
 BUILD_FIRST = "build/{name}.bin is older than the sources; Build first, then download"
+BUILD_FIRST_CODE = "build_first"
 
 
 def state(mock) -> dict:
@@ -51,6 +56,8 @@ def state(mock) -> dict:
         "builds": {},
         "build_auto": None,
         "bin_fresh": True,
+        "stays_stale": False,
+        "download_delay": 0,
         "download_refuse": [],
         "download_exit": 0,
         "downloads": [],
@@ -106,10 +113,22 @@ def finish_build(mock, build_id: str, state_: str = "succeeded", errors=None, ex
     rec["ended"] = "2026-10-11T12:00:09+00:00"
     if state_ == "succeeded" and rec["action"] != "clean":
         rec["bin"] = {"path": "build/override.bin", "size": 56288, "mtime": "2026-10-11T12:00:09+00:00"}
-        v["bin_fresh"] = True
+        v["bin_fresh"] = not v.get("stays_stale")
     for r in _rows(mock):
         if r["id"] == rec["terminal_id"]:
             r["exited"], r["exit_code"] = True, rec["exit_code"]
+
+
+def terminal_closing(mock, path: str) -> None:
+    """`DELETE /terminals/{id}` of a running build's program: the daemon's exit
+    hook ends the build, as a killed make does (a Cancel in the HUD)."""
+    parts = [p for p in path.split("/") if p]
+    if len(parts) != 2 or parts[0] != "terminals" or "vex" not in mock.world:
+        return
+    for rec in state(mock)["builds"].values():
+        if rec["terminal_id"] == parts[1] and rec["state"] == "running":
+            rec.update(state="failed", exit_code=-1, ended="2026-10-11T12:00:09+00:00")
+    mock.__dict__.setdefault("closed_terminals", []).append(parts[1])
 
 
 def handle(h, mock, method: str, path: str, body) -> bool:
@@ -178,11 +197,14 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                 h._err(409, f"{project['name']} is not a VEX V5 project Jarvis can use: {det.get('reason')}")
                 return True
             v["downloads"].append({"slot": slot, "name": name, "project_id": pid})
+            if v.get("download_delay"):
+                time.sleep(v["download_delay"])
             if v["download_refuse"]:
                 h._err(409, v["download_refuse"].pop(0))
                 return True
             if not v["bin_fresh"]:
-                h._err(409, BUILD_FIRST.format(name=det["name"]))
+                # VX-1's 409 carries its code beside the sentence (`BuildFirst`).
+                h._json({"error": BUILD_FIRST.format(name=det["name"]), "code": BUILD_FIRST_CODE}, 409)
                 return True
             device, _brain = _device(mock)
             if device == "brain":

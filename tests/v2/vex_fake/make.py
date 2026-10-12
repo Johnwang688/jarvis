@@ -8,6 +8,9 @@ what the test planted in the project:
 * `clean` in argv: removes `build/`, prints `clean project`, exits 0;
 * `src/SLOW`: sleeps (the timeout check kills it);
 * `src/FAIL`: prints that file's text (a fixture build log) and exits 2;
+* `HOLD` (beside the makefile): waits until the test removes it;
+* `NOOP` (beside the makefile): make found nothing to do — touches nothing,
+  exits 0 (the binary keeps its old time);
 * otherwise writes `build/<P>.bin` and exits 0.
 
 `src/MARKER`, if present, is printed as `OUTPUT-<MARKER upper-cased>`, so the
@@ -36,10 +39,15 @@ if "clean" in args:
 if (src / "SLOW").is_file():
     print("compiling slowly", flush=True)
     time.sleep(60)
+while Path("HOLD").is_file():
+    time.sleep(0.02)
 if (src / "FAIL").is_file():
     sys.stdout.write((src / "FAIL").read_text())
     sys.stdout.flush()
     sys.exit(2)
+if Path("NOOP").is_file():
+    print("make: Nothing to be done for 'all'.", flush=True)
+    sys.exit(0)
 Path("build").mkdir(exist_ok=True)
 Path("build", f"{project}.bin").write_bytes(b"\x00VEXBIN" * 8)
 print(f'"LINK build/{project}.elf"', flush=True)

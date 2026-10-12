@@ -15,6 +15,10 @@
 //     behind the veil), and the store refuses too, so nothing builds or
 //     downloads behind the card; a download's chain a card came into is
 //     dropped (state/vex.ts).
+//   - **One download chain per window** (review M1): while one runs, for any
+//     project, every VEX view says what it is doing, with a Cancel that stops
+//     its build and never sends its download, and no other download, brain
+//     terminal or device read starts here.
 //   - Device info and every build error are the program's text, drawn as
 //     text: markup in them is characters.
 //   - With no `vex.json`, the view says the one command to run.
@@ -22,8 +26,8 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { vex } from "../state/vex";
 import {
-  SETUP_COMMAND, SLOTS, buildLine, defaultName, downloadLabel, errorTarget, errorWhere, isExplicitClick, nameRefusal,
-  setupNote, type BuildError, type Detection,
+  SETUP_COMMAND, SLOTS, buildLine, chainCancellable, chainLine, defaultName, downloadLabel, errorTarget, errorWhere,
+  isExplicitClick, nameRefusal, setupNote, type BuildError, type Detection,
 } from "../lib/vex";
 
 /** A press on a button whose second press matters never takes focus from a pointer. */
@@ -69,19 +73,49 @@ export function VexView(props: {
     return () => clearInterval(t);
   }, [unconfigured]);
 
-  if (!pid) return <div className="pad muted" data-testid="vex-none">Pick a project.</div>;
+  const chain = <ChainBar pane={props.pane} blocked={blocked} />;
+  if (!pid) {
+    return (
+      <div className="scroll vexview" data-testid={`vex-view-${props.pane}`} data-project="">
+        {chain}
+        <div className="pad muted" data-testid="vex-none">Pick a project in this pane&rsquo;s header.</div>
+      </div>
+    );
+  }
   const d = vex.detection(pid);
   const err = vex.detectionError(pid);
   if (!d) {
     return (
-      <div className="pad muted" data-testid="vex-loading">
-        {err ? <span className="err">{err}</span> : "Reading the project's VEX settings…"}
+      <div className="scroll vexview" data-testid={`vex-view-${props.pane}`} data-project={pid}>
+        {chain}
+        <div className="pad muted" data-testid="vex-loading">
+          {err ? <span className="err">{err}</span> : "Reading the project's VEX settings…"}
+        </div>
       </div>
     );
   }
   return (
     <div className="scroll vexview" data-testid={`vex-view-${props.pane}`} data-project={pid}>
+      {chain}
       <Body d={d} pid={pid} name={props.projectName} blocked={blocked} onOpenError={props.onOpenError} />
+    </div>
+  );
+}
+
+/** The window's running download chain, in every VEX view, whatever project it shows (M1). */
+function ChainBar(props: { pane: number; blocked: boolean }) {
+  const c = vex.chain;
+  if (!c) return null;
+  return (
+    <div className="vexnote info vexchain" data-testid="vex-chain" data-project={c.projectId} data-phase={c.phase}
+         role="status">
+      <span data-testid="vex-chain-line">{chainLine(c)}</span>
+      {chainCancellable(c) ? (
+        <button type="button" className="quiet" data-testid="vex-chain-cancel" disabled={props.blocked}
+                title="Stops the build; nothing is downloaded" onClick={() => vex.cancelChain()}>
+          Cancel
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -125,7 +159,7 @@ function Body(props: {
         <div className="pad err small" data-testid="vex-status-error">{vex.statusError}</div>
       ) : null}
       <BuildSection d={d} pid={pid} blocked={blocked} configured={!setup} onOpenError={props.onOpenError} />
-      <DownloadSection key={pid} d={d} pid={pid} blocked={blocked} configured={!setup} />
+      <DownloadSection key={pid} d={d} pid={pid} label={props.name} blocked={blocked} configured={!setup} />
       <DeviceSection blocked={blocked} configured={!setup} />
       {run.note ? (
         <div className={"vexnote " + run.noteTone} data-testid="vex-note" role="status">{run.note}</div>
@@ -225,7 +259,7 @@ function ErrorRow(props: { e: BuildError; i: number; blocked: boolean; onOpen: (
   );
 }
 
-function DownloadSection(props: { d: Detection; pid: string; blocked: boolean; configured: boolean }) {
+function DownloadSection(props: { d: Detection; pid: string; label: string; blocked: boolean; configured: boolean }) {
   const { d, pid, blocked } = props;
   const run = vex.run(pid);
   const [slot, setSlot] = useState<number>(d.slot ?? 1);
@@ -241,7 +275,9 @@ function DownloadSection(props: { d: Detection; pid: string; blocked: boolean; c
     );
   }
   const refusal = nameRefusal(name);
-  const off = blocked || !props.configured || !d.builds || !!run.busy || !!refusal;
+  // One chain per window: no second download while one runs, for any project.
+  const other = vex.chain && vex.chain.projectId !== pid ? vex.chain : null;
+  const off = blocked || !props.configured || !d.builds || !!run.busy || !!refusal || !!vex.chain;
   return (
     <section className="vexsec" data-testid="vex-download">
       <h4>Download</h4>
@@ -269,11 +305,12 @@ function DownloadSection(props: { d: Detection; pid: string; blocked: boolean; c
         tabIndex={-1}
         onMouseDown={noPointerFocus}
         disabled={off}
-        title="Builds first if the program is older than its sources. Starting it stays on the brain or the controller."
+        title={other ? `A download is running for ${other.label || "another project"}`
+          : "Builds first if the program is older than its sources. Starting it stays on the brain or the controller."}
         onClick={(e) => {
           if (!isExplicitClick({ isTrusted: e.nativeEvent.isTrusted, detail: e.detail, button: e.button })) return;
           if (props.blocked) return;
-          void vex.download(pid, slot, name);
+          void vex.download(pid, slot, name, props.label);
         }}
       >
         {run.busy === "download" ? "Downloading…" : downloadLabel(slot)}
@@ -290,7 +327,8 @@ function DownloadSection(props: { d: Detection; pid: string; blocked: boolean; c
 function DeviceSection(props: { blocked: boolean; configured: boolean }) {
   const { blocked } = props;
   const brain = vex.status?.brain ?? null;
-  const off = blocked || !props.configured;
+  // A download's chain holds the device: no brain terminal or device read meanwhile.
+  const off = blocked || !props.configured || !!vex.chain;
   return (
     <section className="vexsec" data-testid="vex-device">
       <h4>Brain</h4>

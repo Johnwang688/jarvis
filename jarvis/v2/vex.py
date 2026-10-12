@@ -143,6 +143,19 @@ _ID = re.compile(r"[0-9a-f]{8}")
 class VexError(Exception):
     """An action that cannot run, in a sentence (HTTP 409)."""
 
+    #: A machine-readable reason the route adds beside the sentence (`code`),
+    #: for the refusals the HUD acts on; None for the rest.
+    code: str | None = None
+
+
+class BuildFirst(VexError):
+    """A download refused because the program must be built first: there is no
+    `build/<name>.bin`, or it is older than its sources and no successful build
+    has run since they last changed. The HUD's one click builds, then downloads
+    again, on this code (`"build_first"`), never on the sentence's wording."""
+
+    code = "build_first"
+
 
 # -- configuration ----------------------------------------------------------------------
 
@@ -1065,6 +1078,9 @@ class Build:
     lock: BuildLock | None = None
     timer: threading.Timer | None = None
     started_ts: float = 0.0
+    # `newest_source(root)` just before make started: a successful build makes
+    # the binary current for every source no newer than this (`Vex._current`).
+    sources_ts: float | None = None
 
     def view(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "action": self.action,
@@ -1110,6 +1126,13 @@ class Vex:
         # One device action at a time: {"kind": "download"|"info"|"brain", "terminal_id"}.
         self._device: dict | None = None
         self._last: dict[tuple, str] = {}
+        # The last successful build per (project realpath, program name): the
+        # sources' newest mtime when it started and the binary it left
+        # (mtime, size). A make that found nothing to do leaves the binary
+        # older than a header or a notes file it never compiles, so "older
+        # than the sources" alone would say Build first forever (VX-2 review,
+        # M2). Both sides are file times, so WSL's clock never enters.
+        self._current: dict[tuple, dict] = {}
         self._timers: set[threading.Timer] = set()
         self._held: set[BuildLock] = set()
         self._stopped = False
@@ -1291,9 +1314,15 @@ class Vex:
         if not lock.acquire():
             raise VexError("a build of this project is already running (here or through "
                            "vexbuild); wait for it to finish")
+        # Read before make starts: a source saved while it runs is newer than
+        # this, so that build never makes it current.
+        try:
+            sources_ts = newest_source(root)
+        except OSError:
+            sources_ts = None                   # unknown: this build makes nothing current
         record = Build(id="", project_id=project.id, project=project.name, action=action,
                        root=root, root_windows=root_windows, started=_utcnow(), lock=lock,
-                       started_ts=time.time())
+                       started_ts=time.time(), sources_ts=sources_ts)
         with self._lock:
             record.id = self._id(self._builds)
             self._keep(self._builds, record.id, record)
@@ -1331,13 +1360,14 @@ class Vex:
 
     def _build_ended(self, record: Build, terminal) -> None:
         errors = parse_errors(plain(terminal.history().data), record.root_windows)
-        found = None
+        found = current = None
+        detected_name = None
         if record.action != "clean":
             try:
                 detected_name = parse_settings(read_settings(record.root)).name
-                found = binary(record.root, detected_name)
+                found = current = binary(record.root, detected_name)
             except (NotVex, OSError):
-                found = None
+                found = current = None
             if found is not None and found["_ts"] + 1 < record.started_ts:
                 found = None                     # an old binary, not this build's
         with self._lock:
@@ -1350,6 +1380,15 @@ class Vex:
             record.ended = _utcnow()
             record.state = ("timed_out" if record.timed_out
                             else "succeeded" if terminal.exit_code == 0 else "failed")
+            # Only the last build counts: a clean, a failure or a timeout
+            # forgets what an earlier success made current.
+            real = os.path.realpath(record.root)
+            for key in [k for k in self._current if k[0] == real]:
+                del self._current[key]
+            if (record.state == "succeeded" and record.action != "clean" and current is not None
+                    and record.sources_ts is not None):
+                self._current[(real, detected_name)] = {
+                    "sources": record.sources_ts, "bin": (current["_ts"], current["size"])}
             timer, lock = record.timer, record.lock
             record.timer = record.lock = None
             if lock is not None:
@@ -1387,10 +1426,11 @@ class Vex:
         root = project.root
         found = binary(root, detected.name)
         if found is None:
-            raise VexError(f"there is no build/{detected.name}.bin yet; Build first")
-        if found["_ts"] < newest_source(root):
-            raise VexError(f"build/{detected.name}.bin is older than the sources; Build first, "
-                           "then download")
+            raise BuildFirst(f"there is no build/{detected.name}.bin yet; Build first")
+        newest = newest_source(root)
+        if found["_ts"] < newest and not self._built_since(root, detected.name, found, newest):
+            raise BuildFirst(f"build/{detected.name}.bin is older than the sources; Build first, "
+                             "then download")
         argv = download_argv(cfg, name, slot, to_windows(str(Path(root) / found["path"])))
         # The device first (one device action at a time, said as such), then
         # the project's build lock, held for the download so no build rewrites
@@ -1428,6 +1468,16 @@ class Vex:
         LOG.info("vex download to slot %d started for project %s", slot, project.name)
         self._timer(DOWNLOAD_TIMEOUT_S, self._device_timeout, terminal)
         return {"terminal_id": terminal.id}
+
+    def _built_since(self, root, name, found, newest) -> bool:
+        """Whether the last build of this project succeeded with every source
+        no newer than now, and left exactly this binary: then the binary is
+        current for what make compiles, even when make found nothing to do
+        and never touched it. Forgotten on a restart (Build first once more)."""
+        with self._lock:
+            last = self._current.get((os.path.realpath(root), name))
+        return (last is not None and last["bin"] == (found["_ts"], found["size"])
+                and newest <= last["sources"])
 
     def _device_timeout(self, terminal) -> None:
         if not terminal.exited:
@@ -1661,6 +1711,10 @@ def route(handler, daemon, parts, query):
             _object(query, ())
             return 200, vex.new_state(parts[2])
     except VexError as exc:
+        if exc.code:
+            # A refusal the HUD acts on carries its code beside the sentence.
+            LOG.info("%s %s -> 409 %s", method, "/".join(parts[:1] + parts[2:]), exc.code)
+            return 409, {"error": str(exc), "code": exc.code}
         raise _api(409, str(exc)) from None
     raise _api(404, "route not found")
 

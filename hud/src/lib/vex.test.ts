@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  DOWNLOAD_NAME, DeviceLedger, SETUP_COMMAND, buildLine, defaultName, downloadLabel, errorTarget, isExplicitClick,
-  nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
+  BUILD_FIRST_CODE, DOWNLOAD_NAME, DeviceLedger, SETUP_COMMAND, STILL_STALE, buildLine, chainCancellable, chainLine,
+  defaultName, downloadLabel, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
   parseStatus, setupNote, slotRefusal, type BuildError, type BuildView,
 } from "./vex";
 
@@ -57,7 +57,11 @@ describe("the download name mirrors the daemon's rule", () => {
 describe("download is the owner's click", () => {
   it("needs a trusted pointer click with the primary button", () => {
     expect(isExplicitClick({ isTrusted: true, detail: 1, button: 0 })).toBe(true);
-    expect(isExplicitClick({ isTrusted: true, detail: 2, button: 0 })).toBe(true);
+  });
+
+  it("a double or triple click's later clicks never count (L3: one download or none, never three)", () => {
+    expect(isExplicitClick({ isTrusted: true, detail: 2, button: 0 })).toBe(false);
+    expect(isExplicitClick({ isTrusted: true, detail: 3, button: 0 })).toBe(false);
   });
 
   it("never Enter or Space on a focused button (detail 0), a script's click, or another button", () => {
@@ -71,11 +75,39 @@ describe("download is the owner's click", () => {
     expect(downloadLabel(3)).toBe("Download to slot 3: replaces whatever is in slot 3 on the brain");
   });
 
-  it("chains a build only on the daemon's 'Build first'", () => {
-    expect(needsBuildFirst("there is no build/override.bin yet; Build first")).toBe(true);
-    expect(needsBuildFirst("build/override.bin is older than the sources; Build first, then download")).toBe(true);
-    expect(needsBuildFirst("A download is running. One device action at a time.")).toBe(false);
-    expect(needsBuildFirst("The brain terminal is using the brain's port; close it first")).toBe(false);
+  it("chains a build only on the daemon's build_first code, never on wording", () => {
+    expect(needsBuildFirst(BUILD_FIRST_CODE)).toBe(true);
+    expect(needsBuildFirst("build_first")).toBe(true);
+    // The sentence alone is not the code: a refusal that only mentions it builds nothing.
+    expect(needsBuildFirst("there is no build/override.bin yet; Build first")).toBe(false);
+    expect(needsBuildFirst(undefined)).toBe(false);
+    expect(needsBuildFirst(null)).toBe(false);
+    expect(needsBuildFirst("Build_First")).toBe(false);
+  });
+
+  it("a build-first that still ends stale says Rebuild, never loops", () => {
+    expect(STILL_STALE).toMatch(/Rebuild/);
+  });
+});
+
+describe("one chain per window (M1)", () => {
+  const c = (over = {}) => ({ label: "override", slot: 3, phase: "build" as const, cancelled: false, ...over });
+
+  it("says what the running chain does, on which project and slot", () => {
+    expect(chainLine(c())).toBe("Building override, then downloading to slot 3");
+    expect(chainLine(c({ phase: "download" }))).toBe("Downloading override to slot 3…");
+    expect(chainLine(c({ phase: "start" }))).toBe("Downloading override to slot 3…");
+    expect(chainLine(c({ phase: "pause" }))).toMatch(/^Pausing the brain terminal, then downloading override to slot 3/);
+    expect(chainLine(c({ cancelled: true }))).toMatch(/^Cancelling/);
+    expect(chainLine(c({ label: "" }))).toBe("Building this project, then downloading to slot 3");
+  });
+
+  it("cancels until the download is sent, never mid-write", () => {
+    expect(chainCancellable(c())).toBe(true);
+    expect(chainCancellable(c({ phase: "start" }))).toBe(true);
+    expect(chainCancellable(c({ phase: "pause" }))).toBe(true);
+    expect(chainCancellable(c({ phase: "download" }))).toBe(false);
+    expect(chainCancellable(c({ cancelled: true }))).toBe(false);
   });
 });
 
@@ -132,9 +164,15 @@ describe("builds", () => {
     expect(errorTarget(err())).toEqual({ path: "src/main.cpp", line: 12, col: 5 });
     expect(errorTarget(err({ in_project: false }))).toBeNull();
     for (const file of ["/usr/include/x.h", "C:/vex/sdk.h", "C:\\x.h", "../outside.cpp", "src/../../x.cpp",
-      "src//x.cpp", "./x.cpp", "", "src\\main.cpp", "a\u0000b"]) {
+      "src//x.cpp", "./../x.cpp", ".", "./", "", "src\\main.cpp", "a\u0000b"]) {
       expect(errorTarget(err({ file })), file).toBeNull();
     }
+  });
+
+  it("drops ./ so a path a compiler prints that way stays clickable, as the editor knows it", () => {
+    expect(errorTarget(err({ file: "./src/main.cpp" }))).toEqual({ path: "src/main.cpp", line: 12, col: 5 });
+    expect(errorTarget(err({ file: "src/./main.cpp" }))?.path).toBe("src/main.cpp");
+    expect(errorTarget(err({ file: "./x.cpp" }))?.path).toBe("x.cpp");
   });
 });
 

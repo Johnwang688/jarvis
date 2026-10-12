@@ -1201,6 +1201,7 @@ class MockDaemon:
                 self._record("DELETE", path, {})
                 if mock_projects.handle(self, mock, "DELETE", path, {}):
                     return
+                mock_vex.terminal_closing(mock, path)
                 if mock_terminals.handle(self, mock, "DELETE", path, {}):
                     return
                 parts = [p for p in path.split("/") if p]

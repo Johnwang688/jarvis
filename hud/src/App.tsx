@@ -30,7 +30,7 @@ import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
 import { VexView } from "./components/VexView";
-import { vex } from "./state/vex";
+import { DETECT_STALE_MS, vex } from "./state/vex";
 import { offersVex } from "./lib/vex";
 import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { buffers, PlainModel } from "./state/buffers";
@@ -129,11 +129,15 @@ function writerOf(threadId: string | undefined, at: { threads: { id: string; pro
  * The project a pane is about, for the VEX view (VX-2): whether its strip
  * offers "vex", and the project a pane switched to it is pinned to. A chat
  * pane is its own conversation's; any other pane its pin while that project
- * exists, else the chat the window is about (as File and Preview follow it).
+ * exists, else the chat the window is about (as File and Preview follow it)
+ * — **except a VEX view, which never follows the chat**: its pin, or none
+ * (review L7: a VEX pane whose project is gone says "Pick a project" rather
+ * than building or downloading another robot's program).
  */
 function stripProject(at: State, spec: PaneSpec, pane: PaneNo): string | null {
   if (spec.view === "chat") return chatProjectId(at.chats[pane], at.threads);
   if (spec.projectId && at.projects.some((p) => p.id === spec.projectId)) return spec.projectId;
+  if (spec.view === "vex") return null;
   return currentProjectId(at);
 }
 
@@ -174,7 +178,19 @@ export default function App() {
     .map((n) => stripProject(state, view.ws.panes[n - 1], n))
     .filter((x): x is string => !!x))).join("\u0000");
   useEffect(() => {
-    for (const pid of vexWanted.split("\u0000")) if (pid) vex.want(pid);
+    const pids = vexWanted.split("\u0000").filter(Boolean);
+    for (const pid of pids) vex.want(pid);
+    // Asked again on the window's focus and when stale (review L4), so a
+    // project that becomes a VEX project is offered the view without a reload.
+    const fresh = () => vex.refreshDetections(pids, 0);
+    const stale = setInterval(() => {
+      if (document.visibilityState === "visible") vex.refreshDetections(pids, DETECT_STALE_MS);
+    }, DETECT_STALE_MS);
+    window.addEventListener("focus", fresh);
+    return () => {
+      clearInterval(stale);
+      window.removeEventListener("focus", fresh);
+    };
   }, [vexWanted]);
   // A render error stopped the title bar, the shell and the orb drawing
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
@@ -1196,14 +1212,15 @@ export default function App() {
   const setPaneView = useCallback((pane: PaneNo, next: View) => {
     if (!mayShow(pane, next)) return;
     const was = layoutNow.current.ws.panes[pane - 1];
-    view.setView(pane, next);
     // The VEX view stays on the project it was opened for (VX-2): a pane
     // that followed the chat is pinned to the project it showed, so choosing
-    // another chat never moves a build or a download to another robot.
-    if (next === "vex" && !(was.projectId && live.current.projects.some((p) => p.id === was.projectId))) {
-      const pid = stripProjectNow(pane);
-      if (pid) view.pin(pane, pid);
-    }
+    // another chat never moves a build or a download to another robot. Read
+    // before the switch: a VEX view itself never follows the chat (L7).
+    const vexPin = next === "vex" && was.view !== "vex"
+      && !(was.projectId && live.current.projects.some((p) => p.id === was.projectId))
+      ? stripProjectNow(pane) : null;
+    view.setView(pane, next);
+    if (vexPin) view.pin(pane, vexPin);
     if (next === "terminal" && was.view !== "terminal" && !was.terminalId) {
       void terminals.ownerOpened(pane, () => {
         const now = layoutNow.current.ws.panes[pane - 1];
@@ -1791,7 +1808,12 @@ export default function App() {
       setBooted(true);
       // The conversation is on screen: in a drawn pane that already shows
       // chat, else in the focused pane — in the single layout, today's chat tab.
-      placeChat(pane);
+      // Never over a VEX view (review L5): a window with no chat drawn is
+      // allowed (WP-B: speech waits, a press is refused with a sentence), and
+      // a lone VEX pane at the lab must come back as itself after a reload.
+      if (lay.ws.panes[pane - 1].view !== "vex" || lay.fit.panes.some((n) => lay.ws.panes[n - 1].view === "chat")) {
+        placeChat(pane);
+      }
       void refreshActivity();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
@@ -2562,8 +2584,11 @@ export default function App() {
             className="panepick"
             data-testid={`pane-${n}-vex-project`}
             value={stripProject(state, spec, n) ?? ""}
-            disabled={blocked}
-            title="The VEX project this pane builds and downloads"
+            // Off while a download's chain runs (review M1): the chain never
+            // goes on to a robot this pane no longer shows.
+            disabled={blocked || !!vex.chain}
+            title={vex.chain ? "A download is running: wait for it, or Cancel it, first"
+              : "The VEX project this pane builds and downloads"}
             onChange={(e) => e.target.value && view.pin(n, e.target.value)}
           >
             {stripProject(state, spec, n) ? null : <option value="">Pick a project</option>}

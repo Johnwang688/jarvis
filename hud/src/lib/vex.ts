@@ -205,33 +205,76 @@ export function downloadLabel(slot: number): string {
 
 /**
  * Whether a click on the Download button is the owner's own: a trusted
- * pointer click with the primary button. Enter or Space on a focused button
- * makes a click with `detail` 0, and so does a script's `el.click()`; neither
- * counts.
+ * pointer click with the primary button, and **the first click of a run**
+ * (`detail` exactly 1). Enter or Space on a focused button makes a click with
+ * `detail` 0, and so does a script's `el.click()`; neither counts. A double
+ * or triple click's later clicks (`detail` 2, 3) do not count either, so a
+ * double click is one download, never two (VX-2 review, L3).
  */
 export function isExplicitClick(e: { isTrusted: boolean; detail: number; button: number }): boolean {
-  return e.isTrusted === true && e.detail >= 1 && e.button === 0;
+  return e.isTrusted === true && e.detail === 1 && e.button === 0;
 }
 
-/** A download the daemon refused because the program must be built first (VX-1 chains Build then Download on the one click). */
-export function needsBuildFirst(message: string): boolean {
-  return /Build first/i.test(message);
+/** VX-1's code on the download's 409 when the program must be built first (`BuildFirst`). */
+export const BUILD_FIRST_CODE = "build_first";
+
+/**
+ * A download the daemon refused because the program must be built first —
+ * read from the refusal's machine-readable `code`, never its wording (VX-1
+ * chains Build then Download on the one click). A refusal without the code
+ * is shown in its own words and builds nothing.
+ */
+export function needsBuildFirst(code: unknown): boolean {
+  return code === BUILD_FIRST_CODE;
+}
+
+/** What the view says when a build-first still ends in a staleness refusal: never a loop. */
+export const STILL_STALE =
+  "The program still counts as older than its sources after that build. Click Rebuild, then Download.";
+
+/** One click's download chain, as every VEX view shows it (VX-2 review, M1: one per window). */
+export interface ChainView {
+  label: string;
+  slot: number;
+  phase: "start" | "pause" | "build" | "download";
+  cancelled: boolean;
+}
+
+/** The running chain's line, in every VEX view: what it is doing, on which project and slot. */
+export function chainLine(c: ChainView): string {
+  const who = c.label || "this project";
+  if (c.cancelled) return `Cancelling the download of ${who}…`;
+  switch (c.phase) {
+    case "pause":
+      return `Pausing the brain terminal, then downloading ${who} to slot ${c.slot}…`;
+    case "build":
+      return `Building ${who}, then downloading to slot ${c.slot}`;
+    default:
+      return `Downloading ${who} to slot ${c.slot}…`;
+  }
+}
+
+/** Cancel stops a chain until its download has been sent; a download in flight is never cut off mid-write. */
+export function chainCancellable(c: ChainView): boolean {
+  return !c.cancelled && c.phase !== "download";
 }
 
 /**
  * The file a build error names, to open at its line — only one inside the
  * project, by a plain relative path: never absolute, never a drive, never
- * `..`, never a backslash. Anything else (an SDK header) is text only.
+ * `..`, never a backslash. Anything else (an SDK header) is text only. A `.`
+ * component (`./src/main.cpp`, as a compiler may print it) is dropped, so
+ * the path is the one the editor knows the file by.
  */
 export function errorTarget(e: BuildError): { path: string; line: number; col: number } | null {
   if (!e.in_project) return null;
-  const path = e.file;
-  if (!path || path.length > 400 || path.startsWith("/") || /^[A-Za-z]:/.test(path) || path.includes("\\")) return null;
+  const raw = e.file;
+  if (!raw || raw.length > 400 || raw.startsWith("/") || /^[A-Za-z]:/.test(raw) || raw.includes("\\")) return null;
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(path)) return null;
-  const parts = path.split("/");
-  if (parts.some((p) => p === "" || p === "." || p === "..")) return null;
-  return { path, line: Math.max(1, e.line), col: Math.max(1, e.col) };
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return null;
+  const parts = raw.split("/").filter((p) => p !== ".");
+  if (!parts.length || parts.some((p) => p === "" || p === "..")) return null;
+  return { path: parts.join("/"), line: Math.max(1, e.line), col: Math.max(1, e.col) };
 }
 
 /** `src/main.cpp:12:5` */

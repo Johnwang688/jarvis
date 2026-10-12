@@ -31,7 +31,18 @@ What it pins:
   - the brain terminal opens in the panel, **reattaches after a reload**,
     and is paused for a download and opened again after it;
   - device info is drawn as text: markup in it is characters;
-  - a device action this window did not start is said.
+  - a device action this window did not start is said;
+  - the review round (one check per finding): **one download chain per
+    window** — refused for another project while one runs, shown in every
+    VEX view with a Cancel that stops its build and sends nothing, the
+    pickers off meanwhile (M1); a build-first that still ends stale says
+    Rebuild, never loops (M2); a card that comes up while the daemon answers
+    builds nothing (L1), and one that comes and goes while it builds drops
+    the download (L2); only a click's first click counts (L3); a project
+    that becomes a VEX project is offered the view on focus (L4); a lone
+    VEX pane survives a reload (L5); a dropped chain never reopens the brain
+    terminal (L6); a VEX pane whose project is gone says "Pick a project"
+    (L7).
 
 Run (after `cd hud && npm ci && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_vex_check.py
@@ -52,7 +63,7 @@ from tests.face.hud_v2_layout_check import _approval, _boot, _pane, _set_storage
 from tests.face.hud_v2_terminal_check import FakePty, pumping  # noqa: E402
 
 VIEW = (1800, 900)
-V = 2  # the VEX view's pane: beside a chat (a window with no chat drawn opens one)
+V = 2  # the VEX view's pane, beside a chat (a lone VEX pane: _lone_pane_checks)
 P3_ROOT = "/mnt/c/Users/johnw/OneDrive/Desktop/override"
 MAIN_CPP = "#include \"vex.h\"\n\nint main() {\n  int x = 1\n  return 0;\n}\n"
 ERRORS = [
@@ -70,17 +81,21 @@ def _project(pid: str, name: str, root: str) -> dict:
 
 
 def _world(mock):
-    """A VEX project (p3), one whose settings file is malformed (p4), and src/main.cpp to open."""
+    """A VEX project (p3), one whose settings file is malformed (p4), a second
+    VEX project (p5), an ordinary one that becomes VEX (p6), and src/main.cpp to open."""
     w = mock.world
     if not any(p["id"] == "p3" for p in w["projects"]):
         w["projects"].append(_project("p3", "override", P3_ROOT))
         w["projects"].append(_project("p4", "broken", "/mnt/c/Users/johnw/OneDrive/Desktop/broken"))
+        w["projects"].append(_project("p5", "flywheel", "/mnt/c/Users/johnw/OneDrive/Desktop/flywheel"))
+        w["projects"].append(_project("p6", "intake", "/mnt/c/Users/johnw/OneDrive/Desktop/intake"))
     w["files"]["src/main.cpp"] = {"content": MAIN_CPP, "mtime": 1757900300}
     src = w["tree"].setdefault("src", [])
     if not any(e["name"] == "main.cpp" for e in src):
         src.append({"name": "main.cpp", "kind": "file", "size": len(MAIN_CPP), "mtime": 1757900300})
     v = mock_vex.state(mock)
     v["projects"]["p3"] = mock_vex.vex_project("p3")
+    v["projects"]["p5"] = mock_vex.vex_project("p5", "flywheel")
     v["projects"]["p4"] = {"project_id": "p4", "vex": False, "malformed": True,
                            "reason": "the VEX settings file is not the extension's version 2 format"}
 
@@ -326,7 +341,7 @@ def _chain_checks(page, mock, check, until, fake):
     v = mock_vex.state(mock)
     v["bin_fresh"] = False
     page.locator(_view(V, _tid("vex-download-btn"))).click()
-    until(lambda: _posted(mock, "/projects/p3/vex/build"), timeout=4)
+    until(lambda: _latest_build(mock), timeout=4)  # this reset's build, not an earlier one
     bid = _latest_build(mock)
     _approval(mock, "vexcard1")
     until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
@@ -441,8 +456,259 @@ def _notice_checks(page, mock, check, until, fake):
           and "did not start" in n.inner_text())
 
 
+# -- the review round (one section per finding) -------------------------------------------------
+
+def _chain_view(n: int):
+    return _view(n, _tid("vex-chain"))
+
+
+def _posted_since(mock, base: int, path: str) -> list:
+    """POSTs to `path` since `base` (mock.calls is the whole run's)."""
+    return [b for (m, p, b) in mock.calls[base:] if m == "POST" and p == path]
+
+
+def _switch_view(page, n: int, view: str):
+    """The pane's view strip: its buttons, or its select in a compact pane."""
+    pick = page.locator(_tid(f"pane-{n}-view-select"))
+    if pick.count():
+        pick.select_option(view)
+    else:
+        page.locator(_pane(n, _tid(f"tab-{view}"))).click()
+
+
+def _one_chain_checks(page, mock, check, until, fake):
+    """M1: one chain per window; every VEX view shows it; Cancel stops the build and sends nothing."""
+    _reset(page, mock, until, {"preset": "cols3", "focused": 2,
+                               "panes": [{"view": "chat"}, {"view": "vex", "projectId": "p3"},
+                                         {"view": "vex", "projectId": "p5"}],
+                               "panel": {"open": False, "height": 260}})
+    base = len(mock.calls)
+    check("M1 setup: both views draw", _ready(page, until)
+          and bool(until(lambda: page.locator(_view(3, _tid("vex-card"))).count() > 0, timeout=5)))
+    v = mock_vex.state(mock)
+    v["bin_fresh"] = False
+    page.locator(_view(2, _tid("vex-download-btn"))).click()
+    until(lambda: _posted_since(mock, base, "/projects/p3/vex/build"), timeout=4)
+    bar2, bar3 = page.locator(_chain_view(2)), page.locator(_chain_view(3))
+    want = "Building override, then downloading to slot 1"
+    check("M1: the running chain is said in its own view",
+          bool(until(lambda: bar2.count() > 0 and want in bar2.inner_text(), timeout=4)),
+          bar2.inner_text() if bar2.count() else "")
+    check("M1: and in every other VEX view, whatever project it shows",
+          bar3.count() > 0 and want in bar3.inner_text(), bar3.inner_text() if bar3.count() else "")
+    other = page.locator(_view(3, _tid("vex-download-btn")))
+    check("M1: another project's Download is off while it runs", other.is_disabled())
+    check("M1: so are the brain terminal and device info",
+          page.locator(_view(3, _tid("vex-brain-btn"))).is_disabled()
+          and page.locator(_view(3, _tid("vex-info-btn"))).is_disabled())
+    check("M1: and every VEX pane's project picker",
+          page.locator(_tid("pane-2-vex-project")).is_disabled()
+          and page.locator(_tid("pane-3-vex-project")).is_disabled())
+    try:
+        other.click(force=True, timeout=500)
+    except Exception:
+        pass
+    time.sleep(0.3)
+    check("M1: a click on it sends nothing", not _posted_since(mock, base, "/projects/p5/vex/download")
+          and not [d for d in v["downloads"] if d["project_id"] == "p5"], str(v["downloads"]))
+    # The reviewer's path: the chain's own pane moved to another project mid-build
+    # (to File, its project picked there, back to VEX).
+    _switch_view(page, 2, "file")
+    page.locator(_tid("pane-2-folder")).select_option("p5")
+    _switch_view(page, 2, "vex")
+    until(lambda: page.locator(_view(2)).get_attribute("data-project") == "p5", timeout=4)
+    check("M1: a pane moved to another project mid-build still says what is running",
+          page.locator(_view(2)).get_attribute("data-project") == "p5" and bar2.count() > 0
+          and want in bar2.inner_text())
+    check("M1: and its Download is off", page.locator(_view(2, _tid("vex-download-btn"))).is_disabled())
+    # Cancel: the build's program is stopped and nothing is sent.
+    bid = _latest_build(mock)
+    btid = v["builds"][bid]["terminal_id"]
+    page.locator(_view(3, _tid("vex-chain-cancel"))).click()
+    check("M1: Cancel stops the build's program (its terminal closed)",
+          bool(until(lambda: any(c[0] == "DELETE" and c[1] == f"/terminals/{btid}" for c in mock.calls[base:]), timeout=4)))
+    check("M1: the chain ends", bool(until(lambda: bar2.count() == 0 and bar3.count() == 0, timeout=6)))
+    time.sleep(0.5)
+    check("M1: and nothing was downloaded", not _sent_downloads(mock) and len(v["downloads"]) == 1,
+          str(v["downloads"]))
+    check("M1: the pickers come back", page.locator(_tid("pane-2-vex-project")).is_enabled()
+          and page.locator(_tid("pane-3-vex-project")).is_enabled())
+    # p3's view says it was cancelled.
+    page.locator(_tid("pane-2-vex-project")).select_option("p3")
+    note = page.locator(_view(2, _tid("vex-note")))
+    check("M1: the chain's project says it was cancelled",
+          bool(until(lambda: note.count() > 0 and "Cancelled" in note.inner_text(), timeout=4)),
+          note.inner_text() if note.count() else "")
+
+
+def _still_stale_checks(page, mock, check, until, fake):
+    """M2: a build-first that still ends stale says Rebuild; nothing loops."""
+    _reset(page, mock, until)
+    base = len(mock.calls)
+    check("M2 setup: the view draws", _ready(page, until))
+    v = mock_vex.state(mock)
+    v["bin_fresh"] = False
+    v["stays_stale"] = True
+    v["build_auto"] = {"state": "succeeded"}
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    note = page.locator(_view(V, _tid("vex-note")))
+    check("M2: a build that leaves the program stale says Rebuild",
+          bool(until(lambda: note.count() > 0 and "Rebuild" in note.inner_text(), timeout=8)),
+          note.inner_text() if note.count() else "")
+    time.sleep(1.0)
+    check("M2: one build and two tries, never a loop",
+          len(_posted_since(mock, base, "/projects/p3/vex/build")) == 1 and len(v["downloads"]) == 2 and not _sent_downloads(mock),
+          f"{len(_posted_since(mock, base, '/projects/p3/vex/build'))} builds, {v['downloads']}")
+
+
+def _answer_card_checks(page, mock, check, until, fake):
+    """L1: a card that comes up while the daemon answers "Build first" builds nothing."""
+    _reset(page, mock, until)
+    base = len(mock.calls)
+    check("L1 setup: the view draws", _ready(page, until))
+    v = mock_vex.state(mock)
+    v["bin_fresh"] = False
+    v["download_delay"] = 1.2
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    until(lambda: v["downloads"], timeout=4)
+    _approval(mock, "vexcardL1")
+    until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
+    note = page.locator(_view(V, _tid("vex-note")))
+    until(lambda: note.count() > 0 and "approval card" in note.inner_text(), timeout=6)
+    time.sleep(0.4)
+    check("L1: a card up when the daemon answered Build first: nothing builds behind it",
+          not _posted_since(mock, base, "/projects/p3/vex/build"), str(_posted_since(mock, base, "/projects/p3/vex/build")))
+    check("L1: and the view says so", note.count() > 0 and "nothing was downloaded" in note.inner_text())
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
+    time.sleep(0.4)
+    check("L1: answering the card builds and sends nothing either",
+          not _posted_since(mock, base, "/projects/p3/vex/build") and not _sent_downloads(mock))
+
+
+def _passing_card_checks(page, mock, check, until, fake):
+    """L2 and L6: a card that comes and goes while it builds drops the download; the brain stays closed."""
+    _reset(page, mock, until)
+    base = len(mock.calls)
+    check("L2 setup: the view draws", _ready(page, until))
+    page.locator(_view(V, _tid("vex-brain-btn"))).click()
+    until(lambda: mock_vex.state(mock)["brain"], timeout=4)
+    v = mock_vex.state(mock)
+    v["bin_fresh"] = False
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    until(lambda: _posted_since(mock, base, "/projects/p3/vex/build"), timeout=6)
+    bid = _latest_build(mock)
+    _approval(mock, "vexcardL2")
+    until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
+    time.sleep(0.3)
+    _finish(mock, fake, bid, "succeeded")
+    note = page.locator(_view(V, _tid("vex-note")))
+    until(lambda: note.count() > 0 and "approval card" in note.inner_text(), timeout=6)
+    time.sleep(0.5)
+    check("L2: a card that came and went while it built drops the download",
+          not _sent_downloads(mock) and len(v["downloads"]) == 1, str(v["downloads"]))
+    check("L2: and the view says so", note.count() > 0 and "nothing was downloaded" in note.inner_text(),
+          note.inner_text() if note.count() else "")
+    brains = _posted_since(mock, base, "/vex/brain")
+    check("L6: the dropped chain never opens the brain terminal again",
+          len(brains) == 1 and mock_vex.state(mock)["brain"] is None, f"{len(brains)} brain posts")
+    bnote = page.locator(_view(V, _tid("vex-brain-note")))
+    check("L6: and says it stays closed, and how to open it",
+          bnote.count() > 0 and "closed for the download" in bnote.inner_text()
+          and "Open the brain terminal" in bnote.inner_text() and "paused" not in bnote.inner_text(),
+          bnote.inner_text() if bnote.count() else "")
+
+
+def _first_click_checks(page, mock, check, until, fake):
+    """L3: only a click's first click counts: a double or triple click is one download or none."""
+    _reset(page, mock, until)
+    base = len(mock.calls)
+    check("L3 setup: the view draws", _ready(page, until))
+    v = mock_vex.state(mock)
+    btn = page.locator(_view(V, _tid("vex-download-btn")))
+    box = btn.bounding_box()
+    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+    def idle():
+        return btn.is_enabled() and page.evaluate("window.__hudVex.chain()") is None
+
+    page.mouse.move(x, y)
+    for count in (2, 3):
+        page.mouse.down(click_count=count)
+        page.mouse.up(click_count=count)
+    time.sleep(0.6)
+    check("L3: a click whose detail is 2 or 3 (a double or triple click's later clicks) sends nothing",
+          not v["downloads"], str(v["downloads"]))
+    btn.dblclick()
+    until(lambda: _sent_downloads(mock), timeout=4)
+    until(idle, timeout=6)
+    time.sleep(0.4)
+    check("L3: a double click is one download", len(v["downloads"]) == 1, str(v["downloads"]))
+    btn.click(click_count=3)
+    until(lambda: len(v["downloads"]) >= 2, timeout=4)
+    until(idle, timeout=6)
+    time.sleep(0.4)
+    check("L3: a triple click is one download", len(v["downloads"]) == 2, str(v["downloads"]))
+
+
+def _detect_again_checks(page, mock, check, until, fake):
+    """L4: a project that becomes a VEX project is offered the view without a reload."""
+    _reset(page, mock, until, {"preset": "cols2", "focused": 2,
+                               "panes": [{"view": "chat"}, {"view": "file", "projectId": "p6"}],
+                               "panel": {"open": False, "height": 260}})
+    base = len(mock.calls)
+    until(lambda: any(c[1] == "/projects/p6/vex" for c in mock.calls[base:]), timeout=4)
+    time.sleep(0.3)
+    check("L4: an ordinary project offers no VEX view", page.locator(_pane(2, _tid("tab-vex"))).count() == 0)
+    mock_vex.state(mock)["projects"]["p6"] = mock_vex.vex_project("p6", "intake")
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    check("L4: once it is one, the window's focus offers it",
+          bool(until(lambda: page.locator(_pane(2, _tid("tab-vex"))).count() > 0, timeout=5)))
+
+
+def _lone_pane_checks(page, mock, check, until, fake):
+    """L5: a lone VEX pane comes back as itself after a reload."""
+    _reset(page, mock, until, {"preset": "single", "focused": 1, "panes": [{"view": "vex", "projectId": "p3"}],
+                               "panel": {"open": False, "height": 260}})
+    base = len(mock.calls)
+    check("L5: a lone VEX pane boots as the VEX view",
+          bool(until(lambda: page.locator(_view(1, _tid("vex-card"))).count() > 0, timeout=5))
+          and page.locator(_pane(1)).get_attribute("data-view") == "vex")
+    page.reload()
+    page.wait_for_selector('[data-testid="sidebar"]', state="attached")
+    time.sleep(0.6)
+    check("L5: and after a reload it is still the VEX view, not chat",
+          bool(until(lambda: page.locator(_view(1, _tid("vex-card"))).count() > 0, timeout=5))
+          and page.locator(_pane(1)).get_attribute("data-view") == "vex"
+          and page.evaluate("window.__hud.workspace().ws.panes[0].view") == "vex")
+
+
+def _gone_project_checks(page, mock, check, until, fake):
+    """L7: a VEX pane whose pinned project is gone says Pick a project; it never follows the chat."""
+    _reset(page, mock, until, {"preset": "cols2", "focused": 2,
+                               "panes": [{"view": "chat"}, {"view": "vex", "projectId": "pgone"}],
+                               "panel": {"open": False, "height": 260}})
+    base = len(mock.calls)
+    none = page.locator(_view(2, _tid("vex-none")))
+    check("L7: a VEX pane whose project is gone says Pick a project",
+          bool(until(lambda: none.count() > 0, timeout=5)), page.locator(_pane(2)).inner_text()[:200])
+    check("L7: and shows no project's controls",
+          page.locator(_view(2, _tid("vex-card"))).count() == 0
+          and page.locator(_view(2, _tid("vex-download-btn"))).count() == 0
+          and page.locator(_view(2, _tid("vex-not"))).count() == 0)
+    check("L7: its picker says so too",
+          page.locator(_tid("pane-2-vex-project")).input_value() == "")
+    page.locator(_tid("pane-2-vex-project")).select_option("p3")
+    check("L7: picking a project shows it",
+          bool(until(lambda: page.locator(_view(2, _tid("vex-card"))).count() > 0, timeout=5)))
+
+
 SECTIONS = (_offer_checks, _setup_checks, _build_checks, _explicit_click_checks, _chain_checks, _card_checks,
-            _brain_checks, _info_checks, _notice_checks)
+            _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _still_stale_checks,
+            _answer_card_checks, _passing_card_checks, _first_click_checks, _detect_again_checks,
+            _lone_pane_checks, _gone_project_checks)
 
 
 def vex_checks(browser, mock, base, check, until, guard, init_script):
