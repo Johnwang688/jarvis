@@ -33,8 +33,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
 import {
-  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, gridTemplate, maxPanelHeight, moveColEdge, rowCount,
-  slotOf, slotWidths, uneven, type PaneNo, type PaneSpec, type View,
+  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, VIEW_LABEL, gridTemplate, maxPanelHeight, moveColEdge,
+  rowCount, slotOf, slotWidths, uneven, type PaneNo, type PaneSpec, type View,
 } from "../lib/workspace";
 import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
@@ -51,15 +51,16 @@ import { TerminalLinkMenu, TerminalPane, TerminalToasts, terminals, useTerminals
  * freeze with it (review of PR #32).
  */
 function useTerminalBridge(v: LayoutControl, place: Map<string, number>, terminalIn?: () => InSpec,
-                           openPreview?: (url: string) => boolean, slots?: Map<number, number>) {
-  const latest = useRef({ v, terminalIn, openPreview });
-  latest.current = { v, terminalIn, openPreview };
+                           openBrowser?: (url: string) => boolean, slots?: Map<number, number>) {
+  const latest = useRef({ v, terminalIn, openBrowser });
+  latest.current = { v, terminalIn, openBrowser };
   useEffect(() => {
-    // A terminal link's "Open in Preview" (WP-E): App's click rule decides the pane.
-    terminals.openPreview = (url) => latest.current.openPreview?.(url) ?? false;
+    // A terminal link's "Open in Browser" (WP-E): App's click rule decides the pane.
+    terminals.openBrowser = (url) => latest.current.openBrowser?.(url) ?? false;
     terminals.defaultIn = () => latest.current.terminalIn?.() ?? "home";
     terminals.setPaneTerminal = (pane, id) => latest.current.v.setTerminal(pane, id);
     terminals.forgetTerminal = (id) => latest.current.v.forgetTerminal(id);
+    terminals.renameTerminal = (from, to) => latest.current.v.renameTerminal(from, to);
     terminals.focusPane = (pane) => {
       latest.current.v.focus(pane);
       requestAnimationFrame(() =>
@@ -127,8 +128,8 @@ export function Workspace(props: {
   offersVex?: (spec: PaneSpec, info: PaneInfo) => boolean;
   /** Where `+` opens a terminal: the focused pane's folder, as an id (lib/terminal.ts, terminalSpecFor). */
   terminalIn?: () => InSpec;
-  /** A terminal link's "Open in Preview": load it in a Preview pane (WP-E); false when it did not. */
-  openPreview?: (url: string) => boolean;
+  /** A terminal link's "Open in Browser": load it in a Browser pane (WP-E); false when it did not. */
+  openBrowser?: (url: string) => boolean;
   /** `+ ▾`'s choices besides Home. */
   projects?: Project[];
   /**
@@ -155,7 +156,7 @@ export function Workspace(props: {
   // holding it, else the panel.
   const place = placeTerminals(ws.panes, fit.panes);
   const slots = new Map<number, number>(PANE_NOS.map((n) => [n, slotOf(ws, n)]));
-  useTerminalBridge(v, place, props.terminalIn, props.openPreview, slots);
+  useTerminalBridge(v, place, props.terminalIn, props.openBrowser, slots);
   const mgr = useTerminals();
   /** A terminal pane's header: the title its program set (text, capped), else its own. */
   const terminalContext = (spec: PaneSpec) => {
@@ -287,7 +288,7 @@ export function Workspace(props: {
               data-view={spec.view}
               data-focused={at.focused ? "true" : "false"}
               data-selected={spec.view === "chat" && n === props.selectedPane ? "true" : undefined}
-              aria-label={`Pane ${at.slot}: ${spec.view}`}
+              aria-label={`Pane ${at.slot}: ${VIEW_LABEL[spec.view]}`}
               tabIndex={-1}
               style={at.drawn ? { gridArea: `p${n}` } : { display: "none" }}
               onPointerDownCapture={() => v.focus(n)}
@@ -305,7 +306,7 @@ export function Workspace(props: {
                       onKeyUp={(e) => e.stopPropagation()}
                     >
                       {views.map((view) => (
-                        <option key={view} value={view}>{view}</option>
+                        <option key={view} value={view}>{VIEW_LABEL[view]}</option>
                       ))}
                     </select>
                   ) : (
@@ -317,7 +318,7 @@ export function Workspace(props: {
                         className={spec.view === view ? "on" : ""}
                         onClick={() => props.onView(n, view)}
                       >
-                        {view}
+                        {VIEW_LABEL[view]}
                       </button>
                     ))
                   )}

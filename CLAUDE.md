@@ -799,7 +799,7 @@ the focused one; "read" is any drawn pane. **A File pane pins its project** when
 keyed by it — it used to save to whatever project was current at save time.
 An unsaved edit is never dropped silently: "follow chat" waits, a gone
 project keeps the pane pinned until "discard edit", and closing the window
-asks. Preview keeps its URL per pane, re-judged on load. The bottom panel
+asks. Preview (the Browser since BR-3a, below WP-E; the File pane reads as the editor) keeps its URL per pane, re-judged on load. The bottom panel
 (⬓, Ctrl+`) holds the terminals (WP-D, below). **Under
 a card every title-bar, fold and rail button is disabled**, the layout menu
 closes, and **the card takes focus** off a preview frame, Monaco or anything
@@ -876,7 +876,7 @@ thread meanwhile stays a new thread. **An SSE event with a
 chat pane most recently clicked — a pointer or keyboard focus into it,
 Ctrl+Alt+N, a sidebar click that opens a thread there. It is kept as an order
 (`selectedOrder`, `selectedChatOf`), so a chat pane the layout drops gives way
-to the one selected before it; clicking a Preview, File or other pane never
+to the one selected before it; clicking a Preview (Browser since BR-3a), File (editor) or other pane never
 changes it; one chat drawn is the selected one, and with none drawn there is
 none. Ambiguous means: a dictated transcript (AUTO sends, REVIEW fills the
 box — **to the selected chat as it is when the transcript lands**, so
@@ -1085,6 +1085,52 @@ The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
 read-only (`backlog` among them).
 While typing is paused the notice cannot be dismissed: it holds the only
 way to resume.
+**A terminal that ended with Jarvis continues where it was** (2026-10-12,
+the owner's option (a); no route changed). A typing key there (printable,
+Enter, Backspace, Tab, an arrow — `lib/terminal.ts` `continuesOn`), a paste
+or **Continue here** is one `POST /terminals` with its remembered `in` and
+its switch (`readableCarry`: off when unknown, so never wider; a session's
+`lastRow` now follows every listing and `PATCH`). `TermManager.rekey` moves
+the session to the new id everywhere — panel tab position (first-seen
+`ranks`), pane (`renameTerminal`, every pane holding it), selected tab,
+remembered spec, `mine` — with `aliases` for the render a pane still holds
+the old id, and the panel's view keyed by its first id (`viewKey`), so the
+**same xterm** stays mounted and focused. The old text is rebuilt from
+**xterm's cells** (`snapshotText`: characters and SGR only, wrapped lines
+joined, each row starting and ending plain; **walked from the bottom and
+stopped at 1 MiB** — built top down a full scrollback took 1.9 s on the
+keydown — and one logical line longer than that keeps its tail, cut at a
+row), never the old bytes — so it holds no query, mode, alternate screen or
+title — and written after the RIS of **every** attach, before the replay,
+then `── restarted HH:MM ──` (plain text). Keys and pastes while it starts
+are `HeldInput` (4 KiB, a paste dropped whole) and go after the replay is
+parsed, **typed, never run** (the lead's decision, PR #64 review L6:
+`HeldInput.release` sends keys up to the first Enter — never it nor anything
+after — and no paste holding a line break; the screen showed the old
+context's prompt, `pi@robot:~$` or `>>>`, and an Enter there would run the
+line in a fresh local shell; the `continued` notice says check the prompt,
+then press Enter, or paste it again). **Any refusal drops the whole hold**
+(M1: `make deploy⏎` then Ctrl+C used to run the line): a key that does not
+type, past 4 KiB, a card since the gesture (`cardCount`), a crash
+(`abortPastes` sets `crashed`), or the terminal leaving the screen (L1: the
+panel closed, another tab, its pane switched away — `dropHiddenHolds`), all
+said as `unsent`. **Only the owner's gesture in that terminal continues it**
+(`mayContinue`: ended, a shell, in this tab's `mine`, a **remembered `in`**
+— never the row's project, which is not a task's worktree (N1) — not
+crashed; never under a card, on a load, a restored panel or a reattach, for
+another window's, an exited shell or a program terminal; Ctrl+D and HUD
+keys never). After a refused continuation (six open) typing asks no more;
+only Continue here tries again (L5). **Memory only: a page reload loses the
+old text.** Running programs do not survive; real survival (a pty host)
+would reverse W-3. **Limit (L4, predates this)**: the switch comes from this
+window's last-seen row, which another window's change can leave stale; a
+full fix needs a daemon event. Free checks: `lib/terminalContinue.test.ts`
+(with a real, unopened xterm: the rebuilt text answers nothing and leaves no
+mode) and `_continue_checks` in `hud_v2_terminal_check.py`; guard removals
+that bite: a paste under a card, the held keys' card count, continuing
+without a gesture, the switch failing open, a raw-byte prefix written after
+the replay window, the `held.closed` check (M1), and L6's stop at Enter (for
+keys and for a paste).
 
 **Jarvis reads a terminal, WP-F (2026-10-10; decisions W-2 is the spec;
 design §18; contract in `docs/hud-api.md`).** `terminal_read(terminal="",
@@ -1289,11 +1335,11 @@ is its own server, untouched.
 **fails if a route module gains a first path segment it does not walk**,
 and fails if any status line but `ws.py`'s is written by hand. `/status`
 gains `hud_port`, `api_port` and `frame_hardened` (the handler class's own
-flag, beside `end_headers`). **The Preview pane** (`lib/preview.ts`) refuses
+flag, beside `end_headers`). **The Preview pane** (the **Browser** since BR-3a, `lib/browser.ts`; below) refuses
 the HUD's and API's ports — as reported **and** 8402/8405, the live
 daemon — and the window's own, and restores nothing until `/status`
 answers (`state/daemonPorts.ts`, read once per page). **"Keep its origin"**
-(`preview-keep-origin`) adds `allow-same-origin`, the only flag ever added
+(`preview-keep-origin`, `browser-keep-origin` since BR-3a) adds `allow-same-origin`, the only flag ever added
 to `allow-scripts allow-forms` (never top navigation, popups or downloads):
 off by default, per pane, offered only for a loopback port that is none of
 the daemon's three nor the window's own, and only while `/status` says
@@ -1304,15 +1350,15 @@ every load and **dropped from storage** when it no longer passes; disabled
 and inert under a card. Safe because scripts plus same-origin are no sandbox
 only for a page on the parent's origin, which the port check refuses and
 `frame-ancestors` keeps a frame from becoming. **A Ctrl+clicked loopback
-link in a terminal opens a menu** (`term-link-menu`): Open in Preview — a
+link in a terminal opens a menu** (`term-link-menu`): Open in Preview (Open in Browser, `term-link-pane`, since BR-3a) — a
 drawn Preview pane, else the focused pane, by the sidebar's click rule;
-refused with the reason for the daemon's ports — or Open in a browser tab;
+refused with the reason for the daemon's ports — or Open in a browser tab (Open in a Chrome tab, `term-link-tab`);
 other links still open a tab directly. It is measured and placed by
 `placeMenu` (`lib/terminal.ts`): below the click, else **above** it — a dev
 server's `Local:` line is usually the panel terminal's last row, where it
 used to open below the window — and clamped on both axes, zoom-aware; its
 Escape listener is a layout effect that ignores Escape once a card is up.
-`judgePreviewUrl` refuses userinfo, as `judgeLink` does. xterm finds a link only when the
+`judgePreviewUrl` (`judgeBrowserUrl` since BR-3a) refuses userinfo, as `judgeLink` does. xterm finds a link only when the
 pointer enters a new cell, so a test that clicks the same cell twice must
 move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
@@ -1381,6 +1427,93 @@ walks `/browser`. Seven guard removals, each in a scratch copy, fail all nine
 of their checks (a control port passed — both suites, a URL on the bus, marks
 ignored — both suites, escapes kept, the query kept, `auto_open` ignored,
 whole lines kept); an unmutated copy passes them.
+
+**The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
+§B.9, §D.2, §G; the decisions file wins).** Four new files under `hud/src/lib/`,
+each with its vitest; **nothing imports them yet** — BR-3b (Remote mode),
+BR-4 (annotate), BR-8b (auto-open) and BR-9c (driving) wire them in.
+`remote.ts`: keys and the pointer to CDP `Input.dispatch*` shapes (**AltGr is
+the character it typed, never Ctrl+Alt**: `@` on a German layout arrives as
+Ctrl+Alt+@), `routeKeyDown` (held under a card and left to bubble, so Escape
+denies; the HUD's keys; the pane's own F5/Ctrl+R/Ctrl+L/Alt+←→; a paste is
+never a key, its text goes as `insertText`; copy and cut forwarded and
+marked), **`browserTakesKey`** — the page gets every key but Ctrl+D
+(push-to-talk), the zoom keys, Ctrl+Alt+1–8 (the plan's "Ctrl+Alt+N"), Ctrl+B,
+Ctrl+Alt+B and Ctrl+`; Ctrl+P, Ctrl+Shift+P, F1 and Ctrl+Shift+F are the
+page's, as Ctrl+P is the shell's; BR-3b owes it an exception in `useLayout`'s
+capture handler, beside `terminalTakesKey`'s — and **a lone modifier is never
+sent** (review of PR #66: push-to-talk's Ctrl, pressed before its D, reached the
+page and paused a driving agent; `modifiers` carries the state), `HeldKeys`
+and `HeldButtons` (a keyup only where its keydown went; nothing released under
+a card — they wait for `releaseAll(false)`; **a press a card cut off is let
+go off the page, never as a click**: a held-button move to `OFF_PAGE` (-1,-1),
+then the release there, every event `clickCount: 0` — released where it was
+pressed, Chrome would click what the owner never finished pressing),
+`pasteMessages` (`cleanPaste`, then ≤ 16 KiB per `{t:"text"}` once
+JSON-escaped, never between a CR and its LF), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
+16 Mpx), pointer positions **divided by the zoom** (`toCss`) before they are
+page points, wheel deltas (screen px ÷ zoom, lines 40 px, pages a viewport,
+Shift sideways, capped), a **generation-tagged, latest-only `FramePipe`** (a
+frame of an older socket, even one still decoding, is never drawn or acked)
+and `cleanTitle` (Cc/Cf/Zl/Zp, tags, variation selectors, U+034F and fillers out; one
+line, capped by code point). `drive.ts`: the daemon's `{t:"agent", kind:
+driver|action|paused|list}` frames (shapes proposed in its header for BR-1b),
+the banner (never Authorize/Approve/Deny), the newest 20 actions, the target's
+outline (a reattach's `driver` or running `list` restarts the banner), Resume
+refused under a card, and **`isTakeover`** (a pointer move is not, a drag is;
+a lone modifier and the socket's own messages never; an unknown kind of input
+is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
+offer | wait (under a card; 30 s) | skip (off, the WP-E judge
+`judgeBrowserUrl` or Jarvis's control ports, an origin already opened or shown, one per 10 s per terminal,
+three a minute); the query and fragment are dropped; a Browser pane already
+showing a page counts as busy. `annotate.ts`: the
+whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
+colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
+the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).
+**A trap found building it:** the Write tool decodes `\uXXXX` in what it
+writes, so a regex meant to name U+2028 held the character and stopped
+parsing; write `\u{…}`, or fix escapes afterwards with a script.
+
+**File reads as the editor, Preview is the Browser, BR-3a (2026-10-12; the
+owner: "also rename "File" to "Editor" and "Preview" to "Browser""; browser
+plan `docs/plans/2026-10-10-hud-browser-plan.md` §7, cut by amendment 1 to
+the rename and the migration; design §18; contract in `docs/hud-api.md`).**
+**The Browser changes in name and id both**: view `"browser"`,
+`PaneSpec.browserUrl` (`keepOrigin` unchanged), `setBrowserUrl`,
+`openBrowser`/`BrowserRequest`/`browserAsk` in App, `BrowserTab.tsx`,
+`lib/browser.ts` (`judgeBrowserUrl`), `.browserframe`, test ids `tab-browser`
+and `browser-*`, and the terminal link menu's `term-link-pane` ("Open in
+Browser") and `term-link-tab` ("Open in a Chrome tab"; WP-E's
+`term-link-browser` collided). Which links get the menu is unchanged —
+loopback only; B-11's any-http(s) waits for Remote mode — and so is every
+rule of WP-E's. **The stored layout migrates as it parses**, under the same
+`jarvis.hud.workspace` key (`parsePane`, `storedView`): `view: "preview"`
+reads as `"browser"`, `previewUrl` as `browserUrl` (only when no valid
+`browserUrl` is stored), and a `keepOrigin` is kept only while it is still
+exactly that URL's origin (`storableKeepOrigin`; the frame judges it again on
+load). A save is a parse, so it writes the new names only; a rolled-back HUD
+shows that pane's default view and loses its URL. **The editor changes in
+name only**: its view id stays `"file"` — a stored `"file"` pane, `tab-file`,
+`pane-N-…` and every editor suite are untouched — and **`VIEW_LABEL`** beside
+`PANE_VIEWS` (`lib/workspace.ts`) is the one label table, drawn by the
+strip's buttons, its compact `<select>` and the pane's `aria-label` (`Pane N:
+editor`); the CSS capitalises it. Owner-visible sentences moved with it: the
+palette's "Show Files" is "Show Editor", "No room to open …" says "switch one
+to the editor", the judge says "Refused: the Browser only loads local
+servers." **Python is left alone**: `preview_route`, `preview_only` and
+`workshop_port` name the workshop listener (8403), which the docs now call
+"the workshop origin". Not done here: WP-E's `DirectFrame` split (BR-3b's,
+with Remote mode). `hud_v2_preview_check.py` is
+**`hud_v2_browser_check.py`** (`browser_checks`), and its `_rename_checks`
+seed a pre-rename layout with the Preview pane in pane 1 (default chat, so a
+dropped view migration shows), check its URL and grant come back and the
+save writes only new names, an old grant for another origin is dropped, and a
+stored `"file"` pane opens as the editor with its tabs. Both of the plan's
+mutations bite: dropping the migration fails four `workspace.test.ts` cases
+and the headless section, carrying `keepOrigin` across an origin mismatch
+fails the grant case. A stored seed in any suite may still say `"preview"`
+(it migrates); new ones should not.
 
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
@@ -1720,7 +1853,7 @@ dist); never install into the owner's real root. **Every context of every
 headless HUD suite runs under `hud_v2_check.watch_csp`**: a CSP violation
 anywhere fails the run, because a CSP breaks quietly (Monaco even falls back
 to a textarea). `tests/face/hud_v2_csp_check.py` (run by `hud_v2_check` after
-the preview section, on a `MockDaemon(0)` of its own) proves the HUD's needs
+the browser section, on a `MockDaemon(0)` of its own) proves the HUD's needs
 work under it — SSE, the terminal socket, Monaco and its worker, the avatar,
 the mic and `/stt`, a loopback frame — and that an inline or remote script,
 `eval`, a `blob:` worker, WebAssembly, a cross-origin fetch, socket, image,
@@ -2687,7 +2820,7 @@ table agree, every capture and Monarch token resolved through Monaco's own
 `TokenTheme`, every warm Monaco default pinned), `monarchRefine.test.ts`
 (Monaco's own Monarch compiler and lexer on the installed definitions), and
 `tests/face/hud_v2_editor_theme_check.py` (a `MockDaemon(0)` of its own, run
-by `hud_v2_check` after the preview section, or alone: a C++ and a Python
+by `hud_v2_check` after the browser section, or alone: a C++ and a Python
 file's rendered tokens against the page's `:root` tokens, Monaco's `.mtkN`
 colour map, every `--vscode-*` colour it publishes, bracket pairs, find in
 the accent, control characters off Monaco's red box, and the approval card's
@@ -3240,7 +3373,7 @@ typing target (`isTypingTarget`) says once, on the selected chat's line,
 meanwhile clears it before paint, so ANSWER THE AUTHORIZATION is the line.
 Free checks: `talkkey.test.ts` (`TalkHold`),
 `editorkeys.test.ts` (the shared tracker), `monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal and
-preview sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
+browser sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
 `_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`;
 `TALK_PROBE` also counts a Ctrl+D that gets past the window, which must be
 none), and the ported checks in the terminal (`\x04` reaches the PTY; nothing

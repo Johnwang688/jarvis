@@ -204,7 +204,7 @@ def _open(page, mock, until, name: str) -> bool:
     syntax worker); True once Monaco holds it."""
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, json.dumps({"preset": "cols2", "focused": 2,
-                              "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]}))
+                              "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]}))
     _boot(page, mock, None, until, reload=True)
     return _open_file(page, until, 2, name)
 

@@ -39,18 +39,29 @@
 // Every number here is in the HUD's own (unzoomed) pixels, like layout.ts.
 
 import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./layout";
-import { originOf, storableKeepOrigin } from "./preview";
+import { originOf, storableKeepOrigin } from "./browser";
 import { parseTabs, sameTabs, type Tabs } from "./buffers";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
-export type View = "chat" | "task" | "file" | "diff" | "preview" | "terminal" | "vex";
+export type View = "chat" | "task" | "file" | "diff" | "browser" | "terminal" | "vex";
 /** What a pane offers. The terminal view (WP-D) shows one of the owner's
  * terminals, chosen per pane (`terminalId`); one terminal is drawn in one
  * place at a time (lib/terminal.ts, `placeTerminals`). The VEX view (VX-2)
  * is offered in the strip only when the pane's project is a VEX project
  * (lib/vex.ts `offersVex`); it shows its pinned project. */
-export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "preview", "terminal", "vex"];
+export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "browser", "terminal", "vex"];
+
+/**
+ * What the owner reads for each view: the strip's buttons, its compact
+ * menu and a pane's `aria-label`. The ids are not labels. The editor's id
+ * stays `"file"`, so a stored `"file"` pane, the test ids (`tab-file`) and
+ * the editor suites need nothing; Preview became Browser in name and id
+ * both (BR-3a). Drawn capitalised by the strip's CSS.
+ */
+export const VIEW_LABEL: Readonly<Record<View, string>> = {
+  chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex",
+};
 
 export type Preset =
   | "single" | "cols2" | "rows2" | "cols3" | "main2" | "grid4" | "grid5" | "grid6" | "grid7" | "grid8";
@@ -132,17 +143,17 @@ function topColumns(preset: Preset): number {
 
 export interface PaneSpec {
   view: View;
-  /** File and Preview panes: the project they are pinned to, or null to follow the chat. */
+  /** File and Browser panes: the project they are pinned to, or null to follow the chat. */
   projectId: string | null;
   /** The terminal a terminal pane shows (WP-D), or null to choose one. */
   terminalId: string | null;
-  /** Preview: the URL last loaded here, judged again before it is loaded again. */
-  previewUrl?: string;
+  /** Browser: the URL last loaded here, judged again before it is loaded again (`previewUrl` until BR-3a). */
+  browserUrl?: string;
   /**
-   * Preview (WP-E, decisions W-4): the origin this pane lets its page keep
+   * Browser (WP-E, decisions W-4): the origin this pane lets its page keep
    * (`allow-same-origin`), off when absent. Stored as the origin it was given
    * for, so a URL on another port, host or scheme is never covered by it;
-   * judged again on every load (lib/preview.ts, `keptOrigin`).
+   * judged again on every load (lib/browser.ts, `keptOrigin`).
    */
   keepOrigin?: string;
   /** File and Diff: the open file, relative to the pane's project (read and written by WP-G2). */
@@ -184,7 +195,7 @@ export interface Workspace {
 }
 
 const DEFAULT_VIEWS: Record<PaneNo, View> = {
-  1: "chat", 2: "preview", 3: "file", 4: "task", 5: "chat", 6: "chat", 7: "chat", 8: "chat",
+  1: "chat", 2: "browser", 3: "file", 4: "task", 5: "chat", 6: "chat", 7: "chat", 8: "chat",
 };
 
 const equalEdges = (n: number) => Array.from({ length: n - 1 }, (_, i) => (i + 1) / n);
@@ -270,6 +281,15 @@ function isView(v: unknown): v is View {
   return typeof v === "string" && (PANE_VIEWS as readonly string[]).includes(v);
 }
 
+/**
+ * A stored view: a known id, and Preview's old one read as the Browser
+ * (BR-3a's migration, under the same key). Null for anything else.
+ */
+function storedView(v: unknown): View | null {
+  if (v === "preview") return "browser";
+  return isView(v) ? v : null;
+}
+
 function isObj(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
@@ -289,16 +309,21 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
   const v = isObj(raw) ? raw : {};
   const id = (x: unknown) => (typeof x === "string" && x && x.length <= ID_MAX ? x : null);
   const spec: PaneSpec = {
-    view: isView(v.view) ? v.view : DEFAULT_VIEWS[n],
+    view: storedView(v.view) ?? DEFAULT_VIEWS[n],
     projectId: id(v.projectId),
     terminalId: id(v.terminalId),
   };
-  if (typeof v.previewUrl === "string" && v.previewUrl && v.previewUrl.length <= URL_MAX) {
-    spec.previewUrl = v.previewUrl;
-  }
+  // The Browser's URL; a value stored before BR-3a names it `previewUrl`
+  // (read only when there is no `browserUrl`). Saves write the new name only,
+  // since a save is a parse of the workspace.
+  const url = (x: unknown) => (typeof x === "string" && x && x.length <= URL_MAX ? x : null);
+  const browserUrl = url(v.browserUrl) ?? url(v.previewUrl);
+  if (browserUrl) spec.browserUrl = browserUrl;
   // Only a grant for exactly the stored URL's origin, on a loopback port that
   // is none of the daemon's defaults; the reported ports are judged on load.
-  const keep = storableKeepOrigin(v.keepOrigin, spec.previewUrl);
+  // An old value's grant is kept only while it still matches the URL it is
+  // read with.
+  const keep = storableKeepOrigin(v.keepOrigin, spec.browserUrl);
   if (keep) spec.keepOrigin = keep;
   if (typeof v.filePath === "string" && v.filePath && v.filePath.length <= PATH_MAX) {
     spec.filePath = v.filePath;
@@ -479,7 +504,7 @@ function repinned(p: PaneSpec, projectId: string | null): PaneSpec {
   return next;
 }
 
-/** Pin a File or Preview pane to a project (null: follow the chat again). Its tabs were the old project's: they go. */
+/** Pin a File or Browser pane to a project (null: follow the chat again). Its tabs were the old project's: they go. */
 export function pinPane(ws: Workspace, pane: PaneNo, projectId: string | null): Workspace {
   if (ws.panes[pane - 1].projectId === projectId) return ws;
   const panes = ws.panes.map((p, i) => (i === pane - 1 ? repinned(p, projectId) : p)) as Panes;
@@ -556,18 +581,27 @@ export function forgetTerminal(ws: Workspace, id: string): Workspace {
 }
 
 /**
- * The URL a Preview pane loaded. A keep-origin grant survives only while the
+ * A terminal continued after a restart under a new id (components/Terminal.tsx,
+ * `continueHere`): every pane holding the old one holds the new one, shown or not.
+ */
+export function renameTerminal(ws: Workspace, from: string, to: string): Workspace {
+  if (from === to || !ws.panes.some((p) => p.terminalId === from)) return ws;
+  return { ...ws, panes: ws.panes.map((p) => (p.terminalId === from ? { ...p, terminalId: to } : p)) as Panes };
+}
+
+/**
+ * The URL a Browser pane loaded. A keep-origin grant survives only while the
  * new URL has the origin it was given for: another port, host or scheme turns
  * it off (W-4).
  */
-export function setPreviewUrl(ws: Workspace, pane: PaneNo, url: string): Workspace {
-  const cur = ws.panes[pane - 1].previewUrl ?? "";
+export function setBrowserUrl(ws: Workspace, pane: PaneNo, url: string): Workspace {
+  const cur = ws.panes[pane - 1].browserUrl ?? "";
   if (cur === url || url.length > URL_MAX) return ws;
   const panes = ws.panes.map((p, i) => {
     if (i !== pane - 1) return p;
     const next = { ...p };
-    if (url) next.previewUrl = url;
-    else delete next.previewUrl;
+    if (url) next.browserUrl = url;
+    else delete next.browserUrl;
     if (next.keepOrigin && (!url || originOf(url) !== next.keepOrigin)) delete next.keepOrigin;
     return next;
   }) as Panes;
@@ -575,7 +609,7 @@ export function setPreviewUrl(ws: Workspace, pane: PaneNo, url: string): Workspa
 }
 
 /**
- * Let a Preview pane's page keep its own origin (an origin), or not (null).
+ * Let a Browser pane's page keep its own origin (an origin), or not (null).
  * Only for exactly the origin of the URL the pane holds, and only one the
  * static judge allows; anything else leaves the workspace as it was.
  */
@@ -591,7 +625,7 @@ export function setKeepOrigin(ws: Workspace, pane: PaneNo, origin: string | null
     }) as Panes;
     return { ...ws, panes };
   }
-  const keep = storableKeepOrigin(origin, spec.previewUrl);
+  const keep = storableKeepOrigin(origin, spec.browserUrl);
   if (!keep || spec.keepOrigin === keep) return ws;
   const panes = ws.panes.map((p, i) => (i === pane - 1 ? { ...p, keepOrigin: keep } : p)) as Panes;
   return { ...ws, panes };
@@ -707,7 +741,7 @@ export function closePane(ws: Workspace, id: PaneNo, then: PaneNo | null = null)
  * What a split shows in the new pane (decisions S-2, plan §3.5): a copy of
  * the pane split from. A file keeps its project and its tabs — on the same
  * buffers (ED-2) — and a diff its project and the open file;
- * a preview its URL and project — never the keep-origin grant, which is the
+ * a Browser its URL and project — never the keep-origin grant, which is the
  * owner's choice for one pane (WP-E); a task view becomes that task's diff
  * (S-7); a chat or a terminal pane starts empty here and the window fills it
  * (a new compose row in the source's project, a new terminal in the folder
@@ -726,9 +760,9 @@ export function copySpec(spec: PaneSpec): PaneSpec {
       out.projectId = spec.projectId;
       if (spec.filePath) out.filePath = spec.filePath;
       break;
-    case "preview":
+    case "browser":
       out.projectId = spec.projectId;
-      if (spec.previewUrl) out.previewUrl = spec.previewUrl;
+      if (spec.browserUrl) out.browserUrl = spec.browserUrl;
       break;
     case "vex":
       out.projectId = spec.projectId;
