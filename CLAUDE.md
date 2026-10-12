@@ -1402,6 +1402,76 @@ the controls, the strip's filter) and each review fix (M1, M2's HUD half,
 L1–L7) shown to fail their checks when removed; M2's daemon half in
 `tests/v2/vex_check.py` (`Device`, the fake make's `NOOP` and `HOLD`).
 
+**New VEX project, VX-3 (2026-10-12; editor plan §2.9 "New VEX project",
+decisions V-4; design §18; contract in `docs/hud-api.md`).** A dialog
+(`components/NewVexProject.tsx`, rules in `lib/vexNew.ts`, picker
+`"newVexProject"`) reached from New project's "New VEX project from a
+template…" and the palette's **New VEX Project from a Template…**
+(`project.newVex` — the palette's one VEX entry, which opens the dialog and
+nothing else; `commands.test.ts` pins that). **The window never makes up a
+path**: the templates are `GET /vex/templates` (split by language, labelled
+from `index.json`), and **the exact folder it shows is the daemon's answer to
+the very body Create sends** — the new `POST /vex/projects/check` (VX-1's
+`_plan`, shared with `new_project`, so the same refusals word for word and the
+path the `project_folder` card names; nothing asked or made; owner-only like
+every VEX route). Create is enabled only while that answer is for exactly the
+inputs on screen (`bodyKey`), the name passes the daemon's `PROJECT_NAME`
+(mirrored, `projectNameRefusal`), and no card is up. Location defaults to
+`vex.json`'s `project_folder` (the HUD now reads it from `/vex/status`, which
+already reported it) and is sent only when changed. **A folder VEX's tools
+could never work in is refused before anyone is asked** (review MED-1):
+`_plan` runs the build's own `to_windows` on the folder, so `My (1)`, `a&b`
+or `Документы` are refused by the check and by Create in the same words — the
+owner used to approve a project whose every build answered 409. Create raises
+the card; the dialog polls `GET /vex/projects/{id}`, **one read at a time,
+riding out a failed read with a backoff** (`afterFailedRead`, review LOW-3:
+only the daemon's answer, a 404/400, or three minutes of failures end the
+tracking — one blip used to say `failed` while the card was still up), and
+says how it ended — **Deny makes nothing and the dialog stays open saying
+so**; on `created` it refreshes projects, closes and starts a new thread in it
+(as New project does). An existing empty folder is used with no card (O5),
+said beforehand. **Under any card every control is disabled (`blocked` from
+App) and inert, and Escape is left to the card** (the dialog's own Escape
+listener returns while a card is up, and its inputs never stop a key then).
+`GET /vex/templates` answers a templates folder that cannot be listed with a
+409 sentence, never a 500. **A template write that fails midway takes back
+what this request wrote** (VX-1 code, review LOW-2): `_write_new` records each
+folder it made and each file it created `O_EXCL` **with its `(st_dev,
+st_ino)`, read by `fstat` from the fd it was made through**, and
+`_remove_written` unlinks those files and `rmdir`s those folders, newest
+first, through the same `O_DIRECTORY | O_NOFOLLOW` fds — **judged by identity,
+never by name** (delta review LOW-B: `O_NOFOLLOW` stops a symlink swap, not a
+rename, and a folder renamed away with an owner folder moved into its name
+lost the owner's `mkenv.mk`): what is at the name now is `stat`ed without
+following and must be the very entry it made, else it is kept and listed as
+left. A project the store would not record takes its template back too
+(`remove_written`), **only through the very folder the template was written
+through** — reopened by path, its `(st_dev, st_ino)` must match `unpack`'s
+(LOW-A: a parent swapped for a symlink to a decoy lost the decoy's files);
+else nothing is removed, here or there. **The message is read from the
+folder** (`_listing`, through its fd; LOW-C): empty again (a retry uses it
+without asking, O5), or what it still holds and says to empty or remove it,
+or that the path is no longer the folder written to. A colliding file is named
+("src/main.cpp already exists …"), and an `OSError` is said by its
+`strerror`, never the path it names. What remains: another program swapping an
+entry in the instant between the take-back's `stat` and its `unlink`.
+Free checks: `lib/vexNew.test.ts`,
+`commands.test.ts`, `tests/v2/vex_check.py` (`NewProjectCheck`, `HalfWritten`; the check
+route in `Routes` and `Coverage`) and `tests/face/hud_v2_vex_new_check.py` (66, a
+`MockDaemon(0)` of its own; `hud_v2_mock_vex.setup_new` lays a temp "Windows
+drive" with real template zips that the daemon's own `list_templates`,
+`read_template`, `unpack` and `settings_document` read and write, and the
+mock's `POST /approvals/{id}` answers the card through
+`mock_vex.approval_decided`; run by `hud_v2_check` after the VEX view
+section; the mock judges the folder with the daemon's own `to_windows` and its
+`new["state_fail"]` fails the next reads). Guards shown to bite when removed:
+the dialog's Escape hold, its `disabled` under a card, `createReady`'s key
+match, the check never asking, the check behind `_owner`, and the review
+round's four — the toolchain refusal, the normalised path, the take-back and
+the poll's tolerance — and the delta review's identity compare (the swapped-in
+folder's `mkenv.mk` is taken without it). `HalfWritten`'s three delta-review
+tests fail on 9e1fcb6.
+
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
 response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
