@@ -1630,6 +1630,20 @@ a search's protected-file filter from `tools.search.refused` (the one
   - One explorer operation at a time (its own lock, not the daemon's: a
     Recycle Bin move can take PowerShell a while).
 
+**The review of PR #53 (same day):** `POST …/search` also takes `key` (the
+searching view's; its newer search cancels its older one, which answers
+`cancelled: true`), answers **429** past four searches at once, and says
+`partial: true` when ripgrep could not read some files. Every match and span
+comes from ripgrep (`--json`); the daemon never runs the pattern itself, so
+**without ripgrep `regex: true` is a 400** and a literal is matched as text.
+`POST …/fs` refuses (403) a `~` path, anything in Jarvis's own folders
+(`editor_policy.jarvis_dirs()`), and a rename or delete of any project's folder
+(extra folders included, archived projects too) or an ancestor of one; it acts
+through directory fds opened without following links (a link on the way is a
+403) and renames without replacing; a deleted file keeps its own name in the
+trash (a second one goes into a `jarvis-deleted.<n>` folder). `GET …/tree`
+answers `root` too: where the project folder resolves.
+
 The window's half (`hud/src/components/QuickOpen.tsx`, `SearchView.tsx`,
 `EditorStatus.tsx`, `FileTab.tsx`'s explorer): keys and rules in CLAUDE.md's
 ED-7 paragraph. Find in files sends the query, the flags and the glob to the

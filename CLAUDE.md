@@ -1697,7 +1697,31 @@ shown only under the `jarvisMayAddToChat` context key, i.e. `jarvisMayRead`).
   says gone; Save recreates); the prompt says so first.
 - **Find in files never prefills from an env buffer** (`dotenv` model) — its
   text goes in no request but its own save.
-Free checks: `tests/v2/editor_nav_check.py` (19 + 1: parity on both
+- **The review of PR #53**, the rules it left. **The owner's search pattern
+  is never run by Python in the daemon** (HIGH 1: `(\w+\s?)+:` on one line
+  held the GIL 27.8 s): `search_bounded` takes every match and highlight span
+  from ripgrep's `--json` (byte offsets turned into UTF-16 columns), ripgrep
+  validates the pattern (`\p{L}` works), no ripgrep means a regex is refused
+  with a sentence and a literal is escaped text; a view's `key` makes its newer
+  search cancel its older one, and at most `MAX_SEARCHES` (4) run at once
+  (429). ripgrep's exit 2 with matches or a silent stderr is **`partial`**,
+  never a 500 (MED 3); `grep_files` keeps its own behaviour, its argv and its
+  fallback's walk order. **`Buffers.renamed` never takes a buffer's place**
+  (MED 2): a dirty one at the new name stays and the renamed buffer stays put;
+  a clean one gives way with its tabs; the explorer refuses first ("… has an
+  unsaved edit open"). The fs route uses the **whole** classifier (a project's
+  extra folders are roots; `_policy_for`'s narrowing is quick open's walk
+  only), refuses `~` names, anything in `editor_policy.jarvis_dirs()`, and a
+  rename or delete of any project's folder or an ancestor of one; Windows
+  names are judged where the path resolves; every change is made through
+  directory fds opened `O_NOFOLLOW` from the real root, a rename with
+  `renameat2(RENAME_NOREPLACE)` (check-then-rename where the filesystem cannot,
+  9p); a delete re-checks the inode through that fd, then `Trash.put_keeping_name`
+  (a second `.env` goes into `jarvis-deleted.<n>/.env`, never `.env.2`; `put`
+  and its other callers unchanged). A folder named `.env` is a folder; the
+  delete warning names unsaved buffers from any project (`tree` now says the
+  folder's resolved `root`).
+Free checks: `tests/v2/editor_nav_check.py` (31: parity on both
 backends, listing, search bounds/gitignore/never-withheld, fs refusals,
 trash, owner-only), `fuzzy.test.ts`, `commands.test.ts` (no download or
 device entry, keys), the ED-7 blocks in `state/buffers.test.ts` and
