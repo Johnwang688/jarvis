@@ -660,7 +660,7 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str]) 
 
 
 def _credential_dirs() -> list[Path]:
-    return [_resolve(d) for d in config.V2_CREDENTIAL_DIRS]
+    return [_resolve(d) for d in config.credential_dirs()]
 
 
 def _under_credential_dir(target: str) -> bool:

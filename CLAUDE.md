@@ -315,6 +315,203 @@ the second round's on dfb1d7e (where v1's browser approved the card).
 the HUD's Origin to the HUD's port), the footing `/terminals` states; it
 closes the routes a v1 agent's browser and any Origin-less API client had.
 
+**The Browser's engine, gate and navigation, BR-1a (2026-10-12; plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C, the
+decisions file beside them wins; contract in `docs/hud-api.md`).** Backend
+only: the stream, input and tabs are BR-1b's, profile management BR-1c's.
+`jarvis/v2/browser/` is fully separate from v1's `jarvis.browser` (whose
+`SESSION` it never starts). Three layers keep the owner's daemon-owned
+Chrome off the control plane and his LAN:
+- **The URL judge** (`policy.judge_url`, pure): a typed or stored URL is
+  `about:blank` or absolute http(s), never userinfo, another scheme
+  (`file:`, `chrome:`, `view-source:`, typed `javascript:`/`data:`, any
+  other `about:`), an `ambiguous_authority`, a control or invisible
+  character, or Jarvis's ports in any loopback spelling (`is_face_origin`
+  plus the daemon's reported ports). Its sentences are fixed and never hold
+  the URL (the handler logs refusals). It is the only layer for `file:` and
+  friends — a browser-initiated load of those never touches the network.
+- **The SOCKS5 gate** (`gate.py`, its own thread `jarvis-browser-gate`):
+  Chrome runs with `--proxy-server=socks5://…`, `--proxy-bypass-list=
+  <-loopback>`, `MAP * ~NOTFOUND` (Chrome never resolves a name itself;
+  defense in depth, since the proxy already gets every name), no QUIC, and
+  **no UDP at all**: `--webrtc-ip-handling-policy=disable_non_proxied_udp`
+  (a SOCKS proxy carries no UDP, so WebRTC gathers no candidate and sends no
+  STUN) and WebRTC's mDNS responder off (`--disable-features=…,
+  WebRtcHideLocalIpsWithMdns`: it joined 224.0.0.251 on every interface for
+  any `RTCPeerConnection`; Chrome keeps only the last `--disable-features`).
+  **The first cut's `--force-webrtc-ip-handling-policy` does not exist**:
+  Chrome ignored it without a word, and the review measured 4 candidates, 158
+  datagrams to a loopback sink and mDNS on the LAN (PR #69's HIGH). So a
+  launch flag is held to its *effect* — `owner_browser_check`'s
+  `test_04b`, and an AF_PACKET sniffer in a private network namespace that
+  sees nothing leave on any interface but `lo` — never to its spelling.
+  **Chrome 155 sends every host as a name,
+  IP literals included** (measured), so the gate parses literals itself
+  (every spelling `inet_aton` takes, IPv6, IPv4-mapped), maps `localhost`
+  and `*.localhost` to this machine without DNS, **resolves a real name
+  exactly once and connects its own socket to the numeric address it
+  judged**. It refuses `policy.refused_ports` — the one list:
+  `control_ports()`, the daemon's reported HUD and API ports, and 8403
+  unless it is this daemon's workshop (`/status` → `refused_ports`) — and
+  its own port, **on every address, before any DNS**; a *name* that
+  resolves to loopback whatever the LAN switch (rebinding onto the owner's
+  services; only literals and `localhost` reach loopback); **this machine
+  unless the owner opened that port** (`loopback_closed`, below); private
+  space unless `browser.json` → `lan` (B-5, off); multicast, reserved and
+  the rest of 0/8; unresolvable and malformed names; anything but CONNECT
+  with no authentication; past 256 connections. A mixed DNS answer connects
+  only to its allowed addresses, and **a name keeps the address class it
+  was first allowed on** for the gate's lifetime (`rebinding`: public stays
+  public, private stays private; 8,192 names remembered, and **a pin younger
+  than 30 min is never forgotten to make room** — the delta review flushed a
+  pinned-public name with 8,193 others and it then reached a private address
+  with the LAN on; while the table is full of young pins an unpinned name may
+  not reach private space, `pins_full`). **Its DNS is bounded and waits
+  rather than fails** (PR #69's LOW and delta review): 5 s for the whole
+  lookup, 32 worker threads, connections asking for one name at once share
+  one lookup, and a domain holds at most four worker threads — counted until
+  `getaddrinfo` really returns — a lookup past that **waiting** for one
+  within its 5 s (only then `dns_busy`): refusing at once had failed 6 of 8
+  images on one CDN. The domain is `gate.domain_key`: the registrable domain
+  where a small table of two-label public suffixes can tell (`co.uk`,
+  `com.au`, `co.jp`, `github.io`, `vercel.app` … — no Public Suffix List
+  dependency; `www.bbc.co.uk` no longer shares slots with `evil.co.uk`), the
+  name's parent under a ccTLD whose second level the table does not know, the
+  last two labels anywhere else. A positive answer is reused for 5 s (1,024
+  names), judged like a fresh one, pin and LAN switch included. A
+  black-holed domain cannot starve every other lookup. It logs and counts the
+  class, never a host.
+- **Loopback is closed like the LAN** (PR #69's MED 2, the lead's decision
+  for the owner): a public page read a CORS-permissive service on this
+  machine through the gate (Local Network Access does not see behind a
+  proxy). A loopback port is reachable only after the owner opened it — a
+  URL on this machine in `POST /browser/tabs` or `…/navigate` (`owner=True`,
+  which only those owner-only routes pass) — held in the host's memory per
+  port until it stops, never one of Jarvis's ports. A page's own move,
+  history and any agent's `navigate` never open one; `browser.json` →
+  `local_servers` (default off) opens every port that is not Jarvis's.
+  **Auto-open never opens a port here** (amendment 2, decision L2): it loads
+  only in a Direct frame, and only the owner's own navigation through these
+  routes opens one. `/status` → `browser` → `loopback_opened` is a count,
+  never which.
+- **The landing guard** (`host.py`): every main-frame `framenavigated` is
+  judged again (`landed=True`, which also admits `about:blank#…`, Chrome's
+  error page and a `blob:` of an http(s) origin) and a refused one is
+  replaced with an explanation page. **A pop-up is handed over before its
+  first load with an empty URL, and that is not a landing** (PR #69's MED 1:
+  judging "" blanked every `window.open` and `target=_blank`); its first real
+  landing is judged as any other.
+
+The **host** runs Playwright's async API on `jarvis-owner-browser`, every
+call timed; nothing starts with the daemon (the first `POST /browser/tabs`
+starts the gate, Playwright and the profile's Chrome), and `Daemon.stop`
+ends it after the terminals and VEX, before the bus and listeners — final,
+with a backstop that kills, by exact PID, any process whose command line
+names the profile's folder as a whole path (Chrome's helpers rewrite their
+argv into one space-separated string, so a space is a boundary too) **and
+whose `/proc/<pid>/exe` is the launched Chrome** (`chrome` or
+`chrome_crashpad_handler` beside `CHROME_PATH`'s target; PR #69's LOW: a
+process merely naming the folder is not ours to signal). `stop()` takes
+`_start_lock`, so a stop during a start waits for it instead of leaving its
+gate, loop and driver running. **Keyed
+by profile from the start:** `profiles.json` (0600) lists `p-<8 hex>` ids,
+never a label (the first start writes **Main**; a corrupt list refuses
+rather than recreating Main over the owner's logins); one Chrome per
+persistent profile on `profiles/<id>/`; **Private** is one more Chrome on a
+throwaway `private/run-<hex>/` (removed at stop, swept with its Chrome at the
+next start — never Playwright's own temp folder in `/tmp`), each Private
+pane an off-the-record `new_context()` given the gate explicitly and closed
+with its last tab. **`config.BROWSER_DIR`** (`~/.local/share/jarvis/browser`,
+`JARVIS_BROWSER_DIR`) is 0700 throughout and refused when it or a folder in
+it is a symlink, not ours or open to anyone else; **`config.credential_dirs()`**
+is `V2_CREDENTIAL_DIRS` plus it, read at call time, and is what v2's
+permissions (`_credential_dirs`, `denied_grant`), `folders` and
+`editor_policy` ask now. **`config.BROWSER_SETTINGS_PATH`**
+(`~/.config/jarvis/browser.json`) is protected state (`files.
+_protected_state`). **A curated launch** (`launch_args`, Playwright's
+defaults replaced whole by `ignore_default_args=True`): the deb's sandbox
+kept (renderers run under seccomp), Safe Browsing, component updates,
+popup blocking and **sign-in and sync kept** (BD-5: no `--disable-sync` on a
+persistent profile; Private has it); no `--enable-automation`, no
+`--no-sandbox`, DevTools only over the private pipe, extensions off,
+permission prompts denied, the media router off (it searches the LAN around
+any proxy), `--mute-audio` (sound is BR-10's). **A clean environment** built
+from nothing — `HOME` is `BROWSER_DIR/home`, so Chrome's NSS store and font
+cache stay in the credential folder; locale variables only, no `JARVIS_*`,
+key, display, `PULSE_SERVER` or D-Bus. `TMPDIR` is left alone on purpose:
+Chrome's singleton socket lives there and a long path crashed it (measured).
+Downloads are off until BR-1b. **Routes** (`browser/routes.py`): every one
+`projects.owner_only` plus a strict loopback Host (its own copy — a module
+importing `terminals` fails `terminal_check`) and no query, checked before a
+body is read or Chrome started; a load reports a failure by its `net::ERR_…`
+code only; `/browser` paths are logged without a query. **No URL, title or
+label** reaches `/status` → `browser`, the bus or the log. **An unknown
+field in any route's body is a 400 naming the count, never the keys**
+(`daemon._object`, every route: "unknown fields (2)"; the names are the
+client's text and the message is logged). **Only the daemon and the browser
+package reach the engine**: `browser_gate_check`'s grep pin fails if any
+other module under `jarvis/` imports `browser.host`/`browser.gate`, names
+`BrowserHost`, builds a `Gate` or a `/browser` path, or calls the daemon's
+`browser.open_tab`/`navigate`/… — no tool, MCP tool or fast-path module
+(BR-2's tools will need their own row in it). Measured under the 3G cap
+(Chrome 155): launch ~0.3 s, first tab ~0.6 s, the tree's PSS ~365 MiB with
+one tab, ~490 MiB after the attack pages and ~470 MiB for Private (RSS
+summed over its 14–19 processes 1.1–1.9 GiB, shared pages counted once per
+process), stop ~0.1 s. A first tab asked for twice at once starts one Chrome
+(`_start_lock`).
+**v1's file tools refuse every credential folder** (PR #69's LOW and delta
+review): `read_file`, `write_file`, `edit_file`, `grep_files` (both
+backends; `search.refused`) and `query_sqlite` refuse anything in
+`config.credential_dirs()` — the Browser profile, `~/.ssh`, `~/.aws`,
+`~/.config/gh`, `~/.config/jarvis`, `~/.gnupg` — as written or where it
+resolves (`files._credential_folder`); the gate's own state files keep their
+rule and stay readable by their own, un-symlinked path. Before, the fast
+path's `read_file` and `query_sqlite` could read the profile's History (a
+SQLite file). **A search judges with one `search.refuser()`**
+(`files.credential_folder_judge`): the folders and the gate's paths read
+once, each directory's real path once, a file's own only when it is a
+symlink — 20k paths in ~0.25 s, where calling the single-path rule per file
+took ~3 s; `files_check` holds it under 1 s and the two backends to parity.
+Free suites: `tests/v2/browser_gate_check.py` (no Chrome: the judge, every
+refusal family against stand-in listeners whose accept counters stay 0,
+rebinding through an injected resolver asked once, a name's class pinned,
+loopback closed until opened, a black-holed domain not starving other
+lookups, the LAN switch, every ATYP, a dev port piped both ways, the grep
+pin) and `tests/v2/owner_browser_check.py` (real headless Chrome, one
+instance at a time, 3 tabs, its gate's resolver answering only `pub.test` —
+a public address its connector carries back to the fixture — and its
+connector refusing all else but loopback, so nothing reaches DNS or the
+network: the twelve ways into the HUD — typed, 302, meta refresh,
+`location=`, iframe, fetch, XHR, WebSocket, a service worker's fetch,
+`<img>`, form POST, `window.open` — from Main and from Private, each with a
+sanity half that reaches an ordinary server by all twelve once the owner
+opened its port; a "public" page and every way refused a loopback port nobody
+opened, reaching it once the owner did, and another port still refused; no
+ICE candidate and no datagram at a loopback UDP sink (STUN, TURN, a remote
+candidate, WebTransport); pop-ups landing on their own page, one sent to
+Jarvis's port on Chrome's error page, one moved past the judge replaced;
+refused schemes; owner-only; the folder; the launch, sandbox and
+environment; persistence across a restart and forget; settings; stop during
+a start; a decoy naming the folder left alone; stop). With
+`JARVIS_NETNS_SNIFF=1` inside `unshare --user --map-current-user --net
+--keep-caps` (only `lo` and a dummy interface holding the default routes),
+its sniffer sees ~15,000 packets on `lo` and none elsewhere. `files_check`'s
+`credential_folder_checks`; `frame_check` walks `/browser`. Each of the
+plan's mutations and each review fix's guard removal bites (the PR lists
+them; the two UDP ones run only in the namespace, since the old flag sends
+mDNS onto the real LAN). **Stated limits:** the Playwright driver (a node
+process) inherits the daemon's environment, as v1's does; none of this is a
+boundary against a program running as the owner, which can read the profile
+or use the gate (no new lever: it could connect directly); the gate's name
+pins live in its memory (a restart forgets them); a public answer for an
+unpinned name is allowed while the pin table is full of young pins, so such a
+name could rebind once the pins age; **a loopback port the owner opened stays
+open to every page, every profile and Private, until the daemon stops** (a
+follow-up for BR-1c: count the panes per port and close it when the last one
+leaves). No idle stop or
+instance cap yet (BR-1c), and **BD-10's memory ceiling is not set** (BR-1c's):
+one tab ~365 MiB PSS, ~490 MiB after the attack pages, Private ~470 MiB.
+
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
 the HUD's catch then dropped its hold on the still-running turn (no Stop, no
@@ -6056,6 +6253,13 @@ Two findings worth keeping:
 
 ## Decisions already made — don't relitigate
 
+- **The owner's Browser keeps this machine closed like the LAN
+  (2026-10-12, the lead's call on PR #69's MED 2, recorded for the owner).**
+  The gate admits a loopback port only after the owner opened it in a tab
+  through the owner-only routes, for the host's lifetime; `local_servers` in
+  `browser.json` (off) opens them all. Pages and agents never open one.
+  Auto-open never opens one (amendment 2, L2). Details in the BR-1a
+  paragraph.
 - **A toolset is enforced at dispatch, not only by what the request offers
   (2026-10-10).** An agent's bound toolset is the set it may call; naming a
   registered tool outside it is refused, dangerous or not. A deferred tool
