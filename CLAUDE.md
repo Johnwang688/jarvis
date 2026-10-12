@@ -363,6 +363,36 @@ retries on "already running", and a task's running thread still 409s
 **non-fatal**: fatal makes the daemon drop and close the session, which there
 is the running one.
 
+**A Claude turn the CLI says somebody else started is never the message's
+answer, and "Prompt is too long" is never a reply (2026-10-12, live on a
+Claude chat; free checks `injected_turn_checks` and `context_full_checks` in
+`tests/v2/claude_provider_check.py`).** After every daemon restart the
+first message to a Claude thread showed nothing and the next message got its
+answer. A resumed CLI (2.1.295) runs a queued background-task notice as a
+transcript-only turn of its own *before* the message — an empty, zero-usage
+`success` result — and on a fresh session, where the CLI is not yet known to
+echo (`prompt_echo`), `_read` took that result as the message's. Meanwhile
+the real answer sat unread in the SDK's buffer, and once that filled, the
+CLI stalled in its next PreToolUse hook until the next send drained it. The
+CLI stamps an injected turn's `origin` (kind not `"human"`) on the user
+message it replays and on its `ResultMessage`; `_read` now reads such a CLI
+turn (`owner = "injected"`) and never ends the message's turn on its result
+— whatever is known about echoing — unless the message's own echo came
+inside it (a message absorbed into a notice's turn is answered there; its
+result is taken, never waited past). When the message's result is "Prompt is
+too long" (the CLI's synthetic API error — `error` set or model
+`<synthetic>` — and an `is_error` result), its text is not shown;
+`_context_full` runs the CLI's own `/compact` once (a stdin user message, as
+the Agent SDK documents; shown as one `compact` tool call; bounded by
+`COMPACT_TIMEOUT_S`, then interrupted), and on a `compact_boundary` sends the
+message again. Still full, or not compacted, or stopped: one non-fatal
+`ERROR` (`CONTEXT_FULL_MESSAGE`, "start a New thread") and the turn ends as
+an error; the session is kept. Logs carry thread ids, origin kinds and
+outcomes only. **Not fixed here**: the provider passes the CLI's
+`total_cost_usd`, which is the session's running total, as each turn's cost,
+and the daemon adds it per turn — a Claude thread's `cost_usd` is the sum of
+running totals (a thread whose CLI total was 23.22 read 109.97).
+
 **The Codex model table is the account's catalog, and drift degrades — never
 breaks, never rewrites (PR #20, 2026-10-09; owner's decisions: options
 1+2+3, no union).** `router.CLI_MODELS["codex"]` is the signed-in account's
