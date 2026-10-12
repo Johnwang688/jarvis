@@ -144,3 +144,7 @@ export function applyGraphite() {
 }
 
 export { monaco };
+
+// Tree-sitter colour over Monarch (ED-5, lib/syntax/client.ts): in this chunk
+// too, so first paint never grows by it.
+export { applySyntax } from "./syntax/client";

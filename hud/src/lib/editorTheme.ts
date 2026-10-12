@@ -161,6 +161,8 @@ export const SCHEME: readonly SchemeRow[] = [
   { captures: ["markup.strong"], monarch: ["strong"], color: "--text", style: "bold" },
   { captures: ["markup.italic"], monarch: ["emphasis"], color: "--text", style: "italic" },
   { captures: ["markup.strikethrough"], monarch: [], color: "--text", style: "strikethrough" },
+  // HTML's <u> (nvim's html_tags queries; ED-5).
+  { captures: ["markup.underline"], monarch: [], color: "--text", style: "underline" },
   { captures: ["markup.raw", "markup.raw.block"], monarch: ["variable.md", "variable.source.md"],
     color: "--syn-string", style: "", example: "code spans and fences" },
   { captures: ["markup.link", "markup.link.label"], monarch: ["string.link.md"], color: "--syn-fn", style: "underline" },
