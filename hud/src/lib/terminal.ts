@@ -403,6 +403,289 @@ export function cleanPaste(text: string): string {
   return (text || "").replace(/[\u001b\u0080-\u009f]/g, "");
 }
 
+// ---------------------------------------------------------------------------
+// continuing a terminal that ended with Jarvis (the owner's option (a),
+// 2026-10-12: docs/plans/2026-10-12-questions-for-owner.md, question 1)
+//
+// When the daemon restarts every shell ends (W-3). The window keeps the
+// xterm and its text, and a key typed there, a paste, or "Continue here"
+// starts a new shell in the same folder, in the same place, under the old
+// text and a separator line. Nothing is written to disk: the old text lives
+// in this page's memory only, and a full page reload loses it. Running
+// programs do not survive — only their text does.
+
+/** The text kept from before a restart, at most the daemon's ring size. */
+export const PREFIX_MAX = 1024 * 1024;
+/** What the owner types or pastes while the new shell starts, at most this many bytes. */
+export const HELD_MAX = 4 * 1024;
+
+/**
+ * Whether the input of one key (xterm's `onData`, as bytes) continues an
+ * ended terminal: a typing key — printable text, Enter, Backspace, Tab or an
+ * arrow. Never a control: Ctrl+C, Ctrl+D (end of input — it would end the
+ * new shell at once), Escape, an Alt+key, a function key, or anything xterm
+ * says on its own (every answer to a query starts with ESC).
+ */
+export function continuesOn(bytes: Uint8Array): boolean {
+  if (!bytes.length) return false;
+  if (bytes.length === 1 && (bytes[0] === 0x0d || bytes[0] === 0x7f || bytes[0] === 0x08 || bytes[0] === 0x09)) {
+    return true;
+  }
+  if (bytes.length === 3 && bytes[0] === 0x1b && (bytes[1] === 0x5b || bytes[1] === 0x4f)
+      && bytes[2] >= 0x41 && bytes[2] <= 0x44) {
+    return true;                                      // an arrow, in either cursor-key mode
+  }
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  // eslint-disable-next-line no-control-regex
+  return !/[\u0000-\u001f\u007f-\u009f]/.test(text);
+}
+
+/**
+ * Whether a terminal this window shows may be continued: it ended with
+ * Jarvis (or is gone with it) — never one that exited on its own, which
+ * keeps Restart — it is a shell, not a program terminal (VX-1), this tab
+ * showed it (never one another window holds), and the window is not
+ * crashed. A card is checked where the owner acts: the strip still says
+ * what typing would do.
+ */
+export function mayContinue(t: { state: string; program: boolean; mine: boolean; crashed: boolean }): boolean {
+  return t.state === "ended" && !t.program && t.mine && !t.crashed;
+}
+
+/**
+ * The "Jarvis can read" switch a continuation is made with: the old
+ * terminal's, and off when that is not known (its row is gone and none was
+ * kept) — a continuation never widens what Jarvis can read.
+ */
+export function readableCarry(row: { readable: boolean } | null | undefined): boolean {
+  return row?.readable === true;
+}
+
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
+type HeldPart = { key: Uint8Array } | { paste: string };
+
+/**
+ * What the owner types or pastes while a continuation starts, in order, held
+ * until the new shell's replay has been parsed. At most `HELD_MAX` bytes; a
+ * paste that does not fit whole is dropped whole. **Never spliced**: once
+ * anything is refused — past the cap, a key that does not type, a card that
+ * came up — everything after it is refused too, so the shell never runs a
+ * line with a hole in it. `dropped` is said (the `unsent` notice).
+ */
+export class HeldInput {
+  parts: HeldPart[] = [];
+  bytes = 0;
+  dropped = 0;
+  closed = false;
+
+  constructor(private max = HELD_MAX) {}
+
+  /** A key's bytes; false when refused. */
+  key(bytes: Uint8Array): boolean {
+    if (!bytes.length) return true;
+    if (!continuesOn(bytes)) {
+      this.refuse(bytes.length);
+      return false;
+    }
+    return this.add({ key: bytes }, bytes.length);
+  }
+
+  /** A paste, cleaned (`cleanPaste`) here; false when refused. */
+  paste(text: string): boolean {
+    const clean = cleanPaste(text);
+    if (!clean) return true;
+    return this.add({ paste: clean }, utf8Length(clean));
+  }
+
+  /** Refused (a card came up meanwhile): this and everything after it. */
+  refuse(bytes: number) {
+    this.closed = true;
+    this.dropped += bytes;
+  }
+
+  private add(part: HeldPart, n: number): boolean {
+    if (this.closed || this.bytes + n > this.max) {
+      this.refuse(n);
+      return false;
+    }
+    this.parts.push(part);
+    this.bytes += n;
+    return true;
+  }
+}
+
+/**
+ * One cell of xterm's buffer, the part the prefix reads (xterm's
+ * `IBufferCell`). Declared here so the rule is tested without a browser.
+ */
+export interface SnapCell {
+  getChars(): string;
+  getWidth(): number;
+  getFgColorMode(): number;
+  getFgColor(): number;
+  getBgColorMode(): number;
+  getBgColor(): number;
+  isFgDefault(): boolean;
+  isFgRGB(): boolean;
+  isBgDefault(): boolean;
+  isBgRGB(): boolean;
+  isBold(): number;
+  isDim(): number;
+  isItalic(): number;
+  isUnderline(): number;
+  isBlink(): number;
+  isInverse(): number;
+  isInvisible(): number;
+  isStrikethrough(): number;
+  isOverline(): number;
+}
+
+export interface SnapLine {
+  readonly isWrapped: boolean;
+  readonly length: number;
+  getCell(x: number, cell?: SnapCell): SnapCell | undefined;
+}
+
+export interface SnapBuffer {
+  readonly length: number;
+  getLine(y: number): SnapLine | undefined;
+  getNullCell(): SnapCell;
+}
+
+/** xterm's colour mode of a 16-colour palette cell (its `Attributes.CM_P16`). */
+const CM_P16 = 0x1000000;
+
+function colourParams(isDefault: boolean, isRgb: boolean, mode: number, colour: number, base: 30 | 40): string {
+  if (isDefault) return "";
+  if (isRgb) return `${base + 8};2;${(colour >> 16) & 255};${(colour >> 8) & 255};${colour & 255}`;
+  if (mode === CM_P16 && colour >= 0 && colour < 16) return String(colour < 8 ? base + colour : base + 60 + colour - 8);
+  return `${base + 8};5;${colour & 255}`;
+}
+
+/** A cell's look as SGR parameters ("" for the default look). Numbers only. */
+function sgrOf(c: SnapCell): string {
+  const p: string[] = [];
+  if (c.isBold()) p.push("1");
+  if (c.isDim()) p.push("2");
+  if (c.isItalic()) p.push("3");
+  if (c.isUnderline()) p.push("4");
+  if (c.isBlink()) p.push("5");
+  if (c.isInverse()) p.push("7");
+  if (c.isInvisible()) p.push("8");
+  if (c.isStrikethrough()) p.push("9");
+  if (c.isOverline()) p.push("53");
+  const fg = colourParams(c.isFgDefault(), c.isFgRGB(), c.getFgColorMode(), c.getFgColor(), 30);
+  const bg = colourParams(c.isBgDefault(), c.isBgRGB(), c.getBgColorMode(), c.getBgColor(), 40);
+  if (fg) p.push(fg);
+  if (bg) p.push(bg);
+  return p.join(";");
+}
+
+function blankCell(c: SnapCell): boolean {
+  const ch = c.getChars();
+  return (ch === "" || ch === " ") && c.isBgDefault() && !c.isInverse();
+}
+
+/**
+ * The text a terminal shows, from its **cells** — never the bytes that drew
+ * them — for writing back above a continuation's output: each line's
+ * characters with their colours and weight as SGR (`ESC[0;…m`, numbers only),
+ * a wrapped line joined to the line it continues (so it rewraps at any
+ * width), trailing blanks and empty lines dropped, every line ending in the
+ * default look. So it carries no query to answer, no mode, no alternate
+ * screen, no title and no link — whatever the old program left the terminal
+ * in. The tail, at most `max` bytes, cut at a line's start.
+ */
+export function snapshotText(buf: SnapBuffer, max = PREFIX_MAX): string {
+  const cell = buf.getNullCell();
+  const lines: string[] = [];
+  let cur = "";
+  let sgr = "";
+  for (let y = 0; y < buf.length; y++) {
+    const line = buf.getLine(y);
+    if (!line) continue;
+    const next = y + 1 < buf.length ? buf.getLine(y + 1) : undefined;
+    const ends = !(next && next.isWrapped);
+    let end = line.length;
+    if (ends) {
+      while (end > 0) {
+        const c = line.getCell(end - 1, cell);
+        if (c && !blankCell(c)) break;
+        end--;
+      }
+    }
+    for (let x = 0; x < end; x++) {
+      const c = line.getCell(x, cell);
+      if (!c || c.getWidth() === 0) continue;         // the second half of a wide character
+      const s = sgrOf(c);
+      if (s !== sgr) {
+        cur += s ? `\x1b[0;${s}m` : "\x1b[0m";
+        sgr = s;
+      }
+      // A cell never holds a control character; dropped anyway, so nothing but our SGR is ever an escape.
+      // eslint-disable-next-line no-control-regex
+      cur += c.getChars().replace(/[\u0000-\u001f\u007f-\u009f]/g, "") || " ";
+    }
+    if (ends) {
+      if (sgr) cur += "\x1b[0m";
+      sgr = "";
+      lines.push(cur);
+      cur = "";
+    }
+  }
+  if (cur) lines.push(sgr ? cur + "\x1b[0m" : cur);
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  let total = 0;
+  let from = lines.length;
+  while (from > 0) {
+    const n = utf8Length(lines[from - 1]) + (from < lines.length ? 2 : 0);
+    if (total + n > max) break;
+    total += n;
+    from--;
+  }
+  return lines.slice(from).join("\r\n");
+}
+
+/** HH:MM, 24-hour, local. */
+export function hhmm(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** The line between the old text and the new shell: plain text, no escape sequence. */
+export function separatorLine(time: string): string {
+  return `── restarted ${time} ──`;
+}
+
+/**
+ * What a continued terminal writes after its RIS on every attach, before the
+ * daemon's replay: the old text, then the separator — at most `PREFIX_MAX`
+ * bytes in all, the old text giving way first.
+ */
+export function continuationPrefix(buf: SnapBuffer, time: string, max = PREFIX_MAX): string {
+  const sep = separatorLine(time) + "\r\n";
+  const text = snapshotText(buf, Math.max(0, max - utf8Length(sep) - 2));
+  return (text ? text + "\r\n" : "") + sep;
+}
+
 /** The daemon's text frames (docs/hud-api.md). Anything else is ignored. */
 export type Control =
   | { type: "attached"; terminal: TerminalRow | null; replay: number }

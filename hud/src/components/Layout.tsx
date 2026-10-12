@@ -24,6 +24,7 @@ import {
   MENU_PRESETS, PANEL, SHAPES, TITLEBAR_H, cellsOf, closePane as closePaneOf, defaultWorkspace,
   equalSplit as equalSplitOf, fitWorkspace, focusPane,
   forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
+  renameTerminal as renameTerminalOf,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
   setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
   setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
@@ -74,6 +75,8 @@ export interface LayoutControl {
   setTerminal: (pane: PaneNo, id: string | null) => void;
   /** A terminal was closed or ended: no pane holds it any more. */
   forgetTerminal: (id: string) => void;
+  /** A terminal continued under a new id after a restart: every pane holding it holds the new one. */
+  renameTerminal: (from: string, to: string) => void;
   setSplit: (preset: Preset, split: Partial<Split>) => void;
   equalSplit: (preset: Preset) => void;
   togglePanel: () => void;
@@ -229,6 +232,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   );
   const setTerminal = useCallback((pane: PaneNo, id: string | null) => setWs((w) => setPaneTerminal(w, pane, id)), []);
   const forgetTerminal = useCallback((id: string) => setWs((w) => forgetTerminalOf(w, id)), []);
+  const renameTerminal = useCallback((from: string, to: string) => setWs((w) => renameTerminalOf(w, from, to)), []);
   const setSplit = useCallback(
     (preset: Preset, split: Partial<Split>) => setWs((w) => setSplitOf(w, preset, split)), [],
   );
@@ -386,7 +390,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
     setPreset, setView, focus, show, pin, setEditors, unpinProject, setPreviewUrl, setFilePath, setKeepOrigin,
-    setTerminal, forgetTerminal, setSplit,
+    setTerminal, forgetTerminal, renameTerminal, setSplit,
     equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
   };
 }
