@@ -661,14 +661,14 @@ class Listener:
 @dataclass(frozen=True)
 class Known:
     """What the daemon knows for certain: rule 1-2's ports, its uid (rule 4),
-    Jarvis's own pids (rule 5: the daemon, the provider roots, BrowserHost's
+    Jarvis's own pids (rule 5: the daemon, the provider roots, the Browser's
     Chrome and driver) and the live terminals (rule 6) as (leader pid, which
     is the session id, leader start in ticks; None when not recorded)."""
 
     ports: PortRules
     uid: int
     jarvis_pids: frozenset[int] = frozenset()
-    terminals: frozenset[tuple[int, int | None]] = frozenset()
+    terminal_leaders: frozenset[tuple[int, int | None]] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -706,11 +706,11 @@ def _refused(cls: str) -> Verdict:
     return Verdict("refused", refusal=cls)
 
 
-def _terminal(f: PidFacts, terminals) -> bool:
+def _terminal(f: PidFacts, leaders) -> bool:
     """Rule 6: the process is in a live terminal's session — the number `sid`
     still belongs to that terminal's leader, or to nobody (a session id is not
     reused while a member lives) — or an ancestor is a terminal's leader."""
-    for leader, leader_start in terminals:
+    for leader, leader_start in leaders:
         if f.sid == leader and (leader_start is None or f.leader_start is None
                                 or f.leader_start == leader_start):
             return True
@@ -730,7 +730,7 @@ def _process_refusal(f: PidFacts | None, listener: Listener, sessions: Sessions,
         return UID, frozenset()
     if f.pid in known.jarvis_pids:
         return JARVIS, frozenset()
-    if _terminal(f, known.terminals):
+    if _terminal(f, known.terminal_leaders):
         return TERMINAL, frozenset()
     holding = sessions.holding(listener.first_seen, f.started_at)
     if not holding:

@@ -1661,6 +1661,67 @@ and the headless section, carrying `keepOrigin` across an origin mismatch
 fails the grant case. A stored seed in any suite may still say `"preview"`
 (it migrates); new ones should not.
 
+**Dev servers an agent started, AO-1a (2026-10-12; plan
+`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §B and §D.4, review
+decisions R-2 and R-7; the decisions file wins).** Pure and **not wired yet**:
+AO-1b's watcher (`devservers.py`), routes and daemon hooks use it.
+`jarvis/v2/devlisten.py`:
+- **Rows.** `parse_rows` reads `/proc/net/tcp`/`tcp6`: LISTEN rows only, the
+  kernel's native word order, binds on `127.0.0.1`, `0.0.0.0`, `::1`, `::` and
+  `::ffff:127.0.0.1`. Another 127/8 address is kept as `odd_loopback`, to be
+  counted and refused; a LAN bind is dropped.
+- **Ports first.** `cheap_refusal` (rules 1-2) runs before anything about a
+  process is read. `port_rules` is `policy.refused_ports` plus the daemon's
+  HUD, API, workshop, gate and bound ports; then the seven service ports, and
+  the ephemeral range read from `ip_local_port_range` (inclusive; fallback
+  32768-60999).
+- **Facts.** `ProcReader` reads over an injectable `/proc` and cgroup root and
+  counts every read in `Work` (counts only, for `/status`). **It never reads
+  `cwd`, `cmdline` or `exe`.** It fails closed on EACCES, a vanished pid, a
+  start time that changed, or a parent younger than its child. The ancestor
+  walk reads `stat` only, at most 16.
+- **The origin tag is the attribution (R-2).** There is no folder rule, and an
+  untagged process is refused. `/proc/<pid>/environ` is read only for the
+  owning pid (the earliest-started pid passing rules 4-7), only after rules
+  1-7, `O_NONBLOCK`, at most 128 KiB. The bytes go into a bytearray searched
+  raw for `JARVIS_ORIGIN_TAG=` at an entry's start (exactly 32 lowercase hex,
+  NUL-ended), which is zeroed in a `finally`. They are never decoded, logged
+  or raised with: a read error is `unreadable` with no message, and **the
+  module logs nothing**. Results are cached per `(pid, start)`.
+- **Turn windows.** `Sessions` holds the tags (live, then `GRACE_S` 600 s
+  after close) and the turn windows, which only Claude and Codex turns open: a
+  listener counts if first seen in `[start, end + 600 s]` from a process
+  started at or after `start − 2 s`.
+- **`attribute()`** applies rules 1-11 in order. It answers attributed, a
+  refusal class, or pending: `life` for rule 10's two sightings 2 s apart,
+  `probe` for rule 11.
+- **The probe's rules.** `parse_response` judges at most 4 KiB, and only the
+  status class and booleans survive:
+  - a page is a 3xx; a 2xx that is `text/html`, or untyped with markup; any
+    other status only `text/html` with markup;
+  - `X-Frame-Options` DENY/SAMEORIGIN, or an enforced `frame-ancestors`
+    without `*` or `http://localhost:*`, is `no_frame` (a 3xx too);
+  - a silent close or a TLS alert asks for one TLS probe.
+
+  `probe_address` (127.0.0.1 or `::1`, with the port judged again) and
+  `probe_request` (one plain `GET /`) are its other rules.
+- **`arbitrate()`** takes the claims within 600 ms of the first: the
+  earliest that `shows` the source, else the newest `focused_at`, ties to the
+  earliest. A later claim, or a window's second, loses.
+
+Free suite: `tests/v2/devlisten_check.py`, 154 checks over fixture `/proc`
+trees, plus a read-only parse of the real `/proc/net` tables.
+- A fake key in a fixture `environ` appears in no return value, exception,
+  log record or counter.
+- A monitor shows that the module opens no `cmdline`, `cwd` or `exe`, and no
+  real `environ`.
+- Work is counted, not timed: a steady poll reads 2 files, and one candidate
+  costs one fd scan.
+
+All 24 mutations bite: every one in §H's AO-1a table, plus the review's
+guards. A grep pin allows only `daemon`, `hud_api`, `terminals` and
+`devservers` to name the module.
+
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
 wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**

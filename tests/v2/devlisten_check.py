@@ -188,7 +188,7 @@ def world(**over):
     sessions.turn_started("th-1", "claude", at=1000.0)
     known = dl.Known(ports=over.get("ports", KNOWN_PORTS), uid=over.get("uid", UID),
                      jarvis_pids=frozenset({100, 101, 102}),
-                     terminals=frozenset({(600, 60000)}))
+                     terminal_leaders=frozenset({(600, 60000)}))
     return sessions, known
 
 
@@ -487,12 +487,12 @@ def attribution_checks(fake: Fake) -> None:
     v = dl.attribute(listener(), [reader.facts(4501)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.TERMINAL, "a setsid child of a terminal leader is terminal")
     fake.process(4502, sid=650, start=100100, environ=tagged(T1))
-    known_650 = dataclasses.replace(known, terminals=frozenset({(650, 65000)}))
+    known_650 = dataclasses.replace(known, terminal_leaders=frozenset({(650, 65000)}))
     v = dl.attribute(listener(), [reader.facts(4502)], sessions, 1006.0, known_650, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.TERMINAL, "a terminal session whose leader exited still counts")
     fake.process(700, start=99000, comm="sh")                  # number 700 reused
     fake.process(4503, sid=700, start=100100, environ=tagged(T1))
-    known_700 = dataclasses.replace(known, terminals=frozenset({(700, 50000)}))
+    known_700 = dataclasses.replace(known, terminal_leaders=frozenset({(700, 50000)}))
     f503 = reader.facts(4503)
     v = dl.attribute(listener(), [f503], sessions, 1006.0, known_700, tag_of=reader.tag, probe=PAGE)
     check(f503.leader_start == 99000 and v.attributed,
