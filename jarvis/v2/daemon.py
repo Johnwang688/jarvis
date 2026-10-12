@@ -260,9 +260,6 @@ class Daemon:
         # entries in it are ever purged: `owned` is this daemon's data root.
         from .trash import Trash
         self.trash = Trash(stores.root)
-        # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
-        # the HUD listener; they end with the daemon. On the bus they are one
-        # lifecycle record, `terminal_attached` (an id and a time), never output.
         # The Browser's switches (`browser.json`, browser/settings.py): in
         # memory here; daemon2's `main()` attaches the owner's file. While
         # `auto_open` is on, a terminal's live output is read for a dev
@@ -270,6 +267,9 @@ class Daemon:
         # socket — never this bus, a log line or the disk.
         from .browser.settings import BrowserSettings
         self.browser_settings = BrowserSettings()
+        # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
+        # the HUD listener; they end with the daemon. On the bus they are one
+        # lifecycle record, `terminal_attached` (an id and a time), never output.
         from .terminals import Terminals
         self.terminals = Terminals(publish=self.bus.publish,
                                    auto_open=self.browser_settings.auto_open,

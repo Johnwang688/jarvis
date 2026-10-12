@@ -871,7 +871,12 @@ class Terminal:
                 # integration" note. Sent once, after the bytes that carried it.
                 attached.send_text(json.dumps({"type": "marked"}))
             if self._sniffer is not None:
-                self._sniff(data, start, attached)
+                try:
+                    self._sniff(data, start, attached)
+                except Exception as exc:  # noqa: BLE001 — a convenience never breaks the terminal
+                    self._sniffer = None
+                    LOG.warning("terminal %s: dev-server detection stopped (%s)", self.id,
+                                type(exc).__name__)
 
     def _sniff(self, data: bytes, start: int, attached) -> None:
         """Dev servers this live output announces (BR-8a, devurl.py), told

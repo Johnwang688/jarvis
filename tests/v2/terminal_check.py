@@ -1468,6 +1468,28 @@ class DevUrls(Base):
         terminal._output(mark(b"A", nonce="00" * 16) + b"  Local: http://localhost:24614/\r\n")
         self.assertEqual(sock.sent[-1], ("text", {"type": "dev_url", "url": "http://localhost:24614/"}))
 
+    def test_a_sniffer_that_fails_never_breaks_the_terminal(self):
+        terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE, integration="posix")
+        self.addCleanup(terminal.finish)
+
+        class Broken(devurl.DevUrlSniffer):
+            def feed(self, data):
+                raise RuntimeError("zq-sniffer-text " + data.decode())
+        terminal._sniffer = Broken(lambda: set())
+        terminal._dev_on = lambda: True
+        sent = []
+        terminal._attachment = SimpleNamespace(send_binary=lambda d: sent.append(d) or True,
+                                               send_text=lambda t: sent.append(t) or True,
+                                               closed=threading.Event())
+        with capture_logs() as records:
+            terminal._output(b"  Local: http://localhost:24615/\r\n")
+            terminal._output(b"more\r\n")
+        self.assertEqual(sent, [b"  Local: http://localhost:24615/\r\n", b"more\r\n"])
+        self.assertIsNone(terminal._sniffer)
+        self.assertIn("dev-server detection stopped (RuntimeError)", "\n".join(records))
+        self.assertNotIn("zq-sniffer-text", "\n".join(records))
+
 
 class NoTool(Base):
     """No tool, MCP tool, fast-path tool or Discord verb reaches a terminal —

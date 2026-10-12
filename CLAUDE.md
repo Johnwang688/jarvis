@@ -1396,7 +1396,9 @@ origins and four send times** — nothing else, whatever it is fed. **One
 after the bytes that carried it; `admit` de-duplicates by (scheme, port) —
 loopback hosts folded, so Puma's `127.0.0.1` and `[::1]` lines are one — and
 rate-limits (one a second, four a minute per terminal); **no window attached:
-dropped and not admitted**, so not remembered; a replay never reaches it.
+dropped and not admitted**, so not remembered; a replay never reaches it; a
+sniffer that raises is dropped for that terminal (one log line, the
+exception's type) and never stops its output.
 **Nothing on the bus, in a log line, a thread log, Discord or a file carries a
 URL or a byte of the text**; the "Jarvis can read" switch is unrelated.
 **`browser.json`** (`config.BROWSER_SETTINGS_PATH`, env
@@ -1422,7 +1424,8 @@ de-dup; the settings file and its gate-state refusal) and `terminal_check`'s
 `DevUrls` (one window hears it, another does not; the typed line never read;
 Jarvis's ports never sent; bus, log and disk clean; off feeds nothing; a
 replay or a second announcement sends nothing; the switch is the owner's;
-an unattached URL not remembered; a forged mark moves nothing); `frame_check`
+an unattached URL not remembered; a forged mark moves nothing; a failing sniffer
+never stops the output); `frame_check`
 walks `/browser`. Seven guard removals, each in a scratch copy, fail all nine
 of their checks (a control port passed — both suites, a URL on the bus, marks
 ignored — both suites, escapes kept, the query kept, `auto_open` ignored,
