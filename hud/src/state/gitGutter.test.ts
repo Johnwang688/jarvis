@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GitGutter, MAX_LINES, type GutterModel } from "./gitGutter";
+import { GitGutter, MAX_LINES, RECHECK_MS, type GutterModel } from "./gitGutter";
 import { GitStatusStore } from "./gitStatus";
 import { splitLines, type GutterMark } from "../lib/linediff";
 import type { GitBase, GitStatus } from "../types";
@@ -146,6 +146,85 @@ describe("the git gutter", () => {
     gutter.watch({ abs: "/p/y", projectId: "p1", path: "y" }, new FakeModel(long + "more\n"), (m) => seen.push(m));
     await settle();
     expect(seen).toEqual([]);
+  });
+
+  // Review of PR #61, LOW 2: the reviewer's probe — a commit in a repository
+  // the project's status poll does not watch (a nested repo, a folder of
+  // robot repos, the Inbox at ~): the marks must follow it all the same.
+  it("a file in another repository than the project's follows a commit there", async () => {
+    let inner = { head: "inner1", text: HEAD };
+    const asked: string[] = [];
+    let visible = true;
+    const store = new GitStatusStore({
+      // The project's own repository (or none): its HEAD never moves here.
+      fetch: async (): Promise<GitStatus> => ({ repo: true, head: "outer", branch: "main", files: {}, dirs: {}, truncated: false }),
+      now: () => Date.now(),
+      visible: () => true,
+    }, 1_000);
+    const gutter = new GitGutter({
+      base: (_p, path) => {
+        asked.push(path);
+        return Promise.resolve({ path, state: "ok", head: inner.head, text: inner.text });
+      },
+      status: store,
+      visible: () => visible,
+    });
+    const edited = HEAD.replace("return 0", "return 7");
+    const model = new FakeModel(edited);
+    const seen: GutterMark[][] = [];
+    gutter.watch({ abs: "/w/robots/arm/main.cpp", projectId: "p1", path: "robots/arm/main.cpp" }, model, (m) => seen.push(m));
+    await settle();
+    vi.advanceTimersByTime(1_000);
+    await settle();
+    expect(seen.at(-1)).toEqual([{ kind: "modified", start: 2, end: 2 }]);
+    expect(gutter.snapshot()[0].rechecking).toBe(true);
+    // The owner commits the edit in the nested repository.
+    inner = { head: "inner2", text: edited };
+    vi.advanceTimersByTime(RECHECK_MS);
+    await settle();
+    expect(seen.at(-1)).toEqual([]);
+    // Hidden, it waits rather than asking.
+    const before = asked.length;
+    visible = false;
+    vi.advanceTimersByTime(RECHECK_MS * 3);
+    await settle();
+    expect(asked.length).toBe(before);
+    visible = true;
+    vi.advanceTimersByTime(RECHECK_MS);
+    await settle();
+    expect(asked.length).toBe(before + 1);
+  });
+
+  it("a file in the project's own repository never rechecks on a timer", async () => {
+    const w = world();
+    const stop = w.gutter.watch({ abs: "/p/main.cpp", projectId: "p1", path: "main.cpp" }, new FakeModel(HEAD), () => {});
+    await settle();
+    vi.advanceTimersByTime(1_000);
+    await settle();
+    expect(w.gutter.snapshot()[0].rechecking).toBe(false);
+    vi.advanceTimersByTime(RECHECK_MS * 3);
+    await settle();
+    expect(w.asked).toHaveLength(1);
+    stop();
+  });
+
+  it("a byte-order mark in HEAD's text is no change; a long file is counted before it is read", async () => {
+    const { gutter } = world({ base: (path) => Promise.resolve({ path, state: "ok", head: "c1", text: "﻿" + HEAD }) });
+    const model = new FakeModel(HEAD);
+    const seen: GutterMark[][] = [];
+    gutter.watch({ abs: "/p/bom.cpp", projectId: "p1", path: "bom.cpp" }, model, (m) => seen.push(m));
+    await settle();
+    model.set(HEAD + "// x\n");
+    vi.advanceTimersByTime(200);
+    expect(seen.at(-1)).toEqual([{ kind: "added", start: 4, end: 4 }]);
+    const long = new FakeModel("x\n");
+    long.getLineCount = () => MAX_LINES + 1;
+    const g2 = world().gutter;
+    g2.watch({ abs: "/p/long", projectId: "p1", path: "long" }, long, () => {});
+    await settle();
+    long.set("y\n");
+    vi.advanceTimersByTime(600);
+    expect(long.reads).toBe(0);
   });
 
   it("a late answer for a gutter nobody watches any more is dropped", async () => {
