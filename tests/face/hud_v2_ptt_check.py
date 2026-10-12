@@ -59,10 +59,10 @@ from tests.face.hud_v2_layout_check import (  # noqa: E402
 )
 
 SINGLE = json.dumps({"preset": "single", "focused": 1,
-                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
 # A chat, and a File pane beside it: push-to-talk needs a chat on screen (W-6).
 CHAT_FILE = json.dumps({"preset": "cols2", "focused": 1,
-                        "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                        "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
 
 
 def ptt_checks(browser, mock, base, check, until, guard, init_script):

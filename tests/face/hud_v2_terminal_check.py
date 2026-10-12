@@ -49,9 +49,9 @@ The checks worth keeping, each written to bite:
   - an OSC title never reaches `document.title` and renders as text; a
     `javascript:` link is inert, an http link opens only on Ctrl+click;
   - a Ctrl+clicked link to a server on this machine opens a menu (WP-E):
-    "Open in Preview" lands in a drawn Preview pane, else the focused pane,
+    "Open in Browser" lands in a drawn Browser pane, else the focused pane,
     and is refused, with the reason, for the HUD's and the API's ports;
-    "Open in a browser tab" still opens it; Escape and a card close it;
+    "Open in a Chrome tab" still opens it; Escape and a card close it;
     and a link on the panel terminal's **last row** opens a menu that flips
     above the click and sits wholly on screen, both buttons clickable, at
     100% and 160% (PR #31 review: it opened below the window);
@@ -517,7 +517,7 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                         _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
                         _hold_checks,
-                        _read_note_checks, _integration_checks, _osc_link_checks, _preview_link_checks,
+                        _read_note_checks, _integration_checks, _osc_link_checks, _browser_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
                         _flood_checks, _chat_panes_checks, _split_close_terminal_checks,
                         _rv47b_copy_readable_checks, _crash_checks):
@@ -1714,8 +1714,8 @@ def _osc_link_checks(page, mock, base, check, until, fake):
           opened == ["http://example.com/ok-link", "https://example.org/osc8"], str(opened))
 
 
-def _preview_link_checks(page, mock, base, check, until, fake):
-    """WP-E: a link to a server on this machine offers "Open in Preview"."""
+def _browser_link_checks(page, mock, base, check, until, fake):
+    """WP-E: a link to a server on this machine offers "Open in Browser" (Preview until BR-3a)."""
     tid = _fresh(page, mock, base, until, fake, size=(1600, 900))
     dev = f"http://127.0.0.1:{mock.dev_port}/"
     hud = f"http://127.0.0.1:{mock.port}/"
@@ -1742,7 +1742,7 @@ def _preview_link_checks(page, mock, base, check, until, fake):
         page.wait_for_timeout(150)
 
     def frame(n):
-        return page.locator(f'[data-testid="pane-{n}"] [data-testid="preview-frame"]')
+        return page.locator(f'[data-testid="pane-{n}"] [data-testid="browser-frame"]')
 
     ctrl_click(0)
     until(lambda: _visible(page, menu), timeout=3)
@@ -1750,29 +1750,32 @@ def _preview_link_checks(page, mock, base, check, until, fake):
           _visible(page, menu) and page.evaluate("window.__opened") == []
           and page.locator('[data-testid="term-link-url"]').inner_text() == dev,
           str(page.evaluate("window.__opened")))
-    check("the link to a dev server may go to Preview", page.locator('[data-testid="term-link-preview"]').is_enabled())
-    page.locator('[data-testid="term-link-preview"]').click()
+    check("the link to a dev server may go to the Browser", page.locator('[data-testid="term-link-pane"]').is_enabled())
+    labels = page.locator(f"{menu} .lm-label").all_inner_texts()
+    check("BR-3a: the menu says Open in Browser, then Open in a Chrome tab",
+          labels == ["Open in Browser", "Open in a Chrome tab"], str(labels))
+    page.locator('[data-testid="term-link-pane"]').click()
     until(lambda: frame(1).count() > 0 and frame(1).get_attribute("src") == dev, timeout=4)
-    check("with no Preview pane drawn, Open in Preview shows it in the focused pane (the click rule)",
-          page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "preview"
+    check("with no Browser pane drawn, Open in Browser shows it in the focused pane (the click rule)",
+          page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "browser"
           and frame(1).get_attribute("src") == dev and not _visible(page, menu))
     ws = page.evaluate("window.__hud.workspace()")["ws"]
-    check("the URL is stored with that pane", ws["panes"][0].get("previewUrl") == dev, str(ws["panes"][0]))
-    check("and the frame is sandboxed as any preview is",
+    check("the URL is stored with that pane", ws["panes"][0].get("browserUrl") == dev, str(ws["panes"][0]))
+    check("and the frame is sandboxed as any Browser frame is",
           frame(1).get_attribute("sandbox") == "allow-scripts allow-forms")
 
     page.locator('[data-testid="pane-1"] [data-testid="tab-chat"]').click()
     until(lambda: page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "chat", timeout=2)
     _layout(page, until, "cols2")
-    if page.locator('[data-testid="pane-2"]').get_attribute("data-view") != "preview":
-        page.locator('[data-testid="pane-2"] [data-testid="tab-preview"]').click()
+    if page.locator('[data-testid="pane-2"]').get_attribute("data-view") != "browser":
+        page.locator('[data-testid="pane-2"] [data-testid="tab-browser"]').click()
     page.locator('[data-testid="pane-1"] [data-testid="input"]').click()
     until(lambda: page.locator('[data-testid="pane-1"]').get_attribute("data-focused") == "true", timeout=2)
     ctrl_click(0)
     until(lambda: _visible(page, menu), timeout=3)
-    page.locator('[data-testid="term-link-preview"]').click()
+    page.locator('[data-testid="term-link-pane"]').click()
     until(lambda: frame(2).count() > 0 and frame(2).get_attribute("src") == dev, timeout=4)
-    check("with a Preview pane drawn, it goes there, and the focused chat pane stays a chat",
+    check("with a Browser pane drawn, it goes there, and the focused chat pane stays a chat",
           frame(2).get_attribute("src") == dev
           and page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "chat"
           and page.locator('[data-testid="pane-2"]').get_attribute("data-focused") == "true")
@@ -1782,16 +1785,16 @@ def _preview_link_checks(page, mock, base, check, until, fake):
         until(lambda: _visible(page, menu), timeout=3)
         refused = page.locator('[data-testid="term-link-refused"]')
         text = refused.inner_text() if refused.count() else ""
-        check(f"a link to the {word}'s port: Open in Preview is refused, and says why",
-              page.locator('[data-testid="term-link-preview"]').is_disabled() and word in text
+        check(f"a link to the {word}'s port: Open in Browser is refused, and says why",
+              page.locator('[data-testid="term-link-pane"]').is_disabled() and word in text
               and page.locator('[data-testid="term-link-url"]').inner_text() == url, text)
         page.keyboard.press("Escape")
         until(lambda: not _visible(page, menu), timeout=2)
     check("Escape closes the menu, opening nothing", page.evaluate("window.__opened") == [])
     ctrl_click(2)
     until(lambda: _visible(page, menu), timeout=3)
-    page.locator('[data-testid="term-link-browser"]').click()
-    check("Open in a browser tab opens it in a new window, as a plain Ctrl+click used to",
+    page.locator('[data-testid="term-link-tab"]').click()
+    check("Open in a Chrome tab opens it in a new window, as a plain Ctrl+click used to",
           page.evaluate("window.__opened") == [api] and not _visible(page, menu), str(page.evaluate("window.__opened")))
 
     ctrl_click(0)
@@ -1853,7 +1856,7 @@ def _menu_edge_checks(page, mock, base, check, until, fake):
             return bool(b) and b["x"] >= 0 and b["y"] >= 0 and b["x"] + b["width"] <= vp["width"] + 0.5 \
                 and b["y"] + b["height"] <= vp["height"] + 0.5
         buttons = [page.locator(f'[data-testid="{t}"]').bounding_box()
-                   for t in ("term-link-preview", "term-link-browser")] if box else [None, None]
+                   for t in ("term-link-pane", "term-link-tab")] if box else [None, None]
         at = f"{zoom}% in a {size_px[0]}px window"
         check(f"at {at}, a link on the panel terminal's last row opens its menu wholly on screen",
               on_screen(box), f"menu {box} viewport {vp} click {x:.0f},{y:.0f}")
@@ -1862,8 +1865,8 @@ def _menu_edge_checks(page, mock, base, check, until, fake):
               bool(box) and box["y"] + box["height"] <= y + 1
               and (abs(box["x"] - x) < 40 or box["x"] + box["width"] >= vp["width"] - 12),
               f"menu {box} click {x:.0f},{y:.0f}")
-        page.locator('[data-testid="term-link-browser"]').click(timeout=2000)
-        check(f"at {at}, its buttons are clickable (Open in a browser tab opened it)",
+        page.locator('[data-testid="term-link-tab"]').click(timeout=2000)
+        check(f"at {at}, its buttons are clickable (Open in a Chrome tab opened it)",
               page.evaluate("window.__opened") == [link] and not _visible(page, menu),
               str(page.evaluate("window.__opened")))
     _store(page, zoom="100", layout="{}")

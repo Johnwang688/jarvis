@@ -53,7 +53,7 @@ from tests.face.hud_v2_layout_check import (  # noqa: E402
 )
 
 SINGLE = json.dumps({"preset": "single", "focused": 1,
-                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
 GRID_CHATS = json.dumps({"preset": "grid4", "focused": 1,
                          "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "chat"}]})
 ROWS_CHATS = json.dumps({"preset": "rows2", "focused": 1,
