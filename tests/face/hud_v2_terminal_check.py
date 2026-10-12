@@ -134,6 +134,7 @@ class FakePty:
         self.waiting: dict[str, dict] = {}
         self.takeover_answers: list[dict] = []
         self.refused_tickets = 0
+        self.gone_after_ticket = 0
         self.closing: list[tuple[dict, int, str]] = []
         ctx.route_web_socket(re.compile(rf"^ws://127\.0\.0\.1:{mock.port}/terminals/"), self._attach)
 
@@ -163,8 +164,16 @@ class FakePty:
         sock = {"tid": tid, "ws": ws, "url": ws.url, "frames": [], "latched": False, "open": True,
                 "n": len(self.sockets), "replayed_at": None, "at": time.monotonic()}
         self.sockets.append(sock)
-        if not ticket or tickets.pop(ticket, None) != tid or self._row(tid) is None:
-            self.refused_tickets += 1
+        fresh = bool(ticket) and tickets.pop(ticket, None) == tid
+        if not fresh or self._row(tid) is None:
+            # Only a stale or missing ticket counts against the HUD. A fresh one
+            # for a terminal the test has since removed (a section's reset
+            # emptying the world while the HUD was still attaching) is the
+            # test's race, not the HUD's: refused all the same, counted apart.
+            if fresh:
+                self.gone_after_ticket += 1
+            else:
+                self.refused_tickets += 1
             self._close(sock, 1008, "a fresh ticket for this terminal is required")
             return
         ws.on_message(lambda m, s=sock: self._message(s, m))
@@ -544,8 +553,11 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                 except Exception:
                     pass
         check("no page errors in the terminal section", not errors, "; ".join(errors[:3]))
+        # Strict for every socket, the terminal there or not: a socket with a
+        # spent, missing or another terminal's ticket fails it. A fresh ticket
+        # for a terminal removed meanwhile is not the HUD's doing (see _attach).
         check("every socket the HUD opened presented a fresh ticket", fake.refused_tickets == 0,
-              f"{fake.refused_tickets} refused")
+              f"{fake.refused_tickets} refused ({fake.gone_after_ticket} fresh, for a terminal the test removed)")
     finally:
         ctx.close()
     _guard_selftest(browser, mock, base, check, until, init_script)
