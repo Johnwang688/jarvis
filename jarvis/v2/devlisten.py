@@ -16,20 +16,30 @@ The pieces, in the order a poll uses them:
   `::ffff:127.0.0.1`. Another 127/8 address is kept as `odd_loopback` so it
   is counted and refused; a LAN or `eth0` bind is dropped.
 * **`cheap_refusal`** (rules 1 and 2) refuses Jarvis's ports, the service
-  and debugger ports and the ephemeral range before anything else is read.
+  and debugger ports and the ephemeral range before anything else is read,
+  then a socket owned by another uid (the daemon's uid is passed in).
 * **`ProcReader`** reads the facts: the daemon's own cgroup, its
-  `cgroup.procs`, the `socket:[inode]` links of those pids' fds, and
-  `/proc/<pid>/stat` for the owner and up to `ANCESTRY_MAX` ancestors. **It
-  never reads `cwd`, `cmdline` or `exe`.** Every failed read fails closed.
+  `cgroup.procs`, the `socket:[inode]` links of those pids' fds (at most
+  `FD_SCAN_MAX` readlinks a scan; past it the scan says it is incomplete and
+  nothing is attributed from it), and `/proc/<pid>/stat` for the owner and up
+  to `ANCESTRY_MAX` ancestors (a chain still going past that is `truncated`,
+  and rule 6 refuses it). **It never reads `cwd`, `cmdline` or `exe`.** Every
+  failed read fails closed.
 * **The origin tag** (rule 8, R-2): `/proc/<pid>/environ` of the owning pid
   only, after rules 1-7 pass, opened `O_RDONLY | O_NONBLOCK`, at most
   `ENVIRON_CAP` bytes into a buffer that is searched as raw bytes for
   `JARVIS_ORIGIN_TAG=` at an entry's start and zeroed before the function
   returns. **It is never decoded, logged, formatted, put into an exception or
-  returned**: what comes back is the 32 tag bytes or a refusal class.
+  returned**: what comes back is the 32 tag bytes or a refusal class. A found
+  tag and "no tag" are remembered per `(pid, start)`; a failed read never is.
 * **`Sessions`** holds the live tags and the Claude and Codex turn windows.
 * **`attribute`** applies rules 1-11 in order and answers a thread, a
-  refusal class, or "not yet" (rule 10's two sightings, rule 11's probe).
+  refusal class, or "not yet" (rule 10's two sightings, rule 11's probe, an
+  incomplete fd scan). **A socket several processes hold fails closed:** if
+  any holder is Jarvis's own or a terminal's, the listener is refused as that,
+  whatever another holder's tag says; only without such a holder does the
+  earliest-started passing pid own it. Rules 7 and 9 are judged at the
+  listener's first sighting, so a verdict waiting on its probe cannot change.
 * **`parse_response`** judges what the probe read: a page that may be framed
   or a refusal class. Nothing of the response is kept but booleans.
 * **`arbitrate`** picks the one window that acts on a server (§D.4).
@@ -37,10 +47,18 @@ The pieces, in the order a poll uses them:
 There is no folder rule (R-2): the tag is the attribution, so an agent's
 `cd /tmp && python3 -m http.server 5000` is attributed to its chat. The cost,
 stated: a child started with a cleared environment (`env -i`) is missed.
+
+Limits, stated. The tag is not a secret and not a boundary (any same-uid
+program can copy it). **A cached tag outlives an `exec` of the same pid:**
+the cache is keyed on `(pid, start)`, and `exec` keeps the start time, so a
+process that execs a program with another environment is still judged by the
+environment it was first read with. A pid reused by another process has
+another start time and is read afresh.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -59,7 +77,8 @@ EPHEMERAL_FALLBACK = (32768, 60999)
 GRACE_S = 600.0            # a turn's window stays open this long after it ends
 START_SLACK_S = 2.0        # a process may start this long before its turn
 MIN_LIFE_S = 2.0           # rule 10: two sightings at least this far apart
-ANCESTRY_MAX = 16          # ancestors read for the terminal check
+ANCESTRY_MAX = 64          # ancestors read for the terminal check; a longer chain is refused
+FD_SCAN_MAX = 50_000       # fd readlinks in one scan; past it nothing is attributed this poll
 ENVIRON_CAP = 128 * 1024   # bytes of /proc/<pid>/environ ever read
 TAG_NAME = b"JARVIS_ORIGIN_TAG="
 TAG_LEN = 32
@@ -77,6 +96,8 @@ PROBE_RETRY_S = (1, 2, 4, 8)
 PROBES_IN_FLIGHT = 2
 
 ARBITRATE_MS = 600         # §D.4: claims are collected this long from the first
+WINDOW_ID_MAX = 128        # longest window nonce a claim may carry
+FOCUSED_AT_MAX = 2**53 - 1  # epoch ms from a browser: a JavaScript safe integer
 
 _NET_CAP = 64 * 1024 * 1024
 _SMALL_CAP = 64 * 1024
@@ -134,6 +155,7 @@ class Work:
     uid_reads: int = 0        # stat() of /proc/<pid>
     fd_lists: int = 0         # /proc/<pid>/fd listings
     fd_readlinks: int = 0
+    fd_skipped: int = 0       # pids an fd scan left unread because it hit FD_SCAN_MAX
     environ_reads: int = 0
     environ_bytes: int = 0
     kinds: Counter = field(default_factory=Counter)   # what was opened, by entry name
@@ -142,6 +164,7 @@ class Work:
         return {"files": self.files, "lines": self.lines, "rows": self.rows,
                 "stat_reads": self.stat_reads, "uid_reads": self.uid_reads,
                 "fd_lists": self.fd_lists, "fd_readlinks": self.fd_readlinks,
+                "fd_skipped": self.fd_skipped,
                 "environ_reads": self.environ_reads, "environ_bytes": self.environ_bytes}
 
 
@@ -267,8 +290,11 @@ def parse_ephemeral(text: bytes) -> tuple[int, int]:
     return EPHEMERAL_FALLBACK
 
 
-def cheap_refusal(row: Row, ports: PortRules) -> str | None:
-    """Rules 1 and 2, before anything about the process is read."""
+def cheap_refusal(row: Row, ports: PortRules, uid: int | None = None) -> str | None:
+    """Rules 1 and 2, then the socket owner's uid (rule 4's class), all before
+    anything about a process is read. A bind class that is neither loopback
+    nor wildcard is refused as `odd_loopback` (`parse_rows` makes no other).
+    `uid` is the daemon's; the caller passes it in (None skips the check)."""
     if row.port in ports.jarvis:
         return JARVIS_PORT
     if row.port in ports.service:
@@ -276,8 +302,10 @@ def cheap_refusal(row: Row, ports: PortRules) -> str | None:
     low, high = ports.ephemeral
     if low <= row.port <= high:
         return EPHEMERAL
-    if row.bind == ODD_LOOPBACK:
+    if row.bind not in (LOOPBACK, WILDCARD):
         return ODD_LOOPBACK
+    if uid is not None and row.uid != uid:
+        return UID
     return None
 
 
@@ -296,7 +324,9 @@ class PidFacts:
     """What attribution needs about one pid holding a listener. `start` is in
     ticks, `started_at` in seconds since boot (CLOCK_BOOTTIME's scale).
     `leader_start` is the start of the process now numbered `sid`, or None
-    when there is none. `ancestors` is (pid, start) from the parent up."""
+    when there is none. `ancestors` is (pid, start) from the parent up, at
+    most `ANCESTRY_MAX`; `truncated` says the chain was still going past it,
+    so rule 6 cannot rule a terminal out."""
 
     pid: int
     start: int
@@ -306,6 +336,7 @@ class PidFacts:
     uid: int
     leader_start: int | None
     ancestors: tuple[tuple[int, int], ...]
+    truncated: bool = False
 
 
 def find_tag(buf, length: int, complete: bool) -> bytes | None:
@@ -329,6 +360,16 @@ def find_tag(buf, length: int, complete: bool) -> bytes | None:
     if end - start != TAG_LEN or not _TAG.fullmatch(buf, start, end):
         return None
     return bytes(buf[start:end])
+
+
+class Owners(dict):
+    """`socket_owners`' answer: inode → pids, as a dict, plus whether the scan
+    finished. `complete` False means the fd budget ran out and `skipped` pids
+    were not (fully) read; `attribute(scan_complete=False)` then answers
+    pending for every listener."""
+
+    complete: bool = True
+    skipped: int = 0
 
 
 class ProcReader:
@@ -410,29 +451,51 @@ class ProcReader:
             return []
         return [int(p) for p in text.split() if _DIGITS.fullmatch(p) and int(p) > 0]
 
-    def socket_owners(self, pids, inodes) -> dict[int, list[int]]:
+    def socket_owners(self, pids, inodes) -> Owners:
         """inode → the pids (among `pids`) holding it, from their fd links.
-        Nothing is read when no inode is wanted."""
+        Nothing is read when no inode is wanted. At most `FD_SCAN_MAX`
+        readlinks are made in one scan, a pid's fd folder walked lazily so a
+        process with a million fds costs no more than the cap: past it the
+        scan stops, counts the pids it left unread (`work.fd_skipped`) and
+        answers with `complete` False — a partial answer, not to attribute
+        from (a holder that is Jarvis's own or a terminal's may be in the
+        part not read)."""
         want = {f"socket:[{int(i)}]": int(i) for i in inodes}
-        found: dict[int, list[int]] = {}
+        found = Owners()
         if not want:
             return found
-        for pid in pids:
+        pids = list(pids)
+        budget = FD_SCAN_MAX
+        for n, pid in enumerate(pids):
             fd_dir = self._pid_path(pid, "fd")
+            tripped = False
             try:
-                names = os.listdir(fd_dir)
+                scan = os.scandir(fd_dir)
             except OSError:
                 continue
             self.work.fd_lists += 1
-            for name in names:
-                self.work.fd_readlinks += 1
-                try:
-                    target = os.readlink(f"{fd_dir}/{name}")
-                except OSError:
-                    continue
-                inode = want.get(target)
-                if inode is not None and pid not in found.setdefault(inode, []):
-                    found[inode].append(pid)
+            try:
+                with scan:
+                    for entry in scan:
+                        if budget <= 0:
+                            tripped = True
+                            break
+                        budget -= 1
+                        self.work.fd_readlinks += 1
+                        try:
+                            target = os.readlink(f"{fd_dir}/{entry.name}")
+                        except OSError:
+                            continue
+                        inode = want.get(target)
+                        if inode is not None and pid not in found.setdefault(inode, []):
+                            found[inode].append(pid)
+            except OSError:
+                continue                       # the process went away mid-listing
+            if tripped:
+                found.complete = False
+                found.skipped = len(pids) - n
+                self.work.fd_skipped += found.skipped
+                break
         return found
 
     # -- facts -------------------------------------------------------------------------
@@ -454,7 +517,9 @@ class ProcReader:
         """The owning pid's facts, or None when any of them cannot be read
         (fail closed). The ancestor walk reads only `stat`, at most
         `ANCESTRY_MAX` of them, and stops at pid 1 or any pid in `stop` (the
-        subreaper, the daemon, the provider roots)."""
+        subreaper, the daemon, the provider roots). A chain still going when
+        the limit is reached is marked `truncated`: nothing above it was
+        looked at, so rule 6 refuses the process."""
         st = self.stat(pid)
         if st is None or st.state in (b"Z", b"X"):
             return None
@@ -475,6 +540,7 @@ class ProcReader:
             ancestors.append((ppid, parent.start))
             seen.add(ppid)
             child_start, ppid = parent.start, parent.ppid
+        truncated = not (ppid <= 1 or ppid in stop or ppid in seen)   # the loop ran out
         if st.sid == pid:
             leader_start = st.start
         elif st.sid > 0:
@@ -483,21 +549,24 @@ class ProcReader:
         else:
             leader_start = None
         return PidFacts(int(pid), st.start, st.start / self.clk_tck, st.ppid, st.sid, uid,
-                        leader_start, tuple(ancestors))
+                        leader_start, tuple(ancestors), truncated)
 
     # -- the origin tag (rule 8) ---------------------------------------------------------
 
     def tag(self, facts: PidFacts) -> bytes | str:
         """The process's origin tag (32 bytes), or `UNTAGGED` / `UNREADABLE`.
-        Read once per (pid, start)."""
+        A found tag and `UNTAGGED` are read once per (pid, start); a failed
+        read (`UNREADABLE`: EMFILE, EACCES, a start time that moved) is never
+        remembered, so the next poll reads again."""
         key = (facts.pid, facts.start)
         if key in self._tags:
             self._tags.move_to_end(key)
             return self._tags[key]
         result = self._read_tag(facts.pid, facts.start)
-        self._tags[key] = result
-        while len(self._tags) > TAG_CACHE:
-            self._tags.popitem(last=False)
+        if isinstance(result, bytes) or result == UNTAGGED:
+            self._tags[key] = result
+            while len(self._tags) > TAG_CACHE:
+                self._tags.popitem(last=False)
         return result
 
     def _read_tag(self, pid: int, start: int) -> bytes | str:
@@ -554,7 +623,7 @@ def _cgroup_path(raw: bytes) -> str | None:
 
 @dataclass
 class Session:
-    tag: bytes
+    tag: bytes = field(repr=False)        # never printed, even by a debug dump
     thread_id: str
     task_id: str | None
     opened: float
@@ -686,8 +755,9 @@ class Probe:
 @dataclass(frozen=True)
 class Verdict:
     """`attributed` (to `thread_id`/`task_id`, through owning `pid`),
-    `refused` (a class), or `pending`: `life` waits for rule 10's second
-    sighting, `probe` for rule 11's answer."""
+    `refused` (a class), or `pending`: `scan` waits for an fd scan that
+    finished (`FD_SCAN_MAX`), `life` for rule 10's second sighting, `probe`
+    for rule 11's answer."""
 
     outcome: str
     refusal: str | None = None
@@ -709,7 +779,11 @@ def _refused(cls: str) -> Verdict:
 def _terminal(f: PidFacts, leaders) -> bool:
     """Rule 6: the process is in a live terminal's session — the number `sid`
     still belongs to that terminal's leader, or to nobody (a session id is not
-    reused while a member lives) — or an ancestor is a terminal's leader."""
+    reused while a member lives) — or an ancestor is a terminal's leader. An
+    ancestor chain too long to read to its end (`truncated`) cannot rule a
+    terminal out, so it counts: fail closed."""
+    if f.truncated:
+        return True
     for leader, leader_start in leaders:
         if f.sid == leader and (leader_start is None or f.leader_start is None
                                 or f.leader_start == leader_start):
@@ -720,52 +794,68 @@ def _terminal(f: PidFacts, leaders) -> bool:
     return False
 
 
-def _process_refusal(f: PidFacts | None, listener: Listener, sessions: Sessions,
-                     known: Known) -> tuple[str | None, frozenset[str]]:
-    """Rules 4-7 for one owning pid: (refusal or None, the threads whose
-    turn window holds it)."""
+def _identity_refusal(f: PidFacts | None, known: Known) -> str | None:
+    """Rules 4-6 for one holding pid: who the process is."""
     if f is None:
-        return UNREADABLE, frozenset()
+        return UNREADABLE
     if f.uid != known.uid:
-        return UID, frozenset()
+        return UID
     if f.pid in known.jarvis_pids:
-        return JARVIS, frozenset()
+        return JARVIS
     if _terminal(f, known.terminal_leaders):
-        return TERMINAL, frozenset()
-    holding = sessions.holding(listener.first_seen, f.started_at)
-    if not holding:
-        return NO_TURN, frozenset()
-    return None, holding
+        return TERMINAL
+    return None
 
 
 def attribute(listener: Listener, facts, sessions: Sessions, now: float, known: Known, *,
-              tag_of, probe: Probe | None = None) -> Verdict:
+              tag_of, probe: Probe | None = None, scan_complete: bool = True) -> Verdict:
     """Rules 1-11 in order (§B.5). `facts` holds one entry per pid found
     holding the listener among the daemon cgroup's processes (None for a pid
-    whose facts could not be read); empty is rule 3. The earliest-started pid
-    passing rules 4-7 is the owning pid, and `tag_of(facts)` — its
-    `environ`, read only now — is consulted for it alone. Rules 10 and 11
-    answer `pending` until the watcher has a second sighting and a probe."""
-    cheap = cheap_refusal(listener.row, known.ports)          # rules 1, 2
+    whose facts could not be read); empty is rule 3. `scan_complete` is the fd
+    scan's (`Owners.complete`): False means holders may be missing, so nothing
+    is attributed this poll (`pending`, "scan").
+
+    **A socket several processes hold fails closed.** If any holder is refused
+    as Jarvis's own (rule 5) or as a terminal's (rule 6), the listener is
+    refused with that class, even when another holder carries a live tag: a
+    shared socket is as much the terminal's or Jarvis's as the agent's. With
+    no such holder the earliest-started pid passing rules 4-7 is the owning
+    pid, and `tag_of(facts)` — its `environ`, read only now — is consulted for
+    it alone. Rules 7 and 9 are judged at the listener's first sighting
+    (`now` is the poll's clock and no rule reads it), so a verdict waiting on
+    its probe cannot change meanwhile. Rules 10 and 11 answer `pending` until
+    the watcher has a second sighting and a probe."""
+    cheap = cheap_refusal(listener.row, known.ports, known.uid)   # rules 1, 2, and 4 for the socket
     if cheap is not None:
         return _refused(cheap)
+    if not scan_complete:
+        return Verdict("pending", pending="scan")
     if not facts:                                             # rule 3
         return _refused(OUTSIDE)
     order = sorted(facts, key=lambda f: (f is None, f.start if f else 0, f.pid if f else 0))
-    first = None
+    first = shared = None
     owner, holding = None, frozenset()
-    for f in order:                                           # rules 4-7
-        refusal, holding = _process_refusal(f, listener, sessions, known)
+    for f in order:                                           # rules 4-7, every holder
+        refusal = _identity_refusal(f, known)
+        if refusal is None and owner is None:
+            holding = sessions.holding(listener.first_seen, f.started_at)    # rule 7
+            if holding:
+                owner = f
+                continue
+            refusal = NO_TURN
         if refusal is None:
-            owner = f
-            break
+            continue                                          # a later passing pid: not the owner
         first = first or refusal
+        if refusal in (JARVIS, TERMINAL):
+            shared = shared or refusal
+    if shared is not None:
+        return _refused(shared)
     if owner is None:
         return _refused(first)
     tag = tag_of(owner)                                       # rule 8
     if not isinstance(tag, bytes):
         return _refused(tag if tag in (UNTAGGED, UNREADABLE) else UNREADABLE)
-    session = sessions.owner(tag, now)                        # rule 9
+    session = sessions.owner(tag, listener.first_seen)        # rule 9
     if session is None or session.thread_id not in holding:
         return _refused(STALE_TAG)
     if listener.last_seen - listener.first_seen < MIN_LIFE_S:  # rule 10
@@ -780,11 +870,12 @@ def attribute(listener: Listener, facts, sessions: Sessions, now: float, known: 
 
 # -- the probe (rule 11) -------------------------------------------------------------------
 
-def probe_address(row: Row, ports: PortRules) -> tuple[str, int] | None:
+def probe_address(row: Row, ports: PortRules, uid: int | None = None) -> tuple[str, int] | None:
     """Where the probe connects, judged again just before `connect`:
     127.0.0.1 for an IPv4, wildcard or IPv4-mapped bind, ::1 for `::1` or
-    `::`. Never a non-loopback address; None for a refused port."""
-    if cheap_refusal(row, ports) is not None or row.bind not in (LOOPBACK, WILDCARD):
+    `::`. Never a non-loopback address; None for a refused port (and, when
+    the daemon's `uid` is passed, for another user's socket)."""
+    if cheap_refusal(row, ports, uid) is not None or row.bind not in (LOOPBACK, WILDCARD):
         return None
     if row.family == 4 or row.mapped:
         return "127.0.0.1", row.port
@@ -799,7 +890,8 @@ def probe_request(port: int) -> bytes:
 
 
 _STATUS = re.compile(r"HTTP/\d(?:\.\d)? ([1-5]\d\d)(?: .*)?")
-_MARKUP = re.compile(rb"<!doctype\s+html|<html|<head|<body", re.IGNORECASE)
+# A tag name must end: `<header` and `<htmlx` are not `<head` or `<html`.
+_MARKUP = re.compile(rb"<(?:!doctype\s+html|html|head|body)(?=[\s>/])", re.IGNORECASE)
 _FRAME_OK = frozenset({"*", "http://localhost:*"})
 
 
@@ -828,20 +920,32 @@ def parse_response(data: bytes) -> Probe:
     data = bytes(data[:PROBE_READ_MAX])
     if not data or data[:1] == b"\x15":           # closed silent, or a TLS alert
         return Probe(NOT_HTTP, retry_tls=True)
-    end, gap = data.find(b"\r\n\r\n"), 4
-    if end < 0:
-        end, gap = data.find(b"\n\n"), 2
-    if end < 0:
+    # The header block ends at the earlier blank line, CRLF or bare LF; a body
+    # that happens to hold the other kind later is not part of it.
+    ends = [(at, gap) for at, gap in ((data.find(b"\r\n\r\n"), 4), (data.find(b"\n\n"), 2))
+            if at >= 0]
+    if not ends:
         return Probe(NOT_HTTP)                    # garbage, or headers past the cap
+    end, gap = min(ends)
     lines = data[:end].decode("latin-1").split("\n")
     status = _STATUS.fullmatch(lines[0].rstrip("\r"))
     if status is None:
         return Probe(NOT_HTTP)
-    headers = []
-    for line in lines[1:]:
-        name, sep, value = line.rstrip("\r").partition(":")
-        if sep and name and not name[0].isspace():
+    headers: list[tuple[str, str]] = []
+    last = -1                                     # index of the header a fold continues
+    for raw in lines[1:]:
+        line = raw.rstrip("\r")
+        if line[:1] in (" ", "\t"):               # obs-fold (RFC 7230 §3.2.4): joined with one space
+            if last >= 0:
+                name, value = headers[last]
+                headers[last] = (name, (value + " " + line.strip()).strip())
+            continue
+        name, sep, value = line.partition(":")
+        if sep and name:
             headers.append((name.strip().lower(), value.strip()))
+            last = len(headers) - 1
+        else:
+            last = -1                             # a line with no colon: its folds go nowhere
     ctypes = [v for n, v in headers if n == "content-type"]
     ctype = ctypes[-1].split(";")[0].strip().lower() if ctypes else None
     html = ctype == "text/html"
@@ -877,12 +981,26 @@ class Claim:
     at: float
 
 
+def _valid_claim(c) -> bool:
+    """A claim whose every field is of its type and in range. Claims come
+    from windows over HTTP, so nothing is trusted to be shaped as declared."""
+    return (isinstance(c, Claim)
+            and isinstance(c.window, str) and 0 < len(c.window) <= WINDOW_ID_MAX
+            and isinstance(c.shows, bool)
+            and isinstance(c.focused_at, int) and not isinstance(c.focused_at, bool)
+            and 0 <= c.focused_at <= FOCUSED_AT_MAX
+            and isinstance(c.at, (int, float)) and not isinstance(c.at, bool)
+            and math.isfinite(c.at))
+
+
 def arbitrate(claims, window_ms: float = ARBITRATE_MS) -> Claim | None:
     """The one window that acts: among the claims that arrived within
     `window_ms` of the first, the earliest that shows the source; else the
     newest `focused_at`; ties to the earliest. A claim after that — or a
-    window's second claim — loses."""
-    ordered = sorted(claims, key=lambda c: c.at)
+    window's second claim — loses. A malformed claim (a field of the wrong
+    type or out of range, or not a `Claim`) is dropped before any of that,
+    never raised on and never the one that opens the window."""
+    ordered = sorted((c for c in claims if _valid_claim(c)), key=lambda c: c.at)
     if not ordered:
         return None
     cutoff = ordered[0].at + window_ms / 1000.0

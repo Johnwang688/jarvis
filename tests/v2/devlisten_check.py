@@ -165,6 +165,14 @@ class Fake:
         return dl.ProcReader(self.proc, self.cg, clk_tck=TCK)
 
 
+def chain(fake: Fake, base: int, depth: int, *, top_ppid: int = 1, start0: int = 1000,
+          environ: bytes = b"") -> None:
+    """Pids `base` (the top, parent `top_ppid`) to `base + depth` (the deepest),
+    each its own session leader and one tick younger than its parent."""
+    for i in range(depth + 1):
+        fake.process(base + i, ppid=(base + i - 1) if i else top_ppid, start=start0 + i, environ=environ)
+
+
 def env(*entries: bytes) -> bytes:
     return b"".join(e + b"\0" for e in entries)
 
@@ -457,8 +465,18 @@ def attribution_checks(fake: Fake) -> None:
     closing.close(T4, at=1001.0)
     v = dl.attribute(listener(), [f], closing, 1500.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
     check(v.attributed, "a closed session inside its grace still attributes")
-    v = dl.attribute(listener(), [f], closing, 1602.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
-    check(v.refusal == dl.STALE_TAG, "a closed session past its grace is stale_tag")
+    # Rule 9 is judged at the first sighting (closed at 1001; the grace ends at 1601).
+    v = dl.attribute(listener(first=1601.0, last=1604.0), [f], closing, 1605.0, known,
+                     tag_of=lambda _f: T4.encode(), probe=PAGE)
+    check(v.attributed, "first seen exactly at the close + 600 s: the session is still inside its grace")
+    v = dl.attribute(listener(first=1602.0, last=1605.0), [f], closing, 1606.0, known,
+                     tag_of=lambda _f: T4.encode(), probe=PAGE)
+    check(v.refusal == dl.STALE_TAG, "first seen after the session's grace: stale_tag")
+    pend = listener(first=1002.0, last=1004.0)
+    v1 = dl.attribute(pend, [f], closing, 1005.0, known, tag_of=lambda _f: T4.encode())
+    v2 = dl.attribute(pend, [f], closing, 1700.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
+    check(v1.pending == "probe" and v2.attributed,
+          "a verdict waiting on its probe does not turn stale_tag as the clock passes the grace (judged at first_seen)")
     two = dl.Sessions()
     two.open(T2, "th-2", "tk-2", at=999.0)
     two.turn_started("th-2", "codex", at=1000.0)
@@ -507,12 +525,55 @@ def attribution_checks(fake: Fake) -> None:
     fs = [reader.facts(4601), reader.facts(4600)]
     v = dl.attribute(listener(), fs, sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.attributed and v.pid == 4600, "the earliest-started passing pid owns it")
-    fake.process(102, start=90000, environ=tagged(T1))         # Jarvis's own, started first
-    v = dl.attribute(listener(), [reader.facts(102), reader.facts(4601)], sessions, 1006.0, known,
+    fake.process(4602, start=100300, environ=env(b"A=1"))      # untagged, later
+    v = dl.attribute(listener(), [reader.facts(4602), reader.facts(4600)], sessions, 1006.0, known,
                      tag_of=reader.tag, probe=PAGE)
-    check(v.attributed and v.pid == 4601, "a refused earlier pid is passed over")
+    check(v.attributed and v.pid == 4600, "a later pid with no tag is no obstacle: the earliest owns it")
+    fake.process(4603, start=99000, environ=tagged(T1))         # started before the turn: no_turn
+    v = dl.attribute(listener(), [reader.facts(4603), reader.facts(4600)], sessions, 1006.0, known,
+                     tag_of=reader.tag, probe=PAGE)
+    check(v.attributed and v.pid == 4600, "a holder outside the turn window is passed over (no Jarvis or terminal)")
+
+    print("\n-- a socket shared with a Jarvis or terminal holder fails closed")
+    fake.process(102, start=90000, environ=tagged(T1))         # Jarvis's own, started first
+    fake.process(4900, ppid=102, sid=4900, start=100100, environ=tagged(T1))    # a tagged child
+    jarvis_first = [reader.facts(102), reader.facts(4900)]
+    calls = Counting(reader)
+    v = dl.attribute(listener(), jarvis_first, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.JARVIS and not v.attributed and calls.calls == 0,
+          "a Jarvis pid first and a tagged child sharing the socket: jarvis, and no environ read")
+    v = dl.attribute(listener(), list(reversed(jarvis_first)), sessions, 1006.0, known,
+                     tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.JARVIS, "the order the facts arrive in does not matter")
+    fake.process(101, start=100400, environ=tagged(T1))        # Jarvis's own, started AFTER the agent
+    v = dl.attribute(listener(), [reader.facts(4900), reader.facts(101)], sessions, 1006.0, known,
+                     tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.JARVIS and calls.calls == 0,
+          "a Jarvis pid that started after the tagged holder still refuses the listener")
+    fake.process(600, start=60000, comm="bash")
+    fake.process(4910, sid=600, start=100050, environ=env(b"A=1"))             # a terminal's process, first
+    fake.process(4911, sid=4911, start=100200, environ=tagged(T1))             # an agent's tagged process
+    term_first = [reader.facts(4910), reader.facts(4911)]
+    v = dl.attribute(listener(), term_first, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.TERMINAL and not v.attributed and calls.calls == 0,
+          "a terminal's process first and a tagged agent process sharing the socket: terminal")
+    v = dl.attribute(listener(), list(reversed(term_first)), sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.TERMINAL, "a terminal holder refuses in either order")
+    fake.process(4912, ppid=600, sid=4912, start=100500, environ=env(b"A=1"))  # a setsid child of the leader, later
+    v = dl.attribute(listener(), [reader.facts(4600), reader.facts(4912)], sessions, 1006.0, known,
+                     tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.TERMINAL, "a terminal leader's child that started after the owner still refuses it")
+    v = dl.attribute(listener(), [reader.facts(4600), reader.facts(102), reader.facts(4910)], sessions, 1006.0,
+                     known, tag_of=calls, probe=PAGE)
+    check(v.refusal in (dl.JARVIS, dl.TERMINAL), "with both kinds of holder, one of the two classes")
+    other_uid = dataclasses.replace(reader.facts(4600), pid=4605, uid=UID + 1)
+    v = dl.attribute(listener(), [other_uid, reader.facts(4601)], sessions, 1006.0, known,
+                     tag_of=reader.tag, probe=PAGE)
+    check(v.attributed and v.pid == 4601, "a holder of another uid is not Jarvis's or a terminal's: it is passed over")
     v = dl.attribute(listener(), [None, reader.facts(102)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.JARVIS, "with none passing, the earliest readable pid's refusal is reported")
+    v = dl.attribute(listener(), [None], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    check(v.refusal == dl.UNREADABLE, "a lone unreadable holder is unreadable")
 
     print("\n-- rules 10 and 11 wait")
     v = dl.attribute(listener(first=1002.0, last=1003.5), [facts], sessions, 1004.0, known, tag_of=reader.tag)
@@ -579,16 +640,65 @@ def fail_closed_checks(fake: Fake) -> None:
     fake.process(4708, start=100100, state="Z")
     check(reader.facts(4708) is None, "a zombie has no facts")
     # The ancestor walk is bounded and stops at its stop set.
+    check(dl.ANCESTRY_MAX == 64, "the ancestor walk is 64 deep")
     for i in range(40):
         fake.process(5000 + i, ppid=(5000 + i - 1) if i else 1, sid=5000, start=1000 + i)
     reader.work = dl.Work()
-    deep = reader.facts(5039)
-    check(deep is not None and len(deep.ancestors) == dl.ANCESTRY_MAX
-          and reader.work.stat_reads <= dl.ANCESTRY_MAX + 2,
-          f"the walk reads at most {dl.ANCESTRY_MAX} ancestors ({reader.work.stat_reads} stat reads)")
+    mid = reader.facts(5039)
+    check(mid is not None and len(mid.ancestors) == 39 and not mid.truncated
+          and reader.work.stat_reads <= 39 + 2,
+          f"a 39-deep chain is read to pid 1 ({reader.work.stat_reads} stat reads), not truncated")
     stopped = reader.facts(5039, stop=frozenset({5036}))
-    check(stopped is not None and [p for p, _ in stopped.ancestors] == [5038, 5037],
+    check(stopped is not None and [p for p, _ in stopped.ancestors] == [5038, 5037]
+          and not stopped.truncated,
           "the walk stops at a stop pid (the subreaper, the daemon, a provider root)")
+    chain(fake, 6000, 64, top_ppid=1)                    # 6064 has exactly 64 ancestors, then pid 1
+    reader.work = dl.Work()
+    exact = reader.facts(6064)
+    check(exact is not None and len(exact.ancestors) == 64 and not exact.truncated
+          and reader.work.stat_reads == 64 + 1,
+          f"exactly 64 ancestors up to pid 1: all read, not truncated ({reader.work.stat_reads} stat reads)")
+    chain(fake, 6100, 65, top_ppid=1)
+    reader.work = dl.Work()
+    over = reader.facts(6165)
+    check(over is not None and len(over.ancestors) == 64 and over.truncated
+          and reader.work.stat_reads <= 64 + 2,
+          f"65 ancestors: 64 are read, no more ({reader.work.stat_reads} stat reads), and the facts say truncated")
+    chain(fake, 6200, 80, top_ppid=1)
+    reader.work = dl.Work()
+    far = reader.facts(6280)
+    check(far is not None and far.truncated and len(far.ancestors) == 64 and reader.work.stat_reads <= 64 + 2,
+          "an 80-deep chain is read 64 deep and is truncated")
+    # A stop pid at the very limit ends the walk there: not truncated.
+    at_limit = reader.facts(6165, stop=frozenset({6100}))
+    check(at_limit is not None and not at_limit.truncated and len(at_limit.ancestors) == 64,
+          "a stop pid right where the limit falls ends the walk: not truncated")
+    check(exact.truncated is False and far.truncated is True and reader.facts(5039).truncated is False,
+          "`truncated` is a plain flag on the facts")
+
+    print("\n-- rule 6 reaches a terminal 25 levels up, and fails closed past the limit")
+    # Every process of a chain is its own session leader (a daemoniser's habit), so
+    # only the ancestor walk can find the terminal's leader at the top.
+    chain(fake, 7000, 25, start0=100000, environ=tagged(T1))
+    chain(fake, 7100, 70, start0=100000, environ=tagged(T1))
+    sessions, known = world()
+    calls = Counting(reader)
+    known25 = dataclasses.replace(known, terminal_leaders=known.terminal_leaders | {(7000, 100000)})
+    f25 = reader.facts(7025)
+    v = dl.attribute(listener(), [f25], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(len(f25.ancestors) == 25 and v.attributed,
+          "control: 25 levels below a process that is not a terminal's, a tagged server is attributed")
+    v = dl.attribute(listener(), [f25], sessions, 1006.0, known25, tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.TERMINAL and not v.attributed,
+          "a process 25 levels below a terminal's leader is refused as terminal's (16 levels used to stop short)")
+    f70 = reader.facts(7170)
+    calls = Counting(reader)
+    v = dl.attribute(listener(), [f70], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(f70.truncated and v.refusal == dl.TERMINAL and not v.attributed and calls.calls == 0,
+          "a process 70 levels deep, however it is tagged, is refused (fail closed) with no environ read")
+    v = dl.attribute(listener(), [f70, reader.facts(7025)], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.TERMINAL,
+          "a truncated holder refuses the listener even when another holder would pass")
     fake.process(5100, ppid=5101, start=1000)
     fake.process(5101, ppid=5100, start=1000)
     loop = reader.facts(5100)
@@ -618,6 +728,9 @@ def tag_checks(fake: Fake, records: list) -> None:
             "not hex": (env(b"OPENROUTER_API_KEY=" + SECRET, b"JARVIS_ORIGIN_TAG=" + b"z" * 32), None),
             "the secret as the value": (env(b"JARVIS_ORIGIN_TAG=" + SECRET[:32]), None),
             "the first of two": (env(b"JARVIS_ORIGIN_TAG=" + t, b"JARVIS_ORIGIN_TAG=" + T2.encode()), t),
+            "a malformed first and a valid second: the first wins, as getenv does":
+                (env(b"JARVIS_ORIGIN_TAG=zz", b"JARVIS_ORIGIN_TAG=" + t), None),
+            "an empty first and a valid second": (env(b"JARVIS_ORIGIN_TAG=", b"JARVIS_ORIGIN_TAG=" + t), None),
         }
         for label, (raw, want) in cases.items():
             got = find(raw)
@@ -703,6 +816,352 @@ def tag_checks(fake: Fake, records: list) -> None:
           "the module logs nothing")
 
 
+# -- the tag cache, the buffer and the read cap --------------------------------------
+
+class OpenFails:
+    """`os.open` raising `errno_` for a path ending `suffix`, `times` times,
+    then behaving. Installed over whatever `os.open` is now."""
+
+    def __init__(self, errno_: int, suffix: str = "/environ", times: int = 1):
+        self.errno_, self.suffix, self.left = errno_, suffix, times
+        self.real = None
+
+    def __enter__(self):
+        self.real = os.open
+        outer = self
+
+        def opener(path, *a, **k):
+            if outer.left > 0 and isinstance(path, str) and path.endswith(outer.suffix):
+                outer.left -= 1
+                raise OSError(outer.errno_, os.strerror(outer.errno_))
+            return outer.real(path, *a, **k)
+        os.open = opener
+        return self
+
+    def __exit__(self, *exc):
+        os.open = self.real
+
+
+def tag_cache_checks(fake: Fake) -> None:
+    import errno
+    t = T1.encode()
+    reader = fake.reader()
+
+    print("\n-- the tag cache: only a found tag or `untagged` is remembered, keyed on (pid, start)")
+    fake.process(8000, start=100100, environ=tagged(T1))
+    f = reader.facts(8000)
+    with OpenFails(errno.EMFILE):
+        first = reader.tag(f)
+    check(first == dl.UNREADABLE and reader.work.environ_reads == 1 and not reader._tags,
+          "EMFILE on the environ open: unreadable, and nothing is cached")
+    again = reader.tag(f)
+    check(again == t and reader.work.environ_reads == 2 and len(reader._tags) == 1,
+          "the next poll reads again and finds the tag (a failure is not remembered)")
+    reader.tag(f)
+    check(reader.work.environ_reads == 2, "a found tag is cached: no third read")
+
+    fake.process(8001, start=100100, environ=tagged(T1))
+    f = reader.facts(8001)
+    reads = reader.work.environ_reads
+    with OpenFails(errno.EACCES):
+        first = reader.tag(f)
+    check(first == dl.UNREADABLE and reader.tag(f) == t and reader.work.environ_reads == reads + 2,
+          "EACCES once and then readable: unreadable, then the tag")
+    if os.geteuid() != 0:
+        fake.process(8002, start=100100, environ=tagged(T1))
+        f = reader.facts(8002)
+        os.chmod(fake.proc / "8002" / "environ", 0)
+        try:
+            first = reader.tag(f)
+        finally:
+            os.chmod(fake.proc / "8002" / "environ", 0o600)
+        check(first == dl.UNREADABLE and reader.tag(f) == t,
+              "a real EACCES environ, made readable later, is read on the next poll")
+    else:
+        print("note: running as root, a real EACCES cannot be produced")
+
+    fake.process(8003, start=100100, environ=tagged(T1))
+    f = reader.facts(8003)
+    fake.restart(8003, 100900)                      # the number now names another process
+    first = reader.tag(f)
+    fake.restart(8003, 100100)
+    check(first == dl.UNREADABLE and reader.tag(f) == t,
+          "a start time that moved mid-read: unreadable, not cached; read afresh when it matches")
+
+    fake.process(8004, start=100100, environ=env(b"A=1"))
+    f = reader.facts(8004)
+    reads = reader.work.environ_reads
+    check(reader.tag(f) == dl.UNTAGGED, "an environment without the tag is untagged")
+    (fake.proc / "8004" / "environ").write_bytes(tagged(T1))
+    check(reader.tag(f) == dl.UNTAGGED and reader.work.environ_reads == reads + 1,
+          "`untagged` is cached for the (pid, start)")
+
+    # The stated limit: exec keeps the pid and its start time, so a cached tag outlives it.
+    fake.process(8005, start=100100, environ=tagged(T1))
+    f = reader.facts(8005)
+    check(reader.tag(f) == t, "a tagged process is read")
+    (fake.proc / "8005" / "environ").write_bytes(env(b"A=1"))      # what an exec of a cleaned env shows
+    check(reader.tag(f) == t,
+          "the limit, stated: a cached tag outlives an exec of the same pid (same start time)")
+
+    # The key includes the start: a pid number reused later does not inherit the tag.
+    fake.process(8010, start=100100, environ=tagged(T1))
+    fa = reader.facts(8010)
+    check(reader.tag(fa) == t, "the first process of pid 8010 is tagged")
+    reads = reader.work.environ_reads
+    fake.process(8010, start=100800, environ=env(b"A=1"))           # the number is reused
+    fb = reader.facts(8010)
+    got = reader.tag(fb)
+    check(got == dl.UNTAGGED and reader.work.environ_reads == reads + 1,
+          "a reused pid with a new start time reads afresh and does not inherit the dead process's tag")
+    check(reader.tag(fa) == t, "and the old (pid, start) entry is still its own")
+
+    print("\n-- the cache is bounded")
+    small = fake.reader()
+    for i in range(dl.TAG_CACHE + 10):
+        fake.process(8100 + i, start=100100 + i, environ=env(b"A=1"))
+        small.tag(small.facts(8100 + i))
+    check(len(small._tags) == dl.TAG_CACHE, "at most TAG_CACHE (pid, start) entries are kept")
+
+    print("\n-- the buffer is zeroed after the read, and the read is capped")
+    fake.process(8200, start=100100, environ=tagged(T1))
+    r = fake.reader()
+    f = r.facts(8200)
+    held: list = []
+    real_fill = r._fill
+
+    def spy(path, buf):
+        out = real_fill(path, buf)
+        held.append((buf, SECRET in bytes(buf[:out[0]])))
+        return out
+    r._fill = spy
+    check(r.tag(f) == t, "the spied read finds the tag")
+    buf, had_secret = held[0]
+    check(had_secret and len(buf) == dl.ENVIRON_CAP and bytes(buf) == bytes(len(buf)),
+          "the 128 KiB buffer held the (fake) key while read, and is all zero after the function returns")
+
+    held.clear()
+    fake.process(8201, start=100100, environ=tagged(T1))
+    f = r.facts(8201)
+    fake.restart(8201, 100999)                                       # the start check fails after the read
+    check(r.tag(f) == dl.UNREADABLE and held and held[0][1] and bytes(held[0][0]) == bytes(len(held[0][0])),
+          "and zeroed on the unreadable path too")
+
+    held.clear()
+    fake.process(8202, start=100100, environ=tagged(T1))
+    f = r.facts(8202)
+
+    def spy_raises(path, buf):
+        out = real_fill(path, buf)
+        held.append((buf, SECRET in bytes(buf[:out[0]])))
+        raise OSError(5, "I/O error")                                # the read dies after filling the buffer
+    r._fill = spy_raises
+    check(r.tag(f) == dl.UNREADABLE and held and held[0][1] and bytes(held[0][0]) == bytes(len(held[0][0])),
+          "and zeroed when the read fails after filling it")
+    r._fill = real_fill
+
+    path = fake.proc / "8300"
+    fake.process(8300, start=100100, environ=b"x" * 64)
+    for size, want in ((64, (64, False)), (63, (63, True)), (100, (64, False)), (0, (0, True)), (65, (64, False))):
+        (path / "environ").write_bytes(b"x" * size)
+        got = fake.reader()._fill(str(path / "environ"), bytearray(64))
+        if got != want:
+            check(False, f"_fill of a {size}-byte file into 64 bytes returned {got}, wanted {want}")
+            break
+    else:
+        check(True, "_fill reports `complete` only when it hit the end of the file before the cap")
+
+    cap = dl.ENVIRON_CAP
+    head = b"P=" + b"z" * (cap - 2 - 1 - len(dl.TAG_NAME) - dl.TAG_LEN) + b"\0" + dl.TAG_NAME + t
+    check(len(head) == cap, "(the fixture environment is exactly 128 KiB, the tag value last)")
+    fake.process(8301, start=100100, environ=head)
+    check(r.tag(r.facts(8301)) == dl.UNTAGGED,
+          "an environment exactly at the cap, tag last with no NUL: not trusted (the value may go on)")
+    fake.process(8302, start=100100, environ=head + b"0")
+    check(r.tag(r.facts(8302)) == dl.UNTAGGED,
+          "a tag whose 33rd digit lies past the cap is not read as a 32-digit tag")
+    fake.process(8303, start=100100, environ=head[:-len(t)] + t + b"\0")
+    check(r.tag(r.facts(8303)) == dl.UNTAGGED,
+          "(a tag that ends exactly where the cap does, its NUL beyond it, is likewise not seen)")
+    fake.process(8304, start=100100, environ=head[:-1][-(cap - 1):])
+    check(len(head[:-1]) == cap - 1 and r.tag(r.facts(8304)) == dl.UNTAGGED,
+          "a 31-digit tag value at the end of a short environment is not a tag")
+    short = b"A=1\0" + dl.TAG_NAME + t
+    fake.process(8305, start=100100, environ=short)
+    check(r.tag(r.facts(8305)) == t, "the same tag at the end of an environment read whole is found")
+
+    print("\n-- environ is opened without following a symlink")
+    real_file = fake.proc / "8400-target"
+    real_file.write_bytes(tagged(T1))
+    fake.process(8400, start=100100, environ=None)
+    os.symlink(real_file, fake.proc / "8400" / "environ")
+    f = r.facts(8400)
+    check(r.tag(f) == dl.UNREADABLE and not any(k == (8400, 100100) for k in r._tags),
+          "an environ that is a symlink is unreadable (O_NOFOLLOW), and not cached")
+
+
+# -- the fd scan's budget -----------------------------------------------------------------
+
+def fd_budget_checks(base: Path) -> None:
+    print("\n-- the fd scan is bounded: FD_SCAN_MAX readlinks, then it stops and attributes nothing")
+    check(dl.FD_SCAN_MAX == 50_000, "the cap is 50,000 readlinks a scan")
+    fake = Fake(base / "fdcap")
+    big, tail = 9000, 9001
+    d = fake.proc / str(big)
+    (d / "fd").mkdir(parents=True)
+    (d / "stat").write_text(stat_text(big, "node", "S", 1, big, 100100))
+    for n in range(dl.FD_SCAN_MAX + 25):
+        os.symlink("/dev/null", d / "fd" / str(n))
+    fake.process(tail, start=100200, fds=["socket:[777001]"], environ=tagged(T1))
+    reader = fake.reader()
+    out = reader.socket_owners([big, tail], [777001])
+    w = reader.work
+    check(w.fd_readlinks == dl.FD_SCAN_MAX and w.fd_lists == 1,
+          f"a pid with more fds than the cap costs at most the cap ({w.fd_readlinks} readlinks, {w.fd_lists} listing)")
+    check(out == {} and out.complete is False and out.skipped == 2 and w.fd_skipped == 2
+          and w.as_dict()["fd_skipped"] == 2,
+          "the scan says it is incomplete, the skipped pids are counted, and the socket in the unread pid is not found")
+    sessions, known = world()
+    calls = Counting(reader)
+    facts = [reader.facts(tail)]
+    v = dl.attribute(listener(), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE,
+                     scan_complete=out.complete)
+    check(v.outcome == "pending" and v.pending == "scan" and not v.attributed and calls.calls == 0,
+          "an incomplete scan attributes nothing this poll: pending (scan), no environ read")
+    v = dl.attribute(listener(), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(v.attributed, "(the same facts from a complete scan do attribute)")
+    v = dl.attribute(listener(port=8405), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE,
+                     scan_complete=False)
+    check(v.refusal == dl.JARVIS_PORT, "a refused port is still refused on an incomplete scan, not left pending")
+    v = dl.attribute(listener(), [], sessions, 1006.0, known, tag_of=calls, probe=PAGE, scan_complete=False)
+    check(v.pending == "scan", "no holder found on an incomplete scan is pending, not `outside`")
+
+    old = dl.FD_SCAN_MAX
+    dl.FD_SCAN_MAX = 5
+    try:
+        small = Fake(base / "fdsmall")
+        for pid, nfds in ((9100, 5), (9101, 6), (9102, 1)):
+            small.process(pid, start=100100, fds=["/dev/null"] * (nfds - 1) + ["socket:[555]"])
+        r = small.reader()
+        check(r.socket_owners([9100], [555]).complete and r.work.fd_readlinks == 5,
+              "exactly the cap of fds in one pid: complete")
+        r = small.reader()
+        got = r.socket_owners([9101], [555])
+        check(not got.complete and r.work.fd_readlinks == 5 and got.skipped == 1,
+              "one fd over the cap: incomplete after exactly the cap's readlinks")
+        r = small.reader()
+        got = r.socket_owners([9102, 9102, 9102], [555])
+        check(got.complete and got == {555: [9102]} and r.work.fd_readlinks == 3,
+              "small pids within the budget in total: complete")
+        r = small.reader()
+        got = r.socket_owners([9100, 9102], [555])
+        check(not got.complete and got == {555: [9100]} and got.skipped == 1 and r.work.fd_skipped == 1,
+              "the budget is for the scan, not each pid: the second pid is left unread")
+    finally:
+        dl.FD_SCAN_MAX = old
+
+
+# -- rule 7: a window's two conditions hold together ------------------------------------------
+
+def window_checks() -> None:
+    print("\n-- rule 7: first sighting and process start must fall in the same window")
+    s = dl.Sessions()
+    s.open(T1, "th-1", at=0.0)
+    s.turn_started("th-1", "claude", at=1000.0)
+    s.turn_ended("th-1", at=1100.0)                  # window 1: 1000..1100, grace to 1700
+    s.turn_started("th-1", "claude", at=2000.0)      # window 2: 2000.., still running
+    check(s.holding(2100.0, 1500.0) == frozenset(),
+          "a process started in window 1's grace, first seen in window 2: not held by either")
+    check(s.holding(2100.0, 1999.0) == {"th-1"}, "started within the slack of window 2: held")
+    check(s.holding(1650.0, 1500.0) == {"th-1"}, "started in window 1 and seen in its grace: held")
+    check(s.holding(1650.0, 990.0) == frozenset(), "started before window 1 and seen in it: not held")
+    _unused, known = world()
+    sessions = dl.Sessions()
+    sessions.open(T1, "th-1", at=999.0)
+    sessions.turn_started("th-1", "claude", at=1000.0)
+    sessions.turn_ended("th-1", at=1100.0)
+    sessions.turn_started("th-1", "claude", at=2000.0)
+    f = dataclasses.replace(_passing_facts(), start=150000, started_at=1500.0, leader_start=150000)
+    v = dl.attribute(listener(first=2100.0, last=2103.0), [f], sessions, 2104.0, known,
+                     tag_of=lambda _f: T1.encode(), probe=PAGE)
+    check(v.refusal == dl.NO_TURN, "attribute(): that process is no_turn")
+    v = dl.attribute(listener(first=1650.0, last=1653.0), [f], sessions, 1654.0, known,
+                     tag_of=lambda _f: T1.encode(), probe=PAGE)
+    check(v.attributed, "attribute(): the same process seen inside window 1's grace is attributed")
+
+
+# -- small guards -------------------------------------------------------------------------------
+
+def nit_checks() -> None:
+    print("\n-- the socket owner's uid, an unknown bind class, and the tag out of reprs")
+    ports = KNOWN_PORTS
+    mine = dl.Row(4, dl.LOOPBACK, 5173, 1, UID)
+    other = dl.Row(4, dl.LOOPBACK, 5173, 1, UID + 1)
+    check(dl.cheap_refusal(mine, ports, UID) is None and dl.cheap_refusal(other, ports, UID) == dl.UID
+          and dl.cheap_refusal(other, ports) is None,
+          "a socket owned by another uid is refused as uid (the daemon's uid is passed in; none passed: no check)")
+    check(dl.cheap_refusal(dl.Row(4, dl.LOOPBACK, 8405, 1, UID + 1), ports, UID) == dl.JARVIS_PORT,
+          "the port rules still come first")
+    check(dl.cheap_refusal(dl.Row(4, "weird", 5173, 1, UID), ports, UID) == dl.ODD_LOOPBACK
+          and dl.cheap_refusal(dl.Row(4, "", 5173, 1, UID), ports, UID) == dl.ODD_LOOPBACK
+          and dl.cheap_refusal(dl.Row(4, dl.WILDCARD, 5173, 1, UID), ports, UID) is None,
+          "an unknown bind class is refused; the wildcard and loopback are not")
+    sessions, known = world()
+    calls = Counting(dl.ProcReader())
+    row = dl.Listener(other, 1002.0, 1005.0)
+    v = dl.attribute(row, [_passing_facts()], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v2 = dl.attribute(row, [], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.UID and v2.refusal == dl.UID and calls.calls == 0,
+          "attribute(): another uid's socket is uid before rule 3 and before any process is judged")
+    check(dl.probe_address(other, ports, UID) is None and dl.probe_address(mine, ports, UID) == ("127.0.0.1", 5173)
+          and dl.probe_address(other, ports) == ("127.0.0.1", 5173),
+          "probe_address passes the uid through when it is given")
+
+    s = dl.Sessions()
+    s.open(T1, "th-1", at=0.0)
+    session = s.owner(T1.encode(), 1.0)
+    check(T1 not in repr(session) and "th-1" in repr(session),
+          "a Session's repr does not carry its tag")
+
+
+def arbitrate_malformed_checks() -> None:
+    print("\n-- arbitrate drops a malformed claim")
+    C = dl.Claim
+    good = C("wa", False, 100, 0.5)
+    bad = [
+        C("wx", "yes", 100, 0.0),            # shows: not a bool
+        C("wx", 1, 100, 0.0),
+        C("wx", True, 100.5, 0.0),           # focused_at: a float
+        C("wx", True, "100", 0.0),
+        C("wx", True, True, 0.0),            # focused_at: a bool
+        C("wx", True, -1, 0.0),              # focused_at out of range
+        C("wx", True, 2**53, 0.0),
+        C("wx", True, 100, float("nan")),    # at: not finite
+        C("wx", True, 100, float("inf")),
+        C("wx", True, 100, "0.0"),
+        C("wx", True, 100, None),
+        C(7, True, 100, 0.0),                # window: not a string
+        C(None, True, 100, 0.0),
+        C("", True, 100, 0.0),
+        C("w" * 200, True, 100, 0.0),
+        {"window": "wx", "shows": True, "focused_at": 1, "at": 0.0},
+        None,
+        "claim",
+    ]
+    try:
+        out = dl.arbitrate([*bad, good])
+        check(out is good, "every malformed claim is dropped; the good one wins, none raises")
+        check(dl.arbitrate(bad) is None, "only malformed claims: no winner, no error")
+        late = C("wl", True, 5, 0.7)
+        check(dl.arbitrate([C("wx", True, "100", 0.0), good, late]) is late,
+              "a malformed claim does not open the 600 ms window (the good claim at 0.5 s does, so 0.7 s is in)")
+        check(dl.arbitrate([C("wa", False, 0, 0.0), C("wb", False, 2**53 - 1, 0.1)]).window == "wb"
+              and dl.arbitrate([C("w" * 128, True, 1, 0)]).window == "w" * 128,
+              "the bounds are inclusive: focused_at 2**53-1, a 128-character window, an int `at`")
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"arbitrate raised {type(exc).__name__}: {exc}")
+
+
 # -- the probe -----------------------------------------------------------------------
 
 def probe_checks() -> None:
@@ -775,6 +1234,68 @@ def probe_checks() -> None:
         ("an SSH banner is not_http", b"SSH-2.0-OpenSSH_9.6\r\n", dl.NOT_HTTP),
         ("headers past 4 KiB are not_http",
          resp("200 OK", ["Content-Type: text/html", "X-Pad: " + "a" * 5000], page), dl.NOT_HTTP),
+        # -- policies and lists are read whole (they were survivors of the review's guard removals)
+        ("a comma-joined CSP whose second policy refuses is no_frame",
+         resp("200 OK", ["Content-Type: text/html",
+                         "Content-Security-Policy: frame-ancestors *, frame-ancestors 'none'"]), dl.NO_FRAME),
+        ("a comma-joined CSP whose first policy refuses is no_frame",
+         resp("200 OK", ["Content-Type: text/html",
+                         "Content-Security-Policy: frame-ancestors 'self', default-src 'self'"]), dl.NO_FRAME),
+        ("a comma-joined CSP that allows framing in every policy passes",
+         resp("200 OK", ["Content-Type: text/html",
+                         "Content-Security-Policy: frame-ancestors *, default-src 'self'"]), None),
+        ("X-Frame-Options: ALLOWALL, DENY is no_frame",
+         resp("200 OK", ["Content-Type: text/html", "X-Frame-Options: ALLOWALL, DENY"]), dl.NO_FRAME),
+        ("X-Frame-Options: SAMEORIGIN, SAMEORIGIN is no_frame",
+         resp("200 OK", ["Content-Type: text/html", "X-Frame-Options: SAMEORIGIN, SAMEORIGIN"]), dl.NO_FRAME),
+        ("two Content-Type headers: the last one (text/html) wins and passes",
+         resp("200 OK", ["Content-Type: text/plain", "Content-Type: text/html"], b"plain"), None),
+        ("two Content-Type headers: the last one (application/json) wins and is not_page",
+         resp("200 OK", ["Content-Type: text/html", "Content-Type: application/json"], page), dl.NOT_PAGE),
+        # -- where the headers end
+        ("LF headers end at their own blank line, not at a later CRLF one in the body",
+         b'HTTP/1.1 200 OK\nContent-Type: application/json\n\n{"a":1}\r\nContent-Type: text/html\r\n\r\n',
+         dl.NOT_PAGE),
+        ("a body that quotes X-Frame-Options after LF headers is not a header",
+         b"HTTP/1.1 200 OK\nContent-Type: text/html\n\n<html>docs\r\nX-Frame-Options: DENY\r\n\r\n", None),
+        ("CRLF headers end at their own blank line, not at an earlier bare LF pair in the body",
+         b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nX-Frame-Options: DENY\r\n\r\n<html>\n\nx", dl.NO_FRAME),
+        ("LF-only headers still end at the first blank line",
+         b"HTTP/1.1 200 OK\nContent-Type: text/html\nX-Frame-Options: DENY\n\n<html>", dl.NO_FRAME),
+        # -- obs-fold (RFC 7230 §3.2.4): a continuation line joins the previous header with one space
+        ("a CSP folded onto a second line (a space) is read whole",
+         resp("200 OK", ["Content-Type: text/html", "Content-Security-Policy: default-src 'self';",
+                         " frame-ancestors 'none'"]), dl.NO_FRAME),
+        ("a CSP folded with a tab",
+         resp("200 OK", ["Content-Type: text/html", "Content-Security-Policy: default-src 'self';",
+                         "\tframe-ancestors 'none'"]), dl.NO_FRAME),
+        ("an X-Frame-Options value folded onto the next line",
+         resp("200 OK", ["Content-Type: text/html", "X-Frame-Options:", " DENY"]), dl.NO_FRAME),
+        ("a fold on LF-only headers",
+         b"HTTP/1.1 200 OK\nContent-Type: text/html\nContent-Security-Policy: default-src 'self';\n"
+         b"  frame-ancestors 'none'\n\n<html>", dl.NO_FRAME),
+        ("a fold of a harmless policy still passes",
+         resp("200 OK", ["Content-Type: text/html", "Content-Security-Policy: default-src 'self';",
+                         " img-src *"]), None),
+        ("a folded Content-Type is joined (text/ + html is not text/html)",
+         resp("200 OK", ["Content-Type: text/", " html"], b"plain"), dl.NOT_PAGE),
+        ("a fold with no header before it is dropped, not raised on",
+         resp("200 OK", [" orphan", "Content-Type: text/html"], b"plain"), None),
+        # -- markup needs a tag name that ends
+        ("<header> is not <head>: an untyped 200 is not_page",
+         resp("200 OK", [], b"<header>Site</header>"), dl.NOT_PAGE),
+        ("<htmlx> is not <html>",
+         resp("200 OK", [], b"<htmlx>"), dl.NOT_PAGE),
+        ("<bodyguard> and <heading> are not markup either",
+         resp("200 OK", [], b"<bodyguard></bodyguard><heading>"), dl.NOT_PAGE),
+        ("a 404 text/html holding only <header> is not_page",
+         resp("404 Not Found", ["Content-Type: text/html"], b"<header>Cannot GET /</header>"), dl.NOT_PAGE),
+        ("<html lang=en> is markup", resp("200 OK", [], b"<html lang=en>"), None),
+        ("<BODY then a newline (whitespace after the name) is markup",
+         resp("200 OK", [], b"<BODY\n>"), None),
+        ("<head/> is markup", resp("200 OK", [], b"<head/>"), None),
+        ("<!DOCTYPE HTML> is markup", resp("200 OK", [], b"<!DOCTYPE HTML>"), None),
+        ("<!doctype htmlx> is not markup", resp("200 OK", [], b"<!doctype htmlx>"), dl.NOT_PAGE),
     ]
     for label, data, want in cases:
         try:
@@ -942,8 +1463,13 @@ def main() -> int:
             attribution_checks(Fake(base / "attr"))
             fail_closed_checks(Fake(base / "closed"))
             tag_checks(Fake(base / "tags"), records)
+            tag_cache_checks(Fake(base / "tagcache"))
+            fd_budget_checks(base)
+            window_checks()
+            nit_checks()
             probe_checks()
             arbitrate_checks()
+            arbitrate_malformed_checks()
             sessions_checks()
             work_checks(base)
             pin_checks()
