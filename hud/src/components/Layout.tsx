@@ -24,8 +24,9 @@ import {
   MENU_PRESETS, PANEL, SHAPES, TITLEBAR_H, cellsOf, closePane as closePaneOf, defaultWorkspace,
   equalSplit as equalSplitOf, fitWorkspace, focusPane,
   forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
+  renameTerminal as renameTerminalOf,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
-  setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  setBrowserUrl as setBrowserUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
   setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
   unpinProject as unpinProjectOf, setEditors as setEditorsOf,
   type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
@@ -65,15 +66,17 @@ export interface LayoutControl {
   setEditors: (pane: PaneNo, projectId: string, tabs: Tabs | null) => void;
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
-  setPreviewUrl: (pane: PaneNo, url: string) => void;
+  setBrowserUrl: (pane: PaneNo, url: string) => void;
   /** The file a File or Diff pane has open (null: none), read again when it mounts (WP-G2). */
   setFilePath: (pane: PaneNo, path: string | null) => void;
-  /** A Preview pane's "keep its own origin" grant (an origin), or none (WP-E, W-4). */
+  /** A Browser pane's "keep its own origin" grant (an origin), or none (WP-E, W-4). */
   setKeepOrigin: (pane: PaneNo, origin: string | null) => void;
   /** The terminal a terminal pane shows (null: choose again); no other pane keeps it (W-1). */
   setTerminal: (pane: PaneNo, id: string | null) => void;
   /** A terminal was closed or ended: no pane holds it any more. */
   forgetTerminal: (id: string) => void;
+  /** A terminal continued under a new id after a restart: every pane holding it holds the new one. */
+  renameTerminal: (from: string, to: string) => void;
   setSplit: (preset: Preset, split: Partial<Split>) => void;
   equalSplit: (preset: Preset) => void;
   togglePanel: () => void;
@@ -220,7 +223,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   const unpinProject = useCallback(
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
-  const setPreviewUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setPreviewUrlOf(w, pane, url)), []);
+  const setBrowserUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setBrowserUrlOf(w, pane, url)), []);
   const setFilePath = useCallback(
     (pane: PaneNo, path: string | null) => setWs((w) => setFilePathOf(w, pane, path)), [],
   );
@@ -229,6 +232,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   );
   const setTerminal = useCallback((pane: PaneNo, id: string | null) => setWs((w) => setPaneTerminal(w, pane, id)), []);
   const forgetTerminal = useCallback((id: string) => setWs((w) => forgetTerminalOf(w, id)), []);
+  const renameTerminal = useCallback((from: string, to: string) => setWs((w) => renameTerminalOf(w, from, to)), []);
   const setSplit = useCallback(
     (preset: Preset, split: Partial<Split>) => setWs((w) => setSplitOf(w, preset, split)), [],
   );
@@ -385,8 +389,8 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     ownerTogglePanel,
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, setEditors, unpinProject, setPreviewUrl, setFilePath, setKeepOrigin,
-    setTerminal, forgetTerminal, setSplit,
+    setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, setFilePath, setKeepOrigin,
+    setTerminal, forgetTerminal, renameTerminal, setSplit,
     equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
   };
 }

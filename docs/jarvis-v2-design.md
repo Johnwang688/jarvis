@@ -2122,6 +2122,28 @@ fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
 
+**A terminal that ended with Jarvis continues where it was (2026-10-12, the
+owner's option (a)).** The owner typed into a terminal whose history was
+still on screen after a restart and got only "New terminal here". Now a
+typing key there, a paste or **Continue here** starts a new shell in the same
+folder, with the same "Jarvis can read" switch (off when unknown), in the
+same place and the same xterm, under the old text and a `── restarted HH:MM
+──` line; what was typed waits (4 KiB) until the new shell's replay has been
+parsed, and is then **typed, never run** (the lead's decision on review):
+the keys up to the first Enter, and no paste with a line break, because the
+line was typed at the old context's prompt (a robot's shell, `>>>`, a root
+shell) and must not run in a fresh local one; the window says so. Any
+refusal while held — a key that does not type, past 4 KiB, a card, the
+terminal leaving the screen — drops all of it. The old text is rebuilt from
+xterm's cells (characters and colours, the last 1 MiB, read from the bottom),
+kept in this page's memory only, and written back after the RIS of every
+later attach of the new terminal. Running programs do not survive —
+only their text — and a page reload loses the text: real survival would need
+a pty host outside the daemon, which would reverse W-3 (option (b), not
+taken). Only the owner's gesture in that terminal continues it: never a
+card, a crash, a load, a reattach, another window's terminal, a shell that
+exited on its own, a program terminal, Ctrl+D or a HUD key. No route changed.
+
 **Jarvis can read a terminal (2026-10-10, WP-F; decisions W-2).**
 `terminal_read(terminal, lines=200)` returns the last lines (at most 1000) of
 one terminal's **normal buffer** as plain text — escape sequences stripped,
@@ -2229,7 +2251,7 @@ other link opens in a new tab as before; the menu flips above a click on
 the panel terminal's last row and stays inside the window at any zoom.
 Free suites: `tests/v2/
 frame_check.py` (every route family on both listeners, checked against the
-route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` and
+route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` (now `browser.test.ts` and `hud_v2_browser_check.py`, BR-3a) and
 the terminal suite's link section. Not yet: a "dev servers in your
 terminals" list (§2.5 item 5).
 
@@ -2889,6 +2911,27 @@ guarded save. **Push-to-talk keeps Ctrl+D in the editor in vim mode too —
 the owner's decision (2026-10-12)**; vim loses its half-page-down. Under an
 approval card the dialog closes and the ⚙ is disabled with the rest of the
 window.
+
+**File reads as the editor, Preview is the Browser (2026-10-12, BR-3a of
+`docs/plans/2026-10-10-hud-browser-plan.md` §7, cut by its amendment 1 to the
+rename and the migration).** The owner: "also rename "File" to "Editor" and
+"Preview" to "Browser"". The strip says **Editor** and **Browser**. The
+Browser changes in name and id both — view `"browser"`, `browserUrl`,
+`lib/browser.ts`, `BrowserTab.tsx`, `browser-*` test ids — and the terminal
+link menu says **Open in Browser** (`term-link-pane`) and **Open in a Chrome
+tab** (`term-link-tab`); which links get the menu is unchanged until Remote
+mode (B-11). A layout stored before the rename migrates as it is read, under
+the same key: a Preview pane opens as the Browser with its URL, and its
+keep-origin grant only while that grant is still exactly the URL's origin;
+the next save writes only the new names. The editor changes in name only:
+its id stays `"file"`, so stored layouts and the editor suites need nothing,
+and one label table (`VIEW_LABEL`) names every view for the strip, its
+compact menu and the pane's `aria-label`; the palette's "Show Files" is
+"Show Editor". The workshop listener (8403) keeps its Python names
+(`preview_route`, `preview_only`) and is "the workshop origin" in the docs.
+Free checks: `workspace.test.ts` (the migration, the grant, the label table,
+a stored `"file"` pane) and `tests/face/hud_v2_browser_check.py` (was
+`hud_v2_preview_check.py`; its `_rename_checks` seed a pre-rename layout).
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

@@ -35,10 +35,10 @@ describe("where a dev server opens", () => {
     expect(p.kind).toBe("split");
     if (p.kind !== "split") return;
     const ws = defaultWorkspace();
-    const next = splitPane(ws, p.source, 2 as PaneNo, { view: "preview", projectId: null, terminalId: null, previewUrl: p.url },
+    const next = splitPane(ws, p.source, 2 as PaneNo, { view: "browser", projectId: null, terminalId: null, browserUrl: p.url },
       { focus: false });
     expect([next.preset, next.order, next.focused]).toEqual(["cols2", [1, 2], 1]);
-    expect(next.panes[1].previewUrl).toBe("http://localhost:5173/");
+    expect(next.panes[1].browserUrl).toBe("http://localhost:5173/");
   });
 
   it("with no room, in the focused pane — unless that pane is busy, the terminal itself or a page", () => {
@@ -47,14 +47,14 @@ describe("where a dev server opens", () => {
     expect(tight({ busy: [1] })).toEqual({ kind: "offer", terminalId: "t1", url: "http://localhost:5173/" });
     expect(tight({ panes: [{ id: 1, view: "terminal", terminalId: "t1" }] }).kind).toBe("offer");
     expect(tight({ panes: [{ id: 1, view: "terminal", terminalId: "t2" }] }).kind).toBe("focused");
-    expect(tight({ panes: [{ id: 1, view: "preview", url: "http://localhost:8080/" }] }).kind).toBe("offer");
-    expect(tight({ panes: [{ id: 1, view: "preview" }] }).kind).toBe("focused");
+    expect(tight({ panes: [{ id: 1, view: "browser", url: "http://localhost:8080/" }] }).kind).toBe("offer");
+    expect(tight({ panes: [{ id: 1, view: "browser" }] }).kind).toBe("focused");
   });
 
-  it("knows the Browser pane by either name", () => {
-    expect(isBrowserView("preview")).toBe(true);
+  it("knows the Browser pane by its view (BR-3a's name)", () => {
     expect(isBrowserView("browser")).toBe(true);
     expect(isBrowserView("chat")).toBe(false);
+    expect(isBrowserView("file")).toBe(false);
   });
 });
 
@@ -101,7 +101,7 @@ describe("what is skipped", () => {
     expect(first.plan.kind).toBe("split");
     // A server restart prints it again, later: no second pane.
     expect(plan("http://localhost:5173/about", win(), first.state, T + 120_000).plan).toEqual({ kind: "skip", why: "duplicate" });
-    const shown = win({ panes: [{ id: 1, view: "chat" }, { id: 4, view: "preview", url: "http://localhost:4000/x" }] });
+    const shown = win({ panes: [{ id: 1, view: "chat" }, { id: 4, view: "browser", url: "http://localhost:4000/x" }] });
     expect(plan("http://localhost:4000/", shown).plan).toEqual({ kind: "skip", why: "duplicate" });
     // Another origin — another host spelling is another origin — opens.
     expect(plan("http://127.0.0.1:5173/", win(), first.state, T + 120_000).plan.kind).toBe("split");

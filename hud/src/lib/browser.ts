@@ -1,4 +1,5 @@
-// What the Preview tab is allowed to iframe, and how.
+// What the Browser pane is allowed to iframe, and how (WP-E; renamed from
+// the Preview pane, lib/preview.ts, in BR-3a).
 //
 // The HUD is the approval surface. An iframe that could reach `/approvals`
 // would let an agent approve itself, which is the frontend half of v1's
@@ -13,7 +14,7 @@
 //
 // **Keeping its own origin (decisions W-4, WP-E).** A framed page normally
 // runs with an opaque origin (`sandbox` without `allow-same-origin`), so a dev
-// app's `localStorage`, cookies and IndexedDB throw. A Preview pane may let a
+// app's `localStorage`, cookies and IndexedDB throw. A Browser pane may let a
 // local dev server's page keep its own origin — off by default, per pane, and
 // only:
 //   - for a loopback port that is none of the daemon's three (HUD, workshop,
@@ -35,7 +36,7 @@ export const FACE_PORT = 8402;
 export const WORKSHOP_PORT = 8403;
 export const API_PORT = 8405;
 
-export interface PreviewVerdict {
+export interface BrowserVerdict {
   ok: boolean;
   url: string;
   reason: string;
@@ -57,7 +58,7 @@ export const DEFAULT_PORTS: DaemonPorts = {
   hud: FACE_PORT, api: API_PORT, workshop: WORKSHOP_PORT, self: null, frameHardened: false,
 };
 
-/** The sandbox every preview frame gets. Nothing else is ever added but `allow-same-origin`. */
+/** The sandbox every Browser frame gets. Nothing else is ever added but `allow-same-origin`. */
 export const SANDBOX = "allow-scripts allow-forms";
 
 export function isLoopbackHost(host: string): boolean {
@@ -88,7 +89,7 @@ function urlPort(url: URL): number {
   return Number(url.port || (url.protocol === "https:" ? 443 : 80));
 }
 
-/** Ports a preview frame never loads: the HUD, the API (reported and default) and this window's own. */
+/** Ports a Browser frame never loads: the HUD, the API (reported and default) and this window's own. */
 function framelessPorts(ports: Partial<DaemonPorts>): Set<number> {
   const out = new Set<number>([FACE_PORT, API_PORT]);
   for (const p of [ports.hud, ports.api, ports.self]) if (typeof p === "number") out.add(p);
@@ -104,19 +105,19 @@ function daemonPorts(ports: Partial<DaemonPorts>): Set<number> {
 }
 
 /**
- * Judge a URL for the preview pane.
+ * Judge a URL for the Browser pane.
  *
  * Allowed: the workshop origin (`http://127.0.0.1:8403/p/<project>/…`) and any
  * `http://localhost:<port>/…` dev server. Refused: the HUD's own origin, the
  * daemon's API listener (WP-E), this window's own port, and anything that is
- * not loopback http — a preview pane is for looking at what was just built on
- * this machine, not a browser. `ports` is what `/status` reported; the
+ * not loopback http — the pane is for looking at what was just built on
+ * this machine. `ports` is what `/status` reported; the
  * defaults (8402, 8405) are refused whatever it says, since they are the
  * owner's live daemon.
  */
-export function judgePreviewUrl(raw: string, ports: Partial<DaemonPorts> = {}): PreviewVerdict {
+export function judgeBrowserUrl(raw: string, ports: Partial<DaemonPorts> = {}): BrowserVerdict {
   const text = (raw || "").trim();
-  if (!text) return { ok: false, url: "", reason: "Enter a preview URL." };
+  if (!text) return { ok: false, url: "", reason: "Enter a URL." };
   let url: URL;
   try {
     url = new URL(text);
@@ -132,7 +133,7 @@ export function judgePreviewUrl(raw: string, ports: Partial<DaemonPorts> = {}): 
     return { ok: false, url: "", reason: "Refused: a URL with a user name or password in it." };
   }
   if (!isLoopbackHost(url.hostname)) {
-    return { ok: false, url: "", reason: "Refused: the preview pane only loads local servers." };
+    return { ok: false, url: "", reason: "Refused: the Browser only loads local servers." };
   }
   const port = urlPort(url);
   if (framelessPorts(ports).has(port)) {
@@ -186,7 +187,7 @@ export function judgeKeepOrigin(url: string, ports: DaemonPorts): KeepVerdict {
   if (!ports.frameHardened) {
     return { ok: false, origin: "", reason: "Jarvis's daemon does not refuse to be framed yet, so no page keeps its origin." };
   }
-  const v = judgePreviewUrl(url, ports);
+  const v = judgeBrowserUrl(url, ports);
   if (!v.ok) return { ok: false, origin: "", reason: v.reason };
   const u = new URL(v.url);
   if (!isLoopbackHost(u.hostname)) {
@@ -238,7 +239,7 @@ export function workshopPortFrom(status: unknown): number {
   return portOf(port) ?? WORKSHOP_PORT;
 }
 
-/** Everything the preview needs from `/status`; the defaults for what a daemon did not say. */
+/** Everything the Browser needs from `/status`; the defaults for what a daemon did not say. */
 export function daemonPortsFrom(status: unknown, self: number | null = null): DaemonPorts {
   const s = status && typeof status === "object" ? (status as Record<string, unknown>) : {};
   return {
@@ -250,7 +251,7 @@ export function daemonPortsFrom(status: unknown, self: number | null = null): Da
   };
 }
 
-/** The workshop URL for a file inside a project (docs/hud-api.md, Preview origin). */
+/** The workshop URL for a file inside a project (docs/hud-api.md, the workshop origin). */
 export function workshopUrl(projectId: string, rel: string, port = WORKSHOP_PORT): string {
   const clean = rel.replace(/^\/+/, "");
   return `http://127.0.0.1:${port}/p/${encodeURIComponent(projectId)}/${clean}`;

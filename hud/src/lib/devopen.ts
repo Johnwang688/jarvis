@@ -19,7 +19,7 @@
 //     localhost:5173 · Open in Browser";
 //   - `wait`: a card is up — nothing in the layout changes under it. The URL
 //     waits (the newest one only) and expires 30 s after it arrived;
-//   - `skip`: the switch is off; the WP-E judge refuses the URL; that origin
+//   - `skip`: the switch is off; the WP-E judge (`judgeBrowserUrl`) refuses the URL; that origin
 //     was auto-opened (or offered) before in this page, or a drawn or hidden
 //     Browser pane already shows it; or the rate limit — one per 10 s per
 //     terminal, three a minute per window — is spent.
@@ -38,7 +38,7 @@
 // socket's history; the daemon's sniffer reads live output only, so a reload's
 // ring replay never sends a URL again.
 
-import { API_PORT, FACE_PORT, WORKSHOP_PORT, judgePreviewUrl, originOf, type DaemonPorts } from "./preview";
+import { API_PORT, FACE_PORT, WORKSHOP_PORT, judgeBrowserUrl, originOf, type DaemonPorts } from "./browser";
 import type { PaneNo, View } from "./workspace";
 
 /** One open per terminal in this long. */
@@ -72,7 +72,7 @@ export function devUrlArrived(s: DevOpenState, url: unknown, terminalId: string,
 export interface PaneShows {
   id: PaneNo;
   view: View;
-  /** A Browser (Preview) pane's URL. */
+  /** A Browser pane's URL (`PaneSpec.browserUrl`). */
   url?: string;
   /** A terminal pane's terminal. */
   terminalId?: string | null;
@@ -108,9 +108,12 @@ export type DevOpenPlan =
   | { kind: "wait" }
   | { kind: "skip"; why: SkipWhy };
 
-/** The pane kind that shows a web page — "preview" until BR-3a renames it "browser". */
+/**
+ * The pane kind that shows a web page. A layout stored before BR-3a says
+ * "preview"; `parsePane` migrates it to "browser" before any pane reaches here.
+ */
 export function isBrowserView(view: string): boolean {
-  return view === "preview" || view === "browser";
+  return view === "browser";
 }
 
 /** `config.control_ports()`'s defaults: the face/HUD, the desktop bridge, the daemon's API, the Spotify callback. */
@@ -158,7 +161,7 @@ export function autoOpenPlan(s: DevOpenState, w: DevWindow, now: number): { stat
   if (!p) return { state: s, plan: { kind: "skip", why: "none" } };
   if (now - p.at > WAIT_MS || now < p.at) return drop("expired");
   if (!w.enabled) return drop("off");
-  const verdict = judgePreviewUrl(p.url, w.ports);
+  const verdict = judgeBrowserUrl(p.url, w.ports);
   if (!verdict.ok || refusedPorts(w).has(portOf(verdict.url))) return drop("refused");
   if (w.blocked) return { state: s, plan: { kind: "wait" } };
   const origin = originOf(verdict.url);
