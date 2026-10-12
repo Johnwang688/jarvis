@@ -46,8 +46,8 @@ import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
 import { ProjectDiff } from "./components/ProjectDiff";
 import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
-import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
-import { judgePreviewUrl } from "./lib/preview";
+import { BrowserTab, type BrowserRequest } from "./components/BrowserTab";
+import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
@@ -1287,14 +1287,14 @@ export default function App() {
   }, [mayShow]);
 
   /**
-   * "Open in Preview" from a terminal link (WP-E): the URL, judged with the
-   * daemon's ports, goes to a drawn Preview pane — the focused one if it is
-   * one — else the focused pane switches to Preview (the sidebar's click
+   * "Open in Browser" from a terminal link (WP-E): the URL, judged with the
+   * daemon's ports, goes to a drawn Browser pane — the focused one if it is
+   * one — else the focused pane switches to Browser (the sidebar's click
    * rule, lib/workspace `show`), unless that pane holds an unsaved edit. The
    * pane loads it as a request, judged again there, and stores it.
    */
-  const [previewAsk, setPreviewAsk] = useState<Partial<Record<PaneNo, PreviewRequest>>>({});
-  const previewSeq = useRef(0);
+  const [browserAsk, setBrowserAsk] = useState<Partial<Record<PaneNo, BrowserRequest>>>({});
+  const browserSeq = useRef(0);
 
   // ---- the editor's navigation (ED-7) ------------------------------------------
 
@@ -1345,20 +1345,20 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const openPreview = useCallback((url: string): boolean => {
+  const openBrowser = useCallback((url: string): boolean => {
     const { status, ports } = daemonPortsNow();
     if (status === "pending") return false;
-    const v = judgePreviewUrl(url, ports);
+    const v = judgeBrowserUrl(url, ports);
     if (!v.ok) return false;
     const lay = layoutNow.current;
-    const pane = showOf(lay.ws, "preview", lay.fit.panes).focused;
-    if (!showView("preview")) return false;
-    const n = ++previewSeq.current;
-    setPreviewAsk((asks) => ({ ...asks, [pane]: { url: v.url, n } }));
+    const pane = showOf(lay.ws, "browser", lay.fit.panes).focused;
+    if (!showView("browser")) return false;
+    const n = ++browserSeq.current;
+    setBrowserAsk((asks) => ({ ...asks, [pane]: { url: v.url, n } }));
     return true;
   }, [showView]);
-  const previewHandled = useCallback((pane: PaneNo, n: number) => {
-    setPreviewAsk((asks) => {
+  const browserHandled = useCallback((pane: PaneNo, n: number) => {
+    setBrowserAsk((asks) => {
       if (asks[pane]?.n !== n) return asks;
       const next = { ...asks };
       delete next[pane];
@@ -1507,7 +1507,7 @@ export default function App() {
       for (const k of PANE_NOS) if (next[k]?.pane === n) delete next[k];
       return next;
     });
-    setPreviewAsk((asks) => {
+    setBrowserAsk((asks) => {
       if (!asks[n]) return asks;
       const next = { ...asks };
       delete next[n];
@@ -1664,7 +1664,7 @@ export default function App() {
     const lay = layoutNow.current;
     const target = placeFile(from, projectId);
     if (target === null) {
-      dispatch({ type: "patch", patch: { error: `No room to open ${path} beside this view: close a pane, or switch one to Files.` } });
+      dispatch({ type: "patch", patch: { error: `No room to open ${path} beside this view: close a pane, or switch one to the editor.` } });
       return;
     }
     const spec = lay.ws.panes[target - 1];
@@ -2510,7 +2510,7 @@ export default function App() {
     spec.projectId && (!pinGone(spec) || (spec.view === "file" && goneHeld[pane]))
       ? spec.projectId : activeProjectId;
   const pinnedElsewhere = (spec: PaneSpec, pane: PaneNo) =>
-    (spec.view === "file" || spec.view === "preview") && paneProject(spec, pane) !== activeProjectId;
+    (spec.view === "file" || spec.view === "browser") && paneProject(spec, pane) !== activeProjectId;
 
   // ---- quick open, the palette, find in files (ED-7) ----------------------------
 
@@ -2543,7 +2543,7 @@ export default function App() {
     }
     const n = t.switchTo ? placeFile(t.pane, t.projectId) : t.pane;
     if (n === null) {
-      patch({ error: "No room to open a file beside this view: close a pane, or switch one to Files." });
+      patch({ error: "No room to open a file beside this view: close a pane, or switch one to the editor." });
       return null;
     }
     view.focus(n);
@@ -2875,17 +2875,17 @@ export default function App() {
           </div>
         );
       }
-      case "preview":
+      case "browser":
         return (
-          <PreviewTab
+          <BrowserTab
             projectId={paneProject(spec, n)}
-            url={spec.previewUrl}
+            url={spec.browserUrl}
             keepOrigin={spec.keepOrigin}
-            request={previewAsk[n] ?? null}
+            request={browserAsk[n] ?? null}
             blocked={blocked}
-            onLoaded={(url) => view.setPreviewUrl(n, url)}
+            onLoaded={(url) => view.setBrowserUrl(n, url)}
             onKeepOrigin={(origin) => view.setKeepOrigin(n, origin)}
-            onRequestHandled={(k) => previewHandled(n, k)}
+            onRequestHandled={(k) => browserHandled(n, k)}
             onProjectRoot={(id) => view.pin(n, id)}
           />
         );
@@ -3077,8 +3077,8 @@ export default function App() {
         return `in: ${projectName(paneProject(spec, info.pane))}`;
       case "vex":
         return `VEX · ${projectName(stripProject(state, spec, info.pane))}`;
-      case "preview":
-        return spec.previewUrl || "";
+      case "browser":
+        return spec.browserUrl || "";
       default:
         return "";
     }
@@ -3221,7 +3221,7 @@ export default function App() {
             onView={setPaneView}
             offersVex={(spec, info) => offersVex(vex.detection(stripProject(state, spec, info.pane)))}
             projects={state.projects}
-            openPreview={openPreview}
+            openBrowser={openBrowser}
             // Where `+` opens a terminal: the folder of what the focused pane
             // shows, as an id. A chat pane is its own conversation; any other
             // pane defers to the chat the window is about (`activeChat`: the

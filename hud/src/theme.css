@@ -818,8 +818,8 @@ select.panepick { max-width: 170px; flex: 0 1 auto; min-width: 0; }
   font: 11px var(--mono); color: var(--text-2); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; min-width: 0; flex: 1 1 auto;
 }
-/* Previews are pages that expect a white canvas. */
-.previewframe { flex: 1 1 auto; border: none; width: 100%; background: #fff; }
+/* The Browser frames pages that expect a white canvas. */
+.browserframe { flex: 1 1 auto; border: none; width: 100%; background: #fff; }
 /* "Keep its origin" (WP-E): a quiet switch at the toolbar's end. */
 .toolbar .keeporigin {
   display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;

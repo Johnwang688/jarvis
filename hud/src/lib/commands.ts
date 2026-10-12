@@ -52,7 +52,7 @@ export const COMMANDS: readonly Command[] = Object.freeze([
   { id: "file.copyPath", label: "Copy Relative Path of Active File", when: open },
   { id: "chat.addSelection", label: "Add Selection to Chat", when: open },
   { id: "chat.newThread", label: "New Thread" },
-  { id: "view.files", label: "Show Files" },
+  { id: "view.files", label: "Show Editor" },
   { id: "view.toggleSidebar", label: "Toggle Sidebar", keys: "Ctrl+B" },
   { id: "view.toggleRight", label: "Toggle Right Pane", keys: "Ctrl+Alt+B" },
   { id: "view.togglePanel", label: "Toggle Terminal Panel", keys: "Ctrl+`" },

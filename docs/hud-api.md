@@ -6,8 +6,8 @@ WP7-notes.md` route table, plus `/approvals` from WP5, `/route` from WP9,
 `/tasks/{id}/start|steer|cancel|resume|answer` from WP11) stays as is. This
 file adds what the HUD needs and nothing else. All JSON; loopback; the HUD
 is served from the daemon on `FACE_PORT` (8402) and calls the API on the
-**same origin** (the daemon serves the API on both listeners); previews
-come from `WORKSHOP_PORT` (8403), a different origin by design.
+**same origin** (the daemon serves the API on both listeners); the workshop origin
+is `WORKSHOP_PORT` (8403), a different origin by design.
 
 ## Static
 
@@ -145,7 +145,7 @@ every one of these routes asks (`kind`):
   cannot see a write made from Windows on the 9p `/mnt/c` mount.
 - **An env file's content travels only between the disk and the owner's
   editor**: never the bus, a log line, `log.jsonl`, Discord, an `@path`
-  attachment, a dropped file, a diff, the preview origin or any tool result
+  attachment, a dropped file, a diff, the workshop origin or any tool result
   (each refuses it: `hud_api.protected` asks `is_env_credential`, and
   withheld files too — with **no gate exemption**: the gate's readable state
   is the editor's routes' alone, so `@.config/jarvis/allowlist.json` is not
@@ -160,12 +160,13 @@ every one of these routes asks (`kind`):
 - `GET /tasks/{id}/diff/file?path=<rel>` → `{"before", "after"}` for the
   Monaco diff editor.
 
-## Preview origin (`WORKSHOP_PORT`)
+## The workshop origin (`WORKSHOP_PORT`)
 
 - The daemon also serves `http://127.0.0.1:8403/p/{project_id}/<rel>`
   read-only from the project root (same scope rules, same skip list,
-  `Cache-Control: no-store`, correct content types). The HUD's Preview tab
-  iframes that, or any `http://localhost:<port>/…` URL the owner types.
+  `Cache-Control: no-store`, correct content types). The HUD's Browser
+  pane (Preview until BR-3a) iframes that, or any
+  `http://localhost:<port>/…` URL the owner types.
   Never the HUD origin: the backend refuses to proxy it, the frontend
   refuses to load it.
 - **What it refuses (403)**: a credential file (`hud_api.protected`: env
@@ -184,7 +185,7 @@ every one of these routes asks (`kind`):
   owner's **live** daemon's preview for fixture project `p1`
   (`GET /p/p1/index.html -> 400` in the live log). Only a daemon too old to
   report one falls back to 8403.
-- The preview origin carries **no** frame headers (it is framed by the HUD
+- The workshop origin carries **no** frame headers (it is framed by the HUD
   on purpose), but every response there carries one CSP, `sandbox
   allow-scripts allow-forms`, so every document it serves runs with an
   opaque origin; the HUD and API listeners refuse to be framed (WP-E,
@@ -870,7 +871,7 @@ Origin only when the browser marked it `Sec-Fetch-Site: same-origin`
 (a forbidden header no page can set; since 2026-10-11 — before it, the
 HUD's own listing was refused). Anything else is 403: the API listener (8405,
 every tool's client), a missing Origin on a write or the socket, `null`, the
-workshop origin, any other site. The preview listener (8403) serves only `/p/...` and answers 404. No
+workshop origin, any other site. The workshop listener (8403) serves only `/p/...` and answers 404. No
 tool, MCP tool, fast-path tool or Discord verb names these routes. A
 program running as the owner can still forge an Origin and fetch a ticket:
 that is why every attach is announced (`terminal_attached`, below).
@@ -1181,10 +1182,10 @@ What the HUD does with the terminal contract above (code in
   and the terminal's bar, one line, capped at 80 — never `document.title`;
   links (plain or OSC 8) open only for `http`/`https`, only on Ctrl+click,
   in a new window with `noopener`; there is no clipboard addon (no OSC 52)
-  and window reports stay off. "Open in Preview" for loopback links is
+  and window reports stay off. "Open in Browser" for loopback links is
   WP-E's (below).
 
-## Additions 2026-10-10 (Preview and dev servers — WP-E)
+## Additions 2026-10-10 (Preview — now the Browser — and dev servers, WP-E)
 
 Plan `docs/plans/2026-10-09-hud-workspace-plan.md` §2.5 items 1–4; decisions
 W-4 (that file wins).
@@ -1215,12 +1216,12 @@ naming `frame-ancestors`, `sandbox`, `report-uri` or `report-to`, raise
 so the answer is **one 400** — the dispatcher's status for a
 `ValueError` — never half a response or a second status line). The HUD's
 full policy (ED-4, below) is built by that same function, in the same one
-header. The **preview listener (8403) carries neither frame
+header. The **workshop listener (8403) carries neither frame
 header**; instead it sends one CSP, `sandbox allow-scripts allow-forms`
 (`hud_api.workshop_security_policy`, a response's own directives merged and
 checked the same way), so a workshop page runs with an opaque origin
-everywhere: inside the HUD (unchanged — the Preview frame was already
-opaque), in a top-level tab (newly), and in a Preview frame whose page was
+everywhere: inside the HUD (unchanged — the Browser frame was already
+opaque), in a top-level tab (newly), and in a Browser frame whose page was
 let keep its origin and then navigated itself to the workshop (it used to
 get the real workshop origin there — its storage and same-origin reads of
 any project's served files; PR #31 review). v1's whiteboard workshop is its
@@ -1233,7 +1234,8 @@ own server and is unaffected.
   (`false` before the daemon has started). A HUD whose `/status` lacks it
   (an older daemon) never offers "keep its own origin".
 
-**The Preview pane (`lib/preview.ts`, `PreviewTab.tsx`):**
+**The Browser pane (`lib/browser.ts`, `BrowserTab.tsx`; the Preview pane,
+`lib/preview.ts` and `PreviewTab.tsx`, until BR-3a):**
 - **Refused ports**: the HUD's (`hud_port`, 8402), the API's (`api_port`,
   8405) — the defaults are refused whatever `/status` says, since they are
   the owner's live daemon — and the window's own port; anything not loopback
@@ -1247,19 +1249,19 @@ own server and is unaffected.
   `allow-popups-to-escape-sandbox`, `allow-downloads` or `allow-modals`.
   The frame is keyed by its sandbox, so a change reloads the page under the
   new flags.
-- **"Keep its origin"** (`preview-keep-origin`, a checkbox; `data-origin`
+- **"Keep its origin"** (`browser-keep-origin`, a checkbox; `data-origin`
   names what it covers): off by default, per pane, offered only when the
   loaded URL is loopback `http(s)` on a port that is none of `hud_port`,
   `workshop_port`, `api_port`, 8402, 8403, 8405 nor the window's own, and
   only while `/status` says `frame_hardened: true`. Stored with the pane
   spec (`jarvis.hud.workspace`) as `keepOrigin: "<scheme://host:port>"` —
   the origin it was given for — so loading a URL on another port, host or
-  scheme turns it off (`setPreviewUrl` drops it, and the frame applies it
+  scheme turns it off (`setBrowserUrl` drops it, and the frame applies it
   only while the origins match). Judged again on every load
   (`keptOrigin`) and **dropped from storage** when it no longer passes; the
   parser keeps only a grant that is exactly the stored URL's origin on a
   non-default loopback port. Disabled under an approval card (and inert
-  behind its veil). A split copies a Preview pane's URL, judged again
+  behind its veil). A split copies a Browser pane's URL, judged again
   on load, and **never** its keep-origin grant (WP-G2).
 - **Why it is safe**: scripts plus same-origin amount to no sandbox only
   when the framed page is the parent's origin. The port check refuses the
@@ -1272,13 +1274,14 @@ own server and is unaffected.
 - **A URL carrying a user name or password** is refused, as a terminal
   link is.
 
-**"Open in Preview" from a terminal.** A Ctrl+clicked link whose host is
+**"Open in Browser" from a terminal.** A Ctrl+clicked link whose host is
 loopback opens a small menu (`term-link-menu`: `term-link-url`,
-`term-link-preview`, `term-link-browser`) instead of a new tab; any other
-link still opens in a new window directly. "Open in Preview" is judged with
+`term-link-pane` "Open in Browser", `term-link-tab` "Open in a Chrome tab";
+`term-link-preview` and `term-link-browser` until BR-3a) instead of a new
+tab; any other link still opens in a new window directly. "Open in Browser" is judged with
 the ports above (refused, disabled, with `term-link-refused` saying why, for
-the HUD's and the API's ports) and lands in a drawn Preview pane — the
-focused one if it is one — else the focused pane switches to Preview (the
+the HUD's and the API's ports) and lands in a drawn Browser pane — the
+focused one if it is one — else the focused pane switches to the Browser (the
 sidebar's click rule, refused for a File pane holding an unsaved edit).
 The pane loads it as a request, judged again there, and stores it. Escape,
 a click elsewhere or an approval card closes the menu. **The menu is placed
@@ -1353,7 +1356,7 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
 VEX V5 in the HUD (editor plan §2.9; decisions V-1 to V-5; code in
 `jarvis/v2/vex.py`). The backend only: the VEX view and its panel tabs are
 VX-2, the new-project dialog VX-3. **Every route is owner-only** on the HUD
-listener with a strict Host: the API listener (8405) is 403, the preview
+listener with a strict Host: the API listener (8405) is 403, the workshop
 listener (8403) 404, a missing or foreign Origin (the workshop's, `null`)
 403, a rebound Host 403. The rule is the shared one, `projects.is_owner`
 (PR #41): **a same-origin `GET` carries no Origin in Chromium** (measured
@@ -1613,7 +1616,7 @@ with ED-5 (below): WebAssembly compiles, JavaScript from a string still does
 not. `connect-src 'self'`
 covers the same-origin `ws://` terminal socket in Chromium (CSP3). A CSP host
 source cannot name an IPv6 literal or a 127/8 address other than 127.0.0.1,
-so the Preview judge refuses `[::1]` and `127.0.0.2` with a sentence naming
+so the Browser judge refuses `[::1]` and `127.0.0.2` with a sentence naming
 `http://localhost:<port>/` instead. There is no `<meta>` policy; the header
 is the only one.
 
@@ -2005,6 +2008,38 @@ three dots but have the main display be the title". No new route.
 - **The HUD** never shows a chat's id as its name: an untitled row reads
   "New thread" (`turns` 0) or "Untitled", and the id is the ⋯ menu's "Copy
   id" (`tmenu-copyid`, the id shown in `tmenu-id`). A title is text.
+
+## Additions 2026-10-12 (File reads as the editor, Preview is the Browser — BR-3a)
+
+The owner: "also rename "File" to "Editor" and "Preview" to "Browser"".
+Browser plan §7 (`docs/plans/2026-10-10-hud-browser-plan.md`), cut by
+amendment 1 to the rename and the stored-state migration. No route changes;
+Python is untouched (`preview_route`, `preview_only` and `workshop_port` name
+the workshop listener, 8403, which these docs now call **the workshop
+origin**).
+
+- **Preview → Browser, in name and id.** The view is `"browser"`; the pane
+  spec's URL is `browserUrl` (`keepOrigin` unchanged); `lib/browser.ts`
+  (`judgeBrowserUrl`), `BrowserTab.tsx`, `.browserframe`. Test ids:
+  `tab-browser`, `browser-url`, `browser-go`, `browser-project`,
+  `browser-refused`, `browser-frame`, `browser-keep-origin`. The terminal
+  link menu's items are `term-link-pane` ("Open in Browser") and
+  `term-link-tab` ("Open in a Chrome tab"). Which links get the menu is
+  unchanged (loopback only; plan B-11 waits for Remote mode).
+- **The stored layout migrates as it parses**, under the same
+  `jarvis.hud.workspace` key: `view: "preview"` reads as `"browser"`,
+  `previewUrl` as `browserUrl` (only when there is no valid `browserUrl`),
+  and a `keepOrigin` is kept only if it is still exactly that URL's origin
+  on an allowed port (`storableKeepOrigin`, then judged again on load as
+  before). A save is a parse, so it writes the new names only. A rolled-back
+  HUD reads such a pane as its default view and loses its URL; nothing worse.
+- **File → editor, in name only.** The view id stays `"file"` — a stored
+  `"file"` pane, `tab-file` and every `pane-N-…` id are unchanged.
+  `lib/workspace.ts` `VIEW_LABEL` names each view (`file` → "editor",
+  `browser` → "browser"); the strip's buttons, its compact menu and a pane's
+  `aria-label` (`Pane N: editor`) read it, and the strip's CSS capitalises
+  it. The palette's "Show Files" is "Show Editor", and "No room to open …"
+  says "switch one to the editor".
 
 ## Additions 2026-10-12 (the Diff pane's uncommitted changes)
 

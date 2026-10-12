@@ -6,7 +6,7 @@
 //    shows another task than a drawn Task pane** — while one is drawn and
 //    shows a task, the Diff shows that task's diff (review of PR #67, L3);
 //    else, while a task is what the window is about (picked more recently
-//    than a thread — the rule File and Preview panes follow), that task's
+//    than a thread — the rule Editor and Browser panes follow), that task's
 //    diff, exactly as before; else the uncommitted changes of the pane's
 //    pinned project (a pane's pin is its own: a File pane that opened a file
 //    and became a Diff pane keeps it); else those of the project the chat is

@@ -728,7 +728,7 @@ def _reachable(page, sel: str) -> tuple[bool, str]:
 
 
 TOOLS = ['[data-testid="tab-chat"]', '[data-testid="tab-task"]', '[data-testid="tab-file"]',
-         '[data-testid="tab-diff"]', '[data-testid="tab-preview"]', '[data-testid="profile"]',
+         '[data-testid="tab-diff"]', '[data-testid="tab-browser"]', '[data-testid="profile"]',
          '[data-testid="open-model"]', '[data-testid="open-voice"]', '[data-testid="open-avatar"]',
          '[data-testid="open-settings"]', '[data-testid="input"]', '[data-testid="model-chip"]',
          '[data-testid="project-chip"]', '[data-testid="dictation"]']
@@ -1360,9 +1360,9 @@ def _workspace_checks(page, mock, check, until):
           "focused" not in (_attr(page, _pane(1), "class") or "") and page.locator(".panectx").count() == 0)
 
     _choose(page, until, "cols2")
-    check("two side by side: a second pane, showing Preview",
+    check("two side by side: a second pane, showing the Browser",
           _attr(page, ws, "data-drawn-preset") == "cols2" and _visible(page, _pane(2))
-          and _attr(page, _pane(2), "data-view") == "preview")
+          and _attr(page, _pane(2), "data-view") == "browser")
     b1 = page.locator(_pane(1)).bounding_box()
     b2 = page.locator(_pane(2)).bounding_box()
     check("beside the first, as tall, the centre halved",
@@ -1370,7 +1370,7 @@ def _workspace_checks(page, mock, check, until):
           and abs(b1["width"] - b2["width"]) <= 3, f"{b1} {b2}")
     check("the chat is still one conversation with one box, in pane 1",
           page.locator('[data-testid="input"]').count() == 1 and page.locator(_pane(1, '[data-testid="input"]')).count() == 1)
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
     until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
     check("a click in a pane focuses it, and only it, with a line under its header",
           _attr(page, _pane(2), "data-focused") == "true" and _attr(page, _pane(1), "data-focused") == "false"
@@ -1409,11 +1409,11 @@ def _workspace_checks(page, mock, check, until):
           _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(1), "data-view") == "chat"
           and page.locator(_pane(1, '[data-testid="input"]')).count() == 1
           and page.locator(_pane(2, '[data-testid="input"]')).count() == 1)
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
-    until(lambda: _attr(page, _pane(2), "data-view") == "preview", timeout=2)
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "browser", timeout=2)
 
     # Hidden, never unmounted: the same frame after one pane and back.
-    page.locator(_pane(2, '[data-testid="preview-project"]')).click()
+    page.locator(_pane(2, '[data-testid="browser-project"]')).click()
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
     page.evaluate("document.querySelector('[data-testid=\"pane-2\"] iframe').__kept = 42")
     src = page.locator(_pane(2, "iframe")).get_attribute("src")
@@ -1427,18 +1427,18 @@ def _workspace_checks(page, mock, check, until):
           and page.evaluate("document.querySelector('[data-testid=\"pane-2\"] iframe').__kept") == 42)
     _boot(page, mock, None, until, reload=True)
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
-    check("a pane's preview URL survives a reload, judged again and loaded",
+    check("a pane's Browser URL survives a reload, judged again and loaded",
           page.locator(_pane(2, "iframe")).get_attribute("src") == src, str(src))
 
     # Where a sidebar click goes.
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
     until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
     page.locator('[data-testid="thread-t1"]').click()
     until(lambda: page.evaluate("window.__hud.state().threadId") == "t1")
     check("a thread click goes to the pane already showing the chat",
-          _attr(page, _pane(1), "data-view") == "chat" and _attr(page, _pane(2), "data-view") == "preview"
+          _attr(page, _pane(1), "data-view") == "chat" and _attr(page, _pane(2), "data-view") == "browser"
           and _attr(page, _pane(1), "data-focused") == "true")
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
     page.locator('[data-testid="task-k1"]').click()
     until(lambda: _attr(page, _pane(2), "data-view") == "task", timeout=2)
     check("a task click, with no task or diff pane on screen, switches the focused pane",
@@ -1677,7 +1677,7 @@ def _grid_card_checks(page, mock, check, until):
         mock.world["terminals"].append(row(tid, "bash · jarvis"))
     fake = mock.fake_pty
     term = f'[data-testid="terminal-{tid}"]'
-    grid = json.dumps({"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"},
+    grid = json.dumps({"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"},
                                                      {"view": "terminal", "terminalId": tid}]})
     for zoom in ("160", "70"):
         page.set_viewport_size({"width": 1280, "height": 800})
@@ -1689,7 +1689,7 @@ def _grid_card_checks(page, mock, check, until):
         page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
         until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0
               or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-        page.locator(_pane(3, '[data-testid="preview-project"]')).click()
+        page.locator(_pane(3, '[data-testid="browser-project"]')).click()
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
         until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
         check(f"at {zoom}% Monaco, a preview frame and a terminal are on screen",
@@ -1725,7 +1725,7 @@ def _sticky_checks(page, mock, check, until):
     different pair and the pane under the pointer jumped."""
     ws = '[data-testid="workspace"]'
     three = json.dumps({"preset": "cols3", "focused": 3,
-                        "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+                        "panes": [{"view": "chat"}, {"view": "browser"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1280, "height": 800})
     _set_storage(page, zoom="150", layout="{}")
     _set_ws(page, three)
@@ -1734,7 +1734,7 @@ def _sticky_checks(page, mock, check, until):
           _attr(page, ws, "data-drawn-preset") == "cols2" and _visible(page, _pane(2)) and _visible(page, _pane(3))
           and not _visible(page, _pane(1)))
     before = [page.locator(_pane(n)).bounding_box() for n in (2, 3)]
-    url = page.locator(_pane(2, '[data-testid="preview-url"]'))
+    url = page.locator(_pane(2, '[data-testid="browser-url"]'))
     url.click()
     page.keyboard.type("http://localhost:5173/")
     time.sleep(0.2)
@@ -1751,7 +1751,7 @@ def _sticky_checks(page, mock, check, until):
 
     # One large plus two stacked, too short for the stack: two columns.
     main = json.dumps({"preset": "main2", "focused": 3,
-                       "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+                       "panes": [{"view": "chat"}, {"view": "browser"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 420})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, main)
@@ -1774,12 +1774,12 @@ def _card_focus_checks(page, mock, check, until):
     card, and Monaco kept its focus under one (review of PR #26). A card now
     takes focus off both, onto itself — never onto a button."""
     two = json.dumps({"preset": "cols2", "focused": 2,
-                      "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+                      "panes": [{"view": "chat"}, {"view": "browser"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, two)
     _boot(page, mock, None, until, reload=True)
-    page.locator(_pane(2, '[data-testid="preview-project"]')).click()
+    page.locator(_pane(2, '[data-testid="browser-project"]')).click()
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
     time.sleep(0.3)
     page.locator(_pane(2, "iframe")).click()
@@ -1843,7 +1843,7 @@ def _editor_card_checks(page, mock, check, until):
     is unfocused and read-only, Escape denies, and a typed `y` lands nowhere.
     At 100% and 160%."""
     two = json.dumps({"preset": "cols2", "focused": 2,
-                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
     host = _pane(2, '[data-testid="editor"]')
     lines = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
     menu = page.locator(_pane(2, ".monaco-menu"))
@@ -2020,7 +2020,7 @@ def _save_scope_checks(page, mock, check, until):
         page.locator(_pane(3, '[data-testid="diff-calc.py"]')).click()
         diff = page.locator(_pane(3, '[data-testid="diff-editor"] .editor.modified .view-lines'))
         until(lambda: diff.count() > 0, timeout=10)
-        _show(page, until, 2, "preview")
+        _show(page, until, 2, "browser")
         until(lambda: page.locator(_pane(2, '[data-testid="editor"]')).count() == 0, timeout=3)
         diff.first.click()
         before = len(_puts(mock))
@@ -2054,7 +2054,7 @@ def _save_scope_checks(page, mock, check, until):
                 until(lambda: button.is_disabled(), timeout=3)
 
         # Pane 3 switched away: Ctrl+S in pane 2 is still pane 2's.
-        _show(page, until, 3, "preview")
+        _show(page, until, 3, "browser")
         until(lambda: page.locator(_pane(3, '[data-testid="editor"]')).count() == 0, timeout=3)
         readme = files["README.md"]["content"]
         _edit(page, until, 2, "\n#three")
@@ -2071,7 +2071,7 @@ def _save_scope_checks(page, mock, check, until):
 
         # An editor that opens while a card is up opens read-only (the first
         # editor of a session, Monaco loading as a card arrives).
-        _show(page, until, 2, "preview")
+        _show(page, until, 2, "browser")
         _show(page, until, 2, "file")
         until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
         _approval(mock, "edro1")
@@ -2104,7 +2104,7 @@ def _late_save_checks(page, mock, check, until):
     files = mock.world["files"]
     kept = {k: dict(v) for k, v in files.items()}
     two = json.dumps({"preset": "cols2", "focused": 2,
-                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, two)
@@ -2158,7 +2158,7 @@ def _chord_checks(page, mock, check, until):
     in the editor, a letter in the chat box, then Ctrl+B in the editor is the
     chord — the anchor, not a fold too."""
     two = json.dumps({"preset": "cols2", "focused": 2,
-                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, two)
@@ -2205,7 +2205,7 @@ def _menu_place_checks(page, mock, check, until):
     # so the file sits beside one; both side panes folded, so the editor's
     # right edge is near the window's at 160%.
     two = json.dumps({"preset": "cols2", "focused": 2,
-                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
     folded = json.dumps({"left": 260, "right": 300, "leftCollapsed": True, "rightCollapsed": True})
     cases = (
         ("70", (1600, 900), "bottom", lambda b, at: abs(b["bottom"] - at[1]) <= 4 and abs(b["x"] - at[0]) <= 4),
@@ -2258,14 +2258,14 @@ def _seen_checks(page, mock, check, until):
     check before these)."""
     seen = lambda path: len(mock.posted(path))  # noqa: E731
     two = json.dumps({"preset": "cols2", "focused": 1,
-                      "panes": [{"view": "preview"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
+                      "panes": [{"view": "browser"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, two)
     _boot(page, mock, None, until, reload=True)
     page.locator('[data-testid="thread-t1"]').click()
     until(lambda: page.evaluate("window.__hud.state().threadId") == "t1")
-    page.locator(_pane(1, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(1, '[data-testid="tab-browser"]')).click()
     until(lambda: _attr(page, _pane(1), "data-focused") == "true", timeout=2)
     check("setup: t1's chat in pane 2, pane 1 focused",
           _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(2), "data-focused") == "false")
@@ -2276,8 +2276,8 @@ def _seen_checks(page, mock, check, until):
           seen("/threads/t1/seen") > before)
 
     _choose(page, until, "single")
-    check("setup: one pane, showing Preview; the chat is hidden",
-          _attr(page, _pane(1), "data-view") == "preview" and not _visible(page, _pane(2)))
+    check("setup: one pane, showing the Browser; the chat is hidden",
+          _attr(page, _pane(1), "data-view") == "browser" and not _visible(page, _pane(2)))
     before = seen("/threads/t1/seen")
     mock.activity("thread", "t1", "unread")
     time.sleep(0.8)
@@ -2286,7 +2286,7 @@ def _seen_checks(page, mock, check, until):
 
     # The same for a task.
     _choose(page, until, "cols2")
-    page.locator(_pane(1, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(1, '[data-testid="tab-browser"]')).click()
     page.locator('[data-testid="task-k1"]').click()
     until(lambda: _attr(page, _pane(1), "data-view") == "task", timeout=2)
     page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
@@ -2405,7 +2405,7 @@ def _eight_checks(page, mock, check, until):
           and max(g[2] for g in geo8) - min(g[2] for g in geo8) <= 2, str(geo8))
 
     # Every pane can show what any pane shows: chat, file, preview, diff, a terminal.
-    views = {1: "chat", 2: "file", 3: "preview", 4: "diff", 5: "terminal", 6: "chat", 7: "file", 8: "preview"}
+    views = {1: "chat", 2: "file", 3: "browser", 4: "diff", 5: "terminal", 6: "chat", 7: "file", 8: "browser"}
     for n, view in views.items():
         _show(page, until, n, view)
     page.locator('[data-testid="task-k1"]').click()
@@ -2416,19 +2416,19 @@ def _eight_checks(page, mock, check, until):
     until(lambda: page.locator(_pane(5, term)).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
     page.locator(_pane(7, '[data-testid="file-calc.py"]')).click()
     until(lambda: page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
-    page.locator(_pane(8, '[data-testid="preview-project"]')).click()
+    page.locator(_pane(8, '[data-testid="browser-project"]')).click()
     until(lambda: page.locator(_pane(8, "iframe")).count() > 0, timeout=4)
     shows = {
         1: _visible(page, _pane(1, '[data-testid="input"]')),
         2: _visible(page, _pane(2, '[data-testid="filetree"]')) or _visible(page, _pane(2, '[data-testid="tree-toggle"]')),
-        3: _visible(page, _pane(3, '[data-testid="preview-url"]')),
+        3: _visible(page, _pane(3, '[data-testid="browser-url"]')),
         4: page.locator(_pane(4, '[data-testid="difflist"]')).count() > 0,
         5: _visible(page, _pane(5, f"{term} .xterm-screen")),
         6: _visible(page, _pane(6, '[data-testid="input"]')),
         7: page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py",
         8: _visible(page, _pane(8, "iframe")),
     }
-    check("in 4×2 every pane shows what it was given: two chats, two files, two previews, a diff, a terminal",
+    check("in 4×2 every pane shows what it was given: two chats, two files, two Browsers, a diff, a terminal",
           all(shows.values()) and all(_attr(page, _pane(n), "data-view") == v for n, v in views.items()), str(shows))
     check("the chats in panes 1 and 6 are two conversations, each with its own box",
           page.locator(_pane(1, '[data-testid="input"]')).count() == 1
@@ -2560,7 +2560,7 @@ def _eight_checks(page, mock, check, until):
 
     # Eight panes under a card: Monaco, a preview frame, a terminal and chats.
     grid8 = json.dumps({"preset": "grid8", "focused": 1, "panes": [
-        {"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"},
+        {"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"},
         {"view": "terminal", "terminalId": tid}, {"view": "chat"}, {"view": "chat"}, {"view": "file"}]})
     fake = mock.fake_pty
     for zoom in ("160", "70"):
@@ -2571,7 +2571,7 @@ def _eight_checks(page, mock, check, until):
         page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
         until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0
               or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-        page.locator(_pane(3, '[data-testid="preview-project"]')).click()
+        page.locator(_pane(3, '[data-testid="browser-project"]')).click()
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
         until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
         drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]

@@ -1,6 +1,6 @@
 // The serving daemon's ports and frame hardening, read from `/status` once
-// per page (WP-E). The Preview tab judges every URL with them, and a
-// terminal's "Open in Preview" judges a link with them before it offers to.
+// per page (WP-E). The Browser tab judges every URL with them, and a
+// terminal's "Open in Browser" judges a link with them before it offers to.
 //
 // **Never a constant in place of an answer.** A hard-coded 8403 once sent the
 // HUD suite's fixture project to the owner's live daemon. Until `/status`
@@ -11,7 +11,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { api } from "../api";
-import { DEFAULT_PORTS, daemonPortsFrom, type DaemonPorts } from "../lib/preview";
+import { DEFAULT_PORTS, daemonPortsFrom, type DaemonPorts } from "../lib/browser";
 
 export interface PortsState {
   status: "pending" | "ok" | "failed";
