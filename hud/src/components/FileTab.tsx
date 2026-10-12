@@ -958,7 +958,9 @@ function FsPrompt(props: {
           value={a.value}
           spellCheck={false}
           autoComplete="off"
-          disabled={props.busy}
+          // Read-only while it runs, never disabled: a disabled box drops
+          // focus, and Escape would then have nowhere to land.
+          readOnly={props.busy}
           onChange={(e) => props.onChange(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.nativeEvent.isComposing) {

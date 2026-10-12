@@ -610,6 +610,8 @@ class MockDaemon:
         # answers only once the Event is set: a transcript still in flight
         # (the crash checks land one after the window stopped drawing).
         self.stt_gate: threading.Event | None = None
+        # What the explorer moved to the trash (ED-7's `fs` delete).
+        self.trashed: list[str] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -785,6 +787,11 @@ class MockDaemon:
                             "note": ("worked from WSL over 9p; git is slow and line endings "
                                      "are mangled") if windows else None,
                         })
+                    if verb == "files":
+                        # Quick open's list (ED-7): never a withheld file or
+                        # the gate's state; env files listed and said.
+                        self._record("GET", path, {})
+                        return self._json(mock.nav_files())
                     if verb == "tree":
                         rel = q.get("path", [""])[0]
                         entries = w["tree"].get(rel)
@@ -844,6 +851,14 @@ class MockDaemon:
                 path = url.path
                 w = mock.world
                 parts = [p for p in path.split("/") if p]
+                if len(parts) == 3 and parts[0] == "projects" and parts[2] in ("search", "fs"):
+                    # Find in files and the explorer's operations (ED-7). The
+                    # real refusals are the daemon's (tests/v2/editor_nav_check.py);
+                    # these mirror their shape.
+                    body = self._body()
+                    self._record("POST", path, body)
+                    status, payload = (mock.nav_search(body) if parts[2] == "search" else mock.nav_fs(body))
+                    return self._json(payload, status)
                 if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["files", "stat"]:
                     body = self._body()
                     self._record("POST", path, body)
@@ -1356,6 +1371,126 @@ class MockDaemon:
 
     def disk_delete(self, rel: str):
         self.world["files"].pop(rel, None)
+
+    # -- the editor's navigation (ED-7) ----------------------------------------
+
+    def _hidden_from_nav(self, rel: str) -> bool:
+        w = self.world
+        return rel in w["protected"] or w["kinds"].get(rel) in ("gate", "withheld")
+
+    def nav_files(self) -> dict:
+        w = self.world
+        files = sorted(r for r in w["files"] if not self._hidden_from_nav(r))
+        return {"files": files, "env": [r for r in files if w["kinds"].get(r) == "env"],
+                "truncated": False, "source": "git"}
+
+    def nav_search(self, body: dict):
+        import re as _re
+        w = self.world
+        query = body.get("query")
+        if not isinstance(query, str) or not query:
+            return 400, {"error": "query must be 1 to 1000 characters"}
+        flags = 0 if body.get("case") else _re.IGNORECASE
+        try:
+            pattern = query if body.get("regex") else _re.escape(query)
+            if body.get("word"):
+                pattern = rf"\b(?:{pattern})\b"
+            rx = _re.compile(pattern, flags)
+        except _re.error as exc:
+            return 400, {"error": f"not a regular expression: {exc}"}
+        matches = []
+        for rel in sorted(w["files"]):
+            # The daemon's filter: never a withheld file, the gate's state or an env file.
+            if self._hidden_from_nav(rel) or w["kinds"].get(rel) == "env":
+                continue
+            for i, line in enumerate(w["files"][rel]["content"].splitlines(), 1):
+                ranges = [[m.start(), m.end()] for m in rx.finditer(line) if m.end() > m.start()]
+                if ranges:
+                    matches.append({"path": rel, "line": i, "text": line, "ranges": ranges[:20]})
+        return 200, {"matches": matches[:2000], "files": len({m["path"] for m in matches}),
+                     "truncated": len(matches) > 2000, "timed_out": False, "backend": "mock", "limit": 2000}
+
+    def _tree_add(self, rel: str, kind: str):
+        tree = self.world["tree"]
+        parent, _, name = rel.rpartition("/")
+        if parent and parent not in tree:
+            self._tree_add(parent, "dir")
+        entries = tree.setdefault(parent, [])
+        if not any(e["name"] == name for e in entries):
+            row = {"name": name, "kind": kind, "size": 0, "mtime": 1757900300}
+            if kind == "file" and self.world["kinds"].get(rel) == "env":
+                row["policy"] = "env"
+            entries.append(row)
+            entries.sort(key=lambda e: e["name"])
+        if kind == "dir":
+            tree.setdefault(rel, [])
+
+    def _tree_remove(self, rel: str):
+        tree = self.world["tree"]
+        parent, _, name = rel.rpartition("/")
+        tree[parent] = [e for e in tree.get(parent, []) if e["name"] != name]
+        for key in [k for k in tree if k == rel or k.startswith(rel + "/")]:
+            del tree[key]
+
+    def _exists(self, rel: str) -> bool:
+        w = self.world
+        return (rel in w["files"] or rel in w["tree"]
+                or any(e["name"] == rel.rpartition("/")[2] for e in w["tree"].get(rel.rpartition("/")[0], [])))
+
+    def nav_fs(self, body: dict):
+        from jarvis.tools.secrets import is_env_credential_name, is_protected
+        w = self.world
+        op, rel, to = body.get("op"), body.get("path"), body.get("to")
+        if op not in ("new_file", "new_folder", "rename", "delete") or not isinstance(rel, str) or not rel:
+            return 400, {"error": "op and path"}
+
+        def refused(name: str) -> bool:
+            base = name.rpartition("/")[2]
+            return ((is_protected(base) and not is_env_credential_name(base)) or ".." in name.split("/")
+                    or self._hidden_from_nav(name))
+        if refused(rel) or (isinstance(to, str) and refused(to)):
+            return 403, {"error": "refused: the editor never changes this"}
+        if op in ("new_file", "new_folder"):
+            if self._exists(rel):
+                return 409, {"error": "something is already there"}
+            if op == "new_file":
+                w["files"][rel] = {"content": "", "mtime": 1757900300}
+                if is_env_credential_name(rel.rpartition("/")[2]):
+                    w["kinds"][rel] = "env"
+            self._tree_add(rel, "file" if op == "new_file" else "dir")
+            return 200, {"ok": True, "op": op, "path": rel, "abs": f"/home/johnw/projects/Jarvis/{rel}",
+                         "kind": w["kinds"].get(rel, "text")}
+        if not self._exists(rel):
+            return 404, {"error": "nothing is there"}
+        is_dir = rel in w["tree"]
+        if op == "delete":
+            self.trashed.append(rel)
+            for key in [k for k in w["files"] if k == rel or k.startswith(rel + "/")]:
+                del w["files"][key]
+            self._tree_remove(rel)
+            return 200, {"ok": True, "op": op, "path": rel, "abs": f"/home/johnw/projects/Jarvis/{rel}",
+                         "dir": is_dir, "trash": {"where": "linux", "location": "/mock/Trash"}}
+        if not isinstance(to, str) or not to:
+            return 400, {"error": "rename needs `to`"}
+        if self._exists(to):
+            return 409, {"error": f"{to} already exists: a rename never replaces anything"}
+        if w["kinds"].get(rel) == "env" and not is_env_credential_name(to.rpartition("/")[2]):
+            return 403, {"error": "an env file keeps an env name here"}
+        for key in [k for k in list(w["files"]) if k == rel or k.startswith(rel + "/")]:
+            new = to + key[len(rel):]
+            w["files"][new] = w["files"].pop(key)
+            if key in w["kinds"]:
+                w["kinds"][new] = w["kinds"].pop(key)
+        if is_env_credential_name(to.rpartition("/")[2]):
+            w["kinds"][to] = "env"
+        entries = {k: v for k, v in w["tree"].items() if k == rel or k.startswith(rel + "/")}
+        self._tree_remove(rel)
+        for key, rows in entries.items():
+            w["tree"][to + key[len(rel):]] = rows
+        self._tree_add(to, "dir" if is_dir else "file")
+        return 200, {"ok": True, "op": op, "path": to, "from": rel,
+                     "abs": f"/home/johnw/projects/Jarvis/{to}", "from_abs": f"/home/johnw/projects/Jarvis/{rel}",
+                     "dir": is_dir, "kind": w["kinds"].get(to, "text")}
 
     def sent(self, method: str, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == method and p == path]
