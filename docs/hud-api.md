@@ -2263,18 +2263,23 @@ protected state (`.env*` but `.example`, the gate's files, Jarvis's folders),
 a file with a second name (a hard link), one that is not a regular file, or
 over 50 MB. At most 16 files and 50 MB in all (**413**). The bytes handed to
 Chrome are read through a descriptor opened `O_NOFOLLOW` that must still be
-the file judged (**409** if it changed). A chooser that takes one file
+the file judged: its descriptor realpath and device/inode must match H8's
+judgment (**409** if it changed). A chooser that takes one file
 refuses two (**400**).
 
 **Downloads** are saved to `BROWSER_DIR/downloads/<profile>/<id>/<name>`
 (the folder 0700, the file 0600), the name cleaned: the last path component
 only, control/format/invisible characters gone, `<>:"/\|?*` → `_`, no
-leading dot and no trailing dot or space, NFC, 120 characters at most
+leading dot and no trailing dot or space, Windows-reserved base names
+(`CON`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, `PRN`, `AUX`, ignoring case
+and extension) prefixed with `_`, NFC, 200 UTF-8 bytes at most
 keeping the extension, `download` when nothing is left. **An executable is
 held** — by its name (`act_rules.executable_download`: `.exe`, `.msi`,
-`.sh`, `.deb`, `.AppImage` …) or its first bytes (`MZ`, ELF, `#!`) — and
+`.sh`, `.deb`, `.AppImage`, `.com`, `.js`, `.py`, `.desktop`, `.command`,
+`.url` …; case-insensitive, including double extensions such as `x.pdf.exe`) or its first bytes (`MZ`, ELF, `#!`) — and
 never served until the owner's card, which BR-9b builds; it can be deleted.
-A Private download is removed when the Private Chrome stops.
+Private downloads go to `downloads/private/<ctx>/<id>/<name>`; that
+context's folder is removed when its last tab closes or Private Chrome stops.
 
 ### The tab's socket
 
@@ -2319,8 +2324,8 @@ message is refused; past 64 KiB the socket closes, 1009):
 | `{t:"takeover_request", id, timeout_s}` | another window asks for this tab; unanswered in 20 s is kept |
 | `{t:"location", url, title, security}` | the tab's address and title (cleaned, one line, 2048 and 120) and CDP's security state (`secure`, `insecure`, `neutral` …); on navigation and load |
 | `{t:"held"}` | input was dropped because a card is up (also sent the moment one is raised; at most once a second) |
-| `{t:"input_dropped", reason}` | the page is not keeping up: more than 256 inputs waited |
-| `{t:"dialog", id, kind, message, default}` | `kind` `alert`/`confirm`/`prompt`/`beforeunload`; `message` and `default` cleaned to one line of 1000. Dismissed after 60 s, and at once if no window shows the tab |
+| `{t:"input_dropped", reason}` | input was dropped because more than 256 inputs waited, or this tab has an open dialog or an unanswered earlier CDP input. For the latter, one notice per blocked spell: `reason: "the page has a dialog open or an input still unanswered; this input was dropped"`. Nothing is queued for later |
+| `{t:"dialog", id, kind, message, default}` | `kind` `alert`/`confirm`/`prompt`/`beforeunload`; `message` and `default` cleaned to one line of 1000. Dismissed after 60 s, and at once if no window shows the tab; automatic dismissal waits while any approval card is pending |
 | `{t:"dialog_closed", id, by}` | `by` `owner` or `timeout` |
 | `{t:"filechooser", id, multiple}` / `{t:"filechooser_closed", id, files}` | the page asked for files; answered with `…/files` |
 | `{t:"popup", tab_id}` | the page opened a tab: add it beside this one (B-13) |
@@ -2340,7 +2345,12 @@ page — ends as a pointer move with no button down (Blink's own reset): no
 `mouseup`, no `click` anywhere. Chrome would otherwise fire `click` on the
 common ancestor (`<html>`) for a release at (-1, -1), whatever `clickCount`
 says (measured, Chrome 155). A socket that drops with a button down is let go
-the same way (not under a card).
+the same way (not under a card). Key presses also record the hold count
+before dispatch: a keyup or char from a key held before a later card is
+dropped, so Space cannot activate a button or checkbox after it. No input
+is sent while a dialog is open or an earlier input to that tab is
+unanswered; those inputs are dropped with one `input_dropped` notice. A
+dialog timeout waits for all pending cards to resolve.
 
 **The owner taking over** (amendment §B.9): every input but a plain pointer
 move and a lone modifier, and every dialog or file-chooser answer, stamps the

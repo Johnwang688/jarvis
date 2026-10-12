@@ -10,12 +10,14 @@ folder, so no tool reads it. The window hears `{t:"download", …}` on the
 tab's socket; `GET /browser/downloads/<id>` serves the file to the owner's
 window only, as an attachment (`application/octet-stream`, `nosniff`, a
 policy that runs nothing), so a downloaded page can never render on the
-HUD's origin. A Private download is removed when the Private Chrome stops.
+HUD's origin. Private downloads live in `downloads/private/<ctx>/`; the
+context's folder goes when its last tab closes or Private Chrome stops.
 
 **Cleaned names** (`clean_name`): the last path component only; controls,
 format and invisible characters, and every character Windows refuses
 (`<>:"/\\|?*`) gone or replaced; no leading dot (no hidden file) and no
-trailing dot or space; NFC; at most 120 characters, keeping the extension;
+trailing dot or space; Windows-reserved base names prefixed with `_`; NFC;
+at most 200 UTF-8 bytes, keeping the extension;
 `download` when nothing is left. The page chose the name; it never names a
 path here, since the file is always one level inside its own folder.
 
@@ -47,7 +49,7 @@ from pathlib import Path
 
 from jarvis import config, untrusted
 
-NAME_CAP = 120
+NAME_CAP = 200
 DOWNLOAD_ID = re.compile(r"[0-9a-f]{8}")
 INCOMING = "incoming"
 MAX_UPLOAD_FILES = 16
@@ -76,12 +78,14 @@ def clean_name(raw) -> str:
         out.append("_" if ch in _WINDOWS else ch)
     name = " ".join("".join(out).split())
     name = name.lstrip(". ").rstrip(". ")
-    if len(name) > NAME_CAP:
+    if re.fullmatch(r"(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])", name.split(".", 1)[0]):
+        name = "_" + name
+    if len(name.encode("utf-8")) > NAME_CAP:
         stem, dot, ext = name.rpartition(".")
-        if dot and 0 < len(ext) <= 16 and stem:
-            name = stem[: NAME_CAP - len(ext) - 1].rstrip(". ") + "." + ext
-        else:
-            name = name[:NAME_CAP].rstrip(". ")
+        suffix = dot + ext if dot and stem and len((dot + ext).encode("utf-8")) < NAME_CAP else ""
+        prefix = stem if suffix else name
+        prefix = prefix.encode("utf-8")[:NAME_CAP - len(suffix.encode("utf-8"))].decode("utf-8", "ignore")
+        name = (prefix.rstrip(". ") or "_") + suffix
     return name or "download"
 
 
@@ -115,7 +119,21 @@ def _profile_dirs() -> list[Path]:
         entries = list(os.scandir(root))
     except OSError:
         return []
-    return [Path(e.path) for e in entries if e.is_dir(follow_symlinks=False)]
+    folders = []
+    for entry in entries:
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        path = Path(entry.path)
+        if entry.name == "private":
+            try:
+                contexts = list(os.scandir(path))
+            except OSError:
+                continue
+            folders.extend(Path(ctx.path) for ctx in contexts
+                           if DOWNLOAD_ID.fullmatch(ctx.name) and ctx.is_dir(follow_symlinks=False))
+        else:
+            folders.append(path)
+    return folders
 
 
 def _entry(folder: Path) -> Path | None:
@@ -136,7 +154,7 @@ def _find(download_id) -> tuple[str, Path] | None:
         folder = profile / download_id
         try:
             if stat.S_ISDIR(os.lstat(folder).st_mode):
-                return profile.name, folder
+                return "private" if profile.parent.name == "private" else profile.name, folder
         except OSError:
             continue
     return None
@@ -171,7 +189,8 @@ def listing() -> list[dict]:
                 info = os.lstat(path)
             except OSError:
                 continue
-            rows.append({"id": entry.name, "profile": profile.name, "name": path.name,
+            rows.append({"id": entry.name, "profile": "private" if profile.parent.name == "private" else profile.name,
+                         "name": path.name,
                          "size": info.st_size, "held": executable(path.name, _head(path)),
                          "at": datetime.fromtimestamp(info.st_mtime, timezone.utc)
                          .isoformat(timespec="seconds")})
@@ -205,7 +224,7 @@ def delete(download_id) -> dict:
     return {"id": download_id, "deleted": True}
 
 
-def save(source: str, profile: str, name: str, download_id: str) -> dict:
+def save(source: str, profile: str, name: str, download_id: str, ctx: str | None = None) -> dict:
     """Copy a finished download into its own folder (`download_id`, made
     here and never one that exists), 0600, under its cleaned name. Returns
     `{id, name, size, held}`."""
@@ -213,6 +232,10 @@ def save(source: str, profile: str, name: str, download_id: str) -> dict:
     if not DOWNLOAD_ID.fullmatch(download_id):
         raise FileRefused(400, "a download id is eight lowercase hex characters")
     folder_root = secure_dir(config.BROWSER_DIR / "downloads" / profile)
+    if profile == "private":
+        if not isinstance(ctx, str) or not DOWNLOAD_ID.fullmatch(ctx):
+            raise FileRefused(400, "a Private download needs its context")
+        folder_root = secure_dir(folder_root / ctx)
     folder = folder_root / download_id
     os.mkdir(folder, 0o700)                     # FileExistsError: never into another's folder
     secure_dir(folder, create=False)
@@ -261,10 +284,11 @@ def upload_payloads(daemon, files) -> list[dict]:
             raise FileRefused(404, "no such project")
         if os.path.isabs(item["path"]) or item["path"].startswith("~"):
             raise FileRefused(400, "a file's path is relative to its project")
-        why, resolved = upload_refusal(item["path"], project.root)
+        judged = []
+        why, resolved = upload_refusal(item["path"], project.root, judged=judged)
         if why is not None:
             raise FileRefused(403, why)
-        data = _read_judged(resolved, MAX_UPLOAD_BYTES)
+        data = _read_judged(resolved, MAX_UPLOAD_BYTES, judged[0])
         total += len(data)
         if total > MAX_UPLOAD_BYTES:
             raise FileRefused(413, "the files to upload are larger than 50 MB in all")
@@ -274,10 +298,10 @@ def upload_payloads(daemon, files) -> list[dict]:
     return out
 
 
-def _read_judged(resolved: str, cap: int) -> bytes:
+def _read_judged(resolved: str, cap: int, judged: os.stat_result) -> bytes:
     """The bytes of exactly the file judged: opened `O_NOFOLLOW`, a regular
     file with one name, no larger than `cap`, and still the path judged
-    (its realpath through the descriptor)."""
+    (its realpath through the descriptor and the judged device/inode)."""
     refused = FileRefused(409, "the file changed after it was checked; choose it again")
     try:
         fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -286,6 +310,8 @@ def _read_judged(resolved: str, cap: int) -> bytes:
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > cap:
+            raise refused
+        if (info.st_dev, info.st_ino) != (judged.st_dev, judged.st_ino):
             raise refused
         if os.path.realpath(f"/proc/self/fd/{fd}") != resolved:
             raise refused

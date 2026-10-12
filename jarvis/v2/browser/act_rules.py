@@ -228,7 +228,9 @@ ASK_SCHEMES = {"chrome": ACCOUNT_SECURITY, "chrome-untrusted": ACCOUNT_SECURITY}
 EXECUTABLE_EXTENSIONS = (".exe", ".msi", ".bat", ".cmd", ".ps1", ".sh", ".deb", ".rpm",
                          ".appimage", ".dmg", ".pkg", ".jar", ".apk", ".scr",
                          ".msix", ".appx", ".vbs", ".hta", ".lnk", ".iso", ".reg", ".msp",
-                         ".application")
+                         ".application", ".js", ".jse", ".wsf", ".wsh", ".vbe", ".chm",
+                         ".url", ".scf", ".msc", ".appref-ms", ".com", ".py", ".pyw",
+                         ".desktop", ".command", ".psm1", ".cpl", ".dll", ".run")
 # A download an agent action started whose MIME type is one of these is held
 # (§B.4), as is one whose name ends in an extension above (`executable_download`).
 EXECUTABLE_MIME_TYPES = frozenset({
@@ -756,7 +758,7 @@ def _under(path: Path, directory: Path) -> bool:
     return path == directory or directory in path.parents
 
 
-def upload_refusal(upload_path: str, project_dir: str) -> tuple[str | None, str]:
+def upload_refusal(upload_path: str, project_dir: str, *, judged: list | None = None) -> tuple[str | None, str]:
     """(fixed sentence, "") if this file may not be uploaded, else (None,
     resolved path). Only a regular file inside the chat's project folder (no
     `..` out, no symlink out), at most 50 MB, with one name on disk (no hard
@@ -770,7 +772,8 @@ def upload_refusal(upload_path: str, project_dir: str) -> tuple[str | None, str]
     starting with `.` but `.well-known` — `.git`, `.GIT`, `.ssh`, `.docker`).
 
     The resolved path is what was judged. It is not a lock: BR-9b must judge
-    again after the card and upload a private copy it opened `O_NOFOLLOW`."""
+    again after the card and upload a private copy it opened `O_NOFOLLOW`.
+    When supplied, `judged` receives the stat used here for that fd comparison."""
     from jarvis.v2 import editor_policy  # the one classifier, called: not copied
 
     if not upload_path or not project_dir:
@@ -809,6 +812,8 @@ def upload_refusal(upload_path: str, project_dir: str) -> tuple[str | None, str]
         return R_UPLOAD_LINKED, ""
     if info.st_size > MAX_UPLOAD_BYTES:
         return R_UPLOAD_SIZE, ""
+    if judged is not None:
+        judged.append(info)
     return None, str(resolved)
 
 

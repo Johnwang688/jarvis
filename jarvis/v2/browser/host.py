@@ -436,7 +436,9 @@ class _Tab:
     dialogs: dict = field(default_factory=dict)
     timers: dict = field(default_factory=dict)
     chooser: tuple | None = None        # (id, FileChooser, loop time)
-    pressed: dict = field(default_factory=dict)     # button -> the stream's hold count at the press
+    pressed: dict = field(default_factory=dict)     # button -> hold count before dispatch
+    keys_pressed: dict = field(default_factory=dict)  # code -> hold count before dispatch
+    input_task: object = None           # unanswered CDP input, never bank more behind it
 
 
 class BrowserHost:
@@ -813,7 +815,9 @@ class BrowserHost:
             return None
         tab_id = self._new_id(self._tabs)
         tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
-                   stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab)),
+                   stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab),
+                                    blocked=lambda: bool(tab.dialogs) or (tab.input_task is not None
+                                                                         and not tab.input_task.done())),
                    cdp_lock=asyncio.Lock(), cast_lock=asyncio.Lock(), wakeup=asyncio.Event())
         self._tabs[tab.id] = tab
         page.on("framenavigated", lambda frame: self._landed(tab, frame))
@@ -845,6 +849,8 @@ class BrowserHost:
         cap = max(1, config.BROWSER_TAB_CAP)
         with self._lock:
             self._popups_refused += 1
+        # Playwright keeps the opener relation on the closed Page object.
+        await self._quietly(page.close())
         try:
             opener = await asyncio.wait_for(page.opener(), CLOSE_TIMEOUT_S)
         except Exception:  # noqa: BLE001
@@ -855,7 +861,6 @@ class BrowserHost:
                                 "reason": f"the page opened a new tab, but the Browser already has "
                                           f"{cap} tabs open; close one first"})
         LOG.info("Browser refused a pop-up past the tab cap")
-        await self._quietly(page.close())
 
     def _release(self, tab: _Tab, reason: str) -> None:
         """A tab is gone: its window is told and let go, its timers and its
@@ -880,6 +885,7 @@ class BrowserHost:
             context = instance.private_contexts.pop(tab.ctx, None) if instance else None
             if context is not None:
                 asyncio.ensure_future(self._quietly(context.close()))
+            _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / tab.ctx)
         self._publish_snapshot()
 
     @staticmethod
@@ -988,7 +994,7 @@ class BrowserHost:
                 ctx = self._new_id(instance.private_contexts)
                 context = await instance.browser.new_context(
                     proxy={"server": f"socks5://127.0.0.1:{self._gate.port}", "bypass": "<-loopback>"},
-                    accept_downloads=False, viewport={"width": 1280, "height": 800})
+                    accept_downloads=True, viewport={"width": 1280, "height": 800})
                 instance.private_contexts[ctx] = context
                 context.on("page", lambda page, c=ctx: self._adopt(instance, page, c))
             context = instance.private_contexts.get(ctx)
@@ -1422,6 +1428,24 @@ class BrowserHost:
         cdp = await self._ensure_cdp(tab)
         if cdp is None:
             return
+        if self.input_held():
+            tab.stream.hold_through()
+            return
+        if tab.stream.input_blocked():
+            tab.stream.drop_blocked_input()
+            return
+        hold_count = tab.stream.hold_count
+        key = method == "Input.dispatchKeyEvent"
+        code = params.get("code", "") if key else None
+        if key:
+            pressed_at = tab.keys_pressed.get(code)
+            if params["type"] in ("keyUp", "char") or params.get("autoRepeat", False):
+                if pressed_at is not None and pressed_at != hold_count:
+                    # Keep the cut-off mark: duplicate ups/chars cannot finish
+                    # the old press either. A fresh down replaces it.
+                    return
+            if params["type"] == "keyUp":
+                tab.keys_pressed.pop(code, None)
         mouse = method == "Input.dispatchMouseEvent"
         button = params.get("button") if mouse else None
         if mouse and params["type"] == "mouseReleased" and button in tab.pressed:
@@ -1434,17 +1458,20 @@ class BrowserHost:
             if tab.pressed[button] != tab.stream.hold_count or params["x"] < 0 or params["y"] < 0:
                 del tab.pressed[button]
                 params = self._let_go(params)
-        # Not cancelled on a timeout: an event blocked behind the page (an
-        # `alert()` the click opened) still lands; the next one is not
-        # held up past DELIVER_WAIT_S.
-        task = asyncio.ensure_future(cdp.send(method, params))
-        task.add_done_callback(lambda t: t.cancelled() or t.exception())
-        await asyncio.wait({task}, timeout=DELIVER_WAIT_S)
+        # Record before yielding: a card may arrive during Chrome's handler.
+        if key and params["type"] in ("keyDown", "rawKeyDown"):
+            tab.keys_pressed[code] = hold_count
         if mouse and button not in (None, "none"):
             if params["type"] == "mousePressed":
-                tab.pressed[button] = tab.stream.hold_count
+                tab.pressed[button] = hold_count
             elif params["type"] == "mouseReleased":
                 tab.pressed.pop(button, None)
+        # Timeout leaves the call alive, but no later input may follow it
+        # until Chrome answers. Input arriving meanwhile is dropped.
+        task = asyncio.ensure_future(cdp.send(method, params))
+        tab.input_task = task
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        await asyncio.wait({task}, timeout=DELIVER_WAIT_S)
 
     async def _release_pressed(self, tab: _Tab) -> None:
         """Let go of every button the page holds, never as a click."""
@@ -1474,9 +1501,6 @@ class BrowserHost:
         """alert, confirm, prompt or beforeunload: told to the tab's window
         and answered by it, or dismissed after DIALOG_TIMEOUT_S. With no
         window showing the tab, nobody could answer: dismissed at once."""
-        if tab.stream is None or tab.stream.attached() is None:
-            asyncio.ensure_future(self._quietly(dialog.dismiss()))
-            return
         dialog_id = self._new_id(tab.dialogs)
         tab.dialogs[dialog_id] = dialog
         kind = dialog.type if dialog.type in DIALOG_KINDS else "alert"
@@ -1485,11 +1509,17 @@ class BrowserHost:
             "message": _clean(dialog.message, DIALOG_TEXT_CAP),
             "default": _clean(dialog.default_value, DIALOG_TEXT_CAP) if kind == "prompt" else ""})
         tab.timers[dialog_id] = asyncio.get_running_loop().call_later(
-            DIALOG_TIMEOUT_S, lambda: asyncio.ensure_future(self._close_dialog(tab, dialog_id, None, "timeout")))
+            DIALOG_TIMEOUT_S if tab.stream.attached() is not None else 0,
+            lambda: asyncio.ensure_future(self._close_dialog(tab, dialog_id, None, "timeout")))
 
     async def _close_dialog(self, tab: _Tab, dialog_id: str, answer, by: str) -> None:
-        if by == "owner" and self.input_held():
-            tab.stream.hold_through()
+        if self.input_held():
+            if by == "owner":
+                tab.stream.hold_through()
+            elif dialog_id in tab.dialogs:
+                tab.timers[dialog_id] = asyncio.get_running_loop().call_later(
+                    0.1, lambda: asyncio.ensure_future(
+                        self._close_dialog(tab, dialog_id, answer, by)))
             return
         dialog = tab.dialogs.pop(dialog_id, None)
         if dialog is None:
@@ -1565,7 +1595,7 @@ class BrowserHost:
         try:
             source = await download.path()
             row = await asyncio.get_running_loop().run_in_executor(
-                None, _files.save, str(source), profile, name, download_id)
+                None, _files.save, str(source), profile, name, download_id, tab.ctx)
         except Exception as exc:  # noqa: BLE001 - a failed or cancelled download
             LOG.info("Browser download failed (%s)", type(exc).__name__)
             tab.stream.send({**notice, "state": "failed"})
@@ -1574,6 +1604,8 @@ class BrowserHost:
             with self._lock:
                 self._downloading -= 1
             await self._quietly(download.delete())
+            if profile == PRIVATE and not any(t.ctx == tab.ctx for t in self._tabs.values()):
+                _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / tab.ctx)
         LOG.info("Browser saved a download%s", " (held: executable)" if row["held"] else "")
         tab.stream.send({"t": "download", "id": row["id"], "name": row["name"], "size": row["size"],
                          "state": "held" if row["held"] else "done", "held": row["held"]})

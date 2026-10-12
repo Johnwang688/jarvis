@@ -368,12 +368,15 @@ class TabStream:
     and the routes all call in. `wake` is how a queued input reaches the
     Browser's thread (the host sets it)."""
 
-    def __init__(self, tab_id: str, *, held=lambda: False, wake=lambda: None, clock=time.monotonic):
+    def __init__(self, tab_id: str, *, held=lambda: False, wake=lambda: None,
+                 clock=time.monotonic, blocked=lambda: False):
         self.tab_id = tab_id
         self._held = held
+        self.input_blocked = blocked
+        self._blocked_notice = False
         self.wake = wake
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._sock = None
         self.gen = 0
         self._takeover: _Takeover | None = None
@@ -632,6 +635,15 @@ class TabStream:
                 self.paused, self.paused_by = True, "owner"
                 self._send(self._sock, self._paused_message())
 
+    def drop_blocked_input(self) -> None:
+        """One notice per blocked spell; dropped events are never queued."""
+        with self._lock:
+            self.dropped += 1
+            if not self._blocked_notice:
+                self._blocked_notice = True
+                self._send(self._sock, {"t": "input_dropped",
+                                       "reason": "the page has a dialog open or an input still unanswered; this input was dropped"})
+
     def enqueue(self, sock, msg: Msg) -> None:
         """One input event from the window: held, refused for want of room,
         or queued for the Browser's thread."""
@@ -648,6 +660,10 @@ class TabStream:
                 if self._held_notice_due():
                     self._send(sock, {"t": "held"})
                 return
+            if self.input_blocked():
+                self.drop_blocked_input()
+                return
+            self._blocked_notice = False
             if len(self._queue) >= INPUT_QUEUE_MAX:
                 self.dropped += 1
                 self._send(sock, {"t": "input_dropped",

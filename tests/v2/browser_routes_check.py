@@ -141,7 +141,7 @@ PAGES = {
 <style>body{{margin:0;height:3000px}} #b{{position:absolute;left:100px;top:100px;width:200px;height:80px}}
 #t{{position:absolute;left:100px;top:300px;width:300px;height:40px}}
 #s{{position:absolute;left:100px;top:400px}}</style>
-<button id=b>press</button><input id=t><p id=s>select me {MARK}</p>{LOGGER}""",
+<button id=b>press</button><input type=checkbox id=box><input id=t><p id=s>select me {MARK}</p>{LOGGER}""",
     "/anim": f"""<!doctype html><title>{MARK} anim</title><style>body{{margin:0}}</style>
 <div id=d style="width:100vw;height:100vh"></div><script>
 let i = 0; (function f() {{ d.style.background = 'hsl(' + (i++ % 360) + ',60%,50%)'; requestAnimationFrame(f); }})();
@@ -252,6 +252,15 @@ class Window:
     def send(self, payload: dict):
         self.conn.send(json.dumps(payload))
 
+    def settled(self):
+        """Fixture input at human pace: wait for the prior CDP answer.
+        Safety/race tests use raw send() to exercise banked input explicitly."""
+        before = len([m for m in self.messages if m.get("t") == "pong"])
+        self.send({"t": "ping"})
+        self.until(lambda w: len([m for m in w.messages if m.get("t") == "pong"]) > before,
+                   what="reader consumed prior input")
+        eventually(self.input_idle, 6, "prior CDP input answered")
+
     def kinds(self):
         return [m.get("t") for m in self.messages]
 
@@ -298,7 +307,9 @@ def mouse(kind, x, y, *, button="left", buttons=None, count=1):
 
 
 def click(window, x, y):
+    window.settled()
     window.send(mouse("mousePressed", x, y))
+    window.settled()
     window.send(mouse("mouseReleased", x, y))
 
 
@@ -308,12 +319,18 @@ def wheel(x, y, dy):
                                  "pointerType": "mouse"}}
 
 
-def type_keys(window, text):
+def type_keys(window, text, *, pace=True):
     for ch in text:
         code = f"Key{ch.upper()}" if ch.isalpha() else ("Digit" + ch if ch.isdigit() else "")
         vk = ord(ch.upper())
+        if pace:
+            window.settled()
         window.send(key(ch, code, vk, ch))
+        if pace:
+            window.settled()
         window.send(key(ch, code, vk, up=True))
+    if pace:
+        window.settled()
 
 
 def chrome_tree(folder: Path) -> list[int]:
@@ -446,6 +463,124 @@ class Pure(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(folder).st_mode), 0o700)
             with self.assertRaises(FileExistsError):
                 F.save(str(source), "p-00000000", "again.txt", "0123abcd")
+
+
+    def test_long_utf8_name_saves(self):
+        with tempfile.TemporaryDirectory(prefix="brc-") as tmp:
+            root = Path(tmp)
+            with patch.object(config, "BROWSER_DIR", root / "browser"):
+                H.secure_dir(config.BROWSER_DIR)
+                source = root / "source"
+                source.write_bytes(b"data")
+                row = F.save(str(source), "p-00000000", "界" * 119 + ".txt", "0123abcd")
+                self.assertLessEqual(len(row["name"].encode("utf-8")), 200)
+                self.assertTrue(row["name"].endswith(".txt"))
+                self.assertEqual((config.BROWSER_DIR / "downloads" / "p-00000000" / "0123abcd" / row["name"]).read_bytes(), b"data")
+
+    def test_windows_reserved_names(self):
+        for name in ("CON", "nul.txt", "com1.log", "LPT9", "PrN.pdf", "aux"):
+            with self.subTest(name=name):
+                self.assertEqual(F.clean_name(name), "_" + name)
+
+    def test_executable_extensions(self):
+        extensions = "js jse wsf wsh vbe vbs chm url scf msc appref-ms com py pyw desktop command hta lnk ps1 psm1 reg jar msi msp scr cpl bat cmd exe dll sh run appimage deb rpm pkg dmg".split()
+        for ext in extensions:
+            for prefix in ("x.", "x.pdf."):
+                with self.subTest(ext=ext, prefix=prefix):
+                    self.assertTrue(F.executable(prefix + ext.upper(), b"plain bytes"))
+        self.assertTrue(F.executable("x.com", b"MZ"))
+
+    def test_pump_checks_hold_without_observer(self):
+        async def check():
+            host = H.BrowserHost()
+            host.input_held = lambda: True
+            stream = S.TabStream("aaaaaaaa")
+            stream._queue.append((1, stream.gen, S.Msg("text", "Input.insertText", {"text": "banked"})))
+            tab = H._Tab(id="aaaaaaaa", profile="p-00000000", ctx=None, page=None,
+                         stream=stream, wakeup=asyncio.Event())
+            sent = []
+            async def deliver(*args):
+                sent.append(args)
+            host._deliver = deliver
+            tab.wakeup.set()
+            task = asyncio.create_task(host._pump(tab))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            self.assertEqual(sent, [], "the pump sent input while an unobserved card was pending")
+        asyncio.run(check())
+
+    def test_popup_closes_before_waiting_for_opener(self):
+        async def check():
+            calls = []
+            class Popup:
+                async def close(self):
+                    calls.append("close")
+                async def opener(self):
+                    calls.append("opener")
+                    return None
+            await H.BrowserHost()._refuse_popup(Popup())
+            self.assertEqual(calls, ["close", "opener"])
+        asyncio.run(check())
+
+    def test_unanswered_input_drops_without_a_dialog(self):
+        async def check():
+            gate = asyncio.Event()
+            sent = []
+            class CDP:
+                async def send(self, method, params):
+                    sent.append(params)
+                    await gate.wait()
+            host = H.BrowserHost()
+            tab = H._Tab(id="aaaaaaaa", profile="p-00000000", ctx=None, page=None, cdp=CDP())
+            tab.stream = S.TabStream(tab.id, blocked=lambda: tab.input_task is not None and not tab.input_task.done())
+            with patch.object(H, "DELIVER_WAIT_S", 0.01):
+                await host._deliver(tab, "Input.insertText", {"text": "first"})
+                await host._deliver(tab, "Input.insertText", {"text": "banked"})
+            gate.set()
+            await tab.input_task
+            self.assertEqual(sent, [{"text": "first"}])
+        asyncio.run(check())
+
+    def test_blocked_input_is_dropped_on_arrival(self):
+        messages = []
+        sock = SimpleNamespace(send_text=lambda raw: messages.append(json.loads(raw)))
+        blocked = [True]
+        stream = S.TabStream("aaaaaaaa", blocked=lambda: blocked[0])
+        stream._sock = sock
+        msg = S.Msg("text", "Input.insertText", {"text": "banked"})
+        stream.enqueue(sock, msg)
+        stream.enqueue(sock, msg)
+        self.assertIsNone(stream.take(), "blocked input was queued for later")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0], {"t": "input_dropped", "reason": "the page has a dialog open or an input still unanswered; this input was dropped"})
+        blocked[0] = False
+        stream.enqueue(sock, msg)
+        self.assertIsNotNone(stream.take())
+        blocked[0] = True
+        stream.enqueue(sock, msg)
+        self.assertEqual(len(messages), 2)
+
+    def test_cut_off_char_is_dropped(self):
+        async def check():
+            sent = []
+            class CDP:
+                async def send(self, method, params):
+                    sent.append(params)
+            host = H.BrowserHost()
+            tab = H._Tab(id="aaaaaaaa", profile="p-00000000", ctx=None, page=None, cdp=CDP(), stream=S.TabStream("aaaaaaaa"))
+            await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "rawKeyDown", "code": "Space"})
+            tab.stream.hold_through(notify=False)
+            await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "char", "code": "Space", "text": " "})
+            await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "keyUp", "code": "Space"})
+            await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "keyUp", "code": "Space"})
+            await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "char", "code": "Space", "text": " "})
+            await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "rawKeyDown", "code": "Space", "autoRepeat": True})
+            self.assertEqual(len(sent), 1)
+        asyncio.run(check())
 
 
 class BrowserStream(unittest.TestCase):
@@ -599,6 +734,8 @@ class BrowserStream(unittest.TestCase):
         conn = websocket.create_connection(
             f"ws://127.0.0.1:{port}/browser/tabs/{tab_id}/attach?ticket={ticket}", timeout=10, **options)
         window = Window(conn)
+        tab = self.host._tabs[tab_id]
+        window.input_idle = lambda: not tab.stream._queue and (tab.input_task is None or tab.input_task.done())
         self.windows.append(window)
         self.addCleanup(window.close)           # a failed section never holds the tab for the next
         return window
@@ -824,7 +961,9 @@ class BrowserStream(unittest.TestCase):
         click(window, 250, 320)                         # focus the text field
         type_keys(window, "hi")
         window.send({"t": "text", "text": f" {TYPED} pasted"})
+        window.settled()
         window.send(key("Backspace", "Backspace", 8))
+        window.settled()
         window.send(key("Backspace", "Backspace", 8, up=True))
         self.wait(lambda: self.js(tab, "t.value") == f"hi {TYPED} paste", what="typed text")
         keys = [r["key"] for r in self.log(tab, "keydown")]
@@ -906,9 +1045,9 @@ class BrowserStream(unittest.TestCase):
 
         self.host._deliver = slow
         try:
-            type_keys(window, "x")
+            type_keys(window, "x", pace=False)
             self.wait(lambda: calls["n"] == 1, 5, "the first key delivered")
-            type_keys(window, "yz")
+            type_keys(window, "yz", pace=False)
             window.send({"t": "text", "text": "queued"})
             time.sleep(0.3)
             with self.card():
@@ -967,6 +1106,82 @@ class BrowserStream(unittest.TestCase):
         self.assertEqual(len(self.log(tab, "click")), base + 1, "a release off the page clicked")
         click(window, 200, 140)
         self.wait(lambda: len(self.log(tab, "click")) == base + 2, what="clicks work after")
+
+    def test_08b_space_cut_off_by_card_never_activates(self):
+        tab = self.tab
+        window = self.attached(tab)
+        for target in ("b", "box"):
+            self.navigate(tab, "/input")
+            self.js(tab, target + ".focus()")
+            window.send(key(" ", "Space", 32, " "))
+            self.wait(lambda: self.log(tab, "keydown"), what="Space down")
+            with self.card():
+                window.wait_for("held")
+            window.send(key(" ", "Space", 32, up=True))
+            window.send(key(" ", "Space", 32, up=True))  # duplicate release also stays cut off
+            window.drain(0.4)
+            self.assertEqual(self.log(tab, "click"), [], target + " activated after the card")
+            self.assertFalse(self.js(tab, "box.checked"))
+            window.send(key(" ", "Space", 32, " "))
+            window.settled()
+            window.send(key(" ", "Space", 32, up=True))
+            self.wait(lambda: self.log(tab, "click"), what="ordinary Space activates " + target)
+            self.assertEqual(self.log(tab, "click")[-1]["target"], target)
+            if target == "box":
+                self.assertTrue(self.js(tab, "box.checked"))
+
+    def test_08c_hold_during_mousedown_dispatch(self):
+        tab = self.tab
+        self.navigate(tab, "/input")
+        window = self.attached(tab)
+        self.js(tab, "b.onmousedown = () => { const end = performance.now() + 1500; while(performance.now() < end) {} }")
+        window.send(mouse("mousePressed", 200, 140))
+        self.wait(lambda: self.host._tabs[tab].input_task is not None and not self.host._tabs[tab].input_task.done(), what="press in flight")
+        time.sleep(0.4)
+        with self.card():
+            window.wait_for("held")
+        self.wait(lambda: self.host._tabs[tab].input_task.done(), what="busy handler completed")
+        window.send(mouse("mouseReleased", 200, 140))
+        window.drain(0.5)
+        self.assertEqual(self.log(tab, "click"), [], "a hold during dispatch was missed")
+
+    def test_08d_dialog_drops_input_and_timeout_waits_for_card(self):
+        tab = self.tab
+        self.navigate(tab, "/input")
+        window = self.attached(tab)
+        self.js(tab, "t.value = 'old'; t.focus(); b.onmousedown = e => { e.preventDefault(); alert('blocked'); }")
+        with patch.object(H, "DIALOG_TIMEOUT_S", 1.0), patch.object(H, "DELIVER_WAIT_S", 0.1):
+            window.send(mouse("mousePressed", 200, 140))
+            dialog = window.wait_for("dialog")
+            window.send(mouse("mouseReleased", 200, 140))
+            window.send({"t": "text", "text": "banked"})
+            window.drain(0.15)  # the release/text are consumed before the card, never banked
+            with self.card():
+                window.drain(1.3)
+                self.assertIsNone(window.last("dialog_closed", id=dialog["id"]), "timeout dismissed under a card")
+                self.assertIn(dialog["id"], self.host._tabs[tab].dialogs)
+            window.wait_for("dialog_closed", timeout=5, id=dialog["id"], by="timeout")
+        self.wait(lambda: self.host._tabs[tab].input_task.done(), what="press answered")
+        window.drain(0.3)
+        self.assertEqual(self.js(tab, "t.value"), "old")
+        self.assertEqual(self.log(tab, "mouseup"), [], "banked release landed")
+        self.assertEqual(self.log(tab, "click"), [])
+        self.assertEqual(len([m for m in window.messages if m.get("t") == "input_dropped"]), 1)
+
+    def test_08e_hold_during_keydown_dispatch(self):
+        tab = self.tab
+        self.navigate(tab, "/input")
+        window = self.attached(tab)
+        self.js(tab, "b.focus(); b.onkeydown = () => { const end = performance.now() + 1500; while(performance.now() < end) {} }")
+        window.send(key(" ", "Space", 32, " "))
+        self.wait(lambda: self.host._tabs[tab].input_task is not None and not self.host._tabs[tab].input_task.done(), what="keydown in flight")
+        time.sleep(0.4)
+        with self.card():
+            window.wait_for("held")
+        self.wait(lambda: self.host._tabs[tab].input_task.done(), what="busy key handler completed")
+        window.send(key(" ", "Space", 32, up=True))
+        window.drain(0.4)
+        self.assertEqual(self.log(tab, "click"), [], "a hold during keydown dispatch was missed")
 
     # -- 6: the agent channel (amendment §B.9) -------------------------------------------------------
 
@@ -1181,7 +1396,7 @@ class BrowserStream(unittest.TestCase):
     def test_14_set_files(self):
         tab = self.tab
         (self.work / "notes.txt").write_text(f"UPLOADz {MARK}\n")
-        (self.work / ".env").write_text("SECRET=not-a-real-value\n")
+        (self.work / ".env").write_text("SECRET=not-a-real-value\n")   # a fake, in the test's temp folder
         (self.work / ".hidden").mkdir()
         (self.work / ".hidden" / "x.txt").write_text("hidden\n")
         (self.work / "twin.txt").write_text("twin\n")
@@ -1225,6 +1440,37 @@ class BrowserStream(unittest.TestCase):
                          "a chooser is answered once")
         window.close()
 
+    def test_14a_upload_folder_swap_and_same_path_replacement(self):
+        from jarvis.v2.browser import act_rules as rules
+        tab = self.tab
+        self.navigate(tab, "/upload")
+        window = self.attached(tab)
+        click(window, 150, 40)
+        chooser = window.wait_for("filechooser")
+        real = rules.upload_refusal
+        for kind in ("folder", "inode"):
+            folder = self.work / ("swap-" + kind)
+            folder.mkdir()
+            source = folder / "notes.txt"
+            source.write_text("judged")
+            def swap(path, project, **kw):
+                result = real(path, project, **kw)
+                if kind == "folder":
+                    # The fd will still have the judged inode: only realpath catches this.
+                    moved = self.work / "moved"
+                    folder.rename(moved)
+                    folder.symlink_to(moved, target_is_directory=True)
+                else:
+                    replacement = self.work / "replacement"
+                    replacement.write_text("other bytes")
+                    replacement.replace(source)
+                return result
+            with patch.object(rules, "upload_refusal", swap):
+                status, _ = self.ask("POST", f"/browser/tabs/{tab}/files", {
+                    "chooser": chooser["id"], "files": [{"project": self.project.id, "path": str(source.relative_to(self.work))}]})
+            self.assertEqual(status, 409, kind + " swap uploaded different file")
+            self.assertIsNone(self.js(tab, "__files"))
+
     def test_14b_a_private_tab_streams_too(self):
         # One Chrome at a time: Main stops first, and Private is its own Chrome.
         main = self.owner("GET", "/browser")["profiles"][0]["id"]
@@ -1236,9 +1482,25 @@ class BrowserStream(unittest.TestCase):
         click(window, 250, 320)
         type_keys(window, "pv")
         self.wait(lambda: self.js(row["tab_id"], "t.value") == "pv", what="Private input")
-        self.owner("DELETE", f"/browser/tabs/{row['tab_id']}")
-        window.wait_for("closed")
-        self.host.close_profile("private")
+        # Each Private context owns its downloads, including listing/serving.
+        ctx_folder = config.BROWSER_DIR / "downloads" / "private" / row["ctx"]
+        for state in ("context", "chrome"):
+            self.owner("POST", f"/browser/tabs/{row['tab_id']}/navigate", {"url": self.url("/dl?n=private.txt")})
+            done = window.wait_for("download", timeout=15, state="done")
+            self.assertTrue((ctx_folder / done["id"] / done["name"]).is_file())
+            listed = {d["id"]: d for d in self.owner("GET", "/browser/downloads")["downloads"]}
+            self.assertEqual(listed[done["id"]]["profile"], "private")
+            self.assertEqual(self.ask("GET", f"/browser/downloads/{done['id']}", raw=True)[0], 200)
+            if state == "context":
+                self.owner("DELETE", f"/browser/tabs/{row['tab_id']}")
+                window.wait_for("closed")
+                self.assertFalse(ctx_folder.exists())
+                row = self.owner("POST", "/browser/tabs", {"profile": "private", "url": self.url("/input")})
+                window = self.attached(row["tab_id"])
+                ctx_folder = config.BROWSER_DIR / "downloads" / "private" / row["ctx"]
+            else:
+                self.host.close_profile("private")
+                self.assertFalse(ctx_folder.exists())
         type(self).tab = self.owner("POST", "/browser/tabs", {"url": self.url("/input")})["tab_id"]
 
     # -- 11: nothing leaves memory, and the end ------------------------------------------------------------

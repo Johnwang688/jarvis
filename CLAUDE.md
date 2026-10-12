@@ -554,7 +554,9 @@ for. So a release of a button pressed before a hold (`tab.pressed` keeps the
 stream's `hold_count` at the press), and any release off the page, is sent
 as a pointer move with no button down (`_let_go`, Blink's own reset): no
 `mouseup`, no `click`, and the next click is ordinary; a socket that drops
-mid-press is let go the same way (never under a card). **Owner input
+mid-press is let go the same way (never under a card). Keys also record
+the hold count before dispatch; a keyup or char from before a later card
+is dropped, so Space never activates after the card. **Owner input
 stamps** every tab it reaches (keys but a lone modifier, text, wheel, press,
 release, drag, dialog and chooser answers — never a plain move), and while
 an agent holds the tab pauses it **before** the event is queued
@@ -563,7 +565,10 @@ an agent holds the tab pauses it **before** the event is queued
 and `owner_state(tab_id)` are BR-9b's to drive. **Dialogs** go to the window
 (`{t:"dialog", id, kind, message, default}`, cleaned to 1000) and are
 answered there; dismissed after `DIALOG_TIMEOUT_S` (60), and at once with no
-window attached. **Pop-ups** open as tabs and the opener's window hears
+window attached, with automatic dismissal waiting under a card. An open
+dialog or unanswered CDP input drops further input to that tab, with one
+`input_dropped` notice; nothing is banked for later. **Pop-ups** open as tabs and the
+opener's window hears
 `{t:"popup", tab_id}` (the listing carries `opener`); **the cap stays 12 in
 all** (decision B-13 "12 in all", which also bounds each profile's Chrome;
 the brief said per instance) and **past it the pop-up is refused**
@@ -574,24 +579,29 @@ into `downloads/<profile>/incoming/`; a finished one is copied by fd to
 `downloads/<profile>/<id>/<cleaned name>` (the folder 0700, made fresh, the
 file 0600 `O_EXCL|O_NOFOLLOW`; `files.clean_name`: last
 component, invisible and Windows-reserved characters out, no leading dot,
-120 keeping the extension) and Playwright's copy deleted; listed and served
+200 UTF-8 bytes keeping the extension) and Playwright's copy deleted;
+listed and served
 owner-only (`GET /browser/downloads[/<id>]`, `application/octet-stream`,
 attachment, `nosniff`, the policy narrowed to `default-src 'none'`, and
 **refused for any `Sec-Fetch-Dest` but `document`/`empty`** — a downloaded
 HTML or script must never run on the HUD's origin, where it could POST
 `/approvals`); **an executable is held** (`act_rules.executable_download`, or
-its first bytes `MZ`/ELF/`#!`), 409 until BR-9b's card, deletable; a Private
-download goes with the Private Chrome. **`set_files`**: a page's file
+its first bytes `MZ`/ELF/`#!`), 409 until BR-9b's card, deletable; executable
+suffixes also cover scripts and launchers (`.js`, `.py`, `.com`, `.url`,
+`.desktop` …), ignoring case and including `x.pdf.exe`; a Private
+download lives in `downloads/private/<ctx>/` and goes with its context or
+Private Chrome. **`set_files`**: a page's file
 chooser (`page.on("filechooser")`, so Playwright intercepts every one) is
 answered only by `POST …/files {chooser, files: [{project, path}]}`, each
 judged by **`act_rules.upload_refusal` (H8), called**, then read through an
-`O_NOFOLLOW` fd whose realpath must be the path judged, and handed to Chrome
+`O_NOFOLLOW` fd whose realpath and device/inode must match H8's judgment,
+and handed to Chrome
 as bytes (≤ 16 files, 50 MB in all). Ctrl+C's `{t:"selection"}` reads the
 selection in an isolated world (`jarvis-copy`; a password field gives "").
 `/status` → `browser` gains counts only (`streams`, `downloading`,
-`popups_refused`). Free suite: **`tests/v2/browser_routes_check.py`** (22:
-5 pure — every BR-2 shape parses, ~50 wrong shapes and bounds refused, names,
-tickets, a `../` name kept in its folder — and 17 on one real headless Chrome
+`popups_refused`). Free suite: **`tests/v2/browser_routes_check.py`** (35:
+13 pure — every BR-2 shape parses, ~50 wrong shapes and bounds refused, names,
+tickets, a `../` name kept in its folder — and 22 on one real headless Chrome
 at 3 tabs, its resolver answering nothing and its connector loopback only:
 ticket and takeover, frames under a slow reader, keys/text/mouse/wheel at a
 logging page, the hold and no replay, the cut-off press, the agent channel,
@@ -605,9 +615,8 @@ bad message delivered. Measured (Chrome 155, 1280×800 at DPR 1, quality 70):
 60 fps with an immediate ack on an animated page, ~6 KB a frame there; the
 tree's PSS 270–400 MiB through the suite. **Stated limits:** Chrome encodes
 at the repaint rate however slow the window (the M1 spike's question); no
-download size cap (a page can fill the disk the profile is on); an input
-event blocked behind a page (`alert()` from a click) is waited for 5 s, then
-the next goes; the window's `takeover` answer is not in BR-2's `isTakeover`
+download size cap (a page can fill the disk the profile is on); the window's
+`takeover` answer is not in BR-2's `isTakeover`
 control list (BR-3b adds it); a page tracking a drag sees no `mouseup` for a
 press a card cut off.
 
