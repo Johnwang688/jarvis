@@ -26,7 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jarvis import config, permissions
 from jarvis.tools import voicectl
 
-PORT = 8441
+# Set by main() once the server has bound port 0: a fixed port failed
+# whenever another run held it.
+PORT = 0
 
 
 def _post(path: str, payload: dict) -> tuple[int, dict]:
@@ -110,7 +112,10 @@ def main() -> int:
         config.ALLOWLIST_PATH = Path(tmp) / "allowlist.json"
         from jarvis.face import server
 
-        srv = server.create_server(port=PORT)
+        global PORT
+        srv = server.create_server(port=0)
+        PORT = srv.server_address[1]
+        assert PORT not in (8402, 8403, 8405), "never the live ports"
         sse: queue.Queue = queue.Queue(maxsize=50)
         with server._subs_lock:
             server._subscribers.append(sse)

@@ -534,9 +534,13 @@ BROWSER_DIR = Path(
     os.environ.get("JARVIS_BROWSER_DIR")
     or Path.home() / ".local" / "share" / "jarvis" / "browser"
 ).expanduser()
-# The Browser's settings (B-5's LAN switch first; amendment 1 adds auto-open
-# and sound): changed only by the owner-only `PATCH /browser/settings`, and
-# protected state (`tools/files._protected_state`), so no agent can flip it.
+# The Browser's settings (B-5's LAN switch, `local_servers`, BR-8a's
+# `auto_open`; later sound): changed only by the owner-only `PATCH
+# /browser/settings`, and protected state (`tools/files._protected_state`), so
+# no agent can flip one. Read and written only by `v2/browser/settings.py`,
+# and only once daemon2's `main()` attaches it: a test or embedded daemon keeps
+# its switches in memory. An empty `JARVIS_BROWSER_SETTINGS` means unset
+# (`Path("")` would be `.`, the working folder in the protected state).
 BROWSER_SETTINGS_PATH = Path(
     os.environ.get("JARVIS_BROWSER_SETTINGS")
     or Path.home() / ".config" / "jarvis" / "browser.json"

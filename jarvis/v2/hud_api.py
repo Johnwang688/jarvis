@@ -1603,7 +1603,8 @@ def route(handler, daemon, parts, query):
         return _terminals.route(handler, daemon, parts, query)
     if parts[0] == "browser":
         # The owner's Browser (BR-1a): owner-only and a strict loopback Host
-        # on every route, checked before anything else (browser/routes.py).
+        # on every route, checked before anything else (browser/routes.py),
+        # its settings included (BR-8a's `auto_open` beside the LAN switch).
         from .browser import routes as _browser
         return _browser.route(handler, daemon, parts, query)
     # The editor's git (ED-9): HEAD's text for the gutter and the explorer's
