@@ -895,3 +895,36 @@ describe("ED-7: the status bar reads the registry's save state", () => {
     expect(b.get("/w/a.py")!.queued).toBe(false);
   });
 });
+
+describe("review of PR #53, MED 2: a rename never takes a buffer's place", () => {
+  it("an unsaved edit at the new name survives; the renamed buffer stays put", async () => {
+    w.files.set("/w/notes.txt", "notes\n");
+    w.files.set("/w/draft.txt", "draft\n");
+    await b.open("p1", "notes.txt", refOf(1, "notes.txt"));
+    await b.open("p1", "draft.txt", refOf(1, "draft.txt"));
+    model("/w/notes.txt").type("EDIT");
+    // notes.txt deleted on disk (its edit stays), draft.txt renamed onto its name
+    w.files.delete("/w/notes.txt");
+    w.files.set("/w/notes.txt", w.files.get("/w/draft.txt")!);
+    w.files.delete("/w/draft.txt");
+    const moves = b.renamed("/w/draft.txt", "/w/notes.txt", "text");
+    expect(moves).toEqual([]);
+    expect(b.isDirty("/w/notes.txt")).toBe(true);
+    expect(b.text("/w/notes.txt")).toBe("notes\nEDIT");
+    expect(b.anyDirty()).toBe(true);
+    expect(b.get("/w/draft.txt")).not.toBeNull();
+  });
+
+  it("a clean buffer at the new name gives way, its tabs kept on the renamed file", async () => {
+    w.files.set("/w/notes.txt", "notes\n");
+    w.files.set("/w/draft.txt", "draft\n");
+    await b.open("p1", "notes.txt", refOf(2, "notes.txt"));
+    await b.open("p1", "draft.txt", refOf(1, "draft.txt"));
+    const old = model("/w/notes.txt");
+    b.renamed("/w/draft.txt", "/w/notes.txt", "text");
+    expect(old.isDisposed()).toBe(true);
+    expect(b.text("/w/notes.txt")).toBe("draft\n");
+    expect(b.get("/w/notes.txt")!.refs.sort()).toEqual(["1|notes.txt", "2|notes.txt"]);
+    expect(b.snapshot()).toHaveLength(1);
+  });
+});

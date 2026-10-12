@@ -310,6 +310,22 @@ def _explorer_checks(page, mock, check, until):
     check("its row leaves the tree", bool(until(
         lambda: page.locator(_pane(2, '[data-testid="file-notes.txt"]')).count() == 0, timeout=3)))
     check("the edit is still in its buffer", (_buf(page, "notes.txt") or {}).get("dirty") is True)
+    # Review of PR #53, MED 2: notes.txt is gone from disk with its edit kept;
+    # renaming another file onto its name is refused before the disk changes.
+    _open(page, until, 2, "README.md", double=True)
+    page.locator(_pane(2, '[data-testid="file-README.md"]')).click(button="right")
+    until(lambda: menu.count() == 1, timeout=2)
+    page.locator('[data-testid="menu-rename"]').click()
+    until(lambda: inp.count() == 1, timeout=2)
+    inp.fill("notes.txt")
+    renames = len(mock.sent("POST", "/projects/p1/fs"))
+    page.keyboard.press("Enter")
+    err = page.locator(_pane(2, '[data-testid="fs-error"]'))
+    check("a rename onto an open unsaved edit is refused, and said",
+          bool(until(lambda: err.count() == 1 and "unsaved edit" in err.inner_text(), timeout=3))
+          and len(mock.sent("POST", "/projects/p1/fs")) == renames and "README.md" in mock.world["files"])
+    check("and the edit is still there", (_buf(page, "notes.txt") or {}).get("dirty") is True)
+    page.keyboard.press("Escape")
     # The daemon's refusal is said.
     page.locator(_pane(2, '[data-testid="file-.env.production"]')).click(button="right")
     until(lambda: menu.count() == 1, timeout=2)

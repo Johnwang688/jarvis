@@ -59,6 +59,8 @@ function Node(props: {
   /** Bumped after an explorer operation: every open folder reads itself again. */
   version: number;
   onMenu: (e: React.MouseEvent, target: MenuTarget) => void;
+  /** The project folder's resolved path, from the top folder's read (ED-7). */
+  onRoot?: (root: string) => void;
 }) {
   const [tree, setTree] = useState<Tree | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -69,6 +71,7 @@ function Node(props: {
       .tree(props.projectId, props.dir, 1)
       .then((t) => {
         setTree(t);
+        if (typeof t.root === "string" && t.root) props.onRoot?.(t.root);
         setErr("");
       })
       .catch((e) => setErr(e.message));
@@ -233,6 +236,8 @@ export function FileTab(props: {
   const [fsAsk, setFsAsk] = useState<FsAsk | null>(null);
   const [fsBusy, setFsBusy] = useState(false);
   const [fsErr, setFsErr] = useState("");
+  // Where the project folder resolves (the tree's read says): buffers are keyed by that.
+  const [rootAbs, setRootAbs] = useState<string | null>(null);
   // A place to put the cursor once the buffer is in the editor: quick open's
   // `:line`, a search hit.
   const reveal = useRef<{ path: string; line: number; col: number } | null>(null);
@@ -528,6 +533,12 @@ export function FileTab(props: {
           setFsAsk(null);
           return;
         }
+        // An unsaved edit open at the new name (a file deleted with its edit
+        // kept, say) would be taken over by the renamed file: refused here,
+        // before the disk changes (review of PR #53, MED 2). The registry
+        // never overwrites it either.
+        const clash = dirtyUnder(to);
+        if (clash.length) throw new Error(`${clash[0]} has an unsaved edit open; save or close it first`);
         const res: FsResult = await api.fileOp(pid, { op: "rename", path: a.path, to });
         setFsAsk(null);
         bump();
@@ -554,9 +565,20 @@ export function FileTab(props: {
   };
 
   /** Open buffers on `path` or under it that hold an unsaved edit: what a delete must warn about. */
-  const dirtyUnder = (path: string): string[] =>
-    buffers.snapshot().filter((b) => b.projectId === pid && b.dirty
-      && (b.path === path || b.path.startsWith(`${path}/`))).map((b) => b.path);
+  /**
+   * The unsaved edits open on `path` or under it, **from any project**: a
+   * buffer is keyed by where its file resolves, so it is matched by that
+   * (`rootAbs`, the project folder's resolved path, from the tree's read),
+   * else — before the tree has said — by this project's relative path. Shown
+   * by their place in this project, else by their full path.
+   */
+  const dirtyUnder = (path: string): string[] => {
+    const target = rootAbs ? `${rootAbs}/${path}` : null;
+    return buffers.snapshot().filter((b) => b.dirty && (target
+      ? b.abs === target || b.abs.startsWith(`${target}/`)
+      : b.projectId === pid && (b.path === path || b.path.startsWith(`${path}/`))))
+      .map((b) => (rootAbs && b.abs.startsWith(`${rootAbs}/`) ? b.abs.slice(rootAbs.length + 1) : b.abs));
+  };
 
   // What App asks (quick open, a search hit elsewhere, the palette), once each.
   const doneAsk = useRef(0);
@@ -688,7 +710,7 @@ export function FileTab(props: {
         ) : null}
         <div className="treebody" style={side === "files" ? undefined : { display: "none" }}
              onContextMenu={(e) => openMenu(e, { path: "", dir: true })}>
-          <Node projectId={pid} dir="" depth={0} onOpen={open} selected={active || ""}
+          <Node projectId={pid} dir="" depth={0} onOpen={open} selected={active || ""} onRoot={setRootAbs}
                 version={treeVersion} onMenu={openMenu} />
         </div>
         <SearchView projectId={pid} ask={searchAsk} visible={side === "search"} blocked={props.blocked}

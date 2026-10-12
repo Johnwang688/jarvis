@@ -524,6 +524,20 @@ export class Buffers {
       if (tail === null) continue;
       const oldAbs = buf.abs;
       const newAbs = toAbs + tail;
+      // **Never over a buffer already at the new name** (review of PR #53,
+      // MED 2): a file deleted with an unsaved edit keeps its buffer, and a
+      // rename onto its name must not throw that edit away. The window asks
+      // first (FileTab); should it still happen (another window), the edit
+      // there stays, and this buffer stays where it was — its file is gone
+      // from there, which the poll says. A clean buffer there gives way: its
+      // tabs now show the renamed file.
+      const there = this.bufs.get(newAbs);
+      let inherited: string[] = [];
+      if (there && there !== buf) {
+        if (this.dirtyOf(there)) continue;
+        inherited = [...there.refs];
+        this.drop(there);
+      }
       this.bufs.delete(oldAbs);
       for (const [k, v] of [...this.byKey]) if (v === oldAbs) this.byKey.delete(k);
       const refs = new Set<string>();
@@ -534,6 +548,7 @@ export class Buffers {
         refs.add(refOf(pane, next));
         if (next !== rel) moves.push({ pane, from: rel, to: next });
       }
+      for (const r of inherited) refs.add(r);
       buf.refs = refs;
       buf.path = follow(oldAbs, buf.path, newAbs);
       buf.abs = newAbs;

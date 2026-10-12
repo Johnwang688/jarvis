@@ -49,6 +49,9 @@ export function SearchView(props: {
   const [folded, setFolded] = useState<Record<string, boolean>>({});
   const box = useRef<HTMLInputElement>(null);
   const seq = useRef(0);
+  // This view's key: on the daemon, its newer search cancels its older one,
+  // so typing never stacks searches (review of PR #53, HIGH 1).
+  const [key] = useState(() => `sv-${Math.random().toString(36).slice(2, 12)}`);
 
   useEffect(() => {
     if (!props.ask) return;
@@ -68,9 +71,9 @@ export function SearchView(props: {
     }
     setBusy(true);
     setErr("");
-    api.searchFiles(props.projectId, { query: q, glob: glob.trim() || undefined, ...flags }).then(
+    api.searchFiles(props.projectId, { query: q, glob: glob.trim() || undefined, key, ...flags }).then(
       (r) => {
-        if (mine !== seq.current) return;
+        if (mine !== seq.current || r.cancelled) return;
         setResult(r);
         setBusy(false);
       },
@@ -161,6 +164,7 @@ export function SearchView(props: {
           : result ? `${total.toLocaleString()} match${total === 1 ? "" : "es"} in ${result.files} file${result.files === 1 ? "" : "s"}`
             + (result.truncated ? ` — stopped at ${result.limit.toLocaleString()}; narrow the search` : "")
             + (result.timed_out ? " — stopped after 10 s; narrow the search" : "")
+            + (result.partial ? " — some files could not be read" : "")
           : ""}
       </div>
       <div className="searchresults" data-testid="search-results">

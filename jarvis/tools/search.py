@@ -19,7 +19,9 @@ read-only search tool alongside it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import base64
+from dataclasses import dataclass, field
+import json
 import os
 import re
 import shutil
@@ -78,6 +80,9 @@ class Hit:
     context: bool = False
     count: int | None = None
     sep: str = ":"
+    # Match spans in `text`, as UTF-16 offsets (the window's columns): the
+    # HUD's find in files only, from ripgrep's own submatches.
+    ranges: list = field(default_factory=list)
 
     def render(self, mode: str) -> str:
         """grep_files' text shapes, byte-identical to what they always were."""
@@ -98,9 +103,7 @@ def _skip_dir(name: str, hidden: bool = False, skip: frozenset = SKIP_DIRS) -> b
 
 
 def _rg_args(
-    pattern: str, path: str, glob: str, mode: str, context_lines: int, case_insensitive: bool,
-    *, respect_ignore: bool = False, hidden: bool = False, fixed: bool = False,
-    skip: Iterable[str] = SKIP_DIRS, max_columns: int = 0,
+    pattern: str, path: str, glob: str, mode: str, context_lines: int, case_insensitive: bool
 ) -> list[str]:
     """The ripgrep invocation, built to match `_python_search` exactly.
 
@@ -114,9 +117,7 @@ def _rg_args(
     Version control is not a relevance filter for an agent: what is worth
     committing and what is worth searching are different questions, and memory
     is the case that proves it. So ignore files are disabled and the skipping
-    is done explicitly, by the same `SKIP_DIRS` the fallback walks with. (The
-    HUD's find in files asks for `respect_ignore`, with a toggle: the owner's
-    search is a person's, and build output is noise there — editor plan §2.8.)
+    is done explicitly, by the same `SKIP_DIRS` the fallback walks with.
 
     **`--null` and `--with-filename` are the other two load-bearing flags**, and
     they are here for the protected-file filter rather than for output. ripgrep
@@ -127,18 +128,11 @@ def _rg_args(
     puts a NUL between the path and everything after it, which no path can
     contain, and `--with-filename` guarantees the path is there at all. See
     `_rg_lines`.
-
-    The keyword-only options are the HUD's (ED-7); their defaults leave
-    `grep_files`' invocation exactly as it was.
     """
     args = [
-        "rg", "--color", "never", "--no-messages",
+        "rg", "--color", "never", "--no-messages", "--no-ignore",
+        "--null", "--with-filename",
     ]
-    if not respect_ignore:
-        args.append("--no-ignore")
-    args += ["--null", "--with-filename"]
-    if hidden:
-        args.append("--hidden")
     if mode == "files":
         args.append("--files-with-matches")
     elif mode == "count":
@@ -147,16 +141,12 @@ def _rg_args(
         args += ["--line-number", "--no-heading"]
         if context_lines > 0:
             args += ["--context", str(context_lines)]
-        if max_columns > 0:
-            args += ["--max-columns", str(max_columns), "--max-columns-preview"]
     if case_insensitive:
         args.append("--ignore-case")
-    if fixed:
-        args.append("--fixed-strings")
     # Matches the fallback's own ceiling, so one backend cannot surface a hit
     # inside a huge artifact that the other skipped.
     args += ["--max-filesize", str(MAX_FILE_BYTES)]
-    for name in sorted(skip):
+    for name in sorted(SKIP_DIRS):
         args += ["--glob", f"!{name}/"]
     if glob:
         args += ["--glob", glob]
@@ -241,22 +231,29 @@ def _rg_lines(stdout: str, mode: str) -> list[str]:
 
 def _python_hits(
     pattern: str, root: Path, glob: str, mode: str, context_lines: int, case_insensitive: bool,
-    *, hidden: bool = False, fixed: bool = False, skip: frozenset = SKIP_DIRS,
-    limit: int | None = None, deadline: float | None = None,
+    *, hidden: bool = False, fixed: bool = False, word: bool = False, skip: frozenset = SKIP_DIRS,
+    limit: int | None = None, deadline: float | None = None, sort: bool = False,
+    ranges: bool = False,
 ) -> tuple[list[Hit], bool]:
     """Fallback for machines without ripgrep. Same output shapes, slower.
 
-    Returns the hits and whether a bound (`limit` hits, or `deadline`) cut it short."""
+    Returns the hits and whether a bound (`limit` hits, or `deadline`) cut it
+    short. The keyword-only options are the HUD's find in files (ED-7); their
+    defaults leave `grep_files` as it was — the walk's own order included."""
     flags = re.IGNORECASE if case_insensitive else 0
-    regex = re.compile(re.escape(pattern) if fixed else pattern, flags)
+    source = re.escape(pattern) if fixed else pattern
+    if word:
+        source = rf"\b(?:{source})\b"
+    regex = re.compile(source, flags)
 
     targets: list[Path] = []
     if root.is_file():
         targets = [root]
     else:
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if not _skip_dir(d, hidden, skip))
-            for name in sorted(filenames):
+            kept = [d for d in dirnames if not _skip_dir(d, hidden, skip)]
+            dirnames[:] = sorted(kept) if sort else kept
+            for name in (sorted(filenames) if sort else filenames):
                 if (not hidden and name.startswith(".")) or (glob and not fnmatch(name, glob)):
                     continue
                 targets.append(Path(dirpath) / name)
@@ -292,7 +289,12 @@ def _python_hits(
         hit_set = set(hits)
         for j in sorted(shown):
             sep = ":" if j in hit_set else "-"
-            out.append(Hit(str(target), line=j + 1, text=lines[j], context=sep == "-", sep=sep))
+            hit = Hit(str(target), line=j + 1, text=lines[j], context=sep == "-", sep=sep)
+            if ranges and sep == ":":
+                hit.ranges = [(_utf16(lines[j][:m.start()]), _utf16(lines[j][:m.end()]))
+                              for _, m in zip(range(RANGES_CAP), regex.finditer(lines[j]))
+                              if m.end() > m.start()]
+            out.append(hit)
             if limit is not None and len(out) >= limit:
                 return out, True
     return out, False
@@ -306,81 +308,199 @@ def _python_search(
     return [h.render(mode) for h in hits]
 
 
+# -- the HUD's find in files (ED-7) ------------------------------------------
+#
+# **The owner's pattern is never evaluated in this process.** Python's `re`
+# backtracks and holds the GIL with no timeout: `(\w+\s?)+:` on one line with a
+# 28-character word froze every daemon thread for 27.8 s (review of PR #53,
+# HIGH 1). So ripgrep does every match and reports every span (`--json`'s
+# submatch byte offsets, turned into the window's UTF-16 columns here); without
+# ripgrep a regular expression is refused, and a literal is matched by
+# `re.escape`d text, which is linear. ripgrep also validates the pattern, so
+# its own syntax (`\p{L}`) works.
+
+RANGES_CAP = 20
+_POLL_S = 0.05
+
+
+def _utf16(text: str) -> int:
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _rg_field(value) -> bytes | None:
+    """`{"text": …}` or `{"bytes": base64}` (ripgrep's JSON), as bytes."""
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("text"), str):
+        return value["text"].encode("utf-8", errors="surrogateescape")
+    if isinstance(value.get("bytes"), str):
+        try:
+            return base64.b64decode(value["bytes"], validate=True)
+        except ValueError:
+            return None
+    return None
+
+
+def _rg_json_args(pattern: str, root: str, *, glob: str, case_insensitive: bool, fixed: bool,
+                  word: bool, respect_ignore: bool, hidden: bool, skip: frozenset) -> list[str]:
+    args = ["rg", "--json", "--color", "never", "--no-messages"]
+    if not respect_ignore:
+        args.append("--no-ignore")
+    if hidden:
+        args.append("--hidden")
+    if case_insensitive:
+        args.append("--ignore-case")
+    if fixed:
+        args.append("--fixed-strings")
+    if word:
+        args.append("--word-regexp")
+    args += ["--max-filesize", str(MAX_FILE_BYTES)]
+    for name in sorted(skip):
+        args += ["--glob", f"!{name}/"]
+    if glob:
+        args += ["--glob", glob]
+    return args + ["--regexp", pattern, "--", root]
+
+
+def _rg_json_hit(raw: bytes, verdicts: dict[str, bool]) -> Hit | None:
+    """One `--json` record as a hit, or None: not a match, unattributable (a
+    credential filter: unrecognised means withheld) or refused by the one
+    filter, `refused` — the same filter `grep_files` applies."""
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or record.get("type") != "match":
+        return None
+    data = record.get("data") or {}
+    path_bytes = _rg_field(data.get("path"))
+    line_bytes = _rg_field(data.get("lines"))
+    number = data.get("line_number")
+    if path_bytes is None or line_bytes is None or type(number) is not int:
+        return None
+    path = os.fsdecode(path_bytes)
+    if path not in verdicts:
+        verdicts[path] = refused(path)
+    if verdicts[path]:
+        return None
+    if line_bytes.endswith(b"\n"):
+        line_bytes = line_bytes[:-1]
+    if line_bytes.endswith(b"\r"):
+        line_bytes = line_bytes[:-1]
+    spans = []
+    for sub in (data.get("submatches") or [])[:RANGES_CAP]:
+        start, end = (sub or {}).get("start"), (sub or {}).get("end")
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(line_bytes):
+            continue
+        a = _utf16(line_bytes[:start].decode("utf-8", errors="replace"))
+        z = a + _utf16(line_bytes[start:end].decode("utf-8", errors="replace"))
+        spans.append((a, z))
+    return Hit(path, line=number, text=line_bytes.decode("utf-8", errors="replace"), ranges=spans)
+
+
 @dataclass
 class Found:
     """A bounded search's answer (`search_bounded`)."""
     hits: list[Hit]
     truncated: bool = False      # stopped at `limit`
     timed_out: bool = False      # stopped at the deadline
+    cancelled: bool = False      # a newer search from the same window took over
+    partial: bool = False        # ripgrep could not read some files (exit 2 with an answer)
     error: str | None = None
+    error_kind: str | None = None  # "regex" (the pattern) or "no_regex" (no ripgrep) or "other"
     backend: str = "rg"
 
 
 def search_bounded(
-    pattern: str, root: Path, *, glob: str = "", case_insensitive: bool = False,
-    fixed: bool = False, respect_ignore: bool = True, hidden: bool = True,
+    query: str, root: Path, *, regex: bool = False, word: bool = False, glob: str = "",
+    case_insensitive: bool = False, respect_ignore: bool = True, hidden: bool = True,
     skip: frozenset = SKIP_DIRS, limit: int = 2000, timeout: float = 10.0,
-    max_columns: int = 1000, use_rg: bool | None = None,
-    keep: Callable[[Hit], bool] | None = None,
+    use_rg: bool | None = None, keep: Callable[[Hit], bool] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Found:
     """Content search with **both** bounds a window needs (ED-7's find in
-    files): at most `limit` hits and `timeout` seconds, and the one
-    protected-file filter (`refused`) applied exactly as `grep_files`
-    applies it — same records, same refusals. `keep` is the caller's own
-    stricter filter on top (it is asked only about hits `refused` let
-    through), never instead.
+    files): at most `limit` hits and `timeout` seconds, the one protected-file
+    filter (`refused`) applied exactly as `grep_files` applies it, and `keep`,
+    the caller's own stricter filter on top (asked only about hits `refused`
+    let through), never instead. **No pattern of the owner's is ever run by
+    Python here** (see the section note): ripgrep matches; without it a regex
+    is refused and a literal is matched as escaped text.
 
     ripgrep's output is read as it comes and the process is killed at the
-    limit or the deadline, so a broad pattern over a large tree costs a
-    bounded amount of memory and time, never the whole dump."""
+    limit, the deadline, or when `cancel` is set (a newer search from the same
+    window), so a broad pattern costs a bounded amount of memory and time.
+    ripgrep exits 2 when a file could not be read, even with `--no-messages`:
+    with an answer, or with nothing on stderr, that is a partial result, never
+    an error that throws the matches away."""
     deadline = time.monotonic() + timeout
     if use_rg is None:
         use_rg = bool(shutil.which("rg"))
     if not use_rg:
-        hits, cut = _python_hits(pattern, root, glob, "content", 0, case_insensitive, hidden=hidden,
-                                 fixed=fixed, skip=skip, limit=None, deadline=deadline)
+        if regex:
+            return Found([], error=("regular expressions need ripgrep, which is not installed here: "
+                                    "search for the text instead"), error_kind="no_regex", backend="python")
+        hits, cut = _python_hits(query, root, glob, "content", 0, case_insensitive, hidden=hidden, fixed=True,
+                                 word=word, skip=skip, deadline=deadline, sort=True, ranges=True)
         kept = [h for h in hits if keep is None or keep(h)]
-        timed = cut and time.monotonic() > deadline
-        return Found(kept[:limit], truncated=len(kept) > limit, timed_out=timed, backend="python")
-    args = _rg_args(pattern, str(root), glob, "content", 0, case_insensitive, respect_ignore=respect_ignore,
-                    hidden=hidden, fixed=fixed, skip=skip, max_columns=max_columns)
+        return Found(kept[:limit], truncated=len(kept) > limit, timed_out=cut and time.monotonic() > deadline,
+                     backend="python")
+    args = _rg_json_args(query, str(root), glob=glob, case_insensitive=case_insensitive, fixed=not regex,
+                         word=word, respect_ignore=respect_ignore, hidden=hidden, skip=skip)
     try:
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 stdin=subprocess.DEVNULL)
     except OSError as exc:
-        return Found([], error=f"search could not start ({type(exc).__name__})")
-    timed = threading.Event()
+        return Found([], error=f"search could not start ({type(exc).__name__})", error_kind="other")
+    timed, cancelled, done = threading.Event(), threading.Event(), threading.Event()
 
-    def expire():
-        timed.set()
-        proc.kill()
+    def watch():
+        # The deadline and the cancel, both: whichever comes first kills it.
+        while not done.wait(_POLL_S):
+            if cancel is not None and cancel.is_set():
+                cancelled.set()
+                break
+            if time.monotonic() >= deadline:
+                timed.set()
+                break
+        else:
+            return
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
-    timer = threading.Timer(max(0.0, deadline - time.monotonic()), expire)
-    timer.daemon = True
-    timer.start()
+    watcher = threading.Thread(target=watch, name="search-watch", daemon=True)
+    watcher.start()
     found = Found([])
     verdicts: dict[str, bool] = {}
     try:
         assert proc.stdout is not None
         for raw in proc.stdout:
-            hit = _rg_record(raw.decode("utf-8", errors="replace").rstrip("\r\n"), "content", verdicts)
+            hit = _rg_json_hit(raw, verdicts)
             if hit is None or (keep is not None and not keep(hit)):
                 continue
             if len(found.hits) >= limit:
                 found.truncated = True
-                proc.kill()
                 break
             found.hits.append(hit)
     finally:
-        timer.cancel()
+        done.set()
         try:
             proc.kill()
         except OSError:
             pass
         _, err = proc.communicate()
-    found.timed_out = timed.is_set() and not found.truncated
-    if proc.returncode not in (0, 1) and not found.truncated and not found.timed_out:
-        found.error = "search failed: " + (err or b"").decode("utf-8", "replace").strip()[:300]
+        watcher.join(1.0)
+    found.cancelled = cancelled.is_set() and not found.truncated
+    found.timed_out = timed.is_set() and not found.truncated and not found.cancelled
+    if found.truncated or found.timed_out or found.cancelled or proc.returncode in (0, 1):
+        return found
+    text = (err or b"").decode("utf-8", "replace").strip()
+    if proc.returncode == 2 and (found.hits or not text):
+        found.partial = True
+        return found
+    found.error = text[:300] or f"search failed (exit {proc.returncode})"
+    found.error_kind = "regex" if "regex parse error" in text or "error parsing" in text else "other"
     return found
 
 

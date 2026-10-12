@@ -169,6 +169,8 @@ export interface TreeEntry {
 export interface Tree {
   path: string;
   entries: TreeEntry[];
+  /** ED-7: where the project folder resolves (buffers are keyed by where a file resolves). */
+  root?: string | null;
 }
 
 /** `GET /projects/{id}/files` (ED-7): quick open's list. */
@@ -182,6 +184,8 @@ export interface FileList {
 
 export interface SearchQuery {
   query: string;
+  /** The searching view: its newer search cancels its older one on the daemon. */
+  key?: string;
   regex?: boolean;
   /** Case-sensitive. */
   case?: boolean;
@@ -204,6 +208,10 @@ export interface SearchResult {
   files: number;
   truncated: boolean;
   timed_out: boolean;
+  /** A newer search from the same view took over: drop this one. */
+  cancelled?: boolean;
+  /** ripgrep could not read some files: what came back is a partial answer. */
+  partial?: boolean;
   limit: number;
 }
 

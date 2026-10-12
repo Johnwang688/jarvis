@@ -249,7 +249,14 @@ def tree(project, name, depth):
         if not top:
             fail(403, "a credential folder: its contents are never listed")
     walk(directory, depth, {directory}, top)
-    return {"path": name, "entries": entries}
+    # `root`: where the project's folder resolves, so the window can tell an
+    # open buffer (keyed by where it resolves) under a row it is about to
+    # delete, from any project (ED-7).
+    try:
+        root = str(Path(project.root).expanduser().resolve())
+    except (OSError, RuntimeError):
+        root = None
+    return {"path": name, "entries": entries, "root": root}
 
 
 # -- the editor's files (ED-2, editor plan §2.4) ---------------------------------

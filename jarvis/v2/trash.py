@@ -155,12 +155,51 @@ class Trash:
             raise TrashError(f"could not move {path.name} to the trash: {exc.strerror or exc}") from exc
         return {"where": "linux", "location": str(self.root), "name": name, "path": str(path)}
 
-    def _reserve(self, info: Path, path: Path) -> tuple[str, Path]:
+    def put_keeping_name(self, path: Path) -> dict:
+        """`put`, but what lands under `files/` keeps the item's own name
+        (the HUD editor's delete, ED-7). `put` names a second `.env` `.env.2`,
+        a name v1's credential rules do not know yet; here, when the name is
+        taken, the item goes into a fresh folder `jarvis-deleted.<n>` under
+        its own name, and that folder is the trash entry (its `.trashinfo`
+        names the item's original path). A Windows path still goes to the
+        Recycle Bin. `put` itself, and every other caller, is unchanged."""
+        path = Path(path)
+        if not path.is_absolute():
+            raise TrashError("only absolute paths go to the trash")
+        if not path.exists() and not path.is_symlink():
+            raise TrashError(f"nothing at {path}")
+        files, info = self.root / "files", self.root / "info"
+        taken = (files / path.name).exists() or (files / path.name).is_symlink() \
+            or (info / (path.name + ".trashinfo")).exists()
+        if self.is_windows(path) or not taken:
+            return self.put(path)
+        files.mkdir(parents=True, exist_ok=True)
+        info.mkdir(parents=True, exist_ok=True)
+        name, record = self._reserve(info, path, base="jarvis-deleted")
+        holder = files / name
+        try:
+            holder.mkdir(mode=0o700)
+            try:
+                os.rename(path, holder / path.name)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                shutil.move(str(path), str(holder / path.name))
+        except OSError as exc:
+            record.unlink(missing_ok=True)
+            try:
+                holder.rmdir()
+            except OSError:
+                pass
+            raise TrashError(f"could not move {path.name} to the trash: {exc.strerror or exc}") from exc
+        return {"where": "linux", "location": str(self.root), "name": f"{name}/{path.name}", "path": str(path)}
+
+    def _reserve(self, info: Path, path: Path, base: str | None = None) -> tuple[str, Path]:
         """Create the .trashinfo first, exclusively, which is what reserves a
         name in the spec: two writers cannot both claim it."""
         stamp = datetime.fromtimestamp(self.clock()).strftime("%Y-%m-%dT%H:%M:%S")
         body = f"[Trash Info]\nPath={quote(str(path), safe='/')}\nDeletionDate={stamp}\n".encode()
-        base = path.name or "item"
+        base = base or path.name or "item"
         for n in range(1, 10_000):
             name = base if n == 1 else f"{base}.{n}"
             record = info / (name + ".trashinfo")

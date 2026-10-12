@@ -34,6 +34,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -409,16 +411,207 @@ class Fs(Nav):
             self.fs("rename", "tools", "tools2", status=403)
         self.assertTrue((hud / "index.html").exists())
 
-    def test_a_dirty_name_on_a_windows_drive(self):
-        project = self.daemon.stores.projects.create("Win", str(self.home))
-        project.root = "/mnt/c/Users/x/Robotics"
-        with self.assertRaises(Exception) as caught:
-            N._check_name(project, "CON.txt")
-        self.assertEqual(getattr(caught.exception, "status", None), 400)
-        for bad in ("a.", "b ", "c?d"):
+    def test_windows_names_are_judged_where_the_path_lands(self):
+        # LOW (review of PR #53): by the resolved target, not the project root.
+        for bad in ("CON.txt", "a.", "b ", "c?d", "dir/NUL"):
+            with self.subTest(bad=bad), self.assertRaises(Exception) as caught:
+                N._check_windows(bad, Path("/mnt/c/Users/x/Robotics") / bad)
+            self.assertEqual(getattr(caught.exception, "status", None), 400)
+        N._check_windows("src/main.cpp", Path("/mnt/c/Users/x/Robotics/src/main.cpp"))
+        N._check_windows("CON.txt", self.home / "CON.txt")  # not a Windows drive: allowed
+        for bad in ("~/x", "/etc/x", "a//b", "./x"):
             with self.subTest(bad=bad), self.assertRaises(Exception):
-                N._check_name(project, bad)
-        N._check_name(project, "src/main.cpp")
+                N._check_name(bad)
+
+
+# ---------------------------------------------------------------------------
+# the review of PR #53
+# ---------------------------------------------------------------------------
+
+class ReviewSearch(Nav):
+    def setUp(self):
+        super().setUp()
+        self.proj = self.home / "proj"
+        self.proj.mkdir()
+        self.url2 = self.project_at(self.proj, "Proj")
+
+    def test_high1_a_catastrophic_pattern_never_starves_the_daemon(self):
+        """`(\w+\s?)+:` on a line with a long word: rg matches its start, and
+        Python's `re` on the rest of the line backtracks exponentially with the
+        GIL held. The pattern must never run in this process."""
+        if not shutil.which("rg"):
+            self.skipTest("ripgrep is not installed")
+        (self.proj / "boom.txt").write_text("a" * 25 + ": " + "a" * 25 + "\n")
+        gaps, stop = [], threading.Event()
+
+        def beat():
+            last = time.monotonic()
+            while not stop.is_set():
+                time.sleep(0.02)
+                now = time.monotonic()
+                gaps.append(now - last)
+                last = now
+        t = threading.Thread(target=beat, daemon=True)
+        t.start()
+        start = time.monotonic()
+        try:
+            got = self.search(url=self.url2, query=r"(\w+\s?)+:", regex=True)
+        finally:
+            elapsed = time.monotonic() - start
+            stop.set()
+            t.join(2)
+        self.assertEqual([m["path"] for m in got["matches"]], ["boom.txt"])
+        self.assertEqual(got["matches"][0]["ranges"], [[0, 26]])
+        self.assertLess(elapsed, N.SEARCH_SECONDS + 2)
+        self.assertLess(max(gaps), 1.0, f"a daemon thread was starved for {max(gaps):.1f} s")
+
+    def test_ranges_come_from_ripgrep_in_utf16(self):
+        if not shutil.which("rg"):
+            self.skipTest("ripgrep is not installed")
+        (self.proj / "u.txt").write_text("é😀 needle é needle\n", encoding="utf-8")
+        got = self.search(url=self.url2, query="needle")
+        row = got["matches"][0]
+        text = row["text"]
+        for a, z in row["ranges"]:
+            # UTF-16 columns, as the window counts them
+            self.assertEqual(text.encode("utf-16-le")[2 * a:2 * z].decode("utf-16-le"), "needle")
+        self.assertEqual(len(row["ranges"]), 2)
+        # ripgrep's own syntax works: it validates, Python never compiles it
+        got = self.search(url=self.url2, query=r"\p{L}+dle", regex=True)
+        self.assertTrue(got["matches"])
+        self.search(url=self.url2, query="(unclosed", regex=True, status=400)
+
+    def test_no_ripgrep_refuses_a_regex_and_matches_a_literal(self):
+        (self.proj / "l.txt").write_text("x = a.b(c)\n")
+        real = N.search_bounded
+        with patch.object(N, "search_bounded", lambda *a, **kw: real(*a, **{**kw, "use_rg": False})):
+            got = self.search(url=self.url2, query=r"(\w+\s?)+:", regex=True, status=400)
+            self.assertIn("ripgrep", json.dumps(got))
+            got = self.search(url=self.url2, query="a.b(c)")
+            self.assertEqual([(m["path"], m["ranges"]) for m in got["matches"]], [("l.txt", [[4, 10]])])
+
+    def test_a_newer_search_from_the_same_window_cancels_the_older(self):
+        slot, ev = N._search_slot("win-1")
+        slot2, ev2 = N._search_slot("win-1")
+        self.assertTrue(ev.is_set())
+        self.assertFalse(ev2.is_set())
+        N._search_done(slot, ev)          # the older one's end never removes the newer
+        self.assertIs(N._SEARCHES.get("win-1"), ev2)
+        N._search_done(slot2, ev2)
+        held = [N._search_slot(f"k{i}") for i in range(N.MAX_SEARCHES)]
+        try:
+            with self.assertRaises(Exception) as caught:
+                N._search_slot("one-too-many")
+            self.assertEqual(getattr(caught.exception, "status", None), 429)
+        finally:
+            for s_, e_ in held:
+                N._search_done(s_, e_)
+        cancel = threading.Event()
+        cancel.set()
+        found = S.search_bounded("x", self.proj, cancel=cancel)
+        self.assertTrue(found.cancelled or not found.hits)
+
+    def test_med3_an_unreadable_file_is_a_partial_result(self):
+        if not shutil.which("rg") or os.geteuid() == 0:
+            self.skipTest("needs ripgrep and a non-root user")
+        (self.proj / "ok.txt").write_text(f"{NEEDLE}\n")
+        locked = self.proj / "locked.txt"
+        locked.write_text(f"{NEEDLE}\n")
+        locked.chmod(0)
+        shut = self.proj / "shut"
+        shut.mkdir()
+        shut.chmod(0)
+        self.addCleanup(locked.chmod, 0o644)
+        self.addCleanup(shut.chmod, 0o755)
+        got = self.search(url=self.url2, query=NEEDLE)
+        self.assertEqual([m["path"] for m in got["matches"]], ["ok.txt"])
+        self.assertTrue(got["partial"])
+        (self.proj / "ok.txt").write_text("nothing\n")
+        got = self.search(url=self.url2, query=NEEDLE)
+        self.assertEqual((got["matches"], got["partial"]), ([], True))
+        # grep_files keeps its own behaviour
+        with runtime.tools_bound({"grep_files"}):
+            out = S.grep_files(NEEDLE, str(self.proj))
+        self.assertTrue(out.startswith(("Error: search failed", "No matches")), out[:80])
+
+    def test_nit_grep_files_fallback_keeps_the_walk_order(self):
+        for name in ("b.txt", "a.txt", "c.txt"):
+            (self.proj / name).write_text(f"{NEEDLE}\n")
+        walk = [str(Path(d) / f) for d, _, fs in os.walk(self.proj) for f in fs]
+        hits, _ = S._python_hits(NEEDLE, self.proj, "", "files", 0, False)
+        self.assertEqual([h.path for h in hits], [p for p in walk if p.endswith(".txt")])
+
+
+class ReviewFs(Nav):
+    def test_low1_an_extra_folder_never_reaches_a_credential(self):
+        app = self.home / "app"
+        project = self.daemon.stores.projects.create("App", str(app), extra_dirs=[str(self.home)])
+        url = f"/projects/{project.id}"
+        (app / "keys").symlink_to(self.home / ".ssh")
+        self.fs("rename", "~/.ssh/id_test", "key.txt", status=400, url=url)
+        self.fs("rename", "keys/id_test", "key.txt", status=403, url=url)
+        self.fs("delete", "keys/id_test", status=403, url=url)
+        self.fs("rename", "main.py", "keys/stolen.py", status=403, url=url)
+        self.assertTrue((self.home / ".ssh" / "id_test").exists())
+        self.assertTrue((app / "main.py").exists())
+
+    def test_low2_jarvis_records_and_project_folders(self):
+        data = self.home / ".local" / "share" / "jarvis" / "v2"
+        data.mkdir(parents=True)
+        (data / "x.json").write_text("{}")
+        for op, path, to in (("delete", ".local/share/jarvis/v2/x.json", None),
+                             ("rename", ".local/share/jarvis/v2/x.json", "x.json"),
+                             ("new_file", ".local/share/jarvis/v2/y.json", None),
+                             ("delete", ".local", None), ("rename", ".local", "local2")):
+            with self.subTest(op=op, path=path):
+                self.fs(op, path, to, status=403)
+        other = self.home / "work" / "app2"
+        other.mkdir(parents=True)
+        (other / "f.txt").write_text("f\n")
+        self.daemon.stores.projects.create("App2", str(other))
+        for op, path, to in (("delete", "work/app2", None), ("rename", "work/app2", "app3"),
+                             ("delete", "work", None), ("rename", "work", "work2")):
+            with self.subTest(op=op, path=path):
+                self.fs(op, path, to, status=403)
+        self.assertTrue((data / "x.json").exists() and (other / "f.txt").exists())
+        self.fs("new_file", "work/app2/new.txt")  # inside another project: a file is fine
+        self.fs("delete", "work/app2/f.txt")
+
+    def test_low3_a_second_deleted_env_file_keeps_its_name(self):
+        trash = self.root / "xdg" / "Trash"
+        for n in (1, 2):
+            (self.home / "app" / ".env.local").write_text(f"K=fake-{n}\n")
+            self.fs("delete", "app/.env.local")
+        names = sorted(p.relative_to(trash / "files").as_posix() for p in (trash / "files").rglob("*") if p.is_file())
+        self.assertEqual(names, [".env.local", "jarvis-deleted/.env.local"])
+        self.assertFalse(any(".env.local." in n for n in names))
+        info = (trash / "info" / "jarvis-deleted.trashinfo").read_text()
+        self.assertIn("Path=" + str(self.home / "app" / ".env.local"), info)
+
+    def test_low5_a_folder_on_the_way_is_never_followed(self):
+        (self.home / "inner").symlink_to(self.home / "app")
+        self.fs("rename", "inner/main.py", "app/moved.py", status=403)
+        self.fs("new_file", "inner/x.py", status=403)
+        self.assertTrue((self.home / "app" / "main.py").exists())
+        self.assertFalse((self.home / "app" / "x.py").exists())
+        a = os.open(str(self.home / "app"), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            (self.home / "app" / "one").write_text("1")
+            (self.home / "app" / "two").write_text("2")
+            with self.assertRaises(FileExistsError):
+                N._rename_noreplace(a, "one", a, "two")
+        finally:
+            os.close(a)
+        self.assertEqual((self.home / "app" / "two").read_text(), "2")
+
+    def test_nit_a_folder_named_env_is_a_folder(self):
+        venv = self.home / "app" / ".env"
+        venv.mkdir()
+        (venv / "pyvenv.cfg").write_text("home = /usr\n")
+        got = self.fs("rename", "app/.env", "app/pyenv")
+        self.assertTrue((self.home / "app" / "pyenv" / "pyvenv.cfg").exists())
+        self.assertNotEqual(got["kind"], "env")
+        self.fs("rename", "app/.env.production", "app/readable.txt", status=403)
 
 
 # ---------------------------------------------------------------------------

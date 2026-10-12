@@ -797,7 +797,8 @@ class MockDaemon:
                         entries = w["tree"].get(rel)
                         if entries is None:
                             return self._err(404, "no such directory")
-                        return self._json({"path": rel, "entries": entries})
+                        # `root`: where the project folder resolves (ED-7).
+                        return self._json({"path": rel, "entries": entries, "root": project["root"].rstrip("/")})
                     if verb == "file":
                         rel = q.get("path", [""])[0]
                         abs_ = mock.abs_of(project, rel)
