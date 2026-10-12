@@ -7,7 +7,10 @@ gate and its navigation policy.
 - `host.py`: Chrome itself, one instance per profile plus the Private one,
   driven by Playwright's async API on its own thread; the landing guard.
 - `routes.py`: `/browser…`, owner-only on the HUD listener.
+- `settings.py`: `browser.json`, the owner's switches (`lan`, `local_servers`,
+  BR-8a's `auto_open`): the one reader and the one writer of that file.
 
 Design: docs/plans/2026-10-10-hud-browser-plan.md, its amendment 1 and its
 decisions file (which wins). Fully separate from v1's `jarvis.browser`.
+Imports nothing: `daemon.py` imports `settings.py` without starting the engine.
 """
