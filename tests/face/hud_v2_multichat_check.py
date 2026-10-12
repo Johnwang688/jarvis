@@ -6,7 +6,7 @@ context of its own and against **a `MockDaemon` of its own** on an ephemeral
 port, as the layout section is (the mock hands SSE frames only to the newest
 `/events` connection, and this section's sends, interrupts, `/seen` posts and
 approval decisions must stay out of the world the main suite asserts on). It
-also runs on its own: `python tests/face/hud_v2_multichat_check.py`.
+also runs on its own: `python tests/face/hud_v2_multichat_check.py [section,…]`.
 
 The checks worth keeping, each written to bite:
   - two threads side by side, each in its own pane with its own box, chips,
@@ -98,6 +98,8 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.set_default_timeout(5000)
+    # Run alone, a comma-separated list of section names runs only those.
+    only = set(filter(None, (sys.argv[1] if len(sys.argv) > 1 and __name__ == "__main__" else "").split(",")))
     try:
         before = mock.sse_connections()
         page.goto(base + "/")
@@ -122,7 +124,12 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _split_close_chat_checks, _split_close_selected_checks,
                         # review of PR #47
                         _rv47_kept_compose_checks, _rv47_close_keeps_mic_checks, _rv47_first_send_closed_checks,
-                        _rv47_loose_unlisted_checks, _rv47_ask_strip_checks):
+                        _rv47_loose_unlisted_checks, _rv47_ask_strip_checks,
+                        # review 2 of PR #47 (c3c928f)
+                        _rv47b_close_other_view_checks, _rv47b_park_said_checks, _rv47b_thread_park_said_checks,
+                        _rv47b_send_held_named_checks):
+            if only and section.__name__.strip("_") not in only:
+                continue
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -1793,10 +1800,6 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 # ---------------------------------------------------------------------------
 # WP-G2: split and close a chat pane (plan §3.5–§3.6)
 
@@ -2182,11 +2185,158 @@ def _rv47_ask_strip_checks(page, mock, check, until):
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     check("review #47 L3: once the card is answered, focus is back on Keep",
           bool(until(lambda: _active_testid(page) == "pane-2-close-keep", timeout=2)), str(_active_testid(page)))
-    # The pane shows something else now: the question about its words goes.
+    # The words are gone now: the question about them goes. (A switch to
+    # another view no longer drops it — the words are still the pane's, and ×
+    # still drops them; review 2 of PR #47, MED-1.)
+    _box(page, 2).fill("")
+    check("review #47 L3: the question is dropped when the words it asked about are gone",
+          bool(until(lambda: ask.count() == 0, timeout=2)))
+
+
+# ---------------------------------------------------------------------------
+# Review 2 of PR #47 (the delta review of c3c928f). Each failed on c3c928f.
+
+def _rv47b_close_other_view_checks(page, mock, check, until):
+    """MED-1: × judges the pane's conversation whatever view it shows. A
+    compose row's unsent words in a pane switched to File: × asks, and the
+    strip that asked stays when the pane switches view."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _focus(page, until, 2)
+    _box(page, 2).fill("words typed before a switch to File")
     page.locator(_pane(2, '[data-testid="tab-file"]')).click()
     until(lambda: _attr(page, _pane(2), "data-view") == "file", timeout=2)
-    check("review #47 L3: the question is dropped when the pane switches to a File view",
-          bool(until(lambda: ask.count() == 0, timeout=2)))
+    page.locator('[data-testid="pane-2-close"]').click()
+    ask = page.locator('[data-testid="pane-2-close-ask"]')
+    until(lambda: ask.count() > 0, timeout=2)
+    time.sleep(0.3)
+    check("review 2 #47 MED-1: × on a pane showing File asks about its compose row's unsent words",
+          ask.count() == 1 and "unsent" in ask.inner_text() and 2 in _order(page), str(_order(page)))
+    page.locator('[data-testid="pane-2-close-keep"]').click()
+    until(lambda: ask.count() == 0, timeout=2)
     page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
     until(lambda: _attr(page, _pane(2), "data-view") == "chat", timeout=2)
-    _box(page, 2).fill("")
+    check("review 2 #47 MED-1: Keep keeps them", _box(page, 2).input_value() == "words typed before a switch to File",
+          _box(page, 2).input_value())
+
+    # Asked in chat, then switched to File: the question still holds, so the
+    # strip stays, and × there asks again rather than closing.
+    time.sleep(0.5)
+    page.locator('[data-testid="pane-2-close"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    page.locator(_pane(2, '[data-testid="tab-file"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "file", timeout=2)
+    time.sleep(0.4)
+    check("review 2 #47 MED-1: the question stays when the pane switches to File (the words are still there)",
+          ask.count() == 1 and 2 in _order(page))
+    time.sleep(0.5)
+    page.locator('[data-testid="pane-2-close"]').click()
+    time.sleep(0.5)
+    check("review 2 #47 MED-1: and × there still asks rather than closing",
+          2 in _order(page) and ask.count() == 1, str(_order(page)))
+    page.locator('[data-testid="pane-2-close-discard"]').click()
+    until(lambda: 2 not in _order(page), timeout=2)
+    check("review 2 #47 MED-1: Discard closes it, the words dropped as asked",
+          "words typed before" not in json.dumps(_state(page, "drafts")), str(_state(page, "drafts")))
+
+
+def _files(n: int, tag: str) -> list:
+    return [{"name": f"{tag}{i}.txt", "mime": "text/plain", "data_b64": "YQ=="} for i in range(n)]
+
+
+def _rv47b_park_said_checks(page, mock, check, until):
+    """MED-2: Open beside reusing a hidden pane says where its unsent words
+    went, and they come back in a New thread pressed in a pane that is already
+    composing, which says so and names the project they were written in."""
+    _fresh(page, mock, until, EIGHT, size=(1920, 1080))
+    until(lambda: len(_order(page)) == 8 and all(_chat(page, n)["compose"] for n in range(1, 9)), timeout=4)
+    for n in range(2, 9):
+        page.evaluate("""n => {
+          const c = window.__hud.state().chats[n].compose;
+          window.__hud.dispatch({type: 'chat', pane: n, patch: {compose: {...c, projectId: 'p2'}}});
+          window.__hud.dispatch({type: 'input', pane: n, text: `school words of pane ${n}`});
+          return true;
+        }""", n)
+    _focus(page, until, 1)
+    _box(page, 1).fill("my own words in pane 1")
+    _choose(page, until, "single")
+    _expand(page, until, "p2", "thread-t3")
+    page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
+    until(lambda: len(_order(page)) == 2 and _chat(page, _order(page)[1])["threadId"] == "t3", timeout=3)
+    took = _order(page)[1]
+    err = page.locator('[data-testid="error"]')
+    check("review 2 #47 MED-2: Open beside reusing a hidden pane says its unsent words are kept, and for which project",
+          bool(until(lambda: err.count() > 0 and "next new thread" in err.inner_text(), timeout=2))
+          and "schoolwork" in err.inner_text(), err.inner_text() if err.count() else "no notice")
+    _focus(page, until, 1)
+    page.evaluate("localStorage.setItem('jarvis.hud.lastProject', 'p1')")   # New thread opens in jarvis
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: f"school words of pane {took}" in _box(page, 1).input_value(), timeout=3)
+    check("review 2 #47 MED-2: New thread in a pane already composing takes them back, after its own words",
+          _box(page, 1).input_value() == f"my own words in pane 1\nschool words of pane {took}"
+          and "compose:*" not in _state(page, "drafts"), repr(_box(page, 1).input_value()))
+    check("review 2 #47 MED-2: and says so, naming the project they were written in",
+          bool(until(lambda: "are back" in err.inner_text(), timeout=2))
+          and "schoolwork" in err.inner_text() and "jarvis" in err.inner_text(), err.inner_text())
+    _box(page, 1).fill("")
+
+
+def _rv47b_thread_park_said_checks(page, mock, check, until):
+    """MED-2 and NIT-3: × on a thread's pane — its words wait with the thread,
+    and that is said, with the files past eight that did not fit."""
+    err = page.locator('[data-testid="error"]')
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    page.evaluate("""f => {
+      window.__hud.dispatch({type: 'park', key: 't2', text: '', files: f.parked});
+      window.__hud.dispatch({type: 'input', pane: 2, text: 'words for the second chat', files: f.box});
+      return true;
+    }""", {"parked": _files(3, "p"), "box": _files(8, "b")})
+    page.locator('[data-testid="pane-2-close"]').click()
+    until(lambda: _order(page) == [1], timeout=2)
+    check("review 2 #47 MED-2/NIT-3: × on a thread's pane says its words wait with that thread, and 3 files were left out",
+          bool(until(lambda: err.count() > 0 and "second chat" in err.inner_text(), timeout=2))
+          and "3 files were left out" in err.inner_text()
+          and len(_state(page, "drafts")["t2"]["files"]) == 8, err.inner_text() if err.count() else "no notice")
+    _open(page, until, 1, "t2")
+    until(lambda: "words for the second chat" in _box(page, 1).input_value(), timeout=3)
+    check("review 2 #47 MED-2: and they are back when the thread opens",
+          _box(page, 1).input_value() == "words for the second chat")
+    page.evaluate("window.__hud.dispatch({type: 'input', pane: 1, text: '', files: []})")
+
+
+def _rv47b_send_held_named_checks(page, mock, check, until):
+    """LOW-2: a first send that fails at `/send` after its pane closed says
+    its words wait with the thread it opened, naming it; and they are back in
+    the box when that thread is opened."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _focus(page, until, 2)
+    held = []
+    page.route(SEND_URL, lambda r: held.append(r) if r.request.method == "POST" else r.continue_())
+    try:
+        _box(page, 2).fill("words whose send fails at /send")
+        _box(page, 2).press("Enter")
+        until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+        tid = held[0].request.url.rsplit("/", 2)[-2]
+        page.locator('[data-testid="pane-2-close"]').click()
+        until(lambda: _order(page) == [1], timeout=2)
+        held[0].fulfill(status=500, content_type="application/json", body=json.dumps({"error": "daemon hiccup"}))
+    finally:
+        page.unroute(SEND_URL)
+    err = page.locator('[data-testid="error"]')
+    until(lambda: err.count() > 0 and "Could not send" in err.inner_text(), timeout=3)
+    check("review 2 #47 LOW-2: a first send failing at /send after its pane closed says where its words wait, naming the thread",
+          "waits with “new thread”" in err.inner_text(), err.inner_text())
+    _expand(page, until, "p1", f"thread-{tid}")
+    page.locator(f'[data-testid="thread-{tid}"]').click()
+    until(lambda: _chat(page, 1)["threadId"] == tid, timeout=3)
+    check("review 2 #47 LOW-2: and they are back in the box when that thread is opened",
+          bool(until(lambda: _box(page, 1).input_value() == "words whose send fails at /send", timeout=3)),
+          repr(_box(page, 1).input_value()))
+    _box(page, 1).fill("")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

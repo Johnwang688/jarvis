@@ -1701,13 +1701,25 @@ reconcile clear it, the reconcile also when the thread is no longer listed —
 archived or deleted). **A first send whose pane closed while its thread
 opened** leaves the new turn `loose` too (`send()`: nothing tracks or shows
 it), and one that fails after the close parks its words for the next new
-thread anywhere and says so (review of PR #47, M2). A compose row's unsent
-words are asked about (G-9) and Discard drops them for good; a terminal goes back to the panel as its
+thread anywhere and says so (review of PR #47, M2); one that fails at
+`/send` after the close says its words wait with that thread, by name (review
+2 of PR #47, LOW-2). **A park is never silent** (review 2, MED-2/NIT-3): a
+release that parks words says where — the thread, by title, or the next new
+thread with the project they were written in — and how many files past eight
+were left out. **Any new compose row takes `ORPHAN_DRAFT` up** (a new
+`Compose.id`: New thread, a split's copy), even from a pane already composing
+— after the words it has — says so, and names the project they were written
+in when the row is in another (`Draft.projects`); the row keeps its own
+project. A compose row's unsent
+words are asked about (G-9) **whatever view the pane shows** — a pane
+switched to File keeps its chat, and × releases it too (review 2, MED-1) —
+and Discard drops them for good; a terminal goes back to the panel as its
 selected tab (`releaseToPanel`) — **no DELETE, no new ticket, the shell lives
 on**. × asks first, in an inline strip (`pane-<id>-close-ask`, focus on
 Keep, never a modal), for an unsaved edit or a compose row's unsent words;
-the strip is dropped when the question no longer holds (the pane switched,
-the words were sent) and Discard re-asks at the click, so it never answers a
+the strip is dropped when the question no longer holds (the words were sent
+or cleared, a file edit joined them — a switch of view alone keeps it, the
+words still being the pane's) and Discard re-asks at the click, so it never answers a
 question nobody asked; Keep is not `disabled` under a card (inert covers it),
 so focus comes back to it. **Focus after a close goes where the mic is**
 (W-6): the selected chat while it is another drawn pane — closing a File pane
@@ -1721,7 +1733,10 @@ in the source's project, written before the layout changes; a terminal's is
 `terminals.create(specOf(source), id, …, {readable})` — **`POST /terminals`
 takes `readable` now, so a copy of a terminal Jarvis may not read is made
 with the switch off from its first byte** (never PATCHed after), and a source
-whose row is unknown fails closed: a copy never widens what Jarvis can read. A
+whose row is unknown fails closed: a copy never widens what Jarvis can read.
+Restart and "New terminal here" keep the old terminal's switch the same way
+(`TermManager.readableOf`: its row, else its session's last; review 2 of
+PR #47, LOW-1). A
 reused id mounts fresh: Workspace unmounts a pane neither drawn nor `kept`,
 and `useLayout` bumps the incarnation on a close and when a split takes back
 a hidden pane (else its old FileTab stayed). File panes store their open
