@@ -1161,6 +1161,12 @@ def browser_snapshot():
                 dead.close()
                 goto_err = tools.dispatch(
                     "browser_goto", json.dumps({"url": f"http://127.0.0.1:{dead_port}/"})).text
+                # The refused load raises at once, but Chromium then commits its
+                # error page (chrome-error://) as a navigation of its own. Under
+                # load that commit landed after the next goto began and
+                # interrupted it ("browser_snapshot crashed"): let it land first.
+                session._submit(lambda: session.page.wait_for_url(
+                    lambda u: u.startswith("chrome-error:"), timeout=15_000))
             finally:
                 browsing.SESSION = saved
             check("a snapshot the page makes throw reports the error's type, not its message",
