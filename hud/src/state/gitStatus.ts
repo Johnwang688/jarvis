@@ -92,7 +92,9 @@ export class GitStatusStore {
     e.inflight = true;
     try {
       const data = await this.deps.fetch(projectId);
-      const key = `${data?.repo ? 1 : 0}|${data?.head ?? ""}|${gitKey(data)}`;
+      // The branch and `truncated` too: the Diff pane's memoized list says
+      // both, and hears nothing the key misses (delta review of PR #67).
+      const key = `${data?.repo ? 1 : 0}|${data?.head ?? ""}|${data?.branch ?? ""}|${data?.truncated ? 1 : 0}|${gitKey(data)}`;
       const changed = key !== e.key || e.error !== null;
       e.data = data;
       e.error = null;
