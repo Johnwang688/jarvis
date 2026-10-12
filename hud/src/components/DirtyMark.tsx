@@ -8,24 +8,27 @@
 // version, however often React asks.
 
 import { memo, useMemo, useSyncExternalStore } from "react";
-import { buffers } from "../state/buffers";
+import { buffers, type Buffers } from "../state/buffers";
 import { dirtyKey, dirtyPathsIn, marksOfKey, type Marks } from "../lib/dirtyMarks";
 
-/** The dirty marks project `projectId`'s tree shows; `root` finds a file read through another project. */
-export function useDirtyMarks(projectId: string | null, root?: string | null): Marks {
+/**
+ * The dirty marks project `projectId`'s tree shows; `root` finds a file read
+ * through another project. `registry` is the window's one (tests pass their own).
+ */
+export function useDirtyMarks(projectId: string | null, root?: string | null, registry: Buffers = buffers): Marks {
   const getKey = useMemo(() => {
     let seen = -1;
     let key = "";
     return () => {
-      const ver = buffers.version();
+      const ver = registry.version();
       if (ver !== seen) {
         seen = ver;
-        key = projectId ? dirtyKey(dirtyPathsIn(buffers.snapshot(), projectId, root)) : "";
+        key = projectId ? dirtyKey(dirtyPathsIn(registry.snapshot(), projectId, root)) : "";
       }
       return key;
     };
-  }, [projectId, root]);
-  const key = useSyncExternalStore(buffers.subscribe, getKey);
+  }, [projectId, root, registry]);
+  const key = useSyncExternalStore(registry.subscribe, getKey);
   return useMemo(() => marksOfKey(key), [key]);
 }
 

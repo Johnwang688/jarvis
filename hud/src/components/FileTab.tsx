@@ -23,7 +23,7 @@
 // this file" — nothing here sends its text anywhere but its own save, and
 // "Add to chat" is disabled for it.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import type { Tree, TreeEntry } from "../types";
 import { CompareEditor, PaneEditor } from "./Editor";
@@ -31,7 +31,7 @@ import { ConflictBar } from "./ConflictBar";
 import { EditorTabs, type TabInfo } from "./EditorTabs";
 import { Chevron, FileIcon } from "./FileIcon";
 import { DirtyDot, useDirtyMarks } from "./DirtyMark";
-import { NO_MARKS, type Marks } from "../lib/dirtyMarks";
+import { NO_MARKS, rowDot, type Marks } from "../lib/dirtyMarks";
 import { Markdown } from "./Markdown";
 import { isMarkdown } from "../lib/monaco";
 import {
@@ -43,7 +43,11 @@ function join(dir: string, name: string) {
   return dir ? `${dir}/${name}` : name;
 }
 
-function Node(props: {
+// Memoized, with props that hold still (a stable `onOpen`, `marks` changing
+// only when the dirty set does): the tree redraws when a buffer goes clean or
+// dirty or the selection moves — never per keystroke, and never because the
+// window redrew around it (typing in a chat box redraws App).
+const Node = memo(function Node(props: {
   projectId: string;
   dir: string;
   depth: number;
@@ -87,7 +91,7 @@ function Node(props: {
                 <span className="tw">{withheld ? "·" : <Chevron open={isOpen} />}</span>
                 <span className="nm">{e.name}</span>
                 {withheld ? <span className="treemark">withheld</span> : null}
-                {!withheld && !isOpen && marks.folder(path) ? <DirtyDot folder testid={`dirty-${path}`} /> : null}
+                {!withheld && rowDot(marks, path, "dir", isOpen) ? <DirtyDot folder testid={`dirty-${path}`} /> : null}
               </div>
               {isOpen ? (
                 <Node
@@ -121,7 +125,7 @@ function Node(props: {
       })}
     </>
   );
-}
+});
 
 const READONLY_LABEL: Record<string, string> = {
   gate: "read-only: permission state",
@@ -298,6 +302,12 @@ export function FileTab(props: {
     setTabs(next);
   };
 
+  // The tree's handle on `open`: one function for the pane's life, so the
+  // memoized tree is not redrawn by a new closure every render.
+  const openLatest = useRef(open);
+  openLatest.current = open;
+  const onTreeOpen = useCallback((path: string, pin: boolean) => openLatest.current(path, pin), []);
+
   const close = (path: string, discard = false) => {
     setAsk(null);
     if (discard) discarding.current.add(path);
@@ -394,7 +404,7 @@ export function FileTab(props: {
   return (
     <div className="split">
       <div className="filetree" data-testid="filetree" style={showTree ? undefined : { display: "none" }}>
-        <Node projectId={pid} dir="" depth={0} onOpen={open} selected={active || ""} marks={marks} />
+        <Node projectId={pid} dir="" depth={0} onOpen={onTreeOpen} selected={active || ""} marks={marks} />
       </div>
       <div className="editorwrap">
         <EditorTabs

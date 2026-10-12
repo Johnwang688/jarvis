@@ -29,7 +29,8 @@ const trimSlashes = (p: string) => p.replace(/^\/+|\/+$/g, "");
  * opened through another project is found by its absolute path under it.
  */
 export function dirtyPathsIn(bufs: readonly DirtyBuffer[], projectId: string, root?: string | null): string[] {
-  const top = root ? root.replace(/\/+$/, "") : "";
+  // A root of "/" is "" here, so every absolute path is under it.
+  const top = root ? root.replace(/\/+$/, "") : null;
   const out = new Set<string>();
   for (const b of bufs) {
     if (!b.dirty) continue;
@@ -38,7 +39,7 @@ export function dirtyPathsIn(bufs: readonly DirtyBuffer[], projectId: string, ro
       if (p) out.add(p);
       continue;
     }
-    if (top && b.abs.startsWith(top + "/")) {
+    if (top !== null && b.abs.startsWith(top + "/")) {
       const p = trimSlashes(b.abs.slice(top.length + 1));
       if (p) out.add(p);
     }
