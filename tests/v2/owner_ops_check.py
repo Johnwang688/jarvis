@@ -118,6 +118,8 @@ class Daemon:
         self.fetches = 0
         self.slow = 0                    # this many more reads time out (the daemon is up)
         self.timeouts: list[float] = []  # the timeout of each read that timed out
+        self.pid = None                  # `/status` → `pid` (None: a daemon from before it)
+        self.pid_after = None            # the restarted daemon's
 
     def restart(self):
         self.down_until = self.clock.now + self.boot
@@ -125,6 +127,7 @@ class Daemon:
         self.started = self.clock.now + self.boot
         self.turns = self.turns_after_restart
         self.slow = 0
+        self.pid = self.pid_after if self.pid_after is not None else self.pid
 
     def read(self, port=None, timeout=2.0):
         """`owner_ops.read_status`: (body, None) or (None, why)."""
@@ -148,7 +151,8 @@ class Daemon:
 
     def _body(self, started):
         hud = self.hud() if callable(self.hud) else self.hud
-        return {"jarvis-daemon": True, "version": 2, "uptime": self.clock.now - started,
+        extra = {"pid": self.pid} if self.pid is not None else {}
+        return {**extra, "jarvis-daemon": True, "version": 2, "uptime": self.clock.now - started,
                 "providers": {"claude": {"ok": True, "reason": "claude 2.1.300"},
                               "codex": {"ok": False, "reason": "codex is not logged in\nrun codex login"},
                               "fast": {"ok": True, "reason": ""}},
@@ -172,6 +176,7 @@ class Programs:
         self.result, self.exec_start = result, exec_start
         self.run_rc, self.run_raises = run_rc, run_raises   # systemd-run
         self.active_after = None         # ActiveState once the restart was issued
+        self.main_pid = self.main_pid_after = None   # MainPID before and after the restart
         self.restarted = False
         self.calls: list[tuple[list, dict]] = []
         self.events: list[str] = []
@@ -205,8 +210,10 @@ class Programs:
         self.events.append("systemctl " + verb)
         if verb == "show":
             active = self.active_after if self.restarted and self.active_after else self.active
+            main = self.main_pid_after if self.restarted and self.main_pid_after else self.main_pid
             out = (f"LoadState={self.load}\nActiveState={active}\nSubState=running\n"
-                   f"Result={self.result}\n" + (f"ExecStart={self.exec_start}\n" if self.exec_start else ""))
+                   f"Result={self.result}\n" + (f"ExecStart={self.exec_start}\n" if self.exec_start else "")
+                   + (f"MainPID={main}\n" if main is not None else ""))
             return subprocess.CompletedProcess(argv, self.show_rc, out if not self.show_rc else "",
                                                self.show_err)
         if verb == "restart":
@@ -397,7 +404,10 @@ class Restart(Base):
         patch.object(O, "read_status", lambda **_: (body, None)).start()
         self.assertEqual(O.restart(out=self.out.append), O.FAILED)
         self.assertIn("something other than the v2 daemon", self.said())
-        self.assertEqual(programs.calls, [])
+        # Only the read the uncommitted-Python warning makes, before the
+        # check (review 2 of PR #48): nothing restarted.
+        self.assertEqual(programs.verbs(), ["show"])
+        self.assertEqual(programs.verbs("systemd-run"), [])
 
     def test_a_hud_that_is_not_served_says_what_to_run(self):
         daemon, _ = self.world()
@@ -947,7 +957,8 @@ class ReviewRestart(Base):
         self.assertTrue(unit.startswith("jarvis-owner-op-"), unit)
         self.assertEqual(argv[:4], ["/usr/bin/systemd-run", "--user", "--collect", "--quiet"])
         self.assertEqual(argv[argv.index("--") + 1:],
-                         [sys.executable, "-m", "jarvis", "restart", "--wait", "30", "--handed-off"])
+                         [sys.executable, "-P", "-m", "jarvis", "restart", "--wait", "30",
+                          "--handed-off"])
         said = self.said()
         self.assertIn(unit, said)
         self.assertIn(f"journalctl --user -u {unit}", said)
@@ -958,7 +969,8 @@ class ReviewRestart(Base):
         patch.object(O, "_cgroup_text", lambda: INSIDE).start()
         _, programs = self.world(Daemon(self.clock, turns=1))
         self.assertEqual(O.restart(out=self.out.append), O.BUSY)
-        self.assertEqual(programs.calls, [], "nothing handed off")
+        self.assertEqual(programs.verbs(), ["show"], "only the warning's read: nothing restarted")
+        self.assertEqual(programs.verbs("systemd-run"), [], "nothing handed off")
 
     def test_m4_no_systemd_run_says_so_and_restarts_nothing(self):
         patch.object(O, "_cgroup_text", lambda: INSIDE).start()
@@ -994,6 +1006,109 @@ class ReviewRestart(Base):
                              ("0::/app.slice/not-jarvis-daemon2.service\n", False)):
             with self.subTest(text=text), patch.object(O, "_cgroup_text", lambda t=text: t):
                 self.assertEqual(O.in_daemon_cgroup(), inside)
+
+
+class Review2Restart(Base):
+    """Review 2 of PR #48: the daemon that answers `/status` must be the
+    unit's (L-4: `/status` → `pid` against systemd's MainPID); the busy check
+    is the last step before the restart — after the uncommitted-Python
+    warning and a hand-off's grace (NIT); the hand-off runs `python -P`. Each
+    fails on 819e58a."""
+
+    def setUp(self):
+        super().setUp()
+        self.parents: dict[int, int] = {}
+        patch.object(O, "_parent_pid", lambda pid: self.parents.get(pid, 1), create=True).start()
+
+    def test_l4_an_idle_daemon_that_is_not_the_units_is_cant_check(self):
+        daemon, programs = self.world()
+        daemon.pid, programs.main_pid = 4242, 1717      # idle, but not the unit's daemon
+        self.assertEqual(O.restart(out=self.out.append), O.BUSY, self.said())
+        self.assertNotIn("restart", programs.verbs(), "the unit's daemon may be busy")
+        said = self.said()
+        self.assertIn("can't check for running turns", said)
+        self.assertIn("pid 4242", said)
+        self.assertIn("pid 1717", said)
+        self.assertIn("--force", said)
+
+    def test_l4_force_restarts_and_says_what_it_overrode(self):
+        daemon, programs = self.world()
+        daemon.pid, programs.main_pid = 4242, 1717
+        daemon.pid_after = programs.main_pid_after = 1818
+        self.assertEqual(O.restart(force=True, out=self.out.append), O.OK, self.said())
+        self.assertIn("restart", programs.verbs())
+        self.assertIn("--force: can't check for running turns", self.said())
+
+    def test_l4_the_units_daemon_or_its_child_is_trusted(self):
+        for pid, parents in ((1717, {}), (4242, {4242: 1717})):
+            with self.subTest(pid=pid):
+                self.parents = parents
+                self.out.clear()
+                daemon, programs = self.world()
+                daemon.pid, programs.main_pid = pid, 1717
+                daemon.pid_after = programs.main_pid_after = 1818
+                self.assertEqual(O.restart(out=self.out.append), O.OK, self.said())
+                self.assertIn("restart", programs.verbs())
+
+    def test_l4_a_restarted_daemon_that_is_not_the_new_main_pid_is_unverified(self):
+        daemon, programs = self.world()
+        daemon.pid = programs.main_pid = 1717
+        daemon.pid_after, programs.main_pid_after = 4242, 1818
+        self.assertEqual(O.restart(out=self.out.append), O.UNVERIFIED, self.said())
+        self.assertIn("restart", programs.verbs())
+        self.assertIn("pid 4242", self.said())
+
+    def test_l4_the_daemon_reports_its_pid(self):
+        import threading
+        from types import SimpleNamespace
+        from jarvis.v2 import daemon as D
+        fake = SimpleNamespace(providers={}, _lock=threading.Lock(), _sessions={}, started_at=0.0,
+                               workshop_port=0, face_port=0, port=0, _server=None,
+                               approvals=SimpleNamespace(pending=lambda: []))
+        with patch.object(config, "HUD_DIR", self.tmp / "hud"), \
+                patch.object(config, "HUD_DIST", self.tmp / "hud"), patch.object(config, "HUD_DEV", False):
+            status = D.Daemon.status(fake)
+        self.assertEqual(status["pid"], os.getpid())
+
+    def test_nit_a_turn_that_starts_during_the_warning_stops_the_restart(self):
+        daemon, programs = self.world()
+
+        def git_status(repo):
+            daemon.turns = 1                 # a turn starts while `git status` runs
+            return []
+        patch.object(O, "uncommitted_python", git_status).start()
+        self.assertEqual(O.restart(out=self.out.append), O.BUSY, self.said())
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_nit_a_turn_that_starts_during_the_hand_off_grace_stops_the_restart(self):
+        daemon, programs = self.world()
+        real = self.clock.sleep
+
+        def sleep(seconds):
+            if seconds == O.HANDOFF_GRACE:
+                daemon.turns = 1             # a turn starts in the grace pause
+            real(seconds)
+        patch.object(O, "_sleep", sleep).start()
+        self.assertEqual(O.restart(handed_off=True, out=self.out.append), O.BUSY, self.said())
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_nit_the_hand_off_never_runs_a_jarvis_from_its_working_directory(self):
+        patch.object(O, "_cgroup_text", lambda: INSIDE).start()
+        _, programs = self.world()
+        self.assertEqual(O.restart(out=self.out.append), O.UNVERIFIED, self.said())
+        (argv, _), = [c for c in programs.calls if os.path.basename(c[0][0]) == "systemd-run"]
+        python = argv[argv.index("--") + 1:]
+        self.assertEqual(python[:4], [sys.executable, "-P", "-m", "jarvis"])
+        # And that is what Python does with -P: a planted jarvis.py in the
+        # working directory is not imported.
+        planted = self.tmp / "cwd"
+        planted.mkdir()
+        (planted / "jarvis.py").write_text("raise SystemExit('the planted module ran')\n")
+        probe = REAL_RUN([sys.executable, "-P", "-c", "import jarvis, sys; sys.stdout.write(jarvis.__file__)"],
+                         cwd=str(planted), capture_output=True, text=True, timeout=60,
+                         env={**os.environ, "PYTHONPATH": ""})
+        self.assertNotIn("planted", probe.stdout + probe.stderr)
+        self.assertNotEqual(Path(probe.stdout.strip() or "x").parent, planted)
 
 
 class ReviewRebuild(RebuildWorld):

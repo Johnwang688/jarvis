@@ -49,6 +49,12 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 
+try:                     # `re`'s own parser: what a pattern will run as (`_regex_work`)
+    from re import _constants as _sre_c, _parser as _sre_parse
+except ImportError:      # pragma: no cover — Python before 3.11
+    import sre_constants as _sre_c
+    import sre_parse as _sre_parse
+
 from . import config, rules
 
 
@@ -1050,7 +1056,8 @@ OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "jarvis.v2.hud_install": (("hud", "install"),
                               ("main", "install", "install_checkout", "npm_build", "prune")),
     "jarvis.v2.owner_ops": (("hud", "rebuild"),
-                            ("restart", "_restart", "rebuild", "pull", "npm_ci", "systemctl")),
+                            ("restart", "_restart", "rebuild", "pull", "npm_ci", "systemctl",
+                             "hand_off")),
 }
 
 # The daemon's systemd unit, changed directly (2026-10-11): `systemctl
@@ -1203,11 +1210,48 @@ def _brace_parts(inside: str) -> list[str] | None:
     return None
 
 
+# A brace, or a comma, that was quoted or escaped on the line: bash never
+# expands it, so `pkill -f 'daemo.{0,1}2'` hands pkill that regex whole
+# (review 2 of PR #48 — expanded, it was judged as `daemo.02` and `daemo.12`,
+# and one pattern could become 256 to match). `_owner_line` marks them
+# before splitting a segment into words, `_unit_words` expands only the
+# unmarked ones, and `_owner_command` hands every other path the plain text.
+_QUOTED = str.maketrans({"{": "", "}": "", ",": ""})
+_UNQUOTED = str.maketrans({"": "{", "": "}", "": ","})
+
+
+def _mark_quoted(text: str) -> str:
+    """`text` with each quoted or backslash-escaped `{`, `}` and `,` marked."""
+    if "{" not in text:
+        return text
+    out, quote, i, n = [], "", 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(c + text[i + 1].translate(_QUOTED))
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = ""
+            out.append(c if c == '"' or c == "'" else c.translate(_QUOTED))
+        else:
+            if c in "'\"":
+                quote = c
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _unmark(word: str) -> str:
+    return word.translate(_UNQUOTED)
+
+
 def _unit_words(tokens: list[str], state: "_Owner") -> list[str] | None:
     """A command's arguments as the shell will hand them over: the line's own
     `$VAR`s put in and split on whitespace (an expansion it did not assign
-    stays as it is, and counts as any words), braces expanded. None past the
-    brace cap."""
+    stays as it is, and counts as any words), unquoted braces expanded
+    (`_mark_quoted`). None past the brace cap."""
     out: list[str] = []
     for token in tokens:
         word = _owner_word(token, state, environ=False)
@@ -1215,6 +1259,7 @@ def _unit_words(tokens: list[str], state: "_Owner") -> list[str] | None:
         if expanded is None:
             return None
         for one in expanded:
+            one = _unmark(one)
             out.extend(one.split() if word != token else [one])
     return out
 
@@ -1248,6 +1293,7 @@ class _Systemctl:
     unknown: bool = False     # an option the table does not know: the verb is a guess
     wild_head: bool = False   # an expansion before or at the verb: the verb is not known
     info: bool = False        # --help/--version: nothing runs
+    properties: list[str] = field(default_factory=list)   # `-p`/`-P`/`--property` values
 
     @property
     def verb(self) -> str | None:
@@ -1280,15 +1326,19 @@ def _systemctl_parse(words: list[str]) -> _Systemctl:
                 out.unknown = True
                 continue
             full = matches[0]
+            value = word[2:].partition("=")[2]
             if _SYSTEMCTL_LONG[full] and not eq:
                 if i >= len(words):
                     out.unknown = True
                     break
                 if not out.operands and _wild_word(words[i]):
                     out.wild_head = True
+                value = words[i]
                 i += 1
             elif eq and not _SYSTEMCTL_LONG[full]:
                 out.unknown = True
+            if full == "property":
+                out.properties.extend(value.split(","))
             out.user = {"user": True, "capsule": True, "system": False}.get(full, out.user)
             out.marked = out.marked or full == "marked"
             out.info = out.info or full in ("help", "version")
@@ -1306,12 +1356,16 @@ def _systemctl_parse(words: list[str]) -> _Systemctl:
                 if takes == 2:
                     break
                 if takes == 1:
+                    value = letters[k + 1:]
                     if k == len(letters) - 1:
                         if i >= len(words):
                             out.unknown = True
                         elif not out.operands and _wild_word(words[i]):
                             out.wild_head = True
+                        value = words[i] if i < len(words) else ""
                         i += 1
+                    if letter in "pP":
+                        out.properties.extend(value.split(","))
                     break
             continue
         out.operands.append(word)
@@ -1402,14 +1456,21 @@ def systemctl_asks(tokens: list[str]) -> str | None:
 def _dbus_op(tokens: list[str], state: "_Owner") -> str | None:
     """A D-Bus call (`busctl`, `dbus-send`, `gdbus`, `qdbus`) that names the
     daemon's unit, or that calls systemd with a method that changes a unit
-    or the manager."""
+    or the manager. A read (`busctl get-property`, a `Get`/`GetAll` call …)
+    changes nothing (review 2 of PR #48); one that names the unit prints its
+    PID, a source for a fed `kill` (`_note_kill`)."""
     words = _unit_words(tokens[1:], state)
     if words is None:
         words = tokens[1:]
     escaped = DAEMON_UNIT.replace("-", "_2d")
-    for word in words:
-        if DAEMON_UNIT in word or escaped in word:
-            return _DAEMON_UNIT_WHY.format(how=f"calls systemd over D-Bus on {DAEMON_UNIT}")
+    names = any(DAEMON_UNIT in word or escaped in word for word in words)
+    tool = rules._basename(tokens[0])
+    if _dbus_read("qdbus" if tool.startswith("qdbus") else tool, words):
+        if names:
+            state.kills.sources.append(lambda: "a D-Bus read of its unit")
+        return None
+    if names:
+        return _DAEMON_UNIT_WHY.format(how=f"calls systemd over D-Bus on {DAEMON_UNIT}")
     systemd = any("systemd1" in w for w in words)
     if not systemd:
         return None
@@ -1425,20 +1486,31 @@ def _dbus_op(tokens: list[str], state: "_Owner") -> str | None:
 
 # Killing the daemon by pattern (2026-10-11, the owner's decision on PR #48's
 # M2): `pkill -f daemon2` stopped it with nobody asked — a plain SIGTERM is a
-# clean exit, which `Restart=on-failure` does not restart. DENY: a `pkill -f`,
-# `killall -r`, or a `kill` fed PIDs by `pgrep -f`/`pidof` on the same line
-# (`$(…)`, backticks, `<(…)`, `| xargs kill`), whose pattern matches one of the
-# daemon's command lines **at `daemon2`** — a match whose span overlaps that
-# word. So `jarvis daemon2`, `daemo[n]2`, `daemon.`, `jarvis d` and `n2$` are
-# refused, while `jarvis` and `python -m jarvis` alone, which do not reach the
-# word, keep the owner's 2026-08-09 matrix (`pkill -f jarvis` stays ALLOW). A
-# pattern only known when it runs counts as matching; one that cannot be
-# compiled, or could backtrack without bound, fails closed. Matching by
-# process *name* (`pkill python`, `killall python`, `pkill` without `-f`)
-# reaches the daemon too, but never at `daemon2` — its names are `python` and
-# `jarvis` — so it is left alone, the stated limit with a `kill` of a literal
-# PID, which nothing here can see.
-_KILL_WORDS = ("kill", "pgrep", "pidof")
+# clean exit, which `Restart=on-failure` does not restart. DENY:
+#   * `pkill -f` and `killall -r` whose pattern matches one of the daemon's
+#     command lines **at `daemon2`** — a match whose span overlaps that word —
+#     so `jarvis daemon2`, `daemo[n]2`, `daemon.`, `jarvis d` and `n2$` are
+#     refused, while `jarvis` and `python -m jarvis` alone, which do not reach
+#     the word, keep the owner's 2026-08-09 matrix (`pkill -f jarvis` stays
+#     ALLOW);
+#   * a `kill` **fed** PIDs on the same line — through `$(…)`, backticks,
+#     `<(…)`, a variable or `xargs` — by a source that yields the daemon's:
+#     `pgrep -f`/`pidof` with such a pattern, `ps` filtered by such a `grep`,
+#     and (review 2 of PR #48) `systemctl show|status` of its unit, a D-Bus
+#     read of it, its cgroup's `cgroup.procs`, `pgrep --cgroup|--pidfile`
+#     naming the unit, and `lsof`/`fuser` on one of its ports;
+#   * `pkill --cgroup|--pidfile` naming the unit, and `fuser -k` on one of its
+#     ports, which kill it outright.
+# A pattern only known when it runs counts as matching; one that will not
+# compile, or whose matching cost cannot be bounded (`_regex_work`), fails
+# closed. **A source is judged only when a fed `kill` is on the line**:
+# `pgrep -f daemon2` alone is a read and is never matched, and `pgrep -f
+# daemon2 && kill -9 4321` kills a literal PID nothing on the line fed it.
+# Matching by process *name* (`pkill python`, `killall python`, `pkill`
+# without `-f`) reaches the daemon too, but never at `daemon2` — its names are
+# `python` and `jarvis` — so it is left alone, the stated limit with a `kill`
+# of a literal PID, which nothing here can see.
+_KILL_WORDS = ("kill", "pgrep", "pidof", "fuser")
 _DAEMON_NAMES = ("python", "python3", "jarvis")
 _SIGNALS = frozenset({
     "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "IOT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
@@ -1457,16 +1529,53 @@ _PROC_LONG = {
 _PKILL_LONG = {**_PROC_LONG, "queue": 1, "echo": 0}
 _PGREP_LONG = {**_PROC_LONG, "delimiter": 1, "list-name": 0, "list-full": 0, "inverse": 0,
                "lightweight": 0}
+_PROC_SHORT_LONG = {"F": "pidfile"}
 # killall (psmisc 23.7): its options with a value.
 _KILLALL_SHORT = {**dict.fromkeys("yosunZ", 1), **dict.fromkeys("eIgilqrvVw", 0)}
 _KILLALL_LONG = {**dict.fromkeys(("younger-than", "older-than", "signal", "user", "ns", "context"), 1),
                  **dict.fromkeys(("exact", "ignore-case", "process-group", "interactive", "list",
                                   "quiet", "regexp", "verbose", "version", "wait", "help"), 0)}
+# grep (GNU grep 3.12; ugrep reads the same patterns): options with a value,
+# and the long ones whose value may only be glued (`--color=always`).
+_GREP_SHORT_VALUE = frozenset("efmABCdD")
+_GREP_LONG = {
+    **dict.fromkeys(("regexp", "file", "max-count", "after-context", "before-context", "context",
+                     "devices", "directories", "exclude", "include", "exclude-dir", "exclude-from",
+                     "label", "binary-files", "group-separator"), 1),
+    **dict.fromkeys(("fixed-strings", "basic-regexp", "extended-regexp", "perl-regexp",
+                     "ignore-case", "no-ignore-case", "invert-match", "word-regexp", "line-regexp",
+                     "count", "color", "colour", "files-with-matches", "files-without-match",
+                     "only-matching", "quiet", "silent", "no-messages", "byte-offset",
+                     "with-filename", "no-filename", "line-number", "initial-tab", "null",
+                     "null-data", "text", "recursive", "dereference-recursive", "line-buffered",
+                     "no-group-separator", "help", "version"), 0)}
 _POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "upper": "A-Z",
                   "lower": "a-z", "space": r"\s", "blank": r" \t", "punct": r"!-/:-@\[-`{-~",
                   "xdigit": "0-9A-Fa-f", "print": " -~", "graph": "!-~", "cntrl": r"\x00-\x1f\x7f",
                   "word": r"\w"}
 _PATTERN_CAP = 256
+# What matching one pattern may cost, and every pattern on one line together,
+# in `_regex_work`'s units (review 2 of PR #48). Python's `re` has no timeout
+# and holds the GIL while it matches, so a match past these would freeze the
+# whole daemon, every turn and the approval broker with it — `.?` thirty times
+# took days. The per-pattern budget fits two unbounded quantifiers on the
+# owner's checkout (`node.*vite.*dev`), and the worst pattern under it matches
+# in about 20 ms (`ReDoS` in tests/rules_check.py holds it under 50 ms).
+_REGEX_BUDGET = 1 << 19
+_LINE_REGEX_BUDGET = 1 << 20
+_LINE_PATTERN_CHARS = 4096
+_PID_PROPERTIES = frozenset({"MainPID", "ControlPID", "ExecMainPID"})
+# D-Bus calls that only read: busctl's and gdbus's reading verbs, and the
+# methods that return state (`Get`, `GetAll`, `Introspect` …).
+_BUSCTL_READS = frozenset({"list", "status", "monitor", "capture", "tree", "introspect",
+                           "get-property", "wait", "help"})
+_GDBUS_READS = frozenset({"introspect", "monitor", "wait", "help"})
+_DBUS_READ_METHODS = frozenset({
+    "Get", "GetAll", "Introspect", "Ping", "GetMachineId", "GetUnit", "GetUnitByPID",
+    "GetUnitByInvocationID", "GetUnitByControlGroup", "GetUnitProcesses", "GetUnitFileState",
+    "GetUnitFileLinks", "GetDefaultTarget", "GetJob", "ListUnits", "ListUnitsFiltered",
+    "ListUnitsByPatterns", "ListUnitsByNames", "ListUnitFiles", "ListUnitFilesByPatterns",
+    "ListJobs", "Dump"})
 
 
 def _daemon_command_lines() -> tuple[str, ...]:
@@ -1474,6 +1583,13 @@ def _daemon_command_lines() -> tuple[str, ...]:
     the other ways it is started."""
     return (f"{Path(config.REPO_ROOT)}/.venv/bin/python -m jarvis daemon2",
             "python3 -m jarvis daemon2", "python -m jarvis daemon2", "jarvis daemon2")
+
+
+def _daemon_ports() -> frozenset[int]:
+    """The ports whose holder may be the daemon: the control plane's
+    (`config.control_ports()`) and the workshop's, which the v2 daemon binds
+    as its preview listener (8403)."""
+    return config.control_ports() | {8403, config.WORKSHOP_PORT}
 
 
 def _signal_word(word: str) -> str | None:
@@ -1487,19 +1603,85 @@ def _signal_word(word: str) -> str | None:
     return None
 
 
-def _regex_bounded(pattern: str) -> bool:
-    """False when matching `pattern` could backtrack without bound — a
-    quantified group that holds a quantifier or an alternation, a back
-    reference, more than two unbounded quantifiers, or a long pattern
-    (Python's `re` has no timeout, and the permit is synchronous)."""
-    if len(pattern) > _PATTERN_CAP or re.search(r"\\[1-9]", pattern):
-        return False
-    groups, last, unbounded, i, n = [[False, False]], None, 0, 0, len(pattern)
+_REPEATS = tuple(getattr(_sre_c, name) for name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")
+                 if hasattr(_sre_c, name))
+_PLAIN_OPS = tuple(getattr(_sre_c, name) for name in ("LITERAL", "NOT_LITERAL", "ANY", "IN", "AT",
+                                                      "CATEGORY") if hasattr(_sre_c, name))
+
+
+def _regex_choices(items, n: int, cap: int) -> int:
+    """An upper bound on the ways a backtracking matcher can try a parsed
+    pattern against `n` characters, saturating at `cap`: a sequence
+    multiplies, an alternation adds, an unbounded repeat counts as the text
+    (n+1 lengths), `?` as 2, `{m,k}` as k−m+1, and a repeat of something
+    that itself chooses as (k−m+1)·inner^k — nested repeats multiply out, so
+    `(.*)*` saturates. A back-reference, or anything not understood here,
+    saturates too: a cost that cannot be bounded is never run."""
+    total = 1
+    for op, av in getattr(items, "data", items):
+        total = min(cap, total * _regex_node(op, av, n, cap))
+        if total >= cap:
+            return cap
+    return total
+
+
+def _regex_node(op, av, n: int, cap: int) -> int:
+    if op in _PLAIN_OPS:
+        return 1
+    if op in _REPEATS:
+        low, high, sub = av
+        most = n if high == _sre_c.MAXREPEAT else min(high, n)
+        if low > most:
+            return 1                   # it cannot match: sre checks the width first
+        inner = _regex_choices(sub, n, cap)
+        out = most - low + 1
+        if inner > 1:
+            for _ in range(most):
+                out *= inner
+                if out >= cap:
+                    return cap
+        return min(cap, out)
+    if op is _sre_c.SUBPATTERN:
+        return _regex_choices(av[-1], n, cap)
+    if op is _sre_c.BRANCH:
+        return min(cap, sum(_regex_choices(branch, n, cap) for branch in av[1]))
+    if op in (_sre_c.ASSERT, _sre_c.ASSERT_NOT):
+        return _regex_choices(av[1], n, cap)
+    if op is getattr(_sre_c, "ATOMIC_GROUP", None):
+        return _regex_choices(av, n, cap)
+    if op is _sre_c.GROUPREF_EXISTS:
+        return min(cap, _regex_choices(av[1], n, cap)
+                   + (_regex_choices(av[2], n, cap) if av[2] is not None else 1))
+    return cap
+
+
+def _regex_work(source: str, flags: int, runs: list[tuple[int, int]], cap: int) -> int:
+    """What matching `source` costs, bounded from above: per text of length
+    n, the choices it can try (`_regex_choices`) times the starts it is tried
+    at, summed over `runs` [(n, starts)], saturating at `cap`. Raises what
+    `re` raises on a pattern it will not compile."""
+    tree = _sre_parse.parse(source, flags)
+    total = 0
+    for n, starts in runs:
+        total += _regex_choices(tree, n, cap) * starts
+        if total >= cap:
+            return cap
+    return total
+
+
+def _ere(pattern: str) -> str:
+    """POSIX ERE (pkill, killall -r, grep -E) in Python's spelling: bracket
+    classes and GNU word boundaries."""
+    pattern = re.sub(r"\[:(\w+):\]", lambda m: _POSIX_CLASSES.get(m.group(1), m.group(0)), pattern)
+    return pattern.replace(r"\<", r"\b").replace(r"\>", r"\b")
+
+
+def _bre(pattern: str) -> str:
+    """POSIX BRE with GNU's escapes (grep's default) as ERE: `\\(`, `\\|`,
+    `\\+`, `\\?`, `\\{` are the operators, and the bare characters are text."""
+    out, i, n = [], 0, len(pattern)
     while i < n:
         c = pattern[i]
-        if c == "\\":
-            i, last = i + 2, None
-            continue
         if c == "[":
             j = i + 1 + (pattern[i + 1:i + 2] == "^")
             j += pattern[j:j + 1] == "]"
@@ -1508,82 +1690,105 @@ def _regex_bounded(pattern: str) -> bool:
                     end = pattern.find(pattern[j + 1] + "]", j + 2)
                     j = end + 1 if end != -1 else j
                 j += 1
-            i, last = j + 1, None
+            out.append(pattern[i:j + 1])
+            i = j + 1
             continue
-        if c == "(":
-            groups.append([False, False])
-            i, last = i + 1, None
+        if c == "\\" and i + 1 < n:
+            nxt = pattern[i + 1]
+            out.append(nxt if nxt in "(){}|+?" else c + nxt)
+            i += 2
             continue
-        if c == ")":
-            last = groups.pop() if len(groups) > 1 else [False, False]
-            i += 1
-            continue
-        if c == "|":
-            groups[-1][1] = True
-            i, last = i + 1, None
-            continue
-        interval = re.match(r"\{(\d*)(,?)(\d*)\}", pattern[i:]) if c == "{" else None
-        if c in "*+?" or interval:
-            span = interval.end() if interval else 1
-            unbound = c in "*+" or bool(interval and (interval.group(2) and
-                                                      (not interval.group(3) or int(interval.group(3)) > 16)))
-            unbounded += unbound
-            if last is not None and (last[0] or last[1]) and (unbound or interval):
-                return False
-            groups[-1][0] = True
-            i += span
-            i += i < n and pattern[i] in "?+"
-            last = None
-            continue
-        i, last = i + 1, None
-    return unbounded <= 2
+        out.append("\\" + c if c in "(){}|+?" else c)
+        i += 1
+    return "".join(out)
 
 
-def _ere(pattern: str) -> str:
-    """POSIX ERE (pkill, killall -r) in Python's spelling: bracket classes
-    and GNU word boundaries."""
-    pattern = re.sub(r"\[:(\w+):\]", lambda m: _POSIX_CLASSES.get(m.group(1), m.group(0)), pattern)
-    return pattern.replace(r"\<", r"\b").replace(r"\>", r"\b")
-
-
-def _selects_daemon(pattern: str, *, full: bool, exact: bool = False, icase: bool = False,
-                    inverse: bool = False, literal: bool = False, line: str = "") -> bool:
-    """Whether a process pattern selects the daemon at `daemon2`: a match on
-    one of its command lines (`full`; else its process names, which never
-    hold the word) whose span overlaps it. `inverse` (pgrep -v) selects it
-    when nothing matches."""
+def _daemon_match(pattern: str, *, how: str, full: bool = True, icase: bool = False,
+                  literal: bool = False, syntax: str = "ere", line: str = "",
+                  budget: list[int] | None = None) -> bool | None:
+    """Whether a process pattern matches the daemon: `how` is "overlap" (a
+    match on one of its command lines — `full`; else its process names, which
+    never hold the word — whose span overlaps `daemon2`), "exact" (a whole
+    one) or "anywhere". None when it cannot be told: an expansion only known
+    when it runs, a pattern too long or too costly to match (`_regex_work`
+    against `_REGEX_BUDGET` and the line's `budget`), or one that will not
+    compile on a line that names `daemon2` (one that will not compile anywhere
+    else selects nothing: the tool refuses it). Every caller fails closed on
+    None."""
     if _wild_word(pattern):
-        return True
+        return None
     texts = _daemon_command_lines() if full else _DAEMON_NAMES
-    source = re.escape(pattern) if literal else _ere(pattern)
-    if not literal and not _regex_bounded(source):
-        return True
+    if how == "overlap" and not full:
+        return False
+    if literal:
+        source = re.escape(pattern)
+    elif len(pattern) > _PATTERN_CAP:
+        return None
+    else:
+        source = {"bre": lambda p: _ere(_bre(p)), "python": str}.get(syntax, _ere)(pattern)
+    flags = re.IGNORECASE if icase else 0
+    if how == "overlap":
+        runs = [(len(t), t.find("daemon2") + 7) for t in texts if "daemon2" in t]
+    else:
+        runs = [(len(t), 1 if how == "exact" else len(t) + 1) for t in texts]
+    if budget is not None:
+        # Parsing costs too (about 2 µs a character): a line's patterns share
+        # `_LINE_PATTERN_CHARS` of it, so a word that expands to 256 patterns
+        # cannot buy a long parse.
+        if len(source) > budget[1]:
+            return None
+        budget[1] -= len(source)
     try:
-        rx = re.compile(source, re.IGNORECASE if icase else 0)
-    except (re.error, OverflowError, RecursionError):
-        return "daemon2" in re.sub(r"[\\()\[\]{}|*+?.^$'\"]", "", line or pattern)
-    if inverse:
-        return not any((rx.fullmatch if exact else rx.search)(text) for text in texts)
+        work = _regex_work(source, flags, runs, _REGEX_BUDGET + 1)
+        if work > _REGEX_BUDGET or (budget is not None and work > budget[0]):
+            return None
+        rx = re.compile(source, flags)
+    except Exception:     # noqa: BLE001 — `re` refuses it (re.error, OverflowError, RecursionError)
+        if "daemon2" in re.sub(r"[\\()\[\]{}|*+?.^$'\"]", "", line or pattern):
+            return None
+        return False
+    if budget is not None:
+        budget[0] -= work
     for text in texts:
-        at = text.find("daemon2")
-        if at < 0:
-            continue
-        if exact:
+        if how == "exact":
             if rx.fullmatch(text):
                 return True
             continue
-        for start in range(len(text) + 1):
+        if how == "anywhere":
+            if rx.search(text):
+                return True
+            continue
+        at = text.find("daemon2")
+        if at < 0:
+            continue
+        for start in range(at + 7):
             m = rx.match(text, start)
             if m and m.start() < at + 7 and m.end() > at:
                 return True
     return False
 
 
+def _selects_daemon(pattern: str, *, full: bool, exact: bool = False, icase: bool = False,
+                    inverse: bool = False, literal: bool = False, line: str = "",
+                    budget: list[int] | None = None) -> bool:
+    """Whether a pkill/pgrep/killall/pidof pattern selects the daemon at
+    `daemon2` (`_daemon_match`); `inverse` (pgrep -v) selects it when nothing
+    matches. Fails closed: what cannot be told selects it."""
+    if inverse:
+        found = _daemon_match(pattern, how="exact" if exact else "anywhere", full=full, icase=icase,
+                              literal=literal, line=line, budget=budget)
+        return True if found is None else not found
+    found = _daemon_match(pattern, how="exact" if exact else "overlap", full=full, icase=icase,
+                          literal=literal, line=line, budget=budget)
+    return True if found is None else found
+
+
 def _proc_args(words: list[str], short: dict, long: dict, signals: bool,
-               signal_letter: str = "") -> tuple[set, list, bool]:
+               signal_letter: str = "") -> tuple[set, list, bool, dict]:
     """(the options seen, by long name or letter; the operands; whether an
-    option was not known) for pkill, pgrep and killall."""
-    seen, operands, unknown, i = set(), [], False, 0
+    option was not known; the value-taking options' values, by long name)
+    for pkill, pgrep and killall."""
+    seen, operands, unknown, values, i = set(), [], False, {}, 0
     while i < len(words):
         word = words[i]
         i += 1
@@ -1605,6 +1810,8 @@ def _proc_args(words: list[str], short: dict, long: dict, signals: bool,
                 value = words[i] if i < len(words) else ""
                 i += 1
             seen.add(full)
+            if long[full]:
+                values.setdefault(full, []).append(value)
             if full == "signal":
                 seen.add("signal=" + (value or "").upper().removeprefix("SIG"))
             continue
@@ -1620,12 +1827,23 @@ def _proc_args(words: list[str], short: dict, long: dict, signals: bool,
                     value = word[2 + k:] or (words[i] if i < len(words) else "")
                     if not word[2 + k:]:
                         i += 1
+                    values.setdefault(_PROC_SHORT_LONG.get(letter, letter), []).append(value)
                     if letter == signal_letter:
                         seen.add("signal=" + value.upper().removeprefix("SIG"))
                     break
             continue
         operands.append(word)
-    return seen, operands, unknown
+    return seen, operands, unknown, values
+
+
+def _names_unit(value: str) -> bool:
+    """Whether an option's value — a cgroup path, a PID file — may name the
+    daemon's unit: an expansion only known when it runs, `daemon2` in it, or
+    a glob the unit's name matches."""
+    if _wild_word(value) or "daemon2" in value:
+        return True
+    return bool(_GLOB.search(value)) and any(
+        fnmatch(name, part) for part in value.split("/") if part for name in _DAEMON_UNIT_NAMES)
 
 
 def _kill_why(tool: str) -> str:
@@ -1634,19 +1852,28 @@ def _kill_why(tool: str) -> str:
             f"`daemon2` ({tool})")
 
 
+def _fed_why(source: str) -> str:
+    return _DAEMON_UNIT_WHY.format(
+        how=f"kills the v2 daemon's process: a `kill` on this line is fed the PIDs of {source}")
+
+
 def _pkill_op(tokens: list[str], state: "_Owner", appends: bool) -> str | None:
     words = _unit_words(tokens[1:], state)
     if words is None:
         return _kill_why("`pkill`, with more brace expansions than are judged here")
-    seen, operands, unknown = _proc_args(words, _PKILL_SHORT, _PKILL_LONG, signals=True)
+    seen, operands, unknown, values = _proc_args(words, _PKILL_SHORT, _PKILL_LONG, signals=True)
     if "signal=0" in seen or {"h", "V", "help", "version"} & seen:
         return None
+    if any(_names_unit(v) for v in values.get("cgroup", []) + values.get("pidfile", [])):
+        return _DAEMON_UNIT_WHY.format(
+            how="kills the processes of the v2 daemon's unit (`pkill --cgroup`/`--pidfile` naming it)")
     full = unknown or bool({"f", "full"} & seen)
     if not operands:
         return _kill_why("`xargs pkill`, its pattern from the input") if appends and full else None
-    line = state.kills.line
+    kills = state.kills
     if any(_selects_daemon(p, full=full, exact=bool({"x", "exact"} & seen),
-                           icase=bool({"i", "ignore-case"} & seen), line=line) for p in operands):
+                           icase=bool({"i", "ignore-case"} & seen), line=kills.line, budget=kills.work)
+           for p in operands):
         return _kill_why("`pkill -f`")
     return None
 
@@ -1655,8 +1882,8 @@ def _killall_op(tokens: list[str], state: "_Owner", appends: bool) -> str | None
     words = _unit_words(tokens[1:], state)
     if words is None:
         return _kill_why("`killall`, with more brace expansions than are judged here")
-    seen, operands, unknown = _proc_args(words, _KILLALL_SHORT, _KILLALL_LONG, signals=True,
-                                         signal_letter="s")
+    seen, operands, unknown, _ = _proc_args(words, _KILLALL_SHORT, _KILLALL_LONG, signals=True,
+                                            signal_letter="s")
     if "signal=0" in seen or {"l", "list", "V", "version", "help"} & seen:
         return None
     regex = unknown or bool({"r", "regexp"} & seen)
@@ -1664,15 +1891,19 @@ def _killall_op(tokens: list[str], state: "_Owner", appends: bool) -> str | None
         return None            # by name: the daemon's names never hold `daemon2`
     if not operands:
         return _kill_why("`xargs killall -r`, its pattern from the input") if appends else None
-    if any(_selects_daemon(p, full=True, icase=bool({"I", "ignore-case"} & seen),
-                           line=state.kills.line) for p in operands):
+    kills = state.kills
+    if any(_selects_daemon(p, full=True, icase=bool({"I", "ignore-case"} & seen), line=kills.line,
+                           budget=kills.work) for p in operands):
         return _kill_why("`killall -r`")
     return None
 
 
-def _note_kill(tokens: list[str], state: "_Owner") -> None:
-    """A `kill` that sends a signal (not `-0`, not a listing): the PIDs it is
-    fed on this line are judged at the line's end."""
+def _note_kill(tokens: list[str], state: "_Owner", appends: bool) -> None:
+    """A `kill` that sends a signal (not `-0`, not a listing) to PIDs fed to
+    it on this line — an operand only known when it runs (`$(…)`, backticks,
+    `$P`, `<(…)`) or `xargs` input — marks the line; its sources are judged
+    at the line's end. A kill of literal PIDs or jobs (`kill -9 4321`, `kill
+    %1`) is fed by nothing on the line (review 2 of PR #48)."""
     words = tokens[1:]
     i = 0
     while i < len(words):
@@ -1687,16 +1918,18 @@ def _note_kill(tokens: list[str], state: "_Owner") -> None:
         if re.fullmatch(r"-(?:s|n|-signal=)?(?:SIG)?0", word, re.IGNORECASE):
             return
         i += 1
-    state.kills.kill = True
+    if appends or any(_wild_word(w) or w.startswith(("<(", ">(")) for w in words):
+        state.kills.kill = True
 
 
 def _note_pid_source(stem: str, tokens: list[str], state: "_Owner", appends: bool) -> None:
     """`pgrep` or `pidof` on the line: whether the PIDs it prints include the
-    daemon's (`pidof`'s names judged as fixed text, failing closed)."""
+    daemon's, judged only if a fed `kill` is on the line (`pidof`'s names as
+    fixed text, failing closed)."""
     words = _unit_words(tokens[1:], state)
-    line = state.kills.line
+    kills = state.kills
     if words is None:
-        state.kills.source = f"`{stem}`, with more brace expansions than are judged here"
+        kills.sources.append(lambda: f"`{stem}`, with more brace expansions than are judged here")
         return
     if stem == "pidof":
         names, i = [], 0
@@ -1707,20 +1940,252 @@ def _note_pid_source(stem: str, tokens: list[str], state: "_Owner", appends: boo
             if not words[i].startswith("-") or words[i] == "-":
                 names.append(words[i])
             i += 1
-        if any(_selects_daemon(name, full=True, literal=True, line=line) for name in names):
-            state.kills.source = "`pidof`"
+        kills.sources.append(lambda: "`pidof`" if any(
+            _selects_daemon(name, full=True, literal=True, line=kills.line, budget=kills.work)
+            for name in names) else None)
         return
-    seen, operands, unknown = _proc_args(words, _PGREP_SHORT, _PGREP_LONG, signals=False)
+    seen, operands, unknown, values = _proc_args(words, _PGREP_SHORT, _PGREP_LONG, signals=False)
     if {"h", "V", "help", "version"} & seen:
         return
-    full = unknown or bool({"f", "full"} & seen)
-    if not operands and appends:
-        state.kills.source = "`xargs pgrep`, its pattern from the input"
+    if any(_names_unit(v) for v in values.get("cgroup", []) + values.get("pidfile", [])):
+        kills.sources.append(lambda: "`pgrep --cgroup`/`--pidfile` naming the daemon's unit")
         return
-    if any(_selects_daemon(p, full=full, exact=bool({"x", "exact"} & seen),
-                           icase=bool({"i", "ignore-case"} & seen),
-                           inverse=bool({"v", "inverse"} & seen), line=line) for p in operands):
-        state.kills.source = "`pgrep -f`"
+    full = unknown or bool({"f", "full"} & seen)
+    if not operands:
+        if appends:
+            kills.sources.append(lambda: "`xargs pgrep`, its pattern from the input")
+        return
+    exact, icase = bool({"x", "exact"} & seen), bool({"i", "ignore-case"} & seen)
+    inverse = bool({"v", "inverse"} & seen)
+    kills.sources.append(lambda: "`pgrep -f` with a pattern that matches its command line at `daemon2`"
+                         if any(_selects_daemon(p, full=full, exact=exact, icase=icase, inverse=inverse,
+                                                line=kills.line, budget=kills.work) for p in operands)
+                         else None)
+
+
+def _note_grep(tokens: list[str], state: "_Owner") -> None:
+    """A `grep` on the line: kept with its patterns, for a `ps` it may filter
+    (`ps aux | grep daemon2 | awk '{print $2}' | xargs kill`)."""
+    stem = rules._basename(tokens[0])
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    syntax = {"egrep": "ere", "fgrep": "fixed"}.get(stem, "bre")
+    patterns: list[str] = []
+    operands: list[str] = []
+    icase = invert = False
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--":
+            operands.extend(words[i:])
+            break
+        if word.startswith("--") and len(word) > 2:
+            name, eq, value = word[2:].partition("=")
+            matches = [n for n in _GREP_LONG if n == name] or [n for n in _GREP_LONG if n.startswith(name)]
+            full = matches[0] if len(matches) == 1 else ""
+            if full and _GREP_LONG[full] and not eq:
+                value = words[i] if i < len(words) else ""
+                i += 1
+            if full == "regexp":
+                patterns.append(value)
+            elif full == "file":
+                patterns.append("$FILE")             # read from a file: not known here
+            syntax = {"fixed-strings": "fixed", "extended-regexp": "ere", "basic-regexp": "bre",
+                      "perl-regexp": "python"}.get(full, syntax)
+            icase = (icase or full == "ignore-case") and full != "no-ignore-case"
+            invert = invert or full == "invert-match"
+            continue
+        if word.startswith("-") and len(word) > 1 and not word[1:].isdigit():
+            for k, letter in enumerate(word[1:]):
+                if letter in _GREP_SHORT_VALUE:
+                    value = word[2 + k:] or (words[i] if i < len(words) else "")
+                    if not word[2 + k:]:
+                        i += 1
+                    if letter == "e":
+                        patterns.append(value)
+                    elif letter == "f":
+                        patterns.append("$FILE")
+                    break
+                syntax = {"F": "fixed", "E": "ere", "G": "bre", "P": "python"}.get(letter, syntax)
+                icase = icase or letter in "iy"
+                invert = invert or letter == "v"
+            continue
+        operands.append(word)
+    if not patterns and operands:
+        patterns.append(operands[0])
+    if patterns:
+        state.kills.greps.append((patterns, syntax, icase, invert))
+
+
+def _ps_filtered_by_grep(kills: "_Kills") -> str | None:
+    """`ps` on the line, and greps that between them keep the daemon's line
+    and select it at `daemon2`: every grep keeps it (a match anywhere, or
+    none for `-v`), and one that is not `-v` matches it there. Fails closed."""
+    if not kills.ps or not kills.greps:
+        return None
+
+    def matches(pattern, syntax, icase, how):
+        return _daemon_match(pattern, how=how, icase=icase, literal=syntax == "fixed",
+                             syntax=syntax, line=kills.line, budget=kills.work)
+
+    at_daemon2 = False
+    for patterns, syntax, icase, invert in kills.greps:
+        found = [matches(p, syntax, icase, "anywhere") for p in patterns]
+        hit = None if None in found else any(found)
+        if hit is not None and hit == invert:
+            return None                              # this grep drops the daemon's line
+        if not invert and any(matches(p, syntax, icase, "overlap") is not False for p in patterns):
+            at_daemon2 = True
+    return "`ps` filtered by a `grep` that matches its command line at `daemon2`" if at_daemon2 else None
+
+
+def _note_systemctl_source(tokens: list[str], state: "_Owner") -> None:
+    """`systemctl show` of the unit's MainPID, ControlPID or ExecMainPID (or
+    of every property), and `systemctl status` of it or of the whole user
+    manager: each prints the daemon's PID."""
+    words = _unit_words(tokens[1:], state)
+    if words is None:
+        return
+    parsed = _systemctl_parse(words)
+    verbs = parsed.operands if parsed.unknown else parsed.operands[:1]
+    units = parsed.operands if parsed.unknown else parsed.units
+    daemon = any(_may_be_daemon(u, parsed.user) for u in units)
+    shows = "show" in verbs and daemon and (
+        not parsed.properties or any(p in _PID_PROPERTIES or _wild_word(p) for p in parsed.properties))
+    status = "status" in verbs and (daemon or (parsed.user and not units))
+    if shows or status:
+        state.kills.sources.append(lambda: "`systemctl show`/`status` of its unit")
+
+
+def _cgroup_source(segment: str) -> bool:
+    """A segment that reads the daemon's cgroup's PIDs: `cgroup.procs` (or
+    `cgroup.threads`) under a path naming the unit, or behind a glob or an
+    expansion that may."""
+    flat = segment.replace("'", "").replace('"', "").replace("\\", "")
+    if "cgroup.procs" not in flat and "cgroup.threads" not in flat:
+        return False
+    return "daemon2" in flat or "$" in flat or "`" in flat or bool(_GLOB.search(flat))
+
+
+def _port_spec_hits(spec: str, ports: frozenset[int]) -> bool:
+    """Whether a list of ports and ranges (`8405`, `8400-8410`, `8402,8405`)
+    may hold one of `ports`: a word only known when it runs may."""
+    if _wild_word(spec):
+        return True
+    for item in spec.split(","):
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", item.strip())
+        if m:
+            low, high = int(m.group(1)), int(m.group(2) or m.group(1))
+            if any(low <= port <= high for port in ports):
+                return True
+    return False
+
+
+def _lsof_source(tokens: list[str], state: "_Owner") -> None:
+    """`lsof -i` that lists the holders of one of the daemon's ports — an
+    address whose port is one of them, or none (every socket)."""
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    ports = _daemon_ports()
+    specs: list[str] = []
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if not word.startswith("-") or word.startswith("--") or len(word) < 2:
+            continue
+        letters = word[1:]
+        for k, letter in enumerate(letters):
+            if letter == "i":
+                rest = letters[k + 1:]
+                if rest:
+                    specs.append(rest)
+                elif i < len(words) and not words[i].startswith(("-", "+")):
+                    specs.append(words[i])
+                    i += 1
+                else:
+                    specs.append("")
+                break
+            if letter in "cdDgkoprsSTux":
+                break                                  # the rest is that option's value
+    for spec in specs:
+        m = re.search(r":([^:\]]*)$", spec)
+        if m is None or _port_spec_hits(m.group(1), ports) or _wild_word(spec):
+            state.kills.sources.append(lambda: "`lsof -i` on the daemon's port")
+            return
+
+
+def _fuser_op(tokens: list[str], state: "_Owner") -> str | None:
+    """`fuser` on one of the daemon's ports (`8405/tcp`, `-n tcp 8405`): with
+    `-k` it kills the daemon; without, it prints its PID."""
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    ports = _daemon_ports()
+    kill = listing = False
+    namespace = ""
+    hit = False
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word.startswith("-") and len(word) > 1 and not _signal_word(word):
+            for k, letter in enumerate(word[1:]):
+                if letter == "n":
+                    namespace = word[2 + k:] or (words[i] if i < len(words) else "")
+                    if not word[2 + k:]:
+                        i += 1
+                    break
+                kill = kill or letter == "k"
+                listing = listing or letter in "lV"
+            continue
+        if word.startswith("-"):
+            continue                                   # a signal
+        m = re.fullmatch(r"([^,/]*)(?:,[^,/]*(?:,[^,/]*)?)?(?:/(tcp|udp))?", word)
+        if (m and m.group(1) and (m.group(2) or namespace in ("tcp", "udp") or _wild_word(namespace))
+                and _port_spec_hits(m.group(1), ports)):
+            hit = True
+    if listing or not hit:
+        return None
+    if kill:
+        return _DAEMON_UNIT_WHY.format(how="kills whatever holds the v2 daemon's port (`fuser -k`)")
+    state.kills.sources.append(lambda: "`fuser` on the daemon's port")
+    return None
+
+
+def _dbus_read(tool: str, words: list[str]) -> bool:
+    """Whether a D-Bus command only reads: busctl's and gdbus's reading
+    verbs, or a call whose method returns state (`Get`, `GetAll`,
+    `Introspect` …). False when it cannot be told."""
+    positionals = []
+    method = ""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word.startswith("-"):
+            name, eq, value = word.partition("=")
+            if tool == "gdbus" and name in ("-m", "--method"):
+                method = value if eq else (words[i] if i < len(words) else "")
+                i += 0 if eq else 1
+            elif not eq and name in ("-H", "--host", "-M", "--machine", "-a", "--address", "-d",
+                                     "--dest", "-o", "--object-path", "-t", "--timeout", "--bus"):
+                i += 1
+            continue
+        positionals.append(word)
+    verb = positionals[0] if positionals else ""
+    if tool == "busctl":
+        if verb in _BUSCTL_READS:
+            return True
+        method = positionals[4] if verb == "call" and len(positionals) > 4 else ""
+    elif tool == "gdbus":
+        if verb in _GDBUS_READS:
+            return True
+        method = method if verb == "call" else ""
+    elif tool == "dbus-send":
+        method = positionals[1] if len(positionals) > 1 else ""
+    else:                                              # qdbus: SERVICE PATH METHOD …
+        if len(positionals) < 3:
+            return True                                # a listing
+        method = positionals[2]
+    return method.rpartition(".")[2] in _DBUS_READ_METHODS
 
 
 _CLI_MODULES = frozenset({"jarvis", "jarvis.__main__"})
@@ -1782,10 +2247,18 @@ _RUNNERS: dict[str, _Runner] = {
 @dataclass
 class _Kills:
     """Per command line, shared by every level of it: a `kill` that sends a
-    signal, a `pgrep`/`pidof` whose PIDs include the daemon's, and the line."""
+    signal to PIDs fed to it, the PID sources on the line (each judged only
+    when there is such a kill — a callable naming the source when it yields
+    the daemon's PIDs), `ps` and the greps that may filter it, the line,
+    whether it holds a kill word at all, and the regex budget its patterns
+    share."""
     kill: bool = False
-    source: str | None = None
+    sources: list = field(default_factory=list)
     line: str = ""
+    armed: bool = False
+    ps: bool = False
+    greps: list = field(default_factory=list)
+    work: list[int] = field(default_factory=lambda: [_LINE_REGEX_BUDGET, _LINE_PATTERN_CHARS])
 
 
 @dataclass
@@ -2225,6 +2698,10 @@ def _python_target_op(kind: str, what: str | None, argv: list[str], segment: str
 
 def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -> str | None:
     tokens, appends, joined = _peel_runner(tokens, state)
+    # `marked` keeps quoted braces marked (`_mark_quoted`) for the paths that
+    # expand braces as bash does (`_unit_words`); every other path, and every
+    # nested command line, reads the plain text.
+    marked, tokens = tokens, [_unmark(t) for t in tokens]
     if not tokens:
         return None
     if joined:
@@ -2238,7 +2715,7 @@ def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -
         words = _brace_expand(head) or [head]
         if head != tokens[0]:
             words = [part for word in words for part in word.split()]
-        tokens = words + tokens[1:]
+        tokens, marked = words + tokens[1:], words + marked[1:]
         if not tokens:
             return None
     stem = rules._basename(tokens[0])
@@ -2252,18 +2729,32 @@ def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -
             state.launchers.add(link.rstrip("/"))
         return None
     if stem == "systemctl":
-        return _systemctl_op(tokens, appends, state)
+        why = _systemctl_op(marked, appends, state)
+        if why is None:
+            _note_systemctl_source(marked, state)
+        return why
     if stem in _DBUS_TOOLS:
-        return _dbus_op(tokens, state)
+        return _dbus_op(marked, state)
     if stem == "pkill":
-        return _pkill_op(tokens, state, appends)
+        return _pkill_op(marked, state, appends)
     if stem == "killall":
-        return _killall_op(tokens, state, appends)
+        return _killall_op(marked, state, appends)
     if stem == "kill":
-        _note_kill(tokens, state)
+        _note_kill(tokens, state, appends)
         return None
     if stem in ("pgrep", "pidof"):
-        _note_pid_source(stem, tokens, state, appends)
+        _note_pid_source(stem, marked, state, appends)
+        return None
+    if stem == "fuser":
+        return _fuser_op(marked, state)
+    if stem == "lsof":
+        _lsof_source(marked, state)
+        return None
+    if stem == "ps":
+        state.kills.ps = True
+        return None
+    if stem in ("grep", "egrep", "fgrep"):
+        _note_grep(marked, state)
         return None
     if _PYTHON.fullmatch(stem) or stem == "coverage":
         targets = (_python_targets(tokens[1:], state) if stem != "coverage"
@@ -2346,32 +2837,72 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
         # sets no variable, reads no here-document and names no launcher a
         # later `ln` could alias) is not parsed — on a long line this is
         # where the time goes.
-        if state.filtered and not (_could_be_owner_op(segment) or "<<" in segment or "jarvis" in segment
-                                   or "=" in segment or state.variables or state.launchers):
+        # A line that kills is parsed whole: any segment may be the source
+        # that feeds the kill its PIDs (`lsof -ti :8405 | xargs kill`).
+        if state.filtered and not (state.kills.armed or _could_be_owner_op(segment) or "<<" in segment
+                                   or "jarvis" in segment or "=" in segment or state.variables
+                                   or state.launchers):
             continue
         segment = _strip_comment(segment)
-        words_only = rules.strip_redirections(segment)
+        if _cgroup_source(segment):
+            state.kills.sources.append(lambda: "its cgroup's `cgroup.procs`")
+        words_only = _mark_quoted(rules.strip_redirections(segment))
         try:
             raw = shlex.split(words_only)
         except ValueError:
             raw = words_only.split()
-        raw = _strip_closers(raw)
+        raw = _strip_reserved(_strip_closers(raw))
         if not raw:
             continue
         words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
         if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
             for word in words:
                 name, value = word.split("=", 1)
-                state.variables[name] = _owner_word(value, state)
+                state.variables[name] = _unmark(_owner_word(value, state))
             continue
         why = _owner_command(raw, segment, state, depth)
         if why:
             return why
-    if depth == 0 and state.kills.kill and state.kills.source:
-        # A `kill` fed PIDs, on this line, by a `pgrep`/`pidof` that selects
-        # the daemon: `kill $(pgrep -f daemon2)`, `pgrep -f daemon2 | xargs kill`.
-        return _kill_why(f"`kill`, fed by {state.kills.source}")
+    if depth == 0 and state.kills.kill:
+        # A `kill` fed PIDs, on this line, by a source that yields the
+        # daemon's: `kill $(pgrep -f daemon2)`, `pgrep -f daemon2 | xargs
+        # kill`, `lsof -ti :8405 | xargs kill`. The sources are judged only
+        # now — `pgrep -f …` alone is a read, and its pattern never runs.
+        for source in state.kills.sources:
+            name = source()
+            if name:
+                return _fed_why(name)
+        name = _ps_filtered_by_grep(state.kills)
+        if name:
+            return _fed_why(name)
     return None
+
+
+# Shell reserved words a command may follow (review 2 of PR #48: `if true;
+# then systemctl --user restart jarvis-daemon2; fi` split into a segment
+# whose first word was `then`, and was not judged).
+_RESERVED = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "{", "coproc"})
+
+
+def _strip_reserved(tokens: list[str]) -> list[str]:
+    """The command a segment runs, past the shell's reserved words (`then
+    jarvis restart`, `do pkill -f daemon2`, `! cmd`, `{ cmd`, `coproc cmd`)
+    and a `case` pattern (`case x in a) cmd`, `b) cmd`)."""
+    for _ in range(32):
+        if not tokens:
+            break
+        head = tokens[0]
+        if head in _RESERVED:
+            tokens = tokens[1:]
+        elif head == "case":
+            tokens = tokens[tokens.index("in") + 1:] if "in" in tokens else []
+        elif head.endswith(")") and head.count(")") > head.count("("):
+            tokens = tokens[1:]                      # a case pattern: `a)`, `*)`, `(a|b)`
+        elif head.startswith("(") and head.endswith(")") and len(tokens) > 1 and head.count("(") == 1:
+            tokens = tokens[1:]                      # `(a)` — a case pattern with its paren
+        else:
+            break
+    return tokens
 
 
 def runs_jarvis(tokens: list[str]) -> str | None:
@@ -2447,8 +2978,12 @@ def owner_op(command: str, *, prefilter: bool = True) -> str | None:
         return None
     if prefilter and not _could_be_owner_op(command):
         return None
+    flat = command.replace("\\\n", "")
+    for ch in ("'", '"', "\\"):
+        flat = flat.replace(ch, "")
+    kills = _Kills(line=command, armed="kill" in flat or "fuser" in flat)
     try:
-        return _owner_line(command, _Owner(filtered=prefilter, kills=_Kills(line=command)), 0)
+        return _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
     except RecursionError:
         return None
 

@@ -1502,3 +1502,12 @@ daemon's own lock (the broker has one of its own). `jarvis restart` and
 non-zero (a restart denies what waits), unless `--force`. Read-only, open like
 the rest of `/status`; the HUD does not use it.
 
+**`GET /status` gains `pid`** (review 2 of PR #48): the daemon's process id.
+`jarvis restart` compares it with systemd's `MainPID` for `jarvis-daemon2`
+before trusting what `/status` says about running turns: a different v2
+daemon answering on this shell's `JARVIS_DAEMON_PORT` (a test daemon, one
+started by hand) is not the unit's, so its idle answer is "can't check"
+(exit 3 unless `--force`), and after the restart a daemon that is not the
+new MainPID does not verify it (exit 4). A `/status` without `pid` (a daemon
+from before this change) is trusted as before.
+

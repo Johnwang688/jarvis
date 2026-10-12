@@ -362,6 +362,10 @@ class Daemon:
                     "threads_open": sum(s.handle is not None for s in self._sessions.values()),
                     "turns_running": sum(s.worker is not None for s in self._sessions.values()),
                     "approvals_pending": approvals_pending,
+                    # This process: `jarvis restart` checks it is systemd's
+                    # MainPID, so another daemon answering on the shell's
+                    # port cannot stand in for the unit's.
+                    "pid": os.getpid(),
                     # The HUD builds preview URLs from this rather than a
                     # hard-coded 8403: a HUD served by any other daemon (a
                     # test's, on an ephemeral port) must never reach the

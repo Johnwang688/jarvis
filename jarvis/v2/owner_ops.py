@@ -14,7 +14,9 @@ runs, so an agent restarting or reinstalling either would be touching its
 own control plane. The owner's terminal is outside Jarvis's gate, so the
 refusal costs the owner nothing.
 
-`restart`:
+`restart` (the warning in 3 is given first, and a hand-off's grace waited
+out first, so the busy check in 1 is the last step before the restart —
+review 2 of PR #48):
   1. ask `/status`; a running turn or a waiting approval refuses unless
      `--force` — a restart cuts a turn off mid-step and denies anything it
      waits on. A daemon systemd says is up but that does not answer (busy,
@@ -25,7 +27,9 @@ refusal costs the owner nothing.
      restarted without that check;
   2. the systemd user unit must be installed **and be what runs the
      daemon**: a daemon started another way (`jarvis hud`, a shell) holds the
-     ports, and systemd would start a second one that cannot bind them;
+     ports, and systemd would start a second one that cannot bind them; and
+     the daemon `/status` answered for must be the unit's (its `pid` is
+     systemd's MainPID), or its idle answer is "can't check";
   3. warn about uncommitted Python in the checkout the daemon runs from —
      the new daemon loads it (Jarvis's chats leave edits on main);
   4. `systemctl --user restart jarvis-daemon2` (argv, never a shell);
@@ -230,9 +234,10 @@ def _first_lines(text: str, n: int = 3) -> str:
 
 
 def unit_state() -> dict[str, str]:
-    """The unit's LoadState, ActiveState, SubState, Result and ExecStart,
-    from `systemctl show`."""
-    result = systemctl("show", UNIT, "--property=LoadState,ActiveState,SubState,Result,ExecStart")
+    """The unit's LoadState, ActiveState, SubState, Result, ExecStart and
+    MainPID, from `systemctl show`."""
+    result = systemctl("show", UNIT,
+                       "--property=LoadState,ActiveState,SubState,Result,ExecStart,MainPID")
     if result.returncode != 0:
         why = _first_lines(result.stderr)
         hint = (" — in WSL, systemd must be on (`[boot] systemd=true` in /etc/wsl.conf)"
@@ -343,6 +348,42 @@ class _Preflight:
             out(f"--force: can't check for running turns ({self.unchecked}); restarting anyway.")
 
 
+def _parent_pid(pid: int) -> int | None:
+    """The parent of `pid`, from /proc, or None."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            fields = handle.read(4096).rpartition(")")[2].split()
+        return int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _main_pid(unit: dict | None) -> int:
+    value = (unit or {}).get("MainPID", "")
+    return int(value) if value.isdigit() else 0
+
+
+def _not_the_units(status: dict | None, unit: dict | None) -> str:
+    """Why the daemon that answered `/status` is not the unit's (its `pid`
+    is not systemd's MainPID, nor a child of it), or "". Says nothing when
+    either is unknown — a daemon from before `/status` had a `pid`, a unit
+    with no MainPID (review 2 of PR #48, L-4)."""
+    pid, main = (status or {}).get("pid"), _main_pid(unit)
+    if type(pid) is not int or pid <= 0 or not main:
+        return ""
+    here = pid
+    for _ in range(4):
+        if here == main:
+            return ""
+        here = _parent_pid(here)
+        if not here or here <= 1:
+            break
+    port = config.DAEMON_PORT
+    return (f"the v2 daemon answering on 127.0.0.1:{port} is pid {pid}, but systemd's {UNIT} is "
+            f"pid {main} — another daemon holds this shell's port (is JARVIS_DAEMON_PORT, {port} "
+            "here, different from the daemon's?), so the unit's running turns cannot be seen")
+
+
 def _no_answer_detail(port: int, why: str, active: str) -> str:
     if why == REFUSED:
         return (f"systemd says {UNIT} is {active}, but nothing answers on 127.0.0.1:{port} — "
@@ -351,10 +392,12 @@ def _no_answer_detail(port: int, why: str, active: str) -> str:
             f"the second time for {RETRY_TIMEOUT:g} s — it may be busy")
 
 
-def _preflight(force: bool) -> _Preflight:
+def _preflight(force: bool, unit: dict | None = None) -> _Preflight:
     """Everything that can refuse a restart before it is issued; raises
-    OpsRefused. Asks systemd only once `/status` has had its say, so a busy
-    daemon is refused without touching systemctl."""
+    OpsRefused. `/status` is read first, so a busy daemon is refused before
+    anything else is asked; `unit` is `unit_state()` when the caller has
+    just read it (the uncommitted-Python warning does, before this — the busy
+    check is the last step before the restart, review 2 of PR #48)."""
     port = config.DAEMON_PORT
     status, why = read_status()
     if status is not None:
@@ -364,7 +407,7 @@ def _preflight(force: bool) -> _Preflight:
         busy = busy_refusal(status)
         if busy is not None and not force:
             raise busy
-    unit = unit_state()
+    unit = unit if unit is not None else unit_state()
     load = unit.get("LoadState", "")
     if load != "loaded":
         raise OpsRefused(
@@ -396,6 +439,14 @@ def _preflight(force: bool) -> _Preflight:
             "that daemon was started another way (`jarvis hud`, `jarvis daemon2` in a shell). "
             f"Stop it, then `systemctl --user start {UNIT}`; restarting through systemd now would "
             "start a second daemon that cannot bind the ports")
+    # The daemon that answered must be the unit's: an idle one on this
+    # shell's port must not stand in for a busy unit (L-4).
+    other = _not_the_units(status, unit)
+    if other:
+        if not force:
+            raise OpsRefused(f"can't check for running turns: {other}. Run this where the daemon's "
+                             "port is set, or pass --force to restart anyway.", BUSY)
+        status, unchecked = None, other
     return _Preflight(status, unit, unchecked=unchecked)
 
 
@@ -439,18 +490,38 @@ def warn_uncommitted(unit: dict | None, out) -> None:
             "discard them first if they are not meant to run.")
 
 
+def _warned_unit(out) -> dict | None:
+    """Read the unit and warn about uncommitted Python in its checkout — the
+    slow part (git status) done before the busy check, never after it
+    (review 2 of PR #48). The unit, or None when systemd cannot say (the
+    busy check then reads it, and refuses with the reason)."""
+    try:
+        unit = unit_state()
+    except OpsRefused:
+        unit = None
+    warn_uncommitted(unit, out)
+    return unit
+
+
 def _restart(*, force: bool, wait: float, out, handed_off: bool = False) -> dict:
-    """Restart the unit and return the new daemon's `/status`; raises OpsRefused."""
+    """Restart the unit and return the new daemon's `/status`; raises
+    OpsRefused. Everything slow — the hand-off's grace, the uncommitted-
+    Python warning — comes first, so the busy check is the last step before
+    `systemctl restart` (review 2 of PR #48)."""
     port = config.DAEMON_PORT
-    checked = _preflight(force)
+    if handed_off:
+        # The terminal that handed this off already warned, and its last
+        # lines reach the HUD in this pause.
+        _sleep(HANDOFF_GRACE)
+        unit = None
+    else:
+        unit = _warned_unit(out)
+    checked = _preflight(force, unit)
     checked.say_forced(out)
-    warn_uncommitted(checked.unit, out)
     out(f"Restarting {UNIT}: open HUD terminals end with the old daemon, and the HUD window "
         "needs a reload (Ctrl+R) once it is back.")
     if checked.status is None and not checked.unchecked:
         out(f"(Nothing answers on 127.0.0.1:{port} right now; restarting the unit anyway.)")
-    if handed_off:
-        _sleep(HANDOFF_GRACE)
     issued = _clock()
     result = systemctl("restart", UNIT, timeout=SYSTEMCTL_TIMEOUT)
     if result.returncode != 0:
@@ -466,6 +537,14 @@ def _restart(*, force: bool, wait: float, out, handed_off: bool = False) -> dict
         raise OpsRefused(f"{UNIT} was restarted but no new daemon answered /status on "
                          f"127.0.0.1:{port} within {wait:g} s ({seen}). See `{JOURNAL}`."
                          f"{_start_limit_hint(now) if now else ''}", UNVERIFIED)
+    if type(status.get("pid")) is int:
+        # The daemon that answered must be the unit's new one (L-4).
+        try:
+            other = _not_the_units(status, unit_state())
+        except OpsRefused:
+            other = ""
+        if other:
+            raise OpsRefused(f"{UNIT} was restarted, but {other}. See `{JOURNAL}`.", UNVERIFIED)
     return status
 
 
@@ -479,8 +558,11 @@ def hand_off(argv: list[str], out) -> str:
                          "mid-wait, and systemd-run is not on PATH to run the restart outside it. "
                          "Run it from a terminal outside the HUD (a WSL shell)")
     name = f"jarvis-owner-op-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+    # `-P`: the working directory is not put on sys.path, so a `jarvis.py`
+    # or `jarvis/` planted in $HOME is never what runs (review 2 of PR #48);
+    # the CLI comes from the venv's own install.
     command = [run, "--user", "--collect", "--quiet", f"--unit={name}",
-               f"--working-directory={Path.home()}", "--", sys.executable, "-m", "jarvis",
+               f"--working-directory={Path.home()}", "--", sys.executable, "-P", "-m", "jarvis",
                *argv, HANDED_OFF]
     out(f"This terminal runs inside the daemon ({UNIT}.service), so the restart would end it "
         f"mid-wait. Handing the restart to the transient unit {name}; its report: "
@@ -556,9 +638,8 @@ def restart(*, force: bool = False, wait: float = WAIT, out=print, handed_off: b
                                  "so it would end itself; nothing was restarted")
             # A HUD terminal: check here, so a refusal is read where it was
             # typed, then restart from outside the cgroup the restart ends.
-            checked = _preflight(force)
+            checked = _preflight(force, _warned_unit(out))
             checked.say_forced(out)
-            warn_uncommitted(checked.unit, out)
             hand_off(_restart_argv(force, wait), out)
             return UNVERIFIED
         status = _restart(force=force, wait=wait, out=out, handed_off=handed_off)
@@ -790,9 +871,8 @@ def rebuild(*, pull_first: bool = False, restart_after: bool = False, clean: boo
     if restart_after:
         try:
             if in_daemon_cgroup():
-                checked = _preflight(force)
+                checked = _preflight(force, _warned_unit(out))
                 checked.say_forced(out)
-                warn_uncommitted(checked.unit, out)
                 hand_off(_restart_argv(force, wait), out)
                 out(f"Installed {installed.id}; the restart's report, with the HUD it serves, is "
                     "in that unit's journal.")
