@@ -1436,14 +1436,25 @@ listener returns while a card is up, and its inputs never stop a key then).
 `GET /vex/templates` answers a templates folder that cannot be listed with a
 409 sentence, never a 500. **A template write that fails midway takes back
 what this request wrote** (VX-1 code, review LOW-2): `_write_new` records each
-folder it made and each file it created `O_EXCL`, and `_remove_written`
-unlinks those files and `rmdir`s those folders, newest first, through the
-same `O_DIRECTORY | O_NOFOLLOW` fds — never anything that was there before or
-appeared meanwhile (`rmdir` removes no folder holding anything); a project the
-store would not record takes its template back too (`remove_written`). The
-message names the folder and says it is empty again (a retry uses it without
-asking, O5), or names what could not be removed and says to empty or remove
-the folder; an `OSError` is said by its `strerror`, never the path it names.
+folder it made and each file it created `O_EXCL` **with its `(st_dev,
+st_ino)`, read by `fstat` from the fd it was made through**, and
+`_remove_written` unlinks those files and `rmdir`s those folders, newest
+first, through the same `O_DIRECTORY | O_NOFOLLOW` fds — **judged by identity,
+never by name** (delta review LOW-B: `O_NOFOLLOW` stops a symlink swap, not a
+rename, and a folder renamed away with an owner folder moved into its name
+lost the owner's `mkenv.mk`): what is at the name now is `stat`ed without
+following and must be the very entry it made, else it is kept and listed as
+left. A project the store would not record takes its template back too
+(`remove_written`), **only through the very folder the template was written
+through** — reopened by path, its `(st_dev, st_ino)` must match `unpack`'s
+(LOW-A: a parent swapped for a symlink to a decoy lost the decoy's files);
+else nothing is removed, here or there. **The message is read from the
+folder** (`_listing`, through its fd; LOW-C): empty again (a retry uses it
+without asking, O5), or what it still holds and says to empty or remove it,
+or that the path is no longer the folder written to. A colliding file is named
+("src/main.cpp already exists …"), and an `OSError` is said by its
+`strerror`, never the path it names. What remains: another program swapping an
+entry in the instant between the take-back's `stat` and its `unlink`.
 Free checks: `lib/vexNew.test.ts`,
 `commands.test.ts`, `tests/v2/vex_check.py` (`NewProjectCheck`, `HalfWritten`; the check
 route in `Routes` and `Coverage`) and `tests/face/hud_v2_vex_new_check.py` (66, a
@@ -1457,7 +1468,9 @@ section; the mock judges the folder with the daemon's own `to_windows` and its
 the dialog's Escape hold, its `disabled` under a card, `createReady`'s key
 match, the check never asking, the check behind `_owner`, and the review
 round's four — the toolchain refusal, the normalised path, the take-back and
-the poll's tolerance.
+the poll's tolerance — and the delta review's identity compare (the swapped-in
+folder's `mkenv.mk` is taken without it). `HalfWritten`'s three delta-review
+tests fail on 9e1fcb6.
 
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API

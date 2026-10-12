@@ -795,7 +795,7 @@ class Templates(Base):
         before = sorted(str(p.relative_to(target)) for p in target.rglob("*"))
         with self.assertRaises(vex.UnpackFailed) as caught:
             vex.unpack(entries, target, settings)
-        self.assertIn("FileExistsError", caught.exception.cause)
+        self.assertIn("makefile already exists", caught.exception.cause)   # named, not "File exists"
         self.assertEqual(caught.exception.left, [])
         self.assertEqual(sorted(str(p.relative_to(target)) for p in target.rglob("*")), before)
 
@@ -2024,6 +2024,98 @@ class HalfWritten(DaemonBase):
         # `vex/` was the owner's: never recorded as made, so never removed.
         self.assertEqual(sorted(p.name for p in target.iterdir()), ["vex"])
         self.assertEqual(sorted(p.name for p in (target / "vex").iterdir()), ["notes.txt"])
+
+    # -- the delta review of 9e1fcb6: identities, not names -------------------------------
+
+    def test_a_folder_swapped_in_mid_write_is_never_taken(self):
+        # LOW-B: after the request made `vex/` and wrote `vex/mkenv.mk`, another
+        # program renames `vex` away and moves an owner folder holding a
+        # `mkenv.mk` into its name; then the next write fails. The take-back
+        # judges what it made by (st_dev, st_ino), so the owner's are kept.
+        cfg = vex.load_config()
+        target = self.world.robotics / "swapbot"
+        target.mkdir()
+        owner = self.world.robotics / "ownerstuff"
+        owner.mkdir()
+        (owner / "mkenv.mk").write_text("the owner's")
+        real = vex._write_new
+
+        def swapping(folder_fd, rel, data, made=None):
+            if rel == "include/vex.h":
+                (target / "vex").rename(self.world.robotics / "moved-vex")
+                owner.rename(target / "vex")
+                raise OSError(28, "No space left on device")
+            return real(folder_fd, rel, data, made)
+
+        with patch.object(vex, "_write_new", swapping), self.assertRaises(vex.UnpackFailed) as caught:
+            vex.unpack([("makefile", b"m"), ("vex/mkenv.mk", b"ours"), ("include/vex.h", b"h")],
+                       target, vex.settings_document("swapbot", "cpp", cfg))
+        self.assertEqual((target / "vex" / "mkenv.mk").read_text(), "the owner's")
+        self.assertFalse((target / "makefile").exists(), "what it made, still in place, goes")
+        self.assertEqual(sorted(caught.exception.left), ["vex", "vex/mkenv.mk"])
+        self.assertEqual(caught.exception.remaining, ["vex"])
+        self.assertNotIn("empty again", vex.unmade_message(target, caught.exception.cause,
+                                                           caught.exception.left,
+                                                           caught.exception.remaining))
+
+    def test_a_folder_swapped_before_the_store_answers_is_never_taken(self):
+        # LOW-A: the store refuses the project after another program swapped
+        # `Robotics` for a symlink to a decoy holding the owner's own
+        # `probebot/{makefile, src/main.cpp, vex/mkenv.mk}`. The take-back
+        # reopens the folder and finds it is not the one the template was
+        # written through: nothing is removed, here or there.
+        from jarvis.v2 import projects as project_module
+        from jarvis.v2.daemon import DaemonError
+        decoy = self.world.user / "Documents" / "Decoy"
+        owner = decoy / "probebot"
+        (owner / "src").mkdir(parents=True)
+        (owner / "vex").mkdir()
+        mine = ("makefile", "src/main.cpp", "vex/mkenv.mk")
+        for rel in mine:
+            (owner / rel).write_text("the owner's " + rel)
+        robotics = self.world.robotics
+        moved = robotics.with_name("Robotics.real")
+
+        def refusing(*_args, **_kwargs):
+            robotics.rename(moved)
+            robotics.symlink_to(decoy)
+            raise DaemonError("the store refused the project")
+
+        with patch.object(project_module, "create_project", refusing):
+            done = self.make("cpp_v5_vsc_empty", name="probebot")
+        self.assertEqual(done["state"], "failed", done)
+        for rel in mine:
+            self.assertEqual((owner / rel).read_text(), "the owner's " + rel)
+        self.assertEqual(sorted(p.name for p in owner.iterdir()), ["makefile", "src", "vex"])
+        self.assertIn("is no longer the folder", done["message"])
+        self.assertTrue((moved / "probebot" / "src" / "main.cpp").is_file(),
+                        "nothing was taken back through a path that moved")
+
+    def test_a_folder_the_owner_filled_meanwhile_is_never_called_empty(self):
+        # LOW-C: the owner's src/main.cpp and notes.txt appear while the card is
+        # up; both cards are approved; the write collides. What it made is taken
+        # back, the owner's stay, and the message lists what the folder holds.
+        target = self.world.robotics / "probebot"
+        self.request("POST", "/vex/projects", {"name": "probebot", "language": "cpp",
+                                               "template": "cpp_v5_vsc_empty"}, status=202)
+        first = eventually(lambda: self.daemon.approvals.pending(), what="the card")[0]
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "main.cpp").write_text("the owner's")
+        (target / "notes.txt").write_text("the owner's notes")
+        self.daemon.approvals.resolve(first.req_id, Decision.ALLOW)
+        second = eventually(lambda: [c for c in self.daemon.approvals.pending()
+                                     if c.req_id != first.req_id], what="the second card")[0]
+        self.daemon.approvals.resolve(second.req_id, Decision.ALLOW)
+        news = self.daemon.vex._news
+        done = eventually(lambda: (lambda r: r.view() if r.state != "asking" else None)(
+            list(news.values())[-1]), what="the request")
+        self.assertEqual(done["state"], "failed", done)
+        self.assertNotIn("empty again", done["message"])
+        self.assertIn("notes.txt", done["message"])
+        self.assertIn("src/main.cpp already exists", done["message"], "the NIT: the colliding file named")
+        self.assertEqual((target / "src" / "main.cpp").read_text(), "the owner's")
+        self.assertEqual(sorted(p.name for p in target.iterdir()), ["notes.txt", "src"])
+        self.assertEqual(sorted(p.name for p in (target / "src").iterdir()), ["main.cpp"])
 
 
 # -- leaks and reach --------------------------------------------------------------------------------------

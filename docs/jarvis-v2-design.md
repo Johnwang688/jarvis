@@ -2384,8 +2384,9 @@ so; Approve makes the folder, unpacks the template (Jarvis's own code), writes
 the settings file in the extension's v2 shape so the project also opens in VS
 Code, and the new project appears in the sidebar and opens as a new thread. A
 Python template gives `src/main.py` and the settings file. A template write
-that fails after the yes takes back what it wrote and says the folder is
-empty again (or what it could not remove). While the card is up the dialog
+that fails after the yes takes back what it wrote — only what it made, judged
+by identity, never anything renamed or swapped into its place — and says what
+the folder holds now (empty again, or what is still there). While the card is up the dialog
 reads its request one read at a time and rides out a failed read, so a blip
 never turns an approved project into a failed one. An existing empty
 folder is used without a card, and the dialog says so before Create. **Under

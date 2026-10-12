@@ -1434,10 +1434,15 @@ HUD can flag one it cannot match to its own click.
 - `GET /vex/projects/{id}` → that request: `state` `"asking"`, `"created"`
   (with `project_id`), `"declined"` or `"failed"`, and a `message`. A
   template write that fails after the yes takes back what that request wrote
-  (only files it created and folders it made, through the folder's fds; VX-3
-  review LOW-2): `failed`'s message names the folder and says it is empty
-  again — Create uses it again without a card (O5) — or names what could not be
-  removed and says to empty or remove the folder. The HUD reads this one read
+  (only files it created and folders it made, through the folder's fds, each
+  judged by its `(st_dev, st_ino)` — a renamed-in entry is never removed — and,
+  after a refusal by the store, only if the folder at that path is still the
+  one the template was written through; VX-3 review LOW-2 and its delta
+  review): `failed`'s message names the colliding file where there is one,
+  and says what the folder holds now, read through its fd — empty again
+  (Create uses it again without a card, O5), what it still holds (empty or
+  remove it), or that the path is no longer the folder written to (nothing
+  removed). The HUD reads this one read
   at a time and rides out a failed read (5xx, the network) with a backoff;
   only an answer, a 404/400, or three minutes of failures end its tracking.
 - `POST /vex/projects/check` `{name, language, template, location?}` (VX-3,
