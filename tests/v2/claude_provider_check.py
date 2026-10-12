@@ -2245,6 +2245,403 @@ def stopped_late_steer_checks() -> None:
         provider.close(handle)
 
 
+NOTICE_ORIGIN = {"kind": "task-notification"}
+ZERO_USAGE = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}
+
+
+def notice_replay() -> SdkUserMessage:
+    """The CLI's replay of a background task's notice it runs as a turn of
+    its own (2.1.295 stamps the injected turn's origin on it)."""
+    return SdkUserMessage(content="<task-notification>a background task ended</task-notification>",
+                          uuid="9e2f0c4a-0000-4000-8000-000000000001", origin=dict(NOTICE_ORIGIN))
+
+
+def notice_result(**kw) -> ResultMessage:
+    """A transcript-only notice's result: no model call, zero usage, success,
+    the injected origin — exactly what a resumed CLI put ahead of the owner's
+    message live (2026-10-12)."""
+    base = dict(num_turns=0, duration_api_ms=0, usage=dict(ZERO_USAGE), origin=dict(NOTICE_ORIGIN))
+    base.update(kw)
+    return result_message(**base)
+
+
+def drain_bounded(provider, handle, text: str, timeout: float = 5.0):
+    """`drain`, but a hang fails the check instead of the suite."""
+    box: dict = {}
+
+    def run():
+        box["events"] = drain(provider, handle, text)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return box.get("events")
+
+
+def injected_turn_checks() -> None:
+    """2026-10-12, live on thread 447ff25e: after every daemon restart the
+    first message to a Claude thread showed nothing, and the next message got
+    its answer. The resumed CLI runs a queued background-task notice as a
+    transcript-only turn of its own before the message (an empty, zero-usage
+    result), and on a fresh session — where the CLI is not yet known to echo —
+    that result was taken as the message's. The CLI stamps such a turn's
+    origin on its replay and its result; neither is ever the message's."""
+    print("\n-- turns the CLI says somebody else started")
+    provider = claude.ClaudeProvider()
+
+    # The live shape: the notice's replay and empty result, then the message.
+    with steer_fake([notice_replay(), notice_result(), PromptEcho(),
+                     assistant("the answer"), result_message()]):
+        handle = provider.resume(thread(session_id=SESSION_ID), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "the first message after a restart")
+        check(events is not None, "injected: the first send ends")
+        events = events or []
+        eq(text_of(events), ["the answer"], "injected: the first send on a fresh session reads its own answer")
+        eq(kinds(events).count("turn_finished"), 1, "injected: and finishes once")
+        eq(events[-1].data.get("stop") if events else None, "end", "injected: on its own result")
+        client.script.extend([PromptEcho(), assistant("two"), result_message()])
+        eq(text_of(drain_bounded(provider, handle, "two") or []), ["two"],
+           "injected: the next send reads its own answer — nothing shifted by one")
+        provider.close(handle)
+
+    # The result alone says so (no replay of the notice).
+    with steer_fake([notice_result(), PromptEcho(), assistant("the answer"), result_message()]):
+        handle = provider.resume(thread(session_id=SESSION_ID), brief(), allow)
+        events = drain_bounded(provider, handle, "go") or []
+        eq(text_of(events), ["the answer"], "injected: a notice's result with no replay is not the message's")
+        provider.close(handle)
+
+    # A notice that makes the model answer, ahead of the message, on a fresh
+    # session: its words reach the owner, its result does not end the turn,
+    # and while it runs the message's turn has not begun (no steer is taken
+    # ahead of the message it would steer — review of PR #22, finding 2).
+    gate = threading.Event()
+    with steer_fake([notice_replay(), assistant("the build finished"), Pause(gate),
+                     notice_result(usage=None), PromptEcho(), assistant("the answer"),
+                     result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        stream = provider.send(handle, UserMessage(text="go"))
+        first = [next(stream), next(stream)]
+        eq(text_of(first), ["the build finished"], "injected: a notice's words reach the owner")
+        check(not accepting(handle, timeout=0.3),
+              "injected: while a notice's turn runs, the message's has not begun")
+        gate.set()
+        events = first + list(stream)
+        eq(text_of(events), ["the build finished", "the answer"],
+           "injected: a notice's turn is read, then the message's own")
+        eq(kinds(events).count("turn_finished"), 1, "injected: one finish, on the message's result")
+        provider.close(handle)
+
+    # The same with no replay: the unechoed turn is taken for the message's
+    # start on a fresh session until its result says whose it was — then the
+    # message's start is still to come, and no steer is taken meanwhile.
+    gate = threading.Event()
+    with steer_fake([assistant("the build finished"), notice_result(usage=None), Pause(gate),
+                     PromptEcho(), assistant("the answer"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        stream = provider.send(handle, UserMessage(text="go"))
+        first = [next(stream), next(stream), next(stream)]
+        eq(kinds(first), ["turn_started", "text", "usage"], "injected, no replay: the notice is read")
+        time.sleep(0.2)
+        check(not handle.native.accepting,
+              "injected, no replay: once its result names it, the message's turn has not begun")
+        gate.set()
+        events = first + list(stream)
+        eq(text_of(events), ["the build finished", "the answer"],
+           "injected, no replay: then the message's own answer")
+        eq(kinds(events).count("turn_finished"), 1, "injected, no replay: one finish")
+        provider.close(handle)
+
+    # The message absorbed into the notice's turn: the result carries the
+    # notice's origin but answers the message — taken, never waited past.
+    with steer_fake([notice_replay(), assistant("a notice"), PromptEcho(),
+                     assistant("the answer"), notice_result(usage=None)]):
+        handle = provider.start(thread(), brief(), allow)
+        events = drain_bounded(provider, handle, "go")
+        check(events is not None, "injected: a message absorbed into a notice's turn never hangs")
+        eq(text_of(events or []), ["a notice", "the answer"], "injected: absorbed: both read")
+        eq(kinds(events or []).count("turn_finished"), 1, "injected: absorbed: one finish")
+        provider.close(handle)
+
+    # A notice injected in the middle of the message's own turn is part of it.
+    with steer_fake([PromptEcho(), assistant("a"), notice_replay(), assistant("b"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        events = drain_bounded(provider, handle, "go") or []
+        eq(text_of(events), ["a", "b"], "injected: mid-turn, the turn goes on")
+        eq(kinds(events).count("turn_finished"), 1, "injected: mid-turn: one finish")
+        provider.close(handle)
+
+
+def too_long() -> AssistantMessage:
+    """The CLI's synthetic API error for a conversation past the window."""
+    return AssistantMessage(content=[TextBlock(text="Prompt is too long")], model="<synthetic>",
+                            error="invalid_request")
+
+
+def too_long_result() -> ResultMessage:
+    return result_message(is_error=True, result="Prompt is too long", usage=dict(ZERO_USAGE))
+
+
+def compacted() -> list:
+    return [SystemMessage(subtype="compact_boundary", data={"compact_metadata": {"trigger": "manual"}}),
+            result_message(num_turns=0, duration_api_ms=0)]
+
+
+def context_full_checks() -> None:
+    """2026-10-12, live on thread 447ff25e: "Prompt is too long" came back as
+    an ordinary reply. It is the CLI saying the conversation no longer fits:
+    the provider runs the CLI's `/compact` once and sends the message again,
+    and when that does not help it says so in one sentence and ends the turn.
+    Never a hang, never the error text as a reply."""
+    print("\n-- a conversation past the context window")
+    provider = claude.ClaudeProvider()
+
+    # Compacting makes room: the message is answered.
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), *compacted(),
+                     PromptEcho(), assistant("the real answer"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "are the PRs up?")
+        check(events is not None, "context full: the turn ends")
+        events = events or []
+        check("Prompt is too long" not in [t for t in text_of(events)],
+              "context full: the CLI's error is never shown as a reply")
+        eq(text_of(events), ["the real answer"], "context full: compacted, the message is answered")
+        sent = [q[0]["message"]["content"] for q in client.queries if isinstance(q, list)]
+        eq(sent, ["are the PRs up?", "/compact", "are the PRs up?"],
+           "context full: the CLI's own /compact, then the message once more")
+        compact = [e.data for e in events if e.kind.value in ("tool_started", "tool_finished")]
+        eq([(d["name"], d.get("ok")) for d in compact], [("compact", None), ("compact", True)],
+           "context full: the compaction shows as one tool call that finished")
+        eq(kinds(events).count("turn_finished"), 1, "context full: one finish")
+        eq(events[-1].data.get("stop"), "end", "context full: on the answer's result")
+        check(all(e.kind is not EventKind.ERROR for e in events), "context full: no error once it worked")
+        provider.close(handle)
+
+    # Compacting does not help: one sentence, a clean end, one attempt only.
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), *compacted(),
+                     PromptEcho(), too_long(), too_long_result()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "hello?") or []
+        errors = [e.data for e in events if e.kind is EventKind.ERROR]
+        eq(errors, [{"message": claude.CONTEXT_STILL_FULL, "fatal": False}],
+           "context full: still full after compacting — the owner is told, non-fatal")
+        eq(len(client.queries), 3, "context full: compacted once, retried once")
+        eq(text_of(events), [], "context full: no error text as a reply")
+        eq(events[-1].data.get("stop") if events else None, "error", "context full: ends as an error")
+        check(handle.native.closed is False, "context full: the session is kept")
+        provider.close(handle)
+
+    # The CLI answers /compact without compacting: no retry.
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), result_message(num_turns=0)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "go") or []
+        eq(len(client.queries), 2, "context full: no compact boundary — no retry")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_NOT_COMPACTED], "context full: and the owner is told it did not finish")
+        provider.close(handle)
+
+    # Compaction that never finishes is bounded, interrupted, and told.
+    gate = threading.Event()
+    with timings(COMPACT_TIMEOUT_S=0.3), \
+            steer_fake([PromptEcho(), too_long(), too_long_result(), Pause(gate)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        started = time.monotonic()
+        events = drain_bounded(provider, handle, "go")
+        check(events is not None and time.monotonic() - started < 3,
+              "context full: a compaction that never ends does not hang the turn")
+        eq(client.interrupts, 1, "context full: the stalled compaction is interrupted")
+        eq([e.data["message"] for e in events or [] if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_NOT_COMPACTED], "context full: and the owner is told it did not finish")
+        gate.set()
+        provider.close(handle)
+
+    context_full_review_checks()
+
+    # The owner stopped the turn: no compaction, no retry.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), too_long(), too_long_result()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.interrupt(handle)
+        gate.set()
+        events = list(stream)
+        eq(len(client.queries), 1, "context full: stopped — nothing more is sent")
+        eq(events[-1].data["stop"], "interrupted", "context full: stopped — finishes as interrupted")
+        provider.close(handle)
+
+    # A model's reply that only starts with the words is a reply.
+    with steer_fake([PromptEcho(), assistant("Prompt is too long — that was the error"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "what went wrong?") or []
+        eq(text_of(events), ["Prompt is too long — that was the error"], "context full: a real reply is shown")
+        eq(len(client.queries), 1, "context full: and nothing is compacted")
+        provider.close(handle)
+
+
+def sent_texts(client) -> list:
+    """Every stdin user message the client was given, steers included."""
+    return [q[0]["message"]["content"] for q in client.queries
+            if isinstance(q, list) and q and isinstance(q[0], dict)]
+
+
+def wait_for(predicate, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def context_full_review_checks() -> None:
+    """Review of PR #57. The message is sent again only when the CLI turn
+    that overflowed was its own and did nothing a second run would repeat:
+    P11, a `git push` ran and then the context filled — it was pushed again;
+    P12, a steer's own CLI turn overflowed — the answered message was sent
+    again in its place. "Full" needs the error result and the words, never a
+    sub-agent's (P1) nor a turn the CLI recovered from (P1b). The owner's Stop
+    during a compaction ends the turn as interrupted, at once."""
+    print("\n-- a conversation past the context window: what is sent again")
+    provider = claude.ClaudeProvider()
+    push = AssistantMessage(content=[ToolUseBlock(id="toolu_1", name="Bash",
+                                                  input={"command": "git push origin feature"})],
+                            model="claude-test")
+    pushed = SdkUserMessage(content=[ToolResultBlock(tool_use_id="toolu_1", content="pushed",
+                                                     is_error=False)])
+
+    # P11: a tool ran in the message's own turn, then the context filled.
+    with steer_fake([PromptEcho(), push, pushed, too_long(), too_long_result(), *compacted(),
+                     # what a wrong re-send would read
+                     PromptEcho(), push, pushed, assistant("pushed again"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "push my branch") or []
+        eq(sent_texts(client), ["push my branch", "/compact"],
+           "P11: a tool already ran — compacted, the message never sent again")
+        eq([e.data["name"] for e in events if e.kind is EventKind.TOOL_STARTED], ["Bash", "compact"],
+           "P11: the push runs once")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_COMPACTED_SEND_AGAIN], "P11: the owner is told to send it again")
+        eq(events[-1].data.get("stop") if events else None, "error", "P11: the turn ends as an error")
+        provider.close(handle)
+
+    # P12: the message is answered; a steer's own CLI turn overflows.
+    gate = threading.Event()
+    with timings(STEER_QUIET_S=0.5), \
+            steer_fake([PromptEcho(), assistant("answer one"), Pause(gate), result_message(),
+                        Echo(), too_long(), too_long_result(), *compacted(),
+                        PromptEcho(), assistant("answer one AGAIN"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="the first message"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="the steer"))
+        gate.set()
+        box: dict = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", list(stream)), daemon=True)
+        worker.start()
+        worker.join(5)
+        events = box.get("events") or []
+        eq(sent_texts(client), ["the first message", "the steer", "/compact"],
+           "P12: a steer's turn overflowed — the answered message is not sent again")
+        eq(text_of(events), ["answer one"], "P12: the first answer, once")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_COMPACTED_SEND_AGAIN], "P12: the owner is told to send again")
+        provider.close(handle)
+
+    # A steer folded into the message's own turn counts as work too.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), Echo(), too_long(), too_long_result(), *compacted(),
+                     PromptEcho(), assistant("again"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="and this"))
+        gate.set()
+        list(stream)
+        eq(sent_texts(client), ["go", "and this", "/compact"],
+           "context full: a folded steer — compacted, nothing sent again")
+        provider.close(handle)
+
+    # P1: a sub-agent's synthetic error, then the turn succeeds.
+    sub_error = AssistantMessage(content=[TextBlock(text="Prompt is too long")], model="<synthetic>",
+                                 parent_tool_use_id="toolu_sub", error="invalid_request")
+    with steer_fake([PromptEcho(), sub_error, assistant("the answer"), result_message(),
+                     *compacted(), PromptEcho(), assistant("answer AGAIN"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "run the build") or []
+        eq(sent_texts(client), ["run the build"], "P1: a sub-agent's error — nothing compacted or sent again")
+        eq(text_of(events), ["the answer"], "P1: the answer is read")
+        eq(events[-1].data.get("stop") if events else None, "end", "P1: and ends the turn")
+        provider.close(handle)
+
+    # P1b: the CLI's own error mid-turn, recovered from: a success result.
+    with steer_fake([PromptEcho(), too_long(), assistant("recovered answer"), result_message(),
+                     *compacted(), PromptEcho(), assistant("answer AGAIN"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "go") or []
+        eq(sent_texts(client), ["go"], "P1b: an error the CLI recovered from — nothing compacted or sent again")
+        eq(text_of(events), ["recovered answer"], "P1b: the recovered answer, not the error text")
+        provider.close(handle)
+
+    # Stop while compacting, and the CLI answers: interrupted, not an error.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), Pause(gate),
+                     result_message(terminal_reason="aborted_streaming", num_turns=0)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        box = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", drain(provider, handle, "go")),
+                                  daemon=True)
+        worker.start()
+        check(wait_for(lambda: len(client.queries) == 2), "stop while compacting: /compact was sent")
+        provider.interrupt(handle)
+        gate.set()
+        worker.join(5)
+        events = box.get("events") or []
+        eq(events[-1].data.get("stop") if events else None, "interrupted",
+           "stop while compacting: the turn finishes as interrupted")
+        eq([e for e in events if e.kind is EventKind.ERROR], [], "stop while compacting: no error")
+        eq(len(client.queries), 2, "stop while compacting: nothing sent again")
+        provider.close(handle)
+
+    # Stop while the CLI goes on compacting: the turn ends at once, not
+    # after COMPACT_TIMEOUT_S (600 s live).
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), Pause(gate)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        box = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", drain(provider, handle, "go")),
+                                  daemon=True)
+        worker.start()
+        wait_for(lambda: len(client.queries) == 2)
+        stopped = time.monotonic()
+        provider.interrupt(handle)
+        worker.join(5)
+        check("events" in box and time.monotonic() - stopped < 2,
+              f"stop while compacting: the turn ends promptly ({time.monotonic() - stopped:.2f}s)")
+        events = box.get("events") or []
+        eq(events[-1].data.get("stop") if events else None, "interrupted",
+           "stop while compacting: finishes as interrupted")
+        gate.set()
+        provider.close(handle)
+
+
 def main() -> int:
     # Hermetic: every client in this suite resolves to a fake executable in a
     # temp dir, never the owner's real `claude` (which nothing here may run).
@@ -2265,6 +2662,8 @@ def main() -> int:
     reviewer_declined_checks()
     interrupt_checks()
     steering_checks()
+    injected_turn_checks()
+    context_full_checks()
     error_checks()
     usage_checks()
     isolation_checks()
