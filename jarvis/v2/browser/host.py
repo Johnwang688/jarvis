@@ -66,11 +66,19 @@ and a refused one is replaced with an explanation page.
 **No browsing leaves memory.** No URL, title or page text is logged or put on
 the bus: refusals are fixed sentences, a failed load is reported by its
 `net::ERR_…` code only, and the log carries classes and counts.
+
+**The stream and the owner's input** (BR-1b, `stream.py`): a window attaches
+to one tab over a ticketed socket and sees its screencast, latest frame
+only; its keys, pointer, wheel and text go back as CDP `Input.*` events,
+each checked against the approval hold on this thread just before it is
+sent. Dialogs, file choosers, pop-ups and downloads are told to that
+window; the files themselves are `files.py`'s.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -89,8 +97,10 @@ from pathlib import Path
 
 from jarvis import config
 
+from . import files as _files
 from . import policy
 from .gate import Gate
+from .stream import TICKET_TTL_S, TabStream, Tickets, serve as _serve_stream
 
 LOG = logging.getLogger("jarvis.v2.browser")
 
@@ -109,6 +119,31 @@ PROFILES_CAP = 64 * 1024
 SETTINGS_CAP = 64 * 1024
 TITLE_CAP = 120
 URL_CAP = 2048
+# BR-1b: the stream, dialogs, file choosers and the hold.
+DIALOG_TIMEOUT_S = 60.0             # an unanswered dialog is dismissed
+DIALOG_TEXT_CAP = 1000
+CHOOSER_TTL_S = 300.0               # an unanswered file chooser is forgotten
+DELIVER_WAIT_S = 5.0                # an input event's answer is waited for this long
+JPEG_QUALITY = 70
+DEFAULT_VIEW = (1280, 800, 1.0)     # the launch viewport, until a window says otherwise
+SELECTION_MAX = 256 * 1024
+DIALOG_KINDS = ("alert", "confirm", "prompt", "beforeunload")
+HELD = "an approval card is waiting for you; nothing reaches the Browser until it is answered"
+# What Ctrl+C copies: the selection, read in an isolated world the page's
+# scripts cannot see into (plan §8.7). A password field gives nothing, as in
+# Chrome; a text field gives its selected text.
+SELECTION_JS = """(() => {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT')) {
+    if (a.tagName === 'INPUT' && !/^(text|search|url|tel|email|number)$/i.test(a.type || 'text')) return '';
+    try {
+      const s = a.selectionStart, e = a.selectionEnd;
+      return (typeof s === 'number' && e > s) ? String(a.value).slice(s, e) : '';
+    } catch (_) { return ''; }
+  }
+  const s = getSelection();
+  return s ? String(s) : '';
+})()"""
 
 TAB_ID = re.compile(r"[0-9a-f]{8}")
 PROFILE_ID = re.compile(r"p-[0-9a-f]{8}")
@@ -452,6 +487,21 @@ class _Tab:
     profile: str
     ctx: str | None
     page: object
+    # BR-1b: the window's stream and what the page asks of it.
+    stream: TabStream | None = None
+    opener: str | None = None
+    cdp: object = None
+    cdp_lock: object = None
+    wakeup: object = None               # an asyncio.Event: input is queued
+    pump: object = None                 # the input task
+    casting: tuple | None = None        # the screencast's size, while it runs
+    cast_lock: object = None
+    security: str | None = None
+    location: tuple | None = None
+    dialogs: dict = field(default_factory=dict)
+    timers: dict = field(default_factory=dict)
+    chooser: tuple | None = None        # (id, FileChooser, loop time)
+    pressed: dict = field(default_factory=dict)     # button -> the stream's hold count at the press
 
 
 class BrowserHost:
@@ -484,6 +534,18 @@ class BrowserHost:
         self._snapshot: dict = {"instances": [], "tabs": 0}
         self._guarded = 0
         self.timings: dict[str, float] = {}
+        # BR-1b: the windows' sockets.
+        self.tickets = Tickets()
+        self._downloading = 0
+        self._popups_refused = 0
+        # The moment a card is raised, every tab's queued input is dropped,
+        # so nothing sent before or during a card is delivered after it
+        # (plan §8.3) — even input the hold check at dispatch never met,
+        # because no input arrived while the card was up. Synchronous on the
+        # asking thread, before the broker waits.
+        bus = getattr(daemon, "bus", None)
+        if bus is not None and hasattr(bus, "observe"):
+            bus.observe(self._observe)
 
     # -- ports and settings ---------------------------------------------------------
 
@@ -583,6 +645,8 @@ class BrowserHost:
                 path = Path(entry.path)
                 stop_pids(path)
                 _remove_tree(path)
+        # A Private download lives only as long as the Private Chrome (BR-1b).
+        _remove_tree(folder.parent / "downloads" / PRIVATE)
 
     def stop(self, timeout: float = STOP_TIMEOUT_S) -> None:
         """Close every Chrome, the Playwright driver and the gate. Final: the
@@ -603,6 +667,11 @@ class BrowserHost:
             self._stopped = True
             self._opened_ports.clear()
             loop, thread = self._loop, self._thread
+        # Every window first: told the Browser ended, its socket closed.
+        self.tickets.clear()
+        for tab in list(self._tabs.values()):
+            if tab.stream is not None:
+                tab.stream.close("ended")
         deadline = time.monotonic() + timeout
         if loop is not None and not loop.is_closed():
             future = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
@@ -732,6 +801,9 @@ class BrowserHost:
         else:
             folder = secure_dir(root / "profiles" / profile)
             downloads = secure_dir(root / "downloads" / profile)
+        # Chrome writes a download under Playwright's own name here; a
+        # finished one is copied out, 0600, under its cleaned name (files.py).
+        incoming = secure_dir(downloads / _files.INCOMING)
         home = secure_dir(root / "home")
         artifacts = secure_dir(root / "artifacts")
         loop = asyncio.get_running_loop()
@@ -745,8 +817,8 @@ class BrowserHost:
                 str(folder), channel="chrome", headless=True, ignore_default_args=True,
                 args=launch_args(folder, self._gate.port, private=private),
                 env=chrome_environment(home), chromium_sandbox=True,
-                artifacts_dir=str(artifacts), downloads_path=str(downloads),
-                accept_downloads=False, handle_sigint=False, handle_sigterm=False,
+                artifacts_dir=str(artifacts), downloads_path=str(incoming),
+                accept_downloads=True, handle_sigint=False, handle_sigterm=False,
                 handle_sighup=False, timeout=LAUNCH_TIMEOUT_S * 1000,
                 viewport={"width": 1280, "height": 800})
         except Exception as exc:  # noqa: BLE001 - Playwright's message holds the command line
@@ -768,7 +840,9 @@ class BrowserHost:
         if instance is None:
             return
         for tab_id in [t.id for t in self._tabs.values() if t.profile == profile]:
-            self._tabs.pop(tab_id, None)
+            tab = self._tabs.pop(tab_id, None)
+            if tab is not None:
+                self._release(tab, "ended")
         try:
             await asyncio.wait_for(instance.context.close(), CLOSE_TIMEOUT_S)
         except Exception:  # noqa: BLE001 - the PID backstop follows
@@ -776,29 +850,90 @@ class BrowserHost:
         await asyncio.get_running_loop().run_in_executor(None, stop_pids, instance.folder)
         if profile == PRIVATE:
             _remove_tree(instance.folder)
+            # A Private download goes with the Private Chrome (BR-1b).
+            _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE)
         self._publish_snapshot()
 
     def _adopt(self, instance: _Instance, page, ctx: str | None):
         """Register a page as a tab (a page we opened, or a pop-up), with the
-        landing guard; a page past the tab cap is closed at once."""
+        landing guard, its stream and the page's own requests (dialogs, file
+        choosers, downloads). **The cap is 12 tabs in all** (decision B-13:
+        "12 in all", which also bounds each profile's Chrome), and a page
+        past it — always a pop-up, since a route refuses first — is closed
+        at once and its opener's window told: the new page is refused,
+        rather than an older tab closed, because an older tab may hold the
+        owner's work (a half-filled form, a sign-in mid-way), and a page
+        could otherwise use pop-ups to evict the owner's tabs one by one."""
         for tab in self._tabs.values():
             if tab.page is page:
                 return tab
         if len(self._tabs) >= max(1, config.BROWSER_TAB_CAP):
-            asyncio.ensure_future(self._quietly(page.close()))
+            asyncio.ensure_future(self._refuse_popup(page))
             return None
-        tab = _Tab(id=self._new_id(self._tabs), profile=instance.profile, ctx=ctx, page=page)
+        tab_id = self._new_id(self._tabs)
+        tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
+                   stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab)),
+                   cdp_lock=asyncio.Lock(), cast_lock=asyncio.Lock(), wakeup=asyncio.Event())
         self._tabs[tab.id] = tab
         page.on("framenavigated", lambda frame: self._landed(tab, frame))
         page.on("close", lambda _page: self._dropped(tab))
+        page.on("load", lambda _page: asyncio.ensure_future(self._titled(tab)))
+        page.on("dialog", lambda dialog: self._dialog(tab, dialog))
+        page.on("filechooser", lambda chooser: self._chooser(tab, chooser))
+        page.on("download", lambda download: asyncio.ensure_future(self._download(tab, download)))
         # A pop-up may have navigated before it was handed to us.
         self._landed(tab, page.main_frame)
+        asyncio.ensure_future(self._link_opener(tab))
         self._publish_snapshot()
         return tab
+
+    async def _link_opener(self, tab: _Tab) -> None:
+        """A pop-up opens in its opener's pane: the opener's window is told
+        the new tab's id, and adds it as a tab beside its own (B-13)."""
+        try:
+            opener = await asyncio.wait_for(tab.page.opener(), CLOSE_TIMEOUT_S)
+        except Exception:  # noqa: BLE001
+            return
+        parent = next((t for t in self._tabs.values() if opener is not None and t.page is opener), None)
+        if parent is None or self._tabs.get(tab.id) is not tab:
+            return
+        tab.opener = parent.id
+        parent.stream.send({"t": "popup", "tab_id": tab.id})
+
+    async def _refuse_popup(self, page) -> None:
+        cap = max(1, config.BROWSER_TAB_CAP)
+        with self._lock:
+            self._popups_refused += 1
+        try:
+            opener = await asyncio.wait_for(page.opener(), CLOSE_TIMEOUT_S)
+        except Exception:  # noqa: BLE001
+            opener = None
+        parent = next((t for t in self._tabs.values() if opener is not None and t.page is opener), None)
+        if parent is not None:
+            parent.stream.send({"t": "popup_refused",
+                                "reason": f"the page opened a new tab, but the Browser already has "
+                                          f"{cap} tabs open; close one first"})
+        LOG.info("Browser refused a pop-up past the tab cap")
+        await self._quietly(page.close())
+
+    def _release(self, tab: _Tab, reason: str) -> None:
+        """A tab is gone: its window is told and let go, its timers and its
+        input task stop. On the Browser's thread."""
+        if tab.stream is not None:
+            tab.stream.close(reason)
+        for timer in tab.timers.values():
+            timer.cancel()
+        tab.timers.clear()
+        tab.dialogs.clear()
+        tab.chooser = None
+        if tab.pump is not None:
+            tab.pump.cancel()
+            tab.pump = None
 
     def _dropped(self, tab: _Tab) -> None:
         if self._tabs.get(tab.id) is tab:
             del self._tabs[tab.id]
+        self._release(tab, "closed")
         if tab.ctx is not None and not any(t.ctx == tab.ctx for t in self._tabs.values()):
             instance = self._instances.get(PRIVATE)
             context = instance.private_contexts.pop(tab.ctx, None) if instance else None
@@ -842,6 +977,37 @@ class BrowserHost:
                 self._guarded += 1
             LOG.info("Browser landing guard replaced a page (%s)", refusal.reason)
             asyncio.ensure_future(self._replace(tab))
+            return
+        # A new page has no chooser open any more.
+        if tab.chooser is not None:
+            tab.chooser = None
+            if tab.stream is not None:
+                tab.stream.remember("chooser", None)
+        self._located(tab, url=url)
+
+    def _located(self, tab: _Tab, *, url: str | None = None, title: str | None = None,
+                 force: bool = False) -> None:
+        """The tab's address, title and security state, to its window only
+        (`{t:"location"}`; never the bus, the log or `/status`)."""
+        old_url, old_title = tab.location or ("", "")
+        new_url = _clean(url, URL_CAP) if url is not None else old_url
+        if title is not None:
+            new_title = _clean(title, TITLE_CAP)
+        else:
+            new_title = old_title if new_url == old_url else ""
+        if (new_url, new_title) == tab.location and not force:
+            return
+        tab.location = (new_url, new_title)
+        if tab.stream is not None:
+            tab.stream.remember("location", {"t": "location", "url": new_url, "title": new_title,
+                                             "security": tab.security})
+
+    async def _titled(self, tab: _Tab) -> None:
+        try:
+            title = await asyncio.wait_for(tab.page.title(), 2.0)
+        except Exception:  # noqa: BLE001
+            return
+        self._located(tab, url=tab.page.url, title=title)
 
     async def _replace(self, tab: _Tab) -> None:
         try:
@@ -859,6 +1025,8 @@ class BrowserHost:
         target = policy.judge_url(url, refused=self.refused_ports()) if url is not None else None
         if ctx is not None and (not isinstance(ctx, str) or not CTX_ID.fullmatch(ctx)):
             raise BrowserRefused(400, "ctx must be eight lowercase hex characters")
+        if target is not None:
+            self._refuse_if_held()
         self._ensure_started()
         profile_id = self._profile_id(profile)
         if ctx is not None and profile_id != PRIVATE:
@@ -869,6 +1037,8 @@ class BrowserHost:
 
     async def _open_tab(self, profile: str, ctx: str | None, url: str | None) -> dict:
         cap = max(1, config.BROWSER_TAB_CAP)
+        if url is not None:
+            self._refuse_if_held()
         if len(self._tabs) >= cap:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         instance = await self._instance(profile)
@@ -922,10 +1092,12 @@ class BrowserHost:
         target = policy.judge_url(url, refused=self.refused_ports())
         if not self._running():
             raise BrowserRefused(404, "no such tab")
+        self._refuse_if_held()
         return self._call(self._navigate(tab_id, target, owner), NAV_TIMEOUT_S + 5)
 
     async def _navigate(self, tab_id, url, owner: bool = False) -> dict:
         tab = self._tab(tab_id)
+        self._refuse_if_held()
         if owner:
             self._open_loopback(url)
         return {"tab_id": tab.id, **(await self._goto(tab, url))}
@@ -935,10 +1107,12 @@ class BrowserHost:
             raise BrowserRefused(400, 'action must be "back", "forward" or "reload"')
         if not self._running():
             raise BrowserRefused(404, "no such tab")
+        self._refuse_if_held()
         return self._call(self._history(tab_id, action), NAV_TIMEOUT_S + 5)
 
     async def _history(self, tab_id, action) -> dict:
         tab = self._tab(tab_id)
+        self._refuse_if_held()
         step = {"back": tab.page.go_back, "forward": tab.page.go_forward,
                 "reload": tab.page.reload}[action]
         try:
@@ -975,7 +1149,11 @@ class BrowserHost:
             except Exception:  # noqa: BLE001
                 title = ""
             rows.append({"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx,
-                         "url": _clean(tab.page.url, URL_CAP), "title": _clean(title, TITLE_CAP)})
+                         "url": _clean(tab.page.url, URL_CAP), "title": _clean(title, TITLE_CAP),
+                         # BR-1b: the tab that opened it (a pop-up's), and
+                         # whether a window streams it now.
+                         "opener": tab.opener,
+                         "shown": tab.stream is not None and tab.stream.attached() is not None})
         return rows
 
     def close_profile(self, profile) -> None:
@@ -1022,6 +1200,464 @@ class BrowserHost:
             await self._close_instance(profile)
             await asyncio.get_running_loop().run_in_executor(None, wipe)
 
+    # -- the hold (plan §8.3, amendment H3) -----------------------------------------------
+
+    def input_held(self) -> bool:
+        """Whether **any** approval is waiting on the owner: then nothing
+        reaches a page. Fails closed — a broker that cannot be asked holds."""
+        daemon = self._daemon
+        if daemon is None:
+            return False
+        try:
+            return bool(daemon.approvals.pending())
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _refuse_if_held(self) -> None:
+        if self.input_held():
+            raise BrowserRefused(409, HELD)
+
+    def _observe(self, record) -> None:
+        """A bus observer: a card raised holds every tab at once."""
+        if isinstance(record, dict) and record.get("kind") == "approval_requested":
+            for tab in list(self._tabs.values()):
+                if tab.stream is not None:
+                    tab.stream.hold_through()
+
+    # -- windows' sockets (BR-1b, stream.py) ------------------------------------------------
+
+    def _submit(self, coro) -> None:
+        """Run `coro` on the Browser's thread without waiting for it; an
+        error is logged by its type only."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            coro.close()
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            coro.close()
+            return
+
+        def done(f):
+            if not f.cancelled() and f.exception() is not None:
+                LOG.warning("Browser stream work failed: %s", type(f.exception()).__name__)
+        future.add_done_callback(done)
+
+    def _wake(self, tab: _Tab) -> None:
+        loop = self._loop
+        if loop is not None and not loop.is_closed() and tab.wakeup is not None:
+            try:
+                loop.call_soon_threadsafe(tab.wakeup.set)
+            except RuntimeError:
+                pass
+
+    def require_tab(self, tab_id) -> _Tab:
+        """The tab, from any thread (404 in words)."""
+        if not self._running():
+            raise BrowserRefused(404, "no such tab")
+        return self._tab(tab_id)
+
+    def ticket(self, tab_id) -> dict:
+        tab = self.require_tab(tab_id)
+        return {"ticket": self.tickets.mint(tab.id), "expires_in": int(TICKET_TTL_S)}
+
+    def _attached_event(self, tab_id: str) -> None:
+        """`browser_attached`: the tab's id and the time, never a URL, so the
+        HUD can tell an attach that was not its own (`terminal_attached`'s
+        rule)."""
+        daemon = self._daemon
+        bus = getattr(daemon, "bus", None)
+        if bus is None:
+            return
+        try:
+            from ..model import utcnow
+            bus.publish({"kind": "browser_attached", "data": {"tab_id": tab_id, "at": utcnow()}})
+        except Exception as exc:  # noqa: BLE001 - a bus problem never ends a session
+            LOG.warning("browser tab %s: attach not published (%s)", tab_id, type(exc).__name__)
+
+    def serve_socket(self, tab_id: str, sock) -> None:
+        """A window's socket for one tab, read on the calling (HTTP handler)
+        thread until it closes."""
+        tab = self._tabs.get(tab_id)
+        if tab is None or tab.stream is None or not self._running():
+            from .. import ws
+            sock.send_text(json.dumps({"t": "refused", "reason": "no such tab"}))
+            sock.close(ws.POLICY, "refused")
+            sock.wait_closed(ws.CLOSE_WAIT_S + 0.5)
+            sock.abort()
+            return
+        row = {"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx, "opener": tab.opener}
+
+        def attached():
+            LOG.info("browser tab %s attached", tab.id)
+            self._attached_event(tab.id)
+            self._submit(self._on_attached(tab))
+
+        _serve_stream(tab.stream, sock, tab_row=row, on_attached=attached,
+                      on_detached=lambda: self._submit(self._on_detached(tab)),
+                      handle=lambda s, msg: self._handle(tab, s, msg))
+
+    def _handle(self, tab: _Tab, sock, msg) -> None:
+        """One valid message from the tab's window (the reader thread)."""
+        stream = tab.stream
+        t = msg.t
+        if msg.input:
+            stream.enqueue(sock, msg)
+        elif t == "dialog":
+            if self.input_held():
+                stream.hold_through()
+                return
+            stream.owner_input()
+            self._submit(self._close_dialog(tab, msg.fields["id"],
+                                            (msg.fields["accept"], msg.fields["text"]), "owner"))
+        elif t == "ack":
+            stream.ack(sock, msg.fields["id"])
+        elif t == "resize":
+            stream.viewport = (msg.fields["width"], msg.fields["height"], msg.fields["scale"])
+            self._submit(self._set_viewport(tab))
+        elif t == "visible":
+            if stream.set_visible(sock, msg.fields["visible"]):
+                self._submit(self._sync_screencast(tab))
+        elif t == "takeover":
+            stream.answer_takeover(sock, msg)
+        elif t == "resume":
+            # Resume Jarvis is refused under a card, as its button is (§B.9).
+            if self.input_held():
+                stream.send_to(sock, {"t": "held"})
+            else:
+                stream.resume()
+        elif t == "stop":
+            stream.pause("stop")
+        elif t == "selection":
+            self._submit(self._selection(tab, stream.gen))
+        elif t == "ping":
+            stream.send_to(sock, {"t": "pong"})
+
+    async def _on_attached(self, tab: _Tab) -> None:
+        await self._ensure_cdp(tab)
+        if tab.pump is None:
+            tab.pump = asyncio.ensure_future(self._pump(tab))
+        if tab.location is None:
+            self._located(tab, url=tab.page.url)
+            await self._titled(tab)
+        await self._sync_screencast(tab)
+
+    async def _on_detached(self, tab: _Tab) -> None:
+        await self._sync_screencast(tab)
+        # A press a dropped socket cut off is let go off the page, never as a
+        # click (BR-2's HeldButtons rule) — unless a card is up: then nothing
+        # reaches the page, and the next input carries the buttons' state.
+        if tab.pressed and tab.stream.attached() is None and not self.input_held():
+            await self._release_pressed(tab)
+
+    async def _ensure_cdp(self, tab: _Tab):
+        if tab.cdp is not None:
+            return tab.cdp
+        async with tab.cdp_lock:
+            if tab.cdp is None and self._tabs.get(tab.id) is tab:
+                cdp = await tab.page.context.new_cdp_session(tab.page)
+                cdp.on("Page.screencastFrame", lambda params: self._frame(tab, cdp, params))
+                cdp.on("Security.visibleSecurityStateChanged", lambda params: self._secured(tab, params))
+                try:
+                    await cdp.send("Security.enable")
+                except Exception:  # noqa: BLE001 - the security state is a courtesy
+                    pass
+                tab.cdp = cdp
+        return tab.cdp
+
+    def _secured(self, tab: _Tab, params) -> None:
+        state = ((params or {}).get("visibleSecurityState") or {}).get("securityState")
+        if isinstance(state, str) and len(state) <= 32 and state != tab.security:
+            tab.security = state
+            self._located(tab, force=True)
+
+    # -- frames ----------------------------------------------------------------------------
+
+    def _view(self, tab: _Tab) -> tuple[int, int, float]:
+        return tab.stream.viewport or DEFAULT_VIEW
+
+    async def _sync_screencast(self, tab: _Tab) -> None:
+        """Start, restart (a new size) or stop the tab's screencast to match
+        whether a window streams it: a tab nobody shows sends nothing."""
+        cdp = tab.cdp
+        if cdp is None:
+            return
+        async with tab.cast_lock:
+            want = tab.stream.streaming() and self._tabs.get(tab.id) is tab
+            width, height, scale = self._view(tab)
+            size = (round(width * scale), round(height * scale))
+            try:
+                if tab.casting is not None and (not want or tab.casting != size):
+                    tab.casting = None
+                    tab.stream.forget_picture()
+                    await cdp.send("Page.stopScreencast")
+                if want and tab.casting is None:
+                    await cdp.send("Page.startScreencast", {
+                        "format": "jpeg", "quality": JPEG_QUALITY, "everyNthFrame": 1,
+                        "maxWidth": size[0], "maxHeight": size[1]})
+                    tab.casting = size
+            except Exception as exc:  # noqa: BLE001 - a closed page has nothing to stream
+                LOG.info("browser tab %s: screencast not changed (%s)", tab.id, type(exc).__name__)
+
+    async def _set_viewport(self, tab: _Tab) -> None:
+        """The window's canvas size at its DPR × the HUD's zoom (BR-2's
+        `viewportFor`), so frames map one to one onto its pixels."""
+        cdp = await self._ensure_cdp(tab)
+        if cdp is None:
+            return
+        width, height, scale = self._view(tab)
+        try:
+            await cdp.send("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": scale, "mobile": False})
+        except Exception as exc:  # noqa: BLE001
+            LOG.info("browser tab %s: viewport not changed (%s)", tab.id, type(exc).__name__)
+            return
+        await self._sync_screencast(tab)
+
+    def _frame(self, tab: _Tab, cdp, params) -> None:
+        """A screencast frame: acked to Chrome at once (it keeps capturing;
+        the window's own acks decide what is sent), then offered to the
+        stream, which keeps only the newest waiting one."""
+        params = params or {}
+        session_id = params.get("sessionId")
+        if session_id is not None:
+            asyncio.ensure_future(self._quietly(cdp.send("Page.screencastFrameAck",
+                                                         {"sessionId": session_id})))
+        data = params.get("data")
+        if not isinstance(data, str) or tab.stream is None:
+            return
+        try:
+            jpeg = base64.b64decode(data, validate=True)
+        except ValueError:
+            return
+        meta = params.get("metadata") or {}
+
+        def size(name):
+            value = meta.get(name)
+            return round(value) if isinstance(value, (int, float)) and value == value else 0
+
+        tab.stream.offer_frame(jpeg, size("deviceWidth"), size("deviceHeight"))
+
+    # -- input -------------------------------------------------------------------------------
+
+    async def _pump(self, tab: _Tab) -> None:
+        """The tab's input, one CDP event at a time, in order. The hold is
+        asked again immediately before each event is sent (amendment H3,
+        "between every CDP event"); a hold drops what is queued too, and
+        nothing dropped is ever sent later."""
+        stream = tab.stream
+        while True:
+            await tab.wakeup.wait()
+            tab.wakeup.clear()
+            while True:
+                item = stream.take()
+                if item is None:
+                    break
+                seq, gen, msg = item
+                if self.input_held():
+                    stream.hold_through()
+                    continue
+                if not stream.deliverable(seq, gen):
+                    continue
+                await self._deliver(tab, msg.method, msg.params)
+
+    @staticmethod
+    def _let_go(params: dict) -> dict:
+        """A pointer move with no button down: Blink's own reset for a press
+        whose release it never got (it drops the press and its capture, and
+        dispatches no `mouseup` and no `click`)."""
+        return {"type": "mouseMoved", "x": params.get("x", -1), "y": params.get("y", -1),
+                "modifiers": 0, "button": "none", "buttons": 0, "clickCount": 0,
+                "pointerType": "mouse"}
+
+    async def _deliver(self, tab: _Tab, method: str, params: dict) -> None:
+        cdp = await self._ensure_cdp(tab)
+        if cdp is None:
+            return
+        mouse = method == "Input.dispatchMouseEvent"
+        button = params.get("button") if mouse else None
+        if mouse and params["type"] == "mouseReleased" and button in tab.pressed:
+            # **A press a card cut off is never a click** (BR-2's HeldButtons
+            # rule, made the daemon's): its release, and any release off the
+            # page (BR-2's OFF_PAGE), is turned into a let-go. Chrome fires
+            # `click` on the common ancestor of the press and the release —
+            # `<html>` for a release at (-1, -1) — whatever `clickCount` says
+            # (measured, Chrome 155), so a real release there is a click.
+            if tab.pressed[button] != tab.stream.hold_count or params["x"] < 0 or params["y"] < 0:
+                del tab.pressed[button]
+                params = self._let_go(params)
+        # Not cancelled on a timeout: an event blocked behind the page (an
+        # `alert()` the click opened) still lands; the next one is not
+        # held up past DELIVER_WAIT_S.
+        task = asyncio.ensure_future(cdp.send(method, params))
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        await asyncio.wait({task}, timeout=DELIVER_WAIT_S)
+        if mouse and button not in (None, "none"):
+            if params["type"] == "mousePressed":
+                tab.pressed[button] = tab.stream.hold_count
+            elif params["type"] == "mouseReleased":
+                tab.pressed.pop(button, None)
+
+    async def _release_pressed(self, tab: _Tab) -> None:
+        """Let go of every button the page holds, never as a click."""
+        tab.pressed.clear()
+        await self._deliver(tab, "Input.dispatchMouseEvent", self._let_go({}))
+
+    async def _selection(self, tab: _Tab, gen: int) -> None:
+        """Ctrl+C: the page's selection, read in an isolated world (§8.7)."""
+        cdp = await self._ensure_cdp(tab)
+        text = ""
+        try:
+            tree = await cdp.send("Page.getFrameTree")
+            world = await cdp.send("Page.createIsolatedWorld", {
+                "frameId": tree["frameTree"]["frame"]["id"], "worldName": "jarvis-copy"})
+            result = await cdp.send("Runtime.evaluate", {
+                "expression": SELECTION_JS, "contextId": world["executionContextId"],
+                "returnByValue": True})
+            value = (result.get("result") or {}).get("value")
+            text = value[:SELECTION_MAX] if isinstance(value, str) else ""
+        except Exception as exc:  # noqa: BLE001
+            LOG.info("browser tab %s: selection not read (%s)", tab.id, type(exc).__name__)
+        tab.stream.send({"t": "selection", "text": text}, gen=gen)
+
+    # -- dialogs and file choosers ---------------------------------------------------------------
+
+    def _dialog(self, tab: _Tab, dialog) -> None:
+        """alert, confirm, prompt or beforeunload: told to the tab's window
+        and answered by it, or dismissed after DIALOG_TIMEOUT_S. With no
+        window showing the tab, nobody could answer: dismissed at once."""
+        if tab.stream is None or tab.stream.attached() is None:
+            asyncio.ensure_future(self._quietly(dialog.dismiss()))
+            return
+        dialog_id = self._new_id(tab.dialogs)
+        tab.dialogs[dialog_id] = dialog
+        kind = dialog.type if dialog.type in DIALOG_KINDS else "alert"
+        tab.stream.remember(f"dialog:{dialog_id}", {
+            "t": "dialog", "id": dialog_id, "kind": kind,
+            "message": _clean(dialog.message, DIALOG_TEXT_CAP),
+            "default": _clean(dialog.default_value, DIALOG_TEXT_CAP) if kind == "prompt" else ""})
+        tab.timers[dialog_id] = asyncio.get_running_loop().call_later(
+            DIALOG_TIMEOUT_S, lambda: asyncio.ensure_future(self._close_dialog(tab, dialog_id, None, "timeout")))
+
+    async def _close_dialog(self, tab: _Tab, dialog_id: str, answer, by: str) -> None:
+        if by == "owner" and self.input_held():
+            tab.stream.hold_through()
+            return
+        dialog = tab.dialogs.pop(dialog_id, None)
+        if dialog is None:
+            return
+        timer = tab.timers.pop(dialog_id, None)
+        if timer is not None:
+            timer.cancel()
+        tab.stream.remember(f"dialog:{dialog_id}", None)
+        try:
+            if answer is not None and answer[0]:
+                if dialog.type == "prompt":
+                    await dialog.accept(answer[1] or "")
+                else:
+                    await dialog.accept()
+            else:
+                await dialog.dismiss()
+        except Exception:  # noqa: BLE001 - a page that went away has no dialog
+            pass
+        tab.stream.send({"t": "dialog_closed", "id": dialog_id, "by": by})
+
+    def _chooser(self, tab: _Tab, chooser) -> None:
+        """A page asked for files: the tab's window is told, and only the
+        owner-only files route answers (`set_files`). Unanswered, nothing
+        is uploaded."""
+        if tab.stream is None or tab.stream.attached() is None:
+            return
+        chooser_id = secrets.token_hex(4)
+        tab.chooser = (chooser_id, chooser, asyncio.get_running_loop().time())
+        try:
+            multiple = bool(chooser.is_multiple())
+        except Exception:  # noqa: BLE001
+            multiple = False
+        tab.stream.remember("chooser", {"t": "filechooser", "id": chooser_id, "multiple": multiple})
+
+    def set_files(self, tab_id, chooser_id, payloads: list[dict]) -> dict:
+        """Answer the tab's open file chooser with files the owner chose
+        (`files.upload_payloads` judged them); an empty list cancels."""
+        if not self._running():
+            raise BrowserRefused(404, "no such tab")
+        self._refuse_if_held()
+        return self._call(self._set_files(tab_id, chooser_id, payloads), CALL_TIMEOUT_S)
+
+    async def _set_files(self, tab_id, chooser_id, payloads) -> dict:
+        tab = self._tab(tab_id)
+        entry = tab.chooser
+        loop = asyncio.get_running_loop()
+        if entry is None or entry[0] != chooser_id or loop.time() - entry[2] > CHOOSER_TTL_S:
+            raise BrowserRefused(409, "that file chooser is no longer open")
+        self._refuse_if_held()
+        tab.chooser = None
+        tab.stream.remember("chooser", None)
+        tab.stream.owner_input()
+        if payloads:
+            chooser = entry[1]
+            if not chooser.is_multiple() and len(payloads) > 1:
+                raise BrowserRefused(400, "this file chooser takes one file")
+            await chooser.set_files(payloads, timeout=CALL_TIMEOUT_S * 1000)
+        tab.stream.send({"t": "filechooser_closed", "id": chooser_id, "files": len(payloads)})
+        return {"tab_id": tab.id, "chooser": chooser_id, "files": len(payloads)}
+
+    # -- downloads -------------------------------------------------------------------------------
+
+    async def _download(self, tab: _Tab, download) -> None:
+        """A download is saved where only the owner reaches it (files.py) and
+        its tab's window told; an executable one is held."""
+        profile = PRIVATE if tab.profile == PRIVATE else tab.profile
+        name = _files.clean_name(getattr(download, "suggested_filename", ""))
+        download_id = secrets.token_hex(4)
+        with self._lock:
+            self._downloading += 1
+        notice = {"t": "download", "id": download_id, "name": name}
+        tab.stream.send({**notice, "state": "started"})
+        try:
+            source = await download.path()
+            row = await asyncio.get_running_loop().run_in_executor(
+                None, _files.save, str(source), profile, name, download_id)
+        except Exception as exc:  # noqa: BLE001 - a failed or cancelled download
+            LOG.info("Browser download failed (%s)", type(exc).__name__)
+            tab.stream.send({**notice, "state": "failed"})
+            return
+        finally:
+            with self._lock:
+                self._downloading -= 1
+            await self._quietly(download.delete())
+        LOG.info("Browser saved a download%s", " (held: executable)" if row["held"] else "")
+        tab.stream.send({"t": "download", "id": row["id"], "name": row["name"], "size": row["size"],
+                         "state": "held" if row["held"] else "done", "held": row["held"]})
+
+    def downloads(self) -> dict:
+        rows = _files.listing()
+        with self._lock:
+            live = self._downloading
+        return {"downloads": rows, "in_progress": live}
+
+    # -- tabs ------------------------------------------------------------------------------------
+
+    def activate(self, tab_id) -> dict:
+        """Switch to a tab: brought to the front in its Chrome."""
+        if not self._running():
+            raise BrowserRefused(404, "no such tab")
+        return self._call(self._activate(tab_id), CLOSE_TIMEOUT_S + 5)
+
+    async def _activate(self, tab_id) -> dict:
+        tab = self._tab(tab_id)
+        await asyncio.wait_for(tab.page.bring_to_front(), CLOSE_TIMEOUT_S)
+        return {"tab_id": tab.id, "active": True}
+
+    # -- the agent channel (amendment §B.9; BR-9b drives it) ------------------------------------
+
+    def owner_state(self, tab_id) -> dict:
+        """What BR-9b's gate reads (H3, H4): the hold, whether the owner
+        paused the tab, and how long since the owner's last input to it."""
+        tab = self.require_tab(tab_id)
+        return {**tab.stream.owner_state(), "held": self.input_held()}
+
     # -- status -------------------------------------------------------------------------
 
     def _publish_snapshot(self) -> None:
@@ -1040,11 +1676,18 @@ class BrowserHost:
             running = self._started and not self._stopped
             guarded = self._guarded
             opened = len(self._opened_ports)
+            downloading = self._downloading
+            popups_refused = self._popups_refused
         gate = self._gate.stats() if self._gate is not None and running else None
         settings = load_settings()
+        streams = sum(1 for t in list(self._tabs.values())
+                      if t.stream is not None and t.stream.attached() is not None)
         return {"available": CHROME_PATH.exists(), "running": running,
                 "version": snapshot.get("version"), "instances": snapshot["instances"],
                 "tabs": snapshot["tabs"], "tab_cap": max(1, config.BROWSER_TAB_CAP),
                 "lan": settings["lan"], "local_servers": settings["local_servers"],
                 # How many loopback ports the owner opened — never which.
-                "loopback_opened": opened, "landing_guard": guarded, "gate": gate}
+                "loopback_opened": opened, "landing_guard": guarded, "gate": gate,
+                # BR-1b: counts only — windows streaming a tab, downloads under
+                # way, pop-ups refused past the cap.
+                "streams": streams, "downloading": downloading, "popups_refused": popups_refused}
