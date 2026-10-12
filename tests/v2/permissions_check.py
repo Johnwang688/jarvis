@@ -1390,8 +1390,30 @@ RUNNER_V2_DENY = (
     "npm exec -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
     "bun exec 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
     "npm exec -c 'cp /tmp/x .env.production'",
+    # The delta review of PR #75 (1723b53): H-A, a memo keyed without its
+    # segment; H-B, a wrapper's own output file; M-A, a named output behind
+    # find -exec; M-B, shells outside the lists and an unknown program's -c;
+    # LOW, owner ops behind find, fd and parallel.
+    "uv run sh <<< 'true' ; uv run sh <<< 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "npm exec -- bash <<< 'true' && npm exec -- bash <<< 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "time -o ~/.config/jarvis/allowlist.json -f x true", "time --output=~/.config/jarvis/allowlist.json true",
+    "env time -o~/.config/jarvis/allowlist.json true", "script ~/.config/jarvis/allowlist.json",
+    "systemd-run --user -p StandardOutput=file:/tmp/../tmp/x -p StandardError=file:"
+    "~/.config/jarvis/allowlist.json true",
+    "find /tmp/x -maxdepth 0 -exec sort -o ~/.config/jarvis/allowlist.json {} \\;",
+    "find /tmp/x -maxdepth 0 -exec sed -n 'w ~/.config/jarvis/allowlist.json' {} \\;",
+    "uv run tcsh -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'", "npx nu -c 'jarvis restart'",
+    "uv run myshell -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "npx zx -e 'jarvis hud install'", "find . -exec jarvis restart \\;", "fd -x jarvis restart",
+    "parallel jarvis ::: restart", "csh -c 'jarvis restart'",
 )
 RUNNER_V2_ALWAYS_ASK = (
+    # H-B: a wrapper's option value is a path again for the credential-folder
+    # rule (`credentials-path` read only the unwrapped command's words).
+    ("time -o ~/.ssh/notes true", "credentials-path"),
+    ("time --output=~/.aws/notes true", "credentials-path"),
+    ("time -o~/.gnupg/notes true", "credentials-path"), ("env -C ~/.ssh ls", "credentials-path"),
+    ("script -c true ~/.ssh/session.log", "credentials-path"),
     ("npx vercel --prod", "vercel-prod"), ("npx vercel deploy --prod", "vercel-prod"),
     ("pnpm dlx vercel --prod", "vercel-prod"), ("npm exec -c 'vercel --prod'", "vercel-prod"),
     ("uv run git push --force origin topic", "git-push-force"),
@@ -1446,7 +1468,9 @@ def runner_checks():
         for line in ("npx --x " * 60 + "rm -rf ~/x", "pnpm --x exec " * 40 + "rm -rf ~/x",
                      "nohup " * 13 + "rm -rf build",
                      # past `decide`'s budget alone: only `runners_unsure` asks it
-                     "uv run --x y --x y " * 2 + "w " * 2000 + "jarvis restart"):
+                     "uv run --x y --x y " * 2 + "w " * 2000 + "jarvis restart",
+                     # a NUL byte (delta review of PR #75, LOW): never a ValueError
+                     "rm a\x00b", "nohup rm\x00 -rf build"):
             asker = Asker(Decision.DENY)
             permit = build_permit(context(brief), asker)
             eq(permit(*bash(line), brief), Decision.DENY, f"too complex: the owner's no holds ({line[:24]}…)")

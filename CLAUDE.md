@@ -3011,7 +3011,16 @@ times took 139 s in the gate detector, and a thousand nested runners raised
 exec-only option no longer hides a write behind it), the table's reading of
 wrapper options in `rules.unwrap` itself (`env -u ls rm -rf build` ran in
 `run_readonly` on main), writers/shells/interpreters behind a runner asked,
-yarn workspaces and corepack in the table. Free checks: `rules_check`
+yarn workspaces and corepack in the table. **The delta review of #75**
+(1723b53) found two writes onto the allowlist that ran unasked and fixed
+them: the gate detector's memo is keyed on the segment's whole text (H-A,
+a here-string behind `uv run sh` judged as the one before it), and a
+wrapper's own output file is a write (H-B, `time -o`, `script`,
+`systemd-run -p StandardOutput=file:`); also a find `-exec` program's named
+outputs (M-A), one list of shells and an unknown program's `-c` string
+judged as a line (M-B), owner ops behind find/fd/parallel, and a NUL byte
+asked rather than raised. `rules_check` `delta_review_75_checks` holds every
+shape. Free checks: `rules_check`
 `runner_checks` (25 refused by `decide`, 11 gate writes refused, 60 asked
 that main allowed, 41 of main's verdicts kept — through `decide`,
 `static_verdict` and real `dispatch` under an allowlist entry for every
@@ -5301,7 +5310,28 @@ jarvis/
     program cannot be told (`rules.unwrap_sure` is None: an unknown option,
     `env -S` past its bound) is neither run by `run_readonly` nor covered by
     an entry, and `run_readonly` refuses `xargs` outright (its `-a FILE`
-    names programs' arguments no check sees);
+    names programs' arguments no check sees). **A wrapper's own output file
+    is a write** (delta review of #75, H-B: once `-o`'s value was an option
+    value, `time -o <allowlist> -f '<entries>' true` ran unasked):
+    `_Opts.writes` names the options whose value it writes, `starts()` hands
+    their values back (`Started.writes`, glued, `=` and getopt_long's unique
+    prefixes too), and they are judged as `tee FILE` is — DENY onto the
+    allowlist or a credential env file, ASK onto the other gate files, ASK in
+    `decide` anyway, refused by `run_readonly`, matched by v2's
+    `credentials-path`. The audit of the table, each from its own `--help`:
+    **writers** are GNU time (`-o`/`--output`), util-linux script (its file
+    operand, `-I`/`-O`/`-B`/`-T`, `--log-*`, `-t[FILE]`/`--timing=FILE`) and
+    systemd-run (`-p StandardOutput=`/`StandardError=file:|append:|
+    truncate:PATH`); **not writers** are env (`-f` reads), xargs (`-a`
+    reads), stdbuf (`-o` is a mode), nohup (only a fixed `nohup.out`), flock
+    (opens its lock file read-only, may create it empty), timeout, nice,
+    ionice, setsid, chronic, exec, command, watch, busybox, and the runners
+    (cache folders and files they read);
+  - **three classes, not two**: a *wrapper* runs its operand (judged as what
+    it runs), a *runner* starts a program (keeps its own verdict unless that
+    program asks for a reason of its own), and **`command -v X` runs
+    nothing** — it looks X up, so `starts()` answers that it starts nothing,
+    and `unwrap` judges it as `X` for the allowlist, as ever;
   - a **runner** keeps its own verdict unless what it starts is refused or
     asks **for a reason of its own** (`rm`, `git push`, `python -c`, a reader
     in a writing form, Jarvis's CLI, and — MED 1 of the review — any writer,
@@ -5312,7 +5342,23 @@ jarvis/
     the identity-compared verdict for "unknown");
   - a **command line** a runner hands a shell (`npm exec -c`/`--call`, `bun
     exec`, pnpm's shell mode) is judged as a line by the same rule
-    (`_line_verdict`);
+    (`_line_verdict`); so is the string a program no table knows is handed
+    with `-c`, `-e` or `--command` behind a wrapper or runner (delta review
+    of #75, M-B: it may be a shell this check does not know), in `decide`,
+    the gate-state detector and the owner-op detector — an owner op or a gate
+    write in it is DENY. A one-word value naming no known program is a value
+    (`npx prettier -c src/`, `npx webpack -c webpack.config.js` keep main's
+    ALLOW). **`rules.SHELLS` is the one list of shells** — `rbash`, `ksh93`,
+    `lksh`, `oksh`, `mksh`, `posh`, `sash`, `yash`, `csh`, `tcsh`, `fish`,
+    `nu`, `xonsh`, `elvish`, `ion`, `osh` and `ysh` beside `sh`/`bash`/`zsh`/
+    `dash`/`ksh`/`ash` — read by the inline-source rule, the vex walk,
+    `protected_state._SHELLS` and `terminal_guard.SHELLS` (`secrets` spells
+    it out and `rules_check` holds the two equal); fish's `--command` and
+    nu's `--commands` are its string too;
+  - **find, fd and parallel run a command too**: an owner op behind `find
+    -exec`/`-ok`, `fd -x`/`-X` or `parallel` (every word that is not an
+    option tried as the command, its input appended) is DENY, as behind a
+    runner (delta review of #75, LOW);
   - a program word only known when it runs (`uv run ${CC}foo`), or an option
     the table does not know that leaves the program unclear (`uv run
     --frobnicate x pytest`), **asks, never allows**.
@@ -5333,7 +5379,12 @@ jarvis/
   walk costs its words, judging a reading costs its words; nested scopes
   share the outermost, so `decide`'s owner ops and gate-state reading spend
   the same one), each reading is judged once (`_Work.memo`, the gate
-  detector's `walked`, the vex walk's `seen`), `starts()` refuses more than
+  detector's `walked`, the vex walk's `seen`) — **a memo is keyed on every
+  input its reading takes**: the gate detector's on the segment's whole text
+  (delta review of #75, H-A: keyed on the program alone, `uv run sh <<<
+  'true' ; uv run sh <<< '<a write onto the allowlist>'` judged the second as
+  the first, and ran unasked under a `uv` entry), `decide`'s on the
+  redirections' targets too, the vex walk's on the here-strings — `starts()` refuses more than
   `STARTS_READINGS` (32) places, the vex walk passes `depth + 1` per wrapper
   or runner (L1: a thousand nested `npx`, `uv run`, `env` or `nohup` raised
   `RecursionError` out of `decide`, on main as on 16675fb) and has its own
@@ -5345,13 +5396,25 @@ jarvis/
   reads), always-ask in v2 (`too-complex`, or the gate detector's opaque
   touch). `cost_checks` judges 42 runner and wrapper forms nested 60 and
   1,000 deep, and four wide ones, through seven readers in under 100 ms
-  each. Differential (review round, the reviewer's harness over 37,011
-  strings: every gate layer, `run_readonly` and v2's layers 1 and 2) — every
-  verdict looser than main or than 16675fb is one of the by-design reads: a
-  wrapper option's value no longer read as the program (`env -u FOO pytest`
-  is ALLOW, `env -u FOO cat README.md` runs in `run_readonly`), or a reader
-  that only reads a gate file (below); no write onto a gate file or a
-  credential env file is looser than main.
+  each. A NUL byte is too complex to judge as well — asked, never covered,
+  never a `ValueError` out of `static_verdict` — and `run_readonly` refuses
+  it. Differential (the reviewers' harness — `decide`, `static_verdict`,
+  `command_verdict`, `command_touch`, the owner-op detector, `allows`,
+  `run_readonly` and v2's layers 1 and 2 — over 37,011 strings, the delta
+  review's 34,399 and its nine generated sets): every verdict looser than
+  main is one of two by-design classes — a wrapper option's value no longer
+  read as the program (`env -u FOO pytest` is ALLOW, `env -u FOO cat
+  README.md` runs in `run_readonly`), or a reader hazard that does not write
+  (below). **How "no write onto a gate file is looser than main" was
+  checked**: every line whose verdict loosened at any layer and that names a
+  gate file or a credential env file was listed and read; each is a read —
+  `cat`/`grep`/`sort -o out.txt`/`rg --pre`/`less --save-marks`/`date -s`/
+  `hostname`/`env -f` of the file, or a `find -exec` reader of it — and the
+  `.env` reads among them are still refused by the secrets layer in
+  `run_command`, `run_readonly` and v2's layer 1 (checked in-process). The
+  first round's claim was not true at 1723b53: `time -o <G>` (H-B) and the
+  memo (H-A) were writes that ran unasked; both are DENY now, with every
+  shape of the delta review in `rules_check` `delta_review_75_checks`.
 
   **A reader hazard is a certain write only of what it writes** (same day,
   PR #24's follow-up 1). Any hazard used to make every operand a certain
@@ -5372,7 +5435,12 @@ jarvis/
   allowlist from DENY to ASK, run on a yes). A find's `-exec`/`-ok` program
   is judged through the table (`_execs_a_writer`): `-exec env|nohup|timeout
   5|uv run|xargs rm`, `-exec sed -i`, `-exec sort -o {}` and any program not
-  known only to read write what they are handed. `sed -i 'w <G>'` keeps both
+  known only to read write what they are handed, **and the named outputs of
+  the program `-exec` runs are find's provable writes** (delta review of #75,
+  M-A: `-exec sort -o <G> {} \;`, `-exec tree -o <G>`, `-exec xxd {} <G>`,
+  `-exec sed -n 'w <G>' {}` — the last ran unasked — and the same behind
+  `env`, `nohup` or `uv run` were DENY on main and only asked at 1723b53;
+  `_exec_effects`). `sed -i 'w <G>'` keeps both
   its in-place edit and the `w` file (LOW 3). The loosenings the
   differential found are reads: `find . -name .env -exec cat {} \;` and
   `find . -name '.env*' -exec grep KEY {} +` were DENY as "writes onto a
