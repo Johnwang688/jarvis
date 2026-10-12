@@ -83,8 +83,13 @@ export function EditorStatus(props: { view: BufferView; editor: any | null }) {
         </span>
       ) : null}
       <span data-testid="status-state" className={v.dirty ? "warnish" : undefined}>{state}</span>
-      {/* A write on its way (a slow disk: /mnt/c), or a second Ctrl+S waiting for it (ED-2). */}
-      {v.saving ? <span data-testid="editor-saving" role="status">saving…</span> : null}
+      {/* The registry's save state (ED-2): a write on its way (a slow disk: /mnt/c),
+          and a second Ctrl+S waiting for it — the one follow-up save. */}
+      {v.saving ? (
+        <span data-testid="editor-saving" role="status" data-queued={String(!!v.queued)}>
+          {v.queued ? "saving… then again" : "saving…"}
+        </span>
+      ) : null}
       <span className="grow" />
       {indent ? <span data-testid="status-indent">{indent}</span> : null}
       <span data-testid="status-enc">{v.encoding === "utf-8-bom" ? "UTF-8 with BOM" : v.encoding ? "UTF-8" : "not text"}</span>

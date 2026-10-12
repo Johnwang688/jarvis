@@ -396,6 +396,19 @@ class Fs(Nav):
         self.assertFalse((repo / "hud" / "dist" / "evil.js").exists())
         self.fs("delete", "jarvis/other.py", url=url)  # an ordinary file beside them
 
+    def test_a_folder_holding_the_hud_install_root_past_the_walk(self):
+        # The walk never enters SKIP_DIRS; the absolute anchors still see what
+        # sits below one: the HUD install root here.
+        holder = self.home / "tools"
+        hud = holder / "node_modules" / "hud-install"
+        hud.mkdir(parents=True)
+        (hud / "index.html").write_text("<title>x</title>")
+        (holder / "readme.txt").write_text("r\n")
+        with patch.object(config, "HUD_DIR", hud):
+            self.fs("delete", "tools", status=403)
+            self.fs("rename", "tools", "tools2", status=403)
+        self.assertTrue((hud / "index.html").exists())
+
     def test_a_dirty_name_on_a_windows_drive(self):
         project = self.daemon.stores.projects.create("Win", str(self.home))
         project.root = "/mnt/c/Users/x/Robotics"

@@ -159,6 +159,8 @@ export interface BufferView {
   eol: string | null;
   dirty: boolean;
   saving: boolean;
+  /** A second Ctrl+S waits for the write that is out (ED-2's one follow-up): the status bar says so (ED-7). */
+  queued: boolean;
   conflict: Conflict | null;
   refs: string[];
   language: string | null;
@@ -345,7 +347,7 @@ export class Buffers {
       // Saving while a write is out *or* a second Ctrl+S waits for one: the
       // tab and the status say "saving…" until the last of them answers.
       encoding: b.encoding, eol: b.eol, dirty: this.dirtyOf(b), saving: b.saving || !!b.again,
-      conflict: b.conflict,
+      queued: !!b.again, conflict: b.conflict,
       refs: [...b.refs], language: b.model?.getLanguageId?.() ?? null,
       modelEol: b.model?.getEOL ? (b.model.getEOL() === "\r\n" ? "CRLF" : "LF") : null,
     };

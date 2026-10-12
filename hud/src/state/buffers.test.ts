@@ -874,3 +874,24 @@ describe("the delta review of PR #49 (each failing on 62fc44d)", () => {
     }
   });
 });
+
+describe("ED-7: the status bar reads the registry's save state", () => {
+  it("saving while a write is out; queued while a second Ctrl+S waits for it", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;
+    const first = b.save("/w/a.py");
+    expect(b.get("/w/a.py")!.saving).toBe(true);
+    expect(b.get("/w/a.py")!.queued).toBe(false);
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");
+    expect(b.get("/w/a.py")!.queued).toBe(true);
+    w.hold = false;
+    w.release();
+    await first;
+    w.release();
+    await second;
+    expect(b.get("/w/a.py")!.saving).toBe(false);
+    expect(b.get("/w/a.py")!.queued).toBe(false);
+  });
+});

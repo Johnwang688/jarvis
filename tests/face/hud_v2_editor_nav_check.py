@@ -77,7 +77,7 @@ def _ctrl_p_probe(page):
     }""")
 
 
-def nav_checks(browser, mock, base, check, until, guard, init_script):
+def nav_checks(browser, mock, base, check, until, guard, init_script, only: str = ""):
     print("\neditor navigation: quick open, palette, find in files, explorer, status bar (ED-7)")
     ctx = browser.new_context(viewport={"width": WIDE[0], "height": WIDE[1]}, permissions=["microphone"])
     guard(ctx)
@@ -93,6 +93,8 @@ def nav_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_quick_open_checks, _palette_checks, _search_checks, _explorer_checks,
                         _status_checks, _add_to_chat_checks, _card_checks):
+            if only and only not in section.__name__:
+                continue
             mock.world["tree"].clear()
             mock.world["tree"].update({k: [dict(e) for e in v] for k, v in keep_tree.items()})
             mock.world["kinds"].clear()
@@ -346,6 +348,20 @@ def _status_checks(page, mock, check, until):
     page.keyboard.type("z")
     check("an edit reads unsaved", bool(until(lambda: _status(page, 2, "status-state") == "● unsaved", timeout=3)))
     check("the indentation is said", _status(page, 2, "status-indent").startswith(("Spaces", "Tab")))
+    # The registry's save state: a slow write out, then a second Ctrl+S queued behind it.
+    mock.world["put_delays"] = [2.0]
+    try:
+        page.keyboard.press("Control+s")
+        saving = page.locator(_pane(2, '[data-testid="editor-saving"]'))
+        check("a slow save says saving…", bool(until(lambda: saving.count() == 1, timeout=1.5)))
+        page.keyboard.type("q")
+        page.keyboard.press("Control+s")
+        check("a second Ctrl+S meanwhile says it is queued",
+              bool(until(lambda: saving.count() == 1 and saving.get_attribute("data-queued") == "true", timeout=1.5)))
+        check("and both end saved", bool(until(lambda: saving.count() == 0
+                                               and _status(page, 2, "status-state") == "saved", timeout=8)))
+    finally:
+        mock.world.pop("put_delays", None)
 
 
 def _add_to_chat_checks(page, mock, check, until):
@@ -446,8 +462,10 @@ def main():
             browser = pw.chromium.launch(
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
+            # `ONLY=card` runs one section (a mutation round's quick way in).
+            import os
             nav_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
-                       v2.guard, v2.FAKE_RECOGNIZER)
+                       v2.guard, v2.FAKE_RECOGNIZER, os.environ.get("ONLY", ""))
             browser.close()
     finally:
         mock.stop()
