@@ -99,6 +99,8 @@ export interface State {
     // ED-7: quick open and the command palette. Pickers like the rest:
     // push-to-talk refuses and the mic claims nothing while one is open.
     | "quickOpen" | "palette"
+    // ED-8: the editor settings.
+    | "editorSettings"
     // VX-3: a new VEX project from the extension's templates.
     | "newVexProject";
   /** Archived projects' names, from `/archive`: `/projects` hides them, but
