@@ -1363,6 +1363,53 @@ on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
 
+**The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
+§B.9, §D.2, §G; the decisions file wins).** Four new files under `hud/src/lib/`,
+each with its vitest; **nothing imports them yet** — BR-3b (Remote mode),
+BR-4 (annotate), BR-8b (auto-open) and BR-9c (driving) wire them in.
+`remote.ts`: keys and the pointer to CDP `Input.dispatch*` shapes (**AltGr is
+the character it typed, never Ctrl+Alt**: `@` on a German layout arrives as
+Ctrl+Alt+@), `routeKeyDown` (held under a card and left to bubble, so Escape
+denies; the HUD's keys; the pane's own F5/Ctrl+R/Ctrl+L/Alt+←→; a paste is
+never a key, its text goes as `insertText`; copy and cut forwarded and
+marked), **`browserTakesKey`** — the page gets every key but Ctrl+D
+(push-to-talk), the zoom keys, Ctrl+Alt+1–8 (the plan's "Ctrl+Alt+N"), Ctrl+B,
+Ctrl+Alt+B and Ctrl+`; Ctrl+P, Ctrl+Shift+P, F1 and Ctrl+Shift+F are the
+page's, as Ctrl+P is the shell's; BR-3b owes it an exception in `useLayout`'s
+capture handler, beside `terminalTakesKey`'s — and **a lone modifier is never
+sent** (review of PR #66: push-to-talk's Ctrl, pressed before its D, reached the
+page and paused a driving agent; `modifiers` carries the state), `HeldKeys`
+and `HeldButtons` (a keyup only where its keydown went; nothing released under
+a card — they wait for `releaseAll(false)`; **a press a card cut off is let
+go off the page, never as a click**: a held-button move to `OFF_PAGE` (-1,-1),
+then the release there, every event `clickCount: 0` — released where it was
+pressed, Chrome would click what the owner never finished pressing),
+`pasteMessages` (`cleanPaste`, then ≤ 16 KiB per `{t:"text"}` once
+JSON-escaped, never between a CR and its LF), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
+16 Mpx), pointer positions **divided by the zoom** (`toCss`) before they are
+page points, wheel deltas (screen px ÷ zoom, lines 40 px, pages a viewport,
+Shift sideways, capped), a **generation-tagged, latest-only `FramePipe`** (a
+frame of an older socket, even one still decoding, is never drawn or acked)
+and `cleanTitle` (Cc/Cf/Zl/Zp, tags, variation selectors, U+034F and fillers out; one
+line, capped by code point). `drive.ts`: the daemon's `{t:"agent", kind:
+driver|action|paused|list}` frames (shapes proposed in its header for BR-1b),
+the banner (never Authorize/Approve/Deny), the newest 20 actions, the target's
+outline (a reattach's `driver` or running `list` restarts the banner), Resume
+refused under a card, and **`isTakeover`** (a pointer move is not, a drag is;
+a lone modifier and the socket's own messages never; an unknown kind of input
+is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
+offer | wait (under a card; 30 s) | skip (off, the WP-E judge
+`judgeBrowserUrl` or Jarvis's control ports, an origin already opened or shown, one per 10 s per terminal,
+three a minute); the query and fragment are dropped; a Browser pane already
+showing a page counts as busy. `annotate.ts`: the
+whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
+colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
+the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).
+**A trap found building it:** the Write tool decodes `\uXXXX` in what it
+writes, so a regex meant to name U+2028 held the character and stopped
+parsing; write `\u{…}`, or fix escapes afterwards with a script.
+
 **File reads as the editor, Preview is the Browser, BR-3a (2026-10-12; the
 owner: "also rename "File" to "Editor" and "Preview" to "Browser""; browser
 plan `docs/plans/2026-10-10-hud-browser-plan.md` §7, cut by amendment 1 to
