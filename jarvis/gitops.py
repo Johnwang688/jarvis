@@ -51,6 +51,27 @@ for git to run (`core.sshCommand`, a filter or textconv driver, `url.*.insteadOf
 tools/files.py), so such a config is either the owner's or something to look at
 by hand.
 
+**Submodules are other repositories, so git is kept out of them.** Inside a
+submodule git obeys *that* repository's config and attributes, not the one
+checked here: a plain `status` or `diff` runs `git status` inside each
+checked-out submodule (its clean filter ran, 2026-10-12), `log -p` under a
+`diff.submodule=diff` runs `git diff` there (its textconv ran — the
+`--no-textconv` pin does not reach that child), and fetch, push, switch and
+grep recurse when a config says so (a push published the submodule's commits
+to *its* remote, past the outgoing scan). Two layers. Every invocation is
+pinned out of submodules — recursion off, `diff.submodule=short`, and
+`--ignore-submodules=dirty` on the command line of the status and diff family
+(a `-c diff.ignoreSubmodules` is overridden by a `.gitmodules` `ignore =`,
+which the agent can write; the command line is not) — and the `-c` pins
+travel into any git that git itself starts (`GIT_CONFIG_PARAMETERS`), so a
+submodule's hooks and fsmonitor are off as well. And because some of git's
+own internals still go in whatever the pins say (`add -A`, `describe
+--dirty`, `rm` of a submodule, and — when `.gitmodules` sets `ignore` —
+commit's status, `stash apply`'s and checkout's change report), every
+checked-out submodule's own config is read like the superproject's, nested
+ones too, and a program-naming key there, or a submodule that cannot be
+read, refuses the repository.
+
 **And what is published is checked.** A commit whose changes name a protected
 credential file or carry a value from one is undone (`reset --soft`, nothing
 lost) before the tool returns, and a push is refused if anything outgoing does.
@@ -60,7 +81,9 @@ with a very large grammar, written to fail closed: an option it does not
 recognise as a value is judged as a flag, a form it cannot place is refused or
 reviewed, and the hardening above does not depend on the matching being right.
 What stays outside it: the owner's own global git configuration and credential
-helpers (which run on push and fetch), and `gh`, which lives in a user-writable
+helpers (which run on push and fetch) — including a filter the global config
+defines that a submodule's attributes name, which runs where git's internals
+still go into a submodule — and `gh`, which lives in a user-writable
 directory like everything else on PATH.
 
 This module is SELF_PROTECTED (tools/files.py): it decides what git runs
@@ -109,7 +132,52 @@ _HARDENING = (
     "-c", "gc.auto=0",                     # auto-gc prunes; the owner's runs still do
     "-c", "maintenance.auto=false",
     "-c", "rebase.updateRefs=false",       # would move other branches mid-rebase
+    # Submodules are other repositories with their own config (see the module
+    # docstring). Recursion off for every command that has it; no submodule
+    # summary (it runs `git log` inside each one); a submodule's diff shown as
+    # two commit ids, never by `git diff` run inside it; and the dirty check
+    # (`git status` inside it) off by default. These reach any git that git
+    # starts, but a `.gitmodules` `ignore =` overrides the last, so `_git`
+    # also puts `--ignore-submodules=dirty` on the command line where it is
+    # accepted (`_SUBMODULE_FLAGS`).
+    "-c", "submodule.recurse=false",
+    "-c", "fetch.recurseSubmodules=false",
+    "-c", "push.recurseSubmodules=no",
+    "-c", "status.submoduleSummary=false",
+    "-c", "diff.submodule=short",
+    "-c", "diff.ignoreSubmodules=dirty",
 )
+
+# Command-line options `_git` adds right after these subcommands. The status
+# and diff family otherwise run `git status` inside each checked-out submodule
+# to see whether it has local changes; `dirty` skips exactly that and still
+# reports a submodule whose commit moved. On the command line it also beats a
+# `submodule.<name>.ignore` in `.gitmodules`, which the `-c` pin does not
+# (measured). Fetch, pull and push get the recursion switch here as well as
+# in the pins. `judge()` refuses any caller option that would turn either back
+# on — the caller's tokens come after these, and the last one wins.
+_SUBMODULE_FLAGS: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(("status", "diff", "diff-files", "diff-index", "diff-tree", "log",
+                     "show", "whatchanged"), ("--ignore-submodules=dirty",)),
+    **dict.fromkeys(("fetch", "pull", "push"), ("--no-recurse-submodules",)),
+}
+
+
+def _with_submodule_flags(args) -> list[str]:
+    """`args` with `_SUBMODULE_FLAGS` added right after the subcommand. The
+    subcommand is the first word that is not a global option; `-c` and `-C`
+    take the word after them (callers pass `-c core.quotePath=false`)."""
+    args = list(args)
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in ("-c", "-C"):
+            i += 2
+        elif token.startswith("-"):
+            i += 1
+        else:
+            return [*args[:i + 1], *_SUBMODULE_FLAGS.get(token, ()), *args[i + 1:]]
+    return args
 
 _ENV_PINS = {
     "GIT_TERMINAL_PROMPT": "0",
@@ -139,6 +207,7 @@ class RepoContext:
     toplevel: Path = Path(".")
     common_dir: Path = Path(".")
     risky: str = ""                    # a repository config key that runs a program
+    submodule_risk: str = ""           # why a checked-out submodule makes git here unsafe
 
     @property
     def own(self) -> bool:
@@ -185,6 +254,30 @@ _PROGRAM_LONG = {
     "no-index": "reads files outside any repository",
 }
 _PROGRAM_EXACT_OK = frozenset({"text"})
+
+# Options that take git into a submodule or turn `_git`'s pins back off:
+# recursion on in any form (`--recurse-submodules[=…]`,
+# `--recurse-submodules-default`), a submodule shown by `git log` or
+# `git diff` run inside it (`--submodule=log|diff`), or a dirty check that
+# runs `git status` inside it (`--ignore-submodules=none|untracked`,
+# `--no-ignore-submodules`). Any long option naming a submodule is refused,
+# and every abbreviation of these, except the spellings that keep git out.
+_SUBMODULE_OPTIONS = ("submodule", "ignore-submodules", "no-ignore-submodules",
+                      "recurse-submodules", "recurse-submodules-default",
+                      "no-recurse-submodules")
+_SUBMODULE_OK = frozenset({"--no-recurse-submodules", "--ignore-submodules",
+                           "--ignore-submodules=all", "--ignore-submodules=dirty"})
+
+
+def _submodule_hit(tokens: list[str]) -> str:
+    """The first token that would take git into a submodule."""
+    for token in tokens:
+        name = _long_name(token)
+        if not name or token in _SUBMODULE_OK:
+            continue
+        if "submodule" in name or any(full.startswith(name) for full in _SUBMODULE_OPTIONS):
+            return token
+    return ""
 
 _BUILTIN_STRATEGIES = frozenset({"ort", "recursive", "resolve", "octopus", "ours", "subtree"})
 
@@ -380,6 +473,9 @@ _REFUSED_SUBCOMMANDS = {
     "read-tree": "overwrites the index",
     "checkout-index": "overwrites working-tree files",
     "merge-file": "overwrites a file in place",
+    # Every form, `status` and `summary` included: each runs git inside the
+    # submodules (describe, log, checkout …), under their own configuration.
+    "submodule": "runs git inside other repositories, under their own configuration",
 }
 
 # `git branch` / `git tag`: the listing form reads, the argument form writes.
@@ -391,7 +487,6 @@ _READ_FLAGS_WITH_VALUE = frozenset({
 _SUBSUB_READS: dict[str, frozenset[str]] = {
     "remote": frozenset({"", "get-url", "show"}),
     "worktree": frozenset({"", "list"}),
-    "submodule": frozenset({"", "status", "summary"}),
     "notes": frozenset({"", "list", "show"}),
 }
 _WRITE_FLAGS = frozenset({
@@ -518,8 +613,6 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
             return _refuse("changing remotes changes where git fetches from and pushes to")
         if sub == "worktree":
             return _refuse("worktrees are made with the git_worktree tool, and never removed by this one")
-        if sub == "submodule":
-            return _refuse("submodule commands fetch other repositories and can run commands")
         return Ruling(REVIEW, f"'notes {action}' writes notes")
 
     if sub == "bisect":
@@ -849,7 +942,11 @@ def judge(args: list[str], ctx: RepoContext) -> Ruling:
         name = _long_name(hit)
         full = next(f for f in _PROGRAM_LONG if f == name or f.startswith(name))
         return _refuse(f"'{hit}' {_PROGRAM_LONG[full]}, and this tool decides that, not the caller")
-    named = "" if _only_unstages(sub, options) else _protected_named(sub, rest)
+    hit = _submodule_hit(options)
+    if hit:
+        return _refuse(f"'{hit}' would take git into a submodule, another repository whose own "
+                       "configuration decides what runs there; this tool never goes into one")
+    named ="" if _only_unstages(sub, options) else _protected_named(sub, rest)
     if named:
         from .tools.secrets import refusal
 
@@ -915,7 +1012,7 @@ def _git(cwd: Path, args, *, timeout: float = LOCAL_TIMEOUT_S) -> tuple[int, str
     """Run hardened git. Never raises for git's own failures."""
     try:
         proc = subprocess.run(
-            [git_binary(), *_HARDENING, *args], cwd=str(cwd), env=_env(),
+            [git_binary(), *_HARDENING, *_with_submodule_flags(args)], cwd=str(cwd), env=_env(),
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             errors="replace", timeout=timeout,
         )
@@ -960,17 +1057,98 @@ _RISKY_KEYS = (
 )
 
 
-def _risky_config(cwd: Path) -> str:
+def _config_risk(cwd: Path, skip: frozenset[str] = frozenset()) -> str | None:
+    """The first key in the repository's own config (local or worktree scope)
+    that names a program or moves where git works; "" for none; None when the
+    config cannot be listed."""
     code, out, _ = _git(cwd, ["config", "--list", "--name-only", "--show-scope"])
     if code != 0:
-        return ""
+        return None
     for line in out.splitlines():
         scope, _, key = line.partition("\t")
         if scope not in ("local", "worktree"):
             continue
         lowered = key.lower()
+        if lowered in skip:
+            continue
         if any(fnmatch(lowered, pattern) for pattern in _RISKY_KEYS):
             return key
+    return ""
+
+
+def _risky_config(cwd: Path) -> str:
+    return _config_risk(cwd) or ""
+
+
+# --- submodules: the belt under the pins ------------------------------------------
+#
+# The pins keep the status and diff family, recursion and submodule diffs out of
+# submodules, but some of git's own internals go in whatever they say (`add -A`,
+# `describe --dirty`, `rm` of a submodule, and under a `.gitmodules` `ignore =`
+# commit's status, `stash apply`'s and checkout's change report — measured
+# against git 2.53). So every checked-out submodule's own config is held to
+# the superproject's rule. Git enters exactly the gitlinks in the index whose
+# directory holds a `.git`, so those are the ones read, nested ones too.
+
+MAX_SUBMODULES = 64
+MAX_SUBMODULE_DEPTH = 4
+
+# Git sets `core.worktree` in every submodule whose repository lives in the
+# superproject's `.git/modules`. It is checked instead by asking the submodule
+# where its top level is: it must be the submodule's own directory.
+_SUBMODULE_OWN_KEYS = frozenset({"core.worktree"})
+
+
+def _gitlinks(top: Path) -> list[str] | None:
+    """The submodule paths in the index at `top`, or None if it cannot be read."""
+    code, out, _ = _git(top, ["ls-files", "--stage", "-z"])
+    if code != 0:
+        return None
+    found: dict[str, None] = {}
+    for record in out.split("\x00"):
+        meta, tab, path = record.partition("\t")
+        if tab and meta.split(" ", 1)[0] == "160000":
+            found[path] = None
+    return list(found)
+
+
+def _submodule_risk(top: Path, prefix: str = "", depth: int = 0,
+                    budget: list[int] | None = None) -> str:
+    """Why a checked-out submodule under `top` makes git there unsafe, or "".
+    Fails closed: a submodule that cannot be read, does not resolve to its
+    own directory, or is past the limits is a reason too."""
+    budget = [MAX_SUBMODULES] if budget is None else budget
+    links = _gitlinks(top)
+    if links is None:
+        where = f"the repository at '{prefix}'" if prefix else "the repository"
+        return f"the submodules of {where} could not be listed"
+    for rel in links:
+        label = f"{prefix}/{rel}" if prefix else rel
+        if "�" in rel:
+            return f"a submodule's path ('{label}') is not UTF-8, so it cannot be checked"
+        where = top / rel
+        if not os.path.lexists(where / ".git"):
+            continue                    # not checked out: git does not go in
+        budget[0] -= 1
+        if budget[0] < 0 or depth >= MAX_SUBMODULE_DEPTH:
+            return (f"it has more checked-out submodules than this tool reads "
+                    f"({MAX_SUBMODULES}, {MAX_SUBMODULE_DEPTH} levels deep)")
+        code, out, _ = _git(where, ["rev-parse", "--show-toplevel"])
+        try:
+            own = code == 0 and Path(out.rstrip("\n")).resolve() == where.resolve()
+        except (OSError, RuntimeError, ValueError):
+            own = False
+        if not own:
+            return f"the submodule at '{label}' does not resolve to a repository of its own directory"
+        key = _config_risk(where, _SUBMODULE_OWN_KEYS)
+        if key is None:
+            return f"the submodule at '{label}' has a git config that could not be read"
+        if key:
+            return (f"the submodule at '{label}' has its own git config setting '{key}', which "
+                    "names a program for git to run or moves where it works")
+        deeper = _submodule_risk(where, label, depth + 1, budget)
+        if deeper:
+            return deeper
     return ""
 
 
@@ -1013,15 +1191,22 @@ def repo_context(path: str) -> RepoContext | str:
     _, out, _ = _git(cwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
     branches = frozenset(line.strip().removeprefix("refs/heads/")
                          for line in out.splitlines() if line.strip())
+    risky = _risky_config(cwd)
     return RepoContext(managed=managed, branch=branch, remotes=remotes, branches=branches,
-                       cwd=cwd, toplevel=toplevel, common_dir=common,
-                       risky=_risky_config(cwd))
+                       cwd=cwd, toplevel=toplevel, common_dir=common, risky=risky,
+                       submodule_risk="" if risky else _submodule_risk(toplevel))
 
 
 def _risky_refusal(ctx: RepoContext) -> str:
-    return (f"Refused: this repository's own git config sets '{ctx.risky}', which names a "
-            "program for git to run or moves where it works. Git here is the owner's to run "
-            "by hand; say so in your report.")
+    """Why nothing runs in this repository, or "" when git may run here."""
+    if ctx.risky:
+        return (f"Refused: this repository's own git config sets '{ctx.risky}', which names a "
+                "program for git to run or moves where it works. Git here is the owner's to run "
+                "by hand; say so in your report.")
+    if ctx.submodule_risk:
+        return (f"Refused: {ctx.submodule_risk}. Git obeys a submodule's own config whenever it "
+                "goes into one, so git here is the owner's to run by hand; say so in your report.")
+    return ""
 
 
 def _secret_in(texts) -> bool:
@@ -1100,8 +1285,9 @@ def _outgoing_problem(ctx: RepoContext, remote: str) -> str:
 
 def _execute(ctx: RepoContext, args: list[str]) -> tuple[bool, str]:
     """Judge, review if needed, check, run. (ran-and-succeeded, text)."""
-    if ctx.risky:
-        return False, _risky_refusal(ctx)
+    blocked = _risky_refusal(ctx)
+    if blocked:
+        return False, blocked
     ruling = judge(args, ctx)
     if ruling.kind == REFUSE:
         return False, (f"Refused: {ruling.reason}. This is a fixed rule of the git tool, not "
@@ -1186,8 +1372,9 @@ def create_worktree(repo: str, branch: str, base: str = "") -> str:
     ctx = repo_context(repo)
     if isinstance(ctx, str):
         return ctx
-    if ctx.risky:
-        return _risky_refusal(ctx)
+    blocked = _risky_refusal(ctx)
+    if blocked:
+        return blocked
     name = (branch or "").strip().removeprefix("refs/heads/")
     if not name:
         return "Error: name the branch to work on, e.g. jarvis/fix-typo."
@@ -1260,8 +1447,9 @@ def open_pull_request(worktree: str, title: str, body: str, base: str = "",
     ctx = repo_context(worktree)
     if isinstance(ctx, str):
         return ctx
-    if ctx.risky:
-        return _risky_refusal(ctx)
+    blocked = _risky_refusal(ctx)
+    if blocked:
+        return blocked
     if not ctx.managed:
         return ("Refused: pull requests are opened from a worktree made by git_worktree. "
                 "Make one, commit there, and call this with its path.")

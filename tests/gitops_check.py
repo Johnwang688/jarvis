@@ -66,7 +66,10 @@ READS = [
     ["remote", "get-url", "origin"], ["remote", "show", "origin"],
     ["config", "--get", "user.name"], ["config", "--list"], ["config", "--global", "--list"],
     ["config", "--get-regexp", "^user"], ["worktree"], ["worktree", "list"],
-    ["submodule", "status"], ["submodule", "summary"], ["stash", "list"], ["stash", "show"],
+    ["stash", "list"], ["stash", "show"],
+    # the spellings that keep git out of submodules, and words that only mention one
+    ["status", "--ignore-submodules"], ["status", "--ignore-submodules=all"],
+    ["diff", "--ignore-submodules=dirty"], ["log", "--grep=submodule"], ["log", "--", "submodule.c"],
     ["bisect", "log"], ["notes"], ["notes", "list"], ["notes", "show"],
     ["rev-parse", "HEAD"], ["rev-parse", "--git-dir"], ["rev-list", "--count", "HEAD"],
     ["ls-files"], ["ls-tree", "HEAD"], ["cat-file", "-p", "HEAD"], ["grep", "-n", "needle"],
@@ -89,7 +92,7 @@ ROUTINE = {
         ["checkout", "-b", "jarvis/new"], ["checkout", "main"], ["checkout", "--detach"],
         ["branch", "jarvis/other"], ["apply", "x.patch"], ["stash", "apply"],
         ["bisect", "start"], ["fetch"], ["fetch", "origin"], ["fetch", "--all"],
-        ["fetch", "-p", "origin"], ["fetch", "origin", "main"],
+        ["fetch", "-p", "origin"], ["fetch", "origin", "main"], ["fetch", "--no-recurse-submodules"],
     ],
     # these move the current branch: only while it is under jarvis/
     "own": [
@@ -198,6 +201,27 @@ REFUSED = {
         ["am", "--directory=x", "m.mbox"], ["am", "-i", "m.mbox"],
         ["hash-object", "-w", "f"], ["commit-tree", "x"], ["read-tree", "x"],
         ["checkout-index", "-a"], ["fast-import"], ["merge-file", "a", "b", "c"],
+    ],
+    # A submodule is another repository, and inside one git obeys its config:
+    # every `submodule` form (status and summary run describe and log in each
+    # one), and every option that recurses, runs `git diff`/`git log` inside one,
+    # or turns the dirty check (`git status` inside one) back on.
+    "goes into a submodule": [
+        ["submodule"], ["submodule", "status"], ["submodule", "summary"],
+        ["submodule", "status", "--recursive"], ["submodule", "absorbgitdirs"],
+        ["submodule", "sync"], ["submodule", "init"], ["submodule--helper", "list"],
+        ["status", "--ignore-submodules=none"], ["status", "--ignore-submodules=untracked"],
+        ["status", "--no-ignore-submodules"], ["status", "--ignore-sub=none"],
+        ["diff", "--ignore-submodules=none"], ["diff", "--submodule=diff"], ["diff", "--submodule"],
+        ["diff", "--submodule=log", "HEAD~1"], ["log", "-p", "--submodule=diff"],
+        ["show", "--submod=diff"], ["diff-files", "--ignore-submodules=none"],
+        ["grep", "--recurse-submodules", "x"], ["grep", "--recurse-sub", "x"],
+        ["ls-files", "--recurse-submodules"], ["fetch", "--recurse-submodules"],
+        ["fetch", "--recurse-submodules=yes"], ["fetch", "--recurse-submodules-default=yes"],
+        ["pull", "--recurse-submodules"], ["pull", "--recurse-submodules=on-demand"],
+        ["push", "--recurse-submodules=on-demand"], ["push", "--recurse-submodules=check"],
+        ["checkout", "--recurse-submodules", "main"], ["switch", "--recurse-submodules", "main"],
+        ["reset", "--recurse-submodules", "HEAD~1"], ["rm", "--recurse-submodules", "f"],
     ],
     "the shape of the request": [
         [], [""], ["-C", "/tmp", "status"], ["-c", "core.pager=x", "status"],
@@ -607,6 +631,342 @@ def hardening_checks() -> None:
           "a repository's own program settings refused")
 
 
+# --- submodules ----------------------------------------------------------------
+#
+# A submodule is another repository, and inside one git obeys *its* config and
+# attributes. Every trap below is a script that writes one marker file (and
+# passes its input through, as a filter must) and nothing else.
+
+FILE_PROTOCOL = ("-c", "protocol.file.allow=always")   # the harness's submodule clones (local paths)
+
+
+def trap(w: World, name: str) -> tuple[Path, Path]:
+    marker = w.markers / name
+    prog = w.markers / f"{name}.sh"
+    prog.write_text(f"#!/bin/sh\ntouch '{marker}'\nexec cat\n", encoding="utf-8")
+    prog.chmod(0o755)
+    return marker, prog
+
+
+def fired(marker: Path) -> bool:
+    hit = marker.exists()
+    if hit:
+        marker.unlink()
+    return hit
+
+
+class Sub:
+    """A real submodule checked out in a worktree the tool made. Its origin is
+    a local bare repository and its own repository lives in the superproject's
+    .git, as `git submodule update` puts it (with git's own core.worktree)."""
+
+    def __init__(self, w: World) -> None:
+        self.w = w
+        self.origin = w.root / "sub-origin.git"
+        self.seed = w.root / "sub-seed"
+        w.sh("init", "-q", "--bare", str(self.origin), cwd=w.root)
+        w.sh("init", "-q", str(self.seed), cwd=w.root)
+        (self.seed / "a.txt").write_text("one\n", encoding="utf-8")
+        # Its attributes name drivers; where a driver is defined decides who runs it.
+        (self.seed / ".gitattributes").write_text("*.txt filter=trap diff=trap\n", encoding="utf-8")
+        w.sh("add", "-A", cwd=self.seed)
+        w.sh("commit", "-q", "-m", "sub first", cwd=self.seed)
+        w.sh("push", "-q", str(self.origin), "HEAD:main", cwd=self.seed)
+        w.sh(*FILE_PROTOCOL, "submodule", "add", "-q", str(self.origin), "sub")
+        w.sh("commit", "-q", "-m", "add the submodule")
+        w.sh("push", "-q", "origin", "main")
+        self.wt = made(gitops.create_worktree(str(w.owner), "feat"))
+        w.sh(*FILE_PROTOCOL, "submodule", "update", "--init", "-q", cwd=self.wt)
+        self.path = self.wt / "sub"
+        self.gitdir = Path(w.sh("rev-parse", "--absolute-git-dir", cwd=self.path).stdout.strip())
+
+    def config(self, *args: str, check: bool = True):
+        return self.w.sh("config", "--file", str(self.gitdir / "config"), *args, check=check)
+
+    def touch(self) -> None:
+        """Same bytes, a later mtime: the index's stat no longer matches, so a
+        status inside the submodule must hash the file again — through its
+        clean filter."""
+        f = self.path / "a.txt"
+        f.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
+        st = f.stat()
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 7_000_000_000))
+
+    def head(self) -> str:
+        return self.w.sh("rev-parse", "HEAD", cwd=self.path).stdout.strip()
+
+
+def add_global(w: World, text: str) -> None:
+    """The owner's global config, in the temp HOME."""
+    gitconfig = w.home / ".gitconfig"
+    gitconfig.write_text(gitconfig.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def submodule_flag_checks() -> None:
+    f = gitops._with_submodule_flags
+    dirty, norec = "--ignore-submodules=dirty", "--no-recurse-submodules"
+    for args, want in (
+        (["status"], ["status", dirty]),
+        (["status", "--short"], ["status", dirty, "--short"]),
+        (("diff", "--stat"), ["diff", dirty, "--stat"]),
+        (["diff-files"], ["diff-files", dirty]), (["diff-index", "HEAD"], ["diff-index", dirty, "HEAD"]),
+        (["diff-tree", "-r", "HEAD"], ["diff-tree", dirty, "-r", "HEAD"]),
+        (["log", "-p", "--", "status"], ["log", dirty, "-p", "--", "status"]),
+        (["show", "HEAD:f.txt"], ["show", dirty, "HEAD:f.txt"]),
+        (["-c", "core.quotePath=false", "diff", "x"], ["-c", "core.quotePath=false", "diff", dirty, "x"]),
+        (["-c", "diff", "ls-files"], ["-c", "diff", "ls-files"]),     # a -c value is not the subcommand
+        (["fetch", "origin"], ["fetch", norec, "origin"]), (["pull", "--ff-only"], ["pull", norec, "--ff-only"]),
+        (["push", "origin", "HEAD:refs/heads/jarvis/x"], ["push", norec, "origin", "HEAD:refs/heads/jarvis/x"]),
+        (["commit", "-m", "status"], ["commit", "-m", "status"]), (["rev-parse", "HEAD"], ["rev-parse", "HEAD"]),
+        ([], []),
+    ):
+        assert f(args) == want, (args, f(args))
+    for pin in ("submodule.recurse=false", "fetch.recurseSubmodules=false", "push.recurseSubmodules=no",
+                "status.submoduleSummary=false", "diff.submodule=short", "diff.ignoreSubmodules=dirty"):
+        i = gitops._HARDENING.index(pin)
+        assert gitops._HARDENING[i - 1] == "-c", pin
+    print("ok  submodules: the status and diff family get --ignore-submodules=dirty and fetch/pull/push "
+          "--no-recurse-submodules after the subcommand; six recursion and summary pins in every call")
+
+
+def submodule_pin_checks() -> None:
+    """The pins, with nothing for the config check to refuse: each driver lives
+    in the owner's global config and is named only by the submodule's own
+    attributes, so it runs exactly when git goes into the submodule. Each case
+    has its sanity half — plain git goes in — and then the tool must not."""
+    with world() as w:
+        s = Sub(w)
+        wt, run = s.wt, gitops.run
+        fmark, fprog = trap(w, "filter")
+        tmark, tprog = trap(w, "textconv")
+        add_global(w, f'[filter "trap"]\n\tclean = {fprog}\n[diff "trap"]\n\ttextconv = {tprog}\n')
+        assert "[exit 0]" in run(str(wt), ["log", "-1"]), "a clean submodule was refused"
+
+        # The submodule's own fsmonitor (pinned, like the superproject's, not refused):
+        # the hardening's -c travels into the `git status` that plain git runs there.
+        mmark, mprog = trap(w, "fsmonitor")
+        s.config("core.fsmonitor", str(mprog))
+        s.touch()
+        w.sh("status", cwd=wt, check=False)
+        assert fired(mmark), "sanity: plain git status did not run the submodule's fsmonitor"
+        for args in (["status"], ["diff"], ["commit", "-a", "-m", "nothing staged"]):
+            s.touch()
+            out = run(str(wt), args)
+            assert not fired(mmark), f"the tool's {args} ran the submodule's fsmonitor: {out}"
+        s.config("--unset", "core.fsmonitor")
+
+        # The dirty check: plain git runs `git status` inside the submodule.
+        for args in (["status"], ["status", "--short"], ["diff"], ["diff", "--stat"], ["diff", "HEAD"],
+                     ["diff-files"], ["diff-index", "HEAD"], ["commit", "-a", "-m", "nothing staged"]):
+            s.touch()
+            w.sh(*args, cwd=wt, check=False)
+            assert fired(fmark), f"sanity: plain git {args} did not go into the submodule"
+            s.touch()
+            out = run(str(wt), args)
+            assert not fired(fmark), f"the tool's {args} ran the submodule's filter: {out}"
+        # ...and a `.gitmodules` `ignore = none` (a file the agent can write) does not
+        # turn it back on: it beats `-c diff.ignoreSubmodules`, not the command line.
+        gitmodules = wt / ".gitmodules"
+        clean_gitmodules = gitmodules.read_text(encoding="utf-8")
+        gitmodules.write_text(clean_gitmodules + "\tignore = none\n", encoding="utf-8")
+        for args in (["status"], ["diff"], ["diff-files"]):
+            s.touch()
+            out = run(str(wt), args)
+            assert "[exit 0]" in out and not fired(fmark), (args, out)
+        gitmodules.write_text(clean_gitmodules, encoding="utf-8")
+        # `dirty`, not `all`: a submodule whose commit moved is still reported.
+        (s.path / "a.txt").write_text("two\n", encoding="utf-8")
+        w.sh("commit", "-q", "-am", "sub change", cwd=s.path)
+        fired(fmark)
+        out = run(str(wt), ["status", "--short"])
+        assert " M sub" in out and not fired(fmark), out
+
+        # A submodule's diff shown by `git diff` run inside it (`diff.submodule=diff`):
+        # its textconv ran there, under the tool's own --no-textconv.
+        add_global(w, "[diff]\n\tsubmodule = diff\n")
+        w.sh("add", "sub", cwd=wt)
+        w.sh("commit", "-q", "-m", "bump the submodule", cwd=wt)
+        fired(fmark)
+        for args in (["log", "-p", "-1"], ["show"], ["diff", "HEAD~1", "HEAD"]):
+            w.sh(*args, cwd=wt, check=False)
+            assert fired(tmark), f"sanity: plain git {args} did not diff inside the submodule"
+            out = run(str(wt), args)
+            assert not fired(tmark), f"the tool's {args} ran the submodule's textconv: {out}"
+            assert "Subproject commit" in out, f"the submodule's change was hidden: {out}"
+
+        # Fetch recurses on demand: a fetched superproject commit that moves the
+        # submodule makes plain git fetch inside it, under its config. (The bump comes
+        # from another clone: a ref in this repository already at it would hide it.)
+        (s.seed / "c.txt").write_text("c\n", encoding="utf-8")
+        w.sh("add", "c.txt", cwd=s.seed)
+        w.sh("commit", "-q", "-m", "sub third", cwd=s.seed)
+        w.sh("push", "-q", str(s.origin), "HEAD:main", cwd=s.seed)
+        third = w.sh("rev-parse", "HEAD", cwd=s.seed).stdout.strip()
+        other = w.root / "other"
+        w.sh("clone", "-q", str(w.origin), str(other), cwd=w.root)
+        w.sh("update-index", "--cacheinfo", f"160000,{third},sub", cwd=other)
+        w.sh("commit", "-q", "-m", "someone bumps the submodule", cwd=other)
+        w.sh("push", "-q", "origin", "HEAD:main", cwd=other)
+
+        def tracking() -> str:
+            return w.sh("rev-parse", "refs/remotes/origin/main", cwd=s.path).stdout.strip()
+
+        before, parent_before = tracking(), w.sh("rev-parse", "origin/main", cwd=wt).stdout.strip()
+        out = run(str(wt), ["fetch", "origin"])
+        assert "[exit 0]" in out and tracking() == before, f"the tool's fetch went into the submodule: {out}"
+        w.sh("update-ref", "refs/remotes/origin/main", parent_before, cwd=wt)
+        w.sh("fetch", "-q", "origin", cwd=wt)
+        assert tracking() != before, "sanity: plain git fetch did not recurse into the submodule"
+
+        # The owner's global `submodule.recurse`: switch and grep go in.
+        add_global(w, "[submodule]\n\trecurse = true\n")
+        w.sh("branch", "jarvis/bumped", "origin/main", cwd=wt)
+        head = s.head()
+        out = run(str(wt), ["switch", "jarvis/bumped"])
+        assert "[exit 0]" in out and s.head() == head, f"the tool's switch checked out inside the submodule: {out}"
+        assert "[exit 0]" in run(str(wt), ["switch", "jarvis/feat"])
+        w.sh("switch", "-q", "jarvis/bumped", cwd=wt)
+        assert s.head() != head, "sanity: plain git switch did not recurse"
+        w.sh("switch", "-q", "jarvis/feat", cwd=wt)
+        def in_sub(text: str) -> bool:
+            return any(line.startswith("sub/") for line in text.splitlines())
+
+        out = run(str(wt), ["grep", "-n", "-e", "."])
+        assert "[exit 0]" in out and not in_sub(out), f"the tool's grep searched inside the submodule: {out}"
+        assert in_sub(w.sh("grep", "-n", "-e", ".", cwd=wt).stdout), "sanity: plain git grep did not recurse"
+
+        # The owner's global `push.recurseSubmodules`: a push publishes the submodule's
+        # commits to *its* remote (past the outgoing credential scan), and runs its hooks.
+        add_global(w, "[push]\n\trecurseSubmodules = on-demand\n")
+        hmark = w.markers / "pre-push"
+        hook = s.gitdir / "hooks" / "pre-push"
+        hook.write_text(f"#!/bin/sh\ntouch '{hmark}'\n", encoding="utf-8")
+        hook.chmod(0o755)
+        w.sh("switch", "-q", "-c", "jarvis/feat", cwd=s.path)
+
+        def sub_commit(name: str) -> str:
+            (s.path / name).write_text("x\n", encoding="utf-8")
+            w.sh("add", name, cwd=s.path)
+            w.sh("commit", "-q", "-m", name, cwd=s.path)
+            fired(fmark)
+            return s.head()
+
+        def published(commit: str) -> bool:
+            return w.sh("cat-file", "-e", f"{commit}^{{commit}}", cwd=s.origin, check=False).returncode == 0
+
+        first = sub_commit("d.txt")
+        w.sh("add", "sub", cwd=wt)
+        w.sh("commit", "-q", "-m", "point at d", cwd=wt)
+        w.sh("push", "-q", "origin", "HEAD:refs/heads/jarvis/feat", cwd=wt)
+        assert published(first) and fired(hmark), "sanity: plain git push did not push the submodule or run its hook"
+        second = sub_commit("e.txt")
+        assert "[exit 0]" in run(str(wt), ["add", "sub"])
+        assert "[exit 0]" in run(str(wt), ["commit", "-m", "point at e"])
+        out = run(str(wt), ["push", "origin"])
+        assert "[exit 0]" in out and "jarvis/feat" in w.heads(), out
+        assert w.sh("rev-parse", "jarvis/feat", cwd=w.origin).stdout == w.sh("rev-parse", "HEAD", cwd=wt).stdout
+        assert not published(second), f"the tool's push published the submodule's commit: {out}"
+        assert not fired(hmark), "a hook inside the submodule ran"
+    print("ok  submodules (pins): status, diff, diff-files/-index and commit -a never run git inside one "
+          "(a .gitmodules 'ignore = none' included), log -p/show/diff never diff inside one, and "
+          "fetch, switch, grep and push never recurse — each against plain git that does")
+
+
+def submodule_config_checks() -> None:
+    """The belt: some of git's internals go into a checked-out submodule whatever
+    the pins say, so a program named in the submodule's own config refuses the
+    repository — every subcommand, before git runs. Fails closed."""
+    with world() as w:
+        s = Sub(w)
+        wt, run = s.wt, gitops.run
+        assert "[exit 0]" in run(str(wt), ["status"]), "a clean submodule (git's own core.worktree) was refused"
+        # A new worktree has the gitlink but not the submodule: git does not go in, so
+        # it is not read (read, its empty directory would resolve to the superproject).
+        bare = made(gitops.create_worktree(str(w.owner), "no-submodule"))
+        assert not (bare / "sub" / ".git").exists()
+        assert "[exit 0]" in run(str(bare), ["status"]), "a submodule never checked out was refused"
+
+        fmark, fprog = trap(w, "filter")
+        s.config("filter.trap.clean", str(fprog))
+        # Sanity: plain git goes in for each — including the ones no pin keeps out.
+        for args in (["status"], ["diff", "--stat"], ["add", "-A"], ["commit", "-a", "-m", "x"],
+                     ["describe", "--dirty", "--always"], ["rm", "-n", "sub"]):
+            s.touch()
+            w.sh(*args, cwd=wt, check=False)
+            assert fired(fmark), f"sanity: plain git {args} did not run the submodule's filter"
+        for args in (["status"], ["diff"], ["diff", "--stat"], ["log", "-p", "-1"], ["add", "-A"],
+                     ["commit", "-a", "-m", "x"], ["describe", "--dirty", "--always"], ["rm", "-n", "sub"],
+                     ["switch", "-c", "jarvis/other"], ["stash", "list"]):
+            s.touch()
+            out = run(str(wt), args)
+            assert out.startswith("Refused") and "submodule at 'sub'" in out and "filter.trap.clean" in out, (args, out)
+            assert not fired(fmark), args
+        assert gitops.create_worktree(str(wt), "other").startswith("Refused")
+        assert gitops.open_pull_request(str(wt), "t", "b").startswith("Refused")
+        s.config("--unset", "filter.trap.clean")
+
+        for key, value in (("diff.trap.textconv", "x"), ("core.sshCommand", "x"), ("include.path", "x"),
+                           ("remote.origin.uploadpack", "x"), ("url.https://example.invalid/.insteadOf", "x:"),
+                           ("diff.external", "x"), ("core.askPass", "x")):
+            s.config(key, value)
+            out = run(str(wt), ["status"])
+            assert out.startswith("Refused") and "submodule at 'sub'" in out, (key, out)
+            s.config("--unset-all", key)
+        assert "[exit 0]" in run(str(wt), ["status"]), "a clean submodule config was not accepted again"
+
+        # Fails closed: a submodule that does not resolve to its own directory, a
+        # config that cannot be read, a .git file pointing nowhere, past the limits.
+        own_worktree = s.config("--get", "core.worktree").stdout.strip()
+        s.config("core.worktree", str(w.root))
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "does not resolve" in out, out
+        s.config("core.worktree", own_worktree)
+        config_file = s.gitdir / "config"
+        good = config_file.read_text(encoding="utf-8")
+        config_file.write_text(good + "[broken\n", encoding="utf-8")
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "submodule at 'sub'" in out, out
+        config_file.write_text(good, encoding="utf-8")
+        dotgit = s.path / ".git"
+        pointer = dotgit.read_text(encoding="utf-8")
+        dotgit.write_text(f"gitdir: {w.root / 'nowhere'}\n", encoding="utf-8")
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "submodule at 'sub'" in out, out
+        dotgit.write_text(pointer, encoding="utf-8")
+        assert "[exit 0]" in run(str(wt), ["status"])
+
+        # Nested: a repository inside the submodule, its config read too.
+        inner = s.path / "inner"
+        w.sh("init", "-q", str(inner), cwd=w.root)
+        (inner / "i.txt").write_text("i\n", encoding="utf-8")
+        (inner / ".gitattributes").write_text("*.txt filter=trap\n", encoding="utf-8")
+        w.sh("add", "-A", cwd=inner)
+        w.sh("commit", "-q", "-m", "inner", cwd=inner)
+        w.sh("add", "inner", cwd=s.path)
+        w.sh("commit", "-q", "-m", "nest a repository", cwd=s.path)
+        assert "[exit 0]" in run(str(wt), ["status"]), "a clean nested repository was refused"
+        w.sh("config", "filter.trap.clean", str(fprog), cwd=inner)
+        f = inner / "i.txt"
+        st = f.stat()
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 7_000_000_000))
+        w.sh("status", cwd=wt, check=False)
+        assert fired(fmark), "sanity: plain git status did not reach the nested repository"
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "submodule at 'sub/inner'" in out and not fired(fmark), out
+        w.sh("config", "--unset", "filter.trap.clean", cwd=inner)
+        assert "[exit 0]" in run(str(wt), ["status"])
+        saved = gitops.MAX_SUBMODULE_DEPTH, gitops.MAX_SUBMODULES
+        try:
+            gitops.MAX_SUBMODULE_DEPTH = 1
+            assert "levels deep" in run(str(wt), ["status"])
+            gitops.MAX_SUBMODULE_DEPTH, gitops.MAX_SUBMODULES = saved[0], 1
+            assert "more checked-out submodules" in run(str(wt), ["status"])
+        finally:
+            gitops.MAX_SUBMODULE_DEPTH, gitops.MAX_SUBMODULES = saved
+    print("ok  submodules (config): a program in a checked-out submodule's own config (nested ones too) "
+          "refuses every subcommand before git runs; unreadable, misplaced or too many fail closed")
+
+
 def credential_checks() -> None:
     with world() as w:
         wt = made(gitops.create_worktree(str(w.owner), "feat"))
@@ -902,6 +1262,9 @@ def main() -> int:
     worktree_checks()
     runner_checks()
     hardening_checks()
+    submodule_flag_checks()
+    submodule_pin_checks()
+    submodule_config_checks()
     credential_checks()
     push_and_pr_checks()
     review_checks()
