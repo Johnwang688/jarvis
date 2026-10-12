@@ -1606,7 +1606,23 @@ link made earlier under another name, `jarvis $(echo hud) install`, a
 launcher or module name from the environment, a Makefile, alias or script.
 Separately, **Jarvis's own CLI is never auto-approved** in any spelling:
 `python -m jarvis…`, the venv's python, `uv run`/`poetry run`/`pipx run
-jarvis` are ASK in `rules.decide`, as bare `jarvis` always was. A shell write **into** the install root (`cp`, `rsync`, a
+jarvis` are ASK in `rules.decide`, as bare `jarvis` always was. The same detector refuses `jarvis hud rebuild`,
+`jarvis restart` and `jarvis daemon2 restart` (2026-10-11, `v2/owner_ops.py`),
+a `systemctl` verb (or a systemd D-Bus call) that changes `jarvis-daemon2` —
+reads, `reset-failed` and `daemon-reload` stay untouched, and `systemctl
+--user set-/unset-/import-environment` are asked — and, the owner's choice the
+same day, a `pkill -f`, `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose
+pattern matches the daemon's command line at `daemon2` (`pkill -f jarvis`
+stays ALLOW; a literal `kill <pid>` and kills by process name are not seen);
+since review 2 also a `kill` fed the daemon's PID by `systemctl show|status`
+of its unit, a D-Bus read of it, its cgroup's `cgroup.procs`, `lsof`/`fuser`
+on its ports, `ps | grep`, a grep over `/proc/*/cmdline` or `ss -p`/`netstat
+-p` on its ports, plus `fuser -k` on its ports and `pkill --cgroup|--pidfile`
+naming its unit. A source is judged only when a fed `kill` is on the line,
+and a kill pattern whose matching cost cannot be bounded is never matched
+(`re` holds the GIL): it is too complex to judge, so asked — never DENY,
+never covered by an allowlist entry, always-ask in v2.
+A shell write **into** the install root (`cp`, `rsync`, a
 redirect) is asked, never auto-approved or covered by an allowlist entry. A
 shell can still write there in a form nobody sees — the accepted shell gap.
 
@@ -1715,6 +1731,27 @@ The window's half (`hud/src/components/QuickOpen.tsx`, `SearchView.tsx`,
 `EditorStatus.tsx`, `FileTab.tsx`'s explorer): keys and rules in CLAUDE.md's
 ED-7 paragraph. Find in files sends the query, the flags and the glob to the
 search route and nothing else; quick open lists once per project for 15 s.
+
+## Additions 2026-10-11 (`jarvis restart` and `jarvis hud rebuild` — PR #48)
+
+**`GET /status` gains `approvals_pending`**: the number of broker approvals
+waiting on the owner (`PendingApprovals.pending()`, a turn's and the escape
+hatch's, which asks after its turn has finished), an integer ≥ 0 beside
+`turns_running`; 0 when the broker cannot be read. It is read before the
+daemon's own lock (the broker has one of its own). `jarvis restart` and
+`jarvis hud rebuild --restart` refuse, exit 3, while it or `turns_running` is
+non-zero (a restart denies what waits), unless `--force`. Read-only, open like
+the rest of `/status`; the HUD does not use it.
+
+**`GET /status` gains `pid`** (review 2 of PR #48): the daemon's process id.
+`jarvis restart` compares it with systemd's `MainPID` for `jarvis-daemon2`
+before trusting what `/status` says about running turns: a different v2
+daemon answering on this shell's `JARVIS_DAEMON_PORT` (a test daemon, one
+started by hand) is not the unit's, so its idle answer is "can't check"
+(exit 3 unless `--force`), and after the restart a daemon that is not the
+new MainPID does not verify it (exit 4). A `/status` without `pid` (a daemon
+from before this change) is trusted as before.
+
 
 ## Additions 2026-10-11 (tree-sitter colour — ED-5)
 

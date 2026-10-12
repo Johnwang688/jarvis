@@ -698,6 +698,14 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             unsure = rules.vex_uncoverable(command)
             if unsure:
                 match = ("vex-device", unsure)
+        if match is None and command.strip():
+            # A kill whose pattern is too costly to judge against the v2
+            # daemon — too complex to judge, so asked, never refused (that
+            # is layer 1's for a provable match) and never the reviewer's
+            # call under AUTO (the delta review of PR #48).
+            unsure = protected_state.kill_unsure(command)
+            if unsure:
+                match = ("daemon-kill", unsure)
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
