@@ -2827,6 +2827,28 @@ an env file, which never reaches the worker — Monaco folds by indentation, as
 before; and the fold query has the colour queries' 250 ms budget (twice over
 it, that file folds by indentation from then on).
 
+**The git gutter and the explorer's git colours (2026-10-12, ED-9 of the
+editor plan, §2.5 and §2.8).** Beside the line numbers each open file shows
+what changed since HEAD, as VS Code does: a bar in sage (`--syn-string`) on
+added lines, in glacier (`--syn-fn`) on modified ones, and a small red wedge
+at 60% where lines were removed — the diff's "removed" colour, the only red,
+never amber. It is diffed against the **buffer**, not the disk, so it follows
+an unsaved edit as it is typed (after a short pause) and is clean again once
+the edit is undone; a file HEAD does not hold, a binary one or one past
+100,000 lines has none, and an env file never has one. The File pane's tree
+colours names the same way — modified glacier, added and untracked sage, a
+merge conflict lavender, ignored dimmed — and a folder takes the strongest
+state inside it. HEAD's text and the status come from two owner-only routes
+(`docs/hud-api.md`) that refuse what the editor withholds, every env file and
+the gate's state, by path and by the name git has for a renamed file (which
+must also lie in the project), and that refuse a repository whose own config
+names a program; the status never goes into a submodule. The status is polled
+every 3 s per project while something shows it (the daemon caches it 2 s); a
+poll that sees nothing new redraws nothing, and typing never redraws the
+tree. A file in another repository than the project's — a nested robot repo,
+a file reached through the Inbox — checks its own HEAD every 10 s while the
+window is visible, so a commit there clears its marks.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

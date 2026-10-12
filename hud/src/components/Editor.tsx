@@ -20,6 +20,8 @@ import {
   diffUri, editorsBlocked, loadMonaco, onEditorsBlocked, type Monaco,
 } from "../lib/monaco";
 import type { TextModel } from "../state/buffers";
+import { gitGutter } from "../state/gitGutter";
+import { gutterDecorations } from "../lib/linediff";
 
 /**
  * Every File pane's live editor (ED-7): the palette lists the actions of the
@@ -63,6 +65,8 @@ export function PaneEditor(props: {
   /** "Add Selection to Chat" in the editor's own context menu (ED-7); off for an env file. */
   mayAddToChat?: boolean;
   onAddToChat?: () => void;
+  /** The git gutter (ED-9): the buffer's project and path there; null draws none. */
+  git?: { projectId: string; path: string } | null;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<any>(null);
@@ -190,6 +194,28 @@ export function PaneEditor(props: {
   useEffect(() => {
     mayAdd.current?.set(!!props.mayAddToChat);
   }, [props.mayAddToChat, ready]);
+
+  // The git gutter (ED-9, state/gitGutter.ts): this buffer's lines against
+  // HEAD's, drawn in this editor's own decorations. The diff is the
+  // buffer's, shared by every pane showing it.
+  const gitProject = props.git?.projectId ?? null;
+  const gitPath = props.git?.path ?? null;
+  useEffect(() => {
+    const ed = editor.current;
+    const model = props.model;
+    const abs = props.viewKey;
+    if (!ed || !gitProject || !gitPath || !abs || !isMonacoModel(model)) return;
+    const shown = ed.getModel();
+    if (shown !== model) return;
+    const coll = ed.createDecorationsCollection();
+    const stop = gitGutter.watch({ abs, projectId: gitProject, path: gitPath }, model as any, (marks) => {
+      if (ed.getModel() === model) coll.set(gutterDecorations(marks));
+    });
+    return () => {
+      stop();
+      if (ed.getModel() === model) coll.clear();
+    };
+  }, [ready, props.model, props.viewKey, gitProject, gitPath]);
 
   // The fallback textarea redraws when its shim model changes.
   useEffect(() => {
