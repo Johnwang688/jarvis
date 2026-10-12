@@ -2273,14 +2273,20 @@ server in one of the known shapes (Vite, Next, Create React App, Angular,
 webpack-dev-server, `python -m http.server`, Flask, uvicorn, Django, Puma,
 Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo, Jupyter, Astro,
 Storybook …) gives its URL, kept only if it is loopback http(s) with an
-explicit port (`0.0.0.0` and `[::]` read as `localhost`), no user name, and
-none of Jarvis's ports (`config.control_ports()`, the workshop's, and the
-daemon's listeners as bound), with the query and fragment dropped. It is sent
+explicit port, no user name, and none of Jarvis's ports
+(`config.control_ports()`, the workshop's, and the daemon's listeners as
+bound), with the query and fragment dropped and the host always written
+`localhost` (the window can frame no other loopback name). Two cheap tests
+run first and change no answer — a loopback host spelling and one of the
+shapes' words, as substring searches over a chunk's whole run of lines — and
+a chunk matches at most 32 lines against the table, so URL-dense output stays
+far above what xterm draws (PR #70 review: another host's URLs had slowed
+the terminal to ~9 MB/s). It is sent
 as one `{"type": "dev_url", "url"}` frame **on that terminal's own attached
-socket**, after the bytes that carried it — once per origin (loopback hosts
-folded) among the last four, at most one a second and four a minute per
-terminal; with no window attached it is dropped and not remembered, and a
-ring replay never sends one. **Nothing else ever carries it**: no bus record,
+socket**, after the bytes that carried it — once per origin among the last
+four, at most one a second and four a minute per terminal, recorded only once
+the socket has taken the frame; with no window attached it is dropped and not
+remembered, and a ring replay never sends one. **Nothing else ever carries it**: no bus record,
 log line, thread log, Discord post or file, and Jarvis never sees it (the
 "Jarvis can read" switch is unrelated: this is the owner's window). The
 sniffer holds at most a 512-byte line, a 64-byte escape carry and four

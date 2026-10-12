@@ -1378,31 +1378,53 @@ it skips `A`/`B` to `C` once the shell has marked a command (bash), else
 `B` to that line's line feed (the POSIX startup file marks no command), so a
 typed `curl http://localhost:3000` opens nothing; never the alternate screen.
 Escapes are stripped by **`terminal_text`'s own compiled patterns** (imported,
-not copied) — colour draws nothing (a whole SGR is skipped in the run, which
-keeps a flood of colour at ~37 MB/s), cursor forward is a space, cursor back,
+not copied) — colour draws nothing (a run of text and whole SGRs is one
+C-level match, `_PLAIN`), cursor forward is a space, cursor back,
 BS or a deleted character spoils the line, any other move, CR and the line
-feeds end it. A finished line is matched against `devurl.SHAPES` (Vite,
+feeds end it. **Two cheap tests that cannot change an answer run before the
+table** (PR #70 review, LOW: a line holding `://` ran up to 17 regexes, and
+URL-dense output went through `_output` at ~9 MB/s): a loopback host
+spelling (`_HOSTS`: `localhost` in any ASCII case, `127.`, `0.0.0.0`, `[:`,
+`[0`) and one of the shapes' words (`_WORDS`; `local` only before a space or
+`:`), as plain substring searches first (`_has_host`, `_has_word` — the
+latter folds the four characters IGNORECASE equates with ASCII letters, ſ ı
+İ and the Kelvin sign, so it is the regex or wider), over a chunk's whole run
+of lines and then per line; and a chunk (or a mark) matches at most
+`MATCH_BUDGET` (32) lines against the table — only a flood of real
+announcements reaches it, and one frame a second can go anyway. **A new
+`SHAPES` row adds its word to `_WORDS` and `_WORD_LITERALS`**; devurl_check's
+`Prefilter` differential (20,000 lines, every case and fold) fails
+otherwise. Measured through `_output` with a socket that takes everything:
+another host's URLs 191 MB/s (was 9.8), a loopback access log 103 (10.9),
+plain logs 262 (124), colour 44 (21), repeated or distinct announcements
+62–69 (7.1 and 2.7); xterm draws ~14. A finished line is matched against `devurl.SHAPES` (Vite,
 Next, CRA, Angular, webpack-dev-server, `http.server`, Flask, uvicorn,
 Django, Puma, Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo,
 Jupyter, Astro, Storybook, Parcel, MkDocs, Eleventy) and `devurl.clean` keeps
 only **loopback http(s) with an explicit port** (`localhost`, `127/8`,
-`[::1]`; `0.0.0.0`/`[::]` → `localhost`), no userinfo, **never Jarvis's
+`[::1]`, `0.0.0.0`, `[::]`) and **sends every one as `localhost`**, the port
+and path kept (PR #70 review: the window can frame no other loopback name,
+and `[::1]` or `127.0.0.2` only burned the server's frame), no userinfo,
+**never Jarvis's
 ports** (`devurl.jarvis_ports()` = `config.control_ports()` ∪ 8403 ∪ the
 configured workshop, plus the daemon's listeners as bound, `own_ports`), the
 query and fragment dropped (a Jupyter `?token=` never travels). **Memory: a
 512-byte line (dropped whole past it), a 64-byte escape carry, the last four
 origins and four send times** — nothing else, whatever it is fed. **One
 `{"type": "dev_url", "url"}` frame on that terminal's attached socket**,
-after the bytes that carried it; `admit` de-duplicates by (scheme, port) —
-loopback hosts folded, so Puma's `127.0.0.1` and `[::1]` lines are one — and
-rate-limits (one a second, four a minute per terminal); **no window attached:
-dropped and not admitted**, so not remembered; a replay never reaches it; a
+after the bytes that carried it; `may_send` de-duplicates by (scheme, port)
+and rate-limits (one a second, four a minute per terminal), and **`sent`
+records a URL only once `send_text` has taken its frame** (PR #70 review: it
+used to be recorded first, and a socket closing or too far behind cost the
+server its frame for good); **no window attached: dropped and not recorded**;
+a replay never reaches it; a
 sniffer that raises is dropped for that terminal (one log line, the
 exception's type) and never stops its output.
 **Nothing on the bus, in a log line, a thread log, Discord or a file carries a
 URL or a byte of the text**; the "Jarvis can read" switch is unrelated.
 **`browser.json`** (`config.BROWSER_SETTINGS_PATH`, env
-`JARVIS_BROWSER_SETTINGS`; `jarvis/v2/browser/settings.py`, the start of
+`JARVIS_BROWSER_SETTINGS` — empty means unset, never `.`, which would put the
+working folder in the protected state; `jarvis/v2/browser/settings.py`, the start of
 BR-1a's package) holds `auto_open`, **on by default**; it is **gate state**
 (`files._protected_state_paths`, by path and by name beside the allowlist) and
 changes only by **owner-only `GET`/`PATCH /browser/settings`** (`is_owner`
@@ -1425,11 +1447,17 @@ de-dup; the settings file and its gate-state refusal) and `terminal_check`'s
 Jarvis's ports never sent; bus, log and disk clean; off feeds nothing; a
 replay or a second announcement sends nothing; the switch is the owner's;
 an unattached URL not remembered; a forged mark moves nothing; a failing sniffer
-never stops the output); `frame_check`
+never stops the output; a frame the socket refuses not remembered; five
+floods at twice xterm's rate through `_output`); `frame_check`
 walks `/browser`. Seven guard removals, each in a scratch copy, fail all nine
 of their checks (a control port passed — both suites, a URL on the bus, marks
 ignored — both suites, escapes kept, the query kept, `auto_open` ignored,
-whole lines kept); an unmutated copy passes them.
+whole lines kept); an unmutated copy passes them. The review round's seven
+fail all nine of theirs: the prefilter removed (another host's URLs spend the
+budget, so an announcement among them is missed), the prefilter and the
+budget removed (both speed checks), a prefilter too strict (no bracketed
+hosts; no `token=`: the differential), recorded before the send, the host
+sent as printed, and the empty setting read as `.`.
 
 **The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1

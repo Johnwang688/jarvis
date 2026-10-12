@@ -372,12 +372,17 @@ class Bounds(unittest.TestCase):
         network = b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n" * 160_000
         access = b"GET http://localhost:3000/api/items?page=2 200 12ms\r\n" * 180_000
         local = b"".join(b"  Local:   http://localhost:%d/\r\n" % (1024 + i) for i in range(280_000))
+        # Twice what xterm draws (~14 MB/s), best of two runs each.
         for data in (colour, lines, os.urandom(4_000_000), network, access, local):
-            sniffer = D.DevUrlSniffer(lambda: NONE)
-            started = time.perf_counter()
-            for i in range(0, len(data), 65536):
-                sniffer.feed(data[i:i + 65536])
-            self.assertLess(time.perf_counter() - started, 2.0, len(data))
+            best = 0.0
+            for _ in range(2):
+                sniffer = D.DevUrlSniffer(lambda: NONE)
+                started = time.perf_counter()
+                for i in range(0, len(data), 65536):
+                    sniffer.feed(data[i:i + 65536])
+                best = max(best, len(data) / (1 << 20) / (time.perf_counter() - started))
+            with self.subTest(flood=data[:30]):
+                self.assertGreater(best, 28.0, f"{best:.1f} MB/s")
 
     def test_a_chunk_matches_at_most_its_budget(self):
         lines = b"".join(b"  Local:   http://localhost:%d/\r\n" % (2000 + i) for i in range(200))
@@ -395,6 +400,16 @@ class Bounds(unittest.TestCase):
         sniffer = D.DevUrlSniffer(lambda: NONE)
         sniffer.feed(lines)
         self.assertEqual(sniffer.feed(b"  Local: http://localhost:2999/\r\n"), ["http://localhost:2999/"])
+
+    def test_other_urls_never_spend_the_budget(self):
+        # The cheap tests keep lines that cannot announce a loopback server
+        # (another host's URLs, a loopback access log) from the table, so an
+        # announcement among them in one chunk is still found.
+        noise = (b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n" * 40
+                 + b"GET http://localhost:3000/api/items?page=2 200 12ms\r\n" * 40)
+        found = D.DevUrlSniffer(lambda: NONE).feed(b"\r\n" + noise + b"  Local:   http://localhost:5173/\r\n"
+                                                    + noise)
+        self.assertEqual(found, ["http://localhost:5173/"])
 
 
 def unfiltered(line: str, refused=()) -> str | None:

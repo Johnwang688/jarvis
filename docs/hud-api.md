@@ -2030,17 +2030,21 @@ BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
   `Serving HTTP on … (…)`, `Starting development server at`, `open your
   browser on`, `available at`, `Server address:`, `Development Server (…)`,
   `waiting on`, Jupyter's URL line, and the like), **loopback** `http`/`https`
-  with an **explicit port**: `localhost`, `127.0.0.0/8` or `[::1]`, with
-  `0.0.0.0` and `[::]` written as `localhost`; never a user name or password,
+  with an **explicit port**: `localhost`, `127.0.0.0/8`, `[::1]`, `0.0.0.0` or
+  `[::]` — **always sent as `localhost`**, the port and path kept, so the host
+  is always one the window's frame policy names (PR #70 review); never a user
+  name or password,
   never one of Jarvis's ports (`config.control_ports()`, 8403 and the
   configured workshop port, and the daemon's own HUD, API and preview ports
   as bound); the query and fragment dropped (a Jupyter `?token=` never
   travels); the path percent-encoded; at most 512 characters. The window
   judges it again (WP-E's Preview judge) before opening anything.
-- **How often**: once per origin per terminal among the last four sent, with
-  loopback hosts folded (`localhost:3000`, `127.0.0.1:3000` and
-  `[::1]:3000` are one server: Puma prints two of them); at most one frame a
-  second and four a minute per terminal.
+- **How often**: once per origin per terminal among the last four sent
+  (`localhost:3000`, `127.0.0.1:3000` and `[::1]:3000` are one server: Puma
+  prints two of them); at most one frame a second and four a minute per
+  terminal. A URL counts as sent only once the socket has taken its frame:
+  one a closing or lagging socket refused is offered again at the server's
+  next announcement.
 - **The switch: `GET /browser/settings`** → `{"auto_open": bool}` and
   **`PATCH /browser/settings`** with exactly `{auto_open: bool}` →
   `{"auto_open": bool}`. **Owner-only** (`projects.is_owner`: the HUD
