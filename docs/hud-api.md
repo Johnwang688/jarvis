@@ -1420,6 +1420,19 @@ HUD can flag one it cannot match to its own click.
   `project_created` arrives as usual.
 - `GET /vex/projects/{id}` → that request: `state` `"asking"`, `"created"`
   (with `project_id`), `"declined"` or `"failed"`, and a `message`.
+- `POST /vex/projects/check` `{name, language, template, location?}` (VX-3,
+  2026-10-12) → 200 `{path, windows_path, state, asks, describe}`: what
+  `POST /vex/projects` would do with the same body, **without asking or making
+  anything**. `path` is the exact folder the `project_folder` card will name,
+  `windows_path` its `C:\…` spelling (null if it has none), `state`
+  `"missing"` or `"empty"`, `asks` false for an existing empty folder (used
+  without a card, O5), `describe` the card's words for it. Every refusal is
+  Create's, word for word (400 for a bad name, language, template or location;
+  409 for a folder off a Windows drive, refused by `check_project_folder`, or
+  not empty), less Create's closing "Nothing was made." Owner-only like every
+  VEX route. `GET /vex/templates` answers a templates folder that cannot be
+  listed with a 409 sentence. The HUD reads `/vex/status`'s
+  `project_folder` as the dialog's default parent (V-4).
 
 **Program terminals** are listed by `GET /terminals` like any other, with two
 new row fields: `program` (`null` for a shell, else `"vex-build"`,

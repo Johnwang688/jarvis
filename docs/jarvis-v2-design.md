@@ -2356,6 +2356,31 @@ flag, a "dev servers" style list of past builds (only the last build per
 project is kept, across a reload by id). Free checks: `lib/vex.test.ts`,
 `tests/face/hud_v2_vex_check.py`.
 
+**New VEX project (2026-10-12, VX-3 of the same plan; decisions V-4).** New
+project's dialog offers "New VEX project from a template…", and the palette
+offers **New VEX Project from a Template…** — the palette's one VEX entry,
+which only opens the dialog. The dialog asks for a name (held to the daemon's
+rule: letters, digits, `_` and `-`, not starting with `-`, at most 64 — VEX's
+make refuses spaces), the language (C++ or Python), a template from the
+extension's own VS Code templates (the daemon's list, labelled from the
+extension's `index.json`), and the folder it goes in, defaulting to the one
+`jarvis vex setup` recorded (V-4). **It shows the exact folder it will create,
+and its Windows spelling**, as the daemon answers for exactly those inputs (a
+check that asks nothing and makes nothing); a folder the daemon refuses is
+said in its own words and Create stays off. **Create raises the
+`project_folder` card** — the exact path, Approve/Deny, never Always — and the
+dialog waits on it: **Deny makes nothing** and the dialog stays open saying
+so; Approve makes the folder, unpacks the template (Jarvis's own code), writes
+the settings file in the extension's v2 shape so the project also opens in VS
+Code, and the new project appears in the sidebar and opens as a new thread. A
+Python template gives `src/main.py` and the settings file. An existing empty
+folder is used without a card, and the dialog says so before Create. **Under
+any approval card every control of the dialog is disabled and inert, and
+Escape belongs to the card** (it denies; the dialog stays, its words kept).
+With no `vex.json` it names `jarvis vex setup` and creates nothing. Free
+checks: `lib/vexNew.test.ts`, `tests/face/hud_v2_vex_new_check.py`,
+`tests/v2/vex_check.py`.
+
 **Up to eight panes (2026-10-10, WP-G1 of
 `docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions beside it).** The
 owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
