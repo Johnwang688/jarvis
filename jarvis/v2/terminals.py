@@ -901,8 +901,12 @@ class Terminal:
         if attached is None:
             return
         for url in dict.fromkeys(found):
-            if sniffer.admit(url):
-                attached.send_text(json.dumps({"type": "dev_url", "url": url}))
+            # Recorded only once the frame is queued: a socket that refuses
+            # it (closing, too far behind) leaves the server's next
+            # announcement free to go to the window that reattaches.
+            if (sniffer.may_send(url)
+                    and attached.send_text(json.dumps({"type": "dev_url", "url": url}))):
+                sniffer.sent(url)
 
     def _check_exit(self, wait: bool = False) -> None:
         proc = self._proc

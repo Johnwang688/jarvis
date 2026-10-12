@@ -1341,8 +1341,8 @@ class DevUrls(Base):
             for host in ("localhost", "127.0.0.1", "[::1]", "0.0.0.0"):
                 self.run_line(client, f"echo  Local: http://{host}:{port}/")
         self.run_line(client, "echo  Local: http://127.0.0.1:24606/")
-        self.wait_dev_url(client, "http://127.0.0.1:24606/")
-        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://127.0.0.1:24606/"])
+        self.wait_dev_url(client, "http://localhost:24606/")                  # sent as localhost
+        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://localhost:24606/"])
 
     def test_nothing_reaches_the_bus_a_log_or_a_file(self):
         marker = "zq-devurl-" + secrets.token_hex(6)
@@ -1467,6 +1467,65 @@ class DevUrls(Base):
         # A mark without this terminal's nonce moves nothing.
         terminal._output(mark(b"A", nonce="00" * 16) + b"  Local: http://localhost:24614/\r\n")
         self.assertEqual(sock.sent[-1], ("text", {"type": "dev_url", "url": "http://localhost:24614/"}))
+
+    def test_a_frame_the_socket_refuses_is_not_remembered(self):
+        # PR #70 review: the URL used to be recorded before `send_text`, whose
+        # False was ignored, so a socket that was closing or behind cost the
+        # server its one frame for good.
+        terminal = T.Terminal("0000000c", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE, integration="posix")
+        self.addCleanup(terminal.finish)
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        frames, accept = [], [False]
+
+        def send_text(text):
+            if accept[0]:
+                frames.append(json.loads(text))
+            return accept[0]
+        terminal._attachment = SimpleNamespace(send_binary=lambda d: True, send_text=send_text,
+                                               closed=threading.Event())
+        line = b"  Local: http://localhost:24616/\r\n"
+        terminal._output(line)                                                 # refused
+        self.assertEqual(frames, [])
+        self.assertEqual(len(terminal._sniffer._recent), 0, "not remembered")
+        accept[0] = True
+        terminal._output(line)                                                 # the restart's
+        self.assertEqual(frames, [{"type": "dev_url", "url": "http://localhost:24616/"}])
+        terminal._output(line)
+        self.assertEqual(len(frames), 1, "and remembered once sent")
+
+    def test_floods_stay_well_above_what_xterm_draws(self):
+        # PR #70 review: 50 MB of "Network: http://192.168…" lines went through
+        # `_output` at 8.9 MB/s with the sniffer (543 without). xterm draws
+        # ~14 MB/s; every flood must stay at twice that, through `_output`
+        # with a socket that takes everything. Best of two runs each.
+        mb = 1 << 20
+        floods = {
+            "network URLs": b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n",
+            "plain logs": b"2026-10-12 10:00:00 INFO worker-3 processed job 12345 in 4.2 ms\r\n",
+            "loopback access log": b"GET http://localhost:3000/api/items?page=2 200 12ms\r\n",
+            "colour": b"\x1b[32mok\x1b[0m test \x1b[1mname\x1b[22m passed in \x1b[33m3ms\x1b[0m\r\n",
+            "announcements": b"  Local:   http://localhost:3000/\r\n",
+        }
+        sock = SimpleNamespace(send_binary=lambda d: True, send_text=lambda t: True,
+                               closed=threading.Event())
+        for name, line in floods.items():
+            data = line * (12 * mb // len(line))
+            best = 0.0
+            for _ in range(2):
+                terminal = T.Terminal("0000000b", shell="/bin/sh", folder="/", project_id=None,
+                                      label="~", cols=80, rows=24, nonce=NONCE, integration="none")
+                terminal._attachment = sock
+                terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+                terminal._dev_on = lambda: True
+                started = time.perf_counter()
+                for i in range(0, len(data), 65536):
+                    terminal._output(data[i:i + 65536])
+                best = max(best, len(data) / mb / (time.perf_counter() - started))
+                terminal.finish()
+            with self.subTest(flood=name):
+                self.assertGreater(best, 28.0, f"{name}: {best:.1f} MB/s")
 
     def test_a_sniffer_that_fails_never_breaks_the_terminal(self):
         terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None, label="~",

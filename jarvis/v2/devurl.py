@@ -35,29 +35,34 @@ executed and the sequence going on, any of it split across chunks. Colour
 (Vite colours the port apart from the host) draws nothing; a cursor moved
 forward is a space; a cursor moved back, a backspace or a deleted character
 spoils the line (what is drawn is no longer what was written); any other
-cursor move, CR and the line feeds end it. Then the line is matched against
+cursor move, CR and the line feeds end it. A line that holds no loopback
+host spelling or none of the shapes' words is passed over at once (`_HOSTS`,
+`_WORDS`: they cannot change an answer, and keep a flood of other URLs at
+C speed); the rest is matched against
 `SHAPES` (Vite, Next, Create React App, Angular, webpack-dev-server,
 `python -m http.server`, Flask, uvicorn, Django, Puma/rails, Hugo, Jekyll,
 Streamlit, Gradio, `php -S`, `serve`, Expo, Jupyter, Astro, Nuxt, Storybook
 and the like), and the URL it announces is kept only if `clean` accepts it:
 
 * http or https, an explicit port, no user name or password;
-* a loopback host: `localhost`, `127.0.0.0/8` or `[::1]` — `0.0.0.0` and
-  `[::]` are read as `localhost`; any other name or address (`Network:
-  http://192.168…`, a public host, `foo.localhost`) is refused;
+* a loopback host: `localhost`, `127.0.0.0/8`, `[::1]`, `0.0.0.0` or `[::]`
+  — **always sent as `localhost`** (the window can frame no other loopback
+  name); any other name or address (`Network: http://192.168…`, a public
+  host, `foo.localhost`) is refused;
 * never one of Jarvis's own ports: `config.control_ports()`, the workshop's
   (8403 and its configured port) and whatever the caller adds (the daemon's
   HUD, API and preview listeners as bound);
 * the query and fragment dropped (a Jupyter `?token=` never travels), the
   path percent-encoded.
 
-**Sending is the caller's choice; `admit` says whether it may.** One frame per
-origin per terminal — loopback hosts folded, so Puma's `127.0.0.1:3000` and
-`[::1]:3000` are one server — among the last `RECENT` sent, at most one per
-`RATE_GAP_S` and `RATE_MAX` per `RATE_WINDOW_S`. A URL found while no window
-is attached is not admitted, so it is not remembered either: the next time the
-server announces itself (a restart) a window that is attached by then hears
-it. A ring replay never reaches here: only live output is fed.
+**Sending is the caller's choice; `may_send` says whether it may, and `sent`
+records only a frame that went.** One frame per origin per terminal — loopback
+hosts folded, so Puma's `127.0.0.1:3000` and `[::1]:3000` are one server —
+among the last `RECENT` sent, at most one per `RATE_GAP_S` and `RATE_MAX` per
+`RATE_WINDOW_S`. A URL found while no window is attached, or one the socket
+refused, is not recorded: the next time the server announces itself (a
+restart) a window that is attached by then hears it. A ring replay never
+reaches here: only live output is fed.
 
 **The limits, stated.** A server started in the background (`npm run dev &`)
 in bash whose banner arrives while the prompt is up is skipped (it lands
@@ -90,6 +95,11 @@ RECENT = 4                 # origins remembered per terminal, for de-duplication
 RATE_GAP_S = 1.0           # at most one frame per terminal this often
 RATE_MAX = 4               # … and this many per RATE_WINDOW_S
 RATE_WINDOW_S = 60.0
+# Lines that pass both cheap tests and are matched against `SHAPES` in one fed
+# chunk (or one mark). A flood of lines that are announcements (`yes "Local:
+# http://localhost:3000/"`) costs ~30 µs a line, and only one frame a second
+# can go anyway: past the budget, the rest of the chunk is not read.
+MATCH_BUDGET = 32
 
 # What the sniffer does with the bytes it is fed (the marks move it).
 READ = "read"              # a command's output, or a terminal that marks nothing
@@ -135,6 +145,52 @@ SHAPES: tuple[tuple[str, re.Pattern], ...] = tuple((name, re.compile(pattern, re
                 r"(?:/(?:lab|tree)\b[A-Za-z0-9\-._~:/?#@!$&'()*+,;=%]*|/\?token=[A-Za-z0-9\-._~%]*))\s*$"),
 ))
 
+# Two cheap tests before any shape runs (review of PR #70: a flood of lines
+# holding `://` ran up to 17 regexes each and throttled the terminal to ~9
+# MB/s). Neither can change an answer:
+# - `_HOSTS`: every host `clean` accepts is spelled `localhost` (any ASCII
+#   case: `_URL` is ASCII-only), `127.…`, `0.0.0.0`, or in brackets starting
+#   `[:` or `[0` (`[::]`, `[::1]`, `[0:0:…:1]`: the first group of `::` and
+#   `::1` is zero), so a line holding none of them announces nothing `clean`
+#   keeps;
+# - `_WORDS`: every row of `SHAPES` needs one of these words, written in its
+#   pattern as literal text (same flag, so the same case folding), so a line
+#   holding none of them matches no row; `local` only before a space or `:`,
+#   as the row needs it (so `localhost` alone is not one). A new row adds its
+#   word here and to `_WORD_LITERALS`; devurl_check's `Prefilter` holds them
+#   to the table.
+# `find_url` asks the two regexes; the sniffer asks `_has_host` and
+# `_has_word` first, the same tests as plain substring searches (a regex
+# alternation under IGNORECASE scans at ~15 MB/s; these at C speed), once over
+# a chunk's whole run of lines and then per line.
+_HOSTS = re.compile(r"localhost|127\.|0\.0\.0\.0|\[[0:]", re.I)
+_WORDS = re.compile(r"local[\s:]|url:|browser on|loopback|running|serving|development server"
+                    r"|listening|available at|server address|waiting on|server at|token=|/lab|/tree",
+                    re.I)
+_WORD_LITERALS = ("url:", "browser on", "loopback", "running", "serving", "development server",
+                  "listening", "available at", "server address", "waiting on", "server at",
+                  "token=", "/lab", "/tree")
+_LOCAL = re.compile(r"local[\s:]")      # on lowered text: no IGNORECASE, so a literal scan
+# The characters outside ASCII that IGNORECASE matches to an ASCII letter of
+# `_WORDS`: those whose lowercase is one (İ → i, the Kelvin sign → k) and
+# those `re` holds equivalent (ı ≈ i, ſ ≈ s). Folded before lowering, so a
+# literal search finds every place the regex would.
+_FOLD = str.maketrans({"İ": "i", "ı": "i", "ſ": "s", "K": "k"})
+
+
+def _has_host(data: bytes) -> bool:
+    """`_HOSTS` on bytes, as substring searches (ASCII case only, which is
+    all `clean`'s ASCII-only hosts have)."""
+    return (b"127." in data or b"0.0.0.0" in data or b"[:" in data or b"[0" in data
+            or b"localhost" in data.lower())
+
+
+def _has_word(text: str) -> bool:
+    """`_WORDS`, as substring searches on the folded, lowered text: true
+    wherever the regex would match (and possibly elsewhere)."""
+    low = (text if text.isascii() else text.translate(_FOLD)).lower()
+    return any(word in low for word in _WORD_LITERALS) or _LOCAL.search(low) is not None
+
 _TRAILING = ".,;:!?'\")}>*"
 _V4_LOOPBACK = ipaddress.ip_network("127.0.0.0/8")
 _V6_LOOPBACK = ipaddress.ip_address("::1")
@@ -151,8 +207,10 @@ def jarvis_ports() -> frozenset[int]:
 def clean(raw: str, refused: Iterable[int] = ()) -> str | None:
     """The URL a dev server announced, as the window may open it, or None.
     Loopback http(s) with an explicit port, never a refused one, no user
-    name or password; `0.0.0.0` and `[::]` read as `localhost`; no query or
-    fragment."""
+    name or password; no query or fragment. **The host sent is always
+    `localhost`** (review of PR #70): `0.0.0.0` and `[::]` mean "every
+    address", and `[::1]` or `127.0.0.2` are hosts the window's frame policy
+    cannot name, so sending them would only burn the server's one frame."""
     url = raw
     while url and url[-1] in _TRAILING:
         url = url[:-1]
@@ -168,27 +226,23 @@ def clean(raw: str, refused: Iterable[int] = ()) -> str | None:
     host = parts.hostname
     if not host or port is None or not 0 < port < 65536:
         return None
-    if host in ("localhost", "0.0.0.0", "::"):
-        name = "localhost"
-    else:
+    if host not in ("localhost", "0.0.0.0", "::"):
         try:
             address = ipaddress.ip_address(host)
         except ValueError:
             return None
-        if address.version == 4 and address in _V4_LOOPBACK:
-            name = str(address)
-        elif address == _V6_LOOPBACK:
-            name = "[::1]"
-        else:
+        if not ((address.version == 4 and address in _V4_LOOPBACK) or address == _V6_LOOPBACK):
             return None
     if port in refused:
         return None
     path = quote(parts.path or "/", safe=_PATH_SAFE)
-    return f"{parts.scheme}://{name}:{port}{path}"
+    return f"{parts.scheme}://localhost:{port}{path}"
 
 
 def find_url(line: str, refused: Iterable[int] = ()) -> str | None:
     """The first URL a line announces that `clean` accepts, or None."""
+    if _HOSTS.search(line) is None or _WORDS.search(line) is None:
+        return None
     for _, shape in SHAPES:
         match = shape.search(line)
         if match is not None:
@@ -200,16 +254,21 @@ def find_url(line: str, refused: Iterable[int] = ()) -> str | None:
 
 def origin_key(url: str) -> tuple[str, int]:
     """What de-duplication compares: the scheme and the port. Every host
-    `clean` lets through is this machine's loopback, so `localhost:3000`,
-    `127.0.0.1:3000` and `[::1]:3000` are one server."""
+    `clean` lets through is this machine's loopback and is sent as
+    `localhost`, so `localhost:3000`, `127.0.0.1:3000` and `[::1]:3000` are
+    one server (Puma prints two of them)."""
     parts = urlsplit(url)
     return parts.scheme, parts.port or 0
 
 
 # -- the sniffer ----------------------------------------------------------------------
 
-# Where a run of plain text stops: a backspace, an escape, a C1 control.
-_STOP = re.compile(rb"[\x08\x1b]|\xc2[\x80-\x9f]")
+# A run of plain text and whole colour sequences, which draw nothing: it stops
+# at a backspace, any other escape, a C1 control, or a `\xc2` the chunk ends on
+# (maybe the start of one). One C-level match per run however much colour it
+# holds; `_SGR` then drops the colour (review of PR #70: a colour flood ran at
+# ~21 MB/s through the terminal, one Python step per sequence).
+_PLAIN = re.compile(rb"(?:[^\x08\x1b\xc2]+|\xc2(?=[^\x80-\x9f])|\x1b\[[0-9;:]*m)+")
 # C0 controls inside a run that draw nothing here (not TAB, not a line end).
 _SILENT = bytes(b for b in range(0x20) if b not in (0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x1B)) + b"\x7f"
 _BREAK = re.compile(rb"[\n\x0b\x0c\r]")
@@ -232,8 +291,8 @@ def _first_number(params: bytes) -> int:
 
 class DevUrlSniffer:
     """One terminal's: fed its live output (`feed`), told its signed marks
-    (`mark`), it returns the loopback URLs announced; `admit` decides which
-    may be sent. Memory: `LINE_CAP` + `CARRY_CAP` bytes, `RECENT` origins and
+    (`mark`), it returns the loopback URLs announced; `may_send` decides
+    which may be sent and `sent` records one that was. Memory: `LINE_CAP` + `CARRY_CAP` bytes, `RECENT` origins and
     `RATE_MAX` times, whatever it is fed. Not thread-safe: the terminal calls
     it under its own lock."""
 
@@ -250,6 +309,7 @@ class DevUrlSniffer:
         self._bel_ends = False
         self._carry = b""
         self._paused = False
+        self._budget = MATCH_BUDGET     # full matches left in this chunk
         self._recent: collections.deque = collections.deque(maxlen=RECENT)
         self._sent: collections.deque = collections.deque(maxlen=RATE_MAX)
 
@@ -270,6 +330,7 @@ class DevUrlSniffer:
         stream. Ends the line being read (output with no newline before the
         prompt still counts) and moves the mode."""
         found: list[str] = []
+        self._budget = MATCH_BUDGET
         self._end_line(found)
         if kind == b"C":
             self._seen_command = True
@@ -307,35 +368,28 @@ class DevUrlSniffer:
             return found
         if self._paused:
             self._resume()
+        self._budget = MATCH_BUDGET
         buf = self._carry + bytes(data) if self._carry else bytes(data)
         self._carry = b""
         i, n = 0, len(buf)
-        text: list[bytes] = []                  # plain text, colour sequences left out
         while i < n:
             if self._string:
                 i = self._skip_string(buf, i)
                 continue
-            match = _STOP.search(buf, i)
-            stop = match.start() if match is not None else n
-            if match is not None and buf[stop] == 0x1B:
-                colour = _SGR.match(buf, stop)
-                if colour is not None:
-                    text.append(buf[i:stop])
-                    i = colour.end()
-                    continue
-            if match is None and buf.endswith(b"\xc2"):
-                stop = n - 1                    # maybe a C1 control: decide next time
-            text.append(buf[i:stop])
-            run = b"".join(text)
-            text.clear()
-            if run:
-                self._run(run, found)
-            if match is None:
-                if stop < n:
-                    self._carry = buf[stop:]
-                return found
-            i = stop
+            plain = _PLAIN.match(buf, i)
+            if plain is not None:
+                run = buf[i:plain.end()]
+                if b"\x1b" in run:
+                    run = _SGR.sub(b"", run)    # every escape in the run starts a whole colour
+                if run:
+                    self._run(run, found)
+                i = plain.end()
+                if i >= n:
+                    return found
             byte = buf[i]
+            if byte == 0xC2 and i == n - 1:
+                self._carry = buf[i:]           # maybe a C1 control: decide next time
+                return found
             if byte == 0x1B:
                 j = self._escape(buf, i, found)
             elif byte == 0x08:
@@ -350,9 +404,6 @@ class DevUrlSniffer:
                     self._carry = buf[i:]
                     return found
             i = j
-        run = b"".join(text)                    # the chunk ended in a colour sequence
-        if run:
-            self._run(run, found)
         return found
 
     # -- text and lines ---------------------------------------------------------------
@@ -380,8 +431,13 @@ class DevUrlSniffer:
         self._end_line(found)
         if first < last:
             middle = run[first + 1:last]
-            if b"://" in middle:
+            # C-level passes over the whole middle first: most floods (logs,
+            # other hosts' URLs, a loopback access log) stop here.
+            if (b"://" in middle and _has_host(middle)
+                    and _has_word(middle.decode("utf-8", "replace"))):
                 for line in _BREAK.split(middle):
+                    if self._budget <= 0:
+                        break
                     if len(line) <= LINE_CAP and b"://" in line:
                         self._match(line, found)
         self._append(run[last + 1:])
@@ -412,7 +468,13 @@ class DevUrlSniffer:
         self._spoiled = False
 
     def _match(self, line: bytes, found: list[str]) -> None:
-        url = find_url(line.decode("utf-8", "replace"), set(self._refused()))
+        if self._budget <= 0 or not _has_host(line):   # `find_url`'s own tests, cheaply first
+            return
+        text = line.decode("utf-8", "replace")
+        if not _has_word(text):
+            return
+        self._budget -= 1
+        url = find_url(text, set(self._refused()))
         if url is not None and url not in found:
             found.append(url)
 
@@ -561,19 +623,23 @@ class DevUrlSniffer:
 
     # -- what may be sent -------------------------------------------------------------
 
-    def admit(self, url: str) -> bool:
-        """May `url` go to the attached window now? True records it: its
-        origin joins the last `RECENT`, and the send counts against the rate.
-        A URL that cannot be sent (no window) must not be admitted, so a later
-        announcement of it still can be."""
-        key = origin_key(url)
-        if key in self._recent:
+    def may_send(self, url: str) -> bool:
+        """May `url` go to the attached window now? Asks only: nothing is
+        recorded until `sent` says the frame went (review of PR #70: a URL
+        recorded before a send that failed was never offered again)."""
+        if origin_key(url) in self._recent:
             return False
         now = self._clock()
         if self._sent and now - self._sent[-1] < RATE_GAP_S:
             return False
         if len(self._sent) >= RATE_MAX and now - self._sent[0] < RATE_WINDOW_S:
             return False
-        self._recent.append(key)
-        self._sent.append(now)
         return True
+
+    def sent(self, url: str) -> None:
+        """`url` reached the window: its origin joins the last `RECENT`, and
+        the send counts against the rate. A URL that could not be sent (no
+        window, a socket that refused it) is never recorded, so the server's
+        next announcement still can be."""
+        self._recent.append(origin_key(url))
+        self._sent.append(self._clock())

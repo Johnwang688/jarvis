@@ -83,24 +83,24 @@ BANNERS: list[tuple[str, bytes, str]] = [
      "http://localhost:8001/"),
     ("running on", b" * Serving Flask app 'app'\r\n * Debug mode: on\r\n"
                    b" * Running on http://127.0.0.1:5000\r\nPress CTRL+C to quit\r\n",
-     "http://127.0.0.1:5000/"),
+     "http://localhost:5000/"),
     ("running on", b"INFO:     Uvicorn running on " + sgr(1) + b"http://127.0.0.1:8000" + sgr(0)
-                   + b" (Press CTRL+C to quit)\r\n", "http://127.0.0.1:8000/"),
-    ("running on", b"* Running on local URL:  http://127.0.0.1:7860\r\n", "http://127.0.0.1:7860/"),
+                   + b" (Press CTRL+C to quit)\r\n", "http://localhost:8000/"),
+    ("running on", b"* Running on local URL:  http://127.0.0.1:7860\r\n", "http://localhost:7860/"),
     ("django", b"Django version 5.1, using settings 'site.settings'\r\n"
                b"Starting development server at http://127.0.0.1:8000/\r\nQuit the server with CONTROL-C.\r\n",
-     "http://127.0.0.1:8000/"),
+     "http://localhost:8000/"),
     ("listening on", b"* Listening on http://127.0.0.1:3000\r\n* Listening on http://[::1]:3000\r\n",
-     "http://127.0.0.1:3000/"),
+     "http://localhost:3000/"),
     ("hugo", b"Web Server is available at http://localhost:1313/ (bind address 127.0.0.1)\r\n",
      "http://localhost:1313/"),
     ("jekyll", b"    Server address: http://127.0.0.1:4000/\r\n  Server running... press ctrl-c to stop.\r\n",
-     "http://127.0.0.1:4000/"),
+     "http://localhost:4000/"),
     ("php -S", b"[Mon Oct 12 10:00:00 2026] PHP 8.3.6 Development Server (http://localhost:8080) started\r\n",
      "http://localhost:8080/"),
     ("expo", "› Metro waiting on exp://10.0.0.4:8081\r\n› Web is waiting on "
              "http://localhost:8081\r\n".encode(), "http://localhost:8081/"),
-    ("serving on", b"INFO    -  [10:00:00] Serving on http://127.0.0.1:8000/\r\n", "http://127.0.0.1:8000/"),
+    ("serving on", b"INFO    -  [10:00:00] Serving on http://127.0.0.1:8000/\r\n", "http://localhost:8000/"),
     ("eleventy", b"[11ty] Server at http://localhost:8080/\r\n", "http://localhost:8080/"),
     ("jupyter", b"[I 2026-10-12 10:00:00.000 ServerApp] Jupyter Server 2.14.2 is running at:\r\n"
                 b"[I 2026-10-12 10:00:00.000 ServerApp] http://localhost:8888/tree?token=abc0123456789def\r\n"
@@ -128,7 +128,15 @@ def sent(chunks) -> list[str]:
         now[0] += D.RATE_GAP_S
         return now[0]
     sniffer = D.DevUrlSniffer(lambda: NONE, clock=clock)
-    return [url for url in run(sniffer, chunks) if sniffer.admit(url)]
+    return [url for url in run(sniffer, chunks) if admit(sniffer, url)]
+
+
+def admit(sniffer: D.DevUrlSniffer, url: str) -> bool:
+    """What the terminal does with a URL and a socket that takes the frame."""
+    if not sniffer.may_send(url):
+        return False
+    sniffer.sent(url)
+    return True
 
 
 def split_every_byte(data: bytes) -> list[bytes]:
@@ -207,16 +215,20 @@ class Cleaning(unittest.TestCase):
         self.assertEqual(D.clean("http://localhost:8888/lab/?token=abc"), "http://localhost:8888/lab/")
         self.assertEqual(D.clean("http://localhost:3000/#/route"), "http://localhost:3000/")
         found = run(D.DevUrlSniffer(lambda: NONE), [b"     or http://127.0.0.1:8888/?token=abc0123456789\r\n"])
-        self.assertEqual(found, ["http://127.0.0.1:8888/"])
+        self.assertEqual(found, ["http://localhost:8888/"])
         self.assertNotIn("token", json.dumps(found))
 
     def test_only_loopback_with_an_explicit_port(self):
         good = {
             "http://localhost:3000": "http://localhost:3000/",
             "https://LOCALHOST:3443/app": "https://localhost:3443/app",
-            "http://127.0.0.1:5000/": "http://127.0.0.1:5000/",
-            "http://127.4.5.6:5001/": "http://127.4.5.6:5001/",
-            "http://[::1]:3000/": "http://[::1]:3000/",
+            # Every loopback host is sent as `localhost`, the port and path kept
+            # (review of PR #70: the window can frame no other loopback name).
+            "http://127.0.0.1:5000/": "http://localhost:5000/",
+            "http://127.4.5.6:5001/a/b": "http://localhost:5001/a/b",
+            "http://127.255.255.254:5002": "http://localhost:5002/",
+            "http://[::1]:3000/": "http://localhost:3000/",
+            "https://[0:0:0:0:0:0:0:1]:3443/x": "https://localhost:3443/x",
             "http://0.0.0.0:8000/": "http://localhost:8000/",
             "http://[::]:8000/": "http://localhost:8000/",
             "http://localhost:3000/café": "http://localhost:3000/caf%C3%A9",
@@ -355,12 +367,136 @@ class Bounds(unittest.TestCase):
     def test_a_flood_is_cheap(self):
         colour = b"\x1b[32mok\x1b[0m test \x1b[1mname\x1b[22m passed in \x1b[33m3ms\x1b[0m\r\n" * 120_000
         lines = b"line of output with no address in it at all\r\n" * 220_000
-        for data in (colour, lines, os.urandom(4_000_000)):
+        # PR #70 review: URL-dense output (another host's, or this machine's
+        # access log) and a flood of real announcements.
+        network = b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n" * 160_000
+        access = b"GET http://localhost:3000/api/items?page=2 200 12ms\r\n" * 180_000
+        local = b"".join(b"  Local:   http://localhost:%d/\r\n" % (1024 + i) for i in range(280_000))
+        for data in (colour, lines, os.urandom(4_000_000), network, access, local):
             sniffer = D.DevUrlSniffer(lambda: NONE)
             started = time.perf_counter()
             for i in range(0, len(data), 65536):
                 sniffer.feed(data[i:i + 65536])
             self.assertLess(time.perf_counter() - started, 2.0, len(data))
+
+    def test_a_chunk_matches_at_most_its_budget(self):
+        lines = b"".join(b"  Local:   http://localhost:%d/\r\n" % (2000 + i) for i in range(200))
+        calls = []
+        real = D.find_url
+
+        def counting(text, refused=()):
+            calls.append(text)
+            return real(text, refused)
+        with patch.object(D, "find_url", counting):
+            found = D.DevUrlSniffer(lambda: NONE).feed(lines)
+        self.assertEqual(len(calls), D.MATCH_BUDGET)
+        self.assertEqual(found[0], "http://localhost:2000/")
+        # Each chunk (and each mark) starts with a fresh budget.
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        sniffer.feed(lines)
+        self.assertEqual(sniffer.feed(b"  Local: http://localhost:2999/\r\n"), ["http://localhost:2999/"])
+
+
+def unfiltered(line: str, refused=()) -> str | None:
+    """`find_url` without its two cheap tests: the table alone."""
+    for _, shape in D.SHAPES:
+        match = shape.search(line)
+        if match is not None:
+            url = D.clean(match.group("url"), refused)
+            if url is not None:
+                return url
+    return None
+
+
+def corpus(count: int, seed: int = 11) -> list[str]:
+    """Lines shaped like announcements, near misses and noise, in every case
+    and the spellings IGNORECASE folds (ſ, ı, İ, the Kelvin sign)."""
+    rng = random.Random(seed)
+    prefixes = ["", "  ", "➜  ", "- ", "┃ ", "[I 2026-10-12 ServerApp] ", "INFO:     ", " * ",
+                "│   ", "     or ", "GET ", "2026-10-12 ", "é "]
+    labels = ["Local:", "LOCAL:", "Local URL:", "local", "Locaͥl:", "Local ", "Running on",
+              "Uvicorn running on", "Running on local URL:", "RUNNING ON", "Listening on",
+              "Liſtening on", "Lıstening on", "LİSTENING ON", "Loopback:", "LOOPBACK:",
+              "open your browser on", "Server running at", "is running at:", "Project is running at",
+              "Serving HTTP on 0.0.0.0 port 8000", "Starting development server at",
+              "PHP 8.3 Development Server", "is available at", "Server address:", "Web is waiting on",
+              "Serving on", "[11ty] Server at", "started server on 0.0.0.0:3000, url:", "Network:",
+              "url:", "see", "", "KEY local:"]
+    seps = [" ", "  ", "\t", " ", ": ", ""]
+    urls = ["http://localhost:3000/", "http://LOCALHOST:3001", "http://LocalHost:3004/a",
+            "http://127.0.0.1:5000", "http://127.9.9.9:5001/x", "http://[::1]:3002/", "http://[::]:8000/",
+            "(http://0.0.0.0:8000/)", "(http://localhost:8080)", "http://192.168.1.2:5173/",
+            "http://example.com:80/", "http://localhoſt:3000", "http://[0:0:0:0:0:0:0:1]:3003/",
+            "http://localhost:8888/tree?token=x", "http://127.0.0.1:8888/?token=y",
+            "http://localhost:8888/lab", "http://localhost:8402/", "https://localhost:3443/app",
+            "http://localhost/", "http://[::ffff:127.0.0.1]:3005/", "http://foo.localhost:3006/",
+            "exp://10.0.0.4:8081", "http://0.0.0.0:3007"]
+    suffixes = ["", "/", " (Press CTRL+C to quit)", ")", " started", "  │", " ** ", ".", " "]
+    lines = []
+    for _ in range(count):
+        lines.append(rng.choice(prefixes) + rng.choice(labels) + rng.choice(seps) + rng.choice(urls)
+                     + rng.choice(suffixes))
+    return lines
+
+
+class Prefilter(unittest.TestCase):
+    """PR #70 review: two cheap tests run before the table, and neither may
+    change an answer."""
+
+    def test_the_cheap_tests_never_change_an_answer(self):
+        refused = set(D.jarvis_ports())
+        lines = corpus(20_000)
+        for _, banner, _ in BANNERS:
+            lines += [D._SGR.sub(b"", line).decode() for line in banner.split(b"\r\n")]
+        hits = 0
+        for line in lines:
+            want = unfiltered(line, refused)
+            with self.subTest(line=line):
+                self.assertEqual(D.find_url(line, refused), want)
+                if want is not None:
+                    hits += 1
+                    self.assertTrue(D._has_host(line.encode()), "the bytes host test")
+                    self.assertTrue(D._has_word(line), "the literal word test")
+                    self.assertIsNotNone(D._HOSTS.search(line))
+                    self.assertIsNotNone(D._WORDS.search(line))
+        self.assertGreater(hits, 2000, "the corpus finds URLs, not only misses")
+
+    def test_the_literal_word_test_is_the_regex_or_wider(self):
+        # `_has_word` stands in for `_WORDS` before decoding is paid for: true
+        # wherever the regex matches, in every folded spelling.
+        for line in corpus(20_000, seed=12):
+            if D._WORDS.search(line):
+                with self.subTest(line=line):
+                    self.assertTrue(D._has_word(line))
+        for spelled in ("LIſTENING", "lıstening", "LİSTENING", "KEY lOcAl:",
+                        "Local　http", "SERVING http", "loOpBack"):
+            if D._WORDS.search(spelled):
+                self.assertTrue(D._has_word(spelled), spelled)
+
+    def test_the_sniffer_finds_what_the_table_finds(self):
+        # Through `feed`, chunks of 20 lines (within the match budget), so the
+        # bulk tests over a chunk's run of lines are exercised too.
+        refused = set(D.jarvis_ports())
+        lines = corpus(6_000, seed=13)
+        for start in range(0, len(lines), 20):
+            group = lines[start:start + 20]
+            want = list(dict.fromkeys(u for u in (unfiltered(x, refused) for x in group) if u))
+            data = "\r\n".join(group).encode() + b"\r\n"
+            with self.subTest(start=start):
+                self.assertEqual(D.DevUrlSniffer(lambda: refused).feed(b"\r\n" + data), want)
+
+    def test_every_loopback_host_is_sent_as_localhost(self):
+        sniffer = D.DevUrlSniffer(lambda: NONE)
+        found = run(sniffer, [b"* Listening on http://[::1]:3100/a\r\n",
+                              b"* Listening on http://127.0.0.2:3101/b?x=1\r\n",
+                              b" * Running on http://127.0.0.1:3102\r\n",
+                              b"Serving HTTP on :: port 3103 (http://[::]:3103/) ...\r\n"])
+        self.assertEqual(found, ["http://localhost:3100/a", "http://localhost:3101/b",
+                                 "http://localhost:3102/", "http://localhost:3103/"])
+        # So a server Puma announces twice uses one frame, and the window can
+        # frame what it gets.
+        self.assertEqual(sent([b"* Listening on http://127.0.0.1:3000\r\n* Listening on http://[::1]:3000\r\n"]),
+                         ["http://localhost:3000/"])
 
 
 class Admit(unittest.TestCase):
@@ -369,32 +505,32 @@ class Admit(unittest.TestCase):
         self.sniffer = D.DevUrlSniffer(lambda: NONE, clock=lambda: self.now)
 
     def test_one_frame_per_origin_loopback_hosts_folded(self):
-        self.assertTrue(self.sniffer.admit("http://127.0.0.1:3000/"))
+        self.assertTrue(admit(self.sniffer, "http://127.0.0.1:3000/"))
         self.now += 10
         for again in ("http://127.0.0.1:3000/", "http://[::1]:3000/", "http://localhost:3000/other"):
-            self.assertFalse(self.sniffer.admit(again), again)
-        self.assertTrue(self.sniffer.admit("https://localhost:3000/"), "another scheme is another origin")
+            self.assertFalse(admit(self.sniffer, again), again)
+        self.assertTrue(admit(self.sniffer, "https://localhost:3000/"), "another scheme is another origin")
 
     def test_rate_limited_per_terminal(self):
-        self.assertTrue(self.sniffer.admit("http://localhost:4001/"))
-        self.assertFalse(self.sniffer.admit("http://localhost:4002/"), "within RATE_GAP_S")
+        self.assertTrue(admit(self.sniffer, "http://localhost:4001/"))
+        self.assertFalse(admit(self.sniffer, "http://localhost:4002/"), "within RATE_GAP_S")
         self.now += D.RATE_GAP_S
-        self.assertTrue(self.sniffer.admit("http://localhost:4002/"))
+        self.assertTrue(admit(self.sniffer, "http://localhost:4002/"))
         for port in (4003, 4004):
             self.now += D.RATE_GAP_S
-            self.assertTrue(self.sniffer.admit(f"http://localhost:{port}/"))
+            self.assertTrue(admit(self.sniffer, f"http://localhost:{port}/"))
         self.now += D.RATE_GAP_S
-        self.assertFalse(self.sniffer.admit("http://localhost:4005/"), f"{D.RATE_MAX} a window")
+        self.assertFalse(admit(self.sniffer, "http://localhost:4005/"), f"{D.RATE_MAX} a window")
         self.now = 1000.0 + D.RATE_WINDOW_S
-        self.assertTrue(self.sniffer.admit("http://localhost:4005/"))
+        self.assertTrue(admit(self.sniffer, "http://localhost:4005/"))
 
     def test_the_last_four_are_remembered(self):
         for port in (4101, 4102, 4103, 4104, 4105):
             self.now += D.RATE_WINDOW_S
-            self.assertTrue(self.sniffer.admit(f"http://localhost:{port}/"))
+            self.assertTrue(admit(self.sniffer, f"http://localhost:{port}/"))
         self.now += D.RATE_WINDOW_S
-        self.assertTrue(self.sniffer.admit("http://localhost:4101/"), "the oldest was let go")
-        self.assertFalse(self.sniffer.admit("http://localhost:4105/"))
+        self.assertTrue(admit(self.sniffer, "http://localhost:4101/"), "the oldest was let go")
+        self.assertFalse(admit(self.sniffer, "http://localhost:4105/"))
 
     def test_found_is_not_sent_until_admitted(self):
         found = self.sniffer.feed(b"  Local: http://localhost:4201/\r\n")
@@ -465,6 +601,28 @@ class Settings(unittest.TestCase):
                 self.assertIs(self.settings().auto_open(), True)
                 self.assertLess(time.monotonic() - started, 2.0, "a FIFO never hangs the read")
                 self.path.unlink()
+
+    def test_an_empty_setting_names_no_folder(self):
+        # PR #70 review: `JARVIS_BROWSER_SETTINGS=""` gave `Path("")`, which is
+        # `.` — the working folder in the gate's protected state. Read at
+        # import, so a fresh interpreter answers.
+        import subprocess
+        repo = Path(__file__).resolve().parents[2]
+        probe = ("from jarvis import config; from jarvis.tools import files; "
+                 "print(config.BROWSER_SETTINGS_PATH); "
+                 "print(any(str(p) in ('.', '') for p in files._protected_state_paths()))")
+        for value in ("", None):
+            env = {k: v for k, v in os.environ.items() if not k.startswith("JARVIS_")}
+            env.update(HOME=str(self.root), PYTHONPATH=str(repo))
+            if value is not None:
+                env["JARVIS_BROWSER_SETTINGS"] = value
+            out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=self.root,
+                                 capture_output=True, text=True, timeout=60)
+            with self.subTest(value=value):
+                self.assertEqual(out.returncode, 0, out.stderr[-500:])
+                path, dot = out.stdout.split()
+                self.assertEqual(path, str(self.root / ".config" / "jarvis" / "browser.json"))
+                self.assertEqual(dot, "False")
 
     def test_browser_json_is_gate_state(self):
         from jarvis import permissions, rules

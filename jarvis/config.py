@@ -572,11 +572,12 @@ DISCORD_GUILD_PATH = Path(
 # by the owner's `PATCH /browser/settings`; gate state, in
 # `tools/files._protected_state`, so no agent may flip one. Read by daemon2's
 # `main()`, never by a test or embedded daemon (which keep theirs in memory).
+# An empty `JARVIS_BROWSER_SETTINGS` means unset: `Path("")` is `.`, which
+# would land the working folder in the gate's protected state (PR #70 review).
 BROWSER_SETTINGS_PATH = Path(
-    os.environ.get(
-        "JARVIS_BROWSER_SETTINGS", Path.home() / ".config" / "jarvis" / "browser.json"
-    )
-)
+    os.environ.get("JARVIS_BROWSER_SETTINGS")
+    or (Path.home() / ".config" / "jarvis" / "browser.json")
+).expanduser()
 
 # Where `/project new` may make or adopt a project folder (v2 B2,
 # `jarvis/v2/folders.py`; decisions O3, O4). A folder must sit strictly *below*
