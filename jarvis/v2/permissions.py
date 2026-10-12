@@ -742,7 +742,13 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
         # What a wrapper or runner in front starts is judged too, from rules'
         # one table: `npx vercel --prod` is a production deploy, and `uv run
         # git push --force origin main` a force push (2026-10-12).
-        for inner in rules.started_commands(segment):
+        # Past the line's work budget or a nesting cap, what it starts cannot
+        # be told: asked, whatever the rules say (review of PR #75).
+        try:
+            started = rules.started_commands(segment)
+        except rules.TooComplex:
+            return "too-complex", rules.RUNNERS_TOO_COMPLEX
+        for inner in started:
             segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
     for rule in always_ask_for(brief, project):
@@ -896,6 +902,13 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             unsure = protected_state.kill_unsure(command)
             if unsure:
                 match = ("daemon-kill", unsure)
+        if match is None and command.strip():
+            # What the line's wrappers and runners start is too complex to
+            # judge within its work budget (review of PR #75): asked, never
+            # the reviewer's call under AUTO and never the allowlist's.
+            unsure = rules.runners_unsure(command)
+            if unsure:
+                match = ("too-complex", unsure)
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")

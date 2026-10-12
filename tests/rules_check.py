@@ -2739,7 +2739,8 @@ RUNNER_KEEPS = {
     "env FOO=1 pytest": "allow", "npx eslint .": "allow", "uv run -m pytest": "allow",
     "python -m runpy pytest": "allow", "uv run python -m runpy pytest": "allow",
     "bunx rm -rf build": "ask", "uvx rm -rf build": "ask", "pnpx rm -rf build": "ask",
-    "watch -n 1 ls": "allow", "env -u FOO pytest": "ask",   # main read FOO as the program
+    "watch -n 1 ls": "allow",
+    "env -u FOO pytest": "allow",   # main read FOO as the program (review of PR #75, HIGH 3)
     "npm exec -c 'eslint .'": "allow", "bun exec 'vite build'": "allow",
     "pnpm exec -c 'prettier --check . && tsc'": "allow",
 }

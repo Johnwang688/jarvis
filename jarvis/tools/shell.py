@@ -111,7 +111,15 @@ def run_readonly(
     # the only thing looked at, and `-c`'s payload is one shlex token that
     # nothing parsed. rules.py has unwrapped `env`/`nohup`/`timeout` since
     # 2026-08-10; this allowlist never got the same treatment.
-    tokens = rules.unwrap(tokens)
+    #
+    # The wrappers' options are read from rules' one table (review of PR #75,
+    # HIGH 3): `env -u ls rm -rf build` used to be judged as `ls` and run
+    # here — rm and all. A line whose program cannot be told is not run.
+    sure = rules.unwrap_sure(tokens)
+    if sure is None:
+        return ("Error: which program this runs cannot be told from its wrappers' options. "
+                "Use run_command.")
+    tokens = sure
     if not tokens:
         return "Error: empty command."
     binary = tokens[0].rsplit("/", 1)[-1]

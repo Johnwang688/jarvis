@@ -59,10 +59,38 @@ from . import config, rules
 
 
 def _resolve(path: str | Path) -> Path:
+    # Within one line's analysis (`rules.work_scope`) a name resolves once:
+    # the readings of its wrappers and runners hand the same operands to
+    # each level (review of PR #75).
+    return _memo(("resolve", str(path)), lambda: _resolve_now(path))
+
+
+def _resolve_now(path: str | Path) -> Path:
     try:
         return Path(path).expanduser().resolve()
     except (OSError, RuntimeError, ValueError):
         return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _memo(key: tuple, compute):
+    """`compute()`, once per key within one line's analysis (`rules.work_scope`):
+    the filesystem does not change under one verdict."""
+    work = rules._WORK.get()
+    if work is None:
+        return compute()
+    cache = work.cache
+    if key in cache:
+        return cache[key]
+    value = compute()
+    if len(cache) < 200_000:
+        cache[key] = value
+    return value
+
+
+def _under(path: Path, folder: Path) -> bool:
+    """`folder in path.parents`, for absolute resolved paths, as text."""
+    top = str(folder)
+    return str(path).startswith(top if top.endswith("/") else top + "/") and path != folder
 
 
 def gate_paths() -> set[Path]:
@@ -98,10 +126,12 @@ def hud_trees() -> set[Path]:
     the write tools refuse then, and a shell write is not the boundary."""
     from .tools.files import _hud_roots
 
-    try:
-        return _hud_roots()
-    except (OSError, RuntimeError):
-        return set()
+    def roots() -> set[Path]:
+        try:
+            return _hud_roots()
+        except (OSError, RuntimeError):
+            return set()
+    return _memo(("hud_trees",), roots)
 
 
 def _in_tree(text: str, trees: set[Path]) -> Path | None:
@@ -109,13 +139,17 @@ def _in_tree(text: str, trees: set[Path]) -> Path | None:
     (`rm -rf ~/.local/share/jarvis`), else None."""
     if not trees:
         return None
+    return _memo(("in_tree", text, id(trees)), lambda: _in_tree_now(text, trees))
+
+
+def _in_tree_now(text: str, trees: set[Path]) -> Path | None:
     if _GLOB.search(text):
         text = str(Path(*[p for p in Path(text).parts if not _GLOB.search(p)] or ["."]))
     resolved = _resolve(text)
     for tree in trees:
-        if resolved == tree or tree in resolved.parents:
+        if resolved == tree or _under(resolved, tree):
             return tree
-        if resolved in tree.parents and len(tree.relative_to(resolved).parts) <= 2:
+        if _under(tree, resolved) and len(tree.relative_to(resolved).parts) <= 2:
             return tree
     return None
 
@@ -236,6 +270,7 @@ class _Budget:
     name-only reading, which has no folder to resolve in)."""
     spans: int = 0
     follow_links: bool = True
+    walked: dict = field(default_factory=dict)  # readings of wrappers and runners judged
 
 
 @dataclass
@@ -252,6 +287,11 @@ def _opaque(why: str) -> Touch:
 def _expand(token: str, state: _State) -> str | None:
     """The token with `~`, `$HOME` and line-local variables expanded, made
     absolute; None if a variable is left that cannot be known."""
+    return _memo(("expand", token, str(state.cwd), tuple(state.variables.items())),
+                 lambda: _expand_now(token, state))
+
+
+def _expand_now(token: str, state: _State) -> str | None:
     def local(match: re.Match) -> str:
         name = match.group(1) or match.group(2)
         return state.variables.get(name, match.group(0))
@@ -302,6 +342,10 @@ def _identities(paths: set[Path]) -> dict[tuple[int, int], Path]:
 
 
 def _exact(text: str, protected: set[Path], ids: dict) -> Path | None:
+    return _memo(("exact", text, id(protected), id(ids)), lambda: _exact_now(text, protected, ids))
+
+
+def _exact_now(text: str, protected: set[Path], ids: dict) -> Path | None:
     if _GLOB.search(text):
         # Component by component: fnmatch's `*` crosses `/`, and `rm ~/*.json`
         # does not reach ~/.config/jarvis/models.json.
@@ -327,11 +371,15 @@ def _exact(text: str, protected: set[Path], ids: dict) -> Path | None:
 
 
 def _ancestor_of(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
+    return _memo(("ancestor", text, id(protected)), lambda: _ancestor_now(text, protected))
+
+
+def _ancestor_now(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
     if _GLOB.search(text):
         return []
     resolved = _resolve(text)
     return [(path, path.relative_to(resolved).parts)
-            for path in protected if resolved != path and resolved in path.parents]
+            for path in protected if resolved != path and _under(path, resolved)]
 
 
 # --- credential env files (ENV-1, 2026-10-12) ---------------------------------
@@ -363,6 +411,11 @@ def _env_target(operand: str, text: str | None, state: _State, verb: str) -> Tou
     """The credential env file a write of `operand` lands on, or None.
     `text` is the operand expanded (None when a variable or the folder is
     unknown); `verb` heads the reason ("a redirect onto", "cp on")."""
+    return _memo(("env_target", operand, text, verb, state.budget.follow_links),
+                 lambda: _env_target_now(operand, text, state, verb))
+
+
+def _env_target_now(operand: str, text: str | None, state: _State, verb: str) -> Touch | None:
     s = _secrets()
     shown = text if text is not None else operand
     name = os.path.basename(shown.rstrip("/")) or shown
@@ -384,7 +437,8 @@ def _env_target(operand: str, text: str | None, state: _State, verb: str) -> Tou
             return Touch(where, name.casefold().startswith(".env"),
                          f"{verb} {name}, a glob that reaches credential env files", env=True)
         return None
-    if text is not None and state.budget.follow_links and s.is_env_credential(text):
+    if text is not None and state.budget.follow_links and _memo(
+            ("env_credential", text), lambda: s.is_env_credential(text)):
         return Touch(where, True, f"{verb} {name}, which leads to a credential env file", env=True)
     return None
 
@@ -555,10 +609,6 @@ def _env_split(rest: list[str], k: int) -> tuple[str, int] | None:
     return None
 
 
-# env's options that take the next word (uutils env 0.8.0, `env --help`).
-_ENV_VALUE_OPTIONS = frozenset({"-C", "--chdir", "-u", "--unset", "-a", "--argv0", "-f", "--file"})
-
-
 def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None, list[str]]:
     """Strip subshell punctuation and wrappers; return the real command, any
     directory `env -C` would run it in, and the words before `unwrap`'s naive
@@ -600,7 +650,7 @@ def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None, lis
                 chdir = Path(target) if target else None
             # `-u NAME`, `-a NAME`, `-f FILE` take the next word: `env -u ls
             # cp …` runs cp, not ls (2026-10-12).
-            k += 2 if rest[k] in _ENV_VALUE_OPTIONS else 1
+            k += 2 if rules.takes_value("env", rest[k]) else 1
         if split is None:
             tokens = rest[k:]
             break
@@ -676,6 +726,54 @@ def _strip_closers(tokens: list[str]) -> list[str]:
             last = last[:-1]
         tokens[-1] = last
     return tokens
+
+
+def _execs_a_writer(tokens: list[str]) -> bool:
+    """Whether a find's `-exec`/`-execdir`/`-ok`/`-okdir` hands what it finds
+    to a program that may write it (review of PR #75, HIGH 2: only the word
+    right after `-exec` was looked at, so `-exec env rm {} +`, `-exec nohup
+    rm`, `-exec timeout 5 rm`, `-exec uv run rm`, `-exec xargs rm` and `-exec
+    sed -i … {} +` read as reads). The program is judged through rules' one
+    table, as every command here is."""
+    for k, token in enumerate(tokens):
+        if token not in rules._FIND_EXEC:
+            continue
+        j = k + 1
+        while j < len(tokens) and tokens[j] not in (";", "+"):
+            j += 1
+        if _writes_what_it_is_given(tokens[k + 1:j], 0):
+            return True
+    return False
+
+
+def _writes_what_it_is_given(words: list[str], hops: int) -> bool:
+    """True unless this command only reads what it is handed: a reader with
+    no writing form on the line, or a wrapper or runner whose every program
+    is one. Anything else — a writer, a shell or interpreter, a reader that
+    edits its operands (`sed -i`, `sort -o {}`), a program this module does
+    not know, a command line handed to a shell, past a bound — may write."""
+    while words and re.fullmatch(r"[A-Za-z_]\w*=.*", words[0]):
+        words = words[1:]
+    if not words:
+        return False
+    stem = rules._basename(words[0])
+    if stem in _READERS:
+        hazard = rules.reader_hazard(words)
+        return hazard is not None and (hazard.operands
+                                       or any("{}" in w for w in hazard.writes))
+    if hops >= rules.PROGRAM_DEPTH:
+        return True
+    try:
+        started = rules.starts(words)
+    except rules.TooComplex:
+        return True
+    if started is None:
+        return True
+    if started.strings or started.joined:
+        return True
+    if not started.programs:
+        return False
+    return any(_writes_what_it_is_given(list(p), hops + 1) for p in started.programs)
 
 
 def _kind(stem: str, tokens: list[str], hazard: rules.Hazard | None) -> str:
@@ -852,11 +950,21 @@ def _started_touches(lead: list[str], parsed: bool, segment: str, local: _State,
     `npm exec -c`, so a copy onto the allowlist behind one was a read or an
     unknown. A reading that is only one of several (an option the table does
     not know) is not provable: its writes are uncertain. False when the bound
-    was hit (the caller stops, as `_nested` does)."""
+    was hit (the caller stops, as `_nested` does).
+
+    Bounded by the line's work budget (`rules.charge`; review of PR #75: an
+    unknown option offered n readings per level and each was walked again,
+    `npx --x ` sixty times took 139 s here), each reading walked once; past
+    the budget, a cap or `PROGRAM_DEPTH` the line is too complex to judge —
+    an opaque touch, which asks and is never covered."""
+    if not lead or (rules._basename(lead[0]) not in rules._WRAPPER_OPTS
+                    and rules._basename(lead[0]) not in rules._RUNNER_SPECS):
+        return True
     try:
+        rules.charge(len(lead))
         started = rules.starts(lead)
-    except rules._TooComplex:
-        seen.touches.append(_opaque("env -S splits more command lines than can be judged"))
+    except rules.TooComplex:
+        seen.touches.append(_opaque("what its wrappers and runners start is too complex to judge"))
         return False
     if started is None or not (started.programs or started.strings):
         return True
@@ -868,12 +976,24 @@ def _started_touches(lead: list[str], parsed: bool, segment: str, local: _State,
     if lines and not _nested(lines, local, state, protected, ids, depth, inner):
         seen.touches += inner.touches
         return False
+    walked = local.budget.walked
     for program in started.programs if not started.joined else ():
-        words, chdir, more = _peel(list(program), local)
-        if not words:
-            continue
-        here = _State(chdir if chdir is not None else local.cwd, local.variables, local.budget)
-        _command(words, more, parsed, segment, here, state, protected, ids, depth, inner, hops + 1)
+        # A reading met again (another reading of an unknown option offers
+        # the same tail) gives what it gave before; it is not walked again.
+        key = (program, hops + 1, local.cwd, tuple(sorted(local.variables.items())))
+        one = walked.get(key)
+        if one is None:
+            one = _Seen()
+            words, chdir, more = _peel(list(program), local)
+            if words:
+                here = _State(chdir if chdir is not None else local.cwd, local.variables,
+                              local.budget)
+                _command(words, more, parsed, segment, here, state, protected, ids, depth, one,
+                         hops + 1)
+            walked[key] = one
+        inner.touches += one.touches
+        inner.writes = inner.writes or one.writes
+        inner.read |= one.read
     if not started.sure:
         inner.touches = [replace(t, certain=False) for t in inner.touches]
     seen.touches += inner.touches
@@ -964,10 +1084,7 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
     # unasked.
     partial = (hazard is not None and stem not in _WRITERS | _INTERPRETERS | _SHELLS
                and not hazard.operands
-               and not (stem in ("find", "bfs") and any(
-                   t in rules._FIND_EXEC and k + 1 < len(tokens)
-                   and rules._basename(tokens[k + 1]) in _WRITERS | _SHELLS | _INTERPRETERS
-                   for k, t in enumerate(tokens))))
+               and not (stem in ("find", "bfs") and _execs_a_writer(tokens)))
     named = set(hazard.writes) if hazard is not None else set()
 
     def provable(operand: str) -> bool:
@@ -1042,9 +1159,12 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
         if tree is not None and kind != "reader":
             seen.touches.append(Touch(tree, False, f"{stem} on {text}", hud=True))
             continue
+        ancestors = _ancestor_of(text, protected)
+        if not ancestors:
+            continue        # (the names below cost O(operands) each: only when needed)
         others = [o for o in everyone if o is not operand]
         other_names = {rules._basename(o.rstrip("/")) for o in others}
-        for path, rel in _ancestor_of(text, protected):
+        for path, rel in ancestors:
             first = rel[0]
             if first in other_names or (stem == "find" and path.name in other_names):
                 # `cp /tmp/x/allowlist.json ~/.config/jarvis/`, or `find
@@ -1172,7 +1292,8 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
         base = Path(os.path.expanduser(str(cwd)))
         if not base.is_absolute():
             base = None  # a relative cwd is relative to nothing we know
-    return _analyse(command, _State(base), protected, _identities(protected)).touches
+    with rules.work_scope():
+        return _analyse(command, _State(base), protected, _identities(protected)).touches
 
 
 def command_touch(command: str, cwd: str | Path | None = None) -> Touch | None:
@@ -1228,7 +1349,8 @@ def env_write_refusal(command: str) -> str | None:
     if ".env" not in text.casefold().translate(_UNQUOTE):
         return None
     state = _State(Path("/"), budget=_Budget(follow_links=False))
-    touches = [t for t in _analyse(command, state, set(), {}).touches if t.env and t.certain]
+    with rules.work_scope():
+        touches = [t for t in _analyse(command, state, set(), {}).touches if t.env and t.certain]
     return refusal(touches[0]) if touches else None
 
 
@@ -2999,7 +3121,12 @@ def _peel_runner(tokens: list[str], state: _Owner) -> list[tuple[list[str], bool
     through rules' one table (`rules.starts`, ssh included), as far as they
     nest. An option the table does not know may or may not take the next
     word, and both readings are followed — so a short table can only add a
-    refusal, never hide a command."""
+    refusal, never hide a command.
+
+    Each reading is followed once, within the line's work budget
+    (`rules.charge`); past the budget, `_PEEL_READINGS` or `_PEEL_HOPS` it
+    raises `rules.TooComplex` rather than stopping quietly (review of PR #75,
+    L2): the caller marks the line too complex to judge, which is asked."""
     tokens = [t for t in tokens]
     while tokens and tokens[0] in ("(", "{", "!"):
         tokens = tokens[1:]
@@ -3007,11 +3134,16 @@ def _peel_runner(tokens: list[str], state: _Owner) -> list[tuple[list[str], bool
         tokens[0] = tokens[0][1:]
     readings: list[tuple[list[str], bool, bool]] = []
     todo: list[tuple[list[str], bool, int]] = [(tokens, False, 0)]
-    while todo and len(readings) < _PEEL_READINGS:
+    seen: set = set()
+    while todo:
+        if len(readings) >= _PEEL_READINGS:
+            raise rules.TooComplex
         tokens, appends, hops = todo.pop()
+        if (tuple(tokens), appends) in seen:
+            continue
+        seen.add((tuple(tokens), appends))
         done = False
-        while hops < _PEEL_HOPS:
-            hops += 1
+        while True:
             while tokens and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0]):
                 tokens = tokens[1:]
             if tokens and tokens[0] == "builtin":
@@ -3019,7 +3151,15 @@ def _peel_runner(tokens: list[str], state: _Owner) -> list[tuple[list[str], bool
                 continue
             if not tokens:
                 break
-            if rules._basename(tokens[0]) == "env":
+            stem = rules._basename(tokens[0])
+            if stem != "env" and stem not in rules._WRAPPER_OPTS and \
+                    stem not in rules._RUNNER_SPECS and stem not in rules._REMOTE_OPTS:
+                break
+            hops += 1
+            if hops > _PEEL_HOPS:
+                raise rules.TooComplex
+            rules.charge(len(tokens))
+            if stem == "env":
                 rest, k = tokens[1:], 0
                 split = None
                 while k < len(rest) and (rest[k].startswith("-") or "=" in rest[k]):
@@ -3030,7 +3170,7 @@ def _peel_runner(tokens: list[str], state: _Owner) -> list[tuple[list[str], bool
                     if found is not None:
                         split, k = found
                         break
-                    k += 2 if rest[k] in _ENV_VALUE_OPTIONS else 1
+                    k += 2 if rules.takes_value("env", rest[k]) else 1
                 if split is not None:
                     try:
                         words = shlex.split(split)
@@ -3040,10 +3180,7 @@ def _peel_runner(tokens: list[str], state: _Owner) -> list[tuple[list[str], bool
                     continue
                 tokens = rest[k:]
                 continue
-            try:
-                started = rules.starts(tokens, remote=True)
-            except rules._TooComplex:
-                started = None
+            started = rules.starts(tokens, remote=True)
             if started is None or not (started.programs or started.strings):
                 break
             readings += [([text], False, True) for text in started.strings]
@@ -3318,7 +3455,11 @@ def runs_jarvis(tokens: list[str]) -> str | None:
     --sync`, the owner ops)."""
     state = _Owner()
     try:
-        readings = _peel_runner(list(tokens), state)
+        with rules.work_scope():
+            readings = _peel_runner(list(tokens), state)
+    except rules.TooComplex:
+        rules.exhaust()     # past the budget or a cap: the line is asked (review of PR #75)
+        return None
     except Exception:     # noqa: BLE001 — a parse failure is not a verdict
         return None
     for tokens, _, joined in readings:
@@ -3394,8 +3535,16 @@ def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, 
         flat = flat.replace(ch, "")
     kills = _Kills(line=command, armed="kill" in flat or "fuser" in flat)
     try:
-        why = _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
+        with rules.work_scope():
+            why = _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
     except RecursionError:
+        return None, None
+    except rules.TooComplex:
+        # What its wrappers and runners start is past the work budget or a
+        # cap (review of PR #75, L2): not judged here, so the line is too
+        # complex to judge — `rules.decide` asks it, and `rules.runners_unsure`
+        # keeps every allowlist entry and v2's reviewer off it.
+        rules.exhaust()
         return None, None
     return why, (None if why else kills.unsure)
 
