@@ -222,8 +222,13 @@ export function defaultWorkspace(): Workspace {
  * first. ⊞ to n panes draws the first n of these.
  */
 export function paneSequence(ws: Pick<Workspace, "order" | "kept">): PaneNo[] {
-  const free = PANE_NOS.filter((n) => !ws.order.includes(n) && !ws.kept.includes(n));
+  const free = PANE_NOS.filter((n) => !inWorkspace(ws, n));
   return [...ws.order, ...ws.kept, ...free];
+}
+
+/** Id `n` is drawn, or hidden by ⊞ to come back — not free (closed by ×, or never drawn). */
+export function inWorkspace(ws: Pick<Workspace, "order" | "kept">, n: PaneNo): boolean {
+  return ws.order.includes(n) || ws.kept.includes(n);
 }
 
 /**

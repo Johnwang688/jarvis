@@ -5,7 +5,7 @@ import {
   TITLEBAR_H, WORKSPACE_KEY, allocate, cellsOf, clampCols, clampPanelHeight, clampRow, closePane, columnWidths, copySpec,
   defaultPane, defaultWorkspace, dropColumn, dropRow, setFilePath, splitPane, splitTitle, splitVerdict,
   equalSplit, fitWorkspace, focusPane, forgetTerminal, gridTemplate, loadWorkspace, maxPanelHeight, moveColEdge,
-  orderOf, paneAt, paneSequence, parseWorkspace, pinPane, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
+  inWorkspace, orderOf, paneAt, paneSequence, parseWorkspace, pinPane, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
   setEditors, setPanel, setPreset, setPreviewUrl, setSplit, setView, show, slotOf, slotWidths, unpinProject,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
@@ -862,6 +862,8 @@ describe("ids are not slots (plan G-1)", () => {
     expect(slotOf(w, 7)).toBe(4);
     expect(setPreset(w, "grid4").order[3]).toBe(7);
     expect(paneSequence(w)).toEqual([1, 5, 2, 7, 3, 4, 6, 8]);
+    // Drawn or hidden is in the workspace; a free id (closed, or never drawn) is not.
+    expect([1, 7, 3].map((n) => inWorkspace(w, n as PaneNo))).toEqual([true, true, false]);
   });
 
   it("is the identity for every WP-A and WP-B workspace", () => {
