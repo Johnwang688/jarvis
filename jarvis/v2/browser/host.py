@@ -312,10 +312,13 @@ def save_settings(changes: dict) -> dict:
 # -- Chrome processes ---------------------------------------------------------------------
 
 def _names_dir(arg: str, folder: str) -> bool:
+    """`folder` appears in `arg` as a whole path: followed by the end, a `/`,
+    or a space (Chrome's helpers rewrite their command line into one
+    space-separated string)."""
     start = arg.find(folder)
     while start >= 0:
         end = start + len(folder)
-        if end == len(arg) or arg[end] == "/":
+        if end == len(arg) or arg[end] in "/ ":
             return True
         start = arg.find(folder, start + 1)
     return False
@@ -323,9 +326,9 @@ def _names_dir(arg: str, folder: str) -> bool:
 
 def chrome_pids(folder: Path) -> list[int]:
     """Every process whose command line names `folder` (or a path inside it)
-    as a whole path: a profile's Chrome tree, its crash handler included.
-    Matched on the folder's exact path, so another profile's or another
-    daemon's Chrome is never matched."""
+    as a whole path: a profile's Chrome tree — its zygotes, renderers and
+    crash handler included. Matched on the folder's exact path, so another
+    profile's or another daemon's Chrome is never matched."""
     text = str(folder)
     out = []
     for name in os.listdir("/proc"):
