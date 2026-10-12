@@ -40,11 +40,31 @@ The review of PR #67 added:
     thread picked leaves both on the task, the caption says why and the
     picker is off; the Task pane switched away gives the chat's project back.
 
+The Diff follow-ups (2026-10-12) added:
+  - **the list at scale**: at git/status's 20,000-row cap only a window of
+    rows is in the DOM, and typing in the chat box beside it costs under
+    15 ms a character (~100 ms with every row drawn); the last row is reached
+    by scrolling, at 100% and 160%; the keys move the selection, which holds
+    and moves while its row is scrolled out of the window; at 160% Page Down
+    and End clip nothing of their row (review of PR #73, NIT);
+  - **a held key** (review of PR #73, MED): ↓ held over 60 rows against a
+    `git/base` that takes 0.5 s sends a handful of requests, not 60, and the
+    last row's diff shows promptly;
+  - **clear task**: in the 2×2 grid with a Task pane, the Task pane's header
+    unpicks the task, and the Diff pane shows its project's changes again
+    (disabled under a card); a task picked again holds it again;
+  - **ED-8's settings** draw the uncommitted-changes diff, live;
+  - **closing a diff mid-compute**: the task diff and Compare each closed
+    while their diff waits on a busy editor worker raise no page error
+    (`no diff result available`) and leave the buffer's edit, dirty state
+    and undo as they were.
+
 Run: PYTHONPATH=. .venv/bin/python tests/face/hud_v2_scm_check.py
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -53,7 +73,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from tests.face.hud_v2_editor_check import WIDE, _fresh, _open, _tab, _type  # noqa: E402
+from tests.face.hud_v2_editor_check import WIDE, _fresh, _lines, _open, _tab, _text, _type  # noqa: E402
 from tests.face.hud_v2_layout_check import _boot, _pane, _show, expand  # noqa: E402
 
 WS = json.dumps({"preset": "cols3", "focused": 2,
@@ -63,6 +83,16 @@ WS_TASK = json.dumps({"preset": "cols3", "focused": 2,
                       "panes": [{"view": "chat"}, {"view": "task"}, {"view": "diff"}]})
 CALC_HEAD = "def add(a, b):\n    return a - b\n"
 D = 3  # the Diff pane
+# The Diff follow-ups (2026-10-12): chat and Diff side by side (the list at
+# scale, measured the PR #67 reviewer's way), and the 2×2 grid with a Task pane.
+WS_SCALE = json.dumps({"preset": "cols2", "focused": 1, "panes": [{"view": "chat"}, {"view": "diff"}]})
+WS_GRID4 = json.dumps({"preset": "grid4", "focused": 1,
+                       "panes": [{"view": "chat"}, {"view": "diff"}, {"view": "file"}, {"view": "task"}]})
+SCALE_N = 20000  # git/status's cap
+# A task-diff file whose diff keeps Monaco's one editor worker busy for
+# seconds (every line differs: the line diff runs to its 5 s limit), so a diff
+# opened after it is still waiting on the worker when it closes.
+HUGE_LINES = 40000
 # The run's page errors, for the checks that look at their own window of them.
 ERRORS: list[str] = []
 
@@ -92,7 +122,7 @@ def _diffed(page, until, before: str, after: str, timeout: float = 6) -> bool:
                       timeout=timeout))
 
 
-def scm_checks(browser, mock, base, check, until, guard, init_script):
+def scm_checks(browser, mock, base, check, until, guard, init_script, only: str = ""):
     print("\nthe Diff pane: a project's uncommitted changes")
     ctx = browser.new_context(viewport={"width": WIDE[0], "height": WIDE[1]}, permissions=["microphone"])
     guard(ctx)
@@ -127,7 +157,11 @@ def scm_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section, ws in ((_list_checks, WS), (_sides_checks, WS), (_env_checks, WS), (_link_checks, WS),
                             (_live_checks, WS), (_swap_checks, WS), (_open_checks, WS), (_mode_checks, WS),
-                            (_task_pane_checks, WS_TASK), (_card_checks, WS), (_empty_checks, WS)):
+                            (_task_pane_checks, WS_TASK), (_card_checks, WS), (_empty_checks, WS),
+                            (_scale_checks, WS_SCALE), (_hold_checks, WS), (_clear_task_checks, WS_GRID4),
+                            (_settings_checks, WS), (_midcompute_checks, WS)):
+            if only and only not in section.__name__:
+                continue
             _fresh(page, mock, until, ws=ws, keep_files=keep)
             try:
                 section(page, mock, check, until, requests)
@@ -461,6 +495,388 @@ def _empty_checks(page, mock, check, until, requests):
         g["files"], g["dirs"] = files, dirs
 
 
+# ---------------------------------------------------------------------------
+# The Diff follow-ups (2026-10-12)
+
+def _in_view(page, list_sel: str, row_sel: str, tol: float = 1.0) -> bool:
+    """The row is drawn and wholly inside the list's scrolled view (to `tol` drawn px)."""
+    lb = page.locator(list_sel).bounding_box()
+    loc = page.locator(row_sel)
+    rb = loc.bounding_box() if loc.count() == 1 else None
+    if not lb or not rb:
+        return False
+    return rb["y"] >= lb["y"] - tol and rb["y"] + rb["height"] <= lb["y"] + lb["height"] + tol
+
+
+def _clip(page, list_sel: str, row_sel: str) -> float:
+    """How many drawn px of the row the list's edges cut off (0: none)."""
+    lb = page.locator(list_sel).bounding_box()
+    rb = page.locator(row_sel).bounding_box() if page.locator(row_sel).count() == 1 else None
+    if not lb or not rb:
+        return float("inf")
+    return max(0.0, lb["y"] - rb["y"]) + max(0.0, rb["y"] + rb["height"] - lb["y"] - lb["height"])
+
+
+def _scale_checks(page, mock, check, until, requests):
+    """Item 1: git/status's 20,000-row cap. Drawn whole, the list made every
+    keystroke in the window cost ~100 ms of style work (the PR #67 reviewer's
+    measure: chat and Diff side by side, 9.8 ms with the list hidden). Only a
+    window of rows is drawn now; the keys move a selection that is a path, so
+    it holds — and moves on — while its row is scrolled out of the window."""
+    from tests.face.hud_v2_layout_check import _set_storage
+    L = 2  # the Diff pane here
+    w = mock.world
+    g = w["git"]
+    name = lambda i: f"src/dir{i // 100:03d}/file{i:05d}.py"  # noqa: E731
+    keep = {k: dict(v) for k, v in w["files"].items()}
+    rows_sel = _pane(L, _tid("scm-rows"))
+    path = lambda: page.locator(_pane(L, _tid("scm-path"))).inner_text()  # noqa: E731
+    row = lambda i: _pane(L, _tid(f"scm-{name(i)}"))  # noqa: E731
+    selected = lambda i: "sel" in (page.locator(row(i)).get_attribute("class") or "").split()  # noqa: E731
+    try:
+        w["git"] = {"head": "c0ffee1", "branch": "main", "base": {}, "dirs": {},
+                    "files": {name(i): "modified" for i in range(SCALE_N)}}
+        _fresh(page, mock, until, ws=WS_SCALE, keep_files=keep)
+        summary = page.locator(_pane(L, _tid("scm-summary")))
+        until(lambda: summary.count() > 0 and "uncommitted" in summary.inner_text(), timeout=30)
+        rows = page.locator(rows_sel)
+        drawn = page.locator(_pane(L, ".scmrow")).count()
+        check(f"{SCALE_N:,} changed files: the list says so, and draws only a window of rows",
+              summary.inner_text().startswith(f"{SCALE_N} uncommitted changes")
+              and rows.count() == 1 and rows.get_attribute("data-count") == str(SCALE_N) and 0 < drawn <= 100,
+              f"{drawn} rows drawn; {summary.inner_text()!r}")
+
+        box = page.locator(_pane(1, _tid("input")))
+        text = "the quick brown fox jumps over the lazy dog " * 2
+        costs = []
+        for _ in range(2):
+            box.click()
+            box.fill("")
+            t0 = time.time()
+            page.keyboard.type(text)
+            until(lambda: text.strip() in box.input_value(), timeout=60)
+            costs.append((time.time() - t0) / len(text) * 1000)
+        box.fill("")
+        print(f"    typing in the chat box beside {SCALE_N:,} changed files: "
+              + ", ".join(f"{c:.1f}" for c in costs) + " ms a character")
+        check("typing in the chat box beside them costs under 15 ms a character (~100 ms with every row drawn)",
+              min(costs) < 15, f"{min(costs):.1f} ms")
+
+        rows.evaluate("e => { e.scrollTop = e.scrollHeight; }")
+        until(lambda: page.locator(row(SCALE_N - 1)).count() > 0, timeout=4)
+        check("scrolled to the bottom, the last row is drawn and in view",
+              _in_view(page, rows_sel, row(SCALE_N - 1)))
+        page.locator(row(SCALE_N - 1)).click()
+        until(lambda: path() == name(SCALE_N - 1), timeout=4)
+        page.keyboard.press("ArrowUp")
+        until(lambda: path() == name(SCALE_N - 2), timeout=4)
+        check("a row clicked gives the list the keys: ↑ selects the row above",
+              path() == name(SCALE_N - 2) and selected(SCALE_N - 2), path())
+        page.keyboard.press("Home")
+        until(lambda: path() == name(0), timeout=4)
+        check("Home: the first row, selected and scrolled into view",
+              path() == name(0) and _in_view(page, rows_sel, row(0)) and selected(0)
+              and rows.evaluate("e => e.scrollTop") == 0)
+        for _ in range(5):
+            page.keyboard.press("ArrowDown")
+        until(lambda: path() == name(5), timeout=4)
+        rows.evaluate("e => { e.scrollTop = 10000 * 24; }")
+        until(lambda: page.locator(row(5)).count() == 0, timeout=4)
+        check("scrolled away, the selected row is no longer drawn — and is still the selection",
+              page.locator(row(5)).count() == 0 and path() == name(5) and page.locator(row(10000)).count() == 1)
+        page.keyboard.press("ArrowDown")
+        until(lambda: path() == name(6), timeout=4)
+        check("↓ moves on from it, and brings the new row back into view",
+              path() == name(6) and _in_view(page, rows_sel, row(6)) and selected(6))
+        page.keyboard.press("End")
+        until(lambda: path() == name(SCALE_N - 1), timeout=4)
+        check("End: the last row, in view", _in_view(page, rows_sel, row(SCALE_N - 1)) and selected(SCALE_N - 1))
+        page.keyboard.press("PageUp")
+        until(lambda: path() != name(SCALE_N - 1), timeout=4)
+        moved = SCALE_N - 1 - int(path()[-8:-3])
+        check("Page Up: a page of rows up, in view", 10 < moved < 80
+              and _in_view(page, rows_sel, row(SCALE_N - 1 - moved)), f"moved {moved}")
+        # The pane's file is kept (a reload): brought into view when the rows arrive.
+        rows.evaluate("e => { e.scrollTop = 12345 * 24; }")
+        until(lambda: page.locator(row(12345)).count() > 0, timeout=4)
+        page.locator(row(12345)).click()
+        until(lambda: path() == name(12345), timeout=4)
+        _set_storage(page, zoom="160")
+        _boot(page, mock, None, until, reload=True)
+        until(lambda: path() == name(12345), timeout=30)
+        # At 160% the pane is narrow: a picked file folds the list away. Shown
+        # again ("Files"), it is laid out only now — and brings the file into view then.
+        toggle = page.locator(_pane(L, _tid("tree-toggle")))
+        narrow = toggle.count() > 0 and not page.locator(rows_sel).is_visible()
+        if narrow:
+            toggle.click()
+        until(lambda: page.locator(row(12345)).count() > 0 and _in_view(page, rows_sel, row(12345)), timeout=6)
+        check("a reload at 160%: the pane's file is picked again and, the list shown, scrolled into view"
+              + (" (narrow: shown with Files)" if narrow else ""),
+              path() == name(12345) and _in_view(page, rows_sel, row(12345)) and selected(12345), path())
+        page.locator(rows_sel).evaluate("e => { e.scrollTop = e.scrollHeight; }")
+        until(lambda: page.locator(row(SCALE_N - 1)).count() > 0, timeout=4)
+        check("…and at 160% the last row is reached by scrolling, in view",
+              _in_view(page, rows_sel, row(SCALE_N - 1)))
+        # Review of PR #73, NIT: at 160% End and Page Down clipped ~0.8 drawn px
+        # of the row they scrolled to (`clientHeight` is rounded). Keys keep a
+        # narrow pane's list open (a click folds it to show the diff).
+        # The list as tall as a window can make it: a part-pixel height, which
+        # `clientHeight` rounds up (400.6 → 401 CSS px; 0.4 × 1.6 = 0.64 drawn px).
+        page.locator(rows_sel).evaluate("e => { e.style.flex = '0 0 400.6px'; }")
+        page.locator(rows_sel).focus()
+        page.keyboard.press("Home")
+        until(lambda: path() == name(0), timeout=4)
+        page.keyboard.press("PageDown")
+        until(lambda: path() != name(0), timeout=4)
+        at = int(path()[-8:-3])
+        down = _clip(page, rows_sel, row(at))
+        page.keyboard.press("End")
+        until(lambda: path() == name(SCALE_N - 1), timeout=4)
+        end = _clip(page, rows_sel, row(SCALE_N - 1))
+        check("at 160% Page Down and End scroll their row wholly into view (no part-pixel clipped)",
+              down < 0.05 and end < 0.05 and page.locator(rows_sel).is_visible(),
+              f"Page Down clipped {down:.3f} px, End {end:.3f} px")
+    finally:
+        _set_storage(page, zoom="100")
+        w["git"] = g
+
+
+def _hold_checks(page, mock, check, until, requests):
+    """Review of PR #73, MED: holding ↓ started a `git/base` request (and a
+    read) for every row passed, with no settle and no abort; against a slow
+    repository (the owner's VEX projects on /mnt/c) the last row's diff came
+    4 s late at 500 ms a request. A key now moves the highlight at once and
+    reads once the keys settle; a request no longer waited for is aborted.
+    Held here at ~33 repeats a second over 60 rows, `git/base` taking 0.5 s."""
+    w = mock.world
+    g = w["git"]
+    n = 61
+    name = lambda i: f"r{i:02d}.txt"  # noqa: E731
+    files = {k: dict(v) for k, v in w["files"].items()}
+    files.update({name(i): {"content": f"row {i} now\n", "mtime": 1757900300 + i} for i in range(n)})
+    path = lambda: page.locator(_in("scm-path")).inner_text()  # noqa: E731
+    try:
+        w["git"] = {"head": "c0ffee1", "branch": "main", "dirs": {}, "base_delay": 0.5,
+                    "base": {name(i): f"row {i} then\n" for i in range(n)},
+                    "files": {name(i): "modified" for i in range(n)}}
+        _fresh(page, mock, until, ws=WS, keep_files=files)
+        _pick(page, until, name(0))
+        check("setup: the first row diffed against a slow HEAD", _diffed(page, until, "row 0 then", "row 0 now"))
+        start = len(requests)
+        t0 = time.time()
+        for _ in range(n - 1):
+            page.keyboard.press("ArrowDown")
+            time.sleep(0.03)
+        held = time.time() - t0
+        until(lambda: path() == name(n - 1), timeout=3)
+        t1 = time.time()
+        shown = _diffed(page, until, f"row {n - 1} then", f"row {n - 1} now", timeout=12)
+        late = time.time() - t1
+        time.sleep(0.3)
+        bases = [u for u in requests[start:] if "/git/base" in u]
+        reads = [u for u in requests[start:] if "/file?" in u]
+        print(f"    held ↓ over {n - 1} rows in {held:.2f} s: {len(bases)} git/base and {len(reads)} reads sent; "
+              f"the last row's diff {late:.2f} s after the last key")
+        check("holding ↓ over 60 rows asks HEAD about a handful of rows, not 60",
+              len(bases) <= 3 and len(reads) <= 3, f"{len(bases)} git/base, {len(reads)} reads")
+        check("…and the last row's diff shows promptly (one slow request, not a queue of them)",
+              bool(shown) and late < 2.0, f"{late:.2f} s")
+        check("…the highlight followed every key at once (the row passed is the one shown)",
+              path() == name(n - 1) and "sel" in (page.locator(_in(f"scm-{name(n - 1)}")).get_attribute("class") or ""))
+        # Clicks read at once; one clicked away from before HEAD answered is
+        # dropped (aborted), not left holding a connection ahead of the next.
+        failed: list[str] = []
+        listener = lambda r: failed.append(f"{r.url} {r.failure}")  # noqa: E731
+        page.on("requestfailed", listener)
+        try:
+            page.locator(_in(f"scm-{name(n - 3)}")).click()
+            time.sleep(0.1)
+            page.locator(_in(f"scm-{name(n - 2)}")).click()
+            shown = _diffed(page, until, f"row {n - 2} then", f"row {n - 2} now", timeout=6)
+            time.sleep(0.3)
+        finally:
+            page.remove_listener("requestfailed", listener)
+        dropped = [f for f in failed if "/git/base" in f and f"path={name(n - 3)}" in f]
+        check("a row clicked away from before HEAD answers: its request is aborted, the next row diffed",
+              bool(dropped) and bool(shown), "; ".join(failed[:3]) or "nothing aborted")
+    finally:
+        w["git"] = g
+
+
+def _clear_task_checks(page, mock, check, until, requests):
+    """Item 2: the 2×2 grid draws a Task pane (slot 4 by default), and while it
+    shows a task every Diff pane shows that task's diff (L3) — so once a task
+    was picked nothing took the window off it. The Task pane's header clears
+    the task now; a Diff pane never shows another task than the Task pane."""
+    L = 2  # the Diff pane; the Task pane is 4
+    mode = page.locator(_pane(L, _tid("diff-mode")))
+    what = lambda: page.locator(_pane(L, _tid("diff-mode-what"))).inner_text().strip()  # noqa: E731
+    why = lambda: page.locator(_pane(L, _tid("diff-mode-why"))).inner_text().strip(" ·")  # noqa: E731
+    picker = page.locator(_tid("pane-2-diff-project"))
+    clear = page.locator(_tid("pane-4-task-clear"))
+    until(lambda: mode.count() > 0 and mode.get_attribute("data-mode") == "project", timeout=6)
+    check("2×2 with a Task pane, no task picked: nothing to clear", clear.count() == 0)
+    expand(page, until, "p1", "task-k1")
+    page.locator(_tid("task-k1")).click()
+    until(lambda: mode.get_attribute("data-mode") == "task", timeout=4)
+    expand(page, until, "p1", "thread-t1")
+    page.locator(_tid("thread-t1")).click()
+    time.sleep(0.5)
+    check("a task picked holds the Diff pane on it, a thread picked since too (L3)",
+          mode.get_attribute("data-mode") == "task" and mode.get_attribute("data-why") == "pane"
+          and picker.is_disabled(), mode.inner_text())
+    check("the Task pane's header names the task and offers to clear it",
+          clear.count() == 1 and clear.is_enabled() and "k1" in page.locator(_tid("pane-4-task")).inner_text())
+    check("…and the Diff pane's picker says how to get out",
+          "clear the task" in (picker.get_attribute("title") or ""))
+    clear.click()
+    until(lambda: mode.get_attribute("data-mode") == "project", timeout=4)
+    check("clear: the Task pane shows no task", page.locator(_pane(4, _tid("task-empty"))).count() == 1)
+    check("…and the Diff pane its project's uncommitted changes, its picker back",
+          what() == "Uncommitted changes in jarvis" and why() == "the chat's project" and picker.is_enabled(),
+          f"{what()} · {why()}")
+    check("…the sidebar's task row is no longer selected, and nothing is left to clear",
+          "sel" not in (page.locator(_tid("task-k1")).get_attribute("class") or "").split() and clear.count() == 0)
+    page.locator(_tid("task-k1")).click()
+    until(lambda: mode.get_attribute("data-mode") == "task", timeout=4)
+    check("a task picked again holds the Diff pane again", mode.get_attribute("data-why") == "pane")
+    mock.emit("approval_requested", {
+        "req_id": "scm2", "code": "SC02", "tool": "run_command", "args": {"command": "ls"},
+        "command": "ls", "origin": "task: scm", "allowlistable": True, "timeout_s": 120,
+    })
+    until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
+    time.sleep(0.3)
+    check("under a card 'clear' is disabled (and the task stays)",
+          clear.is_disabled() and mode.get_attribute("data-mode") == "task")
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
+    check("answered, it comes back", bool(until(lambda: clear.is_enabled(), timeout=3)))
+
+
+def _settings_checks(page, mock, check, until, requests):
+    """Item 4: ED-8's editor settings draw the uncommitted-changes diff as they
+    draw the task diff and Compare — and live, on a change."""
+    from tests.face.hud_v2_editor_settings_check import DIALOG, KEY, _open_dialog
+
+    def size(which: str = "modified") -> str:
+        loc = page.locator(_pane(D, f'[data-testid="scm-editor"] .editor.{which} .view-lines'))
+        return loc.first.evaluate("e => getComputedStyle(e).fontSize") if loc.count() else ""
+    try:
+        _pick(page, until, "calc.py")
+        check("setup: calc.py diffed", _diffed(page, until, "return a - b", "return a + b"))
+        check("with nothing stored the diff draws the default size", size() == "12px" and size("original") == "12px",
+              f"{size()} {size('original')}")
+        check("setup: README.md opens in the File pane", _open(page, until, 2, "README.md"))
+        check("setup: the editor settings open", _open_dialog(page, until, 2))
+        page.locator(_tid("es-font-size")).select_option("16")
+        check("ED-8: a size chosen reaches the uncommitted-changes diff at once, both sides",
+              bool(until(lambda: size() == "16px" and size("original") == "16px", timeout=3)),
+              f"{size()} {size('original')}")
+        page.locator(_tid("es-close")).click()
+        until(lambda: page.locator(DIALOG).count() == 0, timeout=2)
+        _pick(page, until, "notes.txt")
+        check("…and a diff opened after it draws it too",
+              bool(until(lambda: size() == "16px", timeout=4)), size())
+    finally:
+        page.evaluate("k => localStorage.removeItem(k)", KEY)
+
+
+def _midcompute_checks(page, mock, check, until, requests):
+    """Item 3: the task diff (`DiffEditor`) and Compare (`CompareEditor`) own
+    their view model, as ScmDiffEditor does since L1. Handed `{original,
+    modified}`, Monaco never releases the view model it makes, so a diff still
+    waiting on the editor worker when the view closed was never cancelled and
+    threw `no diff result available` against the disposed models. A huge
+    task-diff file keeps the one worker busy; each view is closed while its
+    own diff waits behind it. Compare's right side is the buffer: its edit,
+    dirty state and undo stay."""
+    w = mock.world
+    keep_diff = json.loads(json.dumps(w["diff"]))
+    keep_sides = dict(w["diff_files"])
+    models = lambda: page.evaluate("window.__hud.monacoModels()")  # noqa: E731
+
+    def has(path: str, side: str = "original") -> bool:
+        return any(u.startswith("jarvis-diff:") and f"/{path}?{side}" in u for u in models())
+
+    def b_drawn() -> bool:
+        """b.txt's diff is drawn: the worker has answered everything queued before it."""
+        mod = _pane(D, '[data-testid="diff-editor"] .editor.modified')
+        lines = page.locator(mod + " .view-lines")
+        return (lines.count() > 0 and "two" in lines.first.inner_text()
+                and page.locator(mod + ' [class*="insert"]').count() > 0)
+    try:
+        w["diff"]["files"] = keep_diff["files"] + [
+            {"path": "huge.txt", "status": "M", "additions": HUGE_LINES, "deletions": HUGE_LINES},
+            {"path": "a.txt", "status": "M", "additions": 1, "deletions": 0},
+            {"path": "b.txt", "status": "M", "additions": 1, "deletions": 0},
+        ]
+        w["diff_files"].update({
+            "huge.txt": {"before": "".join(f"alpha line {i} of the old text\n" for i in range(HUGE_LINES)),
+                         "after": "".join(f"omega row {i} in the new file\n" for i in range(HUGE_LINES))},
+            "a.txt": {"before": "first\n", "after": "first\nsecond\n"},
+            "b.txt": {"before": "one\n", "after": "one\ntwo\n"},
+        })
+        check("setup: calc.py opens in the File pane", _open(page, until, 2, "calc.py"))
+        check("setup: an unsaved edit", _type(page, until, 2, "\n#mine"))
+        mock.disk_write("calc.py", "def add(a, b):\n    return a + b  # theirs\n")
+        bar = page.locator(_pane(2, _tid("editor-conflict")))
+        check("setup: the disk changed under it (the conflict bar)", bool(until(lambda: bar.count() > 0, timeout=8)))
+        expand(page, until, "p1", "task-k1")
+        page.locator(_tid("task-k1")).click()
+        check("setup: the Diff pane shows the task's diff",
+              bool(until(lambda: page.locator(_in("diff-huge.txt")).count() > 0, timeout=6)))
+
+        # The task diff: huge.txt's diff takes the worker, a.txt's waits behind
+        # it, and a.txt is closed (b.txt picked) before it comes back.
+        start = len(ERRORS)
+        page.locator(_in("diff-huge.txt")).click()
+        until(lambda: has("huge.txt"), timeout=15)
+        page.locator(_in("diff-a.txt")).click()
+        until(lambda: has("a.txt"), timeout=6)
+        page.locator(_in("diff-b.txt")).click()
+        until(lambda: has("b.txt") and not has("a.txt"), timeout=6)
+        check("setup: the worker answered the diff after them", bool(until(b_drawn, timeout=30)))
+        time.sleep(0.8)
+        new = ERRORS[start:]
+        check("a task diff closed while its diff waits on the worker throws nothing", not new, "; ".join(new[:3]))
+        check("…and its models went with it",
+              not has("a.txt") and not has("a.txt", "modified") and not has("huge.txt"), str(models())[:300])
+
+        # Compare: open while huge.txt's diff holds the worker, closed before its own comes back.
+        start = len(ERRORS)
+        page.locator(_in("diff-huge.txt")).click()
+        until(lambda: has("huge.txt"), timeout=15)
+        page.locator(_pane(2, _tid("conflict-compare"))).click()
+        cmp_ = page.locator(_pane(2, _tid("editor-compare")))
+        until(lambda: cmp_.count() > 0 and any(u.startswith("jarvis-disk:") for u in models()), timeout=6)
+        check("setup: Compare opened", cmp_.count() == 1)
+        page.locator(_pane(2, _tid("conflict-compare"))).click()
+        until(lambda: cmp_.count() == 0 and not any(u.startswith("jarvis-disk:") for u in models()), timeout=6)
+        page.locator(_in("diff-b.txt")).click()
+        check("setup: the worker answered the diff after it", bool(until(b_drawn, timeout=30)))
+        time.sleep(0.8)
+        new = ERRORS[start:]
+        check("Compare closed while its diff waits on the worker throws nothing", not new, "; ".join(new[:3]))
+        check("…the buffer keeps its edit, still unsaved, its model alive",
+              "#mine" in _text(page, 2) and page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "true"
+              and any(u.startswith("file:") and u.endswith("/calc.py") for u in models()), _text(page, 2)[-60:])
+        page.locator(_lines(2)).click()
+        page.keyboard.press("Control+End")
+        undone = False
+        for _ in range(3):
+            page.keyboard.press("Control+z")
+            if until(lambda: "#mine" not in _text(page, 2), timeout=0.6):
+                undone = True
+                break
+        check("…and its undo still takes the edit back", undone, _text(page, 2)[-60:])
+    finally:
+        w["diff"].clear()
+        w["diff"].update(keep_diff)
+        w["diff_files"].clear()
+        w["diff_files"].update(keep_sides)
+
+
 def main():
     from playwright.sync_api import sync_playwright
     from tests.face import hud_v2_check as v2
@@ -474,8 +890,9 @@ def main():
             browser = pw.chromium.launch(
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
+            # `ONLY=scale` runs one section (a mutation round's quick way in).
             scm_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until, v2.guard,
-                       v2.FAKE_RECOGNIZER)
+                       v2.FAKE_RECOGNIZER, os.environ.get("ONLY", ""))
             browser.close()
     finally:
         mock.stop()
