@@ -782,8 +782,9 @@ def _pretty_json(text: str) -> str:
 
 def device_text(data: bytes) -> str:
     """A device read's output as text: escapes and controls removed, JSON
-    pretty-printed, markup left as characters (the HUD draws it as text). A
-    JSON string's own escapes (`\\u001b`) are removed after the parse too."""
+    pretty-printed, markup left as characters (the HUD draws it as text).
+    After the parse a JSON string's control characters stay escaped
+    (`\\u001b`, as JSON writes them) and its invisible ones are removed."""
     text = _pretty_json(_visible(plain(data)))
     return _visible(text)[-INFO_TEXT_CAP:]
 
