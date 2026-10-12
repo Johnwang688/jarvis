@@ -1560,6 +1560,17 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+**Known gap, open (2026-10-12, review of PR #74; reproduced in Chrome 155):**
+a framed page can take the keyboard with no user activation.
+`el.focus()`/`window.focus()` inside the `allow-scripts allow-forms` frame
+moves focus out of the HUD's box, and later keys go to the page, which can
+send them to its own server: chat words, an editor's `.env` value, a
+password typed in a terminal. `inert`, `display: none`, re-focusing the box
+and `contentWindow.blur()` do not stop it, even from a hidden frame. Only
+removing the iframe in the parent's `blur` handler does. AO-2
+(`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §E.8) adds that
+guard for every Browser frame: a frame that gains focus without the owner's
+gesture is unmounted ("This page took the keyboard · Reload").
 
 **The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
@@ -1600,7 +1611,9 @@ is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
 offer | wait (under a card; 30 s) | skip (off, the WP-E judge
 `judgeBrowserUrl` or Jarvis's control ports, an origin already opened or shown, one per 10 s per terminal,
 three a minute); the query and fragment are dropped; a Browser pane already
-showing a page counts as busy. `annotate.ts`: the
+showing a page counts as busy. (Amendment 2, 2026-10-12, replaces `focused`
+and `offer` with a tab in a drawn Browser pane, else a prompt, and the 30 s
+wait with "until the card goes"; AO-3 rewrites it.) `annotate.ts`: the
 whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
 colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
 the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).
@@ -6278,6 +6291,16 @@ Two findings worth keeping:
   (invariant 7). cad-bench holds `skill_list` and `skill_read`,
   so the CAD skill it measures can load. runtime.py and toolgroups.py are
   **not** SELF_PROTECTED: the owner declined it (answer 3).
+- **Auto-opened dev servers are Direct only, and never open a port in the
+  Remote browser's gate (2026-10-12, the lead's decision L2,
+  `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`).** Since the
+  owner asked for servers that Jarvis, Claude and Codex start to open too,
+  an agent can trigger an auto-open. Counting one as the owner's own
+  navigation would hand agents a lever on the gate. Only the owner's typed
+  URL, click or "Open in Remote" opens a loopback port there. This
+  **reverses** the note BR-1a's review first carried: that BR-8b's auto-open
+  counted as the owner's opening. #69 merged with that note already
+  corrected, in the BR-1a paragraph and the "closed like the LAN" bullet.
 
 - **Agents that cannot ask get a typed git tool, not a broader shell
   (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach
