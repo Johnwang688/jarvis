@@ -1,8 +1,36 @@
 import { describe, expect, it } from "vitest";
 import {
   candidateDirs, configPath, deadline, globCost, GLOB_TOKENS_MAX, GLOB_TOTAL_MAX, matchGlob, overrideOf,
-  parseEditorConfig, RESOLVE_MS, resolveProps, SECTIONS_MAX, type ConfigFile,
+  parseEditorConfig, RESOLVE_MS, resolveProps, SECTIONS_MAX, type ConfigFile, type Deadline,
 } from "./editorconfig";
+
+// Load-proof timing (the flaky-test fix; `state/editorconfig.test.ts` has the
+// same two tools). `held` is how long `fn` held the thread: the least of its
+// wall time and the process's CPU time, each at least the thread's own CPU
+// time, and only the first inflated by a CPU taken away under load (the
+// thread's own CPU clock is read a scheduler tick stale on Linux, so it is no
+// use at 16 ms). `workDeadline` reads the work done as its clock, so
+// `RESOLVE_MS` is a fixed number of steps: a check whose point is not the time
+// (a cap found, a small config's answer) cannot be timed out by a slow machine.
+const cpuUsage = (globalThis as { process?: { cpuUsage?: () => { user: number; system: number } } }).process?.cpuUsage;
+const cpuMs = () => {
+  const u = cpuUsage!();
+  return (u.user + u.system) / 1000;
+};
+function held(fn: () => void): number {
+  const w = performance.now();
+  const c = cpuUsage ? cpuMs() : 0;
+  fn();
+  const wall = performance.now() - w;
+  return cpuUsage ? Math.min(wall, cpuMs() - c) : wall;
+}
+/** Nanoseconds one step stands for on the work clock: about this machine's rate (3–4 ns). */
+const WORK_NS = 4;
+function workDeadline(): Deadline {
+  let d: Deadline | undefined;
+  d = deadline(RESOLVE_MS, () => ((d?.total ?? 0) * WORK_NS) / 1e6);
+  return d;
+}
 
 describe("parsing an .editorconfig (the spec's INI)", () => {
   it("reads the preamble's root, sections, pairs and comments", () => {
@@ -202,9 +230,10 @@ describe("a resolution is held to the clock", () => {
   });
 
   it("stops at the deadline: no configuration, and the file to blame named", () => {
-    const t = performance.now();
-    const r = resolveProps([{ dir: "", file: heavy() }], PATH);
-    const ms = performance.now() - t;
+    let r: ReturnType<typeof resolveProps> | undefined;
+    const ms = held(() => {
+      r = resolveProps([{ dir: "", file: heavy() }], PATH);
+    });
     expect(r).toMatchObject({ over: "time", props: {}, culprit: 0 });
     expect(ms).toBeLessThan(16);
   });
@@ -230,9 +259,10 @@ describe("a resolution is held to the clock", () => {
       dir: deep.split("/").slice(0, i).join("/"),
       file: parseEditorConfig(lines.slice(1).join("\n")), // no root: every one applies
     }));
-    const t = performance.now();
-    const r = resolveProps(walk, deep);
-    expect(performance.now() - t).toBeLessThan(16);
+    let r: ReturnType<typeof resolveProps> | undefined;
+    expect(held(() => {
+      r = resolveProps(walk, deep);
+    })).toBeLessThan(16);
     expect(r).toMatchObject({ over: "time", props: {} });
   });
 
@@ -241,10 +271,11 @@ describe("a resolution is held to the clock", () => {
     for (let n = 0; n < 123; n++) nums.push(`[${"{0..999999999}".repeat(30)}${n}x]`, "indent_size = 2");
     const file = parseEditorConfig(nums.join("\n"));
     const name = "9".repeat(1000);
-    const t = performance.now();
-    const r = resolveProps([{ dir: "", file }], name);
-    expect(performance.now() - t).toBeLessThan(16);
-    expect(r.over).toBe("time");
+    let r: ReturnType<typeof resolveProps> | undefined;
+    expect(held(() => {
+      r = resolveProps([{ dir: "", file }], name);
+    })).toBeLessThan(16);
+    expect(r?.over).toBe("time");
     // And a range still matches as the spec says.
     expect(matchGlob("file{1..300}.c", "file250.c")).toBe(true);
     expect(matchGlob("file{1..300}.c", "file301.c")).toBe(false);
@@ -258,7 +289,9 @@ describe("a resolution is held to the clock", () => {
       "[*.{json,yml,yaml}]", "indent_size = 2", "[*.md]", "trim_trailing_whitespace = false",
       "[src/**/vendor/**]", "indent_size = unset", "[lib/**.js]", "indent_size = 2",
     ].join("\n"));
-    const r = resolveProps([{ dir: "", file: real }], `src/${"deep/".repeat(40)}robot.cpp`);
+    // On the work clock: its ~20,000 steps look at the clock ~75 times, and a
+    // real one under load ran out during them (the flake this replaces).
+    const r = resolveProps([{ dir: "", file: real }], `src/${"deep/".repeat(40)}robot.cpp`, workDeadline());
     expect(r.over).toBeNull();
     expect(r.props).toMatchObject({ indent_style: "space", indent_size: "2" });
     // A few thousand steps of a few nanoseconds: nowhere near the deadline, on any machine.
@@ -268,7 +301,8 @@ describe("a resolution is held to the clock", () => {
   it("a glob over a cap configures nothing, and names its file (the caller poisons it)", () => {
     const ok = parseEditorConfig("[*.c]\nindent_size = 2\n");
     const capped = parseEditorConfig(`[*.c]\nindent_size = 3\n[${"{a,b}".repeat(7)}]\nindent_size = 4\n`);
-    const r = resolveProps([{ dir: "", file: ok }, { dir: "", file: capped }], "x.c");
+    // The work clock: finding the cap looks at the clock, which a real one under load could end first.
+    const r = resolveProps([{ dir: "", file: ok }, { dir: "", file: capped }], "x.c", workDeadline());
     expect(r).toMatchObject({ over: "cap", props: {}, culprit: 1 });
   });
 
@@ -279,7 +313,8 @@ describe("a resolution is held to the clock", () => {
     const r = resolveProps([{ dir: "", file: many }], "f0.c");
     expect(r).toMatchObject({ over: "sections", props: {} });
     const fits = parseEditorConfig(Array.from({ length: SECTIONS_MAX }, (_, i) => `[f${i}.c]\nindent_size = 2`).join("\n"));
-    expect(resolveProps([{ dir: "", file: fits }], "f0.c").props).toMatchObject({ indent_size: "2" });
+    // The work clock: 128 sections look at the clock, and a real one ran out under load.
+    expect(resolveProps([{ dir: "", file: fits }], "f0.c", workDeadline()).props).toMatchObject({ indent_size: "2" });
   });
 
   it("a section's glob is compiled once and kept with its file", () => {
