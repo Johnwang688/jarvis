@@ -3501,8 +3501,11 @@ re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
 is `lib/scm.ts` `scmWindow`/`revealTop`): only the rows in view, and
 `SCM_OVERSCAN` (12) either side, are in the DOM, in a spacer as tall as every
 row; **every row is `SCM_ROW_PX` (24) CSS px, pinned inline**, so where a row
-is needs no measuring, and `scrollTop`/`clientHeight` are the list's own CSS
-px (the HUD's zoom does not change them; checked at 160%). The window is
+is needs no measuring, and `scrollTop` is the list's own CSS px (the HUD's
+zoom does not change it; checked at 160%). **How much is in view is the
+drawn height over `currentCSSZoom`** (`viewOf`), never `clientHeight`, which
+is rounded: at 160% a list 400.6 px tall read as 401, and End clipped 0.8
+drawn px of its row (review of PR #73, NIT). The window is
 computed each render from where the list is scrolled, kept in whole rows (a
 scroll redraws the list only when it crosses a row, and only the list: it is
 `memo`'d, with a stable pick). At git/status's 20,000 cap a DOM of every row
@@ -3510,7 +3513,20 @@ made each chat keystroke beside it cost ~100 ms (the reviewer's measure;
 74–103 ms here), and drawing took 0.2–0.4 s; windowed it is ~2 ms, the same
 as no Diff pane. **Keys** (the list is a focusable `listbox`, focused by a
 row click or Tab): ↑ ↓, Page Up/Down, Home, End (`scmKeyStep`) move the
-selection and scroll it into view; Enter reads the selected row again. **The
+selection and scroll it into view; Enter reads the selected row again. **A
+key moves the highlight at once and reads the row only once the keys have
+settled** (`SCM_KEY_SETTLE_MS`, 150 ms; the pane keeps `sel`, the highlight,
+apart from `shown`, the file read, and says "…" between); a click and Enter
+read at once, and a key pick never folds a narrow pane's list (a click
+does). **A read nobody waits for is aborted**: `api.gitBase`/`api.readFile`
+take a signal, aborted in `ScmFile`'s effect cleanup. Review of PR #73, MED:
+↓ held over 60 rows started 60 `git/base` requests and reads, and against a
+slow repository (the owner's VEX projects on /mnt/c) the last row's diff came
+4 s late at 0.5 s a request; now one request and one read go out, the diff
+0.65 s after the last key. **For a screen reader** each option carries an
+id, `aria-setsize` (the whole list) and `aria-posinset`, and the listbox's
+`aria-activedescendant` names the selected option whenever it is drawn (a
+key always draws it; no dangling id when it is scrolled away). **The
 selection is a path, never a drawn row**: scrolled out of the window it
 stays selected, its diff stays shown, and the keys move from it. A file the
 pane had (a reload) is scrolled into view once, when the rows first arrive —
@@ -3535,12 +3551,18 @@ undo stack and dirty state are untouched (checked: edit kept, still dirty,
 Ctrl+Z still undoes it). **`ScmDiffEditor` draws with ED-8's
 `displayOptions`**, live on a settings change (`onEditorSettings`, then
 `reapplyEditorConfig()`, as the other two) — it had a fixed `fontSize: 12`.
-Free checks: `lib/scm.test.ts` (26), `components/ProjectDiff.test.ts` (3: the
-20,000-row window in jsdom and the keys past it, nothing moved under a card)
-and `tests/face/hud_v2_scm_check.py` (now 104; `ONLY=<section>` runs one):
+Free checks: `lib/scm.test.ts` (26), `components/ProjectDiff.test.ts` (4: the
+20,000-row window in jsdom and the keys past it, five keys read nothing until
+they settle and then the last row once, a click at once; the ARIA; nothing
+moved under a card) and `tests/face/hud_v2_scm_check.py` (now 110;
+`ONLY=<section>` runs one):
 `_scale_checks` (20,000 rows, a window drawn, chat typing under 15 ms a
 character, the last row reached, the keys, a selection held and moved out of
-the window, a reload's file revealed at 160%), `_clear_task_checks` (the 2×2
+the window, a reload's file revealed at 160%, and at 160% Page Down and End
+clipping nothing of a list 400.6 px tall), `_hold_checks` (↓ held at ~33 a
+second over 60 rows, the mock's `git/base` taking 0.5 s (`base_delay`): at
+most 3 requests and the last diff within 2 s; a row clicked away from before
+HEAD answered is aborted), `_clear_task_checks` (the 2×2
 grid with a Task pane), `_settings_checks` and `_midcompute_checks` (a
 40,000-line task-diff file keeps Monaco's one editor worker busy for its 5 s
 diff limit; a task diff, then Compare, is opened and closed while its own
@@ -3550,7 +3572,10 @@ out-of-window checks fail; main's build also fails the typing check at
 74 ms); `clear` keeping the task id (three checks); the task diff or Compare
 back to `{original, modified}`, or the task diff's view model never
 disposed (`no diff result available`); the settings not live, or not used at
-all (12px where 16px was chosen); keys that never scroll (five checks).
+all (12px where 16px was chosen); keys that never scroll (five checks); the
+review round's: no settle (60 `git/base`), neither settle nor abort (60, and
+the last diff 4.14 s late), no abort (the clicked-away request completes),
+the rounded `clientHeight` (End clips 0.812 px at 160%).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort

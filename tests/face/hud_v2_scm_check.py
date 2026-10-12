@@ -621,6 +621,9 @@ def _scale_checks(page, mock, check, until, requests):
         # Review of PR #73, NIT: at 160% End and Page Down clipped ~0.8 drawn px
         # of the row they scrolled to (`clientHeight` is rounded). Keys keep a
         # narrow pane's list open (a click folds it to show the diff).
+        # The list as tall as a window can make it: a part-pixel height, which
+        # `clientHeight` rounds up (400.6 → 401 CSS px; 0.4 × 1.6 = 0.64 drawn px).
+        page.locator(rows_sel).evaluate("e => { e.style.flex = '0 0 400.6px'; }")
         page.locator(rows_sel).focus()
         page.keyboard.press("Home")
         until(lambda: path() == name(0), timeout=4)

@@ -2161,8 +2161,11 @@ Rules in CLAUDE.md's "The Diff pane shows the project's uncommitted changes"
 paragraph.
 
 The follow-ups (2026-10-12; CLAUDE.md "The Diff pane's follow-ups") change no
-route and no request: the windowed list draws from the same `git/status`
-answer, the keys pick rows exactly as clicks do (each pick is one
-`git/base`, then a read if allowed), the Task pane's "clear" is window state
+route: the windowed list draws from the same `git/status` answer; a click
+picks a row at once (one `git/base`, then a read if allowed), and a key
+only once the keys have rested 150 ms, so a held key asks about the row it
+stops on and not every row passed; a `git/base` or read the pane no longer
+waits for is aborted (the request is cancelled in the browser; the daemon
+may still finish it); the Task pane's "clear" is window state
 only (`taskId`, `taskFocus`), and the diff views' settings and view models
 are Monaco's.

@@ -3008,7 +3008,11 @@ window nothing (about 2 ms a character beside it, where every row drawn cost
 ~100 ms). It takes keys: ↑ ↓, Page Up/Down, Home and End move the selection
 and scroll it into view, Enter reads it again; a selection scrolled out of
 view stays selected, its diff still shown, and the keys move on from it; a
-reload scrolls the pane's file into view. **The Task pane's header clears its
+reload scrolls the pane's file into view. A held key moves the highlight at
+once and reads only the row it stops on (after 150 ms of no keys), and a
+read no longer wanted is dropped, so on a slow repository the last row's
+diff is not stuck behind every row passed. A screen reader hears each row's
+place in the whole list and the selected row as the keys move. **The Task pane's header clears its
 task** ("task <id> · clear", off under a card): the 2×2 grid draws a Task
 pane, and while it shows a task every Diff pane shows that task's diff, so
 clearing is the way back to a project's uncommitted changes — a Diff pane
