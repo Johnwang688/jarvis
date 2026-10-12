@@ -2813,7 +2813,7 @@ a status that recurses runs `git status` inside the submodule, which obeys
 status through `gitops._git` (a same-size, mtime-moved file forces the
 hash). **The same hole was open in the `git` tool** (`gitops.run(path,
 ["status"])` and `["diff"]` each ran a submodule's filter, measured in-process)
-until 2026-10-12, when `gitops` itself was kept out of submodules (see *Agents
+until 2026-10-12 (PR #65), when `gitops` itself was kept out of submodules (see *Agents
 that cannot ask* in Safety design); the editor's own flag stays, since its
 `_risky` reads the superproject's config only. A base read inside a submodule is refused anyway
 (its config sets `core.worktree`). The owner's global config (a git-lfs
@@ -4681,7 +4681,7 @@ jarvis/
   `--no-ext-diff --no-textconv`; and a repository whose *own* config names a
   program or moves where git works (`core.sshCommand`, a filter/textconv/merge
   driver, `url.*.insteadOf`, `include.path` …) is refused outright. **Git is
-  kept out of submodules** (2026-10-12): inside one it obeys *that*
+  kept out of submodules** (2026-10-12, PR #65): inside one it obeys *that*
   repository's config, and on main a submodule's own filter ran through the
   tool on `status`, `diff`, `add -A`, `commit -a` and `rm`, its textconv on
   `log -p`/`show` under a global `diff.submodule=diff`, and a global
@@ -5360,7 +5360,7 @@ jarvis/
   files stay writable. **Verified to bite** by an in-process mutation sweep
   (disable each protection, the matching check must fail) — 14 of 15 at
   first, the 15th being a mutation that did not mutate, now a structural
-  assertion. **Submodules** (2026-10-12), against a real submodule cloned from
+  assertion. **Submodules** (2026-10-12, PR #65), against a real submodule cloned from
   a local bare repository into a tool-made worktree, every trap a script that
   writes one marker: `submodule_pin_checks` puts the drivers in the owner's
   global config, named only by the submodule's attributes (so the config check
