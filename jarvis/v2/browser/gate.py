@@ -256,6 +256,7 @@ class Gate:
         self._executor: ThreadPoolExecutor | None = None
         self._error: BaseException | None = None
         self._active = 0
+        self._local_tasks: dict[asyncio.Task, int] = {}
         self._counts = Counter()
         self._refusals = Counter()
         self.port: int | None = None
@@ -318,6 +319,25 @@ class Gate:
         if thread is not None:
             thread.join(timeout)
 
+    def revoke_closed_loopback(self) -> None:
+        """Drop established/in-flight local tunnels whose last owner left.
+
+        The host first removes its lease under its lock. The gate rechecks
+        after every connect await too, so a new connect cannot race this call.
+        Public/LAN tunnels are deliberately absent from this collection.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        def revoke():
+            for task, port in list(self._local_tasks.items()):
+                if not self._loopback(port):
+                    task.cancel()
+        try:
+            loop.call_soon_threadsafe(revoke)
+        except RuntimeError:
+            pass
+
     def stats(self) -> dict:
         with self._lock:
             return {"port": self.port, "connections": self._counts["connections"],
@@ -350,6 +370,10 @@ class Gate:
             if request is None:
                 return
             name, port = request
+            kind, literal = policy.host_kind(name)
+            local = kind == "loopback_name" or (kind == "literal" and policy.address_class(literal) == "loopback")
+            if local:
+                self._local_tasks[asyncio.current_task()] = port
             try:
                 upstream = await self._open(name, port)
             except Refusal as refusal:
@@ -370,6 +394,7 @@ class Gate:
         except Exception as exc:  # noqa: BLE001 - one connection never takes the gate down
             LOG.debug("browser gate connection ended: %s", type(exc).__name__)
         finally:
+            self._local_tasks.pop(asyncio.current_task(), None)
             with self._lock:
                 self._active -= 1
             for w in (writer, upstream[1] if upstream else None):
@@ -471,7 +496,11 @@ class Gate:
                 raise Refusal(policy.PINS_FULL)
         for ip in allowed:
             try:
-                return await self._connector(str(ip), port)
+                connected = await self._connector(str(ip), port)
+                if policy.address_class(ip) == "loopback" and not self._loopback(port):
+                    connected[1].close()
+                    raise Refusal(policy.LOOPBACK_CLOSED)
+                return connected
             except (OSError, asyncio.TimeoutError):
                 continue
         return None

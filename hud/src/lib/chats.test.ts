@@ -108,6 +108,8 @@ describe("handing words back", () => {
 
   it("with no thread yet, goes back to the pane holding its compose row, else to no box at all", () => {
     expect(giveBackPane(null, c, none, 2)).toBe(2);
+    expect(giveBackPane(null, c, none, 2, [1])).toBeNull();
+    expect(giveBackPane(null, c, none, 2, [])).toBeNull();
     // Never the selected chat, which may show another thread (W-6; re-review
     // of PR #27): the caller parks them under the compose row instead.
     expect(giveBackPane(null, c, none)).toBeNull();

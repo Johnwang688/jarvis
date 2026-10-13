@@ -628,7 +628,7 @@ class OwnerBrowser(unittest.TestCase):
             time.sleep(step)
         return predicate()
 
-    def attack(self, tab_id, target):
+    def attack(self, tab_id, target, *, keep=()):
         """Every page-initiated way, aimed at `target` (host:port)."""
         type(self).sw += 1
         self.owner("POST", f"/browser/tabs/{tab_id}/navigate",
@@ -637,7 +637,9 @@ class OwnerBrowser(unittest.TestCase):
         self.assertTrue(self.wait(lambda: self.settled(page, "window.__done === true"), 10))
         self.run_on(page.click("#open"))           # a user gesture, so no pop-up blocker
         time.sleep(2.0)
-        self.close_others(tab_id)
+        for other in self.other_tabs(tab_id):
+            if other not in keep:
+                self.owner("DELETE", f"/browser/tabs/{other}")
         for way in ("redirect", "meta", "loc"):
             self.owner("POST", f"/browser/tabs/{tab_id}/navigate",
                        {"url": f"http://127.0.0.1:{self.fx}/{way}?t={target}"})
@@ -886,32 +888,39 @@ class OwnerBrowser(unittest.TestCase):
         # call `navigate` without `owner=True`).
         self.host.navigate(tab, f"http://127.0.0.1:{self.sanity.port}/hit?w=agent")
         self.assertEqual(self.sanity.accepts, 0)
-        self.assertEqual(self.host.status()["loopback_opened"], 1)
-        # The owner opens it in a tab: that port works, from a public page too.
-        self.owner("POST", f"/browser/tabs/{tab}/navigate", {"url": f"http://localhost:{self.sanity.port}/"})
+        self.assertEqual(self.host.status()["loopback_opened"], 0, "the owner left the fixture port")
+        # Keep the authorizing pane open while a different page exercises the
+        # shared gate; navigating that pane away now revokes its permission.
+        keeper = self.owner("POST", "/browser/tabs", {"url": f"http://localhost:{self.sanity.port}/"})["tab_id"]
         self.assertGreaterEqual(self.sanity.accepts, 1)
 
         body = "document.body ? document.body.innerText : ''"
-        self.assertTrue(self.wait(lambda: self.settled(self.page(tab), body) == "ok", 10))
-        self.assertEqual(self.host.status()["loopback_opened"], 2)
+        self.assertTrue(self.wait(lambda: self.settled(self.page(keeper), body) == "ok", 10))
+        self.assertEqual(self.host.status()["loopback_opened"], 1)
         self.assertEqual(self.lna(tab, f"127.0.0.1:{self.sanity.port}"),
                          {"cors": "read:ok", "post": "sent", "done": True})
         # Another loopback port is still refused, by every way.
         self.assertEqual(self.lna(tab, f"127.0.0.1:{self.closed.port}")["cors"], "err")
-        self.attack(tab, f"localhost:{self.closed.port}")
+        self.attack(tab, f"localhost:{self.closed.port}", keep=(keeper,))
         time.sleep(0.5)
         self.assertEqual(self.closed.accepts, 0, "a page reached a loopback port nobody opened")
+        self.owner("DELETE", f"/browser/tabs/{keeper}")
+        self.assertFalse(self.host.loopback_open(self.sanity.port), "closing the last owner revokes the port")
 
     def test_08b_the_ways_reach_an_ordinary_server(self):
         # The sanity half: every way really fires, through the gate, to the
-        # loopback port the owner opened in test_08.
+        # loopback port with a currently open owner-authorizing pane.
+        keeper = self.owner("POST", "/browser/tabs", {"url": f"http://127.0.0.1:{self.sanity.port}/"})["tab_id"]
         allowed_before = self.host._gate.stats()["allowed"]
-        for spelling in ("127.0.0.1", "localhost"):
-            self.sanity.ways.clear()
-            self.attack(self.main_tab, f"{spelling}:{self.sanity.port}")
-            self.assertTrue(self.wait(lambda: set(WAYS) | set(NAV_WAYS) <= self.sanity.ways, 10),
-                            f"{spelling}: only {sorted(self.sanity.ways)}")
-        self.assertGreater(self.host._gate.stats()["allowed"], allowed_before)
+        try:
+            for spelling in ("127.0.0.1", "localhost"):
+                self.sanity.ways.clear()
+                self.attack(self.main_tab, f"{spelling}:{self.sanity.port}", keep=(keeper,))
+                self.assertTrue(self.wait(lambda: set(WAYS) | set(NAV_WAYS) <= self.sanity.ways, 10),
+                                f"{spelling}: only {sorted(self.sanity.ways)}")
+            self.assertGreater(self.host._gate.stats()["allowed"], allowed_before)
+        finally:
+            self.owner("DELETE", f"/browser/tabs/{keeper}")
 
     def test_09_no_way_reaches_jarvis(self):
         refused_before = self.host._gate.stats()["refused"].get(P.JARVIS_PORT, 0)
@@ -1036,10 +1045,13 @@ class OwnerBrowser(unittest.TestCase):
         browser = [pid for pid in chrome_tree(runs[0]) if "--remote-debugging-pipe" in proc_argv(pid)
                    and not any(a.startswith("--type=") for a in proc_argv(pid))]
         self.assertIn("--disable-sync", proc_argv(browser[0]))
+        keeper = self.owner("POST", "/browser/tabs", {"profile": "private", "ctx": row["ctx"],
+                            "url": f"http://127.0.0.1:{self.sanity.port}/"})["tab_id"]
         self.sanity.ways.clear()
-        self.attack(row["tab_id"], f"127.0.0.1:{self.sanity.port}")
+        self.attack(row["tab_id"], f"127.0.0.1:{self.sanity.port}", keep=(keeper,))
         self.assertTrue(self.wait(lambda: {"fetch", "iframe", "302"} <= self.sanity.ways, 10),
                         sorted(self.sanity.ways))
+        self.owner("DELETE", f"/browser/tabs/{keeper}")
         ports = [l.port for l in self.stand_ins.values()]
         self.attack(row["tab_id"], f"localhost:{ports[0]}")
         self.attack(row["tab_id"], f"[::1]:{ports[1]}")
@@ -1053,8 +1065,9 @@ class OwnerBrowser(unittest.TestCase):
         self.assertEqual(self.ask("POST", "/browser/tabs", {"ctx": row["ctx"]})[0], 400)
         for tab_id in (row["tab_id"], second["tab_id"]):
             self.owner("DELETE", f"/browser/tabs/{tab_id}")
-        self.assertTrue(self.wait(lambda: self.host.status()["instances"][0]["contexts"] == 0, 5))
-        self.host.close_profile("private")
+        self.assertTrue(self.wait(lambda: not self.host.status()["instances"] and not chrome_tree(config.BROWSER_DIR)
+                                 and not list((config.BROWSER_DIR / "private").iterdir()), 10),
+                        "the final Private tab closes Chrome and removes its run folder")
         self.assertEqual(list((config.BROWSER_DIR / "private").iterdir()), [], "the run folder went")
         self.assertEqual(chrome_tree(config.BROWSER_DIR), [])
 
@@ -1199,6 +1212,7 @@ class Folder(unittest.TestCase):
     def test_an_unreadable_profiles_list(self):
         (self.root / "browser").mkdir(mode=0o700)
         (self.root / "browser" / "profiles.json").write_text("{not json")
+        (self.root / "browser" / "profiles.json").chmod(0o600)
         self.refused("profiles.json is unreadable")
 
 

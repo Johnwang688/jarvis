@@ -219,7 +219,7 @@ export function giveBackPane(
   prefer: PaneNo | null = null,
   onScreen: readonly PaneNo[] = PANE_NOS,
 ): PaneNo | null {
-  if (!threadId) return prefer;
+  if (!threadId) return prefer !== null && onScreen.includes(prefer) ? prefer : null;
   const shows = (n: PaneNo) => onScreen.includes(n) && shownThread(chats[n], pending[n]) === threadId;
   if (prefer && shows(prefer)) return prefer;
   return PANE_NOS.find(shows) ?? null;

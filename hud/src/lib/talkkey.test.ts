@@ -184,11 +184,26 @@ describe("a Ctrl+D hold, from its first keydown to its keyup (review of PR #40)"
     expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("pass");
   });
 
-  it("a pending Monaco chord's second key is Monaco's: no press, no hold", () => {
+  it("a pending Monaco chord's second key is Monaco's: held, without talking", () => {
     const h = new TalkHold();
     expect(h.down(press(), at({ chordSecond: true }))).toBe("monaco");
     expect(h.down(press({ repeat: true }), at())).toBe("swallow");
     expect(h.up({ key: "d", code: "KeyD" })).toBe(false);
+  });
+
+  it("keeps chord repeats away from a terminal through blur, until either release or a fresh press", () => {
+    for (const blur of [false, true]) for (const key of ["d", "Control"]) {
+      const h = new TalkHold();
+      expect(h.down(press(), at({ chordSecond: true }))).toBe("monaco");
+      if (blur) expect(h.blur()).toBe(false);
+      expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("swallow");
+      expect(h.up({ key })).toBe(false);
+      expect(h.down(press(), at({ terminal: true }))).toBe("pass");
+    }
+    const h = new TalkHold();
+    expect(h.down(press(), at({ chordSecond: true }))).toBe("monaco");
+    expect(h.down(press(), at({ terminal: true }))).toBe("pass");
+    expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("pass");
   });
 
   it("leaves every other key alone", () => {

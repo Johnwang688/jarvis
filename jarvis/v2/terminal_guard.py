@@ -59,7 +59,10 @@ here-document's input line (`>>> `, `> `, `... `, `php > `) that reads the
 environment *explicitly* (`process.env`, `os.environ`, `ENV[`, `$ENV{`, a
 getenv call — never the bare words `ENV`, `env:` or `getenv`, which YAML,
 Dockerfiles and prose hold) refuses the read (2026-10-11 delta and third
-reviews). `--print`/`--eval` never take an option-looking argument as the
+reviews). IPython `In [N]:`/`...:` and irb/pry input prompts count too.
+In IPython input, `%env` dumps and secret-named `%env`/`%set_env` lookups
+or assignments refuse (assignments echo); immediate `!`/`!!` shell escapes
+use the same bounded command judge. `--print`/`--eval` never take an option-looking argument as the
 source either, and after one (or `--`) the first operand left is judged as a
 source too: an ambiguous parse fails toward refusing. The loading idioms
 `env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
@@ -87,7 +90,10 @@ no keyword beside it — a random password printed on its own — is not caught;
 nor is one printed in pieces, reversed, or encoded some other way. Rule 3
 judges command lines by shape, so it cannot see through an alias, a shell
 function, a script, a symlink or a program that prints a secret on its own
-initiative: their output meets rules 1 and 2 and the heuristic only — and
+initiative; nor does the REPL rule resolve dynamic bracket references
+(`process['env']`), aliases/imports (`from os import environ`,
+`__import__('os').environ`), `os.system('env')` or assigned shell captures.
+Their output meets rules 1 and 2 and the heuristic only — and
 so does a script handed a credential file as an argument (`python3 show.py
 .env`): only an interpreter's own inline source or script counts — and a
 program piped in from anything but a literal `echo`/`printf` (`cat x.py |
@@ -761,78 +767,75 @@ def _interpreter_parts(prog: str, args: list[str]):
     inline_s, valued_s, glued_s, inline_l, valued_l = _INTERPRETER_OPTIONS.get(
         prog, ("", "", "", frozenset(), frozenset()))
     sources: list[str] = []
-    # An inline-source option whose next argument looked like an option
-    # (`node --print -e x`, `node -pe -- x`): the source is still to come.
-    # Where that is ambiguous the parse fails toward refusing: the first
-    # operand left over is judged as a source too (2026-10-11 third review).
-    wants_source = False
+    # Reparse bun/deno verbs with one cursor: no recursive calls or repeated
+    # tail copies. Each reparse retains earlier sources and resets its local
+    # ambiguous-source flag, exactly as a separate invocation did.
     i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg == "--":
-            i += 1
-            break
-        if not arg.startswith("-") or arg == "-":
-            break
-        if arg.startswith("--"):
-            name, eq, value = arg.partition("=")
-            if name in inline_l:
-                following = args[i + 1] if i + 1 < len(args) else ""
-                if eq:
-                    sources.append(value)
-                    i += 1
-                elif following.startswith("-") and prog in _NEXT_ARGUMENT_SOURCES:
-                    wants_source = True                    # `--print -e x`, `--eval -- x`
-                    i += 1
-                else:
-                    sources.append(following)
-                    i += 2
-            else:
-                i += 2 if (name in valued_l and not eq) else 1
-            continue
-        step, j = 1, 1
-        next_only = _NEXT_ARGUMENT_SOURCES.get(prog, "")
-        while j < len(arg):
-            letter, glued = arg[j], arg[j + 1:]
-            j += 1
-            if letter in next_only:
-                following = args[i + 1] if i + 1 < len(args) else ""
-                if step == 1 and not following.startswith("-"):
-                    sources.append(following)              # `-pe`: one source, the next argument
-                    step = 2
-                elif step == 1:
-                    wants_source = True                    # `-p -e x`, `-pe -- x`: still to come
-                continue
-            if letter in glued_s:
-                if letter in "l0":                         # perl -l[octal], -0[digits]: the cluster goes on
-                    while j < len(arg) and (arg[j].isdigit() or (letter == "0" and arg[j] in "xX")):
-                        j += 1
-                    continue
-                break                                      # -i[extension]: the rest is the extension
-            if letter in inline_s or letter in valued_s:
-                value = glued or (args[i + 1] if i + 1 < len(args) else "")
-                step = 1 if glued else 2
-                if letter in inline_s:
-                    sources.append(value)
-                elif letter == "m" and prog in ("python", "python3"):
-                    return sources, None, value, args[i + step:]
-                elif letter == "f" and prog == "php":
-                    return sources, value, None, args[i + step:]
+    while True:
+        wants_source = False
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                i += 1
                 break
-        i += step
-    rest = args[i:]
-    if wants_source and rest:
-        sources.append(rest[0])
-    if prog in ("deno", "bun") and rest and rest[0] in ("run", "eval", "serve", "test", "bench", "x"):
-        verb = rest[0]
-        if verb == "eval":
-            rest = _skip_options(rest[1:], valued_l)
-            return sources + rest[:1], None, None, rest[1:]
-        # `bun run -e '…'`, `deno run -A main.ts`: the verb's own options are
-        # the interpreter's, so they are parsed again, not skipped.
-        more, script, module, after = _interpreter_parts(prog, rest[1:])
-        return (None if more is None else sources + more), script, module, after
-    return sources, (rest[0] if rest else None), None, rest[1:]
+            if not arg.startswith("-") or arg == "-":
+                break
+            if arg.startswith("--"):
+                name, eq, value = arg.partition("=")
+                if name in inline_l:
+                    following = args[i + 1] if i + 1 < len(args) else ""
+                    if eq:
+                        sources.append(value)
+                        i += 1
+                    elif following.startswith("-") and prog in _NEXT_ARGUMENT_SOURCES:
+                        wants_source = True                    # `--print -e x`, `--eval -- x`
+                        i += 1
+                    else:
+                        sources.append(following)
+                        i += 2
+                else:
+                    i += 2 if (name in valued_l and not eq) else 1
+                continue
+            step, j = 1, 1
+            next_only = _NEXT_ARGUMENT_SOURCES.get(prog, "")
+            while j < len(arg):
+                letter, glued = arg[j], arg[j + 1:]
+                j += 1
+                if letter in next_only:
+                    following = args[i + 1] if i + 1 < len(args) else ""
+                    if step == 1 and not following.startswith("-"):
+                        sources.append(following)              # `-pe`: one source, the next argument
+                        step = 2
+                    elif step == 1:
+                        wants_source = True                    # `-p -e x`, `-pe -- x`: still to come
+                    continue
+                if letter in glued_s:
+                    if letter in "l0":                         # perl -l[octal], -0[digits]: the cluster goes on
+                        while j < len(arg) and (arg[j].isdigit() or (letter == "0" and arg[j] in "xX")):
+                            j += 1
+                        continue
+                    break                                      # -i[extension]: the rest is the extension
+                if letter in inline_s or letter in valued_s:
+                    value = glued or (args[i + 1] if i + 1 < len(args) else "")
+                    step = 1 if glued else 2
+                    if letter in inline_s:
+                        sources.append(value)
+                    elif letter == "m" and prog in ("python", "python3"):
+                        return sources, None, value, args[i + step:]
+                    elif letter == "f" and prog == "php":
+                        return sources, value, None, args[i + step:]
+                    break
+            i += step
+        if wants_source and i < len(args):
+            sources.append(args[i])
+        if prog in ("deno", "bun") and i < len(args) and args[i] in ("run", "eval", "serve", "test", "bench", "x"):
+            verb = args[i]
+            i += 1
+            if verb == "eval":
+                rest = _skip_options(args[i:], valued_l)
+                return sources + rest[:1], None, None, rest[1:]
+            continue
+        return sources, (args[i] if i < len(args) else None), None, args[i + 1:]
 
 
 def _interpreter_prints(prog: str, args: list[str], depth: int, ctx) -> bool:
@@ -1239,6 +1242,7 @@ _HAZARDS = (
     (_BARE_PRINTER, ("env", "set", "export", "declare", "typeset")),
     (_DUMP_TEXT, ("env", "ENV", "environ", "Environment", "ps", "php", "inspect", "pass")),
     (_SUBCOMMAND_HEADS, None), (_GLOB_HAZARD, ("*", "?", "[")),
+    (re.compile(r"%(?:set_)?env(?=\s|$)"), ("%env", "%set_env")),
 )
 
 
@@ -1305,7 +1309,32 @@ _PROMPT_WORD = re.compile(r"\s*[^\s" + _PROMPT_MARKS + r"]*[" + _PROMPT_MARKS + 
 # Input to a REPL or a here-document at a line's start (`>>> `, `... `, `> `):
 # what follows is source the interpreter runs, so an environment read there
 # prints the environment (2026-10-11 delta review).
-_REPL_INPUT = re.compile(r"\s*(?:php\s*>|>>>|\.\.\.|>)\s+")
+_REPL_INPUT = re.compile(
+    r"\s*(?:(?P<ipython>In \[[0-9]{1,10}\]:|\.\.\.:)"
+    r"|irb\([^\r\n)]{1,120}\):[0-9]{1,10}(?::[0-9]{1,10})?>"
+    r"|\[[0-9]{1,10}\] pry\([^\r\n)]{1,120}\)>|php\s*>|>>>|\.\.\.|>)\s+")
+_IPYTHON_MAGIC = re.compile(r"%(?P<set>set_)?env(?:\s+(?P<args>.*)|$)")
+
+
+def _repl_prints(match: re.Match, scan: str, budget: Budget | None) -> bool:
+    source = scan[match.end():].lstrip()
+    if reads_environment(source, explicit=True):
+        return True
+    if match.group("ipython") is None:
+        return False
+    magic = _IPYTHON_MAGIC.fullmatch(source)
+    if magic is not None:
+        args = (magic.group("args") or "").strip()
+        if not args:
+            return magic.group("set") is None              # %env dumps; %set_env errors
+        name = args.split("=" if "=" in args else " ", 1)[0].strip()
+        # IPython assignments echo their value too. Both the lookup and
+        # assignment of a secret-named variable therefore refuse the read.
+        return bool(name) and _SECRET_NAME.search(name) is not None
+    if source.startswith("!"):
+        command = source[2:] if source.startswith("!!") else source[1:]
+        return prints_secrets(command, budget=budget)       # same bounded parse budget
+    return False
 
 
 def shows_printer(line: str, budget: Budget | None = None) -> bool:
@@ -1342,7 +1371,7 @@ def shows_printer(line: str, budget: Budget | None = None) -> bool:
     if len(line) > SCAN_LINE_CAP and unseen(SCAN_LINE_CAP):
         return True                                        # past the scan: not seen, not read
     repl = _REPL_INPUT.match(scan)
-    if repl is not None and reads_environment(scan[repl.end():], explicit=True):
+    if repl is not None and _repl_prints(repl, scan, budget):
         return True                                        # the whole line: a regex pass, no cap
     if not (_has_trigger(flat) or protected_in(flat)):
         return False
