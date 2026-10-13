@@ -50,11 +50,13 @@ import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
 import { BrowserTab, type BrowserRequest } from "./components/BrowserTab";
 import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
-import { installFrameGuard } from "./state/frameguard";
+import { allowRestore, installFrameGuard } from "./state/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
-import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePicker } from "./components/Pickers";
+import { AvatarPicker, ModelPicker, NewProject, NewTask, GeneralSettings, RoutingSettings, VoicePicker } from "./components/Pickers";
+import { SettingsPage } from "./components/SettingsPage";
+import { loadSettingsSection, saveSettingsSection, type SettingsSection } from "./lib/settings";
 import { useInstallApp } from "./state/installApp";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
@@ -199,26 +201,35 @@ export default function App() {
   // lib/workspace.ts. Every layout key is inert while an authorization card
   // is up (as PTT is), and every layout button is disabled.
   const blocked = state.approvals.length > 0;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState(loadSettingsSection);
+  const settingsNow = useRef(settingsOpen);
+  settingsNow.current = settingsOpen;
+  const pageSettingsReturn = useRef<HTMLElement | null>(null);
+  const settingsKeyRef = useRef<() => void>(() => {});
+  const workBlocked = blocked || settingsOpen;
   const installApp = useInstallApp(blocked);
   // ED-7's keys (Ctrl+P, Ctrl+Shift+P / F1, Ctrl+Shift+F) are taken by
   // `useLayout`'s capture handler — the one interception place — and acted on
   // here with the latest render (`editorKeyRef`, set below).
   const editorKeyRef = useRef<(what: EditorShortcut) => void>(() => {});
-  const view = useLayout(blocked, (what) => editorKeyRef.current(what));
+  const view = useLayout(blocked, (what) => editorKeyRef.current(what),
+    { open: settingsOpen, toggle: () => settingsKeyRef.current() });
   // Under a card nothing reaches a shell (WP-D). Said from here, above the
   // workspace's error boundary: a render error unmounts the workspace, but
   // the terminals' sockets and paste pumps live on, and a hold driven from in
   // there froze with it (review of PR #32). A layout effect, so the hold is on
   // before a paste's next chunk can leave.
-  useLayoutEffect(() => terminals.setBlocked(blocked), [blocked]);
+  useLayoutEffect(() => terminals.setBlocked(workBlocked), [workBlocked]);
+  useLayoutEffect(() => terminals.setCovered(settingsOpen), [settingsOpen]);
   // And nothing reaches an editor: every Monaco goes read-only while a card
   // is up (ED-1; the card takes focus itself), said from here for the same
   // reason.
-  useLayoutEffect(() => setEditorsBlocked(blocked), [blocked]);
+  useLayoutEffect(() => setEditorsBlocked(workBlocked), [workBlocked]);
   // And nothing builds or downloads to a VEX brain (VX-2): every VEX action
   // refuses while a card is up, and a download's chain a card came into is
   // dropped (state/vex.ts) — said from here for the same reason.
-  useLayoutEffect(() => vex.setBlocked(blocked), [blocked]);
+  useLayoutEffect(() => vex.setBlocked(workBlocked), [workBlocked]);
   // And no Browser page takes the keyboard on its own (R-1, state/frameguard):
   // the window-level listeners, installed from here, above the boundary, in a
   // layout effect so they are on before any frame can load.
@@ -379,7 +390,7 @@ export default function App() {
   /** The chat panes the owner can see: drawn, and showing chat. */
   const chatsOnScreen = (): PaneNo[] => {
     const lay = layoutNow.current;
-    return lay.fit.panes.filter((n) => lay.ws.panes[n - 1].view === "chat");
+    return settingsNow.current ? [] : lay.fit.panes.filter((n) => lay.ws.panes[n - 1].view === "chat");
   };
 
   /**
@@ -478,7 +489,7 @@ export default function App() {
           live.current.chats[live.current.selectedChat].busy ||
           live.current.approvals.length > 0 ||
           live.current.picker !== null ||
-          chipOverlay.current ||
+          chipOverlay.current || settingsNow.current ||
           crashedRef.current,
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
@@ -2091,7 +2102,7 @@ export default function App() {
   // Words handed back while a thread was not on screen come back when a
   // **drawn** chat pane shows it — on opening it, and when a pane already
   // holding it comes on screen again (review of PR #27).
-  const onScreenThreads = view.fit.panes
+  const onScreenThreads = (settingsOpen ? [] : view.fit.panes)
     .filter((n) => view.ws.panes[n - 1].view === "chat")
     .map((n) => `${n}:${shownThread(state.chats[n]) ?? ""}`)
     .join("|");
@@ -2114,9 +2125,9 @@ export default function App() {
   // once — the daemon's `activity` record may not reach a window whose stream
   // is reconnecting — unless something newer about that row has arrived
   // meanwhile (ActivitySync).
-  const drawnViews = view.fit.panes.map((n) => view.ws.panes[n - 1].view);
+  const drawnViews = (settingsOpen ? [] : view.fit.panes).map((n) => view.ws.panes[n - 1].view);
   const taskShown = drawnViews.includes("task");
-  const readThreads = view.fit.panes
+  const readThreads = (settingsOpen ? [] : view.fit.panes)
     .filter((n) => view.ws.panes[n - 1].view === "chat")
     .map((n) => state.chats[n].threadId)
     .filter((t): t is string => !!t);
@@ -2226,7 +2237,7 @@ export default function App() {
   const onWakeHit = useCallback(() => {
     if (crashedRef.current) return;
     if (live.current.approvals.length) return; // never talk over a pending authorization
-    if (live.current.picker || chipOverlay.current) return;
+    if (live.current.picker || chipOverlay.current || settingsNow.current) return;
     capture.onWake();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capture]);
@@ -2236,7 +2247,7 @@ export default function App() {
   const press = useCallback(() => {
     if (crashedRef.current) return; // nothing on screen to talk to
     if (live.current.approvals.length) return; // answer the authorization first
-    if (live.current.picker || chipOverlay.current) return;
+    if (live.current.picker || chipOverlay.current || settingsNow.current) return;
     // Push-to-talk and the orb act on the selected chat (decisions W-6): with
     // no chat pane on screen there is no turn to interrupt and nobody to
     // talk to, and the window says so rather than recording for nobody.
@@ -2649,7 +2660,35 @@ export default function App() {
     if (pane !== null) askFile(pane, { kind: "open", path });
   };
   /** Another dialog is open, or the window crashed: ED-7's keys do nothing. */
-  const navBusy = () => !!live.current.picker || threadModel.overlayOpen || crashedRef.current
+  const closeSettings = useCallback(() => {
+    if (live.current.approvals.length) return;
+    settingsNow.current = false;
+    setSettingsOpen(false);
+    requestAnimationFrame(() => {
+      const back = pageSettingsReturn.current;
+      if (!settingsNow.current && !live.current.approvals.length && back?.isConnected
+          && !back.closest("[inert]")) {
+        allowRestore(back);
+        back.focus({ preventScroll: true });
+      }
+    });
+  }, []);
+  settingsKeyRef.current = () => {
+    if (live.current.approvals.length || live.current.picker || chipOverlay.current || crashedRef.current) return;
+    if (settingsNow.current) closeSettings();
+    else {
+      pageSettingsReturn.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      settingsNow.current = true;
+      setSettingsOpen(true);
+    }
+  };
+  const chooseSettingsSection = (section: SettingsSection) => {
+    if (blocked || threadModel.overlayOpen) return;
+    setSettingsSection(section);
+    saveSettingsSection(section);
+  };
+
+  const navBusy = () => settingsNow.current || !!live.current.picker || threadModel.overlayOpen || crashedRef.current
     || live.current.approvals.length > 0;
   const openNav = (kind: "quickOpen" | "palette") => {
     if (navBusy()) return;
@@ -2833,7 +2872,7 @@ export default function App() {
           onCancelTask={cancelTask}
           thinking={thinking}
           accent={state.avatar?.accent ?? null}
-          drawn={fit.panes.includes(n)}
+          drawn={!settingsOpen && fit.panes.includes(n)}
         />
         <InputBar
           status={status}
@@ -3246,20 +3285,9 @@ export default function App() {
         return saved;
       }),
     onArchiveThread: (id: string) => api.archiveThread(id).then(() => threadGone(id)),
-    onOpenArchive: () => patch({ picker: "archive" }),
-    onOpen: (what: "schedules" | "route" | "usage") => {
-      if (what === "schedules") {
-        setEditingSchedule(null);
-        patch({ picker: "schedule" });
-        return;
-      }
-      if (what === "route") {
-        patch({ picker: "settings" });
-        return;
-      }
-      // The usage meters live in the status pane: a folded one opens first.
-      view.open("right");
-      setTimeout(() => document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" }), 0);
+    onOpen: () => {
+      setEditingSchedule(null);
+      patch({ picker: "schedule" });
     },
   });
 
@@ -3269,7 +3297,11 @@ export default function App() {
           Reload prompt in their place and goes no further: the card below is
           outside it, so it stays up and answerable (components/Boundary.tsx). */}
       <WorkspaceBoundary onCrash={onCrash} blocked={blocked}>
-      <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
+      <TitleBar view={view} blocked={blocked} settingsOpen={settingsOpen}
+        settingsDisabled={!!state.picker || threadModel.overlayOpen}
+        onSettings={() => settingsKeyRef.current()} />
+      <div className="workspace-surface" data-testid="workspace-surface" data-covered={settingsOpen}
+        {...(workBlocked ? { inert: "" } as Record<string, string> : {})}>
       <div
         id="shell"
         className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed " : "")
@@ -3280,7 +3312,7 @@ export default function App() {
           <Rail
             side="left"
             auto={drawn.autoLeft}
-            disabled={blocked}
+            disabled={workBlocked}
             onExpand={() => view.open("left")}
             onNewThread={() => newThread()}
           />
@@ -3313,7 +3345,6 @@ export default function App() {
           onRenameProject={sidebarCalls.onRenameProject}
           onRenameThread={sidebarCalls.onRenameThread}
           onArchiveThread={sidebarCalls.onArchiveThread}
-          onOpenArchive={sidebarCalls.onOpenArchive}
           onOpen={sidebarCalls.onOpen}
         />
         {drawn.leftFolded ? null : (
@@ -3322,7 +3353,7 @@ export default function App() {
             width={drawn.left}
             max={maxWidth("left", drawn.right, view.available, mainMin)}
             zoom={view.zoom}
-            blocked={blocked}
+            blocked={workBlocked}
             onResize={(w) => view.setWidth("left", w)}
             onReset={() => view.resetWidth("left")}
           />
@@ -3332,7 +3363,8 @@ export default function App() {
           <CrashProbe where="workspace" />
           <Workspace
             view={view}
-            blocked={blocked}
+            blocked={workBlocked}
+            covered={settingsOpen}
             render={renderView}
             extras={paneExtras}
             context={paneContext}
@@ -3369,7 +3401,7 @@ export default function App() {
             width={drawn.right}
             max={maxWidth("right", drawn.left, view.available, mainMin)}
             zoom={view.zoom}
-            blocked={blocked}
+            blocked={workBlocked}
             onResize={(w) => view.setWidth("right", w)}
             onReset={() => view.resetWidth("right")}
           />
@@ -3379,7 +3411,7 @@ export default function App() {
             <h2 className="bar">{task ? "Task" : "Status"}</h2>
             {/* The zoom control moved to the title bar (2026-10-09): here it
                 folded away with the pane it sat in. */}
-            <CollapseButton side="right" onCollapse={() => view.fold("right")} disabled={blocked} />
+            <CollapseButton side="right" onCollapse={() => view.fold("right")} disabled={workBlocked} />
           </div>
           <div className="scroll">
             <ApprovalQueue requests={state.approvals} />
@@ -3392,7 +3424,6 @@ export default function App() {
               onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
               onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
             />
-            <UsagePanel usage={state.usage} />
             <DiscordPanel
               discord={state.discord}
               projects={state.projects}
@@ -3410,7 +3441,6 @@ export default function App() {
                 patch({ picker: "schedule" });
               }}
             />
-            <DecisionsLog route={state.route} />
             {state.error ? <div className="block err" data-testid="error">{state.error}</div> : null}
           </div>
         </div>
@@ -3418,7 +3448,7 @@ export default function App() {
           <Rail
             side="right"
             auto={drawn.autoRight}
-            disabled={blocked}
+            disabled={workBlocked}
             onExpand={() => view.open("right")}
             approvals={state.approvals.length}
             error={!!state.error}
@@ -3436,7 +3466,7 @@ export default function App() {
         // rather than sitting on top of the input bar.
         compact={drawn.leftFolded}
         tight={micTight}
-        blocked={blocked}
+        blocked={workBlocked}
         zoom={view.zoom}
         status={orbStatus}
         mode={state.dictation}
@@ -3444,7 +3474,76 @@ export default function App() {
         onPress={press}
         onRelease={release}
       />
+      </div>
       </WorkspaceBoundary>
+
+      <DialogBoundary resetKey={settingsOpen ? settingsSection : "closed"}
+        onCrash={() => {
+          threadModel.closeDialogs();
+          // A Settings crash can occur under a card. Close it without moving
+          // focus off that card; the work and authorization stay mounted.
+          if (!live.current.approvals.length) closeSettings();
+          else { settingsNow.current = false; setSettingsOpen(false); }
+          patch({ error: "Settings hit an error and was closed. Reload if it keeps happening." });
+        }}>
+        {settingsOpen ? (
+          <SettingsPage section={settingsSection} onSection={chooseSettingsSection}
+            onClose={closeSettings} blocked={blocked} nested={threadModel.overlayOpen} zoom={view.zoom}>
+            {settingsSection === "General" ? <GeneralSettings blocked={blocked}
+              installStatus={installApp.status} onInstall={installApp.install} /> : null}
+            {settingsSection === "Model" ? (
+              <ModelPicker embedded
+                view={roster}
+                // Each answer is the new describe(): drawn at once, and the chips
+                // re-read too (a default thread's label names the default). The
+                // `model` broadcast does the same for every other window. A refusal
+                // propagates to the picker, which shows it.
+                onPick={(id) => api.setModel(id).then(rosterChanged)}
+                onEffort={(id, effort) => api.setModelEffort(id, effort).then(rosterChanged)}
+                onRemove={(id) => api.removeModel(id).then((r) => {
+                  rosterChanged(r);
+                  return r;
+                })}
+                onReset={() => api.setModel("").then(rosterChanged)}
+                onPinMore={threadModel.openRosterCatalog}
+                onClose={closeSettings}
+              />
+            ) : null}
+            {settingsSection === "Voice" ? (
+              <VoicePicker embedded
+                voices={voices}
+                override={voiceOverride}
+                onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
+                onClose={closeSettings}
+              />
+            ) : null}
+            {settingsSection === "Avatar" ? (
+              <AvatarPicker embedded
+                avatars={avatars}
+                active={state.avatar?.slug || ""}
+                onPick={(slug) => api.setAvatar(slug).then(loadAvatar).catch(() => {})}
+                onClose={closeSettings}
+              />
+            ) : null}
+            {settingsSection === "Usage" ? <UsagePanel usage={state.usage} /> : null}
+            {settingsSection === "Routing" ? <><RoutingSettings route={state.route} />
+              <DecisionsLog route={state.route} /></> : null}
+            {settingsSection === "Archive" ? (
+              <ArchiveView embedded blocked={blocked}
+                version={lifecycle}
+                onRestored={() => {
+                  void refreshProjects();
+                  void refreshThreads();
+                  void refreshTasks();
+                  void refreshSchedules();
+                }}
+                onDeleted={() => void refreshProjects()}
+                onClose={closeSettings}
+              />
+            ) : null}
+          </SettingsPage>
+        ) : null}
+      </DialogBoundary>
 
       {/* The boot animation: on the first frame, so the HUD never shows before
           it; below the authorization veil, and gone the moment a card is known.
@@ -3481,46 +3580,7 @@ export default function App() {
         <Palette entries={paletteList} onRun={runEntry} onClose={() => closeNav(true)} onLeave={() => closeNav(false)} />
       ) : null}
       {state.picker === "editorSettings" && !blocked ? <EditorSettingsDialog onClose={closeEditorSettings} /> : null}
-      {state.picker === "model" ? (
-        <ModelPicker
-          view={roster}
-          // Each answer is the new describe(): drawn at once, and the chips
-          // re-read too (a default thread's label names the default). The
-          // `model` broadcast does the same for every other window. A refusal
-          // propagates to the picker, which shows it.
-          onPick={(id) => api.setModel(id).then(rosterChanged)}
-          onEffort={(id, effort) => api.setModelEffort(id, effort).then(rosterChanged)}
-          onRemove={(id) => api.removeModel(id).then((r) => {
-            rosterChanged(r);
-            return r;
-          })}
-          onReset={() => api.setModel("").then(rosterChanged)}
-          onPinMore={threadModel.openRosterCatalog}
-          onClose={() => patch({ picker: null })}
-        />
-      ) : null}
-      {/* After the Model picker, so its "Pin a model…" opens on top of it. */}
       {threadModel.picker}
-      {state.picker === "voice" ? (
-        <VoicePicker
-          voices={voices}
-          override={voiceOverride}
-          onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
-          onClose={() => patch({ picker: null })}
-        />
-      ) : null}
-      {state.picker === "avatar" ? (
-        <AvatarPicker
-          avatars={avatars}
-          active={state.avatar?.slug || ""}
-          onPick={(slug) => api.setAvatar(slug).then(loadAvatar).catch(() => {})}
-          onClose={() => patch({ picker: null })}
-        />
-      ) : null}
-      {state.picker === "settings" || state.picker === "route" ? (
-        <SettingsDialog route={state.route} onClose={() => patch({ picker: null })}
-          blocked={blocked} installStatus={installApp.status} onInstall={installApp.install} />
-      ) : null}
       {state.picker === "newProject" ? (
         <NewProject
           discordConfigured={guildConfigured(state.discord)}
@@ -3595,19 +3655,6 @@ export default function App() {
             patch({ picker: null });
             projectGone(id, "archived");
           }}
-          onClose={() => patch({ picker: null })}
-        />
-      ) : null}
-      {state.picker === "archive" ? (
-        <ArchiveView
-          version={lifecycle}
-          onRestored={() => {
-            void refreshProjects();
-            void refreshThreads();
-            void refreshTasks();
-            void refreshSchedules();
-          }}
-          onDeleted={() => void refreshProjects()}
           onClose={() => patch({ picker: null })}
         />
       ) : null}

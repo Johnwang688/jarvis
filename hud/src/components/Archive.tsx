@@ -25,10 +25,11 @@ import { archiveSummary, deletedNotice, deleteSummary, plural } from "../lib/pro
 import { quotedName, threadLabel } from "../lib/threadTitle";
 
 /** Escape closes; Enter is swallowed before any focused button sees it. */
-function useConfirmKeys(onClose: () => void) {
+function useConfirmKeys(onClose: () => void, blocked = false, swallowEnter = true) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Enter") {
+      if (blocked) return;
+      if (e.key === "Enter" && swallowEnter) {
         e.preventDefault();
         e.stopPropagation();
       } else if (e.key === "Escape") {
@@ -39,7 +40,7 @@ function useConfirmKeys(onClose: () => void) {
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [onClose, blocked, swallowEnter]);
 }
 
 export function ArchiveConfirm(props: {
@@ -138,6 +139,8 @@ type Pending =
  * permanently, and a read-only transcript. Nothing here can send a message.
  */
 export function ArchiveView(props: {
+  embedded?: boolean;
+  blocked?: boolean;
   version: number;
   onRestored: () => void;
   onDeleted: () => void;
@@ -155,9 +158,10 @@ export function ArchiveView(props: {
   const close = useCallback(() => {
     if (reading) setReading(null);
     else if (pending) setPending(null);
+    else if (emptying) setEmptying(false);
     else props.onClose();
-  }, [reading, pending, props]);
-  useConfirmKeys(close);
+  }, [reading, pending, emptying, props.onClose]);
+  useConfirmKeys(close, props.blocked, !!pending || emptying);
 
   const load = useCallback(() => {
     api.archive().then(setView).catch((e) => setError(e.message));
@@ -308,11 +312,11 @@ export function ArchiveView(props: {
   }
 
   return (
-    <div className="pickerveil" data-testid="archive-view" onClick={(e) => {
-      if (e.target === e.currentTarget) close();
+    <div className={props.embedded ? "settings-picker" : "pickerveil"} data-testid="archive-view" onClick={(e) => {
+      if (!props.embedded && e.target === e.currentTarget) close();
     }}>
-      <div className="picker">
-        <h3>Archive</h3>
+      <div className={props.embedded ? "archive-section" : "picker"}>
+        {props.embedded ? null : <h3>Archive</h3>}
         <div className="rows">
           {body}
           {notice ? <div className="pad small" data-testid="archive-notice">{notice}</div> : null}
@@ -345,7 +349,7 @@ export function ArchiveView(props: {
             )
           ) : null}
           <span style={{ flex: "1 1 auto" }} />
-          <button type="button" data-testid="archive-close" onClick={props.onClose}>Close</button>
+          {props.embedded ? null : <button type="button" data-testid="archive-close" onClick={props.onClose}>Close</button>}
         </div>
       </div>
     </div>
