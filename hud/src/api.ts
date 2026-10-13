@@ -127,7 +127,7 @@ export const api = {
    * (2026-10-08) — never refused; `status` says which. */
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[]; spoken?: boolean }) =>
     req<SendResult>(`/threads/${id}/send`, json(body)),
-  interrupt: (id: string) => req<any>(`/threads/${id}/interrupt`, json({})),
+  interrupt: (id: string, expectedTurnId?: string) => req<any>(`/threads/${id}/interrupt`, json(expectedTurnId ? { expected_turn_id: expectedTurnId } : {})),
   /** The sidebar dots (2026-10-08): every thread and task that is not idle. */
   activity: () => req<any>("/activity").then(parseActivity) as Promise<ActivityView>,
   /** The owner opened it: no longer unread or failed. */

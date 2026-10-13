@@ -1,3 +1,4 @@
+import { SendStops } from "./lib/sendStops";
 // The window. One SSE subscription writes lifecycle state; every panel reads
 // the store. The orb, the capture pipeline and the wake word live here because
 // they are properties of the *window*, not of whichever tab is showing.
@@ -50,7 +51,13 @@ import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
 import { BrowserTab } from "./components/BrowserTab";
 import { useBrowser } from "./state/browser";
 import { useBrowserFrames } from "./state/browserframes";
-import { BROWSER_TABS_MAX } from "./lib/workspace";
+import { BROWSER_TABS_MAX, browserTabId, VIEW_LABEL } from "./lib/workspace";
+import { autoOpenPlan, devUrl, sourceKey, DEV_OPEN_IDLE, type DevSource, type DevWindow } from "./lib/devopen";
+import { devservers } from "./state/devserverClient";
+import type { DevAttempt, PendingDev } from "./state/devservers";
+import { DevServerPrompts, type DevTarget } from "./components/DevServerPrompt";
+import { BrowserSettings } from "./components/BrowserSettings";
+import { cleanTitle } from "./lib/remote";
 import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
 import { allowRestore, cancelLoad, installFrameGuard } from "./state/frameguard";
@@ -212,6 +219,44 @@ export default function App() {
   const pageSettingsReturn = useRef<HTMLElement | null>(null);
   const settingsKeyRef = useRef<() => void>(() => {});
   const workBlocked = blocked || settingsOpen;
+  const devVersion = useSyncExternalStore(devservers.subscribe, devservers.version);
+  const devPolicy = useRef(DEV_OPEN_IDLE);
+  const devPointer = useRef({ down: false, released: 0 });
+  const devUsed = useRef<Partial<Record<PaneNo, number>>>({});
+  const [devUnseen, setDevUnseen] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const paneOf = (target: EventTarget | null): PaneNo | null => {
+      const node = target instanceof Element ? target.closest<HTMLElement>("[data-pane]") : null;
+      const id = Number(node?.dataset.pane);
+      if (PANE_NOS.includes(id as PaneNo)) return id as PaneNo;
+      const test = target instanceof Element ? target.closest<HTMLElement>('[data-testid^="pane-"]')?.dataset.testid : "";
+      const match = /^pane-([1-8])$/.exec(test ?? "");
+      return match ? Number(match[1]) as PaneNo : null;
+    };
+    const used = (e: Event) => { const pane = paneOf(e.target); if (pane) devUsed.current[pane] = Date.now(); };
+    const down = (e: PointerEvent) => { devPointer.current.down = e.buttons !== 0; used(e); };
+    const up = (e?: PointerEvent) => {
+      devPointer.current = { down: !!e?.buttons, released: Date.now() };
+      setTimeout(devservers.wake, 150);
+    };
+    const blur = () => up();
+    const focus = () => devservers.focus();
+    if (document.hasFocus()) focus();
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("pointerup", up, true);
+    document.addEventListener("pointercancel", up, true);
+    document.addEventListener("keydown", used, true);
+    window.addEventListener("blur", blur);
+    window.addEventListener("focus", focus);
+    return () => {
+      document.removeEventListener("pointerdown", down, true);
+      document.removeEventListener("pointerup", up, true);
+      document.removeEventListener("pointercancel", up, true);
+      document.removeEventListener("keydown", used, true);
+      window.removeEventListener("blur", blur);
+      window.removeEventListener("focus", focus);
+    };
+  }, []);
   const installApp = useInstallApp(blocked);
   // ED-7's keys (Ctrl+P, Ctrl+Shift+P / F1, Ctrl+Shift+F) are taken by
   // `useLayout`'s capture handler — the one interception place — and acted on
@@ -367,8 +412,7 @@ export default function App() {
   // thread exists. That id is never sent to the daemon (re-review of PR #27):
   // a Stop or an orb press on it is remembered here and becomes a real
   // interrupt once the thread exists and the message is in.
-  const placeholders = useRef(new Set<string>());
-  const stopWhenOpen = useRef(new Set<string>());
+  const sendStops = useRef(new SendStops());
   const waitingHere = useRef(new Map<string, { text: string; files: Attachment[] }>());
   // Words handed back for a thread that is not on screen wait here until the
   // owner opens it: never in another thread's box (Bugbot on PR #22).
@@ -608,7 +652,7 @@ export default function App() {
       // the turn would stay tracked under it — its `turn_finished` would never
       // free the pane, and the mic would stay suppressed.
       let tracked = threadId ?? compose?.openedId ?? local;
-      if (tracked === local) placeholders.current.add(local);
+      if (!steering) sendStops.current.begin(local, threadId ?? compose?.openedId ?? null);
       // The thinking line counts from the owner's Enter (lib/thinking): now
       // when the thread is known, else once the first send has opened it. A
       // steer leaves the running turn's time as it is.
@@ -690,6 +734,7 @@ export default function App() {
             chatPatch(tracking, { turnThreadId: threadId });
           }
         }
+        sendStops.current.bind(local, threadId);
         if (!known) dispatch({ type: "turn", event: "send", threadId, at: sentAt, by: local });
         const result = await api.send(threadId, {
           text, attachments: attachments.length ? attachments : undefined,
@@ -699,9 +744,23 @@ export default function App() {
         if (status === "started" && result.turn_id) {
           dispatch({ type: "mark", local, patch: { turn_id: result.turn_id, mark: undefined } });
         }
-        // A Stop pressed while the thread was opening: the turn exists now,
-        // so the stop it asked for goes to it.
-        if (stopWhenOpen.current.delete(local) && status === "started") api.interrupt(threadId).catch(() => {});
+        // Stop follows this acknowledged send by exact turn identity. A
+        // delayed reply can never stop a successor, even if its SSE was missed.
+        const deferredStop = sendStops.current.acknowledge(local, { ...result, status });
+        if (deferredStop) void (async () => {
+          if (!deferredStop.turnIds.length) {
+            dispatch({ type: "patch", patch: { error: "Could not stop this send safely: the daemon returned no turn identity." } });
+            return;
+          }
+          try {
+            for (const id of deferredStop.turnIds) {
+              const stopped = await api.interrupt(deferredStop.threadId, id);
+              if (!stopped?.stale) break;
+            }
+          } catch (error: any) {
+            dispatch({ type: "patch", patch: { error: `Could not stop: ${error?.message || "the request failed"}` } });
+          }
+        })();
         if (status === "dropped") {
           // The owner pressed Stop while this steer was on its way and the
           // turn would not take it: stop means stop, so it is not sent, and
@@ -784,8 +843,9 @@ export default function App() {
         // one anywhere (review of PR #47).
         const back = conversation();
         const { ws } = layoutNow.current;
-        const closed = !ws.order.includes(pane) && !ws.kept.includes(pane);
-        const parkKey = !threadId && back === null ? (closed ? ORPHAN_DRAFT : `compose:${pane}`) : null;
+        const draftPane = back ?? pane;
+        const closed = !inWorkspace(ws, draftPane);
+        const parkKey = !threadId ? (closed ? ORPHAN_DRAFT : `compose:${draftPane}`) : null;
         const went = giveBack(threadId, text, attachments, back, parkKey, compose?.projectId ?? null);
         // Held for a thread no drawn pane shows (a first send that failed at
         // `/send` after its pane closed): said, naming the thread, so the
@@ -800,7 +860,7 @@ export default function App() {
         const error = `Could not send: ${e.message}`
           + (went === "parked"
             ? (closed ? " — what you wrote is kept for the next new thread you start."
-              : " — what you wrote is kept for the next new thread in this pane.")
+              : " — what you wrote is kept until this pane shows a new thread again.")
             : went === "held" && threadId
               ? ` — what you wrote waits with ${named(threadId)}: it is back in the box when you open that thread.`
               : "");
@@ -825,8 +885,7 @@ export default function App() {
       } finally {
         // Nothing is tracked under the placeholder once the send is over:
         // the turn is its thread's, or the pane went back to what it had.
-        placeholders.current.delete(local);
-        stopWhenOpen.current.delete(local);
+        sendStops.current.finish(local);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -839,10 +898,7 @@ export default function App() {
    * one is kept until its thread exists (`send` delivers it).
    */
   const interruptTurn = useCallback((turn: string, onError?: (e: any) => void) => {
-    if (placeholders.current.has(turn)) {
-      stopWhenOpen.current.add(turn);
-      return;
-    }
+    if (sendStops.current.stop(turn)) return;
     api.interrupt(turn).catch((e: any) => onError?.(e));
   }, []);
 
@@ -939,6 +995,9 @@ export default function App() {
       browser.onEvent(e);
       const kind = e.kind;
       const data = e.data || e;
+      if (devservers.event(e)) return;
+      if (kind === "_connected") devservers.connect();
+      if (kind === "_disconnected") { devservers.disconnect(); return; }
       const at = live.current;
       // Per pane (lib/chats `routeEvent`). Mine: the panes showing the thread
       // (or about to). Ours: the panes whose turn this is. They differ when
@@ -1256,10 +1315,29 @@ export default function App() {
       api.answerTask(taskId, index, text).then(() => { void refreshTasks(); }),
     [refreshTasks],
   );
+  // Every TaskView and transcript Cancel share this guard. A task can be
+  // drawn twice; a second surface cannot race a pending action on the first.
+  const taskActions = useRef(new Set<string>());
+  const taskAction = useCallback(async (id: string, action: "steer" | "cancel" | "resume" | "start", text?: string) => {
+    if (taskActions.current.has(id)) throw new Error("another action on this task is still pending");
+    taskActions.current.add(id);
+    try {
+      if (action === "steer") await api.steerTask(id, text!);
+      else if (action === "cancel") await api.cancelTask(id);
+      else if (action === "resume") await api.resumeTask(id);
+      else await api.startTask(id);
+      // refreshTasks keeps the last snapshot if its read fails. An accepted
+      // mutation is never described as refused because a later read failed.
+      await refreshTasks();
+    } finally { taskActions.current.delete(id); }
+  }, [refreshTasks]);
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
-    (id: string) => void api.cancelTask(id).then(refreshTasks).catch(() => {}),
-    [refreshTasks],
+    (id: string) => void taskAction(id, "cancel").catch((error: unknown) => {
+      const why = error instanceof Error ? error.message : "the daemon could not be reached";
+      dispatch({ type: "patch", patch: { error: `Could not cancel task ${id}: ${why}` } });
+    }),
+    [taskAction, dispatch],
   );
 
   const refreshActivity = useCallback(async () => {
@@ -1709,6 +1787,123 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releasePane, chatPatch]);
 
+  // ---- claimed local-server placement ------------------------------------
+  const devSourceAt = (pane: PaneNo): DevSource | undefined => {
+    const at = live.current, spec = layoutNow.current.ws.panes[pane - 1];
+    if (spec.view === "terminal" && spec.terminalId) return { kind: "terminal", id: spec.terminalId };
+    if (spec.view === "task" && at.taskId) return { kind: "task", id: at.taskId };
+    const thread = spec.view === "chat" ? shownThread(at.chats[pane], pendingThread.current[pane]) : null;
+    return thread ? { kind: "thread", id: thread } : undefined;
+  };
+  devservers.shows = source => !settingsNow.current && layoutNow.current.fit.panes.some(pane => {
+    const at = devSourceAt(pane); return at && sourceKey(at) === sourceKey(source);
+  });
+  const devLabel = (row: PendingDev): string => {
+    const at = live.current;
+    const label = row.source.kind === "terminal" ? terminals.rows.find(t => t.id === row.source.id)?.title
+      : row.source.kind === "task" ? at.tasks.find(t => t.id === row.source.id)?.brief
+      : at.threads.find(t => t.id === row.source.id)?.title;
+    return cleanTitle(label || (row.source.kind === "terminal" ? "Terminal" : row.source.kind === "task" ? "Task" : "Chat"), 60);
+  };
+  const devProject = (row: PendingDev): string | null => row.source.kind === "terminal"
+    ? terminals.rows.find(t => t.id === row.source.id)?.project_id ?? null
+    : row.source.kind === "task" ? live.current.tasks.find(t => t.id === row.source.id)?.project_id ?? null
+    : live.current.threads.find(t => t.id === row.source.id)?.project_id ?? null;
+  const devHeld = (): PaneNo[] => PANE_NOS.filter(n => {
+    const c = live.current.chats[n];
+    return dirtyNow(n) || c.busy || !!c.turnThreadId || !!c.threadId || !!c.compose?.openedId || !!c.input.trim()
+      || c.files.length > 0 || c.restore.length > 0 || !!live.current.drafts["compose:" + n]
+      || [...terminals.place.values()].includes(n);
+  });
+  const devTargets = (): DevTarget[] => layoutNow.current.fit.panes.map(n => {
+    const spec = layoutNow.current.ws.panes[n - 1], c = live.current.chats[n];
+    const dirty = spec.view === "file" && dirtyNow(n), chain = spec.view === "vex" && !!vex.chain;
+    const privatePane = (spec as PaneSpec & { browserProfile?: string }).browserProfile === "private";
+    const reason = dirty ? "has an unsaved edit" : chain ? "a VEX download is running"
+      : privatePane ? "Private panes cannot load Direct URLs"
+      : spec.view === "terminal" && terminals.rows.find(t => t.id === spec.terminalId)?.busy ? "its program keeps running in the panel"
+      : spec.view === "chat" && (c.input || c.busy) ? "the chat keeps its words and its turn" : undefined;
+    return { pane: n, slot: slotOf(layoutNow.current.ws, n), label: VIEW_LABEL[spec.view],
+      disabled: dirty || chain || privatePane, reason, terminalId: spec.view === "terminal" ? spec.terminalId ?? undefined : undefined };
+  });
+  const devAttempt = (row: PendingDev): DevAttempt => {
+    const lay = layoutNow.current, ports = daemonPortsNow();
+    if (crashedRef.current) return "drop";
+    if (ports.status !== "ok") return "wait";
+    const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
+    const activeMatch = /^pane-([1-8])$/.exec(active?.dataset.testid ?? "");
+    const w: DevWindow = {
+      enabled: devservers.enabled === true, blocked: blockedNow.current, covered: settingsNow.current,
+      ports: ports.ports, controlPorts: ports.controlPorts,
+      panes: PANE_NOS.map(n => {
+        const spec = lay.ws.panes[n - 1];
+        return { id: n, view: spec.view, source: devSourceAt(n), urls: spec.browser?.tabs.map(t => t.url) ?? [],
+          tabCount: spec.browser?.tabs.length ?? 0, usedAt: devUsed.current[n],
+          browserProfile: (spec as PaneSpec & { browserProfile?: string }).browserProfile };
+      }),
+      drawn: lay.fit.panes, focused: lay.ws.focused, activePane: activeMatch ? Number(activeMatch[1]) as PaneNo : undefined,
+      canSplit: lay.autoSplitVerdict(devHeld()).ok,
+      pointerDown: devPointer.current.down, pointerReleasedAt: devPointer.current.released,
+    };
+    const result = autoOpenPlan(row, devPolicy.current, w, Date.now()), plan = result.plan;
+    if (plan.kind === "wait") return "wait";
+    if (plan.kind === "skip") return plan.why === "duplicate" ? "placed" : "drop";
+    if (plan.kind === "prompt") { devPolicy.current = result.state; return "prompt"; }
+    const auto = { kind: row.source.kind, label: devLabel(row) };
+    const source = { kind: "dev_server" as const, entryId: row.id };
+    if (plan.kind === "split") {
+      const verdict = lay.autoSplitVerdict(devHeld());
+      if (!verdict.ok || verdict.id === null) return "wait";
+      const id = verdict.id, tab = { id: browserTabId(), url: plan.url, auto, source };
+      if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
+      lay.split(plan.source, id, { view: "browser", projectId: devProject(row), terminalId: null,
+        browser: { tabs: [tab], active: tab.id }, browserUrl: plan.url }, { focus: false });
+    } else {
+      const tabs = lay.ws.panes[plan.pane - 1].browser?.tabs ?? [];
+      if (tabs.length >= BROWSER_TABS_MAX) return "wait";
+      const id = browserTabId(tabs.map(t => t.id));
+      lay.addBrowserTab(plan.pane, plan.url, { id, auto, source, activate: plan.activate });
+      if (!plan.activate && tabs.length) setDevUnseen(old => ({ ...old, [frameKey(plan.pane, id)]: new URL(plan.url).host }));
+    }
+    devPolicy.current = result.state;
+    return "placed";
+  };
+  // Effects run after layout refs are current; the manager checks ownership
+  // asynchronously, then calls the latest synchronous decision before mutation.
+  const devAttemptNow = useRef(devAttempt); devAttemptNow.current = devAttempt;
+  useEffect(() => { void devservers.attempt(row => devAttemptNow.current(row)); },
+    [devVersion, view.ws, view.fit, blocked, settingsOpen]);
+  useEffect(() => {
+    setDevUnseen(old => {
+      const next = { ...old };
+      for (const key of Object.keys(next)) {
+        const [paneText, id] = key.split(":"), pane = Number(paneText);
+        const browser = view.ws.panes[pane - 1]?.browser;
+        if (!browser?.tabs.some(t => t.id === id) || browser.active === id) delete next[key];
+      }
+      return Object.keys(next).length === Object.keys(old).length ? old : next;
+    });
+  }, [view.ws]);
+  const chooseDevPane = (id: string, pane: PaneNo) => {
+    void devservers.attempt(row => {
+      if (blockedNow.current || settingsNow.current) return "wait";
+      if (crashedRef.current || !devTargets().some(t => t.pane === pane && !t.disabled)) return "wait";
+      const ports = daemonPortsNow(), lay = layoutNow.current;
+      if (ports.status !== "ok") return "wait";
+      const url = devUrl(row.url, ports.ports, ports.controlPorts);
+      if (!url) return "drop";
+      const old = lay.ws.panes[pane - 1];
+      if (old.view === "terminal" && old.terminalId) terminals.releaseToPanel(old.terminalId);
+      // An explicit owner pane choice replaces only that pane's Browser
+      // contents; its chat/terminal/editor state remains in the normal stores.
+      for (const tab of old.browser?.tabs ?? []) lay.closeBrowserTab(pane, tab.id);
+      lay.addBrowserTab(pane, url, { auto: { kind: row.source.kind, label: devLabel(row) },
+        source: { kind: "dev_server", entryId: row.id } });
+      lay.setView(pane, "browser");
+      return "placed";
+    }, id);
+  };
+
   /**
    * A build error clicked in the VEX view (VX-2): its file, at its line, in
    * the editor — ED-2's buffers, so an edit already open there is the one
@@ -2072,6 +2267,26 @@ export default function App() {
       }
     }
   }, [booted, emptyChatPanes, chatPatch]);
+
+  // Failed first sends can return while their compose row is hidden. Take
+  // them up only when that same row is actually drawn; its identity is checked
+  // again by the reducer, and duplicate effects cannot consume it twice.
+  const parkedCompose = (settingsOpen ? [] : view.fit.panes).filter(n => {
+    const c = state.chats[n];
+    return view.ws.panes[n - 1].view === "chat" && !c.threadId && c.compose?.id
+      && !c.compose.openedId && state.drafts[`compose:${n}`];
+  }).map(n => `${n}:${state.chats[n].compose!.id}`).join("|");
+  useEffect(() => {
+    if (!parkedCompose) return;
+    for (const n of chatsOnScreen()) {
+      const c = live.current.chats[n];
+      if (c.compose?.id && !c.threadId && !c.compose.openedId && live.current.drafts[`compose:${n}`]) {
+        dispatch({ type: "restore_compose", pane: n, composeId: c.compose.id });
+      }
+    }
+    // The primitive key changes only for a drawn row with parked words.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parkedCompose, dispatch]);
 
   // A thread's transcript is loaded when a pane opens it, so switching redraws
   // from the saved conversation rather than from whatever is on screen. A
@@ -2933,10 +3148,10 @@ export default function App() {
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
               onAnswer={answerQuestion}
-              onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
-              onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
-              onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
-              onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
+              onSteer={(id, text) => taskAction(id, "steer", text)}
+              onCancel={(id) => taskAction(id, "cancel")}
+              onResume={(id) => taskAction(id, "resume")}
+              onStart={(id) => taskAction(id, "start")}
             />
           </div>
         );
@@ -3023,6 +3238,8 @@ export default function App() {
             spec={spec}
             zoom={view.zoom}
             liveFrames={browserFrames}
+            unseen={Object.keys(devUnseen).filter(key => key.startsWith(n + ":")).map(key => key.slice(key.indexOf(":") + 1))}
+            newTabNote={Object.entries(devUnseen).filter(([key]) => key.startsWith(n + ":")).map(([, host]) => host).at(-1)}
             blocked={workBlocked}
             limitMessage={browserFull === n}
             onLoaded={(id, url) => view.setBrowserUrl(n, url, id)}
@@ -3428,10 +3645,10 @@ export default function App() {
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
               onAnswer={answerQuestion}
-              onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
-              onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
-              onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
-              onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
+              onSteer={(id, text) => taskAction(id, "steer", text)}
+              onCancel={(id) => taskAction(id, "cancel")}
+              onResume={(id) => taskAction(id, "resume")}
+              onStart={(id) => taskAction(id, "start")}
             />
             <DiscordPanel
               discord={state.discord}
@@ -3464,6 +3681,14 @@ export default function App() {
           />
         ) : null}
       </div>
+
+      <DevServerPrompts rows={devservers.rows().filter(row => ["prompt", "notice", "lost"].includes(row.phase))}
+        hidden={workBlocked || crashed || devservers.enabled !== true}
+        layoutKey={JSON.stringify([view.ws.order, view.fit.panes, view.layout, view.zoom])} zoom={view.zoom}
+        label={devLabel} targets={devTargets()}
+        onOpen={id => { if (!blockedNow.current && !settingsNow.current) void devservers.claim(id); }}
+        onPlace={chooseDevPane}
+        onDismiss={id => { if (!blockedNow.current && !settingsNow.current) void devservers.dismiss(id); }} />
 
       <Orb
         state={state.orb}
@@ -3537,6 +3762,7 @@ export default function App() {
             {settingsSection === "Usage" ? <UsagePanel usage={state.usage} /> : null}
             {settingsSection === "Routing" ? <><RoutingSettings route={state.route} />
               <DecisionsLog route={state.route} /></> : null}
+            {settingsSection === "Browser" ? <BrowserSettings blocked={blocked} /> : null}
             {settingsSection === "Archive" ? (
               <ArchiveView embedded blocked={blocked}
                 version={lifecycle}
@@ -3617,7 +3843,7 @@ export default function App() {
                 });
                 // A new project starts as a new thread in it.
                 newThread(created.id);
-                if (channelNote) patch({ error: channelNote });
+                if (channelNote) dispatch({ type: "notice", text: channelNote });
               })
           }
           taken={projectNamesTaken(state.projects, null, state.archivedNames)}

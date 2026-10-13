@@ -20,11 +20,19 @@ headers. No route starts, probes, opens or navigates a server or the Browser.
 
 | Route | Exact body | Answer |
 |---|---|---|
-| `GET /dev-servers?window=<nonce>` | none; window optional | `{servers: [{id, url, state, source, claimed, mine}]}`; only listening, non-dismissed entries |
+| `GET /dev-servers?window=<nonce>` | none; window optional | `{auto_open: bool, servers: [{id, url, state, source, claimed, mine}]}`; effective preference plus listening, non-dismissed entries |
 | `POST /dev-servers/<id>/claim` | `{window, shows: bool, focused_at: int}` | `{won: true, url}` or `{won: false}` |
 | `POST /dev-servers/<id>/renew` | `{window}` | 200 `{}`; extends winner's lease |
 | `POST /dev-servers/<id>/placed` | `{window}` | 200 `{}`; publishes placed and ends lease |
 | `POST /dev-servers/<id>/dismiss` | `{window}` | 200 `{}`; any owner window may dismiss |
+
+Turning automatic opening off publishes exactly
+`{kind: "dev_server_settings", data: {auto_open: false}}` before revoking
+outstanding claims/arbitrations. Turning it on publishes the corresponding
+true boolean; old callbacks do not regain a claim. While disabled,
+claim/renew/placed return **409** `{error, code: "off"}`; owner dismissal
+remains available. The listing reports the effective `auto_open` value for
+bootstrap/reconnect without navigating or touching the Remote browser.
 
 The window nonce is exactly 32 lowercase hex characters. `focused_at` is
 epoch milliseconds in `[0, 2**53 - 1]` (0 means never). Unknown/missing keys
@@ -823,6 +831,15 @@ runs, because the runner retries on exactly that.
   HUD puts the words it sent back in that thread's box — held until the
   thread is opened if another is on screen), the thread was closed, could
   not resume, or Jarvis stopped. Each is also a `queued_dropped` log record.
+- `POST /threads/{id}/interrupt` accepts `{}` for the current turn or
+  `{"expected_turn_id":"<32 lowercase hex>"}` for a delayed send's exact turn.
+  An ended/replaced turn returns `200 {"ok":false,"stale":true}` without
+  cancelling the current turn or clearing its queue. A matching stop returns
+  `{"ok":true}`; malformed identities are `400`. While provider delivery is
+  pending, this thread cannot start or resume a successor; retry after its
+  `409`. Delivery holds no daemon lock and releases its reservation even on
+  provider failure. The HUD remembers Stop across thread creation and `/send`
+  acknowledgement, names only acknowledged turn IDs, and displays errors.
 - `POST /threads/{id}/interrupt` (the owner's Stop) now also drops what waits
   behind the turn (`queue_cleared`). Unchanged otherwise.
 - Every thread record (`GET /threads`, `POST /threads`, `thread_updated`)
@@ -2623,6 +2640,7 @@ Expanded rows show name, label, outcome word and duration only. The read-only
 `__hud.toolGroups()` test hook returns disclosure keys, never tool contents.
 
 
+
 ## Owner Browser pane bindings (BR3b)
 
 These routes use the same owner HUD listener, Origin and strict loopback Host
@@ -2704,3 +2722,59 @@ persistent Remote tab is first drawn, then calls restore; an existing live
 handle reattaches without navigation. A refused local restore stays visibly
 failed until an actual owner address submission. Ended Private sessions never
 replay stored URLs (Private storage contains none).
+## Additions 2026-10-13: read-only HUD Browser look (BR5)
+
+The explicit owner-HUD-chat tool `hud_browser_view(pane: str = "",
+whole_page: bool = False)` consumes the owner pane registry above; it adds no
+HTTP navigation or input route. Selectors are displayed slots `"1"`–`"8"` or
+empty for the last owner-focused eligible pane. Raw tab IDs are refused.
+`whole_page` extends rendered text only, without scrolling the owner page.
+The current live window, visible selected binding, see permission, immutable
+source, source terminal's read switch, hold state, desk context and host page
+identity must still agree at delivery. A stale or changed binding returns a
+fixed refusal without page content. See-off returns exactly:
+
+> the owner has turned off 'Jarvis can see' for pane N; ask them, or use Send to chat.
+
+A successful result fences bounded page URL/title/text/refs as untrusted. It may
+include a masked viewport PNG if the pinned turn model accepts images. Complete
+bounded raw fields are scanned before return truncation: 20,000 nodes, 256 KiB,
+200 refs, five-second scan and 30-second capture limits; incomplete scans refuse.
+Page text caps at 4,000 characters, ref labels at 120 and image long edge at 1,568
+pixels. Known-value/credential hits refuse the entire result. Heuristic withheld
+text suppresses the image. Form values are excluded, and form/embedded-frame
+pixels are masked without changing the DOM. Canvas/image and inaccessible DOM
+text cannot be credential-scanned; pixel capture is not an atomic page freeze.
+
+Direct capture is a fresh off-record load through an already permitted loopback
+port, never a new agent-created lease. Its isolated lifecycle counts against
+host capacity and preserves owner Private contexts. The result says `a fresh
+load, not your exact view`. Missing permission asks for owner Open in Remote or
+Send to chat. See [current Browser notes](notes/browser.md#current-read-only-browser-look-2026-10-13-br5)
+for resource cleanup, scanner and image limits.
+
+Every look decision with a resolved binding publishes exactly:
+
+```json
+{"kind":"browser_viewed","data":{"tab_id":"opaque-bound-view-id","at":"ISO timestamp","refused":false}}
+```
+
+Remote uses its daemon tab ID; Direct uses the stable host-issued `view_id`
+returned by the front-report receipt. No URL, title, text, source identity or
+refusal detail is published. Missing/ambiguous selection emits no invented ID.
+Tool lifecycle summaries contain only `looked at a page` or `refused`, never raw
+page data. This does not add a session/MCP tool or an agent-driving capability.
+
+### Automatic opening preference and page identity (AO-3)
+
+GET /dev-servers now also returns an effective boolean auto_open. The HUD
+bootstraps the preference from this owner-only listing, and uses one
+memory-only 32-lowercase-hex page nonce for /events?window=, terminal attach
+?window=, and dev-server claim/renew/placed/dismiss bodies.
+
+An owner preference change publishes only
+{kind: "dev_server_settings", data: {auto_open: boolean}}. OFF invalidates
+pending claims/arbitrations and queued window placements. claim, renew and
+placed refuse with 409 {error, code: "off"} while disabled; dismiss remains
+an explicit owner action. ON does not revive an old placement response.
+No automatic opening calls browser manager or navigation routes.

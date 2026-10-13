@@ -656,6 +656,7 @@ class MockDaemon:
         # `/status` says every HUD and API response refuses to be framed
         # (WP-E); a test turns it off to play a daemon too old to say so.
         self.frame_hardened = True
+        self.dev_fixture = None     # AO-3 uses the real in-memory claim registry
         # While `stt_gate` is an Event, `POST /stt` is recorded on arrival and
         # answers only once the Event is set: a transcript still in flight
         # (the crash checks land one after the window stopped drawing).
@@ -726,6 +727,10 @@ class MockDaemon:
                 if mock_terminals.handle(self, mock, "GET", path, {}):
                     return
 
+                if mock.dev_fixture and mock.dev_fixture.handle(self, "GET", path, {k: v[0] for k, v in q.items()}):
+                    return
+                if path == "/dev-servers":
+                    return self._json({"auto_open": True, "servers": []})
                 if path == "/events":
                     mock_browser.connected(mock, q.get("window", [None])[0])
                     self.send_response(200)
@@ -965,6 +970,8 @@ class MockDaemon:
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)
+                if mock.dev_fixture and mock.dev_fixture.handle(self, "POST", path, body):
+                    return
                 if mock_vex.handle(self, mock, "POST", path, body):
                     return
                 if mock_projects.handle(self, mock, "POST", path, body):
@@ -1161,6 +1168,8 @@ class MockDaemon:
                 path = urlparse(self.path).path
                 self._record("PATCH", path, body)
                 if mock_browser.handle(self, mock, "PATCH", path, body):
+                    return
+                if mock.dev_fixture and mock.dev_fixture.handle(self, "PATCH", path, body):
                     return
                 if mock_terminals.handle(self, mock, "PATCH", path, body):
                     return
@@ -1460,6 +1469,9 @@ class MockDaemon:
         """Release one SSE frame."""
         frame = {"kind": kind, "data": data or {}}
         frame.update(extra)
+        if self.dev_fixture:
+            self.dev_fixture.publish(frame)
+            return
         with self._sse_cond:
             self._sse.append(frame)
             self._sse_cond.notify_all()

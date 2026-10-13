@@ -55,6 +55,7 @@ export const BROWSER_FULL = "This pane has 12 tabs. Close one to open another.";
 export function BrowserTab(props: {
   pane: number; slot: number; drawn: boolean; projectId: string | null;
   control?: BrowserControl; spec?: PaneSpec; zoom?: number;
+  unseen?: readonly string[]; newTabNote?: string;
   browser?: BrowserTabs; liveFrames: readonly string[]; blocked?: boolean; limitMessage?: boolean;
   onLoaded: (id: string, url: string) => void;
   onSubmitted: (id: string, url: string) => void;
@@ -79,7 +80,7 @@ export function BrowserTab(props: {
     {props.control?<BrowserProfile pane={props.pane as PaneNo} control={props.control} selected={profile}
       see={props.spec?.see!==false} blocked={!!props.blocked} privateEnded={props.spec?.browserPrivateEnded} />:null}
     {props.control?.error?<div className="pad err" data-testid="browser-owner-error">{props.control.error}</div>:null}
-    <BrowserTabStrip tabs={tabs} active={active} blocked={props.blocked}
+    <BrowserTabStrip tabs={tabs} active={active} blocked={props.blocked} unseen={props.unseen}
       onActivate={activate} onClose={(id) => { if (!props.blocked) { setFull(false); props.onClose(id); } }}
       onNew={() => {
         if (props.blocked) return;
@@ -89,6 +90,7 @@ export function BrowserTab(props: {
         setFocusUrl(id);
         props.onAdd(id);
       }} />
+    {props.newTabNote ? <div className="browser-newtab-note" data-testid="browser-new-tab-note">New tab · {props.newTabNote}</div> : null}
     {(full || props.limitMessage) && tabs.length >= BROWSER_TABS_MAX
       ? <div className="pad muted" role="status" data-testid="browser-full">{BROWSER_FULL}</div> : null}
     {shown.map((tab) => tab.mode==="remote"||profile==="private" ? <RemoteTab key={tab.id} {...props} tab={tab}
@@ -248,7 +250,7 @@ function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string
       <select aria-label="Browser mode" value="remote" disabled={props.blocked||profile==="private"} onChange={()=>void action(()=>control!.convert(pane,props.tab.id,"direct"))}><option value="direct">Direct</option><option value="remote">Remote</option></select>
     </div>
     {props.tab.auto?<div className="browserauto">Opened for {props.tab.auto.label}</div>:null}
-    {runtime?.viewed?<div className="small muted" data-testid="browser-viewed">{runtime.viewed.refused?"Jarvis look refused":"Jarvis looked"} · {new Date(runtime.viewed.at*1000).toLocaleTimeString()}</div>:null}
+    {runtime?.viewed?<div className="small muted" data-testid="browser-viewed">{runtime.viewed.refused?"Jarvis look refused":"Jarvis looked"} · {new Date(runtime.viewed.at).toLocaleTimeString()}</div>:null}
     {error||runtime?.error?<div className="pad err" role="status">{error||runtime?.error}</div>:null}
     {runtime?.busy?<div className="pad muted" role="status">Opening Remote page…</div>:null}
     {props.tab.remoteTabId&&control?<RemoteView key={props.tab.remoteTabId} tabId={props.tab.remoteTabId} live={live} blocked={!!props.blocked} zoom={props.zoom??100} projectId={props.projectId}

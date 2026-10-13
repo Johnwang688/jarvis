@@ -12,7 +12,7 @@ import { useDaemonPorts } from "./daemonPorts";
 
 export interface BrowserProfile { id:string; label:string; created:string }
 export interface RemoteRow { tab_id:string; profile:string; ctx:string|null; url?:string; title?:string; opener?:string|null; loaded?:boolean; error?:string }
-export interface BrowserRuntime { busy?:boolean; error?:string; viewed?:{at:number;refused:boolean} }
+export interface BrowserRuntime { busy?:boolean; error?:string; viewed?:{at:string;refused:boolean} }
 const tabKey = (pane:PaneNo,id:string) => `${pane}:${id}`;
 const message = (e:unknown) => cleanTitle(e instanceof Error ? e.message : "The Browser could not apply that change.", 300);
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -84,7 +84,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     if(event.kind==="_disconnected") { now.current.online=false; epoch.current++; setOnline(false); publisher.connect(false); receipts.current=null; }
     if(event.kind==="browser_viewed") {
       const data=event.data;
-      if(!data || typeof data.tab_id!=="string" || typeof data.at!=="number" || typeof data.refused!=="boolean")return;
+      if(!data || typeof data.tab_id!=="string" || typeof data.at!=="string"||!Number.isFinite(Date.parse(data.at)) || typeof data.refused!=="boolean")return;
       const front=receipts.current;
       if(!front)return;
       for(const pane of front.panes) for(const binding of pane.tabs) if(binding.view_id===data.tab_id) {

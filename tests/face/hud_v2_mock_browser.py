@@ -62,6 +62,7 @@ def connected(mock, window):
 
 def handle(h, mock, method, path, body):
     if not (path == "/browser" or path.startswith("/browser/")): return False
+    if path == "/browser/settings": return False  # AO3 owns this fixture.
     host = state(mock)
     parts = path.strip("/").split("/")
     origin = h.headers.get("Origin")

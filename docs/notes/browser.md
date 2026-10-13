@@ -946,6 +946,62 @@ hidden/inert, and every strip/control is disabled under a card. Labels are
 cleaned host/path text, capped at 40; auto-source names cap at 60 and appear in
 visible chrome. Remote mode and autonomous placement remain later packages.
 
+## Current automatic-opening identity and OFF contract (AO-3, 2026-10-13)
+
+The HUD's shared `lib/windowId.ts` provides one fresh memory-only 32-lowercase-hex
+identity per live page. Terminal holder records, dev-server ownership and future
+Remote front-window reporting use that same identity; copied storage is never
+its source. Missing secure random bytes yields no valid auto-open identity.
+
+An owner settings change publishes a fixed `dev_server_settings` boolean-only
+record before invalidating pending claims on OFF. Existing arbitration and claims
+are revoked, and claim/renew/placed refuse while disabled; a later ON does not
+revive old ownership. Owner-only listing includes effective `auto_open`.
+No URL, port or source text is added to that settings event. UI placement wiring
+belongs to the remaining AO-3 work, not to this backend contract alone.
+## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
+
+Auto-open display labels do not authorize reading. Each tab independently keeps
+`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
+and invalid source records become unknown; copies retain source even when they
+drop the display mark and origin grant. Passive URL changes, tab selection,
+reload and project-root actions preserve source. Only a successfully judged
+owner address-field Enter/Load submission clears it, including the same URL;
+that also drops the obsolete auto label so storage cannot recreate a legacy
+restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
+The later daemon pane binding resolves the entry to immutable source identity;
+labels and client-supplied terminal IDs never authorize BR5. Unknown stays
+fail-closed. This shared model change alone does not enable Remote or a tool.
+
+## Current: automatic Direct opening (AO-3)
+
+A memory-only 32-hex page identity now binds HUD event streams, terminal
+attachments and dev-server claims. Agent announcements and terminal preclaims
+flow through the owner-only registry; initial unclaimed entries are quiet
+notices. Claims renew while waiting, and a fresh ownership check precedes
+every placement. OFF is broadcast as a boolean-only event and invalidates
+pending work across windows; stale OFF/ON replies cannot restore it.
+
+Automatic placement splits without moving focus or folding visible areas,
+reuses only strictly blank kept panes, then appends to a drawn normal Browser
+pane, then offers the bounded nonblocking pane-choice prompt. Private panes
+are excluded. Cards and Settings defer placement. Prompts rearm for 500ms
+after movement; their keys stay local and dirty-editor/VEX choices are
+disabled. Busy terminals move to the panel alive on explicit pane choice.
+
+Automatic tabs are Direct, query/fragment-free, without keep-origin grants,
+and retain immutable dev-server source provenance. Existing frame guards
+apply to every resulting frame. No automatic action calls /browser/*;
+Settings uses /browser/settings only for explicit preference writes, while
+the registry listing supplies the effective preference on connect/reconnect.
+The rates are one action per source per 10 seconds and three per window
+per minute (amendment E.2; the older H summary row is superseded).
+
+Validation lives in devopen/state unit tests and hud_v2_autoopen_check.py:
+real production claim arbitration over isolated mock SSE/HTTP, fake terminal
+sockets, focus/card/Settings/lease/window races, and a zero-Remote-route
+request log assertion in every scenario.
+
 ## Current BR-1c implementation (2026-10-13)
 
 This current note supersedes the archived BR-1a host-lifetime loopback rule and
@@ -995,21 +1051,6 @@ doubles. This does not establish simultaneous production memory demand or a
 production memory ceiling (BD-10). No HUD profile chip is included here; BR-3b
 consumes these backend routes.
 
-## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
-
-Auto-open display labels do not authorize reading. Each tab independently keeps
-`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
-and invalid source records become unknown; copies retain source even when they
-drop the display mark and origin grant. Passive URL changes, tab selection,
-reload and project-root actions preserve source. Only a successfully judged
-owner address-field Enter/Load submission clears it, including the same URL;
-that also drops the obsolete auto label so storage cannot recreate a legacy
-restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
-The later daemon pane binding resolves the entry to immutable source identity;
-labels and client-supplied terminal IDs never authorize BR5. Unknown stays
-fail-closed. This shared model change alone does not enable Remote or a tool.
-
-
 
 ## Current owner pane registry (2026-10-13, BR3b incremental interface)
 
@@ -1028,3 +1069,55 @@ This registry commit does not yet supply Remote UI or a browser-reading tool.
 Stored persistent Remote tabs allocate a blank tab and use the owner-only `POST /browser/tabs/<id>/restore {url}` route. It calls `navigate(owner=False)`: restoring state cannot open the shared local-server gate. A live stored handle reattaches without navigation; expired Private state never replays a saved URL. Actual address entry continues through the pane registry transaction and may open the ordinary owner navigation lease.
 
 The landing guard captures the offending document generation when scheduling its explanation. The queued replacement takes the same per-profile lifecycle lock as owner navigation, checks the original tab/generation before navigating, then checks tab/generation/about:blank again before setting explanation content. It cannot blank a newer owner document or write into a page closed during replacement. This is scheduled work; callers never await it while holding the same lock.
+## Current read-only Browser look (2026-10-13, BR5)
+
+`hud_browser_view(pane="", whole_page=False)` is an explicit HUD owner-chat
+fast-path tool. The pane number is its displayed slot (1–8), not a tab ID;
+empty selects the last owner-focused eligible Browser pane. It uses BR3b's live
+owner-window registry and never discovers background tabs or hidden windows.
+The registry, see switch, source, terminal readability, hold/approval state,
+desk presence and page/document identity are checked before and after capture.
+A terminal-derived page keeps that restriction across passive reports, copies,
+mode changes and report expiry. Unknown provenance refuses. An owner address
+submission is the separate explicit disclosure boundary. Browser input and
+arbitrary navigation remain unavailable to this tool.
+
+The host scans in a CDP isolated world using the same visibility judgement as
+v1. Every open-shadow descent checks its host's visibility, including nested
+hosts; direct ShadowRoot text uses the host for style ancestry. No DOM attribute
+stamps, edits, scroll, focus or input are issued. Default text is viewport text; whole-page text includes rendered reachable DOM without
+scrolling. Refs and the image stay viewport-only. Refs additionally require
+centre hit-testing, at least 8×8 pixels and opacity above 0.05; ordinary text
+visibility does not promise occlusion filtering. Limits are 20,000 visited
+nodes, 256 KiB raw text/attributes, 200 refs and a five-second scan stage within
+a 30-second capture deadline. Incomplete scans refuse. Presentation caps page
+text at 4,000 characters after the complete bounded URL/title/attribute/text
+payload is credential-checked, so a hidden tail cannot evade the guard.
+
+Known secrets and recognized credential formats refuse text and image together.
+Keyword-based withheld lines also suppress the image. Form values are never
+read; input, textarea, select, editable and unscanned embedded-frame rectangles
+are masked in memory before the viewport PNG is resized to a 1,568-pixel long
+edge. Pillow is a runtime dependency. The image is emitted only if the actual
+pinned model is known to accept images; turn-scope restoration prevents this
+capability from leaking into another turn. The guard is not OCR: canvas/image
+text, closed/inaccessible DOM, unknown secrets and adversarial changes between
+scan and pixels are not fully detectable. These limits remain in result notes.
+
+A Direct look is explicitly a fresh load, not the owner's exact view. It uses
+a new off-record context only when an existing owner lease or global
+`local_servers` already permits the port. It never grants a port. A dedicated
+reservation counts against the tab cap; failure/cancellation retires the context
+through BR1c's retryable cleanup before releasing the reservation, without
+closing healthy owner Private contexts. Pending cleanup blocks another hidden
+look until resolved. Network policy is still the shared gate, not per-profile
+network isolation.
+
+Page data is fenced as untrusted and enters only the owner's tool conversation.
+`PRIVATE_RESULT` summaries say only `looked at a page` or `refused`; the
+`browser_viewed` bus record contains exactly the bound opaque `tab_id`, timestamp
+and refusal flag. Direct uses the registry's host-minted view ID, never a hidden
+page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
+background tasks, workflows, subagents or default session tools. This backend
+package does not establish the pending BR3b UI or BR6 session/MCP interface,
+real account authentication, a live-provider call or deployment verification.

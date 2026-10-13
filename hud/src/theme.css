@@ -1595,3 +1595,16 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .browserfilelist label { display:flex; gap:5px; align-items:center; }
 .browserfiles .row { flex-wrap:wrap; gap:6px; }
 .browserfiles bdi { overflow-wrap:anywhere; }
+/* Automatic local-server placement asks without taking focus or moving work. */
+.devserver-prompts { position: fixed; z-index: 70; left: 50%; transform: translateX(-50%); width: min(540px, calc(100% - 24px)); display: grid; gap: 8px; pointer-events: none; overflow-y: auto; }
+.devserver-prompt { pointer-events: auto; border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px; background: var(--bg-2); color: var(--text); box-shadow: 0 3px 18px #0005; font: 12px var(--mono); }
+.devserver-heading { font-weight: 600; overflow-wrap: anywhere; }
+.devserver-source { color: var(--text-muted); margin: 4px 0 8px; overflow-wrap: anywhere; }
+.devserver-targets, .devserver-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
+.devserver-targets small { display: block; max-width: 185px; white-space: normal; color: var(--text-muted); margin-top: 3px; font-size: 10px; }
+.devserver-prompt button[aria-disabled=true] { opacity: .45; cursor: default; }
+.devserver-dismiss { margin-top: 4px; }
+.devserver-more { color: var(--text-muted); text-align: center; background: var(--bg-2); border: 1px solid var(--border); padding: 4px; }
+.browser-auto-setting { display: flex; align-items: center; gap: 8px; }
+.browser-newtab-note { padding: 4px 10px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+.browser-unseen { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; }

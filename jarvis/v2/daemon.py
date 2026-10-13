@@ -76,6 +76,10 @@ class DaemonError(RuntimeError):
     """Lifecycle conflict (HTTP 409)."""
 
 
+class _StopPending(DaemonError):
+    """A provider is still receiving the stop for this thread."""
+
+
 class QueueFull(DaemonError):
     """Three messages already wait on this thread's running turn."""
 
@@ -245,6 +249,7 @@ class Daemon:
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
+        self._interrupting: set[str] = set()  # thread identity survives session replacement
         self._dev_hook_errors = set()
         self._dev_streams = {}
         # thread id -> owner messages waiting on its running turn (QUEUE_MAX).
@@ -295,6 +300,8 @@ class Daemon:
         # On the bus and in the log it is nothing but classes and counts.
         from .browser.host import BrowserHost
         self.browser = BrowserHost(self)
+        from .browser.look import BrowserLook
+        self.browser_look = BrowserLook(self)
         from .devservers import DevServers
         self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
         from .browser.panes import BrowserPanes
@@ -355,6 +362,7 @@ class Daemon:
             connect_controls(self)
             # `terminal_read` (WP-F) reads these terminals and no others.
             self.terminals.install()
+            self.browser_look.install()
             self.devservers.start()
             self.schedules.start()
 
@@ -453,6 +461,10 @@ class Daemon:
                     "refused_ports": refused_ports, "dev_watch": dev_watch}
 
     def _dev_settings_changed(self):
+        # A fixed preference fact, never a server URL or a Remote navigation.
+        # Publish before lapsing claims so windows invalidate queued work first.
+        self.bus.publish({"kind": "dev_server_settings",
+                          "data": {"auto_open": self.browser_settings.auto_open()}})
         self.devservers.settings_changed()
 
     def _dev_known(self):
@@ -620,6 +632,8 @@ class Daemon:
             raise BriefRefused("an origin tag belongs only to a session run brief")
         with self._lock:
             self._active()
+            if thread.id in self._interrupting:
+                raise _StopPending("the previous stop is still being delivered; try again shortly")
             if thread.id in self._sessions:
                 raise DaemonError("thread session is already open or opening")
             provider = self.providers.get(thread.provider)
@@ -1124,6 +1138,8 @@ class Daemon:
         """The thread's open session, resumed if it has none."""
         with self._lock:
             self._active()
+            if thread_id in self._interrupting:
+                raise _StopPending("the previous stop is still being delivered; try again shortly")
             session = self._sessions.get(thread_id)
         if session is None:
             from .projects import is_archived
@@ -1138,6 +1154,8 @@ class Daemon:
         Checked under the same lock an archive takes, so a turn cannot start
         in a thread the owner is archiving (decisions B1)."""
         self._active()
+        if session.thread.id in self._interrupting:
+            raise _StopPending("the previous stop is still being delivered; try again shortly")
         if session.handle is None or session.closing:
             raise DaemonError("thread session is opening or closing")
         from .projects import is_archived
@@ -1252,7 +1270,7 @@ class Daemon:
         """Run the next waiting message as its own turn, if the thread is idle.
         Resumes the session if the turn before dropped it."""
         with self._lock:
-            if self._stopping or not self._queues.get(thread_id):
+            if self._stopping or thread_id in self._interrupting or not self._queues.get(thread_id):
                 return
             session = self._sessions.get(thread_id)
             if session is not None and (session.worker is not None or session.closing
@@ -1260,6 +1278,8 @@ class Daemon:
                 return
         try:
             session = session or self._live_session(thread_id)
+        except _StopPending:
+            return  # leave queued words for the interrupt delivery's final drain
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Thread %s could not resume for its queued message (%s)",
                         thread_id, type(exc).__name__)
@@ -1270,7 +1290,7 @@ class Daemon:
             return
         with self._lock:
             waiting = self._queues.get(thread_id)
-            if self._stopping or not waiting or session.worker is not None:
+            if self._stopping or thread_id in self._interrupting or not waiting or session.worker is not None:
                 return
             try:
                 self._sendable(session)
@@ -1543,22 +1563,40 @@ class Daemon:
                 raise DaemonError("thread session is not open")
             return session
 
-    def interrupt(self, thread_id):
-        """The owner's stop. The running turn ends at the provider's next
-        safe point, and the owner messages waiting behind it are dropped
-        (`queue_cleared` hands their words back): stop means stop. A pending
-        approval card goes the way it always went on an interrupt; nothing
-        here answers it."""
-        session = self._session(thread_id)
+    def interrupt(self, thread_id, *, expected_turn_id=None):
+        """Stop the current turn, or a specific acknowledged send's turn.
+
+        A stale targeted stop changes nothing. Provider delivery runs outside
+        the daemon lock, but a thread-scoped reservation prevents a successor
+        from reusing its handle until delivery ends, even across a replacement
+        session. Queued words are never dropped just because delivery is busy.
+        """
+        self.require(self.stores.threads, thread_id)
         with self._lock:
+            session = self._sessions.get(thread_id)
+            if expected_turn_id is not None and (session is None or session.closing
+                    or session.worker is None or session.turn_id != expected_turn_id):
+                return {"ok": False, "stale": True}
+            if session is None or session.handle is None or session.closing:
+                raise DaemonError("thread session is not open")
             if session.worker is None:
                 raise DaemonError("no turn is running on this thread")
+            if thread_id in self._interrupting:
+                return {"ok": True}  # this turn's stop is already on its way
             session.cancelled.set()
             session.owner_stopped = True
             if session.turn_id:
                 session.stopped_turns.append(session.turn_id)
             self._drop_waiting(session.thread, "stopped")
-        session.provider.interrupt(session.handle)
+            provider, handle = session.provider, session.handle
+            self._interrupting.add(thread_id)
+        try:
+            provider.interrupt(handle)
+        finally:
+            with self._lock:
+                self._interrupting.discard(thread_id)
+            self._drain(thread_id)
+        return {"ok": True}
 
     def answer(self, thread_id, req_id, decision):
         session = self._session(thread_id)
@@ -1670,6 +1708,7 @@ class Daemon:
         # The Browser's Chrome, its driver and its gate (BR-1a): after the
         # terminals, before the listeners close. Its own bound, past the
         # daemon's: a Chrome that will not close is killed by exact PID.
+        self.browser_look.stop()
         self.browser_panes.stop()
         self.browser.stop()
         self.bus.close()
@@ -2089,9 +2128,12 @@ def _handler(daemon):
                     _object(self._body(), ())
                     return 200, {"status": daemon.activity.seen_thread(thread_id)}
                 if method == "POST" and action == "interrupt":
-                    _object(self._body(), ())
-                    daemon.interrupt(thread_id)
-                    return 200, {"ok": True}
+                    body = _object(self._body(), ("expected_turn_id",))
+                    expected = body.get("expected_turn_id")
+                    if "expected_turn_id" in body and (not isinstance(expected, str)
+                            or len(expected) != 32 or any(c not in "0123456789abcdef" for c in expected)):
+                        raise APIError(400, "expected_turn_id must be 32 lowercase hexadecimal characters")
+                    return 200, daemon.interrupt(thread_id, expected_turn_id=expected)
                 if method == "POST" and action == "answer":
                     body = _object(self._body(), ("req_id", "decision", "text"), ("req_id",))
                     _text(body["req_id"], "req_id")
