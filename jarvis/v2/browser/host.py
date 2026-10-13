@@ -58,7 +58,8 @@ last tab leaves. A page's or an agent's navigation never opens one.
 **A clean environment** (`chrome_environment`): built from nothing, not
 filtered from the daemon's — `HOME` is `BROWSER_DIR/home` (inside the throwaway run folder for Private), so everything
 Chrome writes outside its profile (its NSS store, the font cache) stays in
-the credential folder; no `JARVIS_*`, no API key, no display, no
+the credential folder. A private `FONTCONFIG_FILE` adds reachable Windows fonts
+while retaining the distro defaults; no `JARVIS_*`, no API key, no display, no
 `PULSE_SERVER`, no D-Bus. (The Playwright driver, a separate node process,
 inherits the daemon's environment as v1's does; no page can reach it.)
 
@@ -91,12 +92,14 @@ import secrets
 import shutil
 import signal
 import stat
+import tempfile
 import threading
 import time
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from jarvis import config
 
@@ -269,6 +272,60 @@ def secure_dir(path: Path, *, create: bool = True) -> Path:
         raise BrowserRefused(409, "the Browser's folder is open to other users; "
                                   "it must be private (chmod 700)")
     return path
+
+
+
+_WINDOWS_FONTS = Path("/mnt/c/Windows/Fonts")
+_SYSTEM_FONTS = Path("/etc/fonts/fonts.conf")
+
+
+def font_environment(home: Path, source=None) -> dict[str, str]:
+    """Add reachable Windows fonts without changing the host's Fontconfig.
+
+    The first writable cache is ours. The distro include retains its aliases,
+    Linux fallbacks and rendering rules; its user includes use this private
+    HOME. Private Chrome's home and font cache die with its run directory.
+    """
+    env = chrome_environment(home, source)
+    if not _WINDOWS_FONTS.is_dir():
+        return env
+    temporary = None
+    try:
+        folder = secure_dir(secure_dir(home) / "fontconfig")
+        cache = secure_dir(folder / "cache")
+        path = folder / "fonts.conf"
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or stat.S_IMODE(st.st_mode) != 0o600):
+                raise BrowserRefused(409, "the Browser's font configuration must be a private file")
+        body = ('<?xml version="1.0"?>\n'
+                '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">\n'
+                '<fontconfig>\n'
+                f'  <cachedir>{xml_escape(str(cache))}</cachedir>\n'
+                f'  <include>{xml_escape(str(_SYSTEM_FONTS))}</include>\n'
+                f'  <dir>{xml_escape(str(_WINDOWS_FONTS))}</dir>\n'
+                '</fontconfig>\n')
+        fd, temporary = tempfile.mkstemp(prefix=".fonts-", dir=folder)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        env["FONTCONFIG_FILE"] = str(path)
+        return env
+    except OSError:
+        raise BrowserRefused(409, "the Browser's font configuration could not be prepared") from None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def _remove_tree(path: Path, *, strict: bool = False) -> None:
@@ -838,7 +895,7 @@ class BrowserHost:
             context = await self._pw.chromium.launch_persistent_context(
                 str(folder), channel="chrome", headless=True, ignore_default_args=True,
                 args=launch_args(folder, self._gate.port, private=private),
-                env=chrome_environment(home), chromium_sandbox=True,
+                env=font_environment(home), chromium_sandbox=True,
                 artifacts_dir=str(artifacts), downloads_path=str(incoming),
                 accept_downloads=True, handle_sigint=False, handle_sigterm=False,
                 handle_sighup=False, timeout=LAUNCH_TIMEOUT_S * 1000,

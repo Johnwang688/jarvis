@@ -1116,3 +1116,9 @@ page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
 background tasks, workflows, subagents or default session tools. This backend
 package does not establish the pending BR3b UI or BR6 session/MCP interface,
 real account authentication, a live-provider call or deployment verification.
+
+## BR7 Windows fonts (2026-10-13)
+
+When `/mnt/c/Windows/Fonts` exists, Chrome uses a private `home/fontconfig/fonts.conf` and first-choice cache under the Browser credential folder. The distro Fontconfig include retains Linux aliases and fallback; no system config or font files change. Private uses its disposable run/home. Unreachable Windows fonts keep the original curated environment. Config files are atomic0600, directories0700; invalid existing config types, ownership or modes refuse startup. No inherited Fontconfig/XDG/Pulse settings are accepted.
+
+A local one-series probe with the exact include-based config rendered36 SegoeUI glyphs (CDP verified). Baseline ready0.238s/RSS918.1MiB; new-cache ready2.594s/926.5MiB; warmed font cache with fresh profile0.187s/917.1MiB. All remain below the30s launch deadline. These are synthetic observations, not a general performance claim. Linux sans-serif/monospace matching and distro rules stayed unchanged; created font caches were private and external cache metadata stayed unchanged.
