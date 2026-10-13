@@ -80,6 +80,10 @@ def _split(browser, context, page, mock, f, check, until, guard, init):
     inp = page.locator(_pane(1, '[data-testid="input"]'))
     inp.fill("keep typing")
     inp.focus()
+    # The microphone opens asynchronously during normal boot even without a
+    # dev-server event. Measure ownership only after that bootstrap completes.
+    check("microphone bootstrap completes before the split baseline",
+          bool(until(lambda: page.evaluate("window.__hud.mic.state().open"))))
     before = browser_calls(mock)
     selection = page.evaluate("({focused: window.__hud.workspace().ws.focused, selected: window.__hud.state().selectedChat, micOpen: window.__hud.mic.state().open, micClaimed: window.__hud.mic.state().claimed})")
     entry = f.add(mock.dev_port, path="/?secret=gone#gone")
@@ -89,8 +93,9 @@ def _split(browser, context, page, mock, f, check, until, guard, init):
     check("automatic URL drops query/fragment and carries immutable source", bool(rows) and rows[0]["url"] == f"http://localhost:{mock.dev_port}/"
           and rows[0].get("source") == {"kind": "dev_server", "entryId": entry.id}, str(rows))
     check("automatic frame keeps own-origin permission off", page.locator(FRAME).get_attribute("sandbox") == "allow-scripts allow-forms")
+    after_selection = page.evaluate("({focused: window.__hud.workspace().ws.focused, selected: window.__hud.state().selectedChat, micOpen: window.__hud.mic.state().open, micClaimed: window.__hud.mic.state().claimed})")
     check("split retains workspace focus, selected chat and mic",
-          selection == page.evaluate("({focused: window.__hud.workspace().ws.focused, selected: window.__hud.state().selectedChat, micOpen: window.__hud.mic.state().open, micClaimed: window.__hud.mic.state().claimed})"))
+          selection == after_selection, str({"before": selection, "after": after_selection}))
     page.keyboard.type(" still here")
     check("split never steals the owner's typing focus", inp.input_value() == "keep typing still here")
     check("claim and placement use one 32-hex page identity",
@@ -121,6 +126,12 @@ def _behind(browser, context, page, mock, f, check, until, guard, init):
     check("in-use Browser appends a tab behind the active page", len(current["tabs"]) == 2 and current["active"] == "old001", str(current))
     check("background automatic tab says New tab and has an unseen dot",
           page.locator(".browser-unseen").count() == 1 and page.locator(".browser-newtab-note").count() == 1)
+    accent_dot = page.locator(".browser-unseen").evaluate("""e => {
+      const probe = document.createElement('i'); probe.style.background = 'var(--accent)';
+      e.append(probe); const expected = getComputedStyle(probe).backgroundColor;
+      const actual = getComputedStyle(e).backgroundColor; probe.remove(); return actual === expected;
+    }""")
+    check("unseen automatic tab uses the theme accent", accent_dot)
     check("appending behind preserves the URL box focus", url.evaluate("(e) => document.activeElement === e"))
     check("behind placement sends its receipt", bool(mock.posted("/dev-servers/" + entry.id + "/placed")))
 

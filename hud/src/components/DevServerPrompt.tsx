@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { noPointerFocus } from "../lib/talkkey";
 import type { PaneNo } from "../lib/workspace";
 import type { PendingDev } from "../state/devservers";
@@ -40,21 +40,31 @@ function DevServerPrompt(props: Parameters<typeof DevServerPrompts>[0] & { row: 
   const ref = useRef<HTMLElement>(null);
   const until = useRef(Infinity);
   const [armed, setArmed] = useState(false);
+  const previousBounds = useRef("");
+  // Recheck at the action boundary too: a card can move after the last
+  // animation frame and before the owner's click or local key arrives.
+  const geometryReady = () => {
+    const rect = ref.current?.getBoundingClientRect();
+    const bounds = rect ? [rect.x, rect.y, rect.width, rect.height].map(x => Math.round(x * 2)).join(":") : "";
+    const now = performance.now();
+    if (bounds !== previousBounds.current) {
+      previousBounds.current = bounds; until.current = now + 500; setArmed(false);
+    }
+    return !!bounds && now >= until.current;
+  };
   // A preceding prompt can move this card without resizing it. Observe its
   // actual bounds while visible, not only its dimensions or window resize.
-  useEffect(() => {
-    let previous = "", frame = 0;
+  useLayoutEffect(() => {
+    let frame = 0;
     const arm = () => {
-      const rect = ref.current?.getBoundingClientRect();
-      const bounds = rect ? [rect.x, rect.y, rect.width, rect.height].map(x => Math.round(x * 2)).join(":") : "";
-      if (bounds !== previous) { previous = bounds; until.current = performance.now() + 500; setArmed(false); }
-      if (bounds && performance.now() >= until.current) setArmed(true);
+      setArmed(geometryReady());
       frame = requestAnimationFrame(arm);
     };
-    until.current = performance.now() + 500; setArmed(false); frame = requestAnimationFrame(arm);
+    previousBounds.current = ""; until.current = performance.now() + 500; setArmed(false);
+    frame = requestAnimationFrame(arm);
     return () => cancelAnimationFrame(frame);
   }, [props.layoutKey, props.row.phase]);
-  const ready = () => !props.hidden && performance.now() >= until.current;
+  const ready = () => !props.hidden && geometryReady();
   const dismiss = () => { if (ready()) props.onDismiss(props.row.id); };
   const place = (target: DevTarget) => { if (ready() && !target.disabled) props.onPlace(props.row.id, target.pane); };
   const notice = props.row.phase === "notice";
