@@ -545,10 +545,16 @@ class OutboundChecks(Harness):
     def test_above_twelve_pending_the_rest_collapse_into_one_line(self):
         self.mirror.rate_posts = M.RATE_POSTS
         words = [f"para{i} " + "q" * 1900 for i in range(20)]
-        self.provider.default = [("text", "\n".join(words))]
+        # This assertion budgets 12 pending reply posts. Let the owner line
+        # leave first; otherwise it legitimately consumes one pending slot.
+        self.provider.release.clear()
+        self.provider.default = [("wait",), ("text", "\n".join(words))]
         chat = self.open_chat()
         self.hud_send(chat, "flood")
         place = self.place(chat.id)
+        wait_for(lambda: self.transport.texts(place) == ["You (HUD): flood"],
+                 what="the owner line to post before the reply")
+        self.provider.release.set()
         self.idle(chat.id)
         for _ in range(6):
             self.now[0] += 5.1
