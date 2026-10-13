@@ -140,3 +140,26 @@ it("effective-off receipts preserve named preference; see-off permanently clears
  await act(async()=>browserSettings.apply(true));await act(async()=>browser.see(1,false));await act(async()=>browser.see(1,true));
  expect(browser.drivePreference(1)).toBe(false);expect(front.panes[0].drive).toBe(false);
 });
+
+it.each(["blocked","covered"])("pending Private permission cannot persist after pane becomes %s",async(kind)=>{
+ source=setBrowserProfile(source,1,"private");source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd",ctx:"1234abcd"});
+ await connected();const pending=deferred<any>(),saved=mocks.write.getMockImplementation()!;
+ mocks.write.mockImplementation((p,...a)=>p==="/panes/1"?pending.promise:saved(p,...a));
+ let job!:Promise<void>;await act(async()=>{job=browser.drive(1,true);});
+ if(kind==="covered")job.catch(()=>{});
+ const body=mocks.write.mock.calls.find(([p])=>p==="/panes/1")![1];
+ await render({[kind]:true});
+ await act(async()=>{pending.resolve({window:body.window,seq:body.seq,panes:[]});await job.catch(()=>{});});
+ expect(browser.drivePreference(1)).toBe(false);expect((workspace.panes[0] as any).drive).toBeUndefined();
+ await render({blocked:false,covered:false});expect(front.panes[0].drive).toBe(false);
+});
+it("pending Private permission cannot survive pane context replacement",async()=>{
+ source=setBrowserProfile(source,1,"private");source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd",ctx:"1234abcd"});
+ await connected();const pending=deferred<any>(),saved=mocks.write.getMockImplementation()!;
+ mocks.write.mockImplementation((p,...a)=>p==="/panes/1"?pending.promise:saved(p,...a));
+ let job!:Promise<void>;await act(async()=>{job=browser.drive(1,true);});job.catch(()=>{});
+ const body=mocks.write.mock.calls.find(([p])=>p==="/panes/1")![1];
+ await act(async()=>set(w=>setBrowserRemote(w,1,"page01",{mode:"remote",remoteTabId:"11111111",ctx:"11111111"})));
+ await act(async()=>{pending.resolve({window:body.window,seq:body.seq,panes:[]});await job.catch(()=>{});});
+ expect(browser.drivePreference(1)).toBe(false);expect(front.panes[0].drive).toBe(false);
+});

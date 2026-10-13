@@ -33,7 +33,7 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
     {enabled === null ? <p className="muted">Waiting for the daemon's setting.</p> : null}
     {error ? <p className="err" role="status">{error}</p> : null}
     <label className="browser-auto-setting"><input type="checkbox" data-testid="browser-agents-drive" checked={drive===true} disabled={blocked||busy||drive===null} onMouseDown={noPointerFocus}
-      onChange={async e=>{if(blocked||busy||drive===null)return;const value=e.target.checked;setBusy(true);setError("");
+      onChange={async e=>{if(!e.nativeEvent.isTrusted||blocked||busy||drive===null)return;const value=e.target.checked;setBusy(true);setError("");
         try{await browserSettings.setDrive(value);}catch(e){setError(e instanceof Error?e.message:"The setting could not be saved.");}finally{setBusy(false);}}} />Agents may drive</label>
     <p className="muted">Allows requested actions in visible Remote panes with their own driving permission.</p>
   </div>;

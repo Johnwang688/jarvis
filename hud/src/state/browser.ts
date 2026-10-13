@@ -208,7 +208,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     publish();
     await publisher.mutate(`/browser/panes/${pane}`,"PATCH",{drive:value},(_,front)=>({...front,panes:front.panes.map(p=>p.pane_id===pane?{...p,drive:value}:p)}));
     const current=now.current.view.ws.panes[pane-1];
-    if (selectedProfile(pane)!==profile || current.browserCtx!==ctx) return;
+    if (!allowed(pane) || current!==spec || selectedProfile(pane)!==profile || current.browserCtx!==ctx) {publish();return;}
     if (profile==="private") {
       if(value)privateDrive.current.set(pane,ctx!);else privateDrive.current.delete(pane);
       setDriveRevision(v=>v+1);
