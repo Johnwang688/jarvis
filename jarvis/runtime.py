@@ -77,9 +77,9 @@ _LOADED: ContextVar[set[str] | None] = ContextVar("jarvis_loaded_groups", defaul
 # by the provider survives the loop's own bind on the same thread.
 _PROPOSAL: ContextVar[dict | None] = ContextVar("jarvis_proposal", default=None)
 
-# Whether the owner is at the desk for this turn, for `terminal_read` (WP-F,
+# Whether the owner is at the desk for this turn, for the desk tools (WP-F,
 # decisions W-2: "foreground chat threads only, where the owner is present").
-# A one-key mutable dict, `{"present": bool}`: the v2 FastPathProvider binds
+# A mutable dict, `{"present": bool, "images": bool}`: the v2 FastPathProvider binds
 # it for an owner's chat turn typed in the HUD, and sets `present` False when
 # a message from anywhere else (Discord, the escape hatch) steers that turn.
 # Unbound — every v1 surface, a workflow, a goal, a task, a script — means
@@ -138,15 +138,18 @@ def bind(
 
 
 @contextmanager
-def turn_scope() -> Iterator[None]:
-    """Restore the six bindings an agent turn owns, even on a nested failure.
+def turn_scope(*, desk: dict | None = None) -> Iterator[None]:
+    """Restore turn bindings, including trusted desk/image context, on every exit.
 
     Snapshot with tokens so originally unbound values become unbound again.
     Mutable plan/loaded objects stay the agent's; only the context bindings
-    are restored. Provider-owned origin, caller, desk and proposal stay live.
+    are restored. Provider-owned origin, caller and proposal stay live. A provider may bind
+    its fresh desk slot here; nested agent scopes preserve its mutable steer state.
     """
-    variables = (_PLAN, _APPROVE, _SHOULD_STOP, _DEPTH, _TOOLS, _LOADED)
+    variables = (_PLAN, _APPROVE, _SHOULD_STOP, _DEPTH, _TOOLS, _LOADED, _DESK)
     tokens = [(variable, variable.set(variable.get())) for variable in variables]
+    if desk is not None:
+        _DESK.set(desk)
     try:
         yield
     finally:
@@ -284,6 +287,12 @@ def at_desk() -> bool:
     in the HUD, and never steered from elsewhere since. Fails closed."""
     slot = _DESK.get()
     return bool(slot is not None and slot.get("present") is True)
+
+
+def desk_images() -> bool:
+    """The current pinned model is known to accept images; never inferred by a tool."""
+    slot = _DESK.get()
+    return bool(at_desk() and slot is not None and slot.get("images") is True)
 
 
 def caller() -> dict | None:

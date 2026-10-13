@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import types
 import typing
 from dataclasses import dataclass
@@ -78,6 +79,23 @@ REGISTRY: dict[str, Tool] = {}
 # that registers it. `terminal_read` (jarvis/v2/tools/terminal_read.py) is the
 # first: a desk feature the fast path names, and nothing else may hold.
 EXPLICIT_ONLY: set[str] = set()
+
+# Results retained in the owner's conversation but never copied to summaries.
+PRIVATE_RESULT: set[str] = set()
+_READ_LINES = re.compile(r"its last (\d+) line")
+
+
+def private_summary(name: str, text: str) -> str:
+    """Only fixed words/counts; no page/terminal text, including refusal details."""
+    if name == "hud_browser_view":
+        return "refused" if text.startswith(("Refused", "Error", "Stopped")) or " is not available to this agent" in text[:200] else "looked at a page"
+    if text.startswith("Refused") or " is not available to this agent" in text[:200]:
+        return "refused"
+    if text.startswith(("Error", "The user declined")):
+        return "error"
+    count = _READ_LINES.search(text[:400]) if name == "terminal_read" else None
+    return f"read {count.group(1)} lines" if count else "read"
+
 
 
 @dataclass(frozen=True)

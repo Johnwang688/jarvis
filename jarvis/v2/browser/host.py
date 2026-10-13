@@ -454,6 +454,9 @@ class _Tab:
     loopback_port: int | None = None
     pending_port: int | None = None
     signin: bool = False
+    page_identity: int = 0              # host-issued lifetime, never a Python address
+    document_generation: int = 0        # includes same-URL/same-document navigation
+    pane_ready: bool = False             # false until the landing guard accepts it
 
 
 class BrowserHost:
@@ -494,8 +497,15 @@ class BrowserHost:
         self._closing_contexts: set[str] = set()
         self._retiring_contexts: dict[str, asyncio.Task] = {}
         self._download_tasks: dict[asyncio.Task, _Tab] = {}
+        # BR5: separate hidden-context identities count against tabs and keep
+        # Private alive through capture/retirement, without entering owner tabs.
+        self._look_reserved: set[str] = set()
+        self._look_tasks: set[asyncio.Task] = set()
+        self._look_lock = None
         self._launched: set[Path] = set()
         self._snapshot: dict = {"instances": [], "tabs": 0}
+        self._next_page_identity = 0
+        self._pane_tabs: dict[str, dict] = {}  # private in-process identity cache; never status/bus
         self._guarded = 0
         self.timings: dict[str, float] = {}
         # BR-1b: the windows' sockets.
@@ -671,6 +681,9 @@ class BrowserHost:
         self._publish_snapshot()
 
     async def _shutdown(self) -> None:
+        looks=list(self._look_tasks)
+        for task in looks:task.cancel()
+        if looks:await asyncio.gather(*looks,return_exceptions=True)
         for profile in list(self._instances.keys() | self._closing_instances.keys()):
             await self._close_instance(profile)
         if self._pw is not None:
@@ -699,6 +712,24 @@ class BrowserHost:
                 LOG.warning("Browser call failed: %s", type(exc).__name__)
                 raise BrowserRefused(409, "the Browser could not do that") from None
             raise
+
+    @staticmethod
+    def _tab_cap() -> int:
+        return max(1, config.BROWSER_TAB_CAP)
+
+    def capture_look(self, snapshot, whole, images, forms, current):
+        """The BR5 service's read adapter. Never admits an owner port lease."""
+        from .look_capture import LOOK_TIMEOUT_S, capture, direct_url
+        from .look import LookRefused
+        deadline = time.monotonic() + LOOK_TIMEOUT_S
+        current()
+        if snapshot.mode == "direct":
+            direct_url(self, snapshot.url)
+            self._ensure_started()
+        elif not self._running():
+            raise LookRefused("no live HUD Browser pane is available")
+        return self._call(capture(self, snapshot, whole, images, forms, current, deadline),
+                          max(0.1, deadline-time.monotonic()) + CLOSE_TIMEOUT_S*3)
 
     # -- profiles (BR-1c) ---------------------------------------------------
 
@@ -853,6 +884,7 @@ class BrowserHost:
             _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE, strict=True)
             self._closing_contexts.difference_update(instance.private_contexts)
             instance.private_contexts.clear()
+            self._look_reserved.clear()
         self._closing_instances.pop(profile, None)
         self._publish_snapshot()
 
@@ -869,11 +901,13 @@ class BrowserHost:
         for tab in self._tabs.values():
             if tab.page is page:
                 return tab
-        if len(self._tabs) >= max(1, config.BROWSER_TAB_CAP):
+        if len(self._tabs) + len(self._look_reserved) >= max(1, config.BROWSER_TAB_CAP):
             asyncio.ensure_future(self._refuse_popup(page))
             return None
         tab_id = self._new_id(self._tabs)
+        self._next_page_identity += 1
         tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
+                   page_identity=self._next_page_identity,
                    stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab),
                                     blocked=lambda: bool(tab.dialogs)),   # on arrival: a dialog only
                    cdp_lock=asyncio.Lock(), cast_lock=asyncio.Lock(), wakeup=asyncio.Event())
@@ -1005,6 +1039,11 @@ class BrowserHost:
             url = frame.url
         except Exception:  # noqa: BLE001
             return
+        # Invalidate before judging/publishing the new URL. Playwright emits
+        # framenavigated for same-document changes and same-URL reloads too.
+        tab.document_generation += 1
+        tab.pane_ready = False
+        self._publish_pane_tabs()
         if not url:
             # A frame that has not navigated yet — a pop-up or a `_blank`
             # tab handed to us before its first load — has landed nowhere.
@@ -1035,7 +1074,9 @@ class BrowserHost:
             tab.chooser = None
             if tab.stream is not None:
                 tab.stream.remember("chooser", None)
+        tab.pane_ready = True
         self._located(tab, url=url)
+        self._publish_pane_tabs()  # _located may return early for a same-URL reload
 
     def _located(self, tab: _Tab, *, url: str | None = None, title: str | None = None,
                  force: bool = False) -> None:
@@ -1100,7 +1141,7 @@ class BrowserHost:
         cap = max(1, config.BROWSER_TAB_CAP)
         if url is not None:
             self._refuse_if_held()
-        if len(self._tabs) >= cap:
+        if len(self._tabs) + len(self._look_reserved) >= cap:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         if profile == PRIVATE and self._closing_contexts:
             if ctx is None or ctx in self._closing_contexts or PRIVATE in self._closing_instances:
@@ -1852,9 +1893,41 @@ class BrowserHost:
         tab = self.require_tab(tab_id)
         return {**tab.stream.owner_state(), "held": self.input_held()}
 
+    # -- pane identity (BR-3b/BR-5; in-process only) --------------------------------------
+
+    def _publish_pane_tabs(self) -> None:
+        """Owner-browser loop publishes primitives; readers never submit CDP.
+
+        Lock order: build the rows on this loop, then take only _lock to swap
+        the cache. No registry/DevServers callbacks and no await under _lock.
+        """
+        rows = {
+            tab.id: {"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx,
+                     "url": (tab.location or ("", ""))[0],
+                     "page_identity": tab.page_identity,
+                     "document_generation": tab.document_generation}
+            for tab in self._tabs.values() if tab.pane_ready and tab.page_identity > 0
+        }
+        with self._lock:
+            self._pane_tabs = rows
+
+    def pane_tab(self, tab_id: str) -> dict | None:
+        """A copied navigation identity, safe on the CDP loop or caller thread.
+
+        Never _call/_listing/title()/CDP: BR5 revalidates from inside capture,
+        and submitting back to that same event loop would deadlock. No URL or
+        source is added to /status, the bus or a log by this accessor.
+        """
+        if not isinstance(tab_id, str) or TAB_ID.fullmatch(tab_id) is None:
+            return None
+        with self._lock:
+            row = None if self._stopped else self._pane_tabs.get(tab_id)
+            return dict(row) if row is not None else None
+
     # -- status -------------------------------------------------------------------------
 
     def _publish_snapshot(self) -> None:
+        self._publish_pane_tabs()
         instances = [{"profile": p, "tabs": sum(t.profile == p for t in self._tabs.values()),
                       "contexts": len(i.private_contexts) if p == PRIVATE else None}
                      for p, i in self._instances.items()]

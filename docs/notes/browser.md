@@ -1050,3 +1050,69 @@ RSS below 1.5 GiB; concurrent three-plus-Private admission uses barrier-controll
 doubles. This does not establish simultaneous production memory demand or a
 production memory ceiling (BD-10). No HUD profile chip is included here; BR-3b
 consumes these backend routes.
+
+
+## Current owner pane registry (2026-10-13, BR3b incremental interface)
+
+`browser/panes.py` now owns live window/pane/tab mappings for the pending Remote
+UI and BR5. Exact owner-only front, permission and address routes are documented
+in `docs/hud-api.md`. All reports carry initial see state; drive is always false.
+Resolved dev-server identities survive entry expiry and cannot be erased by a
+passive report. Only successful owner address submission clears source; failure
+and stale navigation preserve it. Cached host document identities invalidate
+same-URL reloads before the next report. Snapshot URL/source stay memory-only;
+`browser_viewed` carries only a host-issued view ID, timestamp and refusal flag.
+This registry commit does not yet supply Remote UI or a browser-reading tool.
+
+## Current read-only Browser look (2026-10-13, BR5)
+
+`hud_browser_view(pane="", whole_page=False)` is an explicit HUD owner-chat
+fast-path tool. The pane number is its displayed slot (1–8), not a tab ID;
+empty selects the last owner-focused eligible Browser pane. It uses BR3b's live
+owner-window registry and never discovers background tabs or hidden windows.
+The registry, see switch, source, terminal readability, hold/approval state,
+desk presence and page/document identity are checked before and after capture.
+A terminal-derived page keeps that restriction across passive reports, copies,
+mode changes and report expiry. Unknown provenance refuses. An owner address
+submission is the separate explicit disclosure boundary. Browser input and
+arbitrary navigation remain unavailable to this tool.
+
+The host scans in a CDP isolated world using the same visibility judgement as
+v1. Every open-shadow descent checks its host's visibility, including nested
+hosts; direct ShadowRoot text uses the host for style ancestry. No DOM attribute
+stamps, edits, scroll, focus or input are issued. Default text is viewport text; whole-page text includes rendered reachable DOM without
+scrolling. Refs and the image stay viewport-only. Refs additionally require
+centre hit-testing, at least 8×8 pixels and opacity above 0.05; ordinary text
+visibility does not promise occlusion filtering. Limits are 20,000 visited
+nodes, 256 KiB raw text/attributes, 200 refs and a five-second scan stage within
+a 30-second capture deadline. Incomplete scans refuse. Presentation caps page
+text at 4,000 characters after the complete bounded URL/title/attribute/text
+payload is credential-checked, so a hidden tail cannot evade the guard.
+
+Known secrets and recognized credential formats refuse text and image together.
+Keyword-based withheld lines also suppress the image. Form values are never
+read; input, textarea, select, editable and unscanned embedded-frame rectangles
+are masked in memory before the viewport PNG is resized to a 1,568-pixel long
+edge. Pillow is a runtime dependency. The image is emitted only if the actual
+pinned model is known to accept images; turn-scope restoration prevents this
+capability from leaking into another turn. The guard is not OCR: canvas/image
+text, closed/inaccessible DOM, unknown secrets and adversarial changes between
+scan and pixels are not fully detectable. These limits remain in result notes.
+
+A Direct look is explicitly a fresh load, not the owner's exact view. It uses
+a new off-record context only when an existing owner lease or global
+`local_servers` already permits the port. It never grants a port. A dedicated
+reservation counts against the tab cap; failure/cancellation retires the context
+through BR1c's retryable cleanup before releasing the reservation, without
+closing healthy owner Private contexts. Pending cleanup blocks another hidden
+look until resolved. Network policy is still the shared gate, not per-profile
+network isolation.
+
+Page data is fenced as untrusted and enters only the owner's tool conversation.
+`PRIVATE_RESULT` summaries say only `looked at a page` or `refused`; the
+`browser_viewed` bus record contains exactly the bound opaque `tab_id`, timestamp
+and refusal flag. Direct uses the registry's host-minted view ID, never a hidden
+page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
+background tasks, workflows, subagents or default session tools. This backend
+package does not establish the pending BR3b UI or BR6 session/MCP interface,
+real account authentication, a live-provider call or deployment verification.

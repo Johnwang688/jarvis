@@ -1916,6 +1916,23 @@ class NoTool(Base):
         self.assertEqual(text.count(self.READER_IMPORT), 1, "the reader imports read_for_tool once")
         return text.replace(self.READER_IMPORT, "")
 
+    def _without_browser_readable_call(self, text: str) -> str:
+        # BR5 gets one boolean source-readability fact, never a terminal
+        # handle/output/control capability. Pin receiver and argument exactly;
+        # the rest of the module still passes the ordinary terminal needles.
+        import ast
+        call = "self.daemon.terminals.readable_source(source.terminal_id)"
+        tree = ast.parse(text)
+        receivers = [ast.unparse(node) for node in ast.walk(tree)
+                     if isinstance(node, ast.Attribute) and node.attr == "terminals"]
+        self.assertEqual(receivers, ["self.daemon.terminals"])
+        calls = [ast.unparse(node) for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "readable_source"]
+        self.assertEqual(calls, [call])
+        self.assertEqual(text.count(call), 1)
+        return text.replace(call, "True")
+
     def test_no_tool_is_named_for_a_terminal(self):
         from jarvis import tools
         from jarvis.v2 import mcp
@@ -1937,6 +1954,8 @@ class NoTool(Base):
             text = path.read_text(encoding="utf-8")
             if rel == self.READER:
                 text = self._without_reader_import(text)
+            if rel == "jarvis/v2/browser/look.py":
+                text = self._without_browser_readable_call(text)
             if self.NEEDLES.search(text):
                 offenders.append(rel)
         self.assertEqual(offenders, [])
@@ -1958,7 +1977,7 @@ class NoTool(Base):
             self.assertIsNone(self.NEEDLES.search(text), module.__name__)
 
     def test_the_reader_only_reads(self):
-        reader = [T.read_for_tool, T.Terminals.read, T.Terminals._resolve,
+        reader = [T.read_for_tool, T.Terminals.readable_source, T.Terminals.read, T.Terminals._resolve,
                   T.Terminals._read_published, T.Terminal.history, T._secret_values,
                   T._env_values, T._folder_env_files]
         for func in reader:
