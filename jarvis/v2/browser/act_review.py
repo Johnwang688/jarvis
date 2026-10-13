@@ -442,8 +442,9 @@ def judge(facts: Facts, owner_words: str = "", *, chat=None, extra_values=()) ->
                      max_retries=1, stream=False, **options)
         if getattr(reply, "finish_reason", "stop") != "stop":
             return _ask(R_FORM)
-        wire = getattr(reply, "raw", None)
-        if wire is not None:
+        missing_wire = object()
+        wire = getattr(reply, "raw", missing_wire)
+        if wire is not missing_wire:
             # llm.Reply normalizes falsey finish reasons to stop for legacy
             # callers. The Browser gate requires an actual completed wire
             # response; null/empty/missing metadata cannot become consent.

@@ -297,7 +297,7 @@ class Failures(World):
                 verdict = V.judge(page(), "read me the next page", chat=script)
                 self.assertEqual((verdict.verdict, verdict.source), (V.ASK, "failure"))
                 self.assertEqual(V.cache_size(), 0)
-        for wire in ({}, {"choices": []}, {"choices": [{}]}, {"choices": None}):
+        for wire in (None, {}, {"choices": []}, {"choices": [{}]}, {"choices": None}):
             script = Script(lambda _: SimpleNamespace(text=answer(), finish_reason="stop", raw=wire))
             self.assertEqual(V.judge(page(), "read me the next page", chat=script).verdict, V.ASK)
             self.assertEqual(V.cache_size(), 0)
