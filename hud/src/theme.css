@@ -1629,3 +1629,9 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .browser-capture-actions button { padding: 2px 7px; }
 .browser-capture-actions label { display: flex; align-items: center; gap: 4px; color: var(--text-muted); }
 .capture-remote { align-self: flex-start; margin: 0 8px 6px; }
+
+/* Math in shared chat/doc Markdown. Fonts and CSS are bundled locally. */
+.math-display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+.math-display .katex-display { margin: 0.6em 0; }
+.math-inline .katex { font-size: 1.1em; }
+.math-display .katex { font-size: 1.15em; }
