@@ -1081,6 +1081,47 @@ and layout persist in localStorage behind try/catch. The free checks are
 `tests/face/hud_v2_layout_check.py`, run first by `hud_v2_check.py` in a
 context of its own, plus `hud/src/lib/layout.test.ts`.
 
+**HUD installed app and orb icon (2026-10-12, design §18).** Settings offers
+**Install as app** when Chrome supplies `beforeinstallprompt`; otherwise it
+shows Chrome’s menu route. Standalone windows and `appinstalled` say Installed.
+The install action is disabled and inert under an approval card. The manifest
+is `/manifest.webmanifest`, served as `application/manifest+json` under the
+one CSP’s `manifest-src 'self'`; Vite copies public icons into the installed
+build’s integrity manifest. `hud/scripts/render_icons.py` copies the idle orb
+without refactoring `Orb.tsx`, with simpler 16/32px rings and a safe-zone mask.
+`jarvis hud` pins Windows Chrome to `JARVIS_HUD_CHROME_PROFILE` (Default),
+refusing slash, backslash or `..`; the id uses Chromium’s verified double SHA-256.
+Only the HUD root uses `--app-id` when its
+Manifest Resources folder exists under `JARVIS_WINDOWS_LOCALAPPDATA` (else
+converted LOCALAPPDATA, else johnw’s Windows Local AppData). No profile is read.
+
+**HUD boot animation (2026-10-12, design §18; the owner: "this is literally
+perfection … make sure that its disabled when automation is on").** The owner's
+prototype (`prototypes/boot/index.html`) at its default settings, v2 only, no
+audio: seeded binary dust drifts from the bottom left by geometric Brownian
+motion and converges into the orb; two pens draw a sharp box counter-clockwise
+while a pen per letter draws JARVIS, then the dots pop in. The pure half is
+`hud/src/lib/boot.ts` (RNG, paths, timeline, `shouldPlay`), the drawing
+`components/BootOverlay.tsx`. **It mounts on the first frame**, so the HUD is
+never seen before it, and nothing waits on it: the HUD loads, connects and
+renders underneath. **Never under automation**: with `navigator.webdriver` the
+component is not mounted at all, unless the boot suite's own init script sets
+`window.__hudBootForce = true` (which can only make it play). **Once per
+window**: a sessionStorage flag (behind try/catch; without storage, once per
+page load) is set when a window first considers it, so a reload never replays
+it, and reduced motion never plays it. **A click skips it and clicks nothing
+underneath** (the overlay eats the press, its release and the click); **a key
+skips it and still does its job** (never prevented: Ctrl+D, Escape, typing,
+Ctrl+`). **Approvals win**: it sits at z-index 99, below `#authveil`, never
+takes focus, and is removed in the same render a card is drawn in, whether the
+card was waiting when the window opened or arrives mid-play; answering the
+card never restarts it. It fills the window at any zoom (`--ui-zoom` divided
+out, canvases in device pixels), and its fade-out cancels the animation frame,
+timers and listeners. Free checks: `lib/boot.test.ts` and
+`tests/face/hud_v2_boot_check.py` (a `MockDaemon(0)` of its own, run by
+`hud_v2_check`); removing the webdriver, card, click or session guard each
+fails it.
+
 **HUD title bar and split workspace, WP-A (2026-10-09, design §18; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md`, decisions file beside it
 wins).** A 28px window-wide **title bar** holds Model · Voice · Avatar ·
@@ -1673,17 +1714,90 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
-**Known gap, open (2026-10-12, review of PR #74; reproduced in Chrome 155):**
-a framed page can take the keyboard with no user activation.
-`el.focus()`/`window.focus()` inside the `allow-scripts allow-forms` frame
-moves focus out of the HUD's box, and later keys go to the page, which can
-send them to its own server: chat words, an editor's `.env` value, a
-password typed in a terminal. `inert`, `display: none`, re-focusing the box
-and `contentWindow.blur()` do not stop it, even from a hidden frame. Only
-removing the iframe in the parent's `blur` handler does. AO-2
-(`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §E.8) adds that
-guard for every Browser frame: a frame that gains focus without the owner's
-gesture is unmounted ("This page took the keyboard · Reload").
+
+**A framed page never takes the keyboard on its own (2026-10-12, R-1, AO-2's
+first half, shipped alone; `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`
+§E.8, §H AO-2; contract in `docs/hud-api.md`).** The gap PR #74's review
+found (Chrome 155): `el.focus()` or `window.focus()` in a Browser frame,
+with no user activation, moves focus out of the HUD, and every later key —
+chat words, an editor's `.env` value, a terminal password — goes to the
+page, which can send it home. `inert`, `display: none`, `visibility:
+hidden`, re-focusing the box and `contentWindow.blur()` do not stop it, a
+`display: none` frame included; **removing the iframe does.** So each
+Browser iframe is made by script in **`FrameHost`** (`useLayoutEffect`,
+never JSX, so a removal never trips React; `data-browser-frame="<pane>:<tab>"`,
+tab 0 until Direct tabs; a fresh frame per load), the decision is pure in
+**`lib/frameguard.ts`**, and **`state/frameguard.ts`** (installed once by
+App, a layout effect) removes a frame that gains focus without the owner's
+gesture, puts focus back **only on the HUD element that lost it to this
+theft** (caught in its own `focusout`, its text selection kept) — never on one
+that had it earlier, so a page that grabs from another page the owner was
+typing a password in can never hand the next keys to the chat box, where an
+Enter sends them (review of PR #78, H1); with no such element focus goes to
+nothing that types or sends (the notice's container, `tabIndex=-1`, never its
+Reload), or under a card the card — tells the pane — `browser-stolen`, "This page took the keyboard · Reload"
+(`browser-stolen-reload`, React text, plain chrome, disabled and inert under
+a card; the tab's URL stays; memory only) — and writes one console line
+naming the pane slot, never the URL. **Measured in Chromium 149, headless
+and headed under WSLg:** a script steal fires `blur` on the HUD element,
+`focusout`, then the window's own `blur` with `activeElement` already the
+iframe, all before any key reaches the page; no `focus`/`focusin` fires on
+the iframe element. The guard decides in that `blur`, synchronously. **A
+steal from one frame into another fires nothing at all** (contrary to
+§E.8's `focusin` claim): `focusin` is listened for anyway, and what catches
+it is a per-animation-frame check while the keyboard is in a frame, with the
+250 ms `activeElement` belt behind it. **Headed, the HUD sees no pointer
+event over a frame and the iframe never matches `:hover`** (it runs in a
+process of its own; headless it does see `pointerover`), so "the pointer is
+over it" is read from a **transparent shield** over every frame
+(`browser-shield`): a `pointermove`, `pointerdown` or `wheel` on it means
+the owner's pointer is there, and it steps aside; a pointer event anywhere
+else in the HUD brings it back, and so does **any key typed in the HUD**
+(decision: a pointer parked over a page stops counting at the owner's first
+key, narrower than §F's stated limit), and so does the window losing focus
+to another program or being hidden (the HUD never hears the pointer leave a
+frame, so one that left the window from inside a page would else count on).
+**While a HUD text control has the keyboard** (an input, a textarea, Monaco,
+a terminal, contenteditable; `isTypingTarget`), **or another Browser page
+does** (delta review: crossing page B while typing in page A gave B the
+keys), **the shield steps aside only
+on a press**, never a move or a wheel, and the HUD then puts the keyboard in
+the page with `contentWindow.focus()` (the lead's option (a) on review M2): a
+pointer crossing a page mid-typing is never "over" it. The cost, accepted:
+the first click after typing in the HUD only focuses the page, and a wheel
+there scrolls nothing until a click. **A Browser iframe is never
+`.focus()`ed** (H2): FrameHost replaces each frame's `focus` with its
+window's, since an element focus left `activeElement` on that frame after
+another frame took the keyboard, blinding the guard. The gestures: the pointer over it;
+Tab or Shift+Tab within `TAB_MS` 300 — **not cancelled** (Monaco's indent is
+not one) **and only for the frame it landed in**, the first place focus went
+after it (M1); the owner's own
+load — Load, Enter in the URL box, Project root, the keep-origin switch,
+Reload — claimed by the first frame made after it, live until 2 s after
+that frame's `load` (20 s if it never loads) and **revoked by any key in the
+HUD or a focus outside that pane** (decision); and the HUD's own give-back
+after a card (`allowRestore`, ApprovalVeil, once, 300 ms — otherwise every
+card would unmount the page the owner was typing in). A stored URL restored
+at mount and a terminal's "Open in Browser" are no gesture. **Never**,
+whatever the pointer says: a card up (read from the DOM, `#authveil`), or a
+frame not the active tab of a drawn pane (or with no box on screen); a held
+frame under a card goes; a held frame that stops being drawn loses the
+keyboard to nothing that types, without being removed. **Playwright's `locator(frame).click()`
+hit-tests before it moves the mouse and reads the shield as covering the
+frame**: suites click frames with `page.mouse` (the layout suite's
+card-focus check changed so). Free checks: `lib/frameguard.test.ts`,
+`state/frameguard.test.ts` (jsdom), and `hud_v2_browser_check`'s `_guard_*`
+sections (`BROWSER_ONLY=guard`), against the mock dev server's
+`/focus-mount`, `/focus-timer`, `/focus-load`, `/focus-none`,
+`/focus-pointer` and `/focus-reload` pages and their key log
+(`mock.dev_keys`); the review round's checks (H1's exact scenario — no POST,
+the draft unchanged — H2's give-back, M1's three Tabs, M2's crossing and
+click-then-type, and the two surviving mutants) each fail with their guard
+removed. **Limits**: a key in flight as focus moved can be lost, IME
+composition in the box may be cut, a frame-to-frame steal is caught within
+an animation frame (a key typed in that gap reaches the page), a pointer
+resting over a page while no text control has the keyboard counts until the
+owner's first key, and none of it binds a same-uid program.
 
 **Dev servers announced in a terminal, BR-8a (2026-10-12; Browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1/§G/§H, the
@@ -1984,6 +2098,35 @@ comma-joined CSPs, X-Frame-Options lists and the last `Content-Type`),
 `environ` opened following a symlink, `find_tag` taking a later occurrence,
 and every guard of the fixes above. A grep pin allows only `daemon`,
 `hud_api`, `terminals` and `devservers` to name the module.
+
+**Dev-server daemon wiring, AO-1b-i (2026-10-12; amendment 2 §B–§D).**
+`devservers.DevServers`, attached to the daemon, calls AO-1a's rules with
+the fd scan's `complete` answer. A lazy `jarvis-devwatch` polls only during
+Claude/Codex turns and their 600-second grace, or for live registry entries;
+`auto_open` comes only through `devservers.enabled()` → `BrowserSettings`.
+A poll exception logs its type once and stops the watcher; only a new turn
+start or settings change can re-arm it. Off means no watcher work. `main()`
+supplies the real proc/cgroup roots;
+embedded/test daemons must explicitly supply fixture roots to watch.
+An initial baseline is old. Transient missing facts retry three polls;
+before publication the same `(pid, start)` must still hold the inode.
+Two bounded loopback probes send only GET /, never follow redirects, and
+retry TLS once after a silent close or alert. Responses are never retained.
+The memory registry de-dups ports for 60 seconds after down and publishes
+only `{kind: dev_server, data: {id, state, source, at}}`; no port or URL,
+no thread-log record, and no Discord delivery. Owner-only `/dev-servers`
+routes return URLs, arbitrate claims for 600 ms, and renew/complete/dismiss
+90-second leases. Only the last owner HUD stream for a window ending lapses
+its claims; the API listener's parameter has no effect. `/status.dev_watch` is counts.
+`Brief.origin_tag` is hidden from repr, exists only in the session run copy,
+and reaches Claude's SDK env and Codex's app-server env, never argv or
+`brief.json`. `_open` writes it only when absent; it previously only
+round-tripped the stored brief, and the tag is never in it.
+Close retains attribution for the grace. Stop ends terminals,
+then the watcher and probes, then the bus. Terminal announcement support is
+in the registry; AO-1b-ii wires its sniffer. `devservers_check` uses fixture
+proc trees, fake CLIs and fixed free loopback ports; `frame_check` walks the
+new family. No tool or Discord verb reaches either dev module.
 
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
@@ -2651,6 +2794,59 @@ section's `_edit` now types until the pane's Save is enabled: it used to type
 into an editor not yet showing the file, and four "unsaved edit" checks failed
 under load.
 
+**The thinking line, WP-H (2026-10-10; plan
+`docs/plans/2026-10-10-hud-split-panes-plan.md` §4, decisions S-4; design
+§18; contract in `docs/hud-api.md`).** While a chat's turn runs, its foot —
+`[data-testid=thinking]`, right after the log's scroller and before the ticker,
+**outside `[data-testid=log]`** — reads mini orb · word · elapsed (`12s`,
+`3m 07s`, `1h 02m`). The word is a pure precedence table (`lib/thinking.ts`
+`thinkingLine`): "Error" (an `error` in the running turn) · "Ended on an error"
+(static, no time, until the next turn or send) · "Waiting for approval" (an
+approval with this `thread_id`) · "Waiting for your answer" (`needs_input`,
+no approval) · "Running <tool>…" (an unfinished call **this turn** made in this
+pane, name cleaned and capped at 40) · "Thinking…". **The turn is keyed by
+thread, window-wide** (`State.turns`, H-1): `turn_started`, `error`,
+`turn_finished` (`stop`, `next`), this window's sends (a steer leaves the
+running turn's time alone; a failed send takes back only the entry it made)
+and the activity records feed it, so it follows its thread across trades of
+conversations, Discord-started turns and reloads. **Only a change of a
+thread's activity counts, and "working" reaches the line only through the
+entry it makes**: the record that turns a thread idle follows its
+`turn_finished`, so a view still saying "working" must never outlive a finish
+already heard. Into working/needs_input with no entry (or an ended one) is a
+turn noticed late, timed from the record's **`running_since`** (H-b — the
+daemon's live, never-stored field, present only while `running`) else from now
+and corrected when the records arrive; into failed makes it ended; into
+idle/unread deletes it — never one a send in flight made, never an ended one.
+**A running turn no pane tracks is adopted** (H-3) by the drawn chat pane
+showing it when that pane waits on nothing, so Stop and Enter-to-steer return
+after a reload — only with a live entry *and* "working", so a pane a finish
+just freed is never adopted back; the 15 s reconcile undoes a wrong one. It
+never meets WP-G2's `State.loose`: a loose turn's pane closed, so no pane shows
+the thread, and `open_thread` takes the loose turn up before the adopt effect
+looks (it adopts only a turn no pane tracks).
+**The mini orb is an 18px inline SVG, never a canvas** (`components/MiniOrb.tsx`,
+H-2): CSS `transform` keyframes only, no requestAnimationFrame, `aria-hidden`;
+the word is the `role="status"`, the time is not; reduced motion stops every
+animation and leaves colour, word and time. **The palette is one module both
+orbs import** (`lib/orbpalette.ts`; a grep test refuses a second `palette()`,
+`ACCENTABLE` or amber/red hue in any source): the avatar's accent recolours
+"Thinking…" only, and an accent that is not `r,g,b` is ignored. The times
+share **one 1 s clock** that runs only while a drawn line shows one, and only
+those spans redraw on a tick — never the window or a transcript; each pane's
+line is handed to the memoized `ChatTab` as the same object while it says the
+same thing. The line is in flow, no z-index, no button or link,
+`pointer-events: none`, inert under a card, and never says Authorize, Approve or
+Deny. The input bar's status words stay (the suites read them; removing the
+duplicate is a follow-up), and **the input bar re-measures its box's cap when
+the line comes and goes** (`footLine`), or a long draft held at the
+conversation's minimum would let the line take the log below it. Free checks:
+`thinking.test.ts`, `orbpalette.test.ts`, the `turns` cases in
+`store.test.ts`, `hud_backend_check`'s `running_since` case, and the
+`_thinking_*` sections of `tests/face/hud_v2_multichat_check.py` (the mock's
+`thread_running(tid, since)` sets `running`/`running_since`), every mutation
+named in the plan's table shown to bite in a scratch copy.
+
 **The editor's missing half, ED-1 (2026-10-10; plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.2, decisions file beside it
 wins: E-1 no intellisense, E-10).** Monaco is **0.57.0, pinned exactly**, on
@@ -2842,7 +3038,8 @@ The rules the two reviews left, in one place:
 - The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
   file by name, LOW4); a save's unexpected `OSError` is 500 and a
   `PermissionError` 403, never the dispatcher's 409 (the conflict bar); a tree
-  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED.
+  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED, and so, since
+  the owner's answer (2026-10-12), are `editor_git.py` and `editor_nav.py`.
 - **`Buffers.releasePane` touches only buffers this pane held** (H1): × on any
   pane used to discard every edit no tab held. **A project going away asks
   the panes on it together** (H2, `panesLose`/`panesHolding`): two panes
@@ -3111,9 +3308,13 @@ depth, any case, a Windows-trimmed name both ways — not a name ending
   and each file is read non-blocking, regular files only, capped
   (`_read_regular`; a FIFO named `.env.x` hung the old blocking read). A grep
   line attributed to one is dropped (`is_protected`). **What is taken from a
-  file is the lead's decision (PR #60 review, MED-2)**: `.env` and
-  `.env.local` give every value of 8+ characters, exactly as before; every
-  other credential env file gives only (a) the value of a **secret-named
+  file is the lead's decision (PR #60 review, MED-2)**, and since the
+  owner's answer (2026-10-12) it holds for `.env` and `.env.local` too, which
+  used to give every value of 8+ characters (`terminal_read`'s guard still
+  takes every value from the folder chain's env files, `terminals._env_values`;
+  PR #80's review added joined `*PASSWORD`/`*PASSWD`/`*CREDS` names and the
+  CRED, CREDS and MNEMONIC key parts): every credential env file gives
+  only (a) the value of a **secret-named
   key** — a whole word or an `_`/camelCase part of KEY, TOKEN, SECRET,
   PASS/PASSWD/PASSWORD/PWD, CREDENTIAL, PRIVATE, SALT or DSN (plurals too,
   any case) — at 4+ characters and not a boolean; AUTH, SESSION and COOKIE
@@ -4278,8 +4479,7 @@ the layout suite's `_split_checks`,
 `_split_close_terminal_checks`, the preview suite's `_split_checks` and
 `tests/v2/terminal_check.py`'s unreadable-from-the-first-byte case; the PR's
 mutation tables show each failing with its mutation. WP-G3's shared buffer
-arrived with ED-2. Not done: WP-H's
-thinking line.
+arrived with ED-2, and WP-H's thinking line is above.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
@@ -6899,6 +7099,11 @@ Two findings worth keeping:
   through the owner-only routes, for the host's lifetime; `local_servers` in
   `browser.json` (off) opens them all. Pages and agents never open one.
   Auto-open never opens one (amendment 2, L2). Details in the BR-1a
+  paragraph.
+- **No Browser frame takes the keyboard without the owner's gesture
+  (2026-10-12, R-1).** One that gains focus otherwise is removed at once
+  (removal is the only thing that works); never under a card or from a
+  hidden pane. Details in the "A framed page never takes the keyboard"
   paragraph.
 - **A toolset is enforced at dispatch, not only by what the request offers
   (2026-10-10).** An agent's bound toolset is the set it may call; naming a

@@ -686,6 +686,8 @@ class CodexProvider:
                 if candidate in _open_homes:
                     raise BriefRefused("Codex thread already has an open session")
             argv, env, home = codex_config.prepare(thread.id, brief, binary)
+            if brief.origin_tag is not None:
+                env["JARVIS_ORIGIN_TAG"] = brief.origin_tag
             home = home.resolve()
             with _state_lock:
                 if home in _open_homes:

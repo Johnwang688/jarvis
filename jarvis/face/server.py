@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import base64
 import glob
+import hashlib
 import json
 import os
 import queue
@@ -1415,9 +1416,43 @@ def find_browser() -> tuple[str, bool]:
     return find_chromium(), False
 
 
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9 _-]{0,63}")
+
+
+def chrome_app_id(manifest_id_url: str) -> str:
+    """Chromium GenerateAppIdFromManifestId → crx_file::id_util::GenerateId.
+
+    The input is the resolved manifest id URL, including its trailing slash.
+    Chromium hashes that URL before passing the raw digest to GenerateId,
+    which hashes again. Verified with Chromium's CDP PWA.install.
+    """
+    manifest_hash = hashlib.sha256(manifest_id_url.encode("utf-8")).digest()
+    digest = hashlib.sha256(manifest_hash).hexdigest()[:32]
+    return "".join(chr(ord("a") + int(digit, 16)) for digit in digest)
+
+
 def launch_window(url: str, size: tuple[int, int] = (1280, 860)) -> subprocess.Popen:
     browser, is_windows = find_browser()
-    args = [browser, f"--app={url}", f"--window-size={size[0]},{size[1]}"]
+    app_arg = f"--app={url}"
+    profile_args = []
+    if is_windows and Path(browser.replace("\\", "/")).name.lower() == "chrome.exe":
+        profile = config.HUD_CHROME_PROFILE
+        # An allowlist (review of PR #83): a profile folder name such as
+        # "Default" or "Profile 2" — never an option, a path, a quote or a
+        # control character, whatever reached the environment.
+        if not _PROFILE_NAME.fullmatch(profile or ""):
+            raise ValueError("JARVIS_HUD_CHROME_PROFILE must be a Chrome profile folder name "
+                             "such as Default or Profile 2")
+        profile_args = [f"--profile-directory={profile}"]
+        root_url = f"http://localhost:{config.FACE_PORT}/"
+        if url == root_url:
+            app_id = chrome_app_id(root_url)
+            resource = (Path(config.WINDOWS_LOCALAPPDATA) / "Google" / "Chrome" / "User Data"
+                        / profile / "Web Applications" / "Manifest Resources" / app_id)
+            # Existence only: never open or inspect anything inside the profile.
+            if resource.exists():
+                app_arg = f"--app-id={app_id}"
+    args = [browser, app_arg, *profile_args, f"--window-size={size[0]},{size[1]}"]
     if not is_windows:
         # The CfT fallback needs its own profile (mic grant persistence).
         args += [

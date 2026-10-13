@@ -1051,6 +1051,7 @@ _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 #   - `media-src 'self'`: same-origin audio only (`/say`), should playback
 #     ever come back; the microphone and the approval chime are Web Audio,
 #     which no CSP directive governs.
+#   - `manifest-src 'self'`: Chrome loads the HUD's install manifest locally.
 #   - `frame-src`: the Preview pane's loopback frames, by the host names a
 #     CSP can express (an IPv6 literal or another 127/8 address cannot be
 #     named, so the Preview judge refuses those with a sentence). An
@@ -1067,6 +1068,7 @@ HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("img-src", ("'self'", "data:")),
     ("font-src", ("'self'", "data:")),
     ("media-src", ("'self'",)),
+    ("manifest-src", ("'self'",)),
     ("frame-src", ("http://localhost:*", "http://*.localhost:*", "http://127.0.0.1:*",
                    "http://0.0.0.0:*")),
     ("base-uri", ("'none'",)),
@@ -1077,7 +1079,7 @@ HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
 # inline styles, should the file ever be opened as a document.
 AVATAR_CSP = "default-src 'none'; style-src 'unsafe-inline'"
 _FETCH = frozenset({"default-src", "script-src", "worker-src", "connect-src", "style-src", "img-src",
-                    "font-src", "media-src", "frame-src", "object-src"})
+                    "font-src", "media-src", "manifest-src", "frame-src", "object-src"})
 
 
 def _own_directives(extra) -> list[str]:
@@ -1247,8 +1249,8 @@ def hud_build_id() -> str | None:
 
 
 def hud_files(handler, parts):
-    """`GET /` and `GET /assets/*`: the HUD, from the newest intact installed
-    build (`hud_install.state`).
+    """`GET /`, `/assets/*`, `/manifest.webmanifest`, `/icons/*`: the HUD,
+    from the newest intact installed build (`hud_install.state`).
 
     Under JARVIS_HUD_DEV=1 (the headless suites) it is `hud/dist` as it is,
     no link followed; otherwise only a file the build's manifest lists, still
@@ -1284,7 +1286,9 @@ def hud_files(handler, parts):
             data = hud_install.find(root, name)
             if data is None:
                 fail(404, "file not found")
-    return binary(handler, data, mimetypes.guess_type(name)[0] or "application/octet-stream")
+    mime = "application/manifest+json" if name.endswith(".webmanifest") else (
+        mimetypes.guess_type(name)[0] or "application/octet-stream")
+    return binary(handler, data, mime)
 
 
 def check_origin(handler, *, preview=False):
@@ -1592,7 +1596,7 @@ def route(handler, daemon, parts, query):
     """Return None for the existing daemon routes; never consume their bodies."""
     from .daemon import _object, safe_list
     method, stores = handler.command, daemon.stores
-    if method == "GET" and (parts == [""] or parts[0] == "assets"):
+    if method == "GET" and (parts in ([""], ["manifest.webmanifest"]) or parts[0] in ("assets", "icons")):
         return hud_files(handler, parts)
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
         return pickers(handler, daemon, parts, query)
@@ -1601,6 +1605,9 @@ def route(handler, daemon, parts, query):
         # and the attach socket also needs a single-use ticket.
         from . import terminals as _terminals
         return _terminals.route(handler, daemon, parts, query)
+    if parts[0] == "dev-servers":
+        from . import devservers as _devservers
+        return _devservers.route(handler, daemon, parts, query)
     if parts[0] == "browser":
         # The owner's Browser (BR-1a): owner-only and a strict loopback Host
         # on every route, checked before anything else (browser/routes.py),

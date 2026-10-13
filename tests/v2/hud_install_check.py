@@ -99,6 +99,19 @@ class Base(unittest.TestCase):
 
 
 class Install(Base):
+    def test_public_app_artifacts_are_listed_and_integrity_checked(self):
+        public = REPO / "hud" / "public"
+        rels = ["manifest.webmanifest", *[f"icons/{p.name}" for p in sorted((public / "icons").glob("*.png"))]]
+        self.assertEqual(len(rels), 7)
+        for rel in rels:
+            path = self.dist / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((public / rel).read_bytes())
+        built = I.install(self.dist, self.root, now=T0)
+        for rel in rels:
+            self.assertIn(rel, built.files)
+            self.assertEqual(I.find(self.root, rel), (public / rel).read_bytes())
+
     def test_an_install_copies_byte_for_byte_read_only_with_a_manifest(self):
         built = I.install(self.dist, self.root, now=T0)
         self.assertRegex(built.id, r"^\d{8}T\d{12}Z-[0-9a-f]{12}$")

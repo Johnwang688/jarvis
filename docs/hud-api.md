@@ -9,9 +9,62 @@ is served from the daemon on `FACE_PORT` (8402) and calls the API on the
 **same origin** (the daemon serves the API on both listeners); the workshop origin
 is `WORKSHOP_PORT` (8403), a different origin by design.
 
+## Additions: dev-server registry (AO-1b-i, 2026-10-12)
+
+Amendment 2 §B–§D defines the daemon half of automatic dev-server opening.
+Every `/dev-servers` route requires `projects.is_owner` on the HUD listener
+and a strict loopback Host, checked before reading a body. The API listener
+answers **403**. Same-origin GETs without Origin need `Sec-Fetch-Site:
+same-origin`; POSTs require the HUD's Origin. Responses carry WP-E's frame
+headers. No route starts, probes, opens or navigates a server or the Browser.
+
+| Route | Exact body | Answer |
+|---|---|---|
+| `GET /dev-servers?window=<nonce>` | none; window optional | `{servers: [{id, url, state, source, claimed, mine}]}`; only listening, non-dismissed entries |
+| `POST /dev-servers/<id>/claim` | `{window, shows: bool, focused_at: int}` | `{won: true, url}` or `{won: false}` |
+| `POST /dev-servers/<id>/renew` | `{window}` | 200 `{}`; extends winner's lease |
+| `POST /dev-servers/<id>/placed` | `{window}` | 200 `{}`; publishes placed and ends lease |
+| `POST /dev-servers/<id>/dismiss` | `{window}` | 200 `{}`; any owner window may dismiss |
+
+The window nonce is exactly 32 lowercase hex characters. `focused_at` is
+epoch milliseconds in `[0, 2**53 - 1]` (0 means never). Unknown/missing keys
+and wrong types are **400**, unknown entry ids **404**, and down/dismissed
+entries **409** `{error, code: "gone"}`. Renew/placed by a window that does
+not hold the claim are **409**. Claims collect for 600 ms: earliest `shows`
+wins, else newest `focused_at`, with earliest arrival breaking ties. Later
+claims lose while a winner holds the entry. Leases last 90 seconds; windows
+renew every 30 seconds while waiting or prompting. Expiry returns the entry
+to up. `placed` keeps placement until the listener disappears.
+
+`GET /events?window=<nonce>` associates an **owner HUD** SSE stream with its
+window; disconnect returns its outstanding claims to up immediately. The
+parameter is ignored on the API listener and on non-owner requests. Thread
+and project filters retain their existing meaning.
+
+The exact bus record is `{kind: "dev_server", data: {id, state, source, at}}`.
+`id` is `ds_` plus eight random hex characters; `at` is UTC ISO time. States
+published are `up`, `claimed`, `placed`, `dismissed`, `down`; up repeats only
+on lease lapse. Source is `{kind: "thread", thread_id, task_id: null|id}` or
+`{kind: "terminal", terminal_id}`. There is no top-level thread id: filtered
+thread streams, thread logs and Discord do not receive this record. Both
+unfiltered SSE listeners receive it. The bus never carries a port, URL,
+scheme, path, title, process fact, command line, environment or response.
+URLs leave memory only through owner registry/claim answers (and AO-1b-ii's
+terminal socket frame); agents receive `/`, terminal URLs keep their cleaned
+path, and both drop userinfo/query/fragment.
+
+`GET /status` gains `dev_watch: {active, entries, polls, refused: {class:
+count}, work: {rows, fd_readlinks, environ_reads, probes}}`, counts only.
+The registry holds at most 32 entries, limits creation to one per 10 seconds
+per source and six per minute globally, and reuses an id on a port restart
+within 60 seconds of down (including dismissal). It is never persisted.
+The Browser's `auto_open` switch covers watcher and terminal sources;
+automatic opening never grants access through the Remote gate.
+
 ## Static
 
-`GET /` → the HUD's page; `GET /assets/*` → its assets — from the newest
+`GET /` → the HUD's page; `GET /assets/*`, `GET /icons/*` → its assets;
+`GET /manifest.webmanifest` → `application/manifest+json` — from the newest
 **installed build** (`config.HUD_DIR/<build-id>/`, decision C-1; see "the
 HUD's CSP and installed build" below), or from `hud/dist` itself only under
 `JARVIS_HUD_DEV=1`. With nothing installed, `GET /` is a 503 page naming
@@ -1248,8 +1301,27 @@ own server and is unaffected.
   "Keep its origin" switch on, exactly `allow-scripts allow-forms
   allow-same-origin`. Never `allow-top-navigation`, `allow-popups`,
   `allow-popups-to-escape-sandbox`, `allow-downloads` or `allow-modals`.
-  The frame is keyed by its sandbox, so a change reloads the page under the
-  new flags.
+  Every load is a fresh frame (`FrameHost`, 2026-10-12), so a change of the
+  flags reloads the page under them.
+- **No frame takes the keyboard on its own** (R-1, amendment 2 §E.8,
+  2026-10-12). The iframe (`browser-frame`, with `data-browser-frame=
+  "<pane>:<tab>"`, tab 0 until Direct tabs) is made by script and has a
+  transparent shield over it (`browser-shield`, `data-up` "true" while it
+  catches the pointer). A frame that gains focus without the owner's gesture
+  — the pointer over it, Tab or Shift+Tab within 300 ms, their own load
+  (Load, Enter, Project root, the keep-origin switch, Reload) until 2 s
+  after its `load`, or the HUD giving focus back after a card — is removed;
+  under a card or from a hidden pane always. The pane then shows
+  `browser-stolen` ("This page took the keyboard · Reload") with
+  `browser-stolen-reload`, disabled under a card; the tab's URL stays.
+  Focus goes back only to the HUD element that lost it to that theft; with
+  none (the keyboard was taken from another page), the notice's container
+  (`browser-stolen`, `tabIndex=-1`) takes it — never its Reload, never a box
+  that sends. While a HUD text control has the keyboard, the shield steps
+  aside only on a press, and the HUD focuses the page (`contentWindow.focus()`;
+  a Browser iframe's own `focus()` does the same). A Tab counts only if not
+  cancelled and only for the frame it landed in. The console gets one line
+  naming the pane slot, never the URL. No route changes.
 - **"Keep its origin"** (`browser-keep-origin`, a checkbox; `data-origin`
   names what it covers): off by default, per pane, offered only when the
   loaded URL is loopback `http(s)` on a port that is none of `hud_port`,
@@ -1293,6 +1365,23 @@ at 100% and 160%).
 
 Not in this package: §2.5 item 5, a "dev servers in your terminals" list
 built from the listening sockets terminal sessions own.
+
+## Additions 2026-10-10 (the thinking line — WP-H)
+
+- Every thread record (`GET /threads`, `POST /threads`, `thread_updated`)
+  carries live, never-stored `"running_since": "<ISO 8601>"` — when the
+  running turn began (the moment its worker was started; a queued message
+  that runs as the next turn starts a new one) — **present only while
+  `"running": true`**, absent otherwise and from an older daemon. The HUD's
+  thinking line counts from it when it notices a turn late (a reload, a turn
+  started from Discord before any pane showed the thread); with none it
+  counts from when it noticed. It is a display hint only: nothing waits on
+  it, and `running` stays what the HUD reconciles its busy state against.
+- Nothing else changed on the wire. The line is drawn from events the HUD
+  already receives: `turn_started`, `tool_started`/`tool_finished`, `error`,
+  `turn_finished` (`stop`, `next`), `approval_requested`/`approval_resolved`
+  (by `thread_id`) and the `activity` records (`working`, `needs_input`,
+  `failed`, `unread`, `idle`).
 
 ## Additions 2026-10-10 (Jarvis reads a terminal — WP-F)
 
@@ -1604,7 +1693,7 @@ decision C-1 (the decisions file wins).
 
     default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';
     connect-src 'self'; style-src 'self' 'unsafe-inline';
-    img-src 'self' data:; font-src 'self' data:; media-src 'self';
+    img-src 'self' data:; font-src 'self' data:; media-src 'self'; manifest-src 'self';
     frame-src http://localhost:* http://*.localhost:* http://127.0.0.1:* http://0.0.0.0:*;
     base-uri 'none'; form-action 'none'; object-src 'none';
     frame-ancestors 'none'

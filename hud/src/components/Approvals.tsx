@@ -18,6 +18,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
 import { noPointerFocus } from "../lib/talkkey";
+import { allowRestore } from "../state/frameguard";
 
 export function approvalChime(ctx?: AudioContext | null) {
   try {
@@ -196,7 +197,12 @@ export function ApprovalVeil(props: {
       for (const el of made) el.removeAttribute("inert");
       const back = restore.current;
       restore.current = null;
-      if (back && back.isConnected) back.focus({ preventScroll: true });
+      if (back && back.isConnected) {
+        // Giving the keyboard back to a Browser page the owner had it in is
+        // the HUD's act, not the page's (state/frameguard.ts): said first.
+        allowRestore(back);
+        back.focus({ preventScroll: true });
+      }
     };
   }, [up]);
   // The next queued card is a new card (it is keyed by its request): it takes

@@ -14,6 +14,7 @@ import type { Project, ProjectImpact } from "../types";
 import { DirPicker } from "./DirPicker";
 import { DiscordLink } from "./DiscordLink";
 import { api } from "../api";
+import { INSTALL_MENU, type InstallStatus } from "../state/installApp";
 import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
 import {
   chosenHere, configDefaultLine, effectiveDefault, refusal, removeNotice, rowBadges, type RosterView,
@@ -36,11 +37,22 @@ function Shell(props: { title: string; onClose: () => void; children: React.Reac
   );
 }
 
-export function SettingsDialog(props: { route: RouteView | null; onClose: () => void }) {
+export function SettingsDialog(props: {
+  route: RouteView | null; onClose: () => void;
+  blocked: boolean; installStatus: InstallStatus; onInstall: () => Promise<void>;
+}) {
   const chains = props.route?.table?.chains || {};
   const notes = (props.route?.notes || []).filter((w) => typeof w === "string");
   return (
     <Shell title="Settings" onClose={props.onClose}>
+      <div className="pad" data-testid="install-app">
+        {props.installStatus === "installed" ? <span>Installed</span>
+          : props.installStatus === "available" ? (
+            <button type="button" disabled={props.blocked} onClick={() => {
+              if (!props.blocked) void props.onInstall();
+            }}>Install as app</button>
+          ) : <span className="muted small">{INSTALL_MENU}</span>}
+      </div>
       <div className="pad" data-testid="routing-readonly">
         <div className="muted small" style={{ marginBottom: 6 }}>Routing</div>
         {notes.length ? (
