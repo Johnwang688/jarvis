@@ -149,10 +149,9 @@ summaries do not replace detailed matchers, exceptions or owner choices.
   checks, fresh contexts and action budgets. v1 never takes the owner's real
   browser profile. The v2 URL judge, SOCKS gate and action reviewer do different
   jobs: read [Browser notes](docs/notes/browser.md) before changing any. Only
-  owner navigation admits a loopback port while its authorizing tab remains;
-  the last departure revokes established local tunnels too (BR-1c supersedes
-  the archived host-lifetime rule below). The gate is shared across profiles.
-  Agent-triggered auto-open is Direct only and never admits one. No frame takes focus without the owner's gesture,
+  owner navigation admits a port while its tab remains; last departure revokes
+  local tunnels too (BR-1c replaces the archived lifetime rule). The gate is
+  shared. Auto-open is Direct only and never admits a port. No frame takes focus without the owner's gesture,
   including behind cards or in hidden panes.
 - **Untrusted input stays data.** Strip hidden/invisible web text while keeping
   visible content, fence fetched text and retain provenance. Script review is
