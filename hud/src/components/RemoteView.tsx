@@ -9,7 +9,7 @@ interface PageDialog {id:string;kind:string;message:string;default:string}
 export interface RemoteViewProps {
   tabId:string; live:boolean; blocked:boolean; zoom:number; projectId:string|null;
   onLocation:(url:string,title:string)=>void; onPopup:(id:string)=>void;
-  onAction:(action:PaneAction)=>void; onOwnerFocus:()=>void;
+  onAction:(action:PaneAction)=>void; onOwnerFocus:()=>void; onRetry?:()=>Promise<unknown>;
 }
 /** A stream owns one generation. Page messages never focus the HUD or write its clipboard. */
 export function RemoteView(props:RemoteViewProps) {
@@ -162,7 +162,7 @@ export function RemoteView(props:RemoteViewProps) {
       <span>{connected?`Remote · ${security==="secure"?"Encrypted connection":security==="unknown"?"Connection security unknown":"Connection not secure"}`:"Remote · Connecting"}</span>
       <button type="button" disabled={!connected||props.blocked} onClick={()=>setDownloads(v=>!v)}>Downloads</button>
     </div>
-    {error?<div className="pad err" data-testid="remote-error">{error} {!connected?<button disabled={props.blocked} onClick={()=>setRetry(v=>v+1)}>Retry</button>:null}</div>:null}
+    {error?<div className="pad err" data-testid="remote-error">{error} {!connected?<button disabled={props.blocked} onClick={()=>{const gen=generation.current;void Promise.resolve(latest.current.onRetry?.()).then(()=>{if(generation.current===gen&&latest.current.live&&!latest.current.blocked)setRetry(v=>v+1);});}}>Retry</button>:null}</div>:null}
     {dialogs.map(dialog=><PageQuestion key={dialog.id} dialog={dialog} blocked={props.blocked||!connected}
       answer={(accept,text)=>{if(canInput())send({t:"dialog",id:dialog.id,accept,...(dialog.kind==="prompt"?{text}: {})},true);}} />)}
     {chooser||downloads?<BrowserFiles tabId={props.tabId} projectId={props.projectId} chooser={chooser} downloads={downloads}

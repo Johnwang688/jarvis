@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, browserApi } from "../api";
 import { cleanTitle } from "../lib/remote";
 import type { Tree } from "../types";
@@ -8,6 +8,9 @@ export function BrowserFiles(props:{tabId:string;projectId:string|null;chooser:{
   const [path,setPath]=useState("");const [tree,setTree]=useState<Tree|null>(null);
   const [selected,setSelected]=useState<string[]>([]);const [rows,setRows]=useState<Download[]>([]);
   const [error,setError]=useState("");const [busy,setBusy]=useState(false);
+  const revision=useRef(0);
+  useLayoutEffect(()=>{revision.current++;setBusy(false);return()=>{revision.current++;};},
+    [props.blocked,props.generation,props.tabId,props.chooser?.id,props.projectId,props.downloads]);
   useEffect(()=>{
     let cancelled=false;
     if(props.chooser&&props.projectId)void api.tree(props.projectId,path,1).then(row=>{if(!cancelled)setTree(row);}).catch(()=>{if(!cancelled)setError("That project folder could not be listed.");});
@@ -18,22 +21,22 @@ export function BrowserFiles(props:{tabId:string;projectId:string|null;chooser:{
     const load=()=>{if(!props.downloads||latest.current.blocked)return;void browserApi.get<{downloads:Download[]}>("/downloads").then(row=>{if(!cancelled)setRows(row.downloads);}).catch(()=>{if(!cancelled)setError("Downloads could not be listed.");});};
     load();const timer=setInterval(load,3000);return()=>{cancelled=true;clearInterval(timer);};
   },[props.downloads,props.tabId]);
-  useEffect(()=>{setSelected([]);setPath("");setError("");},[props.chooser?.id]);
-  const current=(initial:typeof props)=>latest.current.generation===initial.generation&&latest.current.tabId===initial.tabId&&!latest.current.blocked;
+  useEffect(()=>{setSelected([]);setPath("");setTree(null);setError("");},[props.chooser?.id,props.projectId]);
+  const current=(initial:typeof props,started:number)=>revision.current===started&&latest.current.generation===initial.generation&&latest.current.tabId===initial.tabId&&!latest.current.blocked;
   const upload=async()=>{
-    const initial=latest.current;if(initial.blocked||!initial.chooser||!initial.projectId)return;
+    const initial=latest.current;const started=revision.current;if(initial.blocked||!initial.chooser||!initial.projectId)return;
     setBusy(true);setError("");
     try {await browserApi.write(`/tabs/${initial.tabId}/files`,{chooser:initial.chooser.id,files:selected.map(path=>({project:initial.projectId,path}))});}
-    catch(e){if(current(initial))setError(cleanTitle(e instanceof Error?e.message:"The files could not be sent.",300));}
-    finally{if(current(initial))setBusy(false);}
+    catch(e){if(current(initial,started))setError(cleanTitle(e instanceof Error?e.message:"The files could not be sent.",300));}
+    finally{if(current(initial,started))setBusy(false);}
   };
   const save=async(row:Download)=>{
-    const initial=latest.current;if(initial.blocked)return;setBusy(true);setError("");
+    const initial=latest.current;const started=revision.current;if(initial.blocked||row.held)return;setBusy(true);setError("");
     try {
-      const blob=await browserApi.download(row.id);if(!current(initial))return;
+      const blob=await browserApi.download(row.id);if(!current(initial,started))return;
       const url=URL.createObjectURL(blob);const anchor=document.createElement("a");anchor.href=url;anchor.download=cleanTitle(row.name,200)||"download";anchor.click();setTimeout(()=>URL.revokeObjectURL(url),0);
-    }catch(e){if(current(initial))setError(cleanTitle(e instanceof Error?e.message:"The download could not be saved.",300));}
-    finally{if(current(initial))setBusy(false);}
+    }catch(e){if(current(initial,started))setError(cleanTitle(e instanceof Error?e.message:"The download could not be saved.",300));}
+    finally{if(current(initial,started))setBusy(false);}
   };
   return <div className="browserfiles pad" data-testid="browser-files">
     {props.chooser?<><strong>This page asks for a file</strong>

@@ -63,7 +63,7 @@ export class BrowserPublisher {
   private online = false;
   private active: {abort:AbortController;revision:number;action:Action|null} | null = null;
   private actions: Action[] = [];
-  constructor(private write:BrowserWrite, private receipt:(reply:BrowserReceipt)=>void,
+  constructor(private write:BrowserWrite, private receipt:(reply:BrowserReceipt,front:BrowserFront)=>void,
     private failed:(message:string)=>void, private next:()=>number = () => ++sequence) {}
 
   connect(online:boolean) {
@@ -126,7 +126,7 @@ export class BrowserPublisher {
         this.latest = action.apply(reply, this.latest!);
         this.encoded = JSON.stringify(this.latest);
       }
-      this.receipt(reply);
+      this.receipt(reply,this.latest!);
       action?.resolve(reply);
     } catch (error) {
       const message = error instanceof Error ? error.message : "The Browser change could not be applied.";

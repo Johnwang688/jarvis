@@ -87,3 +87,32 @@ it("retains a hidden Remote handle but closes it when its tab is removed",async(
   source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd"});await connected();await render({covered:true});expect(mocks.remove).not.toHaveBeenCalled();
   await act(async()=>set(w=>closeBrowserTab(w,1,"page01")));expect(mocks.remove).toHaveBeenCalledWith("/tabs/0123abcd");
 });
+
+it("accepts only timestamped viewed events for the current host receipt",async()=>{
+  await connected();await act(async()=>browser.onEvent({kind:"browser_viewed",data:{tab_id:"v_"+"a".repeat(24),at:"2026-10-13T12:30:00Z",refused:true}}));
+  expect(browser.runtime["1:page01"].viewed).toEqual({at:"2026-10-13T12:30:00Z",refused:true});
+  await render({covered:true});await act(async()=>browser.onEvent({kind:"browser_viewed",data:{tab_id:"not-current",at:"2026-10-13T12:31:00Z",refused:false}}));
+  expect(browser.runtime["1:page01"].viewed?.refused).toBe(true);
+});
+
+it("retains the acknowledged receipt after the permission model catches up",async()=>{
+  await connected();expect(browser.captureIdentity(1,"page01")).not.toBeNull();
+  await act(async()=>browser.see(1,false));
+  expect(browser.captureIdentity(1,"page01")).toMatchObject({local_tab_id:"page01",view_id:"v_"+"a".repeat(24)});
+});
+it("an explicit profile conversion owns allocation before a lazy render can restore",async()=>{
+  await connected();let resume!:FrameRequestCallback;
+  vi.spyOn(window,"requestAnimationFrame").mockImplementation(fn=>{resume=fn;return 1;});
+  let change!:Promise<void>;await act(async()=>{change=browser.profile(1,"private");});
+  await act(async()=>browser.ensure(1,"page01"));
+  await act(async()=>{resume(0);await change;});
+  expect(mocks.write.mock.calls.some(([p])=>p.endsWith("/restore"))).toBe(false);
+  expect(mocks.write).toHaveBeenCalledWith("/tabs/0123abcd/navigate",{url:"https://example.test/"});
+});
+
+it("keeps cleanup failure visible across receipts and lets the owner retry",async()=>{
+  source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd"});await connected();
+  mocks.remove.mockRejectedValueOnce(new Error("busy"));await act(async()=>set(w=>closeBrowserTab(w,1,"page01")));
+  expect(browser.cleanupError).toContain("finish closing");await act(async()=>browser.focus(1));expect(browser.cleanupError).toContain("finish closing");
+  mocks.remove.mockResolvedValue({});await act(async()=>browser.retryCleanup());expect(mocks.remove).toHaveBeenCalledTimes(2);expect(browser.cleanupError).toBe("");
+});

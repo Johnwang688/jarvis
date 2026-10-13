@@ -38,6 +38,8 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   const [profiles,setProfiles]=useState<BrowserProfile[]>([]);
   const [runtime,setRuntime]=useState<Record<string,BrowserRuntime>>({});
   const [error,setError]=useState("");
+  const [cleanupError,setCleanupError]=useState("");
+  const retired=useRef(new Set<string>());
   const [online,setOnline]=useState(false);
   const [focus,setFocus]=useState<{pane:PaneNo|null;seq:number}>({pane:null,seq:0});
   const now=useRef({view,covered,blocked,ports,status,profiles,online,focus});
@@ -45,6 +47,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   const mounted=useRef(true);
   const epoch=useRef(0);
   const work=useRef(new Map<string,object>());
+  const transitions=useRef(new Set<string>());
   const receipts=useRef<BrowserReceipt|null>(null);
   const previous=useRef(view.ws);
   const frontCode=useRef("");
@@ -54,7 +57,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   },[]);
   const [publisher]=useState(()=>new BrowserPublisher(
     (path,method,body,signal)=>browserApi.write<BrowserReceipt>(path.slice(8),body,method,signal),
-    (reply)=>{receipts.current=reply; if(mounted.current)setError("");},
+    (reply,front)=>{frontCode.current=JSON.stringify(front);receipts.current=reply; if(mounted.current)setError("");},
     (text)=>{if(mounted.current)setError(text);},
   ));
   const selectedProfile=useCallback((pane:PaneNo)=>now.current.view.ws.panes[pane-1].browserProfile ?? now.current.profiles[0]?.id ?? null,[]);
@@ -109,25 +112,30 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     mounted.current=true;
     return()=>{mounted.current=false;epoch.current++;refreshNumber.current++;publisher.dispose();work.current.clear();};
   },[publisher]);
-  const orphan=useCallback(async(row:RemoteRow)=>{
-    const refs=now.current.view.ws.panes.flatMap(p=>p.browser?.tabs??[]);
-    if(refs.some(t=>t.remoteTabId===row.tab_id))return;
-    try { await browserApi.remove(`/tabs/${row.tab_id}`); }
-    catch(e) {if(!(e instanceof ApiError && e.status===404) && mounted.current)setError("A Browser tab could not be closed. Retry closing it in this pane.");}
+  const closeRemote=useCallback(async(path:string)=>{
+    const panes=now.current.view.ws.panes;
+    const retained=path.startsWith("/contexts/")?panes.some(p=>p.browserCtx===path.slice(10)):
+      panes.some(p=>p.browser?.tabs.some(t=>t.remoteTabId===path.slice(6)));
+    if(retained){retired.current.delete(path);if(mounted.current&&!retired.current.size)setCleanupError("");return;}
+    try {await browserApi.remove(path);retired.current.delete(path);}
+    catch(e){if(e instanceof ApiError&&e.status===404)retired.current.delete(path);else retired.current.add(path);}
+    if(mounted.current)setCleanupError(retired.current.size?"A Browser session could not finish closing.":"");
   },[]);
+  const retryCleanup=useCallback(async()=>{if(now.current.blocked||!now.current.online)return;await Promise.all([...retired.current].map(closeRemote));},[closeRemote]);
+  const orphan=useCallback(async(row:RemoteRow)=>closeRemote(`/tabs/${row.tab_id}`),[closeRemote]);
   useEffect(()=>{
     const old=previous.current; previous.current=view.ws;
     const handles=new Set(view.ws.panes.flatMap(p=>p.browser?.tabs.map(t=>t.remoteTabId).filter(Boolean)??[]));
     const contexts=new Set(view.ws.panes.map(p=>p.browserCtx).filter(Boolean));
     const goneContexts=new Set(old.panes.map(p=>p.browserCtx).filter((c):c is string=>!!c&&!contexts.has(c)));
-    for(const ctx of goneContexts) void browserApi.remove(`/contexts/${ctx}`).catch(e=>{if(!(e instanceof ApiError&&e.status===404))setError("The Private session could not be closed. Retry its cleanup before opening another.");});
+    for(const ctx of goneContexts) void closeRemote(`/contexts/${ctx}`);
     for(const p of old.panes) for(const t of p.browser?.tabs??[]) if(t.remoteTabId&&!handles.has(t.remoteTabId)&&!goneContexts.has(p.browserCtx??"")) void orphan({tab_id:t.remoteTabId,profile:p.browserProfile??"",ctx:p.browserCtx??null});
-  },[view.ws,orphan]);
+  },[view.ws,orphan,closeRemote]);
 
   const ensure=useCallback(async(pane:PaneNo,id:string,ownerConversion=false)=>{
     const key=tabKey(pane,id); const initial=tab(pane,id); const c=now.current;
     const profile=selectedProfile(pane); const spec=c.view.ws.panes[pane-1];
-    if(!initial || !profile || !allowed(pane) || spec.browser?.active!==id || work.current.has(key))return;
+    if(!initial || !profile || !allowed(pane) || spec.browser?.active!==id || work.current.has(key) || transitions.current.has(key))return;
     const token={}; const era=epoch.current; work.current.set(key,token); patch(key,{busy:true,error:""});
     const current=()=>allowed(pane)&&epoch.current===era&&work.current.get(key)===token&&tab(pane,id)===initial&&selectedProfile(pane)===profile&&now.current.view.ws.panes[pane-1].browser?.active===id;
     let created:RemoteRow|null=null;
@@ -172,8 +180,11 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   },[allowed,publish,publisher]);
   const profile=useCallback(async(pane:PaneNo,value:string)=>{
     if(!allowed(pane))return;
-    now.current.view.setBrowserProfile(pane,value);
-    await frame();
+    const before=now.current.view.ws.panes[pane-1].browser?.active;
+    const key=before?tabKey(pane,before):null;
+    if(key)transitions.current.add(key);
+    try {now.current.view.setBrowserProfile(pane,value);await frame();}
+    finally {if(key)transitions.current.delete(key);}
     const active=now.current.view.ws.panes[pane-1].browser?.active;
     if(active&&allowed(pane)&&selectedProfile(pane)===value)await ensure(pane,active,true);
   },[allowed,ensure,selectedProfile]);
@@ -184,8 +195,10 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
       if(selectedProfile(pane)==="private")throw new Error("Private pages use Remote mode.");
       if(t.url)addressTarget(t.url,now.current.ports,false,"direct");
     }
-    now.current.view.setBrowserRemote(pane,id,{mode,url:t.url});
-    await frame();if(mode==="remote"&&allowed(pane))await ensure(pane,id,true);
+    const key=tabKey(pane,id);transitions.current.add(key);
+    try {now.current.view.setBrowserRemote(pane,id,{mode,url:t.url});await frame();}
+    finally {transitions.current.delete(key);}
+    if(mode==="remote"&&allowed(pane))await ensure(pane,id,true);
   },[allowed,tab,selectedProfile,ensure]);
   const signin=useCallback(async(pane:PaneNo)=>{
     if(!allowed(pane))return;
@@ -232,6 +245,6 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     const binding=receipts.current?.panes.find(p=>p.pane_id===pane)?.tabs.find(t=>t.id===id);
     return binding?{window:WINDOW_ID,pane_id:pane,local_tab_id:id,view_id:binding.view_id}:null;
   },[allowed]);
-  return {profiles,runtime,error,online,covered,captureIdentity,refresh,onEvent,ensure,submit,see,profile,convert,signin,location,history,adopt,focus:focusPane,selectedProfile};
+  return {profiles,runtime,error,cleanupError,retryCleanup,online,covered,captureIdentity,refresh,onEvent,ensure,submit,see,profile,convert,signin,location,history,adopt,focus:focusPane,selectedProfile};
 }
 export type BrowserControl=ReturnType<typeof useBrowser>;

@@ -3129,6 +3129,13 @@ def main():
             # The Browser pane's ports and "keep its own origin" (WP-E), and the rename (BR-3a): a
             # context and a mock of their own, the dev server and the API
             # listener on ephemeral ports of the mock's.
+            from tests.face.hud_v2_remote_check import remote_checks
+            remote_mock = MockDaemon(0).start()
+            try:
+                remote_checks(browser, remote_mock, f"http://127.0.0.1:{remote_mock.port}", check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                remote_mock.stop()
+
             from tests.face.hud_v2_browser_check import browser_checks as browser_origin_checks
             browser_mock = MockDaemon(0).start()
             try:

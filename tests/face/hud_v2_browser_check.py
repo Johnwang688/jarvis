@@ -12,7 +12,7 @@ live daemon, is refused and counted as a failure (`hud_v2_check.guard_live`).
 
 The checks worth keeping, each written to bite:
   - the Browser pane refuses the API listener `/status` reports (and 8405),
-    the HUD's own port, and anything not local; nothing ever reaches the
+    the HUD's own port, and non-HTTP schemes; Direct stays local and nothing reaches the
     mock's API listener;
   - the frame's `sandbox` is exactly `allow-scripts allow-forms`, and exactly
     `allow-scripts allow-forms allow-same-origin` with the switch on — never

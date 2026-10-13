@@ -80,6 +80,7 @@ export function BrowserTab(props: {
     {props.control?<BrowserProfile pane={props.pane as PaneNo} control={props.control} selected={profile}
       see={props.spec?.see!==false} blocked={!!props.blocked} privateEnded={props.spec?.browserPrivateEnded} />:null}
     {props.control?.error?<div className="pad err" data-testid="browser-owner-error">{props.control.error}</div>:null}
+    {props.control?.cleanupError?<div className="pad err" role="status">{props.control.cleanupError} <button disabled={props.blocked||!props.control.online} onClick={()=>void props.control!.retryCleanup()}>Retry closing Browser sessions</button></div>:null}
     <BrowserTabStrip tabs={tabs} active={active} blocked={props.blocked} unseen={props.unseen}
       onActivate={activate} onClose={(id) => { if (!props.blocked) { setFull(false); props.onClose(id); } }}
       onNew={() => {
@@ -181,6 +182,7 @@ function DirectTab(props: {
   const grant = status === "ok" && src ? keptOrigin(props.tab.keepOrigin, src, ports) : null;
   const offer = status === "ok" && src ? judgeKeepOrigin(src, ports) : null;
   const workshopPort = status === "ok" ? ports.workshop : null;
+  const viewed=props.control?.runtime[`${props.pane}:${props.tab.id}`]?.viewed;
   return <div className="tabbody browserpage" data-browser-page={props.tab.id}
     style={props.active ? undefined : { display: "none" }} aria-hidden={!props.active}
     {...(!props.active ? { inert: "" } as Record<string, string> : {})}>
@@ -210,6 +212,7 @@ function DirectTab(props: {
       {props.tab.auto ? <div className="browserauto" data-testid="browser-auto">
         Opened for {props.tab.auto.label} · {browserHost(props.tab.url)}
       </div> : null}
+      {viewed?<div className="small muted" data-testid="browser-viewed">{viewed.refused?"Jarvis look refused":"Jarvis looked"} · {new Date(viewed.at).toLocaleTimeString()}</div>:null}
       {reason && !ownerError ? <div className="pad err" data-testid="browser-refused">{reason}</div> : null}
       {ownerError?<div className="pad err" role="status" data-testid="browser-refused">{ownerError}</div>:null}
     </> : null}
@@ -254,7 +257,7 @@ function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string
     {error||runtime?.error?<div className="pad err" role="status">{error||runtime?.error}</div>:null}
     {runtime?.busy?<div className="pad muted" role="status">Opening Remote page…</div>:null}
     {props.tab.remoteTabId&&control?<RemoteView key={props.tab.remoteTabId} tabId={props.tab.remoteTabId} live={live} blocked={!!props.blocked} zoom={props.zoom??100} projectId={props.projectId}
-      onOwnerFocus={()=>control.focus(pane)} onLocation={(url,title)=>control.location(pane,props.tab.id,props.tab.remoteTabId!,url,title)}
+      onRetry={()=>control.ensure(pane,props.tab.id)} onOwnerFocus={()=>control.focus(pane)} onLocation={(url,title)=>control.location(pane,props.tab.id,props.tab.remoteTabId!,url,title)}
       onPopup={id=>void control.adopt(pane,props.tab.remoteTabId!,id)}
       onAction={what=>{if(what==="address")input.current?.focus();else void action(()=>control.history(pane,props.tab.id,what==="hardReload"?"reload":what));}} />:
       !runtime?.busy?<div className="pad muted">{props.spec?.browserPrivateEnded?"This Private session ended. Choose Private again to start a new session.":"Enter an address to open a Remote page."}</div>:null}
