@@ -10,6 +10,9 @@ merging or deploying. It is not a new authorization to expand product scope.
 `B-UI`, `B-DR`, `B-SOUND`, `B-CLASSIFIER` below. No other remaining implementation
 package is claimed by this team in this map. A saved draft is not an active claim.
 
+**Three voice packages are TAKEN by the Claude team (2026-10-13):** `V0`, `V2`, `V6`.
+Its heavy test jobs wait for a free slot under the shared limit below.
+
 ## How teams coordinate
 
 - **TAKEN**: exclusive implementation ownership. Coordinate shared-file changes
@@ -101,13 +104,13 @@ V-1…V-14. [Full voice plan](2026-10-13-voice-rework.md).
 
 | ID | Feature | Status / owner | Dependencies / acceptance |
 |---|---|---|---|
-| V0 | Measure speaker AEC, Silero/RNNoise/KWS cost, local STT real-time factor, speaker EER and Smart Turn | **READY — unclaimed** | Synthetic/offline probes can start; actual owner mic/speaker acceptance is a distinct manual gate. Publish CPU/RSS/latency/WER/EER receipts before choosing models or claiming acoustic quality. |
+| V0 | Measure speaker AEC, Silero/RNNoise/KWS cost, local STT real-time factor, speaker EER and Smart Turn | **TAKEN — Claude lead (owner's Claude Code session); implementer Sonnet 5.5 agent** | Branch `claude/voice-v0`, worktree `voice-v0`. Synthetic/offline only: local models, Kokoro-generated speech, no owner voice, no paid or cloud calls. Physical speaker AEC and owner-mic acceptance stay a separate manual gate. Publish CPU/RSS/latency/WER/EER receipts before choosing models or claiming acoustic quality. Claude lead integrates. |
 | V1 | Mic constraints/readback, bounded drop/transcription diagnostics | **INSTALLED — #128** | Existing capture behavior retained. This is observability, not ML VAD, speaker verification or a proven acoustic fix. |
-| V2 | STT deadlines/retries, retained clips, visible errors and sequence ordering | **READY — unclaimed** | Start from installed V1; keep clips for explicit retry and preserve transcript order on delayed replies. Capture code is shared with V3–V5: land sequentially. |
+| V2 | STT deadlines/retries, retained clips, visible errors and sequence ordering | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v2`, worktree `voice-v2`. Start from installed V1; keep clips for explicit retry and preserve transcript order on delayed replies. Capture code is shared with V3–V5: land sequentially. Merges before V6; V6 rebases onto its App/voice-state hunks. Claude lead integrates. |
 | V3 | Dictation steers busy chats; push-to-talk no longer interrupts; continuation window | **WAIT — unclaimed** | V2. Verify busy/idle transitions, owner destination identity and unchanged Ctrl+D gesture. |
 | V4 | AudioWorklet/resampler, uncapped utterance recorder and chunked STT | **WAIT — unclaimed** | V2. Bounded buffering, ordered chunks and long dictation without silent truncation. |
 | V5 | Silero VAD worker, energy fallback and end-of-utterance timers | **WAIT — unclaimed** | V4 + V0 evidence. Test pause/continuation boundaries and degraded-worker fallback. |
-| V6 | Streaming speech core: prose filter, sentence splitting, /say, one-thread player/queue, controls and output separate from mic | **READY — unclaimed** | Separate track from capture; agree App/voice state interfaces with V2 author. Skip code/diffs/tool calls; Web Lock prevents multiple speaking windows. |
+| V6 | Streaming speech core: prose filter, sentence splitting, /say, one-thread player/queue, controls and output separate from mic | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v6`, worktree `voice-v6`. Separate track from capture; App/voice-state boundary agreed inside the Claude team (V2 lands first). Skip code/diffs/tool calls; Web Lock prevents multiple speaking windows. Claude lead integrates. |
 | V7 | One shared queue across every open chat pane, per-thread voices, floor/stale/backlog rules | **WAIT — unclaimed** | V6. Hidden open panes speak; threads in no pane are silent; playback never overlaps. |
 | V8 | Bounded spoken summaries using Haiku tier, fallback, cost/latency measurement | **WAIT — unclaimed** | V6. Resolve the plan's summary-length inconsistencies before freezing acceptance; no new paid probe inherits the completed Browser budget. |
 | V9 | Barge-in, self-voice reference gating and transcript commands | **WAIT — unclaimed** | V5 + V6. Voice must never authorize an approval card; real speaker/headphone checks remain separate from fake audio tests. |
@@ -168,10 +171,9 @@ PR #125 itself adds plans, not the features those plans describe.
 | VEX-UI | Broad VEX view redesign | **DEFERRED.** The urgent Clean/Build fix is installed. The narrow bug request does not itself expand into a full redesign or authorize real robot operations. |
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 
-Good starting points for another team, after claiming: **V2**, **V6**, **SV-0**,
-**V0** synthetic measurement, or **QA-LOAD**. V2 and V6 are separate logical
-tracks but still need an agreed App/voice-state integration boundary. B-AUTH and
-B-NATIVE have reusable drafts but more shared-file/dependency risk.
+Good starting points for another team, after claiming: **SV-0** or **QA-LOAD**
+(V0, V2 and V6 are now TAKEN by the Claude team). B-AUTH and B-NATIVE have
+reusable drafts but more shared-file/dependency risk.
 
 ## Shared test, review and release contract
 
