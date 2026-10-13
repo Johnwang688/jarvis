@@ -3241,7 +3241,17 @@ onto the allowlist and 4 onto a credential env file DENY), `unwrap_checks`
 and `cost_checks` (42 forms, 60 and 1,000 deep, seven readers, each under
 100 ms); v2 `permissions_check` `runner_checks`; `gitops_check`
 `unnamed_repository_checks`. 16 guard removals each bite in round 1, and 16
-more in the review round.
+more in the review round. **The third delta review of #75** (89074f1): a
+leading `NAME=VALUE`, a reserved word or a function header in front hid a
+wrapper's output file or a runner's here-string shell from the gate-state
+detector (`X=1 time -o <allowlist> … ls` ran unasked under an `ls` entry,
+in modes ask and all); `rules.strip_assignments` and `rules.command_start`
+are now the one reading of a command's first word, `c`/`e` in an option
+cluster carries an unknown program's string (LOW 1), a systemd `Exec…=`
+property is a command line (LOW 2), and `run_readonly` sets only the
+locale and time zone (details in *Program runners* in Safety design;
+`rules_check` `third_delta_review_75_checks`, v2 `permissions_check`
+`third_delta_75_checks`; 7 guard removals bite).
 
 **The Browser's action rules and reviewer, BR-9a (2026-10-12; amendment 1 to
 the Browser plan, §B.3–§B.5, decisions BD-1..BD-4). Pure, and not wired yet:
@@ -5627,6 +5637,43 @@ jarvis/
   first round's claim was not true at 1723b53: `time -o <G>` (H-B) and the
   memo (H-A) were writes that ran unasked; both are DENY now, with every
   shape of the delta review in `rules_check` `delta_review_75_checks`.
+
+  **One reading of a command's first word** (third delta review of #75,
+  89074f1). The gate-state detector's `_peel` left a leading `NAME=VALUE` in
+  the words `_started_touches` reads, so `X=1 time -o <allowlist> -f '…'
+  python3 -V`, `X=1 /usr/bin/time`, `X=1 script -c true <G>`, `X=1
+  systemd-run -p StandardOutput=file:<G>` and `X=1 uv run sh <<< 'cp …
+  <G>'` ran unasked under a `python3`, `ls` or `uv` entry, in modes ask and
+  all (the here-string shape was open at 16675fb too). A reserved word, a
+  `case` pattern or a function header in front (`if true; then time -o <G>
+  ls; fi`, `f() { … }`) was the same hole one word earlier. Now
+  `rules.strip_assignments` (one pattern, `rules.ASSIGNMENT`: `NAME=`,
+  `NAME+=`, `NAME[i]=`; ASCII names only) and `rules.command_start` (the
+  reserved words of `_LEAD_WORDS`, `case … in` and its pattern, `f()`/
+  `function f`, glued parens, and the assignments) are the one place a
+  segment's first word is found: the gate-state detector (`_peel`,
+  `_segment`, a find `-exec` program), the owner-op detector
+  (`_peel_runner`, `_strip_reserved`), the vex reading (`_command_words`),
+  `decide`'s readers (`_judge_started`, `started_commands`), `starts()` and
+  `unwrap`. `D+=…` and `D[0]=…` are tracked as the shell sets them (`D=$HOME;
+  D+=/.config/jarvis; cp x $D/allowlist.json` ran). `command_strings` reads
+  `c`/`e` anywhere in a short-option cluster, both as a glued value and as
+  taking the next word (`uv run mysh -lc '<an owner op>'` was the ALLOW of
+  `uv`; LOW 1). A systemd unit's `Exec…=` property (through `-p`,
+  `--property`, `--socket-/timer-/path-property`) is a command line every
+  reader judges — `starts()` returns it in `strings` and marks it `hidden`,
+  and `decide` asks it whatever it is (LOW 2). And `run_readonly` sets only
+  `LC_*`, `LANG`, `LANGUAGE` and `TZ` with a plain value: `LD_PRELOAD=<a
+  library> ls` ran there on main, ungated. **The cost, stated:** `NAME+=V
+  cmd` and `NAME[i]=V cmd` are judged as `X=1 cmd` always was — the only
+  lines looser than 89074f1 — and `X=1 ls`/`env FOO=1 ls` no longer run in
+  `run_readonly`. **Recorded, not changed:** `decide` judges an assignment
+  in front of a command as the command, as on main, so `LD_PRELOAD=./x.so
+  ls`, `PAGER=…` or `NODE_OPTIONS=…` before an ALLOW stem is that stem's
+  ALLOW (the stem rule's reasoning: `make`, `npm test` and `python3 x.py`
+  already run code); a quoted assignment (`"X=1" ls`, which bash runs as a
+  program named `X=1`) is read as an assignment; and an entry for
+  `systemd-run` covers what its `Exec…=` properties run, by the stem rule.
 
   **A reader hazard is a certain write only of what it writes** (same day,
   PR #24's follow-up 1). Any hazard used to make every operand a certain
