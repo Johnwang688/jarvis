@@ -425,10 +425,11 @@ def _two_turns_checks(page, mock, check, until):
     # Every event kind for pane 2's thread lands in pane 2.
     mock.emit("turn_started", {}, thread_id="t2")
     mock.emit("tool_started", {"call_id": "c2", "name": "grep_files"}, thread_id="t2")
-    until(lambda: page.locator(_pane(2, '[data-testid="op"]')).count() > 0, timeout=3)
-    check("tool_started: pane 2's ticker, not pane 1's",
-          "grep_files" in page.locator(_pane(2, '[data-testid="ops"]')).inner_text()
-          and page.locator(_pane(1, '[data-testid="op"]')).count() == 0)
+    until(lambda: page.locator(_pane(2, '[data-testid="tool-group"]')).count() > 0, timeout=3)
+    page.locator(_pane(2, '[data-testid="tool-group"]')).last.click()
+    check("tool_started: pane 2's transcript, not pane 1's",
+          "grep_files" in page.locator(_pane(2, '[data-testid="tool-call"]')).last.inner_text()
+          and page.locator(_pane(1, '[data-testid="tool-group"]')).count() == 0)
     check("and pane 2's own status says what it runs — on the orb, pane 2 being the selected chat",
           "RUNNING · grep_files" in _chat(page, 2)["status"]
           and "grep_files" in page.locator('[data-testid="orb-status"]').inner_text().lower()
@@ -438,8 +439,8 @@ def _two_turns_checks(page, mock, check, until):
           "responding" in page.locator(_pane(1, '[data-testid="pane-status"]')).inner_text().lower(),
           page.locator(_pane(1, '[data-testid="pane-status"]')).inner_text())
     mock.emit("tool_finished", {"call_id": "c2", "name": "grep_files", "ok": True}, thread_id="t2")
-    until(lambda: "done" in page.locator(_pane(2, '[data-testid="ops"]')).inner_text(), timeout=3)
-    check("tool_finished: marked done in pane 2", "running" not in page.locator(_pane(2, '[data-testid="ops"]')).inner_text())
+    until(lambda: page.locator(_pane(2, '[data-testid="tool-call"]')).last.get_attribute("data-status") == "ok", timeout=3)
+    check("tool_finished: marked ok in pane 2", page.locator(_pane(2, '[data-testid="tool-call"]')).last.get_attribute("data-status") == "ok")
     mock.emit("text_delta", {"text": "two is "}, thread_id="t2")
     until(lambda: page.locator(_pane(2, '[data-testid="draft"]')).count() > 0, timeout=3)
     check("text_delta: pane 2's draft, pane 1's left as it was",
@@ -1060,7 +1061,7 @@ def _rv_transcript_race_checks(page, mock, check, until):
     _open(page, until, 1, "t3", "p2")
     _open(page, until, 2, "t2")
     held = []
-    page.route("**/threads/t1/transcript", lambda r: held.append(r))
+    page.route("**/threads/t1/transcript*", lambda r: held.append(r))
     try:
         _focus(page, until, 1)
         _choose(page, until, "single")
@@ -1073,7 +1074,7 @@ def _rv_transcript_race_checks(page, mock, check, until):
         time.sleep(0.2)
         held[0].continue_()
     finally:
-        page.unroute("**/threads/t1/transcript")
+        page.unroute("**/threads/t1/transcript*")
     time.sleep(0.8)
     log1 = _log(page, 1)
     check("review: a late transcript never lands in a pane that moved on (swap)",
@@ -1086,7 +1087,7 @@ def _rv_transcript_race_checks(page, mock, check, until):
 
     _fresh(page, mock, until, SINGLE)
     held = []
-    page.route("**/threads/t1/transcript", lambda r: held.append(r))
+    page.route("**/threads/t1/transcript*", lambda r: held.append(r))
     try:
         _expand(page, until, "p1", "thread-t1")
         page.locator('[data-testid="thread-t1"]').click()
@@ -1095,7 +1096,7 @@ def _rv_transcript_race_checks(page, mock, check, until):
         until(lambda: "second thread question" in _log(page, 1), timeout=3)
         held[0].continue_()
     finally:
-        page.unroute("**/threads/t1/transcript")
+        page.unroute("**/threads/t1/transcript*")
     time.sleep(0.6)
     check("review: one pane — a late transcript for the thread it left does not overwrite the one it shows",
           "what is the plan" not in _log(page, 1) and "second thread question" in _log(page, 1), _log(page, 1)[:80])
@@ -1720,7 +1721,7 @@ LINE_JS = """(n) => {
     anims: [outer, inner, core].map((c) => c ? c.animationName : null),
     still: orb ? orb.classList.contains('still') : null, inLog: !!el.closest('[data-testid="log"]'),
     afterLog: !!(el.previousElementSibling && el.previousElementSibling.matches('[data-testid="log"]')),
-    beforeOps: !!(el.nextElementSibling && el.nextElementSibling.matches('[data-testid="ops"]')),
+    aboveInput: !!(el.parentElement.nextElementSibling && el.parentElement.nextElementSibling.querySelector('[data-testid="input"]')),
     canvas: el.querySelectorAll('canvas').length, svg: el.querySelectorAll('svg').length,
     role: w ? w.getAttribute('role') : null, timeRole: t ? t.getAttribute('role') : null,
     ariaHidden: orb ? orb.getAttribute('aria-hidden') : null,
@@ -1795,8 +1796,8 @@ def _thinking_pane_checks(page, mock, check, until):
     check("thinking: a turn in pane 2 shows the mini orb and 'Thinking…' there",
           first["word"] == "Thinking…" and first["svg"] == 1 and first["kind"] == "thinking", str(first))
     check("thinking: and nothing in pane 1", _line(page, 1) is None, str(_line(page, 1)))
-    check("thinking: under the transcript — after the log's scroller, before the ticker, outside the log",
-          first["afterLog"] and first["beforeOps"] and not first["inLog"], str(first))
+    check("thinking: under the transcript — after the log's scroller, above the input bar, outside the log",
+          first["afterLog"] and first["aboveInput"] and not first["inLog"], str(first))
     t0 = _secs(first["time"])
     time.sleep(2.2)
     t1 = _secs(_line(page, 2)["time"])
@@ -2076,7 +2077,8 @@ def _thinking_box_cap_checks(page, mock, check, until):
     z = 1.6
     ws = json.loads(D_SINGLE)
     ws["panel"] = {"open": True, "height": 120}
-    d_fresh(page, mock, until, json.dumps(ws), size=(1920, 700), zoom="160")
+    # Keep the min-log term tighter than 35% after removing the tool ticker.
+    d_fresh(page, mock, until, json.dumps(ws), size=(1920, 660), zoom="160")
     _open(page, until, 1, "t1")
     box = _box(page, 1)
     box.click()
@@ -2165,9 +2167,9 @@ def _eight_chats_checks(page, mock, check, until):
           and stop[7].count() == 1 and all(stop[n].count() == 0 for n in range(1, 9) if n != 7)
           and all(not _chat(page, n)["busy"] for n in range(1, 9) if n != 7))
     mock.emit("tool_started", {"call_id": "c7", "name": "pytest"}, thread_id="e7")
-    until(lambda: page.locator(_pane(7, '[data-testid="op"]')).count() > 0, timeout=3)
+    until(lambda: page.locator(_pane(7, '[data-testid="tool-group"]')).count() > 0, timeout=3)
     check("and its tool call ticks in pane 7 only",
-          all(page.locator(_pane(n, '[data-testid="op"]')).count() == 0 for n in range(1, 9) if n != 7))
+          all(page.locator(_pane(n, '[data-testid="tool-group"]')).count() == 0 for n in range(1, 9) if n != 7))
 
     mock.emit("turn_started", {}, thread_id="e8")
     until(lambda: _chat(page, 8)["busy"], timeout=3)

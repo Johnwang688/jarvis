@@ -354,16 +354,17 @@ def _cap_checks(page, mock, check, until):
 
 def _min_log_checks(page, mock, check, until):
     """The conversation's minimum (coordinator, after #28's bottom panel): at
-    1920x700 and 160% with the panel open the pane is short, and 35% of it
-    still left the log 36px. The box now also stops where the pane, less its
-    fixed parts, would leave the log under max(96px, 30%) — but never under two
+    1920x660 and 160% with the panel open the pane is short enough that the
+    min-log term is tighter than 35% even without the tool ticker. The box
+    stops where the pane, less its fixed parts, would leave the log under
+    max(96px, 30%) — but never under two
     lines. Killed by dropping the min-log term from InputBar's cap."""
     z = 1.6
     for panel_h, where in ((None, "the bottom panel at its default height (the pane at its 200px minimum)"),
                            (120, "the bottom panel at its smallest")):
         ws = json.loads(SINGLE)
         ws["panel"] = {"open": True, "height": panel_h or 260}
-        _fresh(page, mock, until, json.dumps(ws), size=(1920, 700), zoom="160")
+        _fresh(page, mock, until, json.dumps(ws), size=(1920, 660), zoom="160")
         until(lambda: _visible(page, '[data-testid="panel"]'), timeout=3)
         _type_long(page, 1)
         p = _box_parts(page, 1)
@@ -376,15 +377,15 @@ def _min_log_checks(page, mock, check, until):
         detail = (f"pane {pane / z:.0f} fixed {fixed / z:.0f} box {box / z:.0f} log {log / z:.0f} "
                   f"(min {min_log / z:.0f}, two lines {two / z:.0f}) zoomed px")
         for name in ("send", "attach", "project", "model"):
-            check(f"review #29 F2: 1920x700 at 160%, {where}, 40 lines typed: {name} is wholly inside the pane",
+            check(f"review #29 F2: 1920x660 at 160%, {where}, 40 lines typed: {name} is wholly inside the pane",
                   _inside(p[name], p["pane"]), f"{p[name]} in {p['pane']}")
         if fits:
-            check(f"review #29 F2: 1920x700 at 160%, {where}, 40 lines typed: the log keeps at least its minimum,"
+            check(f"review #29 F2: 1920x660 at 160%, {where}, 40 lines typed: the log keeps at least its minimum,"
                   " max(96px, 30% of the pane)", log >= min_log - 1 and p["scrolls"], detail)
             check("setup: and there it is the min-log term that stops the box, not 35%",
                   box < SHARE * pane - 2, detail)
         else:
-            check(f"review #29 F2: 1920x700 at 160%, {where}, 40 lines typed: the pane cannot fit the log's"
+            check(f"review #29 F2: 1920x660 at 160%, {where}, 40 lines typed: the pane cannot fit the log's"
                   " minimum, so the box stops at two lines and scrolls and the log keeps the rest",
                   abs(box - two) <= 1.5 and p["scrolls"] and log >= pane - fixed - two - 1, detail)
         page.locator(_pane(1, '[data-testid="input"]')).fill("")
