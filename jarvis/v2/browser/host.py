@@ -1067,7 +1067,7 @@ class BrowserHost:
             with self._lock:
                 self._guarded += 1
             LOG.info("Browser landing guard replaced a page (%s)", refusal.reason)
-            asyncio.ensure_future(self._replace(tab))
+            asyncio.ensure_future(self._replace(tab, tab.document_generation))
             return
         # A new page has no chooser open any more.
         if tab.chooser is not None:
@@ -1102,12 +1102,23 @@ class BrowserHost:
             return
         self._located(tab, url=tab.page.url, title=title)
 
-    async def _replace(self, tab: _Tab) -> None:
-        try:
-            await tab.page.goto("about:blank", timeout=NAV_TIMEOUT_S * 1000)
-            await tab.page.set_content(EXPLANATION, timeout=NAV_TIMEOUT_S * 1000)
-        except Exception:  # noqa: BLE001 - a closed page has nothing to replace
-            pass
+    async def _replace(self, tab: _Tab, generation: int) -> None:
+        # Scheduled, never awaited by a navigation holding this lock. A failed
+        # landing may queue its guard just before the owner's next navigation;
+        # it must not blank the newer document when it finally gets CPU.
+        async with self._launching.setdefault(tab.profile, asyncio.Lock()):
+            if self._tabs.get(tab.id) is not tab or tab.document_generation != generation:
+                return
+            try:
+                await tab.page.goto("about:blank", wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
+                # Main-frame commit increments the generation once. A close or
+                # another landing while goto waited invalidates the explanation.
+                if (self._tabs.get(tab.id) is not tab or tab.document_generation != generation + 1
+                        or tab.page.url != "about:blank"):
+                    return
+                await tab.page.set_content(EXPLANATION, timeout=NAV_TIMEOUT_S * 1000)
+            except Exception:  # noqa: BLE001 - a closed page has nothing to replace
+                pass
 
     # -- tabs (thread-safe entry points) ------------------------------------------------
 

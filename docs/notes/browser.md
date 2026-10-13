@@ -1064,6 +1064,11 @@ same-URL reloads before the next report. Snapshot URL/source stay memory-only;
 `browser_viewed` carries only a host-issued view ID, timestamp and refusal flag.
 This registry commit does not yet supply Remote UI or a browser-reading tool.
 
+## Current Remote restore and landing replacement (BR3b, 2026-10-13)
+
+Stored persistent Remote tabs allocate a blank tab and use the owner-only `POST /browser/tabs/<id>/restore {url}` route. It calls `navigate(owner=False)`: restoring state cannot open the shared local-server gate. A live stored handle reattaches without navigation; expired Private state never replays a saved URL. Actual address entry continues through the pane registry transaction and may open the ordinary owner navigation lease.
+
+The landing guard captures the offending document generation when scheduling its explanation. The queued replacement takes the same per-profile lifecycle lock as owner navigation, checks the original tab/generation before navigating, then checks tab/generation/about:blank again before setting explanation content. It cannot blank a newer owner document or write into a page closed during replacement. This is scheduled work; callers never await it while holding the same lock.
 ## Current read-only Browser look (2026-10-13, BR5)
 
 `hud_browser_view(pane="", whole_page=False)` is an explicit HUD owner-chat
@@ -1116,3 +1121,14 @@ page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
 background tasks, workflows, subagents or default session tools. This backend
 package does not establish the pending BR3b UI or BR6 session/MCP interface,
 real account authentication, a live-provider call or deployment verification.
+
+
+## Current owner Remote Browser UI (BR3b, 2026-10-13)
+
+The Browser strip retains Direct tabs and adds Remote tabs backed by the owner host. Public HTTP(S) address entry chooses Remote; loopback defaults to Direct, with explicit mode conversion. Profile is per pane; mode is per tab. Jarvis can see defaults on and persists an explicit off across navigation, profile changes and copies. Agents may drive stays disabled. Private is always Remote, with one new off-record context for each copied pane; Private URLs, titles and origin grants are omitted from stored workspace state. An ended Private context never replays a stored page.
+
+One ordered publisher uses the shared live SSE window identity for front reports, permission changes and owner address transactions. Layout/Settings/visibility changes revoke a slow address immediately with a newer sequence; confirmed mutation receipts remain current when React catches up. Only successful explicit address entry clears source restrictions. Default profile discovery preserves existing handles, while explicit profile conversion reserves allocation ahead of lazy restore. Restored persistent pages use the non-owner restore route; existing handles reattach without navigation. Failed host cleanup remains visible with an owner retry action.
+
+Each visible active Remote stream consumes a fresh ticket and owns its decode/input generation. Hidden, covered and disconnected streams close while retained handles stay. Approval and annotation blocking stop all page input, clipboard cuts, paste/IME and file/dialog actions without interrupting incoming frames. Unsolicited selection cannot write the local clipboard; cut follows a successful owner clipboard write only. Page dialogs are plain text and never autofocus. Uploads send selected project/path references, and downloads save only on an owner gesture; interrupted late responses cannot create a local save.
+
+Profile controls expose creation, rename, Chrome sign-in, confirmed clearing and deletion through the owner routes. The HUD states Chrome's basic password store and possible sync limitations. This package does not enable agent driving or prove a real account sign-in. BR4 adds capture/annotation controls separately; its identity getter uses the exact current host receipt, not stream pixels.

@@ -11,7 +11,7 @@ export function browserFrames(previous: BrowserFrames, ws: Workspace, drawn: rea
   const valid = new Set<string>(), active: string[] = [], foreground: string[] = [];
   ws.panes.forEach((p, i) => {
     if (p.view !== "browser" || !p.browser) return;
-    for (const t of p.browser.tabs) if (t.url) valid.add(frameKey(i + 1, t.id));
+    for (const t of p.browser.tabs) if (t.url && t.mode !== "remote" && p.browserProfile !== "private") valid.add(frameKey(i + 1, t.id));
     const key = frameKey(i + 1, p.browser.active);
     if (!valid.has(key)) return;
     active.push(key);
