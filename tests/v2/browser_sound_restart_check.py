@@ -146,6 +146,55 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.host._tabs),{old.id});self.assertTrue(popups[0].closed)
         self.assertIsNot(self.host._tabs[old.id].page,popups[0])
 
+    async def test_revocation_blocks_new_allocation_and_popup_adoption_until_quiet_launch(self):
+        for last_close in (False,True):
+            with self.subTest(last_tab_close=last_close):
+                # Freeze reconcile to expose the launch-mode revocation gap.
+                self.host._tabs.clear();self.sound._requests.add(self.profile)
+                self.old.closing=False;self.old.audio=A.InstanceAudio(True)
+                self.host._profiles.require=Mock()
+                old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+                if last_close:await self.host._close_tab(old.id)
+                else:await self.sound.change(old.id,False)
+                self.assertTrue(self.old.audio.applied);self.assertFalse(self.sound.preference(self.profile)[0])
+                before=list(self.context.pages)
+                with self.assertRaises(H.BrowserRefused) as refused:
+                    await self.host._open_tab_locked(self.profile,None,None,owner=False,signin=False)
+                self.assertEqual(refused.exception.status,409);self.assertEqual(self.context.pages,before)
+                with self.assertRaises(H.BrowserRefused):
+                    await self.host._open_page_locked(self.old,None,None,owner=False,signin=False)
+                popup=Page('https://popup.test/');self.context.pages.append(popup)
+                self.assertIsNone(self.host._adopt(self.old,popup,None))
+                self.assertFalse(any(t.page is popup for t in self.host._tabs.values()))
+                await asyncio.gather(*self.old.popup_cleanup);await asyncio.sleep(0)
+                self.assertTrue(popup.closed)
+                # Native stream mute does not change immutable launch mode.
+                epoch=self.old.audio.begin_mute();self.old.audio.finish_mute(epoch)
+                with self.assertRaises(H.BrowserRefused):
+                    await self.host._open_tab_locked(self.profile,None,None,owner=False,signin=False)
+                # The structurally quiet replacement can allocate again.
+                self.old.audio=A.InstanceAudio(False)
+                row=await self.host._open_tab_locked(self.profile,None,None,owner=False,signin=False)
+                self.assertIn(row['tab_id'],self.host._tabs)
+
+    async def test_off_during_new_page_wait_refuses_returned_page(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.old.audio=A.InstanceAudio(True);self.host._profiles.require=Mock()
+        entered=asyncio.Event();release=asyncio.Event();created=[]
+        real=self.context.new_page
+        async def blocked():
+            entered.set();await release.wait()
+            page=await real();created.append(page);return page
+        self.context.new_page=blocked
+        job=asyncio.create_task(self.host._open_tab(self.profile,None,None))
+        await entered.wait();await self.sound.change(old.id,False);release.set()
+        with self.assertRaises(H.BrowserRefused) as refused:await job
+        self.assertEqual(refused.exception.status,409)
+        self.assertEqual(set(self.host._tabs),{old.id})
+        await asyncio.gather(*self.old.popup_cleanup);await asyncio.sleep(0)
+        self.assertTrue(created[0].closed)
+        self.assertFalse(any(t.page is created[0] for t in self.host._tabs.values()))
+
     async def test_popup_flood_while_new_page_waits_is_bounded_and_fails_replacement(self):
         old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
         entered=asyncio.Event();release=asyncio.Event();popups=[]
@@ -175,20 +224,22 @@ class Restart(unittest.IsolatedAsyncioTestCase):
 
     async def test_restore_navigation_cannot_publish_or_attach_a_partial_page(self):
         old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
-        real=self.host._goto
+        real=self.host._goto;admissions=[]
         self.host._running=lambda:True
         async def goto(tab,*args,**kwargs):
             instance=self.host._instances[self.profile]
-            self.assertTrue(instance.restoring)
-            self.host._publish_pane_tabs();self.assertIsNone(self.host.pane_tab(tab.id))
-            with self.assertRaises(H.BrowserRefused) as refused:self.host.ticket(tab.id)
-            self.assertEqual(refused.exception.status,409)
+            self.host._publish_pane_tabs();published=self.host.pane_tab(tab.id)
+            ticket_refused=False
+            try:self.host.ticket(tab.id)
+            except H.BrowserRefused as refused:ticket_refused=refused.status==409
             sock=Mock()
             with patch.object(H,'_serve_stream') as serve:
-                self.host.serve_socket(tab.id,sock,expected_tab=tab);serve.assert_not_called()
-            sock.close.assert_called_once()
+                self.host.serve_socket(tab.id,sock,expected_tab=tab)
+                admissions.append((instance.restoring,published is None,ticket_refused,
+                                   sock.close.call_count==1,serve.called))
             return await real(tab,*args,**kwargs)
         self.host._goto=goto;await self.run_restart()
+        self.assertEqual(admissions,[(True,True,True,True,False)])
         new=self.host._tabs[old.id]
         self.assertFalse(self.host._instances[self.profile].restoring)
         self.assertTrue(new.pane_ready);self.assertEqual(new.page.gotos,['https://example.test/synthetic'])

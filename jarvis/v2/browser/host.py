@@ -1096,7 +1096,7 @@ class BrowserHost:
             self._profiles.require(profile)
         found = self._instances.get(profile)
         if found is not None:
-            if found.closing:
+            if found.closing or self._sound_allocation_blocked(found):
                 raise BrowserRefused(409, "the Browser is changing its sound setting; retry from its Remote pane")
             if found.idle is not None:
                 found.idle.cancel()
@@ -1212,6 +1212,8 @@ class BrowserHost:
         except Exception:  # noqa: BLE001 - the PID backstop follows
             LOG.warning("A Browser Chrome did not close cleanly")
         await asyncio.get_running_loop().run_in_executor(None, stop_pids, instance.folder)
+        if instance.popup_cleanup:
+            await asyncio.gather(*instance.popup_cleanup, return_exceptions=True)
         await self._settle_downloads(profile)
         if profile == PRIVATE:
             _remove_tree(instance.folder, strict=True)
@@ -1222,6 +1224,11 @@ class BrowserHost:
             self._look_reserved.clear()
         self._closing_instances.pop(profile, None)
         self._publish_snapshot()
+
+    def _sound_allocation_blocked(self, instance: _Instance) -> bool:
+        # Owned stream mute cannot silence streams a new page might create.
+        # Only structurally quiet launch mode permits allocation after OFF.
+        return instance.audio.applied and not self._sound.preference(instance.profile)[0]
 
     def _adopt(self, instance: _Instance, page, ctx: str | None, *, logical_id=None, restart_token=None):
         """Register a page as a tab (a page we opened, or a pop-up), with the
@@ -1236,8 +1243,27 @@ class BrowserHost:
         if self._instances.get(instance.profile) is not instance or instance.closing or self._stopped:
             # Restoration teardown owns overflow pages; never allocate a task
             # per popup after that bounded replacement has been retired.
-            if not instance.restoring:
+            if not instance.restoring and not instance.closing:
                 asyncio.ensure_future(self._refuse_popup(page))
+            return None
+        if self._sound_allocation_blocked(instance):
+            if page not in instance.refused_pages:
+                if len(instance.unadopted) + len(instance.refused_pages) < self._tab_cap():
+                    instance.refused_pages.append(page)
+                    task = asyncio.create_task(asyncio.wait_for(page.close(), CLOSE_TIMEOUT_S))
+                    instance.popup_cleanup.append(task)
+                    def settled(done):
+                        if not done.cancelled():
+                            done.exception()
+                        if done in instance.popup_cleanup:
+                            instance.popup_cleanup.remove(done)
+                        if page in instance.refused_pages:
+                            instance.refused_pages.remove(page)
+                        self._sound.wake()
+                    task.add_done_callback(settled)
+                else:
+                    instance.closing = True
+                    self._sound.wake()
             return None
         if instance.restoring:
             if logical_id is None:
@@ -1584,6 +1610,8 @@ class BrowserHost:
     async def _open_page_locked(self, instance: _Instance, ctx, url, *, owner, signin):
         profile = instance.profile
         cap = max(1, config.BROWSER_TAB_CAP)
+        if self._sound_allocation_blocked(instance):
+            raise BrowserRefused(409, "Browser sound is turning off; wait for its Remote pane to finish")
         if profile == PRIVATE:
             if ctx is None:
                 ctx = self._new_id(instance.private_contexts)
