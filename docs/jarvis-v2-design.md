@@ -2255,7 +2255,14 @@ Free suites: `tests/v2/
 frame_check.py` (every route family on both listeners, checked against the
 route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` (now `browser.test.ts` and `hud_v2_browser_check.py`, BR-3a) and
 the terminal suite's link section. Not yet: a "dev servers in your
-terminals" list (§2.5 item 5).
+terminals" list (§2.5 item 5). **No framed page takes the keyboard on its
+own** (2026-10-12, R-1, AO-2's guard): a Browser frame that gains focus
+without the owner's gesture (the pointer over it, Tab, their own load, a
+card's give-back) is removed at once, focus goes back only to the HUD element
+that lost it to that theft (else to nothing that types or sends), and the
+pane says "This page took the keyboard · Reload" — always under a card or
+from a hidden pane. While a HUD text control has the keyboard, only a click on
+a page gives it the keyboard (the first click only focuses it).
 
 **Dev servers announced in a terminal (2026-10-12, BR-8a of
 `docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1; decisions

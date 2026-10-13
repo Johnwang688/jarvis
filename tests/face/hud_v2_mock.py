@@ -577,6 +577,51 @@ document.getElementById("origin").textContent = String(self.origin);
 </script>
 """
 
+# Dev pages that take the keyboard by themselves (R-1; amendment 2 §H AO-2).
+# Each logs every key it receives to its own server (`/keys`, an image
+# request, which a sandboxed page can always make), and the mock counts them
+# (`dev_keys`): a key the page never got is a key the HUD kept.
+#   /focus-mount  focuses its input as it is parsed, React-style on mount;
+#   /focus-timer  calls window.focus() and its input's focus() every `every`
+#                 ms (400), starting `after` ms (0) after it loads;
+#   /focus-load   focuses once on its `load` event;
+#   /focus-none   never focuses itself (it only logs keys; `grab()` from a test);
+#   /focus-pointer grabs on the first pointer event it sees (move, over, wheel);
+#   /focus-reload reloads itself every 400 ms and grabs once, `grab` ms (4000)
+#                 after its first load (`t0` rides in the query).
+# `?delay=N` holds the response N ms (at most 5000), so a page can arrive
+# while the owner is typing.
+FOCUS_PAGE = """<!doctype html><meta charset="utf-8"><title>mock focus page</title>
+<h1>focus page</h1><input id="i" aria-label="page input"><p id="mode">%(mode)s</p>
+<script>
+const q = new URLSearchParams(location.search);
+let n = 0;
+document.addEventListener("keydown", (e) => {
+  n += 1;
+  new Image().src = "/keys?p=" + encodeURIComponent(location.pathname + location.search) + "&n=" + n + "&k=" + encodeURIComponent(e.key);
+}, true);
+const grab = () => { window.focus(); document.getElementById("i").focus(); };
+const mode = %(mode_js)s;
+if (mode === "focus-mount") grab();
+if (mode === "focus-load") window.addEventListener("load", grab);
+if (mode === "focus-timer") window.addEventListener("load", () => {
+  setTimeout(() => { grab(); setInterval(grab, Number(q.get("every") || 400)); }, Number(q.get("after") || 0));
+});
+if (mode === "focus-pointer") {
+  let done = false;
+  const once = () => { if (!done) { done = true; grab(); } };
+  for (const t of ["pointermove", "pointerover", "mousemove", "wheel"]) addEventListener(t, once, true);
+}
+if (mode === "focus-reload") {
+  const t0 = Number(q.get("t0") || Date.now());
+  if (Date.now() - t0 >= Number(q.get("grab") || 4000)) grab();
+  else setTimeout(() => {
+    const u = new URL(location.href); u.searchParams.set("t0", String(t0)); location.replace(u.toString());
+  }, 400);
+}
+</script>
+"""
+
 
 class MockDaemon:
     """The mock server plus the calls it recorded, for the test to assert on."""
@@ -1311,6 +1356,25 @@ class MockDaemon:
             def do_GET(self):
                 mock.dev_hits.append(self.path)
                 body = DEV_PAGE.encode()
+                route, _, query = self.path.partition("?")
+                if route == "/keys":
+                    # A key a focus page received (FOCUS_PAGE): counted, never shown.
+                    mock.dev_keys.append(self.path)
+                    self.send_response(204)
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return
+                if route in ("/focus-mount", "/focus-timer", "/focus-load", "/focus-none", "/focus-pointer",
+                             "/focus-reload"):
+                    args = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+                    try:
+                        delay = min(max(int(args.get("delay", "0")), 0), 5000)
+                    except ValueError:
+                        delay = 0
+                    if delay:
+                        time.sleep(delay / 1000)
+                    mode = route[1:]
+                    body = (FOCUS_PAGE % {"mode": mode, "mode_js": json.dumps(mode)}).encode()
                 if self.path.startswith("/to-workshop"):
                     # A dev page that sends its own frame to the workshop: the
                     # frame keeps the sandbox flags it was given, so with
@@ -1326,6 +1390,7 @@ class MockDaemon:
                 self.wfile.write(body)
 
         self.dev_hits: list[str] = []
+        self.dev_keys: list[str] = []
         self.dev = ThreadingHTTPServer(("127.0.0.1", 0), Dev)
         self.dev.daemon_threads = True
         self.dev_port = self.dev.server_address[1]
