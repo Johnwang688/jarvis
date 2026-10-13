@@ -1400,14 +1400,17 @@ class Backend(unittest.TestCase):
             self.assertEqual(windows[1]["used_percent"], 12.0)
             self.assertNotIn("opus", rendered)
             # A 429 keeps the last good reading rather than blanking the meters.
+            # Expire relative to the monotonic origin, including soon after boot.
             ledger = self.daemon.router.ledger
-            ledger._claude_quota_at = 0
-            with patch.object(H, "fetch_claude_usage", side_effect=H.ClaudeUsageUnavailable("429")):
+            ledger._claude_quota_at = H.time.monotonic() - H.CLAUDE_USAGE_TTL_S - 1
+            with patch.object(H, "fetch_claude_usage", side_effect=H.ClaudeUsageUnavailable("429")) as fetch:
                 self.assertEqual(ledger.quota("claude")["windows"][0]["used_percent"], 74.0)
+                fetch.assert_called_once_with(token)
             # A 401 is a dead login: null, not yesterday's numbers.
-            ledger._claude_quota_at = 0
-            with patch.object(H, "fetch_claude_usage", return_value=None):
+            ledger._claude_quota_at = H.time.monotonic() - H.CLAUDE_USAGE_TTL_S - 1
+            with patch.object(H, "fetch_claude_usage", return_value=None) as fetch:
                 self.assertIsNone(ledger.quota("claude"))
+                fetch.assert_called_once_with(token)
         # No credential file, no call.
         called = []
         with patch.object(H, "fetch_claude_usage", lambda got: called.append(got)):

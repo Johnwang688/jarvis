@@ -2477,10 +2477,13 @@ class TooComplex(Base):
             {"tool": "run_command", "prefix": p} for p in ("ls", "echo", "./v" + "[" * 20000)]))
         for label, line in self.FLOODS.items():
             with self.subTest(label):
-                started = time.perf_counter()
+                # Parser work is synchronous; also check elapsed wall time when it returns.
+                wall = time.perf_counter()
+                started = time.thread_time()
                 verdict = rules.decide(line)
-                took = time.perf_counter() - started
-                self.assertLess(took, 1.0, f"{label}: {took:.2f} s")
+                took = time.thread_time() - started
+                self.assertLess(time.perf_counter() - wall, 20.0, f"{label}: elapsed wall limit")
+                self.assertLess(took, 1.0, f"{label}: {took:.2f} CPU s")
                 if label in ("${",):
                     continue                    # no glob in it: as on main
                 self.assertEqual(verdict.decision, rules.ASK, label)
@@ -2498,9 +2501,12 @@ class TooComplex(Base):
                             ("brackets that close", "x = " + "[ab]" * 20000 + "\n")):
             with self.subTest(label):
                 (folder / "vex" / "big.mk").write_text(text)
-                started = time.perf_counter()
+                # Parser work is synchronous; also check elapsed wall time when it returns.
+                wall = time.perf_counter()
+                started = time.thread_time()
                 reason = vex.makefile_refusal(folder)
-                self.assertLess(time.perf_counter() - started, 1.0, label)
+                self.assertLess(time.thread_time() - started, 1.0, label)
+                self.assertLess(time.perf_counter() - wall, 20.0, f"{label}: elapsed wall limit")
                 self.assertIsNotNone(reason, label)
                 self.assertIn("too complex", reason)
         self.assertEqual(vex.cli(["build"], cwd=str(folder), out=io.StringIO()), 2)
