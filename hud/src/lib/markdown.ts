@@ -13,6 +13,7 @@
 
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
+import { installMath, mathRender, restoreMath } from "./markdownMath";
 
 const md = new MarkdownIt({
   html: false, // never pass raw HTML through
@@ -20,6 +21,8 @@ const md = new MarkdownIt({
   breaks: true,
   typographer: false,
 });
+
+installMath(md);
 
 const ALLOWED_TAGS = [
   "p", "br", "strong", "em", "s", "del", "code", "pre", "blockquote",
@@ -45,7 +48,8 @@ export function safeHref(href: string | null): string | null {
 
 /** Sanitized HTML for `text`. Anchors are already scheme-checked. */
 export function renderMarkdown(text: string): string {
-  const dirty = md.render(text ?? "");
+  const math = mathRender();
+  const dirty = md.render(text ?? "", math);
   const clean = DOMPurify.sanitize(dirty, {
     ALLOWED_TAGS,
     ALLOWED_ATTR: ["href", "title", "align"],
@@ -67,6 +71,8 @@ export function renderMarkdown(text: string): string {
     a.setAttribute("target", "_blank"); // the HUD itself never navigates
     a.setAttribute("rel", "noopener noreferrer");
   }
+
+  restoreMath(clean, math);
 
   const host = document.createElement("div");
   host.appendChild(clean);
