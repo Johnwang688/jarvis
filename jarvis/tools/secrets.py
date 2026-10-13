@@ -889,8 +889,6 @@ def _values_in(path: Path) -> tuple[str, ...]:
     text = _read_regular(path)
     if text is None:
         return ()
-    whole = path.name in _WHOLE_FILES
-
     values: set[str] = set()
     for line in text.splitlines():
         line = line.strip()
@@ -898,10 +896,7 @@ def _values_in(path: Path) -> tuple[str, ...]:
             continue
         key, _, value = line.partition("=")
         value = value.strip().strip("'\"")
-        if whole:
-            if len(value) >= MIN_SECRET_LEN:
-                values.add(value)
-        elif _secret_entry(key, value):
+        if _secret_entry(key, value):
             values.add(value)
 
     # Longest first, so a value that contains another is replaced whole.
@@ -910,11 +905,10 @@ def _values_in(path: Path) -> tuple[str, ...]:
 
 # --- which values of an env file are secrets (ENV-1 review, MED-2) -------------
 #
-# `.env` and `.env.local` are scrubbed whole, as since 2026-07-30: every value
-# of 8 characters or more (`_WHOLE_FILES`; changing that is the owner's call).
-# Every other credential env file (`.env.production`, `.env.staging` …) holds
-# settings as much as secrets — `NODE_ENV=production`, `API_URL=https://…` —
-# and redacting those everywhere mangled ordinary output ("Deploy to
+# Every credential env file, `.env` and `.env.local` included (the owner's
+# answer, 2026-10-12; they were scrubbed whole, every value of 8+ characters,
+# from 2026-07-30 until then), holds settings as much as secrets —
+# `NODE_ENV=production`, `API_URL=https://…` — and redacting those everywhere mangled ordinary output ("Deploy to
 # [redacted…]", `NODE_ENV === '[redacted…]'`, and a write round trip would
 # save the marker into the owner's code). So from those only:
 #
@@ -944,14 +938,18 @@ def _values_in(path: Path) -> tuple[str, ...]:
 # (the secret is its path): a known webhook host (`hooks.slack.com`,
 # Discord's `/api/webhooks/`, …), or a path segment of 16+ characters that
 # mixes letters and digits.
-_WHOLE_FILES = frozenset({".env", ".env.local"})
+#
+# PR #80's review: a joined name ending in PASSWORD, PASSWD or CREDS counts
+# (`PGPASSWORD`, libpq's own variable, `MYSQLPASSWORD`, `USERCREDS`), and CRED,
+# CREDS and MNEMONIC are key parts (`DB_CREDS`, a wallet's `MNEMONIC`).
 _SECRET_KEY_PARTS = frozenset({
     "key", "keys", "token", "tokens", "secret", "secrets", "pass", "passwd", "password",
-    "passwords", "pwd", "credential", "credentials", "private", "salt", "dsn",
-    "pw", "pin", "pins", "seed", "seeds", "passphrase",
+    "passwords", "pwd", "credential", "credentials", "cred", "creds", "private", "salt", "dsn",
+    "pw", "pin", "pins", "seed", "seeds", "passphrase", "mnemonic",
 })
-_JOINED_ENDINGS = ("key", "keys", "secret", "secrets", "pass", "token", "tokens", "pw", "pwd",
-                   "pin", "pins", "seed", "seeds")
+_JOINED_ENDINGS = ("key", "keys", "secret", "secrets", "pass", "password", "passwords", "passwd",
+                   "token", "tokens", "pw", "pwd", "pin", "pins", "seed", "seeds",
+                   "creds", "credential", "credentials")
 _JOINED_STARTS = ("secret", "pass", "seed", "private")
 _SETTING_SUFFIXES = frozenset({"ttl", "timeout", "expires", "expiry", "length", "size", "count",
                                "url", "host", "port", "path", "enabled", "driver", "type", "name"})

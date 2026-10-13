@@ -1421,6 +1421,21 @@ class MockDaemon:
             table[object_id] = status
         self.emit("activity", {"of": of, "id": object_id, "project_id": "p1", "status": status})
 
+    def thread_running(self, thread_id: str, since: str | None):
+        """A turn runs on that thread since `since` (ISO), as `GET /threads`
+        says it: the daemon's live `running` and `running_since` (WP-H, H-b).
+        `None` takes both away again — absent, as an older daemon's are, so
+        the HUD's 15 s reconcile leaves every other test's busy panes alone."""
+        for t in self.world["threads"]:
+            if t["id"] != thread_id:
+                continue
+            if since is None:
+                t.pop("running", None)
+                t.pop("running_since", None)
+            else:
+                t["running"] = True
+                t["running_since"] = since
+
     def emit(self, kind: str, data: dict | None = None, **extra):
         """Release one SSE frame."""
         frame = {"kind": kind, "data": data or {}}

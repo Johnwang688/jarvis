@@ -91,6 +91,8 @@ import {
 } from "./lib/chats";
 import { useStableHandlers, useStableValue } from "./lib/stable";
 import BootOverlay from "./components/BootOverlay";
+import { thinkingLine, type ThinkingLine } from "./lib/thinking";
+import { thinkingClock } from "./components/MiniOrb";
 
 const PROPOSAL_WINDOW_MS = 60_000;
 /** How many of this window's steered or queued messages it remembers, to hand
@@ -351,6 +353,17 @@ export default function App() {
   // Words handed back for a thread that is not on screen wait here until the
   // owner opens it: never in another thread's box (Bugbot on PR #22).
   const heldBack = useRef(new HeldBack());
+  // Each chat pane's thinking line as last handed to its (memoized) ChatTab:
+  // the same object while it says the same thing, so a keystroke anywhere
+  // does not redraw a transcript (WP-H; the `useStableValue` rule, per pane).
+  const linesKept = useRef(new Map<PaneNo, { key: string; value: ThinkingLine | null }>());
+  const keepLine = (n: PaneNo, line: ThinkingLine | null): ThinkingLine | null => {
+    const key = JSON.stringify(line);
+    const had = linesKept.current.get(n);
+    if (had && had.key === key) return had.value;
+    linesKept.current.set(n, { key, value: line });
+    return line;
+  };
 
   const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
     dispatch({ type: "patch", patch: p });
@@ -576,6 +589,12 @@ export default function App() {
       // free the pane, and the mic would stay suppressed.
       let tracked = threadId ?? compose?.openedId ?? local;
       if (tracked === local) placeholders.current.add(local);
+      // The thinking line counts from the owner's Enter (lib/thinking): now
+      // when the thread is known, else once the first send has opened it. A
+      // steer leaves the running turn's time as it is.
+      const sentAt = Date.now();
+      const known = threadId ?? compose?.openedId ?? null;
+      if (known) dispatch({ type: "turn", event: "send", threadId: known, at: sentAt, by: local, steer: steering });
       dispatch({
         type: "message", pane,
         message: { role: "user", text, local, ...(steering ? { mark: "steering" as const } : {}) },
@@ -651,6 +670,7 @@ export default function App() {
             chatPatch(tracking, { turnThreadId: threadId });
           }
         }
+        if (!known) dispatch({ type: "turn", event: "send", threadId, at: sentAt, by: local });
         const result = await api.send(threadId, {
           text, attachments: attachments.length ? attachments : undefined,
           ...(spoken ? { spoken: true } : {}),
@@ -668,12 +688,16 @@ export default function App() {
             patch: { mark: "not sent", ...(result.message_id ? { message_id: result.message_id } : {}) },
           });
           giveBack(threadId, text, attachments, conversation());
+          dispatch({ type: "turn", event: "send_failed", threadId, by: local });
           if (!steering) {
             onPane(turn, { busy: prior.busy, turnThreadId: prior.turnThreadId, orb: prior.orb, status: prior.status });
           }
           return true;
         }
         if (status === "steered" || status === "queued") {
+          // Taken by the running turn, or waiting behind it: no turn of its
+          // own will start for it, so its line entry is an ordinary one now.
+          dispatch({ type: "turn", event: "sent", threadId, by: local });
           dispatch({
             type: "mark", local,
             patch: { mark: status === "queued" ? "queued" : "steering", message_id: result.message_id },
@@ -727,6 +751,9 @@ export default function App() {
         // meanwhile stays — and its words and files go back in the box, so
         // a failed send costs nothing. Said inline, never as a dead end.
         dispatch({ type: "unmessage", local });
+        // Nothing started: the line this send drew goes (only if it is still
+        // this send's — a turn heard starting meanwhile keeps it).
+        if (threadId) dispatch({ type: "turn", event: "send_failed", threadId, by: local });
         // A first send whose compose row no pane holds any more (the owner
         // opened another thread there meanwhile): its words are parked under
         // that row, never put in a box showing another thread. A pane that
@@ -856,6 +883,31 @@ export default function App() {
     return () => clearInterval(timer);
   }, [anyBusy, reconcileBusy]);
 
+  /**
+   * A running turn no pane tracks is adopted (WP-H, plan H-3) by the drawn
+   * chat pane showing its thread, when that pane waits on no turn of its own:
+   * busy, tracking it, THINKING — so Stop and Enter-to-steer come back after a
+   * reload, a pane closed and reopened, or a turn started from Discord before
+   * the thread was opened. Only for a turn the window holds a live entry for
+   * (lib/thinking) *and* the daemon calls working: the record that turns the
+   * thread idle follows its `turn_finished`, and a finish heard first deleted
+   * the entry, so a pane the finish just freed is never adopted back. The
+   * 15 s reconcile undoes a wrong adoption (`running: false`).
+   */
+  useEffect(() => {
+    const { ws, fit } = view;
+    for (const n of fit.panes) {
+      if (ws.panes[n - 1].view !== "chat") continue;
+      const chat = state.chats[n];
+      const t = chat.threadId;
+      if (!t || chat.busy) continue;
+      const turn = state.turns[t];
+      if (!turn || turn.error === "ended" || state.activity.threads[t] !== "working") continue;
+      if (PANE_NOS.some((m) => state.chats[m].turnThreadId === t)) continue;
+      chatPatch(n, { busy: true, turnThreadId: t, status: "THINKING", ...(state.orb === "idle" ? { orb: "thinking" } : {}) });
+    }
+  }, [view, state.chats, state.turns, state.activity, state.orb, chatPatch]);
+
   // ---- events -------------------------------------------------------------
 
   useEffect(() => {
@@ -924,6 +976,9 @@ export default function App() {
           break;
         }
         case "turn_started":
+          // The thinking line's turn (lib/thinking): by thread, whichever
+          // pane shows it — or none yet, for a turn started from Discord.
+          if (tid) dispatch({ type: "turn", event: "started", threadId: tid, at: Date.now() });
           for (const n of mine) {
             chatPatch(n, {
               busy: true, orb: "thinking", draft: "", turnThreadId: at.chats[n].turnThreadId ?? tid ?? null,
@@ -967,6 +1022,12 @@ export default function App() {
           }
           break;
         case "turn_finished": {
+          if (tid) {
+            dispatch({
+              type: "turn", event: "finished", threadId: tid, at: Date.now(),
+              stop: typeof data.stop === "string" ? data.stop : undefined, next: Number(data.next) || 0,
+            });
+          }
           // A message waits behind this turn (`next`) and runs as the thread's
           // next turn at once: the pane stays on it — no flash of idle, no
           // follow-up mic window over a turn about to start. Its own
@@ -990,6 +1051,9 @@ export default function App() {
           // daemon always sends): resetting `busy` here took the Stop and the
           // orb's interrupt away from a turn that was still running.
           for (const n of eitherPane(route)) chatPatch(n, { orb: "error", error: data.message || "error" });
+          // The thread's line turns red, and stays red as "Ended on an error"
+          // once the turn is over (the daemon ends a turn that said one `error`).
+          if (tid) dispatch({ type: "turn", event: "error", threadId: tid, at: Date.now() });
           break;
         case "approval_requested":
           // Only the broker asks the owner, and every broker question carries
@@ -2420,6 +2484,9 @@ export default function App() {
       reconcile: () => reconcileBusy(),
       // The centre's panes as stored and as drawn (lib/workspace.ts).
       workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
+      // The thinking lines' one clock (WP-H): how many drawn lines tick, and
+      // whether its interval runs at all. Read-only.
+      thinkingClock: () => ({ subscribers: thinkingClock.subscribers(), running: thinkingClock.running() }),
       // A split the owner did not click (WP-G2's `{focus: false}`, for the
       // browser's dev-server pane): the id it took, or null when refused.
       split: (source: PaneNo, opts: { focus?: boolean } = {}) => splitFrom(source, opts),
@@ -2739,6 +2806,17 @@ export default function App() {
     // the selected chat's is on the orb — here only while the orb is folded.
     const status = !target ? chat.status : drawn.leftFolded ? orbStatus : null;
     const compose = chat.compose;
+    // The foot of this chat while its thread's turn runs (WP-H): read from the
+    // window's turns by thread, so it shows for a turn this pane did not start
+    // — from Discord, before a reload, in a pane closed and reopened.
+    const shown = shownThread(chat);
+    const thinking = keepLine(n, thinkingLine({
+      chat,
+      threadId: shown,
+      turn: shown ? state.turns[shown] : undefined,
+      activity: shown ? state.activity.threads[shown] : undefined,
+      approvalHere: !!shown && state.approvals.some((r) => r.thread_id === shown),
+    }));
     return (
       <>
         <ChatTab
@@ -2747,6 +2825,9 @@ export default function App() {
           draft={chat.draft}
           ops={chat.ops}
           onCancelTask={cancelTask}
+          thinking={thinking}
+          accent={state.avatar?.accent ?? null}
+          drawn={fit.panes.includes(n)}
         />
         <InputBar
           status={status}
@@ -2786,6 +2867,7 @@ export default function App() {
           onFiles={(files) => dispatch({ type: "input", pane: n, files })}
           stageKey={draftKey(chat, n)}
           onStage={(key, files) => dispatch({ type: "stage", key, files })}
+          footLine={!!thinking}
         />
       </>
     );

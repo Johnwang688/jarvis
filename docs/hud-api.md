@@ -9,6 +9,58 @@ is served from the daemon on `FACE_PORT` (8402) and calls the API on the
 **same origin** (the daemon serves the API on both listeners); the workshop origin
 is `WORKSHOP_PORT` (8403), a different origin by design.
 
+## Additions: dev-server registry (AO-1b-i, 2026-10-12)
+
+Amendment 2 §B–§D defines the daemon half of automatic dev-server opening.
+Every `/dev-servers` route requires `projects.is_owner` on the HUD listener
+and a strict loopback Host, checked before reading a body. The API listener
+answers **403**. Same-origin GETs without Origin need `Sec-Fetch-Site:
+same-origin`; POSTs require the HUD's Origin. Responses carry WP-E's frame
+headers. No route starts, probes, opens or navigates a server or the Browser.
+
+| Route | Exact body | Answer |
+|---|---|---|
+| `GET /dev-servers?window=<nonce>` | none; window optional | `{servers: [{id, url, state, source, claimed, mine}]}`; only listening, non-dismissed entries |
+| `POST /dev-servers/<id>/claim` | `{window, shows: bool, focused_at: int}` | `{won: true, url}` or `{won: false}` |
+| `POST /dev-servers/<id>/renew` | `{window}` | 200 `{}`; extends winner's lease |
+| `POST /dev-servers/<id>/placed` | `{window}` | 200 `{}`; publishes placed and ends lease |
+| `POST /dev-servers/<id>/dismiss` | `{window}` | 200 `{}`; any owner window may dismiss |
+
+The window nonce is exactly 32 lowercase hex characters. `focused_at` is
+epoch milliseconds in `[0, 2**53 - 1]` (0 means never). Unknown/missing keys
+and wrong types are **400**, unknown entry ids **404**, and down/dismissed
+entries **409** `{error, code: "gone"}`. Renew/placed by a window that does
+not hold the claim are **409**. Claims collect for 600 ms: earliest `shows`
+wins, else newest `focused_at`, with earliest arrival breaking ties. Later
+claims lose while a winner holds the entry. Leases last 90 seconds; windows
+renew every 30 seconds while waiting or prompting. Expiry returns the entry
+to up. `placed` keeps placement until the listener disappears.
+
+`GET /events?window=<nonce>` associates an **owner HUD** SSE stream with its
+window; disconnect returns its outstanding claims to up immediately. The
+parameter is ignored on the API listener and on non-owner requests. Thread
+and project filters retain their existing meaning.
+
+The exact bus record is `{kind: "dev_server", data: {id, state, source, at}}`.
+`id` is `ds_` plus eight random hex characters; `at` is UTC ISO time. States
+published are `up`, `claimed`, `placed`, `dismissed`, `down`; up repeats only
+on lease lapse. Source is `{kind: "thread", thread_id, task_id: null|id}` or
+`{kind: "terminal", terminal_id}`. There is no top-level thread id: filtered
+thread streams, thread logs and Discord do not receive this record. Both
+unfiltered SSE listeners receive it. The bus never carries a port, URL,
+scheme, path, title, process fact, command line, environment or response.
+URLs leave memory only through owner registry/claim answers (and AO-1b-ii's
+terminal socket frame); agents receive `/`, terminal URLs keep their cleaned
+path, and both drop userinfo/query/fragment.
+
+`GET /status` gains `dev_watch: {active, entries, polls, refused: {class:
+count}, work: {rows, fd_readlinks, environ_reads, probes}}`, counts only.
+The registry holds at most 32 entries, limits creation to one per 10 seconds
+per source and six per minute globally, and reuses an id on a port restart
+within 60 seconds of down (including dismissal). It is never persisted.
+The Browser's `auto_open` switch covers watcher and terminal sources;
+automatic opening never grants access through the Remote gate.
+
 ## Static
 
 `GET /` → the HUD's page; `GET /assets/*` → its assets — from the newest
@@ -1312,6 +1364,23 @@ at 100% and 160%).
 
 Not in this package: §2.5 item 5, a "dev servers in your terminals" list
 built from the listening sockets terminal sessions own.
+
+## Additions 2026-10-10 (the thinking line — WP-H)
+
+- Every thread record (`GET /threads`, `POST /threads`, `thread_updated`)
+  carries live, never-stored `"running_since": "<ISO 8601>"` — when the
+  running turn began (the moment its worker was started; a queued message
+  that runs as the next turn starts a new one) — **present only while
+  `"running": true`**, absent otherwise and from an older daemon. The HUD's
+  thinking line counts from it when it notices a turn late (a reload, a turn
+  started from Discord before any pane showed the thread); with none it
+  counts from when it noticed. It is a display hint only: nothing waits on
+  it, and `running` stays what the HUD reconciles its busy state against.
+- Nothing else changed on the wire. The line is drawn from events the HUD
+  already receives: `turn_started`, `tool_started`/`tool_finished`, `error`,
+  `turn_finished` (`stop`, `next`), `approval_requested`/`approval_resolved`
+  (by `thread_id`) and the `activity` records (`working`, `needs_input`,
+  `failed`, `unread`, `idle`).
 
 ## Additions 2026-10-10 (Jarvis reads a terminal — WP-F)
 

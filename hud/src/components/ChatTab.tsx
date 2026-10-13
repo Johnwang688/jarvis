@@ -6,11 +6,18 @@
 // mid-word flickers) and is replaced by the rendered reply once, on `text`.
 // And the owner's own message goes up **verbatim** — typing `*foo*` means
 // `*foo*` — while only his is rendered.
+//
+// While this chat's turn runs, its foot says so (WP-H, decisions S-4): the
+// thinking line — mini orb, word, elapsed time — right after the transcript's
+// scroller and before the ticker. It is outside `[data-testid=log]`, so what
+// the log says is the conversation and nothing else.
 
 import { memo, useEffect, useRef, useState } from "react";
 import type { ChatMessage, Thread, ToolOp } from "../types";
 import { chatPlace } from "../lib/discord";
 import { Markdown } from "./Markdown";
+import { ThinkingRow } from "./MiniOrb";
+import type { ThinkingLine } from "../lib/thinking";
 
 /** What became of a message sent while a turn ran (2026-10-08). */
 const MARKS: Record<string, string> = {
@@ -62,6 +69,12 @@ export const ChatTab = memo(function ChatTab(props: {
   draft: string;
   ops: ToolOp[];
   onCancelTask: (id: string) => void;
+  /** The thinking line (lib/thinking `thinkingLine`), or null while nothing runs. */
+  thinking?: ThinkingLine | null;
+  /** The avatar's accent ("r,g,b"): it recolours "Thinking…" only. */
+  accent?: string | null;
+  /** The pane is on screen: the line's time ticks. */
+  drawn?: boolean;
 }) {
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -115,6 +128,7 @@ export const ChatTab = memo(function ChatTab(props: {
           </div>
         ) : null}
       </div>
+      {props.thinking ? <ThinkingRow line={props.thinking} accent={props.accent} drawn={!!props.drawn} /> : null}
       <div className="chatops" data-testid="ops">
         {props.ops
           .slice(-30)

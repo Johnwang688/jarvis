@@ -163,6 +163,9 @@ class _Session:
     provider: Provider
     handle: SessionHandle | None = None
     worker: threading.Thread | None = None
+    # When the running turn began (ISO, with `worker`): the HUD's thinking
+    # line counts from it after a reload (WP-H, H-b). Live, never stored.
+    running_since: str | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
     closing: bool = False
     retired: bool = False
@@ -198,13 +201,15 @@ class _Session:
     # The digest of this session's jarvis-mcp caller token, while one is live
     # (`callers.CallerTokens`); never the token itself.
     caller_key: str | None = None
+    origin_tag: str | None = field(default=None, repr=False)
 
 
 class Daemon:
     def __init__(self, stores: Stores, providers: dict[ProviderName, Provider],
                  permit_factory: Callable[[str, Brief], PermissionCallback] | None,
                  port: int, approvals: PendingApprovals | None = None, *,
-                 face_port: int | None = None, workshop_port: int | None = None):
+                 face_port: int | None = None, workshop_port: int | None = None,
+                 dev_proc_root=None, dev_cgroup_root=None):
         self.stores = stores
         self.providers = {ProviderName(k): v for k, v in providers.items()}
         self.port = port
@@ -240,6 +245,8 @@ class Daemon:
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
+        self._dev_hook_errors = set()
+        self._dev_streams = {}
         # thread id -> owner messages waiting on its running turn (QUEUE_MAX).
         # Per thread rather than per session: a turn that ends by dropping its
         # session (a fatal error) must not take what waits behind it along.
@@ -272,7 +279,7 @@ class Daemon:
         # lifecycle record, `terminal_attached` (an id and a time), never output.
         from .terminals import Terminals
         self.terminals = Terminals(publish=self.bus.publish,
-                                   auto_open=self.browser_settings.auto_open,
+                                   auto_open=lambda: self.devservers.enabled(),
                                    own_ports=lambda: (self.port, self.face_port, self.workshop_port))
         # VEX V5 (VX-1, vex.py): its builds, downloads and brain terminal run
         # as program terminals above; owner-only routes; the bus carries only
@@ -285,6 +292,8 @@ class Daemon:
         # On the bus and in the log it is nothing but classes and counts.
         from .browser.host import BrowserHost
         self.browser = BrowserHost(self)
+        from .devservers import DevServers
+        self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
         # Per-session jarvis-mcp caller tokens (callers.py, plan 2026-10-10
         # §1): minted in `_run_brief` for an owner's Claude or Codex chat that
         # is offered session tools, held only as digests, revoked whenever
@@ -341,6 +350,7 @@ class Daemon:
             connect_controls(self)
             # `terminal_read` (WP-F) reads these terminals and no others.
             self.terminals.install()
+            self.devservers.start()
             self.schedules.start()
 
     def _sweep_carriers(self) -> None:
@@ -357,6 +367,7 @@ class Daemon:
             sweep_carriers(Path(config.V2_DATA_DIR))
 
     def status(self) -> dict:
+        dev_watch = self.devservers.status()
         providers = {}
         for name, provider in self.providers.items():
             try:
@@ -434,7 +445,77 @@ class Daemon:
                     # (`browser.policy.refused_ports`): BR-0's control ports,
                     # this daemon's HUD and API ports, and 8403 unless it is
                     # this daemon's workshop. The HUD's Direct judge reads it.
-                    "refused_ports": refused_ports}
+                    "refused_ports": refused_ports, "dev_watch": dev_watch}
+
+    def _dev_settings_changed(self):
+        self.devservers.settings_changed()
+
+    def _dev_known(self):
+        """Known process identities, never a command-line scan.
+
+        SDK internals are best effort; an unavailable root is still untagged
+        unless it is the agent, and the seven service ports are always refused.
+        Called without taking the daemon lock: turn start already holds it.
+        """
+        pids = {os.getpid()}
+        leaders = set()
+        for terminal in list(self.terminals._terminals.values()):
+            proc = terminal._proc
+            if proc is not None and proc.poll() is None:
+                leaders.add((proc.pid, terminal._start_time))
+        for session in list(self._sessions.values()):
+            native = getattr(session.handle, "native", None)
+            rpc = getattr(native, "rpc", None)
+            proc = getattr(rpc, "process", None)
+            if proc is None:
+                client = getattr(native, "client", None)
+                transport = (getattr(client, "_transport", None)
+                             or getattr(getattr(client, "_query", None), "transport", None))
+                proc = getattr(transport, "_process", None)
+            pid = getattr(proc, "pid", None)
+            if isinstance(pid, int):
+                pids.add(pid)
+        pids.update(self._dev_browser_roots())
+        gate = getattr(self.browser, "_gate", None)
+        return pids, leaders, getattr(gate, "port", None)
+
+    def _dev_hook(self, name, *args):
+        """Watcher faults must not interrupt a turn or provider cleanup."""
+        try:
+            getattr(self.devservers, name)(*args)
+        except Exception as exc:
+            kind = type(exc).__name__
+            with self._lock:
+                if type(exc) not in self._dev_hook_errors:
+                    self._dev_hook_errors.add(type(exc))
+                    LOG.warning("Dev watcher hook failed (%s)", kind)
+            try:
+                self.devservers.note_hook_error(kind)
+            except Exception:
+                pass
+
+    def _dev_stream_started(self, window):
+        with self._lock:
+            self._dev_streams[window] = self._dev_streams.get(window, 0) + 1
+
+    def _dev_stream_ended(self, window):
+        with self._lock:
+            remaining = self._dev_streams[window] - 1
+            if remaining:
+                self._dev_streams[window] = remaining
+            else:
+                del self._dev_streams[window]
+                self._dev_hook("window_ended", window)
+
+    def _dev_browser_roots(self):
+        # Playwright's driver owns its Chrome tree. The watcher recognizes
+        # descendants from stat facts, without Chrome's cmdline-based helper.
+        pw = getattr(self.browser, "_pw", None)
+        impl = getattr(pw, "_impl_obj", None)
+        connection = getattr(impl, "_connection", None) or getattr(pw, "_connection", None)
+        transport = getattr(connection, "_transport", None)
+        pid = getattr(getattr(transport, "_proc", None), "pid", None)
+        return {pid} if isinstance(pid, int) else set()
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):
@@ -528,6 +609,8 @@ class Daemon:
         return thread
 
     def _open(self, thread, brief):
+        if brief.origin_tag is not None:
+            raise BriefRefused("an origin tag belongs only to a session run brief")
         with self._lock:
             self._active()
             if thread.id in self._sessions:
@@ -558,12 +641,16 @@ class Daemon:
                 self._active()
                 thread.provider_session_id = handle.provider_session_id
                 path = self.stores.threads.path(thread.id).with_name("brief.json")
-                _write_bytes(path, json.dumps(to_json(brief), allow_nan=False).encode())
+                if not path.exists():
+                    saved = to_json(brief)
+                    saved.pop("origin_tag", None)
+                    _write_bytes(path, json.dumps(saved, allow_nan=False).encode())
                 self.stores.threads.save(thread)
             return session
         except BaseException:
             # A session that never opened keeps no token (plan §1.4).
             self.callers.revoke(session)
+            self._dev_hook("session_closed", session.origin_tag)
             if session.handle is not None:
                 self._cleanup(session)
             with self._lock:
@@ -611,8 +698,13 @@ class Daemon:
         §1.2). The token lives only in this copy: `_open` writes the saved
         brief, never this one, to brief.json."""
         from . import thread_model
+        run_brief = session.brief
+        if session.thread.provider in (ProviderName.CLAUDE, ProviderName.CODEX):
+            if session.origin_tag is None:
+                session.origin_tag = self.devservers.session_opened(session.thread.id, session.brief.task_id)
+            run_brief = replace(run_brief, origin_tag=session.origin_tag)
         if not thread_model.is_chat(session.thread):
-            return session.brief
+            return run_brief
         choice = thread_model.effective(session.thread)
         session.applied = session.announced = choice
         session.applied_record = (session.thread.model, session.thread.effort)
@@ -624,7 +716,7 @@ class Daemon:
         if token is not None:
             from .bridge import server_entry
             servers["jarvis"] = server_entry(session.thread.provider, self.port, token)
-        return replace(session.brief, model=choice[0], effort=choice[1], mcp_servers=servers)
+        return replace(run_brief, model=choice[0], effort=choice[1], mcp_servers=servers)
 
     def _mint(self, session) -> str | None:
         """A caller token for an owner's chat on Claude or Codex that is
@@ -836,6 +928,10 @@ class Daemon:
             session = self._sessions.get(thread.id)
             record["running"] = session is not None and session.worker is not None
             record["queued"] = len(self._queues.get(thread.id) or ())
+            # When that turn began (WP-H, H-b): present only while it runs, so
+            # a reloaded HUD's thinking line shows the true elapsed time.
+            if record["running"] and session.running_since:
+                record["running_since"] = session.running_since
         if thread.surface:
             # Where the chat is on Discord (PR C): names and a link, for the
             # chat header. Never a token; the guild id is setup's.
@@ -1072,7 +1168,9 @@ class Daemon:
             self.stores.threads._append(thread_id, "log.jsonl", record)
             self.bus.publish(dict(record))
         session.worker = worker
+        session.running_since = utcnow()
         worker.start()
+        self._dev_hook("turn_started", thread_id, session.thread.provider)
         return turn_id
 
     def _waiting_on_owner(self, session) -> bool:
@@ -1309,7 +1407,9 @@ class Daemon:
             return False
 
     def _turn(self, session, message):
-        terminal = None
+        # Wait for _begin to finish the start hook before this turn can end.
+        with self._lock:
+            terminal = None
         failed = False
         fatal = False
         # Who is calling, on this turn's own thread (a fresh context): an
@@ -1348,6 +1448,7 @@ class Daemon:
             # Steered messages the provider took but never delivered (the fast
             # path's final answer came first): they run next, as turns of their
             # own — unless the owner stopped this one.
+            self._dev_hook("turn_ended", session.thread.id)
             returned = []
             undelivered = getattr(session.provider, "undelivered", None)
             if callable(undelivered) and session.handle is not None:
@@ -1378,6 +1479,7 @@ class Daemon:
             finally:
                 with self._lock:
                     session.worker = None
+                    session.running_since = None
                     session.questions.clear()
                     if leftover:
                         if session.owner_stopped:
@@ -1464,6 +1566,7 @@ class Daemon:
         # token dies with it (close, archive, delete, a lost session — plan
         # §1.4). The provider's close then removes its carrier.
         self.callers.revoke(session)
+        self._dev_hook("session_closed", session.origin_tag)
         for operation in (session.provider.interrupt, session.provider.close):
             try:
                 operation(session.handle)
@@ -1543,6 +1646,7 @@ class Daemon:
                 session.retired = True
             self._sessions.clear()
         self.terminals.finish_all(max(deadline, time.monotonic() + 0.2))
+        self.devservers.stop()
         self.vex.stop()
         # The Browser's Chrome, its driver and its gate (BR-1a): after the
         # terminals, before the listeners close. Its own bound, past the
@@ -1662,6 +1766,10 @@ def _log_path(path: str) -> str:
     `/browser` paths, which take no query but must never log a URL that a
     confused client put in one (BR-1a)."""
     url = urlsplit(path)
+    if url.path.startswith("/dev-servers"):
+        return "/dev-servers"               # even malformed ids and queries are client text
+    if url.path == "/events":
+        return "/events"                   # window nonce belongs only to memory
     return url.path if url.path.startswith(("/terminals", "/mcp", "/browser")) else path
 
 
@@ -1801,13 +1909,18 @@ def _handler(daemon):
             if method == "GET" and parts == ["status"]:
                 return 200, daemon.status()
             if method == "GET" and parts == ["events"]:
-                _object(query, ("thread", "project"))
+                _object(query, ("thread", "project", "window"))
                 filters = {}
                 for name, store in (("thread", stores.threads), ("project", stores.projects)):
                     if name in query:
                         daemon.require(store, query[name])
                         filters[name + "_id"] = query[name]
-                self._events(filters)
+                from .projects import is_owner
+                from .devservers import valid_window
+                window = query.get("window") if is_owner(self, daemon) else None
+                if window is not None and not valid_window(window):
+                    raise APIError(400, "invalid window")
+                self._events(filters, window)
                 return 200, None
             if parts == ["projects"]:
                 if method == "GET":
@@ -2044,8 +2157,10 @@ def _handler(daemon):
                     raise APIError(404, "route not found")
                 return 200, to_json(task)
 
-        def _events(self, filters):
+        def _events(self, filters, window=None):
             q = daemon.bus.subscribe(filters)
+            if window is not None:
+                daemon._dev_stream_started(window)
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -2069,6 +2184,8 @@ def _handler(daemon):
                 pass
             finally:
                 daemon.bus.unsubscribe(q)
+                if window is not None:
+                    daemon._dev_stream_ended(window)
     return Handler
 
 
@@ -2311,7 +2428,8 @@ def main() -> int:
             on_request=lambda request: holder["daemon"]._approval_requested(request),
             on_resolve=lambda request, decision, resolution:
                 holder["daemon"]._approval_resolved(request, decision, resolution))
-    daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals)
+    daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals,
+                    dev_proc_root="/proc", dev_cgroup_root="/sys/fs/cgroup")
     if approvals is not None:
         holder["daemon"] = daemon
     # The owner's Browser switches (`browser.json`): here, not in the

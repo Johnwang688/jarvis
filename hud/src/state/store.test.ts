@@ -286,6 +286,166 @@ describe("the test hook's view of the store", () => {
   });
 });
 
+describe("each thread's turn, for the thinking line (WP-H, plan §4 H-1)", () => {
+  const T0 = 1_000_000;
+  const act = (id: string, status: string) => ({ type: "activity" as const, at: T0 + 500,
+    record: { kind: "activity", data: { of: "thread", id, status } } });
+  const run = (s: State, ...actions: any[]): State => actions.reduce((x, a) => reduce(x, a), s);
+  const send = (id: string, by = "local-1", steer = false) =>
+    ({ type: "turn" as const, event: "send" as const, threadId: id, at: T0, by, steer });
+  const started = (id: string, at = T0 + 100) => ({ type: "turn" as const, event: "started" as const, threadId: id, at });
+  const finished = (id: string, stop = "end", next = 0) =>
+    ({ type: "turn" as const, event: "finished" as const, threadId: id, at: T0 + 900, stop, next });
+  const error = (id: string) => ({ type: "turn" as const, event: "error" as const, threadId: id, at: T0 + 300 });
+
+  it("a send with a thread id: tracked from the owner's Enter, no error", () => {
+    const s = run(initialState, send("t1"));
+    expect(s.turns.t1).toMatchObject({ since: T0, error: "", by: "local-1" });
+  });
+
+  it("a send clears an ended error (the next send clears the static red line)", () => {
+    const s = run(initialState, send("t1"), started("t1"), error("t1"), finished("t1", "error"), send("t1", "local-2"));
+    expect(s.turns.t1).toMatchObject({ since: T0, error: "" });
+  });
+
+  it("a steer leaves the running turn's time and error alone", () => {
+    const s = run(initialState, started("t1"), error("t1"), send("t1", "local-2", true));
+    expect(s.turns.t1).toMatchObject({ since: T0 + 100, error: "during" });
+  });
+
+  it("a send into a turn the window knows runs (a Discord turn the pane has not adopted) joins it", () => {
+    const s = run(initialState, started("t1"), send("t1", "local-2", false));
+    expect(s.turns.t1).toMatchObject({ since: T0 + 100, error: "" });
+    expect(s.turns.t1.by).toBeUndefined();
+  });
+
+  it("turn_started: a new entry, unless the send that asked for it made one", () => {
+    expect(run(initialState, started("t1")).turns.t1).toMatchObject({ since: T0 + 100, error: "" });
+    const kept = run(initialState, send("t1"), started("t1"));
+    expect(kept.turns.t1).toMatchObject({ since: T0, error: "" });
+    expect(kept.turns.t1.by).toBeUndefined();
+  });
+
+  it("turn_started replaces an ended entry", () => {
+    const s = run(initialState, started("t1"), finished("t1", "error"), started("t1", T0 + 2000));
+    expect(s.turns.t1).toMatchObject({ since: T0 + 2000, error: "" });
+  });
+
+  it("activity working or needs_input with no entry: a turn noticed late, from running_since", () => {
+    const threads = [thread("t1", { running: true, running_since: new Date(T0 - 42_000).toISOString() }), thread("t2")];
+    const s = run({ ...initialState, threads }, act("t1", "working"), act("t2", "needs_input"));
+    expect(s.turns.t1).toMatchObject({ since: T0 - 42_000, error: "" });
+    expect(s.turns.t1.late).toBeUndefined();
+    // No running_since (an older daemon, or the records not in yet): from now, corrected later.
+    expect(s.turns.t2).toMatchObject({ since: T0 + 500, late: true });
+  });
+
+  it("…and the thread records' running_since corrects an entry noticed late", () => {
+    let s = run(initialState, act("t2", "working"));
+    expect(s.turns.t2.since).toBe(T0 + 500);
+    s = reduce(s, { type: "patch", patch: { threads: [thread("t2", { running: true,
+      running_since: new Date(T0 - 7000).toISOString() })] } });
+    expect(s.turns.t2).toMatchObject({ since: T0 - 7000 });
+    expect(s.turns.t2.late).toBeUndefined();
+  });
+
+  it("the GET /activity snapshot counts too: a thread turned working, a reload's running turn", () => {
+    const threads = [thread("t1", { running: true, running_since: new Date(T0 - 9000).toISOString() })];
+    const s = reduce({ ...initialState, threads }, { type: "patch", patch: { activity: { threads: { t1: "working" }, tasks: {} } } });
+    expect(s.turns.t1).toMatchObject({ since: T0 - 9000, error: "" });
+  });
+
+  it("only a change counts: a view still saying working never revives a turn whose finish was heard", () => {
+    let s = run(initialState, act("t1", "working"), started("t1"));
+    s = run(s, finished("t1"));
+    expect(s.turns.t1).toBeUndefined();
+    // Another thread's record, or the same snapshot again, while t1 still reads working.
+    s = run(s, act("t9", "unread"));
+    s = reduce(s, { type: "patch", patch: { activity: { ...s.activity } } });
+    expect(s.turns.t1).toBeUndefined();
+  });
+
+  it("an existing entry is left alone by working/needs_input (its time stands)", () => {
+    const s = run(initialState, started("t1"), act("t1", "working"), act("t1", "needs_input"), act("t1", "working"));
+    expect(s.turns.t1).toMatchObject({ since: T0 + 100, error: "" });
+  });
+
+  it("error: the running turn's entry says so", () => {
+    expect(run(initialState, started("t1"), error("t1")).turns.t1).toMatchObject({ since: T0 + 100, error: "during" });
+    // An error before any turn event this window heard: no start time to show.
+    expect(run(initialState, error("t1")).turns.t1).toMatchObject({ since: null, error: "during" });
+  });
+
+  it("turn_finished: an error ends it as 'ended', kept", () => {
+    const byStop = run(initialState, started("t1"), finished("t1", "error"));
+    expect(byStop.turns.t1).toMatchObject({ error: "ended", since: T0 + 100 });
+    const bySaid = run(initialState, started("t1"), error("t1"), finished("t1", "interrupted"));
+    expect(bySaid.turns.t1).toMatchObject({ error: "ended" });
+    // Unheard of until it ended on an error: still drawn as ended.
+    expect(run(initialState, finished("t1", "error")).turns.t1).toMatchObject({ error: "ended", since: null });
+  });
+
+  it("turn_finished otherwise deletes it", () => {
+    expect(run(initialState, started("t1"), finished("t1", "end")).turns.t1).toBeUndefined();
+    expect(run(initialState, started("t1"), finished("t1", "interrupted")).turns.t1).toBeUndefined();
+    expect(run(initialState, finished("t1", "end")).turns).toEqual({});
+  });
+
+  it("turn_finished with a message waiting (`next`): the next turn starts now", () => {
+    const s = run(initialState, started("t1"), error("t1"), finished("t1", "error", 1));
+    expect(s.turns.t1).toMatchObject({ since: T0 + 900, error: "" });
+  });
+
+  it("idle, unread and failed records never delete an ended error", () => {
+    let s = run(initialState, started("t1"), finished("t1", "error"));
+    s = run(s, act("t1", "failed"), act("t1", "idle"), act("t1", "unread"), act("t1", "idle"));
+    expect(s.turns.t1).toMatchObject({ error: "ended" });
+  });
+
+  it("a later turn that ends well clears it, even one whose start was missed", () => {
+    const s = run(initialState, started("t1"), finished("t1", "error"), finished("t1", "end"));
+    expect(s.turns.t1).toBeUndefined();
+  });
+
+  it("activity idle or unread with a live entry: a missed finish — the entry goes", () => {
+    for (const status of ["idle", "unread"]) {
+      const s = run(initialState, act("t1", "working"), act("t1", status));
+      expect(s.turns.t1, status).toBeUndefined();
+    }
+  });
+
+  it("activity failed with a live entry: the missed finish was an error", () => {
+    const s = run(initialState, act("t1", "working"), act("t1", "failed"));
+    expect(s.turns.t1).toMatchObject({ error: "ended" });
+  });
+
+  it("a stale idle record (opening the thread) never takes the entry a send in flight made", () => {
+    const s = run(withChats({}, { activity: { threads: { t1: "unread" }, tasks: {} } }), send("t1"), act("t1", "idle"));
+    expect(s.turns.t1).toMatchObject({ since: T0, by: "local-1" });
+  });
+
+  it("a failed send takes back only the entry it made", () => {
+    expect(run(initialState, send("t1"), { type: "turn", event: "send_failed", threadId: "t1", by: "local-1" })
+      .turns.t1).toBeUndefined();
+    const confirmed = run(initialState, send("t1"), started("t1"),
+                          { type: "turn", event: "send_failed", threadId: "t1", by: "local-1" });
+    expect(confirmed.turns.t1).toBeDefined();
+    const other = run(initialState, send("t1", "local-2"), { type: "turn", event: "send_failed", threadId: "t1", by: "local-1" });
+    expect(other.turns.t1).toBeDefined();
+  });
+
+  it("a send the running turn took (steered, queued) is an ordinary entry from then on", () => {
+    const s = run(initialState, send("t1"), { type: "turn", event: "sent", threadId: "t1", by: "local-1" }, act("t1", "working"),
+                  act("t1", "idle"));
+    expect(s.turns.t1).toBeUndefined();
+  });
+
+  it("is keyed by thread, whichever pane shows it, and leaves every other thread alone", () => {
+    const s = run(withChats({ 1: { threadId: "t1" } }), started("t1"), started("t3"), finished("t1"));
+    expect(Object.keys(s.turns)).toEqual(["t3"]);
+  });
+});
+
 describe("a compose row's identity (review of PR #30)", () => {
   it("is minted for every new row, in the same project too, and kept by a row spread from it", () => {
     let s = reduce(initialState, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });

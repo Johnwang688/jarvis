@@ -180,6 +180,7 @@ def route(handler, daemon, parts, query):
                     _fail(500, "the Browser settings could not be saved")
                 LOG.info("browser settings changed by the owner: %s",
                          ", ".join(f"{k} {'on' if v else 'off'}" for k, v in sorted(body.items())))
+                daemon._dev_settings_changed()
                 return 200, values
         # `owner=True` below is the owner's own navigation (this route is the
         # owner's only): it opens the URL's loopback port in the gate, as
