@@ -90,6 +90,7 @@ import {
   isEmptyChat, nonePerPane, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
 import { useStableHandlers, useStableValue } from "./lib/stable";
+import BootOverlay from "./components/BootOverlay";
 import { thinkingLine, type ThinkingLine } from "./lib/thinking";
 import { thinkingClock } from "./components/MiniOrb";
 
@@ -3439,6 +3440,10 @@ export default function App() {
       />
       </WorkspaceBoundary>
 
+      {/* The boot animation: on the first frame, so the HUD never shows before
+          it; below the authorization veil, and gone the moment a card is known.
+          Automation never mounts it unless its own suite opts in. */}
+      {!navigator.webdriver || window.__hudBootForce === true ? <BootOverlay cardUp={blocked} /> : null}
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 
       {/* A picker or dialog that throws is closed, and the window carries on
