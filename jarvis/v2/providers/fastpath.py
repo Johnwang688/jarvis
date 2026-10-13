@@ -52,6 +52,7 @@ from ..provider import (
 )
 from ..tools import propose as _propose  # noqa: F401  (registers task_propose)
 from ..tools import schedules as _schedules  # noqa: F401  (registers schedule_*)
+from ..tools import hud_browser_view as _hud_browser_view  # noqa: F401
 from ..tools import terminal_read as _terminal_read  # noqa: F401  (registers terminal_read)
 
 # Eight steps, per §8.1. Not a work limit — a *definition*: anything that needs
@@ -145,6 +146,7 @@ FAST_TOOLS: frozenset[str] = frozenset(
         # the owner's HUD terminals, read-only (WP-F, decisions W-2) — and
         # only in an owner's chat turn typed in the HUD: `DESK_TOOLS`.
         "terminal_read",
+        "hud_browser_view",
     }
 )
 
@@ -154,7 +156,7 @@ FAST_TOOLS: frozenset[str] = frozenset(
 # hatch, a schedule — runs without them in the request, and the tool itself
 # refuses unless `runtime.at_desk()` (fail closed). A steer from anywhere but
 # the desk takes the turn off the desk for the rest of it.
-DESK_TOOLS: frozenset[str] = frozenset({"terminal_read"})
+DESK_TOOLS: frozenset[str] = frozenset({"terminal_read", "hud_browser_view"})
 
 # Names that must never be in FAST_TOOLS, asserted below and again in the
 # suite. Kept as data rather than left to a reader's eye because the failure
@@ -262,16 +264,10 @@ def _summary(name: str, text: str) -> str:
     which is fixed (2026-10-10 review). The summary rides the bus and the
     thread's `log.jsonl`, and a terminal's text must reach neither: the read's
     first line used to, inside the first 200 characters."""
-    if name not in DESK_TOOLS:
-        return text[:SUMMARY_CHARS]
-    # The tool's own refusals, and dispatch's for a tool this turn does not
-    # hold (PR #34: "… is not available to this agent").
-    if text.startswith("Refused") or " is not available to this agent" in text[:200]:
-        return "refused"
-    if text.startswith(_NOT_OK):
-        return "error"
-    count = _READ_COUNT.search(text[:400])
-    return f"read {count.group(1)} lines" if count else "read"
+    if name in tools.PRIVATE_RESULT:
+        return tools.private_summary(name, text)
+    return text[:SUMMARY_CHARS]
+
 
 
 # --- the handle -------------------------------------------------------------
@@ -422,7 +418,7 @@ class FastPathProvider:
             # A task's thread (or any role but chat) never holds a desk tool.
             if brief.allowed_tools is not None and DESK_TOOLS & set(brief.allowed_tools):
                 raise BriefRefused(
-                    "terminal_read is for the owner's own chat at the HUD, never a task's thread")
+                    "desk tools are for the owner's own chat at the HUD, never a task's thread")
             allowed = [name for name in allowed if name not in DESK_TOOLS]
         if brief.allowed_tools is None:
             return allowed
@@ -640,7 +636,9 @@ class FastPathProvider:
         native.agent.on_event = state.on_event
         # Is the owner at the desk for this turn? A fresh slot per turn, so a
         # steer that took the last turn off the desk does not linger.
-        desk = {"present": _at_desk(native.brief, message)}
+        model_info = models.cached_info(native.agent.model)
+        desk = {"present": _at_desk(native.brief, message),
+                "images": bool(model_info is not None and model_info.vision)}
         native.desk = desk
         self._turn_tools(native, desk["present"])
 
@@ -660,10 +658,11 @@ class FastPathProvider:
 
         def work() -> None:
             try:
-                runtime.bind(proposal=proposal, desk=desk, caller=caller)
-                result["turn"] = native.agent.run_turn(
-                    text, images=list(message.images) or None
-                )
+                runtime.bind(proposal=proposal, caller=caller)
+                with runtime.turn_scope(desk=desk):
+                    result["turn"] = native.agent.run_turn(
+                        text, images=list(message.images) or None
+                    )
             except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
                 result["error"] = exc
             finally:

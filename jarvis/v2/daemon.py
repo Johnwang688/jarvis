@@ -295,6 +295,8 @@ class Daemon:
         # On the bus and in the log it is nothing but classes and counts.
         from .browser.host import BrowserHost
         self.browser = BrowserHost(self)
+        from .browser.look import BrowserLook
+        self.browser_look = BrowserLook(self)
         from .devservers import DevServers
         self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
         # Per-session jarvis-mcp caller tokens (callers.py, plan 2026-10-10
@@ -353,6 +355,7 @@ class Daemon:
             connect_controls(self)
             # `terminal_read` (WP-F) reads these terminals and no others.
             self.terminals.install()
+            self.browser_look.install()
             self.devservers.start()
             self.schedules.start()
 
@@ -1666,6 +1669,7 @@ class Daemon:
         # The Browser's Chrome, its driver and its gate (BR-1a): after the
         # terminals, before the listeners close. Its own bound, past the
         # daemon's: a Chrome that will not close is killed by exact PID.
+        self.browser_look.stop()
         self.browser.stop()
         self.bus.close()
         for server, worker in self._listeners:
