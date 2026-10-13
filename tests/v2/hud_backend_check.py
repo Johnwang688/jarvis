@@ -1714,8 +1714,12 @@ class Backend(unittest.TestCase):
             self.assertFalse(self.request("GET", "/voices")["voice_out"])
         finally:
             voicectl.set_muted(False)
-        source = (Path(__file__).resolve().parents[2] / "hud" / "src" / "App.tsx").read_text()
-        self.assertNotIn("api.mute(", source)
+        hud = Path(__file__).resolve().parents[2] / "hud" / "src"
+        # The mic's mode reaches `/mute` only through the policy, which says no.
+        self.assertIn("export const MIC_OFF_MUTES_SPEECH = false;", (hud / "lib/speech/policy.ts").read_text())
+        app = (hud / "App.tsx").read_text()
+        self.assertIn("onMicModeChange(isMuted(mode),", app)
+        self.assertEqual(app.count("api.mute("), 1)
 
     def test_picker_body_keys_are_the_contract(self):
         """A6: the HUD sent {id}, {name} and {mute}; the daemon read model,
