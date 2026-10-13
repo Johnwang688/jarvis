@@ -219,6 +219,9 @@ class Agent:
         # while this turn ran, as `text` or `(text, images)` items. None —
         # every v1 surface — means nothing is ever steered in.
         self.take_steering: Callable[[], list] | None = None
+        # Optional surface-owned ending, before any handoff call or streamed
+        # final text. None preserves every ordinary/v1 exhaustion behavior.
+        self.exhaustion_message: Callable[[], str | None] | None = None
         self.policy = policy or context.ContextPolicy()
         # Turns the provider's reported prompt_tokens into the number the
         # compaction threshold is judged against, so the threshold means what
@@ -873,9 +876,13 @@ class Agent:
                 self.on_event("context", stats)
 
         turn.stopped_early = True
-        notice = f"[stopped after {self.max_steps} steps without finishing]"
-        handoff = self._handoff(turn)
-        turn.text = f"{notice}\n\n{handoff}" if handoff else notice
+        ending = self.exhaustion_message() if self.exhaustion_message is not None else None
+        if ending is not None:
+            turn.text = ending
+        else:
+            notice = f"[stopped after {self.max_steps} steps without finishing]"
+            handoff = self._handoff(turn)
+            turn.text = f"{notice}\n\n{handoff}" if handoff else notice
         # The transcript has to say so too. Without this it ends on a tail of
         # tool results with no sign the loop was cut off, so the next turn's
         # model cannot know it ran out and will invent a reason for its own
