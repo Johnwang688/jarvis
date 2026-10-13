@@ -26,3 +26,21 @@ describe("showing a newly created program terminal", () => {
     expect(open).toHaveBeenCalledOnce();
   });
 });
+
+describe("Settings covering terminals", () => {
+  it("hides registry visibility without changing placement, selection or sessions", () => {
+    const mgr = new TermManager();
+    mgr.place = new Map([["pane-terminal", 1]]);
+    const original = mgr.place;
+    const pending = { id: "pane-terminal", continuing: true, dropHiddenHold: vi.fn() };
+    mgr.sessions.set(pending.id, pending as any);
+    expect(mgr.visible("pane-terminal")).toBe(true);
+    mgr.setCovered(true);
+    expect(mgr.visible("pane-terminal")).toBe(false);
+    expect(mgr.place).toBe(original);
+    expect(mgr.sessions.get(pending.id)).toBe(pending);
+    expect(pending.dropHiddenHold).toHaveBeenCalledOnce();
+    mgr.setCovered(false);
+    expect(mgr.visible("pane-terminal")).toBe(true);
+  });
+});
