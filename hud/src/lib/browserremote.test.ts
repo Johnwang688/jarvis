@@ -39,7 +39,7 @@ describe("Remote pane state and Private persistence", () => {
       previewUrl:URL,keepOrigin:"http://localhost:23456",see:false,drive:true}]}));
     expect(ws.panes[0].browser!.tabs[0].mode).toBe("remote");
     expect(ws.panes[0].keepOrigin).toBeUndefined(); expect(ws.panes[0].browserCtx).toBeUndefined();
-    expect(ws.panes[0].browserPrivateEnded).toBe(true); expect(ws.panes[0]).not.toHaveProperty("drive");
+    expect(ws.panes[0].browserPrivateEnded).toBe(true); expect(ws.panes[0].drive).toBe(false);
     expect(JSON.stringify(workspaceStorage(ws))).not.toContain("PRIVATE-PATH");
     expect(browserFrames(EMPTY_FRAMES,ws,[1]).recent).toEqual([]);
   });
