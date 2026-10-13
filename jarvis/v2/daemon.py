@@ -280,7 +280,10 @@ class Daemon:
         from .terminals import Terminals
         self.terminals = Terminals(publish=self.bus.publish,
                                    auto_open=lambda: self.devservers.enabled(),
-                                   own_ports=lambda: (self.port, self.face_port, self.workshop_port))
+                                   own_ports=lambda: (self.port, self.face_port, self.workshop_port),
+                                   dev_announce=lambda *a, **k: self.devservers.announce_terminal(*a, **k),
+                                   dev_release=lambda *a: self.devservers.terminal_delivery_failed(*a),
+                                   dev_send=lambda *a: self.devservers.deliver_terminal(*a))
         # VEX V5 (VX-1, vex.py): its builds, downloads and brain terminal run
         # as program terminals above; owner-only routes; the bus carries only
         # an id-only `vex_device` record per device action.

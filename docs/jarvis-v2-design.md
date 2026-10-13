@@ -299,8 +299,8 @@ broker alone.
 - **What actually keeps the floor from loosening the gate** (corrected
   2026-10-08 after review — the first draft claimed "anything not understood
   gets an error or a decline", which was not the whole truth). A Codex
-  approval reaches us only *after* its `auto_review` reviewer passed it, and
-  under AUTO `permit`'s layer 5 answered ALLOW, so a sandbox-widening grant
+  approval under the original `auto_review` policy could bypass Jarvis entirely;
+  when one reached `permit`, AUTO layer 5 answered ALLOW, so a sandbox-widening grant
   riding on an approval (extra permissions, network, a grant root, terminal
   input) was accepted with no human — and the `{decision}` reply cannot strip
   it. Now: unknown server methods get an error; malformed approvals and
@@ -318,16 +318,25 @@ broker alone.
   subcommands both commands are judged and shown, and a human asked. A
   `command: null` can no longer erase the item's real command, and
   a command approval with none is declined; `provider.answer()` can only
-  deny an approval. A plain in-sandbox approval under AUTO is still accepted
-  on the reviewer's word — that is R8, not a regression.
+  deny an approval. Task `auto_review` retains its existing plain-approval
+  fallback. Since 2026-10-13 owner chats select `user` review instead:
+  every chat command/file callback takes the human widening path, even with
+  no explicit permissions overlay. A bare request is not proof of confinement.
 - Approval requests `item/commandExecution/requestApproval`,
   `item/fileChange/requestApproval`, `item/permissions/requestApproval` are
   **routed to the broker**, where the firm denies them. `requestUserInput`
   becomes a clarification question (§10.1). Unknown server requests still fail
   closed.
-- Sandbox `workspace-write`, approval policy `on-request`, and Codex's own
-  automatic reviewer (`--approve-for-me` / `approvals_reviewer =
-  "auto_review"`, already in the owner's config) as the auto-mode analogue.
+- Sandbox `workspace-write` and approval policy `on-request`. Owner chats
+  (Role.CHAT, no task_id) use `approvals_reviewer = "user"`; task threads keep
+  `auto_review`. Config generation, config/read and exact thread/start and
+  thread/resume receipts enforce that choice. A resumed chat that still
+  reports auto_review is refused. Existing roots and network-off checks stay.
+  This followed a synthetic live fixture where auto_review performed a
+  network escalation with zero Jarvis callbacks; user routing alone would
+  be insufficient without the all-chat-callback widening rule above.
+  Metadata/title helpers and task policy are unchanged. No GitHub credential
+  helper or credential-directory grant is added.
   On the CLI, `--approve-for-me` *implies* the workspace-write sandbox and
   refuses an explicit `-s` beside it (verified 0.153.4); over the app-server
   the two are separate fields and the provider sets both.
@@ -1508,7 +1517,10 @@ for everything not under `jarvis/v2/`.
   pre-execution hook is the first thing to verify) or gate always-ask
   tools structurally (a `jarvis-mcp` tool that asks, with the native
   equivalent removed from the toolset). Until then, a project with
-  always-ask additions routes its tasks to Claude.
+  always-ask additions routes its tasks to Claude. **2026-10-13 chat update:**
+  native `user` routing makes chat escalations reach Jarvis and all chat
+  command/file callbacks require owner approval; it does not introduce a
+  universal hook for ordinary sandboxed operations or change task routing.
 - **R6, Codex half answered (WP12a, 2026-09-16):** the app-server protocol
   on 0.153.4 (unchanged in 0.161.0 but for an optional `normalModelSlug`)
   declares `account/rateLimits/updated` with `usedPercent`,
@@ -1654,6 +1666,12 @@ TC-1 (2026-10-12): opt-in `transcript?tools=1` adds safe labels and provider out
 V2 boot (2026-10-12): the approved seeded binary-dust/orb and sharp pen-drawn J.A.R.V.I.S. plate play once per window from the first frame, silently; automation and reduced motion suppress it, clicks are consumed, keys keep working, approvals take precedence, and `hud_v2_boot_check.py` checks it under CSP.
 
 AO-1b-i (2026-10-12): `devservers.py` watches tagged Claude/Codex listeners, holds the memory-only registry and owner-only claims/leases; id-only `dev_server` events and `/status.dev_watch` follow amendment 2 §B–§D.
+AO-1b-ii (2026-10-13) joins shell-terminal banners to that registry, including
+unattached terminals. A validated optional 32-hex `window` nonce on the attach
+query preclaims for that socket and adds `id` to `dev_url`; older attaches
+keep their legacy frame. AO-3 must use the same 32-hex nonce for attach, events
+and claims (the current terminal frontend helper generates only 16 hex).
+
 
 WP12a (Codex) and WP12b (Opus) merged the same day, built against
 `docs/hud-api.md` in parallel and joined at the end: the built HUD served
@@ -2374,14 +2392,27 @@ run first and change no answer — a loopback host spelling and one of the
 shapes' words, as substring searches over a chunk's whole run of lines — and
 a chunk matches at most 32 lines against the table, so URL-dense output stays
 far above what xterm draws (PR #70 review: another host's URLs had slowed
-the terminal to ~9 MB/s). It is sent
-as one `{"type": "dev_url", "url"}` frame **on that terminal's own attached
-socket**, after the bytes that carried it — once per origin among the last
-four, at most one a second and four a minute per terminal, recorded only once
-the socket has taken the frame; with no window attached it is dropped and not
-remembered, and a ring replay never sends one. **Nothing else ever carries it**: no bus record,
-log line, thread log, Discord post or file, and Jarvis never sees it (the
-"Jarvis can read" switch is unrelated: this is the owner's window).
+the terminal to ~9 MB/s). AO-1b-ii registers each eligible cleaned URL
+outside the terminal lock. With an attached window nonce it preclaims and sends
+`{"type": "dev_url", "url", "id"}` after the output bytes, and publishes one
+id-only `claimed` record. A different source, existing claim, placement or
+dismissal wins over a later banner. Failed or stale socket delivery releases
+only the matching private delivery receipt's claim. Queueing checks that
+receipt under the registry lock, so an expired or replaced claim cannot send
+a stale actionable frame. A legacy socket without
+the optional nonce receives `{type, url}` and leaves the entry unclaimed.
+Unattached banners are retained as `up` in memory for an owner window to claim
+(AD-12); this supersedes BR-8a's drop rule. Replay never re-announces. Sniffer
+limits remain one per origin among the last four, one per second and four per
+minute; registry creation also has its shared caps. A URL is recorded after
+successful frame delivery or unattached registry retention. Terminal entries
+wake the lazy watcher without an agent turn and are never HTTP-probed; two
+polls without a LISTEN port after a five-second banner grace mark down,
+including a first baseline poll. A restart within 60 seconds keeps id and
+dismissal and gets a fresh grace. **Only the owner-only registry/claim routes
+and attached socket carry URLs**; bus records contain id/state/source/time,
+never URLs, ports or window nonces, and no log, thread log, Discord post or
+file receives them. The "Jarvis can read" switch is unrelated.
 **Auto-open never opens a port in the Remote gate** (amendment 2): the
 window loads the URL only in a Direct frame, and only the owner's own
 navigation opens a loopback port there. The sniffer holds at most a 512-byte line, a 64-byte escape carry and four

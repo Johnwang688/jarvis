@@ -48,17 +48,21 @@ past `CLAUDE_VERIFIED`, with `JARVIS_CLAUDE_STRICT=1` restoring the old
 major.minor match, and a failed `--version` probe is retried after 60 s
 rather than cached),
 the Codex provider over the app-server (WP4 — lifted from the trading firm's
-transport; its reviewer escalates nothing to us, design R8; **a version floor,
+transport; task `auto_review` has design R8's callback limit, while owner
+chats route approvals to native `user` review; **a version floor,
 not a pin** since 2026-10-08 — `providers/codex_cli.py` runs codex ≥ 0.153.4,
 warns once above the verified 0.161.0, `JARVIS_CODEX_STRICT=1` restores the
 exact match, `JARVIS_CODEX_CLI` picks the binary and nothing under `/mnt/`
 ever runs. Unlike Claude's resolver it *refuses* a relative/Windows/broken
 override rather than warning, launches the realpath it checked rather than
 the symlink, and resolves per session rather than per process — on purpose,
-design §5.4. **A Codex approval arrives already passed by Codex's reviewer,
-so under AUTO nobody decides it** unless we make someone: a sandbox-widening
-approval — extra permissions, network, grant root, `writeStdin`, or any field
-outside the verified schema — goes to a human via `permit(...,
+design §5.4. **Owner Codex chats use `approvals_reviewer = "user"`**
+(2026-10-13): private config, effective config and start/resume receipts must
+agree. Tasks retain `auto_review`. Every chat command/file approval, even a
+bare callback, takes the owner-required widening path before AUTO or static
+ALLOW; normal sandboxed work needs no callback. A task's explicit widening
+— extra permissions, network, grant root, `writeStdin`, or any field
+outside the verified schema — also goes to a human via `permit(...,
 widening=...)` with no Always and a "SANDBOX WIDENING: …" headline, and
 declines with no human, and its grants pass layer 1 first — a grant that is
 or contains protected state or touches a credential dir is DENY unasked
@@ -1906,14 +1910,14 @@ ports** (`devurl.jarvis_ports()` = `config.control_ports()` ∪ 8403 ∪ the
 configured workshop, plus the daemon's listeners as bound, `own_ports`), the
 query and fragment dropped (a Jupyter `?token=` never travels). **Memory: a
 512-byte line (dropped whole past it), a 64-byte escape carry, the last four
-origins and four send times** — nothing else, whatever it is fed. **One
-`{"type": "dev_url", "url"}` frame on that terminal's attached socket**,
-after the bytes that carried it; `may_send` de-duplicates by (scheme, port)
-and rate-limits (one a second, four a minute per terminal), and **`sent`
-records a URL only once `send_text` has taken its frame** (PR #70 review: it
-used to be recorded first, and a socket closing or too far behind cost the
-server its frame for good); **no window attached: dropped and not recorded**;
-a replay never reaches it; a
+origins and four send times** in the sniffer, whatever it is fed. **One
+`{"type": "dev_url", "url", "id"}` frame on a nonce-bound attached socket**
+(AO-1b-ii below; legacy sockets omit `id`), after the bytes that carried it;
+`may_send` de-duplicates by (scheme, port) and rate-limits (one a second,
+four a minute per terminal). `sent` records a URL after a successful socket
+send or unattached registry retention. A refused frame leaves the next
+banner eligible; **unattached URLs are retained in the owner-only memory
+registry**, superseding BR-8a's drop behavior. A replay never reaches it; a
 sniffer that raises is dropped for that terminal (one log line, the
 exception's type) and never stops its output.
 **Nothing on the bus, in a log line, a thread log, Discord or a file carries a
@@ -2060,6 +2064,15 @@ and the headless section, carrying `keepOrigin` across an origin mismatch
 fails the grant case. A stored seed in any suite may still say `"preview"`
 (it migrates); new ones should not.
 
+**Repeated terminal banners refresh liveness (AO-1b-ii review).** Frame
+deduplication does not suppress a same-terminal registry restart: an already
+announced origin refreshes its same-source entry, retaining its id, first path
+and placed/dismissed state. After the 60-second tombstone expires, a new
+unclaimed entry uses the normal source/global rates and registry cap. Neither
+path preclaims or sends a second frame; a different terminal cannot revive a
+retained tombstone through this path. Terminal-output regressions cover all
+prior states, startup grace, expiry, switch-off and the caps.
+
 **Dev servers an agent started, AO-1a (2026-10-12; plan
 `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §B and §D.4, review
 decisions R-2 and R-7; the decisions file wins).** Pure and **not wired yet**:
@@ -2185,10 +2198,30 @@ and reaches Claude's SDK env and Codex's app-server env, never argv or
 `brief.json`. `_open` writes it only when absent; it previously only
 round-tripped the stored brief, and the tag is never in it.
 Close retains attribution for the grace. Stop ends terminals,
-then the watcher and probes, then the bus. Terminal announcement support is
-in the registry; AO-1b-ii wires its sniffer. `devservers_check` uses fixture
+then the watcher and probes, then the bus. Terminal announcements join the
+registry through AO-1b-ii below. `devservers_check` uses fixture
 proc trees, fake CLIs and fixed free loopback ports; `frame_check` walks the
 new family. No tool or Discord verb reaches either dev module.
+
+**Terminal server registry, AO-1b-ii (2026-10-13; amendment 2 §C/AD-12).**
+Shell-terminal banners register even with no window attached; only owner
+registry/claim responses and the attached socket expose their cleaned paths.
+The bus keeps exactly id/state/source/time. The optional attach query
+`window=<32 lowercase hex>` binds to that socket and survives takeover only
+as the new holder's nonce. It preclaims before a `{type: dev_url, url, id}`
+frame; legacy attaches omit id and remain unclaimed. First source on a port
+wins, and claimed/placed/dismissed entries are not redelivered. Registry and
+settings callbacks run outside the terminal lock; an opaque delivery receipt
+prevents a failed or stale socket send from lapsing a newer claim. A final
+registry-locked enqueue refuses a claim that lapsed or changed before delivery.
+Unattached
+registration wakes the lazy watcher without any agent turn; terminal entries
+are never HTTP-probed, and two absent LISTEN polls after five seconds mark
+down, including the initial baseline poll. Restart within 60 seconds reuses
+id/dismissal and resets terminal startup grace. Program/VEX terminals stay
+outside the sniffer. AO-3 must pass one shared **32-hex** page nonce to attach,
+events and claims: the existing frontend helper's 16-hex nonce is incompatible.
+The backend preserves existing legacy clients until that HUD change.
 
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
