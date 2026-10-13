@@ -63,9 +63,11 @@ def guarded(raw: dict, forms) -> bool:
     return any(terminal_guard.withhold(line) for value in fields for line in value.splitlines())
 
 
-def masked_image(encoded: str, scan: dict) -> str:
+def masked_image(encoded: str, scan: dict, *, edge: int = IMAGE_EDGE) -> str:
     """Mask in memory, never paint on the page. Geometry uncertainty refuses."""
     from PIL import Image, ImageDraw
+    if type(edge) is not int or edge not in (IMAGE_EDGE, 1920):
+        raise LookRefused("the page image size could not be read safely")
     if not isinstance(encoded, str) or len(encoded) > IMAGE_BYTES * 2:
         raise LookRefused("the page image could not be read safely")
     data = base64.b64decode(encoded, validate=True)
@@ -91,7 +93,7 @@ def masked_image(encoded: str, scan: dict) -> str:
         box=(max(0,math.floor(left*sx)-3),max(0,math.floor(top*sy)-3),
              min(image.width,math.ceil(right*sx)+3),min(image.height,math.ceil(bottom*sy)+3))
         if box[2]>box[0] and box[3]>box[1]:draw.rectangle(box,fill=(24,26,29))
-    image.thumbnail((IMAGE_EDGE,IMAGE_EDGE),Image.Resampling.LANCZOS)
+    image.thumbnail((edge,edge),Image.Resampling.LANCZOS)
     output=BytesIO();image.save(output,format="PNG")
     return base64.b64encode(output.getvalue()).decode("ascii")
 

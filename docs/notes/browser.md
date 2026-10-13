@@ -1051,6 +1051,21 @@ doubles. This does not establish simultaneous production memory demand or a
 production memory ceiling (BD-10). No HUD profile chip is included here; BR-3b
 consumes these backend routes.
 
+## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
+
+Auto-open display labels do not authorize reading. Each tab independently keeps
+`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
+and invalid source records become unknown; copies retain source even when they
+drop the display mark and origin grant. Passive URL changes, tab selection,
+reload and project-root actions preserve source. Only a successfully judged
+owner address-field Enter/Load submission clears it, including the same URL;
+that also drops the obsolete auto label so storage cannot recreate a legacy
+restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
+The later daemon pane binding resolves the entry to immutable source identity;
+labels and client-supplied terminal IDs never authorize BR5. Unknown stays
+fail-closed. This shared model change alone does not enable Remote or a tool.
+
+
 
 ## Current owner pane registry (2026-10-13, BR3b incremental interface)
 
@@ -1064,6 +1079,11 @@ same-URL reloads before the next report. Snapshot URL/source stay memory-only;
 `browser_viewed` carries only a host-issued view ID, timestamp and refusal flag.
 This registry commit does not yet supply Remote UI or a browser-reading tool.
 
+## Current Remote restore and landing replacement (BR3b, 2026-10-13)
+
+Stored persistent Remote tabs allocate a blank tab and use the owner-only `POST /browser/tabs/<id>/restore {url}` route. It calls `navigate(owner=False)`: restoring state cannot open the shared local-server gate. A live stored handle reattaches without navigation; expired Private state never replays a saved URL. Actual address entry continues through the pane registry transaction and may open the ordinary owner navigation lease.
+
+The landing guard captures the offending document generation when scheduling its explanation. The queued replacement takes the same per-profile lifecycle lock as owner navigation, checks the original tab/generation before navigating, then checks tab/generation/about:blank again before setting explanation content. It cannot blank a newer owner document or write into a page closed during replacement. This is scheduled work; callers never await it while holding the same lock.
 ## Current read-only Browser look (2026-10-13, BR5)
 
 `hud_browser_view(pane="", whole_page=False)` is an explicit HUD owner-chat
@@ -1122,3 +1142,52 @@ real account authentication, a live-provider call or deployment verification.
 Stored persistent Remote tabs allocate a blank tab and use the owner-only `POST /browser/tabs/<id>/restore {url}` route. It calls `navigate(owner=False)`: restoring state cannot open the shared local-server gate. A live stored handle reattaches without navigation; expired Private state never replays a saved URL. Actual address entry continues through the pane registry transaction and may open the ordinary owner navigation lease.
 
 The landing guard captures the offending document generation when scheduling its explanation. The queued replacement takes the same per-profile lifecycle lock as owner navigation, checks the original tab/generation before navigating, then checks tab/generation/about:blank again before setting explanation content. It cannot blank a newer owner document or write into a page closed during replacement. This is scheduled work; callers never await it while holding the same lock.
+
+## Current owner capture boundary (2026-10-13, BR4)
+
+Owner captures use resolve_owner/owner_current on one exact current binding.
+They bypass only initial see/source disclosure policy for that explicit capture;
+full snapshot equality, page/document generations, held state and a monotonic
+approval epoch remain checked. Agent still_current and BrowserLook.read retain
+their existing gates. The lower CDP capture adapter has an optional1920px owner
+image edge; its BR5 default remains1568px. Known credential/heuristic hits omit
+image and text together. Capture-time masks do not prove arbitrary pixels free
+of secrets; send-time credential revalidation promises retained text only.
+
+Capture references are bounded, memory-only and owner-send-only, with fresh
+untrusted fences and canonical mirror names. Capture metadata is not logged or
+published on SSE. The HUD drawing layer uses the existing pixel-coordinate ink
+model and stages an atomic image/reference pair into a pinned draft. Direct
+app-mode Region Capture remains unverified until a real M6 receipt exists;
+never substitute a fresh hidden Remote load for the owner's Direct pixels.
+
+## Current owner Remote Browser UI (BR3b, 2026-10-13)
+
+The Browser strip retains Direct tabs and adds Remote tabs backed by the owner host. Public HTTP(S) address entry chooses Remote; loopback defaults to Direct, with explicit mode conversion. Profile is per pane; mode is per tab. Jarvis can see defaults on and persists an explicit off across navigation, profile changes and copies. Agents may drive stays disabled. Private is always Remote, with one new off-record context for each copied pane; Private URLs, titles and origin grants are omitted from stored workspace state. An ended Private context never replays a stored page.
+
+One ordered publisher uses the shared live SSE window identity for front reports, permission changes and owner address transactions. Layout/Settings/visibility changes revoke a slow address immediately with a newer sequence; confirmed mutation receipts remain current when React catches up. Only successful explicit address entry clears source restrictions. Default profile discovery preserves existing handles, while explicit profile conversion reserves allocation ahead of lazy restore. Restored persistent pages use the non-owner restore route; existing handles reattach without navigation. Failed host cleanup remains visible with an owner retry action.
+
+Each visible active Remote stream consumes a fresh ticket and owns its decode/input generation. Hidden, covered and disconnected streams close while retained handles stay. Approval and annotation blocking stop all page input, clipboard cuts, paste/IME and file/dialog actions without interrupting incoming frames. Unsolicited selection cannot write the local clipboard; cut follows a successful owner clipboard write only. Page dialogs are plain text and never autofocus. Uploads send selected project/path references, and downloads save only on an owner gesture; interrupted late responses cannot create a local save.
+
+Profile controls expose creation, rename, Chrome sign-in, confirmed clearing and deletion through the owner routes. The HUD states Chrome's basic password store and possible sync limitations. This package does not enable agent driving or prove a real account sign-in. BR4 adds capture/annotation controls separately; its identity getter uses the exact current host receipt, not stream pixels.
+
+
+## Current owner capture HUD (BR4, 2026-10-13)
+
+Annotate and Send to chat are explicit gestures on the active drawn Browser tab.
+Remote uses the exact current host receipt; see/source permissions remain unchanged.
+Whole-page text is chosen before capture. The still keeps its captured metadata
+and text scope while the live stream continues; annotation blocks page input and
+navigation. Approval cards and Settings suspend drawing and invalidate pending
+work without discarding existing ink.
+
+Send stages one flattened picture and one opaque page-text reference together,
+never a chat turn. The selected drawn chat is pinned before asynchronous work.
+Stable compose identity follows a later opened thread; closure or replacement
+keeps the pair for the next new thread with an explicit notice. Final attachment
+capacity is judged atomically, and a rejected pair leaves the still and ink.
+
+Direct capture remains unverified on this host. The real app-mode capability
+probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels;
+synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
+“Open this in Remote to annotate” and converts only on that second owner gesture.

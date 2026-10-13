@@ -501,6 +501,7 @@ class BrowserHost:
         # Private alive through capture/retirement, without entering owner tabs.
         self._look_reserved: set[str] = set()
         self._look_tasks: set[asyncio.Task] = set()
+        self._capture_hold_epoch = 0
         self._look_lock = None
         self._launched: set[Path] = set()
         self._snapshot: dict = {"instances": [], "tabs": 0}
@@ -717,7 +718,7 @@ class BrowserHost:
     def _tab_cap() -> int:
         return max(1, config.BROWSER_TAB_CAP)
 
-    def capture_look(self, snapshot, whole, images, forms, current):
+    def capture_look(self, snapshot, whole, images, forms, current, *, image_edge=1568):
         """The BR5 service's read adapter. Never admits an owner port lease."""
         from .look_capture import LOOK_TIMEOUT_S, capture, direct_url
         from .look import LookRefused
@@ -728,7 +729,7 @@ class BrowserHost:
             self._ensure_started()
         elif not self._running():
             raise LookRefused("no live HUD Browser pane is available")
-        return self._call(capture(self, snapshot, whole, images, forms, current, deadline),
+        return self._call(capture(self, snapshot, whole, images, forms, current, deadline, image_edge=image_edge),
                           max(0.1, deadline-time.monotonic()) + CLOSE_TIMEOUT_S*3)
 
     def prepare_action(self, snapshot, action, capability, pin, forms, guard, *, prepared=None):
@@ -1448,6 +1449,11 @@ class BrowserHost:
 
     # -- the hold (plan §8.3, amendment H3) -----------------------------------------------
 
+    def capture_hold_epoch(self) -> int:
+        """A capture spanning any approval card must be started again."""
+        with self._lock:
+            return self._capture_hold_epoch
+
     def input_held(self) -> bool:
         """Whether **any** approval is waiting on the owner: then nothing
         reaches a page. Fails closed — a broker that cannot be asked holds."""
@@ -1466,6 +1472,8 @@ class BrowserHost:
     def _observe(self, record) -> None:
         """A bus observer: a card raised holds every tab at once."""
         if isinstance(record, dict) and record.get("kind") == "approval_requested":
+            with self._lock:
+                self._capture_hold_epoch += 1
             for tab in list(self._tabs.values()):
                 if tab.stream is not None:
                     tab.stream.hold_through()

@@ -12,7 +12,7 @@ live daemon, is refused and counted as a failure (`hud_v2_check.guard_live`).
 
 The checks worth keeping, each written to bite:
   - the Browser pane refuses the API listener `/status` reports (and 8405),
-    the HUD's own port, and anything not local; nothing ever reaches the
+    the HUD's own port, and non-HTTP schemes; Direct stays local and nothing reaches the
     mock's API listener;
   - the frame's `sandbox` is exactly `allow-scripts allow-forms`, and exactly
     `allow-scripts allow-forms allow-same-origin` with the switch on — never
@@ -195,9 +195,9 @@ def _port_checks(page, mock, check, until):
     until(lambda: _count(page, FRAME) > 0, timeout=4)
     page.wait_for_timeout(200)
     check("not as localhost either", _count(page, KEEP) == 0 and _sandbox(page) == OFF)
-    _load(page, "https://example.com/")
+    _load(page, "file:///tmp/refused")
     until(lambda: _count(page, REFUSED) > 0, timeout=3)
-    check("a URL that is not local is refused, with no switch", _count(page, FRAME) == 0 and _count(page, KEEP) == 0)
+    check("a non-http URL is refused, with no origin switch", _count(page, FRAME) == 0 and _count(page, KEEP) == 0)
 
 
 def _keep_checks(page, mock, check, until):
@@ -1064,7 +1064,14 @@ def _guard_gesture_checks(page, mock, check, until):
     # Tab from the URL box, as many times as the toolbar needs.
     _away(page)
     page.locator(_pane(2, '[data-testid="browser-url"]')).click()
-    for _ in range(6):
+    # Capture controls legitimately add stops before the frame. Bound the
+    # traversal by this page's actual controls, while still requiring native
+    # Tab entry into the exact iframe below (never focus it through script).
+    stops = page.locator(_pane(2, '[data-browser-page][aria-hidden="false"]')).evaluate(
+        """e => [...e.querySelectorAll('button,input,select,textarea,a[href],iframe,[tabindex]')]
+            .filter(n => n.tabIndex >= 0 && !n.matches(':disabled') &&
+                !n.closest('[inert]') && n.getClientRects().length).length""")
+    for _ in range(stops + 1):
         page.keyboard.press("Tab")
         page.wait_for_timeout(80)
         if _active_frame(page):

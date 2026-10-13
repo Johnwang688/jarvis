@@ -1571,6 +1571,45 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
   .settings-heading { padding: 10px 12px; }
 }
 
+/* BR-4 owner ink lives on an immutable still below the approval veil. */
+.browser-annotate { position: absolute; inset: 0; z-index: 5; background: var(--bg-1); display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.annotation-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.annotation-toolbar button { padding: 3px 7px; }
+.annotation-toolbar button[aria-pressed=true] { border-color: var(--accent); background: var(--bg-3); }
+.annotation-caption { font-size: 11px; color: var(--text-muted); margin-right: 3px; }
+.annotation-inks { display: flex; gap: 3px; }
+.annotation-inks button { padding: 5px; }
+.annotation-inks span { display: block; width: 11px; height: 11px; border-radius: 50%; background: var(--ink); }
+.annotation-meta, .annotation-note { padding: 4px 9px; font-size: 11px; color: var(--text-2); overflow-wrap: anywhere; }
+.annotation-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-bottom: 1px solid var(--border); }
+.annotation-view { position: relative; flex: 1; min-height: 90px; overflow: hidden; touch-action: none; cursor: crosshair; background: var(--bg-inset); }
+.annotation-view canvas { position: absolute; display: block; pointer-events: none; }
+.annotation-text { position: absolute; display: flex; gap: 3px; max-width: 100%; background: var(--bg-2); padding: 4px; border: 1px solid var(--border-strong); }
+.annotation-text input { width: 180px; min-width: 0; }
+/* Remote Browser: existing Graphite controls, bounded within each pane. */
+.browserprofile { flex: 0 0 auto; min-width: 0; border-bottom: 1px solid var(--border); }
+.browserprofile p { margin: 4px 8px; }
+.browserpermissions { flex-wrap: wrap; gap: 5px 10px; }
+.browserpermissions label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11px; }
+.browserpermissions select { max-width: 160px; }
+.browserprofilemanage { max-height: 250px; overflow: auto; }
+.browserprofilemanage .row { flex-wrap: wrap; gap: 5px; }
+.browserpage > .toolbar { flex-wrap: wrap; }
+.browserpage > .toolbar > input { min-width: 100px; flex: 1 1 120px; }
+.remoteview { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; min-width: 0; overflow: hidden; }
+.remotestatus { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 8px; }
+.remotesurface { position: relative; flex: 1 1 0; min-height: 40px; min-width: 0; overflow: hidden; touch-action: none; }
+.remotesurface canvas { position:absolute; inset:0; width:100%; height:100%; }
+.remoteinput { position:absolute; left:0; bottom:0; width:1px; height:1px; min-width:0; min-height:0; padding:0; border:0; opacity:.01; resize:none; }
+.remotesurface:focus-within { outline:1px solid var(--accent); outline-offset:-1px; }
+.browserquestion { flex:0 0 auto; max-height:180px; overflow:auto; border:1px solid var(--border); background:var(--bg-2); }
+.browserquestion p { white-space:pre-wrap; overflow-wrap:anywhere; }
+.browserquestion input { max-width:100%; }
+.browserfiles { flex:0 0 auto; max-height:240px; overflow:auto; border-bottom:1px solid var(--border); }
+.browserfilelist { display:flex; flex-direction:column; max-height:120px; overflow:auto; padding:4px 0; }
+.browserfilelist label { display:flex; gap:5px; align-items:center; }
+.browserfiles .row { flex-wrap:wrap; gap:6px; }
+.browserfiles bdi { overflow-wrap:anywhere; }
 /* Automatic local-server placement asks without taking focus or moving work. */
 .devserver-prompts { position: fixed; z-index: 70; left: 50%; transform: translateX(-50%); width: min(540px, calc(100% - 24px)); display: grid; gap: 8px; pointer-events: none; overflow-y: auto; }
 .devserver-prompt { pointer-events: auto; border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px; background: var(--bg-2); color: var(--text); box-shadow: 0 3px 18px #0005; font: 12px var(--mono); }
@@ -1585,3 +1624,8 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .browser-newtab-note { padding: 4px 10px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
 .browser-unseen { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; }
 
+.browserpage { position: relative; }
+.browser-capture-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.browser-capture-actions button { padding: 2px 7px; }
+.browser-capture-actions label { display: flex; align-items: center; gap: 4px; color: var(--text-muted); }
+.capture-remote { align-self: flex-start; margin: 0 8px 6px; }
