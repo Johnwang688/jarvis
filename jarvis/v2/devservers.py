@@ -503,12 +503,14 @@ class DevServers:
         self._ensure_thread()
         return entry
 
-    def announce_terminal(self, terminal_id, url, *, window=None, delivery=None):
+    def announce_terminal(self, terminal_id, url, *, window=None, delivery=None, refresh=False):
         """Retain a cleaned banner, preclaiming only its attached window.
 
         Never probes. The first source on a port wins. A delivery receipt is
         private to the terminal reader, so an old failed send cannot release
         a later claim, even when both attachments use the same page nonce.
+        A deduplicated banner only refreshes an existing same-source entry:
+        no new registration, preclaim, frame, or second placement.
         """
         if not self.enabled() or self._stopped:
             return None
@@ -523,6 +525,14 @@ class DevServers:
                 return None
             self._expire(self.clock())
             previous = self._entries.get(parsed.port)
+            if refresh:
+                if previous is None or previous.source != source:
+                    return None
+                # _register preserves id, path, first source and prior state;
+                # a down claimed entry becomes unclaimed, never preclaimed.
+                e = self._register(parsed.port, parsed.scheme, parsed.path or "/",
+                                   source, self.clock())
+                return e.id if e is not None else None
             if (previous is not None and (window is not None or delivery is not None)
                     and (previous.source != source or previous.state in ("dismissed", "placed")
                          or (previous.state == "claimed"

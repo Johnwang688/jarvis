@@ -2141,7 +2141,10 @@ BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
   URL. A later owner window can claim it. Replay never emits an announcement.
   Terminal entries are never HTTP-probed: liveness starts five seconds
   after a banner and marks down after two polls without its LISTEN port,
-  even when no agent session has ever run. A restart within 60 seconds
+  even when no agent session has ever run. Repeated terminal banners refresh
+  only their same-source retained entry, with no second frame, preclaim or
+  placement; the first path and placed/dismissed state stay intact. A different
+  terminal cannot refresh that tombstone. A restart within 60 seconds
   reuses the id and dismissal, with a fresh five-second startup grace.
 - **What is read**: a shell terminal's output (never a program terminal's),
   only a command's own — the prompt and the typed command line are skipped

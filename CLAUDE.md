@@ -2024,6 +2024,13 @@ and the headless section, carrying `keepOrigin` across an origin mismatch
 fails the grant case. A stored seed in any suite may still say `"preview"`
 (it migrates); new ones should not.
 
+**Repeated terminal banners refresh liveness (AO-1b-ii review).** Frame
+deduplication does not suppress a same-terminal registry restart: an already
+announced origin refreshes only its existing same-source entry, retaining its
+id, first path and placed/dismissed state. It never preclaims or sends a second
+frame; a different terminal cannot revive that tombstone through this path.
+The terminal-output regression covers all prior states and startup grace.
+
 **Dev servers an agent started, AO-1a (2026-10-12; plan
 `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §B and §D.4, review
 decisions R-2 and R-7; the decisions file wins).** Pure and **not wired yet**:

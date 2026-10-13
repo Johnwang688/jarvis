@@ -1581,6 +1581,79 @@ class DevUrls(Base):
         again.drain(.2)
         self.assertEqual(self.dev_urls(again), [])
 
+    def test_repeat_banner_revives_retained_source_without_claim_or_second_frame(self):
+        watch = self.daemon.devservers
+        now = [1000.0]
+        watch.clock = lambda: now[0]
+        with patch.object(watch, "_ensure_thread"):
+            for index, prior in enumerate(("up", "placed", "dismissed", "claimed")):
+                with self.subTest(prior=prior):
+                    terminal = T.Terminal(f"{index + 10:08x}", shell="/bin/sh", folder="/",
+                                          project_id=None, label="~", cols=80, rows=24, nonce=NONCE)
+                    self.addCleanup(terminal.finish)
+                    terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+                    terminal._dev_on = lambda: True
+                    terminal._dev_announce = watch.announce_terminal
+                    terminal._dev_release = watch.terminal_delivery_failed
+                    terminal._dev_send = watch.deliver_terminal
+                    port = 24630 + index
+                    line = f"  Local: http://localhost:{port}/first/\r\n".encode()
+                    terminal._output(line)             # unattached: retained and deduplicated
+                    entry = watch._entries[port]
+                    ident = entry.id
+                    with watch._lock:
+                        entry.state = prior
+                        now[0] += 5
+                        watch._liveness(set(), now[0])
+                        watch._liveness(set(), now[0])
+                    self.assertFalse(entry.listening)
+                    frames = []
+                    terminal._attachment_window = self.WINDOW
+                    terminal._attachment = SimpleNamespace(
+                        send_binary=lambda d: True,
+                        send_text=lambda t: frames.append(json.loads(t)) or True,
+                        closed=threading.Event())
+                    now[0] += 10
+                    terminal._output(f"  Local: http://localhost:{port}/new-path/\r\n".encode())
+                    self.assertTrue(entry.listening, "a fresh repeated banner revives the registry")
+                    self.assertEqual(entry.id, ident)
+                    self.assertEqual(entry.path, "/first/")
+                    self.assertEqual(entry.state, "up" if prior == "claimed" else prior)
+                    self.assertEqual(entry.source, {"kind": "terminal", "terminal_id": terminal.id})
+                    self.assertIsNone(entry.window)
+                    self.assertIsNone(entry.delivery)
+                    self.assertEqual(entry.first_seen, now[0])
+                    self.assertEqual(frames, [], "registry refresh never preclaims or places again")
+                    with watch._lock:
+                        watch._liveness(set(), now[0])
+                        watch._liveness(set(), now[0])
+                    self.assertTrue(entry.listening, "the restart gets its startup grace")
+
+    def test_duplicate_from_a_different_terminal_cannot_revive_the_first_source(self):
+        watch = self.daemon.devservers
+        now = [1000.0]
+        watch.clock = lambda: now[0]
+        with patch.object(watch, "_ensure_thread"):
+            ident = watch.announce_terminal("first", "http://localhost:24634/first/")
+            entry = watch._entry(ident)
+            with watch._lock:
+                entry.state = "dismissed"
+                now[0] += 5
+                watch._liveness(set(), now[0])
+                watch._liveness(set(), now[0])
+            terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None,
+                                  label="~", cols=80, rows=24, nonce=NONCE)
+            self.addCleanup(terminal.finish)
+            terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+            terminal._sniffer.sent("http://localhost:24634/other/")
+            terminal._dev_on = lambda: True
+            terminal._dev_announce = watch.announce_terminal
+            terminal._output(b"  Local: http://localhost:24634/other/\r\n")
+            self.assertFalse(entry.listening)
+            self.assertEqual((entry.state, entry.prior_state), ("down", "dismissed"))
+            self.assertEqual(entry.source, {"kind": "terminal", "terminal_id": "first"})
+            self.assertEqual(entry.path, "/first/")
+
     def test_legacy_attach_still_sends_url_but_leaves_entry_unclaimed(self):
         tid = self.open_terminal()["id"]
         client = self.connect(tid, window=None)
