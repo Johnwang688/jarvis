@@ -4,6 +4,7 @@ No URL, title, page text or source permission belongs here. The exact-instance
 activity barrier owns admission; this coordinator never changes agent policy.
 """
 from __future__ import annotations
+import asyncio
 import threading
 from . import audio
 
@@ -19,6 +20,11 @@ class BrowserSound:
         self._available = probe()
         self._queued = False
         self._last_notice = None
+        from .sound_restart import SoundRestarts
+        self.restarts = SoundRestarts(self)
+        self.pulse = audio.Pulse()
+        self._mute_tasks = {}
+        self._mute_reason = {}
 
     def sync(self, *, explicit=False):
         # Serialize preference reads and capability refreshes. A slower older
@@ -60,14 +66,24 @@ class BrowserSound:
     def instance_status(self, instance):
         desired, _, available = self.preference()
         state = instance.audio
-        if state.synchronized(desired):
+        if instance.profile in self.restarts.failed:
+            phase, reason = "failed", "restart_failed"
+        elif instance.profile in self.restarts.restarting:
+            phase, reason = "restarting", None
+        elif state.synchronized(desired):
             phase, reason = "ready", None
         elif instance.profile == "private":
             phase, reason = "pending", "private"
         elif desired and not available.routing:
             phase, reason = "pending", "unavailable"
         else:
-            phase, reason = "pending", "busy"
+            reason = "busy"
+            if not desired and state.applied:
+                if not available.immediate_mute:
+                    reason = "mute_unavailable"
+                elif self._mute_reason.get(instance.profile) == audio.MUTE_UNCERTAIN:
+                    reason = "mute_uncertain"
+            phase = "pending"
         return {"applied": state.applied, "generation": instance.generation,
                 "phase": phase, "reason": reason}
 
@@ -91,6 +107,20 @@ class BrowserSound:
             self._queued = False
         if self.host._stopped:
             return
+        desired, generation, available = self.preference()
+        for instance in list(self.host._instances.values()):
+            if ((instance.audio.synchronized(desired) and instance.profile not in self.restarts.failed)
+                    or (instance.closing and instance.profile not in self.restarts.failed)):
+                # Failed placeholders are retried only by an explicit gesture.
+                continue
+            if not desired and instance.audio.applied:
+                self._mute(instance, generation, available)
+            if instance.profile != "private" and (not desired or available.routing):
+                if instance.profile not in self._mute_tasks:
+                    self.restarts.consider(instance, generation)
+        self.publish()
+
+    def publish(self):
         self.host._publish_snapshot()
         status = self.status()
         rows = tuple((i.profile, tuple(self.instance_status(i).items()))
@@ -102,3 +132,85 @@ class BrowserSound:
         bus = getattr(self.host._daemon, "bus", None)
         if bus is not None:
             bus.publish({"kind": "browser_sound_changed", "data": {"generation": status["generation"]}})
+
+    def _mute(self, instance, generation, available):
+        profile = instance.profile
+        if profile in self._mute_tasks or not available.immediate_mute:
+            return
+        def current():
+            with self._lock:
+                requested = not self._desired and self._generation == generation
+            return (requested and not self.host._stopped and not instance.closing
+                    and self.host._instances.get(profile) is instance)
+        async def run():
+            # The actual executor future settles before structural replacement.
+            # Cancellation of its waiter must not let the native child overlap.
+            def work():
+                from .host import chrome_pids
+                try:
+                    candidates = []
+                    for pid in chrome_pids(instance.folder):
+                        try:
+                            candidates.append(audio.OwnedChrome.pin(pid, instance.folder))
+                        except audio.AudioRefused:
+                            pass
+                    if len(candidates) != 1:
+                        return audio.MuteResult(0, False, audio.MUTE_UNCERTAIN)
+                    return self.pulse.mute_owned(candidates[0], instance.audio, current)
+                except Exception:
+                    return audio.MuteResult(0, False, audio.MUTE_UNCERTAIN)
+            future = asyncio.get_running_loop().run_in_executor(None, work)
+            cancelled = False
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    cancelled = True
+            result = future.result()
+            if current():
+                self._mute_reason[profile] = result.reason
+                self.restarts.consider(instance, generation)
+            if cancelled:
+                raise asyncio.CancelledError()
+        task = asyncio.create_task(run())
+        self._mute_tasks[profile] = task
+        def finished(done):
+            if self._mute_tasks.get(profile) is done:
+                self._mute_tasks.pop(profile, None)
+            if not done.cancelled():
+                done.exception()
+            if self.host._stopped:
+                return
+            desired_now, generation_now, route_now = self.preference()
+            if self.host._instances.get(profile) is instance and not instance.closing:
+                if instance.profile != "private" and (not desired_now or route_now.routing):
+                    self.restarts.consider(instance, generation_now)
+                if not desired_now and instance.audio.applied and generation_now == generation:
+                    # Bounded periodic checks discover streams created while
+                    # this exact ON instance waits for activity to settle.
+                    asyncio.get_running_loop().call_later(1.0, self.wake)
+            self.publish()
+        task.add_done_callback(finished)
+
+    async def retry(self, tab_id):
+        descriptor = self.restarts.descriptors.get(tab_id)
+        tab = self.host._tabs.get(tab_id)
+        profile = descriptor.profile if descriptor is not None else tab.profile if tab else None
+        if profile is None or profile == "private":
+            from .host import BrowserRefused
+            raise BrowserRefused(404, "no such persistent Browser tab")
+        self.restarts.failed.pop(profile, None)
+        self.sync(explicit=True)
+        instance = self.host._instances.get(profile)
+        if instance is not None:
+            self.restarts.consider(instance, self.preference()[1])
+        return {"tab_id": tab_id, "retrying": True}
+
+    async def settle(self):
+        tasks = list(self._mute_tasks.values())
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self.restarts.settle()

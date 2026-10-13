@@ -174,12 +174,12 @@ def route(handler, daemon, parts, query):
             except ws.HandshakeError as exc:
                 _fail(400, str(exc))
             tab = host.require_tab(parts[2])
-            if not host.tickets.redeem(query.get("ticket"), tab.id):
+            if not host.tickets.redeem(query.get("ticket"), tab.id, tab.page_identity):
                 _fail(403, "a fresh ticket for this tab is required")
             # The 101 is written by hand, past `end_headers`: it carries the
             # listener's frame headers explicitly (WP-E), as the terminal's does.
             sock = ws.upgrade(handler, key, headers=frame_headers(handler), max_pending=SOCKET_PENDING)
-            host.serve_socket(tab.id, sock)
+            host.serve_socket(tab.id, sock, expected_tab=tab)
             return 200, None
         if parts == ["browser", "downloads"] and method == "GET":
             return 200, host.downloads()
@@ -240,6 +240,9 @@ def route(handler, daemon, parts, query):
         if len(parts) == 3 and parts[1] == "tabs" and method == "DELETE":
             return 200, host.close_tab(parts[2])
         if len(parts) == 4 and parts[1] == "tabs" and method == "POST":
+            if parts[3] == "sound-retry":
+                _object(handler._body(), ())
+                return 200, host.retry_sound(parts[2])
             if parts[3] == "navigate":
                 body = _object(handler._body(), ("url",), ("url",))
                 return 200, host.navigate(parts[2], body["url"], owner=True)

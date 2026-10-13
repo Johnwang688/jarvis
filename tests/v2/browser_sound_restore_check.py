@@ -1,4 +1,5 @@
 """Pure replay admission/lease tests; no Chrome, network or private URL copies."""
+from dataclasses import replace, FrozenInstanceError
 from pathlib import Path
 import sys, unittest
 from types import SimpleNamespace
@@ -44,7 +45,8 @@ class Restore(unittest.TestCase):
         row=self.describe(tab,lambda *_:True)
         self.assertEqual(target(row,refused=frozenset({33333}),local_servers=True),(BLANK,None,True))
         self.assertEqual(target(row,refused=frozenset(),local_servers=False),(tab.page.url,33333,False))
-        row.url='http://127.0.0.1:33334/synthetic'
+        with self.assertRaises(FrozenInstanceError):row.url='http://127.0.0.1:33334/synthetic'
+        row=replace(row,url='http://127.0.0.1:33334/synthetic')
         self.assertEqual(target(row,refused=frozenset(),local_servers=False),(BLANK,None,True))
 
 if __name__=='__main__':unittest.main()

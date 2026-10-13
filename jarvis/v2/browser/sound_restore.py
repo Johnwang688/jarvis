@@ -9,7 +9,7 @@ from . import policy
 
 BLANK = 'about:blank'
 
-@dataclass
+@dataclass(frozen=True, eq=False)
 class Restore:
     tab_id: str
     profile: str
@@ -18,7 +18,6 @@ class Restore:
     port: int | None
     opener: str | None
     blanked: bool
-    cancelled: bool = False
 
 
 def describe(tab, *, refused, owns_port, local_servers: bool) -> Restore:

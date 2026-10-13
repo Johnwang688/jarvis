@@ -170,6 +170,14 @@ class BrowserActivity:
             found.committed = True
             return True
 
+    def restart_current(self, token: RestartToken, profile: str, instance: int) -> bool:
+        """Exact committed ownership for private structural navigation only."""
+        with self._lock:
+            found = self._restarts.get(profile)
+            return bool(not self._closed and found is not None and found.token is token
+                        and found.committed and token.profile == profile
+                        and self._instances.get(profile) == instance)
+
     def finish_restart(self, token: RestartToken) -> None:
         with self._lock:
             found = self._restarts.get(token.profile)

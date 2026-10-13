@@ -575,6 +575,11 @@ class _Instance:
     generation: int = 0
     audio: InstanceAudio = field(default_factory=lambda: InstanceAudio(False))
     audio_owner: object = None
+    restoring: bool = False
+    unadopted: list = field(default_factory=list)
+    restore_allocation: bool = False
+    refused_pages: list = field(default_factory=list)
+    popup_cleanup: list = field(default_factory=list)
 
 
 @dataclass
@@ -606,6 +611,7 @@ class _Tab:
     page_identity: int = 0              # host-issued lifetime, never a Python address
     document_generation: int = 0        # includes same-URL/same-document navigation
     pane_ready: bool = False             # false until the landing guard accepts it
+    retired: bool = False                # stops ticket minting before same-ID detach
     loading: bool = False                # main-frame request has not finished loading
     activity_holds: dict = field(default_factory=dict)
 
@@ -909,6 +915,7 @@ class BrowserHost:
         self._publish_snapshot()
 
     async def _shutdown(self) -> None:
+        await self._sound.settle()
         await self._activity_work.settle()
         looks=list(self._look_tasks)
         for task in looks:task.cancel()
@@ -1025,6 +1032,17 @@ class BrowserHost:
             row["outcome"] = outcome
             tab.stream.agent_action(row)
 
+    @staticmethod
+    def sound_explanation():
+        return ("<!doctype html><meta charset=utf-8><title>Browser restored</title>"
+                "<body><p>This page was left blank after the sound setting changed. "
+                "Enter an address or use Sign in to open it again.</p>")
+
+    def retry_sound(self, tab_id):
+        if not self._running():
+            raise BrowserRefused(404, "no such tab")
+        return self._call(self._sound.retry(tab_id))
+
     # -- profiles (BR-1c) ---------------------------------------------------
 
     def profiles(self) -> list[dict]:
@@ -1071,6 +1089,8 @@ class BrowserHost:
             self._profiles.require(profile)
         found = self._instances.get(profile)
         if found is not None:
+            if found.closing:
+                raise BrowserRefused(409, "the Browser is changing its sound setting; retry from its Remote pane")
             if found.idle is not None:
                 found.idle.cancel()
                 found.idle = None
@@ -1156,17 +1176,19 @@ class BrowserHost:
         instance = _Instance(profile=profile, folder=folder, context=context, browser=browser,
                              version=getattr(browser, "version", "") or "",
                              audio=InstanceAudio(launch_audio.applied))
+        instance.audio.on_settled(self._sound.wake)
         context.on("page", lambda page: self._adopt(instance, page, None))
         LOG.info("Browser started a Chrome (%s)", "private" if private else "profile")
         return instance
 
-    async def _close_instance(self, profile: str) -> None:
+    async def _close_instance(self, profile: str, *, preserve_activity: bool = False) -> None:
         instance = self._instances.pop(profile, None) or self._closing_instances.get(profile)
         if instance is None:
             return
         self._closing_instances[profile] = instance
         instance.closing = True
-        self.activity.closed(profile, instance.generation)
+        if not preserve_activity:
+            self.activity.closed(profile, instance.generation)
         if profile == PRIVATE:
             self._closing_contexts.update(instance.private_contexts)
         if instance.idle is not None:
@@ -1193,7 +1215,7 @@ class BrowserHost:
         self._closing_instances.pop(profile, None)
         self._publish_snapshot()
 
-    def _adopt(self, instance: _Instance, page, ctx: str | None):
+    def _adopt(self, instance: _Instance, page, ctx: str | None, *, logical_id=None, restart_token=None):
         """Register a page as a tab (a page we opened, or a pop-up), with the
         landing guard, its stream and the page's own requests (dialogs, file
         choosers, downloads). **The cap is 12 tabs in all** (decision B-13:
@@ -1206,13 +1228,35 @@ class BrowserHost:
         if self._instances.get(instance.profile) is not instance or instance.closing or self._stopped:
             asyncio.ensure_future(self._refuse_popup(page))
             return None
+        if instance.restoring:
+            if logical_id is None:
+                if instance.restore_allocation:
+                    if page not in instance.unadopted:
+                        instance.unadopted.append(page)
+                elif len(instance.popup_cleanup) < self._tab_cap():
+                    instance.refused_pages.append(page)
+                    instance.popup_cleanup.append(asyncio.create_task(
+                        asyncio.wait_for(page.close(), CLOSE_TIMEOUT_S)))
+                else:
+                    # Excess unsolicited pages retire this replacement. The
+                    # coordinator's context teardown owns the overflow page.
+                    instance.closing = True
+                return None
+            if not self.activity.restart_current(restart_token, instance.profile, instance.generation):
+                return None
+            descriptor = self._sound.restarts.descriptors.get(logical_id)
+            if descriptor is None or descriptor.profile != instance.profile or logical_id in self._tabs:
+                return None
+        elif logical_id is not None:
+            return None
         for tab in self._tabs.values():
             if tab.page is page:
                 return tab
-        if len(self._tabs) + len(self._look_reserved) >= max(1, config.BROWSER_TAB_CAP):
+        reserved = self._sound.restarts.reserved() - int(logical_id in self._sound.restarts.descriptors)
+        if len(self._tabs) + len(self._look_reserved) + reserved >= max(1, config.BROWSER_TAB_CAP):
             asyncio.ensure_future(self._refuse_popup(page))
             return None
-        tab_id = self._new_id(self._tabs)
+        tab_id = logical_id or self._new_id(set(self._tabs) | set(self._sound.restarts.descriptors))
         self._next_page_identity += 1
         tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
                    page_identity=self._next_page_identity,
@@ -1229,7 +1273,7 @@ class BrowserHost:
         page.on("download", lambda download: self._start_download(tab, download))
         # A pop-up may have navigated before it was handed to us.
         self._landed(tab, page.main_frame)
-        token = self.page_hold(tab, "popup")
+        token = None if instance.restoring else self.page_hold(tab, "popup")
         async def linked():
             try:
                 if token is not None:
@@ -1273,6 +1317,11 @@ class BrowserHost:
     def _release(self, tab: _Tab, reason: str) -> None:
         """A tab is gone: its window is told and let go, its timers and its
         input task stop. On the Browser's thread."""
+        with self._lock:
+            tab.retired = True
+            # A stale old release must not revoke replacement tickets.
+            if self._tabs.get(tab.id) is tab:
+                self.tickets.revoke(tab.id)
         tab.loopback_port = tab.pending_port = None
         self._sync_ports(tab)
         for key, token in list(tab.activity_holds.items()):
@@ -1361,6 +1410,7 @@ class BrowserHost:
         try:
             if request.is_navigation_request() and request.frame is tab.page.main_frame:
                 tab.loading = True
+                self._activity_changed()
         except Exception:
             pass
 
@@ -1420,6 +1470,7 @@ class BrowserHost:
             if tab.stream is not None:
                 tab.stream.remember("chooser", None)
         tab.pane_ready = True
+        self._activity_changed()
         self._located(tab, url=url)
         self._publish_pane_tabs()  # _located may return early for a same-URL reload
 
@@ -1502,7 +1553,7 @@ class BrowserHost:
         cap = max(1, config.BROWSER_TAB_CAP)
         if url is not None:
             self._refuse_if_held()
-        if len(self._tabs) + len(self._look_reserved) >= cap:
+        if len(self._tabs) + len(self._look_reserved) + self._sound.restarts.reserved() >= cap:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         if profile == PRIVATE and self._closing_contexts:
             if ctx is None or ctx in self._closing_contexts or PRIVATE in self._closing_instances:
@@ -1543,8 +1594,14 @@ class BrowserHost:
             row.update(await self._goto(tab, url, owner=owner))
         return row
 
-    async def _goto(self, tab: _Tab, url: str, *, owner: bool = False) -> dict:
-        self._refuse_if_held()
+    async def _goto(self, tab: _Tab, url: str, *, owner: bool = False, restart_token=None) -> dict:
+        if restart_token is None:
+            self._refuse_if_held()
+        else:
+            instance = self._instances.get(tab.profile)
+            if (owner or instance is None or self._tabs.get(tab.id) is not tab
+                    or not self.activity.restart_current(restart_token, tab.profile, instance.generation)):
+                raise BrowserRefused(409, "this Browser replacement is no longer current")
         if owner:
             tab.pending_port = policy.loopback_port(url)
             self._sync_ports(tab)
@@ -1616,9 +1673,17 @@ class BrowserHost:
         return self._call(self._close_tab(tab_id), CLOSE_TIMEOUT_S + 25)
 
     async def _close_tab(self, tab_id) -> dict:
-        tab = self._tab(tab_id)
-        async with self._launching.setdefault(tab.profile, asyncio.Lock()):
-            tab = self._tab(tab_id)
+        # Cancel before waiting for the profile lock; a replacement cannot
+        # resurrect an owner-closed logical tab after its next await.
+        profile = self._sound.restarts.cancel_tab(tab_id)
+        tab = self._tabs.get(tab_id)
+        if tab is None and profile is None:
+            raise BrowserRefused(404, "no such tab")
+        profile = profile or tab.profile
+        async with self._launching.setdefault(profile, asyncio.Lock()):
+            tab = self._tabs.get(tab_id)
+            if tab is None:
+                return {"tab_id": tab_id, "closed": True}
             try:
                 await asyncio.wait_for(tab.page.close(), CLOSE_TIMEOUT_S)
             finally:
@@ -1650,7 +1715,7 @@ class BrowserHost:
                          # whether a window streams it now.
                          "opener": tab.opener,
                          "shown": tab.stream is not None and tab.stream.attached() is not None})
-        return rows
+        return rows + self._sound.restarts.rows()
 
     def close_profile(self, profile) -> None:
         profile_id = self._profile_id(profile)
@@ -1658,6 +1723,7 @@ class BrowserHost:
             self._call(self._close_profile(profile_id), CLOSE_TIMEOUT_S + 20)
 
     async def _close_profile(self, profile: str) -> None:
+        self._sound.restarts.cancel_profile(profile)
         async with self._launching.setdefault(profile, asyncio.Lock()):
             await self._close_instance(profile)
 
@@ -1778,6 +1844,8 @@ class BrowserHost:
 
     def _observe(self, record) -> None:
         """A bus observer: a card raised holds every tab at once."""
+        if isinstance(record, dict) and record.get("kind") in ("approval_resolved",):
+            self._activity_changed()
         if isinstance(record, dict) and record.get("kind") == "approval_requested":
             with self._lock:
                 self._capture_hold_epoch += 1
@@ -1821,7 +1889,11 @@ class BrowserHost:
 
     def ticket(self, tab_id) -> dict:
         tab = self.require_tab(tab_id)
-        return {"ticket": self.tickets.mint(tab.id), "expires_in": int(TICKET_TTL_S)}
+        with self._lock:
+            if self._tabs.get(tab.id) is not tab or tab.retired or self._stopped:
+                raise BrowserRefused(409, "this Browser page is no longer current")
+            ticket = self.tickets.mint(tab.id, tab.page_identity)
+        return {"ticket": ticket, "expires_in": int(TICKET_TTL_S)}
 
     def _attached_event(self, tab_id: str) -> None:
         """`browser_attached`: the tab's id and the time, never a URL, so the
@@ -1837,11 +1909,12 @@ class BrowserHost:
         except Exception as exc:  # noqa: BLE001 - a bus problem never ends a session
             LOG.warning("browser tab %s: attach not published (%s)", tab_id, type(exc).__name__)
 
-    def serve_socket(self, tab_id: str, sock) -> None:
+    def serve_socket(self, tab_id: str, sock, *, expected_tab=None) -> None:
         """A window's socket for one tab, read on the calling (HTTP handler)
         thread until it closes."""
         tab = self._tabs.get(tab_id)
-        if tab is None or tab.stream is None or not self._running():
+        if (tab is None or tab.stream is None or tab.retired or not self._running()
+                or (expected_tab is not None and tab is not expected_tab)):
             from .. import ws
             sock.send_text(json.dumps({"t": "refused", "reason": "no such tab"}))
             sock.close(ws.POLICY, "refused")

@@ -96,6 +96,12 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
       }
     }
     if(event.kind==="browser_profiles_changed") void refresh();
+    if(event.kind==="browser_sound_changed") {
+      // Passive ordered rebind preserves source/see/focus leases. Existing
+      // capture identities become unavailable until the new receipt arrives.
+      receipts.current=null;
+      publisher.heartbeat();
+    }
   },[publisher,refresh,tab,patch]);
   useLayoutEffect(()=>{
     // Pin the initial default once. Deleting it later must show a missing

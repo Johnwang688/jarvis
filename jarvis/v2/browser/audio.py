@@ -89,6 +89,7 @@ class InstanceAudio:
         self._epoch = 0
         self._tainted = False
         self._pending: set[int] = set()
+        self._settled = None
 
     @property
     def applied(self) -> bool:
@@ -101,9 +102,16 @@ class InstanceAudio:
             self._pending.add(self._epoch)
             return self._epoch
 
+    def on_settled(self, callback) -> None:
+        with self._lock:
+            self._settled = callback
+
     def finish_mute(self, epoch: int) -> None:
         with self._lock:
             self._pending.discard(epoch)
+            callback = self._settled
+        if callback is not None:
+            callback()
 
     def snapshot(self) -> tuple[int, bool, int]:
         with self._lock:
