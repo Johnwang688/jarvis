@@ -569,7 +569,13 @@ def always_ask_for(brief: Brief | None = None, project: Project | None = None) -
 
 
 def _tokens_of(segment: str) -> list[str]:
-    return rules.unwrap(rules._tokens(segment))
+    """The command a segment runs, from its program on: past the shell's
+    reserved words, a `case` pattern, a function header, parens and the
+    assignments (`rules.command_start`), and its wrappers (`rules.unwrap`).
+    `if true; then git push --force origin main; fi` split into a segment
+    whose first word was `then`, so no kind rule saw the push (third delta
+    review of PR #75's audit; older than the PR)."""
+    return rules.unwrap(rules.command_start(rules._tokens(segment)))
 
 
 def _any_token(patterns: Iterable[str], tokens: list[str]) -> bool:
@@ -752,8 +758,11 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
     segments: list[tuple[str, list[str], list[str]]] = []
     for segment in rules.segments(command) if command.strip() else []:
         tokens = _tokens_of(segment)
-        stems = [s for s, _ in rules.command_targets(segment)] or (
-            [tokens[0].rsplit("/", 1)[-1]] if tokens else [])
+        stems = [s for s, _ in rules.command_targets(segment)]
+        if tokens and tokens[0].rsplit("/", 1)[-1].lower() not in stems:
+            # The program past a reserved word (`then vercel --prod`), which
+            # the allowlist's stems do not peel.
+            stems.append(tokens[0].rsplit("/", 1)[-1].lower())
         segments.append((segment, tokens, stems))
         # What a wrapper or runner in front starts is judged too, from rules'
         # one table: `npx vercel --prod` is a production deploy, and `uv run

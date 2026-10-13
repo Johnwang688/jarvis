@@ -2723,7 +2723,8 @@ def started_commands(segment: str) -> list[list[str]]:
     seen: set = set()
 
     def walk(words: list[str], depth: int) -> None:
-        words = strip_assignments(words)
+        # From the program on: `then npx vercel --prod` starts vercel too.
+        words = command_start(words)
         if not words or tuple(words) in seen:
             return
         seen.add(tuple(words))

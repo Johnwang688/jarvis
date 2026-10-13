@@ -1626,6 +1626,31 @@ def third_delta_75_checks():
                 before = len(asker.seen)
                 eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line[:60]!r} is refused")
                 eq(len(asker.seen), before, f"[{profile.value}] {line[:60]!r} is never put to the owner")
+        # Layer 2 reads the program past a reserved word, a group or a function
+        # header too: on main `if true; then git push --force origin main; fi`
+        # matched no rule and went to the provider's reviewer under AUTO.
+        from jarvis.v2.permissions import always_ask_match
+        brief = brief_for(P.AUTO)
+        fronts = ("if true; then {s}; fi", "while true; do {s}; done", "case x in x) {s};; esac",
+                  "f() {{ {s}; }}", "! {s}", "{{ {s}; }}", "( {s} )", "coproc {s}", "b+=y {s}",
+                  "a[0]=x {s}")
+        push = ("git-push-protected", "git-push-force")
+        for base, rule in (("git push --force origin main", push), ("git push origin main", push),
+                           ("npx vercel --prod", ("vercel-prod",)),
+                           ("vercel --prod", ("vercel-prod",)),
+                           ("uv run git push --force origin main", push)):
+            for front in fronts:
+                line = front.format(s=base)
+                match = always_ask_match("Bash", {"command": line}, brief)
+                ok(match is not None and match[0] in rule,
+                   f"layer 2 matches {line!r} ({match and match[0]})")
+                asker = Asker(Decision.DENY)
+                eq(build_permit(context(brief), asker)(*bash(line), brief), Decision.DENY,
+                   f"{line!r}: the owner's no holds")
+                eq(len(asker.seen), 1, f"{line!r} is put to the owner under AUTO")
+        for line in ("if true; then git status; fi", "while true; do npm test; done",
+                     "f() { ls; }", "( make )"):
+            eq(always_ask_match("Bash", {"command": line}, brief), None, f"{line!r} asks nothing new")
 
 
 def daemon_checks():
