@@ -945,3 +945,17 @@ frame. A stopped tab stays stopped until Reload. Background content is
 hidden/inert, and every strip/control is disabled under a card. Labels are
 cleaned host/path text, capped at 40; auto-source names cap at 60 and appear in
 visible chrome. Remote mode and autonomous placement remain later packages.
+
+## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
+
+Auto-open display labels do not authorize reading. Each tab independently keeps
+`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
+and invalid source records become unknown; copies retain source even when they
+drop the display mark and origin grant. Passive URL changes, tab selection,
+reload and project-root actions preserve source. Only a successfully judged
+owner address-field Enter/Load submission clears it, including the same URL;
+that also drops the obsolete auto label so storage cannot recreate a legacy
+restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
+The later daemon pane binding resolves the entry to immutable source identity;
+labels and client-supplied terminal IDs never authorize BR5. Unknown stays
+fail-closed. This shared model change alone does not enable Remote or a tool.

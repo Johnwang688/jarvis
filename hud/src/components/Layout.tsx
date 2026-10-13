@@ -27,7 +27,7 @@ import {
   forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
   renameTerminal as renameTerminalOf,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
-  setBrowserUrl as setBrowserUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  setBrowserUrl as setBrowserUrlOf, submitBrowserUrl as submitBrowserUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
   setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
   unpinProject as unpinProjectOf, setEditors as setEditorsOf,
   type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
@@ -70,6 +70,7 @@ export interface LayoutControl {
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
   setBrowserUrl: (pane: PaneNo, url: string, id?: string) => void;
+  submitBrowserUrl: (pane: PaneNo, url: string, id?: string) => void;
   addBrowserTab: (pane: PaneNo, url: string, opts?: BrowserTabOptions) => void;
   closeBrowserTab: (pane: PaneNo, id: string) => void;
   activateBrowserTab: (pane: PaneNo, id: string) => void;
@@ -234,6 +235,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
   const setBrowserUrl = useCallback((pane: PaneNo, url: string, id?: string) => setWs((w) => setBrowserUrlOf(w, pane, url, id)), []);
+  const submitBrowserUrl = useCallback((pane: PaneNo, url: string, id?: string) => setWs((w) => submitBrowserUrlOf(w, pane, url, id)), []);
   const addBrowserTab = useCallback((pane: PaneNo, url: string, opts?: BrowserTabOptions) => setWs((w) => addBrowserTabOf(w, pane, url, opts)), []);
   const closeBrowserTab = useCallback((pane: PaneNo, id: string) => setWs((w) => closeBrowserTabOf(w, pane, id)), []);
   const activateBrowserTab = useCallback((pane: PaneNo, id: string) => setWs((w) => activateBrowserTabOf(w, pane, id)), []);
@@ -415,7 +417,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     ownerTogglePanel,
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, setFilePath, setKeepOrigin,
+    setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
     addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin,
     setTerminal, forgetTerminal, renameTerminal, setSplit,
     equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
