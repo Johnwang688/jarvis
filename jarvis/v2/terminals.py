@@ -743,6 +743,10 @@ class Terminal:
         # `input_ok` False refuses typed input but a lone Ctrl-C.
         self.program = program
         self.input_ok = input_ok
+        # WSL Windows interop waits for an initial cursor report even with
+        # no HUD attached. Only this fresh, input-disabled build screen gets
+        # one fixed reply; later output and other terminals are untouched.
+        self._build_startup = b"" if program == "vex-build" and input_ok is False else None
         self.title = title or f"{os.path.basename(shell)} · {label}"
         # Called once, with this terminal, after its program has exited and
         # its output has been read to the end (or on finish). vex.py's only.
@@ -857,9 +861,30 @@ class Terminal:
             self._check_exit()
         # Every byte the program wrote has been read (EOF), so a hook that
         # parses the ring sees all of it.
+        with self._lock:
+            pending, self._build_startup = self._build_startup, None
+        if pending:
+            self._output(pending)
         self._fire_exit()
 
     def _output(self, data: bytes) -> None:
+        reply = False
+        with self._lock:
+            if self._build_startup is not None:
+                initial = self._build_startup + data
+                query = b"\x1b[6n"
+                if len(initial) < len(query) and query.startswith(initial):
+                    self._build_startup = initial  # at most three bytes
+                    return
+                self._build_startup = None
+                reply = initial.startswith(query)
+                data = initial[len(query):] if reply else initial
+        if reply:
+            # Consume the query so xterm cannot send a second response. This
+            # is protocol input, never an exception to the socket input guard.
+            self.queue_input(b"\x1b[1;1R")
+        if not data:
+            return
         # Settings/registry callbacks may publish or inspect this terminal.
         # They must never run while its state lock is held.
         enabled, failure = False, None
