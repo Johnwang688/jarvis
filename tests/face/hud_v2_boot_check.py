@@ -39,7 +39,7 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
     errors = []
     keep_approvals = mock.world["approvals"]
 
-    def fresh(forced=True, reduced=False, zoom=100, size=(1280, 800), storage=True):
+    def fresh(forced=True, reduced=False, zoom=100, size=(1280, 800), storage=True, extra=""):
         ctx = browser.new_context(viewport={"width": size[0], "height": size[1]},
                                   permissions=["microphone"], device_scale_factor=2 if zoom == 160 else 1,
                                   reduced_motion="reduce" if reduced else "no-preference")
@@ -51,6 +51,8 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
           localStorage.setItem('jarvis.hud.zoom', '{zoom}');
           localStorage.setItem('jarvis.dictation', 'review');
         """)
+        if extra:
+            ctx.add_init_script(extra)
         if not storage:
             ctx.add_init_script("Object.defineProperty(window, 'sessionStorage', {get() { throw new Error('unavailable'); }});")
         page = ctx.new_page()
@@ -194,6 +196,85 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
         finally:
             ctx.close()
 
+    UNDERLAY = """() => {
+      window.__under = {click: 0, dblclick: 0, down: 0, up: 0};
+      const button = document.createElement('button'); button.id = 'under-boot';
+      button.textContent = 'underlay'; button.style.cssText =
+        'position:fixed;left:0;top:0;width:100px;height:100px;z-index:98';
+      for (const [kind, key] of [['click', 'click'], ['dblclick', 'dblclick'],
+                                 ['pointerdown', 'down'], ['pointerup', 'up']])
+        button.addEventListener(kind, () => window.__under[key]++);
+      document.querySelector('#root').appendChild(button);
+    }"""
+
+    def canvas_fails():
+        # Review of PR #82, F1: a throw in the overlay must never take the HUD
+        # (and its approval card) with it.
+        no_canvas = """
+          const own = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function (...args) {
+            return this.closest('#hud-boot') ? null : own.apply(this, args);
+          };"""
+        ctx, page = fresh(extra=no_canvas)
+        try:
+            page.wait_for_timeout(600)
+            check("a canvas with no 2D context ends boot, never the HUD",
+                  page.locator(OVERLAY).count() == 0 and page.locator('[data-testid="input"]').count() == 1
+                  and page.evaluate("window.__bootMounts") >= 1)
+            mock.emit("approval_requested", dict(CARD))
+            page.wait_for_selector('[data-testid="approval-card"]', state="attached")
+            check("…and an approval card still draws and takes focus",
+                  page.evaluate("document.activeElement?.getAttribute('data-testid')") == "approval-card")
+            page.keyboard.press("Escape")
+            page.wait_for_selector('[data-testid="approval-card"]', state="detached")
+        finally:
+            ctx.close()
+
+    def shield():
+        # F3: a quick double-click is eaten whole.
+        ctx, page = fresh()
+        try:
+            page.wait_for_selector(OVERLAY, state="attached")
+            page.evaluate(UNDERLAY)
+            page.mouse.dblclick(40, 40)
+            page.wait_for_selector(OVERLAY, state="detached", timeout=2000)
+            check("a double-click on boot reaches nothing underneath",
+                  page.evaluate("window.__under") == {"click": 0, "dblclick": 0, "down": 0, "up": 0},
+                  str(page.evaluate("window.__under")))
+        finally:
+            ctx.close()
+        # F2: a cancelled press lets the shield go at once.
+        ctx, page = fresh()
+        try:
+            page.wait_for_selector(OVERLAY, state="attached")
+            page.evaluate(UNDERLAY)
+            page.mouse.move(40, 40)
+            page.mouse.down()
+            page.evaluate("""() => document.querySelector('#hud-boot').dispatchEvent(
+              new PointerEvent('pointercancel', {bubbles: true, pointerId: 1}))""")
+            start = time.monotonic()
+            page.wait_for_selector(OVERLAY, state="detached", timeout=3000)
+            check("a cancelled press removes boot within a second", time.monotonic() - start < 1.0)
+            page.mouse.up()
+        finally:
+            ctx.close()
+        # F4: a press held past the hard cap still keeps its release from the HUD.
+        ctx, page = fresh()
+        try:
+            page.wait_for_selector(OVERLAY, state="attached")
+            page.evaluate(UNDERLAY)
+            page.mouse.move(40, 40)
+            page.mouse.down()
+            page.wait_for_timeout(7800)
+            check("a press held past the hard cap keeps boot up", page.locator(OVERLAY).count() == 1)
+            page.mouse.up()
+            page.wait_for_selector(OVERLAY, state="detached", timeout=2000)
+            check("…and its release reaches nothing underneath",
+                  page.evaluate("window.__under") == {"click": 0, "dblclick": 0, "down": 0, "up": 0},
+                  str(page.evaluate("window.__under")))
+        finally:
+            ctx.close()
+
     def covers(zoom, size):
         ctx, page = fresh(zoom=zoom, size=size)
         try:
@@ -234,6 +315,8 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
         run("reduced motion", lambda: no_play(forced=True, reduced=True))
         run("finish", finishes)
         run("click and reload", click_skip)
+        run("canvas failure", canvas_fails)
+        run("click shield", shield)
         for key in ("x", "Escape", "Control+`"):
             run("key " + key, lambda key=key: key_skip(key))
         run("push-to-talk", ptt)

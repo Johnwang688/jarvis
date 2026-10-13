@@ -34,6 +34,8 @@ export const BEAT = { pileIn: 0.25, launch0: 0.2, launchSpread: 0.8, plate0: 0.7
 export const FADE_OUT_S = 0.45;
 /** Keep the pointer shield until the corresponding click has been eaten. */
 export const SKIP_FADE_MS = 200;
+/** How long the click shield outlasts the last release or click (review of PR #82, F3). */
+export const SHIELD_MS = 450;
 /** However the frames go, the overlay is gone this long after it mounted. */
 export const HARD_CAP_MS = 7_000;
 

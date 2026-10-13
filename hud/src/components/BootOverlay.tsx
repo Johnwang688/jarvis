@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { BOOT_DEFAULTS, FADE_OUT_S, HARD_CAP_MS, PLAYED_KEY, SKIP_FADE_MS,
+import { BOOT_DEFAULTS, FADE_OUT_S, HARD_CAP_MS, PLAYED_KEY, SHIELD_MS, SKIP_FADE_MS,
   RINGS, SPIN, bitAt, buildDust, clamp01, easeInOutCubic, hexToRgb, layoutFor,
   particleAt, plateGeometry, penAt, dotsAt, ringRot, shouldPlay } from "../lib/boot";
 
@@ -31,10 +31,22 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
     if (cardUp) { setPlaying(false); return; }
     if (!playing || !overlay.current || !orb.current || !dust.current || !plate.current) return;
     const host = overlay.current;
-    const stopDrawing = startDrawing(host, orb.current, dust.current, plate.current, () => setPlaying(false));
+    // Decorative: whatever fails here ends the animation, never the window that
+    // gates approvals. An uncaught throw in a layout effect unmounts the whole
+    // HUD, card included (review of PR #82, F1: a canvas with no 2D context).
+    let stopDrawing: () => void;
+    try {
+      stopDrawing = startDrawing(host, orb.current, dust.current, plate.current, () => setPlaying(false));
+    } catch {
+      setPlaying(false);
+      return;
+    }
     let skipTimer = 0;
     let skipped = false;
     const finish = () => { stopDrawing(); setPlaying(false); };
+    // The shield stays up SHIELD_MS past the last release or click, so the
+    // second half of a double-click is eaten too (F3).
+    const linger = () => { window.clearTimeout(skipTimer); skipTimer = window.setTimeout(finish, SHIELD_MS); };
     const skip = () => {
       if (skipped) return;
       skipped = true;
@@ -48,30 +60,38 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
     const motion = matchMedia("(prefers-reduced-motion: reduce)");
     const reduce = () => { if (motion.matches) finish(); };
     motion.addEventListener("change", reduce);
-    const hardCap = window.setTimeout(finish, HARD_CAP_MS);
+    let hardCap = window.setTimeout(finish, HARD_CAP_MS);
     // DOM listeners keep the shield through pointerup/click, including long holds.
     const eat = (e: Event) => { e.preventDefault(); e.stopPropagation(); };
     const down = (e: PointerEvent) => {
       eat(e);
-      host.setPointerCapture(e.pointerId);
+      try { host.setPointerCapture(e.pointerId); } catch { /* the pointer is already gone */ }
       skip();
       window.clearTimeout(skipTimer);
+      // A held press keeps the shield until it is let go, however long (F4).
+      window.clearTimeout(hardCap);
+      hardCap = 0;
     };
-    const up = (e: PointerEvent) => {
-      eat(e);
-      skipTimer = window.setTimeout(finish, SKIP_FADE_MS);
-    };
-    const click = (e: MouseEvent) => { eat(e); finish(); };
+    // A release, a cancelled touch or lost capture all let the shield go (F2).
+    const up = (e: Event) => { eat(e); linger(); };
+    const click = (e: Event) => { eat(e); linger(); };
+    const RELEASES = ["pointerup", "pointercancel", "lostpointercapture"] as const;
+    const CLICKS = ["click", "dblclick", "auxclick", "contextmenu"] as const;
+    // The window losing focus mid-press may never deliver the release.
+    const blurred = () => linger();
+    window.addEventListener("blur", blurred);
     host.addEventListener("pointerdown", down);
-    host.addEventListener("pointerup", up);
-    host.addEventListener("click", click);
+    for (const kind of RELEASES) host.addEventListener(kind, up);
+    for (const kind of CLICKS) host.addEventListener(kind, click);
     return () => {
       stopDrawing();
       window.clearTimeout(skipTimer); window.clearTimeout(hardCap);
       window.removeEventListener("keydown", skip, true);
       motion.removeEventListener("change", reduce);
-      host.removeEventListener("pointerdown", down); host.removeEventListener("pointerup", up);
-      host.removeEventListener("click", click);
+      window.removeEventListener("blur", blurred);
+      host.removeEventListener("pointerdown", down);
+      for (const kind of RELEASES) host.removeEventListener(kind, up);
+      for (const kind of CLICKS) host.removeEventListener(kind, click);
     };
   }, [playing, cardUp]);
 
@@ -83,8 +103,13 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
 
 function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
   dustCv: HTMLCanvasElement, svg: SVGSVGElement, done: () => void): () => void {
-  const octx = orbCv.getContext("2d")!;
-  const dctx = dustCv.getContext("2d")!;
+  const ctx2d = (cv: HTMLCanvasElement) => {
+    const ctx = cv.getContext("2d");
+    if (!ctx) throw new Error("no 2D canvas");
+    return ctx;
+  };
+  const octx = ctx2d(orbCv);
+  const dctx = ctx2d(dustCv);
   const CFG = BOOT_DEFAULTS;
   const theme = getComputedStyle(host);
   const HUE = {
@@ -243,7 +268,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     }
     p.fill.setAttribute("opacity", String(q)); p.rule.setAttribute("opacity", String(q));
   }
-  const resize = () => {
+  const layout = () => {
     W = innerWidth; H = innerHeight; dpr = devicePixelRatio || 1;
     for (const cv of [orbCv, dustCv]) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
     L = layoutFor(W, H);
@@ -251,19 +276,27 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     orbStart = timeline.orbStart; orbEnd = timeline.orbEnd;
     drawingPlate = buildPlate();
   };
-  resize();
+  layout();
+  // A frame or a resize that throws ends the animation rather than leaving a
+  // frozen overlay over the HUD.
+  const resize = () => { try { layout(); } catch { stop(); done(); } };
   window.addEventListener("resize", resize);
   let raf = 0, stopped = false;
   const started = performance.now();
+  const stop = () => { stopped = true; cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
   const tick = (now: number) => {
     if (stopped) return;
     const t = (now - started) / 1000;
-    drawOrb(t); drawDust(t); drawPlate(t);
+    try {
+      drawOrb(t); drawDust(t); drawPlate(t);
+    } catch {
+      stop(); done(); return;
+    }
     host.style.opacity = String(1 - clamp01((t - timeline.end) / FADE_OUT_S));
     if (t < timeline.end + FADE_OUT_S) raf = requestAnimationFrame(tick);
     else done();
   };
   drawOrb(0); drawDust(0); drawPlate(0);
   raf = requestAnimationFrame(tick);
-  return () => { stopped = true; cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
+  return stop;
 }
