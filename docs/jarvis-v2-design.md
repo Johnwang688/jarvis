@@ -1572,6 +1572,8 @@ personal chat off; the owner should reset that selection.
 
 ## 18. HUD v2 landed (2026-09-16)
 
+2026-10-12: Settings installs the HUD as a Chrome app with orb PNG icons; `jarvis hud` pins the Default profile and launches its installed app id when present.
+
 WP12a (Codex) and WP12b (Opus) merged the same day, built against
 `docs/hud-api.md` in parallel and joined at the end: the built HUD served
 by `jarvis daemon2` on 8402 passed all 14 live checks against the real
