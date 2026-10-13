@@ -2077,7 +2077,8 @@ def _thinking_box_cap_checks(page, mock, check, until):
     z = 1.6
     ws = json.loads(D_SINGLE)
     ws["panel"] = {"open": True, "height": 120}
-    d_fresh(page, mock, until, json.dumps(ws), size=(1920, 700), zoom="160")
+    # Keep the min-log term tighter than 35% after removing the tool ticker.
+    d_fresh(page, mock, until, json.dumps(ws), size=(1920, 660), zoom="160")
     _open(page, until, 1, "t1")
     box = _box(page, 1)
     box.click()
