@@ -3219,6 +3219,15 @@ def main():
             finally:
                 marks_mock.stop()
 
+            # The boot suite alone opts into animation under webdriver.
+            from tests.face.hud_v2_boot_check import boot_checks
+            boot_mock = MockDaemon(0).start()
+            try:
+                boot_checks(browser, boot_mock, f"http://127.0.0.1:{boot_mock.port}", check, until,
+                            guard, FAKE_RECOGNIZER)
+            finally:
+                boot_mock.stop()
+
             # Chat titles (2026-10-12): the row's title, wrapped and clamped,
             # Copy id in ⋯, and a title arriving live — a mock of their own.
             from tests.face.hud_v2_titles_check import titles_checks

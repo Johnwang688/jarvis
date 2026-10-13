@@ -1574,6 +1574,10 @@ personal chat off; the owner should reset that selection.
 
 TC-1 (2026-10-12): opt-in `transcript?tools=1` adds safe labels and provider outcomes; legacy bytes stay unchanged, unfinished calls track the current turn, and old-label derivation is capped at 500 (contract `docs/hud-api.md`).
 
+2026-10-12: Settings installs the HUD as a Chrome app with orb PNG icons; `jarvis hud` pins the Default profile and launches its installed app id when present.
+
+V2 boot (2026-10-12): the approved seeded binary-dust/orb and sharp pen-drawn J.A.R.V.I.S. plate play once per window from the first frame, silently; automation and reduced motion suppress it, clicks are consumed, keys keep working, approvals take precedence, and `hud_v2_boot_check.py` checks it under CSP.
+
 AO-1b-i (2026-10-12): `devservers.py` watches tagged Claude/Codex listeners, holds the memory-only registry and owner-only claims/leases; id-only `dev_server` events and `/status.dev_watch` follow amendment 2 §B–§D.
 
 WP12a (Codex) and WP12b (Opus) merged the same day, built against

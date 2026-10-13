@@ -54,6 +54,7 @@ import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePicker } from "./components/Pickers";
+import { useInstallApp } from "./state/installApp";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
@@ -90,6 +91,7 @@ import {
   isEmptyChat, nonePerPane, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
 import { useStableHandlers, useStableValue } from "./lib/stable";
+import BootOverlay from "./components/BootOverlay";
 import { thinkingLine, type ThinkingLine } from "./lib/thinking";
 import { thinkingClock } from "./components/MiniOrb";
 
@@ -196,6 +198,7 @@ export default function App() {
   // lib/workspace.ts. Every layout key is inert while an authorization card
   // is up (as PTT is), and every layout button is disabled.
   const blocked = state.approvals.length > 0;
+  const installApp = useInstallApp(blocked);
   // ED-7's keys (Ctrl+P, Ctrl+Shift+P / F1, Ctrl+Shift+F) are taken by
   // `useLayout`'s capture handler — the one interception place — and acted on
   // here with the latest render (`editorKeyRef`, set below).
@@ -3439,6 +3442,10 @@ export default function App() {
       />
       </WorkspaceBoundary>
 
+      {/* The boot animation: on the first frame, so the HUD never shows before
+          it; below the authorization veil, and gone the moment a card is known.
+          Automation never mounts it unless its own suite opts in. */}
+      {!navigator.webdriver || window.__hudBootForce === true ? <BootOverlay cardUp={blocked} /> : null}
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 
       {/* A picker or dialog that throws is closed, and the window carries on
@@ -3507,7 +3514,8 @@ export default function App() {
         />
       ) : null}
       {state.picker === "settings" || state.picker === "route" ? (
-        <SettingsDialog route={state.route} onClose={() => patch({ picker: null })} />
+        <SettingsDialog route={state.route} onClose={() => patch({ picker: null })}
+          blocked={blocked} installStatus={installApp.status} onInstall={installApp.install} />
       ) : null}
       {state.picker === "newProject" ? (
         <NewProject

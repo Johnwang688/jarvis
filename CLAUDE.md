@@ -1107,6 +1107,47 @@ and layout persist in localStorage behind try/catch. The free checks are
 `tests/face/hud_v2_layout_check.py`, run first by `hud_v2_check.py` in a
 context of its own, plus `hud/src/lib/layout.test.ts`.
 
+**HUD installed app and orb icon (2026-10-12, design §18).** Settings offers
+**Install as app** when Chrome supplies `beforeinstallprompt`; otherwise it
+shows Chrome’s menu route. Standalone windows and `appinstalled` say Installed.
+The install action is disabled and inert under an approval card. The manifest
+is `/manifest.webmanifest`, served as `application/manifest+json` under the
+one CSP’s `manifest-src 'self'`; Vite copies public icons into the installed
+build’s integrity manifest. `hud/scripts/render_icons.py` copies the idle orb
+without refactoring `Orb.tsx`, with simpler 16/32px rings and a safe-zone mask.
+`jarvis hud` pins Windows Chrome to `JARVIS_HUD_CHROME_PROFILE` (Default),
+refusing slash, backslash or `..`; the id uses Chromium’s verified double SHA-256.
+Only the HUD root uses `--app-id` when its
+Manifest Resources folder exists under `JARVIS_WINDOWS_LOCALAPPDATA` (else
+converted LOCALAPPDATA, else johnw’s Windows Local AppData). No profile is read.
+
+**HUD boot animation (2026-10-12, design §18; the owner: "this is literally
+perfection … make sure that its disabled when automation is on").** The owner's
+prototype (`prototypes/boot/index.html`) at its default settings, v2 only, no
+audio: seeded binary dust drifts from the bottom left by geometric Brownian
+motion and converges into the orb; two pens draw a sharp box counter-clockwise
+while a pen per letter draws JARVIS, then the dots pop in. The pure half is
+`hud/src/lib/boot.ts` (RNG, paths, timeline, `shouldPlay`), the drawing
+`components/BootOverlay.tsx`. **It mounts on the first frame**, so the HUD is
+never seen before it, and nothing waits on it: the HUD loads, connects and
+renders underneath. **Never under automation**: with `navigator.webdriver` the
+component is not mounted at all, unless the boot suite's own init script sets
+`window.__hudBootForce = true` (which can only make it play). **Once per
+window**: a sessionStorage flag (behind try/catch; without storage, once per
+page load) is set when a window first considers it, so a reload never replays
+it, and reduced motion never plays it. **A click skips it and clicks nothing
+underneath** (the overlay eats the press, its release and the click); **a key
+skips it and still does its job** (never prevented: Ctrl+D, Escape, typing,
+Ctrl+`). **Approvals win**: it sits at z-index 99, below `#authveil`, never
+takes focus, and is removed in the same render a card is drawn in, whether the
+card was waiting when the window opened or arrives mid-play; answering the
+card never restarts it. It fills the window at any zoom (`--ui-zoom` divided
+out, canvases in device pixels), and its fade-out cancels the animation frame,
+timers and listeners. Free checks: `lib/boot.test.ts` and
+`tests/face/hud_v2_boot_check.py` (a `MockDaemon(0)` of its own, run by
+`hud_v2_check`); removing the webdriver, card, click or session guard each
+fails it.
+
 **HUD title bar and split workspace, WP-A (2026-10-09, design §18; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md`, decisions file beside it
 wins).** A 28px window-wide **title bar** holds Model · Voice · Avatar ·
@@ -2419,8 +2460,11 @@ v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
 (so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
 install` — and since 2026-10-11 `jarvis hud rebuild`, `jarvis restart` and
 `jarvis daemon2 restart` (below) — DENY, judged on the **command word** after wrappers and runners
-(`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
-`ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
+(`env -S` here, and since 2026-10-12 everything in rules' one table through
+`rules.starts`: `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`, `npx`,
+`npm exec`/`-c`, `pnpm`, `yarn`, `bun x`/`exec`, `ssh`, `xargs` with input
+that may complete it — every reading of an option the table does not know),
+`python -m jarvis`, a line's
 own `$VAR` or `ln -s` alias, the installer module, Python source that
 *invokes* it, and shells/`eval`/here-documents/substitutions bash would run
 — never on a line that only mentions it (`echo`, `grep`, a commit message,
@@ -3387,6 +3431,56 @@ boundary is still filesystem permissions. Free checks: `secrets_check`
 v2 `permissions_check` (`env_file_checks`), `claude_provider_check`
 (`env_hook_checks`, the real `build_permit` behind the hook) and
 `terminal_text_check`; all fail on 283d45c, and 17 guard removals each bite.
+
+**Command-safety follow-ups (2026-10-12; the detail is *Program runners are
+judged by what they start* in Safety design).** One table of what runs
+another program (`rules.starts`), read by `decide`, the owner-op detector,
+the gate-state write detector, the vex walk and **v2's layer 2**: an
+always-ask rule now matches the program a runner or wrapper starts (`npx
+vercel --prod`, `uv run git push --force …`, `env -u X git push origin
+main`), layer 1 refuses owner ops and gate or credential env writes behind
+one (`npx jarvis hud install`, `npm exec -c 'cp … <allowlist>'`), and layer
+4 no longer auto-allows `uv run rm -rf build`. A reader hazard is a certain
+write only of what it writes (PR #24's follow-ups). gitops: `ls-remote -o`
+and pull's `--cleanup` take the next word (PR #65's round-3 leftovers).
+**The review of #75** added one work budget per line (a line past it is too
+complex to judge: ASK, never covered, always-ask in v2 — `npx --x ` sixty
+times took 139 s in the gate detector, and a thousand nested runners raised
+`RecursionError` on main), every hazard on a reader's line kept (an
+exec-only option no longer hides a write behind it), the table's reading of
+wrapper options in `rules.unwrap` itself (`env -u ls rm -rf build` ran in
+`run_readonly` on main), writers/shells/interpreters behind a runner asked,
+yarn workspaces and corepack in the table. **The delta review of #75**
+(1723b53) found two writes onto the allowlist that ran unasked and fixed
+them: the gate detector's memo is keyed on the segment's whole text (H-A,
+a here-string behind `uv run sh` judged as the one before it), and a
+wrapper's own output file is a write (H-B, `time -o`, `script`,
+`systemd-run -p StandardOutput=file:`); also a find `-exec` program's named
+outputs (M-A), one list of shells and an unknown program's `-c` string
+judged as a line (M-B), owner ops behind find/fd/parallel, and a NUL byte
+asked rather than raised. `rules_check` `delta_review_75_checks` holds every
+shape. Free checks: `rules_check`
+`runner_checks` (25 refused by `decide`, 11 gate writes refused, 60 asked
+that main allowed, 41 of main's verdicts kept — through `decide`,
+`static_verdict` and real `dispatch` under an allowlist entry for every
+stem, modes ask and all, never run), `hazard_certainty_checks` (40 writes
+onto the allowlist and 4 onto a credential env file DENY), `unwrap_checks`
+and `cost_checks` (42 forms, 60 and 1,000 deep, seven readers, each under
+100 ms); v2 `permissions_check` `runner_checks`; `gitops_check`
+`unnamed_repository_checks`. 16 guard removals each bite in round 1, and 16
+more in the review round. **The third delta review of #75** (89074f1): a
+leading `NAME=VALUE`, a reserved word or a function header in front hid a
+wrapper's output file or a runner's here-string shell from the gate-state
+detector (`X=1 time -o <allowlist> … ls` ran unasked under an `ls` entry,
+in modes ask and all); `rules.strip_assignments` and `rules.command_start`
+are now the one reading of a command's first word, `c`/`e` in an option
+cluster carries an unknown program's string (LOW 1), a systemd `Exec…=`
+property is a command line (LOW 2), `run_readonly` sets only the locale
+and time zone, and v2's always-ask rules see the program past a reserved
+word (`if true; then git push --force origin main; fi` matched none, on
+main too) (details in *Program runners* in Safety design;
+`rules_check` `third_delta_review_75_checks`, v2 `permissions_check`
+`third_delta_75_checks`; 7 guard removals bite).
 
 **The Browser's action rules and reviewer, BR-9a (2026-10-12; amendment 1 to
 the Browser plan, §B.3–§B.5, decisions BD-1..BD-4). Pure, and not wired yet:
@@ -5189,10 +5283,11 @@ jarvis/
   (`permissions.allows` asks `rules.vex_uncoverable`), and always-ask at v2's
   layer 2 under every profile. A glob past the caps (256 characters, 64 of
   `*?[`, 512 glob words a line) is **too complex to judge** the same way, and
-  the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). Not
-  general runner unwrapping: `uv run rm -rf ~` is judged as before — and an
-  allowlist entry for `uv` or `npx` covers `uv run vexbuild`, by the general
-  stem-entry rule (an entry is a yes to everything the stem runs). The
+  the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). The
+  runner table it reads is now every reader's (`rules.starts`; *Program
+  runners* below), so `uv run rm -rf ~` is no longer judged as `uv` — and an
+  allowlist entry for `uv` or `npx` still covers `uv run vexbuild`, by the
+  general stem-entry rule (an entry is a yes to everything the stem runs). The
   here-document lexer recognises an operator only where bash does — never in
   quotes, a comment, `${…}` or arithmetic (`$((1<<2))`, `((x<<=1))`,
   `$[…]`), and a backtick's own here-document ends at its backtick —
@@ -5606,7 +5701,10 @@ jarvis/
   one answers — "two backends, two answers" again, the `grep_files` lesson.
   `rules.AUDITED_IMPLEMENTATIONS` names what was read, and `rules_check`
   prints `AUDIT NOT VERIFIED FOR <stem>` (informational, like files_check's
-  PARITY NOT VERIFIED) when a binary reports something else. `jq`, `tree` and
+  PARITY NOT VERIFIED) when a binary reports something else. **That check
+  sees PATH binaries only**: Claude Code's shell functions (grep → ugrep, find
+  → bfs) are never reached by an argv probe, so their entries rest on the
+  hand audit alone, and the check's output says so (2026-10-12). `jq`, `tree` and
   `bat` are not installed and come from their documentation. Recorded, not
   listed: `diff -l` runs the fixed `pr`, `sort -T` writes temporary files it
   deletes, `file -p` restores an atime.
@@ -5633,6 +5731,223 @@ jarvis/
   time: **two implementations of one idea drift, and the more permissive copy
   decides** — so the redirect grammar, the reader-hazard table and the
   continuation rule each have exactly one home now.
+
+  **Program runners are judged by what they start** (2026-10-12, the
+  command-safety follow-ups). `uv run rm -rf ~/projects`, `npm exec -c '…'`,
+  `npx`, `pnpm exec`/`dlx`, `yarn exec`/`dlx`, `bun x`/`exec`, `poetry run`
+  and `pipx run` scored the ALLOW of the runner's own stem, so a human-backed
+  gate ran them with nobody asked; only the vex reading and the owner-op
+  detector read through a runner, each with its own table. Now **one table**
+  says what runs another program — rules' `_WRAPPER_OPTS` and `_RUNNER_SPECS`
+  (each runner's options and values; ssh in `_REMOTE_OPTS`), read through
+  `rules.starts` — and every reader asks it: the vex walk, `decide`
+  (`_judge_started`), the owner-op detector (`protected_state._peel_runner`;
+  its own `_RUNNERS` copy is gone, and it knew neither npx, npm, pnpm, yarn nor
+  bun, so `npx jarvis hud install` was ALLOW), the gate-state write detector
+  (`_started_touches`) and v2's always-ask stems (`rules.started_commands`:
+  `npx vercel --prod` is a production deploy) — and, since the review of
+  #75 (HIGH 3, older than the PR), `rules.unwrap` itself, so the allowlist's
+  stems and `run_readonly` read wrapper options from the table too. The
+  rules in `decide`, judged beside the stem-by-stem reading with the worse
+  winning:
+  - a **wrapper** (`env`, `nohup`, `timeout`, `xargs` …) is judged by what it
+    runs, its options read from the table — `env -u NAME`, `env -C`/`-a`/
+    `-f`, `exec -a NAME`, `xargs -a FILE` and `time -f FMT` take a value.
+    `env -u ls rm -rf build` used to be the ALLOW of `ls`, which
+    `run_readonly` — **ungated, held by workflows and sub-agents** — then
+    *ran*, rm and all; `env -u python3 rm …` was covered by a `python3`
+    allowlist entry (on main a v1 gate ran it with nobody asked). A line whose
+    program cannot be told (`rules.unwrap_sure` is None: an unknown option,
+    `env -S` past its bound) is neither run by `run_readonly` nor covered by
+    an entry, and `run_readonly` refuses `xargs` outright (its `-a FILE`
+    names programs' arguments no check sees). **A wrapper's own output file
+    is a write** (delta review of #75, H-B: once `-o`'s value was an option
+    value, `time -o <allowlist> -f '<entries>' true` ran unasked):
+    `_Opts.writes` names the options whose value it writes, `starts()` hands
+    their values back (`Started.writes`, glued, `=` and getopt_long's unique
+    prefixes too), and they are judged as `tee FILE` is — DENY onto the
+    allowlist or a credential env file, ASK onto the other gate files, ASK in
+    `decide` anyway, refused by `run_readonly`, matched by v2's
+    `credentials-path`. The audit of the table, each from its own `--help`:
+    **writers** are GNU time (`-o`/`--output`), util-linux script (its file
+    operand, `-I`/`-O`/`-B`/`-T`, `--log-*`, `-t[FILE]`/`--timing=FILE`) and
+    systemd-run (`-p StandardOutput=`/`StandardError=file:|append:|
+    truncate:PATH`); **not writers** are env (`-f` reads), xargs (`-a`
+    reads), stdbuf (`-o` is a mode), nohup (only a fixed `nohup.out`), flock
+    (opens its lock file read-only, may create it empty), timeout, nice,
+    ionice, setsid, chronic, exec, command, watch, busybox, and the runners
+    (cache folders and files they read);
+  - **three classes, not two**: a *wrapper* runs its operand (judged as what
+    it runs), a *runner* starts a program (keeps its own verdict unless that
+    program asks for a reason of its own), and **`command -v X` runs
+    nothing** — it looks X up, so `starts()` answers that it starts nothing,
+    and `unwrap` judges it as `X` for the allowlist, as ever;
+  - a **runner** keeps its own verdict unless what it starts is refused or
+    asks **for a reason of its own** (`rm`, `git push`, `python -c`, a reader
+    in a writing form, Jarvis's CLI, and — MED 1 of the review — any writer,
+    shell or interpreter off the allow list: `tee`, `awk`, `sh x.sh`, `perl`,
+    `crontab`, `powershell.exe`, which were the ALLOW of `uv` behind it); a
+    program that is merely unknown asks nothing more, so `npx create-vite`
+    and `npx some-package` stay as main judged them (`rules._UNLISTED` is
+    the identity-compared verdict for "unknown");
+  - a **command line** a runner hands a shell (`npm exec -c`/`--call`, `bun
+    exec`, pnpm's shell mode) is judged as a line by the same rule
+    (`_line_verdict`); so is the string a program no table knows is handed
+    with `-c`, `-e` or `--command` behind a wrapper or runner (delta review
+    of #75, M-B: it may be a shell this check does not know), in `decide`,
+    the gate-state detector and the owner-op detector — an owner op or a gate
+    write in it is DENY. A one-word value naming no known program is a value
+    (`npx prettier -c src/`, `npx webpack -c webpack.config.js` keep main's
+    ALLOW). **`rules.SHELLS` is the one list of shells** — `rbash`, `ksh93`,
+    `lksh`, `oksh`, `mksh`, `posh`, `sash`, `yash`, `csh`, `tcsh`, `fish`,
+    `nu`, `xonsh`, `elvish`, `ion`, `osh` and `ysh` beside `sh`/`bash`/`zsh`/
+    `dash`/`ksh`/`ash` — read by the inline-source rule, the vex walk,
+    `protected_state._SHELLS` and `terminal_guard.SHELLS` (`secrets` spells
+    it out and `rules_check` holds the two equal); fish's `--command` and
+    nu's `--commands` are its string too;
+  - **find, fd and parallel run a command too**: an owner op behind `find
+    -exec`/`-ok`, `fd -x`/`-X` or `parallel` (every word that is not an
+    option tried as the command, its input appended) is DENY, as behind a
+    runner (delta review of #75, LOW);
+  - a program word only known when it runs (`uv run ${CC}foo`), or an option
+    the table does not know that leaves the program unclear (`uv run
+    --frobnicate x pytest`), **asks, never allows**.
+  **The allowlist's stem rule is unchanged**: `command_targets` peels only
+  `_WRAPPERS`, never a runner, so an entry for `uv` or `npx` is a yes to
+  whatever it runs (`uv run rm -rf build` is covered by a `uv` entry) — DENY
+  still wins first. The table also knows yarn's `workspace <x> exec`,
+  `workspaces foreach … exec` and `corepack <pm> …` (MED 2). `python -m
+  runpy` runs a *module*, not a program: `decide` has no per-module rule but
+  Jarvis's own (`runs_jarvis`, which peels it), so nothing moved there.
+
+  **One work budget per line bounds all of it** (review of #75, HIGH 1).
+  Each option the table does not know doubles where a program may stand, and
+  every reading was judged again, runners inside runners: `npx --x ` forty
+  times took 7.5 s in `decide` and 17 s in `command_touch`, sixty times 52 s
+  and 139 s — synchronously, in dispatch and v2's permit. Now every reader
+  charges `rules.work_scope`'s budget (`WORK_CAP` 20,000 words: a starts()
+  walk costs its words, judging a reading costs its words; nested scopes
+  share the outermost, so `decide`'s owner ops and gate-state reading spend
+  the same one), each reading is judged once (`_Work.memo`, the gate
+  detector's `walked`, the vex walk's `seen`) — **a memo is keyed on every
+  input its reading takes**: the gate detector's on the segment's whole text
+  (delta review of #75, H-A: keyed on the program alone, `uv run sh <<<
+  'true' ; uv run sh <<< '<a write onto the allowlist>'` judged the second as
+  the first, and ran unasked under a `uv` entry), `decide`'s on the
+  redirections' targets too, the vex walk's on the here-strings — `starts()` refuses more than
+  `STARTS_READINGS` (32) places, the vex walk passes `depth + 1` per wrapper
+  or runner (L1: a thousand nested `npx`, `uv run`, `env` or `nohup` raised
+  `RecursionError` out of `decide`, on main as on 16675fb) and has its own
+  words cap (its reading is cached per
+  line), `_peel_runner` raises past its caps instead of stopping (L2), and
+  `protected_state` resolves and judges each name once per line. **Past any
+  of it the line is too complex to judge**: ASK, never ALLOW, never covered
+  by an allowlist entry (`rules.runners_unsure`, which `permissions.allows`
+  reads), always-ask in v2 (`too-complex`, or the gate detector's opaque
+  touch). `cost_checks` judges 42 runner and wrapper forms nested 60 and
+  1,000 deep, and four wide ones, through seven readers in under 100 ms
+  each. A NUL byte is too complex to judge as well — asked, never covered,
+  never a `ValueError` out of `static_verdict` — and `run_readonly` refuses
+  it. Differential (the reviewers' harness — `decide`, `static_verdict`,
+  `command_verdict`, `command_touch`, the owner-op detector, `allows`,
+  `run_readonly` and v2's layers 1 and 2 — over 37,011 strings, the delta
+  review's 34,399 and its nine generated sets): every verdict looser than
+  main is one of two by-design classes — a wrapper option's value no longer
+  read as the program (`env -u FOO pytest` is ALLOW, `env -u FOO cat
+  README.md` runs in `run_readonly`), or a reader hazard that does not write
+  (below). **How "no write onto a gate file is looser than main" was
+  checked**: every line whose verdict loosened at any layer and that names a
+  gate file or a credential env file was listed and read; each is a read —
+  `cat`/`grep`/`sort -o out.txt`/`rg --pre`/`less --save-marks`/`date -s`/
+  `hostname`/`env -f` of the file, or a `find -exec` reader of it — and the
+  `.env` reads among them are still refused by the secrets layer in
+  `run_command`, `run_readonly` and v2's layer 1 (checked in-process). The
+  first round's claim was not true at 1723b53: `time -o <G>` (H-B) and the
+  memo (H-A) were writes that ran unasked; both are DENY now, with every
+  shape of the delta review in `rules_check` `delta_review_75_checks`.
+
+  **One reading of a command's first word** (third delta review of #75,
+  89074f1). The gate-state detector's `_peel` left a leading `NAME=VALUE` in
+  the words `_started_touches` reads, so `X=1 time -o <allowlist> -f '…'
+  python3 -V`, `X=1 /usr/bin/time`, `X=1 script -c true <G>`, `X=1
+  systemd-run -p StandardOutput=file:<G>` and `X=1 uv run sh <<< 'cp …
+  <G>'` ran unasked under a `python3`, `ls` or `uv` entry, in modes ask and
+  all (the here-string shape was open at 16675fb too). A reserved word, a
+  `case` pattern or a function header in front (`if true; then time -o <G>
+  ls; fi`, `f() { … }`) was the same hole one word earlier. Now
+  `rules.strip_assignments` (one pattern, `rules.ASSIGNMENT`: `NAME=`,
+  `NAME+=`, `NAME[i]=`; ASCII names only) and `rules.command_start` (the
+  reserved words of `_LEAD_WORDS`, `case … in` and its pattern, `f()`/
+  `function f`, glued parens, and the assignments) are the one place a
+  segment's first word is found: the gate-state detector (`_peel`,
+  `_segment`, a find `-exec` program), the owner-op detector
+  (`_peel_runner`, `_strip_reserved`), the vex reading (`_command_words`),
+  `decide`'s readers (`_judge_started`, `started_commands`), `starts()`,
+  `unwrap` and v2's layer 2 (`_tokens_of`: `if true; then git push --force
+  origin main; fi`, `( npx vercel --prod )` and `f() { vercel --prod; }`
+  matched no always-ask rule, on main too, so under AUTO the provider's
+  reviewer decided them). `decide` and the allowlist's stems strip only the
+  assignments: a reserved word in front is an unknown program there, asked
+  and never covered, as on main. `D+=…` and `D[0]=…` are tracked as the shell sets them (`D=$HOME;
+  D+=/.config/jarvis; cp x $D/allowlist.json` ran). `command_strings` reads
+  `c`/`e` anywhere in a short-option cluster, both as a glued value and as
+  taking the next word (`uv run mysh -lc '<an owner op>'` was the ALLOW of
+  `uv`; LOW 1). A systemd unit's `Exec…=` property (through `-p`,
+  `--property`, `--socket-/timer-/path-property`) is a command line every
+  reader judges — `starts()` returns it in `strings` and marks it `hidden`,
+  and `decide` asks it whatever it is (LOW 2). And `run_readonly` sets only
+  `LC_*`, `LANG`, `LANGUAGE` and `TZ` with a plain value: `LD_PRELOAD=<a
+  library> ls` ran there on main, ungated. **The cost, stated:** `NAME+=V
+  cmd` and `NAME[i]=V cmd` are judged as `X=1 cmd` always was — the only
+  lines looser than 89074f1 — and `X=1 ls`/`env FOO=1 ls` no longer run in
+  `run_readonly`. **Recorded, not changed:** `decide` judges an assignment
+  in front of a command as the command, as on main, so `LD_PRELOAD=./x.so
+  ls`, `PAGER=…` or `NODE_OPTIONS=…` before an ALLOW stem is that stem's
+  ALLOW (the stem rule's reasoning: `make`, `npm test` and `python3 x.py`
+  already run code); a quoted assignment (`"X=1" ls`, which bash runs as a
+  program named `X=1`) is read as an assignment; and an entry for
+  `systemd-run` covers what its `Exec…=` properties run, by the stem rule.
+
+  **A reader hazard is a certain write only of what it writes** (same day,
+  PR #24's follow-up 1). Any hazard used to make every operand a certain
+  write, so `grep --pager=less x <allowlist>` — or an abbreviation another
+  grep reads otherwise (`--p`, `--q`, `--con=`), `less --save-marks`, `rg
+  --pre`, `find … -exec cat` — was DENY for a file it only reads. `Hazard`
+  now carries `operands` (it writes what it is given: `sed -i`, `find
+  -delete`, or `find -exec` of a writer, shell or interpreter) and `writes`
+  (a named output: `sort -o F`, `tree -o F`, `ss -D F`, `less -o F`, `find
+  -fprint F`, ugrep's `--save-config=F`, a sed `w F`, `uniq`/`xxd`'s output
+  operand; a long option abbreviated below three letters is not one); the
+  rest is an uncertain touch, asked and never covered. **Every hazard on the
+  line counts, the strongest kept** (`rules._merged`; review of #75, HIGH 2:
+  each reader returned the first danger it met, so an exec-only option
+  before a real write — `sort --compress-program=gzip -o <G>`, `find <G>
+  -exec cat {} + -delete`, `less -k k -o <G>`, `tree -R -o <G>`, `ss -K -D
+  <G>`, `grep --pager=less --save-config=<G>` — dropped a write onto the
+  allowlist from DENY to ASK, run on a yes). A find's `-exec`/`-ok` program
+  is judged through the table (`_execs_a_writer`): `-exec env|nohup|timeout
+  5|uv run|xargs rm`, `-exec sed -i`, `-exec sort -o {}` and any program not
+  known only to read write what they are handed, **and the named outputs of
+  the program `-exec` runs are find's provable writes** (delta review of #75,
+  M-A: `-exec sort -o <G> {} \;`, `-exec tree -o <G>`, `-exec xxd {} <G>`,
+  `-exec sed -n 'w <G>' {}` — the last ran unasked — and the same behind
+  `env`, `nohup` or `uv run` were DENY on main and only asked at 1723b53;
+  `_exec_effects`). `sed -i 'w <G>'` keeps both
+  its in-place edit and the `w` file (LOW 3). The loosenings the
+  differential found are reads: `find . -name .env -exec cat {} \;` and
+  `find . -name '.env*' -exec grep KEY {} +` were DENY as "writes onto a
+  credential env file" and are ASK — the secrets layer still refuses both in
+  `run_command` and at v2's layer 1 — and `grep --pager x <G>`, `less
+  --save-marks <G>`, `rg --pre cat x <G>`, `sort -o out.txt <G>` read the
+  allowlist and are ASK. `ug`'s `--no-config` counts only before `--`
+  (follow-up 3).
+
+  **Not seen, said plainly:** a runner's own configuration can run
+  something the line never names — `npx --node-options=--require=x.js`,
+  `NODE_OPTIONS` in the environment, an `.npmrc` `script-shell`, `npm exec
+  --package=git+https://…` (a package from anywhere), a `pyproject.toml`
+  `[tool.uv]` source — and none of it is read here; neither are
+  package.json scripts (`npm run x`, `yarn x`).
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model
@@ -5821,7 +6136,11 @@ jarvis/
   (`commit -m -- --gpg-sign` signed with the global `gpg.program`), so every
   reading is judged and they must agree, else refused (`_readings`); after a
   `--`, fetch, pull, ls-remote and remote still read their words as the
-  repository (`fetch -- <url>` reached a repository no remote names); `-S` is
+  repository (`fetch -- <url>` reached a repository no remote names), and
+  so does the word after an option that takes one (`ls-remote -o <word>
+  <url>`, pull's `--cleanup <mode> <url>`; both older than #65, fixed
+  2026-10-12, with a real-git check that plain git reaches such a URL and the
+  tool refuses before git runs); `-S` is
   refused in merge, cherry-pick, revert, rebase, pull and am as in commit
   (`--gpg-sign` everywhere already); and the value-letter tables hold no
   letter git reads as a flag (rebase's `-m` hid `-x <cmd>`, fetch's `-m`
@@ -6821,6 +7140,13 @@ Two findings worth keeping:
   and tests opt in with `runtime.tools_bound(names)` or
   `runtime.unconfined()`, in code only. Details in *A toolset is a boundary*
   (Safety design).
+- **A runner is judged by what it starts; an allowlist entry for its stem is
+  still a yes to what it runs (2026-10-12).** `decide`, the owner ops, the
+  gate-state check and v2's always-ask rules read through `uv run`, `npx`,
+  `npm exec -c` and their kin from one table (`rules.starts`); the
+  allowlist's stems (`command_targets`, `unwrap`) deliberately do not, so a
+  `uv` entry covers `uv run rm -rf build` as it always did. A DENY still
+  wins before any entry is read.
 - **Killing the v2 daemon by pattern is DENY for agents (2026-10-11, the
   owner's "yes add the daemon2 kill rule" on PR #48).** A `pkill -f`,
   `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose pattern matches the

@@ -45,7 +45,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -59,10 +59,38 @@ from . import config, rules
 
 
 def _resolve(path: str | Path) -> Path:
+    # Within one line's analysis (`rules.work_scope`) a name resolves once:
+    # the readings of its wrappers and runners hand the same operands to
+    # each level (review of PR #75).
+    return _memo(("resolve", str(path)), lambda: _resolve_now(path))
+
+
+def _resolve_now(path: str | Path) -> Path:
     try:
         return Path(path).expanduser().resolve()
     except (OSError, RuntimeError, ValueError):
         return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _memo(key: tuple, compute):
+    """`compute()`, once per key within one line's analysis (`rules.work_scope`):
+    the filesystem does not change under one verdict."""
+    work = rules._WORK.get()
+    if work is None:
+        return compute()
+    cache = work.cache
+    if key in cache:
+        return cache[key]
+    value = compute()
+    if len(cache) < 200_000:
+        cache[key] = value
+    return value
+
+
+def _under(path: Path, folder: Path) -> bool:
+    """`folder in path.parents`, for absolute resolved paths, as text."""
+    top = str(folder)
+    return str(path).startswith(top if top.endswith("/") else top + "/") and path != folder
 
 
 def gate_paths() -> set[Path]:
@@ -98,10 +126,12 @@ def hud_trees() -> set[Path]:
     the write tools refuse then, and a shell write is not the boundary."""
     from .tools.files import _hud_roots
 
-    try:
-        return _hud_roots()
-    except (OSError, RuntimeError):
-        return set()
+    def roots() -> set[Path]:
+        try:
+            return _hud_roots()
+        except (OSError, RuntimeError):
+            return set()
+    return _memo(("hud_trees",), roots)
 
 
 def _in_tree(text: str, trees: set[Path]) -> Path | None:
@@ -109,13 +139,17 @@ def _in_tree(text: str, trees: set[Path]) -> Path | None:
     (`rm -rf ~/.local/share/jarvis`), else None."""
     if not trees:
         return None
+    return _memo(("in_tree", text, id(trees)), lambda: _in_tree_now(text, trees))
+
+
+def _in_tree_now(text: str, trees: set[Path]) -> Path | None:
     if _GLOB.search(text):
         text = str(Path(*[p for p in Path(text).parts if not _GLOB.search(p)] or ["."]))
     resolved = _resolve(text)
     for tree in trees:
-        if resolved == tree or tree in resolved.parents:
+        if resolved == tree or _under(resolved, tree):
             return tree
-        if resolved in tree.parents and len(tree.relative_to(resolved).parts) <= 2:
+        if _under(tree, resolved) and len(tree.relative_to(resolved).parts) <= 2:
             return tree
     return None
 
@@ -138,7 +172,10 @@ _INTERPRETERS = frozenset({
     "python", "python3", "perl", "ruby", "node", "deno", "bun", "php",
     "awk", "gawk", "mawk",
 })
-_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "eval"})
+# Every shell rules knows by name (`rules.SHELLS`; delta review of PR #75,
+# M-B: `ksh93`, `rbash`, `tcsh`, `nu` … were unknown stems here, so a copy
+# onto the allowlist in `uv run tcsh -c '…'` was not looked at), and `eval`.
+_SHELLS = rules.SHELLS | {"eval"}
 # Stems that only read the paths they are given (in the forms `rules.py`
 # already recognises — `sed -i` and `find -delete` are caught by
 # `rules.writes_anyway` before this list is consulted).
@@ -236,6 +273,7 @@ class _Budget:
     name-only reading, which has no folder to resolve in)."""
     spans: int = 0
     follow_links: bool = True
+    walked: dict = field(default_factory=dict)  # readings of wrappers and runners judged
 
 
 @dataclass
@@ -252,6 +290,11 @@ def _opaque(why: str) -> Touch:
 def _expand(token: str, state: _State) -> str | None:
     """The token with `~`, `$HOME` and line-local variables expanded, made
     absolute; None if a variable is left that cannot be known."""
+    return _memo(("expand", token, str(state.cwd), tuple(state.variables.items())),
+                 lambda: _expand_now(token, state))
+
+
+def _expand_now(token: str, state: _State) -> str | None:
     def local(match: re.Match) -> str:
         name = match.group(1) or match.group(2)
         return state.variables.get(name, match.group(0))
@@ -302,6 +345,10 @@ def _identities(paths: set[Path]) -> dict[tuple[int, int], Path]:
 
 
 def _exact(text: str, protected: set[Path], ids: dict) -> Path | None:
+    return _memo(("exact", text, id(protected), id(ids)), lambda: _exact_now(text, protected, ids))
+
+
+def _exact_now(text: str, protected: set[Path], ids: dict) -> Path | None:
     if _GLOB.search(text):
         # Component by component: fnmatch's `*` crosses `/`, and `rm ~/*.json`
         # does not reach ~/.config/jarvis/models.json.
@@ -327,11 +374,15 @@ def _exact(text: str, protected: set[Path], ids: dict) -> Path | None:
 
 
 def _ancestor_of(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
+    return _memo(("ancestor", text, id(protected)), lambda: _ancestor_now(text, protected))
+
+
+def _ancestor_now(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
     if _GLOB.search(text):
         return []
     resolved = _resolve(text)
     return [(path, path.relative_to(resolved).parts)
-            for path in protected if resolved != path and resolved in path.parents]
+            for path in protected if resolved != path and _under(path, resolved)]
 
 
 # --- credential env files (ENV-1, 2026-10-12) ---------------------------------
@@ -363,6 +414,11 @@ def _env_target(operand: str, text: str | None, state: _State, verb: str) -> Tou
     """The credential env file a write of `operand` lands on, or None.
     `text` is the operand expanded (None when a variable or the folder is
     unknown); `verb` heads the reason ("a redirect onto", "cp on")."""
+    return _memo(("env_target", operand, text, verb, state.budget.follow_links),
+                 lambda: _env_target_now(operand, text, state, verb))
+
+
+def _env_target_now(operand: str, text: str | None, state: _State, verb: str) -> Touch | None:
     s = _secrets()
     shown = text if text is not None else operand
     name = os.path.basename(shown.rstrip("/")) or shown
@@ -384,7 +440,8 @@ def _env_target(operand: str, text: str | None, state: _State, verb: str) -> Tou
             return Touch(where, name.casefold().startswith(".env"),
                          f"{verb} {name}, a glob that reaches credential env files", env=True)
         return None
-    if text is not None and state.budget.follow_links and s.is_env_credential(text):
+    if text is not None and state.budget.follow_links and _memo(
+            ("env_credential", text), lambda: s.is_env_credential(text)):
         return Touch(where, True, f"{verb} {name}, which leads to a credential env file", env=True)
     return None
 
@@ -555,9 +612,10 @@ def _env_split(rest: list[str], k: int) -> tuple[str, int] | None:
     return None
 
 
-def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
-    """Strip subshell punctuation and wrappers; return the real command and
-    any directory `env -C` would run it in.
+def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None, list[str]]:
+    """Strip subshell punctuation and wrappers; return the real command, any
+    directory `env -C` would run it in, and the words before `unwrap`'s naive
+    peel of the wrappers (what `rules.starts` reads, `_started_touches`).
 
     `env -S STRING` splits STRING into words and reads them as more of its own
     arguments — a whole command line in one word (2026-10-09). It used to be
@@ -566,15 +624,16 @@ def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
     bash's way of running a builtin by name (`builtin eval …`) and is peeled
     the same way.
     """
-    tokens = list(tokens)
-    while tokens and tokens[0] in ("(", "{", "!"):
-        tokens = tokens[1:]
-    if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
-        tokens[0] = tokens[0][1:]
+    # The words before the program — reserved words, a `case` pattern, a
+    # function's header and the `NAME=VALUE` assignments — are not it, and
+    # `lead` must start at it (third delta review of PR #75, HIGH: `X=1 time
+    # -o <allowlist> … ls` kept `X=1` in `lead`, so `_started_touches` never
+    # read `time`'s output file, and it ran unasked behind an `ls` entry).
+    tokens = rules.command_start(tokens)
     chdir = None
     for _ in range(8):
         if tokens and tokens[0] == "builtin":
-            tokens = tokens[1:]
+            tokens = rules.strip_assignments(tokens[1:])
             continue
         if not tokens or rules._basename(tokens[0]) != "env":
             break
@@ -593,7 +652,9 @@ def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
             if rest[k].startswith("--chdir="):
                 target = _expand(rest[k].split("=", 1)[1], state)
                 chdir = Path(target) if target else None
-            k += 1
+            # `-u NAME`, `-a NAME`, `-f FILE` take the next word: `env -u ls
+            # cp …` runs cp, not ls (2026-10-12).
+            k += 2 if rules.takes_value("env", rest[k]) else 1
         if split is None:
             tokens = rest[k:]
             break
@@ -602,7 +663,7 @@ def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
         except ValueError:
             words = split.split()
         tokens = ["env"] + words + rest[k:]
-    return rules.unwrap(tokens), chdir
+    return rules.unwrap(tokens), chdir, tokens
 
 
 _SHELL_VALUE_LONGS = frozenset({"rcfile", "init-file"})
@@ -638,6 +699,10 @@ def _shell_strings(tokens: list[str]) -> tuple[list[str], bool]:
             operands = tokens[i:]
             break
         if token.startswith("--"):
+            name, eq, value = token[2:].partition("=")
+            if name in ("command", "commands"):
+                # fish's `--command`, nu's `--commands` (delta review of PR #75, M-B).
+                return ([value] if eq else tokens[i:i + 1]), False
             if token[2:] in _SHELL_VALUE_LONGS:
                 i += 1
             continue
@@ -669,6 +734,79 @@ def _strip_closers(tokens: list[str]) -> list[str]:
             last = last[:-1]
         tokens[-1] = last
     return tokens
+
+
+def _execs_a_writer(tokens: list[str]) -> bool:
+    """Whether a find's `-exec`/`-execdir`/`-ok`/`-okdir` hands what it finds
+    to a program that may write it (review of PR #75, HIGH 2: only the word
+    right after `-exec` was looked at, so `-exec env rm {} +`, `-exec nohup
+    rm`, `-exec timeout 5 rm`, `-exec uv run rm`, `-exec xargs rm` and `-exec
+    sed -i … {} +` read as reads). The program is judged through rules' one
+    table, as every command here is."""
+    return _exec_effects(tokens)[0]
+
+
+def _exec_effects(tokens: list[str]) -> tuple[bool, list[str]]:
+    """(whether a find's `-exec` programs may write what it finds, the files
+    they write by name). A reader run by `-exec` with a named output — `sort
+    -o F`, `tree -o F`, `xxd IN F`, `uniq IN F`, `less -o F`, `grep
+    --save-config=F`, a sed `w F` — writes F (delta review of PR #75, M-A:
+    those were DENY on main and only asked here), behind `env`, `nohup` or
+    `uv run` too; so does a wrapper's own output file (`-exec time -o F`)."""
+    given, named = False, []
+    for k, token in enumerate(tokens):
+        if token not in rules._FIND_EXEC:
+            continue
+        j = k + 1
+        while j < len(tokens) and tokens[j] not in (";", "+"):
+            j += 1
+        g, n = _given_effects(tokens[k + 1:j], 0)
+        given = given or g
+        named += [w for w in n if w not in named]
+    return given, named
+
+
+def _writes_what_it_is_given(words: list[str], hops: int) -> bool:
+    """True unless this command only reads what it is handed: a reader with
+    no writing form on the line, or a wrapper or runner whose every program
+    is one. Anything else — a writer, a shell or interpreter, a reader that
+    edits its operands (`sed -i`, `sort -o {}`), a program this module does
+    not know, a command line handed to a shell, past a bound — may write."""
+    return _given_effects(words, hops)[0]
+
+
+def _given_effects(words: list[str], hops: int) -> tuple[bool, list[str]]:
+    """(`_writes_what_it_is_given`, the files the command writes by name:
+    a reader's named outputs, a wrapper's own output file)."""
+    words = rules.strip_assignments(words)
+    if not words:
+        return False, []
+    stem = rules._basename(words[0])
+    if stem in _READERS:
+        hazard = rules.reader_hazard(words)
+        if hazard is None:
+            return False, []
+        named = [w for w in hazard.writes if "{}" not in w]
+        return (hazard.operands or any("{}" in w for w in hazard.writes)), named
+    if hops >= rules.PROGRAM_DEPTH:
+        return True, []
+    try:
+        started = rules.starts(words)
+    except rules.TooComplex:
+        return True, []
+    if started is None:
+        return True, []
+    named = list(started.writes)
+    if started.strings or started.joined:
+        return True, named
+    if not started.programs:
+        return False, named
+    given = False
+    for program in started.programs:
+        g, n = _given_effects(list(program), hops + 1)
+        given = given or g
+        named += [w for w in n if w not in named]
+    return given, named
 
 
 def _kind(stem: str, tokens: list[str], hazard: rules.Hazard | None) -> str:
@@ -713,22 +851,32 @@ def _redirect_touches(segment: str, local: _State, protected: set[Path], ids: di
                       seen: _Seen) -> None:
     """Every protected file a redirect in this segment writes, into `seen`:
     gate state, the installed HUD's tree, and credential env files."""
-    for target in _redirect_targets(segment):
+    _target_touches(_redirect_targets(segment), local, protected, ids, seen, "a redirect")
+
+
+def _target_touches(targets, local: _State, protected: set[Path], ids: dict, seen: _Seen,
+                    what: str, certain: bool = True) -> None:
+    """Every protected file one of `targets` — files something writes by name,
+    as a redirect does — names, into `seen`: a certain write of a gate file or
+    a credential env file spelled out, as for `tee FILE`. `what` says who
+    writes (`a redirect`, `time's -o`); `certain` False when the parse that
+    found them was in doubt."""
+    for target in targets:
         text = _expand(target, local)
-        env = _env_target(target, text, local, "a redirect onto")
+        env = _env_target(target, text, local, f"{what} onto")
         if env is not None:
-            seen.touches.append(env)
+            seen.touches.append(env if certain else replace(env, certain=False))
         if text is None:
             for path in protected:
                 if Path(target).name == path.name:
-                    seen.touches.append(Touch(path, False, f"a redirect into {target}"))
+                    seen.touches.append(Touch(path, False, f"{what} into {target}"))
             continue
         hit = _exact(text, protected, ids)
         if hit is not None:
-            seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
+            seen.touches.append(Touch(hit, certain, f"{what} onto {hit.name}"))
         tree = _in_tree(text, hud_trees())
         if tree is not None:
-            seen.touches.append(Touch(tree, False, f"a redirect into {text}", hud=True))
+            seen.touches.append(Touch(tree, False, f"{what} into {text}", hud=True))
 
 
 # `git checkout -- PATH` and `git restore PATH` overwrite PATH with a stored
@@ -799,19 +947,15 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
 
     # `D=~/.config/jarvis` on its own, or `export D=…`: remembered for the
     # segments after it, which is when the shell would expand it.
-    words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
-    if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+    head = rules.command_start(raw, assignments=False)
+    words = head[1:] if head and head[0] in ("export", "declare", "local", "readonly") else head
+    if words and all(rules.ASSIGNMENT.fullmatch(w) for w in words):
         _redirect_touches(segment, state, protected, ids, seen)
         for word in words:
-            name, value = word.split("=", 1)
-            expanded = _expand(value, state) if value else ""
-            if expanded is not None:
-                state.variables[name] = expanded
-            else:
-                state.variables.pop(name, None)
+            _assign(word, state)
         return seen
 
-    tokens, chdir = _peel(raw, state)
+    tokens, chdir, lead = _peel(raw, state)
     if not tokens:
         _redirect_touches(segment, state, protected, ids, seen)
         return seen
@@ -831,6 +975,137 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
 
     # A redirect writes its target whatever the stem is: `echo x>~/…/allowlist.json`.
     _redirect_touches(segment, local, protected, ids, seen)
+    # `env` (and `builtin`) are peeled here rather than walked through the
+    # table: what they start is still behind a wrapper (M-B).
+    bare = rules.command_start(words)
+    _command(tokens, lead, parsed, segment, local, state, protected, ids, depth, seen, 0,
+             wrapped=len(lead) < len(bare))
+    return seen
+
+
+def _assign(word: str, state: _State) -> None:
+    """Remember what an assignment word sets, for the segments after it. `D+=
+    /x` appends (a `D=$HOME; D+=/.config/jarvis` path is the gate's folder);
+    `D[0]=V` is `$D`'s value too, and any other element leaves `$D` alone
+    unless its index cannot be told — then `$D` is unknown (third delta
+    review of PR #75: both were read as commands, and `$D` kept its old
+    value)."""
+    parts = rules.assignment(word)
+    if parts is None:
+        return
+    name, subscript, append, value = parts
+    if subscript is not None:
+        index = subscript.strip()
+        if index.isdigit() and int(index) != 0:
+            return
+        if not index.isdigit():
+            state.variables.pop(name, None)
+            return
+    if append:
+        value = state.variables.get(name, os.environ.get(name, "")) + value
+    expanded = _expand(value, state) if value else ""
+    if expanded is not None:
+        state.variables[name] = expanded
+    else:
+        state.variables.pop(name, None)
+
+
+def _started_touches(lead: list[str], parsed: bool, segment: str, local: _State, state: _State,
+                     protected: set[Path], ids: dict, depth: int, seen: _Seen, hops: int) -> bool:
+    """What the wrapper or runner at the front of `lead` starts — read from
+    rules' one table (`rules.starts`) — each judged as a command of its own,
+    into `seen`; a command line it hands a shell (`npm exec -c`, `bun exec`,
+    pnpm's shell mode, `watch`) as a line (2026-10-12). `unwrap`'s naive peel
+    read `env -u ls cp …` as `ls`, and nothing read past `uv run`, `npx` or
+    `npm exec -c`, so a copy onto the allowlist behind one was a read or an
+    unknown. A reading that is only one of several (an option the table does
+    not know) is not provable: its writes are uncertain. False when the bound
+    was hit (the caller stops, as `_nested` does).
+
+    Bounded by the line's work budget (`rules.charge`; review of PR #75: an
+    unknown option offered n readings per level and each was walked again,
+    `npx --x ` sixty times took 139 s here), each reading walked once; past
+    the budget, a cap or `PROGRAM_DEPTH` the line is too complex to judge —
+    an opaque touch, which asks and is never covered."""
+    if not lead or (rules._basename(lead[0]) not in rules._WRAPPER_OPTS
+                    and rules._basename(lead[0]) not in rules._RUNNER_SPECS):
+        return True
+    try:
+        rules.charge(len(lead))
+        started = rules.starts(lead)
+    except rules.TooComplex:
+        seen.touches.append(_opaque("what its wrappers and runners start is too complex to judge"))
+        return False
+    if started is not None and started.writes:
+        # A file the wrapper itself writes — `time -o FILE`, `script FILE`,
+        # `systemd-run -p StandardOutput=file:FILE` — is a write, as `tee
+        # FILE` is (delta review of PR #75, H-B: `time -o <allowlist> -f
+        # '<entries>' true` ran unasked; the table had made `-o`'s value an
+        # option value, where the old peel had read it as the program).
+        stem_of = rules._basename(lead[0])
+        _target_touches(started.writes, local, protected, ids, seen, f"{stem_of}'s output file",
+                        certain=started.writes_certain)
+        seen.writes = True
+    if started is None or not (started.programs or started.strings):
+        return True
+    if hops >= rules.PROGRAM_DEPTH:
+        seen.touches.append(_opaque("wrappers and runners nested too deeply to judge"))
+        return False
+    inner = _Seen()
+    lines = list(started.strings) + [" ".join(p) for p in started.programs if started.joined]
+    if lines and not _nested(lines, local, state, protected, ids, depth, inner):
+        seen.touches += inner.touches
+        return False
+    walked = local.budget.walked
+    for program in started.programs if not started.joined else ():
+        # A reading met again (another reading of an unknown option offers
+        # the same tail) gives what it gave before; it is not walked again.
+        # **Keyed on the segment's whole text** (delta review of PR #75, H-A):
+        # a reading takes more from its segment than its own words — a shell
+        # reads its here-string from it — and a key without it judged `uv run
+        # sh <<< '<a write onto the allowlist>'` as the `uv run sh <<< 'true'`
+        # before it, which ran unasked. Every input a reading takes is in the
+        # key: the segment, how it parsed, the depth, the folder, the variables.
+        key = (segment, parsed, depth, program, hops + 1, local.cwd,
+               tuple(sorted(local.variables.items())))
+        one = walked.get(key)
+        if one is None:
+            try:
+                rules.charge(len(program))      # judging a reading costs its words
+            except rules.TooComplex:
+                seen.touches += inner.touches
+                seen.touches.append(_opaque("what its wrappers and runners start is too complex "
+                                            "to judge"))
+                return False
+            one = _Seen()
+            words, chdir, more = _peel(list(program), local)
+            if words:
+                here = _State(chdir if chdir is not None else local.cwd, local.variables,
+                              local.budget)
+                _command(words, more, parsed, segment, here, state, protected, ids, depth, one,
+                         hops + 1)
+            walked[key] = one
+        inner.touches += one.touches
+        inner.writes = inner.writes or one.writes
+        inner.read |= one.read
+    if not started.sure:
+        inner.touches = [replace(t, certain=False) for t in inner.touches]
+    seen.touches += inner.touches
+    seen.writes = seen.writes or inner.writes
+    seen.read |= inner.read
+    return True
+
+
+def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, local: _State,
+             state: _State, protected: set[Path], ids: dict, depth: int, seen: _Seen,
+             hops: int, wrapped: bool = False) -> None:
+    """One command — `tokens`, its wrappers peeled by `unwrap`; `lead`, the
+    same words before that peel — into `seen`. Redirections are the
+    segment's, judged once by the caller."""
+    stem = rules._basename(tokens[0])
+    if not _started_touches(lead, parsed, segment, local, state, protected, ids, depth, seen,
+                            hops):
+        return
 
     # A shell handed a string is a command line in its own right — from `-c`
     # (in any cluster), `eval`, or a here-string on its standard input.
@@ -841,9 +1116,17 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
             strings += _here_strings(segment)
         if strings:
             if not _nested(strings, local, state, protected, ids, depth, seen):
-                return seen
+                return
             if inline:
-                return seen
+                return
+    elif (hops > 0 or wrapped) and not rules.known_program(stem):
+        # A program no table knows, started by a wrapper or a runner and
+        # handed `-c`/`-e`/`--command STRING`, may be a shell this module
+        # does not know by name: its string is a command line too (delta
+        # review of PR #75, M-B).
+        strings = rules.command_strings(tokens)
+        if strings and not _nested(strings, local, state, protected, ids, depth, seen):
+            return
 
     hazard = rules.reader_hazard(tokens)
     kind = _kind(stem, tokens, hazard)
@@ -862,7 +1145,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
                        and rules._basename(tokens[k + 1]) in _SHELLS | _INTERPRETERS), None)
     if behind is not None and not _nested([shlex.join(tokens[behind:])], local, state,
                                           protected, ids, depth, seen):
-        return seen
+        return
     if kind == "writer" and stem not in _WRITERS | _INTERPRETERS | _SHELLS | _READERS:
         # Name the writing word behind an unknown wrapper, not the wrapper.
         stem = next((rules._basename(t) for t in tokens[1:]
@@ -891,6 +1174,28 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         # Files a sed script writes (`w FILE`, `s/…/…/w FILE`) live inside the
         # script word, where no operand rule can see them.
         written = written + list(hazard.writes)
+    # A reader in a writing form writes only what it writes (PR #24's
+    # follow-up 1): every operand for `sed -i` and `find -delete`, or for
+    # `find -exec` of a writing program, a shell or an interpreter (code
+    # handed a file is a write here, as everywhere in this module); a named
+    # output (`sort -o F`, a sed `w F`, `uniq IN OUT`). One that only runs
+    # something (`grep --pager`, `rg --pre`, `find -exec cat`), writes some
+    # other file (`less --save-marks`), or was matched by an abbreviation
+    # another implementation reads differently (`grep --p`) writes nothing
+    # provable: what it is given is an uncertain touch — asked, never refused
+    # unasked.
+    exec_given, exec_named = (_exec_effects(tokens) if stem in ("find", "bfs")
+                              else (False, []))
+    partial = (hazard is not None and stem not in _WRITERS | _INTERPRETERS | _SHELLS
+               and not hazard.operands and not exec_given)
+    named = set(hazard.writes) if hazard is not None else set()
+    # What a find's `-exec` program writes by name is find's write too, and a
+    # provable one (`-exec sort -o F {} \;`; delta review of PR #75, M-A).
+    named |= set(exec_named)
+    written = written + [w for w in exec_named if w not in written]
+
+    def provable(operand: str) -> bool:
+        return not partial or operand in named
 
     # Inline source names its files inside a string no tokenizer splits. A
     # full path, or a bare name while standing in the gate's own folder, is a
@@ -944,7 +1249,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         if env_writer:
             env = _env_target(operand, text, local, f"{stem} on")
             if env is not None:
-                seen.touches.append(env)
+                seen.touches.append(env if provable(operand) else replace(env, certain=False))
         if text is None:
             # `$UNSET/allowlist.json`, or a relative name after a `cd` that
             # could not be followed: the right name, an unknowable place.
@@ -954,20 +1259,25 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
             continue
         hit = _exact(text, protected, ids)
         if hit is not None:
-            seen.touches.append(Touch(hit, kind == "writer", f"{stem} on {hit.name}"))
+            seen.touches.append(Touch(hit, kind == "writer" and provable(operand),
+                                      f"{stem} on {hit.name}"))
             continue
         tree = _in_tree(text, hud_trees())
         if tree is not None and kind != "reader":
             seen.touches.append(Touch(tree, False, f"{stem} on {text}", hud=True))
             continue
+        ancestors = _ancestor_of(text, protected)
+        if not ancestors:
+            continue        # (the names below cost O(operands) each: only when needed)
         others = [o for o in everyone if o is not operand]
         other_names = {rules._basename(o.rstrip("/")) for o in others}
-        for path, rel in _ancestor_of(text, protected):
+        for path, rel in ancestors:
             first = rel[0]
             if first in other_names or (stem == "find" and path.name in other_names):
                 # `cp /tmp/x/allowlist.json ~/.config/jarvis/`, or `find
                 # ~/.config/jarvis -name allowlist.json -exec cp …`.
-                lands = kind == "writer" and (len(rel) == 1 or stem == "find")
+                lands = (kind == "writer" and (len(rel) == 1 or stem == "find")
+                         and provable(operand))
                 seen.touches.append(Touch(path, lands, f"{stem} into {text}"))
             elif any(_GLOB.search(n) and (fnmatch(path.name, n) or fnmatch(first, n))
                      for n in other_names):
@@ -979,7 +1289,6 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
             elif any(o.endswith(("/.", "/*")) or (stem == "rsync" and o.endswith("/"))
                      for o in others):
                 seen.touches.append(Touch(path, False, f"{stem} copies a tree into {text}"))
-    return seen
 
 
 _ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
@@ -1080,6 +1389,10 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
     """
     if not command or not command.strip():
         return []
+    if "\x00" in command:
+        # No shell can be handed it, and resolving a path with one raises:
+        # too complex to judge, never a ValueError out of the gate.
+        return [_opaque("the line holds a NUL byte, which no shell can be handed")]
     protected = protected_paths()
     if cwd is None:
         try:
@@ -1090,7 +1403,8 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
         base = Path(os.path.expanduser(str(cwd)))
         if not base.is_absolute():
             base = None  # a relative cwd is relative to nothing we know
-    return _analyse(command, _State(base), protected, _identities(protected)).touches
+    with rules.work_scope():
+        return _analyse(command, _State(base), protected, _identities(protected)).touches
 
 
 def command_touch(command: str, cwd: str | Path | None = None) -> Touch | None:
@@ -1140,13 +1454,16 @@ def env_write_refusal(command: str) -> str | None:
     A write behind a symlink is seen where the folder is known
     (`command_touches(command, cwd)`: v1's `static_verdict`, `run_command`,
     v2's layer 1 with the brief's folder)."""
+    if "\x00" in (command or ""):
+        return None         # `rules.decide` refuses such a line before asking this
     text = _ansi_c(rules.join_continuations(command or ""))
     # Cheap first: a line that cannot spell `.env` once its quotes and
     # backslashes are gone names no env file (`.e''nv` and `.e\nv` do).
     if ".env" not in text.casefold().translate(_UNQUOTE):
         return None
     state = _State(Path("/"), budget=_Budget(follow_links=False))
-    touches = [t for t in _analyse(command, state, set(), {}).touches if t.env and t.certain]
+    with rules.work_scope():
+        touches = [t for t in _analyse(command, state, set(), {}).touches if t.env and t.certain]
     return refusal(touches[0]) if touches else None
 
 
@@ -1188,9 +1505,11 @@ def ask_reason(touch: Touch) -> str:
 # appearing on the line (a DENY cannot be approved, so a false one blocks the
 # owner too — review of PR #44 at 62db94f):
 #   * the **command word** — after assignments, `env` (`-S` split, `-C`,
-#     `-u`), `builtin`, and the wrappers and runners in `_RUNNERS` (`nohup`,
-#     `timeout`, `nice`, `flock FILE`, `xargs`, `systemd-run`, `uv run`,
-#     `uvx`, `poetry/pdm/hatch/rye/pipx run`, `ssh HOST …`) — is `jarvis` (any
+#     `-u`), `builtin`, and every wrapper and runner in rules' one table
+#     (`rules.starts`: `nohup`, `timeout`, `nice`, `flock FILE`, `xargs`,
+#     `systemd-run`, `uv run`, `uvx`, `npx`, `npm exec`/`-c`, `pnpm exec`/
+#     `dlx`, `yarn exec`/`dlx`, `bun x`/`exec`, `poetry/pdm/hatch/rye/pipx
+#     run`, and `ssh HOST …`, whose host may be this one) — is `jarvis` (any
 #     path to it, a `$VAR` the line set to it, or a link the line made to it
 #     with `ln`), or a Python run with `-m jarvis` / `-m jarvis.__main__`, and
 #     its argv, options skipped, begins with an owner path; behind `xargs`, a
@@ -2549,54 +2868,14 @@ _PYTHON = re.compile(r"(?:python|pypy)[0-9.]*")
 _OWNER_DEPTH = 4
 _OWNER_BUDGET = 64 * 1024
 
-# Wrappers and runners that run the command in their arguments: the options
-# that take a value, how many positionals precede the command, a subcommand
-# that must come first (`uv run`), whether the rest is one command *string*
-# (ssh), and whether its input is appended as more arguments (xargs).
-@dataclass(frozen=True)
-class _Runner:
-    values: frozenset = frozenset()
-    positionals: int = 0
-    subcommand: tuple = ()
-    joined: bool = False
-    appends: bool = False
-
-
-_RUN_VALUES = frozenset({"--directory", "--project", "--with", "--with-requirements", "--with-editable",
-                         "--python", "-p", "--package", "--env-file", "--extra", "--group", "--index",
-                         "--default-index", "--from", "--index-url", "--extra-index-url", "-w",
-                         "--only-group", "--no-group", "--cache-dir", "--config-file", "-e", "--env",
-                         "--spec", "--pip-args"})
-_RUNNERS: dict[str, _Runner] = {
-    "nohup": _Runner(), "setsid": _Runner(), "command": _Runner(), "chronic": _Runner(),
-    "time": _Runner(frozenset({"-f", "--format", "-o", "--output"})),
-    "exec": _Runner(frozenset({"-a"})),
-    "nice": _Runner(frozenset({"-n", "--adjustment"})),
-    "ionice": _Runner(frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid",
-                                 "-u", "--uid"})),
-    "stdbuf": _Runner(frozenset({"-i", "-o", "-e", "--input", "--output", "--error"})),
-    "timeout": _Runner(frozenset({"-s", "--signal", "-k", "--kill-after"}), positionals=1),
-    "flock": _Runner(frozenset({"-w", "--timeout", "-E", "--conflict-exit-code"}), positionals=1),
-    "watch": _Runner(frozenset({"-n", "--interval", "-d", "--differences", "-q", "--equexit"}), joined=True),
-    "xargs": _Runner(frozenset({"-I", "-i", "-n", "--max-args", "-L", "-l", "--max-lines", "-d",
-                                "--delimiter", "-a", "--arg-file", "-E", "-e", "--eof", "-P",
-                                "--max-procs", "-s", "--max-chars", "--process-slot-var"}), appends=True),
-    "systemd-run": _Runner(frozenset({"-p", "--property", "-u", "--unit", "--description", "-E",
-                                      "--setenv", "--working-directory", "-M", "--machine", "--slice",
-                                      "-H", "--host", "--uid", "--gid", "--nice", "--on-calendar",
-                                      "--on-active", "--timer-property", "--path-property",
-                                      "--socket-property", "--service-type", "--expand-environment"})),
-    "uv": _Runner(_RUN_VALUES, subcommand=("run", "tool run")),
-    "uvx": _Runner(_RUN_VALUES),
-    "poetry": _Runner(_RUN_VALUES, subcommand=("run",)),
-    "pdm": _Runner(_RUN_VALUES, subcommand=("run",)),
-    "hatch": _Runner(_RUN_VALUES, subcommand=("run",)),
-    "rye": _Runner(_RUN_VALUES, subcommand=("run",)),
-    "pipx": _Runner(_RUN_VALUES, subcommand=("run",)),
-    "ssh": _Runner(frozenset({"-p", "-i", "-l", "-o", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I",
-                              "-L", "-m", "-O", "-Q", "-R", "-S", "-W", "-w", "-B"}), positionals=1,
-                   joined=True),
-}
+# Which wrappers and runners run the command in their arguments, and how
+# their options are read, is rules' one table (`rules.starts`, ssh included
+# with `remote=True`): this module kept a second copy (`_RUNNERS`) until
+# 2026-10-12, which knew neither npx nor `npm exec`, `pnpm`, `yarn` or
+# `bun x`, read `xargs -i` and `watch -d` as taking the next word, and so let
+# `npx jarvis hud install` and `yarn exec jarvis restart` through.
+_PEEL_READINGS = 32      # readings of one command followed, at most
+_PEEL_HOPS = 12          # wrappers and runners peeled inside one another
 
 
 @dataclass
@@ -2948,82 +3227,84 @@ def _source_invokes(source: str, state: _Owner, depth: int) -> str | None:
     return None
 
 
-def _peel_runner(tokens: list[str], state: _Owner) -> tuple[list[str], bool, bool]:
-    """(the command a line of words runs, whether more words may be appended
-    to it from input, whether it is one command *string*). Peels assignments,
-    `builtin`, `env` and everything in `_RUNNERS`, as far as they nest."""
-    tokens = [t for t in tokens]
-    while tokens and tokens[0] in ("(", "{", "!"):
-        tokens = tokens[1:]
-    if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
-        tokens[0] = tokens[0][1:]
-    appends = joined = False
-    for _ in range(12):
-        while tokens and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0]):
-            tokens = tokens[1:]
-        if tokens and tokens[0] == "builtin":
-            tokens = tokens[1:]
+def _peel_runner(tokens: list[str], state: _Owner, appends: bool = False
+                 ) -> list[tuple[list[str], bool, bool, bool]]:
+    """Every reading of (the command a line of words runs, whether more words
+    may be appended to it from input, whether it is one command *string*,
+    whether a wrapper or runner started it). `appends`: words from input may
+    be added to the line itself (`parallel`, `fd -x`).
+    Peels assignments, `builtin` and `env` here, and every wrapper and runner
+    through rules' one table (`rules.starts`, ssh included), as far as they
+    nest. An option the table does not know may or may not take the next
+    word, and both readings are followed — so a short table can only add a
+    refusal, never hide a command.
+
+    Each reading is followed once, within the line's work budget
+    (`rules.charge`); past the budget, `_PEEL_READINGS` or `_PEEL_HOPS` it
+    raises `rules.TooComplex` rather than stopping quietly (review of PR #75,
+    L2): the caller marks the line too complex to judge, which is asked."""
+    tokens = rules.command_start(tokens)
+    readings: list[tuple[list[str], bool, bool, bool]] = []
+    todo: list[tuple[list[str], bool, int]] = [(tokens, appends, 0)]
+    seen: set = set()
+    while todo:
+        if len(readings) >= _PEEL_READINGS:
+            raise rules.TooComplex
+        tokens, appends, hops = todo.pop()
+        if (tuple(tokens), appends) in seen:
             continue
-        if not tokens:
-            break
-        stem = rules._basename(tokens[0])
-        if stem == "env":
-            rest, k = tokens[1:], 0
-            split = None
-            while k < len(rest) and (rest[k].startswith("-") or "=" in rest[k]):
-                if rest[k] == "--":
-                    k += 1
-                    break
-                found = _env_split(rest, k)
-                if found is not None:
-                    split, k = found
-                    break
-                k += 2 if rest[k] in ("-C", "--chdir", "-u", "--unset") else 1
-            if split is not None:
-                try:
-                    words = shlex.split(split)
-                except ValueError:
-                    words = split.split()
-                tokens = ["env"] + words + rest[k:]
+        seen.add((tuple(tokens), appends))
+        done = False
+        while True:
+            tokens = rules.strip_assignments(tokens)
+            if tokens and tokens[0] == "builtin":
+                tokens = tokens[1:]
                 continue
-            tokens = rest[k:]
-            continue
-        runner = _RUNNERS.get(stem)
-        if runner is None:
-            break
-        rest = tokens[1:]
-        if runner.subcommand:
-            matched = next((sub for sub in runner.subcommand
-                            if rest[:len(sub.split())] == sub.split()), None)
-            if matched is None:
+            if not tokens:
                 break
-            rest = rest[len(matched.split()):]
-        k, positionals = 0, runner.positionals
-        while k < len(rest):
-            token = rest[k]
-            if token == "--":
-                k += 1
+            stem = rules._basename(tokens[0])
+            if stem != "env" and stem not in rules._WRAPPER_OPTS and \
+                    stem not in rules._RUNNER_SPECS and stem not in rules._REMOTE_OPTS:
                 break
-            if token.startswith("-") and len(token) > 1:
-                name = token.split("=", 1)[0]
-                k += 2 if (name in runner.values and "=" not in token) else 1
+            hops += 1
+            if hops > _PEEL_HOPS:
+                raise rules.TooComplex
+            rules.charge(len(tokens))
+            if stem == "env":
+                rest, k = tokens[1:], 0
+                split = None
+                while k < len(rest) and (rest[k].startswith("-") or "=" in rest[k]):
+                    if rest[k] == "--":
+                        k += 1
+                        break
+                    found = _env_split(rest, k)
+                    if found is not None:
+                        split, k = found
+                        break
+                    k += 2 if rules.takes_value("env", rest[k]) else 1
+                if split is not None:
+                    try:
+                        words = shlex.split(split)
+                    except ValueError:
+                        words = split.split()
+                    tokens = ["env"] + words + rest[k:]
+                    continue
+                tokens = rest[k:]
                 continue
-            if stem == "timeout" and re.fullmatch(r"[\d.]+[smhd]?", token) and positionals:
-                positionals -= 1
-                k += 1
-                continue
-            if positionals:
-                positionals -= 1
-                k += 1
-                continue
+            started = rules.starts(tokens, remote=True)
+            if started is None or not (started.programs or started.strings):
+                break
+            readings += [([text], False, True, True) for text in started.strings]
+            for program in started.programs:
+                if started.joined:
+                    readings.append((list(program), appends or started.appends, True, True))
+                else:
+                    todo.append((list(program), appends or started.appends, hops))
+            done = True
             break
-        tokens = rest[k:]
-        if stem == "flock" and tokens and tokens[0] in ("-c", "--command"):
-            return tokens[1:2], False, True
-        appends = appends or runner.appends
-        if runner.joined:
-            return tokens, appends, True
-    return tokens, appends, joined
+        if not done:
+            readings.append((tokens, appends, False, hops > 0))
+    return readings
 
 
 def _python_target_op(kind: str, what: str | None, argv: list[str], segment: str, state: _Owner,
@@ -3054,8 +3335,69 @@ def _python_target_op(kind: str, what: str | None, argv: list[str], segment: str
     return _source_invokes(source or "", state, depth)
 
 
-def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -> str | None:
-    tokens, appends, joined = _peel_runner(tokens, state)
+def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int,
+                   appends: bool = False) -> str | None:
+    for words, more, joined, behind in _peel_runner(tokens, state, appends):
+        why = _owner_reading_of(words, more, joined, segment, state, depth, behind)
+        if why:
+            return why
+    return None
+
+
+def _exec_blocks(tokens: list[str], openers, closers) -> list[list[str]]:
+    """The commands a find's `-exec`/`-ok` or fd's `-x`/`-X` runs: the words
+    after each opener, up to a closer or the end."""
+    blocks = []
+    for k, token in enumerate(tokens):
+        if token in openers:
+            j = k + 1
+            while j < len(tokens) and tokens[j] not in closers:
+                j += 1
+            blocks.append(tokens[k + 1:j])
+    return blocks
+
+
+_PARALLEL_ENDS = frozenset({":::", "::::", ":::+", "::::+"})
+
+
+def _owner_runs_given(stem: str, tokens: list[str], segment: str, state: _Owner,
+                      depth: int) -> str | None:
+    """An owner op that `find -exec`, `fd -x` or `parallel` runs (delta review
+    of PR #75, LOW: they run their command as the runners do, so it is the
+    same DENY). fd and parallel append what they find or are given; parallel
+    hands its command to a shell, and which word starts it is not parsed
+    (its options are many), so every word that is not an option is tried."""
+    if depth >= _OWNER_DEPTH:
+        return None
+    if stem in ("find", "bfs"):
+        for block in _exec_blocks(tokens, rules._FIND_EXEC, (";", "+")):
+            why = _owner_command(block, segment, state, depth + 1)
+            if why:
+                return why
+        return None
+    if stem in ("fd", "fdfind"):
+        for block in _exec_blocks(tokens, ("-x", "--exec", "-X", "--exec-batch"), (";",)):
+            why = _owner_command(block, segment, state, depth + 1, appends=True)
+            if why:
+                return why
+        return None
+    if stem == "parallel":
+        end = next((k for k, t in enumerate(tokens) if t in _PARALLEL_ENDS), len(tokens))
+        for start in range(1, end):
+            if tokens[start].startswith("-"):
+                continue
+            rules.charge(end - start)
+            why = (_owner_command(tokens[start:end], segment, state, depth + 1, appends=True)
+                   or _owner_line(" ".join(tokens[start:end]), state, depth + 1))
+            if why:
+                return why
+    return None
+
+
+def _owner_reading_of(tokens: list[str], appends: bool, joined: bool, segment: str,
+                      state: _Owner, depth: int, behind: bool = False) -> str | None:
+    """`_owner_command` for one reading of what the command runs. `behind`:
+    a wrapper or runner started it."""
     # `marked` keeps quoted braces marked (`_mark_quoted`) for the paths that
     # expand braces as bash does (`_unit_words`); every other path, and every
     # nested command line, reads the plain text.
@@ -3125,11 +3467,21 @@ def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -
             if why:
                 return why
         return None
+    if stem in ("find", "bfs", "fd", "fdfind", "parallel"):
+        return _owner_runs_given(stem, tokens, segment, state, depth)
     if stem in _SHELLS and depth < _OWNER_DEPTH:
         strings, stdin = _shell_strings(tokens)
         if stdin:
             strings = strings + _here_strings(segment) + _take_bodies(segment, state)
         for text in strings:
+            why = _owner_line(text, state, depth + 1)
+            if why:
+                return why
+    elif behind and depth < _OWNER_DEPTH and not rules.known_program(stem):
+        # A program no table knows, started by a wrapper or runner and handed
+        # `-c`/`-e`/`--command STRING`, may be a shell: its string is a line
+        # (delta review of PR #75, M-B).
+        for text in rules.command_strings(tokens):
             why = _owner_line(text, state, depth + 1)
             if why:
                 return why
@@ -3216,10 +3568,9 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
         if not raw:
             continue
         words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
-        if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+        if words and all(rules.ASSIGNMENT.fullmatch(w) for w in words):
             for word in words:
-                name, value = word.split("=", 1)
-                state.variables[name] = _unmark(_owner_word(value, state))
+                _owner_assign(word, state)
             continue
         why = _owner_command(raw, segment, state, depth)
         if why:
@@ -3239,31 +3590,36 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
     return None
 
 
-# Shell reserved words a command may follow (review 2 of PR #48: `if true;
-# then systemctl --user restart jarvis-daemon2; fi` split into a segment
-# whose first word was `then`, and was not judged).
-_RESERVED = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "{", "coproc"})
-
-
 def _strip_reserved(tokens: list[str]) -> list[str]:
     """The command a segment runs, past the shell's reserved words (`then
-    jarvis restart`, `do pkill -f daemon2`, `! cmd`, `{ cmd`, `coproc cmd`)
-    and a `case` pattern (`case x in a) cmd`, `b) cmd`)."""
-    for _ in range(32):
-        if not tokens:
-            break
-        head = tokens[0]
-        if head in _RESERVED:
-            tokens = tokens[1:]
-        elif head == "case":
-            tokens = tokens[tokens.index("in") + 1:] if "in" in tokens else []
-        elif head.endswith(")") and head.count(")") > head.count("("):
-            tokens = tokens[1:]                      # a case pattern: `a)`, `*)`, `(a|b)`
-        elif head.startswith("(") and head.endswith(")") and len(tokens) > 1 and head.count("(") == 1:
-            tokens = tokens[1:]                      # `(a)` — a case pattern with its paren
-        else:
-            break
-    return tokens
+    jarvis restart`, `do pkill -f daemon2`, `! cmd`, `{ cmd`, `coproc cmd`;
+    review 2 of PR #48: `if true; then systemctl --user restart
+    jarvis-daemon2; fi` split into a segment whose first word was `then`),
+    a `case` pattern (`case x in a) cmd`, `b) cmd`) and a function's header
+    — rules' one reading (`rules.command_start`), the gate-state detector's
+    and the vex reading's too. Assignments are left: the caller records them."""
+    return rules.command_start(tokens, assignments=False)
+
+
+def _owner_assign(word: str, state: "_Owner") -> None:
+    """Remember an assignment word's value for the segments after it, as the
+    gate-state detector does (`_assign`): `x+=V` appends; `x[0]=V` sets
+    `$x`, another element leaves it, an index not told makes it unknown."""
+    parts = rules.assignment(word)
+    if parts is None:
+        return
+    name, subscript, append, value = parts
+    if subscript is not None:
+        index = subscript.strip()
+        if index.isdigit() and int(index) != 0:
+            return
+        if not index.isdigit():
+            state.variables.pop(name, None)
+            return
+    value = _unmark(_owner_word(value, state))
+    if append:
+        value = state.variables.get(name, os.environ.get(name, "")) + value
+    state.variables[name] = value
 
 
 def runs_jarvis(tokens: list[str]) -> str | None:
@@ -3276,11 +3632,21 @@ def runs_jarvis(tokens: list[str]) -> str | None:
     --sync`, the owner ops)."""
     state = _Owner()
     try:
-        tokens, _, joined = _peel_runner(list(tokens), state)
+        with rules.work_scope():
+            readings = _peel_runner(list(tokens), state)
+    except rules.TooComplex:
+        rules.exhaust()     # past the budget or a cap: the line is asked (review of PR #75)
+        return None
     except Exception:     # noqa: BLE001 — a parse failure is not a verdict
         return None
-    if joined or not tokens:
-        return None
+    for tokens, _, joined, _behind in readings:
+        found = None if joined or not tokens else _runs_jarvis_reading(tokens, state)
+        if found:
+            return found
+    return None
+
+
+def _runs_jarvis_reading(tokens: list[str], state: _Owner) -> str | None:
     if _is_launcher(tokens[0], state):
         return "the jarvis CLI"
     stem = rules._basename(tokens[0])
@@ -3327,7 +3693,8 @@ def _could_be_owner_op(command: str) -> bool:
         return True
     # A word the line assembles from its own variables (`x=h; jarvis ${x}ud
     # install`) need not spell the op's word anywhere: such a line is parsed.
-    return "$" in flat and re.search(r"(?:^|[\s;&|(])[A-Za-z_]\w*=", flat) is not None
+    return "$" in flat and re.search(r"(?:^|[\s;&|(])[A-Za-z_]\w*(?:\[[^\]]*\])?\+?=",
+                                     flat) is not None
 
 
 def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, str | None]:
@@ -3346,8 +3713,16 @@ def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, 
         flat = flat.replace(ch, "")
     kills = _Kills(line=command, armed="kill" in flat or "fuser" in flat)
     try:
-        why = _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
+        with rules.work_scope():
+            why = _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
     except RecursionError:
+        return None, None
+    except rules.TooComplex:
+        # What its wrappers and runners start is past the work budget or a
+        # cap (review of PR #75, L2): not judged here, so the line is too
+        # complex to judge — `rules.decide` asks it, and `rules.runners_unsure`
+        # keeps every allowlist entry and v2's reviewer off it.
+        rules.exhaust()
         return None, None
     return why, (None if why else kills.unsure)
 

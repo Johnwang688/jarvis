@@ -8,6 +8,7 @@ one catch-all `run_command` would leave the harness nothing to reason about.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from typing import Annotated
@@ -55,6 +56,11 @@ _OPERATORS = (">", ">>", "<", "|", ";", "&", "\n", "\r")
 # to stop looking for them: `grep "$(cat .env)" f` is still substitution.
 _SUBSTITUTIONS = ("$(", "`")
 
+# The only variables `run_readonly` lets a line set before its program: the
+# locale and the time zone, with a plain value (no `$`, no quote, no space).
+_SAFE_ENV_NAME = re.compile(r"LC_[A-Z]+|LANG|LANGUAGE|TZ")
+_SAFE_ENV_VALUE = re.compile(r"[A-Za-z0-9_.:@+,/-]*")
+
 TIMEOUT_S = 60
 
 
@@ -89,6 +95,8 @@ def run_readonly(
     # ran one (2026-10-09), because the substitution scan below looked for
     # `$(` in text that only contained it once joined.
     command = rules.join_continuations(command)
+    if "\x00" in command:
+        return "Error: the command holds a NUL byte, which no shell can be handed."
     try:
         tokens = shlex.split(command)
     except ValueError as exc:
@@ -111,7 +119,46 @@ def run_readonly(
     # the only thing looked at, and `-c`'s payload is one shlex token that
     # nothing parsed. rules.py has unwrapped `env`/`nohup`/`timeout` since
     # 2026-08-10; this allowlist never got the same treatment.
-    tokens = rules.unwrap(tokens)
+    #
+    # The wrappers' options are read from rules' one table (review of PR #75,
+    # HIGH 3): `env -u ls rm -rf build` used to be judged as `ls` and run
+    # here — rm and all. A line whose program cannot be told is not run.
+    peeled: list[str] = []
+    written: list[str] = []
+    sure = rules.unwrap_sure(tokens, peeled, written)
+    if sure is None:
+        return ("Error: which program this runs cannot be told from its wrappers' options. "
+                "Use run_command.")
+    # A wrapper that writes a file of its own — `time -o FILE` (delta review
+    # of PR #75, H-B: `time -o <allowlist> -f '<entries>' ls` ran here) — is
+    # not a read, whatever it runs.
+    if written:
+        return ("Error: a wrapper on this line writes a file it names "
+                f"({written[0][:80]}), so it is not a read. Use run_command.")
+    # xargs hands its program arguments from a file (`-a list`) this check
+    # never sees: `xargs -a list cat` reads whatever `list` names. Here,
+    # with no pipe and no input, that is the only thing xargs adds.
+    if "xargs" in peeled:
+        return ("Error: xargs passes its program arguments this check cannot see. "
+                "Use run_command.")
+    # An assignment before the program — the shell's (`X=1 ls`) or env's
+    # (`env X=1 ls`) — sets what it runs with, and some names make any
+    # program load code: `LD_PRELOAD=./x.so ls` ran here, with nobody asked
+    # (found in the third delta review of PR #75, older than the PR; also
+    # `LD_AUDIT`, `GCONV_PATH`, `PATH` …). Only the locale and time zone may
+    # be set; a line whose program is not a plain tail of its words (`env
+    # -S`) sets nothing here.
+    tail = len(tokens) - len(sure)
+    if tail < 0 or tokens[tail:] != sure:
+        return ("Error: what this runs, or what it runs with, cannot be told. "
+                "Use run_command.")
+    for word in tokens[:tail]:
+        parts = rules.assignment(word)
+        if parts is not None and not (_SAFE_ENV_NAME.fullmatch(parts[0]) and parts[1] is None
+                                      and _SAFE_ENV_VALUE.fullmatch(parts[3])):
+            return (f"Error: setting {parts[0]} changes what the program runs with, so it is "
+                    "not a read. Use run_command.")
+    tokens = sure
     if not tokens:
         return "Error: empty command."
     binary = tokens[0].rsplit("/", 1)[-1]

@@ -17,6 +17,12 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 # that the browser and web tools can refuse to touch it without importing the
 # face (which would drag Playwright and the agent into every import).
 FACE_PORT = int(os.environ.get("JARVIS_FACE_PORT", "8402"))
+# The owner's Chrome profile for the HUD window (`jarvis hud`); empty means the default.
+def hud_chrome_profile(environ=os.environ) -> str:
+    return environ.get("JARVIS_HUD_CHROME_PROFILE") or "Default"
+
+
+HUD_CHROME_PROFILE = hud_chrome_profile()
 # The headless daemon's port. v1's `jarvis daemon` serves a read-only
 # health/status endpoint here (the single-instance lock, and how the face can
 # tell that another process already owns the Discord gateway). v2's daemon
@@ -634,6 +640,21 @@ VEX_PATH = Path(
 # Colon-separated overrides exist for the test suite, which points them at a
 # temp tree of fakes; nothing here is ever searched beyond these roots.
 _WINDOWS_HOME = "/mnt/c/Users/johnw"
+
+
+def _windows_localappdata() -> Path:
+    override = os.environ.get("JARVIS_WINDOWS_LOCALAPPDATA")
+    if override:
+        return Path(override)
+    local = os.environ.get("LOCALAPPDATA", "").replace("\\", "/")
+    if len(local) >= 3 and local[1:3] == ":/" and local[0].isalpha():
+        return Path(f"/mnt/{local[0].lower()}/{local[3:]}")
+    if local.startswith("/"):
+        return Path(local)
+    return Path(_WINDOWS_HOME) / "AppData" / "Local"
+
+
+WINDOWS_LOCALAPPDATA = _windows_localappdata()
 VEX_STORAGE_ROOTS: tuple[str, ...] = tuple(
     p for p in os.environ.get("JARVIS_VEX_STORAGE_ROOTS", "").split(":") if p
 ) or (f"{_WINDOWS_HOME}/AppData/Roaming/Code/User/globalStorage/vexrobotics.vexcode",
