@@ -944,7 +944,11 @@ its temporary profile, HOME and artifacts. Forget stops one profile, waits for
 download workers, wipes its profile/downloads, and leaves its label and an empty
 0700 folder. Delete also removes metadata after the wipe. Per-profile locks
 cover queued opens, downloads and even a cancelled filesystem wipe; a failure
-cannot be reported as a successful deletion.
+cannot be reported as a successful deletion. Failed or cancelled context
+retirement retains its identity and closing state until strict data cleanup
+finishes, so DELETE can retry it. Healthy existing Private contexts stay usable;
+new-context admission waits for unresolved cleanup. Repeated cancellations of
+a profile wipe still cannot release its lock while the worker is running.
 
 Only an admitted owner navigation temporarily grants a local port, retained
 while its authorizing tab remains there. Failure/cancellation rolls it back;

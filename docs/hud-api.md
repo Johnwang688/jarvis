@@ -2236,7 +2236,10 @@ starts Chrome but `POST /browser/tabs` or the dedicated profile sign-in route.
   symlinked metadata is refused. Capacity and duplicate-label refusals are 409;
   invalid labels/IDs are 400 and unknown IDs are 404. Destructive operations
   wait for downloads and filesystem workers before wiping only their target;
-  failure is reported and metadata remains until a successful delete.
+  failure is reported and metadata remains until a successful delete. Failed
+  Private context cleanup keeps that ctx addressable for DELETE retry; success
+  waits for data removal. Existing healthy contexts remain usable; reuse of
+  the retiring ctx and new-context admission wait for cleanup.
 - **Sign-in entry** is owner-only, refused under an approval card, and accepts
   no URL. It opens exactly `chrome://settings/syncSetup`; the measured local
   Chrome redirects to exactly `chrome://settings/people`, also permitted for

@@ -147,7 +147,8 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         self.host._launch=AsyncMock()
         deleting=asyncio.create_task(self.host._manage_profile_async(profile,True))
         self.assertTrue(await asyncio.to_thread(entered.wait,3))
-        deleting.cancel()
+        deleting.cancel();await asyncio.sleep(0)
+        deleting.cancel();await asyncio.sleep(0)
         opening=asyncio.create_task(self.host._open_tab(profile,None,None))
         await asyncio.sleep(0);await asyncio.sleep(0)
         self.assertFalse(opening.done(), "a timed-out wipe still owns its lifecycle lock")
@@ -175,6 +176,81 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
             release.set();await closing
         self.assertFalse(incoming.exists());self.assertFalse(folder.exists())
         self.assertNotIn(H.PRIVATE,self.host._instances)
+
+    def private_fixture(self):
+        ctx="abcdefab"
+        folder=H.secure_dir(config.BROWSER_DIR/"private"/"run-test")
+        incoming=H.secure_dir(config.BROWSER_DIR/"downloads"/H.PRIVATE/ctx)
+        (incoming/"fixture").write_text("temporary")
+        context=SimpleNamespace(close=AsyncMock())
+        instance=H._Instance(H.PRIVATE,folder,SimpleNamespace(close=AsyncMock()),None)
+        instance.private_contexts[ctx]=context
+        self.host._instances[H.PRIVATE]=instance
+        return ctx,instance,context,incoming
+
+    async def test_context_failure_retains_identity_and_retries_every_stage(self):
+        for phase in ("context", "download", "directory", "engine"):
+            with self.subTest(phase=phase):
+                ctx,instance,context,incoming=self.private_fixture()
+                real_remove=H.shutil.rmtree
+                failed=False
+                async def settle(*args):
+                    nonlocal failed
+                    if phase=="download" and not failed:
+                        failed=True;raise H.BrowserRefused(409,"fixture writer pending")
+                def remove(path,*args,**kw):
+                    nonlocal failed
+                    target=incoming if phase=="directory" else instance.folder
+                    if phase in ("directory","engine") and Path(path)==target and not failed:
+                        failed=True;raise OSError("fixture failure")
+                    return real_remove(path,*args,**kw)
+                if phase=="context":context.close.side_effect=[OSError("fixture failure"),None]
+                with patch.object(H,"stop_pids",return_value=[]),patch.object(H.shutil,"rmtree",side_effect=remove),patch.object(self.host,"_settle_downloads",side_effect=settle):
+                    with self.assertRaises((OSError,H.BrowserRefused)):await self.host._close_context(ctx)
+                    self.assertIs(instance.private_contexts[ctx],context)
+                    self.assertIn(ctx,self.host._closing_contexts)
+                    for wanted in (ctx,None):
+                        with self.assertRaises(H.BrowserRefused) as refused:
+                            await self.host._open_tab(H.PRIVATE,wanted,None)
+                        self.assertEqual(refused.exception.status,409)
+                    self.assertEqual(await self.host._close_context(ctx),{"ctx":ctx,"closed":True})
+                self.assertNotIn(ctx,self.host._closing_contexts)
+                self.assertFalse(incoming.exists());self.assertFalse(instance.folder.exists())
+
+    async def test_context_cancellation_keeps_retryable_state(self):
+        ctx,instance,context,incoming=self.private_fixture()
+        entered=asyncio.Event()
+        async def closing():entered.set();await asyncio.Event().wait()
+        context.close.side_effect=closing
+        deleting=asyncio.create_task(self.host._close_context(ctx))
+        await entered.wait();deleting.cancel()
+        with self.assertRaises(asyncio.CancelledError):await deleting
+        self.assertIs(instance.private_contexts[ctx],context)
+        self.assertIn(ctx,self.host._closing_contexts)
+        context.close=AsyncMock()
+        with patch.object(H,"stop_pids",return_value=[]):await self.host._close_context(ctx)
+        self.assertFalse(incoming.exists());self.assertNotIn(ctx,self.host._closing_contexts)
+
+    async def test_failed_natural_retirement_preserves_other_private_context(self):
+        ctx,instance,context,incoming=self.private_fixture()
+        context.close.side_effect=[OSError("fixture failure"),None]
+        other="01234567";other_context=SimpleNamespace(close=AsyncMock())
+        instance.private_contexts[other]=other_context
+        tab=H._Tab("abcdefab",H.PRIVATE,ctx,SimpleNamespace())
+        healthy=H._Tab("01234567",H.PRIVATE,other,SimpleNamespace())
+        self.host._tabs.update({tab.id:tab,healthy.id:healthy})
+        self.host._dropped(tab)
+        with self.assertRaises(OSError):await self.host._retiring_contexts[ctx]
+        await asyncio.sleep(0)
+        self.assertNotIn(ctx,self.host._retiring_contexts)
+        self.assertIs(instance.private_contexts[ctx],context)
+        self.assertIn(ctx,self.host._closing_contexts)
+        self.assertIs(self.host._tabs[healthy.id],healthy)
+        self.assertIs(instance.private_contexts[other],other_context)
+        self.assertEqual(await self.host._close_context(ctx),{"ctx":ctx,"closed":True})
+        self.assertFalse(incoming.exists());self.assertIs(self.host._instances[H.PRIVATE],instance)
+        self.assertIs(self.host._tabs[healthy.id],healthy)
+        other_context.close.assert_not_awaited()
 
     async def test_private_cleanup_failure_is_retryable_and_reported(self):
         folder=config.BROWSER_DIR/"private"/"run-test"

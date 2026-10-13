@@ -765,7 +765,8 @@ class BrowserHost:
             self._launch_reserved.discard(profile)
 
     def _idle_if_empty(self, instance: _Instance) -> None:
-        if instance.closing or any(t.profile == instance.profile for t in self._tabs.values()):
+        if (instance.closing or any(t.profile == instance.profile for t in self._tabs.values())
+                or (instance.profile == PRIVATE and instance.private_contexts)):
             return
         if instance.idle is not None:
             instance.idle.cancel()
@@ -831,6 +832,8 @@ class BrowserHost:
             return
         self._closing_instances[profile] = instance
         instance.closing = True
+        if profile == PRIVATE:
+            self._closing_contexts.update(instance.private_contexts)
         if instance.idle is not None:
             instance.idle.cancel()
             instance.idle = None
@@ -848,6 +851,8 @@ class BrowserHost:
             _remove_tree(instance.folder, strict=True)
             # A Private download goes with the Private Chrome (BR-1b).
             _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE, strict=True)
+            self._closing_contexts.difference_update(instance.private_contexts)
+            instance.private_contexts.clear()
         self._closing_instances.pop(profile, None)
         self._publish_snapshot()
 
@@ -942,7 +947,8 @@ class BrowserHost:
             task = asyncio.create_task(self._retire_context(tab.ctx))
             self._retiring_contexts[tab.ctx] = task
             def finished(done):
-                self._retiring_contexts.pop(tab.ctx, None)
+                if self._retiring_contexts.get(tab.ctx) is done:
+                    self._retiring_contexts.pop(tab.ctx, None)
                 if not done.cancelled() and done.exception() is not None:
                     LOG.warning("A Private context did not finish closing")
             task.add_done_callback(finished)
@@ -951,19 +957,30 @@ class BrowserHost:
         self._publish_snapshot()
 
     async def _retire_context(self, ctx: str) -> None:
-        try:
-            async with self._launching.setdefault(PRIVATE, asyncio.Lock()):
-                instance = self._instances.get(PRIVATE)
-                context = instance.private_contexts.pop(ctx, None) if instance else None
-                if context is not None:
-                    await self._quietly(context.close())
-                await self._settle_downloads(PRIVATE, ctx)
-                _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / ctx, strict=True)
-                if (instance is not None and not instance.private_contexts
-                        and not any(t.profile == PRIVATE for t in self._tabs.values())):
-                    await self._close_instance(PRIVATE)
-        finally:
-            self._closing_contexts.discard(ctx)
+        async with self._launching.setdefault(PRIVATE, asyncio.Lock()):
+            await self._retire_context_locked(ctx)
+
+    async def _retire_context_locked(self, ctx: str) -> None:
+        # The identity and closing marker survive every failure/cancellation.
+        # A retry can finish the same context, even if its final engine close
+        # moved that engine to _closing_instances before cleanup failed.
+        instance = self._instances.get(PRIVATE) or self._closing_instances.get(PRIVATE)
+        if instance is None or ctx not in instance.private_contexts:
+            raise BrowserRefused(404, "no such Private context")
+        self._closing_contexts.add(ctx)
+        context = instance.private_contexts[ctx]
+        for tab in [t for t in self._tabs.values() if t.ctx == ctx]:
+            self._tabs.pop(tab.id, None)
+            self._release(tab, "context closed")
+        await asyncio.wait_for(context.close(), CLOSE_TIMEOUT_S)
+        await self._settle_downloads(PRIVATE, ctx)
+        _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / ctx, strict=True)
+        if (len(instance.private_contexts) == 1
+                and not any(t.profile == PRIVATE for t in self._tabs.values())):
+            await self._close_instance(PRIVATE)
+        instance.private_contexts.pop(ctx, None)
+        self._closing_contexts.discard(ctx)
+        self._publish_snapshot()
 
     @staticmethod
     async def _quietly(awaitable) -> None:
@@ -1085,10 +1102,11 @@ class BrowserHost:
             self._refuse_if_held()
         if len(self._tabs) >= cap:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
+        if profile == PRIVATE and self._closing_contexts:
+            if ctx is None or ctx in self._closing_contexts or PRIVATE in self._closing_instances:
+                raise BrowserRefused(409, "Private cleanup is unfinished; retry closing it first")
         instance = await self._instance(profile)
         if profile == PRIVATE:
-            if ctx in self._closing_contexts:
-                raise BrowserRefused(404, "no such Private context")
             if ctx is None:
                 ctx = self._new_id(instance.private_contexts)
                 context = await instance.browser.new_context(
@@ -1248,23 +1266,7 @@ class BrowserHost:
     async def _close_context(self, ctx: str) -> dict:
         async with self._launching.setdefault(PRIVATE, asyncio.Lock()):
             self._refuse_if_held()
-            instance = self._instances.get(PRIVATE)
-            if instance is None or ctx not in instance.private_contexts:
-                raise BrowserRefused(404, "no such Private context")
-            self._closing_contexts.add(ctx)
-            try:
-                context = instance.private_contexts.pop(ctx)
-                for tab in [t for t in self._tabs.values() if t.ctx == ctx]:
-                    self._tabs.pop(tab.id, None)
-                    self._release(tab, "context closed")
-                await context.close()
-                await self._settle_downloads(PRIVATE, ctx)
-                _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / ctx, strict=True)
-                if not instance.private_contexts and not any(t.profile == PRIVATE for t in self._tabs.values()):
-                    await self._close_instance(PRIVATE)
-                self._publish_snapshot()
-            finally:
-                self._closing_contexts.discard(ctx)
+            await self._retire_context_locked(ctx)
         return {"ctx": ctx, "closed": True}
 
     def forget(self, profile) -> dict:
@@ -1305,11 +1307,14 @@ class BrowserHost:
             # caller timed out, so a queued open cannot race the old worker.
             wiping = asyncio.get_running_loop().run_in_executor(None, self._wipe_profile, profile)
             cancelled = False
-            try:
-                await asyncio.shield(wiping)
-            except asyncio.CancelledError:
-                cancelled = True
-                await wiping
+            while not wiping.done():
+                try:
+                    await asyncio.shield(wiping)
+                except asyncio.CancelledError:
+                    # More than one caller/stop timeout may cancel this task.
+                    # Each cancellation is deferred; none reaches the worker.
+                    cancelled = True
+            wiping.result()
             if delete:
                 self._profiles.delete(profile)
             else:
