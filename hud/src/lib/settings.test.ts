@@ -1,8 +1,8 @@
 import { loadSettingsSection, saveSettingsSection, settingsSection, isSettingsKey, SETTINGS_SECTIONS, SETTINGS_SECTION_KEY } from "./settings";
 describe("Settings window preference", () => {
   afterEach(() => { vi.restoreAllMocks(); localStorage.clear(); });
-  it("accepts only the seven sections in their displayed order", () => {
-    expect(SETTINGS_SECTIONS).toEqual(["General", "Model", "Voice", "Avatar", "Usage", "Routing", "Archive"]);
+  it("accepts only the sections in their displayed order", () => {
+    expect(SETTINGS_SECTIONS).toEqual(["General", "Model", "Voice", "Avatar", "Usage", "Routing", "Browser", "Archive"]);
     for (const name of SETTINGS_SECTIONS) expect(settingsSection(name)).toBe(name);
     for (const bad of [null, "", "general", "Terminal", {}, "__proto__"]) expect(settingsSection(bad)).toBe("General");
   });

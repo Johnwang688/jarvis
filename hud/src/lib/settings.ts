@@ -1,5 +1,5 @@
 /** Window preferences only; no daemon configuration is written here. */
-export const SETTINGS_SECTIONS = ["General", "Model", "Voice", "Avatar", "Usage", "Routing", "Archive"] as const;
+export const SETTINGS_SECTIONS = ["General", "Model", "Voice", "Avatar", "Usage", "Routing", "Browser", "Archive"] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 export const SETTINGS_SECTION_KEY = "jarvis.settings.section";
 export function settingsSection(value: unknown): SettingsSection {

@@ -2590,3 +2590,17 @@ Open state is window-local, bounded to 500 `thread|turn|firstCall` keys, and
 never appears in this API or localStorage. Every group starts collapsed.
 Expanded rows show name, label, outcome word and duration only. The read-only
 `__hud.toolGroups()` test hook returns disclosure keys, never tool contents.
+
+### Automatic opening preference and page identity (AO-3)
+
+GET /dev-servers now also returns an effective boolean auto_open. The HUD
+bootstraps the preference from this owner-only listing, and uses one
+memory-only 32-lowercase-hex page nonce for /events?window=, terminal attach
+?window=, and dev-server claim/renew/placed/dismiss bodies.
+
+An owner preference change publishes only
+{kind: "dev_server_settings", data: {auto_open: boolean}}. OFF invalidates
+pending claims/arbitrations and queued window placements. claim, renew and
+placed refuse with 409 {error, code: "off"} while disabled; dismiss remains
+an explicit owner action. ON does not revive an old placement response.
+No automatic opening calls browser manager or navigation routes.

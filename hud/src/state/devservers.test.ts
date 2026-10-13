@@ -48,6 +48,13 @@ describe("owner wire parsing", () => {
 });
 
 describe("bootstrap and live events", () => {
+  it("a down event beats an older listening snapshot without resurrecting a notice", async () => {
+    const { store, wire } = setup(), list = deferred(); wire.list.mockReturnValueOnce(list.promise);
+    store.connect(); store.event(event(ID, "down"));
+    list.resolve({ auto_open: true, servers: [listed()] }); await flush();
+    expect(store.rows()).toEqual([]); expect(wire.claim).not.toHaveBeenCalled();
+  });
+
   it("shows old unclaimed servers as quiet notices and only owner Open claims", async () => {
     const { store, wire } = setup();
     wire.list.mockResolvedValue({ auto_open: true, servers: [listed()] });
@@ -90,6 +97,16 @@ describe("bootstrap and live events", () => {
 });
 
 describe("terminal receipts", () => {
+  it.each([{ servers: [] }, { servers: [listed()] }])("keeps a current terminal preclaim ahead of an older bootstrap snapshot: %j", async ({ servers }) => {
+    const { store, wire } = setup(), list = deferred(); wire.list.mockReturnValueOnce(list.promise);
+    store.connect(); store.terminal("term1", URL, ID);
+    list.resolve({ auto_open: true, servers }); await flush();
+    expect(store.rows().map(row => row.phase)).toEqual(["queued"]);
+    const action = vi.fn().mockReturnValue("placed");
+    await store.attempt(action);
+    expect(action).toHaveBeenCalledOnce(); expect(wire.claim).not.toHaveBeenCalled();
+  });
+
   it("uses a valid current-socket preclaim without claiming a second time", async () => {
     const { store, wire } = setup(); store.connect(); await flush();
     store.terminal("term1", URL, ID); await flush();
@@ -147,6 +164,15 @@ describe("ownership fences and leases", () => {
     expect(store.rows()[0].phase).toBe("prompt");
     store.disconnect(); const n = wire.act.mock.calls.length;
     await vi.advanceTimersByTimeAsync(60_000); expect(wire.act).toHaveBeenCalledTimes(n);
+  });
+  it("an offered prompt keeps renewing past the deferred-work backstop", async () => {
+    const { store, wire } = setup(); store.connect(); await flush(); store.terminal("term1", URL, ID);
+    await store.attempt(() => "prompt");
+    await vi.advanceTimersByTimeAsync(720_000);
+    expect(store.rows()[0].phase).toBe("prompt");
+    expect(wire.act.mock.calls.some(c => c[1] === "dismiss")).toBe(false);
+    const choose = vi.fn().mockReturnValue("placed"); await store.attempt(choose, ID);
+    expect(choose).toHaveBeenCalledOnce();
   });
   it("caps deferred claims at four and expires them after ten minutes without owner dismissal", async () => {
     const { store, wire } = setup(); store.connect(); await flush();

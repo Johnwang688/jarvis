@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEV_OPEN_IDLE, OPENED_KEPT, PER_SOURCE_MS, WAIT_MS, WINDOW_MAX, autoOpenPlan, devUrl, enqueueDev,
+  DEV_OPEN_IDLE, OPENED_KEPT, WAIT_MS, WINDOW_MAX, autoOpenPlan, devUrl, enqueueDev,
   offerLabel, type DevEntry, type DevOpenState, type DevWindow, type PaneShows,
 } from "./devopen";
 import { autoSplitVerdict, blankKeptPane, defaultWorkspace, freeId, setPreset, splitPane, type PaneNo } from "./workspace";
@@ -100,11 +100,11 @@ describe("URL and lifecycle boundaries", () => {
   });
   it("applies one/10s/source and independently three/min/window", () => {
     let s = plan().state;
-    expect(plan(entry({ id: "ds_00000002", at: T + PER_SOURCE_MS - 1 }), win(), s, T + PER_SOURCE_MS - 1).plan)
+    expect(plan(entry({ id: "ds_00000002", at: T + 9_999 }), win(), s, T + 9_999).plan)
       .toEqual({ kind: "skip", why: "rate" });
-    expect(plan(entry({ id: "ds_00000002", at: T + PER_SOURCE_MS }), win(), s, T + PER_SOURCE_MS).plan.kind).toBe("split");
+    expect(plan(entry({ id: "ds_00000002", at: T + 10_000 }), win(), s, T + 10_000).plan.kind).toBe("split");
     s = DEV_OPEN_IDLE;
-    for (let i = 0; i < WINDOW_MAX; i++) {
+    for (let i = 0; i < 3; i++) {
       const result = plan(entry({ id: String(i), source: { kind: "task", id: String(i) } }), win(), s, T + i);
       expect(result.plan.kind).toBe("split"); s = result.state;
     }

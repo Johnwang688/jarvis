@@ -58,6 +58,8 @@ export class DevServerStore {
   private token = 0;
   private revision = 0;
   private listingSeq = 0;
+  private eventSeq = 0;
+  private observed = new Map<string, number>();
   private live = new Set<string>();
   private inFlight = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -102,20 +104,20 @@ export class DevServerStore {
   }
   disconnect() {
     this.epoch++; this.connected = false; this.enabled = null; this.acting = false;
-    this.entries.clear(); this.meta.clear(); this.live.clear(); this.inFlight.clear();
+    this.entries.clear(); this.meta.clear(); this.live.clear(); this.inFlight.clear(); this.observed.clear();
     if (this.timer) clearInterval(this.timer);
     this.timer = null; this.changed();
   }
   setting(value: boolean) {
     if (value === this.enabled) return;
     this.epoch++; this.enabled = value; this.acting = false; this.inFlight.clear();
-    this.entries.clear(); this.meta.clear(); this.live.clear();
+    this.entries.clear(); this.meta.clear(); this.live.clear(); this.observed.clear();
     this.changed();
     if (value && this.connected) void this.refresh();
   }
   async refresh() {
     if (!this.connected) return;
-    const epoch = this.epoch, seq = ++this.listingSeq;
+    const epoch = this.epoch, seq = ++this.listingSeq, snapshotToken = this.token, snapshotEvent = this.eventSeq;
     let data: unknown;
     try { data = await this.wire.list(this.window); } catch { return; }
     if (!this.connected || epoch !== this.epoch || seq !== this.listingSeq) return;
@@ -127,12 +129,17 @@ export class DevServerStore {
     this.enabled = true;
     const present = new Set(list.rows.map(e => e.id));
     for (const row of this.entries.values()) {
-      if (!present.has(row.id) && row.phase !== "claiming" && !this.live.has(row.id)) this.drop(row.id);
+      if (!present.has(row.id) && (this.observed.get(row.id) ?? 0) <= snapshotEvent && row.token <= snapshotToken && row.phase !== "claiming" && !this.live.has(row.id)) this.drop(row.id);
     }
     for (const row of list.rows) {
+      if ((this.observed.get(row.id) ?? 0) > snapshotEvent) continue;
       this.meta.set(row.id, row);
       if (this.remembered.includes(row.id)) continue;
       const old = this.entries.get(row.id);
+      // A current socket can preclaim after this HTTP snapshot was taken.
+      // Only a later read/event may revoke that newer receipt; renew still
+      // proves ownership immediately before any workspace change.
+      if (old && old.token > snapshotToken) continue;
       if (old?.phase === "claiming" || old?.phase === "placing") continue;
       if (row.state === "placed" || row.state === "dismissed" || row.state === "down") { this.drop(row.id, true); continue; }
       if (row.state === "claimed") {
@@ -164,6 +171,11 @@ export class DevServerStore {
     if (raw.kind !== "dev_server") return false;
     const row = parseDevEvent(raw.data);
     if (!row || !this.connected) return true;
+    // Retain bounded event tombstones even after a row is removed. A slow
+    // HTTP snapshot must never bring a newer down/dismissed record back.
+    this.observed.delete(row.id);
+    this.observed.set(row.id, ++this.eventSeq);
+    while (this.observed.size > REMEMBER) this.observed.delete(this.observed.keys().next().value!);
     this.meta.set(row.id, row);
     while (this.meta.size > MAX) {
       const expired = this.meta.keys().next().value!;
@@ -243,7 +255,7 @@ export class DevServerStore {
     const epoch = this.epoch;
     this.acting = true;
     try {
-      if (this.now() - row.at >= WAIT_MS) { this.drop(row.id, true); this.changed(); return; }
+      if (row.phase === "queued" && this.now() - row.at >= WAIT_MS) { this.drop(row.id, true); this.changed(); return; }
       if (!await this.renew(row, epoch) || !this.current(epoch, row)) return;
       // No await between this fence, the App's final eligibility check, and mutation.
       const result = action(row);
@@ -272,7 +284,7 @@ export class DevServerStore {
     let waiting = false;
     for (const row of [...this.entries.values()]) {
       if (!["queued", "prompt"].includes(row.phase)) continue;
-      if (this.now() - row.at >= WAIT_MS) { this.drop(row.id, true); continue; }
+      if (row.phase === "queued" && this.now() - row.at >= WAIT_MS) { this.drop(row.id, true); continue; }
       waiting = true;
       if (this.now() - row.renewedAt >= RENEW_MS) await this.renew(row, epoch);
       if (epoch !== this.epoch) return;

@@ -972,3 +972,32 @@ restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
 The later daemon pane binding resolves the entry to immutable source identity;
 labels and client-supplied terminal IDs never authorize BR5. Unknown stays
 fail-closed. This shared model change alone does not enable Remote or a tool.
+
+## Current: automatic Direct opening (AO-3)
+
+A memory-only 32-hex page identity now binds HUD event streams, terminal
+attachments and dev-server claims. Agent announcements and terminal preclaims
+flow through the owner-only registry; initial unclaimed entries are quiet
+notices. Claims renew while waiting, and a fresh ownership check precedes
+every placement. OFF is broadcast as a boolean-only event and invalidates
+pending work across windows; stale OFF/ON replies cannot restore it.
+
+Automatic placement splits without moving focus or folding visible areas,
+reuses only strictly blank kept panes, then appends to a drawn normal Browser
+pane, then offers the bounded nonblocking pane-choice prompt. Private panes
+are excluded. Cards and Settings defer placement. Prompts rearm for 500ms
+after movement; their keys stay local and dirty-editor/VEX choices are
+disabled. Busy terminals move to the panel alive on explicit pane choice.
+
+Automatic tabs are Direct, query/fragment-free, without keep-origin grants,
+and retain immutable dev-server source provenance. Existing frame guards
+apply to every resulting frame. No automatic action calls /browser/*;
+Settings uses /browser/settings only for explicit preference writes, while
+the registry listing supplies the effective preference on connect/reconnect.
+The rates are one action per source per 10 seconds and three per window
+per minute (amendment E.2; the older H summary row is superseded).
+
+Validation lives in devopen/state unit tests and hud_v2_autoopen_check.py:
+real production claim arbitration over isolated mock SSE/HTTP, fake terminal
+sockets, focus/card/Settings/lease/window races, and a zero-Remote-route
+request log assertion in every scenario.
