@@ -63,8 +63,8 @@ def server_entry(provider, port: int, token: str) -> dict:
     `python -m jarvis.v2.mcp_session`: a stdlib-only relay that imports no
     tool. The token is in `env`, which each provider carries off the command
     line — Claude in a private file, Codex in its private `config.toml`. On
-    Codex, each read-only session tool is `approval_mode = "approve"`, so
-    Codex does not ask about a read the daemon has already judged (§4.2)."""
+    Codex every exact offered tool delegates to the daemon: annotations
+    remain truthful and the bridge applies the session gate before execution."""
     from jarvis import config
     from .model import ProviderName
     from . import session_tools
@@ -74,9 +74,11 @@ def server_entry(provider, port: int, token: str) -> dict:
     name = provider.value if isinstance(provider, ProviderName) else str(provider)
     if name == ProviderName.CODEX.value:
         approve = {tool.name: {"approval_mode": "approve"}
-                   for tool in session_tools.for_provider(ProviderName.CODEX) if tool.read_only}
+                   for tool in session_tools.for_provider(ProviderName.CODEX)}
         if approve:
             entry["tools"] = approve
+            entry["enabled_tools"] = sorted(approve)
+            entry["tool_timeout_sec"] = 900
     return entry
 
 
@@ -128,7 +130,7 @@ def _body(handler) -> dict:
         raise APIError(400, "body must be a JSON object") from None
     if not isinstance(value, dict):
         raise APIError(400, "body must be a JSON object")
-    unknown = set(value) - {"name", "arguments"}
+    unknown = set(value) - {"name", "arguments", "codex_context"}
     if unknown:
         raise APIError(400, "unknown fields: " + ", ".join(sorted(unknown)))
     if not isinstance(value.get("name"), str) or not value["name"]:
@@ -136,7 +138,8 @@ def _body(handler) -> dict:
     arguments = value.get("arguments", {})
     if not isinstance(arguments, dict):
         raise APIError(400, "arguments must be a JSON object")
-    return {"name": value["name"], "arguments": arguments}
+    return {"name": value["name"], "arguments": arguments,
+            "codex_context": value.get("codex_context")}
 
 
 def route(handler, daemon, parts, query):
@@ -157,7 +160,8 @@ def route(handler, daemon, parts, query):
     if parts[1] == "tools":
         return 200, {"tools": listing(provider)}
     body = _body(handler)
-    return 200, call(daemon, session, caller, body["name"], body["arguments"])
+    return 200, call(daemon, session, caller, body["name"], body["arguments"],
+                     codex_context=body["codex_context"])
 
 
 def _approver(session, current):
@@ -182,7 +186,7 @@ def _approver(session, current):
     return approve
 
 
-def call(daemon, session, caller, name: str, arguments: dict) -> dict:
+def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=None) -> dict:
     """Run one offered tool for `session`, in the daemon. `{text, isError}`
     (plus `image` for a tool that returns one)."""
     from jarvis import runtime, tools
@@ -213,11 +217,31 @@ def call(daemon, session, caller, name: str, arguments: dict) -> dict:
         turn_id = session.turn_id if worker is not None else None
         desk = session.desk.slot if worker is not None else {"present": False}
 
+    native_current = None
+    if caller.provider == "codex" and entry.foreground_only:
+        # The bearer token authenticates the owning chat, not which native
+        # agent used its relay. Admit exact host thread/turn/call identity
+        # before dispatch. No provider callbacks while holding daemon locks.
+        admit = getattr(session.provider, "admit_foreground_mcp", None)
+        try:
+            native_current = admit(session.handle, codex_context) if callable(admit) else None
+        except Exception:
+            native_current = None
+        if not callable(native_current):
+            return {"text": "Refused: this Jarvis tool is only available to the current foreground chat turn.",
+                    "isError": True}
+
     def current():
         with daemon._lock:
-            return (live_session() and session.worker is worker
+            live = (live_session() and session.worker is worker
                     and (session.turn_id if session.worker is not None else None) == turn_id
                     and not session.cancelled.is_set())
+        if not live:
+            return False
+        try:
+            return native_current is None or native_current() is True
+        except Exception:
+            return False
     who = {"thread_id": thread.id, "project_id": thread.project_id,
            "provider": caller.provider, "turn_id": turn_id}
     names = frozenset(entry.name for entry in offered)
@@ -227,6 +251,20 @@ def call(daemon, session, caller, name: str, arguments: dict) -> dict:
     def run():
         runtime.bind(caller=who, depth=0, tool_names=names, approve=approve,
                      desk=desk, should_stop=lambda: not current())
+        # Codex native approval delegates transport for every offered tool.
+        # Unlike Claude it has no PreToolUse hook, so nondangerous entries
+        # still need the exact session permit (STRICT/named always-ask).
+        # Dangerous entries take dispatch's existing single owner gate.
+        if caller.provider == "codex" and not tools.REGISTRY[name].dangerous:
+            from .provider import Decision
+            permit = getattr(session, "permit", None)
+            try:
+                allowed = (current() and permit is not None
+                           and Decision(permit(name, dict(arguments), None)) is Decision.ALLOW)
+            except Exception:  # a missing or malformed permit never delegates
+                allowed = False
+            if not allowed or not current():
+                return tools.ToolResult("Refused: this chat did not permit the Jarvis tool call.")
         if not current() and not entry.desk_only:
             return tools.ToolResult("Refused: this chat turn is no longer current.")
         return tools.dispatch(name, json.dumps(arguments), approve=approve)

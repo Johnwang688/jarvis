@@ -201,8 +201,8 @@ where the daemon receives them; its same-origin read fails on main.
 Claude owner chats offer `terminal_read` plus the exact shared D-3 catalog
 (`jarvis/v2/mcp_catalog.py`), filtered by registered tool availability. The
 external MCP server still excludes terminal reads and retains its deny-all
-dangerous-tool approver. Codex's production session catalog remains empty
-until WP-3. Task workers receive neither a token nor a Jarvis server.
+dangerous-tool approver. Codex now shares this catalog under the WP-3
+boundary below. Task workers receive neither a token nor a Jarvis server.
 
 `desk.py` owns memory-only per-session authority. Every daemon turn gets a
 fresh mutable slot using the original fast-path predicate. A non-HUD native
@@ -244,3 +244,55 @@ listeners/relay/fake-shell PTY, native hooks over a fake SDK, lifecycle and
 approval barriers, guard/read-switch behavior, summaries and catalog bounds.
 Native authenticated Claude L1/L2/L5 validation is a separate release gate;
 these fake/free checks do not claim that gate passed.
+
+
+## Current implementation: Codex session MCP (WP-3)
+
+Codex owner chats offer the same availability-filtered D-3 catalog (23
+names declared, 15 read-only) plus `terminal_read`. Its supported profile
+remains AUTO only; ASK/STRICT and always-ask brief additions still fail
+provider validation. Defensive permit tests do not expand that matrix.
+Per-tool native `approval_mode="approve"` delegates every exact offered name
+to the daemon without falsifying `readOnlyHint`. The bridge checks the
+session permit before nondangerous dispatch and after any wait. Dangerous
+calls use dispatch's one owner card, never Always. External MCP stays deny-all.
+Private config readback must match the actual relay, environment, enabled
+names and per-tool policy. Start/resume override the exact new session server;
+its 900-second timeout covers the broker's bounded owner wait. Existing
+sandbox, network-off, reviewer and carrier cleanup rules remain in force.
+
+Installed Codex 0.161 emits host outer `tools/call._meta`: `threadId`,
+`callId`, and `x-codex-turn-metadata` with native thread/turn identity.
+The relay forwards only bounded typed identities, never arguments._meta.
+Both thread fields must agree. The provider admits a terminal call only
+against its already-established active parent handle/turn, with no
+parent/subagent marker and a never-used call ID. IDs remain spent for that
+turn (cap 4096); cap exhaustion denies until a real new turn. The callback
+checks the exact handle, turn, active send, cancellation and close again
+outside daemon locks after waits and guarded reads. Missing or malformed
+metadata refuses before terminal dispatch. This keeps native child D-3 tools
+available without enabling child terminal reads; no global or chat-only
+multi_agent setting is changed.
+
+The same desk slots and steer carry described above apply. MCP item events
+are matched to the current native thread/turn and stable server/tool/call
+identity, deduplicated, and completed once on interruption. Terminal results
+use only `read`, `read N lines`, `refused` or `error` in normalized summaries;
+raw results and metadata are not retained in the provider's lifecycle map.
+Raw tool text still goes to Codex/OpenAI and its private conversation files,
+and anything the model repeats follows normal reply surfaces. Outer metadata
+is an installed-native-host boundary, not protection from an OS user who
+reads the carrier and forges a direct relay request. That accepted same-user
+limit remains, including a malicious child using such out-of-band access.
+Unmeasured internal agents are not claimed individually tested: a request
+without the exact live parent identity fails closed.
+
+`codex_session_mcp_check.py` covers identity, replay/races, policy/readback,
+private lifecycle events, and the real relay plus guarded fake-shell PTY.
+Synthetic installed-native gates passed parent/child identity and forged
+argument provenance, parent success/child terminal refusal/child D-3 success,
+read/write and exactly one dangerous deny/allow, a 65-second owner wait,
+off-desk/accepted steer/postread withholding/next-turn carry, and resume
+with a new token, old-token refusal and the same native thread. These probes
+used no real terminal contents or account side effects. Independent review
+and the full regression sweep remain separate release gates.

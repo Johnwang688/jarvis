@@ -8,8 +8,9 @@ parent's D-3 tools; the foreground hook refuses terminal_read for them. A
 listed tool runs **in the daemon**, through the bridge's single
 `tools.dispatch` (`bridge.py`), never in the jarvis-mcp process the CLI starts.
 
-WP-2 offers Claude owner chats `terminal_read` and the D-3 catalog, filtered
-by installed tool availability. Codex stays empty until WP-3. Tests may
+Owner Claude and Codex chats receive `terminal_read` and the D-3 catalog,
+filtered by installed tool availability. Codex foreground-only calls are
+bound to the exact native parent handle/turn before daemon dispatch. Tests may
 register temporary entries without widening the production catalog.
 
 The flags, each read by exactly one place:
@@ -17,8 +18,9 @@ The flags, each read by exactly one place:
 - `read_only` — the tool changes nothing. Claude's `PreToolUse` hook returns
   an explicit delegation allow for it and `permissions.build_permit`'s
   `jarvis-tool` layer ALLOWs it without asking anyone (an always-ask rule
-  naming it still asks); Codex's config marks it `approval_mode = "approve"` and the relay's
-  listing marks it `readOnlyHint`.
+  naming it still asks); the relay listing marks it `readOnlyHint`. Codex delegates all exact
+  offered entries to the daemon via native `approval_mode = "approve"`;
+  this flag never mislabels a write or bypasses the daemon gate.
 - `foreground_only` — the conversation itself may call it, a sub-agent may
   not. Claude's hook refuses it when the hook input carries `agent_id`,
   without asking `permit`.
@@ -47,14 +49,14 @@ class SessionTool:
     desk_only: bool = False
 
 
-# WP-2 enables owner Claude chats only. Codex remains empty until WP-3.
-_CLAUDE = frozenset({ProviderName.CLAUDE.value})
+# Both owner-chat providers share the approved catalog.
+_CHAT_PROVIDERS = frozenset({ProviderName.CLAUDE.value, ProviderName.CODEX.value})
 SESSION_TOOLS: dict[str, SessionTool] = {
-    name: SessionTool(name, providers=_CLAUDE, read_only=name in MCP_READ_ONLY)
+    name: SessionTool(name, providers=_CHAT_PROVIDERS, read_only=name in MCP_READ_ONLY)
     for name in MCP_TOOLS
 }
 SESSION_TOOLS["terminal_read"] = SessionTool(
-    "terminal_read", providers=_CLAUDE, read_only=True, foreground_only=True, desk_only=True)
+    "terminal_read", providers=_CHAT_PROVIDERS, read_only=True, foreground_only=True, desk_only=True)
 
 
 def register(entry: SessionTool) -> SessionTool:
@@ -125,3 +127,15 @@ def claude_session_tool(brief, name: str) -> SessionTool | None:
             or "jarvis" not in brief.mcp_servers):
         return None
     return claude_tool(name)
+
+
+def codex_session_tool(brief, name: str) -> SessionTool | None:
+    """Canonical name on the daemon-provided Codex owner-chat server only.
+
+    The caller must also check provider=Codex; Brief deliberately has no
+    provider field. Incoming user briefs cannot supply the jarvis server.
+    """
+    if (brief is None or brief.role != Role.CHAT or brief.task_id is not None
+            or "jarvis" not in brief.mcp_servers or not isinstance(name, str)):
+        return None
+    return offered(ProviderName.CODEX, name)

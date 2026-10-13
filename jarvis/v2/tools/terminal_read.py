@@ -8,14 +8,15 @@ output could contain secrets". So:
   focus, attach to, open or close a terminal, and `tests/v2/terminal_check.py`
   greps the tree to keep it that way.
 * **Only where the owner is present.** It runs only inside a turn the fast
-  path or authenticated Claude bridge bound as the owner's own, typed in the
+  path or authenticated Claude/Codex bridge bound as the owner's own, typed in the
   HUD (`runtime.at_desk()`), and
   never in a sub-agent. A Discord or DM turn, the escape hatch, a schedule, a
   task, a workflow, a goal and every v1 surface leave the slot unbound, and an
   unbound slot refuses. It is in `tools.EXPLICIT_ONLY`, so no surface that
   takes "the whole registry" picks it up either. The standalone MCP server
   excludes it; the session relay runs it only through the daemon's existing
-  caller authentication and single dispatch. Codex awaits WP-3.
+  caller authentication and single dispatch. Codex additionally requires the
+  exact current native parent thread, turn and one-shot call identity.
 * **Refused, or withheld, when it may hold a secret.** `terminal_guard`
   refuses the whole read with one sentence that never says what or where, and
   withholds single lines the heuristic flags; the owner's per-terminal

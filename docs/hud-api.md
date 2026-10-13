@@ -1446,14 +1446,15 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
   never where), `Refused: the owner has turned off reading for this terminal
   (<title>)`, or an `Error:` naming the open terminals.
 - **Who holds it**: `FAST_TOOLS` on an owner's HUD chat turn, and the
-  authenticated Claude owner-chat session catalog (WP-2). Claude lists it
-  consistently but refuses it off-desk; task workers, Discord/DM turns,
+  authenticated Claude/Codex owner-chat session catalog (WP-2/WP-3). Both
+  list it consistently but refuse it off-desk; task workers, Discord/DM turns,
   schedules, the escape hatch and subagents cannot run it. The send route
   sets `UserMessage.desk` only on the HUD listener with its Origin. Native
   non-HUD steers revoke the current slot and carry revocation into the next
   turn; unsettled delivery keeps every intervening successor off-desk.
   Stop/end/close revoke old slots. The standalone MCP server excludes it,
-  and Codex awaits WP-3. It is not `dangerous`, writes nothing, and ordinarily
+  and Codex additionally admits only the exact current native parent
+  thread/turn and one-shot host call identity. It is not `dangerous`, writes nothing, and ordinarily
   asks nobody (an owner-named always-ask rule still applies).
 - SSE **`terminal_read`** `{kind: "terminal_read", data: {terminal_id,
   lines, at, refused}}` — exactly those keys — for every read that reaches a
@@ -1463,8 +1464,9 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
   A record of another shape is dropped whole; any other key is never drawn.
   It is HUD chrome: nothing is written to the PTY or the ring.
 - **Where the text goes** (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). The
-  Claude session reads also reach the Claude CLI/model transcript and any
-  model reply, but not the daemon's terminal tool summary or denial reason.
+  Claude/Codex session reads also reach their CLI/model transcript (including
+  Codex/OpenAI and private Codex conversation files) and any model reply,
+  but not the daemon's terminal tool summary or denial reason.
   The same-user caller-token carrier limit still applies. The
   `tool_finished` record's `summary` for `terminal_read` is fixed — "read N
   lines", "refused" or "error" — never the result's first characters. That

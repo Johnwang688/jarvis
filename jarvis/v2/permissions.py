@@ -898,7 +898,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 return finish(Decision.DENY, L_HUMAN,
                               "strict profile refuses a dangerous Jarvis tool")
             match = always_ask_match(tool, args, brief, ctx.project)
-            if match is None and ctx.provider == "claude":
+            if match is None and ctx.provider in ("claude", "codex"):
                 match = always_ask_match(session_tools.CLAUDE_PREFIX + tool, args, brief, ctx.project)
             reason = ("a dangerous Jarvis tool: the owner decides every call"
                       + (f" (also always-ask rule {match[0]})" if match else ""))
@@ -911,7 +911,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # dangerous entries are asked once by the bridge's branch above,
         # including named always-ask rules, and can never mint Always.
         delegated = (session_tools.claude_session_tool(brief, tool)
-                     if ctx.provider == "claude" else None)
+                     if ctx.provider == "claude" else
+                     session_tools.codex_session_tool(brief, tool)
+                     if ctx.provider == "codex" else None)
         if delegated is not None:
             if profile == PermissionProfile.STRICT:
                 return finish(Decision.DENY, L_JARVIS_DELEGATE,
@@ -924,7 +926,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         match = always_ask_match(tool, args, brief, ctx.project)
         if match is None and delegated is not None:
-            match = always_ask_match(delegated.name, args, brief, ctx.project)
+            alias = (session_tools.CLAUDE_PREFIX + delegated.name
+                     if ctx.provider == "codex" else delegated.name)
+            match = always_ask_match(alias, args, brief, ctx.project)
         if match is None and command.strip():
             # A line that might write the gate's own state but is not provably
             # a write (layer 1 took those): a copy into the gate's folder, a
