@@ -66,6 +66,11 @@ SUMMARY_CHARS = 200
 
 # How a v1 tool result says "this did not happen". See `_TurnState._on_tool_end`.
 _NOT_OK = ("Error", "Refused", "The user declined")
+# The exact framing written by tools.dispatch and its approval gate.
+_DENIAL_PREFIXES = ("Refused: ", "The user declined to run this.")
+# These results carry stored/file/page content, which can start with anything.
+_RAW_CONTENT_TOOLS = frozenset(("memory_read", "session_summary", "session_read",
+                               "read_file", "fetch_page", "skill_read"))
 
 FAST_PROMPT = """
 
@@ -821,13 +826,12 @@ class _TurnState:
             {
                 "call_id": call_id,
                 "name": name,
-                # v1's contract: a tool failure comes back as *text*, never a
-                # raise (invariant 4), so this is prefix matching and cannot be
-                # anything else. "Error" is the general failure, "Refused" the
-                # DENY verdict, and the decline is what a denied approval
-                # returns — which is a call that did not happen and must not
-                # render as one that did.
+                # Preserve v1's ok contract; raw content cannot establish an
+                # outcome, even when v1's broad prefix check says not ok.
                 "ok": not text.startswith(_NOT_OK),
+                "outcome": ("ok" if name in _RAW_CONTENT_TOOLS else
+                            "denied" if text.startswith(_DENIAL_PREFIXES) else
+                            "failed" if text.startswith("Error:") else "ok"),
                 "summary": _summary(name, text),
             },
         )

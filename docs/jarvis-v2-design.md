@@ -1573,6 +1573,7 @@ personal chat off; the owner should reset that selection.
 ## 18. HUD v2 landed (2026-09-16)
 
 Model defaults (2026-10-12): OpenRouter's orchestrator and following tiers default to `anthropic/claude-haiku-5.5`, compaction defaults to 100k tokens (`JARVIS_COMPACT_AT_TOKENS`), and Claude requests use top-level `cache_control: {"type": "ephemeral"}`; saved HUD selections still take precedence.
+TC-1 (2026-10-12): opt-in `transcript?tools=1` adds safe labels and provider outcomes; legacy bytes stay unchanged, unfinished calls track the current turn, and old-label derivation is capped at 500 (contract `docs/hud-api.md`).
 
 2026-10-12: Settings installs the HUD as a Chrome app with orb PNG icons; `jarvis hud` pins the Default profile and launches its installed app id when present.
 

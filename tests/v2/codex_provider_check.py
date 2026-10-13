@@ -197,7 +197,7 @@ def peer(script_path, log_path, thread_name):
             if mode == "capacity":
                 finish("failed", {"codexErrorInfo": "serverOverloaded", "message": "capacity"})
                 continue
-            if mode == "full":
+            if mode in ("full", "declined", "tool_failed"):
                 event("item/agentMessage/delta", delta="Hello")
                 event("item/reasoning/summaryTextDelta", delta="Think")
                 event("item/reasoning/textDelta", delta="More")
@@ -206,7 +206,7 @@ def peer(script_path, log_path, thread_name):
                     {"id": "patch", "type": "fileChange", "changes": [{"path": "ok.txt", "diff": "--- a\n+++ b\n-old\n+ok\n+yes"}], "status": "inProgress"},
                 ]:
                     event("item/started", item=item)
-                    item = {**item, "status": "completed"}
+                    item = {**item, "status": "declined" if mode == "declined" else "failed" if mode == "tool_failed" else "completed"}
                     if item["type"] == "commandExecution":
                         item["exitCode"] = 0
                     event("item/completed", item=item)
@@ -604,6 +604,16 @@ class Checks(unittest.TestCase):
             self.provider.account_metadata()
         self.assertFalse(codex._auth_lock.locked(), "a raising close() cannot leak the lock")
 
+    def test_tool_outcomes_from_item_status(self):
+        for mode, expected in (("declined", "denied"), ("tool_failed", "failed")):
+            with self.subTest(mode=mode):
+                h = self.start(mode)
+                finishes = [e for e in self.send(h) if e.kind is K.TOOL_FINISHED]
+                self.assertEqual([e.data["name"] for e in finishes], ["shell", "apply_patch"])
+                self.assertEqual([e.data["outcome"] for e in finishes], [expected, expected])
+                self.assertTrue(all(e.data["ok"] is False for e in finishes))
+                self.provider.close(h)
+
     def test_full_exact_events(self):
         h = self.start("full")
         events = self.send(h)
@@ -613,9 +623,9 @@ class Checks(unittest.TestCase):
         self.assertTrue(all(e.thread_id == "test" for e in events))
         self.assertEqual(events[1].data, {"text": "Hello"})
         self.assertEqual(events[4].data, {"call_id": "cmd", "name": "shell", "args": {"command": "echo ok", "cwd": str(self.work)}})
-        self.assertEqual(events[5].data, {"call_id": "cmd", "name": "shell", "ok": True, "summary": "exit code 0"})
+        self.assertEqual(events[5].data, {"call_id": "cmd", "name": "shell", "ok": True, "outcome": "ok", "summary": "exit code 0"})
         self.assertEqual(events[6].data["args"]["paths"], ["ok.txt"])
-        self.assertEqual(events[7].data, {"call_id": "patch", "name": "apply_patch", "ok": True, "summary": "1 files, +2/-1 lines"})
+        self.assertEqual(events[7].data, {"call_id": "patch", "name": "apply_patch", "ok": True, "outcome": "ok", "summary": "1 files, +2/-1 lines"})
         self.assertEqual(events[8].data["plan"], [{"step": "write", "status": "completed"}])
         self.assertEqual(events[9].data["reason"], "declined")
         self.assertEqual(events[-2].data, {"input": 100, "output": 20, "cached": 40, "cost_usd": None,
