@@ -1,3 +1,4 @@
+import { SendStops } from "./lib/sendStops";
 // The window. One SSE subscription writes lifecycle state; every panel reads
 // the store. The orb, the capture pipeline and the wake word live here because
 // they are properties of the *window*, not of whichever tab is showing.
@@ -365,8 +366,7 @@ export default function App() {
   // thread exists. That id is never sent to the daemon (re-review of PR #27):
   // a Stop or an orb press on it is remembered here and becomes a real
   // interrupt once the thread exists and the message is in.
-  const placeholders = useRef(new Set<string>());
-  const stopWhenOpen = useRef(new Set<string>());
+  const sendStops = useRef(new SendStops());
   const waitingHere = useRef(new Map<string, { text: string; files: Attachment[] }>());
   // Words handed back for a thread that is not on screen wait here until the
   // owner opens it: never in another thread's box (Bugbot on PR #22).
@@ -606,7 +606,7 @@ export default function App() {
       // the turn would stay tracked under it — its `turn_finished` would never
       // free the pane, and the mic would stay suppressed.
       let tracked = threadId ?? compose?.openedId ?? local;
-      if (tracked === local) placeholders.current.add(local);
+      if (!steering) sendStops.current.begin(local, threadId ?? compose?.openedId ?? null);
       // The thinking line counts from the owner's Enter (lib/thinking): now
       // when the thread is known, else once the first send has opened it. A
       // steer leaves the running turn's time as it is.
@@ -688,6 +688,7 @@ export default function App() {
             chatPatch(tracking, { turnThreadId: threadId });
           }
         }
+        sendStops.current.bind(local, threadId);
         if (!known) dispatch({ type: "turn", event: "send", threadId, at: sentAt, by: local });
         const result = await api.send(threadId, {
           text, attachments: attachments.length ? attachments : undefined,
@@ -697,9 +698,23 @@ export default function App() {
         if (status === "started" && result.turn_id) {
           dispatch({ type: "mark", local, patch: { turn_id: result.turn_id, mark: undefined } });
         }
-        // A Stop pressed while the thread was opening: the turn exists now,
-        // so the stop it asked for goes to it.
-        if (stopWhenOpen.current.delete(local) && status === "started") api.interrupt(threadId).catch(() => {});
+        // Stop follows this acknowledged send by exact turn identity. A
+        // delayed reply can never stop a successor, even if its SSE was missed.
+        const deferredStop = sendStops.current.acknowledge(local, { ...result, status });
+        if (deferredStop) void (async () => {
+          if (!deferredStop.turnIds.length) {
+            dispatch({ type: "patch", patch: { error: "Could not stop this send safely: the daemon returned no turn identity." } });
+            return;
+          }
+          try {
+            for (const id of deferredStop.turnIds) {
+              const stopped = await api.interrupt(deferredStop.threadId, id);
+              if (!stopped?.stale) break;
+            }
+          } catch (error: any) {
+            dispatch({ type: "patch", patch: { error: `Could not stop: ${error?.message || "the request failed"}` } });
+          }
+        })();
         if (status === "dropped") {
           // The owner pressed Stop while this steer was on its way and the
           // turn would not take it: stop means stop, so it is not sent, and
@@ -824,8 +839,7 @@ export default function App() {
       } finally {
         // Nothing is tracked under the placeholder once the send is over:
         // the turn is its thread's, or the pane went back to what it had.
-        placeholders.current.delete(local);
-        stopWhenOpen.current.delete(local);
+        sendStops.current.finish(local);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -838,10 +852,7 @@ export default function App() {
    * one is kept until its thread exists (`send` delivers it).
    */
   const interruptTurn = useCallback((turn: string, onError?: (e: any) => void) => {
-    if (placeholders.current.has(turn)) {
-      stopWhenOpen.current.add(turn);
-      return;
-    }
+    if (sendStops.current.stop(turn)) return;
     api.interrupt(turn).catch((e: any) => onError?.(e));
   }, []);
 
@@ -1254,10 +1265,29 @@ export default function App() {
       api.answerTask(taskId, index, text).then(() => { void refreshTasks(); }),
     [refreshTasks],
   );
+  // Every TaskView and transcript Cancel share this guard. A task can be
+  // drawn twice; a second surface cannot race a pending action on the first.
+  const taskActions = useRef(new Set<string>());
+  const taskAction = useCallback(async (id: string, action: "steer" | "cancel" | "resume" | "start", text?: string) => {
+    if (taskActions.current.has(id)) throw new Error("another action on this task is still pending");
+    taskActions.current.add(id);
+    try {
+      if (action === "steer") await api.steerTask(id, text!);
+      else if (action === "cancel") await api.cancelTask(id);
+      else if (action === "resume") await api.resumeTask(id);
+      else await api.startTask(id);
+      // refreshTasks keeps the last snapshot if its read fails. An accepted
+      // mutation is never described as refused because a later read failed.
+      await refreshTasks();
+    } finally { taskActions.current.delete(id); }
+  }, [refreshTasks]);
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
-    (id: string) => void api.cancelTask(id).then(refreshTasks).catch(() => {}),
-    [refreshTasks],
+    (id: string) => void taskAction(id, "cancel").catch((error: unknown) => {
+      const why = error instanceof Error ? error.message : "the daemon could not be reached";
+      dispatch({ type: "patch", patch: { error: `Could not cancel task ${id}: ${why}` } });
+    }),
+    [taskAction, dispatch],
   );
 
   const refreshActivity = useCallback(async () => {
@@ -2951,10 +2981,10 @@ export default function App() {
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
               onAnswer={answerQuestion}
-              onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
-              onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
-              onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
-              onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
+              onSteer={(id, text) => taskAction(id, "steer", text)}
+              onCancel={(id) => taskAction(id, "cancel")}
+              onResume={(id) => taskAction(id, "resume")}
+              onStart={(id) => taskAction(id, "start")}
             />
           </div>
         );
@@ -3442,10 +3472,10 @@ export default function App() {
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
               onAnswer={answerQuestion}
-              onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
-              onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
-              onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
-              onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
+              onSteer={(id, text) => taskAction(id, "steer", text)}
+              onCancel={(id) => taskAction(id, "cancel")}
+              onResume={(id) => taskAction(id, "resume")}
+              onStart={(id) => taskAction(id, "start")}
             />
             <DiscordPanel
               discord={state.discord}

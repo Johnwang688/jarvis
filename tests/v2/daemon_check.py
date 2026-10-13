@@ -251,6 +251,59 @@ class DaemonChecks(unittest.TestCase):
         self.assertEqual(stream.next()["kind"], "thread_closed")
         self.request("POST", f"/threads/{thread.id}/answer", {"req_id": "pending", "text": "x"}, 409)
 
+    def test_expected_interrupt_never_stops_a_successor_or_drops_its_queue(self):
+        thread = self.thread()
+        first = self.d.send(thread.id, UserMessage("first"))
+        self.wait_turn(thread)
+        second = self.d.send(thread.id, UserMessage("block"))
+        eventually(lambda: self.fake.handles[thread.id].native["entered"].is_set())
+        self.d.deliver(thread.id, UserMessage("queued successor words"))
+        before = list(self.d._queues[thread.id])
+        result = self.request("POST", f"/threads/{thread.id}/interrupt", {"expected_turn_id": first})
+        self.assertEqual(result, {"ok": False, "stale": True})
+        self.assertEqual(self.fake.interrupted, [])
+        self.assertFalse(self.d._sessions[thread.id].cancelled.is_set())
+        self.assertEqual(list(self.d._queues[thread.id]), before)
+        self.assertEqual(self.request("POST", f"/threads/{thread.id}/interrupt", {"expected_turn_id": second}), {"ok": True})
+        self.wait_turn(thread)
+        self.assertEqual(list(self.d._queues.get(thread.id, ())), [])
+        self.assertEqual(self.request("POST", f"/threads/{thread.id}/interrupt", {"expected_turn_id": second}), {"ok": False, "stale": True})
+        for bad in (None, 42, "", "a" * 33):
+            self.request("POST", f"/threads/{thread.id}/interrupt", {"expected_turn_id": bad}, 400)
+
+    def test_interrupt_delivery_fences_successor_start_and_releases_on_error(self):
+        thread = self.thread()
+        first = self.d.send(thread.id, UserMessage("stubborn"))
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        def delayed_interrupt(handle):
+            if entered.is_set(): return  # close_thread may also request a stop
+            entered.set()
+            if not release.wait(3): raise RuntimeError("test did not release interruption")
+            raise RuntimeError("fixture delivery failure")
+        def stop():
+            try: self.d.interrupt(thread.id, expected_turn_id=first)
+            except Exception as exc: errors.append(exc)
+        with patch.object(self.fake, "interrupt", side_effect=delayed_interrupt):
+            worker = threading.Thread(target=stop)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.fake.handles[thread.id].native["release"].set()
+                self.wait_turn(thread)
+                with self.assertRaises(mod.DaemonError): self.d.send(thread.id, UserMessage("too early"))
+                with self.assertRaises(mod.DaemonError): self.d.deliver(thread.id, UserMessage("also too early"))
+                # A replacement session cannot bypass a thread-scoped delivery fence.
+                self.d.close_thread(thread.id)
+                with self.assertRaises(mod.DaemonError): self.d.send(thread.id, UserMessage("replacement too early"))
+            finally:
+                release.set(); worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(errors and "fixture delivery failure" in str(errors[0]))
+        self.d.send(thread.id, UserMessage("works after failure"))
+        self.wait_turn(thread)
+        self.assertEqual(self.fake.messages[-1].text, "works after failure")
+
     def test_permit_isolation_and_concurrent_threads(self):
         a, b = self.thread(), self.thread()
         self.d.send(a.id, UserMessage("permit"))

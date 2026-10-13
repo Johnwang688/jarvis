@@ -34,7 +34,7 @@ describe("TaskView answers", () => {
       root.render(createElement(TaskView, {
         task: t, threads: [],
         onAnswer: (id: string, index: number, text: string) => answer(id, index, text),
-        onSteer: () => {}, onCancel: () => {}, onResume: () => {}, onStart: () => {},
+        onSteer: async () => {}, onCancel: async () => {}, onResume: async () => {}, onStart: async () => {},
       }));
     });
   const $ = (id: string) => host.querySelector<HTMLElement>(`[data-testid="${id}"]`);
@@ -114,5 +114,60 @@ describe("TaskView answers", () => {
     answer = async () => {};
     render(task("running"));
     expect($("blocking-questions")).toBeNull();
+  });
+});
+
+
+describe("TaskView action ownership", () => {
+  let host: HTMLDivElement, root: Root;
+  let invoke: (id: string, verb: string, text?: string) => Promise<unknown>;
+  const $ = (id: string) => host.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
+  const render = (id = "k1") => act(() => root.render(createElement(TaskView, {
+    task: {...task("intake"), id}, threads: [], onAnswer: async () => {},
+    onSteer: (id, text) => invoke(id, "steer", text), onCancel: id => invoke(id, "cancel"),
+    onResume: id => invoke(id, "resume"), onStart: id => invoke(id, "start"),
+  })));
+  const type = (text: string) => act(() => {
+    const el = $("steer-box");
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, text);
+    el.dispatchEvent(new Event("input", {bubbles:true}));
+  });
+  const click = (id: string) => act(async () => { $(id).click(); });
+  beforeEach(() => {host = document.createElement("div");document.body.appendChild(host);root=createRoot(host);});
+  afterEach(() => {act(() => root.unmount());host.remove();});
+  it("keeps delayed refusals and steering words with their captured task", async () => {
+    let reject!: (e: Error) => void;
+    const sent: unknown[] = [];
+    invoke = (id, verb, text) => {sent.push([id,verb,text]);return new Promise((_, no) => {reject=no;});};
+    render();type("first task words");await click("steer-send");
+    render("k2");expect(($("steer-box") as HTMLTextAreaElement).value).toBe("");type("second task words");
+    await act(async () => reject(new Error("old task refused")));
+    expect($("task-action-error")).toBeNull();
+    expect(($("steer-box") as HTMLTextAreaElement).value).toBe("second task words");
+    render();expect($("task-action-error").textContent).toContain("old task refused");
+    expect(($("steer-box") as HTMLTextAreaElement).value).toBe("first task words");
+    expect(sent).toEqual([["k1","steer","first task words"]]);
+  });
+  it("keeps a newer edit even if the owner types back the submitted words", async () => {
+    let resolve!: () => void;
+    invoke = () => new Promise<void>(yes => {resolve=yes;});
+    render();type("same words");await click("steer-send");type("changed");type("same words");
+    await act(async () => resolve());
+    expect(($("steer-box") as HTMLTextAreaElement).value).toBe("same words");
+    await click("steer-send");await act(async () => resolve());
+    expect(($("steer-box") as HTMLTextAreaElement).value).toBe("");
+  });
+  it("gates duplicate actions synchronously, before a React render disables buttons", async () => {
+    let resolve!: () => void; let calls = 0;
+    invoke = () => {calls++;return new Promise<void>(yes => {resolve=yes;});};
+    render();type("words");
+    act(() => {$("steer-send").click();$("task-cancel").click();$("task-start").click();});
+    expect(calls).toBe(1);expect(($("task-cancel") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => resolve());expect(($("task-cancel") as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("handles a synchronous callback failure and permits a successful retry", async () => {
+    invoke = () => {throw new Error("offline");};render();await click("task-cancel");
+    expect($("task-action-error").textContent).toBe("Could not cancel: offline");
+    invoke = async () => {};await click("task-cancel");expect($("task-action-error")).toBeNull();
   });
 });
