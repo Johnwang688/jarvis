@@ -1,7 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { BrowserFiles } from "./BrowserFiles";
-const mocks=vi.hoisted(()=>({tree:vi.fn(),get:vi.fn(),write:vi.fn(),download:vi.fn(),click:vi.fn()}));
+const mocks=vi.hoisted(()=>({tree:vi.fn(),get:vi.fn(),write:vi.fn(),download:vi.fn(),remove:vi.fn(),click:vi.fn()}));
 vi.mock("../api",()=>({api:{tree:mocks.tree},browserApi:mocks}));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
 let root:Root;let host:HTMLDivElement;let props:Parameters<typeof BrowserFiles>[0];
@@ -13,7 +13,7 @@ beforeEach(()=>{
   props={tabId:"0123abcd",projectId:"project-one",chooser:null,downloads:true,blocked:false,generation:1,onCloseDownloads:vi.fn()};
   mocks.get.mockReset().mockResolvedValue({downloads:[{id:"file1234",name:"output.txt",held:false},{id:"held1234",name:"app.exe",held:true}]});
   mocks.tree.mockReset().mockResolvedValue({entries:[{name:"safe.txt",kind:"file"},{name:".env",kind:"file",policy:"env"},{name:"keys",kind:"dir",policy:"withheld"}]});
-  mocks.write.mockReset().mockResolvedValue({});mocks.download.mockReset().mockResolvedValue(new Blob(["file"]));mocks.click.mockReset();
+  mocks.remove.mockReset().mockResolvedValue({});mocks.write.mockReset().mockResolvedValue({});mocks.download.mockReset().mockResolvedValue(new Blob(["file"]));mocks.click.mockReset();
   vi.spyOn(HTMLAnchorElement.prototype,"click").mockImplementation(mocks.click);
   vi.stubGlobal("URL",Object.assign(URL,{createObjectURL:vi.fn(()=>"blob:test"),revokeObjectURL:vi.fn()}));
 });
@@ -80,4 +80,21 @@ it("ignores a late folder listing after the chooser binding changes",async()=>{
   await act(async()=>pending.resolve({entries:[{name:"old-project.txt",kind:"file"}]}));
   expect(host.textContent).not.toContain("old-project.txt");
   expect(host.textContent).toContain("safe.txt");
+});
+
+it("reports owner file input only after a current successful chooser response",async()=>{
+  const onOwnerInput=vi.fn(),pending=deferred<any>();mocks.write.mockReturnValueOnce(pending.promise);
+  await render({downloads:false,chooser:{id:"chooser1",multiple:false},onOwnerInput});await act(async()=>host.querySelector<HTMLInputElement>("input")!.click());await act(async()=>button("Use selected file").click());
+  expect(onOwnerInput).not.toHaveBeenCalled();await act(async()=>pending.resolve({}));expect(onOwnerInput).toHaveBeenCalledOnce();
+});
+it("failed or invalidated chooser responses never invent takeover",async()=>{
+  const onOwnerInput=vi.fn(),pending=deferred<any>();mocks.write.mockReturnValueOnce(pending.promise);
+  await render({downloads:false,chooser:{id:"chooser1",multiple:false},onOwnerInput});await act(async()=>host.querySelector<HTMLInputElement>("input")!.click());await act(async()=>button("Use selected file").click());
+  await render({blocked:true});await render({blocked:false});await act(async()=>pending.resolve({}));expect(onOwnerInput).not.toHaveBeenCalled();
+  mocks.write.mockRejectedValueOnce(new Error("refused"));await act(async()=>button("Use selected file").click());expect(onOwnerInput).not.toHaveBeenCalled();
+});
+it("held downloads offer deletion and an honest fresh-tab explanation, never a release route",async()=>{
+  await render();expect(host.textContent).toContain("fresh tab");const rows=[...host.querySelectorAll(".row")];const held=rows.find(row=>row.textContent?.includes("app.exe"))!;
+  expect(held.textContent).not.toContain("Save");await act(async()=>held.querySelector<HTMLButtonElement>("button")!.click());
+  expect(mocks.remove).toHaveBeenCalledExactlyOnceWith("/downloads/held1234");expect(mocks.write).not.toHaveBeenCalled();expect(host.textContent).not.toContain("app.exe");
 });

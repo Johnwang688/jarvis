@@ -69,14 +69,15 @@ export function BrowserApprovalCard({ request, onDecide, onPresent }: {
   const latest = useRef(key); latest.current = key;
   const [deciding, setDeciding] = useState<string | null>(null);
   const sent = useRef<string | null>(null);
+  const chimed = useRef<string | null>(null);
   const busy = deciding === key;
-  useEffect(() => { onPresent(); }, [key, onPresent]);
+  useEffect(() => { if (chimed.current !== key) { chimed.current = key; onPresent(); } }, [key, onPresent]);
   const decide = (allow: boolean) => {
     if (latest.current !== key || sent.current === key || (allow && !details.canAuthorize())) return;
     sent.current = key; setDeciding(key);
     onDecide(request.req_id, allow, false);
   };
-  return <div className="auth" data-testid="approval-card" data-req={request.req_id} tabIndex={-1}
+  return <div className="auth browserauth" data-testid="approval-card" data-req={request.req_id} tabIndex={-1}
     role="alertdialog" aria-modal="true" aria-label="Browser authorization required"
     onKeyDownCapture={event => {
       if ((event.key === "Enter" || event.key === " ") && !(event.target instanceof Element && event.target.closest('[data-testid="approval-deny"]'))) event.preventDefault();

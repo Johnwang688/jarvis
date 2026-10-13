@@ -1,6 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { RemoteView, type RemoteViewProps } from "./RemoteView";
+import { driving } from "../state/driving";
 const mocks=vi.hoisted(()=>({write:vi.fn(),clipboard:vi.fn(),draw:vi.fn(),decode:vi.fn()}));
 vi.mock("../api",()=>({browserApi:{write:mocks.write},api:{}}));
 vi.mock("./BrowserFiles",()=>({BrowserFiles:()=>null}));
@@ -25,7 +26,7 @@ const input=()=>host.querySelector<HTMLTextAreaElement>("textarea")!;
 const key=async(key:string,extra:KeyboardEventInit={})=>{await act(async()=>{input().dispatchEvent(new KeyboardEvent("keydown",{bubbles:true,cancelable:true,key,code:key.length===1?`Key${key.toUpperCase()}`:key,...extra}));});};
 const frame=async(value:unknown)=>{await act(async()=>socket().message(value));};
 beforeEach(()=>{
-  Socket.instances=[];vi.stubGlobal("WebSocket",Socket);
+  driving.retain([]);Socket.instances=[];vi.stubGlobal("WebSocket",Socket);
   vi.stubGlobal("ResizeObserver",class{observe(){}disconnect(){}});
   vi.stubGlobal("createImageBitmap",mocks.decode);
   Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:mocks.clipboard}});
@@ -35,7 +36,7 @@ beforeEach(()=>{
   host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);
   props={tabId:"0123abcd",live:true,blocked:false,zoom:100,projectId:null,onLocation:vi.fn(),onPopup:vi.fn(),onAction:vi.fn(),onOwnerFocus:vi.fn()};
 });
-afterEach(async()=>{await act(async()=>root.unmount());host.remove();vi.restoreAllMocks();vi.unstubAllGlobals();vi.useRealTimers();});
+afterEach(async()=>{await act(async()=>root.unmount());host.remove();driving.retain([]);vi.restoreAllMocks();vi.unstubAllGlobals();vi.useRealTimers();});
 async function ready(){await render();await act(async()=>socket().open());socket().sent=[];}
 it("never opens a hidden stream and discards a late ticket",async()=>{
   const ticket=deferred<{ticket:string}>();mocks.write.mockReturnValue(ticket.promise);
@@ -94,4 +95,34 @@ it("page dialogs and metadata are plain text and never steal focus",async()=>{
 });
 it("closes hidden streams and uses a fresh one-use ticket on return",async()=>{
   await ready();const first=socket();await render({live:false});expect(first.closed).toBe(true);await render({live:true});expect(mocks.write).toHaveBeenCalledTimes(2);expect(Socket.instances).toHaveLength(2);
+});
+
+async function replay(paused=false){await frame({t:"agent",kind:"driver",thread_id:"driver-thread",provider:"fast"});await frame({t:"agent",kind:"paused",paused,by:paused?"owner":null});await frame({t:"agent",kind:"list",actions:[]});}
+const driveButton=(kind:string)=>host.querySelector<HTMLButtonElement>(`[data-testid="drive-${kind}"]`);
+it("agent replay uses displayed slots; only successful owner input mirrors takeover",async()=>{
+  await ready();await render({slotOf:id=>id==="driver-thread"?2:null});await replay();
+  expect(host.textContent).toContain("chat in pane 2");await key("d",{ctrlKey:true});expect(driveButton("stop")).not.toBeNull();
+  const realSend=socket().send;socket().send=()=>{throw new Error("closed");};await key("a");expect(driveButton("stop")).not.toBeNull();
+  socket().send=realSend;await key("b");expect(host.textContent).toContain("you took over");expect(driveButton("resume")?.disabled).toBe(false);
+});
+it("Stop and Resume use the current socket, wait for confirmation and stay inert under a card",async()=>{
+  await ready();await replay();await act(async()=>driveButton("stop")!.click());expect(socket().sent).toContainEqual({t:"stop"});expect(driveButton("resume")?.disabled).toBe(true);
+  await frame({t:"agent",kind:"paused",paused:true,by:"stop"});await render({blocked:true});socket().sent=[];
+  const resume=driveButton("resume")!;resume.disabled=false;await act(async()=>resume.click());expect(socket().sent).toEqual([]);
+  await render({blocked:false});await act(async()=>driveButton("resume")!.click());expect(socket().sent).toEqual([{t:"resume"}]);expect(host.textContent).toContain("Paused");
+  await frame({t:"agent",kind:"paused",paused:false});expect(host.textContent).toContain("Driven by");
+});
+it("old socket agent replies cannot revive Resume after hide and reattach",async()=>{
+  await ready();await replay(true);const first=socket(),stale=first.onmessage!;
+  await render({live:false});expect(driveButton("resume")?.disabled).toBe(true);
+  await render({live:true});await act(async()=>socket().open());expect(driveButton("resume")).toBeNull();
+  await act(async()=>stale({data:JSON.stringify({t:"agent",kind:"paused",paused:true,by:"owner"})}));expect(driveButton("resume")).toBeNull();
+  await frame({t:"agent",kind:"paused",paused:true,by:"owner"});expect(driveButton("resume")?.disabled).toBe(true);
+  await frame({t:"agent",kind:"list",actions:[]});expect(driveButton("resume")?.disabled).toBe(false);
+  await act(async()=>socket().onclose?.());expect(driveButton("resume")?.disabled).toBe(true);
+});
+it("annotation/card blocking leaves frames flowing without target pixels or active controls",async()=>{
+  await ready();await replay();await frame({t:"agent",kind:"action",id:"one",at:Date.now(),action:"click",outcome:"asking",target:"target",text:"",rect:{x:1,y:2,width:10,height:20},page_identity:1,document_generation:2});
+  await render({blocked:true});await frame(binary(1));expect(mocks.draw).toHaveBeenCalledOnce();expect(driveButton("stop")?.disabled).toBe(true);
+  expect(host.querySelector('[data-testid="drive-outline"]')).toBeNull();expect(host.querySelectorAll("canvas")).toHaveLength(1);
 });
