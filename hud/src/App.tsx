@@ -76,6 +76,8 @@ import { useInstallApp } from "./state/installApp";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
+import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type ClaimSource } from "./lib/voiceDiagnostics";
+import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, Schedule, Thread, VoiceEntry } from "./types";
@@ -539,6 +541,18 @@ export default function App() {
 
   // ---- capture ------------------------------------------------------------
 
+  const voiceDiagnostics = useMemo(() => new VoiceDiagnostics(), []);
+  const captureSuppression = (): SuppressionReason | null => {
+    const at = live.current;
+    if (at.orb === "speaking") return "speaking";
+    if (at.selectedChat === null) return "no_chat";
+    if (at.chats[at.selectedChat].busy) return "busy";
+    if (at.approvals.length) return "card";
+    if (at.picker !== null || chipOverlay.current) return "picker";
+    if (settingsNow.current) return "settings";
+    if (crashedRef.current) return "crash";
+    return null;
+  };
   const capture = useMemo(
     () =>
       new Capture({
@@ -554,6 +568,8 @@ export default function App() {
           live.current.picker !== null ||
           chipOverlay.current || settingsNow.current ||
           crashedRef.current,
+        suppressionReason: () => captureSuppression() ?? "speaking",
+        onDrop: (reason, ms, source) => { voiceDiagnostics.add(ms, source, reason); },
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
         onListening: () => {
@@ -565,7 +581,7 @@ export default function App() {
           if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "idle", status: note || "" } });
           else dispatch({ type: "patch", patch: { orb: "idle" } });
         },
-        onUtterance: (wav) => void onUtterance(wav),
+        onUtterance: (wav, ms, source) => void onUtterance(wav, ms, source),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -577,7 +593,7 @@ export default function App() {
   const unplaced = useRef<string[]>([]);
 
   const onUtterance = useCallback(
-    async (wav: Blob) => {
+    async (wav: Blob, ms = 0, source: ClaimSource = "unclaimed") => {
       // Ambiguous input (decisions W-6): what was said goes to **the selected
       // chat as it is when the transcript lands** — the chat pane most
       // recently clicked, whatever thread it shows by then. Clicking another
@@ -589,25 +605,30 @@ export default function App() {
         else if (p.error !== undefined) dispatch({ type: "patch", patch: { error: p.error } });
       };
       // A crashed window uploads nothing, and sends nothing, for anyone.
-      if (crashedRef.current) return;
+      if (crashedRef.current) { voiceDiagnostics.add(ms, source, "suppressed:crash"); return; }
       const mode = live.current.dictation;
       const what = outcomeFor(mode);
       // OFF never reaches here (Capture refuses to claim while muted), but the
       // mode is checked again rather than assumed: the fail-closed direction
       // costs a discarded utterance and the other costs an upload.
-      if (what === "discard") return;
+      if (what === "discard") { voiceDiagnostics.add(ms, source, "muted"); return; }
+      const diagnostic = voiceDiagnostics.add(ms, source, "transcribing");
+      const sttStarted = performance.now();
+      const finish = (outcome: "stt_failed" | "suppressed:crash" | "empty_transcript" | "unplaced" | "review" | "handed_to_chat") => voiceDiagnostics.finish(diagnostic, outcome, performance.now() - sttStarted);
       say({ orb: "transcribing", status: "TRANSCRIBING" });
       let text = "";
       try {
         text = await api.stt(wav);
       } catch (e: any) {
+        finish("stt_failed");
         say({ orb: "error", status: "STT FAILED", error: e.message });
         return;
       }
       // The window crashed while this was being transcribed: the words go
       // nowhere — not to a chat the owner cannot see, not into a box.
-      if (crashedRef.current) return;
+      if (crashedRef.current) { finish("suppressed:crash"); return; }
       if (!text.trim()) {
+        finish("empty_transcript");
         say({ orb: "idle", status: "DIDN'T CATCH THAT" });
         return;
       }
@@ -615,6 +636,7 @@ export default function App() {
       if (n === null) {
         // No chat on screen: never sent anywhere. It waits for the next chat
         // selected, in its box, unsent — and the window says so.
+        finish("unplaced");
         unplaced.current.push(text);
         dispatch({
           type: "patch",
@@ -624,10 +646,12 @@ export default function App() {
       }
       // REVIEW never sends on its own: the transcript lands in the box.
       if (what === "review") {
+        finish("review");
         chatPatch(n, { orb: "idle", status: "", pendingTranscript: text });
         return;
       }
       // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
+      finish("handed_to_chat");
       await send(n, text, [], true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2582,7 +2606,10 @@ export default function App() {
     let stream: MediaStream | null = null;
     (async () => {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream = await openMicrophone(constraints => navigator.mediaDevices.getUserMedia(constraints));
+        let settings: unknown;
+        try { settings = stream.getAudioTracks()[0]?.getSettings?.(); } catch { /* readback unavailable */ }
+        voiceDiagnostics.microphone("available", settings);
         ctx = new AudioContext();
         const ratio = ctx.sampleRate / 16000;
         const src = ctx.createMediaStreamSource(stream);
@@ -2610,6 +2637,7 @@ export default function App() {
         mute.gain.value = 0;
         node.connect(mute).connect(ctx.destination);
       } catch {
+        voiceDiagnostics.microphone("unavailable");
         // A window without a mic grant still types; every other affordance
         // stays exactly as it was.
       }
@@ -2683,6 +2711,7 @@ export default function App() {
   useEffect(() => {
     (window as any).__hud = {
       capture,
+      voiceDiagnostics: () => voiceDiagnostics.snapshot(),
       mic: {
         feedMs: (ms: number, amp: number, frame?: number) => capture.feedMs(ms, amp, frame),
         wake: () => onWakeHit(),
@@ -3742,12 +3771,12 @@ export default function App() {
               />
             ) : null}
             {settingsSection === "Voice" ? (
-              <VoicePicker embedded
+              <><VoicePicker embedded
                 voices={voices}
                 override={voiceOverride}
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
-              />
+              /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

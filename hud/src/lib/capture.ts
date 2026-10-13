@@ -26,16 +26,20 @@ import {
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs, wavBlob,
 } from "./vad";
 
+import type { ClaimSource, DropReason, SuppressionReason } from "./voiceDiagnostics";
+
 export interface CaptureHooks {
   /** Suppressed whenever the detector would be listening to him, not the owner. */
   suppressed: () => boolean;
+  suppressionReason?: () => SuppressionReason;
+  onDrop?: (reason: DropReason, ms: number, source: ClaimSource) => void;
   /** OFF: nothing is claimed and nothing is uploaded. */
   muted: () => boolean;
   onLevel: (level: number) => void;
   onListening: () => void;
   onIdle: (note?: string) => void;
   /** A finished, claimed utterance. The dictation mode decides what happens next. */
-  onUtterance: (wav: Blob, ms: number) => void;
+  onUtterance: (wav: Blob, ms: number, source?: ClaimSource) => void;
 }
 
 export class Capture {
@@ -47,6 +51,31 @@ export class Capture {
   ptt: { from: number } | null = null;
   micFloorSample = 0;
   private followUpTimer: any = null;
+  private claimSource: ClaimSource = "unclaimed";
+  // Observation only: the real VAD deliberately resets while suppressed.
+  private blockedVad = new Vad();
+  private blockedReason: DropReason | null = null;
+  private blockedAlreadyReported = false;
+  private wasBlocked = false;
+
+  private drop(reason: DropReason, ms: number, source = this.claimSource) {
+    try { this.hooks.onDrop?.(reason, ms, source); } catch { /* diagnostics cannot change capture */ }
+  }
+
+  private observeBlocked(rms: number, n: number, reason: DropReason | null) {
+    if (!reason) {
+      if (this.blockedVad.open && !this.blockedAlreadyReported && this.blockedReason)
+        this.drop(this.blockedReason, samplesToMs(this.blockedVad.voiced), "unclaimed");
+      this.blockedVad.reset(); this.blockedReason = null; this.blockedAlreadyReported = false;
+      return;
+    }
+    const event = this.blockedVad.feed(rms, n, this.ring.written);
+    if (event === "open") this.blockedReason = reason;
+    if (event === "close" || event === "cap") {
+      if (!this.blockedAlreadyReported) this.drop(this.blockedReason ?? reason, samplesToMs(this.blockedVad.voiced), "unclaimed");
+      this.blockedReason = null; this.blockedAlreadyReported = false;
+    }
+  }
 
   constructor(private hooks: CaptureHooks, private now: () => number = () => performance.now()) {}
 
@@ -76,6 +105,9 @@ export class Capture {
    * suppressed from then on.
    */
   abandon() {
+    if (this.ptt) this.drop("suppressed:crash", samplesToMs(this.ring.written - this.ptt.from), "ptt");
+    else if (this.vad.open) this.drop("suppressed:crash", samplesToMs(this.vad.voiced));
+    this.blockedAlreadyReported = this.vad.open;
     this.ptt = null;
     this.segClaimed = false;
     this.wakeHitAt = -1e9;
@@ -94,7 +126,17 @@ export class Capture {
     // Muted, the orb shows nothing: a level meter on a muted mic reads as "he
     // is listening", which is exactly the wrong promise.
     this.hooks.onLevel(muted ? 0 : Math.min(1, rms * 4));
-    if (muted || this.hooks.suppressed()) {
+    const suppressed = this.hooks.suppressed();
+    const reason: DropReason | null = muted ? "muted" : suppressed ? `suppressed:${this.hooks.suppressionReason?.() ?? "speaking"}` : null;
+    if (reason && !this.wasBlocked && this.vad.open && !this.ptt && !this.blockedAlreadyReported) {
+      this.drop(reason, samplesToMs(this.vad.voiced));
+      this.blockedAlreadyReported = true;
+    }
+    if (reason && !this.wasBlocked) this.blockedVad.floor = this.vad.floor;
+    this.wasBlocked = reason !== null;
+    if (this.ptt) this.blockedAlreadyReported = true;
+    this.observeBlocked(rms, frame.length, reason);
+    if (muted || suppressed) {
       // Still track the room, so the threshold is current the moment the
       // follow-up window opens; just never open an utterance.
       if (this.vad.open) {
@@ -110,6 +152,7 @@ export class Capture {
 
   private onVadEvent(event: "open" | "close" | "cap") {
     if (event === "open") {
+      this.claimSource = this.ptt ? "ptt" : this.conversing() ? "follow_up" : this.now() - this.wakeHitAt < WAKE_GRACE_MS ? "wake" : "unclaimed";
       this.segClaimed = this.conversing() || this.now() - this.wakeHitAt < WAKE_GRACE_MS;
       if (this.segClaimed) {
         // Saying his name claims exactly one utterance.
@@ -122,8 +165,9 @@ export class Capture {
     const { from, to } = closeBounds(this.vad, this.ring.written, event);
     const claimed = this.segClaimed;
     this.segClaimed = false;
-    if (!claimed) return;
+    if (!claimed) { if (!this.ptt) this.drop("unclaimed", samplesToMs(this.vad.voiced)); return; }
     if (!longEnough(this.vad)) {
+      this.drop("too_short", samplesToMs(this.vad.voiced));
       this.vad.voiced = 0;
       this.openFollowUp(); // he was addressed; give the owner the window back
       this.hooks.onIdle("DIDN'T CATCH THAT");
@@ -136,8 +180,8 @@ export class Capture {
     from = Math.max(from, this.micFloorSample);
     const samples = this.ring.slice(from, to);
     this.vad.voiced = 0;
-    if (!samples.length) return;
-    this.hooks.onUtterance(wavBlob(samples, CAP_RATE), samplesToMs(samples.length));
+    if (!samples.length) { this.drop("too_short", 0); return; }
+    this.hooks.onUtterance(wavBlob(samples, CAP_RATE), samplesToMs(samples.length), this.claimSource);
   }
 
   // ---- wake ---------------------------------------------------------------
@@ -153,6 +197,7 @@ export class Capture {
     this.wakeHitAt = this.now();
     if (this.vad.open && !this.segClaimed) {
       this.segClaimed = true;
+      this.claimSource = "wake";
       this.wakeHitAt = -1e9; // spent: this hit claims this utterance and no other
       this.vad.openedAt = Math.min(
         this.vad.openedAt,
@@ -170,6 +215,7 @@ export class Capture {
   press() {
     if (this.hooks.muted()) return false; // muting takes away recording, not the interrupt
     if (this.ptt) return false;
+    this.claimSource = "ptt";
     this.ptt = { from: Math.max(0, this.ring.written - msToSamples(PREROLL_MS)) };
     this.closeFollowUp();
     this.hooks.onListening();
@@ -182,6 +228,7 @@ export class Capture {
     this.ptt = null;
     const to = this.ring.written;
     if (samplesToMs(to - from) < MIN_UTTER_MS + PREROLL_MS) {
+      this.drop("too_short", samplesToMs(to - from), "ptt");
       this.hooks.onIdle("TOO SHORT");
       return;
     }
