@@ -1572,6 +1572,8 @@ personal chat off; the owner should reset that selection.
 
 ## 18. HUD v2 landed (2026-09-16)
 
+V2 boot (2026-10-12): the approved seeded binary-dust/orb and sharp pen-drawn J.A.R.V.I.S. plate play once per window from the first frame, silently; automation and reduced motion suppress it, clicks are consumed, keys keep working, approvals take precedence, and `hud_v2_boot_check.py` checks it under CSP.
+
 WP12a (Codex) and WP12b (Opus) merged the same day, built against
 `docs/hud-api.md` in parallel and joined at the end: the built HUD served
 by `jarvis daemon2` on 8402 passed all 14 live checks against the real

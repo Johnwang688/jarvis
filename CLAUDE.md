@@ -1081,6 +1081,33 @@ and layout persist in localStorage behind try/catch. The free checks are
 `tests/face/hud_v2_layout_check.py`, run first by `hud_v2_check.py` in a
 context of its own, plus `hud/src/lib/layout.test.ts`.
 
+**HUD boot animation (2026-10-12, design §18; the owner: "this is literally
+perfection … make sure that its disabled when automation is on").** The owner's
+prototype (`prototypes/boot/index.html`) at its default settings, v2 only, no
+audio: seeded binary dust drifts from the bottom left by geometric Brownian
+motion and converges into the orb; two pens draw a sharp box counter-clockwise
+while a pen per letter draws JARVIS, then the dots pop in. The pure half is
+`hud/src/lib/boot.ts` (RNG, paths, timeline, `shouldPlay`), the drawing
+`components/BootOverlay.tsx`. **It mounts on the first frame**, so the HUD is
+never seen before it, and nothing waits on it: the HUD loads, connects and
+renders underneath. **Never under automation**: with `navigator.webdriver` the
+component is not mounted at all, unless the boot suite's own init script sets
+`window.__hudBootForce = true` (which can only make it play). **Once per
+window**: a sessionStorage flag (behind try/catch; without storage, once per
+page load) is set when a window first considers it, so a reload never replays
+it, and reduced motion never plays it. **A click skips it and clicks nothing
+underneath** (the overlay eats the press, its release and the click); **a key
+skips it and still does its job** (never prevented: Ctrl+D, Escape, typing,
+Ctrl+`). **Approvals win**: it sits at z-index 99, below `#authveil`, never
+takes focus, and is removed in the same render a card is drawn in, whether the
+card was waiting when the window opened or arrives mid-play; answering the
+card never restarts it. It fills the window at any zoom (`--ui-zoom` divided
+out, canvases in device pixels), and its fade-out cancels the animation frame,
+timers and listeners. Free checks: `lib/boot.test.ts` and
+`tests/face/hud_v2_boot_check.py` (a `MockDaemon(0)` of its own, run by
+`hud_v2_check`); removing the webdriver, card, click or session guard each
+fails it.
+
 **HUD title bar and split workspace, WP-A (2026-10-09, design §18; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md`, decisions file beside it
 wins).** A 28px window-wide **title bar** holds Model · Voice · Avatar ·
