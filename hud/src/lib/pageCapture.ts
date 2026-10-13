@@ -9,6 +9,8 @@ export interface CaptureStill {
   image: { mime: "image/png" | "image/jpeg"; data_b64: string; width: number; height: number };
   url: string; title: string; text_chars: number; whole: boolean; notes: string[];
 }
+export interface CaptureIdentity { window: string; pane_id: number; local_tab_id: string; view_id: string }
+export const CAPTURE_NO_CHAT = "No chat is open to attach files to: open a chat first.";
 export const CAPTURE_CHANGED = "This Browser view changed. Capture it again.";
 export const DIRECT_CAPTURE = "Open this in Remote to annotate.";
 

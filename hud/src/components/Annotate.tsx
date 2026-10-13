@@ -7,7 +7,7 @@ import {
 import { loadCaptureImage, type CaptureStill } from "../lib/pageCapture";
 
 export function Annotate(props: {
-  still: CaptureStill; zoom: number; blocked: boolean; active: boolean;
+  still: CaptureStill; zoom: number; blocked: boolean; active: boolean; notice?: string;
   onClose: () => void; onStage: (ops: readonly Op[]) => Promise<boolean>;
 }) {
   const view = useRef<HTMLDivElement>(null);
@@ -16,11 +16,14 @@ export function Annotate(props: {
   const fit = useRef<Fit>({ x: 0, y: 0, scale: 1 });
   const drag = useRef<{ id: number; from: Pt; tool: Exclude<Tool, "text">; op: Op; colour: string; width: number } | null>(null);
   const textInput = useRef<HTMLInputElement>(null);
+  const textBox = useRef<HTMLDivElement>(null);
+  const textAt = useRef<Pt | null>(null);
   const [tool, setTool] = useState<Tool>("pen");
   const [colour, setColour] = useState<string>(INK[0].value);
   const [ops, setOps] = useState<Op[]>([]);
   const marks = useRef(ops); marks.current = ops;
   const [text, setText] = useState<{ at: Pt; value: string; size: number; colour: string } | null>(null);
+  textAt.current = text?.at ?? null;
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -32,6 +35,10 @@ export function Annotate(props: {
     if (!v || !c || !img) return;
     fit.current = fitStill({ width: v.clientWidth, height: v.clientHeight }, props.still.image);
     const f = fit.current;
+    if (textBox.current && textAt.current) {
+      textBox.current.style.left = Math.max(0, Math.min(v.clientWidth - textBox.current.offsetWidth, f.x + textAt.current[0] * f.scale)) + "px";
+      textBox.current.style.top = Math.max(0, Math.min(v.clientHeight - textBox.current.offsetHeight, f.y + textAt.current[1] * f.scale)) + "px";
+    }
     c.style.left = f.x + "px"; c.style.top = f.y + "px";
     c.style.width = props.still.image.width * f.scale + "px";
     c.style.height = props.still.image.height * f.scale + "px";
@@ -61,7 +68,7 @@ export function Annotate(props: {
       image.current?.removeAttribute("src"); image.current = null;
     };
   }, [props.still]);
-  useLayoutEffect(() => { paint.current(); }, [ops, props.zoom, props.active]);
+  useLayoutEffect(() => { paint.current(); }, [ops, props.zoom, props.active, !!text]);
   useLayoutEffect(() => {
     if (props.blocked || !props.active) cancelDrag();
   }, [props.blocked, props.active]);
@@ -138,7 +145,7 @@ export function Annotate(props: {
       }}
       onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}>
       <canvas ref={canvas} width={props.still.image.width} height={props.still.image.height} />
-      {text && <div className="annotation-text" style={{ left: fit.current.x + text.at[0] * fit.current.scale, top: fit.current.y + text.at[1] * fit.current.scale }}
+      {text && <div className="annotation-text" ref={textBox}
         onPointerDown={e => e.stopPropagation()}>
         <input ref={textInput} aria-label="Annotation text" maxLength={TEXT_MAX} value={text.value} disabled={disabled}
           onChange={e => setText({ ...text, value: e.target.value })}
@@ -147,6 +154,7 @@ export function Annotate(props: {
         <button type="button" disabled={disabled} onClick={finishText}>Add</button>
       </div>}
     </div>
+    {props.notice && <div className="annotation-note" role="status">{props.notice}</div>}
     {error && <div className="annotation-note err" role="status">{error}</div>}
     {props.still.notes.map((note, i) => <div className="annotation-note muted" key={i}>{note}</div>)}
   </section>;

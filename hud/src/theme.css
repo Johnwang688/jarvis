@@ -1599,3 +1599,9 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .browser-auto-setting { display: flex; align-items: center; gap: 8px; }
 .browser-newtab-note { padding: 4px 10px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
 .browser-unseen { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; }
+
+.browserpage { position: relative; }
+.browser-capture-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.browser-capture-actions button { padding: 2px 7px; }
+.browser-capture-actions label { display: flex; align-items: center; gap: 4px; color: var(--text-muted); }
+.capture-remote { align-self: flex-start; margin: 0 8px 6px; }
