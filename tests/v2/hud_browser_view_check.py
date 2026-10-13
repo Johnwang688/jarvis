@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from jarvis import config,llm,runtime,tools
 from jarvis.v2.browser import host as H, look as L, look_capture as C, look_scan as S
-from jarvis.v2.browser.panes import PaneSnapshot,ResolvedSource,PaneRefused
+from jarvis.v2.browser.panes import BrowserPanes,PaneSnapshot,ResolvedSource,PaneRefused
 from jarvis.v2.providers import fastpath as F
 from jarvis.v2.tools.hud_browser_view import hud_browser_view
 from tests.v2 import owner_browser_check as O
@@ -288,6 +288,8 @@ class Real(O.OwnerBrowser):
         self.run_on(self.pg.wait_for_load_state("load"))
         self.snap=snapshot(tab_id=self.tab.id,view_id=self.tab.id,ctx=self.tab.ctx,url=self.url,page_identity=self.tab.page_identity,document_generation=self.tab.document_generation)
         self.valid=True
+        original_registry=self.daemon.browser_panes
+        self.addCleanup(setattr,self.daemon,"browser_panes",original_registry)
         self.daemon.browser_panes=SimpleNamespace(resolve=lambda pane:self.snap,
             still_current=lambda snap:self.valid and snap==self.snap and self.pg.url==self.url
                 and (snap.mode=="direct" or self.host.pane_tab(snap.tab_id)==dict(
@@ -430,7 +432,74 @@ class Real(O.OwnerBrowser):
             result=self.read();self.assertTrue(result.refused);self.assertEqual(result.text,"");self.assertIsNone(result.image)
 
 
+class RegistryReal(Real):
+    """The actual registry and actual Chrome, without a front-report double."""
+    def setUp(self):
+        super().setUp()
+        self.now=1.0
+        self.registry=BrowserPanes(self.daemon,clock=lambda:self.now)
+        self.daemon.browser_panes=self.registry
+        self.window="a"*32;self.registry.window_started(self.window)
+        self.body={"window":self.window,"seq":1,"focus_seq":1,"focused_slot":2,"covered":False,
+            "panes":[{"pane_id":5,"slot":2,"drawn":True,"profile":"private","ctx":self.tab.ctx,
+                "see":True,"drive":False,"active":"aaaaaa", "tabs":[{"id":"aaaaaa","mode":"remote",
+                    "tab_id":self.tab.id,"source":None}]}]}
+
+    def test_14_real_registry_resolves_displayed_slot_and_event_identity(self):
+        self.html("<p>Registry capture fixture</p>")
+        for pid,slot in ((1,1),(2,3)):
+            self.body["panes"].append({"pane_id":pid,"slot":slot,"drawn":True,"profile":"private",
+                "ctx":None,"see":True,"drive":False,"active":None,"tabs":[]})
+        receipt=self.registry.report(self.body)
+        result=self.read();self.assertFalse(result.refused,result.refused)
+        self.assertEqual(self.registry.resolve("2").pane_id,5)
+        self.assertIn("Registry capture fixture",result.text)
+        events=[r["data"] for r in self.records if r.get("kind")=="browser_viewed"]
+        self.assertEqual(events[-1]["tab_id"],self.tab.id)
+        self.assertFalse(events[-1]["refused"])
+        for selector in ("5",self.tab.id):self.assertTrue(self.service.read(selector,False).refused)
+        self.assertIn(self.tab.id,json.dumps(receipt))
+
+    def test_15_real_registry_off_source_and_window_expiry_fail_closed(self):
+        self.body["panes"][0]["see"]=False
+        self.registry.report(self.body)
+        with patch.object(self.host,"capture_look",wraps=self.host.capture_look) as capture:
+            self.assertEqual(self.read().refused,"the owner has turned off 'Jarvis can see' for pane 2; ask them, or use Send to chat.")
+            self.registry.permissions(5,{"window":self.window,"seq":2,"see":True})
+            self.now+=61
+            self.assertTrue(self.read().refused)
+            capture.assert_not_called()
+        self.body["seq"]=3;self.body["panes"][0]["see"]=True
+        self.body["panes"][0]["tabs"][0]["source"]={"kind":"unknown"}
+        self.registry.report(self.body)
+        with patch.object(self.host,"capture_look",wraps=self.host.capture_look) as capture:
+            self.assertIn("source",self.read().refused);capture.assert_not_called()
+
+    def test_16_real_registry_source_cannot_be_laundered_by_passive_report(self):
+        tab=self.body["panes"][0]["tabs"][0]
+        tab["source"]={"kind":"dev_server","entryId":"ds_0123abcd"}
+        with patch.object(self.daemon.devservers,"source_snapshot",return_value={"kind":"terminal","terminal_id":"fixture-terminal"}):
+            self.registry.report(self.body)
+        tab["source"]=None;self.body["seq"]=2;self.registry.report(self.body)
+        self.assertEqual(self.registry.resolve("2").source.terminal_id,"fixture-terminal")
+        with patch.object(self.daemon.terminals,"readable_source",return_value=False),patch.object(self.host,"capture_look",wraps=self.host.capture_look) as capture:
+            self.assertIn("terminal",self.read().refused);capture.assert_not_called()
+
+    def test_17_real_registry_permission_or_window_end_during_scan_discards(self):
+        self.registry.report(self.body);original=C._scan
+        async def off(*args,**kwargs):
+            result=await original(*args,**kwargs)
+            self.registry.permissions(5,{"window":self.window,"seq":2,"see":False})
+            return result
+        with patch.object(C,"_scan",new=off):
+            result=self.read();self.assertTrue(result.refused);self.assertEqual(result.text,"");self.assertIsNone(result.image)
+        self.registry.permissions(5,{"window":self.window,"seq":3,"see":True})
+        async def end(*args,**kwargs):
+            result=await original(*args,**kwargs);self.registry.window_ended(self.window);return result
+        with patch.object(C,"_scan",new=end):self.assertTrue(self.read().refused)
+
+
 def load_tests(loader,tests,pattern):
-    return unittest.TestSuite(cls(name) for cls in (Pure,Lifecycle,Real) for name in sorted(cls.__dict__) if name.startswith("test_"))
+    return unittest.TestSuite(cls(name) for cls in (Pure,Lifecycle,Real,RegistryReal) for name in sorted(cls.__dict__) if name.startswith("test_"))
 
 if __name__=="__main__":unittest.main(verbosity=2)

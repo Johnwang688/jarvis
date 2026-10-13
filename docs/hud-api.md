@@ -2695,3 +2695,47 @@ lease, binding, visibility, permissions and cached host page/document generation
 it rejects see-off. Same-URL reload and same-document navigation invalidate a
 Remote snapshot without waiting for a HUD heartbeat. Host cache reads are safe
 on the browser event-loop thread; no registry lock is held across CDP/network.
+
+
+## Additions 2026-10-13: read-only HUD Browser look (BR5)
+
+The explicit owner-HUD-chat tool `hud_browser_view(pane: str = "",
+whole_page: bool = False)` consumes the owner pane registry above; it adds no
+HTTP navigation or input route. Selectors are displayed slots `"1"`–`"8"` or
+empty for the last owner-focused eligible pane. Raw tab IDs are refused.
+`whole_page` extends rendered text only, without scrolling the owner page.
+The current live window, visible selected binding, see permission, immutable
+source, source terminal's read switch, hold state, desk context and host page
+identity must still agree at delivery. A stale or changed binding returns a
+fixed refusal without page content. See-off returns exactly:
+
+> the owner has turned off 'Jarvis can see' for pane N; ask them, or use Send to chat.
+
+A successful result fences bounded page URL/title/text/refs as untrusted. It may
+include a masked viewport PNG if the pinned turn model accepts images. Complete
+bounded raw fields are scanned before return truncation: 20,000 nodes, 256 KiB,
+200 refs, five-second scan and 30-second capture limits; incomplete scans refuse.
+Page text caps at 4,000 characters, ref labels at 120 and image long edge at 1,568
+pixels. Known-value/credential hits refuse the entire result. Heuristic withheld
+text suppresses the image. Form values are excluded, and form/embedded-frame
+pixels are masked without changing the DOM. Canvas/image and inaccessible DOM
+text cannot be credential-scanned; pixel capture is not an atomic page freeze.
+
+Direct capture is a fresh off-record load through an already permitted loopback
+port, never a new agent-created lease. Its isolated lifecycle counts against
+host capacity and preserves owner Private contexts. The result says `a fresh
+load, not your exact view`. Missing permission asks for owner Open in Remote or
+Send to chat. See [current Browser notes](notes/browser.md#current-read-only-browser-look-2026-10-13-br5)
+for resource cleanup, scanner and image limits.
+
+Every look decision with a resolved binding publishes exactly:
+
+```json
+{"kind":"browser_viewed","data":{"tab_id":"opaque-bound-view-id","at":"ISO timestamp","refused":false}}
+```
+
+Remote uses its daemon tab ID; Direct uses the stable host-issued `view_id`
+returned by the front-report receipt. No URL, title, text, source identity or
+refusal detail is published. Missing/ambiguous selection emits no invented ID.
+Tool lifecycle summaries contain only `looked at a page` or `refused`, never raw
+page data. This does not add a session/MCP tool or an agent-driving capability.
