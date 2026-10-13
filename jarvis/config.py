@@ -1066,7 +1066,8 @@ truly needs one, ask the user rather than looking for a way around it.
 # concrete: a named tool the agent lacks is a refused step, where before it was
 # a call that quietly ran.
 #
-# So every paragraph that names a tool is listed here by its opening words, with
+# Each known paragraph is indexed by its exact original text; the opening words
+# below identify that paragraph, never arbitrary caller text. Each entry lists
 # the versions it may take. `narrow_prompt(text, names)` uses the first version
 # whose tools are all held, and leaves the paragraph out when none is. None means
 # the paragraph as written; a narrower version is the paragraph's own sentences
@@ -1080,6 +1081,16 @@ truly needs one, ask the user rather than looking for a way around it.
 # surface to it — each tool its prompt names is one it holds — and holds each
 # narrower version to its original, sentence by sentence, so a change to one
 # that is not made to the other fails there.
+WORKFLOW_GIT_PARAGRAPH = (
+    "For a change to a repository: never edit the owner's checkout. Make your "
+    "own with git_worktree, edit and commit there with the file tools and the "
+    "git tool, and hand it over with git_pull_request — the owner or another "
+    "session reviews and merges it. The git tool refuses destructive "
+    "operations (hard reset, force push, deleting branches, discarding "
+    "changes) and says so; do not look for a way around a refusal, report it."
+)
+
+
 PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]] = {
     "To change a file that already exists": (
         (("edit_file", "write_file", "read_file"), None),
@@ -1168,13 +1179,25 @@ PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]
 }
 
 
+def _original_prompt_rules() -> dict:
+    """Index only our exact canonical paragraphs, never caller prefix matches."""
+    paragraphs = [p.strip("\n") for p in SYSTEM_PROMPT.split("\n\n")]
+    paragraphs.append(WORKFLOW_GIT_PARAGRAPH)
+    result = {}
+    for opening, versions in PROMPT_TOOL_PARAGRAPHS.items():
+        matches = [p for p in paragraphs if p.startswith(opening)]
+        if len(matches) != 1:
+            raise ValueError(f"prompt rule {opening!r} must identify one canonical paragraph")
+        result[matches[0]] = versions
+    return result
+
+
+_PROMPT_RULES_BY_PARAGRAPH = _original_prompt_rules()
+
+
 def prompt_rule(paragraph: str) -> tuple[tuple[tuple[str, ...], str | None], ...] | None:
     """The versions a prompt paragraph may take, or None (always kept)."""
-    body = paragraph.lstrip("\n")
-    for opening, versions in PROMPT_TOOL_PARAGRAPHS.items():
-        if body.startswith(opening):
-            return versions
-    return None
+    return _PROMPT_RULES_BY_PARAGRAPH.get(paragraph.strip("\n"))
 
 
 def narrow_prompt(text: str, tool_names) -> str:
