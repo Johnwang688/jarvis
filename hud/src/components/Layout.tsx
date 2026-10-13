@@ -1,3 +1,4 @@
+import { isSettingsKey } from "../lib/settings";
 // The window's geometry, applied: the zoom, the two pane widths, folding a
 // pane to a rail, the separators that resize them, the centre's panes and the
 // bottom panel, and the title bar that toggles all of it (lib/layout.ts and
@@ -144,7 +145,8 @@ export function focusPaneElement(pane: PaneNo, frames = 10) {
  * that has not moved, which is how a click meant for DENY lands on something
  * else.
  */
-export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) => void): LayoutControl {
+export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) => void,
+                          settings?: { open: boolean; toggle: () => void }): LayoutControl {
   // Applied in the initializer too, so a window reopened at 140% does not
   // draw its first frame at 100% and then jump.
   const [zoom, setZoomState] = useState(() => {
@@ -187,6 +189,8 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   now.current = { fit, ws, layout, available, availableH, prefer, preferPanel };
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
   const editorKeyRef = useRef(onEditorKey);
   editorKeyRef.current = onEditorKey;
 
@@ -322,11 +326,23 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     const onKey = (e: KeyboardEvent) => {
       const step = { second: chordSecond(e, inMonaco(e.target)) };
       if (e.isComposing) return;
+      if (isSettingsKey(e)) {
+        e.preventDefault();
+        if (step.second && !blockedRef.current) return;
+        e.stopPropagation();
+        if (!e.repeat && !blockedRef.current) settingsRef.current?.toggle();
+        return;
+      }
       const what = shortcutFor(e);
       const save = isSaveKey(e);
       if (!what && !save) return;
       if (blockedRef.current) {
         e.preventDefault();
+        return;
+      }
+      if (settingsRef.current?.open && !what?.startsWith("zoom")) {
+        e.preventDefault();
+        e.stopPropagation();
         return;
       }
       // In a terminal the shell gets Ctrl+B and Ctrl+Alt+B (readline back-
@@ -684,9 +700,6 @@ export function ZoomControl(props: {
 
 // ---- the title bar (2026-10-09, plan §2.1) -------------------------------------
 
-/** Below this many zoomed px the four text buttons fold into a ⋯ menu; zoom and the toggles never hide. */
-export const TITLE_FOLD_W = 560;
-
 type Area = "left" | "panel" | "right" | "grid" | "split";
 
 /**
@@ -866,38 +879,20 @@ function toggleTitle(area: "left" | "right" | "panel", open: boolean, auto: bool
   return `Show the ${name} (${key})`;
 }
 
-export type TitlePicker = "model" | "voice" | "avatar" | "settings";
-
-const TOOLS: { id: TitlePicker; label: string }[] = [
-  { id: "model", label: "Model" },
-  { id: "voice", label: "Voice" },
-  { id: "avatar", label: "Avatar" },
-  { id: "settings", label: "Settings" },
-];
-
-/**
- * The window-wide title bar (plan §2.1): Model · Voice · Avatar · Settings │
- * − 100% + │ ⊞ ◧ ⬓ ◨. Its right end is the window's top right in every fold
- * state, so the button that reopens a pane never folds away with it (the zoom
- * control used to live in the status pane's header and did exactly that).
- * The toggles follow what is *drawn*: a pane the window folded reads closed,
- * with `data-auto` and a dashed outline, and opening it folds the other one
- * instead. At the narrowest widths the four text buttons fold into ⋯ and the
- * bar wraps rather than clipping; the zoom control and the toggles never hide.
- */
+/** Window controls stay reachable in every fold state. Settings covers the
+ * workspace while zoom remains available; layout controls wait until close. */
 export function TitleBar(props: {
   view: LayoutControl;
   blocked: boolean;
-  onPicker: (which: TitlePicker) => void;
+  settingsOpen?: boolean;
+  settingsDisabled?: boolean;
+  onSettings: () => void;
 }) {
   const v = props.view;
   const { blocked } = props;
   const [layoutMenu, setLayoutMenu] = useState<MenuAt | null>(null);
-  const [toolsMenu, setToolsMenu] = useState<MenuAt | null>(null);
   const customize = useRef<HTMLButtonElement>(null);
-  const more = useRef<HTMLButtonElement>(null);
   const closeLayout = useCallback(() => setLayoutMenu(null), []);
-  const closeTools = useCallback(() => setToolsMenu(null), []);
   // Where a menu opens is read **in the click**, never inside the updater:
   // React runs an updater during the click only when nothing is pending, and
   // otherwise at render time, when the event's `currentTarget` is already
@@ -911,13 +906,10 @@ export function TitleBar(props: {
 
   // An authorization card closes any open menu: nothing behind it may move.
   useEffect(() => {
-    if (!blocked) return;
-    setLayoutMenu(null);
-    setToolsMenu(null);
-  }, [blocked]);
+    if (blocked || props.settingsOpen) setLayoutMenu(null);
+  }, [blocked, props.settingsOpen]);
 
   const sides = v.fit.sides;
-  const folded = v.available < TITLE_FOLD_W;
   const dropped = v.fit.dropped;
   // A terminal in the hidden panel has exited (plan §2.3): a dot on ⬓.
   const panelDot = usePanelDot() && !v.fit.panel.open;
@@ -933,36 +925,10 @@ export function TitleBar(props: {
   return (
     <header id="titlebar" data-testid="titlebar">
       <div className="tb-group tb-tools">
-        {folded ? (
-          <button
-            type="button"
-            ref={more}
-            className="tb-text"
-            data-testid="titlebar-more"
-            title="Model, Voice, Avatar and Settings"
-            aria-label="More: Model, Voice, Avatar and Settings"
-            aria-haspopup="menu"
-            aria-expanded={!!toolsMenu}
-            disabled={blocked}
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => toggleMenu(setToolsMenu, e)}
-          >
-            ⋯
-          </button>
-        ) : (
-          TOOLS.map((t) => (
-            <button
-              type="button"
-              key={t.id}
-              className="tb-text"
-              data-testid={`open-${t.id}`}
-              disabled={blocked}
-              onClick={() => props.onPicker(t.id)}
-            >
-              {t.label}
-            </button>
-          ))
-        )}
+        <button type="button" className="tb-icon" data-testid="titlebar-settings"
+          aria-label="Settings" title="Settings (Ctrl+,)" aria-expanded={!!props.settingsOpen}
+          disabled={blocked || props.settingsDisabled}
+          onMouseDown={(e) => e.preventDefault()} onClick={props.onSettings}>⚙</button>
       </div>
       <span className="tb-sep" aria-hidden="true" />
       <ZoomControl
@@ -984,7 +950,7 @@ export function TitleBar(props: {
           aria-expanded={!!layoutMenu}
           aria-pressed={!!layoutMenu}
           data-dropped={dropped || undefined}
-          disabled={blocked}
+          disabled={blocked || props.settingsOpen}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => toggleMenu(setLayoutMenu, e)}
         >
@@ -1001,7 +967,7 @@ export function TitleBar(props: {
             aria-label={`${t.open ? "Hide" : "Show"} the ${t.area === "left" ? "sidebar" : t.area === "right" ? "status pane" : "panel"}`}
             aria-pressed={t.open}
             data-auto={t.auto ? "true" : undefined}
-            disabled={blocked}
+            disabled={blocked || props.settingsOpen}
             onClick={t.act}
           >
             <AreaIcon area={t.area} open={t.open} />
@@ -1014,26 +980,6 @@ export function TitleBar(props: {
 
       {layoutMenu ? (
         <LayoutMenu view={v} at={layoutMenu} opener={customize} onClose={closeLayout} />
-      ) : null}
-      {toolsMenu ? (
-        <MenuShell at={toolsMenu} testid="titlebar-more-menu" label="More" opener={more} onClose={closeTools}>
-          {TOOLS.map((t) => (
-            <button
-              type="button"
-              key={t.id}
-              role="menuitem"
-              data-mi=""
-              className="lm-row"
-              data-testid={`open-${t.id}`}
-              onClick={() => {
-                closeTools();
-                props.onPicker(t.id);
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </MenuShell>
       ) : null}
     </header>
   );

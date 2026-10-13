@@ -20,6 +20,8 @@ from __future__ import annotations
 import time
 
 
+from tests.face.hud_v2_check import open_settings
+
 def projects_checks(page, mock, check, until, expand):
     w = mock.world
     _menu_checks(page, mock, check, until, expand)
@@ -307,14 +309,14 @@ def _archive_checks(page, mock, check, until, expand):
     check("its schedules are paused", [s["enabled"] for s in w["schedules"] if s["project_id"] == "p2"] == [False])
 
     # The Archive view: restore.
-    page.locator('[data-testid="open-archive"]').click()
+    open_settings(page, "Archive")
     until(lambda: page.locator('[data-testid="archived-project-p2"]').count() > 0)
     check("the Archive lists it", page.locator('[data-testid="archived-project-p2"]').count() == 1)
     page.locator('[data-testid="archive-restore-p2"]').click()
     until(lambda: mock.posted("/projects/p2/restore"))
     until(lambda: page.locator('[data-testid="project-p2"]').count() > 0)
     check("Restore brings it back to the sidebar", page.locator('[data-testid="project-p2"]').count() == 1)
-    page.locator('[data-testid="archive-close"]').click()
+    page.locator('[data-testid="settings-close"]').click()
     until(lambda: page.locator('[data-testid="archive-view"]').count() == 0)
 
     # Archive again, then delete permanently — only from the Archive.
@@ -326,7 +328,7 @@ def _archive_checks(page, mock, check, until, expand):
     until(lambda: not page.locator('[data-testid="archive-confirm-btn"]').is_disabled())
     page.locator('[data-testid="archive-confirm-btn"]').click()
     until(lambda: page.locator('[data-testid="project-p2"]').count() == 0)
-    page.locator('[data-testid="open-archive"]').click()
+    open_settings(page, "Archive")
     until(lambda: page.locator('[data-testid="archive-delete-p2"]').count() > 0)
     page.locator('[data-testid="archive-delete-p2"]').click()
     until(lambda: page.locator('[data-testid="delete-summary"]').count() > 0
@@ -346,7 +348,7 @@ def _archive_checks(page, mock, check, until, expand):
     check("and says it is in the trash", "trash" in page.locator('[data-testid="archive-notice"]').inner_text())
     until(lambda: "1 item" in page.locator('[data-testid="trash-info"]').inner_text())
     check("the trash counts it", "1 item" in page.locator('[data-testid="trash-info"]').inner_text())
-    page.locator('[data-testid="archive-close"]').click()
+    page.locator('[data-testid="settings-close"]').click()
     until(lambda: page.locator('[data-testid="archive-view"]').count() == 0)
 
 
@@ -364,7 +366,7 @@ def _thread_archive_checks(page, mock, check, until, expand):
     check("and the open conversation becomes a new thread in its project",
           page.evaluate("window.__hud.state().threadId") is None
           and page.evaluate("window.__hud.state().compose.projectId") == "p1")
-    page.locator('[data-testid="open-archive"]').click()
+    open_settings(page, "Archive")
     until(lambda: page.locator('[data-testid="archived-thread-t1"]').count() > 0)
     check("the Archive lists the thread", page.locator('[data-testid="archived-thread-t1"]').count() == 1)
     page.locator('[data-testid="archive-open-t1"]').click()
@@ -377,7 +379,7 @@ def _thread_archive_checks(page, mock, check, until, expand):
     until(lambda: page.locator('[data-testid="archive-restore-thread-t1"]').count() > 0)
     page.locator('[data-testid="archive-restore-thread-t1"]').click()
     until(lambda: mock.posted("/threads/t1/restore"))
-    page.locator('[data-testid="archive-close"]').click()
+    page.locator('[data-testid="settings-close"]').click()
     until(lambda: page.locator('[data-testid="archive-view"]').count() == 0)
     page.evaluate("window.__hud.dispatch({type: 'patch', patch: {}})")
     check("Restore brings the thread back", expand(page, "p1", "thread-t1"))
@@ -387,7 +389,7 @@ def _thread_archive_checks(page, mock, check, until, expand):
     w["threads"].append({**w["threads"][0], "id": "t9", "title": "old notes",
                          "archived": "2026-10-01T00:00:00+00:00"})
     w["trash_fails"] = "TrashError: could not move it to the trash: disk full"
-    page.locator('[data-testid="open-archive"]').click()
+    open_settings(page, "Archive")
     until(lambda: page.locator('[data-testid="archive-delete-thread-t9"]').count() > 0)
     page.locator('[data-testid="archive-delete-thread-t9"]').click()
     until(lambda: page.locator('[data-testid="delete-confirm-btn"]').count() > 0)
@@ -399,7 +401,7 @@ def _thread_archive_checks(page, mock, check, until, expand):
           bool(notice) and "staged for retry" in notice and "disk full" in notice
           and "are in the trash" not in notice, str(notice))
     w["trash_fails"] = None
-    page.locator('[data-testid="archive-close"]').click()
+    page.locator('[data-testid="settings-close"]').click()
     until(lambda: page.locator('[data-testid="archive-view"]').count() == 0)
 
 

@@ -44,6 +44,8 @@ LONG = ("Planning the robotics lab week around the drivetrain rebuild, the auton
 MARKUP = '<img src=x onerror="window.__pwned=1"> & <b>bold</b>'
 
 
+from tests.face.hud_v2_check import open_settings
+
 def _thread(tid: str, title: str, turns: int) -> dict:
     return {"id": tid, "project_id": "p1", "role": "chat", "provider": "fast",
             "provider_session_id": None, "task_id": None, "title": title, "title_source": "",
@@ -258,7 +260,7 @@ def _archive_checks(page, mock, check, until):
         t["archived"] = "2026-10-12T00:00:00+00:00"
     w["threads"] += [titled, untitled]
     try:
-        page.locator('[data-testid="open-archive"]').click()
+        open_settings(page, "Archive")
         until(lambda: page.locator('[data-testid="archived-thread-name-t25"]').count() > 0, timeout=4)
         a = page.locator('[data-testid="archived-thread-name-t24"]')
         b = page.locator('[data-testid="archived-thread-name-t25"]')
@@ -267,7 +269,7 @@ def _archive_checks(page, mock, check, until):
         check("…and an untitled one's label, never its id",
               b.inner_text() == "Untitled" and "t25" not in page.locator(
                   '[data-testid="archived-thread-t25"]').inner_text())
-        page.locator('[data-testid="archive-close"]').click()
+        page.locator('[data-testid="settings-close"]').click()
     finally:
         w["threads"][:] = [t for t in w["threads"] if t["id"] not in ("t24", "t25")]
 

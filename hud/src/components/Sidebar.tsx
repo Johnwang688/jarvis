@@ -115,7 +115,7 @@ export const Sidebar = memo(function Sidebar(props: {
   onNewTask: (projectId: string) => void;
   onMoveThread: (threadId: string, projectId: string) => void;
   onMoveCompose: (projectId: string, pane: PaneNo) => void;
-  onOpen: (what: "schedules" | "usage" | "route") => void;
+  onOpen: (what: "schedules") => void;
   // --- rename, edit, archive (decisions B); each resolves with the record
   // the backend saved, whose name may be numbered.
   onEditProject?: (projectId: string) => void;
@@ -123,7 +123,6 @@ export const Sidebar = memo(function Sidebar(props: {
   onRenameProject?: (projectId: string, name: string) => Promise<Project>;
   onRenameThread?: (threadId: string, title: string) => Promise<Thread>;
   onArchiveThread?: (threadId: string) => Promise<unknown>;
-  onOpenArchive?: () => void;
   /** The HUD zoom in percent: a menu placed from a screen rect is placed in zoomed space. */
   zoom?: number;
   /** Folds the sidebar to its rail (2026-10-08). */
@@ -582,20 +581,6 @@ export const Sidebar = memo(function Sidebar(props: {
           <span className="tw">⏱</span>
           <span className="nm">Schedules</span>
         </div>
-        <div className="tree-row" data-testid="open-usage" onClick={() => props.onOpen("usage")}>
-          <span className="tw">$</span>
-          <span className="nm">Usage</span>
-        </div>
-        <div className="tree-row" data-testid="open-route" onClick={() => props.onOpen("route")}>
-          <span className="tw">⇄</span>
-          <span className="nm">Route</span>
-        </div>
-        {props.onOpenArchive ? (
-          <div className="tree-row" data-testid="open-archive" onClick={props.onOpenArchive}>
-            <span className="tw">▤</span>
-            <span className="nm">Archive</span>
-          </div>
-        ) : null}
       </div>
 
       {pmenu && pmenuProject ? (
