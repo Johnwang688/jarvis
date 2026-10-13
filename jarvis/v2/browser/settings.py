@@ -19,11 +19,13 @@ owner's switches for the HUD's Browser, each a boolean:
   by default. Auto-open loads only in a Direct frame and never opens a port in
   the Remote gate: only the owner's own navigation does (amendment 2).
 
-- **`sound`** (BR-10): WSLg audio for daemon-owned Remote Chrome only. **Off**
-  by default; each live engine reports its applied state separately.
+- **`sound`** (BR-10): master permission for owner speaker buttons, **allowed** by default.
+  Each instance still starts muted; explicit memory-only owner gestures enable it.
 
-A missing, unreadable or malformed file, or a value that is not a boolean,
-reads as the default. Later packages add their switches here, and a
+A missing file or omitted key reads as the default. Sound master permission
+fails closed for unreadable/malformed files and non-boolean values; repairing
+such a file through another setting keeps sound off. Other switches retain
+their existing defaults. Later packages add their switches here, and a
 write keeps every key it does not change — one a later package added
 included.
 
@@ -62,7 +64,10 @@ import time
 
 LOG = logging.getLogger(__name__)
 
-DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": False}
+DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": True}
+FAIL_CLOSED_KEYS = frozenset({"sound"})
+_UNKNOWN = object()
+_UNREADABLE = object()
 FILE_CAP = 64 * 1024
 RECHECK_S = 1.0
 
@@ -72,8 +77,10 @@ def _stamp(path: Path):
     when it is not there (or cannot be looked at)."""
     try:
         st = os.stat(path, follow_symlinks=False)
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _UNREADABLE
     return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode
 
 
@@ -115,7 +122,7 @@ def _read(path: Path) -> dict | None:
 
 
 def _values(raw: dict) -> dict[str, bool]:
-    return {key: raw[key] if isinstance(raw.get(key), bool) else default
+    return {key: raw[key] if isinstance(raw.get(key), bool) else (False if key in FAIL_CLOSED_KEYS and key in raw else default)
             for key, default in DEFAULTS.items()}
 
 
@@ -147,7 +154,7 @@ class BrowserSettings:
         self._clock = clock
         self._path: Path | None = None
         self._values = dict(DEFAULTS)
-        self._stamp = None
+        self._stamp = _UNKNOWN
         self._checked = float("-inf")
         if path is not None:
             self.attach(path)
@@ -161,18 +168,20 @@ class BrowserSettings:
         with self._lock:
             self._path = Path(path).expanduser()
             self._values = dict(DEFAULTS)
-            self._stamp = None
+            self._stamp = _UNKNOWN
             self._refresh()
 
     def _refresh(self) -> None:
         """The caller holds `_lock`."""
         self._checked = self._clock()
         stamp = _stamp(self._path)
-        if stamp == self._stamp:
+        if stamp is not _UNREADABLE and stamp == self._stamp:
             return
         self._stamp = stamp
-        raw = _read(self._path) if stamp is not None else None
+        raw = _read(self._path) if stamp is not None and stamp is not _UNREADABLE else None
         self._values = _values(raw or {})
+        if stamp is not None and raw is None:
+            self._values.update({key: False for key in FAIL_CLOSED_KEYS})
 
     def value(self, key: str) -> bool:
         """One switch, as the file says it now. Cheap — memory, and a `stat`
@@ -208,7 +217,11 @@ class BrowserSettings:
             if self._path is None:
                 self._values.update(changes)
                 return dict(self._values)
-            payload = dict(_read(self._path) or {})
+            raw = _read(self._path)
+            payload = dict(raw or {})
+            if raw is None and _stamp(self._path) is not None:
+                # Repairing malformed state must not enable an omitted safety switch.
+                payload.update({key: False for key in FAIL_CLOSED_KEYS})
             payload.update(changes)
             _write(self._path, payload)
             self._values = _values(payload)

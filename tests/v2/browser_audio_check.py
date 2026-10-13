@@ -68,7 +68,7 @@ class Settings(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "settings.json"
             settings = S.BrowserSettings(path)
-            self.assertFalse(settings.value("sound")); self.assertFalse(path.exists())
+            self.assertTrue(settings.value("sound")); self.assertFalse(path.exists())
             path.write_text(json.dumps({"future": {"x": True}, "sound": "true", "lan": True}))
             self.assertFalse(S.BrowserSettings(path).value("sound"))
             self.assertTrue(settings.update(sound=True)["sound"])
