@@ -287,6 +287,8 @@ class Real(O.OwnerBrowser):
         self.tab=self.host._tabs[row["tab_id"]];self.pg=self.tab.page
         self.run_on(self.pg.wait_for_load_state("load"))
         self.snap=snapshot(tab_id=self.tab.id,view_id=self.tab.id,ctx=self.tab.ctx,url=self.url,page_identity=self.tab.page_identity,document_generation=self.tab.document_generation)
+        self.instance_generation=self.host.pane_tab(self.tab.id)["instance_generation"]
+        self.assertIs(type(self.instance_generation),int)
         self.valid=True
         original_registry=self.daemon.browser_panes
         self.addCleanup(setattr,self.daemon,"browser_panes",original_registry)
@@ -294,7 +296,8 @@ class Real(O.OwnerBrowser):
             still_current=lambda snap:self.valid and snap==self.snap and self.pg.url==self.url
                 and (snap.mode=="direct" or self.host.pane_tab(snap.tab_id)==dict(
                     tab_id=snap.tab_id,profile=snap.profile,ctx=snap.ctx,url=snap.url,
-                    page_identity=snap.page_identity,document_generation=snap.document_generation)))
+                    page_identity=snap.page_identity,document_generation=snap.document_generation,
+                    instance_generation=self.instance_generation)))
         self.service=self.daemon.browser_look
         self.desk={"present":True,"images":True}
         self.scope=runtime.turn_scope(desk=self.desk);self.scope.__enter__();self.addCleanup(self.scope.__exit__,None,None,None)
