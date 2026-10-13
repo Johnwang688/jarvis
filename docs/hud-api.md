@@ -2695,3 +2695,12 @@ lease, binding, visibility, permissions and cached host page/document generation
 it rejects see-off. Same-URL reload and same-document navigation invalidate a
 Remote snapshot without waiting for a HUD heartbeat. Host cache reads are safe
 on the browser event-loop thread; no registry lock is held across CDP/network.
+
+
+`POST /browser/tabs/<id>/restore` is an owner-only lazy restore with exact
+`{url}`. It uses the ordinary URL/card checks with `owner=False`, so it never
+creates a loopback gate lease. The HUD creates a blank tab only when a stored
+persistent Remote tab is first drawn, then calls restore; an existing live
+handle reattaches without navigation. A refused local restore stays visibly
+failed until an actual owner address submission. Ended Private sessions never
+replay stored URLs (Private storage contains none).

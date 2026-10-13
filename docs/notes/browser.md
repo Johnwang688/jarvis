@@ -1022,3 +1022,9 @@ and stale navigation preserve it. Cached host document identities invalidate
 same-URL reloads before the next report. Snapshot URL/source stay memory-only;
 `browser_viewed` carries only a host-issued view ID, timestamp and refusal flag.
 This registry commit does not yet supply Remote UI or a browser-reading tool.
+
+## Current Remote restore and landing replacement (BR3b, 2026-10-13)
+
+Stored persistent Remote tabs allocate a blank tab and use the owner-only `POST /browser/tabs/<id>/restore {url}` route. It calls `navigate(owner=False)`: restoring state cannot open the shared local-server gate. A live stored handle reattaches without navigation; expired Private state never replays a saved URL. Actual address entry continues through the pane registry transaction and may open the ordinary owner navigation lease.
+
+The landing guard captures the offending document generation when scheduling its explanation. The queued replacement takes the same per-profile lifecycle lock as owner navigation, checks the original tab/generation before navigating, then checks tab/generation/about:blank again before setting explanation content. It cannot blank a newer owner document or write into a page closed during replacement. This is scheduled work; callers never await it while holding the same lock.
