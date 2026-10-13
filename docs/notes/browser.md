@@ -1116,3 +1116,9 @@ page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
 background tasks, workflows, subagents or default session tools. This backend
 package does not establish the pending BR3b UI or BR6 session/MCP interface,
 real account authentication, a live-provider call or deployment verification.
+
+## Current Remote restore and landing replacement (BR3b, 2026-10-13)
+
+Stored persistent Remote tabs allocate a blank tab and use the owner-only `POST /browser/tabs/<id>/restore {url}` route. It calls `navigate(owner=False)`: restoring state cannot open the shared local-server gate. A live stored handle reattaches without navigation; expired Private state never replays a saved URL. Actual address entry continues through the pane registry transaction and may open the ordinary owner navigation lease.
+
+The landing guard captures the offending document generation when scheduling its explanation. The queued replacement takes the same per-profile lifecycle lock as owner navigation, checks the original tab/generation before navigating, then checks tab/generation/about:blank again before setting explanation content. It cannot blank a newer owner document or write into a page closed during replacement. This is scheduled work; callers never await it while holding the same lock.

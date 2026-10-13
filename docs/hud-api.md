@@ -2771,3 +2771,11 @@ pending claims/arbitrations and queued window placements. claim, renew and
 placed refuse with 409 {error, code: "off"} while disabled; dismiss remains
 an explicit owner action. ON does not revive an old placement response.
 No automatic opening calls browser manager or navigation routes.
+
+`POST /browser/tabs/<id>/restore` is an owner-only lazy restore with exact
+`{url}`. It uses the ordinary URL/card checks with `owner=False`, so it never
+creates a loopback gate lease. The HUD creates a blank tab only when a stored
+persistent Remote tab is first drawn, then calls restore; an existing live
+handle reattaches without navigation. A refused local restore stays visibly
+failed until an actual owner address submission. Ended Private sessions never
+replay stored URLs (Private storage contains none).
