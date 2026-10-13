@@ -1991,6 +1991,7 @@ export default function App() {
   const projectGone = useCallback(
     (id: string, how: "archived" | "deleted") => {
       if (!id) return;
+      if (how === "deleted") buffers.projectDeleted(id);
       const at = live.current;
       const name = at.projects.find((p) => p.id === id)?.name || "the project";
       forgetLastProject(id);
