@@ -778,8 +778,9 @@ export default function App() {
         // one anywhere (review of PR #47).
         const back = conversation();
         const { ws } = layoutNow.current;
-        const closed = !ws.order.includes(pane) && !ws.kept.includes(pane);
-        const parkKey = !threadId && back === null ? (closed ? ORPHAN_DRAFT : `compose:${pane}`) : null;
+        const draftPane = back ?? pane;
+        const closed = !inWorkspace(ws, draftPane);
+        const parkKey = !threadId ? (closed ? ORPHAN_DRAFT : `compose:${draftPane}`) : null;
         const went = giveBack(threadId, text, attachments, back, parkKey, compose?.projectId ?? null);
         // Held for a thread no drawn pane shows (a first send that failed at
         // `/send` after its pane closed): said, naming the thread, so the
@@ -794,7 +795,7 @@ export default function App() {
         const error = `Could not send: ${e.message}`
           + (went === "parked"
             ? (closed ? " — what you wrote is kept for the next new thread you start."
-              : " — what you wrote is kept for the next new thread in this pane.")
+              : " — what you wrote is kept until this pane shows a new thread again.")
             : went === "held" && threadId
               ? ` — what you wrote waits with ${named(threadId)}: it is back in the box when you open that thread.`
               : "");
@@ -2069,6 +2070,26 @@ export default function App() {
       }
     }
   }, [booted, emptyChatPanes, chatPatch]);
+
+  // Failed first sends can return while their compose row is hidden. Take
+  // them up only when that same row is actually drawn; its identity is checked
+  // again by the reducer, and duplicate effects cannot consume it twice.
+  const parkedCompose = (settingsOpen ? [] : view.fit.panes).filter(n => {
+    const c = state.chats[n];
+    return view.ws.panes[n - 1].view === "chat" && !c.threadId && c.compose?.id
+      && !c.compose.openedId && state.drafts[`compose:${n}`];
+  }).map(n => `${n}:${state.chats[n].compose!.id}`).join("|");
+  useEffect(() => {
+    if (!parkedCompose) return;
+    for (const n of chatsOnScreen()) {
+      const c = live.current.chats[n];
+      if (c.compose?.id && !c.threadId && !c.compose.openedId && live.current.drafts[`compose:${n}`]) {
+        dispatch({ type: "restore_compose", pane: n, composeId: c.compose.id });
+      }
+    }
+    // The primitive key changes only for a drawn row with parked words.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parkedCompose, dispatch]);
 
   // A thread's transcript is loaded when a pane opens it, so switching redraws
   // from the saved conversation rather than from whatever is on screen. A
@@ -3608,7 +3629,7 @@ export default function App() {
                 });
                 // A new project starts as a new thread in it.
                 newThread(created.id);
-                if (channelNote) patch({ error: channelNote });
+                if (channelNote) dispatch({ type: "notice", text: channelNote });
               })
           }
           taken={projectNamesTaken(state.projects, null, state.archivedNames)}
