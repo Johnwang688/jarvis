@@ -523,6 +523,31 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 #orbdock.mini { left: 2px; bottom: 8px; transform: scale(0.2424); transform-origin: left bottom; }
 #orbdock.mini .st, #orbdock.mini #micstrip, #orbdock.tight #micstrip { display: none; }
 
+/* Jarvis's voice (components/SpeechStrip): pause, skip, stop and a line, above
+   the mic strip. Not in the layout until there is speech to control, so the
+   sidebar gives it its room only then (`.speech-on`). */
+#orbdock { --micstrip-h: 40px; }
+#orbdock.tight { --micstrip-h: 0px; }
+#speechstrip {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + var(--micstrip-h) + 6px);
+  display: flex; flex-direction: column; gap: 3px; align-items: stretch;
+}
+#speechstrip .note {
+  font: 9px var(--mono); letter-spacing: 0.06em; color: var(--text-muted); text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;
+}
+#speechstrip[data-state="playing"] .note { color: var(--accent); }
+#speechstrip .btns { display: flex; justify-content: center; }
+#speechstrip button {
+  padding: 2px 0; width: 36px; border-radius: 0; margin-left: -1px; font: 11px var(--mono);
+}
+#speechstrip button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
+#speechstrip button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+#speechstrip.compact { position: fixed; left: 2px; bottom: 72px; width: 32px; display: block; z-index: 40; }
+#speechstrip.compact button { width: 32px; height: 20px; padding: 0; border-radius: var(--radius); margin: 0; }
+#shell.speech-on #sidebar { padding-bottom: 224px; }
+#shell.mic-tight.speech-on #sidebar { padding-bottom: 180px; }
+
 /* Folded: the mode as one small button above the mini orb (a red OFF when muted). */
 #modecycle {
   position: fixed; left: 2px; bottom: 48px; width: 32px; height: 20px; z-index: 40; padding: 0;

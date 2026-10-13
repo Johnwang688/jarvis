@@ -1,8 +1,6 @@
-// The owner's open questions, as the plan's recommended answers (V6).
-//
-// Each is one named constant or one small function here, so an answer that
-// differs is a one-line change with its test beside it. They are listed under
-// "Pending owner confirmation" in the V6 pull request.
+// The owner's decisions on the voice plan's questions 9, 11 and 15 (answered
+// 2026-10-13, docs/plans/2026-10-13-voice-rework.md §7), each one named
+// constant or small function here with its test beside it.
 
 import { shownThread, type Chats } from "../chats";
 import type { PaneNo } from "../workspace";

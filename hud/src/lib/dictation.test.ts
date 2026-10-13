@@ -83,6 +83,23 @@ describe("dictation mode", () => {
     expect(orbLine({ mode: "off", approvals: 2, orb: "approval" })).toBe("ANSWER THE AUTHORIZATION");
   });
 
+  it("says when Jarvis is speaking, over a turn's status but never over the mic's or a card's", () => {
+    const talking = { state: "playing" as const, label: "Fix the build" };
+    expect(orbLine({ mode: "review", approvals: 0, orb: "idle", speech: talking })).toBe("SPEAKING · Fix the build");
+    // Mid-task updates are read while the turn runs.
+    expect(orbLine({ status: "RESPONDING", mode: "auto", approvals: 0, orb: "thinking", speech: talking })).toBe("SPEAKING · Fix the build");
+    expect(orbLine({ status: "RUNNING · bash", mode: "auto", approvals: 0, orb: "tool", speech: talking })).toBe("SPEAKING · Fix the build");
+    expect(orbLine({ mode: "review", approvals: 0, orb: "idle", speech: { state: "paused" } })).toBe("SPEECH PAUSED");
+    // The microphone's own lines and a pending card still win.
+    for (const status of ["LISTENING · SPEAK NOW", "TRANSCRIBING", "STT FAILED", "DIDN'T CATCH THAT"]) {
+      expect(orbLine({ status, mode: "auto", approvals: 0, orb: "listening", speech: talking })).toBe(status);
+    }
+    expect(orbLine({ mode: "review", approvals: 1, orb: "approval", speech: talking })).toBe("ANSWER THE AUTHORIZATION");
+    // Idle speech says nothing; and a muted mic is not mistaken for muted speech.
+    expect(orbLine({ mode: "off", approvals: 0, orb: "idle", speech: { state: "idle" } })).toBe("MIC MUTED");
+    expect(orbLine({ mode: "off", approvals: 0, orb: "idle", speech: talking })).not.toMatch(/MUTED/);
+  });
+
   it("cycles OFF → REVIEW → AUTO → OFF, so unmuting never lands on AUTO", () => {
     expect(nextMode("off")).toBe("review");
     expect(nextMode("review")).toBe("auto");

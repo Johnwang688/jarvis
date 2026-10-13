@@ -801,3 +801,29 @@ false holds, WASM Silero/RNNoise/KWS CPU, local Parakeet RTF/WER and speaker
 EER. Synthetic diagnostics checks establish none of those measurements.
 This package does not change wake recognition, add speech playback, alter
 approvals, retain retry clips, add continuation, or claim a live deployment.
+
+## V6: streaming speech core (2026-10-13)
+
+Design §12.2 listed "TTS speculation" as carried over; it was not (v1's
+`_sentences`/`_stable_chunks`/`_Speculator` stayed in `jarvis/face/server.py`
+and nothing in the v2 HUD called `/say`). V6 ports the splitter to
+`hud/src/lib/speech/split.ts` and holds it to v1's answers with recorded
+vectors (`tests/face/speech_vectors_check.py --write` regenerates
+`vectors.json`; the check fails when the Python and the file drift). Unlike
+v1, speech starts while the model writes (decision V-3).
+
+Pieces (`hud/src/lib/speech/`): `prose.ts` (streaming markdown filter: fences,
+unfenced diffs, indented code, tables, `[...]` diagnostics, inline code, paths,
+URLs, hashes; independent of where deltas fall), `stream.ts` (filter + splitter
+per message, `text` remainder rule, 1200-character stopgap until V8's summary),
+`queue.ts` (one item at a time, prefetch 2, stale/pane drops, `PlayOrder` seam
+for V7), `player.ts` (Web Audio; `<audio>` is out, CSP `media-src 'self'`
+excludes `blob:`), `speaker.ts` (Web Lock `jarvis-speech`, focus steals),
+`controller.ts`, `policy.ts` (the owner's answers to Q9/Q11/Q15 as constants).
+
+`/say` refuses a voice not in `catalog()` (400) and `local_only` never reaches
+`llm.speech` (503 on a local failure). The mic's OFF no longer posts `/mute`.
+While a chunk plays the capture detector stays suppressed, as v1 did (self-voice
+gating is V9). Not done: multi-pane shared queue and per-thread voices (V7),
+summaries (V8), barge-in and spoken commands (V9), the follow-up window opening
+when speech ends (V3/V5), and any physical speaker or Windows-audio acceptance.

@@ -25,7 +25,7 @@ import { ProseStream, type SpokenChunk } from "./stream";
 export interface SpeechEventLike {
   kind?: string;
   thread_id?: string;
-  data?: { text?: string; stop?: string } | undefined;
+  data?: { text?: string; stop?: string; [key: string]: unknown } | undefined;
   text?: string;
   stop?: string;
 }

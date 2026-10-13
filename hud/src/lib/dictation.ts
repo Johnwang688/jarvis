@@ -69,12 +69,28 @@ export function outcomeFor(mode: DictationMode): UtteranceOutcome {
  * to speak, or silence, and a muted mic must never look like it is listening
  * (nor a live one look muted).
  */
-export function orbLine(p: { status?: string; mode: DictationMode; approvals: number; orb: string }): string {
+export function orbLine(p: {
+  status?: string; mode: DictationMode; approvals: number; orb: string;
+  /** Jarvis's own voice (V6): playing or paused, and whose chat. */
+  speech?: { state: "idle" | "playing" | "paused"; label?: string };
+}): string {
+  // Speech says itself over a *turn's* status (RESPONDING, RUNNING ...): mid-task
+  // updates are read while the turn runs. It never covers what the mic is doing
+  // (LISTENING, TRANSCRIBING, STT FAILED ...) nor a pending authorization.
+  const speaking = p.speech && p.speech.state !== "idle" && p.approvals === 0
+    && (!p.status || TURN_STATUS.test(p.status));
+  if (speaking) {
+    const where = p.speech!.label ? ` · ${p.speech!.label}` : "";
+    return p.speech!.state === "paused" ? `SPEECH PAUSED${where}` : `SPEAKING${where}`;
+  }
   if (p.status) return p.status;
   if (p.approvals > 0) return "ANSWER THE AUTHORIZATION";
   if (isMuted(p.mode)) return "MIC MUTED";
   return p.orb === "idle" ? "" : p.orb;
 }
+
+/** The statuses a turn writes (store `chatPatch`): not the microphone's. */
+const TURN_STATUS = /^(?:RESPONDING|THINKING|SENDING|RUNNING\b)/;
 
 /** The folded sidebar's one mode button cycles OFF → REVIEW → AUTO → OFF: one
  * click from muted never lands on a mic that sends on its own (the reasoning
