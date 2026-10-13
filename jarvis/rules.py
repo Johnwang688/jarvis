@@ -46,6 +46,8 @@ the same reasoning that freezes permissions.py and the approval broker.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 import re
 import shlex
@@ -468,8 +470,14 @@ _INLINE_CODE_FLAGS = {"-c", "-e", "--eval", "--command", "-"}
 # The comment above says allowing the stem must not allow the language; without
 # this, one deleted space allowed the language.
 _INLINE_ATTACHED = ("-c", "-e")
-_INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "php",
-                 "sh", "bash", "zsh", "ksh", "dash"}
+# Every shell this module knows by name — the one list (delta review of PR
+# #75, M-B): `_INTERPRETERS`, the inline-source tables, the vex walk
+# (`_SHELL_STEMS`) and `protected_state._SHELLS` read it. Each runs the
+# string after `-c` (fish's `--command`, nu's `--commands` too).
+SHELLS = frozenset({"sh", "bash", "rbash", "dash", "zsh", "ksh", "ksh93", "lksh", "oksh", "mksh",
+                    "posh", "ash", "sash", "yash", "fish", "csh", "tcsh", "nu", "xonsh",
+                    "elvish", "ion", "osh", "ysh"})
+_INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "php"} | SHELLS
 
 _URL = re.compile(r"https?://[^\s'\"|;&)]+")
 
@@ -924,7 +932,9 @@ def command_targets(command: str) -> list[tuple[str, str]]:
         return []
     targets: list[tuple[str, str]] = []
     for segment in segments(command):
-        tokens = _unwrap(_tokens(segment))
+        # A segment whose program cannot be told (`unwrap_sure`) is covered by
+        # nothing: `env -u python3 rm …` is not the `python3` it looked like.
+        tokens = unwrap_sure(_tokens(segment))
         if not tokens:
             return []
         targets.append((_basename(tokens[0]), tokens[0]))
@@ -957,21 +967,129 @@ def _unwrap(tokens: list[str]) -> list[str]:
 
     `FOO=1 nohup timeout 5 python -c '…'` has to be judged as the python run it
     is, not as an assignment, a nohup or a timeout. Bounded so a pathological
-    line cannot loop.
+    line cannot loop. Where an option the table does not know leaves more
+    than one reading, this is the first; `unwrap_sure` says when there is
+    only one.
     """
-    for _ in range(5):
-        while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
-            tokens = tokens[1:]
+    return _unwrap_reading(tokens)[0]
+
+
+def unwrap_sure(tokens: list[str], peeled: list | None = None,
+                writes: list | None = None) -> list[str] | None:
+    """`unwrap`, or None when which program runs cannot be told: an option the
+    table does not know may or may not take the next word, `env -S` splits
+    past its bound, or the wrappers nest past `PROGRAM_DEPTH`. `run_readonly`
+    runs nothing it cannot tell, and `command_targets` covers nothing.
+    `peeled`, when given, receives the stem of each wrapper taken off;
+    `writes`, the files those wrappers write themselves (`time -o FILE`)."""
+    tokens, sure = _unwrap_reading(list(tokens), peeled, writes)
+    return tokens if sure else None
+
+
+# A shell assignment word: `NAME=VALUE`, `NAME+=VALUE` or `NAME[i]=VALUE`,
+# ASCII names only (bash runs `Xé=1` as a command). **The one pattern every
+# reader of a segment's first word strips** (third delta review of PR #75,
+# HIGH: the gate-state detector kept `X=1` in front of `time -o FILE`, read
+# `X=1` as the program, and so never saw the wrapper's own output file — a
+# write onto the allowlist ran unasked behind an `ls` entry). `unwrap` had
+# its own narrower copy, which missed `+=` and `[i]=`.
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=.*", re.S)
+_ASSIGNMENT = ASSIGNMENT
+_ASSIGNMENT_PARTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[([^\]]*)\])?(\+?)=(.*)", re.S)
+
+
+def assignment(word: str) -> tuple[str, str | None, bool, str] | None:
+    """(name, subscript or None, whether it appends, value) of an assignment
+    word (`ASSIGNMENT`), or None for any other word."""
+    match = _ASSIGNMENT_PARTS.fullmatch(word)
+    if match is None:
+        return None
+    name, subscript, plus, value = match.groups()
+    return name, subscript, bool(plus), value
+
+
+def strip_assignments(words: list[str]) -> list[str]:
+    """The words from the first that is not a leading assignment: `X=1 A="x
+    y" time -o F ls` runs `time`. Every place that reads a command's first
+    word strips them with this, and only this (`command_start` too)."""
+    words = list(words)
+    k = 0
+    while k < len(words) and ASSIGNMENT.fullmatch(words[k]):
+        k += 1
+    return words[k:]
+
+
+def command_start(words: list[str], *, assignments: bool = True) -> list[str]:
+    """A segment's words from its program on: the shell's words that may
+    stand before a command and are not it — the reserved words that open a
+    compound command or a pipeline (`then`, `do`, `else`, `!`, `{`, `(`,
+    `coproc`: `_LEAD_WORDS`), a `case … in` and its pattern (`a)`, `(a|b)`),
+    a function's header (`f()`, `function f`), parens glued to the program —
+    and, with `assignments`, the `NAME=VALUE` words (`strip_assignments`).
+    `for`/`select` are left in front: their words are a list, not a program,
+    and each caller judges that. One function for the gate-state detector,
+    the owner-op detector and the vex reading (third delta review of PR #75:
+    `if true; then time -o <allowlist> ls; fi` hid the wrapper behind
+    `then` from the gate-state detector)."""
+    words = list(words)
+    while words:
+        word = words[0]
+        if word in _LEAD_WORDS or word.endswith("()") or (
+                assignments and ASSIGNMENT.fullmatch(word)):
+            words.pop(0)
+        elif word == "case":
+            words = words[words.index("in") + 1:] if "in" in words else []
+        elif word == "function":
+            words = words[2:]
+        elif word.startswith("(") and len(word) > 1:
+            words[0] = _cut(word, len(word) - len(word.lstrip("(")))
+            if not words[0]:
+                words.pop(0)
+        elif len(words) > 1 and word.endswith(")") and word.count(")") > word.count("("):
+            words.pop(0)                    # a `case` pattern
+        else:
+            break
+    return words
+
+
+def _unwrap_reading(tokens: list[str], peeled: list | None = None,
+                    writes: list | None = None) -> tuple[list[str], bool]:
+    """(the command inside its wrappers, whether it is the only reading).
+
+    **The wrappers' options are read from the one table** (`_WRAPPER_OPTS`,
+    through `starts`; review of PR #75, HIGH 3). This used to drop every word
+    that looked like an option or a duration and take what was left, so the
+    value of an option that takes one became the program: `env -u ls rm -rf
+    build` was `ls`, which `run_readonly` — ungated, held by workflows and
+    sub-agents — then ran as a read, and `env -u python3 rm …` was covered by
+    a `python3` allowlist entry. Same for `env -C`/`-a`, `exec -a`, `xargs
+    -a` and `time -f`."""
+    tokens = list(tokens)
+    sure = True
+    for _ in range(PROGRAM_DEPTH + 2):
+        tokens = strip_assignments(tokens)
         if not tokens or _basename(tokens[0]) not in _WRAPPERS:
-            return tokens
-        rest = tokens[1:]
-        # Drop the wrapper's own flags and bare durations (`timeout 5 …`).
-        while rest and (rest[0].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", rest[0])):
-            rest = rest[1:]
-        if not rest:
-            return tokens
-        tokens = rest
-    return tokens
+            return tokens, sure
+        stem = _basename(tokens[0])
+        if stem == "command" and any(t.startswith("-") and set(t[1:]) & {"v", "V"}
+                                     for t in tokens[1:2]):
+            # `command -v x` looks x up and runs nothing; judged as x, as ever.
+            rest = [t for t in tokens[1:] if not t.startswith("-")]
+            return (rest or tokens), sure
+        try:
+            started = starts(tokens)
+        except _TooComplex:
+            return tokens, False
+        if started is not None and writes is not None:
+            writes.extend(started.writes)
+        if started is None or not started.programs:
+            return tokens, sure and not (started and started.strings)
+        if not started.sure:
+            sure = False
+        if peeled is not None:
+            peeled.append(stem)
+        tokens = list(started.programs[0])
+    return tokens, False
 
 
 def _stem(tokens: list[str]) -> str:
@@ -1031,15 +1149,26 @@ class Hazard:
     """Why a reader, in this form, is not a read.
 
     `reason` completes a sentence that starts with the program's name.
-    `writes` lists files it will write when they can only be read out of a
-    script (a sed `w` command's file is inside one shlex token, invisible to
-    anything that looks at operands). `runs` means the line carries text the
+    `writes` lists the files it will write — out of a script (a sed `w`
+    command's file is inside one shlex token, invisible to anything that
+    looks at operands), an option's value (`sort -o FILE`) or an operand by
+    position (`uniq IN OUT`). `operands`: it writes every operand it is given
+    (`sed -i`, `find -delete`). `runs` means the line carries text the
     program executes, so a gate file named in it is treated like inline
     interpreter source.
+
+    **Only those are certain writes** (2026-10-12, PR #24's follow-up 1):
+    `protected_state` used to read any hazard as a certain write of every
+    operand, so a hazard that only runs something (`grep --pager`, `rg
+    --pre`, `find -exec`), writes some other file (`less --save-marks`,
+    ugrep's `.ugrep`), or was matched by an abbreviation another grep reads
+    differently (`--p`, `--q`, `--con=`) made a gate file it merely reads a
+    DENY. Those are uncertain now: asked, never refused unasked.
     """
     reason: str
     writes: tuple[str, ...] = ()
     runs: bool = False
+    operands: bool = False
 
 
 @dataclass(frozen=True)
@@ -1066,8 +1195,16 @@ class _Getopt:
     max_operands: int | None = None      # uniq/xxd: an operand past this many is written
     operand_danger: Callable[[str], bool] | None = None
     operand_reason: str = ""
+    # Dangerous options whose value is the file written (`sort -o FILE`): a
+    # letter, or a long name abbreviated to three letters or more (a shorter
+    # one may be another of the program's options: a hazard, not a certain write).
+    writes_value: frozenset = frozenset()
 
-    def __call__(self, args: list[str]) -> str:
+    def __call__(self, args: list[str]) -> "str | Hazard":
+        # Every danger on the line, not the first (review of PR #75, HIGH 2:
+        # `sort --compress-program=gzip -o <allowlist> f` stopped at the
+        # program and never saw the write).
+        found: list = []
         operands: list[str] = []
         i, ended = 0, False
         while i < len(args):
@@ -1080,17 +1217,37 @@ class _Getopt:
                 ended = True
                 continue
             if token.startswith("--"):
-                name, eq, _ = token[2:].partition("=")
+                name, eq, value = token[2:].partition("=")
+                hit = False
                 for long, why in self.danger_longs.items():
                     if name and long.startswith(name):
-                        return why
-                if name in self.arg_longs and not eq:
+                        hit = True
+                        if long in self.writes_value and len(name) >= 3:
+                            if not eq:
+                                value = args[i] if i < len(args) else ""
+                                i += 1
+                            found.append(Hazard(why, writes=(value,) if value else ()))
+                        else:
+                            found.append(why)
+                        break
+                if not hit and name in self.arg_longs and not eq:
                     i += 1
                 continue
             letters = token[1:]
             for k, letter in enumerate(letters):
                 if letter in self.danger_shorts:
-                    return self.danger_shorts[letter]
+                    if letter in self.writes_value:
+                        value = "" if self.whole_cluster else letters[k + 1:]
+                        if not value:
+                            value = args[i] if i < len(args) else ""
+                            i += 1
+                        found.append(Hazard(self.danger_shorts[letter],
+                                            writes=(value,) if value else ()))
+                        if self.whole_cluster:
+                            continue
+                        break
+                    found.append(self.danger_shorts[letter])
+                    continue
                 if letter in self.optional_shorts:
                     break
                 if letter in self.arg_shorts:
@@ -1101,10 +1258,28 @@ class _Getopt:
                         i += 1
                     break
         if self.operand_danger is not None and any(self.operand_danger(o) for o in operands):
-            return self.operand_reason
+            found.append(self.operand_reason)
         if self.max_operands is not None and len(operands) > self.max_operands:
-            return self.operand_reason
+            found.append(Hazard(self.operand_reason, writes=tuple(operands[self.max_operands:])))
+        return _merged(found)
+
+
+def _merged(found: list) -> "str | Hazard":
+    """Every hazard a reader's words carry, kept together (review of PR #75,
+    HIGH 2): the readers returned the first danger they met, so an option
+    that only runs something, read before a real write, hid the write and
+    turned a DENY into an ASK. Its operands are written if any hazard says
+    so, every file named as written is kept, it runs if any runs, and the
+    reason is the strongest one's. One hazard comes back as it was."""
+    found = [f for f in found if f]
+    if not found:
         return ""
+    if len(found) == 1:
+        return found[0]
+    hazards = [f if isinstance(f, Hazard) else Hazard(f) for f in found]
+    lead = max(hazards, key=lambda h: (h.operands, bool(h.writes), h.runs))
+    return Hazard(lead.reason, writes=tuple(dict.fromkeys(w for h in hazards for w in h.writes)),
+                  runs=any(h.runs for h in hazards), operands=any(h.operands for h in hazards))
 
 
 # GNU findutils 4.10 and bfs 4.1.1 together. bfs adds `-rm`, an alias of
@@ -1120,10 +1295,26 @@ _FIND_HAZARDS = {
 }
 
 
-def _find_hazard(args: list[str]) -> str:
+def _find_hazard(args: list[str]) -> str | Hazard:
     """find's predicates are whole words: `-executable` (a test of the mode
-    bits) is not `-exec`, which the old prefix match made it."""
-    return next((_FIND_HAZARDS[t] for t in args if t in _FIND_HAZARDS), "")
+    bits) is not `-exec`, which the old prefix match made it. `-delete`
+    removes what it is given; `-fprint FILE` and its kin write FILE; `-exec`
+    and `-ok` run a program, which writes nothing provable by itself (what
+    the program does with `{}` is `protected_state`'s to judge). Every
+    predicate counts, not the first (review of PR #75, HIGH 2: `find <G>
+    -exec cat {} + -delete` was only "runs a program")."""
+    found: list = []
+    for k, token in enumerate(args):
+        why = _FIND_HAZARDS.get(token)
+        if why is None:
+            continue
+        if token in ("-delete", "-rm"):
+            found.append(Hazard(why, operands=True))
+        elif token.startswith("-f"):
+            found.append(Hazard(why, writes=tuple(args[k + 1:k + 2])))
+        else:
+            found.append(why)
+    return _merged(found)
 
 
 # grep is GNU grep 3.12 on PATH and ugrep 7.8.4 in Claude Code's shell; GNU
@@ -1153,6 +1344,9 @@ _GREP_VALUE_SHORTS = "ABCDdefm"
 
 
 def _grep_hazard(args: list[str]) -> str | Hazard:
+    # Every danger, not the first (review of PR #75, HIGH 2: `--pager=less
+    # --save-config=<G>` was only "runs a program").
+    found: list = []
     i = 0
     while i < len(args):
         token = args[i]
@@ -1160,33 +1354,42 @@ def _grep_hazard(args: list[str]) -> str | Hazard:
         if token == "--":
             break
         if token.startswith("---"):          # ugrep's short spelling of --config
-            return _GREP_DANGER["config"]
+            found.append(_GREP_DANGER["config"])
+            continue
         if token.startswith("--"):
             name, eq, value = token[2:].partition("=")
             for long, why in _GREP_DANGER.items():
                 if name and long.startswith(name):
-                    if long == "save-config":
-                        return Hazard(why, writes=(value if eq and value else ".ugrep",))
-                    return why
+                    # `--s` may be `--silent`; from `--sa` on it is only this.
+                    if long == "save-config" and name.startswith("sa"):
+                        found.append(Hazard(why, writes=(value if eq and value else ".ugrep",)))
+                    else:
+                        found.append(why)
+                    break
             continue
         if token.startswith("-") and len(token) > 1:
             letters = token[1:]
             for k, letter in enumerate(letters):
                 if letter == "Q":
-                    return "-Q starts a screen whose view command runs a program"
+                    found.append("-Q starts a screen whose view command runs a program")
+                    continue
                 if letter in _GREP_VALUE_SHORTS:
                     if k == len(letters) - 1:
                         i += 1
                     break
-    return ""
+    return _merged(found)
 
 
 def _ug_hazard(args: list[str]) -> str | Hazard:
     """`ug` is ugrep that loads `.ugrep` from the working or home directory on
-    its own — options from a file, filter included — unless told not to."""
-    if "--no-config" in args:
+    its own — options from a file, filter included — unless told not to. A
+    `--no-config` after `--` is a pattern or a file name, not the option
+    (PR #24's follow-up 3)."""
+    options = args[:args.index("--")] if "--" in args else args
+    if "--no-config" in options:
         return _grep_hazard(args)
-    return _grep_hazard(args) or "loads a .ugrep configuration file, which can name a filter command"
+    return _merged([_grep_hazard(args),
+                    "loads a .ugrep configuration file, which can name a filter command"])
 
 
 # ripgrep runs a program of the caller's choosing over every file it searches
@@ -1203,34 +1406,49 @@ def _rg_hazard(args: list[str]) -> str:
                  if t.split("=", 1)[0] in _RG_HAZARDS), "")
 
 
-def _less_hazard(args: list[str]) -> str:
+def _less_hazard(args: list[str]) -> str | Hazard:
     """less writes a log file (`-o`/`-O`/`--log-file`/`--LOG-FILE`), loads key
     files that can set LESSOPEN — a program run on every file (`-k`,
     `--lesskey-*`) — and runs its own commands at start-up (`+cmd`). Its
     clusters are not modelled letter by letter: any of those letters anywhere
     in a short option counts, which can only add a refusal. `--save-marks`
-    (less 668) writes its history file."""
-    for token in args:
+    (less 668) writes its history file. Only a log file named plainly
+    (`-o FILE`, `-OFILE`, `--log-file=FILE`) is a certain write of that file;
+    the rest write elsewhere, run something, or may be read otherwise."""
+    found: list = []         # every one, not the first (review of PR #75, HIGH 2)
+    for k, token in enumerate(args):
         if token == "--":
             break
         if token.startswith("+"):
-            return "+ runs less commands at start-up"
+            found.append("+ runs less commands at start-up")
+            continue
         if token.startswith("--"):
-            name = token[2:].split("=", 1)[0]
+            name, eq, value = token[2:].partition("=")
             for long in ("log-file", "LOG-FILE", "lesskey-file", "lesskey-src",
                          "lesskey-content", "save-marks"):
                 if name and long.startswith(name):
-                    return f"--{long} writes a file or loads key bindings"
+                    why = f"--{long} writes a file or loads key bindings"
+                    if long in ("log-file", "LOG-FILE") and len(name) >= 3:
+                        value = value if eq else (args[k + 1] if k + 1 < len(args) else "")
+                        found.append(Hazard(why, writes=(value,) if value else ()))
+                    else:
+                        found.append(why)
+                    break
         elif token.startswith("-") and any(c in token[1:] for c in "oOk"):
-            return "-o/-O write a log file and -k loads key bindings"
-    return ""
+            why = "-o/-O write a log file and -k loads key bindings"
+            if token[1:2] in ("o", "O"):
+                value = token[2:] or (args[k + 1] if k + 1 < len(args) else "")
+                found.append(Hazard(why, writes=(value,) if value else ()))
+            else:
+                found.append(why)
+    return _merged(found)
 
 
 _XXD_VALUE_WORDS = {"c": "cols", "g": "groupsize", "l": "len", "n": "name",
                     "o": "offset", "s": "seek", "R": "R"}
 
 
-def _xxd_hazard(args: list[str]) -> str:
+def _xxd_hazard(args: list[str]) -> str | Hazard:
     """`xxd [options] [infile [outfile]]`: a second operand is written. xxd's
     options are single-dash words (`-c8`, `-c 8`, `-cols 8`), so a value is
     the next word when the option is spelled whole or as a prefix of its long
@@ -1249,7 +1467,9 @@ def _xxd_hazard(args: list[str]) -> str:
         word = _XXD_VALUE_WORDS.get(token[1:2])
         if word is not None and (len(token) == 2 or word.startswith(token[1:])):
             i += 1
-    return "writes its second operand, the output file" if len(operands) > 1 else ""
+    if len(operands) > 1:
+        return Hazard("writes its second operand, the output file", writes=(operands[1],))
+    return ""
 
 
 def _bat_hazard(args: list[str]) -> str:
@@ -1364,31 +1584,34 @@ def _sed_hazard(args: list[str]) -> str | Hazard:
                 break
             if letter not in _SED_FLAGS:
                 return Hazard(_SED_UNSURE)
-    if in_place:
-        return Hazard("-i edits files in place")
+    # `-i` and the script's own writes together (review of PR #75, LOW 3:
+    # `sed -i 'w <G>' notes.txt` returned at `-i`, and the `w` file was lost).
+    edits = Hazard("-i edits files in place", operands=True) if in_place else ""
     if from_file and file_unboxed:
-        return Hazard("-f runs a script file this check cannot read")
+        return _merged([edits, Hazard("-f runs a script file this check cannot read")])
     if not scripts and not from_file:
         if not operands:
-            return ""
+            return edits
         scripts = [(operands[0], sandbox)]
     # GNU sed joins its -e fragments with newlines into one program, so they
     # are scanned joined: `-e 'a\\' -e 'text'` is one append.
     text = "\n".join(script for script, boxed in scripts if not boxed)
     if not text:
-        return ""
+        return edits
     writes, reads, runs, parsed = _sed_script(text)
     if runs:
-        return Hazard("script runs a command (an e command or the e flag of s)",
-                      tuple(writes), runs=True)
+        return _merged([edits, Hazard("script runs a command (an e command or the e flag of s)",
+                                      tuple(writes), runs=True)])
     if writes:
-        return Hazard("script writes a file (a w or W command, or the w flag of s)",
-                      tuple(writes))
+        return _merged([edits, Hazard("script writes a file (a w or W command, or the w flag "
+                                      "of s)", tuple(writes))])
     if reads:
-        return Hazard("script reads a file that is not an operand (an r or R command)")
+        return _merged([edits, Hazard("script reads a file that is not an operand (an r or R "
+                                      "command)")])
     if not parsed:
-        return Hazard("script could not be fully parsed, so it is not provably a read")
-    return ""
+        return _merged([edits, Hazard("script could not be fully parsed, so it is not provably "
+                                      "a read")])
+    return edits
 
 
 def _sed_until(script: str, i: int, delim: str, regex: bool = False) -> int | None:
@@ -1648,7 +1871,8 @@ READER_HAZARDS: dict[str, Callable[[list[str]], "str | Hazard"]] = {
         arg_longs=frozenset({"key", "field-separator", "buffer-size", "temporary-directory",
                              "batch-size", "files0-from", "parallel", "random-source", "sort"}),
         danger_longs={"output": "--output writes its output to a file",
-                      "compress-program": "--compress-program runs a program"}),
+                      "compress-program": "--compress-program runs a program"},
+        writes_value=frozenset({"o", "output"})),
     "uniq": _Getopt(
         arg_shorts="fsw", optional_shorts="D",
         arg_longs=frozenset({"skip-fields", "skip-chars", "check-chars"}),
@@ -1672,13 +1896,15 @@ READER_HAZARDS: dict[str, Callable[[list[str]], "str | Hazard"]] = {
         danger_shorts={"o": "-o writes its output to a file",
                        "R": "-R writes a 00Tree.html into every directory"},
         arg_longs=frozenset({"filelimit", "timefmt", "charset", "sort", "hintro",
-                             "houtro", "infofile"})),
+                             "houtro", "infofile"}),
+        writes_value=frozenset({"o"})),
     "ss": _Getopt(
         arg_shorts="fANF",
         danger_shorts={"D": "-D writes raw socket data to a file", "K": "-K closes sockets"},
         arg_longs=frozenset({"family", "query", "socket", "net", "filter", "bpf-map-id"}),
         danger_longs={"diag": "--diag writes raw socket data to a file",
-                      "kill": "--kill closes sockets"}),
+                      "kill": "--kill closes sockets"},
+        writes_value=frozenset({"D", "diag"})),
     "hostname": _Getopt(
         danger_shorts={"F": "-F sets the host name from a file", "b": "-b sets the host name"},
         danger_longs={"file": "--file sets the host name from a file",
@@ -1779,12 +2005,12 @@ def writes_anyway(tokens: list[str]) -> str:
 # argument (`deno eval …`). python and node are auto-ALLOW stems, so each of
 # those was arbitrary code with nobody asked.
 _INLINE_LETTERS = {"python": "c", "python3": "c", "node": "ep", "bun": "ep",
-                   "perl": "eE", "ruby": "e", "php": "r",
-                   "sh": "c", "bash": "c", "zsh": "c", "ksh": "c", "dash": "c"}
+                   "perl": "eE", "ruby": "e", "php": "r", **{s: "c" for s in SHELLS}}
 # Letters that take a value end a cluster: `python -mcProfile` names a module.
 _VALUE_LETTERS = {"python": "mWXQ", "python3": "mWXQ", "node": "rC", "bun": "r",
-                  "sh": "oO", "bash": "oO", "zsh": "oO", "ksh": "oO", "dash": "oO"}
-_INLINE_LONGS = {"node": ("eval", "print"), "bun": ("eval", "print")}
+                  **{s: "oO" for s in SHELLS}}
+_INLINE_LONGS = {"node": ("eval", "print"), "bun": ("eval", "print"),
+                 "fish": ("command",), "nu": ("commands",)}
 _INLINE_SUBCOMMANDS = {"deno": frozenset({"eval", "repl"}), "bun": frozenset({"repl"})}
 # Given no program, these read one from standard input — a pipe, a here-string
 # or a here-document is inline source by another route (`… | python3`).
@@ -1904,6 +2130,77 @@ class _TooComplex(Exception):
     """Past a cap: the line is too complex to judge."""
 
 
+TooComplex = _TooComplex      # what `protected_state` and v2 catch
+STARTS_READINGS = 32       # places a wrapper's or runner's program may stand, per call
+
+
+# --- the work budget for what wrappers and runners start (review of PR #75) ---
+#
+# An option the table does not know is followed both ways, so each one
+# doubles where a program may stand, and every reading is judged again,
+# runners inside runners: `npx --x ` forty times before a command took 7.5 s
+# in `decide` and 17 s in `command_touch`, sixty times 52 s and 139 s —
+# synchronously, inside dispatch and v2's permit. `PROGRAM_DEPTH` bounded the
+# depth, not the work. So every reader of the table charges **one budget per
+# line** (`work_scope`; nested scopes share the outermost, so `decide`'s owner
+# ops and body backstop spend the same one), readings already judged are not
+# judged again (`_Work.memo`), and past the budget or any cap the answer is
+# **too complex to judge**: asked, never allowed, never covered by an
+# allowlist entry (`runners_unsure`), always-ask in v2.
+WORK_CAP = 20_000          # words a line's wrappers and runners may make the readers scan
+RUNNERS_TOO_COMPLEX = ("what its wrappers and runners start is too complex to judge (past the "
+                       "work budget or a nesting cap), so it is asked, and no allowlist entry "
+                       "covers it")
+NUL_TOO_COMPLEX = ("the line holds a NUL byte, which no shell can be handed: too complex to "
+                   "judge, so it is asked, and no allowlist entry covers it")
+
+
+@dataclass
+class _Work:
+    left: int
+    exhausted: str | None = None
+    memo: dict = field(default_factory=dict)       # `_judge_words` per reading
+    cache: dict = field(default_factory=dict)      # protected_state: names resolved, judged
+
+
+_WORK: contextvars.ContextVar = contextvars.ContextVar("jarvis_rules_work", default=None)
+
+
+@contextlib.contextmanager
+def work_scope(*, fresh: bool = False):
+    """The line's work budget: the outermost scope makes it and nested ones
+    share it (`fresh` always makes one)."""
+    work = None if fresh else _WORK.get()
+    if work is not None:
+        yield work
+        return
+    work = _Work(WORK_CAP)
+    token = _WORK.set(work)
+    try:
+        yield work
+    finally:
+        _WORK.reset(token)
+
+
+def charge(units: int) -> None:
+    """Spend `units` of the line's budget; past it, `TooComplex` (and the
+    scope remembers why, so the line is asked)."""
+    work = _WORK.get()
+    if work is None:
+        return
+    work.left -= max(units, 1)
+    if work.left < 0:
+        work.exhausted = work.exhausted or RUNNERS_TOO_COMPLEX
+        raise _TooComplex
+
+
+def exhaust(reason: str = RUNNERS_TOO_COMPLEX) -> None:
+    """A reader past one of its own caps: the line is too complex to judge."""
+    work = _WORK.get()
+    if work is not None:
+        work.exhausted = work.exhausted or reason
+
+
 @dataclass(frozen=True)
 class _Opts:
     """A wrapper's or runner's options, as far as finding its program goes."""
@@ -1919,23 +2216,41 @@ class _Opts:
     assignments: bool = False           # NAME=VALUE words before the program (env)
     dash: bool = False                  # a lone `-` is an option (env)
     program: bool = True                # False: no operand is a program (script)
+    # Options whose value is a file the wrapper itself writes (`time -o FILE`,
+    # `script -O FILE`; review of PR #75's delta review, H-B), short letters
+    # and long names alike; `operand_writes`: its first operand is one
+    # (`script FILE`); `property_writes`: options whose `KEY=VALUE` value may
+    # point standard output or error at a file (`systemd-run -p
+    # StandardOutput=file:PATH`).
+    writes: frozenset = frozenset()
+    operand_writes: bool = False
+    property_writes: frozenset = frozenset()
 
 
 def _opts(flags="", values="", optional="", lflags="", lvalues="", strings="", module="",
-          shell="", positionals=0, assignments=False, dash=False, program=True) -> _Opts:
+          shell="", positionals=0, assignments=False, dash=False, program=True, writes="",
+          operand_writes=False, property_writes="") -> _Opts:
     return _Opts(flags, values, optional, frozenset(lflags.split()), frozenset(lvalues.split()),
                  frozenset(strings.split()), frozenset(module.split()), frozenset(shell.split()),
-                 positionals, assignments, dash, program)
+                 positionals, assignments, dash, program, frozenset(writes.split()),
+                 operand_writes, frozenset(property_writes.split()))
 
 
-# Wrappers: run their operand as a program (`_WRAPPERS` above unwraps the same
-# idea for every other verdict, without reading options; this table is for
-# the vex reading alone).
+# Wrappers: run their operand as a program. **This table and `_RUNNER_SPECS`
+# below are the one table of what runs another program** (2026-10-12): the
+# vex reading (`_Walk`), `decide` (`_judge_started`), the owner-op detector
+# (`protected_state._peel_runner`), the gate-state write detector and v2's
+# always-ask stems all read them through `starts()`. `_WRAPPERS` above is
+# still the naive peel `unwrap` does for the allowlist's stems and
+# `run_readonly`, whose meanings are their own; `decide` judges both readings
+# and the worse wins, so the table can only add a refusal there.
 _WRAPPER_OPTS = {
-    "env": _opts("i0v", "uCS", lflags="ignore-environment null debug list-signal-handling help "
-                 "version block-signal default-signal ignore-signal",
-                 lvalues="unset chdir split-string", assignments=True, dash=True),
+    # uutils env 0.8.0 (`env --help`): -u, -C, -S, -a and -f take a value.
+    "env": _opts("i0vhV", "uCSaf", lflags="ignore-environment null debug list-signal-handling "
+                 "help version block-signal default-signal ignore-signal",
+                 lvalues="unset chdir split-string argv0 file", assignments=True, dash=True),
     "nohup": _opts(lflags="help version"),
+    "chronic": _opts("evh"),
     "timeout": _opts("v", "sk", lflags="preserve-status foreground verbose help version",
                      lvalues="signal kill-after", positionals=1),
     "setsid": _opts("cfw", lflags="ctty fork wait help version"),
@@ -1945,8 +2260,9 @@ _WRAPPER_OPTS = {
                     lvalues="class classdata pid pgid uid"),
     "command": _opts("p"),
     "exec": _opts("cl", "a"),
+    # GNU time 1.9: `-o FILE`/`--output=FILE` writes FILE (with `-a`, appends).
     "time": _opts("pavq", "fo", lflags="portability verbose quiet append help version",
-                  lvalues="format output"),
+                  lvalues="format output", writes="o output"),
     "xargs": _opts("0prtxo", "adEILnPs", optional="eil",
                    lflags="null interactive no-run-if-empty verbose exit open-tty show-limits "
                    "help version eof replace max-lines",
@@ -1962,14 +2278,41 @@ _WRAPPER_OPTS = {
                          lvalues="unit property description slice service-type uid gid nice "
                          "working-directory setenv host machine on-active on-boot on-startup "
                          "on-unit-active on-unit-inactive on-calendar timer-property "
-                         "path-property socket-property json expand-environment"),
+                         "path-property socket-property json expand-environment",
+                         property_writes="p property socket-property timer-property "
+                         "path-property"),
     "flock": _opts("sxeunoFhV", "wEc", lflags="shared exclusive unlock nonblock nb close no-fork "
                    "verbose help version", lvalues="timeout wait conflict-exit-code command",
                    strings="c command", positionals=1),
+    # util-linux script 2.41: its file operand (default `typescript`), `-I`,
+    # `-O`, `-B`, `-T` and their long names, and `-t[FILE]`/`--timing=FILE`
+    # each write a log file.
     "script": _opts("aefqhV", "cEIOBTmo", optional="t", lflags="append return flush quiet help "
-                    "version", lvalues="command echo log-in log-out log-io log-timing "
-                    "logging-format output-limit", strings="c command", program=False),
+                    "version force timing", lvalues="command echo log-in log-out log-io "
+                    "log-timing logging-format output-limit", strings="c command", program=False,
+                    writes="I O B T t log-in log-out log-io log-timing timing",
+                    operand_writes=True),
 }
+# The rest of this table writes no file it is told of (the audit of review of
+# PR #75's delta review, H-B, from each tool's own `--help`): env's `-f FILE`
+# and xargs' `-a FILE` read; stdbuf's `-o MODE` is a buffering mode; nohup
+# writes only `nohup.out` (in the working folder or HOME, when its output is a
+# terminal) — a fixed name, never a gate file; flock opens its lock file
+# read-only (`O_RDONLY|O_CREAT`): it may create an empty one, never write or
+# truncate it. The runners' options name folders they cache into
+# (`--cache-dir`) or files they read (`--config-file`, `--env-file`,
+# `--userconfig`); none writes a file it names.
+
+_STD_FILE = re.compile(r"Standard(?:Output|Error)=(?:file|append|truncate):(.+)", re.S)
+# A unit property that holds a command line: `ExecStart=`, `ExecStartPre=`,
+# `ExecStartPost=`, `ExecCondition=`, `ExecReload=`, `ExecStop=`,
+# `ExecStopPost=` and their `…Ex=` forms (third delta review of PR #75, LOW
+# 2: `systemd-run -p ExecStartPost=<a command> true` ran a command line no
+# reader looked at). Every `Exec…=` property is read so — `ExecSearchPath=`
+# and `ExecPaths=` change which program runs or what it may reach — which
+# can only ask or refuse. systemd's own prefixes (`@`, `-`, `:`, `+`, `!`,
+# `|`) are taken off the command.
+_EXEC_PROPERTY = re.compile(r"\s*Exec[A-Za-z]*=(.*)", re.S)
 
 _UV_FLAGS = ("quiet verbose native-tls offline no-cache no-progress no-config preview no-preview "
              "managed-python no-managed-python no-python-downloads show-settings help version")
@@ -2029,6 +2372,20 @@ _BUN_RUN = _opts("bh", "Fcrdl", lflags="silent bun watch hot no-clear-screen smo
                  "loader port conditions elide-lines")
 _STRING = "string"          # the subcommand's next word is a command line (`bun exec`)
 
+_NPM_SPEC = (_NPM, {"exec": _NPM, "x": _NPM})
+_PNPM_SPEC = (_PNPM, {"exec": _PNPM_EXEC, "dlx": _PNPM_DLX})
+_YARN_DLX = _opts("q", "p", lflags="quiet", lvalues="package")
+# yarn runs a program through `exec` and `dlx`, and through them inside a
+# workspace: `yarn workspace <name> exec …` and `yarn workspaces foreach
+# [options] exec …` (yarn 4's `--help`; review of PR #75, MED 2).
+_YARN_FOREACH = _opts("ARWvpitn", "j", lflags="all recursive worktree verbose parallel "
+                      "interlaced topological topological-dev no-private dry-run help",
+                      lvalues="from jobs include exclude")
+_YARN_SPEC = (_opts("h", lvalues="cwd", lflags="help"),
+              {"exec": _opts(), "dlx": _YARN_DLX,
+               "workspace": (_opts(positionals=1), {"exec": _opts(), "dlx": _YARN_DLX}),
+               "workspaces": (_PLAIN, {"foreach": (_YARN_FOREACH, {"exec": _opts()})})})
+
 # Runners: a stem's own program table, or (its options before a subcommand,
 # {subcommand: what follows}). A subcommand not listed starts no program —
 # `uv pip`, `npm run` (a package.json script by that name, not a program).
@@ -2038,32 +2395,65 @@ _RUNNER_SPECS = {
     "poetry": (_POETRY, {"run": _POETRY}),
     "pipx": (_PIPX, {"run": _PIPX_RUN}),
     "pdm": (_PDM, {"run": _PDM_RUN}),
+    "rye": (_PLAIN, {"run": _opts("lvqh", lflags="list verbose quiet help",
+                                  lvalues="pyproject")}),
     "hatch": (_HATCH, {"run": _PLAIN}),
     "pixi": (_PLAIN, {"run": _PIXI_RUN, "exec": _PIXI_EXEC}),
     "conda": (_PLAIN, {"run": _CONDA_RUN}),
     "mamba": (_PLAIN, {"run": _CONDA_RUN}),
     "micromamba": (_PLAIN, {"run": _CONDA_RUN}),
     "bun": (_PLAIN, {"run": _BUN_RUN, "x": _BUNX, "exec": _STRING}),
-    "npm": (_NPM, {"exec": _NPM, "x": _NPM}),
-    "pnpm": (_PNPM, {"exec": _PNPM_EXEC, "dlx": _PNPM_DLX}),
-    "yarn": (_opts("h", lvalues="cwd", lflags="help"),
-             {"exec": _opts(), "dlx": _opts("q", "p", lflags="quiet", lvalues="package")}),
+    "npm": _NPM_SPEC,
+    "pnpm": _PNPM_SPEC,
+    "yarn": _YARN_SPEC, "yarnpkg": _YARN_SPEC,
+    # corepack runs the package manager it is named (`corepack yarn@4 exec …`;
+    # review of PR #75, MED 2).
+    "corepack": (_PLAIN, {"yarn": _YARN_SPEC, "yarnpkg": _YARN_SPEC, "npm": _NPM_SPEC,
+                          "pnpm": _PNPM_SPEC, "npx": _NPX, "pnpx": _PNPM_DLX}),
 }
-_SHELL_STEMS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "posh",
-                          "fish"})
+_SHELL_STEMS = SHELLS
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 # Words that open or close a compound command rather than name a program.
 _LEAD_WORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "(",
                          "((", "coproc", "fi", "done", "esac", "}", ")", "))", ";;"})
-_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=.*", re.S)
 
 
-def _option_walk(tokens: list[str], start: int, opts: _Opts):
+def _wrote(opts: _Opts, name: str, value: str, writes: list | None, long: bool,
+           hidden: list | None = None) -> None:
+    """Record the file an option's value names, when that option writes one:
+    by name, or — for a long option this table does not know — as a unique
+    prefix of one that does (getopt_long reads `--out=F` as `--output=F`).
+    A property option's `Exec…=` value is a command line the unit runs:
+    into `hidden`."""
+    if writes is None or not name:
+        return
+
+    def named(options: frozenset) -> bool:
+        return name in options or (long and any(
+            w.startswith(name) and len(w) > 1 for w in options))
+
+    if named(opts.property_writes):
+        match = _STD_FILE.fullmatch(value.strip())
+        if match:
+            writes.append(match.group(1))
+        match = _EXEC_PROPERTY.fullmatch(value)
+        if match and hidden is not None:
+            line = match.group(1).lstrip().lstrip("@-:+!|")
+            if line.strip():
+                hidden.append(line)
+    if named(opts.writes):
+        writes.append(value)
+
+
+def _option_walk(tokens: list[str], start: int, opts: _Opts, writes: list | None = None,
+                 hidden: list | None = None):
     """(indices where the program may stand, command-line strings, whether
     the program is a module, whether the rest is one command line). An
     index of `len(tokens)` means no program. An unknown option is followed
     both ways — taking the next word, and not — so the set is every place
-    the program could be."""
+    the program could be. `writes`, when given, receives every value of an
+    option that writes a file (`_Opts.writes`), in any reading; `hidden`,
+    every command line a property option names (`Exec…=`)."""
     n = len(tokens)
     found: set[int] = set()
     strings: list[str] = []
@@ -2087,17 +2477,29 @@ def _option_walk(tokens: list[str], start: int, opts: _Opts):
             continue
         if token.startswith("--") and len(token) > 2:
             name, eq, value = token[2:].partition("=")
+            if (name not in opts.long_values and name not in opts.long_flags
+                    and (opts.writes or opts.property_writes)):
+                # getopt_long (GNU time, util-linux script, systemd-run) takes
+                # a unique prefix: `--outp F` is `--output F`, a certain write.
+                full = [w for w in opts.long_values | opts.long_flags if w.startswith(name)]
+                if len(full) == 1 and full[0] in opts.writes | opts.property_writes:
+                    name = full[0]
             module = module or name in opts.module
             shell = shell or name in opts.shell
+            following = tokens[i + 1] if i + 1 < n else ""
             if name in opts.long_values:
                 if name in opts.strings:
-                    strings.append(value if eq else (tokens[i + 1] if i + 1 < n else ""))
+                    strings.append(value if eq else following)
+                _wrote(opts, name, value if eq else following, writes, True, hidden)
                 todo.append((i + (1 if eq else 2), left))
             elif name in opts.long_flags or eq:
                 if name in opts.strings and eq:
                     strings.append(value)
+                if eq:
+                    _wrote(opts, name, value, writes, True, hidden)
                 todo.append((i + 1, left))
             else:
+                _wrote(opts, name, following, writes, True, hidden)
                 todo += [(i + 1, left), (i + 2, left)]
             continue
         if token.startswith("-") and len(token) > 1:
@@ -2109,9 +2511,13 @@ def _option_walk(tokens: list[str], start: int, opts: _Opts):
                     glued = letters[k + 1:]
                     if letter in opts.strings:
                         strings.append(glued or (tokens[i + 1] if i + 1 < n else ""))
+                    _wrote(opts, letter, glued or (tokens[i + 1] if i + 1 < n else ""), writes,
+                           False, hidden)
                     todo.append((i + (1 if glued else 2), left))
                     break
                 if letter in opts.optional:
+                    if letters[k + 1:]:
+                        _wrote(opts, letter, letters[k + 1:], writes, False, hidden)
                     todo.append((i + 1, left))
                     break
                 if letter in opts.flags:
@@ -2137,8 +2543,12 @@ def _runner_walk(tokens: list[str], spec):
     strings: list[str] = []
     module = shell = False
     places, *_ = _option_walk(tokens, 1, before)
+    if len(places) > STARTS_READINGS:
+        raise _TooComplex
     for p in places:
-        follow = subcommands.get(tokens[p]) if p < len(tokens) else None
+        # `corepack yarn@4.1.0 …` names a version with the program.
+        follow = (subcommands.get(tokens[p]) or subcommands.get(str(tokens[p]).split("@", 1)[0])
+                  if p < len(tokens) else None)
         if follow is None:
             continue
         if follow == _STRING:
@@ -2189,6 +2599,161 @@ def _env_splice(tokens: list[str]) -> list[str]:
     return out
 
 
+# ssh runs its command on another host — which may be this one — as a command
+# line. Read only where that matters (`starts(remote=True)`: the owner-op
+# detector, for `ssh localhost jarvis restart`); `decide` already asks every
+# ssh, and the vex reading sees vexcom by name anywhere on the line.
+_REMOTE_OPTS = {
+    "ssh": _opts("46AaCfGgKkMNnqsTtVvXxYy", "BbcDEeFIiJLlmOoPpQRSWw", positionals=1),
+}
+
+
+@dataclass(frozen=True)
+class Started:
+    """What a wrapper or a runner at the front of a command starts (`starts`).
+
+    `programs` holds one word list per reading of where the program stands —
+    more than one when an option the table does not know may or may not take
+    the next word (`sure` is False then) — and `joined` says each is one
+    command line, not a program (`watch` without `-x`, pnpm's shell mode,
+    ssh's remote command). `strings` are command lines an option carries
+    (`npm exec -c`/`--call`, `bun exec`, `flock -c`, `script -c`).
+    `appends`: its input is added as more arguments (xargs). `module`: the
+    program is a Python module (`uv run -m`). `open_end`: one reading leaves
+    it no program at all (an unknown option took the last word). `writes`:
+    files the wrapper itself writes (`time -o FILE`, `script FILE`,
+    `systemd-run -p StandardOutput=file:FILE`) — `writes_certain` is False
+    when an option this table does not know leaves the parse in doubt.
+    `hidden`: those of `strings` a unit property holds (`systemd-run -p
+    ExecStartPost=CMD`), judged as lines and never auto-approved."""
+    programs: tuple = ()
+    strings: tuple = ()
+    joined: bool = False
+    module: bool = False
+    appends: bool = False
+    open_end: bool = False
+    writes: tuple = ()
+    writes_certain: bool = True
+    hidden: tuple = ()
+
+    @property
+    def sure(self) -> bool:
+        return len(self.programs) <= 1
+
+
+def starts(tokens: list[str], *, remote: bool = False) -> Started | None:
+    """What `tokens[0]`, a wrapper or a runner from the one table, starts —
+    or None when it is neither. A `Started` with no programs and no strings
+    starts nothing: `uv pip install`, `npm run build` (a package.json script,
+    not a program), `command -v x` (a lookup). Raises `_TooComplex` past
+    `env -S`'s bound (`_env_splice`), or when an option the table does not
+    know leaves more than `STARTS_READINGS` places the program may stand.
+    Leading assignments are not the program (`strip_assignments`)."""
+    tokens = strip_assignments(tokens)
+    if not tokens:
+        return None
+    stem = _basename(tokens[0])
+    if stem in _WRAPPER_OPTS or (remote and stem in _REMOTE_OPTS):
+        tokens = list(tokens)
+        opts = _WRAPPER_OPTS.get(stem) or _REMOTE_OPTS[stem]
+        if stem == "command" and any(t.startswith("-") and set(t[1:]) & {"v", "V"}
+                                     for t in tokens[1:2]):
+            return Started()                    # `command -v x` looks x up
+        if stem == "env":
+            tokens = _env_splice(tokens)
+        writes: list[str] = []
+        hidden: list[str] = []
+        places, strings, _module, _shell = _option_walk(tokens, 1, opts, writes, hidden)
+        strings += hidden
+        if len(places) > STARTS_READINGS or len(strings) > STARTS_READINGS:
+            raise _TooComplex
+        hidden_lines = tuple(dict.fromkeys(hidden))
+        if opts.operand_writes:
+            writes += [tokens[p] for p in sorted(places) if p < len(tokens)]
+        writes_certain = len(places) <= 1
+        if not opts.program:
+            return Started(strings=tuple(strings), writes=tuple(dict.fromkeys(writes)),
+                           writes_certain=writes_certain, hidden=hidden_lines)
+        joined = stem in _REMOTE_OPTS or (
+            stem == "watch" and not any(t in ("-x", "--exec") for t in tokens[1:]))
+        return Started(tuple(tuple(tokens[p:]) for p in sorted(places) if p < len(tokens)),
+                       tuple(strings), joined=joined, appends=stem == "xargs",
+                       open_end=len(tokens) in places, writes=tuple(dict.fromkeys(writes)),
+                       writes_certain=writes_certain, hidden=hidden_lines)
+    spec = _RUNNER_SPECS.get(stem)
+    if spec is None:
+        return None
+    tokens = list(tokens)
+    places, strings, module, shell = _runner_walk(tokens, spec)
+    if len(places) > STARTS_READINGS or len(strings) > STARTS_READINGS:
+        raise _TooComplex
+    return Started(tuple(tuple(tokens[p:]) for p in sorted(places) if p < len(tokens)),
+                   tuple(strings), joined=shell, module=module, open_end=len(tokens) in places)
+
+
+def takes_value(stem: str, token: str) -> bool:
+    """Whether `token`, an option of the wrapper `stem`, takes the next word
+    as its value — from the one table (`_WRAPPER_OPTS`), so `protected_state`
+    keeps no second copy of, say, env's `-u NAME`."""
+    opts = _WRAPPER_OPTS.get(stem)
+    if opts is None or not token.startswith("-") or token == "-":
+        return False
+    if token.startswith("--"):
+        name, eq, _ = token[2:].partition("=")
+        return not eq and name in opts.long_values
+    letters = token[1:]
+    for k, letter in enumerate(letters):
+        if letter in opts.values:
+            return k == len(letters) - 1
+        if letter not in opts.flags:
+            return False
+    return False
+
+
+def started_commands(segment: str) -> list[list[str]]:
+    """The words of every program the wrappers and runners at the front of
+    one segment start — through one another, every reading, and through the
+    command lines they hand a shell — each as `unwrap` leaves it. What v2's
+    always-ask rules read beside the segment's own words: `npx vercel --prod`
+    is a `vercel --prod`, `uv run git push --force` a `git push --force`.
+    [] when it starts nothing. Bounded by the line's work budget, each
+    reading walked once; past the budget, `PROGRAM_DEPTH` or `PROGRAM_CAP`
+    it raises `TooComplex` — the caller asks (review of PR #75)."""
+    out: list[list[str]] = []
+    seen: set = set()
+
+    def walk(words: list[str], depth: int) -> None:
+        # From the program on: `then npx vercel --prod` starts vercel too.
+        words = command_start(words)
+        if not words or tuple(words) in seen:
+            return
+        seen.add(tuple(words))
+        if _basename(words[0]) not in _WRAPPER_OPTS and _basename(words[0]) not in _RUNNER_SPECS:
+            return
+        if depth > PROGRAM_DEPTH or len(out) >= PROGRAM_CAP:
+            raise _TooComplex
+        charge(len(words))
+        started = starts(words)
+        if started is None:
+            return
+        if started.joined:
+            lines = list(started.strings) + [" ".join(p) for p in started.programs]
+            programs: list[list[str]] = []
+        else:
+            lines, programs = list(started.strings), [list(p) for p in started.programs]
+        for line in lines:
+            programs += [_tokens(strip_redirections(s)) for s in segments(join_continuations(line))]
+        for program in programs:
+            inner = _unwrap(list(program))
+            if inner:
+                out.append(inner)
+                walk(program, depth + 1)
+
+    with work_scope():
+        walk(_tokens(strip_redirections(segment)), 0)
+    return out
+
+
 def _shell_command(tokens: list[str]) -> tuple[list[str], bool]:
     """(the command string a shell runs, whether it reads its commands from
     standard input). The `c` is found in a cluster (`bash -lc`); `-o`/`-O`
@@ -2207,7 +2772,7 @@ def _shell_command(tokens: list[str]) -> tuple[list[str], bool]:
             break
         if token.startswith("--"):
             name, eq, value = token[2:].partition("=")
-            if name == "command":
+            if name in ("command", "commands"):         # fish; nu
                 return ([value] if eq else tokens[i:i + 1]), False
             if name in ("rcfile", "init-file", "init-command") and not eq:
                 i += 1
@@ -2790,23 +3355,9 @@ def _command_words(tokens: list[str]) -> list[str]:
     """A segment's words from the program on: compound-command keywords,
     `(`, a function's name, a `case` pattern and assignments cut off the
     front, and the `)`/`}` that close a group cut off the end."""
-    tokens = list(tokens)
-    while tokens:
-        word = tokens[0]
-        if word in _LEAD_WORDS or word.endswith("()") or _ASSIGNMENT.fullmatch(word):
-            tokens.pop(0)
-        elif word in ("for", "select"):
-            return []                       # the words of `for x in …` are not run
-        elif word == "case":
-            tokens = tokens[tokens.index("in") + 1:] if "in" in tokens else []
-        elif word == "function":
-            tokens = tokens[2:]
-        elif word.startswith("(") and len(word) > 1:
-            tokens[0] = _cut(word, len(word) - len(word.lstrip("(")))
-        elif len(tokens) > 1 and word.endswith(")") and word.count(")") > word.count("("):
-            tokens.pop(0)                   # a `case` pattern
-        else:
-            break
+    tokens = command_start(tokens)
+    if tokens and tokens[0] in ("for", "select"):
+        return []                           # the words of `for x in …` are not run
     tokens = [t for t in tokens if t not in (")", "}", "))", ";;")]
     if tokens:
         last = tokens[-1]
@@ -2838,6 +3389,8 @@ class _Walk:
         self.spent = 0
         self.bodies: list[str] = []     # every here-document body set aside, for the backstop
         self.flagged: list[str] = []    # a here-document reading flagged unsure
+        self.seen: set = set()          # readings already walked
+        self.words = 0                  # words of readings walked (`WORK_CAP`)
 
     def _spend(self, depth: int) -> None:
         self.spent += 1
@@ -2856,6 +3409,13 @@ class _Walk:
             self.segment(_shell_words(strip_redirections(segment)), certain, depth, here=here)
 
     def segment(self, tokens, certain, depth, via_input=False, here=(), replace=None) -> None:
+        # A reading reached again (an option the table does not know offers
+        # the same tail more than once) is not walked again.
+        key = (tuple((str(t), getattr(t, "active", None)) for t in tokens), certain, depth,
+               via_input, tuple(here), replace)
+        if key in self.seen:
+            return
+        self.seen.add(key)
         self._spend(depth)
         tokens = _command_words(tokens)
         if not tokens:
@@ -2867,8 +3427,8 @@ class _Walk:
         stem = _basename(word)
         if _PYTHON.fullmatch(stem) and _module_run(args):
             self.modules = True
-        if stem in _WRAPPER_OPTS:
-            self._wrapper(stem, tokens, certain, depth, via_input, replace, here)
+        if stem in _WRAPPER_OPTS or stem in _RUNNER_SPECS:
+            self._started(stem, tokens, certain, depth, via_input, replace, here)
         elif stem in _SHELL_STEMS:
             strings, stdin = _shell_command(tokens)
             for text in strings + ([_unquoted(w) for w in here] if stdin else []):
@@ -2886,47 +3446,49 @@ class _Walk:
                                  replace="{}")
                     i = j
                 i += 1
-        elif stem in _RUNNER_SPECS:
-            places, strings, module, shell = _runner_walk(tokens, _RUNNER_SPECS[stem])
-            for text in strings:
-                self.line(text, certain, depth + 1)
-            programs = sorted(p for p in places if p < len(tokens))
-            sure = certain and len(programs) == 1
-            for p in programs:
-                if module and _VEX_MODULE.fullmatch(tokens[p]):
-                    self.modules = True
-                if shell:
-                    self.line(" ".join(tokens[p:]), sure, depth + 1)
-                self.segment(tokens[p:], sure, depth, via_input=via_input, here=here)
 
-    def _wrapper(self, stem, tokens, certain, depth, via_input, replace, here=()) -> None:
-        opts = _WRAPPER_OPTS[stem]
-        if stem == "command" and any(t.startswith("-") and set(t[1:]) & {"v", "V"}
-                                     for t in tokens[1:2]):
-            return                              # `command -v x` looks x up
-        if stem == "env":
-            tokens = _env_splice(tokens)
-        places, strings, _module, _shell = _option_walk(tokens, 1, opts)
-        for text in strings:
-            self.line(text, certain, depth + 1)
-        if not opts.program:
+    def _started(self, stem, tokens, certain, depth, via_input, replace, here=()) -> None:
+        """A wrapper or a runner: what it starts, from the one table (`starts`)."""
+        started = starts(tokens)
+        if started is None:
             return
+        for text in started.strings:
+            self.line(text, certain, depth + 1)
         if stem == "xargs":
             replace = _xargs_replace(tokens) or replace
-        sure = certain and len(places) == 1
-        exec_mode = stem == "watch" and any(t in ("-x", "--exec") for t in tokens[1:])
-        for p in sorted(places):
-            rest = tokens[p:]
-            if stem == "xargs" and not rest:
-                continue                        # bare xargs runs echo
-            if stem == "watch" and not exec_mode:
-                if rest:
-                    self.line(" ".join(rest), sure, depth + 1)
+        elif stem not in _WRAPPER_OPTS:
+            replace = None                      # a runner's program is its own word
+        # A wrapper's reading is sure when one place is possible at all (an
+        # option that may swallow its program leaves none); a runner's, when
+        # one program is.
+        wrapper = stem in _WRAPPER_OPTS
+        sure = certain and (len(started.programs) + (wrapper and started.open_end)) == 1
+        for program in started.programs:
+            # Walking a reading costs its words; past `WORK_CAP` the line is
+            # too complex to judge (review of PR #75, HIGH 1). The walk's own
+            # budget, not the line's: the vex reading is cached per line.
+            self.words += len(program)
+            if self.words > WORK_CAP:
+                raise _TooComplex
+            program = list(program)
+            if started.module and _VEX_MODULE.fullmatch(program[0]):
+                self.modules = True
+            # One level deeper per wrapper or runner (review of PR #75, L1: the
+            # depth was passed on unchanged, so a thousand nested `npx`
+            # recursed past Python's limit and raised out of dispatch).
+            if started.joined:
+                self.line(" ".join(program), sure, depth + 1)
+                if stem in _RUNNER_SPECS:       # pnpm's shell mode also names a program
+                    self.segment(program, sure, depth + 1, via_input=via_input, here=here)
                 continue
             # Standard input flows on to the program, except through xargs,
             # which reads it as arguments.
-            self.segment(rest, sure, depth, via_input=via_input or stem == "xargs",
-                         replace=replace, here=() if stem == "xargs" else here)
+            self.segment(program, sure, depth + 1, via_input=via_input or started.appends,
+                         replace=replace, here=() if started.appends else here)
+        if wrapper and started.open_end and not started.joined and stem != "xargs":
+            # A wrapper fed its program from input (`xargs nohup`): the
+            # program is read from input, which `segment` records.
+            self.segment([], sure, depth + 1, via_input=via_input, replace=replace, here=here)
 
 
 def _unquoted(word: str) -> str:
@@ -3251,7 +3813,14 @@ def vex_uncoverable(command: str) -> str | None:
     return line.deny or line.unsure
 
 
-def _judge_segment(segment: str) -> Verdict:
+# What `_judge_plain` answers for a stem on no list at all: asked, but only for
+# being unknown. Compared by identity, never by value (`Verdict(ASK) ==
+# _UNLISTED`): a runner's program that is merely unknown keeps the runner's
+# own verdict (`_judge_started`), so `npx some-package` stays what it was.
+_UNLISTED = Verdict(ASK)
+
+
+def _judge_segment(segment: str, depth: int = 0) -> Verdict:
     raw = _tokens(segment)
     tokens = _unwrap(list(raw))
     stem = _stem(tokens)
@@ -3281,7 +3850,251 @@ def _judge_segment(segment: str) -> Verdict:
 
     # The command's own words, redirections cut out first: `uniq in.txt 2>&1`
     # has one operand, not two.
-    bare = _unwrap(_tokens(strip_redirections(segment))) if redirects else tokens
+    words = _tokens(strip_redirections(segment)) if redirects else raw
+    return _judge_words(words, redirects, raw, depth)
+
+
+def _judge_words(words: list[str], redirects: list, raw: list[str] | None,
+                 depth: int) -> Verdict:
+    """One command's words (redirections out), judged two ways, the worse
+    winning: stem by stem (`_judge_plain`, wrappers peeled by `unwrap`), and
+    by what the wrappers and runners at its front start (`_judge_started`,
+    the one table). `raw` is None for a program a runner starts: Jarvis's own
+    CLI was already looked for through every runner (`runs_jarvis`)."""
+    bare = _unwrap(list(words))
+    tokens = _unwrap(list(raw)) if raw is not None and raw is not words else bare
+    plain = _judge_plain(tokens, bare, redirects, raw)
+    if plain.decision == DENY:
+        return plain
+    started = _judge_started(words, redirects, depth)
+    if started is None:
+        return plain
+    if _ORDER[started.decision] < _ORDER[plain.decision]:
+        return started
+    if plain is _UNLISTED and started.decision == ASK:
+        return started      # asked for a reason, not only for being unknown
+    return plain
+
+
+# A runner that runs a program only known when it runs (`uv run $CC`, `npx
+# "$TOOL"`, `uv run ./bin/*`): what it starts cannot be told.
+_UNTOLD = re.compile(r"[$`*?]")
+
+
+def _judge_started(words: list[str], redirects: list, depth: int) -> Verdict | None:
+    """What the wrapper or runner at the front of `words` starts, judged —
+    or None when nothing there starts a program (`starts`).
+
+    A wrapper in `_WRAPPERS` (`env`, `nohup`, `timeout` …) is judged by
+    what it runs, its options read from the table (`env -u NAME`, `exec -a
+    NAME`, `xargs -a FILE` take a value). A runner (`uv run`, `npx`, `npm
+    exec`, `poetry run` …) keeps its own verdict — `uv` is a build tool —
+    unless what it starts is refused, or asked for a reason of its own (`rm`,
+    `git push`, `python -c`, a reader in a writing form, a writer or an
+    interpreter): then that. A program that is only unknown (`npx
+    create-vite`) asks nothing more. A command line it hands a shell (`npm
+    exec -c`, `bun exec`, pnpm's shell mode) is judged as a line, by the same
+    rule (`_line_verdict`). A program word only known when it runs, or more
+    than one place the program may stand (an option the table does not
+    know), asks rather than allows.
+
+    Bounded by the line's work budget (`charge`), with every reading judged
+    once (`_Work.memo`); past it, or past `PROGRAM_DEPTH`, the line is too
+    complex to judge (`RUNNERS_TOO_COMPLEX`)."""
+    lead = strip_assignments(words)
+    if not lead:
+        return None
+    stem = _basename(lead[0])
+    if stem not in _WRAPPER_OPTS and stem not in _RUNNER_SPECS:
+        return None
+    try:
+        charge(len(lead))
+        started = starts(lead)
+    except _TooComplex:
+        exhaust()
+        return Verdict(ASK, RUNNERS_TOO_COMPLEX)
+    if started is None or not (started.programs or started.strings):
+        return None
+    if depth >= PROGRAM_DEPTH:
+        exhaust()
+        return Verdict(ASK, RUNNERS_TOO_COMPLEX)
+    transparent = stem in _WRAPPERS
+    worst = Verdict(ALLOW)
+    work = _WORK.get()
+    # Everything a reading's verdict reads from outside its own words is in
+    # its memo key: the redirections, targets included (delta review of PR
+    # #75, H-A, where the gate detector's key missed a here-string).
+    shape = tuple((r.op, r.word) for r in redirects)
+
+    def worse(verdict: Verdict) -> None:
+        nonlocal worst
+        if _ORDER[verdict.decision] < _ORDER[worst.decision]:
+            worst = verdict
+
+    if started.writes:
+        # `time -o FILE` writes FILE, as `tee FILE` does (delta review of PR
+        # #75, H-B); the gate-state detector refuses it onto the allowlist.
+        worse(Verdict(ASK, f"{stem} writes {started.writes[0][:60]}, the file its option names"))
+    for text in started.strings:
+        verdict = _line_verdict(text, depth + 1)
+        if verdict.decision == DENY:
+            return verdict
+        if text in started.hidden:
+            # A command line a unit property holds (`-p ExecStartPost=CMD`)
+            # is asked whatever it is (third delta review of PR #75, LOW 2).
+            worse(Verdict(ASK, f"{stem} runs a command line held in a unit property: "
+                          f"{text[:60]}"))
+        if verdict.decision == ALLOW or (verdict is _UNLISTED and not transparent):
+            continue
+        worse(Verdict(ASK, f"{stem} runs a command line that asks: {verdict.reason or text[:60]}"))
+    for program in started.programs:
+        key = (program, depth + 1, shape, started.joined)
+        verdict = work.memo.get(key) if work is not None else None
+        if verdict is None:
+            try:
+                charge(len(program))        # judging a reading costs its words
+            except _TooComplex:
+                exhaust()
+                return Verdict(ASK, RUNNERS_TOO_COMPLEX)
+            if started.joined:
+                verdict = _line_verdict(" ".join(program), depth + 1)
+            else:
+                verdict = _judge_words(list(program), redirects, None, depth + 1)
+            if work is not None:
+                work.memo[key] = verdict
+        if verdict.decision == DENY:
+            return verdict
+        inner = _basename(program[0])
+        if not started.joined and _UNTOLD.search(program[0]):
+            worse(Verdict(ASK, f"the program {stem} starts ({program[0][:60]}) is only known "
+                          "when it runs"))
+        own = strip_assignments(program)
+        if not started.joined and own and not known_program(_basename(own[0])):
+            # A program no table knows, handed `-c`/`-e`/`--command STRING`,
+            # may be a shell: its string is judged as a command line (M-B).
+            for text in command_strings(own):
+                try:
+                    line = _line_verdict(text, depth + 1)
+                except _TooComplex:
+                    exhaust()
+                    return Verdict(ASK, RUNNERS_TOO_COMPLEX)
+                if line.decision == DENY:
+                    return line
+                if line.decision != ALLOW and line is not _UNLISTED:
+                    worse(Verdict(ASK, f"{inner} is handed a command line that asks: "
+                                  f"{line.reason or text[:60]}"))
+        if verdict.decision == ALLOW or (verdict is _UNLISTED and not transparent):
+            continue
+        if transparent:
+            worse(verdict)
+        else:
+            what = f"`{' '.join(program)[:60]}`" if started.joined else inner
+            worse(Verdict(ASK, f"{stem} starts {what}, which asks"
+                          + (f": {verdict.reason}" if verdict.reason else "")))
+    if not started.sure and worst.decision == ALLOW:
+        worst = Verdict(ASK, f"an option of {stem}'s that this check does not know leaves "
+                        "which program it starts unclear")
+    return worst
+
+
+def _line_verdict(text: str, depth: int) -> Verdict:
+    """A command line a runner hands a shell (`npm exec -c`, `bun exec`,
+    pnpm's shell mode, `watch`), judged as `decide` judges a line — owner
+    ops, credential env writes, substitution, every segment, worst wins —
+    except that a line asked only because its programs are unknown answers
+    `_UNLISTED`, as a runner's unknown program does: `npm exec -c 'eslint .'`
+    is the `npm` it always was, `npm exec -c 'eslint . && rm -rf dist'` asks."""
+    text = join_continuations(text)
+    whole = _general_verdict(text, depth)
+    if whole.decision != ASK or has_substitution(text):
+        return whole
+    from . import protected_state
+    if protected_state.kill_unsure(text):
+        return whole
+    for segment in segments(text):
+        verdict = _judge_segment(segment, depth)
+        if verdict.decision != ALLOW and verdict is not _UNLISTED:
+            return verdict
+        words = _unwrap(_tokens(strip_redirections(segment)))
+        if verdict is _UNLISTED and words and _UNTOLD.search(words[0]):
+            return Verdict(ASK, f"the program it runs ({words[0][:60]}) is only known when it runs")
+    return _UNLISTED
+
+
+# Programs that write what they are given, run code, or change the machine,
+# kept off the auto-approve list on purpose (MED 1 of the review of PR #75):
+# bare, each asks as an unknown stem; behind a runner, an unknown stem asks
+# nothing more, so they need a reason of their own there — `uv run tee -a
+# ~/.bashrc`, `uv run sh x.sh`, `uv run perl …`, `uv run crontab -r` and
+# `uv run powershell.exe …` were the ALLOW of `uv`. protected_state's writer,
+# shell and interpreter sets, plus these.
+_ASKS_ON_ITS_OWN = frozenset({"tee", "awk", "gawk", "mawk", "nawk", "crontab", "at", "batch",
+                              "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd",
+                              "cmd.exe", "wsl", "wsl.exe", "fish", "mksh", "ash", "yash", "csh",
+                              "tcsh"})
+
+
+def known_program(stem: str) -> bool:
+    """Whether some table here, or in `protected_state`, knows the program
+    `stem`: one this check can say what it does with its arguments."""
+    from . import protected_state
+    return (stem in _ALLOW_STEMS or stem in _NEVER_AUTO_STEMS or stem in _INTERPRETERS
+            or stem in _ASKS_ON_ITS_OWN or stem in _ESCALATION or stem in _DESTRUCTION
+            or stem in READER_HAZARDS or stem in _NO_HAZARD or stem in _WRAPPER_OPTS
+            or stem in _RUNNER_SPECS or stem in _REMOTE_OPTS or stem in _WRAPPERS
+            or stem in protected_state._WRITERS or stem in protected_state._READERS
+            or stem in protected_state._INTERPRETERS or stem in protected_state._SHELLS)
+
+
+def command_strings(tokens: list[str]) -> list[str]:
+    """The strings a program is handed with `-c`, `-e` or `--command` (or
+    `--command=…`, or glued to `-c`/`-e` when they hold a space, which no
+    cluster of flags does), `c` or `e` in a cluster of flags included (`-lc`,
+    `-ic`, `-ec`, `-xc`, `-cl`) — what a shell this check does not know by name
+    would run as a command line (delta review of PR #75, M-B: behind a
+    runner, an unknown program is judged only as unknown, so `uv run myshell
+    -c '<an owner op>'` was the ALLOW of `uv`). Read only for a program no
+    table knows (`known_program`); options end at `--`. A value that is one
+    plain word naming no program a table knows is a value, not a command
+    line (`npx prettier -c src/`, `npx webpack -c webpack.config.js`)."""
+    out: list[str] = []
+    for i, token in enumerate(tokens[1:], 1):
+        if token == "--":
+            break
+        following = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if token == "--command":
+            out.append(following)
+        elif token.startswith("--command="):
+            out.append(token.split("=", 1)[1])
+        elif token.startswith("-") and not token.startswith("--") and len(token) > 1:
+            # A short-option cluster holding `c` or `e` (third delta review of
+            # PR #75, LOW 1: `uv run mysh -lc '<an owner op>'` was the ALLOW
+            # of `uv`; a shell reads `-lc`, `-ic`, `-ec`, `-xc`, `-cl` as `-c`
+            # with flags). Read both ways a getopt program may: the rest of
+            # the cluster as its glued value, and the next word as the value
+            # (the cluster all flags).
+            letters = token[1:]
+            k = next((j for j, ch in enumerate(letters) if ch in "ce"), None)
+            if k is None or not all(ch.isascii() and ch.isalpha() for ch in letters[:k]):
+                continue
+            glued = letters[k + 1:]
+            if glued and any(ch.isspace() for ch in glued):
+                out.append(glued)
+            if all(ch.isascii() and ch.isalpha() for ch in letters) and following:
+                out.append(following)
+    return [text for text in out
+            if _COMMAND_CHARS.search(text) or known_program(_basename(text.strip()))]
+
+
+_COMMAND_CHARS = re.compile(r"[\s;|&$`<>(){}]")
+
+
+def _judge_plain(tokens: list[str], bare: list[str], redirects: list,
+                 raw: list[str] | None) -> Verdict:
+    """The stem-by-stem reading of one command, wrappers peeled by `unwrap`."""
+    stem = _stem(tokens)
+    if not stem:
+        return Verdict(ASK, "could not parse the command")
     hazard = reader_hazard(bare)
     if hazard is not None:
         return Verdict(ASK, f"{stem} {hazard.reason}, so it is not a read")
@@ -3316,7 +4129,7 @@ def _judge_segment(segment: str) -> Verdict:
     # (`auth`, `voice clone`, `discord commands --sync`, the owner ops) and
     # `python` and `uv` are on the allow list (review of PR #44 at 75f14c2).
     from . import protected_state
-    own = protected_state.runs_jarvis(raw)
+    own = protected_state.runs_jarvis(raw) if raw is not None else None
     if own:
         return Verdict(ASK, f"runs {own}; Jarvis's own commands are the owner's to run")
 
@@ -3334,7 +4147,10 @@ def _judge_segment(segment: str) -> Verdict:
         return Verdict(ASK)
     if stem in _ALLOW_STEMS:
         return Verdict(ALLOW)
-    return Verdict(ASK)
+    if (stem in _ASKS_ON_ITS_OWN or stem in protected_state._WRITERS
+            or stem in protected_state._SHELLS or stem in protected_state._INTERPRETERS):
+        return Verdict(ASK, f"{stem} writes what it is given or runs code, so it is asked")
+    return _UNLISTED
 
 
 def decide(command: str) -> Verdict:
@@ -3344,8 +4160,18 @@ def decide(command: str) -> Verdict:
     something dangerous to something benign cannot launder it.
 
     The line is judged as bash will read it: backslash-newline continuations
-    are removed first (`join_continuations`).
+    are removed first (`join_continuations`). What its wrappers and runners
+    start is judged within one work budget (`work_scope`); a line past it is
+    asked, never allowed (`RUNNERS_TOO_COMPLEX`, `runners_unsure`).
     """
+    with work_scope() as work:
+        verdict = _decide(command)
+    if work.exhausted and verdict.decision != DENY:
+        return Verdict(ASK, work.exhausted)
+    return verdict
+
+
+def _decide(command: str) -> Verdict:
     raw = command or ""
     command = join_continuations(raw)
     if not command.strip():
@@ -3360,6 +4186,17 @@ def decide(command: str) -> Verdict:
     vex = _vex_line(raw)
     if vex.deny:
         return Verdict(DENY, vex.deny)
+    if "\x00" in raw:
+        # No shell can be handed a NUL byte (the line could not run as
+        # written), and the readers that resolve paths raise on one: too
+        # complex to judge — asked, never covered by an allowlist entry
+        # (`runners_unsure`, or `vex_uncoverable` when the vex reading said
+        # so first), always-ask in v2; never a ValueError out of the gate
+        # (delta review of PR #75, LOW).
+        if vex.unsure:
+            return Verdict(ASK, vex.unsure)
+        exhaust(NUL_TOO_COMPLEX)
+        return Verdict(ASK, NUL_TOO_COMPLEX)
 
     worst = _general_verdict(command)
     # A line that may run vexcom and cannot be told, or is too complex to
@@ -3373,10 +4210,35 @@ def decide(command: str) -> Verdict:
     return worst
 
 
-def _general_verdict(command: str) -> Verdict:
+@functools.lru_cache(maxsize=256)
+def _runners_unsure_cached(command: str) -> str | None:
+    with work_scope(fresh=True) as work:
+        _decide(command)
+    return work.exhausted
+
+
+def runners_unsure(command: str) -> str | None:
+    """Why no allowlist entry, and no v2 profile, may answer for this line
+    without asking: what its wrappers and runners start is too complex to
+    judge within the line's work budget, or past a nesting cap.
+    `permissions.allows` and v2's layer 2 read it; `decide` asks it too."""
+    command = command or ""
+    if len(command) > 16384:
+        with work_scope(fresh=True) as work:
+            _decide(command)
+        return work.exhausted
+    return _runners_unsure_cached(command)
+
+
+def _general_verdict(command: str, depth: int = 0) -> Verdict:
     """`decide`'s reading with the vex reading off: the owner ops, command
     substitution and every segment, worst wins. `command` is already joined
     (`join_continuations`). The body backstop reads it too (`_body_marker`)."""
+    with work_scope():
+        return _general_reading(command, depth)
+
+
+def _general_reading(command: str, depth: int) -> Verdict:
     # The installed HUD's one writer, `jarvis hud install`, is the owner's and
     # the lead's — never Jarvis's, asked or not (decision C-1; review of PR
     # #44, MED-2: `python -m jarvis hud install` scored ALLOW here, and an
@@ -3410,7 +4272,7 @@ def _general_verdict(command: str) -> Verdict:
 
     worst = inner
     for segment in segments(command):
-        verdict = _judge_segment(segment)
+        verdict = _judge_segment(segment, depth)
         if _ORDER[verdict.decision] < _ORDER[worst.decision]:
             worst = verdict
         if worst.decision == DENY:
