@@ -84,7 +84,8 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
     s = reduce(s, { type: "op_start", pane: 2, op: { call_id: "c1", name: "grep", started: 1 } });
     expect([s.chats[1].ops.length, s.chats[2].ops.length]).toEqual([0, 1]);
     s = reduce(s, { type: "settle", pane: 2, text: "hello" });
-    expect(s.chats[2].messages.map((m) => m.text)).toEqual(["hello"]);
+    expect(s.chats[2].messages.map((m) => m.text)).toEqual(["", "hello"]);
+    expect(s.chats[2].messages[0].calls?.[0].name).toBe("grep");
     expect(s.chats[1].messages).toEqual([]);
     expect(s.chats[2].draft).toBe("");
   });
@@ -694,5 +695,98 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
     expect(reduce(s, { type: "loose", threadId: "t4", status: "THINKING" })).toBe(s);
     const opened = reduce(s, { type: "open_thread", pane: 1, threadId: "t4" });
     expect(opened.chats[1]).toMatchObject({ busy: true, turnThreadId: "t4" });
+  });
+});
+
+
+describe("tool transcript state (TC-2)", () => {
+  const at = "2026-10-13T00:00:00Z";
+  const start = (s: State, id: string, turn = "turn") => reduce(s, { type: "op_start", pane: 1,
+    op: { call_id: id, name: "Read", label: "safe", started: Date.parse(at), at, turn_id: turn } });
+  it("clears interim drafts and writes both states without leaking result/args", () => {
+    let s = withChats({ 1: { threadId: "a", loadedThread: "a", draft: "interim", busy: true } });
+    s = start(s, "1");
+    expect(s.chats[1].draft).toBe(""); expect(s.chats[1].ops).toHaveLength(1);
+    expect(s.chats[1].messages[0].calls?.[0]).toMatchObject({ label: "safe", outcome: "running" });
+    s = reduce(s, { type: "op_done", pane: 1, call_id: "1", turn_id: "turn", ok: false, outcome: "denied", summary: "SECRET RESULT", at });
+    expect(s.chats[1].messages[0].calls?.[0].outcome).toBe("denied");
+    expect(JSON.stringify(s.chats[1].messages)).not.toContain("SECRET RESULT");
+  });
+  it("a stop before queued-next state stops that turn, not later calls with reused ids", () => {
+    let s = start(withChats({ 1: { threadId: "a", busy: true } }), "same");
+    s = start(s, "same", "next");
+    s = reduce(s, { type: "tool_stop", pane: 1, turn_id: "turn", at });
+    s = reduce(s, { type: "turn", event: "finished", threadId: "a", at: Date.parse(at), next: 1 });
+    expect(s.chats[1].messages.flatMap(m => m.calls ?? []).map(c => c.outcome)).toEqual(["stopped", "running"]);
+    expect(s.chats[1].busy).toBe(true);
+  });
+  it("replays an overlapping delayed history with steer splits, finishes and stopped calls", () => {
+    let s = start(withChats({ 1: { threadId: "a", loadedThread: null, busy: true } }), "1");
+    s = reduce(s, { type: "message", pane: 1, message: { role: "user", text: "steer", message_id: "m", at, mark: "queued" } });
+    s = start(s, "2");
+    s = reduce(s, { type: "op_done", pane: 1, call_id: "1", turn_id: "turn", ok: true, summary: "", at });
+    s = reduce(s, { type: "tool_stop", pane: 1, turn_id: "turn", at });
+    s = reduce(s, { type: "mark", message_id: "m", patch: { mark: undefined } });
+    s = reduce(s, { type: "transcript", threadId: "a", rows: [
+      { role: "tool", call_id: "1", turn_id: "turn", name: "Read", label: "safe", outcome: "running", at },
+      { role: "user", text: "steer", message_id: "m", at, mark: "queued" },
+    ] });
+    expect(s.chats[1].messages.map(m => m.calls?.map(c => c.outcome) ?? m.text)).toEqual([["ok"], "steer", ["stopped"]]);
+    expect(s.chats[1].messages[1].mark).toBeUndefined();
+    expect(s.chats[1].ops.every(o => o.finished)).toBe(true);
+    expect(s.chats[1].toolTurnId).toBeNull(); expect(s.chats[1].toolReplay).toEqual([]);
+  });
+  it.each([false, true])("uses the initial send's acknowledged turn before/after history (ack first: %s)", ackFirst => {
+    let s = withChats({ 1: { threadId: "a", loadedThread: null } });
+    s = reduce(s, { type: "message", pane: 1, message: { role: "user", text: "again", local: "initial" } });
+    const ack = () => { s = reduce(s, { type: "mark", local: "initial", patch: { turn_id: "new" } }); };
+    if (ackFirst) ack();
+    s = reduce(s, { type: "transcript", threadId: "a", rows: [
+      { role: "user", text: "again", at, turn_id: "old" },
+      { role: "user", text: "again", at, turn_id: "new" },
+      { role: "user", text: "again", at, turn_id: "new", message_id: "steer-1" },
+      { role: "user", text: "again", at, turn_id: "new", message_id: "steer-2" },
+      { role: "assistant", text: "answer", at, turn_id: "new" },
+    ] });
+    if (!ackFirst) ack();
+    expect(s.chats[1].messages.map(m => m.local ?? m.message_id ?? m.turn_id)).toEqual(["old", "initial", "steer-1", "steer-2", "new"]);
+  });
+  it("keeps an acknowledged send absent from the history snapshot", () => {
+    let s = withChats({ 1: { threadId: "a", loadedThread: null } });
+    s = reduce(s, { type: "message", pane: 1, message: { role: "user", text: "again", local: "initial" } });
+    s = reduce(s, { type: "mark", local: "initial", patch: { turn_id: "new" } });
+    s = reduce(s, { type: "transcript", threadId: "a", rows: [{ role: "user", text: "again", at, turn_id: "old" }] });
+    expect(s.chats[1].messages).toHaveLength(2);
+    expect(s.chats[1].messages[1]).toMatchObject({ local: "initial", turn_id: "new" });
+  });
+  it("binds an optimistic steer before history replay and never revives a failed send", () => {
+    let s = withChats({ 1: { threadId: "a", loadedThread: null } });
+    s = reduce(s, { type: "message", pane: 1, message: { role: "user", text: "steer", local: "local" } });
+    s = start(s, "1");
+    s = reduce(s, { type: "mark", local: "local", patch: { message_id: "server", mark: "steering" } });
+    s = reduce(s, { type: "message", pane: 1, message: { role: "user", text: "failed", local: "failed" } });
+    s = reduce(s, { type: "unmessage", local: "failed" });
+    s = reduce(s, { type: "transcript", threadId: "a", rows: [
+      { role: "user", text: "steer", at, message_id: "server", mark: "steering" },
+      { role: "tool", call_id: "1", turn_id: "turn", name: "Read", label: "safe", outcome: "running", at },
+    ] });
+    expect(s.chats[1].messages.map(m => m.calls ? "tool" : m.text)).toEqual(["steer", "tool"]);
+    expect(s.chats[1].messages[0]).toMatchObject({ local: "local", message_id: "server", mark: "steering" });
+  });
+  it("reconciles a server id learned after history has landed, preserving history order", () => {
+    let s = withChats({ 1: { threadId: "a", loadedThread: null } });
+    s = reduce(s, { type: "message", pane: 1, message: { role: "user", text: "steer", local: "local" } });
+    s = reduce(s, { type: "transcript", threadId: "a", rows: [
+      { role: "user", text: "steer", at, message_id: "server" }, { role: "assistant", text: "reply" },
+    ] });
+    s = reduce(s, { type: "mark", local: "local", patch: { message_id: "server", mark: "steering" } });
+    expect(s.chats[1].messages.map(m => m.text)).toEqual(["steer", "reply"]);
+    expect(s.chats[1].messages[0]).toMatchObject({ local: "local", at, mark: "steering" });
+  });
+  it("lands history in the pane that now owns the thread and drops it after closing", () => {
+    const s = withChats({ 1: { threadId: "b" }, 2: { threadId: "a" } });
+    const after = reduce(s, { type: "transcript", threadId: "a", rows: [{ role: "user", text: "a" }] });
+    expect(after.chats[1].messages).toEqual([]); expect(after.chats[2].messages[0].text).toBe("a");
+    expect(reduce(s, { type: "transcript", threadId: "gone", rows: [] })).toBe(s);
   });
 });

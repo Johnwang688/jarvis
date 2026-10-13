@@ -35,6 +35,7 @@
 // tracks its turn** (`routeEvent`); approvals, activity and lifecycle events
 // stay window-wide. An event with no thread goes to the selected chat.
 
+import type { TranscriptEvent } from "./toolCalls";
 import type { Attachment, ChatMessage, Thread, ToolOp } from "../types";
 import type { Compose } from "./compose";
 import type { GiveBack } from "./giveback";
@@ -59,6 +60,9 @@ export interface ChatState {
   messages: ChatMessage[];
   draft: string;
   ops: ToolOp[];
+  toolTurnId: string | null;
+  /** Events heard before history lands; travels with this conversation. */
+  toolReplay: TranscriptEvent[];
   /** Words (and files) handed back to this pane's box, oldest first, until
    * the box takes them (lib/giveback.ts). */
   restore: GiveBack[];
@@ -82,14 +86,14 @@ export type Chats = Record<PaneNo, ChatState>;
 /** The fields a `ChatState` has — what the test hook's legacy `patch` routes to a pane. */
 export const CHAT_KEYS: readonly (keyof ChatState)[] = [
   "threadId", "compose", "turnThreadId", "busy", "status", "messages", "draft", "ops", "restore",
-  "pendingTranscript", "input", "files", "loadedThread",
+  "pendingTranscript", "input", "files", "loadedThread", "toolTurnId", "toolReplay",
 ];
 
 export function emptyChat(): ChatState {
   return {
     threadId: null, compose: null, turnThreadId: null, busy: false, status: "",
     messages: [], draft: "", ops: [], restore: [], pendingTranscript: "", input: "", files: [],
-    loadedThread: null,
+    loadedThread: null, toolTurnId: null, toolReplay: [],
   };
 }
 

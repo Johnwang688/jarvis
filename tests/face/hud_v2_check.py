@@ -215,17 +215,15 @@ def chat_checks(page, mock):
           and "Working on it." in rendered.inner_text()
           and "**" not in rendered.inner_text(), rendered.inner_text())
 
-    # The tool stream: started/finished with durations (v1's OPERATIONS).
+    # Tool calls now live in a collapsed transcript group.
     mock.emit("tool_started", {"call_id": "c1", "name": "grep_files"}, thread_id="t1")
-    until(lambda: page.locator('[data-testid="op"]').count() > 0)
-    check("a running tool shows in the ticker",
-          "grep_files" in page.locator('[data-testid="ops"]').inner_text())
-    check("and shows as running", "running" in page.locator('[data-testid="ops"]').inner_text())
+    until(lambda: page.locator('[data-testid="tool-group"]').count() > 0)
+    page.locator('[data-testid="tool-group"]').last.click()
+    check("a running tool shows in the transcript", "grep_files" in page.locator('[data-testid="tool-call"]').last.inner_text())
+    check("and shows as running", page.locator('[data-testid="tool-call"]').last.get_attribute("data-status") == "running")
     mock.emit("tool_finished", {"call_id": "c1", "name": "grep_files", "ok": True}, thread_id="t1")
-    until(lambda: "done" in page.locator('[data-testid="ops"]').inner_text())
-    check("a finished tool stops being shown as running",
-          "running" not in page.locator('[data-testid="ops"]').inner_text(),
-          page.locator('[data-testid="ops"]').inner_text())
+    until(lambda: page.locator('[data-testid="tool-call"]').last.get_attribute("data-status") == "ok")
+    check("a finished tool stops being shown as running", page.locator('[data-testid="tool-call"]').last.get_attribute("data-status") == "ok")
     mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
 
     # A proposal_reply is a system line with a 60s cancel that calls
@@ -3085,6 +3083,14 @@ def main():
                                  guard, FAKE_RECOGNIZER)
             finally:
                 multichat_mock.stop()
+
+            from tests.face.hud_v2_toolcalls_check import toolcalls_checks
+            toolcalls_mock = MockDaemon(0).start()
+            try:
+                toolcalls_checks(browser, toolcalls_mock, f"http://127.0.0.1:{toolcalls_mock.port}", check, until,
+                                 guard, FAKE_RECOGNIZER)
+            finally:
+                toolcalls_mock.stop()
 
             # The input bar declutter (PR #29) and its review: a context and a
             # mock of their own, for the same reasons.

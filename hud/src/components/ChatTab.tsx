@@ -1,4 +1,4 @@
-// The chat tab: rendered replies, the live draft, the OPERATIONS ticker, and
+// The chat tab: rendered replies, the live draft, the collapsed tool groups, and
 // a proposal_reply shown as a system line with a 60-second Cancel.
 //
 // Two rules carried from v1. The draft is **plain text** while it is being
@@ -9,12 +9,13 @@
 //
 // While this chat's turn runs, its foot says so (WP-H, decisions S-4): the
 // thinking line — mini orb, word, elapsed time — right after the transcript's
-// scroller and before the ticker. It is outside `[data-testid=log]`, so what
+// scroller and above the input bar. It is outside `[data-testid=log]`, so what
 // the log says is the conversation and nothing else.
 
 import { memo, useEffect, useRef, useState } from "react";
-import type { ChatMessage, Thread, ToolOp } from "../types";
+import type { ChatMessage, Thread } from "../types";
 import { chatPlace } from "../lib/discord";
+import { ToolGroupRow } from "./ToolGroupRow";
 import { Markdown } from "./Markdown";
 import { ThinkingRow } from "./MiniOrb";
 import type { ThinkingLine } from "../lib/thinking";
@@ -56,8 +57,20 @@ function Proposal({ msg, onCancel }: { msg: ChatMessage; onCancel: (id: string) 
   );
 }
 
+export const MessageRow = memo(function MessageRow({ msg: m, onCancel }: { msg: ChatMessage; onCancel: (id: string) => void }) {
+  if (m.proposal) return <Proposal msg={m} onCancel={onCancel} />;
+  return <div className={`msg ${m.role}`} data-testid={`msg-${m.role}`}>
+    <div className="who">
+      {m.role === "user" ? "YOU" : m.role === "system" ? "SYSTEM" : "JARVIS"}
+      {m.role === "user" && m.via ? <span className="via" data-testid="via-discord"> · via Discord</span> : null}
+      {m.role === "user" && m.mark ? <span className={`mark ${m.mark.replace(" ", "-")}`} data-testid="msg-mark"> · {MARKS[m.mark]}</span> : null}
+    </div>
+    {m.role === "assistant" ? <Markdown text={m.text} /> : <div className="body user-text">{m.text}</div>}
+  </div>;
+});
+
 /**
- * One chat pane's transcript and tool ticker. Memoized: typing in any box
+ * One chat pane's transcript and grouped tool calls. Memoized: typing in any box
  * re-renders the window (the box's words are the store's, WP-B), and a long
  * transcript redrawn per keystroke cost milliseconds per character, per
  * chat pane (re-review of PR #27). Every prop is stable between keystrokes.
@@ -67,7 +80,8 @@ export const ChatTab = memo(function ChatTab(props: {
   thread?: Thread | null;
   messages: ChatMessage[];
   draft: string;
-  ops: ToolOp[];
+  toolTurnId?: string | null;
+  busy?: boolean;
   onCancelTask: (id: string) => void;
   /** The thinking line (lib/thinking `thinkingLine`), or null while nothing runs. */
   thinking?: ThinkingLine | null;
@@ -77,10 +91,16 @@ export const ChatTab = memo(function ChatTab(props: {
   drawn?: boolean;
 }) {
   const logRef = useRef<HTMLDivElement>(null);
+  const follows = useRef(true);
+  const shown = useRef(props.thread?.id);
+  // Markdown fills each new body in a passive effect; follow after those
+  // child effects, when the transcript has its final height.
   useEffect(() => {
     const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [props.messages, props.draft]);
+    if (!el) return;
+    if (shown.current !== props.thread?.id) { follows.current = true; shown.current = props.thread?.id; }
+    if (follows.current) el.scrollTop = el.scrollHeight;
+  }, [props.messages, props.draft, props.thread?.id]);
 
   const place = chatPlace(props.thread);
   return (
@@ -94,32 +114,16 @@ export const ChatTab = memo(function ChatTab(props: {
           )}
         </div>
       ) : null}
-      <div className="scroll chatlog" ref={logRef} data-testid="log">
-        {props.messages.map((m, i) =>
-          m.proposal ? (
-            <Proposal key={i} msg={m} onCancel={props.onCancelTask} />
-          ) : (
-            <div className={`msg ${m.role}`} key={i} data-testid={`msg-${m.role}`}>
-              <div className="who">
-                {m.role === "user" ? "YOU" : m.role === "system" ? "SYSTEM" : "JARVIS"}
-                {m.role === "user" && m.via ? (
-                  <span className="via" data-testid="via-discord"> · via Discord</span>
-                ) : null}
-                {m.role === "user" && m.mark ? (
-                  <span className={`mark ${m.mark.replace(" ", "-")}`} data-testid="msg-mark">
-                    {" · "}
-                    {MARKS[m.mark]}
-                  </span>
-                ) : null}
-              </div>
-              {m.role === "assistant" ? (
-                <Markdown text={m.text} />
-              ) : (
-                <div className="body user-text">{m.text}</div>
-              )}
-            </div>
-          ),
-        )}
+      <div className="scroll chatlog" ref={logRef} data-testid="log" onScroll={e => {
+        if (e.target !== e.currentTarget) return;
+        const el = e.currentTarget;
+        follows.current = el.scrollHeight - el.clientHeight - el.scrollTop <= 24;
+      }}>
+        {props.messages.map((m, i) => m.calls ? (
+          <ToolGroupRow key={`tool:${m.turn_id}|${m.calls[0].call_id}`} group={m}
+            threadId={props.thread?.id ?? ""} using={!!props.busy && i === props.messages.length - 1 && m.turn_id === props.toolTurnId}
+            drawn={props.drawn !== false} />
+        ) : <MessageRow key={`msg:${i}`} msg={m} onCancel={props.onCancelTask} />)}
         {props.draft ? (
           <div className="msg assistant draft" data-testid="draft">
             <div className="who">JARVIS</div>
@@ -129,20 +133,6 @@ export const ChatTab = memo(function ChatTab(props: {
         ) : null}
       </div>
       {props.thinking ? <ThinkingRow line={props.thinking} accent={props.accent} drawn={!!props.drawn} /> : null}
-      <div className="chatops" data-testid="ops">
-        {props.ops
-          .slice(-30)
-          .reverse()
-          .map((o) => (
-            <div className={"op" + (o.finished ? " done" : "")} key={o.call_id} data-testid="op">
-              <span className="nm">{o.name}</span>
-              <span>{o.finished ? (o.ok === false ? "failed" : "done") : "running"}</span>
-              <span className="ms">
-                {o.finished ? `${((o.finished - o.started) / 1000).toFixed(1)}s` : ""}
-              </span>
-            </div>
-          ))}
-      </div>
     </div>
   );
 });

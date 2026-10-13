@@ -207,10 +207,15 @@ def _value(value):
     raise BriefRefused("Unsupported value in Codex MCP configuration")
 
 
+def approvals_reviewer(brief: Brief) -> str:
+    """Owner chats route every native approval to Jarvis; task policy stays native."""
+    return "user" if brief.role == Role.CHAT and brief.task_id is None else "auto_review"
+
+
 def config_text(brief: Brief) -> str:
     values = dict(model_provider="openai", forced_login_method="chatgpt",
                   cli_auth_credentials_store="file", sandbox_mode="workspace-write",
-                  approval_policy="on-request", approvals_reviewer="auto_review",
+                  approval_policy="on-request", approvals_reviewer=approvals_reviewer(brief),
                   web_search="live", check_for_update_on_startup=False)
     if brief.model is not None:
         values["model"] = brief.model

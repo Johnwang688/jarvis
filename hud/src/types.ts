@@ -486,10 +486,25 @@ export interface HudEvent {
   [k: string]: any;
 }
 
+export type ToolOutcome = "running" | "ok" | "failed" | "denied" | "stopped";
+export interface ToolCall {
+  call_id: string;
+  turn_id: string;
+  name: string;
+  label: string;
+  outcome: ToolOutcome;
+  at: string;
+  finished_at?: string;
+}
+export interface ToolEntry extends ToolCall { role: "tool" }
+
 export interface ChatMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   text: string;
   at?: string;
+  /** A grouped transcript row; never contains raw args or result summaries. */
+  calls?: ToolCall[];
+  turn_id?: string;
   /** A system line that carries a cancel affordance (a proposal_reply). */
   proposal?: { task_id: string; until: number };
   /** PR C: the owner's message came from Discord (a thread or the DM). */
@@ -520,6 +535,9 @@ export interface SendResult {
 }
 
 export interface ToolOp {
+  turn_id?: string;
+  label?: string;
+  at?: string;
   call_id: string;
   name: string;
   started: number;

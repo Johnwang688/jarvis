@@ -973,10 +973,15 @@ that is why every attach is announced (`terminal_attached`, below).
 - `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
   use, 30 seconds, valid for this terminal only**; it is spent the moment it
   is presented, whatever the answer. Fetch one right before each attach.
-- `GET /terminals/{id}/attach?ticket=…` — the WebSocket. Build the URL from
-  `location.host` (never a fixed port). The checks run in this order: the
-  owner-only gate (a refused Origin does not spend the ticket), a
-  well-formed version-13 upgrade (else 400), the ticket (else 403). Then
+- `GET /terminals/{id}/attach?ticket=…&window=…` — the WebSocket. Build the URL from
+  `location.host` (never a fixed port). The optional `window` is the same
+  **32 lowercase hex** in-memory page nonce used by `/events` and claims.
+  It binds to the successful socket attachment, including a takeover.
+  Omitting it preserves the legacy unclaimed frame contract. Invalid,
+  empty, duplicate or unknown query fields are 400 before ticket redemption.
+  The checks run in this order: the owner-only gate (a refused Origin does
+  not spend the ticket), query validation, a well-formed version-13 upgrade
+  (else 400), the ticket (else 403). Then
   `HTTP/1.1 101`. No extension (no compression) and no subprotocol is
   agreed. Client frames must be masked; a message is at most 64 KiB (send
   pastes in 16 KiB chunks); control frames are at most 125 bytes and never
@@ -1029,8 +1034,9 @@ that is why every attach is announced (`terminal_attached`, below).
     then a close when the terminal is closed; `{"type": "exit", "code",
     "reason": "ended"}` then close 1001 when Jarvis stops (terminals do not
     survive a restart, W-3); `input_dropped`, `input_resumed` and
-    `input_resume_refused` (above); `{"type": "dev_url", "url"}` when a dev
-    server announces itself in the live output (BR-8a, below).
+    `input_resume_refused` (above); `{"type": "dev_url", "url", "id"}` when a dev
+    server announces itself in the live output and this socket supplied its
+    page nonce (AO-1b-ii, below); legacy sockets without a nonce omit `id`.
   - Window → server: `{"type": "resize", "cols", "rows"}` (same ranges;
     anything else is ignored), `{"type": "input_resume"}` (above) and the
     takeover answer below. Unknown messages are ignored.
@@ -2113,15 +2119,35 @@ The daemon half of "a dev server started in a HUD terminal opens in a
 Browser pane by itself" (Browser plan amendment 1 §D.1; decisions B-2).
 BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
 
-- **`{"type": "dev_url", "url": "http://localhost:5173/"}`**, a text frame on
-  a terminal's attach socket, **that terminal's socket only**, after the
-  binary output that carried the announcement. The window that holds the
-  terminal hears it; another window, the bus, `/events`, the listing, a log
-  line, Discord and the disk never do, and the "Jarvis can read" switch is
-  unrelated (Jarvis never sees it). Sent only for **live** output: a
-  reattach's replay never sends one, and an announcement made while no
-  window is attached is dropped (and not remembered, so the server's next
-  announcement — a restart — is sent to whichever window holds it then).
+- **AO-1b-ii (2026-10-13, amendment 2 §C/AD-12):**
+  `{"type": "dev_url", "url": "http://localhost:5173/", "id": "ds_…"}` is
+  sent only on the attached terminal socket, after the binary output that
+  carried the announcement. The attach query's `window` nonce preclaims
+  this registry entry for that window; the window needs no claim POST,
+  and posts `placed` after acting. A new entry publishes one `dev_server`
+  record with state `claimed`, containing only id/state/source/time.
+  Another source's entry, an existing claim, a placement or a dismissal
+  cannot be replaced by a banner. A socket that loses attachment or
+  refuses the frame releases only that delivery's still-current claim.
+  Queueing checks the receipt under the registry lock, so a claim lost before
+  delivery never sends an actionable frame.
+  Settings and registry callbacks run outside the terminal state lock.
+  An attach without `window` still receives the legacy `{type, url}` frame
+  and leaves the entry unclaimed. The HUD's older 16-hex `pageNonce()` is
+  **not** a valid claim nonce: AO-3 must supply one shared 32-hex page nonce.
+- With **no window attached**, the cleaned URL, including its path, is
+  retained in the memory-only registry as `up`/unclaimed. The bus carries
+  only ids/state/source/time; only owner registry/claim answers carry the
+  URL. A later owner window can claim it. Replay never emits an announcement.
+  Terminal entries are never HTTP-probed: liveness starts five seconds
+  after a banner and marks down after two polls without its LISTEN port,
+  even when no agent session has ever run. Repeated terminal banners refresh
+  their same-source retained entry, with no second frame, preclaim or
+  placement; the first path and placed/dismissed state stay intact. After
+  retention expires, a fresh banner may register a new unclaimed entry under
+  the usual rate and capacity limits, still without another terminal frame.
+  A different terminal cannot refresh a retained tombstone. A restart within 60 seconds
+  reuses the id and dismissal, with a fresh five-second startup grace.
 - **What is read**: a shell terminal's output (never a program terminal's),
   only a command's own — the prompt and the typed command line are skipped
   by the shell's signed OSC 133 marks (`B` to `C` in bash; `B` to the end of
@@ -2145,9 +2171,10 @@ BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
 - **How often**: once per origin per terminal among the last four sent
   (`localhost:3000`, `127.0.0.1:3000` and `[::1]:3000` are one server: Puma
   prints two of them); at most one frame a second and four a minute per
-  terminal. A URL counts as sent only once the socket has taken its frame:
-  one a closing or lagging socket refused is offered again at the server's
-  next announcement.
+  terminal. A URL counts as sent once its socket takes the frame or an
+  unattached announcement is retained in the registry. A closing or lagging
+  socket's refusal leaves the next banner eligible. Registry creation also
+  obeys the shared one-per-10-seconds/source, six-per-minute and 32-entry caps.
 - **The switch: `auto_open`** in `browser.json`, beside BR-1a's `lan` and
   `local_servers` — read and changed through BR-1a's owner-only `GET`/`PATCH
   /browser/settings` (the table in the next section; one contract for all
@@ -2479,7 +2506,8 @@ thread log.
 parameter the HTTP JSON body is byte-identical to the previous contract.
 Other values, duplicate parameters and unknown parameters return 400.
 Existing text, system and user rows (including steer and queue marks) retain
-their positions and fields. Tool entries sit at their start's position:
+their positions and fields. With `tools=1`, TC-2 additionally returns their
+`turn_id` when recorded; the no-parameter response remains byte-identical. Tool entries sit at their start's position:
 
 ```json
 {"role": "tool", "call_id": "call-1", "name": "Bash", "label": "pytest -q", "outcome": "ok", "turn_id": "turn-1", "at": "2026-10-12T12:00:00Z", "finished_at": "2026-10-12T12:00:01Z"}
@@ -2521,4 +2549,15 @@ their positions and fields. Tool entries sit at their start's position:
   (`declined` is in both command and patch status schemas generated by 0.161.0). Command success also requires exit
   code zero. No client classifies result text; no new bus kinds or log lines.
 
-TC-1 supplies the daemon contract. The HUD opts in and groups calls in TC-2.
+The TC-2 HUD consumer (2026-10-13) requests `tools=1`; only a 400 retries
+without it. Archive's text-only reader continues using the original route.
+The HUD folds calls by consecutive turn, replays events received during the
+request by `(turn_id, call_id)` and message identity, and stops outstanding
+calls when their turn ends. A later send response supplies the stable id for
+an optimistic steer. For an initial owner message, `send.turn_id` matches
+the opt-in row's `turn_id`; this never merges a steer or repeated text by
+content. A failed send is removed from pending replay too.
+Open state is window-local, bounded to 500 `thread|turn|firstCall` keys, and
+never appears in this API or localStorage. Every group starts collapsed.
+Expanded rows show name, label, outcome word and duration only. The read-only
+`__hud.toolGroups()` test hook returns disclosure keys, never tool contents.
