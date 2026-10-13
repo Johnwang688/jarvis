@@ -121,6 +121,12 @@ export interface BufferDeps {
   prepare?(model: TextModel, projectId: string, path: string, kind: Kind): Promise<unknown>;
 }
 
+export interface BufferAlias {
+  projectId: string;
+  path: string;
+}
+interface VerifiedAlias extends BufferAlias { writable: boolean }
+
 interface Buf {
   abs: string;
   projectId: string;
@@ -141,6 +147,11 @@ interface Buf {
   /** Ctrl+S pressed again while `inflight` was out: the one follow-up save. */
   again: Promise<SaveOutcome> | null;
   refs: Set<string>;
+  aliases: Map<string, VerifiedAlias>;
+  holders: Map<string, VerifiedAlias>;
+  /** Read/stat responses from an invalidated IO route cannot apply. */
+  routeGen: number;
+  routeValid: boolean;
   wasDirty: boolean;
   sub: { dispose(): void } | null;
   /** A programmatic change (a reload in place) is under way: not an edit. */
@@ -169,6 +180,7 @@ export interface BufferView {
   queued: boolean;
   conflict: Conflict | null;
   refs: string[];
+  aliases: BufferAlias[];
   language: string | null;
   modelEol: string | null;
 }
@@ -209,6 +221,7 @@ export class Buffers {
   private bufs = new Map<string, Buf>();
   private byKey = new Map<string, string>();
   private pending = new Map<string, Promise<Buf>>();
+  private deletedProjects = new Set<string>();
   /** A buffer being made, by abs: a second read of the same file waits for it. */
   private making = new Map<string, Promise<Buf>>();
   private listeners = new Set<() => void>();
@@ -364,7 +377,7 @@ export class Buffers {
       // tab and the status say "saving…" until the last of them answers.
       encoding: b.encoding, eol: b.eol, dirty: this.dirtyOf(b), saving: b.saving || !!b.again,
       queued: !!b.again, conflict: b.conflict,
-      refs: [...b.refs], language: b.model?.getLanguageId?.() ?? null,
+      refs: [...b.refs], aliases: [...b.aliases.values()].map(({ projectId, path }) => ({ projectId, path })), language: b.model?.getLanguageId?.() ?? null,
       modelEol: b.model?.getEOL ? (b.model.getEOL() === "\r\n" ? "CRLF" : "LF") : null,
     };
   }
@@ -382,6 +395,7 @@ export class Buffers {
    * error (404 gone, 403 out of scope).
    */
   async open(projectId: string, path: string, ref: string): Promise<BufferView> {
+    this.requireProject(projectId);
     const key = `${projectId}\u0000${path}`;
     let buf: Buf | undefined;
     const known = this.byKey.get(key);
@@ -395,7 +409,14 @@ export class Buffers {
       }
       buf = await p;
     }
+    this.requireProject(projectId);
+    const alias = buf.aliases.get(key);
+    if (!alias) throw new Error("the file route changed; reopen it");
+    // A reused tab ref cannot remain a candidate holder of another model.
+    for (const other of this.bufs.values()) if (other !== buf) other.holders.delete(ref);
     buf.refs.add(ref);
+    buf.holders.set(ref, alias);
+    this.route(buf, false);
     this.emit();
     return this.view(buf);
   }
@@ -403,6 +424,8 @@ export class Buffers {
   private async load(projectId: string, path: string, key: string): Promise<Buf> {
     const deps = this.need();
     const r = await deps.read(projectId, path);
+    this.requireProject(projectId);
+    const alias: VerifiedAlias = { projectId, path: r.path || path, writable: !r.protected && editableOf(parseKind(r.kind), r.editable) };
     const abs = typeof r.abs === "string" && r.abs ? r.abs : `${projectId}:${r.path || path}`;
     // The same file through another project or another name: one buffer —
     // whether it is made already or still being made. Two reads of one file
@@ -412,12 +435,15 @@ export class Buffers {
     // (review of PR #49, L1).
     const existing = this.bufs.get(abs);
     if (existing) {
+      existing.aliases.set(key, alias);
       this.byKey.set(key, abs);
       return existing;
     }
     const making = this.making.get(abs);
     if (making) {
       const buf = await making;
+      this.requireProject(projectId);
+      buf.aliases.set(key, alias);
       this.byKey.set(key, abs);
       return buf;
     }
@@ -425,6 +451,8 @@ export class Buffers {
     this.making.set(abs, made);
     try {
       const buf = await made;
+      this.requireProject(projectId);
+      buf.aliases.set(key, alias);
       this.byKey.set(key, abs);
       return buf;
     } finally {
@@ -443,6 +471,10 @@ export class Buffers {
         /* a buffer opens without it */
       }
     }
+    if (this.deletedProjects.has(projectId)) {
+      model?.dispose();
+      this.requireProject(projectId);
+    }
     const raced = this.bufs.get(abs);
     if (raced) {
       // Cannot happen while `making` dedupes by abs; if it ever does, the
@@ -457,7 +489,7 @@ export class Buffers {
       encoding: r.encoding ?? null, eol: r.eol ?? null,
       model, saved: model ? model.getAlternativeVersionId() : 0, conflict: null, saving: false,
       inflight: null, again: null,
-      refs: new Set(), wasDirty: false, sub: null, applying: false, gen: 0,
+      refs: new Set(), aliases: new Map(), holders: new Map(), routeGen: 0, routeValid: true, wasDirty: false, sub: null, applying: false, gen: 0,
     };
     if (model) {
       // Said the moment it changes (App's guards read it in the same event
@@ -486,6 +518,7 @@ export class Buffers {
   release(abs: string, ref: string, opts: { discard?: boolean } = {}) {
     const b = this.bufs.get(abs);
     if (!b || !b.refs.delete(ref)) return;
+    b.holders.delete(ref);
     if (!b.refs.size && (!this.dirtyOf(b) || opts.discard)) this.drop(b);
     this.emit();
   }
@@ -505,12 +538,46 @@ export class Buffers {
       for (const r of [...b.refs]) {
         if (paneOfRef(r) === key) {
           b.refs.delete(r);
+          b.holders.delete(r);
           held = true;
         }
       }
       if (held && !b.refs.size && (!this.dirtyOf(b) || opts.discard)) this.drop(b);
     }
     this.emit();
+  }
+
+  private requireProject(projectId: string) {
+    if (this.deletedProjects.has(projectId)) throw new Error("the project was deleted; open this file from a surviving project");
+  }
+
+  /** Permanent deletion only: archived projects still have owner file routes. */
+  projectDeleted(projectId: string) {
+    this.deletedProjects.add(projectId);
+    for (const b of this.bufs.values()) {
+      for (const [key, alias] of b.aliases) if (alias.projectId === projectId) {
+        b.aliases.delete(key); this.byKey.delete(key);
+      }
+      for (const [ref, alias] of b.holders) if (alias.projectId === projectId) b.holders.delete(ref);
+      if (b.projectId === projectId) {
+        b.routeGen += 1;
+        this.route(b, false);
+      }
+    }
+    this.emit();
+  }
+
+  /** Adopt only a successful read still held by a live tab, preserving text/etag/undo. */
+  private route(b: Buf, notify = true): boolean {
+    if (b.routeValid && !this.deletedProjects.has(b.projectId)) return true;
+    const alias = [...b.holders].find(([ref, a]) => b.refs.has(ref) && a.writable
+      && !this.deletedProjects.has(a.projectId) && [...b.aliases.values()].includes(a))?.[1];
+    if (alias) {
+      b.projectId = alias.projectId; b.path = alias.path; b.routeValid = true; b.routeGen += 1;
+      return true;
+    }
+    if (notify) this.notice(b.abs, "the file route is no longer available; your edit is still here, reopen it from a project or copy it");
+    return false;
   }
 
   private drop(b: Buf) {
@@ -557,6 +624,8 @@ export class Buffers {
       // tabs now show the renamed file.
       const there = this.bufs.get(newAbs);
       let inherited: string[] = [];
+      const inheritedAliases = new Map<string, VerifiedAlias>();
+      const inheritedHolders = new Map<string, VerifiedAlias>();
       if (there && there !== buf) {
         if (this.dirtyOf(there)) {
           // This buffer stays where it was, and so do its tabs (App reads `kept`).
@@ -564,28 +633,59 @@ export class Buffers {
           continue;
         }
         inherited = [...there.refs];
+        for (const [key, alias] of there.aliases) inheritedAliases.set(key, alias);
+        for (const [ref, alias] of there.holders) inheritedHolders.set(ref, alias);
         this.drop(there);
       }
       this.bufs.delete(oldAbs);
       for (const [k, v] of [...this.byKey]) if (v === oldAbs) this.byKey.delete(k);
+      const aliases = new Map<string, VerifiedAlias>(inheritedAliases);
+      const movedAliases = new Map<VerifiedAlias, VerifiedAlias>();
+      for (const [key, alias] of buf.aliases) {
+        // Only the same verified root can carry an alias through a rename.
+        // An arbitrary symlink spelling needs another daemon read first.
+        if (!oldAbs.endsWith(`/${alias.path}`)) continue;
+        const root = oldAbs.slice(0, -alias.path.length);
+        if (!newAbs.startsWith(root)) continue;
+        const next = { ...alias, path: newAbs.slice(root.length) };
+        const split = key.indexOf("\u0000");
+        const requested = key.slice(split + 1);
+        if (!oldAbs.endsWith(`/${requested}`)) continue;
+        const requestedRoot = oldAbs.slice(0, -requested.length);
+        if (!newAbs.startsWith(requestedRoot)) continue;
+        aliases.set(`${alias.projectId}\u0000${newAbs.slice(requestedRoot.length)}`, next);
+        movedAliases.set(alias, next);
+      }
+      const holders = new Map<string, VerifiedAlias>(inheritedHolders);
       const refs = new Set<string>();
       for (const r of buf.refs) {
         const pane = paneOfRef(r);
         const rel = r.slice(pane.length + 1);
         const next = follow(oldAbs, rel, newAbs);
-        refs.add(refOf(pane, next));
+        const nextRef = refOf(pane, next);
+        refs.add(nextRef);
+        const previous = buf.holders.get(r);
+        const alias = previous && movedAliases.get(previous);
+        if (alias) holders.set(nextRef, alias);
         if (next !== rel) moves.push({ pane, from: rel, to: next });
       }
       for (const r of inherited) refs.add(r);
       buf.refs = refs;
-      buf.path = follow(oldAbs, buf.path, newAbs);
+      buf.holders = holders;
+      buf.aliases = aliases;
+      const route = [...aliases.values()].find(a => a.projectId === buf.projectId
+        && a.path === follow(oldAbs, buf.path, newAbs));
+      buf.routeValid = !!route;
+      if (route) buf.path = route.path;
+      buf.routeGen += 1;
       buf.abs = newAbs;
       if (tail === "" && kind) {
         const k = parseKind(kind);
         if (k !== buf.kind && (k === "text" || k === "env")) buf.kind = k;
       }
       this.bufs.set(newAbs, buf);
-      this.byKey.set(`${buf.projectId}\u0000${buf.path}`, newAbs);
+      for (const key of aliases.keys()) this.byKey.set(key, newAbs);
+      this.route(buf, false);
       if (buf.model) this.deps?.relanguage?.(buf.model, newAbs, buf.kind);
     }
     if (moves.length || this.bufs.has(toAbs)) this.emit();
@@ -618,6 +718,7 @@ export class Buffers {
   save(abs: string, opts: { expected?: string | null } = {}): Promise<SaveOutcome> {
     const b = this.bufs.get(abs);
     if (!b || !b.model || !b.editable) return Promise.resolve("skipped");
+    if (!this.route(b)) return Promise.resolve("error");
     if (b.inflight) {
       // A follow-up drops `expected`. Keep mine and Save to recreate pass one
       // and rely on the conflict bar disabling them while a save is out
@@ -661,6 +762,7 @@ export class Buffers {
     const content = (b.encoding === "utf-8-bom" ? BOM : "") + b.model.getValue();
     const expected = "expected" in opts ? opts.expected ?? null : b.etag;
     const gen = b.gen;
+    const route = { projectId: b.projectId, path: b.path };
     b.saving = true;
     this.emit();
     // A write that never answers would hold `saving` — and with it the poll
@@ -679,7 +781,7 @@ export class Buffers {
     });
     try {
       const r = await Promise.race([
-        deps.write(b.projectId, { path: b.path, content, expected_etag: expected }, ctl.signal),
+        deps.write(route.projectId, { path: route.path, content, expected_etag: expected }, ctl.signal),
         timeout,
       ]);
       b.saving = false;
@@ -717,15 +819,18 @@ export class Buffers {
         const said = e?.body && typeof e.body === "object" && "etag" in e.body ? e.body.etag : undefined;
         let now: string | null | undefined = said === null || (typeof said === "string" && ETAG.test(said))
           ? said : undefined;
-        if (now === undefined) {
+        if (now === undefined && this.route(b, false)) {
+          const checked = { projectId: b.projectId, path: b.path, routeGen: b.routeGen };
           try {
-            const row = (await deps.stat(b.projectId, [b.path])).files?.[b.path];
-            now = row?.gone ? null : typeof row?.etag === "string" && ETAG.test(row.etag) ? row.etag : undefined;
+            const row = (await deps.stat(checked.projectId, [checked.path])).files?.[checked.path];
+            if (b.routeGen === checked.routeGen) {
+              now = row?.gone ? null : typeof row?.etag === "string" && ETAG.test(row.etag) ? row.etag : undefined;
+            }
           } catch {
             now = undefined;
           }
         }
-        if (this.bufs.get(abs) !== b) return "conflict";
+        if (this.bufs.get(abs) !== b || b.gen !== gen) return "conflict";
         if (typeof now === "string") b.conflict = this.changed(b, now);
         else if (now === null) b.conflict = { state: "gone" };
         this.emit();
@@ -765,19 +870,21 @@ export class Buffers {
    */
   async reload(abs: string, opts: { onlyIfClean?: boolean; toast?: boolean } = {}): Promise<boolean> {
     const b = this.bufs.get(abs);
-    if (!b || !b.model) return false;
+    if (!b || !b.model || !this.route(b)) return false;
+    const routeGen = b.routeGen;
     const deps = this.need();
     let r: FileRead;
     try {
       r = await deps.read(b.projectId, b.path);
     } catch (e: any) {
+      if (b.routeGen !== routeGen) return false;
       if (e?.status === 404) {
         b.conflict = { state: "gone" };
         this.emit();
       } else this.notice(abs, e?.message || "reload failed");
       return false;
     }
-    if (this.bufs.get(abs) !== b || !b.model || b.model.isDisposed()) return false;
+    if (this.bufs.get(abs) !== b || b.routeGen !== routeGen || !b.model || b.model.isDisposed()) return false;
     if (r.protected || parseKind(r.kind) === "withheld") return false;
     if (opts.onlyIfClean && this.dirtyOf(b)) {
       if (r.etag && r.etag !== b.etag) b.conflict = this.changed(b, r.etag);
@@ -806,9 +913,11 @@ export class Buffers {
   /** What is on disk now, and its etag, for Compare: read through the buffer's own project. */
   async readDisk(abs: string): Promise<{ text: string; etag: string | null } | null> {
     const b = this.bufs.get(abs);
-    if (!b) return null;
+    if (!b || !this.route(b)) return null;
+    const routeGen = b.routeGen;
     try {
       const r = await this.need().read(b.projectId, b.path);
+      if (this.bufs.get(abs) !== b || b.routeGen !== routeGen) return null;
       return r.protected ? null : { text: unBOM(r.content ?? ""), etag: typeof r.etag === "string" ? r.etag : null };
     } catch {
       return null;
@@ -862,7 +971,7 @@ export class Buffers {
     try {
       const groups = new Map<string, Buf[]>();
       for (const b of this.bufs.values()) {
-        if (!b.refs.size || b.kind === "withheld" || !b.model) continue;
+        if (!b.refs.size || b.kind === "withheld" || !b.model || !this.route(b, false)) continue;
         groups.set(b.projectId, [...(groups.get(b.projectId) || []), b]);
       }
       for (const [projectId, bufs] of groups) {
@@ -872,7 +981,7 @@ export class Buffers {
           // have read the disk before the write landed, and once the save's
           // answer moved the etag that reads as someone else's write — a
           // conflict bar against the owner's own save on a slow disk.
-          const asked = new Map(chunk.map((b) => [b, { etag: b.etag, saving: b.saving || !!b.again }]));
+          const asked = new Map(chunk.map((b) => [b, { etag: b.etag, saving: b.saving || !!b.again, routeGen: b.routeGen, path: b.path }]));
           let rows: Record<string, StatRow>;
           try {
             rows = (await this.deps.stat(projectId, chunk.map((b) => b.path))).files || {};
@@ -882,8 +991,8 @@ export class Buffers {
           for (const b of chunk) {
             if (this.bufs.get(b.abs) !== b) continue;
             const was = asked.get(b)!;
-            if (was.saving || was.etag !== b.etag) continue;
-            const row = rows[b.path];
+            if (was.saving || was.etag !== b.etag || was.routeGen !== b.routeGen) continue;
+            const row = rows[was.path];
             const saving = b.saving || !!b.again;
             switch (pollAction({ etag: b.etag, dirty: this.dirtyOf(b), saving, conflict: b.conflict }, row)) {
               case "reload":
@@ -935,6 +1044,7 @@ export class Buffers {
     for (const b of [...this.bufs.values()]) this.drop(b);
     this.byKey.clear();
     this.pending.clear();
+    this.deletedProjects.clear();
     this.making.clear();
     this.touches = [];
     this.emit();
