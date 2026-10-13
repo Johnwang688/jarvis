@@ -11,7 +11,7 @@ from tests.face.hud_v2_remote_check import Remote
 from jarvis.v2.browser.panes import PaneRefused
 
 def controls_checks(browser,mock,base,check,until,guard,fake):
-    ctx=browser.new_context(viewport={"width":1600,"height":800})
+    ctx=browser.new_context(viewport={"width":1600,"height":800},has_touch=True)
     guard(ctx);ctx.add_init_script(fake);remote=Remote(ctx,mock);page=ctx.new_page()
     page.set_default_timeout(5000);errors=[];page.on("pageerror",lambda e:errors.append(str(e)))
     try:
@@ -19,7 +19,6 @@ def controls_checks(browser,mock,base,check,until,guard,fake):
         raw={"preset":"cols2","focused":2,"panes":[{"view":"chat"},{"view":"browser","browserProfile":"p-11111111",
              "browser":{"active":"pageaa","tabs":[{"id":"pageaa","url":"https://example.test/","mode":"remote"}]}},
              {"view":"file"},{"view":"task"}]}
-        ctx.add_init_script("localStorage.setItem('jarvis.hud.workspace',"+json.dumps(json.dumps(raw))+");localStorage.setItem('jarvis.hud.zoom','100');")
         _set_storage(page,zoom="100",layout="{}");_set_ws(page,json.dumps(raw));_boot(page,mock,None,until,reload=True)
         pane=page.locator(_pane(2));button=pane.locator('[data-testid="browser-options-toggle"]')
         options=pane.locator('[data-testid="browser-options"]')
@@ -65,6 +64,30 @@ def controls_checks(browser,mock,base,check,until,guard,fake):
         until(lambda:next(p for p in front()["panes"] if p["pane_id"]==2)["drawn"],timeout=3)
         check("Browser Escape restores its options button and host visibility",options.is_hidden()
               and button.evaluate("e=>e===document.activeElement"))
+        surface=pane.locator('[data-testid="remote-surface"]')
+        def page_press_events(after):
+            return [m for m in remote.inputs()[after:] if m.get("t")=="mouse" and m.get("e",{}).get("type") in ("mousePressed","mouseReleased")]
+        for gesture in ("mouse","touch"):
+            button.click();before=len(remote.inputs())
+            point={"x":20,"y":surface.bounding_box()["height"]-25}
+            if gesture=="mouse":surface.click(position=point)
+            else:surface.tap(position=point)
+            page.wait_for_timeout(100)
+            check("Browser "+gesture+" dismissal consumes its compatibility page press",options.is_hidden() and not page_press_events(before),str(remote.inputs()[before:]))
+            before=len(remote.inputs());surface.click(position=point)
+            until(lambda:bool(page_press_events(before)),timeout=3)
+            check("Browser next deliberate click works after "+gesture+" dismissal",bool(page_press_events(before)))
+        address=pane.locator('[data-testid="browser-url"]')
+        address.fill(f"http://127.0.0.1:{mock.dev_port}/");address.press("Enter")
+        until(lambda:pane.locator('[data-testid="browser-frame"]').count()==1,timeout=4)
+        frame=pane.frame_locator('[data-testid="browser-frame"]')
+        frame.locator("body").evaluate("e=>{window.__dismissInputs=[];for(const k of ['pointerdown','mousedown','mouseup','click'])document.addEventListener(k,()=>window.__dismissInputs.push(k),true)}")
+        button.click();bounds=pane.locator('[data-testid="browser-frame"]').bounding_box()
+        page.mouse.click(bounds["x"]+20,bounds["y"]+bounds["height"]-25)
+        page.wait_for_timeout(100)
+        check("Browser Direct iframe cannot receive the dismissal gesture",options.is_hidden() and frame.locator("body").evaluate("()=>window.__dismissInputs.length")==0)
+        address.fill("https://example.test/");address.press("Enter")
+        until(lambda:pane.locator("canvas").get_attribute("data-frame")=="ready",timeout=4)
         button.click();_approval(mock,"options-card")
         until(lambda:page.locator('[data-testid="approval-card"]').count()==1,timeout=3)
         check("Browser cards close and disable options before owner actions",options.is_hidden() and button.is_disabled())

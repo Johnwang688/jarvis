@@ -124,6 +124,9 @@ export function BrowserTab(props: {
     const outside = (event: PointerEvent) => {
       if (!(event.target instanceof Node) || optionsTarget?.parentElement?.contains(event.target)
           || anchor.current?.contains(event.target)) return;
+      // Cancelling pointerdown suppresses this gesture's compatibility mouse
+      // press/release even if closing the panel commits before those events.
+      event.preventDefault(); event.stopPropagation();
       closeOptions();
     };
     document.addEventListener("pointerdown", outside, true);
@@ -139,7 +142,7 @@ export function BrowserTab(props: {
     },
     onAnnotating: setAnnotating,
   };
-  return <div className="tabbody browserbody" onPointerDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture],[data-browser-options]")&&!props.blocked)props.control?.focus(props.pane as PaneNo);}}
+  return <div className="tabbody browserbody" data-options-open={optionsOpen ? "true" : undefined} onPointerDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture],[data-browser-options]")&&!props.blocked)props.control?.focus(props.pane as PaneNo);}}
     onKeyDownCapture={e=>{
       if ((e.target as Element).closest("[data-browser-options]") && !props.blocked) {
         if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeOptions(); anchor.current?.focus(); }

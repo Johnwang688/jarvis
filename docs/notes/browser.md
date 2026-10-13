@@ -1378,7 +1378,9 @@ not drawn to the host. This invalidates old action refs without changing saved
 see/drive preferences or transient Private consent. Exact component ownership
 prevents a stale unmount from uncovering a replacement pane. Escape restores the
 options button; outside clicks close it without forwarding the first Remote page
-gesture. Cards, hidden panes, Settings and annotations disable options.
+gesture. Dismissal cancels pointerdown, consuming its compatibility mouse events;
+a transparent shield catches Direct iframe presses on the stable HUD frame host.
+Cards, hidden panes, Settings and annotations disable options.
 
 Capture pins its destination and cancellation token before closing options,
 then waits for the new front receipt. Card, visibility, profile/context, active

@@ -1655,3 +1655,6 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .browser-project-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 11px; }
 .browser-option-status:empty { display: none; }
 .browser-option-status p { margin: 4px 8px; }
+
+/* Catch Direct dismissal on a stable HUD host before any iframe event. */
+.browserbody[data-options-open=true] .framehost::after { content: ""; position: absolute; inset: 0; z-index: 2; background: transparent; }

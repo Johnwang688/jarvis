@@ -79,3 +79,11 @@ it("ending an annotation releases the immediate hold and lets the next options g
   expect(observed.remote.inputHeld()).toBe(false);expect(toggle().disabled).toBe(false);
   await act(async()=>toggle().click());expect(panel().hidden).toBe(false);
 });
+
+it.each(["mouse","touch","pen"])("cancels the entire outside dismissal pointer gesture: %s",async(pointerType)=>{
+  await show();await act(async()=>toggle().click());
+  const event=new MouseEvent("pointerdown",{bubbles:true,cancelable:true});
+  Object.defineProperty(event,"pointerType",{value:pointerType});
+  await act(async()=>host.querySelector('[data-testid="remote-status"]')!.dispatchEvent(event));
+  expect(event.defaultPrevented).toBe(true);expect(panel().hidden).toBe(true);
+});
