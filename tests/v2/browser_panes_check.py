@@ -96,6 +96,45 @@ class Panes(unittest.TestCase):
         self.registry.window_ended(W)
         self.assertEqual(self.registry._sequences, {})
 
+    def test_expired_binding_preserves_frozen_source_on_passive_report(self):
+        self.registry.report(self.source_report())
+        before = self.registry.resolve()
+        self.now += LEASE_S
+        self.source = {"kind": "terminal", "terminal_id": "wrong-reused-source"}
+        self.registry.report(report(2))
+        after = self.registry.resolve("1")
+        self.assertEqual(after.source, before.source)
+        self.assertFalse(self.registry.still_current(before))
+        self.assertGreater(after.generation, before.generation)
+        self.registry.window_ended(W)
+        self.assertEqual(self.registry._dormant, {})
+
+    def test_expired_heartbeat_does_not_reset_focus_or_steal_other_window(self):
+        other = "b" * 32
+        self.registry.window_started(other)
+        self.registry.report(report(focus_seq=100))
+        self.now = 40
+        self.registry.report(report(window=other, focus_seq=1))
+        self.now = 62
+        self.registry.report(report(2, focus_seq=100))
+        self.assertEqual(self.registry.resolve().window, other)
+        self.registry.report(report(3, focus_seq=101))
+        self.assertEqual(self.registry.resolve().window, W)
+
+    def test_address_completion_cannot_revive_a_lease_that_expired_during_navigation(self):
+        self.registry.report(self.source_report())
+        self.now = 50
+        def opened(*args, **kwargs):
+            self.now = 70
+            return {"tab_id": T, "loaded": True}
+        self.host.open_tab.side_effect = opened
+        with self.assertRaises(PaneRefused): self.registry.address(4, L, self.address(mode="remote"))
+        self.host.close_tab.assert_called_once_with(T)
+        self.assertEqual(self.registry._windows, {})
+        self.assertEqual(self.registry._dormant[W].panes[4].tabs[L].source.terminal_id, "term-1")
+        self.registry.report(report(3))
+        self.assertEqual(self.registry.resolve("1").source.terminal_id, "term-1")
+
     def test_source_is_frozen_after_expiry_reuse_and_passive_clear(self):
         self.registry.report(self.source_report())
         snap = self.registry.resolve()
