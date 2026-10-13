@@ -1234,17 +1234,23 @@ class BrowserHost:
         owner's work (a half-filled form, a sign-in mid-way), and a page
         could otherwise use pop-ups to evict the owner's tabs one by one."""
         if self._instances.get(instance.profile) is not instance or instance.closing or self._stopped:
-            asyncio.ensure_future(self._refuse_popup(page))
+            # Restoration teardown owns overflow pages; never allocate a task
+            # per popup after that bounded replacement has been retired.
+            if not instance.restoring:
+                asyncio.ensure_future(self._refuse_popup(page))
             return None
         if instance.restoring:
             if logical_id is None:
-                if instance.restore_allocation:
-                    if page not in instance.unadopted:
+                if page in instance.unadopted or page in instance.refused_pages:
+                    return None
+                pending = len(instance.unadopted) + len(instance.refused_pages)
+                if pending < self._tab_cap():
+                    if instance.restore_allocation:
                         instance.unadopted.append(page)
-                elif len(instance.popup_cleanup) < self._tab_cap():
-                    instance.refused_pages.append(page)
-                    instance.popup_cleanup.append(asyncio.create_task(
-                        asyncio.wait_for(page.close(), CLOSE_TIMEOUT_S)))
+                    else:
+                        instance.refused_pages.append(page)
+                        instance.popup_cleanup.append(asyncio.create_task(
+                            asyncio.wait_for(page.close(), CLOSE_TIMEOUT_S)))
                 else:
                     # Excess unsolicited pages retire this replacement. The
                     # coordinator's context teardown owns the overflow page.
@@ -1904,7 +1910,9 @@ class BrowserHost:
     def ticket(self, tab_id) -> dict:
         tab = self.require_tab(tab_id)
         with self._lock:
-            if self._tabs.get(tab.id) is not tab or tab.retired or self._stopped:
+            instance = self._instances.get(tab.profile)
+            if (self._tabs.get(tab.id) is not tab or tab.retired or self._stopped
+                    or instance is None or instance.closing or instance.restoring):
                 raise BrowserRefused(409, "this Browser page is no longer current")
             ticket = self.tickets.mint(tab.id, tab.page_identity)
         return {"ticket": ticket, "expires_in": int(TICKET_TTL_S)}
@@ -1927,7 +1935,9 @@ class BrowserHost:
         """A window's socket for one tab, read on the calling (HTTP handler)
         thread until it closes."""
         tab = self._tabs.get(tab_id)
+        instance = self._instances.get(tab.profile) if tab is not None else None
         if (tab is None or tab.stream is None or tab.retired or not self._running()
+                or instance is None or instance.closing or instance.restoring
                 or (expected_tab is not None and tab is not expected_tab)):
             from .. import ws
             sock.send_text(json.dumps({"t": "refused", "reason": "no such tab"}))
@@ -2460,6 +2470,7 @@ class BrowserHost:
                      "document_generation": tab.document_generation}
             for tab in self._tabs.values() if tab.pane_ready and tab.page_identity > 0
             and tab.profile in self._instances and not self._instances[tab.profile].closing
+            and not self._instances[tab.profile].restoring
         }
         with self._lock:
             self._pane_tabs = rows

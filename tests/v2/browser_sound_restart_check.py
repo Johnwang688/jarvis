@@ -146,6 +146,54 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.host._tabs),{old.id});self.assertTrue(popups[0].closed)
         self.assertIsNot(self.host._tabs[old.id].page,popups[0])
 
+    async def test_popup_flood_while_new_page_waits_is_bounded_and_fails_replacement(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        entered=asyncio.Event();release=asyncio.Event();popups=[]
+        original=self.host._launch.side_effect
+        async def launch(*args,**kwargs):
+            instance=await original(*args,**kwargs)
+            real=instance.context.new_page
+            async def blocked():
+                entered.set();await release.wait();return await real()
+            instance.context.new_page=blocked
+            return instance
+        self.host._launch.side_effect=launch
+        restart=asyncio.create_task(self.run_restart());await entered.wait()
+        instance=self.launches[-1];cap=self.host._tab_cap()
+        for _ in range(cap*4):
+            page=Page('https://popup.test/');instance.context.pages.append(page);popups.append(page)
+            self.assertIsNone(self.host._adopt(instance,page,None))
+        self.assertTrue(instance.closing)
+        self.assertLessEqual(len(instance.unadopted)+len(instance.refused_pages),cap)
+        self.assertLessEqual(len(instance.popup_cleanup),cap)
+        self.assertEqual(self.host._tabs,{})
+        release.set();await restart
+        self.assertTrue(instance.context.closed);self.assertTrue(all(p.closed for p in popups))
+        self.assertEqual(instance.unadopted,[]);self.assertEqual(self.host._tabs,{})
+        self.assertEqual(set(self.sound.restarts.descriptors),{old.id})
+        self.assertEqual(self.sound.instance_status(self.host._instances[self.profile])['phase'],'failed')
+
+    async def test_restore_navigation_cannot_publish_or_attach_a_partial_page(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        real=self.host._goto
+        self.host._running=lambda:True
+        async def goto(tab,*args,**kwargs):
+            instance=self.host._instances[self.profile]
+            self.assertTrue(instance.restoring)
+            self.host._publish_pane_tabs();self.assertIsNone(self.host.pane_tab(tab.id))
+            with self.assertRaises(H.BrowserRefused) as refused:self.host.ticket(tab.id)
+            self.assertEqual(refused.exception.status,409)
+            sock=Mock()
+            with patch.object(H,'_serve_stream') as serve:
+                self.host.serve_socket(tab.id,sock,expected_tab=tab);serve.assert_not_called()
+            sock.close.assert_called_once()
+            return await real(tab,*args,**kwargs)
+        self.host._goto=goto;await self.run_restart()
+        new=self.host._tabs[old.id]
+        self.assertFalse(self.host._instances[self.profile].restoring)
+        self.assertTrue(new.pane_ready);self.assertEqual(new.page.gotos,['https://example.test/synthetic'])
+        self.assertIsNotNone(self.host.pane_tab(old.id));self.assertIn('ticket',self.host.ticket(old.id))
+
     async def test_forbidden_redirect_is_inert_and_loses_transferred_port(self):
         old=self.tab(url='http://127.0.0.1:33333/synthetic',lease=33333)
         await asyncio.sleep(0);await asyncio.sleep(0)
