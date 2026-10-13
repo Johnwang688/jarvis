@@ -1095,6 +1095,62 @@ class ThirdReview(unittest.TestCase):
                 self.assertFalse(G.prints_secrets(command), command)
 
 
+class ReplFollowups(unittest.TestCase):
+    def test_named_repl_environment_reads_and_shell_escapes(self):
+        refused = [
+            "In [1]: %env", "   ...: %env", "In [1]: %env API_KEY",
+            "In [2]: %env API_KEY=placeholder", "In [3]: %env API_KEY placeholder",
+            "In [4]: %set_env API_KEY=placeholder", "In [5]: %set_env API_KEY placeholder",
+            "In [1]: %env API-KEY", "In [1]: %env API.KEY=placeholder",
+            "In [1]: %set_env 1API_KEY=placeholder", "In [1]: %env 1API_KEY placeholder",
+            "In [2]: !env", "In [2]: !!env", "In [2]: !cat .env",
+            "   ...: !printenv API_KEY", "In [1]: print(os.environ)",
+            "irb(main):001> ENV.to_h", "irb(main):001:0> puts ENV['API_KEY']",
+            "[1] pry(main)> ENV.to_h", "[20] pry(#<Object>)> ENV['API_KEY']",
+        ]
+        for source in refused:
+            with self.subTest(source=source):
+                self.assertTrue(G.shows_printer(source))
+                self.assertTrue(G.judge((source + "\r\nplaceholder\r\n").encode(), 0).refused)
+
+    def test_benign_repl_input_and_prose_keep_reading(self):
+        for source in [
+            "In [1]: %env MODE", "In [1]: %env MODE=prod", "In [1]: %env MODE prod",
+            "In [1]: %env BUILD-MODE", "In [1]: %env BUILD.MODE=prod",
+            "In [1]: %set_env 1MODE=prod", "In [1]: %env 1MODE prod",
+            "In [1]: %env MODE='test run'", 'In [1]: %env MODE "test run"',
+            "In [1]: %set_env MODE=prod", "In [1]: %set_env", "In [1]: %env?",
+            "In [1]: %environment", "In [1]: !ls -la", "In [1]: !!echo ready",
+            "In [1]: !env MODE=prod python3 app.py", "In [1]: ENV = 'prod'",
+            "irb(main):001> ENV['MODE']", "[1] pry(main)> puts 'ready'",
+            "> Set the ENV variable", "> env:", "README: In [1]: %env",
+            "Use irb(main):001> ENV.to_h to list variables.",
+        ]:
+            with self.subTest(source=source):
+                self.assertFalse(G.shows_printer(source))
+
+    def test_shell_escape_spends_existing_budget_and_unseen_magic_fails_closed(self):
+        G.prints_secrets.cache_clear()
+        budget = G.Budget(0)
+        self.assertTrue(G.shows_printer("In [1]: !echo ready", budget))
+        self.assertTrue(G.shows_printer("In [1]: " + " " * G.SCAN_LINE_CAP + "%env"))
+        self.assertFalse(G.shows_printer("In [1]: " + " " * G.SCAN_LINE_CAP + "ready"))
+
+    def test_interpreter_verbs_do_not_recurse_or_copy_each_tail(self):
+        for prog in ("bun", "deno"):
+            for script in ("main.ts", ".env"):
+                args = ["run"] * 2000 + [script, "operand"]
+                started = time.thread_time()
+                self.assertEqual(G._interpreter_parts(prog, args), ([], script, None, ["operand"]))
+                self.assertLess(time.thread_time() - started, .1)
+        self.assertEqual(G._interpreter_parts("bun", ["-p", "-e", "1", "run", "-e", "Bun.env"]),
+                         (["1", "run", "Bun.env"], None, None, []))
+        self.assertEqual(G._interpreter_parts("deno", ["run", "--config", "foo", "eval", "--seed", "1", "Deno.env.toObject()"]),
+                         (["Deno.env.toObject()"], None, None, []))
+        self.assertEqual(G._interpreter_parts("bun", ["run", "-pe", "--", "Bun.env"]),
+                         (["Bun.env"], "Bun.env", None, []))
+
+
 class FolderValues(unittest.TestCase):
     def test_env_variants_are_credential_files_here_but_example_names_are_not(self):
         # ENV-1: the owner's `.env*` rule, asked through `secrets.is_protected`
