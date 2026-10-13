@@ -23,12 +23,13 @@ warning. What keeps a newer version from loosening the gate is narrower than
 - an approval that would **widen the sandbox** (extra permissions, a
   managed-network prompt, a grant root, terminal input) is put to a human
   every time, with no Always (`permit(..., widening=...)`), and declined with
-  no human. The reply is a bare `{decision}`, so the grant cannot be split
-  off; and a request reaches us only after Codex's reviewer passed it, so
-  without this an AUTO brief's "the reviewer decides" meant nobody did;
-- a plain in-sandbox approval under AUTO is still accepted on the strength
-  of Codex's reviewer (design R8) — that is the AUTO contract, not a gap
-  this adapter closes;
+  no human. The reply is a bare `{decision}`, so the grant cannot be split off;
+- owner chats select native `user` review and verify it in effective config
+  and start/resume receipts. Every command/file approval callback in a chat
+  is owner-required widening, even without an explicit grant field: a bare
+  callback does not prove execution stays sandboxed. Ordinary sandboxed
+  work runs without callbacks. Tasks retain `auto_review` and its existing
+  fallback for plain approvals (design R8);
 - a non-null approval field outside the verified schema
   (`_KNOWN_APPROVAL_FIELDS`) counts as a widening — it may be a new grant —
   so a human is asked, shown it, and offered no Always.
@@ -183,9 +184,9 @@ def _approval_problem(p: dict) -> str | None:
     return None
 
 
-# Approval kinds that are a plain command run inside the sandbox. Anything
-# else widens what the sandbox lets through; a kind not listed at all is one
-# this adapter cannot describe to the owner, so it is declined outright.
+# Command versus terminal-input shapes, not proof that execution stays in
+# the sandbox. Owner chat callbacks always take the human widening path.
+# A kind not listed at all cannot be described and is declined outright.
 _PLAIN_KINDS = (None, "command")
 _WIDENING_KINDS = {"writeStdin": "input to a running terminal (writeStdin)"}
 # Every approval field in the 0.153.4 and 0.161.0 schemas (identical in both).
@@ -700,16 +701,23 @@ class CodexProvider:
                 if account.get("type") != "chatgpt":
                     raise BriefRefused("Codex requires ChatGPT authentication; API-key billing refused")
                 effective = rpc.request("config/read", {"includeLayers": False})["config"]
+                reviewer = codex_config.approvals_reviewer(brief)
                 required = {"forced_login_method": "chatgpt", "model_provider": "openai",
                             "sandbox_mode": "workspace-write", "approval_policy": "on-request",
-                            "approvals_reviewer": "auto_review"}
+                            "approvals_reviewer": reviewer}
                 if any(effective.get(k) != v for k, v in required.items()):
                     raise BriefRefused("Codex effective config changed authentication or permissions")
+                workspace = effective.get("sandbox_workspace_write") or {}
+                if workspace.get("network_access", False) is not False:
+                    raise BriefRefused("Codex effective config enabled sandbox networking")
+                expected_roots = codex_config.git_roots(brief)
+                if workspace.get("writable_roots", []) != expected_roots:
+                    raise BriefRefused("Codex effective config changed writable roots")
                 params = {"cwd": brief.cwd, "modelProvider": "openai", "sandbox": "workspace-write",
-                          "approvalPolicy": "on-request", "approvalsReviewer": "auto_review",
+                          "approvalPolicy": "on-request", "approvalsReviewer": reviewer,
                           # baseInstructions replaces the native prompt. The additive
                           # developer field preserves it, AGENTS.md and skill loading.
-                          "developerInstructions": brief.system_append}
+                          "developerInstructions": "\n\n".join(filter(None, (brief.system_append, codex_config.git_note(brief))))}
                 if brief.model:
                     params["model"] = brief.model
                 if brief.effort:
@@ -727,8 +735,10 @@ class CodexProvider:
                         or (brief.effort and result.get("reasoningEffort") != brief.effort)
                         or result.get("modelProvider", "openai") != "openai"
                         or result.get("approvalPolicy") != "on-request"
-                        or result.get("approvalsReviewer") != "auto_review"
-                        or result.get("sandbox", {}).get("type") != "workspaceWrite"):
+                        or result.get("approvalsReviewer") != reviewer
+                        or result.get("sandbox", {}).get("type") != "workspaceWrite"
+                        or result.get("sandbox", {}).get("writableRoots", []) != expected_roots
+                        or result.get("sandbox", {}).get("networkAccess", False) is not False):
                     raise BriefRefused("Codex did not honor the requested model, effort or sandbox")
                 if not resume:
                     accounting = Accounting(home / "usage.json", returned_id, False)
@@ -1114,6 +1124,12 @@ class CodexProvider:
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: {declined}")
                 return
+            if codex_config.approvals_reviewer(s.brief) == "user":
+                # With on-request/user, this callback may authorize a sandbox
+                # escape even without an explicit permissions overlay. Never
+                # let AUTO's "native reviewer decides" fallback answer it:
+                # every chat callback takes the owner-only, no-Always path.
+                parts.insert(0, "Codex chat requests execution beyond its ordinary sandbox; owner approval required")
             line = _headline(parts)
             if line:
                 args["sandbox_widening"] = line

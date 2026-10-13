@@ -3498,7 +3498,8 @@ def cost_checks() -> None:
     start is judged within one work budget per line. Every form in
     `COST_RUNNERS`, nested 60 and 1,000 deep, is judged by `decide`,
     `static_verdict`, `command_touch`, `owner_op`, `runners_unsure`, v2's
-    always-ask match and `run_readonly` in well under 100 ms each (at
+    always-ask match and `run_readonly` in under 100 ms of calling-thread CPU
+    time each (with the separate 3 s wall deadline still enforced; at
     16675fb `npx --x ` sixty deep took 52 s and 139 s; a thousand nested
     `npx` raised RecursionError on main), never ALLOW, never an exception;
     and a line past the budget is never covered by an allowlist entry."""
@@ -3543,15 +3544,17 @@ def cost_checks() -> None:
                     for _ in range(2):          # the faster of two: a busy machine is not a regression
                         rules._runners_unsure_cached.cache_clear()
                         rules._vex_line_cached.cache_clear()
-                        start = time.perf_counter()
+                        # This work is synchronous. Do not charge other test processes
+                        # stealing CPU time against this parser-complexity budget.
+                        start = time.thread_time()
                         with recorded() as ran, _deadline(3):
                             value = read(line)
-                        elapsed = time.perf_counter() - start
+                        elapsed = time.thread_time() - start
                         took = elapsed if took is None else min(took, elapsed)
                         if took < COST_LIMIT:
                             break
                     assert not ran, (runner, depth, name)
-                    assert took < COST_LIMIT, f"{name} took {took:.3f} s on {runner!r} x{depth}"
+                    assert took < COST_LIMIT, f"{name} took {took:.3f} CPU s on {runner!r} x{depth}"
                     if took > slowest[0]:
                         slowest = (took, f"{name} on {runner!r} x{depth}")
                     if name in ("decide", "static"):
@@ -3585,8 +3588,8 @@ def cost_checks() -> None:
         config.ALLOWLIST_PATH.write_text("[]")
     print(f"ok  cost: {len(COST_RUNNERS)} runner forms nested 60 and 1,000 deep, and 4 wide ones "
           f"({count} lines) "
-          f"judged by 7 readers each in under {COST_LIMIT * 1000:.0f} ms (slowest "
-          f"{slowest[0] * 1000:.0f} ms, {slowest[1]}); never ALLOW, never an exception, never "
+          f"judged by 7 readers each in under {COST_LIMIT * 1000:.0f} CPU ms (slowest "
+          f"{slowest[0] * 1000:.0f} CPU ms, {slowest[1]}); never ALLOW, never an exception, never "
           "covered past the budget")
 
 

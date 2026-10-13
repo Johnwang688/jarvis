@@ -58,6 +58,7 @@ import { shortId, threadTooltip } from "../lib/threadmodel";
 import { shortThreadId, threadLabel } from "../lib/threadTitle";
 import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
 import { InlineRename } from "./InlineRename";
+import { HoverTitle } from "./HoverTitle";
 import { CollapseButton } from "./Layout";
 import { toCss } from "../lib/layout";
 import { ACTIVITY_LABEL, NO_ACTIVITY, projectActivity, type ActivityStatus, type ActivityView } from "../lib/activity";
@@ -467,22 +468,18 @@ export const Sidebar = memo(function Sidebar(props: {
                           onCancel={() => setRenaming(null)}
                         />
                       ) : (() => {
-                        // The title, wrapped and clamped at three lines (its
-                        // whole as the tooltip); never the id, which is in ⋯.
+                        // One line, scrolling on hover; the id stays in ⋯.
                         const label = threadLabel(t);
                         return (
-                          <span
-                            className={"nm ttl" + (label.untitled ? " untitled" : "")}
-                            data-testid={`thread-name-${t.id}`}
-                            data-untitled={label.untitled ? "true" : undefined}
-                            title={label.untitled ? undefined : label.text}
+                          <HoverTitle
+                            text={label.text}
+                            untitled={label.untitled}
+                            testid={`thread-name-${t.id}`}
                             onDoubleClick={(e) => {
                               e.stopPropagation();
                               if (props.onRenameThread) setRenaming({ kind: "thread", id: t.id });
                             }}
-                          >
-                            {label.text}
-                          </span>
+                          />
                         );
                       })()}
                       {movedAway(t, p) ? (
@@ -490,7 +487,7 @@ export const Sidebar = memo(function Sidebar(props: {
                       ) : null}
                       <span className={`badge ${t.provider}`}>{t.provider}</span>
                       {t.model ? (
-                        <span className="badge pin" data-testid={`pin-${t.id}`}>{shortId(t.model)}</span>
+                        <span className="badge pin" data-testid={`pin-${t.id}`} title={t.model}>{shortId(t.model)}</span>
                       ) : null}
                       <button
                         type="button"
