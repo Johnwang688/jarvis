@@ -163,6 +163,9 @@ class _Session:
     provider: Provider
     handle: SessionHandle | None = None
     worker: threading.Thread | None = None
+    # When the running turn began (ISO, with `worker`): the HUD's thinking
+    # line counts from it after a reload (WP-H, H-b). Live, never stored.
+    running_since: str | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
     closing: bool = False
     retired: bool = False
@@ -925,6 +928,10 @@ class Daemon:
             session = self._sessions.get(thread.id)
             record["running"] = session is not None and session.worker is not None
             record["queued"] = len(self._queues.get(thread.id) or ())
+            # When that turn began (WP-H, H-b): present only while it runs, so
+            # a reloaded HUD's thinking line shows the true elapsed time.
+            if record["running"] and session.running_since:
+                record["running_since"] = session.running_since
         if thread.surface:
             # Where the chat is on Discord (PR C): names and a link, for the
             # chat header. Never a token; the guild id is setup's.
@@ -1161,6 +1168,7 @@ class Daemon:
             self.stores.threads._append(thread_id, "log.jsonl", record)
             self.bus.publish(dict(record))
         session.worker = worker
+        session.running_since = utcnow()
         worker.start()
         self._dev_hook("turn_started", thread_id, session.thread.provider)
         return turn_id
@@ -1471,6 +1479,7 @@ class Daemon:
             finally:
                 with self._lock:
                     session.worker = None
+                    session.running_since = None
                     session.questions.clear()
                     if leftover:
                         if session.owner_stopped:

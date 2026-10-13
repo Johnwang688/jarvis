@@ -138,6 +138,11 @@ export function InputBar(props: {
    * conversation wherever it is by then, not to this box's next one. */
   stageKey?: string | null;
   onStage?: (key: string, files: Attachment[]) => void;
+  /** The chat's thinking line is up (WP-H): one more fixed part above this
+   * bar, so the box's cap is measured again when it comes and goes — or a
+   * long draft held at the conversation's minimum would let the line take
+   * the log below it. */
+  footLine?: boolean;
 }) {
   const [ownText, setOwnText] = useState("");
   const [ownFiles, setOwnFiles] = useState<Attachment[]>([]);
@@ -223,7 +228,10 @@ export function InputBar(props: {
     if (pane) ro.observe(pane);
     return () => ro.disconnect();
   }, []);
-  useLayoutEffect(() => fit.current(), [text, files.length, notes.length, props.imageNote, props.status != null]);
+  useLayoutEffect(
+    () => fit.current(),
+    [text, files.length, notes.length, props.imageNote, props.status != null, !!props.footLine],
+  );
 
   // REVIEW dictation puts the transcript in the box and focuses it. Nothing is
   // ever sent on its own in this mode — that is the whole point of the mode.
