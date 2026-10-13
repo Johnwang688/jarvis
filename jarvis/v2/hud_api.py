@@ -537,7 +537,7 @@ def directories(name):
             "dirs": sorted(names)}
 
 
-def assemble_turn(project, body, *, paths: bool = True):
+def assemble_turn(project, body, *, paths: bool = True, owner: bool = False, captures=None):
     """v1 fences/notes/caps, with project-scoped @paths and credential names refused.
 
     `paths=False` (a message typed in Discord, PR C) takes the attachments
@@ -588,6 +588,15 @@ def assemble_turn(project, body, *, paths: bool = True):
     for item in combined[:8]:
         if any(not isinstance(item.get(k), str) for k in ("name", "mime", "data_b64")):
             fail(400, "attachment fields must be strings")
+        # Opaque owner-minted reference, not file data despite the legacy
+        # field name. Resolve before base64 decoding and canonicalize its
+        # mirror name so page metadata never reaches Discord.
+        from .browser.captures import MIME as CAPTURE_MIME, OWNER_ONLY, UNAVAILABLE
+        if item["mime"] == CAPTURE_MIME:
+            names.append("page text")
+            blocks.append(captures.resolve(item["data_b64"], owner=owner)
+                          if captures is not None else (UNAVAILABLE if owner is True else OWNER_ONLY))
+            continue
         name, mime = (item["name"] or "attachment")[:200], item["mime"] or "text/plain"
         if (is_protected(item["name"].replace("\\", "/"))
                 or is_env_credential_name(item["name"].replace("\\", "/").rsplit("/", 1)[-1])
@@ -1802,11 +1811,15 @@ def route(handler, daemon, parts, query):
         thread = daemon.require(stores.threads, parts[1])
         if parts[2] == "send" and method == "POST":
             project = daemon.require(stores.projects, thread.project_id)
-            message = assemble_turn(project, handler._body())
+            # Authenticate before resolving an opaque page capture. API
+            # and Discord sends can never use the owner's retained page text.
+            from .projects import is_owner
+            owner = is_owner(handler, daemon)
+            message = assemble_turn(project, handler._body(), owner=owner,
+                                    captures=daemon.browser_captures)
             # The owner is at the desk only when the window itself sent this
             # (the HUD's listener and Origin), never a script on the API one.
-            from .projects import is_owner
-            if is_owner(handler, daemon):
+            if owner:
                 message = dataclasses.replace(message, desk=True)
             # Never a dead end while a turn runs (2026-10-08): the message
             # starts a turn, is steered into the running one, or waits behind

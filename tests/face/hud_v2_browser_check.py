@@ -1064,7 +1064,14 @@ def _guard_gesture_checks(page, mock, check, until):
     # Tab from the URL box, as many times as the toolbar needs.
     _away(page)
     page.locator(_pane(2, '[data-testid="browser-url"]')).click()
-    for _ in range(6):
+    # Capture controls legitimately add stops before the frame. Bound the
+    # traversal by this page's actual controls, while still requiring native
+    # Tab entry into the exact iframe below (never focus it through script).
+    stops = page.locator(_pane(2, '[data-browser-page][aria-hidden="false"]')).evaluate(
+        """e => [...e.querySelectorAll('button,input,select,textarea,a[href],iframe,[tabindex]')]
+            .filter(n => n.tabIndex >= 0 && !n.matches(':disabled') &&
+                !n.closest('[inert]') && n.getClientRects().length).length""")
+    for _ in range(stops + 1):
         page.keyboard.press("Tab")
         page.wait_for_timeout(80)
         if _active_frame(page):

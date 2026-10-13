@@ -1051,6 +1051,21 @@ doubles. This does not establish simultaneous production memory demand or a
 production memory ceiling (BD-10). No HUD profile chip is included here; BR-3b
 consumes these backend routes.
 
+## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
+
+Auto-open display labels do not authorize reading. Each tab independently keeps
+`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
+and invalid source records become unknown; copies retain source even when they
+drop the display mark and origin grant. Passive URL changes, tab selection,
+reload and project-root actions preserve source. Only a successfully judged
+owner address-field Enter/Load submission clears it, including the same URL;
+that also drops the obsolete auto label so storage cannot recreate a legacy
+restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
+The later daemon pane binding resolves the entry to immutable source identity;
+labels and client-supplied terminal IDs never authorize BR5. Unknown stays
+fail-closed. This shared model change alone does not enable Remote or a tool.
+
+
 
 ## Current owner pane registry (2026-10-13, BR3b incremental interface)
 
@@ -1122,6 +1137,23 @@ background tasks, workflows, subagents or default session tools. This backend
 package does not establish the pending BR3b UI or BR6 session/MCP interface,
 real account authentication, a live-provider call or deployment verification.
 
+## Current owner capture boundary (2026-10-13, BR4)
+
+Owner captures use resolve_owner/owner_current on one exact current binding.
+They bypass only initial see/source disclosure policy for that explicit capture;
+full snapshot equality, page/document generations, held state and a monotonic
+approval epoch remain checked. Agent still_current and BrowserLook.read retain
+their existing gates. The lower CDP capture adapter has an optional1920px owner
+image edge; its BR5 default remains1568px. Known credential/heuristic hits omit
+image and text together. Capture-time masks do not prove arbitrary pixels free
+of secrets; send-time credential revalidation promises retained text only.
+
+Capture references are bounded, memory-only and owner-send-only, with fresh
+untrusted fences and canonical mirror names. Capture metadata is not logged or
+published on SSE. The HUD drawing layer uses the existing pixel-coordinate ink
+model and stages an atomic image/reference pair into a pinned draft. Direct
+app-mode Region Capture remains unverified until a real M6 receipt exists;
+never substitute a fresh hidden Remote load for the owner's Direct pixels.
 
 ## Current owner Remote Browser UI (BR3b, 2026-10-13)
 
@@ -1132,3 +1164,24 @@ One ordered publisher uses the shared live SSE window identity for front reports
 Each visible active Remote stream consumes a fresh ticket and owns its decode/input generation. Hidden, covered and disconnected streams close while retained handles stay. Approval and annotation blocking stop all page input, clipboard cuts, paste/IME and file/dialog actions without interrupting incoming frames. Unsolicited selection cannot write the local clipboard; cut follows a successful owner clipboard write only. Page dialogs are plain text and never autofocus. Uploads send selected project/path references, and downloads save only on an owner gesture; interrupted late responses cannot create a local save.
 
 Profile controls expose creation, rename, Chrome sign-in, confirmed clearing and deletion through the owner routes. The HUD states Chrome's basic password store and possible sync limitations. This package does not enable agent driving or prove a real account sign-in. BR4 adds capture/annotation controls separately; its identity getter uses the exact current host receipt, not stream pixels.
+
+
+## Current owner capture HUD (BR4, 2026-10-13)
+
+Annotate and Send to chat are explicit gestures on the active drawn Browser tab.
+Remote uses the exact current host receipt; see/source permissions remain unchanged.
+Whole-page text is chosen before capture. The still keeps its captured metadata
+and text scope while the live stream continues; annotation blocks page input and
+navigation. Approval cards and Settings suspend drawing and invalidate pending
+work without discarding existing ink.
+
+Send stages one flattened picture and one opaque page-text reference together,
+never a chat turn. The selected drawn chat is pinned before asynchronous work.
+Stable compose identity follows a later opened thread; closure or replacement
+keeps the pair for the next new thread with an explicit notice. Final attachment
+capacity is judged atomically, and a rejected pair leaves the still and ink.
+
+Direct capture remains unverified on this host. The real app-mode capability
+probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels;
+synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
+“Open this in Remote to annotate” and converts only on that second owner gesture.

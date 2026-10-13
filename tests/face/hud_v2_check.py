@@ -3126,6 +3126,14 @@ def main():
             from tests.face.hud_v2_autoopen_check import autoopen_checks
             autoopen_checks(browser, check, until, guard, FAKE_RECOGNIZER)
 
+            from tests.face.hud_v2_capture_check import capture_checks
+            capture_mock = MockDaemon(0).start()
+            try:
+                capture_checks(browser, capture_mock, f"http://127.0.0.1:{capture_mock.port}", check, until,
+                               guard, FAKE_RECOGNIZER)
+            finally:
+                capture_mock.stop()
+
             # The Browser pane's ports and "keep its own origin" (WP-E), and the rename (BR-3a): a
             # context and a mock of their own, the dev server and the API
             # listener on ephemeral ports of the mock's.

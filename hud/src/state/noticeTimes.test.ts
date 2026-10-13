@@ -40,3 +40,16 @@ it("stamps at the stable production dispatch boundary before React reduces it", 
     expect(current!.state.errorAt).toBe(0);
   } finally { await act(async () => root.unmount()); host.remove(); }
 });
+
+it("stamps capture capacity and orphan notices with the same dispatch time", () => {
+  vi.spyOn(Date, "now").mockImplementation(() => { throw new Error("reducer read clock"); });
+  const file = { name: "fixture", mime: "text/plain", data_b64: "" };
+  const full = { ...initialState, drafts: { target: { text: "", files: Array(7).fill(file) } } };
+  const refused = reduce(full, { type: "stage", key: "target", files: [file, file], atomic: true, issuedAt: 1234 });
+  expect(refused.error).toContain("two attachment slots");
+  expect(refused.errorAt).toBe(1234);
+  const orphan = reduce(initialState, { type: "stage", key: "compose:1", files: [file, file],
+    capture: { id: "closed-compose", pane: 1, projectId: null }, atomic: true, issuedAt: 5678 });
+  expect(orphan.error).toContain("kept for the next new thread");
+  expect(orphan.errorAt).toBe(5678);
+});
