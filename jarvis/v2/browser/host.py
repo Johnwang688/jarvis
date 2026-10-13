@@ -849,6 +849,60 @@ class BrowserHost:
         return self._call(capture(self, snapshot, whole, images, forms, current, deadline, image_edge=image_edge),
                           max(0.1, deadline-time.monotonic()) + CLOSE_TIMEOUT_S*3)
 
+    def prepare_action(self, snapshot, action, capability, pin, forms, guard, *, prepared=None):
+        """BR9b private adapter: read facts, never grant a network lease."""
+        from .drive_execute import prepare
+        guard()
+        return self._call(prepare(self, snapshot, action, capability, pin, forms, guard, prepared), 20)
+
+    def execute_action(self, snapshot, action, prepared, pin, forms, guard, *, upload_bytes=None):
+        """Wait through cancelled in-flight input cleanup before releasing a driver."""
+        from .drive_execute import ACTION_TIMEOUT_S, execute
+        from .drive import ActResult
+        guard()
+        if not self._running():
+            return ActResult("stopped", "Stopped: the Browser closed.")
+        done = threading.Event()
+        async def run():
+            try:
+                return await execute(self, snapshot, action, prepared, pin, forms, guard, upload_bytes=upload_bytes)
+            finally:
+                done.set()
+        future = asyncio.run_coroutine_threadsafe(run(), self._loop)
+        try:
+            return future.result(ACTION_TIMEOUT_S + 10)
+        except FuturesTimeout:
+            future.cancel()
+            # A cancelled concurrent Future is marked done before its coroutine
+            # has settled. Wait on the coroutine's finally, not future.done().
+            # Browser shutdown's exact-process kill also settles a stuck CDP.
+            while not done.wait(.1):
+                pass
+            return ActResult("stopped", "Stopped: the Browser action timed out; look again.")
+
+    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text):
+        tab = self.require_tab(tab_id)
+        target = "" if prepared.context_flagged or prepared.target is None else prepared.target.name
+        rect = None
+        if prepared.rect and not prepared.context_flagged:
+            left, top, right, bottom = prepared.rect
+            rect = {"x": left, "y": top, "width": right-left, "height": bottom-top}
+        tab.stream.agent_driver(thread_id, "fast")
+        tab.stream.agent_action({"id": action_id, "at": datetime.now(timezone.utc).isoformat(), "action": action,
+            "target": target, "text": text if action in ("type", "select") else "",
+            "outcome": outcome, "rect": rect, "page_identity": tab.page_identity,
+            "document_generation": tab.document_generation})
+
+    def drive_finished(self, tab_id, action_id, outcome):
+        tab = self._tabs.get(tab_id)
+        if tab is None:
+            return
+        with tab.stream._lock:
+            row = next((dict(row) for row in tab.stream.actions if row["id"] == action_id), None)
+        if row is not None:
+            row["outcome"] = outcome
+            tab.stream.agent_action(row)
+
     # -- profiles (BR-1c) ---------------------------------------------------
 
     def profiles(self) -> list[dict]:
@@ -1089,6 +1143,8 @@ class BrowserHost:
             tab.pump = None
 
     def _dropped(self, tab: _Tab) -> None:
+        drive=getattr(self._daemon,"browser_drive",None)
+        if drive is not None:drive.downloads.closed_tab(tab.id)
         if self._tabs.get(tab.id) is tab:
             del self._tabs[tab.id]
         self._release(tab, "closed")
@@ -1958,7 +2014,10 @@ class BrowserHost:
     # -- downloads -------------------------------------------------------------------------------
 
     def _start_download(self, tab: _Tab, download) -> None:
-        task = asyncio.create_task(self._download(tab, download))
+        drive=getattr(self._daemon,"browser_drive",None)
+        item=drive.downloads.started(tab.id,getattr(download,"url",None)) if drive is not None else None
+        if item is not None:item.done=asyncio.Event()
+        task = asyncio.create_task(self._download(tab, download, item))
         self._download_tasks[task] = tab
         task.add_done_callback(lambda done: self._download_tasks.pop(done, None))
 
@@ -1972,7 +2031,17 @@ class BrowserHost:
             # Consume outcomes without cancelling an executor-backed writer.
             await asyncio.gather(*done, return_exceptions=True)
 
-    async def _download(self, tab: _Tab, download) -> None:
+    def wait_action_downloads(self, token):
+        async def wait():
+            # Wait only for attributed saves, never another owner tab. A late
+            # or unfinished save stays held and does not acquire an approval.
+            events=[item.done.wait() for item in token.downloads if item.done is not None and not item.done.is_set()]
+            if events:
+                try:await asyncio.wait_for(asyncio.gather(*events),10)
+                except asyncio.TimeoutError:pass
+        self._call(wait(),12)
+
+    async def _download(self, tab: _Tab, download, item=None) -> None:
         """A download is saved where only the owner reaches it (files.py) and
         its tab's window told; an executable one is held."""
         profile = PRIVATE if tab.profile == PRIVATE else tab.profile
@@ -1986,13 +2055,18 @@ class BrowserHost:
             source = await download.path()
             if self._tabs.get(tab.id) is not tab or tab.profile not in self._instances:
                 return
+            from functools import partial
             row = await asyncio.get_running_loop().run_in_executor(
-                None, _files.save, str(source), profile, name, download_id, tab.ctx)
+                None, partial(_files.save, str(source), profile, name, download_id, tab.ctx,agent_held=item is not None))
+            if item is not None:
+                drive=getattr(self._daemon,"browser_drive",None)
+                if drive is not None:drive.downloads.completed(item,row)
         except Exception as exc:  # noqa: BLE001 - a failed or cancelled download
             LOG.info("Browser download failed (%s)", type(exc).__name__)
             tab.stream.send({**notice, "state": "failed"})
             return
         finally:
+            if item is not None and item.done is not None:item.done.set()
             with self._lock:
                 self._downloading -= 1
             await self._quietly(download.delete())
@@ -2002,8 +2076,17 @@ class BrowserHost:
         tab.stream.send({"t": "download", "id": row["id"], "name": row["name"], "size": row["size"],
                          "state": "held" if row["held"] else "done", "held": row["held"]})
 
+    def download_released(self, tab_id, row):
+        tab=self._tabs.get(tab_id)
+        if tab is not None:
+            tab.stream.send({"t":"download","id":row["id"],"name":row["name"],"size":row["size"],"state":"done","held":False})
+
     def downloads(self) -> dict:
         rows = _files.listing()
+        drive=getattr(self._daemon,"browser_drive",None)
+        if drive is not None:
+            for row in rows:
+                if row["held"] and drive.downloads.listed_release(row["id"]):row["held"]=False
         with self._lock:
             live = self._downloading
         return {"downloads": rows, "in_progress": live}
@@ -2027,7 +2110,9 @@ class BrowserHost:
         """What BR-9b's gate reads (H3, H4): the hold, whether the owner
         paused the tab, and how long since the owner's last input to it."""
         tab = self.require_tab(tab_id)
-        return {**tab.stream.owner_state(), "held": self.input_held()}
+        return {**tab.stream.owner_state(), "held": self.input_held(),
+                "depressed": bool(tab.pressed or tab.keys_pressed),
+                "input_busy": bool(tab.input_task is not None and not tab.input_task.done())}
 
     # -- pane identity (BR-3b/BR-5; in-process only) --------------------------------------
 

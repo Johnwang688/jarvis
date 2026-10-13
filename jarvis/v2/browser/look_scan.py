@@ -70,8 +70,21 @@ SCAN_JS = r"""(args) => {
                 && !hides(e) && parseFloat(cs.opacity)>0.05 && r.width>=8 && r.height>=8
                 && viewport(r) && !offPage(r,e)) {
             const x=r.left+r.width/2, y=r.top+r.height/2;
-            const hit=document.elementFromPoint(x,y);
-            if(x>=0 && x<innerWidth && y>=0 && y<innerHeight && hit && (hit===e || e.contains(hit))) {
+            // document.elementFromPoint returns an open shadow host. Descend
+            // only that hit path, bounded independently of the page's nesting.
+            let hit=document.elementFromPoint(x,y), depth=0;
+            while(hit && hit.shadowRoot) {
+                if(++depth>64) {out.incomplete=true;break;}
+                const inner=hit.shadowRoot.elementFromPoint(x,y);
+                if(!inner || inner===hit)break;
+                hit=inner;
+            }
+            let coveredByTarget=false;
+            for(let a=hit, steps=0;a && steps++<args.nodeCap;a=parentOf(a)) {
+                if(a===e) {coveredByTarget=true;break;}
+            }
+            if(out.incomplete)break;
+            if(x>=0 && x<innerWidth && y>=0 && y<innerHeight && coveredByTarget) {
                 if(candidates.length>=args.refCap) {out.incomplete=true;break;}
                 const attrs={};
                 for(const key of ['role','type','aria-label','title','placeholder','href']) attrs[key]=charge(e.getAttribute(key));

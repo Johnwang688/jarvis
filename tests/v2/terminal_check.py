@@ -1917,7 +1917,7 @@ class NoTool(Base):
         return text.replace(self.READER_IMPORT, "")
 
     def _without_browser_readable_call(self, text: str) -> str:
-        # BR5 gets one boolean source-readability fact, never a terminal
+        # BR5 and BR9b each get one boolean source-readability fact, never a terminal
         # handle/output/control capability. Pin receiver and argument exactly;
         # the rest of the module still passes the ordinary terminal needles.
         import ast
@@ -1956,7 +1956,7 @@ class NoTool(Base):
             text = path.read_text(encoding="utf-8")
             if rel == self.READER:
                 text = self._without_reader_import(text)
-            if rel == "jarvis/v2/browser/look.py":
+            if rel in {"jarvis/v2/browser/look.py", "jarvis/v2/browser/drive.py"}:
                 text = self._without_browser_readable_call(text)
             if self.NEEDLES.search(text):
                 offenders.append(rel)
