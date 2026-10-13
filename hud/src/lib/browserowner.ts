@@ -118,6 +118,7 @@ export class BrowserPublisher {
     const path = action?.path ?? "/browser/front";
     const method = action?.method ?? "POST";
     const body = action ? {...action.body,window:front.window,seq} : {...front,seq};
+    let succeeded = false;
     try {
       const reply = await this.write(path,method,body,current.abort.signal);
       if (this.active !== current || current.abort.signal.aborted || current.revision !== this.revision || !this.online) throw cancelled();
@@ -128,17 +129,21 @@ export class BrowserPublisher {
       }
       this.receipt(reply,this.latest!);
       action?.resolve(reply);
+      succeeded = true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "The Browser change could not be applied.";
       action?.reject(error instanceof Error ? error : new Error(message));
       if (this.active === current && !current.abort.signal.aborted) {
+        // The host may have applied none or all of a failed write. Require a
+        // fresh full report before any later mutation, including a new gesture.
+        this.dirty = true;
         this.failed(message);
-        // No rapid retry loop. A new state, heartbeat or reconnect retries the
-        // full report; queued owner changes cannot pass a failed report.
+        // Do not retry from finally after failure. A new state, owner action,
+        // heartbeat or reconnect resumes; existing queued changes are refused.
         for (const queued of this.actions.splice(0)) queued.reject(new Error(message));
       }
     } finally {
-      if (this.active === current) { this.active = null; void this.pump(); }
+      if (this.active === current) { this.active = null; if (succeeded) void this.pump(); }
     }
   }
 }

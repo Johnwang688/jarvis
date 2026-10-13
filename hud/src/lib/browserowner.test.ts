@@ -90,3 +90,36 @@ describe("front snapshots",()=>{
     expect(browserFront(ws,[1],false,WINDOW,null,1,3,DEFAULT_PORTS).panes).toEqual([]);
   });
 });
+
+it("independent: a new owner mutation cannot bypass a failed updated front report",async()=>{
+  const f=fixture();f.publisher.connect(true);f.publisher.update(front());f.answer(0);await tick();
+  f.publisher.update({...front(),focus_seq:2});
+  f.calls[1].reject(new Error("connection interrupted before host received new profile"));await tick();
+  expect(f.calls).toHaveLength(2);
+  const action=f.publisher.mutate("/browser/panes/1/tabs/abcdef/address","POST",{url:"https://example.test/",mode:"remote"},(_r,b)=>b);
+  action.catch(()=>{});
+  expect(f.calls[2].path).toBe("/browser/front");
+  expect(f.calls[2].body.focus_seq).toBe(2);
+  f.answer(2);await tick();expect(f.calls[3].path).toContain("/address");f.answer(3);await action;
+});
+
+it.each(["transport failure","mismatched receipt"])("a %s during a mutation requires a fresh report without retrying itself",async(failure)=>{
+  const f=fixture();f.publisher.connect(true);f.publisher.update(front());f.answer(0);await tick();
+  const first=f.publisher.mutate("/browser/panes/1","PATCH",{see:false},(_r,b)=>b);
+  const refused=expect(first).rejects.toThrow();
+  if(failure==="transport failure")f.calls[1].reject(new Error("lost acknowledgment"));else f.answer(1,{seq:-1});
+  await refused;await tick();expect(f.calls).toHaveLength(2);
+  const next=f.publisher.mutate("/browser/panes/1","PATCH",{see:true},(_r,b)=>b);
+  expect(f.calls[2].path).toBe("/browser/front");
+  f.answer(2);await tick();expect(f.calls[3].path).toBe("/browser/panes/1");f.answer(3);await next;
+});
+it("refuses a recovery mutation when its replacement report also fails and waits again",async()=>{
+  const f=fixture();f.publisher.connect(true);f.publisher.update(front());
+  f.calls[0].reject(new Error("offline"));await tick();
+  const change=f.publisher.mutate("/browser/panes/1","PATCH",{see:false},(_r,b)=>b);
+  const refused=expect(change).rejects.toThrow("still offline");
+  expect(f.calls[1].path).toBe("/browser/front");f.calls[1].reject(new Error("still offline"));await refused;await tick();
+  expect(f.calls).toHaveLength(2);
+  f.publisher.heartbeat();expect(f.calls[2].path).toBe("/browser/front");f.answer(2);await tick();
+  expect(f.calls).toHaveLength(3);
+});
