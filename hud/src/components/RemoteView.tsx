@@ -11,6 +11,7 @@ import type { DriveLease } from "../lib/drivestate";
 interface PageDialog {id:string;kind:string;message:string;default:string}
 export interface RemoteViewProps {
   tabId:string; live:boolean; blocked:boolean; zoom:number; projectId:string|null;
+  inputHeld?:()=>boolean;
   onLocation:(url:string,title:string)=>void; onPopup:(id:string)=>void;
   onAction:(action:PaneAction)=>void; onOwnerFocus:()=>void; onRetry?:()=>Promise<unknown>;
   slotOf?:(threadId:string)=>number|null;
@@ -37,7 +38,7 @@ export function RemoteView(props:RemoteViewProps) {
   const [dialogs,setDialogs]=useState<PageDialog[]>([]);
   const [chooser,setChooser]=useState<{id:string;multiple:boolean}|null>(null);
   const [downloads,setDownloads]=useState(false);
-  const canInput=()=>latest.current.live&&!latest.current.blocked&&socket.current?.readyState===WebSocket.OPEN;
+  const canInput=()=>latest.current.live&&!latest.current.blocked&&!latest.current.inputHeld?.()&&socket.current?.readyState===WebSocket.OPEN;
   const send=(body:object,inputMessage=false)=>{
     const ws=socket.current;
     if(!ws||ws.readyState!==WebSocket.OPEN||(inputMessage&&!canInput()))return false;

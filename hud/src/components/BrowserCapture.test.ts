@@ -119,3 +119,38 @@ describe("capture gesture lifecycle", () => {
     expect(host.querySelector("input")!.disabled).toBe(true);
   });
 });
+
+it("pins the original destination before the uncover hook and waits before capture", async () => {
+  const ready = deferred<void>();
+  await show({ beforeCapture: () => ready.promise });
+  await click("Send to chat");
+  expect(api.captureBrowser).not.toHaveBeenCalled();
+  key = "later-chat";
+  await act(async () => ready.resolve());
+  expect(stage).toHaveBeenCalledExactlyOnceWith({ key: "thread-original" }, pair);
+});
+it("a card or hidden tab during the uncover hook cannot revive the capture or destination pin", async () => {
+  for (const changed of [{ blocked: true }, { drawn: false }, { active: false }, { remoteTabId: "changed1" }]) {
+    const ready = deferred<void>(), release = vi.fn();
+    const destination = { target: () => ({ key: "pinned-before-wait" }), stage, release };
+    await show({ beforeCapture: () => ready.promise, destination });
+    await click("Send to chat");
+    await show({ ...changed, beforeCapture: () => ready.promise, destination });
+    await show({ beforeCapture: () => ready.promise, destination });
+    await act(async () => ready.resolve());
+    expect(api.captureBrowser).not.toHaveBeenCalled();
+    expect(stage).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledExactlyOnceWith({ key: "pinned-before-wait" });
+  }
+});
+it("portal controls can be hidden without unmounting the controller or captured still", async () => {
+  const panel = document.createElement("div"); document.body.append(panel);
+  await show({ controlsTarget: panel });
+  expect(host.querySelector('[data-testid="browser-capture-actions"]')).toBeNull();
+  await act(async () => [...panel.querySelectorAll("button")].find(b=>b.textContent==="Annotate")!.click());
+  expect(host.querySelector('[data-testid="frozen-still"]')).not.toBeNull();
+  panel.hidden = true;
+  await show({ controlsTarget: panel });
+  expect(host.querySelector('[data-testid="frozen-still"]')).not.toBeNull();
+  panel.remove();
+});
