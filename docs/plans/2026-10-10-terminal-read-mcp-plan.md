@@ -522,3 +522,34 @@ Free/fake checks and mutation evidence are required before independent source
 review. Native synthetic Claude L1/L2/L5 probes remain a separate release gate;
 no live-provider pass is claimed by this implementation note. Current details
 are in [the control-plane notes](../notes/control-plane.md#current-implementation-claude-session-mcp-wp-2).
+
+
+## WP-3 implementation status (2026-10-13)
+
+Codex now shares the exact available D-3 tools plus terminal_read with truthful
+annotations. Every offered native MCP name delegates to the daemon; ordinary
+calls preflight the session permit, and dangerous calls use the existing
+single owner approval. Codex's AUTO-only provider support remains unchanged.
+ASK/STRICT/named-rule unit coverage is defensive gate coverage, not a claim
+that those unsupported native profiles can start.
+
+Installed 0.161 synthetic parent/child probes established outer native
+thread/turn/call metadata before relay dispatch, including a forged-argument
+probe. WP-3 admits terminal calls only against the exact established parent
+handle/turn, matching outer/native thread fields, no child markers, and a
+bounded one-shot call ID. Missing proof refuses. D-6's multi_agent=false
+fallback was not needed; D-3 remains available to native children/off-desk.
+The accepted same-user carrier/forged-direct-request limit is unchanged.
+
+Native L3/L4/L5 synthetic gates passed: ordinary read/write, parent terminal
+success and child refusal, child D-3 success, one dangerous denial and one
+fake approved execution, a 65-second approval wait, off-desk refusal,
+accepted native steer during a read with postread withholding and successor
+carry, and fresh-token resume of the same native thread. The initial
+characterization used an ephemeral thread which could not spawn; it was
+not counted as L4 success. Initial enforcement/lifecycle fixture failures
+(short approval resolver/turn cap) were retained and corrected; passing
+probes used the real provider/relay/bridge with fake side effects. Free
+regressions, deliberate boundary mutations, independent source review and
+full release checks are separate gates. Current behavior and privacy limits
+are in [the control-plane notes](../notes/control-plane.md#current-implementation-codex-session-mcp-wp-3).

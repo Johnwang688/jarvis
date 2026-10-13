@@ -95,9 +95,11 @@ class Relay:
                 tools.append(tool)
         return {"tools": tools}
 
-    def call_tool(self, name: str, arguments: dict) -> dict:
-        got = self._request("POST", "/mcp/call", {"name": name, "arguments": arguments},
-                            CALL_TIMEOUT_S)
+    def call_tool(self, name: str, arguments: dict, *, codex_context=None) -> dict:
+        body = {"name": name, "arguments": arguments}
+        if codex_context is not None:
+            body["codex_context"] = codex_context
+        got = self._request("POST", "/mcp/call", body, CALL_TIMEOUT_S)
         if got is None:
             return _result(NOT_CONNECTED, error=True)
         status, payload = got
@@ -110,6 +112,24 @@ class Relay:
             result["content"].append({"type": "image", "data": image["data"],
                                       "mimeType": image["mimeType"]})
         return result
+
+
+def _codex_context(params):
+    """Installed 0.161 outer host metadata, never tool arguments._meta.
+
+    Only typed identity fields leave this process. The authenticated daemon
+    provider decides whether they are required; Claude ignores this field.
+    """
+    meta = params.get("_meta")
+    native = meta.get("x-codex-turn-metadata") if isinstance(meta, dict) else None
+    if not isinstance(native, dict):
+        return None
+    thread, turn, call = native.get("thread_id"), native.get("turn_id"), meta.get("callId")
+    if (not all(isinstance(value, str) and 0 < len(value) <= 128 for value in (thread, turn, call))
+            or meta.get("threadId") != thread):
+        return None
+    return {"thread_id": thread, "turn_id": turn, "call_id": call,
+            "subagent": any(key in native for key in ("parent_thread_id", "subagent_kind", "thread_source"))}
 
 
 def _result(text: str, *, error: bool = False) -> dict:
@@ -140,7 +160,7 @@ def _route(relay: Relay, method: str, params: dict):
             arguments = {}
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise RPCError(-32602, "tools/call requires a name and an arguments object")
-        return relay.call_tool(name, arguments)
+        return relay.call_tool(name, arguments, codex_context=_codex_context(params))
     raise RPCError(-32601, "Method not found")
 
 

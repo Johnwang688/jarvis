@@ -101,7 +101,7 @@ _open_homes: set[Path] = set()
 
 
 # Codex asking to approve an MCP tool call (plan 2026-10-10 §4.2). The
-# jarvis server's read-only tools are `approval_mode = "approve"` in the
+# jarvis server's exact offered tools are `approval_mode = "approve"` in the
 # private config, so none should arrive; if one does — an elicitation, or a
 # `requestUserInput` marked as an MCP tool approval — it is declined with a
 # non-fatal ERROR, never a QUESTION for the owner, never an accept.
@@ -363,6 +363,9 @@ class _Session:
     turn_id: str | None = None
     pending: dict[str, _Pending] = field(default_factory=dict)
     items: dict[str, dict] = field(default_factory=dict)
+    # Only identities/completion flags; never retain raw MCP results here.
+    mcp_items: dict[str, tuple[str, str, str, bool]] = field(default_factory=dict)
+    mcp_calls: set[str] = field(default_factory=set)
     closed: threading.Event = field(default_factory=threading.Event)
     cancelled: threading.Event = field(default_factory=threading.Event)
     mutex: threading.RLock = field(default_factory=threading.RLock)
@@ -700,7 +703,8 @@ class CodexProvider:
                 account = rpc.request("account/read", {"refreshToken": False}).get("account") or {}
                 if account.get("type") != "chatgpt":
                     raise BriefRefused("Codex requires ChatGPT authentication; API-key billing refused")
-                effective = rpc.request("config/read", {"includeLayers": False})["config"]
+                effective = rpc.request("config/read", {"includeLayers": False, "cwd": brief.cwd})["config"]
+                codex_config.validate_mcp(brief, effective)
                 reviewer = codex_config.approvals_reviewer(brief)
                 required = {"forced_login_method": "chatgpt", "model_provider": "openai",
                             "sandbox_mode": "workspace-write", "approval_policy": "on-request",
@@ -720,8 +724,16 @@ class CodexProvider:
                           "developerInstructions": "\n\n".join(filter(None, (brief.system_append, codex_config.git_note(brief))))}
                 if brief.model:
                     params["model"] = brief.model
+                overrides = {}
                 if brief.effort:
-                    params["config"] = {"model_reasoning_effort": brief.effort}
+                    overrides["model_reasoning_effort"] = brief.effort
+                server = codex_config.session_mcp(brief)
+                if server is not None:
+                    # A resumed native thread must use this session's new
+                    # carrier and exact delegation map, never saved overrides.
+                    overrides["mcp_servers.jarvis"] = server
+                if overrides:
+                    params["config"] = overrides
                 if resume:
                     accounting = Accounting(home / "usage.json", native_id, True)
                     params.update(threadId=native_id, excludeTurns=True)
@@ -814,6 +826,8 @@ class CodexProvider:
             s.accounting.turns += 1
             s.accounting.save()
             s.items.clear()
+            s.mcp_items.clear()
+            s.mcp_calls.clear()
             submitted = True
             start_deadline = time.monotonic() + START_TIMEOUT
             params = {"threadId": s.thread_id, "input": inputs}
@@ -917,7 +931,8 @@ class CodexProvider:
                         raise RpcError("Too many Codex events before turn/start reply")
                     if method in ("item/started", "item/fileChange/patchUpdated") and params.get("threadId") == s.thread_id:
                         item = params.get("item") or {"id": params["itemId"], "type": "fileChange", "changes": params.get("changes", [])}
-                        s.items[item["id"]] = item
+                        if item.get("type") != "mcpToolCall":
+                            s.items[item["id"]] = item
                     early.append(msg)
                     continue
                 if params.get("threadId") not in (None, s.thread_id):
@@ -952,12 +967,14 @@ class CodexProvider:
                     s.accounting.complete = status == "completed"
                     s.accounting.save()
                     completed = True
+                    yield from self._mcp_unfinished(h)
                     yield self._event(h, EventKind.TURN_FINISHED,
                                       stop={"completed": "end", "interrupted": "interrupted"}.get(status, "error"))
                     return
                 else:
                     yield from self._notification(h, method, params)
         except (RpcError, OSError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            yield from self._mcp_unfinished(h)
             self.close(h)
             yield self._event(h, EventKind.ERROR, message=str(exc), fatal=True)
         finally:
@@ -982,6 +999,7 @@ class CodexProvider:
                     s.stale_steers.append(rid)
                 s.steers.clear()
             s.interrupt_at = None
+            s.mcp_items.clear()
             s.cancelled.clear()
             if acquired:
                 _auth_lock.release()
@@ -1014,9 +1032,12 @@ class CodexProvider:
             yield self._event(h, EventKind.PLAN_UPDATED, plan=p["plan"], explanation=p.get("explanation"))
         elif method in ("item/started", "item/completed", "item/fileChange/patchUpdated"):
             item = p.get("item") or {"id": p.get("itemId"), "type": "fileChange", "changes": p.get("changes", [])}
-            s.items[item["id"]] = item
             kind = item["type"]
             done = method == "item/completed"
+            if kind == "mcpToolCall":
+                yield from self._mcp_item(h, method, p, item)
+                return
+            s.items[item["id"]] = item
             if kind in ("commandExecution", "fileChange"):
                 name, args = self._tool(item)
                 if method == "item/started":
@@ -1044,8 +1065,23 @@ class CodexProvider:
             elif done and kind == "plan":
                 yield self._event(h, EventKind.PLAN_UPDATED, text=item["text"])
         elif method == "item/autoApprovalReview/completed" and p.get("review", {}).get("status") == "denied":
+            mcp = s.mcp_items.get(p.get("targetItemId"))
+            action = p.get("action")
+            action = action if isinstance(action, dict) else {}
+            if mcp is not None or action.get("type") == "mcpToolCall":
+                # The installed schema permits a missing/null targetItemId.
+                # Early or unmatched reviews must not copy private rationale,
+                # titles or action metadata into the daemon's event stream.
+                if (p.get("threadId") != s.thread_id or not s.turn_id
+                        or p.get("turnId") != s.turn_id):
+                    return
+                name = mcp[2] if mcp is not None else "mcp"
+                if action.get("server") == "jarvis" and action.get("toolName") == "terminal_read":
+                    name = "terminal_read"
+                yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name,
+                                  args={}, command=None, reason="refused")
+                return
             item = s.items.get(p.get("targetItemId"), {})
-            action = p.get("action", {})
             if action.get("type") in ("command", "execve", "writeStdin"):
                 name, args = "shell", dict(action)
             elif action.get("type") == "applyPatch":
@@ -1056,6 +1092,95 @@ class CodexProvider:
                 name, args = self._tool(item)
             yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name, args=args,
                               command=args.get("command"), reason=p["review"].get("rationale") or "Reviewer declined")
+
+    def admit_foreground_mcp(self, h, context):
+        """One native parent call -> its exact live handle/turn predicate.
+
+        Called before terminal dispatch, outside daemon locks. A request can
+        never establish a native turn: send's trusted start response does.
+        One-shot IDs stay spent until an actual new turn, including failures.
+        """
+        s = h.native
+        if (not isinstance(context, dict)
+                or set(context) != {"thread_id", "turn_id", "call_id", "subagent"}
+                or context.get("subagent") is not False
+                or not all(isinstance(context.get(key), str) and 0 < len(context[key]) <= 128
+                           for key in ("thread_id", "turn_id", "call_id"))):
+            return None
+        turn, thread, call = context["turn_id"], context["thread_id"], context["call_id"]
+
+        def current():
+            with s.mutex:
+                return (h.native is s and not s.closed.is_set() and not s.cancelled.is_set()
+                        and s.sending.locked() and s.thread_id == thread
+                        and s.turn_id == turn)
+
+        with s.mutex:
+            if not current() or call in s.mcp_calls or len(s.mcp_calls) >= 4096:
+                return None
+            s.mcp_calls.add(call)
+        return current
+
+    def _mcp_item(self, h, method, params, item):
+        """Only current, exact MCP lifecycle items; results stay private."""
+        s = h.native
+        if (params.get("threadId") != s.thread_id or not s.turn_id
+                or params.get("turnId") != s.turn_id):
+            return
+        call_id, server, tool = (item.get(key) for key in ("id", "server", "tool"))
+        if not all(isinstance(value, str) and value and len(value) <= 256
+                   for value in (call_id, server, tool)):
+            raise RpcError("Codex returned a malformed MCP identity")
+        name = tool if server == "jarvis" else f"mcp__{server}__{tool}"
+        previous = s.mcp_items.get(call_id)
+        identity = (server, tool, name)
+        if previous is not None and previous[:3] != identity:
+            raise RpcError("Codex changed an MCP call identity")
+        if previous is not None and previous[3]:
+            return
+        if previous is None:
+            if len(s.mcp_items) >= 4096:
+                raise RpcError("Too many Codex MCP calls in one turn")
+            s.mcp_items[call_id] = (*identity, False)
+            args = item.get("arguments")
+            yield self._event(h, EventKind.TOOL_STARTED, call_id=call_id, name=name,
+                              args=args if isinstance(args, dict) else {})
+        if method != "item/completed":
+            return
+        s.mcp_items[call_id] = (*identity, True)
+        private = server == "jarvis" and tool == "terminal_read"
+        result = item.get("result")
+        content = result.get("content") if isinstance(result, dict) else None
+        # Text blocks only, bounded before concatenating; structured metadata,
+        # images and transport errors never become a terminal summary.
+        parts, remaining = [], 400 if private else 200
+        if isinstance(content, list):
+            for block in content[:200]:
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                    parts.append(block["text"][:remaining])
+                    remaining -= len(parts[-1])
+                    if remaining <= 0:
+                        break
+        text = "".join(parts)
+        denied = server == "jarvis" and text.startswith(("Refused", "The user declined"))
+        failed = (item.get("status") != "completed" or item.get("error") is not None
+                  or not isinstance(content, list) or (private and not text)
+                  or (server == "jarvis" and text.startswith("Error:")))
+        if private:
+            from jarvis import tools
+            summary = tools.private_summary("terminal_read", "Refused" if denied else "Error" if failed else text)
+        else:
+            summary = text[:200] or ("error" if failed else "completed")
+        yield self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name=name,
+                          ok=not (denied or failed),
+                          outcome="denied" if denied else "failed" if failed else "ok", summary=summary)
+
+    def _mcp_unfinished(self, h):
+        for call_id, (server, tool, name, done) in list(h.native.mcp_items.items()):
+            if not done:
+                h.native.mcp_items[call_id] = (server, tool, name, True)
+                yield self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name=name,
+                                  ok=False, outcome="failed", summary="error" if server == "jarvis" and tool == "terminal_read" else "interrupted")
 
     @staticmethod
     def _reply(s, request, result=None, **kwargs):
