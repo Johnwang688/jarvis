@@ -1,0 +1,336 @@
+// The speech queue (V6): chunks of agent prose, one played at a time.
+//
+// Built for one thread in V6 but shaped for V7's shared queue: an item names
+// its `thread`, `messageKey` and `seq`, and *which live item plays next* is one
+// replaceable function (`PlayOrder`), FIFO here. V7 swaps in the floor rules
+// (a message holds the floor, a slow holder yields after 4 s, a backlog
+// collapses) without touching synthesis, playback or the controls below.
+//
+// Rules this file keeps (plan §3.9):
+//   1. One item plays at a time; two never overlap.
+//   2. Items play in order. A later one that is ready waits for an earlier one
+//      still being synthesized, and a failed synthesis is skipped and marked.
+//   3. At most `prefetch` items are synthesized ahead of the one playing
+//      (Kokoro serializes on one instance; more would only queue).
+//   4. A thread leaving, or an owner send to it, drops its unplayed items and
+//      stops its playing one (`dropThread`).
+//   5. Pause is the owner's: the sentence in hand restarts on resume (Q13).
+//
+// Time and audio are injected (`Clock`, `Player`), so every rule is tested with
+// a fake clock and a fake player, never a real speaker.
+
+export type ItemKind = "verbatim" | "summary" | "fallback";
+export type ItemState = "pending" | "synthesizing" | "ready" | "playing" | "done" | "skipped" | "dropped";
+/** Why an item was skipped or dropped, for diagnostics and the strip's mark. */
+export type ItemMark = "tts_failed" | "tts_timeout" | "play_failed" | "skipped" | "stopped" | "thread_left" | "stale";
+
+export interface SpeechItem {
+  id: number;
+  thread: string;
+  /** One message of one thread: skip acts on all of its chunks. */
+  messageKey: string;
+  seq: number;
+  /** A named voice, or null for the daemon's own choice (the avatar's). */
+  voice: string | null;
+  kind: ItemKind;
+  text: string;
+  state: ItemState;
+  mark?: ItemMark;
+}
+
+export interface Clock {
+  now(): number;
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+export interface PlayHandle {
+  /** Settles once: "ended" at the natural end, "stopped" after `stop()`. */
+  done: Promise<"ended" | "stopped">;
+  stop(): void;
+}
+
+export interface Player {
+  /** Bytes from `/say` to something `play` takes. */
+  decode(bytes: ArrayBuffer): Promise<unknown>;
+  play(audio: unknown): PlayHandle;
+  /** The output level, 0..1, for the orb. */
+  level(): number;
+  /** The platform is holding audio back (an autoplay policy); the owner must interact. */
+  blocked(): boolean;
+  /** Told when `blocked()` may have changed. */
+  subscribeBlocked?(cb: () => void): () => void;
+}
+
+export type Synth = (item: SpeechItem, signal: AbortSignal) => Promise<unknown>;
+/** The live items in the order they are to be played: the head plays next. */
+export type PlayOrder = (live: readonly SpeechItem[]) => readonly SpeechItem[];
+
+export const fifo: PlayOrder = (live) => live;
+
+export type QueueState = "idle" | "playing" | "paused";
+
+export interface QueueView {
+  state: QueueState;
+  /** The thread being spoken: the playing item's, else the head's. */
+  thread: string | null;
+  /** Live items not yet played, the playing one excluded. */
+  queued: number;
+  /** Items skipped because their synthesis failed, since the last `stop`/`clearMarks`. */
+  failed: number;
+  /** Autoplay is blocked until the owner interacts with the page. */
+  blocked: boolean;
+}
+
+export interface QueueDeps {
+  synth: Synth;
+  player: Player;
+  clock: Clock;
+  onChange?: () => void;
+  order?: PlayOrder;
+  prefetch?: number;
+  synthTimeoutMs?: number;
+}
+
+export const PREFETCH = 2;
+export const SYNTH_TIMEOUT_MS = 20_000;
+const HISTORY = 40;
+
+type Slot = { item: SpeechItem; audio?: unknown; abort?: AbortController; timer?: unknown };
+
+export class SpeechQueue {
+  private slots: Slot[] = [];
+  private history: SpeechItem[] = [];
+  private current: { slot: Slot; handle: PlayHandle } | null = null;
+  private paused = false;
+  private failed = 0;
+  private ids = 0;
+  private cached: QueueView | null = null;
+  private pumping = false;
+  private again = false;
+  private readonly order: PlayOrder;
+  private readonly prefetch: number;
+  private readonly timeout: number;
+
+  constructor(private readonly deps: QueueDeps) {
+    this.order = deps.order ?? fifo;
+    this.prefetch = deps.prefetch ?? PREFETCH;
+    this.timeout = deps.synthTimeoutMs ?? SYNTH_TIMEOUT_MS;
+  }
+
+  // ---- reading ------------------------------------------------------------
+
+  view(): QueueView {
+    const live = this.live();
+    const state: QueueState = this.current ? "playing" : this.paused && live.length ? "paused" : "idle";
+    const head = this.current?.slot.item ?? this.order(live)[0];
+    const view: QueueView = {
+      state,
+      thread: head ? head.thread : null,
+      queued: live.length - (this.current ? 1 : 0),
+      failed: this.failed,
+      blocked: this.deps.player.blocked(),
+    };
+    const old = this.cached;
+    if (old && old.state === view.state && old.thread === view.thread && old.queued === view.queued
+      && old.failed === view.failed && old.blocked === view.blocked) return old;
+    return (this.cached = view);
+  }
+
+  /** Items in play order (live), for the test hook and diagnostics. */
+  items(): readonly SpeechItem[] {
+    return this.order(this.live()).map((i) => ({ ...i }));
+  }
+
+  /** The most recent finished or dropped items, newest last. */
+  past(): readonly SpeechItem[] {
+    return this.history.map((i) => ({ ...i }));
+  }
+
+  level(): number {
+    return this.current ? this.deps.player.level() : 0;
+  }
+
+  // ---- writing ------------------------------------------------------------
+
+  enqueue(entry: Pick<SpeechItem, "thread" | "messageKey" | "seq" | "text"> & Partial<Pick<SpeechItem, "voice" | "kind">>): SpeechItem {
+    const item: SpeechItem = {
+      id: ++this.ids, voice: null, kind: "verbatim", ...entry, state: "pending",
+    };
+    this.slots.push({ item });
+    this.pump();
+    return { ...item };
+  }
+
+  pause(): void {
+    if (this.paused) return;
+    this.paused = true;
+    const cur = this.current;
+    if (cur) {
+      // The sentence in hand restarts on resume (Q13): back to `ready`, audio kept.
+      this.current = null;
+      cur.slot.item.state = "ready";
+      cur.handle.stop();
+    }
+    this.pump();
+  }
+
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    this.pump();
+  }
+
+  /** Skip the rest of the current message. Returns what was skipped, or null when nothing is live. */
+  skip(): { thread: string; messageKey: string } | null {
+    const head = this.current?.slot.item ?? this.order(this.live())[0];
+    if (!head) return null;
+    const { thread, messageKey } = head;
+    this.finishWhere((i) => i.thread === thread && i.messageKey === messageKey, "skipped", "skipped");
+    this.pump();
+    return { thread, messageKey };
+  }
+
+  /** Stop and clear everything. */
+  stop(): void {
+    this.finishWhere(() => true, "dropped", "stopped");
+    this.paused = false;
+    this.failed = 0;
+    this.pump();
+  }
+
+  /** A thread's unplayed items go, and its playing one stops (pane closed; the owner sent). */
+  dropThread(thread: string, mark: ItemMark = "thread_left"): void {
+    this.finishWhere((i) => i.thread === thread, "dropped", mark);
+    this.pump();
+  }
+
+  clearMarks(): void {
+    this.failed = 0;
+    this.notify();
+  }
+
+  // ---- the machine --------------------------------------------------------
+
+  private live(): SpeechItem[] {
+    return this.slots.map((s) => s.item);
+  }
+
+  private notify(): void {
+    this.deps.onChange?.();
+  }
+
+  private retire(slot: Slot, state: "done" | "skipped" | "dropped", mark?: ItemMark): void {
+    slot.item.state = state;
+    if (mark) slot.item.mark = mark;
+    slot.abort?.abort();
+    if (slot.timer !== undefined) this.deps.clock.clearTimeout(slot.timer);
+    slot.abort = undefined;
+    slot.timer = undefined;
+    slot.audio = undefined;
+    this.slots = this.slots.filter((s) => s !== slot);
+    this.history.push(slot.item);
+    if (this.history.length > HISTORY) this.history.shift();
+  }
+
+  private finishWhere(match: (i: SpeechItem) => boolean, state: "skipped" | "dropped", mark: ItemMark): void {
+    for (const slot of [...this.slots]) {
+      if (!match(slot.item)) continue;
+      if (this.current?.slot === slot) {
+        const { handle } = this.current;
+        this.current = null;
+        this.retire(slot, state, mark);
+        handle.stop();
+      } else {
+        this.retire(slot, state, mark);
+      }
+    }
+  }
+
+  private pump(): void {
+    // Re-entrant calls (a synchronous synth, a settled promise) fold into one more pass.
+    if (this.pumping) { this.again = true; return; }
+    this.pumping = true;
+    try {
+      do {
+        this.again = false;
+        this.step();
+      } while (this.again);
+    } finally {
+      this.pumping = false;
+    }
+    this.notify();
+  }
+
+  private step(): void {
+    const ordered = this.order(this.live());
+    if (!ordered.length) this.paused = false;
+    const slotOf = (item: SpeechItem) => this.slots.find((s) => s.item === item)!;
+
+    // Synthesis: up to `prefetch` ahead of the one playing, in play order.
+    let ahead = ordered.filter((i) => i.state === "synthesizing" || i.state === "ready").length;
+    for (const item of ordered) {
+      if (ahead >= this.prefetch) break;
+      if (item.state !== "pending") continue;
+      ahead += 1;
+      this.synthesize(slotOf(item));
+    }
+
+    // Playback: the head, once it is ready, and only when nothing plays.
+    if (this.current || this.paused) return;
+    const head = this.order(this.live())[0];
+    if (!head || head.state !== "ready") return;
+    const slot = slotOf(head);
+    let handle: PlayHandle;
+    try {
+      handle = this.deps.player.play(slot.audio);
+    } catch {
+      this.failed += 1;
+      this.retire(slot, "skipped", "play_failed");
+      this.again = true;
+      return;
+    }
+    head.state = "playing";
+    this.current = { slot, handle };
+    handle.done.then((how) => {
+      if (this.current?.slot !== slot || how !== "ended") return;
+      this.current = null;
+      this.retire(slot, "done");
+      this.pump();
+    }, () => {
+      if (this.current?.slot !== slot) return;
+      this.current = null;
+      this.failed += 1;
+      this.retire(slot, "skipped", "play_failed");
+      this.pump();
+    });
+  }
+
+  private synthesize(slot: Slot): void {
+    const { item } = slot;
+    item.state = "synthesizing";
+    const abort = new AbortController();
+    slot.abort = abort;
+    const fail = (mark: ItemMark) => {
+      if (!this.slots.includes(slot) || item.state !== "synthesizing") return;
+      this.failed += 1;
+      this.retire(slot, "skipped", mark);
+      this.pump();
+    };
+    slot.timer = this.deps.clock.setTimeout(() => { slot.timer = undefined; fail("tts_timeout"); }, this.timeout);
+    let started: Promise<unknown>;
+    try {
+      started = Promise.resolve(this.deps.synth({ ...item }, abort.signal));
+    } catch (e) {
+      started = Promise.reject(e);
+    }
+    started.then((audio) => {
+      if (!this.slots.includes(slot) || item.state !== "synthesizing") return;
+      if (slot.timer !== undefined) this.deps.clock.clearTimeout(slot.timer);
+      slot.timer = undefined;
+      slot.audio = audio;
+      item.state = "ready";
+      this.pump();
+    }, () => fail("tts_failed"));
+  }
+}
