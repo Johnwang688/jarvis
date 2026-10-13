@@ -23,6 +23,7 @@ import {
   type ChatState, type Chats,
 } from "../lib/chats";
 import { PANE_NOS, defaultWorkspace, type PaneNo } from "../lib/workspace";
+import { applyTurn, turnsAfterActivity, turnsAfterThreads, type TurnEvent, type Turns } from "../lib/thinking";
 
 // What the centre shows is the workspace's (lib/workspace.ts, 2026-10-09): a
 // view per pane, stored with the layout, not a single `tab` in this store.
@@ -45,6 +46,10 @@ export interface State {
   taskThreads: Record<string, TaskThread[]>;
   /** The sidebar dots: what each thread and task is doing (lib/activity.ts). */
   activity: ActivityView;
+  /** Each thread's running turn as this window knows it, keyed by thread and
+   * window-wide (WP-H, lib/thinking.ts): the thinking line at the foot of
+   * whichever pane shows it, fed by the turn events and the activity records. */
+  turns: Turns;
   /** Each chat pane's conversation and the turn it waits on (lib/chats.ts). */
   chats: Chats;
   /** The selected chat (decisions W-6, lib/chats `selectedChatOf`): the drawn
@@ -109,7 +114,7 @@ export interface State {
 }
 
 export const initialState: State = {
-  projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY,
+  projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY, turns: {},
   chats: emptyChats(), selectedChat: null, selectedOrder: [], home: defaultWorkspace().order[0], loose: {},
   drafts: {}, composeSeq: 0, taskId: null, taskFocus: false,
   approvals: [], usage: null, discord: null, schedules: [],
@@ -146,7 +151,9 @@ export type Action =
   | { type: "approval_drop"; req_id: string }
   | { type: "task_upsert"; task: Task }
   | { type: "thread_patch"; id: string; patch: Partial<Thread> }
-  | { type: "activity"; record: any }
+  | { type: "activity"; record: any; at?: number }
+  /** A turn event for one thread (lib/thinking `applyTurn`), whichever pane shows it. */
+  | ({ type: "turn" } & TurnEvent)
   /** Hand words back to a pane's box. */
   | { type: "give_back"; pane: PaneNo; text: string; files: Attachment[]; nonce: number }
   /** That pane's box took every hand-back up to `nonce`. */
@@ -311,8 +318,21 @@ function turnOrb(s: State, c: ChatState): OrbState {
 export function reduce(s: State, a: Action): State {
   switch (a.type) {
     case "patch": {
-      const next = { ...s, ...a.patch };
+      let next = { ...s, ...a.patch };
+      // The activity snapshot (`GET /activity`) and the thread records feed
+      // the thinking line too: a thread that turned working is a turn noticed
+      // late, and a record's `running_since` is when it really began.
+      if (a.patch.activity && a.patch.activity !== s.activity) {
+        next = { ...next, turns: turnsAfterActivity(next.turns, s.activity, next.activity, next.threads, Date.now()) };
+      }
+      if (a.patch.threads) next = { ...next, turns: turnsAfterThreads(next.turns, next.threads) };
       return a.patch.error !== undefined && a.patch.errorAt === undefined ? wrote(next, a.patch.error) : next;
+    }
+
+    case "turn": {
+      const { type: _t, ...event } = a;
+      const turns = applyTurn(s.turns, event as TurnEvent);
+      return turns === s.turns ? s : { ...s, turns };
     }
 
     case "chat": {
@@ -456,7 +476,8 @@ export function reduce(s: State, a: Action): State {
     case "activity": {
       // Folded into the map as it is now, for the thread_patch reason.
       const activity = applyActivity(s.activity, a.record);
-      return activity === s.activity ? s : { ...s, activity };
+      if (activity === s.activity) return s;
+      return { ...s, activity, turns: turnsAfterActivity(s.turns, s.activity, activity, s.threads, a.at ?? Date.now()) };
     }
 
     case "give_back": {

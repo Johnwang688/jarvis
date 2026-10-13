@@ -922,7 +922,8 @@ class ReviewRestart(Base):
         from jarvis.v2 import daemon as D
         fake = SimpleNamespace(providers={}, _lock=threading.Lock(), _sessions={}, started_at=0.0,
                                workshop_port=0, face_port=0, port=0, _server=None,
-                               approvals=SimpleNamespace(pending=lambda: ["one", "two"]))
+                               approvals=SimpleNamespace(pending=lambda: ["one", "two"]),
+                               devservers=SimpleNamespace(status=lambda: {}))
         with patch.object(config, "HUD_DIR", self.tmp / "hud"), \
                 patch.object(config, "HUD_DIST", self.tmp / "hud"), patch.object(config, "HUD_DEV", False):
             status = D.Daemon.status(fake)
@@ -1064,7 +1065,8 @@ class Review2Restart(Base):
         from jarvis.v2 import daemon as D
         fake = SimpleNamespace(providers={}, _lock=threading.Lock(), _sessions={}, started_at=0.0,
                                workshop_port=0, face_port=0, port=0, _server=None,
-                               approvals=SimpleNamespace(pending=lambda: []))
+                               approvals=SimpleNamespace(pending=lambda: []),
+                               devservers=SimpleNamespace(status=lambda: {}))
         with patch.object(config, "HUD_DIR", self.tmp / "hud"), \
                 patch.object(config, "HUD_DIST", self.tmp / "hud"), patch.object(config, "HUD_DEV", False):
             status = D.Daemon.status(fake)

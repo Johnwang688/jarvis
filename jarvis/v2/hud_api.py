@@ -1605,6 +1605,9 @@ def route(handler, daemon, parts, query):
         # and the attach socket also needs a single-use ticket.
         from . import terminals as _terminals
         return _terminals.route(handler, daemon, parts, query)
+    if parts[0] == "dev-servers":
+        from . import devservers as _devservers
+        return _devservers.route(handler, daemon, parts, query)
     if parts[0] == "browser":
         # The owner's Browser (BR-1a): owner-only and a strict loopback Host
         # on every route, checked before anything else (browser/routes.py),

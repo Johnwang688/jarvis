@@ -292,6 +292,12 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("GET", "/icons/%2e%2e/index.html", None),
         ("HEAD", "/", None), ("OPTIONS", "/status", None),
         ("GET", "/status", None), ("GET", "/events", None), ("GET", "/nope", None), ("GET", "/projects/zzzz", None),
+        ("GET", "/dev-servers", None),
+        ("GET", "/dev-servers?window=" + "a" * 32, None),
+        ("POST", "/dev-servers/ds_deadbeef/claim", {"window": "a" * 32, "shows": True, "focused_at": 0}),
+        ("POST", "/dev-servers/ds_deadbeef/renew", {"window": "a" * 32}),
+        ("POST", "/dev-servers/ds_deadbeef/placed", {"window": "a" * 32}),
+        ("POST", "/dev-servers/ds_deadbeef/dismiss", {"window": "a" * 32}),
         ("GET", "/projects/deadbeef", None),
         ("GET", "/projects", None), ("POST", "/projects", {}), ("GET", f"/projects/{p}", None),
         ("PATCH", f"/projects/{p}", {"name": "Calc"}), ("PATCH", f"/projects/{p}", {"bogus": 1}),
@@ -726,7 +732,7 @@ class Status(Base):
 class Coverage(Base):
     ROUTE_FILES = ("jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/projects.py",
                    "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py", "jarvis/v2/vex.py",
-                   "jarvis/v2/browser/routes.py")
+                   "jarvis/v2/browser/routes.py", "jarvis/v2/devservers.py")
 
     def families(self) -> set[str]:
         """Every first path segment a route module matches on."""

@@ -1095,6 +1095,33 @@ Only the HUD root uses `--app-id` when its
 Manifest Resources folder exists under `JARVIS_WINDOWS_LOCALAPPDATA` (else
 converted LOCALAPPDATA, else johnw’s Windows Local AppData). No profile is read.
 
+**HUD boot animation (2026-10-12, design §18; the owner: "this is literally
+perfection … make sure that its disabled when automation is on").** The owner's
+prototype (`prototypes/boot/index.html`) at its default settings, v2 only, no
+audio: seeded binary dust drifts from the bottom left by geometric Brownian
+motion and converges into the orb; two pens draw a sharp box counter-clockwise
+while a pen per letter draws JARVIS, then the dots pop in. The pure half is
+`hud/src/lib/boot.ts` (RNG, paths, timeline, `shouldPlay`), the drawing
+`components/BootOverlay.tsx`. **It mounts on the first frame**, so the HUD is
+never seen before it, and nothing waits on it: the HUD loads, connects and
+renders underneath. **Never under automation**: with `navigator.webdriver` the
+component is not mounted at all, unless the boot suite's own init script sets
+`window.__hudBootForce = true` (which can only make it play). **Once per
+window**: a sessionStorage flag (behind try/catch; without storage, once per
+page load) is set when a window first considers it, so a reload never replays
+it, and reduced motion never plays it. **A click skips it and clicks nothing
+underneath** (the overlay eats the press, its release and the click); **a key
+skips it and still does its job** (never prevented: Ctrl+D, Escape, typing,
+Ctrl+`). **Approvals win**: it sits at z-index 99, below `#authveil`, never
+takes focus, and is removed in the same render a card is drawn in, whether the
+card was waiting when the window opened or arrives mid-play; answering the
+card never restarts it. It fills the window at any zoom (`--ui-zoom` divided
+out, canvases in device pixels), and its fade-out cancels the animation frame,
+timers and listeners. Free checks: `lib/boot.test.ts` and
+`tests/face/hud_v2_boot_check.py` (a `MockDaemon(0)` of its own, run by
+`hud_v2_check`); removing the webdriver, card, click or session guard each
+fails it.
+
 **HUD title bar and split workspace, WP-A (2026-10-09, design §18; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md`, decisions file beside it
 wins).** A 28px window-wide **title bar** holds Model · Voice · Avatar ·
@@ -2072,6 +2099,35 @@ comma-joined CSPs, X-Frame-Options lists and the last `Content-Type`),
 and every guard of the fixes above. A grep pin allows only `daemon`,
 `hud_api`, `terminals` and `devservers` to name the module.
 
+**Dev-server daemon wiring, AO-1b-i (2026-10-12; amendment 2 §B–§D).**
+`devservers.DevServers`, attached to the daemon, calls AO-1a's rules with
+the fd scan's `complete` answer. A lazy `jarvis-devwatch` polls only during
+Claude/Codex turns and their 600-second grace, or for live registry entries;
+`auto_open` comes only through `devservers.enabled()` → `BrowserSettings`.
+A poll exception logs its type once and stops the watcher; only a new turn
+start or settings change can re-arm it. Off means no watcher work. `main()`
+supplies the real proc/cgroup roots;
+embedded/test daemons must explicitly supply fixture roots to watch.
+An initial baseline is old. Transient missing facts retry three polls;
+before publication the same `(pid, start)` must still hold the inode.
+Two bounded loopback probes send only GET /, never follow redirects, and
+retry TLS once after a silent close or alert. Responses are never retained.
+The memory registry de-dups ports for 60 seconds after down and publishes
+only `{kind: dev_server, data: {id, state, source, at}}`; no port or URL,
+no thread-log record, and no Discord delivery. Owner-only `/dev-servers`
+routes return URLs, arbitrate claims for 600 ms, and renew/complete/dismiss
+90-second leases. Only the last owner HUD stream for a window ending lapses
+its claims; the API listener's parameter has no effect. `/status.dev_watch` is counts.
+`Brief.origin_tag` is hidden from repr, exists only in the session run copy,
+and reaches Claude's SDK env and Codex's app-server env, never argv or
+`brief.json`. `_open` writes it only when absent; it previously only
+round-tripped the stored brief, and the tag is never in it.
+Close retains attribution for the grace. Stop ends terminals,
+then the watcher and probes, then the bus. Terminal announcement support is
+in the registry; AO-1b-ii wires its sniffer. `devservers_check` uses fixture
+proc trees, fake CLIs and fixed free loopback ports; `frame_check` walks the
+new family. No tool or Discord verb reaches either dev module.
+
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
 wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
@@ -2734,6 +2790,59 @@ section on a `MockDaemon(0)` of its own, or alone — plus `ModelChip.test.ts`
 section's `_edit` now types until the pane's Save is enabled: it used to type
 into an editor not yet showing the file, and four "unsaved edit" checks failed
 under load.
+
+**The thinking line, WP-H (2026-10-10; plan
+`docs/plans/2026-10-10-hud-split-panes-plan.md` §4, decisions S-4; design
+§18; contract in `docs/hud-api.md`).** While a chat's turn runs, its foot —
+`[data-testid=thinking]`, right after the log's scroller and before the ticker,
+**outside `[data-testid=log]`** — reads mini orb · word · elapsed (`12s`,
+`3m 07s`, `1h 02m`). The word is a pure precedence table (`lib/thinking.ts`
+`thinkingLine`): "Error" (an `error` in the running turn) · "Ended on an error"
+(static, no time, until the next turn or send) · "Waiting for approval" (an
+approval with this `thread_id`) · "Waiting for your answer" (`needs_input`,
+no approval) · "Running <tool>…" (an unfinished call **this turn** made in this
+pane, name cleaned and capped at 40) · "Thinking…". **The turn is keyed by
+thread, window-wide** (`State.turns`, H-1): `turn_started`, `error`,
+`turn_finished` (`stop`, `next`), this window's sends (a steer leaves the
+running turn's time alone; a failed send takes back only the entry it made)
+and the activity records feed it, so it follows its thread across trades of
+conversations, Discord-started turns and reloads. **Only a change of a
+thread's activity counts, and "working" reaches the line only through the
+entry it makes**: the record that turns a thread idle follows its
+`turn_finished`, so a view still saying "working" must never outlive a finish
+already heard. Into working/needs_input with no entry (or an ended one) is a
+turn noticed late, timed from the record's **`running_since`** (H-b — the
+daemon's live, never-stored field, present only while `running`) else from now
+and corrected when the records arrive; into failed makes it ended; into
+idle/unread deletes it — never one a send in flight made, never an ended one.
+**A running turn no pane tracks is adopted** (H-3) by the drawn chat pane
+showing it when that pane waits on nothing, so Stop and Enter-to-steer return
+after a reload — only with a live entry *and* "working", so a pane a finish
+just freed is never adopted back; the 15 s reconcile undoes a wrong one. It
+never meets WP-G2's `State.loose`: a loose turn's pane closed, so no pane shows
+the thread, and `open_thread` takes the loose turn up before the adopt effect
+looks (it adopts only a turn no pane tracks).
+**The mini orb is an 18px inline SVG, never a canvas** (`components/MiniOrb.tsx`,
+H-2): CSS `transform` keyframes only, no requestAnimationFrame, `aria-hidden`;
+the word is the `role="status"`, the time is not; reduced motion stops every
+animation and leaves colour, word and time. **The palette is one module both
+orbs import** (`lib/orbpalette.ts`; a grep test refuses a second `palette()`,
+`ACCENTABLE` or amber/red hue in any source): the avatar's accent recolours
+"Thinking…" only, and an accent that is not `r,g,b` is ignored. The times
+share **one 1 s clock** that runs only while a drawn line shows one, and only
+those spans redraw on a tick — never the window or a transcript; each pane's
+line is handed to the memoized `ChatTab` as the same object while it says the
+same thing. The line is in flow, no z-index, no button or link,
+`pointer-events: none`, inert under a card, and never says Authorize, Approve or
+Deny. The input bar's status words stay (the suites read them; removing the
+duplicate is a follow-up), and **the input bar re-measures its box's cap when
+the line comes and goes** (`footLine`), or a long draft held at the
+conversation's minimum would let the line take the log below it. Free checks:
+`thinking.test.ts`, `orbpalette.test.ts`, the `turns` cases in
+`store.test.ts`, `hud_backend_check`'s `running_since` case, and the
+`_thinking_*` sections of `tests/face/hud_v2_multichat_check.py` (the mock's
+`thread_running(tid, since)` sets `running`/`running_since`), every mutation
+named in the plan's table shown to bite in a scratch copy.
 
 **The editor's missing half, ED-1 (2026-10-10; plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.2, decisions file beside it
@@ -4317,8 +4426,7 @@ the layout suite's `_split_checks`,
 `_split_close_terminal_checks`, the preview suite's `_split_checks` and
 `tests/v2/terminal_check.py`'s unreadable-from-the-first-byte case; the PR's
 mutation tables show each failing with its mutation. WP-G3's shared buffer
-arrived with ED-2. Not done: WP-H's
-thinking line.
+arrived with ED-2, and WP-H's thinking line is above.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
