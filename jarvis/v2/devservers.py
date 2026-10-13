@@ -65,6 +65,7 @@ class Entry:
     misses: int = 0
     claims: list = field(default_factory=list)
     claim_until: float | None = None
+    delivery: object | None = field(default=None, repr=False)
 
     @property
     def url(self):
@@ -251,6 +252,7 @@ class DevServers:
             self._polls += 1
             if baseline_needed:
                 self._cgroup, self._ephemeral, self._baseline = cgroup, ephemeral, keys
+                self._liveness({r.port for r in rows}, now)
                 return
             self._baseline.intersection_update(keys)
             self._liveness({r.port for r in rows}, now)
@@ -465,7 +467,7 @@ class DevServers:
             "id": entry.id, "state": entry.state, "source": dict(entry.source), "at": utcnow()}})
         self._changed.notify_all()
 
-    def _register(self, port, scheme, path, source, first_seen, window=None):
+    def _register(self, port, scheme, path, source, first_seen, window=None, delivery=None):
         now = self.clock()
         self._expire(now)
         previous = self._entries.get(port)
@@ -476,6 +478,8 @@ class DevServers:
                 previous.listening, previous.misses = True, 0
                 previous.state = "up" if previous.prior_state == "claimed" else previous.prior_state
                 previous.down_at = None
+                if previous.source == source and source["kind"] == "terminal":
+                    previous.first_seen = first_seen       # a fresh banner gets its startup grace
                 return previous                          # same id, first source, no second up
         key = (("task", source["task_id"]) if source.get("task_id")
                else (source["kind"], source.get("thread_id", source.get("terminal_id"))))
@@ -491,6 +495,7 @@ class DevServers:
         entry = Entry(entry_id, port, scheme, path, dict(source), first_seen)
         if window is not None:
             entry.window, entry.lease_until, entry.state = window, now + CLAIM_LEASE_S, "claimed"
+            entry.delivery = delivery
         self._entries[port] = entry
         self._rates[key] = now
         self._recent.append(now)
@@ -498,11 +503,15 @@ class DevServers:
         self._ensure_thread()
         return entry
 
-    def announce_terminal(self, terminal_id, url, *, window=None):
-        """Registry half of AO-1b-ii; the terminal sniffer is wired separately.
+    def announce_terminal(self, terminal_id, url, *, window=None, delivery=None, refresh=False):
+        """Retain a cleaned banner, preclaiming only its attached window.
 
-        Input is BR-8a's cleaned URL. Never probes; first source on a port wins.
-        An attached terminal may supply its page nonce to claim immediately.
+        Never probes. The first source on a port wins. A delivery receipt is
+        private to the terminal reader, so an old failed send cannot release
+        a later claim, even when both attachments use the same page nonce.
+        A deduplicated banner refreshes a same-source entry, or registers an
+        unclaimed entry after expiry under the normal caps. Never a preclaim,
+        frame, replacement of another source, or second placement of a live id.
         """
         if not self.enabled() or self._stopped:
             return None
@@ -511,14 +520,66 @@ class DevServers:
         if url is None or (window is not None and not valid_window(window)):
             return None
         parsed = urlsplit(url)
+        source = {"kind": "terminal", "terminal_id": terminal_id}
         with self._lock:
+            if not self.enabled() or self._stopped:
+                return None
+            self._expire(self.clock())
+            previous = self._entries.get(parsed.port)
+            if refresh:
+                if previous is not None and previous.source != source:
+                    return None
+                # Retained entries keep id, path, source and prior state.
+                # After expiry, normal caps govern a new unclaimed entry.
+                # Neither path preclaims a window or sends another frame.
+                e = self._register(parsed.port, parsed.scheme, parsed.path or "/",
+                                   source, self.clock())
+                return e.id if e is not None else None
+            if (previous is not None and (window is not None or delivery is not None)
+                    and (previous.source != source or previous.state in ("dismissed", "placed")
+                         or (previous.state == "claimed"
+                             and (previous.window != window or previous.delivery is not delivery)))):
+                return None
             e = self._register(parsed.port, parsed.scheme, parsed.path or "/",
-                               {"kind": "terminal", "terminal_id": terminal_id}, self.clock(), window)
-            if (e is not None and window is not None and e.state == "up"
-                    and e.source == {"kind": "terminal", "terminal_id": terminal_id}):
-                e.window, e.lease_until, e.state = window, self.clock() + CLAIM_LEASE_S, "claimed"
-                self._publish(e)
-            return e.id if e else None
+                               source, self.clock(), window, delivery)
+            if e is None:
+                return None
+            if delivery is not None and (e.source != source or e.state in ("dismissed", "placed")):
+                return None
+            if window is not None:
+                if e.source != source or not e.listening:
+                    return None
+                if e.state == "up":
+                    e.window, e.lease_until, e.state = window, self.clock() + CLAIM_LEASE_S, "claimed"
+                    e.delivery = delivery
+                    self._publish(e)
+                elif e.state != "claimed" or e.window != window or e.delivery is not delivery:
+                    return None
+            return e.id
+
+    def deliver_terminal(self, terminal_id, entry_id, window, delivery, enqueue):
+        """Queue only while this preclaim is current, before any competing claim.
+
+        The enqueue closure only takes the terminal lock and queues a frame;
+        terminal code never acquires the registry lock while holding that lock.
+        """
+        with self._lock:
+            self._expire(self.clock())
+            e = next((e for e in self._entries.values() if e.id == entry_id), None)
+            if (not self.enabled() or self._stopped or e is None or not e.listening
+                    or e.state != "claimed" or e.window != window or e.delivery is not delivery
+                    or e.source != {"kind": "terminal", "terminal_id": terminal_id}):
+                return False
+            return enqueue()
+
+    def terminal_delivery_failed(self, terminal_id, entry_id, window, delivery):
+        """Release just the still-current preclaim whose socket refused it."""
+        with self._lock:
+            e = next((e for e in self._entries.values() if e.id == entry_id), None)
+            if (e is not None and e.listening and e.state == "claimed" and e.window == window
+                    and e.source == {"kind": "terminal", "terminal_id": terminal_id}
+                    and e.delivery is delivery):
+                self._lapse(e)
 
     def _liveness(self, ports, now):
         for e in self._entries.values():
@@ -529,6 +590,7 @@ class DevServers:
                 e.listening, e.down_at = False, now
                 e.prior_state, e.state = e.state, "down"
                 e.window = e.lease_until = None
+                e.delivery = None
                 e.claims.clear()
                 e.claim_until = None
                 self._publish(e)
@@ -544,6 +606,7 @@ class DevServers:
 
     def _lapse(self, e):
         e.state, e.window, e.lease_until = "up", None, None
+        e.delivery = None
         e.claims.clear()
         e.claim_until = None
         self._publish(e)
@@ -591,6 +654,7 @@ class DevServers:
                     winner = dl.arbitrate(e.claims)
                     if winner is not None:
                         e.window, e.lease_until, e.state = winner.window, self.clock() + CLAIM_LEASE_S, "claimed"
+                        e.delivery = None
                         self._publish(e)
                     else:
                         e.claim_until = None
@@ -609,6 +673,7 @@ class DevServers:
                 return 409, {"error": "dev server is gone", "code": "gone"}
             if action != "dismiss" and (e.state != "claimed" or e.window != window):
                 raise APIError(409, "this window does not hold the claim")
+            e.delivery = None
             if action == "renew":
                 e.lease_until = self.clock() + CLAIM_LEASE_S
             else:

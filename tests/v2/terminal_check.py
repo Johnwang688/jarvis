@@ -253,12 +253,14 @@ class Base(unittest.TestCase):
 
     # -- WebSocket ------------------------------------------------------------------
 
-    def url(self, tid, ticket, port=None):
+    def url(self, tid, ticket, port=None, window=None):
         port = port or self.daemon.face_port
         query = f"?ticket={ticket}" if ticket is not None else ""
+        if window is not None:
+            query += ("&" if query else "?") + "window=" + window
         return f"ws://127.0.0.1:{port}/terminals/{tid}/attach{query}"
 
-    def connect(self, tid, ticket="fresh", *, port=None, origin="hud", host=None):
+    def connect(self, tid, ticket="fresh", *, port=None, origin="hud", host=None, window=None):
         if ticket == "fresh":
             ticket = self.ticket(tid)
         options = {}
@@ -271,7 +273,7 @@ class Base(unittest.TestCase):
             options["origin"] = origin
         if host is not None:
             options["host"] = host
-        conn = websocket.create_connection(self.url(tid, ticket, port), timeout=5, **options)
+        conn = websocket.create_connection(self.url(tid, ticket, port, window), timeout=5, **options)
         client = Client(conn)
         self.clients.append(client)
         return client
@@ -1266,16 +1268,25 @@ _PROMPT_MARK = re.compile(rb"\]133;B;jarvis=[0-9a-f]+\x1b\\")
 
 
 class DevUrls(Base):
-    """BR-8a: a dev server's URL, read from a terminal's live output, is told
-    to the window attached to that terminal — as `{"type": "dev_url", "url"}`
-    on its socket — and to nothing else: no bus record, no log line, no file.
-    With the owner's `auto_open` off, no byte of output reaches the sniffer."""
+    """Live terminal banners join the memory-only registry (AO-1b-ii).
+
+    The attached owner's socket carries the cleaned URL; the bus carries ids.
+    With auto_open off, no output reaches the sniffer or registry.
+    """
+    WINDOW = "a" * 32
+
+    def connect(self, tid, ticket="fresh", *, window=WINDOW, **kw):
+        return super().connect(tid, ticket, window=window, **kw)
 
     def setUp(self):
         super().setUp()
         # One frame a second per terminal is devurl_check's to prove; here
         # several servers announce themselves in quick succession.
         guard = patch.object(devurl, "RATE_GAP_S", 0.0)
+        guard.start()
+        self.addCleanup(guard.stop)
+        from jarvis.v2 import devservers
+        guard = patch.object(devservers, "SOURCE_RATE_S", 0.0)
         guard.start()
         self.addCleanup(guard.stop)
 
@@ -1319,7 +1330,12 @@ class DevUrls(Base):
         self.assertIn("  Local:   http://localhost:24601/\n", one.text())
         one.drain(0.3)
         two.drain(0.3)
-        self.assertEqual(self.dev_urls(one), [{"type": "dev_url", "url": "http://localhost:24601/"}])
+        frame, = self.dev_urls(one)
+        self.assertEqual(set(frame), {"type", "url", "id"})
+        self.assertEqual(frame["url"], "http://localhost:24601/")
+        entry = self.daemon.devservers._entry(frame["id"])
+        self.assertEqual((entry.state, entry.window), ("claimed", self.WINDOW))
+        self.assertEqual(entry.source, {"kind": "terminal", "terminal_id": tid1})
         self.assertEqual(self.dev_urls(two), [])
         self.assertNotIn("dev_url", json.dumps(self.owner("GET", "/terminals")))
 
@@ -1344,7 +1360,7 @@ class DevUrls(Base):
         self.wait_dev_url(client, "http://localhost:24606/")                  # sent as localhost
         self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://localhost:24606/"])
 
-    def test_nothing_reaches_the_bus_a_log_or_a_file(self):
+    def test_only_id_state_source_time_reach_the_bus_no_url_log_or_file(self):
         marker = "zq-devurl-" + secrets.token_hex(6)
         url = f"http://localhost:24607/{marker}/"
         events = self.daemon.bus.subscribe()
@@ -1360,8 +1376,15 @@ class DevUrls(Base):
                 drained.append(events.get_nowait())
             except Exception:
                 break
-        self.assertEqual([r["kind"] for r in drained], ["terminal_attached"], drained)
+        self.assertEqual([r["kind"] for r in drained], ["terminal_attached", "dev_server"], drained)
+        record = drained[1]
+        self.assertEqual(set(record), {"kind", "data"})
+        self.assertEqual(set(record["data"]), {"id", "state", "source", "at"})
+        self.assertEqual(record["data"]["state"], "claimed")
+        self.assertEqual(record["data"]["source"], {"kind": "terminal", "terminal_id": tid})
         self.assertNotIn(marker, json.dumps(drained))
+        self.assertNotIn("24607", json.dumps(drained))
+        self.assertNotIn(self.WINDOW, json.dumps(drained))
         text = "\n".join(records)
         self.assertIn(f"terminal {tid} closed", text)                           # the capture worked
         self.assertIn("browser settings changed by the owner: auto_open on", text)
@@ -1387,6 +1410,7 @@ class DevUrls(Base):
             client.drain(0.3)
             self.assertEqual(self.dev_urls(client), [])
             self.assertEqual(fed, [], "no byte of output reached the sniffer")
+            self.assertEqual(self.owner("GET", "/dev-servers")["servers"], [])
             self.assertFalse(self.owner("GET", "/browser/settings")["auto_open"])
             # On again: the next announcement is read.
             self.owner("PATCH", "/browser/settings", {"auto_open": True})
@@ -1455,7 +1479,7 @@ class DevUrls(Base):
         self.assertEqual(self.request("PATCH", "/browser/settings", {"local_servers": "yes"})[0], 400)
         self.assertTrue(settings.value("local_servers"), "a refused PATCH changed nothing")
 
-    def test_unattached_output_is_dropped_and_not_remembered(self):
+    def test_standalone_without_registry_keeps_legacy_signed_mark_behavior(self):
         terminal = T.Terminal("0000000e", shell="/bin/sh", folder="/", project_id=None, label="~",
                               cols=80, rows=24, nonce=NONCE, integration="posix")
         self.addCleanup(terminal.finish)
@@ -1517,6 +1541,295 @@ class DevUrls(Base):
         self.assertEqual(frames, [{"type": "dev_url", "url": "http://localhost:24616/"}])
         terminal._output(line)
         self.assertEqual(len(frames), 1, "and remembered once sent")
+
+    def test_unattached_live_pty_banner_is_retained_for_owner_claim(self):
+        tid, client = self.session()
+        client.close()
+        terminal = self.term(tid)
+        until = time.monotonic() + 3
+        while terminal._attachment is not None and time.monotonic() < until:
+            time.sleep(.01)
+        self.assertIsNone(terminal._attachment)
+        events = self.daemon.bus.subscribe()
+        self.addCleanup(self.daemon.bus.unsubscribe, events)
+        # Real fake-shell PTY output with no socket: path retained, query/fragment stripped.
+        self.assertTrue(terminal.queue_input(b"echo  Local: http://localhost:24620/app/?secret=hidden#frag\n"))
+        until = time.monotonic() + 3
+        while not self.daemon.devservers.listing()["servers"] and time.monotonic() < until:
+            time.sleep(.01)
+        server, = self.owner("GET", "/dev-servers")["servers"]
+        self.assertEqual(server["url"], "http://localhost:24620/app/")
+        self.assertEqual((server["state"], server["claimed"]), ("up", False))
+        record = events.get(timeout=1)
+        self.assertEqual(set(record), {"kind", "data"})
+        self.assertEqual(record["kind"], "dev_server")
+        self.assertEqual(set(record["data"]), {"id", "state", "source", "at"})
+        self.assertEqual(record["data"]["state"], "up")
+        self.assertEqual(record["data"]["source"], {"kind": "terminal", "terminal_id": tid})
+        for forbidden in ("24620", "/app/", "hidden", self.WINDOW):
+            self.assertNotIn(forbidden, json.dumps(record))
+        self.assertTrue(events.empty(), "one record for unattached registration")
+        for kw in ({"origin": None}, {"origin": "http://evil.example"},
+                   {"port": self.daemon.port}, {"port": self.daemon.workshop_port},
+                   {"host": f"evil.example:{self.daemon.face_port}"}):
+            self.assertIn(self.request("GET", "/dev-servers", **kw)[0], (403, 404))
+        result = self.owner("POST", f"/dev-servers/{server['id']}/claim",
+                            {"window": self.WINDOW, "shows": True, "focused_at": 1})
+        self.assertEqual(result, {"won": True, "url": server["url"]})
+        again = self.connect(tid)
+        again.until(lambda c: "replayed" in c.kinds(), what="replay")
+        again.drain(.2)
+        self.assertEqual(self.dev_urls(again), [])
+
+    def test_repeat_banner_revives_retained_source_without_claim_or_second_frame(self):
+        watch = self.daemon.devservers
+        now = [1000.0]
+        watch.clock = lambda: now[0]
+        with patch.object(watch, "_ensure_thread"):
+            for index, prior in enumerate(("up", "placed", "dismissed", "claimed")):
+                with self.subTest(prior=prior):
+                    terminal = T.Terminal(f"{index + 10:08x}", shell="/bin/sh", folder="/",
+                                          project_id=None, label="~", cols=80, rows=24, nonce=NONCE)
+                    self.addCleanup(terminal.finish)
+                    terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+                    terminal._dev_on = lambda: True
+                    terminal._dev_announce = watch.announce_terminal
+                    terminal._dev_release = watch.terminal_delivery_failed
+                    terminal._dev_send = watch.deliver_terminal
+                    port = 24630 + index
+                    line = f"  Local: http://localhost:{port}/first/\r\n".encode()
+                    terminal._output(line)             # unattached: retained and deduplicated
+                    entry = watch._entries[port]
+                    ident = entry.id
+                    with watch._lock:
+                        entry.state = prior
+                        now[0] += 5
+                        watch._liveness(set(), now[0])
+                        watch._liveness(set(), now[0])
+                    self.assertFalse(entry.listening)
+                    frames = []
+                    terminal._attachment_window = self.WINDOW
+                    terminal._attachment = SimpleNamespace(
+                        send_binary=lambda d: True,
+                        send_text=lambda t: frames.append(json.loads(t)) or True,
+                        closed=threading.Event())
+                    now[0] += 10
+                    terminal._output(f"  Local: http://localhost:{port}/new-path/\r\n".encode())
+                    self.assertTrue(entry.listening, "a fresh repeated banner revives the registry")
+                    self.assertEqual(entry.id, ident)
+                    self.assertEqual(entry.path, "/first/")
+                    self.assertEqual(entry.state, "up" if prior == "claimed" else prior)
+                    self.assertEqual(entry.source, {"kind": "terminal", "terminal_id": terminal.id})
+                    self.assertIsNone(entry.window)
+                    self.assertIsNone(entry.delivery)
+                    self.assertEqual(entry.first_seen, now[0])
+                    self.assertEqual(frames, [], "registry refresh never preclaims or places again")
+                    with watch._lock:
+                        watch._liveness(set(), now[0])
+                        watch._liveness(set(), now[0])
+                    self.assertTrue(entry.listening, "the restart gets its startup grace")
+
+    def test_repeat_after_tombstone_expiry_registers_unclaimed_under_normal_gates(self):
+        from jarvis.v2 import devservers
+        watch = self.daemon.devservers
+        now = [1000.0]
+        watch.clock = lambda: now[0]
+        terminal = T.Terminal("0000000e", shell="/bin/sh", folder="/", project_id=None,
+                              label="~", cols=80, rows=24, nonce=NONCE)
+        self.addCleanup(terminal.finish)
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        terminal._dev_announce = watch.announce_terminal
+        terminal._dev_release = watch.terminal_delivery_failed
+        terminal._dev_send = watch.deliver_terminal
+        line = b"  Local: http://localhost:24635/app/\r\n"
+        with patch.object(watch, "_ensure_thread"):
+            terminal._output(line)
+            entry = watch._entries[24635]
+            ident = entry.id
+            with watch._lock:
+                now[0] += 5
+                watch._liveness(set(), now[0])
+                watch._liveness(set(), now[0])
+            now[0] += devservers.DOWN_KEEP_S + 1
+            frames = []
+            terminal._attachment_window = self.WINDOW
+            terminal._attachment = SimpleNamespace(
+                send_binary=lambda d: True, send_text=lambda t: frames.append(json.loads(t)) or True,
+                closed=threading.Event())
+            with patch.object(watch, "enabled", return_value=False):
+                terminal._output(line)
+                self.assertIs(watch._entries[24635], entry, "off creates or revives nothing")
+                self.assertFalse(entry.listening)
+            with patch.object(devservers, "ENTRIES_MAX", 0):
+                terminal._output(line)
+                self.assertEqual(watch.listing()["servers"], [], "entry cap still applies")
+            with patch.object(devservers, "SOURCE_RATE_S", 1000):
+                watch._rates[("terminal", terminal.id)] = now[0]
+                terminal._output(line)
+                self.assertEqual(watch.listing()["servers"], [], "source rate still applies")
+            with patch.object(devservers, "GLOBAL_RATE_MAX", 0):
+                terminal._output(line)
+                self.assertEqual(watch.listing()["servers"], [], "global rate still applies")
+            terminal._output(line)
+            self.assertIn(24635, watch._entries, "a fresh post-expiry banner is discoverable")
+            fresh = watch._entries[24635]
+            self.assertNotEqual(fresh.id, ident)
+            self.assertTrue(fresh.listening)
+            self.assertEqual((fresh.state, fresh.window, fresh.delivery), ("up", None, None))
+            self.assertEqual(fresh.source, {"kind": "terminal", "terminal_id": terminal.id})
+            self.assertEqual(watch.listing()["servers"][0]["url"], "http://localhost:24635/app/")
+            self.assertEqual(frames, [], "no duplicate frame even with an attached window")
+
+    def test_duplicate_from_a_different_terminal_cannot_revive_the_first_source(self):
+        watch = self.daemon.devservers
+        now = [1000.0]
+        watch.clock = lambda: now[0]
+        with patch.object(watch, "_ensure_thread"):
+            ident = watch.announce_terminal("first", "http://localhost:24634/first/")
+            entry = watch._entry(ident)
+            with watch._lock:
+                entry.state = "dismissed"
+                now[0] += 5
+                watch._liveness(set(), now[0])
+                watch._liveness(set(), now[0])
+            terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None,
+                                  label="~", cols=80, rows=24, nonce=NONCE)
+            self.addCleanup(terminal.finish)
+            terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+            terminal._sniffer.sent("http://localhost:24634/other/")
+            terminal._dev_on = lambda: True
+            terminal._dev_announce = watch.announce_terminal
+            terminal._output(b"  Local: http://localhost:24634/other/\r\n")
+            self.assertFalse(entry.listening)
+            self.assertEqual((entry.state, entry.prior_state), ("down", "dismissed"))
+            self.assertEqual(entry.source, {"kind": "terminal", "terminal_id": "first"})
+            self.assertEqual(entry.path, "/first/")
+
+    def test_legacy_attach_still_sends_url_but_leaves_entry_unclaimed(self):
+        tid = self.open_terminal()["id"]
+        client = self.connect(tid, window=None)
+        self.at_prompt(client)
+        self.run_line(client, "echo  Local: http://localhost:24621/")
+        self.wait_dev_url(client, "http://localhost:24621/")
+        self.assertEqual(self.dev_urls(client), [{"type": "dev_url", "url": "http://localhost:24621/"}])
+        entry, = self.owner("GET", "/dev-servers")["servers"]
+        self.assertEqual((entry["state"], entry["claimed"]), ("up", False))
+
+    def test_attach_window_is_strict_and_bad_query_does_not_spend_ticket(self):
+        tid = self.open_terminal()["id"]
+        ticket = self.ticket(tid)
+        for window in ("", "a" * 16, "A" * 32, "g" * 32, "a" * 33,
+                       self.WINDOW + "&window=" + self.WINDOW):
+            self.assertEqual(self.refused(tid, ticket, window=window), 400)
+        for kw in ({"origin": None}, {"origin": "null"}, {"origin": "http://evil.example"},
+                   {"host": f"evil.example:{self.daemon.face_port}"}):
+            self.assertEqual(self.refused(tid, ticket, **kw), 403)
+        client = self.connect(tid, ticket)
+        client.until(lambda c: "replayed" in c.kinds(), what="valid unchanged ticket")
+
+    def test_takeover_binds_banners_to_new_socket_window(self):
+        tid, first = self.session()
+        second = self.connect(tid, window="b" * 32)
+        second.until(lambda c: "waiting" in c.kinds(), what="takeover waiting")
+        first.until(lambda c: "takeover_request" in c.kinds(), what="takeover request")
+        request = next(m for m in first.messages if m["type"] == "takeover_request")
+        first.conn.send(json.dumps({"type": "takeover", "id": request["id"], "allow": True}))
+        second.until(lambda c: "replayed" in c.kinds(), what="takeover replay")
+        self.run_line(second, "echo  Local: http://localhost:24622/")
+        self.wait_dev_url(second, "http://localhost:24622/")
+        frame, = self.dev_urls(second)
+        self.assertEqual(self.daemon.devservers._entry(frame["id"]).window, "b" * 32)
+        first.drain(.1)
+        self.assertEqual(self.dev_urls(first), [])
+
+    def test_registry_callback_can_reenter_terminal_and_failed_send_releases_only_its_claim(self):
+        terminal = T.Terminal("0000000d", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE)
+        self.addCleanup(terminal.finish)
+        watch = self.daemon.devservers
+        other = watch.announce_terminal("other", "http://localhost:24623/", window=self.WINDOW)
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: bool(terminal.history())
+        def announce(*a, **kw):
+            terminal.history()                    # would deadlock under terminal._lock
+            return watch.announce_terminal(*a, **kw)
+        terminal._dev_announce = announce
+        terminal._dev_release = watch.terminal_delivery_failed
+        terminal._dev_send = watch.deliver_terminal
+        terminal._attachment_window = self.WINDOW
+        terminal._attachment = SimpleNamespace(send_binary=lambda d: True, send_text=lambda t: False,
+                                               closed=threading.Event())
+        worker = threading.Thread(target=terminal._output,
+                                  args=(b"  Local: http://localhost:24624/\r\n",), daemon=True)
+        worker.start()
+        worker.join(2)
+        self.assertFalse(worker.is_alive(), "registry callbacks must not hold the terminal lock")
+        entry = next(e for e in watch._entries.values() if e.port == 24624)
+        self.assertEqual((entry.state, entry.window), ("up", None))
+        self.assertEqual(watch._entry(other).state, "claimed")
+        self.assertEqual(len(terminal._sniffer._recent), 0)
+        frames = []
+        terminal._attachment.send_text = lambda t: frames.append(json.loads(t)) or True
+        terminal._output(b"  Local: http://localhost:24624/\r\n")
+        self.assertEqual(frames, [{"type": "dev_url", "url": "http://localhost:24624/", "id": entry.id}])
+        self.assertEqual((entry.state, entry.window), ("claimed", self.WINDOW))
+
+    def test_attachment_change_during_registration_never_sends_a_stale_frame(self):
+        terminal = T.Terminal("0000000a", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE)
+        self.addCleanup(terminal.finish)
+        watch = self.daemon.devservers
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        first_frames, second_frames = [], []
+        first = SimpleNamespace(send_binary=lambda d: True,
+                                send_text=lambda t: first_frames.append(json.loads(t)) or True,
+                                closed=threading.Event())
+        second = SimpleNamespace(send_binary=lambda d: True,
+                                 send_text=lambda t: second_frames.append(json.loads(t)) or True,
+                                 closed=threading.Event())
+        terminal._attachment, terminal._attachment_window = first, self.WINDOW
+        def announce(*a, **kw):
+            ident = watch.announce_terminal(*a, **kw)
+            terminal.detach(first)
+            self.assertIsNone(terminal.attach(second, 0, window="b" * 32))
+            return ident
+        terminal._dev_announce = announce
+        terminal._dev_release = watch.terminal_delivery_failed
+        terminal._dev_send = watch.deliver_terminal
+        terminal._output(b"  Local: http://localhost:24625/\r\n")
+        self.assertEqual(first_frames, [])
+        self.assertFalse(any(m["type"] == "dev_url" for m in second_frames))
+        entry, = watch._entries.values()
+        self.assertEqual((entry.state, entry.window), ("up", None))
+        self.assertEqual(len(terminal._sniffer._recent), 0)
+
+    def test_a_claim_lost_before_queueing_never_sends_its_preclaimed_frame(self):
+        terminal = T.Terminal("00000009", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE)
+        self.addCleanup(terminal.finish)
+        watch = self.daemon.devservers
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        frames = []
+        terminal._attachment_window = self.WINDOW
+        terminal._attachment = SimpleNamespace(send_binary=lambda d: True,
+                                               send_text=lambda t: frames.append(json.loads(t)) or True,
+                                               closed=threading.Event())
+        def announce(*a, **kw):
+            ident = watch.announce_terminal(*a, **kw)
+            watch.window_ended(self.WINDOW)
+            self.assertTrue(watch.claim(ident, "b" * 32, True, 0)[1]["won"])
+            return ident
+        terminal._dev_announce = announce
+        terminal._dev_release = watch.terminal_delivery_failed
+        terminal._dev_send = watch.deliver_terminal
+        terminal._output(b"  Local: http://localhost:24626/\r\n")
+        self.assertEqual(frames, [])
+        entry, = watch._entries.values()
+        self.assertEqual((entry.state, entry.window), ("claimed", "b" * 32))
+        self.assertEqual(len(terminal._sniffer._recent), 0)
 
     def test_floods_stay_well_above_what_xterm_draws(self):
         # PR #70 review: 50 MB of "Network: http://192.168…" lines went through
