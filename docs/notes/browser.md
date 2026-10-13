@@ -1164,3 +1164,24 @@ One ordered publisher uses the shared live SSE window identity for front reports
 Each visible active Remote stream consumes a fresh ticket and owns its decode/input generation. Hidden, covered and disconnected streams close while retained handles stay. Approval and annotation blocking stop all page input, clipboard cuts, paste/IME and file/dialog actions without interrupting incoming frames. Unsolicited selection cannot write the local clipboard; cut follows a successful owner clipboard write only. Page dialogs are plain text and never autofocus. Uploads send selected project/path references, and downloads save only on an owner gesture; interrupted late responses cannot create a local save.
 
 Profile controls expose creation, rename, Chrome sign-in, confirmed clearing and deletion through the owner routes. The HUD states Chrome's basic password store and possible sync limitations. This package does not enable agent driving or prove a real account sign-in. BR4 adds capture/annotation controls separately; its identity getter uses the exact current host receipt, not stream pixels.
+
+
+## Current owner capture HUD (BR4, 2026-10-13)
+
+Annotate and Send to chat are explicit gestures on the active drawn Browser tab.
+Remote uses the exact current host receipt; see/source permissions remain unchanged.
+Whole-page text is chosen before capture. The still keeps its captured metadata
+and text scope while the live stream continues; annotation blocks page input and
+navigation. Approval cards and Settings suspend drawing and invalidate pending
+work without discarding existing ink.
+
+Send stages one flattened picture and one opaque page-text reference together,
+never a chat turn. The selected drawn chat is pinned before asynchronous work.
+Stable compose identity follows a later opened thread; closure or replacement
+keeps the pair for the next new thread with an explicit notice. Final attachment
+capacity is judged atomically, and a rejected pair leaves the still and ink.
+
+Direct capture remains unverified on this host. The real app-mode capability
+probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels;
+synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
+“Open this in Remote to annotate” and converts only on that second owner gesture.

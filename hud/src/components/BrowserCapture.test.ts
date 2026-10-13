@@ -23,7 +23,7 @@ const stage = vi.fn(() => true), remote = vi.fn();
 async function show(overrides: Record<string, unknown> = {}) {
   await act(async () => root.render(React.createElement(BrowserCapture, {
     remoteTabId: "abcdef01", active: true, drawn: true, blocked: false, zoom: 100,
-    identity: () => identity, destination: { target: () => key, stage }, onRemote: remote, ...overrides,
+    identity: () => identity, destination: { target: () => key ? { key } : null, stage }, onRemote: remote, ...overrides,
   })));
 }
 async function click(label: string) {
@@ -51,7 +51,7 @@ describe("capture gesture lifecycle", () => {
     await act(async () => root.render(React.createElement(React.StrictMode, null,
       React.createElement(BrowserCapture, { remoteTabId: "abcdef01", active: true, drawn: true,
         blocked: false, zoom: 100, identity: () => identity,
-        destination: { target: () => key, stage }, onRemote: remote }))));
+        destination: { target: () => key ? { key } : null, stage }, onRemote: remote }))));
     await click("Annotate");
     expect(api.captureBrowser).toHaveBeenCalledTimes(1);
     expect(host.querySelector('[data-testid="frozen-still"]')).not.toBeNull();
@@ -73,7 +73,7 @@ describe("capture gesture lifecycle", () => {
     await show(); await click("Send to chat");
     key = "other-thread"; await act(async () => capture.resolve(still));
     key = "another-thread"; await act(async () => image.resolve(pair));
-    expect(stage).toHaveBeenCalledExactlyOnceWith("thread-original", pair);
+    expect(stage).toHaveBeenCalledExactlyOnceWith({ key: "thread-original" }, pair);
     expect(host.querySelector('[data-testid="frozen-still"]')).toBeNull();
   });
   it("a card which appears and disappears cannot revive an old response", async () => {
@@ -101,13 +101,13 @@ describe("capture gesture lifecycle", () => {
     await show(); vi.mocked(captureAttachments).mockResolvedValue(pair); stage.mockReturnValue(false);
     await click("Stage still");
     expect(host.querySelector('[data-testid="frozen-still"]')?.textContent).toContain("two attachment slots");
-    expect(stage).toHaveBeenCalledExactlyOnceWith("thread-original", pair);
+    expect(stage).toHaveBeenCalledExactlyOnceWith({ key: "thread-original" }, pair);
   });
   it("Annotate fetches a still without staging and pins the chat only at its later Send gesture", async () => {
     await show(); await click("Annotate");
     expect(captureAttachments).not.toHaveBeenCalled(); expect(stage).not.toHaveBeenCalled();
     key = "later-selected"; await click("Stage still");
-    expect(stage).toHaveBeenCalledExactlyOnceWith("later-selected", pair);
+    expect(stage).toHaveBeenCalledExactlyOnceWith({ key: "later-selected" }, pair);
   });
   it("duplicate clicks do not start two captures, and whole text is selected before capture", async () => {
     const capture = deferred<unknown>(); vi.mocked(api.captureBrowser).mockReturnValue(capture.promise);

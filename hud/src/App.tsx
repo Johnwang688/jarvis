@@ -20,6 +20,9 @@ import { SendStops } from "./lib/sendStops";
 // send, a transcript — stays with that thread.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
+import { CaptureDrafts } from "./lib/captureDraft";
+import type { CaptureDestination } from "./components/BrowserCapture";
 import { api, subscribe } from "./api";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
@@ -524,6 +527,23 @@ export default function App() {
     if (selected !== at.selectedChat || front) dispatch({ type: "select", pane: selected, front });
   }, [selected, focusedChat, state.selectedChat, state.selectedOrder, dispatch]);
 
+  const pageDrafts = useRef(new CaptureDrafts());
+  const pageDestination = useMemo<CaptureDestination>(() => ({
+    target: () => {
+      const pane = live.current.selectedChat;
+      return pageDrafts.current.pin(live.current, pane !== null && chatsOnScreen().includes(pane) ? pane : null);
+    },
+    stage: (target, files) => {
+      // Judge capacity against the actual commit state; acknowledge only the
+      // intact pair so a refused or interrupted action cannot discard ink.
+      flushSync(() => dispatch({ type: "stage", key: target.key, capture: target.compose, files, atomic: true }));
+      const at = live.current;
+      return [...PANE_NOS.map(n => at.chats[n].files), ...Object.values(at.drafts).map(d => d.files)]
+        .some(staged => files.every(file => staged.includes(file)));
+    },
+    release: target => pageDrafts.current.release(target),
+  }), [dispatch]);
+
   // ---- capture ------------------------------------------------------------
 
   const capture = useMemo(
@@ -713,6 +733,7 @@ export default function App() {
             const t = await api.openThread({
               project_id: projectId, role: "chat", ...threadBody(composeChoice(compose)),
             });
+            pageDrafts.current.opened(compose?.id, t.id);
             const n = conversation();
             threadId = t.id;
             opened = t;
@@ -3231,6 +3252,7 @@ export default function App() {
         return (
           <BrowserTab
             pane={n}
+            captureDestination={pageDestination}
             slot={info.slot}
             drawn={info.drawn}
             projectId={paneProject(spec, n)}

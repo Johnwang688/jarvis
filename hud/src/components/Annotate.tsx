@@ -90,7 +90,7 @@ export function Annotate(props: {
     finally { sending.current = false; setBusy(false); }
   };
   const disabled = props.blocked || !props.active || busy;
-  return <section className="browser-annotate" data-testid="browser-annotate" aria-label="Annotate captured page"
+  return <section className="browser-annotate" data-browser-capture="" data-testid="browser-annotate" aria-label="Annotate captured page"
     {...(disabled ? { inert: "" } as Record<string, string> : {})}
     onKeyDown={e => {
       e.stopPropagation();

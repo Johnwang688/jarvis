@@ -1,6 +1,7 @@
 // Explicit owner gestures only. A capture never turns see on or changes source.
 import { useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api";
+import type { CaptureTarget } from "../lib/captureDraft";
 import type { Attachment } from "../types";
 import { type Op } from "../lib/annotate";
 import {
@@ -11,9 +12,10 @@ import { Annotate } from "./Annotate";
 
 export interface CaptureDestination {
   /** Read at the Send gesture, before either capture or export starts. */
-  target: () => string | null;
+  target: () => CaptureTarget | null;
   /** Atomically commit both files to that draft; return whether both landed. */
-  stage: (key: string, pair: Attachment[]) => boolean;
+  stage: (target: CaptureTarget, pair: Attachment[]) => boolean;
+  release?: (target: CaptureTarget) => void;
 }
 export function BrowserCapture(props: {
   remoteTabId: string | null; active: boolean; drawn: boolean; blocked: boolean; zoom: number;
@@ -41,7 +43,7 @@ export function BrowserCapture(props: {
     if (!key) setMessage(CAPTURE_NO_CHAT);
     return key;
   };
-  const stage = async (capture: CaptureStill, ops: readonly Op[], key: string, token: number) => {
+  const stage = async (capture: CaptureStill, ops: readonly Op[], key: CaptureTarget, token: number) => {
     const pair = await captureAttachments(capture, ops);
     if (!valid(token)) return false;
     const accepted = now.current.destination.stage(key, pair);
@@ -53,9 +55,9 @@ export function BrowserCapture(props: {
     setMessage("");
     const key = send ? target() : null;
     if (send && !key) return;
-    if (!props.remoteTabId) { setFallback(true); setMessage(DIRECT_CAPTURE); return; }
+    if (!props.remoteTabId) { if (key) props.destination.release?.(key); setFallback(true); setMessage(DIRECT_CAPTURE); return; }
     const identity = props.identity();
-    if (!identity) { setMessage(CAPTURE_CHANGED); return; }
+    if (!identity) { if (key) props.destination.release?.(key); setMessage(CAPTURE_CHANGED); return; }
     const stamp = JSON.stringify(identity), token = ++epoch.current;
     working.current = true; setBusy(true); setFallback(false);
     try {
@@ -69,6 +71,7 @@ export function BrowserCapture(props: {
     } catch (e) {
       if (valid(token)) setMessage(e instanceof Error ? e.message : "This page could not be captured.");
     } finally {
+      if (key) now.current.destination.release?.(key);
       if (mounted.current && token === epoch.current) { working.current = false; setBusy(false); }
     }
   };
@@ -78,11 +81,11 @@ export function BrowserCapture(props: {
     const token = ++epoch.current;
     working.current = true;
     try { return await stage(still, ops, key, token); }
-    finally { if (token === epoch.current) working.current = false; }
+    finally { now.current.destination.release?.(key); if (token === epoch.current) working.current = false; }
   };
   const disabled = !props.active || !props.drawn || props.blocked || busy;
   return <>
-    <div className="browser-capture-actions" data-testid="browser-capture-actions">
+    <div className="browser-capture-actions" data-browser-capture="" data-testid="browser-capture-actions">
       <button type="button" disabled={disabled} onClick={() => void begin(false)}>Annotate</button>
       <button type="button" disabled={disabled} onClick={() => void begin(true)}>Send to chat</button>
       <label><input type="checkbox" checked={whole} disabled={disabled || !!still}
@@ -90,8 +93,8 @@ export function BrowserCapture(props: {
         onKeyDown={e => e.stopPropagation()} onKeyUp={e => e.stopPropagation()} /> Whole-page text</label>
       {busy && <span role="status">Capturing…</span>}
     </div>
-    {message && <div className="annotation-note" role="status" data-testid="capture-notice">{message}</div>}
-    {fallback && <button type="button" className="capture-remote" disabled={disabled}
+    {message && <div className="annotation-note" data-browser-capture="" role="status" data-testid="capture-notice">{message}</div>}
+    {fallback && <button type="button" className="capture-remote" data-browser-capture="" disabled={disabled}
       onClick={() => { if (eligible()) { setFallback(false); props.onRemote(); } }}>Open in Remote</button>}
     {still && <Annotate key={still.capture_id} still={still} zoom={props.zoom}
       blocked={props.blocked || busy} active={props.active && props.drawn} notice={message}

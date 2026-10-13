@@ -10,6 +10,7 @@
 // The orb follows **the selected chat's** turn: a turn event in another pane
 // never repaints it.
 
+import type { CaptureTarget } from "../lib/captureDraft";
 import { applyEvent, fold, historyOps, outcome, type TranscriptEvent } from "../lib/toolCalls";
 import type { ToolEntry, ToolOutcome } from "../types";
 import React, { createContext, useContext, useReducer } from "react";
@@ -175,7 +176,7 @@ export type Action =
    * to the box of the pane holding that conversation when they are ready,
    * else to its parked draft — never to whatever the pane they were dropped
    * on shows by then (re-review of PR #27). */
-  | { type: "stage"; key: string; files: Attachment[]; atomic?: boolean }
+  | { type: "stage"; key: string; files: Attachment[]; atomic?: boolean; capture?: CaptureTarget["compose"] }
   | { type: "restore_compose"; pane: PaneNo; composeId: string }
   | { type: "notice"; text: string }
   /** Words for a conversation no pane shows: kept with its parked draft
@@ -408,8 +409,11 @@ export function reduce(s: State, a: Action): State {
 
     case "stage": {
       if (!a.files.length) return s;
-      const n = PANE_NOS.find((p) => draftKey(s.chats[p], p) === a.key);
-      const had = s.drafts[a.key];
+      const sameCompose = a.capture ? PANE_NOS.find(p => s.chats[p].compose?.id === a.capture!.id) : undefined;
+      const orphan = !!a.capture && sameCompose === undefined;
+      const key = a.capture ? sameCompose !== undefined ? draftKey(s.chats[sameCompose], sameCompose)! : ORPHAN_DRAFT : a.key;
+      const n = PANE_NOS.find((p) => draftKey(s.chats[p], p) === key);
+      const had = s.drafts[key];
       const all = [...(n !== undefined ? s.chats[n].files : had?.files ?? []), ...a.files];
       // A page picture and its opaque text reference are one owner-selected
       // capture. Capacity changes while export runs must never split the pair.
@@ -417,7 +421,9 @@ export function reduce(s: State, a: Action): State {
         return noticed(s, "This capture needs two attachment slots: remove a file and try again.");
       const files = all.slice(0, MAX_FILES);
       const next = n !== undefined ? withChat(s, n, { ...s.chats[n], files })
-        : { ...s, drafts: { ...s.drafts, [a.key]: { ...had, text: had?.text ?? "", files } } };
+        : { ...s, drafts: { ...s.drafts, [key]: { ...had, text: had?.text ?? "", files,
+            ...(orphan ? { projects: withProject(had?.projects, a.capture!.projectId) } : {}) } } };
+      if (orphan) return noticed(next, "The Browser capture is kept for the next new thread you start.");
       return all.length > MAX_FILES ? noticed(next, filesLeftOut(all.length - MAX_FILES).trim()) : next;
     }
 
