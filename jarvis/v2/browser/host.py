@@ -58,7 +58,8 @@ last tab leaves. A page's or an agent's navigation never opens one.
 **A clean environment** (`chrome_environment`): built from nothing, not
 filtered from the daemon's — `HOME` is `BROWSER_DIR/home` (inside the throwaway run folder for Private), so everything
 Chrome writes outside its profile (its NSS store, the font cache) stays in
-the credential folder; no `JARVIS_*`, no API key, no display, no
+the credential folder. A private `FONTCONFIG_FILE` adds reachable Windows fonts
+while retaining the distro defaults; no `JARVIS_*`, no API key, no display, no
 `PULSE_SERVER`, no D-Bus. (The Playwright driver, a separate node process,
 inherits the daemon's environment as v1's does; no page can reach it.)
 
@@ -97,6 +98,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from jarvis import config
 
@@ -269,6 +271,121 @@ def secure_dir(path: Path, *, create: bool = True) -> Path:
         raise BrowserRefused(409, "the Browser's folder is open to other users; "
                                   "it must be private (chmod 700)")
     return path
+
+
+
+_WINDOWS_FONTS = Path("/mnt/c/Windows/Fonts")
+_SYSTEM_FONTS = Path("/etc/fonts/fonts.conf")
+
+
+def _font_home_fd(home: Path) -> int:
+    """Pin an existing home without traversing any substituted symlink."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", flags)
+    try:
+        for part in home.absolute().parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        _private_font_fd(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _private_font_fd(fd: int) -> None:
+    st = os.fstat(fd)
+    if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+            or stat.S_IMODE(st.st_mode) & 0o077):
+        raise BrowserRefused(409, "the Browser's font folder must be private")
+
+
+def _font_child_fd(parent: int, name: str, *, create: bool) -> int:
+    if create:
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        _private_font_fd(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def font_environment(home: Path, source=None) -> dict[str, str]:
+    """Add reachable Windows fonts using only pinned private directories.
+
+    The first writable cache is ours. The distro include retains its aliases,
+    Linux fallbacks and rendering rules; its user includes use this private
+    HOME. Private Chrome's home and font cache die with its run directory.
+    The caller has created home; this function never creates a parent path.
+    """
+    env = chrome_environment(home, source)
+    if not _WINDOWS_FONTS.is_dir():
+        return env
+    pinned: list[int] = []
+    temporary = None
+    try:
+        home_fd = _font_home_fd(home); pinned.append(home_fd)
+        folder_fd = _font_child_fd(home_fd, "fontconfig", create=True); pinned.append(folder_fd)
+        cache_fd = _font_child_fd(folder_fd, "cache", create=True); pinned.append(cache_fd)
+        folder = home / "fontconfig"
+        path = folder / "fonts.conf"
+        try:
+            st = os.stat("fonts.conf", dir_fd=folder_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or stat.S_IMODE(st.st_mode) != 0o600):
+                raise BrowserRefused(409, "the Browser's font configuration must be a private file")
+        body = ('<?xml version="1.0"?>\n'
+                '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">\n'
+                '<fontconfig>\n'
+                f'  <cachedir>{xml_escape(str(folder / "cache"))}</cachedir>\n'
+                f'  <include>{xml_escape(str(_SYSTEM_FONTS))}</include>\n'
+                f'  <dir>{xml_escape(str(_WINDOWS_FONTS))}</dir>\n'
+                '</fontconfig>\n')
+        temporary = ".fonts-" + secrets.token_hex(12)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=folder_fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+            written = os.fstat(stream.fileno())
+        os.replace(temporary, "fonts.conf", src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        temporary = None
+        # Writes above never follow the pathname again. Re-open the complete
+        # path before handing it to Chrome, so a swapped parent is a refusal.
+        current: list[int] = []
+        try:
+            current.append(_font_home_fd(home))
+            current.append(_font_child_fd(current[-1], "fontconfig", create=False))
+            current.append(_font_child_fd(current[-1], "cache", create=False))
+            same = lambda left, right: (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+            if (not all(same(os.fstat(old), os.fstat(new)) for old, new in zip(pinned, current))
+                    or not same(written, os.stat("fonts.conf", dir_fd=current[1], follow_symlinks=False))):
+                raise BrowserRefused(409, "the Browser's font folder changed during preparation")
+        finally:
+            for current_fd in reversed(current):
+                os.close(current_fd)
+        env["FONTCONFIG_FILE"] = str(path)
+        return env
+    except OSError:
+        raise BrowserRefused(409, "the Browser's font configuration could not be prepared") from None
+    finally:
+        if temporary is not None and len(pinned) >= 2:
+            try:
+                os.unlink(temporary, dir_fd=pinned[1])
+            except OSError:
+                pass
+        for pinned_fd in reversed(pinned):
+            os.close(pinned_fd)
 
 
 def _remove_tree(path: Path, *, strict: bool = False) -> None:
@@ -501,6 +618,7 @@ class BrowserHost:
         # Private alive through capture/retirement, without entering owner tabs.
         self._look_reserved: set[str] = set()
         self._look_tasks: set[asyncio.Task] = set()
+        self._capture_hold_epoch = 0
         self._look_lock = None
         self._launched: set[Path] = set()
         self._snapshot: dict = {"instances": [], "tabs": 0}
@@ -717,7 +835,7 @@ class BrowserHost:
     def _tab_cap() -> int:
         return max(1, config.BROWSER_TAB_CAP)
 
-    def capture_look(self, snapshot, whole, images, forms, current):
+    def capture_look(self, snapshot, whole, images, forms, current, *, image_edge=1568):
         """The BR5 service's read adapter. Never admits an owner port lease."""
         from .look_capture import LOOK_TIMEOUT_S, capture, direct_url
         from .look import LookRefused
@@ -728,7 +846,7 @@ class BrowserHost:
             self._ensure_started()
         elif not self._running():
             raise LookRefused("no live HUD Browser pane is available")
-        return self._call(capture(self, snapshot, whole, images, forms, current, deadline),
+        return self._call(capture(self, snapshot, whole, images, forms, current, deadline, image_edge=image_edge),
                           max(0.1, deadline-time.monotonic()) + CLOSE_TIMEOUT_S*3)
 
     # -- profiles (BR-1c) ---------------------------------------------------
@@ -838,7 +956,7 @@ class BrowserHost:
             context = await self._pw.chromium.launch_persistent_context(
                 str(folder), channel="chrome", headless=True, ignore_default_args=True,
                 args=launch_args(folder, self._gate.port, private=private),
-                env=chrome_environment(home), chromium_sandbox=True,
+                env=font_environment(home), chromium_sandbox=True,
                 artifacts_dir=str(artifacts), downloads_path=str(incoming),
                 accept_downloads=True, handle_sigint=False, handle_sigterm=False,
                 handle_sighup=False, timeout=LAUNCH_TIMEOUT_S * 1000,
@@ -1067,7 +1185,7 @@ class BrowserHost:
             with self._lock:
                 self._guarded += 1
             LOG.info("Browser landing guard replaced a page (%s)", refusal.reason)
-            asyncio.ensure_future(self._replace(tab))
+            asyncio.ensure_future(self._replace(tab, tab.document_generation))
             return
         # A new page has no chooser open any more.
         if tab.chooser is not None:
@@ -1102,12 +1220,23 @@ class BrowserHost:
             return
         self._located(tab, url=tab.page.url, title=title)
 
-    async def _replace(self, tab: _Tab) -> None:
-        try:
-            await tab.page.goto("about:blank", timeout=NAV_TIMEOUT_S * 1000)
-            await tab.page.set_content(EXPLANATION, timeout=NAV_TIMEOUT_S * 1000)
-        except Exception:  # noqa: BLE001 - a closed page has nothing to replace
-            pass
+    async def _replace(self, tab: _Tab, generation: int) -> None:
+        # Scheduled, never awaited by a navigation holding this lock. A failed
+        # landing may queue its guard just before the owner's next navigation;
+        # it must not blank the newer document when it finally gets CPU.
+        async with self._launching.setdefault(tab.profile, asyncio.Lock()):
+            if self._tabs.get(tab.id) is not tab or tab.document_generation != generation:
+                return
+            try:
+                await tab.page.goto("about:blank", wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
+                # Main-frame commit increments the generation once. A close or
+                # another landing while goto waited invalidates the explanation.
+                if (self._tabs.get(tab.id) is not tab or tab.document_generation != generation + 1
+                        or tab.page.url != "about:blank"):
+                    return
+                await tab.page.set_content(EXPLANATION, timeout=NAV_TIMEOUT_S * 1000)
+            except Exception:  # noqa: BLE001 - a closed page has nothing to replace
+                pass
 
     # -- tabs (thread-safe entry points) ------------------------------------------------
 
@@ -1383,6 +1512,11 @@ class BrowserHost:
 
     # -- the hold (plan §8.3, amendment H3) -----------------------------------------------
 
+    def capture_hold_epoch(self) -> int:
+        """A capture spanning any approval card must be started again."""
+        with self._lock:
+            return self._capture_hold_epoch
+
     def input_held(self) -> bool:
         """Whether **any** approval is waiting on the owner: then nothing
         reaches a page. Fails closed — a broker that cannot be asked holds."""
@@ -1401,6 +1535,8 @@ class BrowserHost:
     def _observe(self, record) -> None:
         """A bus observer: a card raised holds every tab at once."""
         if isinstance(record, dict) and record.get("kind") == "approval_requested":
+            with self._lock:
+                self._capture_hold_epoch += 1
             for tab in list(self._tabs.values()):
                 if tab.stream is not None:
                     tab.stream.hold_through()

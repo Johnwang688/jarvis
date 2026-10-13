@@ -99,7 +99,7 @@ SNIFF = os.environ.get("JARVIS_NETNS_SNIFF") == "1"
 PSS_LIMIT = 1.5 * 1024 ** 3
 WAYS = ("iframe", "img", "fetch", "xhr", "ws", "form", "sw", "open")
 NAV_WAYS = ("302", "meta", "loc")
-ENV_ALLOWED = {"HOME", "PATH", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ"}
+ENV_ALLOWED = {"HOME", "PATH", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "FONTCONFIG_FILE"}
 
 
 class Fake:
@@ -762,6 +762,8 @@ class OwnerBrowser(unittest.TestCase):
                        "DISPLAY", "JARVIS_"):
             self.assertNotIn(secret, blob)
         self.assertEqual(env.get("LC_ALL"), "C.UTF-8", "the locale passes")
+        if H._WINDOWS_FONTS.is_dir():
+            self.assertEqual(env.get("FONTCONFIG_FILE"), str(config.BROWSER_DIR / "home" / "fontconfig" / "fonts.conf"))
 
     def test_04b_no_udp_leaves_chrome(self):
         """WebRTC and WebTransport, effect not flags (review of PR #69, HIGH:
@@ -1045,6 +1047,30 @@ class OwnerBrowser(unittest.TestCase):
         finally:
             self.owner("DELETE", f"/browser/tabs/{tab}")
         self.assertIsNone(self.host.pane_tab(tab))
+
+    def test_11c_stored_restore_never_opens_gate_or_hits_control_ports(self):
+        local = Sanity()
+        self.addCleanup(local.close)
+        tab = self.owner("POST", "/browser/tabs", {})["tab_id"]
+        try:
+            url = f"http://localhost:{local.port}/hit?w=restore"
+            restored = self.owner("POST", f"/browser/tabs/{tab}/restore", {"url": url})
+            self.assertFalse(restored["loaded"])
+            self.assertEqual(local.accepts, 0)
+            self.assertFalse(self.host.loopback_open(local.port))
+            before = self.stand_in_accepts()
+            for listener in self.stand_ins.values():
+                status, _ = self.ask("POST", f"/browser/tabs/{tab}/restore",
+                                     {"url": f"http://localhost:{listener.port}/"})
+                self.assertEqual(status, 400)
+            self.assertEqual(self.stand_in_accepts(), before)
+            opened = self.owner("POST", f"/browser/tabs/{tab}/navigate", {"url": url})
+            self.assertTrue(opened["loaded"], opened)
+            self.assertGreater(local.accepts, 0)
+            self.assertTrue(self.host.loopback_open(local.port))
+        finally:
+            self.owner("DELETE", f"/browser/tabs/{tab}")
+        self.assertFalse(self.host.loopback_open(local.port))
 
     def test_12_the_tab_cap(self):
         self.close_others(self.main_tab)

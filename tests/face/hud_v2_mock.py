@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 # Policy with `frame-ancestors 'none'`, and `X-Frame-Options: DENY` — so every
 # headless suite runs under the CSP; the mock workshop runs under the
 # workshop's sandbox.
+from tests.face import hud_v2_mock_browser as mock_browser
 from jarvis.v2.hud_api import AVATAR_CSP, frame_headers  # noqa: E402
 
 _HUD_LISTENER = SimpleNamespace(server=SimpleNamespace())
@@ -721,6 +722,8 @@ class MockDaemon:
                     return
                 if mock_projects.handle(self, mock, "GET", path, {}):
                     return
+                if mock_browser.handle(self, mock, "GET", path, {}):
+                    return
                 if mock_terminals.handle(self, mock, "GET", path, {}):
                     return
 
@@ -729,6 +732,7 @@ class MockDaemon:
                 if path == "/dev-servers":
                     return self._json({"auto_open": True, "servers": []})
                 if path == "/events":
+                    mock_browser.connected(mock, q.get("window", [None])[0])
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-store")
@@ -972,6 +976,8 @@ class MockDaemon:
                     return
                 if mock_projects.handle(self, mock, "POST", path, body):
                     return
+                if mock_browser.handle(self, mock, "POST", path, body):
+                    return
                 if mock_terminals.handle(self, mock, "POST", path, body):
                     return
 
@@ -1161,6 +1167,8 @@ class MockDaemon:
                 body = self._body()
                 path = urlparse(self.path).path
                 self._record("PATCH", path, body)
+                if mock_browser.handle(self, mock, "PATCH", path, body):
+                    return
                 if mock.dev_fixture and mock.dev_fixture.handle(self, "PATCH", path, body):
                     return
                 if mock_terminals.handle(self, mock, "PATCH", path, body):
@@ -1292,6 +1300,8 @@ class MockDaemon:
                 if mock_projects.handle(self, mock, "DELETE", path, {}):
                     return
                 mock_vex.terminal_closing(mock, path)
+                if mock_browser.handle(self, mock, "DELETE", path, {}):
+                    return
                 if mock_terminals.handle(self, mock, "DELETE", path, {}):
                     return
                 parts = [p for p in path.split("/") if p]

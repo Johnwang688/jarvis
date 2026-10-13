@@ -66,6 +66,91 @@ class Panes(unittest.TestCase):
         self.assertEqual(receipt["panes"][0]["tabs"][0]["view_id"], first.view_id)
         with self.assertRaises(PaneRefused): self.registry.resolve("4")
 
+    def owner_snapshot(self, body=None):
+        self.registry.report(body or report())
+        snap = self.registry.resolve("1")
+        return self.registry.resolve_owner(W, 4, L, snap.view_id)
+
+    def test_owner_capture_see_off_does_not_grant_agent_access_or_change_source(self):
+        body = self.source_report()
+        body["panes"][0]["see"] = False
+        snap = self.owner_snapshot(body)
+        self.assertFalse(snap.see)
+        self.assertEqual(snap.source.terminal_id, "term-1")
+        self.assertTrue(self.registry.owner_current(snap))
+        self.assertFalse(self.registry.still_current(snap))
+        self.assertEqual(self.registry.resolve("1"), snap)
+        self.host.open_tab.assert_not_called()
+        self.host.navigate.assert_not_called()
+        self.host.close_tab.assert_not_called()
+        self.assertFalse(self.registry.owner_current(None))
+
+    def test_owner_capture_requires_exact_window_pane_active_tab_and_host_view(self):
+        snap = self.owner_snapshot()
+        for args in [
+            ("b" * 32, 4, L, snap.view_id), (W, 1, L, snap.view_id),
+            (W, 4, "ghijkl", snap.view_id), (W, 4, L, "v_" + "f" * 24),
+            (None, 4, L, snap.view_id), (W, True, L, snap.view_id),
+            (W, 4, "../x", snap.view_id), (W, 4, L, None),
+            (W, 4, L, "https://example.test/private"),
+        ]:
+            with self.subTest(args=args), self.assertRaises(PaneRefused):
+                self.registry.resolve_owner(*args)
+        body = report(2)
+        body["panes"][0]["tabs"].append({"id": "ghijkl", "mode": "direct", "url": "http://localhost:23456/other", "source": None})
+        receipt = self.registry.report(body)
+        background = next(t for t in receipt["panes"][0]["tabs"] if t["id"] == "ghijkl")
+        with self.assertRaises(PaneRefused):
+            self.registry.resolve_owner(W, 4, "ghijkl", background["view_id"])
+
+    def test_owner_capture_permission_tab_cover_and_generation_changes_invalidate(self):
+        for change in ("see", "active", "covered", "drawn", "url"):
+            with self.subTest(change=change):
+                self.setUp()
+                snap = self.owner_snapshot()
+                if change == "see":
+                    self.registry.permissions(4, {"window": W, "seq": 2, "see": False})
+                else:
+                    body = report(2)
+                    if change == "active":
+                        body["panes"][0]["tabs"].append({"id": "ghijkl", "mode": "direct", "url": "http://localhost:23456/other", "source": None})
+                        body["panes"][0]["active"] = "ghijkl"
+                    elif change == "covered":
+                        body["covered"] = True
+                    elif change == "drawn":
+                        body["panes"][0]["drawn"] = False
+                    else:
+                        body["panes"][0]["tabs"][0]["url"] = "http://localhost:23456/new"
+                    self.registry.report(body)
+                self.assertFalse(self.registry.owner_current(snap))
+
+    def test_owner_capture_remote_document_identity_checked_without_hud_report(self):
+        snap = self.owner_snapshot(self.remote())
+        self.assertTrue(self.registry.owner_current(snap))
+        self.rows[T]["document_generation"] += 1
+        self.assertFalse(self.registry.owner_current(snap))
+        self.rows[T]["document_generation"] -= 1
+        self.rows[T]["page_identity"] += 1
+        self.assertFalse(self.registry.owner_current(snap))
+        self.rows.pop(T)
+        self.assertFalse(self.registry.owner_current(snap))
+
+    def test_owner_capture_heartbeat_preserves_binding_but_expiry_and_disconnect_revoke(self):
+        snap = self.owner_snapshot()
+        self.now += 20
+        self.registry.report(report(2))
+        self.assertTrue(self.registry.owner_current(snap))
+        self.now += LEASE_S
+        self.assertFalse(self.registry.owner_current(snap))
+        with self.assertRaises(PaneRefused):
+            self.registry.resolve_owner(W, 4, L, snap.view_id)
+        self.registry.report(report(3))
+        fresh = self.registry.resolve_owner(W, 4, L, self.registry.resolve("1").view_id)
+        self.registry.window_ended(W)
+        self.assertFalse(self.registry.owner_current(fresh))
+        with self.assertRaises(PaneRefused):
+            self.registry.resolve_owner(W, 4, L, fresh.view_id)
+
     def test_unknown_dead_windows_and_reference_count(self):
         body = report(window="b" * 32)
         with self.assertRaisesRegex(PaneRefused, "live owner"): self.registry.report(body)
@@ -400,6 +485,18 @@ class Ingress(unittest.TestCase):
         self.registry.address.assert_called_once_with(4,L,{})
         with self.assertRaises(APIError): route(self.handler,self.daemon,["browser","front"],{"url":"secret"})
         with self.assertRaises(APIError): route(self.handler,self.daemon,["browser","panes","04"],{})
+
+    def test_restore_is_owner_only_and_never_claims_owner_navigation(self):
+        from jarvis.v2.browser.routes import route
+        from jarvis.v2.daemon import APIError
+        self.handler._body.return_value = {"url": "http://localhost:23456/"}
+        self.daemon.browser.navigate.return_value = {"loaded": False}
+        path = ["browser", "tabs", T, "restore"]
+        self.assertEqual(route(self.handler, self.daemon, path, {}), (200, {"loaded": False}))
+        self.daemon.browser.navigate.assert_called_once_with(T, "http://localhost:23456/", owner=False)
+        self.handler.headers.pop("Origin")
+        with self.assertRaises(APIError): route(self.handler, self.daemon, path, {})
+        self.assertEqual(self.daemon.browser.navigate.call_count, 1)
 
     def test_real_source_accessor_copies_under_lock_without_mutating_entry(self):
         from jarvis.v2.devservers import DevServers, Entry

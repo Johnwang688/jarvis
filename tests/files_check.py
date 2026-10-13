@@ -153,9 +153,9 @@ def protection_checks(tmp: Path) -> None:
         path = config.REPO_ROOT / rel
         before = path.read_text(encoding="utf-8")
         call("read_file", path=str(path))
-        # Pick a line that genuinely exists, so a refusal cannot be mistaken
-        # for "the anchor simply did not match".
-        anchor = next(ln for ln in before.split("\n") if ln.startswith("from ") or ln.startswith("import "))
+        # Pick an exact, unique line (data-only modules may have no imports),
+        # so missing/ambiguous anchors cannot masquerade as guard refusals.
+        anchor = next(ln for ln in before.splitlines() if ln.strip() and before.count(ln) == 1)
         out = call("edit_file", path=str(path), old_string=anchor, new_string="# pwned")
         assert "safety layer" in out, f"{rel}: {out}"
         assert path.read_text(encoding="utf-8") == before, f"{rel} was modified"

@@ -281,6 +281,8 @@ class Daemon:
         # socket — never this bus, a log line or the disk.
         from .browser.settings import BrowserSettings
         self.browser_settings = BrowserSettings()
+        from .browser.captures import Captures
+        self.browser_captures = Captures()
         # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
         # the HUD listener; they end with the daemon. On the bus they are one
         # lifecycle record, `terminal_attached` (an id and a time), never output.
