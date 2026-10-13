@@ -1,0 +1,18 @@
+{
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "name": "J.A.R.V.I.S.",
+  "short_name": "Jarvis",
+  "background_color": "#141413",
+  "theme_color": "#141413",
+  "icons": [
+    {"src": "/icons/orb-16.png", "sizes": "16x16", "type": "image/png", "purpose": "any"},
+    {"src": "/icons/orb-32.png", "sizes": "32x32", "type": "image/png", "purpose": "any"},
+    {"src": "/icons/orb-48.png", "sizes": "48x48", "type": "image/png", "purpose": "any"},
+    {"src": "/icons/orb-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/icons/orb-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "/icons/orb-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}

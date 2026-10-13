@@ -1574,6 +1574,8 @@ personal chat off; the owner should reset that selection.
 
 Model defaults (2026-10-12): OpenRouter's orchestrator and following tiers default to `anthropic/claude-haiku-5.5`, compaction defaults to 100k tokens (`JARVIS_COMPACT_AT_TOKENS`), and Claude requests use top-level `cache_control: {"type": "ephemeral"}`; saved HUD selections still take precedence.
 
+2026-10-12: Settings installs the HUD as a Chrome app with orb PNG icons; `jarvis hud` pins the Default profile and launches its installed app id when present.
+
 V2 boot (2026-10-12): the approved seeded binary-dust/orb and sharp pen-drawn J.A.R.V.I.S. plate play once per window from the first frame, silently; automation and reduced motion suppress it, clicks are consumed, keys keep working, approvals take precedence, and `hud_v2_boot_check.py` checks it under CSP.
 
 AO-1b-i (2026-10-12): `devservers.py` watches tagged Claude/Codex listeners, holds the memory-only registry and owner-only claims/leases; id-only `dev_server` events and `/status.dev_watch` follow amendment 2 §B–§D.

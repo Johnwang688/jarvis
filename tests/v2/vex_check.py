@@ -2749,16 +2749,18 @@ HEREDOC_BACKSTOP = {
 # rule, marks the body too — hidden by a misread body end, nothing else would ask it, so an
 # allowlist entry or a human-backed v1 surface would run it. At 0f947ba each was ASK and coverable.
 HEREDOC_UNSURE_ALLOW_LINES = {
-    "npx with an option its table does not know": "npx --frobnicate $X thing",
-    "uv run, the same": "uv run --frobnicate $X thing",
-    "poetry run, the same": "poetry run --frobnicate $TOOL build",
     "an ALLOW stem with a glob past the caps": "ls " + "[" * 70,
 }
 # Unsure alone but ASK by the general rules: the general ASK already asks, so nothing is marked.
+# A runner handed an expansion as its program was ALLOW by the general rules until `decide`
+# read what runners start (2026-10-12, `rules._judge_started`): now it asks there too.
 HEREDOC_UNSURE_ASK_LINES = {
     "an expansion as the program": "$X --user",
     "a code span as the program": "`kP` is now 0.8",
     "an unknown program with a glob past the caps": "./" + "a*" * 70,
+    "npx with an option its table does not know": "npx --frobnicate $X thing",
+    "uv run, the same": "uv run --frobnicate $X thing",
+    "poetry run, the same": "poetry run --frobnicate $TOOL build",
 }
 # DENY alone: marked, as since round 4.
 HEREDOC_DENY_LINES = {"an argument glob that names it": "ls ve?com", "the bin/* marker": M}

@@ -183,6 +183,10 @@ def allows(tool_name: str, args: dict[str, Any], cwd: str | None = None) -> bool
     # pattern nobody could check (`protected_state.kill_unsure`).
     if protected_state.kill_unsure(command):
         return False
+    # What the line's wrappers and runners start is too complex to judge
+    # within its work budget (review of PR #75): no entry answers for it.
+    if rules.runners_unsure(command):
+        return False
     targets = rules.command_targets(command)
     if not targets:
         return False

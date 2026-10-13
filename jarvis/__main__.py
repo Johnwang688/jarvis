@@ -410,7 +410,11 @@ def cmd_hud(args) -> int:
             time.sleep(0.1)
     if not args.no_window:
         from .face.server import launch_window
-        launch_window(f"http://localhost:{config.FACE_PORT}/")
+        try:
+            launch_window(f"http://localhost:{config.FACE_PORT}/")
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red] The daemon is running; open the HUD by hand.")
+            return 2
     return 0
 
 

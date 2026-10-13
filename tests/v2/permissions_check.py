@@ -1380,6 +1380,107 @@ def review_48_checks():
             ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
 
 
+# Program runners judged by what they start (2026-10-12): each layer-1 line was
+# allowed under AUTO on main, and each always-ask line went to the reviewer.
+RUNNER_V2_DENY = (
+    "npx jarvis hud install", "yarn exec jarvis restart", "npm exec -c 'jarvis hud install'",
+    "bun x jarvis restart", "pnpm exec -c 'jarvis restart'",
+    "env -u ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "exec -a ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "npm exec -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "bun exec 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "npm exec -c 'cp /tmp/x .env.production'",
+    # The delta review of PR #75 (1723b53): H-A, a memo keyed without its
+    # segment; H-B, a wrapper's own output file; M-A, a named output behind
+    # find -exec; M-B, shells outside the lists and an unknown program's -c;
+    # LOW, owner ops behind find, fd and parallel.
+    "uv run sh <<< 'true' ; uv run sh <<< 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "npm exec -- bash <<< 'true' && npm exec -- bash <<< 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "time -o ~/.config/jarvis/allowlist.json -f x true", "time --output=~/.config/jarvis/allowlist.json true",
+    "env time -o~/.config/jarvis/allowlist.json true", "script ~/.config/jarvis/allowlist.json",
+    "systemd-run --user -p StandardOutput=file:/tmp/../tmp/x -p StandardError=file:"
+    "~/.config/jarvis/allowlist.json true",
+    "find /tmp/x -maxdepth 0 -exec sort -o ~/.config/jarvis/allowlist.json {} \\;",
+    "find /tmp/x -maxdepth 0 -exec sed -n 'w ~/.config/jarvis/allowlist.json' {} \\;",
+    "uv run tcsh -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'", "npx nu -c 'jarvis restart'",
+    "uv run myshell -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "npx zx -e 'jarvis hud install'", "find . -exec jarvis restart \\;", "fd -x jarvis restart",
+    "parallel jarvis ::: restart", "csh -c 'jarvis restart'",
+)
+RUNNER_V2_ALWAYS_ASK = (
+    # H-B: a wrapper's option value is a path again for the credential-folder
+    # rule (`credentials-path` read only the unwrapped command's words).
+    ("time -o ~/.ssh/notes true", "credentials-path"),
+    ("time --output=~/.aws/notes true", "credentials-path"),
+    ("time -o~/.gnupg/notes true", "credentials-path"), ("env -C ~/.ssh ls", "credentials-path"),
+    ("script -c true ~/.ssh/session.log", "credentials-path"),
+    ("npx vercel --prod", "vercel-prod"), ("npx vercel deploy --prod", "vercel-prod"),
+    ("pnpm dlx vercel --prod", "vercel-prod"), ("npm exec -c 'vercel --prod'", "vercel-prod"),
+    ("uv run git push --force origin topic", "git-push-force"),
+    ("env -u X git push origin main", "git-push-protected"),
+    ("npx stripe charges create --amount 5", "payments-stripe"),
+    ("bun x gh release create v1", "gh-release"),
+)
+RUNNER_V2_ORDINARY = ("npx vercel", "npx vercel ls", "uv run pytest", "npx vite", "npm exec vitest",
+                      "uv run git push origin topic")
+
+
+def runner_checks():
+    """What a wrapper or runner starts, at each layer: refused at layer 1 under
+    AUTO and STRICT and never asked; an always-ask rule matched through it;
+    and no longer auto-allowed at layer 4 when the program asks on its own."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import always_ask_match, build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in RUNNER_V2_DENY:
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        for line, rule in RUNNER_V2_ALWAYS_ASK:
+            match = always_ask_match("Bash", {"command": line}, brief)
+            eq(match[0] if match else None, rule, f"{line!r} matches always-ask rule {rule}")
+            asker = Asker(Decision.DENY)
+            permit = build_permit(context(brief), asker)
+            eq(permit(*bash(line), brief), Decision.DENY, f"{line!r}: the owner's no holds")
+            eq(len(asker.seen), 1, f"{line!r} is put to the owner under AUTO")
+            eq(box.decisions[-1]["layer"], "always-ask", f"{line!r} at layer 2")
+        for line in RUNNER_V2_ORDINARY:
+            eq(always_ask_match("Bash", {"command": line}, brief), None, f"{line!r} asks nothing new")
+        # Layer 4: a human-backed asker no longer waves through what a runner
+        # starts when that program asks on its own; ordinary runs still pass.
+        human = build_permit(context(brief), Asker(Decision.ALLOW))
+        human(*bash("uv run rm -rf build"), brief)
+        eq(box.decisions[-1]["layer"], "reviewer", "`uv run rm -rf build` is not layer 4's ALLOW")
+        human(*bash("uv run pytest"), brief)
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "`uv run pytest` still is")
+        # The review of PR #75, HIGH 1: past the line's work budget what it
+        # starts is too complex to judge — asked at layer 2 in every profile,
+        # never the reviewer's call and never the allowlist's.
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": s} for s in ("npx", "pnpm", "uv", "nohup", "rm")]))
+        for line in ("npx --x " * 60 + "rm -rf ~/x", "pnpm --x exec " * 40 + "rm -rf ~/x",
+                     "nohup " * 13 + "rm -rf build",
+                     # past `decide`'s budget alone: only `runners_unsure` asks it
+                     "uv run --x y --x y " * 2 + "w " * 2000 + "jarvis restart",
+                     # a NUL byte (delta review of PR #75, LOW): never a ValueError
+                     "rm a\x00b", "nohup rm\x00 -rf build"):
+            asker = Asker(Decision.DENY)
+            permit = build_permit(context(brief), asker)
+            eq(permit(*bash(line), brief), Decision.DENY, f"too complex: the owner's no holds ({line[:24]}…)")
+            eq(len(asker.seen), 1, f"too complex: asked under AUTO ({line[:24]}…)")
+            eq(box.decisions[-1]["layer"], "always-ask", f"too complex: at layer 2 ({line[:24]}…)")
+            ok("too-complex" in box.decisions[-1]["reason"] or "gate-state" in box.decisions[-1]["reason"],
+               f"too complex: said so ({box.decisions[-1]['reason'][:60]})")
+        config.ALLOWLIST_PATH.unlink()
+
+
 _UNIT_CGROUP = "/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service"
 # Review 2 of PR #48 at layer 1 (each allowed under AUTO on 819e58a, or — the
 # first — a permit that never returned).
@@ -1485,6 +1586,71 @@ def review_48_delta_checks():
         permit = build_permit(context(brief), asker)
         for line in REVIEW_48_DELTA_V2_ORDINARY:
             ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
+
+
+# The third delta review of PR #75 at layer 1: an assignment or a reserved
+# word in front of a wrapper's output file or a runner's here-string shell, a
+# `c`/`e` cluster handed to an unknown program, and a systemd `Exec…=`
+# property. Each was allowed under AUTO at 89074f1 (or asked, by layer 2).
+_A = "~/.config/jarvis/allowlist.json"
+THIRD_DELTA_75_V2_DENY = (
+    f"X=1 time -o {_A} -f x ls", f"FOO= time -o {_A} ls", f"X=$(true) time -o {_A} ls",
+    f"X=1 env time -o {_A} ls", f"X=1 /usr/bin/time -o {_A} ls", f"X=1 nohup time -o {_A} ls",
+    f"X=1 script -c true {_A}", f"X=1 systemd-run --user -p StandardOutput=file:{_A} true",
+    f"X=1 uv run sh <<< 'cp /tmp/x {_A}'", f"X=1 npm exec -- sh <<< 'cp /tmp/x {_A}'",
+    f"A=1 B=2 time -o {_A} ls", f"A=\"x y\" time -o {_A} ls", f"b+=y time -o {_A} ls",
+    f"if true; then time -o {_A} ls; fi", f"case x in x) uv run sh <<< 'cp /tmp/x {_A}';; esac",
+    "X=1 uv run sh <<< 'jarvis restart'",
+    "D=$HOME; D+=/.config/jarvis; cp /tmp/x $D/allowlist.json",
+    "npx mysh -lc 'jarvis restart'", f"uv run mysh -ec 'cp /tmp/x {_A}'",
+    "pnpm exec zx -xc 'jarvis hud install'",
+    "systemd-run --user -p ExecStartPost='jarvis restart' true",
+    f"systemd-run --user --property=ExecStart='/bin/sh -c \"cp /tmp/x {_A}\"' true",
+)
+
+
+def third_delta_75_checks():
+    """The third delta review of PR #75 at layer 1: refused under AUTO and
+    STRICT, never put to the owner."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_command
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in THIRD_DELTA_75_V2_DENY:
+                ok(denied_command(line, "/tmp"), f"layer 1 refuses {line[:60]!r}")
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line[:60]!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line[:60]!r} is never put to the owner")
+        # Layer 2 reads the program past a reserved word, a group or a function
+        # header too: on main `if true; then git push --force origin main; fi`
+        # matched no rule and went to the provider's reviewer under AUTO.
+        from jarvis.v2.permissions import always_ask_match
+        brief = brief_for(P.AUTO)
+        fronts = ("if true; then {s}; fi", "while true; do {s}; done", "case x in x) {s};; esac",
+                  "f() {{ {s}; }}", "! {s}", "{{ {s}; }}", "( {s} )", "coproc {s}", "b+=y {s}",
+                  "a[0]=x {s}")
+        push = ("git-push-protected", "git-push-force")
+        for base, rule in (("git push --force origin main", push), ("git push origin main", push),
+                           ("npx vercel --prod", ("vercel-prod",)),
+                           ("vercel --prod", ("vercel-prod",)),
+                           ("uv run git push --force origin main", push)):
+            for front in fronts:
+                line = front.format(s=base)
+                match = always_ask_match("Bash", {"command": line}, brief)
+                ok(match is not None and match[0] in rule,
+                   f"layer 2 matches {line!r} ({match and match[0]})")
+                asker = Asker(Decision.DENY)
+                eq(build_permit(context(brief), asker)(*bash(line), brief), Decision.DENY,
+                   f"{line!r}: the owner's no holds")
+                eq(len(asker.seen), 1, f"{line!r} is put to the owner under AUTO")
+        for line in ("if true; then git status; fi", "while true; do npm test; done",
+                     "f() { ls; }", "( make )"):
+            eq(always_ask_match("Bash", {"command": line}, brief), None, f"{line!r} asks nothing new")
 
 
 def daemon_checks():
@@ -1856,7 +2022,9 @@ def main():
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     env_file_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
-                    review_48_round2_checks, review_48_delta_checks, daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
+                    review_48_round2_checks, review_48_delta_checks, runner_checks,
+                    third_delta_75_checks, daemon_checks,
+                    auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
     print()

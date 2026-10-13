@@ -288,6 +288,8 @@ def routes(t) -> list[tuple[str, str, object]]:
     p, th, tk = t.project.id, t.thread.id, t.task.id
     return [
         ("GET", "/", None), ("GET", "/assets/missing.js", None), ("GET", "/assets/%2e%2e/index.html", None),
+        ("GET", "/manifest.webmanifest", None), ("GET", "/icons/orb-16.png", None),
+        ("GET", "/icons/%2e%2e/index.html", None),
         ("HEAD", "/", None), ("OPTIONS", "/status", None),
         ("GET", "/status", None), ("GET", "/events", None), ("GET", "/nope", None), ("GET", "/projects/zzzz", None),
         ("GET", "/dev-servers", None),
@@ -484,17 +486,28 @@ class FrameHeaders(Base):
         (dist / "assets" / "app-1a2b.js").write_text("console.log('HUD')")
         (dist / "assets" / "editor.worker-3c4d.js").write_text("self.onmessage = () => {}")
         (dist / "assets" / "grammar-5e6f.wasm").write_bytes(b"\0asm\1\0\0\0")
+        (dist / "manifest.webmanifest").write_text('{"id":"/"}')
+        (dist / "icons").mkdir()
+        (dist / "icons" / "orb-16.png").write_bytes(b"icon fixture")
         hud_install.install(dist, root)
         for listener in ("hud", "api"):
             for path, mime in (("/", "text/html"), ("/assets/app-1a2b.js", "javascript"),
                                ("/assets/editor.worker-3c4d.js", "javascript"),
                                ("/assets/grammar-5e6f.wasm", "application/wasm"),
+                               ("/manifest.webmanifest", "application/manifest+json"),
+                               ("/icons/orb-16.png", "image/png"),
                                ("/status", "application/json")):
                 with self.subTest(listener=listener, path=path):
                     status, got, content = self.ask(listener, "GET", path)
                     self.assertEqual(status, 200, content)
                     self.assertIn(mime, dict(got)["Content-Type"])
                     self.assert_hardened(got, f"{listener} installed {path}")
+            # The manifest's type is set explicitly, not left to the platform's
+            # mimetypes table (review of PR #83: Python 3.14 knows .webmanifest).
+            with patch("jarvis.v2.hud_api.mimetypes.guess_type", return_value=(None, None)):
+                status, got, _ = self.ask(listener, "GET", "/manifest.webmanifest")
+            self.assertEqual(status, 200)
+            self.assertIn("application/manifest+json", dict(got)["Content-Type"])
             status, got, _ = self.ask(listener, "GET", "/assets/absent.js")
             self.assertEqual(status, 404)
             self.assert_hardened(got, f"{listener} absent asset")
@@ -529,6 +542,7 @@ class FrameHeaders(Base):
         self.assertEqual(got["img-src"], ["'self'", "data:"])
         self.assertEqual(got["font-src"], ["'self'", "data:"])
         self.assertEqual(got["media-src"], ["'self'"])
+        self.assertEqual(got["manifest-src"], ["'self'"])
         self.assertEqual(got["frame-src"], ["http://localhost:*", "http://*.localhost:*", "http://127.0.0.1:*",
                                             "http://0.0.0.0:*"])
         for name in ("base-uri", "form-action", "object-src", "frame-ancestors"):
@@ -542,6 +556,10 @@ class FrameHeaders(Base):
         base = H.content_security_policy()
         self.assertEqual(H.content_security_policy("img-src 'self'"),
                          base.replace("img-src 'self' data:", "img-src 'self'"))
+        self.assertEqual(H.content_security_policy("manifest-src 'none'"),
+                         base.replace("manifest-src 'self'", "manifest-src 'none'"))
+        self.assertNotIn("manifest-src", H.content_security_policy("default-src 'none'"),
+                         "manifest-src is a fetch directive: default-src can narrow it away")
         self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF' 'WASM-UNSAFE-EVAL'"), base,
                          "keywords fold case")
         self.assertEqual(H.content_security_policy("script-src 'none'"),
@@ -558,7 +576,7 @@ class FrameHeaders(Base):
                           "connect-src https://example.com", "connect-src ws:", "img-src 'self' blob:",
                           "img-src *", "default-src 'self'", "frame-src *", "frame-src http://example.com",
                           "worker-src blob:", "base-uri 'self'", "form-action 'self'", "object-src 'self'",
-                          "manifest-src 'self'", "script-src-elem 'self'", "upgrade-insecure-requests",
+                          "manifest-src *", "script-src-elem 'self'", "upgrade-insecure-requests",
                           "require-trusted-types-for 'script'", "img-src 'self'; img-src data:",
                           "img-src 'none' 'self'", "script-src"):
             with self.subTest(loosening=loosening), self.assertRaises(ValueError):
