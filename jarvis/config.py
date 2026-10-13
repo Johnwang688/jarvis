@@ -380,6 +380,15 @@ SESSIONS_DIR = Path(
 GIT_WORKTREES_DIR = Path(
     os.environ.get("JARVIS_GIT_WORKTREES", Path.home() / ".local" / "share" / "jarvis" / "worktrees")
 )
+# Where a Codex chat makes its own git worktrees (2026-10-12; the owner: chats
+# should "write to git with the same permissions that Claude Code normally
+# has"). A Codex chat's sandbox may write here and in its repository's .git,
+# and nowhere else outside its project (`codex_config.git_roots`). Not
+# GIT_WORKTREES_DIR: that is the v1 git tool's write tier. Empty means unset.
+CHAT_WORKTREES_DIR = Path(
+    os.environ.get("JARVIS_CHAT_WORKTREES")
+    or Path.home() / ".local" / "share" / "jarvis" / "chat-worktrees"
+)
 V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )

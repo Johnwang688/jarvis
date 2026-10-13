@@ -8,8 +8,80 @@ import re
 import tempfile
 
 from jarvis import config
-from jarvis.v2.model import PermissionProfile
+from jarvis.v2.model import PermissionProfile, Role
 from jarvis.v2.provider import Brief, BriefRefused
+
+_GITFILE_CAP = 4096
+
+
+def _small_text(path: Path) -> str:
+    """A `.git` or `commondir` file's first line; a regular file only, capped."""
+    with open(path, "rb") as stream:
+        return stream.read(_GITFILE_CAP).decode("utf-8", "replace").strip()
+
+
+def git_dirs(cwd: str) -> list[Path]:
+    """Where the repository at or above `cwd` keeps its history: its git dir
+    and, for a linked worktree, the common one. [] outside a repository, when
+    one cannot be read, or when it sits in a credential folder or Jarvis's own
+    data."""
+    here = Path(cwd).resolve()
+    found: list[Path] = []
+    try:
+        for folder in (here, *here.parents):
+            dot = folder / ".git"
+            if dot.is_symlink():
+                return []
+            if dot.is_dir():
+                found = [dot.resolve()]
+                break
+            if dot.is_file():
+                text = _small_text(dot)
+                if not text.startswith("gitdir:"):
+                    return []
+                gitdir = Path(text[len("gitdir:"):].strip())
+                gitdir = (gitdir if gitdir.is_absolute() else folder / gitdir).resolve()
+                found = [gitdir]
+                common = gitdir / "commondir"
+                if common.is_file():
+                    shared = Path(_small_text(common))
+                    found.append((shared if shared.is_absolute() else gitdir / shared).resolve())
+                break
+    except OSError:
+        return []
+    barred = [Path(p).expanduser().resolve() for p in config.credential_dirs()]
+    barred.append(Path(config.V2_DATA_DIR).resolve())
+    out = []
+    for path in found:
+        if not path.is_dir() or any(path == b or b in path.parents for b in barred):
+            return []
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def git_roots(brief: Brief) -> list[str]:
+    """What a Codex chat's sandbox may write outside its project: the
+    repository's git dirs (commits, branches, worktrees) and
+    `config.CHAT_WORKTREES_DIR`. Task workers get none; their worktrees are
+    Jarvis's. The network stays off: a push or `gh` has to ask to leave the
+    sandbox, so Jarvis's gate still judges it (a push to main or a force push
+    asks the owner)."""
+    if brief.role != Role.CHAT:
+        return []
+    return [str(p) for p in git_dirs(brief.cwd)] + [str(Path(config.CHAT_WORKTREES_DIR).expanduser())]
+
+
+def git_note(brief: Brief) -> str:
+    """The sentence a Codex chat is told about git, or "" for anything else."""
+    roots = git_roots(brief)
+    if not roots:
+        return ""
+    where = roots[-1]
+    return (f"Git in this session: the sandbox lets you write this repository's .git (commit, branch, "
+            f"worktree) and {where}. Make new git worktrees under {where}/<name>; other folders outside "
+            "the project are read-only. The network is off inside the sandbox, so run `git push` and `gh` "
+            "with escalated permissions; Jarvis decides those, and a push to main or a force push asks the owner.")
 
 
 def validate(brief: Brief) -> None:
