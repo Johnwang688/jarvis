@@ -19,6 +19,7 @@ Run it standalone to poke at the HUD by hand:
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import threading
 import time
@@ -27,10 +28,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
-# The daemon's own frame headers (WP-E), never a copy: the HUD under test is
-# always rendered under exactly what 8402 sends — `frame-ancestors 'none'` and
-# `X-Frame-Options: DENY` — and the mock workshop under the workshop's sandbox.
-from jarvis.v2.hud_api import frame_headers  # noqa: E402
+# The daemon's own headers (WP-E, ED-4), never a copy: the HUD under test is
+# always rendered under exactly what 8402 sends — the whole Content-Security-
+# Policy with `frame-ancestors 'none'`, and `X-Frame-Options: DENY` — so every
+# headless suite runs under the CSP; the mock workshop runs under the
+# workshop's sandbox.
+from jarvis.v2.hud_api import AVATAR_CSP, frame_headers  # noqa: E402
 
 _HUD_LISTENER = SimpleNamespace(server=SimpleNamespace())
 _PREVIEW_LISTENER = SimpleNamespace(server=SimpleNamespace(preview_only=True))
@@ -46,6 +49,10 @@ try:  # the terminals' HTTP routes (WP-C/WP-D); the socket is the test's fake PT
     from tests.face import hud_v2_mock_terminals as mock_terminals
 except ImportError:
     import hud_v2_mock_terminals as mock_terminals  # type: ignore[no-redef]
+try:  # the VEX routes (VX-1's contract, VX-2's view); builds and downloads are terminal rows
+    from tests.face import hud_v2_mock_vex as mock_vex
+except ImportError:
+    import hud_v2_mock_vex as mock_vex  # type: ignore[no-redef]
 
 # A hostile avatar, checked for what it does rather than what it says: the art
 # is drawn in the window that gates approvals, so an `onload` in it must never
@@ -58,6 +65,27 @@ HOSTILE_SVG = (
     '<circle cx="50" cy="50" r="40" fill="#38bdf8"/>'
     "</svg>"
 )
+
+
+def etag_of(content: str) -> str:
+    """The daemon's etag (ED-2): the first 128 bits of the bytes' SHA-256."""
+    return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+
+def eol_of(content: str):
+    crlf = content.count("\r\n")
+    lf = content.count("\n") - crlf
+    cr = content.count("\r") - crlf
+    kinds = [n for n, c in (("LF", lf), ("CRLF", crlf), ("CR", cr)) if c]
+    return None if not kinds else kinds[0] if len(kinds) == 1 else "mixed"
+
+
+READONLY = {
+    "env": "Jarvis can't read this file. Only you can, here.",
+    "gate": "Jarvis's own permission state: read-only here. Edit it by hand.",
+    "safety": "part of Jarvis's safety layer: read-only here. Edit it by hand.",
+    "binary": "read-only here: it is not UTF-8.",
+}
 
 
 def _world() -> dict:
@@ -146,7 +174,11 @@ def _world() -> dict:
                 {"name": "src", "kind": "dir", "size": 0, "mtime": 1757900000},
                 {"name": "README.md", "kind": "file", "size": 42, "mtime": 1757900001},
                 {"name": "calc.py", "kind": "file", "size": 61, "mtime": 1757900002},
-                {"name": ".env", "kind": "file", "size": 61, "mtime": 1757900003},
+                {"name": ".env", "kind": "file", "size": 61, "mtime": 1757900003, "policy": "env"},
+                {"name": ".env.production", "kind": "file", "size": 40, "mtime": 1757900005, "policy": "env"},
+                {"name": "google_token.json", "kind": "file", "size": 61, "mtime": 1757900006, "policy": "withheld"},
+                {"name": "allowlist.json", "kind": "file", "size": 3, "mtime": 1757900007},
+                {"name": "notes.txt", "kind": "file", "size": 9, "mtime": 1757900008},
             ],
             "src": [
                 {"name": "main.py", "kind": "file", "size": 12, "mtime": 1757900004},
@@ -156,9 +188,18 @@ def _world() -> dict:
             "calc.py": {"content": "def add(a, b):\n    return a + b\n", "mtime": 1757900002},
             "README.md": {"content": "# Title\n\nSome **docs** here.\n", "mtime": 1757900001},
             "src/main.py": {"content": "print('hi')\n", "mtime": 1757900004},
+            # The owner's env files (ED-2): the owner edits them, Jarvis never
+            # reads them. Fake values, made up for the mock.
+            ".env": {"content": "MOCK_KEY=fake-value-not-a-secret\n", "mtime": 1757900003},
+            ".env.production": {"content": "API_KEY=sk-mock-ed2-fake-0000\n", "mtime": 1757900005},
+            "allowlist.json": {"content": "[]\n", "mtime": 1757900007},
+            "notes.txt": {"content": "a\r\nb\nc\n", "mtime": 1757900008},
         },
-        # A protected credential name comes back 200 with no content, ever.
-        "protected": {".env"},
+        # What the daemon's editor_policy says of each file (ED-2); a file not
+        # here is text.
+        "kinds": {".env": "env", ".env.production": "env", "allowlist.json": "gate"},
+        # A withheld credential comes back 200 with no content, ever.
+        "protected": {"google_token.json"},
         "diff": {
             "base": "main", "head": "jarvis/add-multiply",
             "files": [
@@ -309,6 +350,42 @@ def _remove_refusal(w, model_id) -> str | None:
     m = w["models"]
     return removal_refusal([r["id"] for r in m["models"]], m.get("selected") or "",
                            m["default"], model_id)
+
+
+def _task_verb(mock, task_id: str, verb: str, body) -> tuple[int, dict]:
+    """`POST /tasks/{id}/<verb>` (§11.2): the daemon's own body check
+    (`daemon.task_verb_body`) and, for an answer, the runner's own rule
+    (`control.answer_refusal`) — imported, never copied. This used to answer
+    `{"ok": true}` to anything, which is how the HUD sent `{question, answer}`
+    to `/answer` for weeks with every check green while the daemon answered
+    400 (2026-10-11). An accepted answer is applied as the runner applies it:
+    the question answered, `open_question` the next blocking one, the task
+    still CLARIFYING (the runner only queues it), one `task_status_changed`."""
+    from jarvis.v2.control import answer_refusal
+    from jarvis.v2.daemon import APIError, task_verb_body
+
+    if verb not in ("start", "steer", "cancel", "resume", "answer"):
+        return 404, {"error": "route not found"}
+    try:
+        args = task_verb_body(verb, body)
+    except APIError as exc:
+        return exc.status, {"error": str(exc)}
+    except ValueError as exc:               # the dispatcher's answer to one
+        return 400, {"error": f"request failed ({type(exc).__name__})"}
+    if verb != "answer":
+        return 200, {"ok": True}
+    task = next((t for t in mock.world["tasks"] if t["id"] == task_id), None)
+    if task is None:
+        return 404, {"error": "no such task"}
+    questions = task["spec"]["questions"]
+    refusal = answer_refusal(task_id, task["state"], questions, args["index"], args["text"])
+    if refusal:
+        return 409, {"error": refusal}
+    questions[args["index"]]["answer"] = args["text"].strip()
+    remaining = [q for q in questions if q["blocking"] and q["answer"] is None]
+    task["status"]["open_question"] = remaining[0]["text"] if remaining else None
+    mock.emit("task_status_changed", {"task_id": task_id, "state": task["state"]}, task_id=task_id)
+    return 200, task
 
 
 # --- a chat thread's model (decisions 2026-10-06, A) -----------------------
@@ -500,6 +577,51 @@ document.getElementById("origin").textContent = String(self.origin);
 </script>
 """
 
+# Dev pages that take the keyboard by themselves (R-1; amendment 2 §H AO-2).
+# Each logs every key it receives to its own server (`/keys`, an image
+# request, which a sandboxed page can always make), and the mock counts them
+# (`dev_keys`): a key the page never got is a key the HUD kept.
+#   /focus-mount  focuses its input as it is parsed, React-style on mount;
+#   /focus-timer  calls window.focus() and its input's focus() every `every`
+#                 ms (400), starting `after` ms (0) after it loads;
+#   /focus-load   focuses once on its `load` event;
+#   /focus-none   never focuses itself (it only logs keys; `grab()` from a test);
+#   /focus-pointer grabs on the first pointer event it sees (move, over, wheel);
+#   /focus-reload reloads itself every 400 ms and grabs once, `grab` ms (4000)
+#                 after its first load (`t0` rides in the query).
+# `?delay=N` holds the response N ms (at most 5000), so a page can arrive
+# while the owner is typing.
+FOCUS_PAGE = """<!doctype html><meta charset="utf-8"><title>mock focus page</title>
+<h1>focus page</h1><input id="i" aria-label="page input"><p id="mode">%(mode)s</p>
+<script>
+const q = new URLSearchParams(location.search);
+let n = 0;
+document.addEventListener("keydown", (e) => {
+  n += 1;
+  new Image().src = "/keys?p=" + encodeURIComponent(location.pathname + location.search) + "&n=" + n + "&k=" + encodeURIComponent(e.key);
+}, true);
+const grab = () => { window.focus(); document.getElementById("i").focus(); };
+const mode = %(mode_js)s;
+if (mode === "focus-mount") grab();
+if (mode === "focus-load") window.addEventListener("load", grab);
+if (mode === "focus-timer") window.addEventListener("load", () => {
+  setTimeout(() => { grab(); setInterval(grab, Number(q.get("every") || 400)); }, Number(q.get("after") || 0));
+});
+if (mode === "focus-pointer") {
+  let done = false;
+  const once = () => { if (!done) { done = true; grab(); } };
+  for (const t of ["pointermove", "pointerover", "mousemove", "wheel"]) addEventListener(t, once, true);
+}
+if (mode === "focus-reload") {
+  const t0 = Number(q.get("t0") || Date.now());
+  if (Date.now() - t0 >= Number(q.get("grab") || 4000)) grab();
+  else setTimeout(() => {
+    const u = new URL(location.href); u.searchParams.set("t0", String(t0)); location.replace(u.toString());
+  }, 400);
+}
+</script>
+"""
+
 
 class MockDaemon:
     """The mock server plus the calls it recorded, for the test to assert on."""
@@ -537,6 +659,8 @@ class MockDaemon:
         # answers only once the Event is set: a transcript still in flight
         # (the crash checks land one after the window stopped drawing).
         self.stt_gate: threading.Event | None = None
+        # What the explorer moved to the trash (ED-7's `fs` delete).
+        self.trashed: list[str] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -550,9 +674,12 @@ class MockDaemon:
             def log_message(self, *args):
                 pass
 
+            _csp = None             # a response's own directives (the avatar's)
+
             def end_headers(self):
-                for name, value in frame_headers(_HUD_LISTENER):
+                for name, value in frame_headers(_HUD_LISTENER, self._csp):
                     self.send_header(name, value)
+                self._csp = None
                 super().end_headers()
 
             # -- helpers
@@ -586,6 +713,8 @@ class MockDaemon:
                 path, q = url.path, parse_qs(url.query)
                 self._record("GET", path, {k: v[0] for k, v in q.items()})
                 w = mock.world
+                if mock_vex.handle(self, mock, "GET", path, {}):
+                    return
                 if mock_projects.handle(self, mock, "GET", path, {}):
                     return
                 if mock_terminals.handle(self, mock, "GET", path, {}):
@@ -631,7 +760,11 @@ class MockDaemon:
                         status["frame_hardened"] = True
                     return self._json(status)
                 if path == "/projects":
-                    return self._json(w["projects"])
+                    # The daemon's `project_view`: each root beside where it
+                    # resolves (#50). A world project may say `root_real`
+                    # itself (a root through a symlink); else it is the root.
+                    return self._json([{**p, "root_real": p.get("root_real") or p["root"]}
+                                       for p in w["projects"]])
                 if path == "/threads":
                     pid = q.get("project", [None])[0]
                     return self._json([t for t in w["threads"] if not pid or t["project_id"] == pid])
@@ -689,6 +822,7 @@ class MockDaemon:
                 if path == "/avatar.svg":
                     body = HOSTILE_SVG.encode()
                     self.send_response(200)
+                    self._csp = AVATAR_CSP          # as the daemon's `pickers` sends it
                     self.send_header("Content-Type", "image/svg+xml")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -708,6 +842,11 @@ class MockDaemon:
                             "note": ("worked from WSL over 9p; git is slow and line endings "
                                      "are mangled") if windows else None,
                         })
+                    if verb == "files":
+                        # Quick open's list (ED-7): never a withheld file or
+                        # the gate's state; env files listed and said.
+                        self._record("GET", path, {})
+                        return self._json(mock.nav_files())
                     if verb == "tree":
                         rel = q.get("path", [""])[0]
                         entries = w["tree"].get(rel)
@@ -716,15 +855,33 @@ class MockDaemon:
                         return self._json({"path": rel, "entries": entries})
                     if verb == "file":
                         rel = q.get("path", [""])[0]
+                        abs_ = mock.abs_of(project, rel)
                         if rel in w["protected"]:
-                            return self._json({"path": rel, "mtime": 0, "size": 0,
+                            return self._json({"path": rel, "abs": abs_, "kind": "withheld", "editable": False,
+                                               "readonly": "a credential file: its contents are never sent to this window.",
                                                "protected": True})
                         rec = w["files"].get(rel)
                         if rec is None:
                             return self._err(404, "no such file")
-                        return self._json({"path": rel, "content": rec["content"],
-                                           "mtime": rec["mtime"],
-                                           "size": len(rec["content"]), "protected": False})
+                        kind = w["kinds"].get(rel, "text")
+                        content = rec["content"]
+                        # The daemon's `editable` (ED-2's review, MED1): an
+                        # editable kind the editor still may not write — an
+                        # env file that is not UTF-8 — is in `uneditable`.
+                        editable = kind in ("text", "env") and rel not in w.get("uneditable", ())
+                        return self._json({
+                            "path": rel, "abs": abs_, "content": content, "etag": etag_of(content),
+                            "mtime": rec["mtime"], "size": len(content.encode()), "protected": False,
+                            "encoding": "utf-8" if editable or kind != "env" else None,
+                            "eol": eol_of(content), "kind": kind, "editable": editable,
+                            "readonly": (READONLY.get(kind) if editable or kind != "env"
+                                         else READONLY["env"] + " And read-only here: it holds NUL bytes.")})
+
+                # /projects/{id}/git/base|status (ED-9). The real refusals are
+                # the daemon's (tests/v2/editor_git_check.py); these mirror
+                # their shape. No `git` in the world: not a repository.
+                if len(parts) == 4 and parts[0] == "projects" and parts[2] == "git":
+                    return mock.git_route(parts[3], q, self)
 
                 # /threads/{id}/transcript|log
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "transcript":
@@ -754,6 +911,37 @@ class MockDaemon:
                 url = urlparse(self.path)
                 path = url.path
                 w = mock.world
+                parts = [p for p in path.split("/") if p]
+                if len(parts) == 3 and parts[0] == "projects" and parts[2] in ("search", "fs"):
+                    # Find in files and the explorer's operations (ED-7). The
+                    # real refusals are the daemon's (tests/v2/editor_nav_check.py);
+                    # these mirror their shape.
+                    body = self._body()
+                    self._record("POST", path, body)
+                    status, payload = (mock.nav_search(body) if parts[2] == "search" else mock.nav_fs(body))
+                    return self._json(payload, status)
+                if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["files", "stat"]:
+                    body = self._body()
+                    self._record("POST", path, body)
+                    paths = body.get("paths")
+                    if not isinstance(paths, list):
+                        return self._err(400, "paths must be a list of strings")
+                    if len(paths) > 100:
+                        return self._err(413, "at most 100 paths at once")
+                    files = {}
+                    for rel in paths:
+                        if rel in w["protected"]:
+                            files[rel] = {"kind": "withheld"}
+                        elif rel in w["files"]:
+                            # `stat_etags` (on cue): what the poll says while a
+                            # read already sees a newer write — a disk that moved
+                            # again between the stat and the read.
+                            files[rel] = {"etag": w.get("stat_etags", {}).get(rel)
+                                          or etag_of(w["files"][rel]["content"]),
+                                          "kind": w["kinds"].get(rel, "text")}
+                        else:
+                            files[rel] = {"gone": True}
+                    return self._json({"files": files})
                 if path == "/stt":
                     n = int(self.headers.get("Content-Length") or 0)
                     raw = self.rfile.read(n) if n else b""
@@ -765,6 +953,8 @@ class MockDaemon:
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)
+                if mock_vex.handle(self, mock, "POST", path, body):
+                    return
                 if mock_projects.handle(self, mock, "POST", path, body):
                     return
                 if mock_terminals.handle(self, mock, "POST", path, body):
@@ -863,10 +1053,12 @@ class MockDaemon:
                         status = "idle"
                     return self._json({"status": status})
                 if len(parts) == 3 and parts[0] == "tasks":
-                    return self._json({"ok": True})
+                    status, payload = _task_verb(mock, parts[1], parts[2], body)
+                    return self._json(payload, status)
                 if len(parts) == 2 and parts[0] == "approvals":
                     req_id = parts[1]
                     w["approvals"] = [r for r in w["approvals"] if r["req_id"] != req_id]
+                    mock_vex.approval_decided(mock, req_id, body)      # VX-3's project_folder card
                     return self._json({"ok": True})
                 if len(parts) == 3 and parts[0] == "schedules" and parts[2] == "run-now":
                     return self._json({"ok": True})
@@ -1008,7 +1200,15 @@ class MockDaemon:
                               thread_id=t["id"], project_id=t["project_id"])
                     mock.emit("thread_updated", dict(t, thread_id=t["id"], changed=["model", "effort"]),
                               thread_id=t["id"], project_id=t["project_id"])
-                    return self._json(t)
+                    # A slow answer, on cue (`patch_delays`, seconds, one per
+                    # request): the change is made and broadcast at once, but
+                    # this request's own answer — the record as it was then —
+                    # arrives late, after any change sent behind it.
+                    answer = dict(t)
+                    delays = w.get("patch_delays")
+                    if delays:
+                        time.sleep(delays.pop(0))
+                    return self._json(answer)
                 if len(parts) == 2 and parts[0] == "threads":
                     for t in w["threads"]:
                         if t["id"] == parts[1]:
@@ -1041,17 +1241,30 @@ class MockDaemon:
                 w = mock.world
                 if len(parts) == 3 and parts[0] == "projects" and parts[2] == "file":
                     rel = body.get("path", "")
-                    if rel in w["protected"]:
-                        return self._err(403, "protected file")
+                    kind = w["kinds"].get(rel, "text")
+                    if rel in w["protected"] or kind not in ("text", "env") or rel in w.get("uneditable", ()):
+                        return self._err(403, "read-only here")
                     rec = w["files"].get(rel)
-                    if rec is None:
-                        return self._err(404, "no such file")
-                    if body.get("expected_mtime") != rec["mtime"]:
-                        # Someone else wrote it since it was read.
+                    if "expected_etag" in body:
+                        now = etag_of(rec["content"]) if rec else None
+                        if now != body["expected_etag"]:
+                            # Someone else wrote it since it was read: the
+                            # disk's etag (null: gone), the file untouched.
+                            return self._json({"error": "file changed on disk since it was read", "etag": now}, 409)
+                    elif rec is None or body.get("expected_mtime") != rec["mtime"]:
                         return self._err(409, "changed on disk")
+                    if rec is None:
+                        rec = w["files"][rel] = {"content": "", "mtime": 1757900100}
                     rec["content"] = body.get("content", "")
                     rec["mtime"] = rec["mtime"] + 1
-                    return self._json({"mtime": rec["mtime"]})
+                    answer = {"etag": etag_of(rec["content"]), "mtime": rec["mtime"],
+                              "abs": mock.abs_of(next(p for p in w["projects"] if p["id"] == parts[1]), rel)}
+                    # A slow answer, on cue (`put_delays`, seconds, one per
+                    # write): the file is written at once, the answer late.
+                    delays = w.get("put_delays")
+                    if delays:
+                        time.sleep(delays.pop(0))
+                    return self._json(answer)
                 return self._err(404, "no such route")
 
             def do_DELETE(self):
@@ -1059,6 +1272,7 @@ class MockDaemon:
                 self._record("DELETE", path, {})
                 if mock_projects.handle(self, mock, "DELETE", path, {}):
                     return
+                mock_vex.terminal_closing(mock, path)
                 if mock_terminals.handle(self, mock, "DELETE", path, {}):
                     return
                 parts = [p for p in path.split("/") if p]
@@ -1142,6 +1356,25 @@ class MockDaemon:
             def do_GET(self):
                 mock.dev_hits.append(self.path)
                 body = DEV_PAGE.encode()
+                route, _, query = self.path.partition("?")
+                if route == "/keys":
+                    # A key a focus page received (FOCUS_PAGE): counted, never shown.
+                    mock.dev_keys.append(self.path)
+                    self.send_response(204)
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return
+                if route in ("/focus-mount", "/focus-timer", "/focus-load", "/focus-none", "/focus-pointer",
+                             "/focus-reload"):
+                    args = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+                    try:
+                        delay = min(max(int(args.get("delay", "0")), 0), 5000)
+                    except ValueError:
+                        delay = 0
+                    if delay:
+                        time.sleep(delay / 1000)
+                    mode = route[1:]
+                    body = (FOCUS_PAGE % {"mode": mode, "mode_js": json.dumps(mode)}).encode()
                 if self.path.startswith("/to-workshop"):
                     # A dev page that sends its own frame to the workshop: the
                     # frame keeps the sandbox flags it was given, so with
@@ -1157,6 +1390,7 @@ class MockDaemon:
                 self.wfile.write(body)
 
         self.dev_hits: list[str] = []
+        self.dev_keys: list[str] = []
         self.dev = ThreadingHTTPServer(("127.0.0.1", 0), Dev)
         self.dev.daemon_threads = True
         self.dev_port = self.dev.server_address[1]
@@ -1223,6 +1457,188 @@ class MockDaemon:
 
     def posted(self, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == "POST" and p == path]
+
+    # -- the disk behind the editor (ED-2) -------------------------------------
+
+    def abs_of(self, project: dict, rel: str) -> str:
+        return project["root"].rstrip("/") + "/" + rel
+
+    def disk_write(self, rel: str, content: str):
+        """Something other than the editor writes a file (an agent, a shell)."""
+        rec = self.world["files"].setdefault(rel, {"content": "", "mtime": 1757900200})
+        rec["content"] = content
+        rec["mtime"] += 1
+
+    def disk_delete(self, rel: str):
+        self.world["files"].pop(rel, None)
+
+    # -- the editor's git (ED-9) -----------------------------------------------
+    #
+    # `world["git"]` (absent: not a repository): {"head", "branch", "base":
+    # {rel: HEAD's text}, "files": {rel: state}, "dirs": {rel: state}}.
+    # `git_base_calls` counts the base reads, for the suite.
+
+    def git_route(self, verb: str, q: dict, handler):
+        w = self.world
+        repo = w.get("git")
+        if verb == "status":
+            if not repo:
+                return handler._json({"repo": False, "head": None, "branch": None, "files": {}, "dirs": {},
+                                      "truncated": False})
+            return handler._json({"repo": True, "head": repo.get("head"), "branch": repo.get("branch", "main"),
+                                  "files": dict(repo.get("files", {})), "dirs": dict(repo.get("dirs", {})),
+                                  "truncated": False})
+        if verb != "base":
+            return handler._err(404, "route not found")
+        rel = q.get("path", [""])[0]
+        self.git_base_calls = getattr(self, "git_base_calls", 0) + 1
+        # A slow repository, on cue (`base_delay`, seconds: git on /mnt/c).
+        if repo and repo.get("base_delay"):
+            time.sleep(float(repo["base_delay"]))
+        if w["kinds"].get(rel) == "env":
+            return handler._err(403, "an env file: its committed text is not served here (the gutter is off for it).")
+        if rel in w["protected"] or w["kinds"].get(rel) in ("gate", "withheld"):
+            return handler._err(403, "its committed text is not served here (the gutter is off for it).")
+        # A file deleted from the working tree still answers what HEAD holds
+        # (`deleted: true`); nothing on disk and nothing in HEAD is 404.
+        deleted = rel not in w["files"]
+        if deleted and not (repo and rel in repo.get("base", {})):
+            return handler._err(404, "file not found")
+        if not repo:
+            return handler._json({"path": rel, "state": "no_repo", "head": None, "text": None})
+        extra = {"deleted": True} if deleted else {}
+        # `states` (on cue): binary, too_large, not_a_file, as the daemon says them.
+        state = repo.get("states", {}).get(rel)
+        if state:
+            return handler._json({"path": rel, "state": state, "head": repo.get("head"), "text": None, **extra})
+        text = repo.get("base", {}).get(rel)
+        if text is None:
+            return handler._json({"path": rel, "state": "new", "head": repo.get("head"), "text": None})
+        try:
+            return handler._json({"path": rel, "state": "ok", "head": repo.get("head"), "text": text,
+                                  "size": len(text.encode()), "renamed": False, **extra})
+        except (BrokenPipeError, ConnectionResetError):
+            return None  # the window dropped it (aborted) while a slow answer was on its way
+
+    # -- the editor's navigation (ED-7) ----------------------------------------
+
+    def _hidden_from_nav(self, rel: str) -> bool:
+        w = self.world
+        return rel in w["protected"] or w["kinds"].get(rel) in ("gate", "withheld")
+
+    def nav_files(self) -> dict:
+        w = self.world
+        files = sorted(r for r in w["files"] if not self._hidden_from_nav(r))
+        return {"files": files, "env": [r for r in files if w["kinds"].get(r) == "env"],
+                "truncated": False, "source": "git"}
+
+    def nav_search(self, body: dict):
+        import re as _re
+        w = self.world
+        query = body.get("query")
+        if not isinstance(query, str) or not query:
+            return 400, {"error": "query must be 1 to 1000 characters"}
+        flags = 0 if body.get("case") else _re.IGNORECASE
+        try:
+            pattern = query if body.get("regex") else _re.escape(query)
+            if body.get("word"):
+                pattern = rf"\b(?:{pattern})\b"
+            rx = _re.compile(pattern, flags)
+        except _re.error as exc:
+            return 400, {"error": f"not a regular expression: {exc}"}
+        matches = []
+        for rel in sorted(w["files"]):
+            # The daemon's filter: never a withheld file, the gate's state or an env file.
+            if self._hidden_from_nav(rel) or w["kinds"].get(rel) == "env":
+                continue
+            for i, line in enumerate(w["files"][rel]["content"].splitlines(), 1):
+                ranges = [[m.start(), m.end()] for m in rx.finditer(line) if m.end() > m.start()]
+                if ranges:
+                    matches.append({"path": rel, "line": i, "text": line, "ranges": ranges[:20]})
+        return 200, {"matches": matches[:2000], "files": len({m["path"] for m in matches}),
+                     "truncated": len(matches) > 2000, "timed_out": False, "backend": "mock", "limit": 2000}
+
+    def _tree_add(self, rel: str, kind: str):
+        tree = self.world["tree"]
+        parent, _, name = rel.rpartition("/")
+        if parent and parent not in tree:
+            self._tree_add(parent, "dir")
+        entries = tree.setdefault(parent, [])
+        if not any(e["name"] == name for e in entries):
+            row = {"name": name, "kind": kind, "size": 0, "mtime": 1757900300}
+            if kind == "file" and self.world["kinds"].get(rel) == "env":
+                row["policy"] = "env"
+            entries.append(row)
+            entries.sort(key=lambda e: e["name"])
+        if kind == "dir":
+            tree.setdefault(rel, [])
+
+    def _tree_remove(self, rel: str):
+        tree = self.world["tree"]
+        parent, _, name = rel.rpartition("/")
+        tree[parent] = [e for e in tree.get(parent, []) if e["name"] != name]
+        for key in [k for k in tree if k == rel or k.startswith(rel + "/")]:
+            del tree[key]
+
+    def _exists(self, rel: str) -> bool:
+        w = self.world
+        return (rel in w["files"] or rel in w["tree"]
+                or any(e["name"] == rel.rpartition("/")[2] for e in w["tree"].get(rel.rpartition("/")[0], [])))
+
+    def nav_fs(self, body: dict):
+        from jarvis.tools.secrets import is_env_credential_name, is_protected
+        w = self.world
+        op, rel, to = body.get("op"), body.get("path"), body.get("to")
+        if op not in ("new_file", "new_folder", "rename", "delete") or not isinstance(rel, str) or not rel:
+            return 400, {"error": "op and path"}
+
+        def refused(name: str) -> bool:
+            base = name.rpartition("/")[2]
+            return ((is_protected(base) and not is_env_credential_name(base)) or ".." in name.split("/")
+                    or self._hidden_from_nav(name))
+        if refused(rel) or (isinstance(to, str) and refused(to)):
+            return 403, {"error": "refused: the editor never changes this"}
+        if op in ("new_file", "new_folder"):
+            if self._exists(rel):
+                return 409, {"error": "something is already there"}
+            if op == "new_file":
+                w["files"][rel] = {"content": "", "mtime": 1757900300}
+                if is_env_credential_name(rel.rpartition("/")[2]):
+                    w["kinds"][rel] = "env"
+            self._tree_add(rel, "file" if op == "new_file" else "dir")
+            return 200, {"ok": True, "op": op, "path": rel, "abs": f"/home/johnw/projects/Jarvis/{rel}",
+                         "kind": w["kinds"].get(rel, "text")}
+        if not self._exists(rel):
+            return 404, {"error": "nothing is there"}
+        is_dir = rel in w["tree"]
+        if op == "delete":
+            self.trashed.append(rel)
+            for key in [k for k in w["files"] if k == rel or k.startswith(rel + "/")]:
+                del w["files"][key]
+            self._tree_remove(rel)
+            return 200, {"ok": True, "op": op, "path": rel, "abs": f"/home/johnw/projects/Jarvis/{rel}",
+                         "dir": is_dir, "trash": {"where": "linux", "location": "/mock/Trash"}}
+        if not isinstance(to, str) or not to:
+            return 400, {"error": "rename needs `to`"}
+        if self._exists(to):
+            return 409, {"error": f"{to} already exists: a rename never replaces anything"}
+        if w["kinds"].get(rel) == "env" and not is_env_credential_name(to.rpartition("/")[2]):
+            return 403, {"error": "an env file keeps an env name here"}
+        for key in [k for k in list(w["files"]) if k == rel or k.startswith(rel + "/")]:
+            new = to + key[len(rel):]
+            w["files"][new] = w["files"].pop(key)
+            if key in w["kinds"]:
+                w["kinds"][new] = w["kinds"].pop(key)
+        if is_env_credential_name(to.rpartition("/")[2]):
+            w["kinds"][to] = "env"
+        entries = {k: v for k, v in w["tree"].items() if k == rel or k.startswith(rel + "/")}
+        self._tree_remove(rel)
+        for key, rows in entries.items():
+            w["tree"][to + key[len(rel):]] = rows
+        self._tree_add(to, "dir" if is_dir else "file")
+        return 200, {"ok": True, "op": op, "path": to, "from": rel,
+                     "abs": f"/home/johnw/projects/Jarvis/{to}", "from_abs": f"/home/johnw/projects/Jarvis/{rel}",
+                     "dir": is_dir, "kind": w["kinds"].get(to, "text")}
 
     def sent(self, method: str, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == method and p == path]

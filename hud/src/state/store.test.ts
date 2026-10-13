@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { compatActions, flatState, initialState, reduce, type State } from "./store";
-import { emptyChats, runningHere, type ChatState } from "../lib/chats";
+import { describe, expect, it, vi } from "vitest";
+import { activePane, compatActions, flatState, initialState, reduce, type State } from "./store";
+import { emptyChat, emptyChats, runningHere, type ChatState } from "../lib/chats";
 import type { PaneNo } from "../lib/workspace";
 import type { Thread } from "../types";
 
@@ -443,5 +443,256 @@ describe("each thread's turn, for the thinking line (WP-H, plan §4 H-1)", () =>
   it("is keyed by thread, whichever pane shows it, and leaves every other thread alone", () => {
     const s = run(withChats({ 1: { threadId: "t1" } }), started("t1"), started("t3"), finished("t1"));
     expect(Object.keys(s.turns)).toEqual(["t3"]);
+  });
+});
+
+describe("a compose row's identity (review of PR #30)", () => {
+  it("is minted for every new row, in the same project too, and kept by a row spread from it", () => {
+    let s = reduce(initialState, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    const first = s.chats[1].compose!.id;
+    expect(first).toBeTruthy();
+    // A change to the same row (the chips, a send) spreads it: the same row.
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { ...s.chats[1].compose!, effort: "low" } } });
+    expect(s.chats[1].compose!.id).toBe(first);
+    // New thread, or a re-aim when a project goes: a fresh row, even in the same project.
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    const second = s.chats[1].compose!.id;
+    expect(second).toBeTruthy();
+    expect(second).not.toBe(first);
+    // Another pane's row is another row.
+    s = reduce(s, { type: "chat", pane: 2, patch: { compose: { projectId: "p1" } } });
+    expect(new Set([first, second, s.chats[2].compose!.id]).size).toBe(3);
+  });
+
+  it("travels with its conversation when two panes trade them", () => {
+    let s = reduce(initialState, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    const id = s.chats[1].compose!.id;
+    s = reduce(s, { type: "chat", pane: 2, patch: { threadId: "t1" } });
+    s = reduce(s, { type: "chat_swap", a: 1, b: 2 });
+    expect(s.chats[2].compose?.id).toBe(id);
+  });
+});
+
+describe("× on a chat pane: release_chat (WP-G2, plan §3.6)", () => {
+  it("parks the box's words and files under the thread; they come back when it opens in another pane", () => {
+    const file = { name: "a.txt", mime: "text/plain", data_b64: "YQ==" } as any;
+    let s = withChats({ 2: { threadId: "t1", input: "half a thought", files: [file] } }, { selectedChat: 2 });
+    s = reduce(s, { type: "release_chat", pane: 2 });
+    expect(s.chats[2]).toEqual(emptyChat());
+    expect(s.drafts.t1).toEqual({ text: "half a thought", files: [file] });
+    s = reduce(s, { type: "chat", pane: 3, patch: { compose: { projectId: "p1" } } });
+    s = reduce(s, { type: "open_thread", pane: 3, threadId: "t1" });
+    expect([s.chats[3].input, s.chats[3].files]).toEqual(["half a thought", [file]]);
+    expect(s.drafts.t1).toBeUndefined();
+  });
+
+  it("adds to words already parked for that thread rather than replacing them", () => {
+    let s = withChats({ 2: { threadId: "t1", input: "second" } }, { drafts: { t1: { text: "first", files: [] } } });
+    s = reduce(s, { type: "release_chat", pane: 2 });
+    expect(s.drafts.t1.text).toBe("first\nsecond");
+  });
+
+  it("drops a compose row's words (× asked first, G-9) and never parks them for the id's next compose row", () => {
+    let s = withChats({ 4: { compose: { projectId: "p1", id: "c9" }, input: "never sent" } });
+    s = reduce(s, { type: "release_chat", pane: 4 });
+    expect(s.drafts).toEqual({});
+    s = reduce(s, { type: "chat", pane: 4, patch: { compose: { projectId: "p1" } } });
+    expect(s.chats[4].input).toBe("");
+  });
+
+  it("takes the pane out of the selection order, so an id a split reuses inherits no selection", () => {
+    let s = withChats({ 1: { threadId: "a" }, 2: { threadId: "b" } }, { selectedChat: 2, selectedOrder: [2, 1] });
+    s = reduce(s, { type: "release_chat", pane: 2 });
+    expect(s.selectedOrder).toEqual([1]);
+  });
+
+  it("keeps the microphone's status for the next selected chat to take, and nothing else", () => {
+    let s = withChats({ 2: { threadId: "b", status: "LISTENING · SPEAK NOW" } }, { selectedChat: 2, selectedOrder: [2, 1] });
+    s = reduce(s, { type: "release_chat", pane: 2 });
+    s = reduce(s, { type: "select", pane: 1 });
+    expect([s.chats[1].status, s.chats[2].status]).toEqual(["LISTENING · SPEAK NOW", ""]);
+    const busy = reduce(withChats({ 2: { threadId: "b", status: "RUNNING · ls" } }, { selectedChat: 2 }),
+                        { type: "release_chat", pane: 2 });
+    expect(busy.chats[2].status).toBe("");
+  });
+
+  it("leaves a running turn loose; the pane that opens its thread next takes it up, Stop and all", () => {
+    let s = withChats({ 2: { threadId: "t1", busy: true, turnThreadId: "t1", status: "RUNNING · pytest" } });
+    s = reduce(s, { type: "release_chat", pane: 2 });
+    expect(s.loose).toEqual({ t1: "RUNNING · pytest" });
+    s = reduce(s, { type: "open_thread", pane: 5, threadId: "t1" });
+    expect(s.chats[5]).toMatchObject({ threadId: "t1", busy: true, turnThreadId: "t1", status: "RUNNING · pytest" });
+    expect(s.loose).toEqual({});
+  });
+
+  it("trades: a pane busy on another thread's turn leaves that one loose in its place", () => {
+    let s = withChats({ 3: { threadId: "t2", busy: true, turnThreadId: "t2", status: "THINKING" } },
+                      { loose: { t1: "RUNNING · ls" } });
+    s = reduce(s, { type: "open_thread", pane: 3, threadId: "t1" });
+    expect(s.chats[3]).toMatchObject({ threadId: "t1", busy: true, turnThreadId: "t1" });
+    expect(s.loose).toEqual({ t2: "THINKING" });
+  });
+
+  it("never leaves a placeholder (a first send's local-N) loose: no thread can open it", () => {
+    const s = reduce(withChats({ 2: { compose: { projectId: "p", id: "c1" }, busy: true, turnThreadId: "local-3" } }),
+                     { type: "release_chat", pane: 2 });
+    expect(s.loose).toEqual({});
+  });
+
+  it("forgets a loose turn once it is over", () => {
+    const s = withChats({}, { loose: { t1: "THINKING" } });
+    expect(reduce(s, { type: "turn_over", threadId: "t1" }).loose).toEqual({});
+    expect(reduce(s, { type: "turn_over", threadId: "other" })).toBe(s);
+  });
+
+  it("does not adopt a loose turn another pane already tracks", () => {
+    let s = withChats({ 1: { threadId: "x", busy: true, turnThreadId: "t1" } }, { loose: { t1: "THINKING" } });
+    s = reduce(s, { type: "open_thread", pane: 2, threadId: "t1" });
+    // Pane 1 moved on from t1 mid-turn: the existing hand-off brings it here, once.
+    expect(s.chats[2]).toMatchObject({ busy: true, turnThreadId: "t1" });
+    expect(s.chats[1]).toMatchObject({ busy: false, turnThreadId: null });
+    expect(s.loose).toEqual({});
+  });
+});
+
+describe("the chat the window is about, with pane 1 closed (WP-G2)", () => {
+  it("starts with no selected chat and falls back to the pane in slot 1, never id 1", () => {
+    expect(initialState.selectedChat).toBeNull();
+    const s = withChats({ 3: { threadId: "t3" } }, { selectedChat: null, selectedOrder: [], home: 3 });
+    expect(activePane(s)).toBe(3);
+    expect(flatState(s).threadId).toBe("t3");
+    expect(reduce(s, { type: "home", pane: 3 })).toBe(s);
+    expect(reduce(s, { type: "home", pane: 2 }).home).toBe(2);
+    // A selection, or one made before, still comes first.
+    expect(activePane({ ...s, selectedOrder: [5] })).toBe(5);
+    expect(activePane({ ...s, selectedChat: 6, selectedOrder: [5] })).toBe(6);
+  });
+});
+
+describe("words no pane's compose row holds any more (review of PR #47)", () => {
+  it("a hidden compose row a split takes back parks its words for the next new thread, wherever it opens", () => {
+    const file = { name: "a.txt", mime: "text/plain", data_b64: "YQ==" } as any;
+    let s = withChats({ 8: { compose: { projectId: "p1", id: "c3" }, input: "precious unsent words", files: [file],
+                             restore: [{ text: "handed back", files: [], nonce: 4 }] } });
+    s = reduce(s, { type: "release_chat", pane: 8, keep: true });
+    expect(s.chats[8]).toEqual(emptyChat());
+    expect(s.drafts["compose:*"]).toEqual({ text: "precious unsent words\nhanded back", files: [file], projects: ["p1"] });
+    // The split's own new compose row in that pane takes them up.
+    s = reduce(s, { type: "chat", pane: 8, patch: { compose: { projectId: "p2" }, takeOrphan: true } });
+    expect([s.chats[8].input, s.chats[8].files]).toEqual(["precious unsent words\nhanded back", [file]]);
+    expect(s.drafts["compose:*"]).toBeUndefined();
+  });
+
+  it("a × (which asked) still drops them, and a row's own parked words come first", () => {
+    let s = withChats({ 4: { compose: { projectId: "p1", id: "c9" }, input: "discarded" } });
+    s = reduce(s, { type: "release_chat", pane: 4 });
+    expect(s.drafts).toEqual({});
+    s = withChats({}, { drafts: { "compose:*": { text: "orphan", files: [] }, "compose:3": { text: "mine", files: [] } } });
+    s = reduce(s, { type: "chat", pane: 3, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+    expect(s.chats[3].input).toBe("mine");
+    expect(s.drafts["compose:*"]).toEqual({ text: "orphan", files: [] });
+    // A thread opened is not a new thread: it never takes them.
+    s = reduce(s, { type: "open_thread", pane: 5, threadId: "t1" });
+    expect(s.chats[5].input).toBe("");
+    s = reduce(s, { type: "chat", pane: 6, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+    expect(s.chats[6].input).toBe("orphan");
+  });
+
+  it("New thread in a pane already composing takes the parked words up, after its own (review 2 of PR #47, MED-2)", () => {
+    const projects = [{ id: "p1", name: "jarvis" }, { id: "p2", name: "schoolwork" }] as any;
+    let s = withChats({ 1: { compose: { projectId: "p1", id: "x1" }, input: "mine" },
+                        8: { compose: { projectId: "p2", id: "x8" }, input: "orphaned" } }, { projects });
+    s = reduce(s, { type: "release_chat", pane: 8, keep: true });
+    expect(s.drafts["compose:*"]).toEqual({ text: "orphaned", files: [], projects: ["p2"] });
+    expect(s.error).toContain("kept for the next new thread you start");
+    expect(s.error).toContain("schoolwork");
+    // The project chip moves the row (same id): not a new thread, nothing taken.
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p2", id: "x1" } } });
+    expect(s.chats[1].input).toBe("mine");
+    expect(s.drafts["compose:*"]).toBeDefined();
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+    expect(s.chats[1].input).toBe("mine\norphaned");
+    expect(s.chats[1].compose?.projectId).toBe("p1");
+    expect(s.drafts["compose:*"]).toBeUndefined();
+    expect(s.error).toContain("are back");
+    expect(s.error).toContain("written in schoolwork");
+    expect(s.error).toContain("This new thread is in jarvis");
+  });
+
+  it("a release that parks says where, and how many files past eight were left out (MED-2, NIT-3)", () => {
+    const f = (n: number, tag: string) =>
+      Array.from({ length: n }, (_, i) => ({ name: `${tag}${i}`, mime: "text/plain", data_b64: "YQ==" })) as any;
+    const threads = [{ id: "t2", title: "second chat", project_id: "p1" }] as any;
+    let s = withChats({ 2: { threadId: "t2", input: "for t2", files: f(8, "b") } },
+                      { threads, drafts: { t2: { text: "", files: f(3, "p") } } });
+    s = reduce(s, { type: "release_chat", pane: 2 });
+    expect(s.drafts.t2.files).toHaveLength(8);
+    expect(s.error).toContain("“second chat”");
+    expect(s.error).toContain("3 files were left out");
+    // Nothing to park: nothing said.
+    s = reduce(withChats({ 2: { threadId: "t2" } }, { threads }), { type: "release_chat", pane: 2 });
+    expect(s.error).toBe("");
+    // A × that asked (no keep) drops a compose row's words, silently.
+    s = reduce(withChats({ 2: { compose: { projectId: "p1", id: "c2" }, input: "gone" } }), { type: "release_chat", pane: 2 });
+    expect([s.drafts, s.error]).toEqual([{}, ""]);
+  });
+
+  it("only a new thread the owner started takes them up, never a row given to a pane nobody sees (review 3 of PR #47)", () => {
+    const projects = [{ id: "p1", name: "jarvis" }, { id: "p2", name: "schoolwork" }] as any;
+    const orphan = { "compose:*": { text: "orphan words", files: [], projects: ["p1"] } };
+    // × reset pane 1 and the window gave the closed pane a fresh row: no take-up, nothing said.
+    let s = withChats({}, { projects, drafts: { ...orphan } });
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    expect([s.chats[1].input, s.drafts, s.error]).toEqual(["", orphan, ""]);
+    // A project or thread going away re-aims rows, drawn or not, with new ids: no take-up.
+    s = withChats({ 5: { compose: { projectId: "p1", id: "c5" } }, 6: { threadId: "t1" } },
+                  { projects, drafts: { ...orphan } });
+    s = reduce(s, { type: "chat", pane: 5, patch: { threadId: null, compose: { projectId: "p2" }, messages: [] } });
+    s = reduce(s, { type: "chat", pane: 6, patch: { threadId: null, compose: { projectId: "p2" }, messages: [] } });
+    expect([s.chats[5].input, s.chats[6].input, s.drafts, s.error]).toEqual(["", "", orphan, ""]);
+    // New thread in a pane already composing, said by the owner: it does.
+    s = reduce(s, { type: "chat", pane: 5, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+    expect([s.chats[5].input, s.drafts]).toEqual(["orphan words", {}]);
+    expect(s.error).toContain("are back, in this new thread's box");
+    // The flag never lands in a pane's conversation.
+    expect("takeOrphan" in s.chats[5]).toBe(false);
+  });
+
+  it("notices that arrive together share the error line; a later one replaces it (review 3 of PR #47, LOW)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      const threads = [{ id: "t2", title: "second chat", project_id: "p1" }] as any;
+      let s = withChats({ 2: { threadId: "t2", input: "for t2" }, 7: { compose: { projectId: "p1", id: "c7" }, input: "kept" } },
+                        { threads, projects: [{ id: "p1", name: "jarvis" }] as any });
+      s = reduce(s, { type: "release_chat", pane: 2 });
+      s = reduce(s, { type: "release_chat", pane: 7, keep: true });
+      expect(s.error).toContain("waits with “second chat”");
+      expect(s.error).toContain("kept for the next new thread you start");
+      // The new thread that takes them, in the same breath: said too, and nothing said twice.
+      s = reduce(s, { type: "chat", pane: 7, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+      expect(s.error).toContain("waits with “second chat”");
+      expect(s.error).toContain("are back, in this new thread's box");
+      expect(s.error.split("second chat").length).toBe(2);
+      // Later, a notice replaces what is there; a plain write always does.
+      vi.setSystemTime(1_000_000 + 5_000);
+      s = reduce(withChats({ 3: { threadId: "t2", input: "again" } }, { threads, error: s.error, errorAt: s.errorAt }),
+                 { type: "release_chat", pane: 3 });
+      expect(s.error.startsWith("What you had not sent waits with")).toBe(true);
+      s = reduce(s, { type: "patch", patch: { error: "Could not send: x" } });
+      expect([s.error, s.errorAt]).toEqual(["Could not send: x", 1_005_000]);
+      s = reduce(s, { type: "patch", patch: { error: "" } });
+      expect([s.error, s.errorAt]).toEqual(["", 0]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a turn no pane tracks is left loose, once", () => {
+    const s = reduce(withChats({}), { type: "loose", threadId: "t4", status: "THINKING" });
+    expect(s.loose).toEqual({ t4: "THINKING" });
+    expect(reduce(s, { type: "loose", threadId: "t4", status: "THINKING" })).toBe(s);
+    const opened = reduce(s, { type: "open_thread", pane: 1, threadId: "t4" });
+    expect(opened.chats[1]).toMatchObject({ busy: true, turnThreadId: "t4" });
   });
 });

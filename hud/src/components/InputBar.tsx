@@ -5,8 +5,9 @@
 // *or spoken* — rides that turn. `@path` in the text attaches a server-side
 // file, which the backend resolves with the v1 `_assemble_turn` rules.
 //
-// Space typed in the box must never trigger push-to-talk, so the textarea
-// stops that key from reaching the document handler.
+// A key typed in the box is the box's: the textarea stops its keys from
+// bubbling to the window's handlers. Push-to-talk (Ctrl+D) is taken at the
+// window in the capture phase, before the box, so it works from here.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Attachment, Project } from "../types";
@@ -356,7 +357,7 @@ export function InputBar(props: {
             }
           }}
           onKeyDown={(e) => {
-            // Space in the box is a space, never push-to-talk.
+            // The box's keys are the box's (Ctrl+D never gets here: App).
             e.stopPropagation();
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -428,7 +429,7 @@ function Chip({ chip }: { chip: ProjectChip }) {
           style={{ width: "auto" }}
           value={chip.value || ""}
           onChange={(e) => chip.onChange(e.target.value)}
-          // Space on the select opens it; it must never reach push-to-talk.
+          // Space on the select opens it; its keys stop here.
           onKeyDown={(e) => e.stopPropagation()}
           onKeyUp={(e) => e.stopPropagation()}
         >

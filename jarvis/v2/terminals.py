@@ -15,10 +15,14 @@ WebSocket, so the Origin check carries the weight):
 - Every route is `projects.owner_only`: it answers only on the HUD's own
   listener (`FACE_PORT`), never the API listener every tool's HTTP client
   uses (8405) and never the preview origin (8403, which serves only
-  `/p/...`), and only to a request whose `Origin` is present and equals the
-  HUD's own (`http://127.0.0.1:<port>` or `http://localhost:<port>`, matching
-  `Host`). A missing Origin, `null` (the sandboxed Preview frame), the
-  workshop's 8403 and every other site are refused.
+  `/p/...`), and only to the HUD's own page: a request whose `Origin` is
+  present and equals the HUD's own (`http://127.0.0.1:<port>` or
+  `http://localhost:<port>`, matching `Host`) — every write and every socket
+  — or a plain GET with no Origin that the browser marked `Sec-Fetch-Site:
+  same-origin`, which is how Chromium sends the HUD's own listing (it omits
+  Origin on a same-origin GET; until 2026-10-11 that listing was refused).
+  A missing Origin on anything else, `null` (the sandboxed Preview frame),
+  the workshop's 8403 and every other site are refused.
 - `Host` must be literally `127.0.0.1:<port>` or `localhost:<port>`
   (`hud_api.check_origin`, and again here), so DNS rebinding cannot reach it.
 - The socket also needs a **ticket**: single use, 30 s, valid for one
@@ -29,11 +33,13 @@ WebSocket, so the Origin check carries the weight):
 - **Taking over** a terminal another window is showing asks in that window
   first ("Let it / Keep it"), and is refused after 20 s with no answer.
 
-**Stricter than `/approvals`, on purpose.** `POST /approvals/{id}` refuses
-only a *wrong* Origin, so a local client that sends none is accepted there.
-A terminal needs the HUD listener, an Origin that must be present, a ticket,
-and the takeover question. For a browser-based attack two independent
-checks would have to fail at once.
+**Stricter than `/approvals`, on purpose.** `POST /approvals/{id}` is
+owner-only since BR-0 (the HUD listener and an Origin that must be present,
+as on every owner-only write; it used to refuse only a *wrong* Origin). A
+terminal needs that — an Origin on every write and on the socket; only the
+listing, a same-origin read, may come without one — plus a ticket and the
+takeover question. For a browser-based attack two independent checks would
+have to fail at once.
 
 **Not a boundary against a program running as the owner.** Such a program
 (a script an agent wrote and got run, say) can send any Origin it likes,
@@ -68,11 +74,30 @@ are included), then SIGKILL; the session's leader is matched on its start
 time, so a session whose pid was reused is never signalled. **Terminals end
 with the daemon** (`Daemon.stop` closes them all); there is no tmux.
 
-**Output never leaves memory.** It exists in two places: this ring and the
-owner's browser. It never goes to the bus (the only record there is
-`terminal_attached`: ids and a time), a log (the daemon log gets lifecycle
-lines only: opened, attached, exited, closed, with the folder as a project
-name or `~`), a session or thread log, Discord, or disk.
+**Output stays in memory unless Jarvis reads it.** It exists in two places:
+this ring and the owner's browser. It never goes to the bus (the records
+there are `terminal_attached`, ids and a time, and `terminal_read`, ids, a
+line count, a time and whether it was refused), a log (the daemon log gets
+lifecycle lines only: opened, attached, read, exited, closed, with the folder
+as a project name or `~`), a thread log, Discord, or disk. **What a
+`terminal_read` returns is the exception, and it goes where any tool result
+goes**: into the fast-path conversation's transcript, and so to OpenRouter
+with every later request; into that conversation's v1 session file
+(`messages.json` under `config.SESSIONS_DIR`); into `config.SPILL_DIR` if
+context truncation later cuts it as an old result; and into anything the
+model's reply repeats — a reply is mirrored to the chat's Discord thread and
+spoken like any other. The tool's ticker summary is fixed ("read N lines",
+"refused"), so the tool's own `tool_finished` record carries none of the
+text onto the bus or into the thread's `log.jsonl`; the model's reply is not
+filtered, and reaches both (and Discord, and speech) like any reply.
+
+**Dev servers (BR-8a, `devurl.py`).** While the owner's "open dev servers
+automatically" switch is on (`browser.json` → `auto_open`), a shell
+terminal's live output — a command's own, by the signed marks — is read for a
+dev server's loopback URL, in memory under `_lock`, and one `{"type":
+"dev_url", "url"}` frame goes to **that terminal's attached socket and
+nowhere else**: no bus record, no log line, no file, and nothing Jarvis can
+read. No window attached, it is dropped. Off, no byte reaches the sniffer.
 
 **Shell integration (W-2, item 3).** bash reads `terminal_rc.bash` as its
 --rcfile; a POSIX `sh`-family shell (sh, dash, ash, ksh, mksh, …) reads
@@ -96,7 +121,32 @@ between the marks; a nested shell, `sudo -i`, `ssh` or `python` puts
 everything under the outer command's span; a line kept out of history
 records only its first command. WP-F's text-pattern refusals must always
 apply, marks or no marks. `readable` is the owner's "Jarvis can read"
-switch, on by default; nothing reads it yet.
+switch, on by default.
+
+**What Jarvis can read (WP-F, decisions W-2).** `read_for_tool` is the one
+way in for an agent, and it only reads: it resolves a terminal from what the
+HUD shows (its id, title or number), refuses one whose switch is off by
+name, renders the ring's normal buffer as plain text (`terminal_text`: no
+escape sequences, never the alternate screen — the state at the start of a
+ring that has dropped bytes comes from an `AltTracker` fed every dropped
+byte), and hands it to `terminal_guard`, which refuses the whole read when
+it may hold a credential and withholds lines that look like one. Every read
+that reaches a terminal, refused or not, publishes `terminal_read` with
+exactly `{terminal_id, lines, at, refused}`: never output, a command or a
+reason. The `terminal_read` tool (jarvis/v2/tools/terminal_read.py) imports
+this one function and nothing else from here.
+
+**Program terminals (VX-1).** `Terminals.create_program` runs one program —
+a VEX build, download, device-info read or the brain's user port — on a PTY
+the same way, so its output lives in the same ring, reattaches the same way
+and closes with the same routes. **Only `jarvis/v2/vex.py` creates one**,
+from its own argv tables, after checking the executable against `vex.json`;
+no route takes an argv, a program name or a path. They count apart from the
+shells (at most six of each), get no startup file, start from
+`program_environment()` (the shell allowlist with `WSLENV` emptied, so
+nothing of the daemon's crosses into a Windows program), refuse typed input
+but a lone Ctrl-C unless `input_ok`, and tell `vex.py` when they end
+(`on_exit`, once, after the output is read to EOF).
 """
 from __future__ import annotations
 
@@ -114,6 +164,7 @@ import secrets
 import select
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -122,13 +173,14 @@ import threading
 import time
 from urllib.parse import unquote_to_bytes
 
-from jarvis import config
+from jarvis import config, untrusted
 from .model import utcnow
-from . import ws
+from . import devurl, terminal_guard, terminal_text, ws
 
 LOG = logging.getLogger(__name__)
 
 TERMINAL_CAP = 6
+PROGRAM_CAP = 6                # program terminals (VX-1), counted apart from shells
 RING_BYTES = 1 << 20
 TICKET_TTL_S = 30.0
 TAKEOVER_TIMEOUT_S = 20.0
@@ -295,6 +347,18 @@ def launcher(shell: Shell) -> tuple[list[str], str]:
     return prefix, shell.path
 
 
+def program_environment(*, source=None, env_file: Path | None = None) -> dict:
+    """The environment a program terminal starts from (VX-1): the shell's
+    allowlist, and **`WSLENV` emptied**, so no Linux variable crosses into a
+    Windows program through interop — the Windows side gets its own
+    environment and nothing of the daemon's."""
+    env = clean_environment("/bin/sh", source=source, env_file=env_file)
+    env.pop("SHELL", None)
+    env.pop("COLORTERM", None)
+    env["WSLENV"] = ""
+    return env
+
+
 def _dotenv_names(path: Path) -> set[str]:
     """The names `.env` defines (config loads them into the daemon's own
     environment). Names only: no value is kept."""
@@ -415,12 +479,18 @@ class Ring:
     """The last `cap` bytes of a terminal's output, in order, with the
     absolute stream offset of the first byte still held (`start`)."""
 
-    def __init__(self, cap: int = RING_BYTES):
+    def __init__(self, cap: int = RING_BYTES, on_drop=None):
         self.cap = cap
         self._chunks: collections.deque[bytes] = collections.deque()
         self._size = 0
         self.start = 0
         self._before = b""                     # the last byte dropped, if any
+        # Every byte the ring lets go, in order (the terminal's AltTracker).
+        self.on_drop = on_drop
+
+    def _dropped(self, data: bytes) -> None:
+        if data and self.on_drop is not None:
+            self.on_drop(data)
 
     @property
     def end(self) -> int:
@@ -436,6 +506,9 @@ class Ring:
             elif self._chunks:
                 self._before = self._chunks[-1][-1:]
             self.start = self.end + len(data) - self.cap
+            for chunk in self._chunks:
+                self._dropped(chunk)
+            self._dropped(data[:-self.cap])
             self._chunks.clear()
             self._chunks.append(data[-self.cap:])
             self._size = self.cap
@@ -450,10 +523,12 @@ class Ring:
             excess = self._size - self.cap
             if len(first) <= excess:
                 self._chunks.popleft()
+                self._dropped(first)
                 self._size -= len(first)
                 self.start += len(first)
                 self._before = first[-1:]
             else:
+                self._dropped(first[:excess])
                 self._chunks[0] = first[excess:]
                 self._size -= excess
                 self.start += excess
@@ -465,14 +540,19 @@ class Ring:
         the first newline in its first 64 KiB, so it does not begin
         mid-line; with no newline there it starts at the cut. An escape
         sequence that spans the cut, or that newline, can still be split."""
+        start, data, skip = self.view()
+        return start + skip, data[skip:]
+
+    def view(self) -> tuple[int, bytes, int]:
+        """(offset of the first byte held, every byte held, how many of them
+        `snapshot` leaves out at the front)."""
         data = b"".join(self._chunks)
-        start = self.start
-        if start > 0 and self._before != b"\n":
+        skip = 0
+        if self.start > 0 and self._before != b"\n":
             cut = data.find(b"\n", 0, 64 * 1024)
             if cut >= 0:
-                data = data[cut + 1:]
-                start += cut + 1
-        return start, data
+                skip = cut + 1
+        return self.start, data, skip
 
 
 @dataclass
@@ -486,6 +566,10 @@ class CommandSpan:
     end: int | None = None
     exit_code: int | None = None
     prompt: int | None = None
+    # The command line was longer than COMMAND_CAP and the part cut off
+    # `could_print`: rule 3 counts the span as a printer (a guard that
+    # cannot see is not a reason to read).
+    unseen: bool = False
 
 
 class Marks:
@@ -512,8 +596,14 @@ class Marks:
         # profile that `exec`s another shell configures "bash" and marks
         # nothing, so no `sudo -k` either.
         self.marked = False
+        # The signed marks the last `feed` finished, in order, as (the stream
+        # offset just past the mark, its letter): what the dev-server sniffer
+        # (BR-8a, devurl.py) needs to tell a command's output from the prompt
+        # and the typed line. Rebuilt every feed.
+        self.events: list[tuple[int, bytes]] = []
 
     def feed(self, data: bytes) -> None:
+        self.events = []
         buf = self._carry + data
         base = self._offset - len(self._carry)
         self._offset += len(data)
@@ -569,6 +659,8 @@ class Marks:
         nonce = values.get(b"jarvis")
         if nonce is None or not hmac.compare_digest(nonce, self._nonce):
             return
+        if kind in (b"A", b"B", b"C", b"D"):
+            self.events.append((end, kind))
         open_span = self._open()
         if kind == b"A":
             if open_span is not None:           # a prompt with no D: it ended there
@@ -583,7 +675,9 @@ class Marks:
                 evicted = self.spans.popleft()
                 self.spans_from = max(self.spans_from,
                                       evicted.end if evicted.end is not None else start)
-            self.spans.append(CommandSpan(command[:COMMAND_CAP], start=end, prompt=self.prompt))
+            self.spans.append(CommandSpan(command[:COMMAND_CAP], start=end, prompt=self.prompt,
+                                          unseen=len(command) > COMMAND_CAP
+                                          and terminal_guard.could_print(command, COMMAND_CAP)))
             self.integrated = True              # output is attributed to commands from here on
         elif kind == b"D" and open_span is not None:
             open_span.end = start
@@ -598,13 +692,15 @@ class Marks:
 
 @dataclass(frozen=True)
 class History:
-    """What WP-F's `terminal_read` will read: the ring's bytes from `start`
+    """What WP-F's `terminal_read` reads: the ring's bytes from `start`
     and the command spans overlapping them. Bytes before `spans_from` lost
     their spans to the span cap and are unattributed. `integrated`: this
     terminal has marked a command; without it a reader has text patterns
     only. Spans are advisory either way (module note): the text-pattern
     refusals apply to every read. `prompt` is where the last signed prompt
-    mark began, None if there was none."""
+    mark began, None if there was none. `alt`: the alternate screen is in
+    force at `start` (from every byte the ring has dropped, and the ones the
+    replay cut leaves out), so a read never starts inside vim's screen."""
     start: int
     data: bytes
     spans: tuple
@@ -612,6 +708,13 @@ class History:
     integrated: bool
     readable: bool
     prompt: int | None = None
+    alt: bool = False
+    # A switch into or out of the alternate screen that the ring's cut split
+    # in two: its first bytes, which the ring no longer holds. Render
+    # `lead + data` from `start - len(lead)`, in state `alt`, and the switch is
+    # parsed whole (2026-10-10 review: its second half used to be read as the
+    # first text of the normal screen).
+    lead: bytes = b""
 
 
 # -- one terminal --------------------------------------------------------------------
@@ -626,21 +729,37 @@ class _Takeover:
 
 class Terminal:
     def __init__(self, tid: str, *, shell: str, folder: str, project_id: str | None,
-                 label: str, cols: int, rows: int, nonce: str, integration: str = "none"):
+                 label: str, cols: int, rows: int, nonce: str, integration: str = "none",
+                 program: str | None = None, input_ok: bool = True, title: str | None = None):
         self.id = tid
         self.shell = shell
         self.folder = folder
         self.project_id = project_id
         self.label = label
         self.integration = integration
-        self.title = f"{os.path.basename(shell)} · {label}"
+        # A program terminal (VX-1) runs one program from an argv table in
+        # `vex.py`, never a shell: `program` names which ("vex-build", …).
+        # `input_ok` False refuses typed input but a lone Ctrl-C.
+        self.program = program
+        self.input_ok = input_ok
+        self.title = title or f"{os.path.basename(shell)} · {label}"
+        # Called once, with this terminal, after its program has exited and
+        # its output has been read to the end (or on finish). vex.py's only.
+        self.on_exit = None
+        self._exit_fired = False
         self.created = utcnow()
         self.cols, self.rows = cols, rows
         self.readable = True
         self.exited = False
         self.exit_code: int | None = None
-        self._ring = Ring()
+        self._alt = terminal_text.AltTracker()  # the alternate screen, at the ring's start
+        self._ring = Ring(on_drop=self._alt.feed)
         self._marks = Marks(nonce)
+        # Dev servers announced here (BR-8a, devurl.py): set by
+        # `Terminals.create` for a shell, with the owner's "open dev servers
+        # automatically" switch (`browser.json` → `auto_open`). Memory only.
+        self._sniffer: devurl.DevUrlSniffer | None = None
+        self._dev_on = None
         self._lock = threading.Lock()           # ring, marks, attachment, state
         self._io_lock = threading.RLock()       # the master fd's life
         self._attachment: ws.WebSocket | None = None
@@ -731,9 +850,13 @@ class Terminal:
                     self._check_exit(wait=True)
                     break
             self._check_exit()
+        # Every byte the program wrote has been read (EOF), so a hook that
+        # parses the ring sees all of it.
+        self._fire_exit()
 
     def _output(self, data: bytes) -> None:
         with self._lock:
+            start = self._ring.end
             self._ring.append(data)
             was_marked = self._marks.marked
             self._marks.feed(data)
@@ -747,6 +870,43 @@ class Terminal:
                 # The startup file is running: the window drops its "no
                 # integration" note. Sent once, after the bytes that carried it.
                 attached.send_text(json.dumps({"type": "marked"}))
+            if self._sniffer is not None:
+                try:
+                    self._sniff(data, start, attached)
+                except Exception as exc:  # noqa: BLE001 — a convenience never breaks the terminal
+                    self._sniffer = None
+                    LOG.warning("terminal %s: dev-server detection stopped (%s)", self.id,
+                                type(exc).__name__)
+
+    def _sniff(self, data: bytes, start: int, attached) -> None:
+        """Dev servers this live output announces (BR-8a, devurl.py), told
+        to the attached window as `{"type": "dev_url", "url"}` after the bytes
+        that carried them — to that socket and nowhere else: no bus record, no
+        log line, nothing on disk. Off (`auto_open` false), the sniffer is
+        told the marks' letters and never fed a byte. No window attached: the
+        URL is dropped, and not remembered. The caller holds `_lock`."""
+        sniffer, events = self._sniffer, self._marks.events
+        if not self._dev_on():
+            for _, kind in events:
+                sniffer.mark(kind)
+            sniffer.pause()
+            return
+        found, pos = [], 0
+        for end, kind in events:
+            cut = max(pos, min(len(data), end - start))
+            found += sniffer.feed(data[pos:cut])
+            found += sniffer.mark(kind)
+            pos = cut
+        found += sniffer.feed(data[pos:])
+        if attached is None:
+            return
+        for url in dict.fromkeys(found):
+            # Recorded only once the frame is queued: a socket that refuses
+            # it (closing, too far behind) leaves the server's next
+            # announcement free to go to the window that reattaches.
+            if (sniffer.may_send(url)
+                    and attached.send_text(json.dumps({"type": "dev_url", "url": url}))):
+                sniffer.sent(url)
 
     def _check_exit(self, wait: bool = False) -> None:
         proc = self._proc
@@ -770,6 +930,30 @@ class Terminal:
             if attached is not None:
                 attached.send_text(json.dumps({"type": "exit", "code": code}))
         LOG.info("terminal %s exited (code %d)", self.id, code)
+
+    def _fire_exit(self) -> None:
+        """`on_exit`, once, outside every lock — only after the exit has been
+        recorded."""
+        with self._lock:
+            if self._exit_fired or not self.exited:
+                return
+            self._exit_fired = True
+            hook = self.on_exit
+        if hook is not None:
+            try:
+                hook(self)
+            except Exception as exc:  # noqa: BLE001 — a hook never breaks the terminal
+                LOG.warning("terminal %s: exit hook failed (%s)", self.id, type(exc).__name__)
+
+    def signal_program(self, sig: int) -> None:
+        """Send `sig` to every live process in this terminal's session, without
+        detaching the window or forgetting the terminal (a program terminal's
+        timeout: its output stays readable)."""
+        for pid in self._members():
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
 
     # -- input and size ------------------------------------------------------------
 
@@ -870,16 +1054,20 @@ class Terminal:
                 "shown": self._attachment is not None, "exited": self.exited,
                 "exit_code": self.exit_code, "readable": self.readable,
                 "busy": self.busy(), "integration": self.integration,
-                "integrated": self._marks.integrated, "marked": self._marks.marked}
+                "integrated": self._marks.integrated, "marked": self._marks.marked,
+                "program": self.program, "input": self.input_ok}
 
     def history(self) -> History:
-        """The ring and its command spans, for WP-F. No route reaches this."""
+        """The ring and its command spans, for WP-F (`read_for_tool`). No
+        route reaches this."""
         with self._lock:
-            start, data = self._ring.snapshot()
+            ring_start, held, skip = self._ring.view()
+            start, data = ring_start + skip, held[skip:]
+            alt, lead = self._alt.lead(held[:skip])
             spans = tuple(replace(s) for s in self._marks.spans
                           if s.end is None or s.end > start)
             return History(start, data, spans, self._marks.spans_from, self._marks.integrated,
-                           self.readable, self._marks.prompt)
+                           self.readable, self._marks.prompt, alt, lead)
 
     # -- windows ---------------------------------------------------------------------
 
@@ -1049,6 +1237,7 @@ class Terminal:
         if not self.exited and self._proc is not None and self._proc.returncode is not None:
             code = self._proc.returncode
             self.exited, self.exit_code = True, code if code >= 0 else 128 - code
+        self._fire_exit()
 
 
 def _size_ok(cols, rows) -> bool:
@@ -1077,17 +1266,33 @@ def _control_type(raw: bytes):
 class Terminals:
     """The daemon's terminals, their tickets, and the attach sessions.
 
-    `publish` is the daemon bus's: the only record it is ever handed is
-    `terminal_attached` with the terminal's id and the time."""
+    `publish` is the daemon bus's: the records it is ever handed are
+    `terminal_attached` (the terminal's id and the time) and `terminal_read`
+    (ids, a count, a time, whether it was refused).
 
-    def __init__(self, *, clock=time.monotonic, publish=None):
+    `auto_open` (BR-8a) is the owner's "open dev servers automatically"
+    switch, read per chunk of output (`BrowserSettings.auto_open`); None
+    sniffs nothing. `own_ports` gives the daemon's bound listeners, which a
+    dev-server URL may never name (beside `devurl.jarvis_ports()`)."""
+
+    def __init__(self, *, clock=time.monotonic, publish=None, auto_open=None, own_ports=None):
         self._lock = threading.Lock()
         self._terminals: dict[str, Terminal] = {}
         self._tickets: dict[str, tuple[str, float]] = {}
         self._clock = clock
         self._publish = publish
+        self._auto_open = auto_open
+        self._own_ports = own_ports
         self._rc_text: dict[str, bytes] = {}
         self._stopped = False
+
+    def _refused_ports(self) -> set[int]:
+        """Ports a dev-server URL may never name: Jarvis's, default and
+        configured, and this daemon's listeners as bound."""
+        ports = set(devurl.jarvis_ports())
+        if self._own_ports is not None:
+            ports |= {p for p in self._own_ports() if isinstance(p, int) and p > 0}
+        return ports
 
     def _rc_pipe(self, nonce: str, kind: str) -> int:
         """The read end of a pipe holding this terminal's startup file, with
@@ -1124,7 +1329,7 @@ class Terminals:
         return read
 
     def create(self, folder: str, *, project_id: str | None, label: str,
-               cols: int = 80, rows: int = 24) -> Terminal:
+               cols: int = 80, rows: int = 24, readable: bool = True) -> Terminal:
         if not _size_ok(cols, rows):
             raise ValueError("cols must be 2-1000 and rows 1-500")
         shell = resolve_shell()
@@ -1133,7 +1338,7 @@ class Terminals:
         with self._lock:
             if self._stopped:
                 raise TerminalError("Jarvis is stopping")
-            if len(self._terminals) >= TERMINAL_CAP:
+            if sum(t.program is None for t in self._terminals.values()) >= TERMINAL_CAP:
                 raise TerminalError(f"{TERMINAL_CAP} terminals are open; close one first")
             tid = secrets.token_hex(4)
             while tid in self._terminals:
@@ -1145,6 +1350,10 @@ class Terminals:
             try:
                 terminal = Terminal(tid, shell=shell.name, folder=folder, project_id=project_id,
                                     label=label, cols=cols, rows=rows, nonce=nonce, integration=kind)
+                terminal.readable = readable        # before the shell runs, or any reader sees it
+                if self._auto_open is not None:     # before the shell runs: its first bytes count
+                    terminal._sniffer = devurl.DevUrlSniffer(self._refused_ports)
+                    terminal._dev_on = self._auto_open
             except BaseException:
                 if rc_fd is not None:
                     os.close(rc_fd)
@@ -1168,6 +1377,49 @@ class Terminals:
         LOG.info("terminal %s opened in %s", tid, label)
         return terminal
 
+    def create_program(self, argv: list[str], *, folder: str, label: str, program: str,
+                       title: str, project_id: str | None = None, input_ok: bool = False,
+                       on_exit=None, cols: int = 80, rows: int = 24) -> Terminal:
+        """A program terminal (VX-1): one program on a PTY, its output in the
+        ring like a shell's, attached and closed by the same routes.
+
+        **Only `jarvis/v2/vex.py` calls this** (`tests/v2/vex_check.py` greps
+        for it), with an argv from its own tables whose executable it checked
+        against `vex.json` the moment before; no route takes an argv, a
+        program or a path. No startup file, no marks, the program
+        environment (`program_environment`: nothing of the daemon's crosses
+        into a Windows program), and HUP/INT/QUIT/TERM/TSTP at their defaults.
+        `on_exit(terminal)` runs once when the program has ended and its
+        output has been read to the end."""
+        if not _size_ok(cols, rows):
+            raise ValueError("cols must be 2-1000 and rows 1-500")
+        if not argv or not all(isinstance(a, str) for a in argv) or not os.path.isabs(argv[0]):
+            raise TerminalError("a program terminal needs an absolute program")
+        env_prog, signals, _argv0 = _env_probe()
+        prefix = [env_prog, f"--default-signal={_RESET_SIGNALS}", "--"] if env_prog and signals else []
+        with self._lock:
+            if self._stopped:
+                raise TerminalError("Jarvis is stopping")
+            if sum(t.program is not None for t in self._terminals.values()) >= PROGRAM_CAP:
+                raise TerminalError(f"{PROGRAM_CAP} program terminals are open; close one first")
+            tid = secrets.token_hex(4)
+            while tid in self._terminals:
+                tid = secrets.token_hex(4)
+            terminal = Terminal(tid, shell=argv[0], folder=folder, project_id=project_id,
+                                label=label, cols=cols, rows=rows, nonce=secrets.token_hex(16),
+                                program=program, input_ok=input_ok, title=title)
+            # Set before the program starts: one that ends at once still
+            # reaches its hook.
+            terminal.on_exit = on_exit
+            try:
+                terminal.spawn([*prefix, *argv], program_environment())
+            except BaseException:
+                terminal.finish()               # the wake pipe
+                raise
+            self._terminals[tid] = terminal
+        LOG.info("terminal %s opened for %s in %s", tid, program, label)
+        return terminal
+
     def get(self, tid: str) -> Terminal:
         if not isinstance(tid, str) or not _ID.fullmatch(tid):
             _fail(400, "terminal id must be eight lowercase hex characters")
@@ -1181,6 +1433,89 @@ class Terminals:
         with self._lock:
             terminals = list(self._terminals.values())
         return [t.row() for t in terminals]
+
+    # -- what Jarvis can read (WP-F) -----------------------------------------------------
+
+    def install(self) -> None:
+        """Make these the terminals `read_for_tool` reads (the daemon, at start)."""
+        global _installed
+        with _installed_lock:
+            _installed = self
+
+    def uninstall(self) -> None:
+        global _installed
+        with _installed_lock:
+            if _installed is self:
+                _installed = None
+
+    def _resolve(self, spec) -> Terminal:
+        """A terminal from what the HUD shows: its id, its title (or the
+        folder part of it), or its number in the panel's order. Never a path."""
+        with self._lock:
+            terminals = list(self._terminals.values())
+        if not terminals:
+            raise TerminalReadError("no HUD terminal is open")
+        text = " ".join(str(spec if spec is not None else "").split())
+        if not text and len(terminals) == 1:
+            return terminals[0]
+        if _ID.fullmatch(text):
+            found = [t for t in terminals if t.id == text]
+        elif text.isdigit():
+            n = int(text)
+            found = [terminals[n - 1]] if 1 <= n <= len(terminals) else []
+        else:
+            want = text.casefold()
+            found = [t for t in terminals if " ".join(t.title.split()).casefold() == want]
+            if not found:
+                found = [t for t in terminals if " ".join(t.label.split()).casefold() == want]
+        if len(found) == 1:
+            return found[0]
+        listed = "; ".join(f"{i}. {t.title} (id {t.id})" for i, t in enumerate(terminals, 1))
+        named = untrusted.one_line(text, 60) or "nothing"
+        if found:
+            raise TerminalReadError(f"{named} names more than one terminal; use an id. Open: {listed}")
+        raise TerminalReadError(f"no terminal is called {named}. Open: {listed}")
+
+    def _read_published(self, terminal: Terminal, lines: int, refused: bool) -> None:
+        """`terminal_read`, so the HUD can say "Jarvis read 200 lines · 15:42"
+        on that terminal. The id, a count, the time and whether it was
+        refused: never output, a command, or why."""
+        LOG.info("terminal %s read by Jarvis (%d lines%s)", terminal.id, lines,
+                 ", refused" if refused else "")
+        if self._publish is None:
+            return
+        try:
+            self._publish({"kind": "terminal_read",
+                           "data": {"terminal_id": terminal.id, "lines": int(lines),
+                                    "at": utcnow(), "refused": bool(refused)}})
+        except Exception as exc:  # noqa: BLE001 — a bus problem never fails a read
+            LOG.warning("terminal %s: read not published (%s)", terminal.id, type(exc).__name__)
+
+    def read(self, spec, lines: int = terminal_guard.DEFAULT_LINES) -> "ToolRead":
+        terminal = self._resolve(spec)
+        if not terminal.readable:
+            self._read_published(terminal, 0, True)
+            return ToolRead(terminal.id, terminal.title, refused=READ_OFF)
+        history = terminal.history()
+        if not history.readable:
+            self._read_published(terminal, 0, True)
+            return ToolRead(terminal.id, terminal.title, refused=READ_OFF)
+        values = _secret_values(terminal.folder)
+        verdict = terminal_guard.judge(history.lead + history.data, history.start - len(history.lead),
+                                       lines=lines, alt=history.alt, rows=terminal.rows,
+                                       cols=terminal.cols, spans=history.spans,
+                                       spans_from=history.spans_from,
+                                       integrated=history.integrated, values=values)
+        if not terminal.readable:
+            # The owner turned reading off while this read was being judged.
+            self._read_published(terminal, 0, True)
+            return ToolRead(terminal.id, terminal.title, refused=READ_OFF)
+        self._read_published(terminal, verdict.covered, verdict.refused)
+        if verdict.refused:
+            return ToolRead(terminal.id, terminal.title, refused=terminal_guard.REFUSAL,
+                            lines=verdict.covered)
+        return ToolRead(terminal.id, terminal.title, text=verdict.text, lines=verdict.covered,
+                        withheld=verdict.withheld, cut=verdict.cut, shortened=verdict.shortened)
 
     # -- tickets ---------------------------------------------------------------------
 
@@ -1243,7 +1578,10 @@ class Terminals:
                 if not terminal.holds(sock):
                     break
                 if kind == ws.BINARY:
-                    if latched and data != CTRL_C:
+                    if not terminal.input_ok and data != CTRL_C:
+                        _send(sock, "input_refused", bytes=len(data),
+                              reason="this program takes no typed input; Ctrl-C or close stops it")
+                    elif latched and data != CTRL_C:
                         _send(sock, "input_dropped", bytes=len(data), latched=True,
                               reason=_LATCHED)
                     elif not terminal.queue_input(data):
@@ -1310,6 +1648,119 @@ class Terminals:
             LOG.info("terminal %s ended with Jarvis", terminal.id)
 
 
+# -- read_for_tool (WP-F) -----------------------------------------------------------------
+
+READ_OFF = "the owner has turned off reading for this terminal"
+
+
+class TerminalReadError(Exception):
+    """A read that names no terminal this daemon has, in a sentence."""
+
+
+@dataclass(frozen=True)
+class ToolRead:
+    """One read, for the tool: the lines (plain text, not yet fenced), a
+    refusal sentence, or — when no such terminal is open — an error sentence
+    (and no event). `lines` is how many lines the read covered."""
+    terminal_id: str
+    title: str
+    refused: str | None = None
+    error: str | None = None
+    text: str = ""
+    lines: int = 0
+    withheld: int = 0
+    cut: int = 0
+    shortened: int = 0
+
+
+_installed: Terminals | None = None
+_installed_lock = threading.Lock()
+
+
+ENV_FILE_CAP = 100_000
+
+
+def _env_values(path: str) -> set[str]:
+    """The values one env file defines, read so nothing planted there can
+    hang a read (2026-10-10 review: a FIFO named `.env` did): the target
+    opened non-blocking and without following a final symlink, a regular
+    file only, at most ENV_FILE_CAP bytes. Values only; never logged."""
+    try:
+        fd = os.open(os.path.realpath(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return set()
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return set()
+        chunks, size = [], 0
+        while size < ENV_FILE_CAP:
+            chunk = os.read(fd, ENV_FILE_CAP - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    except OSError:
+        return set()
+    finally:
+        os.close(fd)
+    from jarvis.tools import secrets as v1_secrets
+    values = set()
+    for line in b"".join(chunks).decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        value = line.partition("=")[2].strip().strip("'\"")
+        if len(value) >= v1_secrets.MIN_SECRET_LEN:
+            values.add(value)
+    return values
+
+
+def _folder_env_files(directory: Path) -> list[str]:
+    """Every credential env file in one folder: `secrets.env_files_in`, the
+    owner's `.env*` rule (`.env`, `.env.local`, every `.env.*` but a name
+    ending `.example`; ENV-1) — one definition, not a copy."""
+    from jarvis.tools import secrets as v1_secrets
+    return [str(path) for path in v1_secrets.env_files_in(directory)]
+
+
+def _secret_values(folder: str) -> list[str]:
+    """Rule 1's values: everything `secrets.secret_values()` reaches, plus
+    every credential env file in the terminal's folder and its parents up to
+    home."""
+    from jarvis.tools import secrets as v1_secrets
+    values = set(v1_secrets.secret_values())
+    try:
+        here, home = Path(folder).resolve(), Path.home().resolve()
+        chain = []
+        for directory in [here, *here.parents][:12]:
+            chain.append(directory)
+            if directory == home:
+                break
+    except (OSError, RuntimeError, ValueError):
+        chain = []
+    for directory in chain:
+        for path in _folder_env_files(directory):
+            values |= _env_values(path)
+    return sorted(values, key=len, reverse=True)
+
+
+def read_for_tool(terminal: str, lines: int = terminal_guard.DEFAULT_LINES) -> ToolRead:
+    """The `terminal_read` tool's one way in, and it only reads.
+
+    `terminal` is what the HUD shows (an id, a title, a number); `lines` is
+    clamped to 1–1000. When no such terminal is open the answer carries an
+    `error` sentence. Never writes to, resizes, focuses, attaches to, opens
+    or closes a terminal."""
+    with _installed_lock:
+        terminals = _installed
+    if terminals is None:
+        return ToolRead("", "", error="no HUD terminals are running here")
+    try:
+        return terminals.read(terminal, lines)
+    except TerminalReadError as exc:
+        return ToolRead("", "", error=str(exc))
+
+
 # -- routes (owner-only, the HUD listener) -----------------------------------------------
 
 def _strict_host(handler, daemon) -> None:
@@ -1361,16 +1812,21 @@ def route(handler, daemon, parts, query):
         if method == "GET":
             return 200, terminals.listing()
         if method == "POST":
-            body = _object(handler._body(), ("in", "cols", "rows"), ("in",))
+            body = _object(handler._body(), ("in", "cols", "rows", "readable"), ("in",))
             cols, rows = body.get("cols", 80), body.get("rows", 24)
             if not _size_ok(cols, rows):
                 _fail(400, "cols must be an integer 2-1000 and rows 1-500")
+            # The "Jarvis can read" switch from the first byte (WP-G2: a split's
+            # copy of a terminal Jarvis may not read is made with it off).
+            readable = body.get("readable", True)
+            if not isinstance(readable, bool):
+                _fail(400, "readable must be a boolean")
             folder, project_id, label = resolve_folder(daemon, body["in"])
             if not os.path.isabs(folder) or not Path(folder).is_dir():
                 _fail(409, f"the folder {folder} does not exist any more")
             try:
                 terminal = terminals.create(folder, project_id=project_id, label=label,
-                                            cols=cols, rows=rows)
+                                            cols=cols, rows=rows, readable=readable)
             except TerminalError as exc:
                 _fail(409, str(exc))
             return 201, terminal.row()

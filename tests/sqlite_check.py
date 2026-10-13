@@ -11,13 +11,16 @@ Run:  .venv/bin/python tests/sqlite_check.py
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import config, runtime
 from jarvis import tools
 from jarvis.tools.sqlite import query_sqlite
 
@@ -57,11 +60,39 @@ def main() -> int:
         protected = query_sqlite(str(Path(tmp) / "google_token.json"), "SELECT 1")
         assert "refus" in protected.lower() or "credential" in protected.lower(), protected
         assert "no database file" in query_sqlite(str(Path(tmp) / "nope.db"), "SELECT 1")
+        # ENV-1: a credential env file is refused by name, and through a
+        # symlink under an innocent name (`secrets.is_credential`).
+        (Path(tmp) / ".env.production").write_text("API_KEY=FAKE-SQLITE-ENV1\n")
+        (Path(tmp) / "data.db").symlink_to(".env.production")
+        for name in (".env.production", "data.db"):
+            refused = query_sqlite(str(Path(tmp) / name), "SELECT 1")
+            assert "credential" in refused.lower() and "FAKE-SQLITE" not in refused, (name, refused)
 
-    print("ok  sqlite: read-only enforced by engine, caps, protected names, dispatch")
+        # The HUD Browser's History is a SQLite file in a credential folder
+        # (review of PR #69): refused as written and through a symlink, with
+        # a temp BROWSER_DIR and HOME, never the owner's.
+        profile = Path(tmp) / "browser" / "profiles" / "p-00000000" / "Default"
+        profile.mkdir(parents=True)
+        history = sqlite3.connect(profile / "History")
+        history.execute("CREATE TABLE urls (url TEXT)")
+        history.execute("INSERT INTO urls VALUES ('https://bank.example/BROWSERSECRET')")
+        history.commit()
+        history.close()
+        (Path(tmp) / "visits.db").symlink_to(profile / "History")
+        with patch.dict(os.environ, {"HOME": str(Path(tmp) / "home")}), \
+                patch.object(config, "BROWSER_DIR", Path(tmp) / "browser"):
+            for target in (profile / "History", Path(tmp) / "visits.db"):
+                refused = query_sqlite(str(target), "SELECT url FROM urls")
+                assert "credential folder" in refused and "BROWSERSECRET" not in refused, (target, refused)
+            assert "300" in query_sqlite(str(db), "SELECT count(*) FROM rules")
+
+    print("ok  sqlite: read-only enforced by engine, caps, protected names, credential folders, dispatch")
     print("\nall sqlite checks passed")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"query_sqlite"}):
+        sys.exit(main())

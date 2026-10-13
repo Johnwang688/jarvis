@@ -53,7 +53,9 @@ from jarvis import pocket, voice  # noqa: E402
 REAL_INSTALLED = importlib.util.find_spec("pocket_tts") is not None
 
 RATE = 16000
-PORT = 8442
+# Set by route_checks() once the server has bound port 0: a fixed port failed
+# whenever another run held it.
+PORT = 0
 
 
 # ---- the fake library --------------------------------------------------------
@@ -556,7 +558,10 @@ def route_checks() -> None:
     """GET /voices and POST /voice against a real threaded server."""
     from jarvis.face import server
 
-    srv = server.create_server(port=PORT)
+    global PORT
+    srv = server.create_server(port=0)
+    PORT = srv.server_address[1]
+    assert PORT not in (8402, 8403, 8405), "never the live ports"
     sse: queue.Queue = queue.Queue(maxsize=50)
     with server._subs_lock:
         server._subscribers.append(sse)

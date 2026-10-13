@@ -2,17 +2,27 @@
 // pane (its view strip, its context in a split, and whatever the caller puts
 // on the right — the profile select, a pinned project), the edges between
 // panes, and the bottom panel with its own edge. lib/workspace.ts decides
-// every number; App decides what each view shows.
+// every number (`gridTemplate`, `slotWidths`); App decides what each view
+// shows.
 //
 // A pane is mounted the first time a preset draws it and is then **hidden,
 // never unmounted**, as the side panes are: an unsaved edit or a loaded
-// preview in pane 3 survives switching to one pane and back.
+// preview in pane 3 survives switching to one pane and back. Up to eight
+// panes (WP-G1): a pane is known by its id (`pane-<id>`, its React key) and
+// carries its slot, the number the owner reads, as `data-slot`.
 //
-// In the single layout — the default — pane 1 is the only pane mounted and
-// its header is the old tab row exactly: the five view buttons and, on the
-// right, the profile select. The split-only chrome (the focus line, the
-// context, the compact view menu) is drawn only when there is more than one
-// pane, so the default window renders as it did.
+// In the single layout — the default — one pane is mounted and its header is
+// the old tab row: the view buttons, the split button (WP-G2: that is how one
+// pane becomes two) and, on the right, the profile select. The split-only
+// chrome (the focus line, the context, the compact view menu, the ×) is drawn
+// only when there is more than one pane.
+//
+// Split and × (WP-G2): the split button adds a copy of the pane after it (App
+// decides what the copy shows and whether one fits); × closes exactly that
+// pane, asking first in an inline strip when App says it holds something that
+// cannot wait (an unsaved edit, a compose row's unsent words). A × clicked
+// within CLOSE_GUARD_MS of a close, or as a double-click's second click,
+// closes nothing. A pane neither drawn nor hidden by ⊞ is unmounted.
 //
 // Several chats (WP-B): any pane may show chat, each its own conversation.
 // The selected chat's pane (decisions W-6: the chat pane most recently
@@ -20,15 +30,15 @@
 // split, an accent down its header's edge and a mic mark. A view switch goes through the caller (`onView`), which refuses
 // to switch a File pane holding an unsaved edit away.
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
 import {
-  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_VIEWS, SHAPES, columnWidths, maxPanelHeight, moveColEdge,
-  type PaneNo, type PaneSpec, type View,
+  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, VIEW_LABEL, gridTemplate, maxPanelHeight, moveColEdge,
+  rowCount, slotOf, slotWidths, uneven, type PaneNo, type PaneSpec, type View,
 } from "../lib/workspace";
 import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
-import { Separator, type LayoutControl } from "./Layout";
+import { AreaIcon, Separator, type LayoutControl } from "./Layout";
 import { Panel } from "./Panel";
 import { TerminalLinkMenu, TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
 
@@ -41,15 +51,16 @@ import { TerminalLinkMenu, TerminalPane, TerminalToasts, terminals, useTerminals
  * freeze with it (review of PR #32).
  */
 function useTerminalBridge(v: LayoutControl, place: Map<string, number>, terminalIn?: () => InSpec,
-                           openPreview?: (url: string) => boolean) {
-  const latest = useRef({ v, terminalIn, openPreview });
-  latest.current = { v, terminalIn, openPreview };
+                           openBrowser?: (url: string) => boolean, slots?: Map<number, number>) {
+  const latest = useRef({ v, terminalIn, openBrowser });
+  latest.current = { v, terminalIn, openBrowser };
   useEffect(() => {
-    // A terminal link's "Open in Preview" (WP-E): App's click rule decides the pane.
-    terminals.openPreview = (url) => latest.current.openPreview?.(url) ?? false;
+    // A terminal link's "Open in Browser" (WP-E): App's click rule decides the pane.
+    terminals.openBrowser = (url) => latest.current.openBrowser?.(url) ?? false;
     terminals.defaultIn = () => latest.current.terminalIn?.() ?? "home";
     terminals.setPaneTerminal = (pane, id) => latest.current.v.setTerminal(pane, id);
     terminals.forgetTerminal = (id) => latest.current.v.forgetTerminal(id);
+    terminals.renameTerminal = (from, to) => latest.current.v.renameTerminal(from, to);
     terminals.focusPane = (pane) => {
       latest.current.v.focus(pane);
       requestAnimationFrame(() =>
@@ -61,11 +72,18 @@ function useTerminalBridge(v: LayoutControl, place: Map<string, number>, termina
     void terminals.refresh();
   }, []);
   const key = [...place].map(([id, n]) => `${id}:${n}`).join(",");
+  // "in pane N" names the slot, never the id (plan G-1).
+  const slotKey = [...(slots ?? [])].map(([n, s]) => `${n}@${s}`).join(",");
   useEffect(() => terminals.setZoom(v.zoom), [v.zoom]);
   useEffect(() => terminals.setPanelOpen(v.fit.panel.open), [v.fit.panel.open]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => terminals.setPlace(place), [key]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => terminals.setSlots(slots ?? new Map()), [slotKey]);
 }
+
+/** A click on × this soon after a close closes nothing: the second click of a double-click lands on whatever × moved under the pointer. */
+export const CLOSE_GUARD_MS = 400;
 
 /** Under this, a split pane's File and Diff views hide their tree behind a toggle. */
 export const NARROW_W = 560;
@@ -74,6 +92,8 @@ export const COMPACT_W = 520;
 
 export interface PaneInfo {
   pane: PaneNo;
+  /** Where the owner sees it: 1-based, reading order (lib/workspace `slotOf`). */
+  slot: number;
   /** Drawn by this render (a mounted pane may be hidden). */
   drawn: boolean;
   /** More than one pane is drawn. */
@@ -85,15 +105,6 @@ export interface PaneInfo {
   /** A split pane too narrow for the five view words. */
   compact: boolean;
   focused: boolean;
-}
-
-/** Which column a slot sits in, read off the shape's grid areas. */
-function slotColumn(areas: readonly string[], slot: number): number {
-  for (const row of areas) {
-    const i = row.split(" ").indexOf(`s${slot}`);
-    if (i >= 0) return i;
-  }
-  return 0;
 }
 
 export function Workspace(props: {
@@ -109,12 +120,34 @@ export function Workspace(props: {
   selectedPane: PaneNo | null;
   /** Show `view` in `pane` — the strip's buttons and its menu. */
   onView: (pane: PaneNo, view: View) => void;
+  /**
+   * Whether the strip offers the VEX view in this pane (VX-2): only when the
+   * pane's project is a VEX project (lib/vex.ts `offersVex`). A pane already
+   * showing it keeps the button, so the owner can see where they are.
+   */
+  offersVex?: (spec: PaneSpec, info: PaneInfo) => boolean;
   /** Where `+` opens a terminal: the focused pane's folder, as an id (lib/terminal.ts, terminalSpecFor). */
   terminalIn?: () => InSpec;
-  /** A terminal link's "Open in Preview": load it in a Preview pane (WP-E); false when it did not. */
-  openPreview?: (url: string) => boolean;
+  /** A terminal link's "Open in Browser": load it in a Browser pane (WP-E); false when it did not. */
+  openBrowser?: (url: string) => boolean;
   /** `+ ▾`'s choices besides Home. */
   projects?: Project[];
+  /**
+   * The split button (WP-G2): whether pane `pane` can be split now, and its
+   * title — what it does, or why not (lib/workspace `splitTitle`). Without
+   * it there is no button.
+   */
+  splitFor?: (pane: PaneNo) => { ok: boolean; title: string };
+  onSplit?: (pane: PaneNo) => void;
+  /** × first asks this (an unsaved edit, unsent words): the question, or null to close at once. */
+  closeQuestion?: (pane: PaneNo) => string | null;
+  /**
+   * For a question about unsaved edits (ED-2): saving them, true once all are
+   * saved — the question then offers Save / Don't save / Cancel, as closing
+   * the last tab on one does. Null for a question with nothing to save.
+   */
+  closeSave?: (pane: PaneNo) => (() => Promise<boolean>) | null;
+  onClose?: (pane: PaneNo) => void;
 }) {
   const v = props.view;
   const { fit, ws } = v;
@@ -122,7 +155,8 @@ export function Workspace(props: {
   // One terminal is drawn in one place at a time (W-1): the first drawn pane
   // holding it, else the panel.
   const place = placeTerminals(ws.panes, fit.panes);
-  useTerminalBridge(v, place, props.terminalIn, props.openPreview);
+  const slots = new Map<number, number>(PANE_NOS.map((n) => [n, slotOf(ws, n)]));
+  useTerminalBridge(v, place, props.terminalIn, props.openBrowser, slots);
   const mgr = useTerminals();
   /** A terminal pane's header: the title its program set (text, capped), else its own. */
   const terminalContext = (spec: PaneSpec) => {
@@ -130,20 +164,63 @@ export function Workspace(props: {
     if (!id) return "terminal";
     return mgr.sessions.get(id)?.title || mgr.row(id)?.title || `terminal ${id}`;
   };
-  // Every pane any render has drawn stays mounted (hidden when not drawn).
-  const ever = useRef<Set<PaneNo>>(new Set<PaneNo>([1]));
+  // Every pane any render has drawn stays mounted (hidden when not drawn),
+  // until it is closed: a pane neither drawn nor hidden by ⊞ is unmounted, and
+  // a split that reuses its id later mounts it fresh (its incarnation).
+  const ever = useRef<Set<PaneNo>>(new Set<PaneNo>());
   for (const n of fit.panes) ever.current.add(n);
+  for (const n of Array.from(ever.current)) {
+    if (!ws.order.includes(n) && !ws.kept.includes(n) && !fit.panes.includes(n)) ever.current.delete(n);
+  }
+  // × that asks first (an unsaved edit, unsent words): which pane, and what it asks.
+  const [asking, setAsking] = useState<{ pane: PaneNo; question: string; save: (() => Promise<boolean>) | null } | null>(null);
+  // The last close: a click on × this soon after one (a double-click, the
+  // second click landing on the × that moved under the pointer) closes nothing.
+  const lastClose = useRef(0);
+  const closeNow = (n: PaneNo) => {
+    lastClose.current = Date.now();
+    setAsking(null);
+    props.onClose?.(n);
+  };
+  const onCloseClick = (n: PaneNo, e: React.MouseEvent) => {
+    if (props.blocked || e.detail > 1 || Date.now() - lastClose.current < CLOSE_GUARD_MS) return;
+    const question = props.closeQuestion?.(n) ?? null;
+    if (question) {
+      setAsking({ pane: n, question, save: props.closeSave?.(n) ?? null });
+      return;
+    }
+    closeNow(n);
+  };
+  // The question takes focus on Keep: Enter there never discards anything.
+  useEffect(() => {
+    if (!asking) return;
+    document.querySelector<HTMLElement>(`[data-testid="pane-${asking.pane}-close-keep"]`)?.focus({ preventScroll: true });
+  }, [asking]);
+  // A question about what the pane no longer holds is not left standing
+  // (review of PR #47): the pane switched to a File with an edit, the words
+  // were sent — "Discard and close" must never answer a question nobody asked.
+  const question = asking ? props.closeQuestion?.(asking.pane) ?? null : null;
+  useEffect(() => {
+    if (asking && question !== asking.question) setAsking(null);
+  }, [asking, question]);
+  /** Split and × are buttons: Space and Enter press them and go no further; a held Enter presses once. */
+  const buttonKeys = {
+    onKeyDown: (e: React.KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.repeat) e.preventDefault();
+    },
+    onKeyUp: (e: React.KeyboardEvent) => e.stopPropagation(),
+  };
 
-  const shape = SHAPES[fit.drawn];
   const split = fit.panes.length > 1;
-  const fracs = columnWidths(fit.cols, 1);
-  const colPx = columnWidths(fit.cols, fit.width);
-  const areas = shape.areas
-    .map((row) => `"${row.replace(/s(\d)/g, (_, i) => `p${fit.panes[Number(i) - 1]}`)}"`)
+  const tpl = gridTemplate(fit.drawn, fit);
+  const widths = slotWidths(fit);
+  const areas = tpl.areas
+    .map((row) => `"${row.replace(/s(\d+)/g, (_, i) => `p${fit.panes[Number(i) - 1]}`)}"`)
     .join(" ");
   const gridStyle: React.CSSProperties = {
-    gridTemplateColumns: fracs.map((f) => `minmax(0, ${f}fr)`).join(" "),
-    gridTemplateRows: shape.rows === 2 ? `minmax(0, ${fit.row}fr) minmax(0, ${1 - fit.row}fr)` : "minmax(0, 1fr)",
+    gridTemplateColumns: tpl.columns.map((f) => `minmax(0, ${f}fr)`).join(" "),
+    gridTemplateRows: tpl.rows.map((f) => `minmax(0, ${f}fr)`).join(" "),
     gridTemplateAreas: areas,
   };
   // The room a drag measures against: what is on screen, else what was fitted.
@@ -151,16 +228,32 @@ export function Workspace(props: {
   const roomH = () => grid.current?.offsetHeight || fit.height;
 
   const info = (n: PaneNo): PaneInfo => {
-    const slot = fit.panes.indexOf(n);
-    const drawn = slot >= 0;
-    const width = drawn ? (split ? colPx[slotColumn(shape.areas, slot + 1)] : fit.width) : NaN;
+    const at = fit.panes.indexOf(n);
+    const drawn = at >= 0;
+    const width = drawn ? (split ? widths[at] : fit.width) : NaN;
     return {
-      pane: n, drawn, split, width,
+      pane: n, slot: slotOf(ws, n), drawn, split, width,
       narrow: split && width < NARROW_W,
       compact: split && width < COMPACT_W,
       focused: ws.focused === n,
     };
   };
+
+  /** A column edge: its key in `Split`, the edges it moves among, and where it is drawn. */
+  const twoRows = rowCount(fit.drawn) === 2;
+  const ownBottom = uneven(fit.drawn);
+  const colEdges: { testid: string; part: "cols" | "bottom"; edges: number[]; i: number; style: React.CSSProperties }[] = [
+    ...fit.cols.map((c, i) => ({
+      testid: `split-col-${i + 1}`, part: "cols" as const, edges: fit.cols, i,
+      // 3 over 2 and 4 over 3: the top row's edges span the top row only.
+      style: ownBottom ? { left: `calc(${c * 100}% - 3px)`, bottom: "auto", height: `${fit.row * 100}%` }
+        : { left: `calc(${c * 100}% - 3px)` },
+    })),
+    ...(ownBottom ? fit.bottom : []).map((c, i) => ({
+      testid: `split-colb-${i + 1}`, part: "bottom" as const, edges: fit.bottom, i,
+      style: { left: `calc(${c * 100}% - 3px)`, top: `${fit.row * 100}%` },
+    })),
+  ];
 
   const panelMax = maxPanelHeight(fit, v.availableH);
 
@@ -175,44 +268,49 @@ export function Workspace(props: {
         className={split ? "split" : undefined}
         style={gridStyle}
       >
-        {([1, 2, 3, 4] as PaneNo[]).filter((n) => ever.current.has(n)).map((n) => {
+        {PANE_NOS.filter((n) => ever.current.has(n)).map((n) => {
           const spec = ws.panes[n - 1];
           const at = info(n);
           const ctx = at.split ? (spec.view === "terminal" ? terminalContext(spec) : props.context(spec, at)) : "";
+          const views = PANE_VIEWS.filter((view) =>
+            view !== "vex" || spec.view === "vex" || (at.drawn && !!props.offersVex?.(spec, at)));
           return (
             <section
-              key={n}
+              // Keyed by id and incarnation: a pane keeps its id for life, and
+              // one closed and reused later (WP-G2) mounts fresh.
+              key={`${n}.${v.incarnation[n] ?? 0}`}
               className={
                 "wpane" + (at.split && at.focused ? " focused" : "")
                 + (at.split && spec.view === "chat" && n === props.selectedPane ? " selected" : "")
               }
               data-testid={`pane-${n}`}
+              data-slot={at.slot}
               data-view={spec.view}
               data-focused={at.focused ? "true" : "false"}
               data-selected={spec.view === "chat" && n === props.selectedPane ? "true" : undefined}
-              aria-label={`Pane ${n}: ${spec.view}`}
+              aria-label={`Pane ${at.slot}: ${VIEW_LABEL[spec.view]}`}
               tabIndex={-1}
               style={at.drawn ? { gridArea: `p${n}` } : { display: "none" }}
               onPointerDownCapture={() => v.focus(n)}
               onFocusCapture={() => v.focus(n)}
             >
-              <div className="tabs" id={n === 1 ? "tabs" : undefined}>
+              <div className="tabs" id={at.drawn && at.slot === 1 ? "tabs" : undefined}>
                 <div className="viewstrip" data-testid={`pane-${n}-view`}>
                   {at.compact ? (
                     <select
                       data-testid={`pane-${n}-view-select`}
-                      aria-label={`What pane ${n} shows`}
+                      aria-label={`What pane ${at.slot} shows`}
                       value={spec.view}
                       onChange={(e) => props.onView(n, e.target.value as View)}
                       onKeyDown={(e) => e.stopPropagation()}
                       onKeyUp={(e) => e.stopPropagation()}
                     >
-                      {PANE_VIEWS.map((view) => (
-                        <option key={view} value={view}>{view}</option>
+                      {views.map((view) => (
+                        <option key={view} value={view}>{VIEW_LABEL[view]}</option>
                       ))}
                     </select>
                   ) : (
-                    PANE_VIEWS.map((view) => (
+                    views.map((view) => (
                       <button
                         type="button"
                         key={view}
@@ -220,11 +318,30 @@ export function Workspace(props: {
                         className={spec.view === view ? "on" : ""}
                         onClick={() => props.onView(n, view)}
                       >
-                        {view}
+                        {VIEW_LABEL[view]}
                       </button>
                     ))
                   )}
                 </div>
+                {props.splitFor ? (() => {
+                  const sp = props.splitFor(n);
+                  return (
+                    <button
+                      type="button"
+                      className="tb-icon panesplit"
+                      data-testid={`pane-${n}-split`}
+                      aria-label="Split pane"
+                      title={sp.title}
+                      disabled={props.blocked || !sp.ok}
+                      onClick={() => {
+                        if (!props.blocked && sp.ok) props.onSplit?.(n);
+                      }}
+                      {...buttonKeys}
+                    >
+                      <AreaIcon area="split" open={false} />
+                    </button>
+                  );
+                })() : null}
                 {at.split && spec.view === "chat" && n === props.selectedPane ? (
                   <span className="micmark" data-testid={`pane-${n}-mic`} role="img" aria-label="Selected chat"
                         title="The selected chat: what you say, the orb, and files dropped outside a chat go here">
@@ -237,7 +354,59 @@ export function Workspace(props: {
                 ) : null}
                 {ctx ? <span className="panectx" title={ctx}>{ctx}</span> : null}
                 <div className="paneextras">{props.extras(spec, at)}</div>
+                {split && at.drawn && props.onClose ? (
+                  <button
+                    type="button"
+                    className="tb-icon paneclose"
+                    data-testid={`pane-${n}-close`}
+                    aria-label={`Close pane ${at.slot}`}
+                    title={spec.view === "chat"
+                      ? "Close this pane. The thread keeps running and stays in the sidebar"
+                      : "Close this pane"}
+                    disabled={props.blocked}
+                    onClick={(e) => onCloseClick(n, e)}
+                    {...buttonKeys}
+                  >
+                    ×
+                  </button>
+                ) : null}
               </div>
+              {asking && asking.pane === n ? (
+                <div className="closeask" data-testid={`pane-${n}-close-ask`} role="group" aria-label="Close this pane?">
+                  <span>{asking.question}</span>
+                  {asking.save ? (
+                    <button type="button" data-testid={`pane-${n}-close-save`} disabled={props.blocked}
+                            onClick={() => {
+                              const save = asking.save;
+                              if (props.blocked || !save) return;
+                              // Closed only once every edit is on disk; a
+                              // conflict stays in the pane, which stays open.
+                              void save().then((ok) => {
+                                if (ok) closeNow(n);
+                                else setAsking(null);
+                              });
+                            }}
+                            {...buttonKeys}>
+                      Save
+                    </button>
+                  ) : null}
+                  <button type="button" data-testid={`pane-${n}-close-discard`} disabled={props.blocked}
+                          onClick={() => {
+                            // Asked again at the click: only the question shown is answered.
+                            if (props.blocked || (props.closeQuestion?.(n) ?? null) !== asking.question) return;
+                            closeNow(n);
+                          }}
+                          {...buttonKeys}>
+                    {asking.save ? "Don't save" : "Discard and close"}
+                  </button>
+                  {/* Not disabled under a card (the veil makes it inert): a disabled button drops
+                      focus to the page before the card can record it, so focus could not come back. */}
+                  <button type="button" data-testid={`pane-${n}-close-keep`}
+                          onClick={() => setAsking(null)} {...buttonKeys}>
+                    {asking.save ? "Cancel" : "Keep"}
+                  </button>
+                </div>
+              ) : null}
               {spec.view === "terminal" ? (
                 <TerminalPane pane={n} terminalId={spec.terminalId} drawn={at.drawn} />
               ) : (
@@ -247,14 +416,15 @@ export function Workspace(props: {
           );
         })}
 
-        {fit.cols.map((c, i) => {
+        {colEdges.map(({ testid, part, edges, i, style }) => {
+          const c = edges[i];
           const w = Number.isFinite(fit.width) ? fit.width : 0;
-          const lo = (i === 0 ? 0 : fit.cols[i - 1] * w) + PANE_MIN_W;
-          const hi = (i === fit.cols.length - 1 ? w : fit.cols[i + 1] * w) - PANE_MIN_W;
+          const lo = (i === 0 ? 0 : edges[i - 1] * w) + PANE_MIN_W;
+          const hi = (i === edges.length - 1 ? w : edges[i + 1] * w) - PANE_MIN_W;
           return (
             <Separator
-              key={`col-${i}`}
-              testid={`split-col-${i + 1}`}
+              key={testid}
+              testid={testid}
               className="wsplit col"
               orientation="vertical"
               label="Resize the panes"
@@ -264,25 +434,25 @@ export function Workspace(props: {
               max={Math.max(lo, hi)}
               zoom={v.zoom}
               blocked={props.blocked}
-              style={{ left: `calc(${c * 100}% - 3px)` }}
+              style={style}
               onDrag={(start, delta) => {
                 const room = roomW();
-                v.setSplit(fit.drawn, { cols: moveColEdge(fit.cols, i, (start + delta) / room, room) });
+                v.setSplit(fit.drawn, { [part]: moveColEdge(edges, i, (start + delta) / room, room) });
               }}
               onKey={(key, shift) => {
                 const room = roomW();
-                const min = (i === 0 ? 0 : fit.cols[i - 1] * room) + PANE_MIN_W;
-                const max = (i === fit.cols.length - 1 ? room : fit.cols[i + 1] * room) - PANE_MIN_W;
+                const min = (i === 0 ? 0 : edges[i - 1] * room) + PANE_MIN_W;
+                const max = (i === edges.length - 1 ? room : edges[i + 1] * room) - PANE_MIN_W;
                 const next = keyStep("x", c * room, key, shift, min, Math.max(min, max));
                 if (next === null) return false;
-                v.setSplit(fit.drawn, { cols: moveColEdge(fit.cols, i, next / room, room) });
+                v.setSplit(fit.drawn, { [part]: moveColEdge(edges, i, next / room, room) });
                 return true;
               }}
               onReset={() => v.equalSplit(fit.drawn)}
             />
           );
         })}
-        {shape.rows === 2 ? (
+        {twoRows ? (
           <Separator
             testid="split-row"
             className="wsplit row"

@@ -22,11 +22,14 @@ every move below names its exact path.
 
 **Only the owner, in the HUD (B11).** The routes that archive, restore or
 delete are owner-only: they answer only on the HUD's own listener
-(`FACE_PORT`) and only to a request that carries the HUD's `Origin`. That is
-a speed bump, not a boundary — the boundary is that **no tool reaches these
+(`FACE_PORT`), and only to the HUD's own page — a request carrying the HUD's
+`Origin`, or a plain read (GET/HEAD) that carries no `Origin` and that the
+browser marked `Sec-Fetch-Site: same-origin` (`is_owner`, below). That is a
+speed bump, not a boundary — the boundary is that **no tool reaches these
 routes** (`tests/v2/archive_check.py` asserts it), and a shell command an
 agent might use to call one goes through the permission gate like every other
-command, the same footing as `/approvals`.
+command, the same footing as `/approvals` (owner-only through this gate too,
+since BR-0).
 """
 from __future__ import annotations
 
@@ -115,19 +118,56 @@ def refuse_archived_project(project: Project) -> None:
 # -- the owner-only gate ----------------------------------------------------------
 
 def is_owner(handler, daemon) -> bool:
-    """The owner-only test without the 403: the HUD's listener and its Origin.
+    """The owner-only test without the 403: the HUD's listener, and the HUD's
+    own page asking.
+
+    A request is the owner's only when it arrives on the HUD listener
+    (`daemon.face_port`; never the API listener every tool's HTTP client
+    uses, never the preview listener) and either
+
+      (a) carries `Origin: http://<Host>` — what a browser sends on every
+          POST, PATCH, PUT and DELETE and on a WebSocket handshake; or
+      (b) is a plain read — GET or HEAD, not a WebSocket upgrade — with **no**
+          `Origin` header at all, a loopback `Host`, and `Sec-Fetch-Site:
+          same-origin`. Chromium sends no Origin on a same-origin GET, so
+          until 2026-10-11 the HUD's own `GET /terminals` (and every other
+          owner-only read) was refused here and the terminal listing never
+          loaded.
+
+    `Sec-Fetch-Site` is a forbidden header name: page script cannot set or
+    change it. A page on any other origin — the Preview listener, the
+    workshop, any site — is `same-site` or `cross-site`, never
+    `same-origin`, and its cross-origin fetch carries its own `Origin`
+    besides, which (a) refuses. A write with no Origin is never the owner's,
+    whatever else it says, and neither is `Origin: null` (an opaque,
+    sandboxed frame). DNS rebinding is refused on two grounds, measured in
+    Chromium 149: a rebound name (`http://evil.example:<port>`) is not a
+    potentially trustworthy URL, so the browser sends it no fetch metadata
+    at all and (b) never matches; and its `Host` is not loopback, which
+    `hud_api.check_origin`'s strict Host test refuses on every request before
+    any route runs ("untrusted Host"; `terminals._strict_host` again for the
+    terminals, and (b)'s own loopback test here) — keep all three. A program
+    running as the owner can send any of these headers; this was never a
+    boundary against one (module note).
 
     `PATCH /projects` uses it to tag `project_updated` with `by: "owner" |
     "api"` (B1, decisions D4): an owner rename moves the Discord channel at
     once, anything else asks through the approval gate first."""
     port = handler.server.server_address[1]
+    if port != daemon.face_port:
+        return False
     host = handler.headers.get("Host", "")
     origin = handler.headers.get("Origin")
-    return port == daemon.face_port and bool(origin) and origin == f"http://{host}"
+    if origin is not None:
+        return bool(origin) and origin == f"http://{host}"
+    return (handler.command in ("GET", "HEAD")
+            and handler.headers.get("Upgrade") is None
+            and host in (f"127.0.0.1:{port}", f"localhost:{port}")
+            and handler.headers.get("Sec-Fetch-Site") == "same-origin")
 
 
 def owner_only(handler, daemon) -> None:
-    """The HUD's listener and the HUD's Origin, or 403. See the module note."""
+    """The HUD's listener and the HUD's own page (`is_owner`), or 403. See the module note."""
     from .daemon import APIError
     if not is_owner(handler, daemon):
         raise APIError(403, "only the owner can do this, from the HUD")
@@ -218,6 +258,28 @@ def impact(daemon, project_id: str) -> dict:
 
 # -- projects -------------------------------------------------------------------
 
+def resolved_root(root: str) -> str | None:
+    """Where a project's folder resolves: the root `hud_api.scope` reads every
+    editor path under, so a file's `abs` (the read route's) sits below it even
+    when `root` goes through a symlink. None when there is nothing to resolve
+    or it cannot be resolved — the HUD then falls back to `root`."""
+    if not isinstance(root, str) or not root or "\x00" in root:
+        return None
+    try:
+        return str(Path(root).resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def project_view(project: Project) -> dict:
+    """A project as the routes that answer with one send it: the record, plus
+    `root_real` (`resolved_root`). Display data only — never stored, never on
+    the bus, and refused if sent back (POST and PATCH name their fields)."""
+    data = to_json(project)
+    data["root_real"] = resolved_root(project.root)
+    return data
+
+
 def create_project(daemon, name, root, **values) -> Project:
     """Make one project record and announce it. Shared by `POST /projects` and
     Discord's `/project new` (B2), so both number a colliding name the same way
@@ -253,6 +315,64 @@ def create_project(daemon, name, root, **values) -> Project:
     daemon.bus.publish({"kind": "project_created", "project_id": created.id,
                         "data": to_json(created)})
     return created
+
+
+MAX_FOLDER_ASKS = 3
+
+
+def confirm_folder(asker, check, name, *, origin, say, taken_roots, channel_id=None):
+    """Ask when needed, make the folder, and ask again if it changed after the
+    yes. -> the path, or None once `say` has been told why not.
+
+    **The one caller of `folders.make_project_folder`** (`folders_check` greps
+    for it), shared by Discord's `/project new` (B2) and the HUD's new VEX
+    project (VX-1), so both raise the same `project_folder` request — the
+    exact path, Approve/Deny, never Always, a timeout denies — and both
+    re-check after the yes. An existing empty folder is used without asking
+    (O5). `asker` is the daemon's broker (`.ask(request) -> Decision`); one
+    that raises never grants. `taken_roots()` is every project's root, re-read
+    when the folder changed (what appeared may be another project's)."""
+    from . import folders
+    from .approvals import ApprovalRequest
+    from .provider import Decision
+    approval, forced = None, False
+    for _ in range(MAX_FOLDER_ASKS):
+        if check.needs_confirmation or forced:
+            verb = "Create" if check.action == "create" else "Use"
+            say(f"{verb} `{check.path}` ({check.describe()}) for project "
+                f"**{name}**? Approve or Deny on the request below.")
+            request = ApprovalRequest(
+                tool=folders.TOOL, args=check.approval_args(name),
+                reason=f"{verb} {check.path} as the folder of project {name}",
+                origin=origin, allowlistable=False, discord_channel_id=channel_id)
+            try:
+                decision = Decision(asker.ask(request))
+            except Exception as exc:             # a broker that breaks never grants
+                import logging
+                logging.getLogger(__name__).warning(
+                    "project folder approval failed (%s)", type(exc).__name__)
+                decision = Decision.DENY
+            if decision is not Decision.ALLOW:
+                say(f"Not approved, so nothing was made (`{check.path}`).")
+                return None
+            approval = folders.approved(request, decision)
+        try:
+            return folders.make_project_folder(check, approval)
+        except folders.FolderChanged as exc:
+            try:
+                check = folders.check_project_folder(exc.check.raw, taken_roots=taken_roots())
+            except folders.FolderRefused as refused:
+                say(f"`{exc.check.path}` changed while you were deciding, and "
+                    f"now {refused}. Nothing was made.")
+                return None
+            approval, forced = None, True
+            say(f"`{check.path}` changed while you were deciding: it is now "
+                f"{check.describe()}. Asking again.")
+        except folders.FolderRefused as exc:
+            say(f"I can't use that folder any more: {exc}. Nothing was made.")
+            return None
+    say(f"`{check.path}` kept changing, so nothing was made.")
+    return None
 
 
 def _expect(expect, current):
@@ -435,6 +555,33 @@ def _chat_only(thread, verb):
         raise DaemonError(f"task threads cannot be {verb} on their own; they go with their task's project")
 
 
+def _write_title(daemon, thread, title: str, source: str) -> None:
+    """Under `daemon._lock`: a thread's title, made unique in its project, on
+    the record, on the live session's copy and on disk. The one write path
+    for a rename and an automatic title (titles.py)."""
+    stores = daemon.stores
+    title = unique_name(title, thread_titles_taken(stores, thread.project_id, but=thread.id))
+    # `ThreadStore.set_title` is the one writer: a save keeps the stored
+    # title whatever copy it holds (review of PR #62, L1).
+    stored = stores.threads.set_title(thread.id, title, source)
+    thread.title, thread.title_source = stored.title, stored.title_source
+    session = daemon._sessions.get(thread.id)
+    if session is not None:
+        # The live session's copy is what the daemon reads (and what
+        # `auto_title` checks), so it hears the title too.
+        session.thread.title = thread.title
+        session.thread.title_source = source
+
+
+def _title_changed(daemon, thread) -> None:
+    """After the lock: every surface hears it the same way (the HUD re-reads
+    the list, the Discord mirror renames the chat's Discord thread)."""
+    daemon.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
+                        "project_id": thread.project_id,
+                        "data": {"thread_id": thread.id, "title": thread.title,
+                                 "title_source": thread.title_source, "changed": ["title"]}})
+
+
 def rename_thread(daemon, thread_id: str, title) -> dict:
     from .daemon import APIError, DaemonError
     if not isinstance(title, str) or not title.strip():
@@ -447,19 +594,36 @@ def rename_thread(daemon, thread_id: str, title) -> dict:
         if thread.archived or is_archived(stores, thread.project_id):
             raise DaemonError("restore the thread before renaming it")
         title = unique_name(title, thread_titles_taken(stores, thread.project_id, but=thread.id))
-        if title == thread.title:
+        if title == thread.title and thread.title_source == "owner":
             return daemon.thread_json(thread)
-        thread.title = title
-        session = daemon._sessions.get(thread.id)
-        if session is not None:
-            # The live session writes its own Thread on usage and finish; a
-            # rename it did not hear would be undone by the next turn.
-            session.thread.title = title
-        stores.threads.save(thread)
-    daemon.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
-                        "project_id": thread.project_id,
-                        "data": {"thread_id": thread.id, "title": thread.title, "changed": ["title"]}})
+        # The owner's: an automatic title never replaces it (titles.py).
+        _write_title(daemon, thread, title, "owner")
+    _title_changed(daemon, thread)
     return daemon.thread_json(thread)
+
+
+def auto_title(daemon, thread_id: str, title: str) -> bool:
+    """titles.py's write: `title` onto a chat thread **only if, under the
+    daemon lock, it still has none** — on disk and on the live session's
+    copy — so a rename that landed while the title was being generated wins.
+    Archived threads included (the backfill titles them too). False when
+    nothing was written. Never a tool: nothing an agent holds reaches it."""
+    title = " ".join((title or "").split())[:TITLE_CAP]
+    if not title:
+        return False
+    stores = daemon.stores
+    with daemon._lock:
+        if daemon._stopping:
+            return False
+        thread = stores.threads.get(thread_id)
+        if thread is None or thread.task_id is not None or thread.role != Role.CHAT:
+            return False
+        session = daemon._sessions.get(thread.id)
+        if thread.title or (session is not None and session.thread.title):
+            return False
+        _write_title(daemon, thread, title, "auto")
+    _title_changed(daemon, thread)
+    return True
 
 
 def archive_thread(daemon, thread_id: str) -> dict:
@@ -497,7 +661,9 @@ def restore_thread(daemon, thread_id: str) -> dict:
         if project.archived:
             raise DaemonError(f"restore project {project.name} first; this thread is archived with it")
         if thread.title:
-            thread.title = unique_name(thread.title, thread_titles_taken(stores, thread.project_id, but=thread.id))
+            renumbered = unique_name(thread.title, thread_titles_taken(stores, thread.project_id, but=thread.id))
+            if renumbered != thread.title:
+                thread.title = stores.threads.set_title(thread.id, renumbered, thread.title_source).title
         thread.archived = None
         stores.threads.save(thread)
     daemon.bus.publish({"kind": "thread_restored", "thread_id": thread.id,

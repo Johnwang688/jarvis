@@ -3,13 +3,14 @@ import {
   AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, MINE_KEY, OUTPUT_HIGH_WATER, OutputPipe, attachUrl, chunk,
   clampSize, cleanPaste, cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, inheritMine,
   integrationNote, isCtrlC, judgeLink, loadMine, pageNonce, parseControl, parseMine, parsePrefs, parseRow, parseRows,
-  menuWidth, parseSpec, placeMenu, placeTerminals, saveMine, terminalSpecFor, terminalTakesKey,
+  menuWidth, parseRead, parseSpec, placeMenu, placeTerminals, readNoteText, saveMine, terminalSpecFor,
+  terminalTakesKey,
 } from "./terminal";
 
 const row = (over: Record<string, unknown> = {}) => ({
   id: "0a1b2c3d", title: "bash · Calc", folder: "/home/o/calc", project_id: "p1", created: "2026-10-09T00:00:00",
   cols: 80, rows: 24, shown: false, exited: false, exit_code: null, readable: true, busy: false,
-  integration: "bash", integrated: false, marked: false, ...over,
+  integration: "bash", integrated: false, marked: false, program: null, input: true, ...over,
 });
 
 describe("the socket's URL", () => {
@@ -346,7 +347,7 @@ describe("where + opens a terminal", () => {
     expect(terminalSpecFor("chat", at)).toEqual({ thread: "t1" });
     expect(terminalSpecFor("chat", { ...at, thread: null, compose: "p3" })).toEqual({ project: "p3" });
     expect(terminalSpecFor("file", at)).toEqual({ project: "p2" });
-    expect(terminalSpecFor("preview", at)).toEqual({ project: "p2" });
+    expect(terminalSpecFor("browser", at)).toEqual({ project: "p2" });
     expect(terminalSpecFor("task", at)).toEqual({ task: "k1" });
     expect(terminalSpecFor("diff", at)).toEqual({ task: "k1" });
     expect(terminalSpecFor("terminal", at)).toEqual({ thread: "t1" });
@@ -572,5 +573,27 @@ describe("a write that throws", () => {
     expect(() => pending.shift()!()).toThrow("xterm refused it");   // a's callback hands over boom
     await Promise.resolve();
     expect(parsed).toEqual(["after", "a", "c"]);
+  });
+});
+
+describe("Jarvis's reads (terminal_read, WP-F)", () => {
+  const ok = { terminal_id: "0a1b2c3d", lines: 200, at: "2026-10-10T15:42:00+00:00", refused: false };
+
+  it("takes exactly {terminal_id, lines, at, refused} and says what happened", () => {
+    const note = parseRead(ok)!;
+    expect(note).toEqual({ terminalId: "0a1b2c3d", lines: 200, at: ok.at, refused: false });
+    expect(readNoteText(note, "15:42")).toBe("Jarvis read 200 lines · 15:42");
+    expect(readNoteText({ ...note, lines: 1 }, "15:42")).toBe("Jarvis read 1 line · 15:42");
+    expect(readNoteText({ ...note, refused: true, lines: 0 }, "15:42")).toBe("refused a read · 15:42");
+  });
+
+  it("drops a record of the wrong shape, and never carries anything else", () => {
+    for (const bad of [null, {}, { ...ok, terminal_id: "../etc" }, { ...ok, lines: -1 }, { ...ok, lines: 2.5 },
+                       { ...ok, lines: "200" }, { ...ok, refused: "no" }, { ...ok, lines: 10 ** 9 }]) {
+      expect(parseRead(bad)).toBeNull();
+    }
+    const note = parseRead({ ...ok, output: "SECRET", command: "printenv", reason: "rule 1" })!;
+    expect(Object.keys(note).sort()).toEqual(["at", "lines", "refused", "terminalId"]);
+    expect(parseRead({ ...ok, at: "x".repeat(500) })!.at.length).toBe(64);
   });
 });

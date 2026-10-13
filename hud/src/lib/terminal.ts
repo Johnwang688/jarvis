@@ -52,6 +52,14 @@ export interface TerminalRow {
   integrated: boolean;
   /** What took: the startup file's first signed prompt mark arrived. */
   marked: boolean;
+  /**
+   * A program terminal (VX-1): `"vex-build"`, `"vex-download"`, `"vex-info"`
+   * or `"vex-brain"`; null for a shell. One ends with its program: no
+   * Restart or "New terminal here" (they would open a shell).
+   */
+  program: string | null;
+  /** Whether typed input reaches it (a build's does not; Ctrl-C always does). */
+  input: boolean;
 }
 
 /** Where a new terminal starts: resolved by the daemon from ids, never a path. */
@@ -94,6 +102,8 @@ export function parseRow(raw: unknown): TerminalRow | null {
     integration,
     integrated: v.integrated === true,
     marked: v.marked === true,
+    program: typeof v.program === "string" && /^[a-z-]{1,32}$/.test(v.program) ? v.program : null,
+    input: v.input !== false,
   };
 }
 
@@ -393,6 +403,359 @@ export function cleanPaste(text: string): string {
   return (text || "").replace(/[\u001b\u0080-\u009f]/g, "");
 }
 
+// ---------------------------------------------------------------------------
+// continuing a terminal that ended with Jarvis (the owner's option (a),
+// 2026-10-12: docs/plans/2026-10-12-questions-for-owner.md, question 1)
+//
+// When the daemon restarts every shell ends (W-3). The window keeps the
+// xterm and its text, and a key typed there, a paste, or "Continue here"
+// starts a new shell in the same folder, in the same place, under the old
+// text and a separator line. Nothing is written to disk: the old text lives
+// in this page's memory only, and a full page reload loses it. Running
+// programs do not survive — only their text does.
+
+/** The text kept from before a restart, at most the daemon's ring size. */
+export const PREFIX_MAX = 1024 * 1024;
+/** What the owner types or pastes while the new shell starts, at most this many bytes. */
+export const HELD_MAX = 4 * 1024;
+
+/**
+ * Whether the input of one key (xterm's `onData`, as bytes) continues an
+ * ended terminal: a typing key — printable text, Enter, Backspace, Tab or an
+ * arrow. Never a control: Ctrl+C, Ctrl+D (end of input — it would end the
+ * new shell at once), Escape, an Alt+key, a function key, or anything xterm
+ * says on its own (every answer to a query starts with ESC).
+ */
+export function continuesOn(bytes: Uint8Array): boolean {
+  if (!bytes.length) return false;
+  if (bytes.length === 1 && (bytes[0] === 0x0d || bytes[0] === 0x7f || bytes[0] === 0x08 || bytes[0] === 0x09)) {
+    return true;
+  }
+  if (bytes.length === 3 && bytes[0] === 0x1b && (bytes[1] === 0x5b || bytes[1] === 0x4f)
+      && bytes[2] >= 0x41 && bytes[2] <= 0x44) {
+    return true;                                      // an arrow, in either cursor-key mode
+  }
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  // eslint-disable-next-line no-control-regex
+  return !/[\u0000-\u001f\u007f-\u009f]/.test(text);
+}
+
+/**
+ * Whether a terminal this window shows may be continued: it ended with
+ * Jarvis (or is gone with it) — never one that exited on its own, which
+ * keeps Restart — it is a shell, not a program terminal (VX-1), this tab
+ * showed it (never one another window holds), where it was opened is known
+ * — a remembered `in`, never a guess from its row: a task's or a thread's
+ * terminal whose `in` was pushed out of the 24 kept would land in the project
+ * root rather than its worktree (PR #64 review N1), and a program terminal
+ * never has one — and the window is not crashed. A card is checked where the
+ * owner acts: the strip still says what typing would do.
+ */
+export function mayContinue(
+  t: { state: string; program: boolean; mine: boolean; known: boolean; crashed: boolean },
+): boolean {
+  return t.state === "ended" && !t.program && t.mine && t.known && !t.crashed;
+}
+
+/**
+ * The "Jarvis can read" switch a continuation is made with: the old
+ * terminal's, and off when that is not known (its row is gone and none was
+ * kept) — a continuation never widens what Jarvis can read.
+ */
+export function readableCarry(row: { readable: boolean } | null | undefined): boolean {
+  return row?.readable === true;
+}
+
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
+type HeldPart = { key: Uint8Array } | { paste: string };
+
+/**
+ * What the owner types or pastes while a continuation starts, in order, held
+ * until the new shell's replay has been parsed. At most `HELD_MAX` bytes; a
+ * paste that does not fit whole is dropped whole. **Never spliced**: once
+ * anything is refused — past the cap, a key that does not type, a card that
+ * came up — everything after it is refused too, and the session sends none of
+ * what came before it either (PR #64 review M1: `make deploy⏎` then Ctrl+C
+ * used to run the line). All of it is said (the `unsent` notice). What is sent
+ * when nothing was refused is `release()`: typed, never run.
+ */
+export class HeldInput {
+  parts: HeldPart[] = [];
+  bytes = 0;
+  dropped = 0;
+  closed = false;
+
+  constructor(private max = HELD_MAX) {}
+
+  /** A key's bytes; false when refused. */
+  key(bytes: Uint8Array): boolean {
+    if (!bytes.length) return true;
+    if (!continuesOn(bytes)) {
+      this.refuse(bytes.length);
+      return false;
+    }
+    return this.add({ key: bytes }, bytes.length);
+  }
+
+  /** A paste, cleaned (`cleanPaste`) here; false when refused. */
+  paste(text: string): boolean {
+    const clean = cleanPaste(text);
+    if (!clean) return true;
+    return this.add({ paste: clean }, utf8Length(clean));
+  }
+
+  /** Refused (a card came up meanwhile): this and everything after it. */
+  refuse(bytes: number) {
+    this.closed = true;
+    this.dropped += bytes;
+  }
+
+  /**
+   * What goes to the new shell once its replay is parsed, when nothing was
+   * refused (a refusal drops the whole hold: `TermSession.flushHeld`). **A
+   * held line is typed, never run** (the lead's decision, PR #64 review L6):
+   * until the first key the screen showed the old context's prompt
+   * (`pi@robot:~$`, `>>>`, a root shell), and an Enter typed at it would run
+   * that line in a fresh local shell in the project folder. So keys go up to
+   * the first line end (CR or LF) — never it, nor anything after — and a
+   * paste holding a line break is not sent at all, nor anything after it.
+   * `withheld` is every byte not sent.
+   */
+  release(): { parts: HeldPart[]; stopped: "enter" | "paste" | null; withheld: number } {
+    const parts: HeldPart[] = [];
+    let stopped: "enter" | "paste" | null = null;
+    let withheld = 0;
+    for (const p of this.parts) {
+      if (stopped) {
+        withheld += "key" in p ? p.key.length : utf8Length(p.paste);
+      } else if ("key" in p) {
+        const at = p.key.findIndex((b) => b === 0x0d || b === 0x0a);
+        if (at < 0) {
+          parts.push(p);
+          continue;
+        }
+        if (at > 0) parts.push({ key: p.key.slice(0, at) });
+        withheld += p.key.length - at;
+        stopped = "enter";
+      } else if (/[\r\n]/.test(p.paste)) {
+        withheld += utf8Length(p.paste);
+        stopped = "paste";
+      } else {
+        parts.push(p);
+      }
+    }
+    return { parts, stopped, withheld };
+  }
+
+  private add(part: HeldPart, n: number): boolean {
+    if (this.closed || this.bytes + n > this.max) {
+      this.refuse(n);
+      return false;
+    }
+    this.parts.push(part);
+    this.bytes += n;
+    return true;
+  }
+}
+
+/**
+ * One cell of xterm's buffer, the part the prefix reads (xterm's
+ * `IBufferCell`). Declared here so the rule is tested without a browser.
+ */
+export interface SnapCell {
+  getChars(): string;
+  getWidth(): number;
+  getFgColorMode(): number;
+  getFgColor(): number;
+  getBgColorMode(): number;
+  getBgColor(): number;
+  isFgDefault(): boolean;
+  isFgRGB(): boolean;
+  isBgDefault(): boolean;
+  isBgRGB(): boolean;
+  isBold(): number;
+  isDim(): number;
+  isItalic(): number;
+  isUnderline(): number;
+  isBlink(): number;
+  isInverse(): number;
+  isInvisible(): number;
+  isStrikethrough(): number;
+  isOverline(): number;
+}
+
+export interface SnapLine {
+  readonly isWrapped: boolean;
+  readonly length: number;
+  getCell(x: number, cell?: SnapCell): SnapCell | undefined;
+}
+
+export interface SnapBuffer {
+  readonly length: number;
+  getLine(y: number): SnapLine | undefined;
+  getNullCell(): SnapCell;
+}
+
+/** xterm's colour mode of a 16-colour palette cell (its `Attributes.CM_P16`). */
+const CM_P16 = 0x1000000;
+
+function colourParams(isDefault: boolean, isRgb: boolean, mode: number, colour: number, base: 30 | 40): string {
+  if (isDefault) return "";
+  if (isRgb) return `${base + 8};2;${(colour >> 16) & 255};${(colour >> 8) & 255};${colour & 255}`;
+  if (mode === CM_P16 && colour >= 0 && colour < 16) return String(colour < 8 ? base + colour : base + 60 + colour - 8);
+  return `${base + 8};5;${colour & 255}`;
+}
+
+/** A cell's look as SGR parameters ("" for the default look). Numbers only. */
+function sgrOf(c: SnapCell): string {
+  const p: string[] = [];
+  if (c.isBold()) p.push("1");
+  if (c.isDim()) p.push("2");
+  if (c.isItalic()) p.push("3");
+  if (c.isUnderline()) p.push("4");
+  if (c.isBlink()) p.push("5");
+  if (c.isInverse()) p.push("7");
+  if (c.isInvisible()) p.push("8");
+  if (c.isStrikethrough()) p.push("9");
+  if (c.isOverline()) p.push("53");
+  const fg = colourParams(c.isFgDefault(), c.isFgRGB(), c.getFgColorMode(), c.getFgColor(), 30);
+  const bg = colourParams(c.isBgDefault(), c.isBgRGB(), c.getBgColorMode(), c.getBgColor(), 40);
+  if (fg) p.push(fg);
+  if (bg) p.push(bg);
+  return p.join(";");
+}
+
+function blankCell(c: SnapCell): boolean {
+  const ch = c.getChars();
+  return (ch === "" || ch === " ") && c.isBgDefault() && !c.isInverse();
+}
+
+/**
+ * The text a terminal shows, from its **cells** — never the bytes that drew
+ * them — for writing back above a continuation's output: each line's
+ * characters with their colours and weight as SGR (`ESC[0;…m`, numbers only),
+ * a wrapped line joined to the line it continues (so it rewraps at any
+ * width), trailing blanks and empty lines dropped, every line ending in the
+ * default look. So it carries no query to answer, no mode, no alternate
+ * screen, no title and no link — whatever the old program left the terminal
+ * in. The tail, at most `max` bytes, cut at a line's start — or, when the
+ * last line alone is longer, inside it (PR #64 review L3: one long wrapped
+ * line used to lose the whole text).
+ *
+ * **Walked from the bottom, and stopped at the cap** (review L2): built top
+ * down, a full scrollback (10,000 rows of 250 truecolour columns) took 1.9 s
+ * on the keydown and ~88 M characters before it was trimmed.
+ */
+export function snapshotText(buf: SnapBuffer, max = PREFIX_MAX): string {
+  const cell = buf.getNullCell();
+  const lines: string[] = [];                         // logical lines, bottom up
+  let total = 0;                                      // their bytes, joined by "\r\n"
+  let group: string[] = [];                           // the logical line being read: its rows, bottom up
+  let groupBytes = 0;
+  for (let y = buf.length - 1; y >= 0; y--) {
+    const line = buf.getLine(y);
+    if (!line) continue;
+    const next = y + 1 < buf.length ? buf.getLine(y + 1) : undefined;
+    const row = rowText(line, cell, !(next && next.isWrapped));
+    const n = utf8Length(row);
+    const sep = lines.length ? 2 : 0;
+    if (total + sep + groupBytes + n > max) {
+      // The last line alone is too long: its tail, from a row's start (each row starts and ends plain).
+      if (!lines.length && groupBytes) lines.push(group.reverse().join(""));
+      group = [];
+      break;
+    }
+    group.push(row);
+    groupBytes += n;
+    if (!line.isWrapped) {                            // the row a logical line starts on
+      const text = group.reverse().join("");
+      group = [];
+      groupBytes = 0;
+      if (!lines.length && !text) continue;           // empty lines below the text
+      total += sep + utf8Length(text);
+      lines.push(text);
+    }
+  }
+  // The top row continued a line that scrolled off: what is left of it.
+  if (group.length) {
+    const text = group.reverse().join("");
+    if (text || lines.length) lines.push(text);
+  }
+  return lines.reverse().join("\r\n");
+}
+
+/**
+ * One row's cells as text and SGR, starting and ending in the default look,
+ * so any row boundary is a place the text may start. Trailing blanks are
+ * dropped only where a logical line ends (`trim`): a wrapped row's spaces are
+ * the middle of its line.
+ */
+function rowText(line: SnapLine, cell: SnapCell, trim: boolean): string {
+  let end = line.length;
+  if (trim) {
+    while (end > 0) {
+      const c = line.getCell(end - 1, cell);
+      if (c && !blankCell(c)) break;
+      end--;
+    }
+  }
+  let out = "";
+  let sgr = "";
+  for (let x = 0; x < end; x++) {
+    const c = line.getCell(x, cell);
+    if (!c || c.getWidth() === 0) continue;           // the second half of a wide character
+    const s = sgrOf(c);
+    if (s !== sgr) {
+      out += s ? `\x1b[0;${s}m` : "\x1b[0m";
+      sgr = s;
+    }
+    // A cell never holds a control character; dropped anyway, so nothing but our SGR is ever an escape.
+    // eslint-disable-next-line no-control-regex
+    out += c.getChars().replace(/[\u0000-\u001f\u007f-\u009f]/g, "") || " ";
+  }
+  return sgr ? out + "\x1b[0m" : out;
+}
+
+/** HH:MM, 24-hour, local. */
+export function hhmm(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** The line between the old text and the new shell: plain text, no escape sequence. */
+export function separatorLine(time: string): string {
+  return `── restarted ${time} ──`;
+}
+
+/**
+ * What a continued terminal writes after its RIS on every attach, before the
+ * daemon's replay: the old text, then the separator — at most `PREFIX_MAX`
+ * bytes in all, the old text giving way first.
+ */
+export function continuationPrefix(buf: SnapBuffer, time: string, max = PREFIX_MAX): string {
+  const sep = separatorLine(time) + "\r\n";
+  const text = snapshotText(buf, Math.max(0, max - utf8Length(sep) - 2));
+  return (text ? text + "\r\n" : "") + sep;
+}
+
 /** The daemon's text frames (docs/hud-api.md). Anything else is ignored. */
 export type Control =
   | { type: "attached"; terminal: TerminalRow | null; replay: number }
@@ -480,7 +843,7 @@ function isLoopbackHost(host: string): boolean {
 export interface LinkVerdict {
   ok: boolean;
   url: string;
-  /** A server on this machine (a dev server): WP-E offers it to Preview. */
+  /** A server on this machine (a dev server): WP-E offers it to the Browser. */
   loopback: boolean;
 }
 
@@ -573,10 +936,13 @@ export function inTerminal(target: EventTarget | null): boolean {
  * Which of the HUD's own keys stand aside in a terminal, so the shell gets
  * them (plan §2.2's key table): Ctrl+B and Ctrl+Alt+B (readline back-char,
  * page up in less and vim) and Ctrl+_ (readline undo). Everything else —
- * the zoom keys, Ctrl+`, Ctrl+Alt+1…4 — stays the HUD's even there.
+ * the zoom keys, Ctrl+`, Ctrl+Alt+1…8 — stays the HUD's even there.
  */
 export function terminalTakesKey(shortcut: string | null, key: string): boolean {
   if (shortcut === "toggleLeft" || shortcut === "toggleRight") return true;
+  // Ctrl+P is readline's previous line (ED-7 leaves it to the shell); the
+  // palette and find in files (Ctrl+Shift+P, Ctrl+Shift+F, F1) stay the HUD's.
+  if (shortcut === "quickOpen") return true;
   return shortcut === "zoomOut" && key === "_";
 }
 
@@ -628,6 +994,35 @@ export function placeTerminals(
 }
 
 /**
+ * `terminal_read` on the bus (WP-F, decisions W-2): Jarvis read this terminal,
+ * or asked and was refused. The record is exactly `{terminal_id, lines, at,
+ * refused}` — never output, a command or a reason — and a record that does not
+ * have that shape is dropped whole; any other key is ignored, never drawn.
+ */
+export interface ReadNote {
+  terminalId: string;
+  lines: number;
+  at: string;
+  refused: boolean;
+}
+
+export function parseRead(data: unknown): ReadNote | null {
+  const d = (data ?? {}) as Record<string, unknown>;
+  if (!isTerminalId(d.terminal_id)) return null;
+  const lines = d.lines;
+  if (typeof lines !== "number" || !Number.isInteger(lines) || lines < 0 || lines > 100_000) return null;
+  if (typeof d.refused !== "boolean") return null;
+  return { terminalId: d.terminal_id, lines, at: typeof d.at === "string" ? d.at.slice(0, 64) : "",
+           refused: d.refused };
+}
+
+/** The terminal bar's note: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42". */
+export function readNoteText(note: ReadNote, time: string): string {
+  if (note.refused) return `refused a read · ${time}`;
+  return `Jarvis read ${note.lines} line${note.lines === 1 ? "" : "s"} · ${time}`;
+}
+
+/**
  * Whose attach was it? Every attach publishes `terminal_attached` with only
  * `{terminal_id, at}` — a same-uid program can mint a ticket and attach to a
  * terminal no window shows, and over HTTP that looks like the HUD. The window
@@ -673,7 +1068,7 @@ export class AttachLedger {
 /**
  * Where `+` opens a terminal (plan §2.4): the folder of what the focused
  * pane shows — a chat's own folder (its thread; a compose row's project), a
- * File or Preview pane's project, a task's worktree — else home. Always as an
+ * File or Browser pane's project, a task's worktree — else home. Always as an
  * id the daemon resolves, never a path. A terminal pane defers to the chat.
  */
 export function terminalSpecFor(view: string, at: {
@@ -683,7 +1078,8 @@ export function terminalSpecFor(view: string, at: {
     at.thread ? { thread: at.thread } : at.compose ? { project: at.compose } : "home";
   switch (view) {
     case "file":
-    case "preview":
+    case "browser":
+    case "vex":
       return at.project ? { project: at.project } : chat();
     case "task":
     case "diff":

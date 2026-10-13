@@ -109,7 +109,7 @@ describe("WorkspaceBoundary", () => {
     );
   });
 
-  it("keeps Space and Enter on Reload to itself: they never reach the document (push-to-talk)", () => {
+  it("keeps Space and Enter on Reload to itself: they press it and never reach the document", () => {
     draw();
     (window as any).__hudCrashProbe = "workspace";
     draw();

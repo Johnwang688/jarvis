@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import runtime
 from jarvis import config, gitops, llm, tools, workflows
 from jarvis.gitops import OWN, READ, REFUSE, REVIEW, WRITE, RepoContext
 
@@ -65,7 +66,10 @@ READS = [
     ["remote", "get-url", "origin"], ["remote", "show", "origin"],
     ["config", "--get", "user.name"], ["config", "--list"], ["config", "--global", "--list"],
     ["config", "--get-regexp", "^user"], ["worktree"], ["worktree", "list"],
-    ["submodule", "status"], ["submodule", "summary"], ["stash", "list"], ["stash", "show"],
+    ["stash", "list"], ["stash", "show"],
+    # the spellings that keep git out of submodules, and words that only mention one
+    ["status", "--ignore-submodules"], ["status", "--ignore-submodules=all"],
+    ["diff", "--ignore-submodules=dirty"], ["log", "--grep=submodule"], ["log", "--", "submodule.c"],
     ["bisect", "log"], ["notes"], ["notes", "list"], ["notes", "show"],
     ["rev-parse", "HEAD"], ["rev-parse", "--git-dir"], ["rev-list", "--count", "HEAD"],
     ["ls-files"], ["ls-tree", "HEAD"], ["cat-file", "-p", "HEAD"], ["grep", "-n", "needle"],
@@ -74,7 +78,9 @@ READS = [
     ["ls-remote", "origin"], ["format-patch", "--stdout", "HEAD~1"],
     ["diff", "--no-ext-diff"], ["diff", "--text"], ["symbolic-ref", "HEAD"],
     ["clean", "-n"], ["clean", "--dry-run", "-d"], ["version"], ["count-objects", "-v"],
-    ["log", "--oneline", "--", "--output"],    # after `--` it is a pathspec, not an option
+    ["log", "--", "--output"],                 # after a `--` nothing could take, it is a pathspec
+    ["log", "-p", "--", "f.txt"], ["stash", "show", "-p"], ["stash", "list", "-p"],
+    ["ls-remote", "--", "origin"],
 ]
 
 # Routine writes. Each is {where it may run: kind}. In the owner's checkout (or
@@ -88,7 +94,8 @@ ROUTINE = {
         ["checkout", "-b", "jarvis/new"], ["checkout", "main"], ["checkout", "--detach"],
         ["branch", "jarvis/other"], ["apply", "x.patch"], ["stash", "apply"],
         ["bisect", "start"], ["fetch"], ["fetch", "origin"], ["fetch", "--all"],
-        ["fetch", "-p", "origin"], ["fetch", "origin", "main"],
+        ["fetch", "-p", "origin"], ["fetch", "origin", "main"], ["fetch", "--no-recurse-submodules"],
+        ["fetch", "-m", "origin"], ["fetch", "-j", "4", "origin"], ["fetch", "--", "origin"],
     ],
     # these move the current branch: only while it is under jarvis/
     "own": [
@@ -103,6 +110,16 @@ ROUTINE = {
         ["push"], ["push", "origin"], ["push", "-u", "origin", "jarvis/feat"],
         ["push", "origin", "HEAD"], ["push", "origin", "HEAD:jarvis/feat"],
         ["push", "--dry-run"], ["push", "-u"],
+        # a message is words, even one that looks like a submodule option (review of PR #65)
+        ["commit", "-m", "--submodule docs"], ["commit", "-am", "--submodule docs"],
+        ["commit", "--message", "--submodule=diff is now refused"],
+        ["merge", "-m", "--ignore-submodules=none", "x"],
+        # a `--` that is a message and the end of options alike, judged the same either way
+        ["commit", "-m", "--", "f.txt"], ["commit", "-m", "msg", "--", "f.txt"],
+        # signing switched off, and the flags git reads as flags (delta review of PR #65)
+        ["merge", "--no-gpg-sign", "x"], ["cherry-pick", "--no-gpg-sign", "abc123"],
+        ["revert", "--no-gpg-sign", "HEAD"], ["rebase", "--no-gpg-sign", "main"],
+        ["rebase", "-m", "origin/main"], ["cherry-pick", "-x", "abc123"],
     ],
 }
 
@@ -111,6 +128,7 @@ REVIEWED = [
     ["tag", "v1"], ["tag", "-a", "v1", "-m", "x"], ["branch", "-m", "jarvis/a", "jarvis/b"],
     ["branch", "-u", "origin/main"], ["branch", "--set-upstream-to=origin/main"],
     ["notes", "add", "-m", "x"], ["update-index", "--assume-unchanged", "f"],
+    ["tag", "-a", "v1", "-m", "--submodule=diff"],
 ]
 
 # Refused even in an own worktree on an own branch. Grouped by what each is
@@ -197,6 +215,73 @@ REFUSED = {
         ["am", "--directory=x", "m.mbox"], ["am", "-i", "m.mbox"],
         ["hash-object", "-w", "f"], ["commit-tree", "x"], ["read-tree", "x"],
         ["checkout-index", "-a"], ["fast-import"], ["merge-file", "a", "b", "c"],
+    ],
+    # A submodule is another repository, and inside one git obeys its config:
+    # every `submodule` form (status and summary run describe and log in each
+    # one), and every option that recurses, runs `git diff`/`git log` inside one,
+    # or turns the dirty check (`git status` inside one) back on.
+    "goes into a submodule": [
+        ["submodule"], ["submodule", "status"], ["submodule", "summary"],
+        ["submodule", "status", "--recursive"], ["submodule", "absorbgitdirs"],
+        ["submodule", "sync"], ["submodule", "init"], ["submodule--helper", "list"],
+        ["status", "--ignore-submodules=none"], ["status", "--ignore-submodules=untracked"],
+        ["status", "--no-ignore-submodules"], ["status", "--ignore-sub=none"],
+        ["diff", "--ignore-submodules=none"], ["diff", "--submodule=diff"], ["diff", "--submodule"],
+        ["diff", "--submodule=log", "HEAD~1"], ["log", "-p", "--submodule=diff"],
+        ["show", "--submod=diff"], ["diff-files", "--ignore-submodules=none"],
+        ["grep", "--recurse-submodules", "x"], ["grep", "--recurse-sub", "x"],
+        ["ls-files", "--recurse-submodules"], ["fetch", "--recurse-submodules"],
+        ["fetch", "--recurse-submodules=yes"], ["fetch", "--recurse-submodules-default=yes"],
+        ["pull", "--recurse-submodules"], ["pull", "--recurse-submodules=on-demand"],
+        ["push", "--recurse-submodules=on-demand"], ["push", "--recurse-submodules=check"],
+        ["checkout", "--recurse-submodules", "main"], ["switch", "--recurse-submodules", "main"],
+        ["reset", "--recurse-submodules", "HEAD~1"], ["rm", "--recurse-submodules", "f"],
+        # an option word next to a message is still an option, and `-m` is a flag to diff
+        ["commit", "-m", "x", "--submodule=diff"], ["diff", "-m", "--submodule=diff"],
+        ["log", "-m", "--ignore-submodules=none"],
+        # ...and to `stash list` (git log) and `stash show` (diff): delta review of PR #65
+        ["stash", "show", "-p", "-m", "--submodule=diff"], ["stash", "list", "-p", "-m", "--submodule=diff"],
+        ["stash", "show", "-pm", "--submodule=diff"], ["stash", "list", "-pm", "--submodule=diff"],
+        ["stash", "list", "-p", "-m", "--ignore-submodules=none"],
+        ["notes", "show", "-m", "--submodule=diff"],   # notes show takes no -m: no value to skip
+    ],
+    # A `--` right after an option that takes a value is that value, and options go
+    # on after it (git 2.53: `commit -m -- --gpg-sign` signed). Which options take a
+    # value is not modelled, so both readings are judged and must agree; delta review.
+    "a '--' that may be an option's value": [
+        ["commit", "-m", "--", "--gpg-sign"], ["commit", "-m", "--", "-S"],
+        ["merge", "-m", "--", "-s", "evil", "x"], ["commit", "-F", "--", "--gpg-sign"],
+        ["commit", "--message", "--", "--gpg-sign"], ["commit", "-am", "--", "--gpg-sign"],
+        ["commit", "-m", "--end-of-options", "--gpg-sign"],
+        ["commit", "-m", "--", "-m", "--", "--gpg-sign"], ["tag", "-a", "v1", "-m", "--", "-s"],
+        ["diff", "--stat", "--", "--output=x"], ["log", "--grep", "--", "--output=x"],
+        ["log", "--oneline", "--", "--output"],     # --oneline takes nothing, but that is not modelled
+        ["push", "-u", "--", "origin", "main"],
+        ["commit", *["-m", "--"] * 9, "-S"],         # past the bound
+    ],
+    # -S[<keyid>] and --gpg-sign sign with the owner's key wherever git takes them;
+    # --no-gpg-sign stays (delta review of PR #65).
+    "signs with the owner's key": [
+        ["merge", "-S", "x"], ["merge", "-Skeyid", "x"], ["merge", "--gpg-sign", "x"],
+        ["merge", "--gpg", "x"], ["merge", "-nS", "x"], ["cherry-pick", "-S", "abc123"],
+        ["cherry-pick", "-x", "-S", "abc123"], ["cherry-pick", "-xS", "abc123"],
+        ["revert", "-S", "HEAD"], ["revert", "-sS", "HEAD"], ["rebase", "-S", "main"],
+        ["rebase", "-m", "-S", "main"], ["rebase", "--gpg-sign=key", "main"], ["am", "-S", "m.mbox"],
+        ["pull", "-S"], ["pull", "-j", "-S"], ["pull", "--gpg-sign"], ["pull", "--gpg-s"],
+    ],
+    # A flag read as taking a value hid the word after it (from each command's -h).
+    "a flag read as taking a value": [
+        ["rebase", "-m", "-x", "touch x"],          # rebase's -m is --merge
+        ["fetch", "-m", "-P", "origin"],            # fetch's -m is --multiple
+        ["fetch", "-m", "origin", "evil"],          # ...so every word is a remote
+    ],
+    # After `--` fetch, pull and ls-remote still read the repository (measured: each
+    # reached a repository no remote names); only configured remotes are contacted.
+    "a repository named after '--'": [
+        ["fetch", "--", "https://example.invalid/r"], ["fetch", "--", "evil", "main"],
+        ["pull", "--", "https://example.invalid/r"], ["pull", "--ff-only", "--", "evil"],
+        ["ls-remote", "--", "https://example.invalid/r"], ["remote", "show", "--", "evil"],
+        ["fetch", "origin", "--", "x:y"],
     ],
     "the shape of the request": [
         [], [""], ["-C", "/tmp", "status"], ["-c", "core.pager=x", "status"],
@@ -606,6 +691,391 @@ def hardening_checks() -> None:
           "a repository's own program settings refused")
 
 
+# --- submodules ----------------------------------------------------------------
+#
+# A submodule is another repository, and inside one git obeys *its* config and
+# attributes. Every trap below is a script that writes one marker file (and
+# passes its input through, as a filter must) and nothing else.
+
+FILE_PROTOCOL = ("-c", "protocol.file.allow=always")   # the harness's submodule clones (local paths)
+
+
+def trap(w: World, name: str) -> tuple[Path, Path]:
+    marker = w.markers / name
+    prog = w.markers / f"{name}.sh"
+    prog.write_text(f"#!/bin/sh\ntouch '{marker}'\nexec cat\n", encoding="utf-8")
+    prog.chmod(0o755)
+    return marker, prog
+
+
+def fired(marker: Path) -> bool:
+    hit = marker.exists()
+    if hit:
+        marker.unlink()
+    return hit
+
+
+class Sub:
+    """A real submodule checked out in a worktree the tool made. Its origin is
+    a local bare repository and its own repository lives in the superproject's
+    .git, as `git submodule update` puts it (with git's own core.worktree)."""
+
+    def __init__(self, w: World) -> None:
+        self.w = w
+        self.origin = w.root / "sub-origin.git"
+        self.seed = w.root / "sub-seed"
+        w.sh("init", "-q", "--bare", str(self.origin), cwd=w.root)
+        w.sh("init", "-q", str(self.seed), cwd=w.root)
+        (self.seed / "a.txt").write_text("one\n", encoding="utf-8")
+        # Its attributes name drivers; where a driver is defined decides who runs it.
+        (self.seed / ".gitattributes").write_text("*.txt filter=trap diff=trap\n", encoding="utf-8")
+        w.sh("add", "-A", cwd=self.seed)
+        w.sh("commit", "-q", "-m", "sub first", cwd=self.seed)
+        w.sh("push", "-q", str(self.origin), "HEAD:main", cwd=self.seed)
+        w.sh(*FILE_PROTOCOL, "submodule", "add", "-q", str(self.origin), "sub")
+        w.sh("commit", "-q", "-m", "add the submodule")
+        w.sh("push", "-q", "origin", "main")
+        self.wt = made(gitops.create_worktree(str(w.owner), "feat"))
+        w.sh(*FILE_PROTOCOL, "submodule", "update", "--init", "-q", cwd=self.wt)
+        self.path = self.wt / "sub"
+        self.gitdir = Path(w.sh("rev-parse", "--absolute-git-dir", cwd=self.path).stdout.strip())
+
+    def config(self, *args: str, check: bool = True):
+        return self.w.sh("config", "--file", str(self.gitdir / "config"), *args, check=check)
+
+    def touch(self) -> None:
+        """Same bytes, a later mtime: the index's stat no longer matches, so a
+        status inside the submodule must hash the file again — through its
+        clean filter."""
+        f = self.path / "a.txt"
+        f.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
+        st = f.stat()
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 7_000_000_000))
+
+    def head(self) -> str:
+        return self.w.sh("rev-parse", "HEAD", cwd=self.path).stdout.strip()
+
+
+def add_global(w: World, text: str) -> None:
+    """The owner's global config, in the temp HOME."""
+    gitconfig = w.home / ".gitconfig"
+    gitconfig.write_text(gitconfig.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def submodule_flag_checks() -> None:
+    f = gitops._with_submodule_flags
+    dirty, norec = "--ignore-submodules=dirty", "--no-recurse-submodules"
+    for args, want in (
+        (["status"], ["status", dirty]),
+        (["status", "--short"], ["status", dirty, "--short"]),
+        (("diff", "--stat"), ["diff", dirty, "--stat"]),
+        (["diff-files"], ["diff-files", dirty]), (["diff-index", "HEAD"], ["diff-index", dirty, "HEAD"]),
+        (["diff-tree", "-r", "HEAD"], ["diff-tree", dirty, "-r", "HEAD"]),
+        (["log", "-p", "--", "status"], ["log", dirty, "-p", "--", "status"]),
+        (["show", "HEAD:f.txt"], ["show", dirty, "HEAD:f.txt"]),
+        (["-c", "core.quotePath=false", "diff", "x"], ["-c", "core.quotePath=false", "diff", dirty, "x"]),
+        (["-c", "diff", "ls-files"], ["-c", "diff", "ls-files"]),     # a -c value is not the subcommand
+        # every global option git reads a separate value for (review of PR #65), and the = forms
+        (["--git-dir", "status", "log"], ["--git-dir", "status", "log", dirty]),
+        (["--git-dir=/x/.git", "status"], ["--git-dir=/x/.git", "status", dirty]),
+        (["--work-tree", "diff", "status"], ["--work-tree", "diff", "status", dirty]),
+        (["--namespace", "show", "fetch"], ["--namespace", "show", "fetch", norec]),
+        (["--config-env", "a.b=HOME", "diff"], ["--config-env", "a.b=HOME", "diff", dirty]),
+        (["--attr-source", "HEAD", "show"], ["--attr-source", "HEAD", "show", dirty]),
+        (["-C", "/x", "--no-pager", "status"], ["-C", "/x", "--no-pager", "status", dirty]),
+        (["fetch", "origin"], ["fetch", norec, "origin"]), (["pull", "--ff-only"], ["pull", norec, "--ff-only"]),
+        (["push", "origin", "HEAD:refs/heads/jarvis/x"], ["push", norec, "origin", "HEAD:refs/heads/jarvis/x"]),
+        (["commit", "-m", "status"], ["commit", "-m", "status"]), (["rev-parse", "HEAD"], ["rev-parse", "HEAD"]),
+        ([], []),
+    ):
+        assert f(args) == want, (args, f(args))
+    for pin in ("submodule.recurse=false", "fetch.recurseSubmodules=false", "push.recurseSubmodules=no",
+                "status.submoduleSummary=false", "diff.submodule=short", "diff.ignoreSubmodules=dirty"):
+        i = gitops._HARDENING.index(pin)
+        assert gitops._HARDENING[i - 1] == "-c", pin
+    # The same pins in git's environment form, for the git that gh starts.
+    env = gitops._config_env()
+    pairs = [f"{env[f'GIT_CONFIG_KEY_{n}']}={env[f'GIT_CONFIG_VALUE_{n}']}"
+             for n in range(int(env["GIT_CONFIG_COUNT"]))]
+    assert pairs == [gitops._HARDENING[i + 1] for i, t in enumerate(gitops._HARDENING) if t == "-c"], pairs
+    assert "core.hooksPath=/dev/null" in pairs and "core.fsmonitor=false" in pairs
+    print("ok  submodules: the status and diff family get --ignore-submodules=dirty and fetch/pull/push "
+          "--no-recurse-submodules after the subcommand; six recursion and summary pins in every call")
+
+
+def submodule_pin_checks() -> None:
+    """The pins, with nothing for the config check to refuse: each driver lives
+    in the owner's global config and is named only by the submodule's own
+    attributes, so it runs exactly when git goes into the submodule. Each case
+    has its sanity half — plain git goes in — and then the tool must not."""
+    with world() as w:
+        s = Sub(w)
+        wt, run = s.wt, gitops.run
+        fmark, fprog = trap(w, "filter")
+        tmark, tprog = trap(w, "textconv")
+        add_global(w, f'[filter "trap"]\n\tclean = {fprog}\n[diff "trap"]\n\ttextconv = {tprog}\n')
+        assert "[exit 0]" in run(str(wt), ["log", "-1"]), "a clean submodule was refused"
+
+        # The submodule's own fsmonitor (pinned, like the superproject's, not refused):
+        # the hardening's -c travels into the `git status` that plain git runs there.
+        mmark, mprog = trap(w, "fsmonitor")
+        s.config("core.fsmonitor", str(mprog))
+        s.touch()
+        w.sh("status", cwd=wt, check=False)
+        assert fired(mmark), "sanity: plain git status did not run the submodule's fsmonitor"
+        for args in (["status"], ["diff"], ["commit", "-a", "-m", "nothing staged"]):
+            s.touch()
+            out = run(str(wt), args)
+            assert not fired(mmark), f"the tool's {args} ran the submodule's fsmonitor: {out}"
+        s.config("--unset", "core.fsmonitor")
+
+        # The dirty check: plain git runs `git status` inside the submodule.
+        for args in (["status"], ["status", "--short"], ["diff"], ["diff", "--stat"], ["diff", "HEAD"],
+                     ["diff-files"], ["diff-index", "HEAD"], ["commit", "-a", "-m", "nothing staged"]):
+            s.touch()
+            w.sh(*args, cwd=wt, check=False)
+            assert fired(fmark), f"sanity: plain git {args} did not go into the submodule"
+            s.touch()
+            out = run(str(wt), args)
+            assert not fired(fmark), f"the tool's {args} ran the submodule's filter: {out}"
+        # ...and a `.gitmodules` `ignore = none` (a file the agent can write) does not
+        # turn it back on: it beats `-c diff.ignoreSubmodules`, not the command line.
+        gitmodules = wt / ".gitmodules"
+        clean_gitmodules = gitmodules.read_text(encoding="utf-8")
+        gitmodules.write_text(clean_gitmodules + "\tignore = none\n", encoding="utf-8")
+        for args in (["status"], ["diff"], ["diff-files"]):
+            s.touch()
+            out = run(str(wt), args)
+            assert "[exit 0]" in out and not fired(fmark), (args, out)
+        gitmodules.write_text(clean_gitmodules, encoding="utf-8")
+        # `dirty`, not `all`: a submodule whose commit moved is still reported.
+        (s.path / "a.txt").write_text("two\n", encoding="utf-8")
+        w.sh("commit", "-q", "-am", "sub change", cwd=s.path)
+        fired(fmark)
+        out = run(str(wt), ["status", "--short"])
+        assert " M sub" in out and not fired(fmark), out
+
+        # A submodule's diff shown by `git diff` run inside it (`diff.submodule=diff`):
+        # its textconv ran there, under the tool's own --no-textconv.
+        add_global(w, "[diff]\n\tsubmodule = diff\n")
+        w.sh("add", "sub", cwd=wt)
+        w.sh("commit", "-q", "-m", "bump the submodule", cwd=wt)
+        fired(fmark)
+        for args in (["log", "-p", "-1"], ["show"], ["diff", "HEAD~1", "HEAD"]):
+            w.sh(*args, cwd=wt, check=False)
+            assert fired(tmark), f"sanity: plain git {args} did not diff inside the submodule"
+            out = run(str(wt), args)
+            assert not fired(tmark), f"the tool's {args} ran the submodule's textconv: {out}"
+            assert "Subproject commit" in out, f"the submodule's change was hidden: {out}"
+
+        # Fetch recurses on demand: a fetched superproject commit that moves the
+        # submodule makes plain git fetch inside it, under its config. (The bump comes
+        # from another clone: a ref in this repository already at it would hide it.)
+        (s.seed / "c.txt").write_text("c\n", encoding="utf-8")
+        w.sh("add", "c.txt", cwd=s.seed)
+        w.sh("commit", "-q", "-m", "sub third", cwd=s.seed)
+        w.sh("push", "-q", str(s.origin), "HEAD:main", cwd=s.seed)
+        third = w.sh("rev-parse", "HEAD", cwd=s.seed).stdout.strip()
+        other = w.root / "other"
+        w.sh("clone", "-q", str(w.origin), str(other), cwd=w.root)
+        w.sh("update-index", "--cacheinfo", f"160000,{third},sub", cwd=other)
+        w.sh("commit", "-q", "-m", "someone bumps the submodule", cwd=other)
+        w.sh("push", "-q", "origin", "HEAD:main", cwd=other)
+
+        def tracking() -> str:
+            return w.sh("rev-parse", "refs/remotes/origin/main", cwd=s.path).stdout.strip()
+
+        before, parent_before = tracking(), w.sh("rev-parse", "origin/main", cwd=wt).stdout.strip()
+        out = run(str(wt), ["fetch", "origin"])
+        assert "[exit 0]" in out and tracking() == before, f"the tool's fetch went into the submodule: {out}"
+        w.sh("update-ref", "refs/remotes/origin/main", parent_before, cwd=wt)
+        w.sh("fetch", "-q", "origin", cwd=wt)
+        assert tracking() != before, "sanity: plain git fetch did not recurse into the submodule"
+
+        # The owner's global `submodule.recurse`: switch and grep go in.
+        add_global(w, "[submodule]\n\trecurse = true\n")
+        w.sh("branch", "jarvis/bumped", "origin/main", cwd=wt)
+        head = s.head()
+        out = run(str(wt), ["switch", "jarvis/bumped"])
+        assert "[exit 0]" in out and s.head() == head, f"the tool's switch checked out inside the submodule: {out}"
+        assert "[exit 0]" in run(str(wt), ["switch", "jarvis/feat"])
+        w.sh("switch", "-q", "jarvis/bumped", cwd=wt)
+        assert s.head() != head, "sanity: plain git switch did not recurse"
+        w.sh("switch", "-q", "jarvis/feat", cwd=wt)
+        def in_sub(text: str) -> bool:
+            return any(line.startswith("sub/") for line in text.splitlines())
+
+        out = run(str(wt), ["grep", "-n", "-e", "."])
+        assert "[exit 0]" in out and not in_sub(out), f"the tool's grep searched inside the submodule: {out}"
+        assert in_sub(w.sh("grep", "-n", "-e", ".", cwd=wt).stdout), "sanity: plain git grep did not recurse"
+
+        # The owner's global `push.recurseSubmodules`: a push publishes the submodule's
+        # commits to *its* remote (past the outgoing credential scan), and runs its hooks.
+        add_global(w, "[push]\n\trecurseSubmodules = on-demand\n")
+        hmark = w.markers / "pre-push"
+        hook = s.gitdir / "hooks" / "pre-push"
+        hook.write_text(f"#!/bin/sh\ntouch '{hmark}'\n", encoding="utf-8")
+        hook.chmod(0o755)
+        w.sh("switch", "-q", "-c", "jarvis/feat", cwd=s.path)
+
+        def sub_commit(name: str) -> str:
+            (s.path / name).write_text("x\n", encoding="utf-8")
+            w.sh("add", name, cwd=s.path)
+            w.sh("commit", "-q", "-m", name, cwd=s.path)
+            fired(fmark)
+            return s.head()
+
+        def published(commit: str) -> bool:
+            return w.sh("cat-file", "-e", f"{commit}^{{commit}}", cwd=s.origin, check=False).returncode == 0
+
+        first = sub_commit("d.txt")
+        w.sh("add", "sub", cwd=wt)
+        w.sh("commit", "-q", "-m", "point at d", cwd=wt)
+        w.sh("push", "-q", "origin", "HEAD:refs/heads/jarvis/feat", cwd=wt)
+        assert published(first) and fired(hmark), "sanity: plain git push did not push the submodule or run its hook"
+        second = sub_commit("e.txt")
+        assert "[exit 0]" in run(str(wt), ["add", "sub"])
+        assert "[exit 0]" in run(str(wt), ["commit", "-m", "point at e"])
+        out = run(str(wt), ["push", "origin"])
+        assert "[exit 0]" in out and "jarvis/feat" in w.heads(), out
+        assert w.sh("rev-parse", "jarvis/feat", cwd=w.origin).stdout == w.sh("rev-parse", "HEAD", cwd=wt).stdout
+        assert not published(second), f"the tool's push published the submodule's commit: {out}"
+        assert not fired(hmark), "a hook inside the submodule ran"
+    print("ok  submodules (pins): status, diff, diff-files/-index and commit -a never run git inside one "
+          "(a .gitmodules 'ignore = none' included), log -p/show/diff never diff inside one, and "
+          "fetch, switch, grep and push never recurse — each against plain git that does")
+
+
+def submodule_config_checks() -> None:
+    """The belt: some of git's internals go into a checked-out submodule whatever
+    the pins say, so a program named in the submodule's own config refuses the
+    repository — every subcommand, before git runs. Fails closed."""
+    with world() as w:
+        s = Sub(w)
+        wt, run = s.wt, gitops.run
+        assert "[exit 0]" in run(str(wt), ["status"]), "a clean submodule (git's own core.worktree) was refused"
+        # A new worktree has the gitlink but not the submodule: git does not go in, so
+        # it is not read (read, its empty directory would resolve to the superproject).
+        bare = made(gitops.create_worktree(str(w.owner), "no-submodule"))
+        assert not (bare / "sub" / ".git").exists()
+        assert "[exit 0]" in run(str(bare), ["status"]), "a submodule never checked out was refused"
+
+        fmark, fprog = trap(w, "filter")
+        s.config("filter.trap.clean", str(fprog))
+        # Sanity: plain git goes in for each — including the ones no pin keeps out.
+        for args in (["status"], ["diff", "--stat"], ["add", "-A"], ["commit", "-a", "-m", "x"],
+                     ["describe", "--dirty", "--always"], ["rm", "-n", "sub"]):
+            s.touch()
+            w.sh(*args, cwd=wt, check=False)
+            assert fired(fmark), f"sanity: plain git {args} did not run the submodule's filter"
+        for args in (["status"], ["diff"], ["diff", "--stat"], ["log", "-p", "-1"], ["add", "-A"],
+                     ["commit", "-a", "-m", "x"], ["describe", "--dirty", "--always"], ["rm", "-n", "sub"],
+                     ["switch", "-c", "jarvis/other"], ["stash", "list"]):
+            s.touch()
+            out = run(str(wt), args)
+            assert out.startswith("Refused") and "submodule at 'sub'" in out and "filter.trap.clean" in out, (args, out)
+            assert not fired(fmark), args
+        assert gitops.create_worktree(str(wt), "other").startswith("Refused")
+        assert gitops.open_pull_request(str(wt), "t", "b").startswith("Refused")
+        s.config("--unset", "filter.trap.clean")
+
+        for key, value in (("diff.trap.textconv", "x"), ("core.sshCommand", "x"), ("include.path", "x"),
+                           ("remote.origin.uploadpack", "x"), ("url.https://example.invalid/.insteadOf", "x:"),
+                           ("diff.external", "x"), ("core.askPass", "x")):
+            s.config(key, value)
+            out = run(str(wt), ["status"])
+            assert out.startswith("Refused") and "submodule at 'sub'" in out, (key, out)
+            s.config("--unset-all", key)
+        assert "[exit 0]" in run(str(wt), ["status"]), "a clean submodule config was not accepted again"
+
+        # Fails closed: a submodule that does not resolve to its own directory, a
+        # config that cannot be read, a .git file pointing nowhere, past the limits.
+        own_worktree = s.config("--get", "core.worktree").stdout.strip()
+        s.config("core.worktree", str(w.root))
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "does not resolve" in out, out
+        s.config("core.worktree", own_worktree)
+        config_file = s.gitdir / "config"
+        good = config_file.read_text(encoding="utf-8")
+        config_file.write_text(good + "[broken\n", encoding="utf-8")
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "submodule at 'sub'" in out, out
+        config_file.write_text(good, encoding="utf-8")
+        dotgit = s.path / ".git"
+        pointer = dotgit.read_text(encoding="utf-8")
+        dotgit.write_text(f"gitdir: {w.root / 'nowhere'}\n", encoding="utf-8")
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "submodule at 'sub'" in out, out
+        dotgit.write_text(pointer, encoding="utf-8")
+        assert "[exit 0]" in run(str(wt), ["status"])
+        # A config listing that fails on its own (a broken config fails rev-parse first,
+        # so this branch is defence only; reached here by making the listing fail).
+        real_risk = gitops._config_risk
+        gitops._config_risk = lambda cwd, skip=frozenset(): None if skip else real_risk(cwd, skip)
+        try:
+            out = run(str(wt), ["status"])
+        finally:
+            gitops._config_risk = real_risk
+        assert out.startswith("Refused") and "could not be read" in out, out
+
+        # Nested: a repository inside the submodule, its config read too.
+        inner = s.path / "inner"
+        w.sh("init", "-q", str(inner), cwd=w.root)
+        (inner / "i.txt").write_text("i\n", encoding="utf-8")
+        (inner / ".gitattributes").write_text("*.txt filter=trap\n", encoding="utf-8")
+        w.sh("add", "-A", cwd=inner)
+        w.sh("commit", "-q", "-m", "inner", cwd=inner)
+        w.sh("add", "inner", cwd=s.path)
+        w.sh("commit", "-q", "-m", "nest a repository", cwd=s.path)
+        assert "[exit 0]" in run(str(wt), ["status"]), "a clean nested repository was refused"
+        w.sh("config", "filter.trap.clean", str(fprog), cwd=inner)
+        f = inner / "i.txt"
+        st = f.stat()
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 7_000_000_000))
+        w.sh("status", cwd=wt, check=False)
+        assert fired(fmark), "sanity: plain git status did not reach the nested repository"
+        out = run(str(wt), ["status"])
+        assert out.startswith("Refused") and "submodule at 'sub/inner'" in out and not fired(fmark), out
+        w.sh("config", "--unset", "filter.trap.clean", cwd=inner)
+        assert "[exit 0]" in run(str(wt), ["status"])
+        saved = gitops.MAX_SUBMODULE_DEPTH, gitops.MAX_SUBMODULES
+        try:
+            gitops.MAX_SUBMODULE_DEPTH = 1
+            assert "levels deep" in run(str(wt), ["status"])
+            gitops.MAX_SUBMODULE_DEPTH, gitops.MAX_SUBMODULES = saved[0], 1
+            assert "more checked-out submodules" in run(str(wt), ["status"])
+        finally:
+            gitops.MAX_SUBMODULE_DEPTH, gitops.MAX_SUBMODULES = saved
+    print("ok  submodules (config): a program in a checked-out submodule's own config (nested ones too) "
+          "refuses every subcommand before git runs; unreadable, misplaced or too many fail closed")
+
+
+def signing_checks() -> None:
+    """A signature runs the owner's signing program (here a trap as the global
+    config's gpg.program). Plain git takes a `--` after `-m` as the message and
+    signs on the option after it; the tool never runs it (delta review of PR #65)."""
+    with world() as w:
+        wt = made(gitops.create_worktree(str(w.owner), "feat"))
+        mark = w.markers / "gpg-ran"
+        prog = w.markers / "gpg.sh"
+        prog.write_text(f"#!/bin/sh\ntouch '{mark}'\nexit 1\n", encoding="utf-8")
+        prog.chmod(0o755)
+        add_global(w, f"[gpg]\n\tprogram = {prog}\n")
+        w.sh("commit", "--allow-empty", "-m", "--", "--gpg-sign", cwd=wt, check=False)
+        assert fired(mark), "sanity: plain git did not take the '--' as the message and sign"
+        w.sh("branch", "jarvis/side", cwd=wt)
+        for args in (["commit", "--allow-empty", "-m", "--", "--gpg-sign"],
+                     ["commit", "--allow-empty", "-am", "--", "-S"],
+                     ["commit", "--allow-empty", "-m", "--end-of-options", "-S"],
+                     ["merge", "-S", "jarvis/side"], ["merge", "-m", "--", "-S", "jarvis/side"],
+                     ["cherry-pick", "-x", "-S", "HEAD"], ["revert", "-S", "HEAD"],
+                     ["rebase", "-m", "-S", "jarvis/side"]):
+            out = gitops.run(str(wt), args)
+            assert out.startswith("Refused") and not fired(mark), (args, out)
+    print("ok  signing: -S and --gpg-sign refused in commit, merge, cherry-pick, revert and rebase, "
+          "a '--' taken as a message included — against plain git, which signs")
+
+
 def credential_checks() -> None:
     with world() as w:
         wt = made(gitops.create_worktree(str(w.owner), "feat"))
@@ -742,6 +1212,40 @@ def push_and_pr_checks() -> None:
         assert "uncommitted" in gitops.open_pull_request(str(wt), "t", "b")
     print("ok  pull request: pushes the worktree's own branch only, opens a PR through gh, never merges; "
           "bad requests push nothing")
+
+
+def gh_git_checks() -> None:
+    """`gh pr create` runs git itself (a plain `git status` for its "uncommitted
+    change(s)" warning). Every git it starts carries the hardening's pins through
+    GIT_CONFIG_COUNT, so neither the repository's fsmonitor nor a submodule's runs
+    (review of PR #65). The stand-in gh runs that `git status`, from PATH as gh does."""
+    with world() as w:
+        s = Sub(w)
+        wt, run = s.wt, gitops.run
+        (wt / "feature.txt").write_text("feature\n", encoding="utf-8")
+        run(str(wt), ["add", "feature.txt"])
+        assert "[exit 0]" in run(str(wt), ["commit", "-m", "add the feature"])
+        top, top_prog = trap(w, "fsmonitor-repo")
+        sub, sub_prog = trap(w, "fsmonitor-submodule")
+        w.sh("config", "core.fsmonitor", str(top_prog))     # pinned, not refused, like any fsmonitor
+        s.config("core.fsmonitor", str(sub_prog))
+        stand_in = w.fakebin / "gh"
+        stand_in.write_text("#!/bin/sh\ngit status --porcelain >/dev/null 2>&1\n"
+                            "printf '%s\\n' https://example.invalid/pull/9\n", encoding="utf-8")
+        stand_in.chmod(0o755)
+        os.environ["JARVIS_GH"] = str(stand_in)
+        s.touch()
+        out = gitops.open_pull_request(str(wt), "Add the feature", "body")
+        assert "opened a pull request" in out and "pull/9" in out, out
+        assert not fired(top), "the git that gh started ran the repository's fsmonitor"
+        assert not fired(sub), "the git that gh started went into the submodule and ran its fsmonitor"
+        # Sanity: the same stand-in, in gitops' environment without the pins, runs both.
+        s.touch()
+        subprocess.run([str(stand_in)], cwd=str(wt), env=gitops._env(), stdin=subprocess.DEVNULL,
+                       capture_output=True, check=True)
+        assert fired(top) and fired(sub), "sanity: the stand-in's git status ran no fsmonitor"
+    print("ok  gh: every git that gh starts carries the pins — no fsmonitor in the repository or a "
+          "submodule — against the same git unpinned, which runs both")
 
 
 def review_checks() -> None:
@@ -901,8 +1405,13 @@ def main() -> int:
     worktree_checks()
     runner_checks()
     hardening_checks()
+    submodule_flag_checks()
+    submodule_pin_checks()
+    submodule_config_checks()
+    signing_checks()
     credential_checks()
     push_and_pr_checks()
+    gh_git_checks()
     review_checks()
     dispatch_and_tool_checks()
     agent_wiring_checks()
@@ -911,4 +1420,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({
+        "edit_file", "git", "git_worktree", "read_file", "write_file"
+    }):
+        sys.exit(main())

@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import websocket  # noqa: E402  (websocket-client, already a dependency)
 
 from jarvis import config  # noqa: E402
-from jarvis.v2 import terminals as T, ws as W  # noqa: E402
+from jarvis.v2 import devurl, terminals as T, ws as W  # noqa: E402
 from jarvis.v2.daemon import Daemon  # noqa: E402
 from jarvis.v2.model import ProviderName as PN  # noqa: E402
 from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, Usage  # noqa: E402
@@ -192,6 +192,7 @@ class Base(unittest.TestCase):
                                 MODELS_PATH=self.root / "models.json",
                                 PROVIDER_DEFAULTS_PATH=self.root / "provider_defaults.json",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
+                                BROWSER_SETTINGS_PATH=self.root / "browser.json",
                                 TERMINAL_SHELL=str(FAKE_SHELL)).items():
             guard = patch.object(config, name, value)
             guard.start()
@@ -705,6 +706,19 @@ class Lifecycle(Base):
         self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
         self.assertTrue(self.open_terminal()["readable"])
 
+    def test_a_terminal_can_be_made_unreadable_from_its_first_byte(self):
+        # WP-G2: a split's copy of a terminal Jarvis may not read is created
+        # with the switch off, never readable for the round trip a PATCH takes.
+        row = self.open_terminal(readable=False)
+        self.assertFalse(row["readable"])
+        self.assertFalse(self.term(row["id"]).readable)
+        self.assertFalse(self.term(row["id"]).history().readable)
+        self.assertTrue(self.open_terminal(readable=True)["readable"])
+        for bad in ("no", 0, None, [False]):
+            self.owner("POST", "/terminals", {"in": "home", "readable": bad}, status=400)
+        # Still the owner's alone, like every terminal route.
+        self.request("POST", "/terminals", {"in": "home", "readable": False}, port=self.daemon.port, status=403)
+
     def test_at_most_six(self):
         self.assertEqual(T.TERMINAL_CAP, 6)
         made = [self.open_terminal()["id"] for _ in range(6)]
@@ -1194,12 +1208,26 @@ class capture_logs:
 
 class Leaks(Base):
     def test_output_reaches_no_bus_no_log_and_no_file(self):
+        import contextvars
+        from jarvis import runtime, tools
+        from jarvis.v2.tools import terminal_read  # noqa: F401  (registers the tool)
         marker = "zq-terminal-marker-" + secrets.token_hex(6)
         events = self.daemon.bus.subscribe()
+
+        def read():
+            ctx = contextvars.copy_context()
+            ctx.run(runtime.bind, desk={"present": True}, depth=0,
+                    tool_names={"terminal_read"})  # dispatch refuses unbound (PR #42)
+            return ctx.run(tools.dispatch, "terminal_read",
+                           json.dumps({"terminal": tid, "lines": 20})).text
+
         with capture_logs() as records:
             tid, client = self.session()
             client.type(f"echo {marker}")
             client.wait_line(marker)
+            # Jarvis reads it (WP-F): the tool's answer holds the output,
+            # the bus and the log never do.
+            self.assertIn(marker, read())
             client.control({"type": "resize", "cols": 100, "rows": 30})
             self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
             client.close()
@@ -1213,11 +1241,15 @@ class Leaks(Base):
             except Exception:
                 break
         # Lifecycle ids only, never output: one `terminal_attached` per attach
-        # (two here), each exactly {terminal_id, at}.
-        self.assertEqual([r["kind"] for r in drained], ["terminal_attached"] * 2, drained)
+        # (two here), each exactly {terminal_id, at} — and one `terminal_read`
+        # for the read, exactly {terminal_id, lines, at, refused}.
+        self.assertEqual(sorted(r["kind"] for r in drained),
+                         ["terminal_attached"] * 2 + ["terminal_read"], drained)
         for record in drained:
             self.assertEqual(set(record), {"kind", "data"})
-            self.assertEqual(set(record["data"]), {"terminal_id", "at"})
+            keys = ({"terminal_id", "at"} if record["kind"] == "terminal_attached"
+                    else {"terminal_id", "lines", "at", "refused"})
+            self.assertEqual(set(record["data"]), keys)
             self.assertEqual(record["data"]["terminal_id"], tid)
             self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
         self.assertNotIn(marker, json.dumps(drained))
@@ -1230,12 +1262,338 @@ class Leaks(Base):
                 self.assertNotIn(marker.encode(), path.read_bytes(), path)
 
 
+_PROMPT_MARK = re.compile(rb"\]133;B;jarvis=[0-9a-f]+\x1b\\")
+
+
+class DevUrls(Base):
+    """BR-8a: a dev server's URL, read from a terminal's live output, is told
+    to the window attached to that terminal — as `{"type": "dev_url", "url"}`
+    on its socket — and to nothing else: no bus record, no log line, no file.
+    With the owner's `auto_open` off, no byte of output reaches the sniffer."""
+
+    def setUp(self):
+        super().setUp()
+        # One frame a second per terminal is devurl_check's to prove; here
+        # several servers announce themselves in quick succession.
+        guard = patch.object(devurl, "RATE_GAP_S", 0.0)
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    @staticmethod
+    def dev_urls(client):
+        return [m for m in client.messages if m.get("type") == "dev_url"]
+
+    def wait_dev_url(self, client, url):
+        client.until(lambda c: any(m.get("url") == url for m in self.dev_urls(c)),
+                     what=f"dev_url {url}")
+
+    @staticmethod
+    def prompts(client) -> int:
+        return len(_PROMPT_MARK.findall(bytes(client.output)))
+
+    def at_prompt(self, client, count=1):
+        client.until(lambda c: self.prompts(c) >= count, what="a prompt")
+
+    def run_line(self, client, line, expect=None):
+        """Type a line once the shell is at its prompt, and wait for the next
+        prompt: typed ahead, the tty would echo it inside the running
+        command's output, where it is output."""
+        self.at_prompt(client)
+        before = self.prompts(client)
+        client.type(line)
+        self.at_prompt(client, before + 1)
+        expect = line.partition(" ")[2] if expect is None else expect
+        self.assertIn("\n" + expect + "\n", client.text())
+
+    def session(self, tid=None):
+        tid, client = super().session(tid)
+        self.at_prompt(client)
+        return tid, client
+
+    def test_it_reaches_only_the_window_attached_to_that_terminal(self):
+        tid1, one = self.session()
+        tid2, two = self.session()
+        one.type("echo   Local:   http://localhost:24601/")
+        self.wait_dev_url(one, "http://localhost:24601/")
+        # After the bytes that carried it: the line is already on screen.
+        self.assertIn("  Local:   http://localhost:24601/\n", one.text())
+        one.drain(0.3)
+        two.drain(0.3)
+        self.assertEqual(self.dev_urls(one), [{"type": "dev_url", "url": "http://localhost:24601/"}])
+        self.assertEqual(self.dev_urls(two), [])
+        self.assertNotIn("dev_url", json.dumps(self.owner("GET", "/terminals")))
+
+    def test_the_prompt_and_the_typed_line_are_never_read(self):
+        tid, client = self.session()
+        # The first command (before any C mark) and a later one (after).
+        self.run_line(client, "# Local: http://localhost:24602/", "fake: #: command not found")
+        self.run_line(client, "curl http://localhost:24603", "fake: curl: command not found")
+        self.run_line(client, "#  * Running on http://127.0.0.1:24604", "fake: #: command not found")
+        self.run_line(client, "echo  Local: http://localhost:24605/")
+        self.wait_dev_url(client, "http://localhost:24605/")
+        client.drain(0.3)
+        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://localhost:24605/"])
+
+    def test_jarvis_ports_are_never_sent(self):
+        tid, client = self.session()
+        for port in sorted({self.daemon.face_port, self.daemon.port, self.daemon.workshop_port,
+                            8402, 8403, 8404, 8405, 8406}):
+            for host in ("localhost", "127.0.0.1", "[::1]", "0.0.0.0"):
+                self.run_line(client, f"echo  Local: http://{host}:{port}/")
+        self.run_line(client, "echo  Local: http://127.0.0.1:24606/")
+        self.wait_dev_url(client, "http://localhost:24606/")                  # sent as localhost
+        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://localhost:24606/"])
+
+    def test_nothing_reaches_the_bus_a_log_or_a_file(self):
+        marker = "zq-devurl-" + secrets.token_hex(6)
+        url = f"http://localhost:24607/{marker}/"
+        events = self.daemon.bus.subscribe()
+        with capture_logs() as records:
+            tid, client = self.session()
+            client.type(f"echo  Local: {url}")
+            self.wait_dev_url(client, url)
+            self.owner("PATCH", "/browser/settings", {"auto_open": True})
+            self.owner("DELETE", f"/terminals/{tid}")
+        drained = []
+        while True:
+            try:
+                drained.append(events.get_nowait())
+            except Exception:
+                break
+        self.assertEqual([r["kind"] for r in drained], ["terminal_attached"], drained)
+        self.assertNotIn(marker, json.dumps(drained))
+        text = "\n".join(records)
+        self.assertIn(f"terminal {tid} closed", text)                           # the capture worked
+        self.assertIn("browser settings changed by the owner: auto_open on", text)
+        self.assertNotIn(marker, text)
+        self.assertNotIn("24607", text)
+        for path in self.root.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(marker.encode(), path.read_bytes(), path)
+
+    def test_with_auto_open_off_the_sniffer_is_never_fed(self):
+        self.assertTrue(self.owner("GET", "/browser/settings")["auto_open"])
+        self.assertEqual(self.owner("PATCH", "/browser/settings", {"auto_open": False}),
+                         {"lan": False, "local_servers": False, "auto_open": False})
+        fed = []
+        real = devurl.DevUrlSniffer.feed
+
+        def counting(sniffer, data):
+            fed.append(len(data))
+            return real(sniffer, data)
+        with patch.object(devurl.DevUrlSniffer, "feed", counting):
+            tid, client = self.session()
+            self.run_line(client, "echo  Local: http://localhost:24608/")
+            client.drain(0.3)
+            self.assertEqual(self.dev_urls(client), [])
+            self.assertEqual(fed, [], "no byte of output reached the sniffer")
+            self.assertFalse(self.owner("GET", "/browser/settings")["auto_open"])
+            # On again: the next announcement is read.
+            self.owner("PATCH", "/browser/settings", {"auto_open": True})
+            self.run_line(client, "echo  Local: http://localhost:24609/")
+            self.wait_dev_url(client, "http://localhost:24609/")
+        self.assertTrue(fed)
+        self.assertEqual([m["url"] for m in self.dev_urls(client)], ["http://localhost:24609/"])
+
+    def test_a_replay_or_a_second_announcement_never_sends_it_again(self):
+        tid, client = self.session()
+        self.run_line(client, "echo  Local: http://localhost:24610/")
+        self.wait_dev_url(client, "http://localhost:24610/")
+        client.close()
+        again = self.connect(tid)
+        again.until(lambda c: "replayed" in c.kinds() and "24610" in c.text(), what="the replay")
+        self.at_prompt(again)
+        # The same server again (a restart): the same origin, and Puma's
+        # second line for it.
+        self.run_line(again, "echo  Local: http://127.0.0.1:24610/")
+        self.run_line(again, "echo * Listening on http://[::1]:24610")
+        self.run_line(again, "echo  Local: http://localhost:24611/")
+        self.wait_dev_url(again, "http://localhost:24611/")
+        self.assertEqual([m["url"] for m in self.dev_urls(again)], ["http://localhost:24611/"])
+
+    def test_the_switch_is_the_owners(self):
+        path = "/browser/settings"
+        defaults = {"lan": False, "local_servers": False, "auto_open": True}
+        self.assertEqual(self.owner("GET", path), defaults)
+        for kw in ({"port": self.daemon.port}, {"port": self.daemon.workshop_port},
+                   {"origin": f"http://127.0.0.1:{self.daemon.workshop_port}"},
+                   {"origin": "http://evil.example"}, {"origin": "null"}, {"origin": None},
+                   {"host": f"evil.example:{self.daemon.face_port}"}):
+            with self.subTest(**{k: str(v) for k, v in kw.items()}):
+                status, _ = self.request("PATCH", path, {"auto_open": False}, **kw)
+                self.assertIn(status, (403, 404))
+                status, _ = self.request("GET", path, None, **kw)
+                self.assertIn(status, (403, 404))
+        for bad in ({"auto_open": "no"}, {"auto_open": 0}, {"bogus": True}, {}, [True]):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.request("PATCH", path, bad)[0], 400)
+        self.assertEqual(self.request("PATCH", path + "?x=1", {"auto_open": False})[0], 400)
+        self.assertEqual(self.request("POST", path, {"auto_open": False})[0], 404)
+        self.assertEqual(self.request("GET", "/browser/other")[0], 404)
+        self.assertEqual(self.owner("GET", path), defaults)
+        self.assertFalse((self.root / "browser.json").exists(), "a test daemon writes no file")
+
+    def test_one_set_of_switches_for_every_reader(self):
+        # The reconciliation with BR-1a (#69): the routes, the engine, the
+        # gate's per-connection reads, `/status` and the terminals all ask the
+        # daemon's one `BrowserSettings`. No Chrome starts.
+        settings, host = self.daemon.browser_settings, self.daemon.browser
+        self.assertIs(host._settings, settings)
+        tid = self.open_terminal()["id"]
+        term = self.term(tid)
+        self.assertTrue(term._dev_on())
+        self.assertFalse(host.loopback_open(24699))
+        changed = self.owner("PATCH", "/browser/settings",
+                             {"lan": True, "local_servers": True, "auto_open": False})
+        self.assertEqual(changed, {"lan": True, "local_servers": True, "auto_open": False})
+        self.assertEqual((settings.value("lan"), settings.value("local_servers")), (True, True))
+        self.assertTrue(host.loopback_open(24699), "the gate's per-connection read")
+        self.assertFalse(term._dev_on(), "the terminals' read")
+        status = self.request("GET", "/status", port=self.daemon.port, origin=None)[1]["browser"]
+        self.assertEqual((status["lan"], status["local_servers"]), (True, True))
+        self.assertTrue(self.owner("GET", "/browser")["settings"]["lan"])
+        self.assertEqual(self.request("PATCH", "/browser/settings", {"local_servers": "yes"})[0], 400)
+        self.assertTrue(settings.value("local_servers"), "a refused PATCH changed nothing")
+
+    def test_unattached_output_is_dropped_and_not_remembered(self):
+        terminal = T.Terminal("0000000e", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE, integration="posix")
+        self.addCleanup(terminal.finish)
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        line = b"  Local: http://localhost:24612/\r\n"
+        terminal._output(line)                                                  # no window
+
+        class Sock:
+            def __init__(self):
+                self.sent, self.closed = [], threading.Event()
+
+            def send_binary(self, data):
+                self.sent.append(("binary", bytes(data)))
+                return True
+
+            def send_text(self, text):
+                self.sent.append(("text", json.loads(text)))
+                return True
+        sock = Sock()
+        terminal._attachment = sock
+        # The typed line between B and C, and the C mark split across chunks.
+        c_mark = mark(b"C;cmdline_url=npm%20run%20dev")
+        terminal._output(mark(b"A") + b"$ " + mark(b"B") + b"echo Local: http://localhost:24613/\r\n"
+                         + c_mark[:9])
+        terminal._output(c_mark[9:] + line[:12])
+        terminal._output(line[12:] + mark(b"D;0"))
+        texts = [item for kind, item in sock.sent if kind == "text"]
+        self.assertEqual(texts, [{"type": "marked"},                           # the signed A
+                                 {"type": "dev_url", "url": "http://localhost:24612/"}])
+        self.assertEqual(sock.sent[-1][0], "text", "after the bytes that carried it")
+        # A mark without this terminal's nonce moves nothing.
+        terminal._output(mark(b"A", nonce="00" * 16) + b"  Local: http://localhost:24614/\r\n")
+        self.assertEqual(sock.sent[-1], ("text", {"type": "dev_url", "url": "http://localhost:24614/"}))
+
+    def test_a_frame_the_socket_refuses_is_not_remembered(self):
+        # PR #70 review: the URL used to be recorded before `send_text`, whose
+        # False was ignored, so a socket that was closing or behind cost the
+        # server its one frame for good.
+        terminal = T.Terminal("0000000c", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE, integration="posix")
+        self.addCleanup(terminal.finish)
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        frames, accept = [], [False]
+
+        def send_text(text):
+            if accept[0]:
+                frames.append(json.loads(text))
+            return accept[0]
+        terminal._attachment = SimpleNamespace(send_binary=lambda d: True, send_text=send_text,
+                                               closed=threading.Event())
+        line = b"  Local: http://localhost:24616/\r\n"
+        terminal._output(line)                                                 # refused
+        self.assertEqual(frames, [])
+        self.assertEqual(len(terminal._sniffer._recent), 0, "not remembered")
+        accept[0] = True
+        terminal._output(line)                                                 # the restart's
+        self.assertEqual(frames, [{"type": "dev_url", "url": "http://localhost:24616/"}])
+        terminal._output(line)
+        self.assertEqual(len(frames), 1, "and remembered once sent")
+
+    def test_floods_stay_well_above_what_xterm_draws(self):
+        # PR #70 review: 50 MB of "Network: http://192.168…" lines went through
+        # `_output` at 8.9 MB/s with the sniffer (543 without). xterm draws
+        # ~14 MB/s; every flood must stay at twice that, through `_output`
+        # with a socket that takes everything. Best of two runs each.
+        mb = 1 << 20
+        floods = {
+            "network URLs": b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n",
+            "plain logs": b"2026-10-12 10:00:00 INFO worker-3 processed job 12345 in 4.2 ms\r\n",
+            "loopback access log": b"GET http://localhost:3000/api/items?page=2 200 12ms\r\n",
+            "colour": b"\x1b[32mok\x1b[0m test \x1b[1mname\x1b[22m passed in \x1b[33m3ms\x1b[0m\r\n",
+            "announcements": b"  Local:   http://localhost:3000/\r\n",
+        }
+        sock = SimpleNamespace(send_binary=lambda d: True, send_text=lambda t: True,
+                               closed=threading.Event())
+        for name, line in floods.items():
+            data = line * (12 * mb // len(line))
+            best = 0.0
+            for _ in range(2):
+                terminal = T.Terminal("0000000b", shell="/bin/sh", folder="/", project_id=None,
+                                      label="~", cols=80, rows=24, nonce=NONCE, integration="none")
+                terminal._attachment = sock
+                terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+                terminal._dev_on = lambda: True
+                started = time.perf_counter()
+                for i in range(0, len(data), 65536):
+                    terminal._output(data[i:i + 65536])
+                best = max(best, len(data) / mb / (time.perf_counter() - started))
+                terminal.finish()
+            with self.subTest(flood=name):
+                self.assertGreater(best, 28.0, f"{name}: {best:.1f} MB/s")
+
+    def test_a_sniffer_that_fails_never_breaks_the_terminal(self):
+        terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce=NONCE, integration="posix")
+        self.addCleanup(terminal.finish)
+
+        class Broken(devurl.DevUrlSniffer):
+            def feed(self, data):
+                raise RuntimeError("zq-sniffer-text " + data.decode())
+        terminal._sniffer = Broken(lambda: set())
+        terminal._dev_on = lambda: True
+        sent = []
+        terminal._attachment = SimpleNamespace(send_binary=lambda d: sent.append(d) or True,
+                                               send_text=lambda t: sent.append(t) or True,
+                                               closed=threading.Event())
+        with capture_logs() as records:
+            terminal._output(b"  Local: http://localhost:24615/\r\n")
+            terminal._output(b"more\r\n")
+        self.assertEqual(sent, [b"  Local: http://localhost:24615/\r\n", b"more\r\n"])
+        self.assertIsNone(terminal._sniffer)
+        self.assertIn("dev-server detection stopped (RuntimeError)", "\n".join(records))
+        self.assertNotIn("zq-sniffer-text", "\n".join(records))
+
+
 class NoTool(Base):
-    """No tool, MCP tool, fast-path tool or Discord verb reaches a terminal."""
+    """No tool, MCP tool, fast-path tool or Discord verb reaches a terminal —
+    but one: `terminal_read` (WP-F), which imports exactly `read_for_tool`."""
 
     NEEDLES = re.compile(r"""['"]/terminals|\.terminals\b|import\s+terminals\b|\bterminals\s+import|"""
                          r"""jarvis\.v2\.terminals|\bTerminals\(|\bterminals\.(route|serve|create)""")
-    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py"}
+    # vex.py (VX-1) creates program terminals, from its own argv tables, behind
+    # owner-only routes; tests/v2/vex_check.py holds it to that.
+    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py",
+               "jarvis/v2/vex.py"}
+    # The one reader, and the one line it may hold.
+    READER = "jarvis/v2/tools/terminal_read.py"
+    READER_IMPORT = "from ..terminals import read_for_tool\n"
+    # What `read_for_tool` and everything it calls must never do.
+    WRITES = ("queue_input", "_write(", "resize(", ".control(", "attach(", "ticket(", ".create(",
+              "self.close(", "terminals.close(", "terminal.close(", "hangup", "spawn(", "send_text",
+              "send_binary", "readable =", "redeem(", "os.write", "_terminals.pop", "serve(", "finish(")
+
+    def _without_reader_import(self, text: str) -> str:
+        self.assertEqual(text.count(self.READER_IMPORT), 1, "the reader imports read_for_tool once")
+        return text.replace(self.READER_IMPORT, "")
 
     def test_no_tool_is_named_for_a_terminal(self):
         from jarvis import tools
@@ -1243,7 +1601,10 @@ class NoTool(Base):
         from jarvis.v2.providers import fastpath
         reachable = set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(tools.REGISTRY)
         self.assertTrue({"task_propose", "schedule_delete"} <= reachable)
-        self.assertEqual(sorted(n for n in reachable if "terminal" in n.lower()), [])
+        self.assertEqual(sorted(n for n in reachable if "terminal" in n.lower()), ["terminal_read"])
+        # jarvis-mcp cannot tell a chat from a task worker: it does not offer it.
+        self.assertNotIn("terminal_read", mcp.MCP_TOOLS)
+        self.assertFalse(tools.REGISTRY["terminal_read"].dangerous)
 
     def test_nothing_but_the_daemon_and_its_routes_reaches_the_module(self):
         repo = Path(__file__).resolve().parents[2]
@@ -1252,7 +1613,10 @@ class NoTool(Base):
             rel = path.relative_to(repo).as_posix()
             if rel in self.ALLOWED:
                 continue
-            if self.NEEDLES.search(path.read_text(encoding="utf-8")):
+            text = path.read_text(encoding="utf-8")
+            if rel == self.READER:
+                text = self._without_reader_import(text)
+            if self.NEEDLES.search(text):
                 offenders.append(rel)
         self.assertEqual(offenders, [])
         # And the tool modules the agent actually runs, by import.
@@ -1265,7 +1629,21 @@ class NoTool(Base):
             if func is not None:
                 modules.add(inspect.getmodule(func))
         for module in modules:
-            self.assertIsNone(self.NEEDLES.search(inspect.getsource(module)), module.__name__)
+            text = inspect.getsource(module)
+            if module.__name__ == "jarvis.v2.tools.terminal_read":
+                text = self._without_reader_import(text)
+                # It reaches the terminals through one call of that one function.
+                self.assertEqual(len(re.findall(r"\bread_for_tool\(", text)), 1)
+            self.assertIsNone(self.NEEDLES.search(text), module.__name__)
+
+    def test_the_reader_only_reads(self):
+        reader = [T.read_for_tool, T.Terminals.read, T.Terminals._resolve,
+                  T.Terminals._read_published, T.Terminal.history, T._secret_values,
+                  T._env_values, T._folder_env_files]
+        for func in reader:
+            source = inspect.getsource(func)
+            for verb in self.WRITES:
+                self.assertNotIn(verb, source, f"{func.__qualname__} calls {verb}")
 
     def test_the_needles_would_catch_a_tool_that_reached_in(self):
         for text in ('client.post("/terminals", ...)', "daemon.terminals.create(x)",

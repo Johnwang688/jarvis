@@ -21,12 +21,14 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import runtime  # noqa: E402
 from jarvis import config, tools  # noqa: E402
-from jarvis.tools import search as search_mod  # noqa: E402
+from jarvis.tools import files as v1_files, search as search_mod  # noqa: E402
 from jarvis.tools.files import SELF_PROTECTED  # noqa: E402
 
 
@@ -168,6 +170,59 @@ def protection_checks(tmp: Path) -> None:
     print("ok  guard: edit_file refuses every safety-layer file and .env")
 
 
+def env_file_checks(tmp: Path) -> None:
+    """ENV-1, the owner's `.env*` rule: Jarvis reads no credential env file
+    (`.env`, `.env.<anything>`, any depth, any case — not `*.example`) and
+    writes only `*.example`. On main only `.env` and `.env.local` were
+    refused: `.env.production` was readable and writable by both tools."""
+    root = tmp / "envs"
+    root.mkdir()
+    secret = "FAKE-PROD-VALUE-0123456789"
+    credential = {
+        ".env.production": f"API_KEY={secret}\n",
+        ".env.staging.local": f"API_KEY={secret}\n",
+        ".ENV.Test": f"API_KEY={secret}\n",
+        ".env.sample": f"API_KEY={secret}\n",
+        ".env.example.bak": f"API_KEY={secret}\n",
+    }
+    for name, text in credential.items():
+        (root / name).write_text(text, encoding="utf-8")
+    # A symlink either way: an innocent name to a credential, and an
+    # `.example` name that leads (through a `.env` hop) to one.
+    (root / "settings.txt").symlink_to(".env.production")
+    (root / "real.txt").write_text(f"API_KEY={secret}\n", encoding="utf-8")
+    (root / ".env").symlink_to("real.txt")
+    (root / ".env.local.example").symlink_to(".env")
+    paths = [root / n for n in credential] + [root / "settings.txt", root / ".env.local.example"]
+
+    for path in paths:
+        before = path.read_bytes()
+        out = call("read_file", path=str(path))
+        assert out.startswith("Error:") and "protected" in out, (path.name, out)
+        assert secret not in out, (path.name, out)
+        out = call("write_file", path=str(path), content="clobbered")
+        assert out.startswith("Error:") and "protected" in out, (path.name, out)
+        out = call("edit_file", path=str(path), old_string="API_KEY", new_string="X")
+        assert out.startswith("Error:") and "protected" in out, (path.name, out)
+        assert path.read_bytes() == before, f"{path.name} was modified"
+    # Creating one from nothing is refused too.
+    out = call("write_file", path=str(root / "deep" / ".env.preview"), content="X=1\n")
+    assert out.startswith("Error:") and "protected" in out, out
+    assert not (root / "deep" / ".env.preview").exists()
+
+    # `*.example` stays readable and writable: create, read, edit, rewrite.
+    for name in (".env.example", "config/.env.development.example"):
+        target = root / name
+        out = call("write_file", path=str(target), content="API_KEY=\n")
+        assert out.startswith("Wrote"), (name, out)
+        assert "API_KEY=" in call("read_file", path=str(target)), name
+        out = call("edit_file", path=str(target), old_string="API_KEY=", new_string="API_KEY=xxx")
+        assert out.startswith("Edited"), (name, out)
+        assert target.read_text(encoding="utf-8") == "API_KEY=xxx\n", name
+    print(f"ok  guard: {len(paths)} credential env files (case, templates, symlinks either way) "
+          "refused by read_file/write_file/edit_file; *.example read and written")
+
+
 def gate_state_checks(tmp: Path) -> None:
     """SELF_PROTECTED froze the gate's code. Nothing froze the gate's *data*.
 
@@ -210,6 +265,102 @@ def gate_state_checks(tmp: Path) -> None:
     assert "safety layer" in out, out
     assert not target.exists(), "the allowlist was created from nothing"
     print("ok  guard: the approval gate's state file is refused by both write tools")
+
+
+def hud_build_checks(tmp: Path) -> None:
+    """BR-0: the built HUD is not writable by the write tools.
+
+    The v2 daemon serves `config.HUD_DIST` on its HUD listener, where the
+    page's script carries the HUD's own Origin — the one request
+    `POST /approvals` accepts. A file written there is a program the owner's
+    next reload runs with the power to approve. On dfb1d7e both write tools
+    wrote it. `config.HUD_DIST` points at a temp dir here; the source beside
+    it stays writable (SELF_PROTECTED is not widened).
+    """
+    real = config.HUD_DIST
+    dist = tmp / "hud" / "dist"
+    (dist / "assets").mkdir(parents=True)
+    page = dist / "index.html"
+    page.write_text("<!doctype html><title>J.A.R.V.I.S.</title>", encoding="utf-8")
+    source = tmp / "hud" / "src" / "App.tsx"
+    source.parent.mkdir(parents=True)
+    source.write_text("export const x = 1;\n", encoding="utf-8")
+    link = tmp / "innocent-looking"
+    link.symlink_to(dist / "assets", target_is_directory=True)
+    config.HUD_DIST = dist
+    try:
+        assert "<title>" in call("read_file", path=str(page)), "it stays readable"
+        out = call("edit_file", path=str(page), old_string="J.A.R.V.I.S.", new_string="x")
+        assert "built HUD" in out, out
+        out = call("write_file", path=str(page), content="<script>approve()</script>")
+        assert "built HUD" in out, out
+        for planted in (dist / "assets" / "index-new.js", link / "via-a-symlink.js",
+                        dist / "fresh" / "dir" / "x.js"):
+            out = call("write_file", path=str(planted), content="approve()")
+            assert "built HUD" in out, (planted, out)
+            assert not planted.exists() and not (dist / "assets" / planted.name).exists(), planted
+        assert "J.A.R.V.I.S." in page.read_text(encoding="utf-8"), "the page was rewritten"
+        # The HUD's source is ordinary work; the owner's build writes dist.
+        call("read_file", path=str(source))
+        out = call("edit_file", path=str(source), old_string="x = 1", new_string="x = 2")
+        assert "x = 2" in source.read_text(encoding="utf-8"), out
+    finally:
+        config.HUD_DIST = real
+    # Since C-1 (ED-4) what is served — and so what is refused — is the
+    # installed copy, unless JARVIS_HUD_DEV=1 serves hud/dist itself.
+    assert real == (config.HUD_BUILD if config.HUD_DEV else config.HUD_DIR), real
+    print("ok  guard: the built HUD (config.HUD_DIST) is refused by both write tools, "
+          "through a symlink and for a new file; its source stays writable")
+
+
+def installed_hud_checks(tmp: Path) -> None:
+    """C-1 (ED-4): the installed HUD — every build under `config.HUD_DIR`, and
+    a build planted beside them — is refused by both write tools, through the
+    one check BR-0 added (`config.HUD_DIST` is the install root now). Fails on
+    main, where `HUD_DIST` was the repo's hud/dist and the install root was
+    ordinary ground."""
+    from jarvis.v2 import hud_install
+
+    saved = (config.HUD_DIR, config.HUD_DIST, config.HUD_DEV)
+    built = tmp / "c1-build"
+    (built / "assets").mkdir(parents=True)
+    (built / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>", encoding="utf-8")
+    (built / "assets" / "index-1a2b.js").write_text("console.log(1)", encoding="utf-8")
+    root = tmp / "share" / "jarvis" / "hud"
+    config.HUD_DIR = config.HUD_DIST = root
+    config.HUD_DEV = False
+    try:
+        installed = hud_install.install(built, root)
+        page = installed.path / "index.html"
+        assert "<title>" in call("read_file", path=str(page)), "it stays readable"
+        out = call("edit_file", path=str(page), old_string="J.A.R.V.I.S.", new_string="x")
+        assert "built HUD" in out, out
+        newer = root / "29991231T235959999999Z-0123456789ab"
+        for planted in (page, installed.path / "assets" / "index-1a2b.js", installed.path / "new.js",
+                        newer / "index.html", newer / "manifest.json", root / "stray.js"):
+            out = call("write_file", path=str(planted), content="<script>approve()</script>")
+            assert "built HUD" in out and "jarvis hud install" in out, (planted, out)
+        assert not newer.exists() and not (root / "stray.js").exists()
+        assert hud_install.newest(root).id == installed.id
+        assert hud_install.read(installed, "index.html") == built.joinpath("index.html").read_bytes()
+    finally:
+        config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
+    # The install root is refused always — also in a process whose
+    # JARVIS_HUD_DEV=1 serves hud/dist (review of PR #44, L4), which is then
+    # refused as well.
+    dev_dist = tmp / "c1-dev-dist"
+    dev_dist.mkdir()
+    saved = (config.HUD_DIR, config.HUD_DIST, config.HUD_DEV)
+    config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = root, dev_dist, True
+    try:
+        for target in (root / "29991231T235959999999Z-0123456789ab" / "index.html", dev_dist / "index.html"):
+            out = call("write_file", path=str(target), content="<script>approve()</script>")
+            assert "built HUD" in out, (target, out)
+            assert not target.exists(), target
+    finally:
+        config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
+    print("ok  guard: the installed HUD (every build, and a build planted beside them) is "
+          "refused by both write tools, in dev mode too")
 
 
 def model_state_checks(tmp: Path) -> None:
@@ -508,6 +659,110 @@ def grep_protected_checks(tmp: Path) -> None:
     print(f"ok  grep_files: context lines, single-file paths and count mode all filtered — {ran}")
 
 
+def credential_folder_checks(tmp: Path) -> None:
+    """v1's file tools refuse every credential folder (review of PR #69).
+
+    `config.credential_dirs()` — ~/.ssh, ~/.aws, ~/.config/gh,
+    ~/.config/jarvis, ~/.gnupg and the HUD Browser's profile folder — was
+    closed to v2's tools but not to v1's: the Browser profile's History, Web
+    Data and Sessions were readable by the fast path's read_file and
+    grep_files. Now read_file, write_file, edit_file and grep_files (both
+    backends) refuse anything in one, as written or through a symlink; the
+    gate's own state files keep their old rule and stay readable config.
+    HOME and `BROWSER_DIR` point at temp folders for the check, so it never
+    looks at the owner's own."""
+    from unittest.mock import patch
+
+    home = tmp / "cred-home"
+    profile = tmp / "browser-dir" / "profiles" / "p-00000000" / "Default"
+    profile.mkdir(parents=True)
+    (profile / "History").write_text("visited https://bank.example/account BROWSERSECRET\n")
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    (ssh / "id_test").write_text("SSHSECRET key material\n")
+    jarvis_cfg = home / ".config" / "jarvis"
+    jarvis_cfg.mkdir(parents=True)
+    (jarvis_cfg / "allowlist.json").write_text('[{"tool": "run_readonly", "prefix": "ls"}]')
+    (jarvis_cfg / "other.json").write_text('{"note": "JARVISCFGSECRET"}')
+    outside = tmp / "outside"
+    outside.mkdir()
+    (outside / "notes.txt").write_text("an ordinary note\n")
+    link = outside / "history-link.txt"
+    link.symlink_to(profile / "History")
+
+    with patch.dict(os.environ, {"HOME": str(home)}), \
+            patch.object(config, "BROWSER_DIR", tmp / "browser-dir"), \
+            patch.object(config, "ALLOWLIST_PATH", jarvis_cfg / "allowlist.json"):
+        for target in (profile / "History", ssh / "id_test", jarvis_cfg / "other.json", link,
+                       "~/.ssh/id_test"):
+            out = call("read_file", path=str(target))
+            assert "credential folder" in out and "SECRET" not in out, f"read {target}: {out}"
+            out = call("write_file", path=str(target), content="overwritten")
+            assert out.startswith("Error:"), f"write {target}: {out}"
+            out = call("edit_file", path=str(target), old_string="SECRET", new_string="X")
+            assert out.startswith("Error:"), f"edit {target}: {out}"
+        new = profile / "planted.txt"
+        out = call("write_file", path=str(new), content="planted")
+        assert out.startswith("Error:") and not new.exists(), out
+        assert "BROWSERSECRET" in (profile / "History").read_text(), "History was rewritten"
+        # The gate's own state stays readable config, by its own path only.
+        assert "run_readonly" in call("read_file", path=str(jarvis_cfg / "allowlist.json"))
+
+        real_which = search_mod.shutil.which
+        have_rg = real_which("rg") is not None
+        for root in (tmp / "browser-dir", home, outside, profile / "History", link):
+            for mode in ("content", "files", "count"):
+                kwargs = dict(pattern="SECRET", path=str(root), mode=mode)
+                with_rg = call("grep_files", **kwargs) if have_rg else None
+                search_mod.shutil.which = lambda name: None
+                try:
+                    with_py = call("grep_files", **kwargs)
+                finally:
+                    search_mod.shutil.which = real_which
+                for out, label in ((with_rg, "ripgrep"), (with_py, "fallback")):
+                    if out is None:
+                        continue
+                    body = "" if out.startswith("No matches") else out
+                    for bit in ("BROWSERSECRET", "SSHSECRET", "JARVISCFGSECRET", "History", "id_test"):
+                        assert bit not in body, f"{label} leaked {bit} for {kwargs}:\n{out}"
+        found = call("grep_files", pattern="ordinary", path=str(outside))
+        assert "notes.txt" in found, found
+
+        # A search's own judge (`search.refuser`, the folders read once) and
+        # the single-path rule agree on every shape: a symlinked folder in,
+        # a symlinked file in, `..`, a missing path, the gate's state by its
+        # own path and through a symlink (delta review of PR #69).
+        dirlink = outside / "profile-link"
+        dirlink.symlink_to(profile, target_is_directory=True)
+        allowlink = outside / "allow-link.json"
+        allowlink.symlink_to(jarvis_cfg / "allowlist.json")
+        judge = search_mod.refuser()
+        shapes = {profile / "History": True, dirlink / "History": True, link: True,
+                  profile / ".." / "Default" / "History": True, ssh / "id_test": True,
+                  outside / "missing" / "x.txt": False, outside / "notes.txt": False,
+                  jarvis_cfg / "allowlist.json": False, allowlink: True, jarvis_cfg / "other.json": True}
+        for path, want in shapes.items():
+            assert judge(path) is want and search_mod.refused(path) is want \
+                and v1_files._credential_folder(path) is want, (path, want)
+        out = call("grep_files", pattern="SECRET", path=str(dirlink))
+        assert "BROWSERSECRET" not in out, out
+
+        # And it is cheap: 20,000 paths judged in under a second (the first
+        # cut took ~3 s, rebuilding the folders and resolving per file).
+        many = tmp / "many"
+        for d in range(200):
+            (many / f"d{d}").mkdir(parents=True)
+        paths = [str(many / f"d{d}" / f"f{f}.py") for d in range(200) for f in range(100)]
+        started = time.perf_counter()
+        judge = search_mod.refuser()
+        assert not any(judge(p) for p in paths)
+        took = time.perf_counter() - started
+        assert took < 1.0, f"20k paths took {took:.2f} s"
+    ran = "both backends" if have_rg else "fallback only (rg not installed)"
+    print(f"ok  credential folders: read, write, edit and grep refused, symlinks too; "
+          f"the gate's state readable — {ran}")
+
+
 def backend_parity_checks(tmp: Path) -> None:
     """Both backends must answer identically, or the tool has two behaviours.
 
@@ -562,11 +817,15 @@ def main() -> int:
         read_checks(tmp)
         edit_checks(tmp)
         protection_checks(tmp)
+        env_file_checks(tmp)
         gate_state_checks(tmp)
+        hud_build_checks(tmp)
+        installed_hud_checks(tmp)
         model_state_checks(tmp)
         numbering_guard_checks(tmp)
         grep_checks(tmp)
         grep_protected_checks(tmp)
+        credential_folder_checks(tmp)
         rg_args_checks()
         gitignore_checks(tmp)
         backend_parity_checks(tmp)
@@ -575,4 +834,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"edit_file", "grep_files", "read_file", "write_file"}):
+        sys.exit(main())

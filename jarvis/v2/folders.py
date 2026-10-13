@@ -13,11 +13,12 @@ Two functions, and the split between them is the point:
   written inside. It re-runs the check first and refuses if anything moved
   since the owner said yes (`FolderChanged`, so the caller asks again).
 
-**Who may call `make_project_folder`.** Only the `/project new` confirmation
-handler (`jarvis/v2/discord/project_commands.py`). It is not a tool, not an MCP
-tool and not an HTTP route; `tests/v2/folders_check.py` greps the tree to keep
-it that way. A model never makes a folder: the folder is made by code, from the
-check the owner approved.
+**Who may call `make_project_folder`.** Only the confirmation handler,
+`projects.confirm_folder`, which Discord's `/project new` and the HUD's new VEX
+project (VX-1) both call. It is not a tool, not an MCP tool and not an HTTP
+route; `tests/v2/folders_check.py` greps the tree to keep it that way. A model
+never makes a folder: the folder is made by code, from the check the owner
+approved.
 
 *Not here yet (B2b):* `project_propose` — a Claude Sonnet or Opus chat raising
 the same `project_folder` confirmation (decisions O3's model rule). It needs
@@ -39,7 +40,7 @@ ancestor (so a symlinked parent cannot carry the folder somewhere else):
   (`$HOME`, `/mnt/c/Users/johnw`) — a root itself included;
 * `config.PROJECT_WORK_DIR` itself (it holds projects; it is not one);
 * any component starting with `.`;
-* `config.V2_CREDENTIAL_DIRS`, `config.V2_DATA_DIR`, `config.REPO_ROOT` and
+* `config.credential_dirs()` (the Browser's folder among them), `config.V2_DATA_DIR`, `config.REPO_ROOT` and
   `/mnt/c/Users/johnw/AppData` — inside them, or a folder that contains them;
 * under `/mnt/<drive>`, a name Windows cannot hold (`CON`, `NUL`, `COM1`, …,
   `<>:"\\|?*`, a trailing dot or space);
@@ -177,7 +178,7 @@ def roots() -> list[Path]:
 
 
 def _protected() -> list[Path]:
-    out = [_expand(d) for d in config.V2_CREDENTIAL_DIRS]
+    out = [_expand(d) for d in config.credential_dirs()]
     out += [Path(os.path.normpath(str(config.V2_DATA_DIR))),
             Path(os.path.normpath(str(config.REPO_ROOT))), Path(APPDATA)]
     return out

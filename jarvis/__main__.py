@@ -351,16 +351,54 @@ def cmd_desktop(args) -> int:
     return 0
 
 
+def cmd_vex(args) -> int:
+    # Human-only, like `jarvis desktop setup`: which VEX executables the HUD's
+    # Build, Download and brain terminal run is the owner's choice, made here.
+    # There is deliberately no `jarvis vex download`: sending code to a robot
+    # is only ever the owner's click in the HUD (decision V-2).
+    from .v2 import vex_setup
+
+    return vex_setup.run()
+
+
 def cmd_route(args) -> int:
     from .v2.router import cli
     return cli(args)
 
 
 def cmd_hud(args) -> int:
-    """Start the v2 service once, then open the owner's app-mode browser."""
+    """Start the v2 service once, then open the owner's app-mode browser.
+
+    `jarvis hud install` builds `hud/` and installs it where the daemon serves
+    it from (decision C-1, ED-4): a human or lead step, never a tool. `jarvis
+    hud rebuild` is the same install with `npm ci` first when it is needed,
+    and optionally a pull before and a restart after (`v2/owner_ops.py`)."""
     import subprocess
     import time
+    from .v2 import hud_install
     from .v2.daemon import is_running
+    action = getattr(args, "action", "open")
+    if action != "rebuild":
+        stray = [flag for flag, name in (("--pull", "pull"), ("--restart", "restart"),
+                                         ("--clean", "clean"), ("--force", "force"))
+                 if getattr(args, name, None) not in (None, False)]
+        if stray:
+            console.print(f"[red]{', '.join(stray)} {'is' if len(stray) == 1 else 'are'} only "
+                          f"for `jarvis hud rebuild`, not `jarvis hud {action}`.[/red]")
+            return 2
+    if action == "install":
+        return hud_install.main(allow_dirty=bool(getattr(args, "allow_dirty", False)))
+    if action == "rebuild":
+        from .v2 import owner_ops
+        return owner_ops.rebuild(pull_first=bool(getattr(args, "pull", False)),
+                                 restart_after=bool(getattr(args, "restart", False)),
+                                 clean=bool(getattr(args, "clean", False)),
+                                 allow_dirty=bool(getattr(args, "allow_dirty", False)),
+                                 force=bool(getattr(args, "force", False)),
+                                 wait=_wait(args))
+    if not config.HUD_DEV and hud_install.newest(config.HUD_DIR) is None:
+        console.print("[yellow]No HUD is installed, so the window will say so. "
+                      "Run `jarvis hud install` first.[/yellow]")
     if not is_running(config.DAEMON_PORT):
         child = subprocess.Popen([sys.executable, "-m", "jarvis", "daemon2"],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -376,7 +414,31 @@ def cmd_hud(args) -> int:
     return 0
 
 
+def _wait(args) -> float:
+    from .v2 import owner_ops
+    wait = getattr(args, "wait", None)
+    return owner_ops.WAIT if wait is None else wait
+
+
+def cmd_restart(args) -> int:
+    """`jarvis restart`: restart the v2 daemon's systemd unit and report on
+    it (`v2/owner_ops.py`). The owner's, from their own terminal — DENY for
+    every agent."""
+    from .v2 import owner_ops
+
+    return owner_ops.restart(force=bool(getattr(args, "force", False)), wait=_wait(args),
+                             handed_off=bool(getattr(args, "handed_off", False)))
+
+
 def cmd_daemon2(args) -> int:
+    if getattr(args, "action", "run") == "restart":
+        return cmd_restart(args)
+    stray = [flag for flag, name in (("--force", "force"),)
+             if getattr(args, name, None) not in (None, False)]
+    if stray:
+        console.print(f"[red]{', '.join(stray)} {'is' if len(stray) == 1 else 'are'} only for "
+                      "`jarvis daemon2 restart` (or `jarvis restart`).[/red]")
+        return 2
     from .v2 import daemon
 
     return daemon.main()
@@ -403,7 +465,7 @@ def cmd_mcp(args) -> int:
 def cmd_daemon(args) -> int:
     from . import daemon
 
-    if args.action == "install":
+    if getattr(args, "action", "open") == "install":
         return daemon.install()
     return daemon.run()
 
@@ -766,7 +828,17 @@ def cmd_config(args) -> int:
     return 0
 
 
-def main() -> int:
+def _seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not 0 < value <= 600:
+        raise argparse.ArgumentTypeError("--wait takes 0 < SECONDS <= 600")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jarvis", description="Your personal agent.")
     sub = parser.add_subparsers(dest="command")
 
@@ -864,11 +936,77 @@ def main() -> int:
                          help="seconds to wait for the bridge to connect")
     desktop.set_defaults(func=cmd_desktop)
 
-    hud = sub.add_parser("hud", help="open the v2 HUD (starts the daemon if needed)")
+    vexcmd = sub.add_parser(
+        "vex", help="find VS Code's VEX tools for the HUD's VEX view (human-only)")
+    vexcmd.add_argument("action", choices=["setup"])
+    vexcmd.set_defaults(func=cmd_vex)
+
+    hud = sub.add_parser(
+        "hud",
+        help="open the v2 HUD (starts the daemon if needed), or `install`/`rebuild` it (human-only)",
+        description=(
+            "open     open the HUD window, starting the daemon if needed\n"
+            "install  build hud/ and install it where the daemon serves it from\n"
+            "rebuild  install with the latest changes: `npm ci` first when node_modules is\n"
+            "         missing or older than package-lock.json (or --clean), a fast-forward\n"
+            "         of main before (--pull) and a daemon restart after (--restart) if\n"
+            "         asked, then check the daemon serves the new build\n\n"
+            "A HUD-only change needs only a reload of the window (Ctrl+R); restart the\n"
+            "daemon only when Python changed."),
+        epilog=(
+            "rebuild exit codes: 0 installed and served; 1 refused or failed; 3 a turn is\n"
+            "running or an approval waiting (or that could not be checked), so nothing was\n"
+            "restarted; 4 installed but not verified (or the restart handed off).\n"
+            "Owner-only: Jarvis is refused install and rebuild in every spelling."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    hud.add_argument("action", nargs="?", choices=["open", "install", "rebuild"], default="open",
+                     help="install: build hud/ and install it; rebuild: npm ci when needed, "
+                          "then install, then verify")
     hud.add_argument("--no-window", action="store_true", help="start the daemon without opening a browser")
+    hud.add_argument("--allow-dirty", action="store_true",
+                     help="install/rebuild: build even with uncommitted changes under hud/")
+    hud.add_argument("--pull", action="store_true",
+                     help="rebuild: first fast-forward main from origin/main (refused off main or "
+                          "with uncommitted tracked changes; never stashes, resets or forces)")
+    hud.add_argument("--restart", action="store_true",
+                     help="rebuild: restart the daemon afterwards (as `jarvis restart`)")
+    hud.add_argument("--clean", action="store_true",
+                     help="rebuild: run `npm ci` even when node_modules looks current")
+    hud.add_argument("--force", action="store_true",
+                     help="rebuild --restart: restart even while a turn is running")
+    # No option of `hud` (or `daemon2`) takes a value: the owner-op detector
+    # reads `jarvis hud … rebuild` by its words, and a value before the action
+    # (`--wait 30 rebuild`) would hide it. `jarvis restart --wait` has the
+    # op as its first word. tests/v2/owner_ops_check.py pins this.
     hud.set_defaults(func=cmd_hud)
 
-    sub.add_parser("daemon2", help="v2 daemon and local API").set_defaults(func=cmd_daemon2)
+    restart_help = ("restart the v2 daemon (systemd's jarvis-daemon2) and report on it; "
+                    "refused while a turn runs or an approval waits unless --force (human-only)")
+    restart_epilog = ("Open HUD terminals end with the old daemon; press Ctrl+R in the HUD "
+                      "afterwards. Exit codes: 0 restarted and answering; 1 refused or failed; "
+                      "3 a turn is running or an approval waiting (or the daemon did not answer, "
+                      "so that could not be checked), nothing restarted; 4 restarted but no new "
+                      "daemon answered /status in time, or handed off from a HUD terminal. "
+                      "Owner-only: Jarvis is refused it in every spelling.")
+    restart = sub.add_parser("restart", help=restart_help, description=restart_help,
+                             epilog=restart_epilog)
+    restart.add_argument("--force", action="store_true",
+                         help="restart even while a turn is running (it is cut off)")
+    restart.add_argument("--wait", type=_seconds, default=None, metavar="SECONDS",
+                         help="how long to wait for the new daemon to answer /status (default 30)")
+    # Set only by the restart a HUD terminal hands to a transient unit outside
+    # the daemon's cgroup (`owner_ops.hand_off`), so it never hands off again.
+    restart.add_argument("--handed-off", action="store_true", help=argparse.SUPPRESS)
+    restart.set_defaults(func=cmd_restart)
+
+    daemon2 = sub.add_parser("daemon2", help="v2 daemon and local API; `daemon2 restart` = "
+                                             "`jarvis restart`", epilog=restart_epilog)
+    daemon2.add_argument("action", nargs="?", choices=["run", "restart"], default="run",
+                         help="run: run the daemon in this process (systemd does this); "
+                              "restart: as `jarvis restart`")
+    daemon2.add_argument("--force", action="store_true",
+                         help="restart: restart even while a turn is running")
+    daemon2.set_defaults(func=cmd_daemon2)
 
     discord = sub.add_parser("discord", help="v2 Discord surface (human-only)")
     discord_sub = discord.add_subparsers(dest="action", required=True)
@@ -933,7 +1071,11 @@ def main() -> int:
 
     sub.add_parser("tools", help="list registered tools").set_defaults(func=cmd_tools)
     sub.add_parser("config", help="show configured model tiers").set_defaults(func=cmd_config)
+    return parser
 
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
     if not getattr(args, "func", None):
         args = parser.parse_args(["chat"])

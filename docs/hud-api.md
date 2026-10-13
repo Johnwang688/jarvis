@@ -6,13 +6,16 @@ WP7-notes.md` route table, plus `/approvals` from WP5, `/route` from WP9,
 `/tasks/{id}/start|steer|cancel|resume|answer` from WP11) stays as is. This
 file adds what the HUD needs and nothing else. All JSON; loopback; the HUD
 is served from the daemon on `FACE_PORT` (8402) and calls the API on the
-**same origin** (the daemon serves the API on both listeners); previews
-come from `WORKSHOP_PORT` (8403), a different origin by design.
+**same origin** (the daemon serves the API on both listeners); the workshop origin
+is `WORKSHOP_PORT` (8403), a different origin by design.
 
 ## Static
 
-`GET /` → the built HUD (`hud/dist/index.html`); `GET /assets/*` → its
-assets. `GET /avatar.svg`, `GET /avatars`, `GET /voices`, `GET /models`,
+`GET /` → the HUD's page; `GET /assets/*` → its assets — from the newest
+**installed build** (`config.HUD_DIR/<build-id>/`, decision C-1; see "the
+HUD's CSP and installed build" below), or from `hud/dist` itself only under
+`JARVIS_HUD_DEV=1`. With nothing installed, `GET /` is a 503 page naming
+`jarvis hud install`. `GET /avatar.svg`, `GET /avatars`, `GET /voices`, `GET /models`,
 `GET /models/catalog`, `POST /avatar`, `POST /voice`, `POST /model`,
 `POST /mute`, `POST /say` — **v1 semantics and shapes** (`jarvis/face/
 server.py`), re-homed; `POST /model` sets the **fast path's** global
@@ -63,20 +66,93 @@ since the v1 face and the v2 daemon are separate processes.
 - `GET /projects/{id}/platform` → `{"platform": "wsl"|"windows", "note":
   str|null}` — `windows` when the root is under `/mnt/<drive>/`, with the
   9p caution as the note.
+- Every project the routes answer with (`GET /projects`, `GET`/`PATCH
+  /projects/{id}`, `POST /projects`) carries **`root_real`** beside `root`
+  (#50, 2026-10-11): where the root resolves (`projects.resolved_root`, the
+  root the file routes read under), or `null` when it cannot be resolved.
+  A file's `abs` sits under it even when `root` goes through a symlink, so
+  a File pane's tree finds a buffer read through another project
+  (`lib/dirtyMarks.ts` `treeRoot`, falling back to `root`). Display data
+  only: never stored, never on the bus, and 400 if sent back on a POST or
+  PATCH.
 
 ## Files (scoped: project root + `extra_dirs`; anything else 403)
 
+**Every editor file route is owner-only, reads included** (ED-2, decisions
+E-7): `projects.owner_only` — the HUD's listener and the HUD's own page (its
+`Origin`, or a same-origin GET's `Sec-Fetch-Site`), else **403**. The API
+listener every tool's HTTP client uses never reaches them. What the editor
+may do with a file is one classifier, `jarvis/v2/editor_policy.py`, which
+every one of these routes asks (`kind`):
+
+| `kind` | What | The editor |
+|---|---|---|
+| `text` | everything else | editable |
+| `env` | a credential env file: `.env` or `.env.<anything>`, any depth, not ending `.example`, case-insensitive, symlinks resolved both ways (`secrets.is_env_credential`, the owner's `.env*` rule). **Never demoted**: one whose bytes are not UTF-8 text (UTF-16 from PowerShell 5.1, Latin-1) stays `env`, with `editable: false` | **the owner's** to edit: "Jarvis can't read this file"; read-only when `editable` is false |
+| `gate` | the gate's own state (`protected_paths()`: the allowlist, models.json, routing.json …), even inside `~/.config/jarvis` — only a path that **resolves to itself** (no symlink on its way) and is no credential by another rule; this exemption is the editor's routes' alone | readable, read-only |
+| `safety` | SELF_PROTECTED, git's internals and global config, the served HUD build (`files._self_protected`) | readable, read-only |
+| `binary` | not UTF-8, or a NUL in the first 8 KiB (not an env file) | readable (lossy), read-only; a PUT never overwrites it |
+| `withheld` | a credential bundle by name, anything under `V2_CREDENTIAL_DIRS` (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.config/jarvis`, `~/.gnupg`) or v2's session carriers (`V2_DATA_DIR/claude`, `V2_DATA_DIR/codex`), Claude's and Codex's login files, git's credential store, `.netrc`, `~/.docker/config.json`, `~/.kube/config` (and `$KUBECONFIG`), `~/.npmrc`, `~/.pypirc` | **no content, ever** |
+
 - `GET /projects/{id}/tree?path=<rel>&depth=2` →
-  `{"path", "entries": [{"name", "kind": "file"|"dir", "size", "mtime"}]}`
-  (`.git`, `.jarvis`, `node_modules`, `.venv` omitted; a `SKIP_DIRS` in the
-  backend, the v1 grep list).
-- `GET /projects/{id}/file?path=<rel>` → `{"path", "content", "mtime",
-  "size", "protected": bool}`; protected credential names (v1 secrets
-  layer) return `{"protected": true}` with **no content**, 200.
-- `PUT /projects/{id}/file` `{"path", "content", "expected_mtime"}` →
-  `{"mtime"}`; 409 on mtime mismatch (someone else wrote it); 403 on a
-  protected name or a SELF_PROTECTED / allowlist path; 413 over 2 MB.
-  Atomic write.
+  `{"path", "entries": [{"name", "kind": "file"|"dir", "size", "mtime",
+  "policy"?}]}` (`.git`, `.jarvis`, `node_modules`, `.venv` omitted; a
+  `SKIP_DIRS` in the backend, the v1 grep list). `policy` is present only on
+  a row the editor treats specially: `"withheld"` (never opened; a withheld
+  folder is never walked, and listing one is 403) or `"env"` (a file only: a
+  virtualenv folder named `.env` is a folder). Inside a
+  withheld folder only the gate's own state files — and the folders on the
+  way to them — are listed (`~/.config/jarvis/allowlist.json` stays
+  reachable from the Inbox).
+- `GET /projects/{id}/file?path=<rel>` → `{"path", "abs", "content",
+  "etag", "mtime", "mtime_ns", "size", "encoding": "utf-8"|"utf-8-bom"|null,
+  "eol": "LF"|"CRLF"|"CR"|"mixed"|null, "kind", "editable": bool,
+  "readonly": str|null, "protected": false}`. `abs` is where the file
+  resolves (one editor buffer per file on disk, however many projects reach
+  it); `etag` is the first 128 bits of the bytes' SHA-256, as hex;
+  **`editable`** is whether the editor may save it — the HUD follows it,
+  never the kind alone (an env file that is not UTF-8 is `kind: "env"`,
+  `editable: false`, `encoding: null`), and a read without it is read-only;
+  `readonly` is the sentence beside the editor's lock (null for an editable
+  file Jarvis may read). A withheld file is `{"path", "abs", "kind":
+  "withheld", "editable": false, "readonly", "protected": true}` — **no
+  content and no etag**, 200. A `binary` (or non-UTF-8 env) file's content is
+  decoded with replacement characters, for reading only. An unknown `kind`
+  opens read-only and closed to Jarvis in the HUD.
+- `PUT /projects/{id}/file` `{"path", "content", "expected_etag"}` →
+  `{"etag", "abs", "mtime", "mtime_ns", "size"}`. `expected_etag` is the
+  etag the edit was made against, or `null` for "the file must not exist"
+  (create; also Save to recreate). Under the daemon's lock the bytes on disk
+  are hashed again: a mismatch is **409 `{"error", "etag"}`** with the
+  current etag (`null`: the file is gone), and the file is left
+  byte-identical. A rewrite that restored the old mtime is still a 409; a
+  `touch` alone is not one. 403 for every file that is not `editable` (every
+  kind but `text` and `env`, and bytes on disk that are not text) and when
+  the filesystem refuses the write; **500** for any other unexpected disk
+  error (never a 409, which is the conflict bar); 413 over 2 MB; 400 for a
+  malformed etag, for both or neither precondition, or any other key. Atomic
+  (a temp file beside it, named `<name>.<random>.tmp` — so an env file's temp
+  is an env file by name — 0600 from its first byte, renamed over), the
+  file's mode kept;
+  a new file is 0644, a new env file 0600. **`expected_mtime` is still
+  accepted for one release** (exactly one of the two), then goes.
+- `POST /projects/{id}/files/stat` `{"paths": [rel, …]}` (at most 100, else
+  413) → `{"files": {rel: row}}`, each row `{"etag", "mtime_ns", "size",
+  "kind"}`, `{"gone": true}`, `{"kind": "withheld"}`, or `{"error": status}`
+  for a path the project cannot reach; `etag` is null over 2 MB. A file is
+  hashed again only when its stat (device, inode, size, mtime_ns, ctime_ns)
+  moved. The HUD asks every 2 s while it is visible, and on focus — inotify
+  cannot see a write made from Windows on the 9p `/mnt/c` mount.
+- **An env file's content travels only between the disk and the owner's
+  editor**: never the bus, a log line, `log.jsonl`, Discord, an `@path`
+  attachment, a dropped file, a diff, the workshop origin or any tool result
+  (each refuses it: `hud_api.protected` asks `is_env_credential`, and
+  withheld files too — with **no gate exemption**: the gate's readable state
+  is the editor's routes' alone, so `@.config/jarvis/allowlist.json` is not
+  attached; a dropped file named like a credential store, `.npmrc` or
+  `.docker/config.json` among them, is not either). The HUD keeps it out of localStorage and
+  add-to-chat, and gives its model a language of its own (`dotenv`) so its
+  words are never offered as suggestions in another file.
 - `GET /tasks/{id}/diff` → `{"base", "head", "files": [{"path", "status":
   "A"|"M"|"D"|"R", "additions", "deletions"}], "patch": str}` from the
   worktree (`git diff <base>...HEAD` plus the working tree), capped at 1 MB
@@ -84,20 +160,32 @@ since the v1 face and the v2 daemon are separate processes.
 - `GET /tasks/{id}/diff/file?path=<rel>` → `{"before", "after"}` for the
   Monaco diff editor.
 
-## Preview origin (`WORKSHOP_PORT`)
+## The workshop origin (`WORKSHOP_PORT`)
 
 - The daemon also serves `http://127.0.0.1:8403/p/{project_id}/<rel>`
   read-only from the project root (same scope rules, same skip list,
-  `Cache-Control: no-store`, correct content types). The HUD's Preview tab
-  iframes that, or any `http://localhost:<port>/…` URL the owner types.
+  `Cache-Control: no-store`, correct content types). The HUD's Browser
+  pane (Preview until BR-3a) iframes that, or any
+  `http://localhost:<port>/…` URL the owner types.
   Never the HUD origin: the backend refuses to proxy it, the frontend
   refuses to load it.
+- **What it refuses (403)**: a credential file (`hud_api.protected`: env
+  files, withheld files, credential bundles), **any path with a hidden
+  component inside the project** (a name starting with `.`) **except
+  `.well-known`** — as written and where it resolves; its 403 says "hidden
+  path: not served on the preview origin", every other one "protected file" —
+  and **anything under
+  Jarvis's own config and data folders** (`~/.config/jarvis`,
+  `~/.local/share/jarvis`, `V2_DATA_DIR`, the sessions, spill, goals and
+  voices folders; `editor_policy.jarvis_dirs`). It has no owner check by
+  design and answers any loopback client — v1's `fetch_page` included — while
+  the Inbox is rooted at `~` (review of PR #49, LOW3).
 - The port is read from `GET /status` → `workshop_port` (2026-10-08), never
   assumed: a hard-coded 8403 made the HUD suite's mock-served window load the
   owner's **live** daemon's preview for fixture project `p1`
   (`GET /p/p1/index.html -> 400` in the live log). Only a daemon too old to
   report one falls back to 8403.
-- The preview origin carries **no** frame headers (it is framed by the HUD
+- The workshop origin carries **no** frame headers (it is framed by the HUD
   on purpose), but every response there carries one CSP, `sandbox
   allow-scripts allow-forms`, so every document it serves runs with an
   opaque origin; the HUD and API listeners refuse to be framed (WP-E,
@@ -119,6 +207,14 @@ since the v1 face and the v2 daemon are separate processes.
   "state": "open"|"closed", "turns", "cost_usd"}]` — the orchestration
   view.
 - `GET /tasks/{id}/journal?after=N` → the journal records.
+- The WP11 verbs' bodies (`daemon.task_verb_body`, 400 for any other
+  shape): `start` and `cancel` `{}`; `steer` `{"text", "spoken"?}`;
+  `resume` `{"provider"?}`; `answer` exactly `{"index", "text"}`, where
+  `index` is the question's place in `spec.questions` — every question,
+  answered and assumable ones included — and only a `clarifying` task takes
+  one (`control.answer_refusal`, 409 with its sentence otherwise). This
+  file named the verbs without their bodies, and the HUD sent `{question,
+  answer}` to `answer` until 2026-10-11.
 
 ## Usage
 
@@ -490,11 +586,14 @@ worktree and no branch is touched; the ledger and decision log are kept.
 
 **Owner only.** Archive, restore, both deletes and the trash empty answer
 only on the HUD's listener (`FACE_PORT`) and only to a request carrying the
-HUD's `Origin`; anything else is 403. No tool reaches them (fast path, MCP,
+HUD's `Origin` — or, for a plain GET/HEAD only, one carrying no `Origin` at
+all that the browser marked `Sec-Fetch-Site: same-origin` (Chromium sends no
+Origin on a same-origin GET; `projects.is_owner`, 2026-10-11); anything else
+is 403. No tool reaches them (fast path, MCP,
 Claude or Codex threads, Discord) — `tests/v2/archive_check.py` asserts
 it. The gate keeps every tool's HTTP client off these routes; it is not a
 boundary against a shell command the permission gate approved, the same
-footing as `/approvals`.
+footing as `/approvals` (owner-only too since BR-0, below).
 
 ## Additions 2026-10-07 (Discord slash core — S1)
 
@@ -766,9 +865,13 @@ The owner's terminals (HUD plan §2.4, decisions W-2, W-3, W-5; code in
 shell on a real PTY. **Every route is owner-only**: it answers only on the
 HUD's listener (`FACE_PORT`) and only to a request whose `Origin` is present
 and equals `http://<Host>`, with `Host` exactly `127.0.0.1:<port>` or
-`localhost:<port>`. Anything else is 403: the API listener (8405, every
-tool's client), a missing Origin, `null`, the workshop origin, any other
-site. The preview listener (8403) serves only `/p/...` and answers 404. No
+`localhost:<port>` — except a plain GET (the listing), which Chromium sends
+with no Origin when the HUD's own page asks, and which is accepted with no
+Origin only when the browser marked it `Sec-Fetch-Site: same-origin`
+(a forbidden header no page can set; since 2026-10-11 — before it, the
+HUD's own listing was refused). Anything else is 403: the API listener (8405,
+every tool's client), a missing Origin on a write or the socket, `null`, the
+workshop origin, any other site. The workshop listener (8403) serves only `/p/...` and answers 404. No
 tool, MCP tool, fast-path tool or Discord verb names these routes. A
 program running as the owner can still forge an Origin and fetch a ticket:
 that is why every attach is announced (`terminal_attached`, below).
@@ -791,7 +894,7 @@ that is why every attach is announced (`terminal_attached`, below).
   a profile that `exec`s another shell configures `"bash"` and never marks,
   so it has no `sudo -k` either, and the HUD says so. `integrated`: the
   shell has marked a command (bash only).
-- `POST /terminals` `{in, cols?, rows?}` → 201 `row`. `in` is `"home"`,
+- `POST /terminals` `{in, cols?, rows?, readable?}` → 201 `row`. `in` is `"home"`,
   `{"thread": id}` (that thread's own folder, `cwd`), `{"project": id}` (its
   root) or `{"task": id}` (its worktree if it exists, else the root it was
   started under). **The folder is resolved from ids, never from a path
@@ -809,7 +912,10 @@ that is why every attach is announced (`terminal_attached`, below).
   running it under its own name would run something the owner did not
   name. The startup file must fit 8 KiB (a pipe's capacity even under
   `pipe-user-pages-soft`), is written without blocking, and a short write
-  is a 409, never a cut file or a wedged route.
+  is a 409, never a cut file or a wedged route. `readable` (a boolean,
+  default true; 2026-10-11, WP-G2) sets the "Jarvis can read" switch before
+  the shell runs, so a split's copy of a terminal Jarvis may not read is
+  never readable, not even for the round trip a `PATCH` would take.
 - `PATCH /terminals/{id}` `{readable: bool}` → `row`. Exactly that key.
 - `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
   use, 30 seconds, valid for this terminal only**; it is spent the moment it
@@ -870,7 +976,8 @@ that is why every attach is announced (`terminal_attached`, below).
     then a close when the terminal is closed; `{"type": "exit", "code",
     "reason": "ended"}` then close 1001 when Jarvis stops (terminals do not
     survive a restart, W-3); `input_dropped`, `input_resumed` and
-    `input_resume_refused` (above).
+    `input_resume_refused` (above); `{"type": "dev_url", "url"}` when a dev
+    server announces itself in the live output (BR-8a, below).
   - Window → server: `{"type": "resize", "cols", "rows"}` (same ranges;
     anything else is ignored), `{"type": "input_resume"}` (above) and the
     takeover answer below. Unknown messages are ignored.
@@ -945,12 +1052,19 @@ command's span; and a line kept out of history (a leading space under
 whether or not the terminal is `integrated`; spans can add refusals, never
 remove one.
 
-**Output never leaves memory**: on the bus there are lifecycle ids only
-(`terminal_attached`), never output; the HUD lists terminals with `GET
+**Output stays in memory unless Jarvis reads it**: on the bus there are
+lifecycle records only (`terminal_attached`, and since WP-F `terminal_read`:
+ids, a count, a time), never output; the HUD lists terminals with `GET
 /terminals` and learns of an exit over the socket. Output is not in any log
-(the daemon logs opened / attached / exited / closed with the folder as a
+(the daemon logs opened / attached / read / exited / closed with the folder as a
 project name or `~`, and logs `/terminals` paths without their query, so
-never a ticket), not in a thread log, not on Discord, not on disk.
+never a ticket), not in a thread log, not on Discord, not on disk. **The
+exception is a `terminal_read` result (WP-F, below)**: what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken).
+Its `tool_finished` summary is fixed ("read N lines", "refused", "error"), so
+the tool's own record on the bus and in the thread's `log.jsonl` carries none
+of it. That is all the fixed summary promises: the model's reply is not
+filtered — it goes to `log.jsonl`, the bus, Discord and speech like any reply,
+so whatever it repeats of the terminal lands there too.
 
 ## Additions 2026-10-09 (terminal panel and view — WP-D)
 
@@ -1017,6 +1131,50 @@ What the HUD does with the terminal contract above (code in
   reads "no integration" at once. Both say sudo may cache there.
 - **`readable`**: each terminal's bar carries the "Jarvis can read" switch,
   `PATCH /terminals/{id}` with exactly `{readable}`.
+- **Split and × (WP-G2, 2026-10-11)**: splitting a pane that shows a terminal
+  is one `POST /terminals` with the `in` the source was opened with (the
+  window's remembered spec) and, unless the source's row says it is
+  readable, `readable: false` — the copy is unreadable from its first byte,
+  and a source the window does not know fails closed. A refused create (the cap's 409) leaves the copy on
+  the picker with the daemon's sentence; nothing retries. × on a pane showing
+  a terminal sends **nothing**: no `DELETE`, no new ticket — the socket stays
+  attached and the terminal becomes the panel's selected tab.
+- **Continuing after Jarvis restarted (2026-10-12, the owner's option (a))**:
+  no route changed. A terminal that ended with Jarvis (`exit` with `reason:
+  "ended"`, or a ticket answered 404) and that this tab showed reads
+  "Jarvis restarted; this terminal ended. Type to continue in a new shell
+  here." with **Continue here** beside **New terminal here**. A typing key
+  (printable text, Enter, Backspace, Tab, an arrow), a paste or Continue
+  here is one ordinary `POST /terminals` with the `in` it was opened with
+  and, unless its row (kept current from every listing and `PATCH`) says it
+  is readable, `readable: false`. The new terminal takes the old one's
+  place everywhere the window tracks it (its panel tab position, its pane,
+  the selected tab, `jarvis.hud.terminals`, `jarvis.hud.terminals.mine`)
+  and attaches into **the same xterm**. On that attach and every later one
+  the window writes, after the RIS and before the replay, the old text —
+  rebuilt from xterm's cells (characters and SGR colours only, at most
+  1 MiB, never the old bytes, so nothing in it is a query, a mode or an
+  alternate screen) — and a separator, `── restarted HH:MM ──`, plain
+  text (the old text walked from the bottom, stopped at the cap; one longer
+  line keeps its tail). Keys and pastes made while it starts are held
+  (4 KiB, a paste that does not fit is dropped whole) and, once the new
+  replay has been parsed, **typed, never run** (PR #64 review L6): keys up
+  to the first Enter, never it nor anything after, and no paste holding a
+  line break — the notice says the line waits at a new local shell's
+  prompt (check it, then press Enter, or paste again). **Any refusal drops
+  the whole hold** (a key that does not type, past 4 KiB, a card raised
+  meanwhile, the terminal no longer on screen — the panel closed, another
+  tab, its pane switched away), said with the `unsent` notice. Never under
+  a card, after a crash, on a load, a restored panel or a reattach, for a
+  terminal this tab did not show (another window's), one whose `in` is not
+  remembered (never guessed from its row), a shell that exited on its own
+  (Restart and Close as before) or a program terminal; Ctrl+D and the HUD's
+  own keys never continue one. Six already open: the daemon's 409 sentence
+  in the strip, nothing held, and from then on only Continue here tries
+  again. **The old text is memory only**: a page reload loses it, and
+  nothing of it is written to disk or sent anywhere. The switch comes from
+  this window's last-seen row, which another window can leave stale (a
+  limit that predates this; it needs a daemon event).
 - **`busy`**: × reads a `GET /terminals` sent after the click (never one
   already on its way) and, when the foreground process is not the shell,
   asks before `DELETE`; if the listing fails it asks anyway, saying it could
@@ -1025,10 +1183,10 @@ What the HUD does with the terminal contract above (code in
   and the terminal's bar, one line, capped at 80 — never `document.title`;
   links (plain or OSC 8) open only for `http`/`https`, only on Ctrl+click,
   in a new window with `noopener`; there is no clipboard addon (no OSC 52)
-  and window reports stay off. "Open in Preview" for loopback links is
+  and window reports stay off. "Open in Browser" for loopback links is
   WP-E's (below).
 
-## Additions 2026-10-10 (Preview and dev servers — WP-E)
+## Additions 2026-10-10 (Preview — now the Browser — and dev servers, WP-E)
 
 Plan `docs/plans/2026-10-09-hud-workspace-plan.md` §2.5 items 1–4; decisions
 W-4 (that file wins).
@@ -1057,13 +1215,14 @@ the header; U+2028 used to fail after the status line was written), or
 naming `frame-ancestors`, `sandbox`, `report-uri` or `report-to`, raise
 `ValueError` (a programming error; `binary()` checks before writing a byte,
 so the answer is **one 400** — the dispatcher's status for a
-`ValueError` — never half a response or a second status line). The editor's full policy (ED-4, `'wasm-unsafe-eval'`) extends
-that function. The **preview listener (8403) carries neither frame
+`ValueError` — never half a response or a second status line). The HUD's
+full policy (ED-4, below) is built by that same function, in the same one
+header. The **workshop listener (8403) carries neither frame
 header**; instead it sends one CSP, `sandbox allow-scripts allow-forms`
 (`hud_api.workshop_security_policy`, a response's own directives merged and
 checked the same way), so a workshop page runs with an opaque origin
-everywhere: inside the HUD (unchanged — the Preview frame was already
-opaque), in a top-level tab (newly), and in a Preview frame whose page was
+everywhere: inside the HUD (unchanged — the Browser frame was already
+opaque), in a top-level tab (newly), and in a Browser frame whose page was
 let keep its origin and then navigated itself to the workshop (it used to
 get the real workshop origin there — its storage and same-origin reads of
 any project's served files; PR #31 review). v1's whiteboard workshop is its
@@ -1076,7 +1235,8 @@ own server and is unaffected.
   (`false` before the daemon has started). A HUD whose `/status` lacks it
   (an older daemon) never offers "keep its own origin".
 
-**The Preview pane (`lib/preview.ts`, `PreviewTab.tsx`):**
+**The Browser pane (`lib/browser.ts`, `BrowserTab.tsx`; the Preview pane,
+`lib/preview.ts` and `PreviewTab.tsx`, until BR-3a):**
 - **Refused ports**: the HUD's (`hud_port`, 8402), the API's (`api_port`,
   8405) — the defaults are refused whatever `/status` says, since they are
   the owner's live daemon — and the window's own port; anything not loopback
@@ -1088,38 +1248,60 @@ own server and is unaffected.
   "Keep its origin" switch on, exactly `allow-scripts allow-forms
   allow-same-origin`. Never `allow-top-navigation`, `allow-popups`,
   `allow-popups-to-escape-sandbox`, `allow-downloads` or `allow-modals`.
-  The frame is keyed by its sandbox, so a change reloads the page under the
-  new flags.
-- **"Keep its origin"** (`preview-keep-origin`, a checkbox; `data-origin`
+  Every load is a fresh frame (`FrameHost`, 2026-10-12), so a change of the
+  flags reloads the page under them.
+- **No frame takes the keyboard on its own** (R-1, amendment 2 §E.8,
+  2026-10-12). The iframe (`browser-frame`, with `data-browser-frame=
+  "<pane>:<tab>"`, tab 0 until Direct tabs) is made by script and has a
+  transparent shield over it (`browser-shield`, `data-up` "true" while it
+  catches the pointer). A frame that gains focus without the owner's gesture
+  — the pointer over it, Tab or Shift+Tab within 300 ms, their own load
+  (Load, Enter, Project root, the keep-origin switch, Reload) until 2 s
+  after its `load`, or the HUD giving focus back after a card — is removed;
+  under a card or from a hidden pane always. The pane then shows
+  `browser-stolen` ("This page took the keyboard · Reload") with
+  `browser-stolen-reload`, disabled under a card; the tab's URL stays.
+  Focus goes back only to the HUD element that lost it to that theft; with
+  none (the keyboard was taken from another page), the notice's container
+  (`browser-stolen`, `tabIndex=-1`) takes it — never its Reload, never a box
+  that sends. While a HUD text control has the keyboard, the shield steps
+  aside only on a press, and the HUD focuses the page (`contentWindow.focus()`;
+  a Browser iframe's own `focus()` does the same). A Tab counts only if not
+  cancelled and only for the frame it landed in. The console gets one line
+  naming the pane slot, never the URL. No route changes.
+- **"Keep its origin"** (`browser-keep-origin`, a checkbox; `data-origin`
   names what it covers): off by default, per pane, offered only when the
   loaded URL is loopback `http(s)` on a port that is none of `hud_port`,
   `workshop_port`, `api_port`, 8402, 8403, 8405 nor the window's own, and
   only while `/status` says `frame_hardened: true`. Stored with the pane
   spec (`jarvis.hud.workspace`) as `keepOrigin: "<scheme://host:port>"` —
   the origin it was given for — so loading a URL on another port, host or
-  scheme turns it off (`setPreviewUrl` drops it, and the frame applies it
+  scheme turns it off (`setBrowserUrl` drops it, and the frame applies it
   only while the origins match). Judged again on every load
   (`keptOrigin`) and **dropped from storage** when it no longer passes; the
   parser keeps only a grant that is exactly the stored URL's origin on a
   non-default loopback port. Disabled under an approval card (and inert
-  behind its veil).
+  behind its veil). A split copies a Browser pane's URL, judged again
+  on load, and **never** its keep-origin grant (WP-G2).
 - **Why it is safe**: scripts plus same-origin amount to no sandbox only
   when the framed page is the parent's origin. The port check refuses the
   HUD's origin up front, and `frame-ancestors 'none'` on every HUD and API
   response stops a frame from navigating itself into the HUD later. A page
-  on another origin cannot reach the parent's DOM, and `/approvals` still
-  needs the HUD's own Origin and a JSON body. And a page that sends its
-  frame to the workshop lands opaque there (the workshop's own sandbox).
+  on another origin cannot reach the parent's DOM, and `/approvals` needs
+  the HUD's listener, its own Origin and a JSON body (owner-only, BR-0).
+  And a page that sends its frame to the workshop lands opaque there (the
+  workshop's own sandbox).
 - **A URL carrying a user name or password** is refused, as a terminal
   link is.
 
-**"Open in Preview" from a terminal.** A Ctrl+clicked link whose host is
+**"Open in Browser" from a terminal.** A Ctrl+clicked link whose host is
 loopback opens a small menu (`term-link-menu`: `term-link-url`,
-`term-link-preview`, `term-link-browser`) instead of a new tab; any other
-link still opens in a new window directly. "Open in Preview" is judged with
+`term-link-pane` "Open in Browser", `term-link-tab` "Open in a Chrome tab";
+`term-link-preview` and `term-link-browser` until BR-3a) instead of a new
+tab; any other link still opens in a new window directly. "Open in Browser" is judged with
 the ports above (refused, disabled, with `term-link-refused` saying why, for
-the HUD's and the API's ports) and lands in a drawn Preview pane — the
-focused one if it is one — else the focused pane switches to Preview (the
+the HUD's and the API's ports) and lands in a drawn Browser pane — the
+focused one if it is one — else the focused pane switches to the Browser (the
 sidebar's click rule, refused for a File pane holding an unsaved edit).
 The pane loads it as a request, judged again there, and stores it. Escape,
 a click elsewhere or an approval card closes the menu. **The menu is placed
@@ -1147,3 +1329,1084 @@ built from the listening sockets terminal sessions own.
   `turn_finished` (`stop`, `next`), `approval_requested`/`approval_resolved`
   (by `thread_id`) and the `activity` records (`working`, `needs_input`,
   `failed`, `unread`, `idle`).
+
+## Additions 2026-10-10 (Jarvis reads a terminal — WP-F)
+
+Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
+
+- **Tool `terminal_read(terminal="", lines=200)`** (`jarvis/v2/tools/
+  terminal_read.py`, v1 registry). `terminal` is what the HUD shows — the
+  id, the title (`bash · Calc`, or just its folder part), or the number in
+  the panel's order; empty means the only one — resolved by the daemon,
+  never a path. `lines` is clamped to 1–1000. It returns the terminal's
+  normal buffer as plain text (no escape sequences, the alternate screen
+  never read), fenced as untrusted web content from `HUD terminal <title>
+  (id <id>)`, with notes after the fence: `[N line(s) withheld: possible
+  secret]`, `[the oldest N line(s) left out to fit]` (48,000 characters at
+  most), `[N long line(s) cut to 2,000 characters]`. Or exactly
+  `Refused: possible credential in this output` (an exact known value or its
+  encodings, a credential format, or a secret-printing command — never which,
+  never where), `Refused: the owner has turned off reading for this terminal
+  (<title>)`, or an `Error:` naming the open terminals.
+- **Who holds it**: `FAST_TOOLS`, and only for an owner's chat turn the HUD's
+  own window sent — the send route sets `UserMessage.desk` only on the HUD's
+  listener with its Origin. A task's thread, a Discord or DM turn, the escape
+  hatch, a schedule, a sub-agent and every v1 surface neither see nor can run
+  it (`runtime.at_desk()` fails closed); jarvis-mcp does not offer it. It is
+  not `dangerous`, asks nobody, and writes nothing.
+- SSE **`terminal_read`** `{kind: "terminal_read", data: {terminal_id,
+  lines, at, refused}}` — exactly those keys — for every read that reaches a
+  terminal, refused or not (`lines` is how many it covered; 0 when the switch
+  refused it). Never output, a command or a reason. The terminal's bar shows
+  the last one: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42".
+  A record of another shape is dropped whole; any other key is never drawn.
+  It is HUD chrome: nothing is written to the PTY or the ring.
+- **Where the text goes** (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). The
+  `tool_finished` record's `summary` for `terminal_read` is fixed — "read N
+  lines", "refused" or "error" — never the result's first characters. That
+  keeps the tool's own record clean, nothing more: the model's reply is not
+  filtered, and reaches `log.jsonl`, the bus, Discord and speech like any
+  reply (2026-10-11 re-review).
+- **What a dev server prints stays readable** (2026-10-11 re-review): an
+  `--env-file` loads a file (`node --env-file=.env server.js`), `wc -l <
+  .env` counts one, `docker inspect --format '{{.State.Status}}'` prints no
+  environment, and a reader's or an interpreter's name in prose (a commit
+  message, a nodemon banner) is not a command. A screen dense with command
+  candidates is refused past a parse budget rather than read slowly, and
+  what any parse bound leaves unread refuses the read when it could hold a
+  printer.
+- **The limit**: a secret with no recognisable shape and no keyword beside it
+  is not caught, nor is one an alias, a shell function, a script or a symlink
+  prints, nor one a script prints from a credential file it was handed as an
+  argument, nor a program piped in from anything but a literal
+  `echo`/`printf` (rule 3 reads command lines by shape). A REPL or
+  here-document input line (`> `, `>>> `, `... `) refuses only for an
+  explicit environment read, never for the bare words `ENV`, `env:` or
+  `getenv`, so an environment read spelled only with those is not caught
+  there. The loading idioms
+  `env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
+  refused: their error messages can echo part of a value. The "Jarvis can read"
+  switch and the note are the backstops.
+
+## Additions 2026-10-11 (the VEX backend — VX-1)
+
+VEX V5 in the HUD (editor plan §2.9; decisions V-1 to V-5; code in
+`jarvis/v2/vex.py`). The backend only: the VEX view and its panel tabs are
+VX-2, the new-project dialog VX-3. **Every route is owner-only** on the HUD
+listener with a strict Host: the API listener (8405) is 403, the workshop
+listener (8403) 404, a missing or foreign Origin (the workshop's, `null`)
+403, a rebound Host 403. The rule is the shared one, `projects.is_owner`
+(PR #41): **a same-origin `GET` carries no Origin in Chromium** (measured
+2026-10-10), so a `GET` with no Origin is accepted only when the browser's
+own `Sec-Fetch-Site: same-origin` says the HUD sent it (`none`, `same-site`
+and `cross-site` are 403); every other method needs the HUD's Origin. **No request names an executable, a path to run or an argument**:
+the programs and their argv come from `vex.json` and `vex.py`'s tables, the
+project folder from the project's id, and a body with any field not listed
+(`path`, `args`, `program`) is 400. Every 409 is a sentence. Output lives in
+the program terminal's ring and the window only, as WP-C's terminals do —
+never on the bus or in the log. **Every action that spawns a VEX tool first
+hashes it** (and, for a build, the five tools `make.exe` runs) against the
+SHA-256 `jarvis vex setup` recorded, and is 409 "the VEX tools changed since
+`jarvis vex setup` (<tool>); run it again" on a mismatch.
+
+**SSE `vex_device`** `{action: "download"|"brain"|"info", at}` — one per
+device action, when it starts; nothing else (no slot, name, path or output),
+as `terminal_attached`. A device action the window did not cause (a
+program running as the owner POSTing with a forged Origin) shows up here; the
+HUD can flag one it cannot match to its own click.
+
+- `GET /vex/status` → `{configured, hint, vexcom_version, toolchain,
+  sdks: {cpp, python}, extension_version, templates, project_folder, device,
+  brain}`. `configured` false with `hint` (a sentence ending "run `jarvis
+  vex setup` again") when `vex.json` is missing, malformed, or names a path
+  that fails the use-time check. `device` is the device action running
+  (`"download"`, `"info"`, `"brain"` or null); `brain` the brain terminal's
+  id.
+- `GET /projects/{id}/vex` → detection: `{project_id, vex: true, name,
+  language: "cpp"|"python", slot, sdk_version, printf_float, python_main,
+  on_windows_drive, builds}` or `{project_id, vex: false, reason}`, plus
+  `malformed: true` for a settings file that is not the extension's v2 shape
+  (platform V5, language cpp/python, slot 1–8, `extension.json` 2; read
+  within 64 KB, never through a symlink) and `pros: true` for a PROS project.
+- `POST /projects/{id}/vex/build` `{action: "build"|"rebuild"|"clean"}` →
+  202 `{build_id, terminal_id}`. C++ only, the project on a Windows drive,
+  one build per project at a time (a lock file `vexbuild` shares: 409 "a
+  build of this project is already running"), and refused (409, with the
+  reason) when the project's make files name `vexcom` — or cannot all be read
+  (more than 32, one past 256 KB, a symlink or FIFO among them, a symlinked
+  `vex/`, an `include` named by a variable or outside the project). Runs `make.exe P=<name> T=<SDK>
+  CC=… CXX=… OBJCOPY=… SIZE=… LINK=… ARCH=… [PRINTF_FLOAT=1]`, plus `-B` for
+  rebuild and `clean` for clean, every path converted to `C:\…`, in the
+  project folder, as a program terminal (`program: "vex-build"`); it replaces
+  the project's previous ended build terminal. 5-minute timeout.
+- `GET /vex/builds/{id}` → `{id, project_id, action, state:
+  "running"|"succeeded"|"failed"|"timed_out", terminal_id, exit_code, errors,
+  bin, started, ended}`. `errors` are `{file, line, col, severity:
+  "error"|"warning", message, in_project}` parsed from the build's own
+  `file:line:col: error|warning:` lines (notes skipped; a file under the
+  project comes back relative, with `/`); `bin` is `{path: "build/<name>.bin",
+  size, mtime}` when this build wrote one. The last 32 are kept.
+- `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id}`.
+  `slot` an integer 1–8 (not a string, not a bool); `name`
+  `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 `{error,
+  code: "build_first"}` (`Vex._fresh`, judged under the project's build lock)
+  when there is no `build/<name>.bin`; while a build of the project is
+  unfinished (marked on disk before make runs, cleared only by a success — a
+  cancelled, failed or timed-out build, or a daemon that died mid-build,
+  refuses); when this daemon's last build wrote exactly this binary (its `P=`
+  name, mtime_ns and size; a make that found nothing to do never counts) but
+  the sources' digest (sorted path, mtime_ns, size) differs from when that
+  build started; and otherwise when it is older than the newest source.
+  Sources are only C/C++ sources and headers, assembly and make files
+  (`SOURCE_SUFFIXES`), never notes or editor backups. The record is in
+  memory: a restart falls back to the mtime rule. The settings file's name
+  must pass the `P=` rule before it names a file; VX-2 chains Build (then one
+  rebuild) then Download on the one click, on the `code`, never the sentence.
+  Every other 409 here has no `code`. Also 409 while another device
+  action runs, while the brain terminal holds the port, while a build of the
+  project runs, and for a Python project (its download flag is a spike
+  item). Runs `vexcom.exe --name <name> --slot <n> --write <bin as C:\…>
+  --progress` (DishPy's flags) in the project folder (`program:
+  "vex-download"`); 3-minute timeout. **No "run after download"** (V-3), and
+  no other route, CLI or tool downloads.
+- `POST /vex/brain` `{}` → `{terminal_id, started}`: the brain's user port,
+  `vexcom.exe --user`, both ways (`program: "vex-brain"`, the only program
+  terminal that takes typed input). One at a time: the open one comes back
+  with `started: false`. 409 while a download or info read runs. Closing its
+  terminal frees the device.
+- `POST /vex/device/info` `{read?}` → `{text, exit_code, read}`: a device
+  read, from the owner's `vexcom --help` (vexcom 1.0.2b2). `read` is
+  `"system"` (the default) — exactly `vexcom.exe --json`, "system info in
+  json format" — or `"programs"` — exactly `vexcom.exe --programs`, the
+  programs on the brain; anything else (or another key) is 400, before
+  anything is looked up. Both are the one `info` device action (`program:
+  "vex-info"`, a terminal closed when it ends; `vex_device {action: "info"}`
+  on the bus); 409 while a download runs or the brain terminal holds the
+  port, and a download, the brain terminal or another read is 409 while
+  one runs. `vexcom.exe` is hashed against `vex.json` immediately before the
+  spawn. The output comes back as plain text: escapes and control characters
+  removed, markup left as characters — draw it as text. Output that parses
+  as JSON (from its first line opening `{` or `[`, the lines before kept, up
+  to 256 KiB) is pretty-printed with a two-space indent; a JSON string's
+  control characters stay escaped (`\u001b`) and invisible characters are
+  removed. At most the last 16 KiB. A 10-second timeout (409 "did not
+  answer"). A non-zero `exit_code` (no brain connected, say) still answers
+  200 with vexcom's text.
+- `GET /vex/templates` → `[{id, language, label}]`: the extension's
+  `cpp_v5_vsc_*.zip` and `py_v5_vsc_*.zip` in the configured templates
+  folder, labelled from its `index.json` where it names them.
+- `POST /vex/projects` `{name, language, template, location?}` → 202 `{id,
+  name, path, state: "asking", project_id: null, message}`. `name`
+  `^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`, `template` an id of that language,
+  `location` the parent folder (default `vex.json`'s `project_folder`, V-4);
+  the target is `<location>/<name>`, which must be on a Windows drive and pass
+  `folders.check_project_folder` (409 with its sentence; a folder with
+  something in it is 409 too). The template is checked whole before anyone is
+  asked. Then the **`project_folder` card** (exact path, Approve/Deny, never
+  Always, a timeout denies) unless the folder exists and is empty (O5); on a
+  yes one `mkdir`, the template unpacked by Jarvis's own code, the settings
+  file written in the extension's v2 shape, and the project created —
+  `project_created` arrives as usual.
+- `GET /vex/projects/{id}` → that request: `state` `"asking"`, `"created"`
+  (with `project_id`), `"declined"` or `"failed"`, and a `message`. A
+  template write that fails after the yes takes back what that request wrote
+  (only files it created and folders it made, through the folder's fds, each
+  judged by its `(st_dev, st_ino)` — a renamed-in entry is never removed — and,
+  after a refusal by the store, only if the folder at that path is still the
+  one the template was written through; VX-3 review LOW-2 and its delta
+  review): `failed`'s message names the colliding file where there is one,
+  and says what the folder holds now, read through its fd — empty again
+  (Create uses it again without a card, O5), what it still holds (empty or
+  remove it), or that the path is no longer the folder written to (nothing
+  removed). The HUD reads this one read
+  at a time and rides out a failed read (5xx, the network) with a backoff;
+  only an answer, a 404/400, or three minutes of failures end its tracking.
+- `POST /vex/projects/check` `{name, language, template, location?}` (VX-3,
+  2026-10-12) → 200 `{path, windows_path, state, asks, describe}`: what
+  `POST /vex/projects` would do with the same body, **without asking or making
+  anything**. `path` is the exact folder the `project_folder` card will name,
+  `windows_path` its `C:\…` spelling, `state`
+  `"missing"` or `"empty"`, `asks` false for an existing empty folder (used
+  without a card, O5), `describe` the card's words for it. Every refusal is
+  Create's, word for word (400 for a bad name, language, template or location;
+  409 for a folder off a Windows drive, refused by `check_project_folder`,
+  **refused by `to_windows`** — a character a Windows command line could
+  misread, such as `(`, `&` or anything outside ASCII, which a build or a
+  download would refuse later (VX-3 review MED-1; Create refuses it too) — or
+  not empty), less Create's closing "Nothing was made." Owner-only like every
+  VEX route. `GET /vex/templates` answers a templates folder that cannot be
+  listed with a 409 sentence. The HUD reads `/vex/status`'s
+  `project_folder` as the dialog's default parent (V-4).
+
+**Program terminals** are listed by `GET /terminals` like any other, with two
+new row fields: `program` (`null` for a shell, else `"vex-build"`,
+`"vex-download"`, `"vex-info"` or `"vex-brain"`) and `input` (whether typed
+input reaches it). Attach, ticket, PATCH `readable` and DELETE work on them
+unchanged; DELETE stops the program. A frame to a terminal with `input`
+false is answered `{"type": "input_refused", bytes, reason}` (a lone Ctrl-C
+still goes through). Program terminals count apart from shells: six of each.
+
+### The VEX view (VX-2, 2026-10-11)
+
+The download's 409 gained `code: "build_first"` (review round, above); the
+HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
+`state/vex.ts`, `components/VexView.tsx`):
+
+- `GET /projects/{id}/vex` is read once per project a drawn pane is about, and
+  again when the VEX view shows, when the window gets focus, and every 30 s
+  for one older than that: the strip offers the `vex` view only for `vex:
+  true`, `malformed: true` or `pros: true`.
+- The terminal row's `program` and `input` are read (`lib/terminal.ts`
+  `TerminalRow`): a program terminal's panel tab carries `data-program`, and one
+  that ended offers Close, never Restart or "New terminal here" (they open a
+  shell). A program terminal the window's own click started is listed, claimed
+  as this window's and shown as the panel's tab (`terminals.showProgram`).
+- Build: `POST …/vex/build {action}`, then `GET /vex/builds/{id}` every 0.6 s
+  to its end. The last build id per project is kept in `localStorage`
+  (`jarvis.hud.vex.builds`, ids only) so the errors list comes back after a
+  reload.
+- Download: `POST …/vex/download {slot, name}` **only from the Download
+  button, on a trusted pointer click whose `detail` is exactly 1** (a double
+  click is one download). **One chain per window**: no second download, for
+  any project, while one runs. A 409 with `code: "build_first"` starts a
+  build and, when it succeeds and no approval card has come up since the
+  click (nor while the 409 was on its way), sends the download again; if that
+  is `build_first` again (make found nothing to do, a header it does not list
+  changed), one `rebuild` and the download again; a third `build_first`
+  stops the chain with the daemon's sentence. While the brain terminal holds
+  the port it is closed first (`DELETE /terminals/{id}`) and opened again
+  afterwards (`POST /vex/brain`) — never after a chain a card, a crash or the
+  owner's Cancel dropped, nor after a card that came and went while the
+  download ran. **Cancel** (until the download is sent) closes the
+  build's program terminal (`DELETE /terminals/{id}`, which ends the build)
+  and sends nothing. The download's end is read from the terminal listing
+  (`exited`, `exit_code`).
+- SSE `vex_device`: matched against the device actions this window started
+  (recorded before each request; 30 s); one it did not start is said in the
+  VEX view.
+- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `chain()`, `run(id)`),
+  and `__hud.monacoEditors()` rows gain `line` and `column` (where the cursor
+  is).
+
+## Additions 2026-10-11 (BR-0 — only the HUD window approves)
+
+- **`POST /approvals/{id}` `{decision, always?}` is owner-only**
+  (`projects.owner_only`): it answers only on the HUD's listener
+  (`FACE_PORT`, 8402) and only to a request whose `Origin` is the HUD's;
+  anything else is **403**, and the request stays pending. The API listener
+  (8405) serves the same HUD page, so a page loaded from it sent an Origin
+  equal to its Host and used to pass `check_origin`. The HUD already calls
+  it from its own listener (`api.resolveApproval`); Discord's buttons and
+  `/yes`/`/no`/`/always`, and the escape hatch, resolve in-process and
+  never call the route. **`GET /approvals` is unchanged** — open on both
+  listeners; reading what waits is not a lever.
+- **`POST /threads/{id}/answer` cannot approve.** Its body is exactly one
+  of `{req_id, text}` (a provider question's answer, passed on as text) or
+  `{req_id, decision}` (a provider's pending approval). For an approval,
+  anything but a deny — as `decision` or as `text` — is **400** on every
+  provider: a yes comes only from the card above (the broker), and this
+  route only withdraws. (The Claude provider used to accept an
+  `allow` here, even as `text`, and it beat a card the owner had not
+  answered.) Provider questions are Codex's alone; the Claude provider and
+  the fast path raise none.
+- **`PATCH /projects/{id}`: a change to `profile`, `always_ask`,
+  `extra_dirs` or `root` is owner-only** (the HUD's listener and Origin,
+  else **403**, nothing changed). A field sent back with its current value
+  needs no owner, and `name`, `routing` and the rest are as before. The HUD
+  already PATCHes from its own listener; nothing else changes these fields
+  over HTTP.
+- **v1's browser and `fetch_page` refuse every Jarvis port**
+  (`config.control_ports()`: 8402, 8404, 8405, 8406, configured and
+  default; never 8403) in every loopback spelling — they used to refuse
+  only 8402, so a v1 agent could open the HUD on 8405. v1's browser judges
+  the page wherever it is, before every act and read (a page that moved
+  itself onto the HUD listener after goto's check was read and its card
+  clicked), and `fetch_page` judges each redirect hop before requesting it.
+  A *cross-site* navigation onto the HUD or API listener was already a 403
+  (`Sec-Fetch-Site`); a same-site page (another `localhost` port) was not.
+- **The built HUD (`config.HUD_DIST`, what `GET /` and `/assets/*` serve) is
+  not writable by any agent write tool**, v1's or a v2 provider's, nor by a
+  Codex write grant: its script runs with the HUD's Origin. Rebuilding it is
+  the owner's (`npm run build`).
+
+## Additions 2026-10-11 (the HUD's CSP and installed build — ED-4)
+
+Editor plan `docs/plans/2026-10-09-hud-editor-plan.md` §1.7 and §2.7;
+decision C-1 (the decisions file wins).
+
+**Every HUD and API response carries the full policy**, in the one
+`Content-Security-Policy` header WP-E's frame rule rides in
+(`hud_api.content_security_policy`, `hud_api.HUD_POLICY`):
+
+    default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';
+    connect-src 'self'; style-src 'self' 'unsafe-inline';
+    img-src 'self' data:; font-src 'self' data:; media-src 'self';
+    frame-src http://localhost:* http://*.localhost:* http://127.0.0.1:* http://0.0.0.0:*;
+    base-uri 'none'; form-action 'none'; object-src 'none';
+    frame-ancestors 'none'
+
+— the page, every `/assets/*` file (a worker takes its policy from its own
+script's response), JSON, SSE, errors and the terminal's `101`. No inline
+script, no script from another origin, no `eval`, no `blob:` worker, no
+plugin, no `<base>`, no form posted anywhere. `'wasm-unsafe-eval'` came
+with ED-5 (below): WebAssembly compiles, JavaScript from a string still does
+not. `connect-src 'self'`
+covers the same-origin `ws://` terminal socket in Chromium (CSP3). A CSP host
+source cannot name an IPv6 literal or a 127/8 address other than 127.0.0.1,
+so the Browser judge refuses `[::1]` and `127.0.0.2` with a sentence naming
+`http://localhost:<port>/` instead. There is no `<meta>` policy; the header
+is the only one.
+
+A response's own directives may only **narrow** the policy: each must
+restate a directive the policy sets, with a subset of its sources (`'none'`
+always qualifies); a response that states `default-src` (necessarily
+`'none'`) drops every fetch directive it does not restate. Anything else —
+a new directive, a source the policy lacks, a directive twice — raises
+`ValueError` (a 400 before a byte is written). `/avatar.svg` sends
+`default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action
+'none'; frame-ancestors 'none'`.
+
+**The HUD is served from an installed copy (C-1).** `jarvis hud install` — a
+CLI the owner or the lead runs, never a tool — runs `npm run build` in `hud/`
+and copies `hud/dist` into `config.HUD_DIR/<build-id>/` (default
+`~/.local/share/jarvis/hud/`, `JARVIS_HUD_DIR` overrides; ids are
+`YYYYMMDDTHHMMSSffffffZ-<12 hex>`, so they sort by time), files 0444 and
+folders 0555, with `manifest.json` (`format`, `build`, `installed_at`,
+`source`, `git_head`, `dirty`, `files: {path: {sha256, size}}`), through a
+temp folder renamed into place; the newest three builds are kept. It refuses
+**uncommitted changes under `hud/`** (`git status --porcelain -- hud`, which
+counts untracked files) unless `--allow-dirty` is given, looks again once the
+build is done (an edit that landed mid-build is never recorded clean, and a
+checkout that moved is refused), and records the commit and whether it was
+dirty. Its git runs hardened, as `gitops` runs it: an absolute git, `GIT_*`
+dropped, pager and editors pinned, hooks and fsmonitor off; a checkout whose
+own config names a program git would run is not read at all ("cannot say"). It refuses an install root that is, or sits
+under, a symbolic link, one inside the repository, not a folder or writable
+by others, and a build output holding a link, a special file, an odd name or
+no `index.html`.
+
+The daemon serves the **newest intact** build — its manifest reads (a
+malformed, oversized or hostile manifest is ignored, never an error) and its
+`index.html` still matches it; a newer build whose page fails is passed over
+for the one before. Only a file the manifest lists is served, read without
+following a link, its size and SHA-256 checked **on every read** (no cache);
+anything else is a 404, logged. An asset the newest intact build lacks is
+served from an older kept build that has it (Vite names are content hashes),
+so a window loaded before an install keeps its lazy chunks — **an install
+needs a reload, not a daemon restart**. Serving an older build because a
+newer one failed is never silent: `/status` says `"fallback"` and lists the
+build passed over. With no intact build, `GET /` is a 503 page that says
+which: "not installed", or "failed verification" when builds are there but
+none passes. `config.HUD_DIST` is the install root (or
+`hud/dist` under `JARVIS_HUD_DEV=1`), and BR-0's one write check refuses the
+install root always, plus `hud/dist` in dev mode, to every agent write tool
+and v2 grant.
+
+**Jarvis never runs the installer.** `jarvis hud install` is DENY for agents
+through one detector (`protected_state.owner_op`, its table `OWNER_OPS`,
+asked by `rules.decide`, so v1's gate and v2's layer 1), and `run_command`
+refuses it with no approver. It judges the **command word** after peeling
+wrappers and runners (`env` incl. `-S`, `nohup`, `timeout`, `flock`,
+`systemd-run`, `uv run`, `ssh host …`, `xargs` — whose input may complete
+the path), `python -m jarvis`, a `$VAR` or an `ln -s` link the line made, a
+Python run of `jarvis.v2.hud_install`, Python source that *invokes* the
+installer (importing or reading from it is not), and shells, `eval`,
+here-documents and substitutions that bash would run (never inside single
+quotes or a quoted here-document). A jarvis argv word only known at run time —
+an expansion the line did not assign (an unset one vanishes), `$@`/`$*`, a
+glob, a brace — counts as any words, so a line that *could* expand to an op
+is refused too. A refusal that came from a substitution says to single-quote
+text that only mentions the command. A line that only mentions it — `echo
+…`, a `grep` for it, a single-quoted commit message — is untouched: a DENY
+cannot be approved, so a false one would block the owner too. Not seen: a
+link made earlier under another name, `jarvis $(echo hud) install`, a
+launcher or module name from the environment, a Makefile, alias or script.
+Separately, **Jarvis's own CLI is never auto-approved** in any spelling:
+`python -m jarvis…`, the venv's python, `uv run`/`poetry run`/`pipx run
+jarvis` are ASK in `rules.decide`, as bare `jarvis` always was. The same detector refuses `jarvis hud rebuild`,
+`jarvis restart` and `jarvis daemon2 restart` (2026-10-11, `v2/owner_ops.py`),
+a `systemctl` verb (or a systemd D-Bus call) that changes `jarvis-daemon2` —
+reads, `reset-failed` and `daemon-reload` stay untouched, and `systemctl
+--user set-/unset-/import-environment` are asked — and, the owner's choice the
+same day, a `pkill -f`, `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose
+pattern matches the daemon's command line at `daemon2` (`pkill -f jarvis`
+stays ALLOW; a literal `kill <pid>` and kills by process name are not seen);
+since review 2 also a `kill` fed the daemon's PID by `systemctl show|status`
+of its unit, a D-Bus read of it, its cgroup's `cgroup.procs`, `lsof`/`fuser`
+on its ports, `ps | grep`, a grep over `/proc/*/cmdline` or `ss -p`/`netstat
+-p` on its ports, plus `fuser -k` on its ports and `pkill --cgroup|--pidfile`
+naming its unit. A source is judged only when a fed `kill` is on the line,
+and a kill pattern whose matching cost cannot be bounded is never matched
+(`re` holds the GIL): it is too complex to judge, so asked — never DENY,
+never covered by an allowlist entry, always-ask in v2.
+A shell write **into** the install root (`cp`, `rsync`, a
+redirect) is asked, never auto-approved or covered by an allowlist entry. A
+shell can still write there in a form nobody sees — the accepted shell gap.
+
+**`GET /status` gains `hud_build`, `hud_git_head`, `hud_state` and
+`hud_passed_over`**: what `GET /` actually serves — the build's id (`"dev"`
+under `JARVIS_HUD_DEV=1`, `null` when nothing intact), the commit it was
+installed from, `"installed"`, `"fallback"`, `"dev"`, `"not installed"`,
+`"failed verification"` or `"refused: …"`, and the newer builds passed over.
+daemon2 logs the same at start-up, and **warns** in dev mode, on a fallback,
+when nothing is served, when the build was installed with uncommitted
+changes, and when `hud/` changed between its commit and the checkout's HEAD
+(`git diff --quiet <commit> HEAD -- hud`, so a Python-only merge is quiet).
+
+
+## Additions 2026-10-11 (the editor's navigation — ED-7)
+
+Every route here is **owner-only** (`projects.owner_only`: the HUD listener
+and the HUD's own page, never the API listener), checked before the body is
+read; `jarvis/v2/editor_nav.py` holds them. None keeps a copy of a rule: what
+a path is comes from `editor_policy`, where it may go from `hud_api.scope`,
+a search's protected-file filter from `tools.search.refused` (the one
+`grep_files` uses), and a delete goes to `trash.Trash.put`.
+
+- `GET /projects/{id}/files` → `{"files": [rel, …], "env": [rel, …],
+  "truncated": bool, "source": "git"|"walk"}`: what quick open may offer.
+  In a repository, `git ls-files --cached --others --exclude-standard`
+  (`gitops._git`, hardened: no hooks, fsmonitor or pager), so `.gitignore`d
+  build output is not listed; elsewhere a walk. **Dotfiles are listed**
+  (`.github/…`, `.clang-format`, env files — named in `env` for their lock).
+  Never listed: a withheld file, anything in a credential folder (never
+  entered), the gate's own state, `SKIP_DIRS` (`node_modules`, `.git`,
+  `.venv`, `.jarvis` …), a symlinked folder (never entered), and a symlink
+  whose target is outside the project or not a regular file. At most 50,000
+  files, 20 folders deep and 5 s (`truncated: true` past any). 403 when the
+  project's root is itself a credential folder.
+- `POST /projects/{id}/search` `{"query", "regex"?, "case"?, "word"?,
+  "glob"?, "ignore"?}` → `{"matches": [{"path", "line", "text", "ranges":
+  [[start, end], …]}], "files", "truncated", "timed_out", "backend",
+  "limit"}`. Find in files on `tools.search.search_bounded`, the core
+  `grep_files` also uses, so **both refuse exactly the same files**:
+  `secrets.PROTECTED_NAMES` and every credential env file
+  (`secrets.is_env_credential`) — grep_files gained the env half with this
+  route (`tools.search.refused`). On top of it a hit is shown only when
+  `scope` places it in the project and `editor_policy` says it is not
+  withheld, the gate's state or an env file. `query` 1–1,000 characters, a
+  literal unless `regex`; `case` is case-sensitive (default off); `word`
+  whole words; `glob` a ripgrep glob (`*.cpp`, `src/**`); `ignore` respects
+  `.gitignore` (default **on**; off searches ignored files too). Hidden files
+  are searched, `SKIP_DIRS` never. At most **2,000 matches and 10 s**
+  (`truncated` / `timed_out`); a line is cut at 1,000 characters; `ranges`
+  are UTF-16 offsets. **400 on the Inbox** (it is the whole home folder), on
+  a pattern neither engine accepts, and on any other key.
+- `POST /projects/{id}/fs` `{"op": "new_file"|"new_folder"|"rename"|"delete",
+  "path", "to"?}` → `{"ok", "op", "path", "abs", "kind"?, "from"?,
+  "from_abs"?, "dir"?, "trash"?}`. `path` and `to` are relative to the
+  project; each must pass `scope` (no `..`, no `SKIP_DIRS` component, inside
+  the project lexically and resolved — so a symlink out is refused) and every
+  name must be a real one (no control or invisible character; on `/mnt/<drive>`
+  nothing Windows reserves or cannot hold). **Refused (403)**: a path
+  `editor_policy` calls the gate's state, withheld (a credential bundle by
+  name, anything in a credential folder, a login file) or the safety layer
+  (SELF_PROTECTED, git's internals and configuration, the HUD install root and
+  `config.HUD_DIST`), and a **folder that holds any of those** — by absolute
+  path wherever it sits below (the gate's files, the credential folders and
+  login files, the HUD roots, Jarvis's SELF_PROTECTED files) and by a walk of
+  at most 20,000 entries that never follows a symlink or enters `SKIP_DIRS`
+  (past the cap the folder is refused rather than judged in part). A project
+  root itself is never renamed or deleted.
+  - `new_file` makes an empty file (0644; a credential env file 0600 — the
+    owner may make one); `new_folder` a folder; both make missing parents and
+    are 409 when something is there.
+  - `rename` (a move too) **never replaces anything**: 409 when `to` exists
+    (a case-only rename on a case-folding drive is allowed), 400 when its
+    folder is missing or a folder would go inside itself. **An env file keeps
+    an env name**: renamed to a name Jarvis can read it is 403 (the owner's
+    own shell can do that on purpose). A file renamed *to* an env name becomes
+    one. The answer's `abs`/`from_abs` let the window move its buffers.
+  - `delete` **moves to the trash**, never an unlink: the freedesktop home
+    trash with a `.trashinfo` (`$XDG_DATA_HOME/Trash`), or the Windows Recycle
+    Bin for a `/mnt/<drive>` path (`trash.Trash.put`, under a `Trash` owned by
+    the project, so Jarvis's own retention purge never empties it). 404 when
+    nothing is there.
+  - One explorer operation at a time (its own lock, not the daemon's: a
+    Recycle Bin move can take PowerShell a while).
+
+**The review of PR #53 (same day):** `POST …/search` also takes `key` (the
+searching view's; its newer search cancels its older one, which answers
+`cancelled: true`), answers **429** past four searches at once, and says
+`partial: true` when ripgrep could not read some files. Every match and span
+comes from ripgrep (`--json`); the daemon never runs the pattern itself, so
+**without ripgrep `regex: true` is a 400** and a literal is matched as text.
+`POST …/fs` refuses (403) a `~` path, anything in Jarvis's own folders
+(`editor_policy.jarvis_dirs()`), and a rename or delete of any project's folder
+(extra folders included, archived projects too) or an ancestor of one; it acts
+through directory fds opened without following links, from a project folder
+opened before anything is judged (a link on the way is a 403; a project folder
+that moved while it was checked is a 409), renames without replacing, and moves
+a deleted item into the trash through fds too (a trash folder reached through a
+link is a 409, and nothing moves; a path on a Windows drive goes to the Recycle
+Bin by path). A second deleted item under a protected or env name keeps its
+name in a `jarvis-deleted[.<n>]` folder; anything else is numbered
+(`notes.txt.2`). A bad file filter is a 400 that says so. The window matches an
+open buffer to a row by the project's `root_real` (#50).
+
+The window's half (`hud/src/components/QuickOpen.tsx`, `SearchView.tsx`,
+`EditorStatus.tsx`, `FileTab.tsx`'s explorer): keys and rules in CLAUDE.md's
+ED-7 paragraph. Find in files sends the query, the flags and the glob to the
+search route and nothing else; quick open lists once per project for 15 s.
+
+## Additions 2026-10-11 (`jarvis restart` and `jarvis hud rebuild` — PR #48)
+
+**`GET /status` gains `approvals_pending`**: the number of broker approvals
+waiting on the owner (`PendingApprovals.pending()`, a turn's and the escape
+hatch's, which asks after its turn has finished), an integer ≥ 0 beside
+`turns_running`; 0 when the broker cannot be read. It is read before the
+daemon's own lock (the broker has one of its own). `jarvis restart` and
+`jarvis hud rebuild --restart` refuse, exit 3, while it or `turns_running` is
+non-zero (a restart denies what waits), unless `--force`. Read-only, open like
+the rest of `/status`; the HUD does not use it.
+
+**`GET /status` gains `pid`** (review 2 of PR #48): the daemon's process id.
+`jarvis restart` compares it with systemd's `MainPID` for `jarvis-daemon2`
+before trusting what `/status` says about running turns: a different v2
+daemon answering on this shell's `JARVIS_DAEMON_PORT` (a test daemon, one
+started by hand) is not the unit's, so its idle answer is "can't check"
+(exit 3 unless `--force`), and after the restart a daemon that is not the
+new MainPID does not verify it (exit 4). A `/status` without `pid` (a daemon
+from before this change) is trusted as before.
+
+
+## Additions 2026-10-11 (tree-sitter colour — ED-5)
+
+Editor plan `docs/plans/2026-10-09-hud-editor-plan.md` §2.6. No new route;
+two things change on the wire.
+
+**The policy's `script-src` is `'self' 'wasm-unsafe-eval'`** (one header,
+`hud_api.content_security_policy`, as ED-4 set out): WebAssembly may compile
+in the page and in a worker — a worker takes its policy from its own
+script's `/assets/*` response — and nothing else is widened: `eval`, `new
+Function` and a string `setTimeout` are still refused, and a response may
+narrow it away (`script-src 'self'`). The syntax worker is the only code
+that compiles WebAssembly, and only the runtime and the grammars its loader's
+map names (`hud/src/lib/syntax/assets.ts`), fetched from `/assets/` on the
+HUD's origin; any other URL is refused before a request is made.
+
+**`/assets/*.wasm`** — the tree-sitter runtime and thirteen grammars, under
+their Vite content-hashed names — are served like every other installed
+asset (hash-checked on every read, `jarvis hud install`), as
+`application/wasm` with the full policy. They are fetched only when a file of
+their language first opens.
+
+The HUD's test hooks for it are read-only and not an API:
+`window.__hudSyntax.states()`, `.probe(url)` (asks the loader's gate, never
+fetches) and `.loaded()` (the grammars compiled).
+
+## Additions 2026-10-12 (the git gutter and the explorer's git colours — ED-9)
+
+Editor plan §2.8 ("Git gutter, explorer git colours"). Both routes are
+**owner-only** (`projects.owner_only`: the HUD listener and the HUD's own
+page), checked in `hud_api.route` **before anything else** — the project is
+not even looked up for anyone else, so the API listener and a bare request
+get 403 whatever the id. `jarvis/v2/editor_git.py` holds them. Git runs only
+through `gitops._git` (an absolute system git, every `GIT_*` variable
+dropped, hooks, fsmonitor, the pager and auto-gc off, `GIT_OPTIONAL_LOCKS=0`
+so a status never rewrites the index), and **a repository whose own config
+names a program for git to run, or moves where it works**
+(`gitops._risky_config`: a filter, textconv, `core.sshCommand`,
+`core.worktree`, `include.path` …), **is refused by both routes (403)**, as
+`gitops` refuses it everywhere.
+
+- `GET /projects/{id}/git/base?path=` → `{"path", "state", "head", "text",
+  "size"?, "renamed"?}`: what HEAD holds for a project file, the gutter's
+  base. `path` is placed by `hud_api.scope` and judged **before git runs**:
+  the gate's state, anything `editor_policy` withholds (no gate exemption)
+  and every credential env file (`secrets.is_env_credential`) are **403**,
+  as written or where they resolve — **and so is a file whose name in git is
+  one of those**: a staged rename (`git diff-index --cached -M HEAD`, which
+  reports no copies — a staged copy is `new`) serves its source's HEAD text,
+  so the source is judged too (`git mv .env notes.txt` makes `notes.txt` a
+  403; its text is never sent). **The source must also be in the project**,
+  placed as `hud_api.scope` places a path (under one of its roots, no
+  `SKIP_DIRS` or `.git` component): a file moved in from outside the
+  project, or out of `node_modules`, answers `new` and nothing of its source
+  is sent. HEAD's blob is read **by object id** (`git cat-file blob <oid>`),
+  so no path-based attribute (textconv, a filter, an eol conversion) applies;
+  its size is read from `ls-tree -l` first and capped at the editor's own
+  read cap (2 MiB), and its bytes are judged by the editor's own rule
+  (`editor_policy.is_text`, a strict UTF-8 decode). `state`: `ok` (with
+  `text`, as stored — CRLF kept, a byte-order mark kept; the window compares
+  lines), `new` (HEAD does not hold it: untracked, newly added, a copy, or a
+  rename from outside the project — no gutter), `no_repo`, `no_head` (no
+  commit yet), `binary` (a NUL in the first 8 KiB or bytes that are not UTF-8
+  — no gutter; a U+FFFD the file holds is text), `too_large`, `not_a_file`
+  (a symlink, a submodule, a folder in HEAD) or `unavailable` (git could not
+  say). `head` is HEAD's commit id; `text` is null unless `state` is `ok`.
+  404 when the file is not there; 403 for a path outside the project.
+  **Since 2026-10-12** (the Diff pane's uncommitted changes, below) a file
+  **deleted from the working tree** — nothing at all at the path, not even a
+  broken link — answers what HEAD holds, with `"deleted": true`; it is
+  judged exactly as a file that is there (every refusal above, before git
+  runs), and a path HEAD does not hold either is still 404 (so are a folder,
+  a broken link and anything else there that is not a file).
+- `GET /projects/{id}/git/status` → `{"repo", "head", "branch", "files":
+  {rel: state}, "dirs": {rel: state}, "truncated", "note"?}`: the explorer's
+  colours. `git status --porcelain=v2 -z --branch --untracked-files=normal
+  --ignored=traditional --renames --ignore-submodules=all -- .` at the
+  project's root — **never into a submodule**, whose own config `_risky`
+  did not read (a status that recursed would run a filter it names). Paths
+  are relative to the project's root (a repository path outside it is
+  dropped); `dirs` are folders git reported whole (`untracked`,
+  `ignored`), `""` the project's own folder. `state` is `modified`, `added`,
+  `untracked`, `ignored`, `renamed` (a staged rename; its source is never
+  returned), `deleted` or `conflict`. **Judged before they are returned**:
+  a path under a `SKIP_DIRS` folder, withheld (a credential bundle by name,
+  in a credential folder, a login file) or the gate's state is dropped.
+  `head` is null before the first commit; `repo: false` outside a
+  repository. **Cached for 2 s per root** — or three times what the status
+  took, when that is longer (a slow `/mnt/c` repository rests between runs)
+  — a refusal too, and run once at a time per root; at most 20,000 entries (`truncated`) and 5 s (`truncated`
+  with a `note`). 403 when the project's root is itself a credential folder.
+
+The window's half (`hud/src/lib/linediff.ts`, `lib/gitMarks.ts`,
+`state/gitGutter.ts`, `state/gitStatus.ts`): the gutter diffs HEAD's text
+against the **buffer** (Myers, bounded), only for a `text` or `safety`
+buffer — never an env file — and asks for HEAD's text again when the status
+poll's `head` moves, and every 10 s while the window is visible for a file
+whose base `head` is not the project's (a nested repository, the Inbox, an
+extra folder: the poll cannot see that HEAD move); the status is polled
+every 3 s per project while a tree or a gutter shows it. Rules in CLAUDE.md's
+ED-9 paragraph.
+
+## Additions 2026-10-12 (folding from the tree — ED-6)
+
+Editor plan §2.6, "Folding from the tree". No route and nothing on the wire
+changes: the fold queries (nvim-treesitter's `folds.scm`, vendored at ED-5's
+pin) are bundled text inside the syntax worker's own `/assets/` script, and
+folds are computed in that worker from the tree it already holds. No new
+`.wasm`, no policy change. `window.__hudSyntax.states()` gains `folds`: how
+many fold answers from the tree were handed to Monaco for that model (every
+other answer is indentation folding).
+
+
+## Additions 2026-10-12 (editor settings and `.editorconfig` — ED-8)
+
+Editor plan §2.8. **No new route.** The editor settings are the window's own
+(localStorage `jarvis.hud.editor`: `{fontFamily, fontSize, tabSize,
+insertSpaces, wordWrap, wordWrapMarkdown, minimap, stickyScroll, whitespace,
+bracketPairs, cursorStyle, vim}`, each field checked alone on load); nothing
+about them reaches the daemon.
+
+**`.editorconfig` uses ED-2's owner-only routes**, as the editor's buffer
+opens a file at `<dir>/<name>` in project `{id}`:
+- `POST /projects/{id}/files/stat {"paths": ["<dir>/.editorconfig",
+  "<parent>/.editorconfig", …, ".editorconfig"]}` — the file's folder and
+  each folder above it **up to the project's root, never above** (at most 32,
+  within the route's 100), once per folder every 3 s at most;
+- `GET /projects/{id}/file?path=<dir>/.editorconfig` for each that stat says
+  exists as `kind: "text"` — once per etag, every one on the walk; they are
+  applied nearest first, stopping at one whose preamble says `root = true`. A
+  withheld, non-text, missing or refused answer is no configuration, and one
+  whose stat `size` is over 64 KB is never read. A path's resolution is kept
+  per (path, each config's folder and etag), so restored tabs ask nothing
+  twice. Judging happens in the window, one resolution per task, under a
+  5 ms clock; a config that runs it out of time twice, or is over a cap,
+  configures nothing until its etag changes.
+
+Neither sends any file's content. What the files say sets the buffer's
+indentation and, for a file with no line break, the line ending its new
+lines take; **a save never carries anything `.editorconfig` asked for** — no
+trimmed whitespace, final newline or converted line endings.
+
+Test hook, read-only and not an API: `window.__hud.editorSettings()` →
+`{settings, stored, editors: [{uri, fontFamily, fontSize, wordWrap, minimap,
+stickyScroll, renderWhitespace, bracketPairs, cursorStyle, vim, model:
+{insertSpaces, tabSize, indentSize, eol}}]}` — never any text.
+
+## Additions 2026-10-12 (chat titles)
+
+The owner: "right now each chat just displays its id … keep the id in the
+three dots but have the main display be the title". No new route.
+
+- **Threads carry `title_source`**: `""` (nobody named it yet, or a v1
+  migration's title), `"auto"` (the daemon's titler) or `"owner"` (a
+  rename). `PATCH /threads/{id}` `{title}` sets `"owner"` — a rename to the
+  title it already has does too. Absent from an older daemon; the HUD reads
+  absent as `""`.
+- **Chat titles are generated** (`jarvis/v2/titles.py`): at a chat
+  thread's first owner message, and at start-up for untitled chats with an
+  owner message (archived ones included), the daemon names the chat from the
+  owner's typed words — Codex `gpt-6-luna` (`JARVIS_TITLE_CODEX_MODEL`) when
+  Codex is healthy and the account lists it, else the default OpenRouter
+  model. Never a task's thread. An automatic title is written only onto an
+  empty title (a rename always wins), unique in the project like a rename's.
+- **`thread_updated`** for a title, from a rename or the titler, is
+  `{thread_id, title, title_source, changed: ["title"]}` (no record: the HUD
+  re-reads `/threads`). `title_source` is new on it. The Discord mirror
+  renames the chat's Discord thread on it, **except while the chat or its
+  project is archived**: then the new name waits and is applied on
+  `thread_restored` / `project_restored` (a rename would unarchive the
+  Discord thread).
+- **The Archive view** names an archived chat by its title (or "Untitled"),
+  its id as the tooltip (`archived-thread-name-<id>`).
+- **The HUD** never shows a chat's id as its name: an untitled row reads
+  "New thread" (`turns` 0) or "Untitled", and the id is the ⋯ menu's "Copy
+  id" (`tmenu-copyid`, the id shown in `tmenu-id`). A title is text.
+
+## Additions 2026-10-12 (dev servers in HUD terminals — BR-8a)
+
+The daemon half of "a dev server started in a HUD terminal opens in a
+Browser pane by itself" (Browser plan amendment 1 §D.1; decisions B-2).
+BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
+
+- **`{"type": "dev_url", "url": "http://localhost:5173/"}`**, a text frame on
+  a terminal's attach socket, **that terminal's socket only**, after the
+  binary output that carried the announcement. The window that holds the
+  terminal hears it; another window, the bus, `/events`, the listing, a log
+  line, Discord and the disk never do, and the "Jarvis can read" switch is
+  unrelated (Jarvis never sees it). Sent only for **live** output: a
+  reattach's replay never sends one, and an announcement made while no
+  window is attached is dropped (and not remembered, so the server's next
+  announcement — a restart — is sent to whichever window holds it then).
+- **What is read**: a shell terminal's output (never a program terminal's),
+  only a command's own — the prompt and the typed command line are skipped
+  by the shell's signed OSC 133 marks (`B` to `C` in bash; `B` to the end of
+  that line in a shell that marks no command) — never the alternate screen,
+  with escape sequences stripped by `terminal_text`'s grammar, one line of
+  at most 512 bytes at a time (a longer one is dropped whole).
+- **What `url` is**: from one of the known announcement shapes
+  (`devurl.SHAPES`: `Local:`, `Loopback:`, `Running on`, `Listening on`,
+  `Serving HTTP on … (…)`, `Starting development server at`, `open your
+  browser on`, `available at`, `Server address:`, `Development Server (…)`,
+  `waiting on`, Jupyter's URL line, and the like), **loopback** `http`/`https`
+  with an **explicit port**: `localhost`, `127.0.0.0/8`, `[::1]`, `0.0.0.0` or
+  `[::]` — **always sent as `localhost`**, the port and path kept, so the host
+  is always one the window's frame policy names (PR #70 review); never a user
+  name or password,
+  never one of Jarvis's ports (`config.control_ports()`, 8403 and the
+  configured workshop port, and the daemon's own HUD, API and preview ports
+  as bound); the query and fragment dropped (a Jupyter `?token=` never
+  travels); the path percent-encoded; at most 512 characters. The window
+  judges it again (WP-E's Preview judge) before opening anything.
+- **How often**: once per origin per terminal among the last four sent
+  (`localhost:3000`, `127.0.0.1:3000` and `[::1]:3000` are one server: Puma
+  prints two of them); at most one frame a second and four a minute per
+  terminal. A URL counts as sent only once the socket has taken its frame:
+  one a closing or lagging socket refused is offered again at the server's
+  next announcement.
+- **The switch: `auto_open`** in `browser.json`, beside BR-1a's `lan` and
+  `local_servers` — read and changed through BR-1a's owner-only `GET`/`PATCH
+  /browser/settings` (the table in the next section; one contract for all
+  three). **On by default**. While it is off, no byte of terminal output
+  reaches the sniffer.
+- **Auto-open never opens a port in the Remote gate** (amendment 2): the
+  window loads the URL only in a Direct frame, and a loopback port opens to
+  the Remote browser only through the owner's own navigation.
+
+## Additions 2026-10-12 (the Browser's engine — BR-1a)
+
+The owner's built-in Browser, backend only (plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C): a
+daemon-owned Google Chrome behind a SOCKS gate. The stream, input, dialogs,
+downloads and the tab strip are BR-1b's; profile management is BR-1c's.
+
+**Every `/browser` route is the owner's**: `projects.owner_only` (the HUD
+listener, and the HUD's own page — its Origin, or a same-origin GET with no
+Origin) plus a strict loopback `Host`, checked before a body is read, a tab
+is looked up or Chrome is started; anything else is **403**. No route takes
+a query string (**400**; BR-1b's socket attach takes its `ticket`, below); a
+URL travels only in a JSON body, and no refusal ever contains one. Nothing
+starts Chrome but `POST /browser/tabs`.
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /browser` | — | `/status` → `browser` (below) plus `profiles: [{id, label, created}]` and `settings` |
+| `GET /browser/settings` | — | `{lan, local_servers, auto_open}` |
+| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool, auto_open?: bool}`, at least one, each a boolean (else **400** `<key> must be a boolean`) | `{lan, local_servers, auto_open}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
+| `GET /browser/tabs` | — | `[{tab_id, profile, ctx, url, title}]` — the title cleaned to one line of 120; `[]` while nothing runs |
+| `POST /browser/tabs` | `{profile?, ctx?, url?}` | **201** `{tab_id, profile, ctx, loaded, error?}` |
+| `DELETE /browser/tabs/<id>` | — | `{tab_id, closed: true}` |
+| `POST /browser/tabs/<id>/navigate` | exactly `{url}` | `{tab_id, loaded, error?}` |
+| `POST /browser/tabs/<id>/history` | exactly `{action: "back" \| "forward" \| "reload"}` | `{tab_id, loaded, error?}` |
+| `POST /browser/profiles/<id>/forget` | `{}` | `{profile, forgotten: true}` |
+
+- **`profile`**: omitted means the first profile (**Main**, which the first
+  start creates), `"private"`, or a `p-<8 hex>` id from `GET /browser`
+  (404 if unknown, 400 if not that shape). **`ctx`** (8 hex) names a Private
+  context: `profile: "private"` with no `ctx` makes a new off-the-record
+  context and answers its id; with one, the tab opens in it (404 if gone).
+  A context closes with its last tab.
+- **The URL judge** runs first on every `url` (typed, stored, "Open in
+  Browser"): exactly `about:blank`, or an absolute `http`/`https` URL with a
+  host. Refused (**400**, one of fixed sentences): any other scheme (`file:`,
+  `chrome:`, `chrome-untrusted:`, `devtools:`, `view-source:`,
+  `chrome-extension:`, `javascript:`, `data:`, any `about:` but blank, `ftp:`,
+  `ws:` …), a user name or password, a host two parsers read differently
+  (`config.ambiguous_authority`), a control or invisible character, more than
+  16 KiB, and **one of Jarvis's own ports** (`refused_ports`) in any loopback
+  spelling (`localhost`, `*.localhost`, `127.1`, `0x7f000001`, `[::1]`,
+  `[::ffff:127.0.0.1]`, `0.0.0.0`, a trailing dot …).
+- **A URL on this machine opens its port** (review of PR #69, the lead's
+  decision): a `url` naming this machine in any loopback spelling, sent to
+  `POST /browser/tabs` or `…/navigate`, opens that port in the gate from
+  then until the Browser stops (never one of `refused_ports`). Loopback is
+  otherwise closed like the LAN: a page's own move, `…/history`, and anything
+  that is not these two owner routes never open a port. `local_servers: true`
+  in the settings opens every loopback port that is not Jarvis's.
+- **An unknown field** in any body (here and on every other route) is
+  **400** `unknown fields (N)`: the count, never the names.
+- **The settings** (`browser.json`, `config.BROWSER_SETTINGS_PATH`, env
+  `JARVIS_BROWSER_SETTINGS`): `lan` (off), `local_servers` (off) and BR-8a's
+  `auto_open` (on). A missing, unreadable or malformed file, or a value that
+  is not a boolean, reads as the default; an edit by hand lands within a
+  second (the gate asks per connection, re-`stat`ing at most once a second).
+  `jarvis/v2/browser/settings.py` is the file's one reader and one writer;
+  the routes, the engine, the gate, `/status` and the terminals all ask the
+  daemon's `BrowserSettings`. **An embedded or test daemon keeps the
+  settings in memory**: only daemon2's `main()` attaches the owner's file
+  (a suite that wants a file attaches its own temp path).
+- **`loaded: false`** with **`error`** — Chrome's `net::ERR_…` code only,
+  never its message (it names the URL) — when a load fails; a connection the
+  gate refused reads `net::ERR_SOCKS_CONNECTION_FAILED`. Navigation answers
+  once the load commits.
+- **409** sentences: Chrome is not installed, the Browser's folder is a
+  symlink, not ours or open to others (it must be 0700), `profiles.json` is
+  unreadable, Chrome could not start, the tab cap (`JARVIS_BROWSER_TAB_CAP`,
+  12) is reached, the Browser is stopping. **504** when the Browser does not
+  answer in time.
+- **forget** ("Sign out of everything", plan §3): that profile's Chrome
+  stops, its folder and downloads are removed and an empty 0700 folder made;
+  the label stays. `private` closes every Private context.
+
+**`GET /status`** gains:
+
+- **`browser`**: `{available, running, version, instances: [{profile, tabs,
+  contexts}], tabs, tab_cap, lan, local_servers, loopback_opened,
+  landing_guard, gate}` — `loopback_opened` is how many loopback ports the
+  owner opened (never which); `gate` is `{port, connections, allowed,
+  failed, open, refused: {class: count}}` while running, else null. Profile
+  ids only: **no URL, title or label**.
+- **`refused_ports`**: every port the Browser's gate refuses on this machine
+  — `config.control_ports()` (8402, 8404, 8405, 8406, configured and
+  default), this daemon's `hud_port` and `api_port`, and 8403 unless it is
+  this daemon's `workshop_port`. The HUD's Direct (Preview) judge reads it.
+
+**The gate** refuses, for every connection Chrome makes, Jarvis's ports and
+its own on every address; a name that resolves to loopback; a loopback port
+the owner has not opened (unless `local_servers`); private addresses unless
+`lan` is true; a name answering with another kind of address than the one
+it was first allowed on; a private answer for a name it has no room to pin;
+multicast, reserved and unresolvable destinations; a lookup that waited its
+whole 5 s for one of its domain's four resolver slots. It counts each refusal
+by class (`jarvis_port`, `own_port`, `name_to_loopback`, `loopback_closed`,
+`private_network`, `rebinding`, `pins_full`, `not_a_host`, `unresolvable`,
+`dns_busy`, `bad_request`, `unsupported`, `busy`) and logs nothing else about
+it.
+Chrome sends no UDP at all (no QUIC; WebRTC held to proxied transports, so
+no ICE candidate, STUN or mDNS). **Nothing about browsing goes on the bus**
+in BR-1a.
+
+## Additions 2026-10-12 (File reads as the editor, Preview is the Browser — BR-3a)
+
+The owner: "also rename "File" to "Editor" and "Preview" to "Browser"".
+Browser plan §7 (`docs/plans/2026-10-10-hud-browser-plan.md`), cut by
+amendment 1 to the rename and the stored-state migration. No route changes;
+Python is untouched (`preview_route`, `preview_only` and `workshop_port` name
+the workshop listener, 8403, which these docs now call **the workshop
+origin**).
+
+- **Preview → Browser, in name and id.** The view is `"browser"`; the pane
+  spec's URL is `browserUrl` (`keepOrigin` unchanged); `lib/browser.ts`
+  (`judgeBrowserUrl`), `BrowserTab.tsx`, `.browserframe`. Test ids:
+  `tab-browser`, `browser-url`, `browser-go`, `browser-project`,
+  `browser-refused`, `browser-frame`, `browser-keep-origin`. The terminal
+  link menu's items are `term-link-pane` ("Open in Browser") and
+  `term-link-tab` ("Open in a Chrome tab"). Which links get the menu is
+  unchanged (loopback only; plan B-11 waits for Remote mode).
+- **The stored layout migrates as it parses**, under the same
+  `jarvis.hud.workspace` key: `view: "preview"` reads as `"browser"`,
+  `previewUrl` as `browserUrl` (only when there is no valid `browserUrl`),
+  and a `keepOrigin` is kept only if it is still exactly that URL's origin
+  on an allowed port (`storableKeepOrigin`, then judged again on load as
+  before). A save is a parse, so it writes the new names only. A rolled-back
+  HUD reads such a pane as its default view and loses its URL; nothing worse.
+- **File → editor, in name only.** The view id stays `"file"` — a stored
+  `"file"` pane, `tab-file` and every `pane-N-…` id are unchanged.
+  `lib/workspace.ts` `VIEW_LABEL` names each view (`file` → "editor",
+  `browser` → "browser"); the strip's buttons, its compact menu and a pane's
+  `aria-label` (`Pane N: editor`) read it, and the strip's CSS capitalises
+  it. The palette's "Show Files" is "Show Editor", and "No room to open …"
+  says "switch one to the editor".
+
+## Additions 2026-10-12 (the Diff pane's uncommitted changes)
+
+No new route. A Diff pane with no task to show lists its project's
+uncommitted changes from ED-9's two owner-only routes and the editor's read:
+
+- `GET /projects/{id}/git/status` (unchanged) is the list, through the one
+  status poller (`state/gitStatus.ts`), watched only while the pane is
+  drawn. `ignored` entries are not listed; a folder in `dirs` reported
+  `untracked` is one row; `""` untracked (the whole project folder) is said
+  in a sentence.
+- `GET /projects/{id}/git/base?path=` is the left side, asked again when the
+  status's `head` moves. It now answers a **deleted** file too (`"deleted":
+  true`, above).
+- `GET /projects/{id}/file?path=` (ED-2's read, unchanged) is the right side
+  when no buffer holds the file — asked only after `git/base` answered
+  without a refusal, so a file that is an env file only where it resolves is
+  never read for a diff (`hud_v2_scm_check`'s `link.txt` pins the order:
+  with the read no longer waiting on HEAD's answer it is sent). When a
+  buffer holds it, the right side is that buffer's own Monaco model and
+  nothing is read.
+- **An env file by name** (`.env`, `.env.*`, never `.env.example`) is listed
+  and **never asked about**: no `git/base`, no read. A `git/base` 403 naming
+  an env file shows the same sentence and stops there.
+
+Rules in CLAUDE.md's "The Diff pane shows the project's uncommitted changes"
+paragraph.
+
+The follow-ups (2026-10-12; CLAUDE.md "The Diff pane's follow-ups") change no
+route: the windowed list draws from the same `git/status` answer; a click
+picks a row at once (one `git/base`, then a read if allowed), and a key
+only once the keys have rested 150 ms, so a held key asks about the row it
+stops on and not every row passed; a `git/base` or read the pane no longer
+waits for is aborted (the request is cancelled in the browser; the daemon
+may still finish it); the Task pane's "clear" is window state
+only (`taskId`, `taskFocus`), and the diff views' settings and view models
+are Monaco's.
+
+## Additions 2026-10-12 (the Browser's stream, input, hold, dialogs, tabs and files — BR-1b)
+
+Backend only (plan `docs/plans/2026-10-10-hud-browser-plan.md` §2 "The
+stream", §3 "Downloads", §8, §11's BR-1b; amendment 1 §B.3 H3/H8, §B.4,
+§B.8, §B.9): what a HUD window needs to see and drive one tab. BR-3b draws
+it with BR-2's `remote.ts` and `drive.ts`. Every route below is BR-1a's
+owner-only rule (the HUD listener, its Origin or a same-origin GET with no
+Origin, a strict loopback Host); the API listener is **403**.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /browser/tabs/<id>/ticket` | `{}` | `{ticket, expires_in: 30}` — single use, this tab only |
+| `GET /browser/tabs/<id>/attach?ticket=` | — | **101**, the tab's socket (below); the one query any `/browser` route takes. **403** without the HUD's Origin or a fresh ticket for this tab, **404** for no such tab |
+| `POST /browser/tabs/<id>/activate` | `{}` | `{tab_id, active: true}` — "switch": the tab brought to the front in its Chrome |
+| `POST /browser/tabs/<id>/files` | `{chooser, files: [{project, path}]}` | `{tab_id, chooser, files: N}` — answers the page's open file chooser; `files: []` cancels it |
+| `GET /browser/downloads` | — | `{downloads: [{id, profile, name, size, held, at}], in_progress}`, newest first; `[]` before the Browser ever ran (nothing is made) |
+| `GET /browser/downloads/<id>` | — | the file: `application/octet-stream`, `Content-Disposition: attachment` (an ASCII fallback and `filename*=UTF-8''…`), `nosniff`, `no-store`, and the HUD's policy narrowed to `default-src 'none'` (nothing in it runs). **409** for a held executable; **403** for `Sec-Fetch-Dest` other than `document` or `empty` (never a script, style, frame or image) |
+| `DELETE /browser/downloads/<id>` | — | `{id, deleted: true}` |
+
+`GET /browser/tabs` rows gain **`opener`** (the tab that opened a pop-up, else
+null) and **`shown`** (a window streams it). `/status` → `browser` gains
+counts only: **`streams`** (tabs a window streams), **`downloading`** and
+**`popups_refused`**.
+
+**The hold** (plan §8.3, amendment H3). While **any** approval waits on the
+owner (`daemon.approvals.pending()`), nothing reaches a page:
+`…/navigate`, `…/history`, `POST /browser/tabs` with a `url` and `…/files`
+answer **409** "an approval card is waiting for you; nothing reaches the
+Browser until it is answered", and the socket drops every input (below).
+
+**Uploads** (`…/files`): only an answer to a chooser the page opened (its
+`id` from the socket's `filechooser`; **409** once answered, replaced, or
+older than 5 min); `project` is a project id (**404** unknown or archived),
+`path` relative to its root (**400** if absolute or `~`). Each file is
+judged by BR-9a's H8 rule, called (`act_rules.upload_refusal`): **403** with
+its sentence for a file outside the project or through a symlink out of it,
+a hidden component (`.git`, `.hidden/…`; never `.well-known`), credential or
+protected state (`.env*` but `.example`, the gate's files, Jarvis's folders),
+a file with a second name (a hard link), one that is not a regular file, or
+over 50 MB. At most 16 files and 50 MB in all (**413**). The bytes handed to
+Chrome are read through a descriptor opened `O_NOFOLLOW` that must still be
+the file judged: its descriptor realpath and device/inode must match H8's
+judgment (**409** if it changed). A chooser that takes one file
+refuses two (**400**).
+
+**Downloads** are saved to `BROWSER_DIR/downloads/<profile>/<id>/<name>`
+(the folder 0700, the file 0600), the name cleaned: the last path component
+only, control/format/invisible characters gone, `<>:"/\|?*` → `_`, no
+leading dot and no trailing dot or space, Windows-reserved base names
+(`CON`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, `PRN`, `AUX`, ignoring case
+and extension) prefixed with `_`, NFC, 200 UTF-8 bytes at most
+keeping the extension, `download` when nothing is left. **An executable is
+held** — by its name (`act_rules.executable_download`: `.exe`, `.msi`,
+`.sh`, `.deb`, `.AppImage`, `.com`, `.js`, `.py`, `.desktop`, `.command`,
+`.url` …; case-insensitive, including double extensions such as `x.pdf.exe`) or its first bytes (`MZ`, ELF, `#!`) — and
+never served until the owner's card, which BR-9b builds; it can be deleted.
+Private downloads go to `downloads/private/<ctx>/<id>/<name>`; that
+context's folder is removed when its last tab closes or Private Chrome stops.
+
+### The tab's socket
+
+RFC 6455 (`jarvis/v2/ws.py`, as the terminal's: masked client frames, 64 KiB
+messages, pings), at most 12 MiB queued to one window. Text messages are
+JSON objects with a `t`; **binary messages are frames**, daemon → window
+only.
+
+**A frame** is one binary message: an 8-byte header — the frame's id
+(uint32), the viewport it shows in CSS px, width then height (uint16 each),
+big-endian — then the JPEG. **Latest only, one in flight**: the next frame
+is sent only once the window acks (`{t:"ack", id}`, read as "everything up
+to `id`", BR-2's `FramePipe`); frames that arrive meanwhile replace each
+other in one slot. A window that attaches is sent the current picture at
+once (a page that does not repaint sends no new frame). A tab no window
+streams, or whose window says `{t:"visible", visible: false}`, is not cast.
+
+**Window → daemon** (anything else, or a field out of bounds, is answered
+`{t:"bad", reason}` — a fixed sentence — and acts on nothing; a binary
+message is refused; past 64 KiB the socket closes, 1009):
+
+| Message | Meaning |
+|---|---|
+| `{t:"key", e}` | `Input.dispatchKeyEvent`: `e` exactly BR-2's `CdpKeyEvent` — `type` `keyDown`/`rawKeyDown`/`keyUp`, `modifiers` 0–15, `key` 1–32 characters with no control, `code` alphanumeric ≤ 32, key codes 0–255, `text`/`unmodifiedText` ≤ 8 characters with no control but Enter's `\r`, `autoRepeat`/`isKeypad` booleans, `location` 0–3 |
+| `{t:"mouse", e}` | `Input.dispatchMouseEvent`: `e` exactly BR-2's `CdpMouseEvent` — the four types, `x`/`y` from -1 (BR-2's `OFF_PAGE`) to 4096, `button` one of six, `buttons` 0–31, `clickCount` 0–3, `pointerType: "mouse"`; `deltaX`/`deltaY` (both, ±5000) only on `mouseWheel` |
+| `{t:"text", text}` | `Input.insertText` (a paste or an IME commit): 1 byte–16 KiB of UTF-8, no control character but tab, CR and LF |
+| `{t:"dialog", id, accept, text?}` | answers a dialog; `text` (≤ 4 KiB) is a prompt's answer |
+| `{t:"ack", id}` | frames up to `id` drawn |
+| `{t:"resize", width, height, deviceScaleFactor?}` | the viewport (1–4096 each way, scale 0.25–8, ≤ 16 Mpx; BR-2's `viewportFor`); the frames follow |
+| `{t:"visible", visible}` | the pane is drawn or not |
+| `{t:"takeover", id, allow}` | this window's answer to `takeover_request` |
+| `{t:"resume"}` / `{t:"stop"}` | Resume Jarvis (refused under a card: `held`) / the banner's Stop |
+| `{t:"selection"}` | the page's selection, for Ctrl+C (answered `selection`) |
+| `{t:"focus"}`, `{t:"blur"}`, `{t:"ping"}`, `{t:"pong"}` | accepted; `ping` is answered `pong` |
+
+**Daemon → window:**
+
+| Message | Meaning |
+|---|---|
+| `{t:"attached", tab: {tab_id, profile, ctx, opener}}` | first, then the agent channel's state and anything still open (a location, a dialog, a chooser), then the current picture |
+| `{t:"waiting", timeout_s}` / `{t:"refused", reason}` / `{t:"taken"}` | the takeover question's three outcomes (for the asking window, a refusal; for the holder, `taken` and its socket closed) |
+| `{t:"takeover_request", id, timeout_s}` | another window asks for this tab; unanswered in 20 s is kept |
+| `{t:"location", url, title, security}` | the tab's address and title (cleaned, one line, 2048 and 120) and CDP's security state (`secure`, `insecure`, `neutral` …); on navigation and load |
+| `{t:"held"}` | input was dropped because a card is up (also sent the moment one is raised; at most once a second) |
+| `{t:"input_dropped", reason}` | input was dropped because more than 256 inputs waited, or this tab has an open dialog or an unanswered earlier CDP input. For the latter, one notice per blocked spell: `reason: "the page has a dialog open or an input still unanswered; this input was dropped"`. Nothing is queued for later |
+| `{t:"dialog", id, kind, message, default}` | `kind` `alert`/`confirm`/`prompt`/`beforeunload`; `message` and `default` cleaned to one line of 1000. Dismissed after 60 s, and at once if no window shows the tab; automatic dismissal waits while any approval card is pending |
+| `{t:"dialog_closed", id, by}` | `by` `owner` or `timeout` |
+| `{t:"filechooser", id, multiple}` / `{t:"filechooser_closed", id, files}` | the page asked for files; answered with `…/files` |
+| `{t:"popup", tab_id}` | the page opened a tab: add it beside this one (B-13) |
+| `{t:"popup_refused", reason}` | the cap (12 in all) is reached; no tab was closed |
+| `{t:"download", id, name, state, size?, held?}` | `state` `started`, `done`, `held` (an executable) or `failed` |
+| `{t:"selection", text}` | the selection (≤ 256 Ki characters), read in an isolated world; a password field gives `""` |
+| `{t:"agent", kind, …}` | amendment §B.9 in BR-2's `drive.ts` shapes: `driver {thread_id, provider}`, `action {id, at, action, target, text, outcome, rect?}` (target and text cleaned, 60), `paused {paused, by}`, `list {actions}` (the newest 50, in memory only) |
+| `{t:"closed", reason}` | the tab closed (`closed`) or the Browser stopped (`ended`); the socket closes |
+| `{t:"bad", reason}` / `{t:"pong"}` | as above |
+
+**Input and the hold.** Every input event is checked against the hold when
+it arrives and again on the Browser's thread immediately before it is sent;
+the moment a card is raised every tab's queued input is dropped, so **input
+sent before or during a card is never delivered after it**. A press whose
+release the page has not had when a card comes — and any release off the
+page — ends as a pointer move with no button down (Blink's own reset): no
+`mouseup`, no `click` anywhere. Chrome would otherwise fire `click` on the
+common ancestor (`<html>`) for a release at (-1, -1), whatever `clickCount`
+says (measured, Chrome 155). A socket that drops with a button down is let go
+the same way (not under a card). Key presses also record the hold count
+before dispatch: a keyup or char from a key held before a later card is
+dropped, so Space cannot activate a button or checkbox after it. No input
+is sent while a dialog is open or an earlier input to that tab is
+unanswered; those inputs are dropped with one `input_dropped` notice. A
+dialog timeout waits for all pending cards to resolve.
+
+**The owner taking over** (amendment §B.9): every input but a plain pointer
+move and a lone modifier, and every dialog or file-chooser answer, stamps the
+tab (BR-9b's H4 reads how long ago) and, while an agent holds it, pauses it
+**before** the input is queued: `{t:"agent", kind:"paused", paused: true,
+by: "owner"}`. BR-9b's gate reads it in-process (`BrowserHost.owner_state(tab_id)`:
+the hold, paused and by whom, seconds since the owner's last input); no route
+exposes it.
+
+**The bus** carries one record, **`browser_attached`** with exactly
+`{tab_id, at}`, per attach; nothing else about the Browser — no URL, title,
+typed text, dialog text, file name or frame — reaches the bus, the log or a
+thread log.

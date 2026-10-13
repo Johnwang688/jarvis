@@ -26,7 +26,7 @@ from typing import Annotated
 
 from .. import config
 from . import tool
-from .secrets import is_protected, refusal
+from .secrets import is_credential, is_env_credential, refusal, write_refusal
 
 _seen: dict[str, float] = {}
 
@@ -69,6 +69,27 @@ SELF_PROTECTED = frozenset(
         # rules: an agent that could edit the judge could widen it.
         "jarvis/gitops.py",
         "jarvis/tools/gitctl.py",
+        # Decide what of the owner's terminal output reaches the model
+        # (WP-F, 2026-10-10): the read guard, the credential formats it and
+        # the renderer it reads through, and the tool. Editing them is editing
+        # what a read refuses.
+        "jarvis/credential_patterns.py",
+        "jarvis/v2/terminal_guard.py",
+        "jarvis/v2/terminal_text.py",
+        "jarvis/v2/tools/terminal_read.py",
+        # Decide which chat may call Jarvis through jarvis-mcp, with which
+        # token, which tools it is offered, and how its calls are gated
+        # (2026-10-10, plan docs/plans/2026-10-10-terminal-read-mcp-plan.md).
+        # An agent that could edit them could hand itself a token or a tool.
+        "jarvis/v2/callers.py",
+        "jarvis/v2/bridge.py",
+        "jarvis/v2/session_tools.py",
+        "jarvis/v2/mcp_session.py",
+        # Decides what the HUD's editor may show and write, and what an
+        # `@path`, the preview origin and a task diff withhold (ED-2,
+        # 2026-10-11). Editing it is editing which credentials the window
+        # serves.
+        "jarvis/v2/editor_policy.py",
     }
 )
 
@@ -129,15 +150,30 @@ _NUMBER_FIELD = 6
 # `config.ROUTING_PATH` joined it — `JARVIS_ROUTING` can put the live routing
 # file outside the allowlist's directory. The saved Codex catalog joined it in
 # PR #20: it is loaded as the Codex model table at daemon start.
-def _protected_state() -> set[Path]:
+def _protected_state_paths() -> set[Path]:
+    """The gate's state files as configured, unresolved: the editor's read
+    path (`v2/editor_policy.py`) needs to know which of them is a symlink."""
+    # `vex.json` (VX-1, 2026-10-10) names the executables the HUD's VEX
+    # Build, Download and brain terminal run when the owner clicks: an agent
+    # that could repoint it could choose what runs on that click.
+    # `browser.json` (BR-1a, BR-8a, 2026-10-12) holds the owner's Browser
+    # switches: the LAN and every loopback server (an agent that could flip
+    # them could open the owner's home network, or every server on this
+    # machine, to the pages his Browser loads) and "open dev servers
+    # automatically".
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
-             "provider_defaults.json")
+             "provider_defaults.json", "vex.json", "browser.json")
     allow = config.ALLOWLIST_PATH.expanduser()
     paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
              config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser(),
-             config.CODEX_CATALOG_PATH.expanduser()}
+             config.CODEX_CATALOG_PATH.expanduser(), config.VEX_PATH.expanduser(),
+             config.BROWSER_SETTINGS_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
-    return {p.resolve() for p in paths}
+    return paths
+
+
+def _protected_state() -> set[Path]:
+    return {p.resolve() for p in _protected_state_paths()}
 
 
 # A repository's own `.git` (hooks, config, the refs and the worktree
@@ -170,11 +206,43 @@ def _git_internal(resolved: Path) -> bool:
         return True  # cannot tell: refuse
 
 
+# The built HUD the v2 daemon serves (`config.HUD_DIST`, BR-0). Its script runs
+# with the HUD's own Origin on the HUD listener — the one request
+# `POST /approvals` accepts — so writing a file into it is planting a program
+# the owner's next reload runs with the power to approve a card. Keyed on the
+# resolved directory (a symlink into it does not launder a write), read per
+# call so a test can repoint it. Not a widening of SELF_PROTECTED: the HUD's
+# *source* stays writable. Since C-1 (ED-4) `config.HUD_DIST` is the install
+# root `config.HUD_DIR`, so this one check covers every installed build and a
+# build planted beside them; `jarvis hud install` (the owner's or the lead's
+# CLI, never a tool) is what writes it.
+def _hud_roots() -> set[Path]:
+    """Every folder the HUD is or could be served from, resolved: the install
+    root `config.HUD_DIR` always — even in a process started with
+    JARVIS_HUD_DEV=1, whose tools would otherwise leave it writable (review of
+    PR #44, L4) — and `config.HUD_DIST`, which is `hud/dist` under that flag.
+    The one definition the write tools, v2's grants and `protected_state`'s
+    shell check share. Raises OSError/RuntimeError when a root cannot be
+    resolved; callers refuse then."""
+    return {Path(config.HUD_DIR).expanduser().resolve(),
+            Path(config.HUD_DIST).expanduser().resolve()}
+
+
+def _hud_build(resolved: Path) -> bool:
+    try:
+        roots = _hud_roots()
+    except (OSError, RuntimeError):
+        return True  # cannot tell: refuse
+    return any(resolved == root or root in resolved.parents for root in roots)
+
+
 def _self_protected(target: Path) -> bool:
     resolved = target.resolve()
     if resolved in _protected_state():
         return True
     if _git_internal(resolved):
+        return True
+    if _hud_build(resolved):
         return True
     try:
         rel = resolved.relative_to(config.REPO_ROOT)
@@ -190,6 +258,12 @@ def _protect_refusal(target: Path) -> str:
             "or obeys, so it can only be changed by the owner by hand. Use the git tool for "
             "git operations."
         )
+    if _hud_build(target.resolve()):
+        return (
+            f"Error: {target.name} is in the built HUD the daemon serves, whose script "
+            "can approve what the owner is asked. Change the HUD's source under "
+            "hud/src instead; the owner installs it with `jarvis hud install`."
+        )
     return (
         f"Error: {target.name} is part of Jarvis's safety layer and can "
         "only be changed by the owner by hand. Explain what you wanted "
@@ -199,6 +273,84 @@ def _protect_refusal(target: Path) -> str:
 
 def _resolve(path: str) -> Path:
     return Path(path).expanduser().resolve()
+
+
+# Credential folders (`config.credential_dirs()`: ~/.ssh, ~/.aws, ~/.config/gh,
+# ~/.config/jarvis, ~/.gnupg and the HUD Browser's profile folder) are closed
+# to v1's file tools, reads included (review of PR #69: the Browser profile's
+# History, Web Data and Sessions were readable by the fast path's read_file
+# and grep_files). v2 already refuses them (`permissions._credential_dirs`,
+# `editor_policy.credential_dirs`). The one exception keeps an older rule: the
+# gate's own state files — the allowlist, models.json … — stay readable
+# config, but only by their own path, never through a symlink.
+_credential_dir_cache: dict[tuple, list[Path]] = {}
+
+
+def _credential_roots() -> list[Path]:
+    key = (config.credential_dirs(), os.environ.get("HOME", ""))
+    found = _credential_dir_cache.get(key)
+    if found is None:
+        found = []
+        for raw in key[0]:
+            base = Path(os.path.abspath(os.path.expanduser(raw)))
+            found.append(base)
+            try:
+                real = base.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if real != base:
+                found.append(real)
+        _credential_dir_cache.clear()
+        _credential_dir_cache[key] = found
+    return found
+
+
+def credential_folder_judge():
+    """`_credential_folder` for many paths at once — a search: the folders
+    and the gate's own paths are read once, each directory's real path once,
+    and a path's own real path only when its last component is a symlink
+    (otherwise it is its directory's real path plus its name). String
+    prefixes, not `Path.parents`: a search judges every file it reads
+    (review of PR #69: 20k paths took 3.4 s against 0.31 s before)."""
+    roots = tuple(str(r) if str(r).endswith(os.sep) else str(r) + os.sep for r in _credential_roots())
+    own = frozenset(os.path.abspath(str(p)) for p in _protected_state_paths())
+    real_dirs: dict[str, str] = {}
+
+    def inside(p: str) -> bool:
+        p = p + os.sep
+        return any(p.startswith(r) for r in roots)
+
+    def judge(path: str | Path) -> bool:
+        try:
+            lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
+            head, tail = os.path.split(lexical)
+            if not tail or os.path.islink(lexical):
+                resolved = os.path.realpath(lexical)
+            else:
+                real = real_dirs.get(head)
+                if real is None:
+                    real = real_dirs[head] = os.path.realpath(head)
+                resolved = os.path.join(real, tail)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            return True
+        if resolved == lexical and lexical in own:
+            return False
+        return inside(lexical) or inside(resolved)
+
+    return judge
+
+
+def _credential_folder(path: str | Path) -> bool:
+    """True if `path`, as written or where it resolves, is a credential
+    folder or lies inside one — unless it is one of the gate's state files
+    named by its own, un-symlinked path."""
+    return credential_folder_judge()(path)
+
+
+def _credential_folder_refusal(path: str | Path) -> str:
+    return (f"Error: {Path(str(path)).name} is in a credential folder (SSH, cloud and Git "
+            "logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis "
+            "does not read or write. Ask the owner for what you need instead.")
 
 
 def _strip_numbering(text: str, strict: bool = True) -> str | None:
@@ -246,9 +398,12 @@ def read_file(
     """
     target = _resolve(path)
     # Checked before .exists() so the refusal is the same whether or not the
-    # file is there, and against both spellings so a symlink cannot launder it.
-    if is_protected(path) or is_protected(target):
+    # file is there, and against both spellings so a symlink cannot launder it
+    # (`is_credential` also follows every symlink hop of the name: ENV-1).
+    if is_credential(path) or is_credential(target):
         return refusal(target.name)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     if not target.exists():
         return f"Error: {target} does not exist."
     if target.is_dir():
@@ -307,8 +462,13 @@ def write_file(
     target = _resolve(path)
     if _self_protected(target):
         return _protect_refusal(target)
-    if is_protected(path) or is_protected(target):
+    if is_env_credential(path) or is_env_credential(target):
+        # The owner's `.env*` rule (ENV-1): Jarvis writes only `*.example`.
+        return write_refusal(Path(path).name)
+    if is_credential(path) or is_credential(target):
         return refusal(target.name)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     if target.exists():
         stamp = _seen.get(str(target))
         current = target.stat().st_mtime
@@ -361,8 +521,13 @@ def edit_file(
     target = _resolve(path)
     if _self_protected(target):
         return _protect_refusal(target)
-    if is_protected(path) or is_protected(target):
+    if is_env_credential(path) or is_env_credential(target):
+        # The owner's `.env*` rule (ENV-1): Jarvis writes only `*.example`.
+        return write_refusal(Path(path).name)
+    if is_credential(path) or is_credential(target):
         return refusal(target.name)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     if not target.exists():
         return f"Error: {target} does not exist. Use write_file to create it."
     if target.is_dir():

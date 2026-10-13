@@ -290,6 +290,8 @@ export function ProjectDialog(props: {
   discordConfigured?: boolean;
   /** A channel was created, linked or unlinked from the dialog. */
   onDiscordChanged?: () => void;
+  /** VX-3: make a VEX project from the extension's templates instead. */
+  onVex?: () => void;
   onClose: () => void;
 }) {
   const edit = props.mode === "edit" && !!props.initial;
@@ -382,6 +384,14 @@ export function ProjectDialog(props: {
       >
         <div className="pad col" data-testid={edit ? "project-dialog-edit" : "project-dialog-new"}
              onKeyDown={(e) => { if (e.key === "Escape") props.onClose(); }}>
+          {!edit && props.onVex ? (
+            <div className="row small" data-testid="project-vex-row">
+              <span className="muted">A VEX V5 robot?</span>
+              <button type="button" data-testid="project-new-vex" onClick={props.onVex}>
+                New VEX project from a template…
+              </button>
+            </div>
+          ) : null}
           <label className="muted small">Name</label>
           <input data-testid="project-name" placeholder="what to call it" value={name}
                  autoFocus={!inbox} disabled={inbox} onKeyDown={keys} onChange={(e) => setName(e.target.value)} />
@@ -502,10 +512,12 @@ export function NewProject(props: {
              options: { channel: boolean }) => Promise<unknown>;
   taken?: string[];
   discordConfigured?: boolean;
+  onVex?: () => void;
   onClose: () => void;
 }) {
   return <ProjectDialog mode="new" onCreate={props.onCreate} taken={props.taken}
-                        discordConfigured={props.discordConfigured} onClose={props.onClose} />;
+                        discordConfigured={props.discordConfigured} onVex={props.onVex}
+                        onClose={props.onClose} />;
 }
 
 export function NewTask(props: { onCreate: (brief: string) => void; onClose: () => void }) {

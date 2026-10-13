@@ -57,8 +57,10 @@ def load_tools(
     # (a sub-agent, a bench, anything narrowed on purpose) must not be able to
     # widen it by asking — before 2026-10-10 this wrote any available group
     # into the set and `Agent._sync_tools` folded its tools in.
+    # A group with no core is refused too: an empty core is "held" by every
+    # agent, which would let anything holding load_tools widen into it.
     held = runtime.current_tools()
-    if held is not None and not set(entry.core) <= held:
+    if held is not None and (not entry.core or not set(entry.core) <= held):
         return (
             f"Error: the '{name}' tools are not available to this agent, so they "
             "cannot be loaded here. Say what you need and let the user decide."

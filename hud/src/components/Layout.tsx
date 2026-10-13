@@ -17,18 +17,25 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   DEFAULT_LAYOUT, PANE, ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN, dragWidth, inMonaco, isZoom, keyWidth,
-  loadLayout, loadZoom, saveLayout, saveZoom, shortcutFor, stepZoom, toCss,
+  loadLayout, loadZoom, saveLayout, saveZoom, shortcutFor, stepZoom, toCss, isEditorShortcut, type EditorShortcut,
   type Fitted, type PaneLayout, type Side,
 } from "../lib/layout";
 import {
-  PANEL, PRESETS, SHAPES, TITLEBAR_H, equalSplit as equalSplitOf, fitWorkspace, focusPane, forgetTerminal as forgetTerminalOf,
-  loadWorkspace, panesOf, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal, setPanel, setPreset as setPresetOf,
-  setKeepOrigin as setKeepOriginOf, setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
-  unpinProject as unpinProjectOf,
-  type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
+  MENU_PRESETS, PANEL, SHAPES, TITLEBAR_H, cellsOf, closePane as closePaneOf, defaultWorkspace,
+  equalSplit as equalSplitOf, fitWorkspace, focusPane,
+  forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
+  renameTerminal as renameTerminalOf,
+  setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
+  setBrowserUrl as setBrowserUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
+  unpinProject as unpinProjectOf, setEditors as setEditorsOf,
+  type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
+  type WorkspaceFit,
 } from "../lib/workspace";
 import { inTerminal, terminalTakesKey } from "../lib/terminal";
+import { chordSecond, isSaveKey, resetChord } from "../lib/editorkeys";
 import { terminals, usePanelDot } from "./Terminal";
+import type { Tabs } from "../lib/buffers";
 
 export interface LayoutControl {
   zoom: number;
@@ -55,29 +62,69 @@ export interface LayoutControl {
   /** A sidebar click: the pane already showing that kind of thing, else the focused pane. */
   show: (view: View) => void;
   pin: (pane: PaneNo, projectId: string | null) => void;
+  /** A File pane's tabs (ED-2), pinning it to their project in the same step. */
+  setEditors: (pane: PaneNo, projectId: string, tabs: Tabs | null) => void;
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
-  setPreviewUrl: (pane: PaneNo, url: string) => void;
-  /** A Preview pane's "keep its own origin" grant (an origin), or none (WP-E, W-4). */
+  setBrowserUrl: (pane: PaneNo, url: string) => void;
+  /** The file a File or Diff pane has open (null: none), read again when it mounts (WP-G2). */
+  setFilePath: (pane: PaneNo, path: string | null) => void;
+  /** A Browser pane's "keep its own origin" grant (an origin), or none (WP-E, W-4). */
   setKeepOrigin: (pane: PaneNo, origin: string | null) => void;
   /** The terminal a terminal pane shows (null: choose again); no other pane keeps it (W-1). */
   setTerminal: (pane: PaneNo, id: string | null) => void;
   /** A terminal was closed or ended: no pane holds it any more. */
   forgetTerminal: (id: string) => void;
+  /** A terminal continued under a new id after a restart: every pane holding it holds the new one. */
+  renameTerminal: (from: string, to: string) => void;
   setSplit: (preset: Preset, split: Partial<Split>) => void;
   equalSplit: (preset: Preset) => void;
   togglePanel: () => void;
+  /**
+   * The owner's own ⬓, the layout menu's Panel row and Ctrl+`: togglePanel,
+   * and opening the panel this way opens a terminal when there is none (the
+   * owner's call, 2026-10-11). A stored layout, a reload and a terminal shown
+   * in the panel open it with togglePanel, which opens nothing. Given a
+   * click, only its first counts: a double-click is one gesture, as Ctrl+`
+   * ignores auto-repeat.
+   */
+  ownerTogglePanel: (click?: { detail?: number }) => void;
   setPanelHeight: (height: number) => void;
   resetPanelHeight: () => void;
   /** Reset layout: one pane, default widths, the panel closed. */
   resetAll: () => void;
+  /**
+   * Split (WP-G2, lib/workspace `splitPane`): pane `id` shows `spec` right
+   * after `source`, on the ladder's shape for one pane more. `focus: false`
+   * leaves focus where it is. An id ⊞ had hidden mounts fresh.
+   */
+  split: (source: PaneNo, id: PaneNo, spec: PaneSpec, opts?: { focus?: boolean }) => void;
+  /** × (lib/workspace `closePane`): that pane goes, and mounts fresh if a split reuses its id; focus to `then` if drawn. */
+  close: (pane: PaneNo, then?: PaneNo | null) => void;
+  /** Whether one more pane can be drawn in this window now (`dirty`: ids holding an unsaved edit). */
+  splitVerdict: (dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
+  /**
+   * Render-only, by pane id: how many times that id has been closed (or
+   * taken back from ⊞'s hidden panes by a split). The workspace keys a pane
+   * by id and incarnation, so an id a close frees and a split reuses mounts
+   * fresh — never the old FileTab, frame or terminal slot.
+   */
+  incarnation: Readonly<Partial<Record<PaneNo, number>>>;
 }
 
-/** Focus pane N for the keyboard: its message box when it has one, else the pane itself. */
-function focusPaneElement(pane: PaneNo) {
+/**
+ * Focus pane `pane` (an id) for the keyboard: its message box when it has
+ * one, else the pane itself. A pane a split just made may not be drawn yet
+ * when the change came from outside a React event (a socket, a timer): it
+ * is looked for again for a few frames (review of PR #47).
+ */
+export function focusPaneElement(pane: PaneNo, frames = 10) {
   requestAnimationFrame(() => {
     const el = document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`);
-    if (!el) return;
+    if (!el || el.offsetParent === null) {
+      if (frames > 0) focusPaneElement(pane, frames - 1);
+      return;
+    }
     const box = el.querySelector<HTMLElement>('[data-testid="input"]');
     (box && !(box as HTMLTextAreaElement).disabled ? box : el).focus();
   });
@@ -91,7 +138,7 @@ function focusPaneElement(pane: PaneNo) {
  * that has not moved, which is how a click meant for DENY lands on something
  * else.
  */
-export function useLayout(blocked = false): LayoutControl {
+export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) => void): LayoutControl {
   // Applied in the initializer too, so a window reopened at 140% does not
   // draw its first frame at 100% and then jump.
   const [zoom, setZoomState] = useState(() => {
@@ -130,10 +177,12 @@ export function useLayout(blocked = false): LayoutControl {
   const fit = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel, drawnBefore.current);
   drawnBefore.current = { preset: ws.preset, drawn: fit.drawn, panes: fit.panes };
   const fitted = fit.sides;
-  const now = useRef({ fit, ws, layout, available, availableH, prefer });
-  now.current = { fit, ws, layout, available, availableH, prefer };
+  const now = useRef({ fit, ws, layout, available, availableH, prefer, preferPanel });
+  now.current = { fit, ws, layout, available, availableH, prefer, preferPanel };
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
+  const editorKeyRef = useRef(onEditorKey);
+  editorKeyRef.current = onEditorKey;
 
   const setZoom = useCallback((level: number) => setZoomState(isZoom(level) ? level : ZOOM_DEFAULT), []);
   const zoomBy = useCallback((dir: 1 | -1) => setZoomState((z) => stepZoom(z, dir)), []);
@@ -168,15 +217,22 @@ export function useLayout(blocked = false): LayoutControl {
   const focus = useCallback((pane: PaneNo) => setWs((w) => focusPane(w, pane)), []);
   const show = useCallback((view: View) => setWs((w) => showOf(w, view, now.current.fit.panes)), []);
   const pin = useCallback((pane: PaneNo, projectId: string | null) => setWs((w) => pinPane(w, pane, projectId)), []);
+  const setEditors = useCallback(
+    (pane: PaneNo, projectId: string, tabs: Tabs | null) => setWs((w) => setEditorsOf(w, pane, projectId, tabs)), [],
+  );
   const unpinProject = useCallback(
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
-  const setPreviewUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setPreviewUrlOf(w, pane, url)), []);
+  const setBrowserUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setBrowserUrlOf(w, pane, url)), []);
+  const setFilePath = useCallback(
+    (pane: PaneNo, path: string | null) => setWs((w) => setFilePathOf(w, pane, path)), [],
+  );
   const setKeepOrigin = useCallback(
     (pane: PaneNo, origin: string | null) => setWs((w) => setKeepOriginOf(w, pane, origin)), [],
   );
   const setTerminal = useCallback((pane: PaneNo, id: string | null) => setWs((w) => setPaneTerminal(w, pane, id)), []);
   const forgetTerminal = useCallback((id: string) => setWs((w) => forgetTerminalOf(w, id)), []);
+  const renameTerminal = useCallback((from: string, to: string) => setWs((w) => renameTerminalOf(w, from, to)), []);
   const setSplit = useCallback(
     (preset: Preset, split: Partial<Split>) => setWs((w) => setSplitOf(w, preset, split)), [],
   );
@@ -197,6 +253,34 @@ export function useLayout(blocked = false): LayoutControl {
     setPreferPanel(at.fit.panel.auto || trial.panel.auto);
     setWs((w) => setPanel(w, { open: true }));
   }, []);
+  // A pane closed, or a hidden one a split takes back, mounts fresh next time.
+  const [incarnation, setIncarnation] = useState<Partial<Record<PaneNo, number>>>({});
+  const bump = useCallback(
+    (pane: PaneNo) => setIncarnation((m) => ({ ...m, [pane]: (m[pane] ?? 0) + 1 })), [],
+  );
+  const split = useCallback((source: PaneNo, id: PaneNo, spec: PaneSpec, opts: { focus?: boolean } = {}) => {
+    if (blockedRef.current) return;
+    if (now.current.ws.kept.includes(id)) bump(id);
+    setWs((w) => splitPaneOf(w, source, id, spec, opts));
+  }, [bump]);
+  const close = useCallback((pane: PaneNo, then: PaneNo | null = null) => {
+    if (blockedRef.current) return;
+    const at = now.current.ws;
+    if (closePaneOf(at, pane) === at) return;
+    bump(pane);
+    setWs((w) => closePaneOf(w, pane, then));
+  }, [bump]);
+  const splitVerdict = useCallback((dirty: readonly PaneNo[] = []) => {
+    const at = now.current;
+    return splitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, dirty);
+  }, []);
+  const ownerTogglePanel = useCallback((click?: { detail?: number }) => {
+    if (blockedRef.current || (click?.detail ?? 0) > 1) return;
+    const opening = !now.current.fit.panel.open;
+    togglePanel();
+    // Closed again before the terminal is made: it is not opened, nor the panel reopened.
+    if (opening) void terminals.ownerOpened("panel", () => now.current.fit.panel.open);
+  }, [togglePanel]);
   const resetAll = useCallback(() => {
     setWs((w) => resetWorkspace(w));
     setLayout({ ...DEFAULT_LAYOUT });
@@ -204,30 +288,57 @@ export function useLayout(blocked = false): LayoutControl {
     setPreferPanel(false);
   }, []);
 
-  // Capture phase on the window: the input bar stops its keys from bubbling
-  // (so Space typed there is not push-to-talk), and these keys must work from
-  // the box the owner's cursor usually sits in. The zoom keys are the HUD's
-  // everywhere, Monaco and the input bar included — neither binds them, and
-  // letting one through is Chrome's page zoom, which this control cannot see
-  // and the browser remembers per site. Ctrl+B stands aside in Monaco (its
-  // Ctrl+K Ctrl+B chord), ignores auto-repeat (holding it would flap the
-  // pane), and nothing fires mid-composition. Ctrl+` and Ctrl+Alt+1 … 4
-  // ignore auto-repeat too.
+  // **The one place the HUD's layout keys are taken** (push-to-talk's Ctrl+D
+  // is App's, the same way, and shares the chord tracker below). Capture
+  // phase on the window: the input bar stops its keys from bubbling, and
+  // these keys must work from the box the owner's cursor usually sits in.
+  // The zoom keys are the HUD's everywhere, Monaco and the input bar included — letting one through is Chrome's page zoom, which
+  // this control cannot see and the browser remembers per site. Ctrl+B folds
+  // the sidebar from Monaco too (decisions E-10), ignores auto-repeat
+  // (holding it would flap the pane), and nothing fires mid-composition.
+  // Ctrl+` and Ctrl+Alt+1 … 8 ignore auto-repeat too.
+  //
+  // Monaco's Ctrl+K chords (ED-1): the second key of one typed in an editor
+  // is Monaco's, whatever HUD key it is — Ctrl+K Ctrl+B sets the selection
+  // anchor, Ctrl+K Ctrl+0 folds all — and is still kept from Chrome. Every
+  // keydown feeds the tracker (lib/editorkeys.ts), so a lone Ctrl+B is told
+  // apart from a chord's. The tracker is the window's, shared with
+  // push-to-talk, which leaves a chord's Ctrl+D to Monaco the same way.
+  //
+  // Ctrl+S: Chrome's "Save page as" never opens. In an editor that editor's
+  // own Ctrl+S action saves its buffer (components/Editor.tsx); in a terminal
+  // it is the shell's (XOFF, readline's forward search).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const step = { second: chordSecond(e, inMonaco(e.target)) };
       if (e.isComposing) return;
       const what = shortcutFor(e);
-      if (!what) return;
+      const save = isSaveKey(e);
+      if (!what && !save) return;
       if (blockedRef.current) {
         e.preventDefault();
         return;
       }
       // In a terminal the shell gets Ctrl+B and Ctrl+Alt+B (readline back-
-      // char; page up in less and vim) and Ctrl+_ (readline undo). The zoom
-      // keys, Ctrl+` and Ctrl+Alt+N stay the HUD's there too.
-      if (inTerminal(e.target) && terminalTakesKey(what, e.key)) return;
+      // char; page up in less and vim), Ctrl+_ (readline undo) and Ctrl+S.
+      // The zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's there too.
+      if (inTerminal(e.target) && (save || terminalTakesKey(what, e.key))) return;
+      if (step.second || save || !what) {
+        e.preventDefault();
+        return;
+      }
+      if (isEditorShortcut(what)) {
+        // Quick open, the palette, find in files (ED-7): never Chrome's print
+        // dialog, and stopped here so Monaco never sees them (its F1 would
+        // open its own quick command over ours). A pending chord's second
+        // key was left to Monaco above; under a card nothing opens (above).
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.repeat) return;
+        editorKeyRef.current?.(what);
+        return;
+      }
       if (what === "toggleLeft" || what === "toggleRight") {
-        if (inMonaco(e.target)) return;
         e.preventDefault();
         if (e.repeat) return;
         toggle(what === "toggleLeft" ? "left" : "right");
@@ -236,18 +347,18 @@ export function useLayout(blocked = false): LayoutControl {
       if (what === "togglePanel") {
         e.preventDefault();
         if (e.repeat) return;
-        const opening = !now.current.fit.panel.open;
-        togglePanel();
         // VS Code's key: opening the panel opens a terminal when there is none.
-        if (opening) void terminals.keyOpened();
+        ownerTogglePanel();
         return;
       }
-      if (what === "focus1" || what === "focus2" || what === "focus3" || what === "focus4") {
-        const pane = Number(what.slice(-1)) as PaneNo;
-        // Only a pane the preset has: Ctrl+Alt+3 in two columns is left alone.
-        // One the window dropped for room is brought back into the drawn set
-        // (fitWorkspace keeps a dropped set only while it holds the focus).
-        if (!panesOf(now.current.ws.preset).includes(pane)) return;
+      if (what.startsWith("focus")) {
+        // Slot N, never id N (plan G-1): the pane the owner sees N-th in
+        // reading order. Only a slot the preset has: Ctrl+Alt+3 in two
+        // columns is left alone. A pane the window dropped for room is
+        // brought back into the drawn set (fitWorkspace keeps a dropped set
+        // only while it holds the focus).
+        const pane = paneAt(now.current.ws, Number(what.slice(5)));
+        if (pane === null) return;
         e.preventDefault();
         if (e.repeat) return;
         setWs((w) => focusPane(w, pane));
@@ -258,15 +369,29 @@ export function useLayout(blocked = false): LayoutControl {
       if (what === "zoomReset") setZoomState(ZOOM_DEFAULT);
       else setZoomState((z) => stepZoom(z, what === "zoomIn" ? 1 : -1));
     };
+    // Monaco leaves a chord when the document loses focus (it polls
+    // `document.hasFocus()`, which stays true while a frame inside has it);
+    // so does the tracker.
+    const onBlur = () => {
+      setTimeout(() => {
+        if (!document.hasFocus()) resetChord();
+      }, 0);
+    };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [toggle, togglePanel]);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [toggle, ownerTogglePanel]);
 
   return {
+    ownerTogglePanel,
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setKeepOrigin, setTerminal, forgetTerminal, setSplit,
-    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll,
+    setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, setFilePath, setKeepOrigin,
+    setTerminal, forgetTerminal, renameTerminal, setSplit,
+    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
   };
 }
 
@@ -274,8 +399,8 @@ export function useLayout(blocked = false): LayoutControl {
  * A draggable edge, on either axis: a 7px hit area over a 1px rule (it takes
  * no room), a resize cursor, and the accent line on hover, focus and while
  * dragging. Keyboard: the caller's `onKey` (arrows, Shift for a bigger step,
- * Home and End); a double-click resets. Space on a focused separator is not
- * push-to-talk. `orientation` is ARIA's: a "vertical" separator stands
+ * Home and End); a double-click resets. Space on a focused separator does
+ * nothing. `orientation` is ARIA's: a "vertical" separator stands
  * between left and right and moves along x.
  */
 export function Separator(props: {
@@ -356,15 +481,10 @@ export function Separator(props: {
       onDoubleClick={() => {
         if (!props.blocked) props.onReset();
       }}
-      // Space on a focused separator is not push-to-talk (the document-level
-      // handler would otherwise hear it), and does nothing here either.
-      onKeyUp={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
-      }}
+      // Space on a focused separator does nothing (no scroll behind it).
       onKeyDown={(e) => {
         if (e.code === "Space" || e.key === " ") {
           e.preventDefault();
-          e.stopPropagation();
           return;
         }
         if (props.blocked) return;
@@ -556,13 +676,13 @@ export function ZoomControl(props: {
 /** Below this many zoomed px the four text buttons fold into a ⋯ menu; zoom and the toggles never hide. */
 export const TITLE_FOLD_W = 560;
 
-type Area = "left" | "panel" | "right" | "grid";
+type Area = "left" | "panel" | "right" | "grid" | "split";
 
 /**
  * A window outline, 16×16, with the area the button controls filled with
  * `currentColor` when open and drawn as an outline when closed.
  */
-function AreaIcon(props: { area: Area; open: boolean }) {
+export function AreaIcon(props: { area: Area; open: boolean }) {
   const { area, open } = props;
   const band =
     area === "left" ? { x: 1.5, y: 1.5, w: 4.5, h: 13 }
@@ -572,7 +692,10 @@ function AreaIcon(props: { area: Area; open: boolean }) {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
       <rect x="1.5" y="1.5" width="13" height="13" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
-      {band ? (
+      {area === "split" ? (
+        // A pane's split button (WP-G2): the outline and one divider, VS Code's split.
+        <line x1="8" y1="1.5" x2="8" y2="14.5" stroke="currentColor" strokeWidth="1.2" />
+      ) : band ? (
         <rect
           x={band.x} y={band.y} width={band.w} height={band.h}
           fill={open ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.2"
@@ -587,21 +710,25 @@ function AreaIcon(props: { area: Area; open: boolean }) {
   );
 }
 
-/** A preset tile's diagram: the shape's panes as small rectangles. */
+/**
+ * A preset tile's diagram: the shape's panes as small rectangles, drawn from
+ * the shape itself (lib/workspace `cellsOf`, at its default edges), so a
+ * tile can never disagree with what choosing it draws.
+ */
 function PresetIcon(props: { preset: Preset }) {
-  const cells: Record<Preset, [number, number, number, number][]> = {
-    single: [[1, 1, 22, 14]],
-    cols2: [[1, 1, 10.5, 14], [12.5, 1, 10.5, 14]],
-    rows2: [[1, 1, 22, 6.5], [1, 8.5, 22, 6.5]],
-    cols3: [[1, 1, 6.6, 14], [8.7, 1, 6.6, 14], [16.4, 1, 6.6, 14]],
-    main2: [[1, 1, 13, 14], [15, 1, 8, 6.5], [15, 8.5, 8, 6.5]],
-    grid4: [[1, 1, 10.5, 6.5], [12.5, 1, 10.5, 6.5], [1, 8.5, 10.5, 6.5], [12.5, 8.5, 10.5, 6.5]],
-  };
+  const cells = cellsOf(props.preset, defaultWorkspace().splits[props.preset]);
+  const gap = 1;
   return (
     <svg width="24" height="16" viewBox="0 0 24 16" aria-hidden="true" focusable="false">
-      {cells[props.preset].map(([x, y, w, h], i) => (
-        <rect key={i} x={x} y={y} width={w} height={h} rx="1" fill="none" stroke="currentColor" strokeWidth="1.1" />
-      ))}
+      {cells.map((c, i) => {
+        const x = 1 + c.left * 22 + (c.left > 0 ? gap / 2 : 0);
+        const y = 1 + c.top * 14 + (c.top > 0 ? gap / 2 : 0);
+        const w = (c.right - c.left) * 22 - (c.left > 0 ? gap / 2 : 0) - (c.right < 1 ? gap / 2 : 0);
+        const h = (c.bottom - c.top) * 14 - (c.top > 0 ? gap / 2 : 0) - (c.bottom < 1 ? gap / 2 : 0);
+        return (
+          <rect key={i} x={x} y={y} width={w} height={h} rx="1" fill="none" stroke="currentColor" strokeWidth="1.1" />
+        );
+      })}
     </svg>
   );
 }
@@ -623,7 +750,7 @@ function menuAt(el: HTMLElement, zoom: number): MenuAt {
 /**
  * A small menu: closed by Escape (focus back to its opener) and by a press
  * anywhere else; the arrow keys move between its items (`data-mi`), and Space
- * inside it never reaches push-to-talk.
+ * on one presses it.
  */
 function MenuShell(props: {
   at: MenuAt;
@@ -638,9 +765,13 @@ function MenuShell(props: {
 }) {
   const box = useRef<HTMLDivElement>(null);
   const { onClose, opener } = props;
+  // It opens on the chosen tile (a `menuitemradio`), else on the first item —
+  // never on a checked toggle row (`menuitemcheckbox`): with 3 over 2 or 4
+  // over 3 current no tile is checked, and focus used to land on the sidebar
+  // toggle, where Enter folded the sidebar (review of PR #37).
   useLayoutEffect(() => {
     const first =
-      box.current?.querySelector<HTMLElement>('[data-mi][aria-checked="true"]')
+      box.current?.querySelector<HTMLElement>('[data-mi][role="menuitemradio"][aria-checked="true"]')
       || box.current?.querySelector<HTMLElement>("[data-mi]");
     first?.focus();
   }, []);
@@ -697,18 +828,11 @@ function MenuShell(props: {
       style={{ right: props.at.right, top: props.at.top }}
       onMouseDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
-        if (e.code === "Space" || e.key === " ") {
-          e.stopPropagation();
-          return;
-        }
         if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) {
           e.preventDefault();
           e.stopPropagation();
           move(e);
         }
-      }}
-      onKeyUp={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
       }}
     >
       {props.children}
@@ -786,9 +910,12 @@ export function TitleBar(props: {
   const dropped = v.fit.dropped;
   // A terminal in the hidden panel has exited (plan §2.3): a dot on ⬓.
   const panelDot = usePanelDot() && !v.fit.panel.open;
-  const toggles: { area: "left" | "panel" | "right"; open: boolean; auto: boolean; act: () => void }[] = [
+  // `act` gets the click: ⬓ counts only a double-click's first (ownerTogglePanel).
+  const toggles: {
+    area: "left" | "panel" | "right"; open: boolean; auto: boolean; act: (click: React.MouseEvent) => void;
+  }[] = [
     { area: "left", open: !sides.leftFolded, auto: sides.autoLeft, act: () => v.toggle("left") },
-    { area: "panel", open: v.fit.panel.open, auto: v.fit.panel.auto, act: v.togglePanel },
+    { area: "panel", open: v.fit.panel.open, auto: v.fit.panel.auto, act: v.ownerTogglePanel },
     { area: "right", open: !sides.rightFolded, auto: sides.autoRight, act: () => v.toggle("right") },
   ];
 
@@ -902,10 +1029,11 @@ export function TitleBar(props: {
 }
 
 /**
- * ⊞'s menu, the one entry point for presets: six tiles (the stored preset
- * checked), the three toggles written out with their shortcuts, Reset layout,
- * and — when the window is drawing fewer panes than the preset has — a line
- * saying so.
+ * ⊞'s menu, the one entry point for presets: eight tiles, four to a row (the
+ * stored preset checked; 3 over 2 and 4 over 3 have no tile, so with one of
+ * them chosen no tile is), the three toggles written out with their
+ * shortcuts, Reset layout, and — when the window is drawing fewer panes than
+ * the preset has — a line saying so.
  */
 export function LayoutMenu(props: {
   view: LayoutControl;
@@ -915,9 +1043,11 @@ export function LayoutMenu(props: {
 }) {
   const v = props.view;
   const sides = v.fit.sides;
-  const rows: { area: "left" | "panel" | "right"; label: string; key: string; on: boolean; act: () => void }[] = [
+  const rows: {
+    area: "left" | "panel" | "right"; label: string; key: string; on: boolean; act: (click: React.MouseEvent) => void;
+  }[] = [
     { area: "left", label: "Sidebar", key: "Ctrl+B", on: !sides.leftFolded, act: () => v.toggle("left") },
-    { area: "panel", label: "Panel", key: "Ctrl+`", on: v.fit.panel.open, act: v.togglePanel },
+    { area: "panel", label: "Panel", key: "Ctrl+`", on: v.fit.panel.open, act: v.ownerTogglePanel },
     { area: "right", label: "Status pane", key: "Ctrl+Alt+B", on: !sides.rightFolded, act: () => v.toggle("right") },
   ];
   const total = SHAPES[v.ws.preset].panes;
@@ -928,12 +1058,12 @@ export function LayoutMenu(props: {
       label="Customize layout"
       opener={props.opener}
       onClose={props.onClose}
-      gridCols={3}
-      gridCount={PRESETS.length}
+      gridCols={4}
+      gridCount={MENU_PRESETS.length}
     >
-      <div className="lm-head">Layout</div>
+      <div className="lm-head" data-testid="layout-head">Layout · {total} pane{total === 1 ? "" : "s"}</div>
       <div className="lm-tiles" role="group" aria-label="Panes">
-        {PRESETS.map((p) => (
+        {MENU_PRESETS.map((p) => (
           <button
             type="button"
             key={p}

@@ -1,0 +1,438 @@
+// Tree-sitter colour, the main thread's half (ED-5, editor plan §2.6). In the
+// lazy Monaco chunk: `monacoBundle.ts` exports `applySyntax`, and
+// `loadMonaco()` calls it once.
+//
+// What it does:
+//  - registers a `DocumentRangeSemanticTokensProvider` for each Monaco
+//    language a grammar covers (lib/syntax/grammars.ts). Monaco asks for the
+//    visible lines (plus a screen above and below) on open, scroll and edit;
+//    the provider asks the syntax worker and hands back its tokens. Monarch
+//    stays underneath: until the worker answers, and wherever it does not,
+//    Monarch's colour is what shows;
+//  - registers a `FoldingRangeProvider` for the same languages (ED-6): folds
+//    from nvim's `folds.scm` (lib/syntax/folds.ts), which Monaco's sticky
+//    scroll follows too; wherever tree-sitter is not serving a model it
+//    answers null, and Monaco folds by indentation as before;
+//  - sends each covered model's text to the worker the first time Monaco asks
+//    for its colour, then every content change, as `{offset, length, text}`
+//    with the model's version;
+//  - keeps the budgets the main thread can see: a model past
+//    `BUDGETS.maxChars` never reaches the worker (Monarch, "syntax: basic
+//    (large file)"); the worker's own (a slow first parse, reparses cancelled
+//    twice running) arrive as a state;
+//  - draws that state in each editor's bottom-right corner — only when a
+//    covered language is on Monarch, so the owner knows why it is quieter —
+//    as text (`data-testid="syntax-status"`);
+//  - turns `semanticHighlighting.enabled` on for every editor it sees (the
+//    standalone theme leaves it off), without touching where editors are made.
+//
+// The worker is made by Monaco's `getWorker` with the label `SYNTAX_WORKER`
+// (lib/monaco.ts): the one place the HUD makes a worker.
+
+import type * as MonacoNS from "monaco-editor/editor";
+import { BUDGETS, type BasicReason, type DocState } from "./budgets";
+import { COVERED_LANGUAGES, grammarFor, type GrammarName } from "./grammars";
+import type { FoldRange } from "./folds";
+import { legend } from "./legend";
+
+type Monaco = typeof MonacoNS;
+type Model = MonacoNS.editor.ITextModel;
+
+export interface SyntaxStatus {
+  uri: string;
+  language: string;
+  grammar: GrammarName;
+  state: DocState;
+  reason?: BasicReason | "no worker";
+  /** Token answers with data, applied or not (tests wait on this). */
+  served: number;
+  /**
+   * Times the model's whole text was sent to the worker (`open`). A model
+   * past `BUDGETS.maxChars` is never sent: 0 (tests pin the client's own
+   * guard, which the worker's would otherwise hide).
+   */
+  opens: number;
+  /** Fold answers from the tree handed to Monaco (ED-6); every other answer is null: indentation. */
+  folds: number;
+}
+
+interface Track extends SyntaxStatus {
+  id: string;
+  model: Model;
+  opened: boolean;
+  subs: { dispose(): void }[];
+}
+
+type Reply = {
+  req: number;
+  id: string;
+  version: number;
+  data: Uint32Array | null;
+  state: DocState;
+  reason?: BasicReason;
+  truncatedAt?: number;
+  stale?: boolean;
+};
+
+type FoldsReply = {
+  req: number;
+  id: string;
+  version: number;
+  ranges: FoldRange[] | null;
+  state: DocState;
+  reason?: BasicReason;
+  stale?: boolean;
+};
+
+/**
+ * A token request the worker has not answered in this long means the worker
+ * is wedged (it answers in order, so every later request would wait too): it
+ * is treated as dead, as on an error — every covered model goes back to
+ * Monarch and its editor says "syntax: basic (no worker)".
+ */
+export const REPLY_TIMEOUT_MS = 10_000;
+
+export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
+  let worker: Worker | null = null;
+  let dead = false;
+  let seq = 0;
+  let ids = 0;
+  const tracks = new Map<string, Track>();
+  const byId = new Map<string, Track>();
+  const waiting = new Map<number, (r: Reply | null) => void>();
+  const foldsWaiting = new Map<number, (r: FoldsReply | null) => void>();
+  const probes = new Map<number, (r: { ok: boolean; error?: string }) => void>();
+  const asks = new Map<number, (names: string[]) => void>();
+  const changed = new monaco.Emitter<void>();
+  const redraws = new Set<() => void>();
+
+  const redraw = () => redraws.forEach((f) => f());
+
+  function fail() {
+    dead = true;
+    worker?.terminate();
+    worker = null;
+    for (const t of tracks.values()) {
+      if (t.state !== "basic") Object.assign(t, { state: "basic", reason: "no worker" });
+    }
+    waiting.forEach((resolve) => resolve(null));
+    waiting.clear();
+    foldsWaiting.forEach((resolve) => resolve(null));
+    foldsWaiting.clear();
+    probes.forEach((resolve) => resolve({ ok: false, error: "no syntax worker" }));
+    probes.clear();
+    asks.forEach((resolve) => resolve([]));
+    asks.clear();
+    changed.fire();
+    redraw();
+  }
+
+  function post(m: unknown): boolean {
+    if (dead) return false;
+    if (!worker) {
+      try {
+        worker = makeWorker();
+      } catch {
+        fail();
+        return false;
+      }
+      worker.onmessage = (ev: MessageEvent) => onMessage(ev.data);
+      worker.onerror = () => fail();
+    }
+    worker.postMessage(m);
+    return true;
+  }
+
+  function onMessage(m: any) {
+    if (!m || typeof m !== "object") return;
+    if (m.t === "tokens") {
+      const resolve = waiting.get(m.req);
+      waiting.delete(m.req);
+      resolve?.(m as Reply);
+      const t = byId.get(m.id);
+      if (t && m.state === "basic" && t.state !== "basic") setState(t, "basic", m.reason);
+    } else if (m.t === "folds") {
+      const resolve = foldsWaiting.get(m.req);
+      foldsWaiting.delete(m.req);
+      resolve?.(m as FoldsReply);
+      const t = byId.get(m.id);
+      if (t && m.state === "basic" && t.state !== "basic") setState(t, "basic", m.reason);
+    } else if (m.t === "state") {
+      const t = byId.get(m.id);
+      if (t) setState(t, m.state, m.reason);
+    } else if (m.t === "changed") {
+      if (byId.has(m.id)) changed.fire();
+    } else if (m.t === "probe") {
+      const resolve = probes.get(m.req);
+      probes.delete(m.req);
+      resolve?.({ ok: !!m.ok, ...(m.error ? { error: String(m.error) } : {}) });
+    } else if (m.t === "loaded") {
+      const resolve = asks.get(m.req);
+      asks.delete(m.req);
+      resolve?.(Array.isArray(m.names) ? m.names.map(String) : []);
+    }
+  }
+
+  function setState(t: Track, state: DocState, reason?: Track["reason"]) {
+    if (t.state === state && t.reason === reason) return;
+    t.state = state;
+    t.reason = state === "basic" ? reason : undefined;
+    // On Monarch now: ask Monaco to draw again, so tokens already given are
+    // cleared (an empty answer) rather than left to go stale.
+    changed.fire();
+    redraw();
+  }
+
+  function untrack(t: Track, tellWorker = true) {
+    if (tellWorker && t.opened) post({ t: "close", id: t.id });
+    t.subs.forEach((s) => s.dispose());
+    tracks.delete(t.uri);
+    byId.delete(t.id);
+    redraw();
+  }
+
+  /** The model's track, opening it in the worker the first time. Null for a language tree-sitter does not colour. */
+  function track(model: Model): Track | null {
+    const uri = model.uri.toString();
+    const have = tracks.get(uri);
+    if (have && have.model === model) return have;
+    if (have) untrack(have);
+    const language = model.getLanguageId();
+    const grammar = grammarFor(language, model.uri.path);
+    if (!grammar) return null;
+    const t: Track = {
+      id: `m${++ids}`, uri, language, grammar, model, state: "loading", served: 0, opens: 0, folds: 0, opened: false, subs: [],
+    };
+    tracks.set(uri, t);
+    byId.set(t.id, t);
+    t.subs.push(
+      model.onWillDispose(() => untrack(t)),
+      model.onDidChangeLanguage(() => {
+        untrack(t);
+        changed.fire();
+      }),
+      model.onDidChangeContent((e) => {
+        if (t.state === "basic") return;
+        if (model.getValueLength() > BUDGETS.maxChars) {
+          if (t.opened) post({ t: "close", id: t.id });
+          t.opened = false;
+          setState(t, "basic", "large file");
+          return;
+        }
+        if (e.isFlush) open(t);
+        else {
+          post({
+            t: "change", id: t.id, version: e.versionId,
+            changes: e.changes.map((c) => ({ offset: c.rangeOffset, length: c.rangeLength, text: c.text })),
+          });
+        }
+      }),
+    );
+    if (model.getValueLength() > BUDGETS.maxChars) setState(t, "basic", "large file");
+    else open(t);
+    redraw();
+    return t;
+  }
+
+  function open(t: Track) {
+    t.opened = post({
+      t: "open", id: t.id, grammar: t.grammar, text: t.model.getValue(), version: t.model.getVersionId(),
+      styledAs: t.language,
+    });
+    if (t.opened) t.opens++;
+    if (!t.opened && !dead) setState(t, "basic", "no worker");
+  }
+
+  const provider: MonacoNS.languages.DocumentRangeSemanticTokensProvider = {
+    onDidChange: changed.event,
+    getLegend: legend,
+    async provideDocumentRangeSemanticTokens(model, range) {
+      const t = track(model);
+      if (!t) return null;
+      // On Monarch: an empty answer clears whatever tree-sitter drew before.
+      if (t.state === "basic" || !t.opened) return { data: new Uint32Array(0) };
+      const req = ++seq;
+      const version = model.getVersionId();
+      const reply = new Promise<Reply | null>((resolve) => {
+        waiting.set(req, resolve);
+        setTimeout(() => {
+          if (!waiting.delete(req)) return;
+          resolve(null);
+          // No answer: the worker is wedged. Monarch for every model, said in
+          // each editor's corner (fail() also asks Monaco to draw again).
+          fail();
+        }, REPLY_TIMEOUT_MS);
+      });
+      if (!post({ t: "tokens", id: t.id, req, version, first: range.startLineNumber - 1, last: range.endLineNumber - 1 })) {
+        waiting.delete(req);
+        return { data: new Uint32Array(0) };
+      }
+      const r = await reply;
+      if (model.isDisposed()) return null;
+      // No answer (the worker failed or stopped answering): an empty answer,
+      // so nothing tree-sitter drew before stays on screen over Monarch.
+      if (!r) return { data: new Uint32Array(0) };
+      if (model.getVersionId() !== r.version) return null;
+      if (r.state === "basic") return { data: new Uint32Array(0) };
+      if (!r.data) return null;
+      t.served++;
+      if (t.state === "loading") setState(t, "ready");
+      return { data: r.data };
+    },
+  };
+  for (const id of COVERED_LANGUAGES) monaco.languages.registerDocumentRangeSemanticTokensProvider(id, provider);
+
+  // ---- folds from the tree (ED-6) -----------------------------------------
+  //
+  // A `FoldingRangeProvider` for the same languages, so Monaco folds `{ … }`,
+  // functions and Markdown sections rather than indentation — and its sticky
+  // scroll, which reads folding providers when no language has an outline,
+  // follows the same ranges. **null means indentation**: Monaco's folding
+  // (and sticky scroll) fall back to the indentation provider whenever a
+  // provider answers null, so every way tree-sitter is not serving a model
+  // answers null — on Monarch (large file, slow parse or edits, grammar
+  // failed, no worker), a worker that never answers (the reply timeout, as
+  // for tokens), the folds query over its budget, or an answer for a version
+  // the model has moved past (Monaco has cancelled that request anyway).
+  // An uncovered language — `dotenv` among them — has no provider at all, so
+  // it never reaches the worker this way either.
+  const kinds = monaco.languages.FoldingRangeKind;
+  // Told whenever the colour is (a state change, a dead worker, a retried reparse).
+  const foldsChanged = new monaco.Emitter<MonacoNS.languages.FoldingRangeProvider>();
+  const foldProvider: MonacoNS.languages.FoldingRangeProvider = {
+    onDidChange: foldsChanged.event,
+    async provideFoldingRanges(model, _context, token) {
+      const t = track(model);
+      if (!t || t.state === "basic" || !t.opened) return null;
+      const req = ++seq;
+      const version = model.getVersionId();
+      const reply = new Promise<FoldsReply | null>((resolve) => {
+        foldsWaiting.set(req, resolve);
+        setTimeout(() => {
+          if (!foldsWaiting.delete(req)) return;
+          resolve(null);
+          fail(); // no answer: the worker is wedged, as for tokens
+        }, REPLY_TIMEOUT_MS);
+      });
+      if (!post({ t: "folds", id: t.id, req, version })) {
+        foldsWaiting.delete(req);
+        return null;
+      }
+      const r = await reply;
+      if (!r || model.isDisposed() || token.isCancellationRequested) return null;
+      if (r.state === "basic" || !r.ranges || model.getVersionId() !== r.version) return null;
+      t.folds++;
+      return r.ranges.map((f) => ({
+        start: f.start,
+        end: f.end,
+        ...(f.kind === "comment" ? { kind: kinds.Comment } : f.kind === "imports" ? { kind: kinds.Imports } : {}),
+      }));
+    },
+  };
+  changed.event(() => foldsChanged.fire(foldProvider));
+  for (const id of COVERED_LANGUAGES) monaco.languages.registerFoldingRangeProvider(id, foldProvider);
+
+  // ---- every editor: semantic colour on, and the status corner -----------
+
+  const enable = (ed: { updateOptions(o: object): void }) => {
+    try {
+      ed.updateOptions({ "semanticHighlighting.enabled": true });
+    } catch {
+      /* an editor that went away before its first task */
+    }
+  };
+  monaco.editor.onDidCreateDiffEditor((diff) => queueMicrotask(() => enable(diff)));
+  monaco.editor.onDidCreateEditor((ed) => {
+    queueMicrotask(() => {
+      enable(ed);
+      statusCorner(monaco, ed, (model) => (model ? tracks.get(model.uri.toString()) ?? null : null), redraws);
+    });
+  });
+
+  // ---- test hooks (read-only, and the loader's gate) ----------------------
+
+  (window as any).__hudSyntax = {
+    /** Every model tree-sitter has been asked about: its grammar and state. */
+    states: (): SyntaxStatus[] =>
+      [...tracks.values()].map(({ uri, language, grammar, state, reason, served, opens, folds }) =>
+        ({ uri, language, grammar, state, reason, served, opens, folds })),
+    /**
+     * The worker's loader asked to fetch `url`: a shipped grammar's URL loads,
+     * any other is refused before a request is made.
+     */
+    probe: (url: string): Promise<{ ok: boolean; error?: string }> =>
+      new Promise((resolve) => {
+        const req = ++seq;
+        probes.set(req, resolve);
+        setTimeout(() => {
+          if (probes.delete(req)) resolve({ ok: false, error: "no answer from the syntax worker" });
+        }, REPLY_TIMEOUT_MS);
+        if (!post({ t: "probe", req, url })) {
+          probes.delete(req);
+          resolve({ ok: false, error: "no syntax worker" });
+        }
+      }),
+    /** The grammars the worker has compiled so far, by name; none if it never started. */
+    loaded: (): Promise<string[]> =>
+      new Promise((resolve) => {
+        if (!worker) return resolve([]);
+        const req = ++seq;
+        asks.set(req, resolve);
+        setTimeout(() => {
+          if (asks.delete(req)) resolve([]);
+        }, REPLY_TIMEOUT_MS);
+        if (!post({ t: "loaded", req })) {
+          asks.delete(req);
+          resolve([]);
+        }
+      }),
+  };
+}
+
+/** The bottom-right corner of one editor: "syntax: basic (<why>)" while its model is on Monarch. */
+function statusCorner(
+  monaco: Monaco,
+  ed: MonacoNS.editor.ICodeEditor,
+  stateOf: (model: Model | null) => SyntaxStatus | null,
+  redraws: Set<() => void>,
+) {
+  const node = document.createElement("div");
+  node.setAttribute("data-testid", "syntax-status");
+  node.setAttribute("role", "status");
+  Object.assign(node.style, {
+    pointerEvents: "none",
+    fontSize: "11px",
+    lineHeight: "16px",
+    padding: "0 6px",
+    margin: "0 4px 4px 0",
+    color: "var(--text-muted)",
+    background: "var(--bg-2)",
+    border: "1px solid var(--border)",
+    borderRadius: "3px",
+    whiteSpace: "nowrap",
+  });
+  const widget: MonacoNS.editor.IOverlayWidget = {
+    getId: () => "jarvis.syntaxStatus",
+    getDomNode: () => node,
+    getPosition: () => ({ preference: monaco.editor.OverlayWidgetPositionPreference.BOTTOM_RIGHT_CORNER }),
+  };
+  const draw = () => {
+    const s = stateOf(ed.getModel());
+    const text = s && s.state === "basic" ? `syntax: basic${s.reason ? ` (${s.reason})` : ""}` : "";
+    node.textContent = text;
+    node.style.display = text ? "" : "none";
+    node.setAttribute("data-state", s?.state ?? "off");
+  };
+  try {
+    ed.addOverlayWidget(widget);
+  } catch {
+    return;
+  }
+  draw();
+  redraws.add(draw);
+  const sub = ed.onDidChangeModel(draw);
+  ed.onDidDispose(() => {
+    redraws.delete(draw);
+    sub.dispose();
+  });
+}

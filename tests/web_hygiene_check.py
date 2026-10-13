@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bs4 import BeautifulSoup  # noqa: E402
 
+from jarvis import runtime  # noqa: E402
 from jarvis import config, tools  # noqa: E402
 
 FAILURES: list[str] = []
@@ -1160,6 +1161,12 @@ def browser_snapshot():
                 dead.close()
                 goto_err = tools.dispatch(
                     "browser_goto", json.dumps({"url": f"http://127.0.0.1:{dead_port}/"})).text
+                # The refused load raises at once, but Chromium then commits its
+                # error page (chrome-error://) as a navigation of its own. Under
+                # load that commit landed after the next goto began and
+                # interrupted it ("browser_snapshot crashed"): let it land first.
+                session._submit(lambda: session.page.wait_for_url(
+                    lambda u: u.startswith("chrome-error:"), timeout=15_000))
             finally:
                 browsing.SESSION = saved
             check("a snapshot the page makes throw reports the error's type, not its message",
@@ -1247,8 +1254,13 @@ def browser_snapshot():
                   and not session.eval_js("!!document.getElementById('inj2')"), snap[-300:])
 
             for style in ("display:none", "visibility:hidden", "opacity:0", "font-size:0"):
-                session.goto(serve(f"/hundredk-{style[:4]}",
-                                   FLOOD_PAGE.format(count=100_000, style=style)))
+                # Loaded with more time than browser_goto's own 30 s: the opacity:0
+                # page alone takes ~16 s to reach DOMContentLoaded (its script makes
+                # 100,000 spans), and under load it ran out ("browser_snapshot
+                # crashed"). The load is not what this measures; the snapshot is.
+                url = serve(f"/hundredk-{style[:4]}", FLOOD_PAGE.format(count=100_000, style=style))
+                session._submit(lambda url=url: session.page.goto(
+                    url, wait_until="domcontentloaded", timeout=180_000))
 
                 def main_equivalent():
                     session.page.wait_for_timeout(150)
@@ -1307,4 +1319,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({
+        "browser_goto", "browser_screenshot", "browser_snapshot", "browser_type",
+        "fetch_page", "web_search"
+    }):
+        sys.exit(main())

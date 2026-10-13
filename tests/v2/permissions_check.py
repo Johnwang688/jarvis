@@ -941,16 +941,550 @@ class PermitProvider:
         pass
 
 
-def http_json(port, method, path, body=None):
+def http_json(port, method, path, body=None, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         payload = None if body is None else json.dumps(body).encode()
-        headers = {"Content-Type": "application/json"} if payload else {}
+        headers = {**({"Content-Type": "application/json"} if payload else {}), **(headers or {})}
         conn.request(method, path, payload, headers)
         response = conn.getresponse()
         return response.status, json.loads(response.read() or b"null")
     finally:
         conn.close()
+
+
+def hud_json(daemon, method, path, body=None):
+    """A request as the HUD window sends it: its own listener, its Origin."""
+    return http_json(daemon.face_port, method, path, body,
+                     {"Origin": f"http://127.0.0.1:{daemon.face_port}"})
+
+
+def approve_route_owner_only_checks(daemon, req_id):
+    """BR-0: only the HUD window can answer a card over HTTP.
+
+    The API listener serves the same HUD page, so a page loaded there sends an
+    Origin equal to its Host and passed `check_origin`. v1's agent browser
+    could load that page (it refused only the face's port) and click the
+    card's button. Fails on a49423c: the first request below answered 200.
+    """
+    def still_pending():
+        status, pending = http_json(daemon.port, "GET", "/approvals")
+        return status == 200 and [r["req_id"] for r in pending] == [req_id]
+
+    body = {"decision": "allow"}
+    api_origin = {"Origin": f"http://127.0.0.1:{daemon.port}"}
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body, api_origin)
+    eq(status, 403, "the API listener refuses an approval sent with its own Origin "
+                    "(a page it served)")
+    ok(still_pending(), "and the request is still waiting for the owner")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://localhost:{daemon.port}"})
+    eq(status, 403, "…in its localhost spelling too")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body)
+    eq(status, 403, "the API listener refuses an approval with no Origin")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://127.0.0.1:{daemon.face_port}"})
+    eq(status, 403, "the API listener refuses the HUD's Origin as well (it is not the HUD's Host)")
+    status, _ = http_json(daemon.face_port, "POST", "/approvals/" + req_id, body)
+    eq(status, 403, "the HUD's listener refuses an approval with no Origin")
+    status, _ = http_json(daemon.face_port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://127.0.0.1:{daemon.workshop_port}"})
+    eq(status, 403, "the HUD's listener refuses another origin (the workshop's)")
+    ok(still_pending(), "none of those refusals resolved or dropped the request")
+    status, pending = http_json(daemon.port, "GET", "/approvals")
+    eq(status, 200, "reading pending approvals stays open on the API listener")
+
+
+def hud_build_deny_checks():
+    """BR-0: no provider's write tool, and no Codex grant, reaches the built
+    HUD the daemon serves — a script planted there approves with the HUD's own
+    Origin on the owner's next reload. On dfb1d7e every write below was
+    allowed and every grant approvable."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_file, denied_grant
+    from jarvis.v2.provider import Decision
+
+    real = config.HUD_DIST
+    ok(denied_file(str(real / "index.html")) is not None,
+       "the real config.HUD_DIST (the installed HUD since C-1) is refused")
+    with Sandbox() as box:
+        dist = box.root / "hud" / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (box.root / "hud" / "src").mkdir()
+        link = box.root / "looks-ordinary"
+        link.symlink_to(dist, target_is_directory=True)
+        config.HUD_DIST = dist
+        try:
+            for target in (dist / "index.html", dist / "assets" / "planted.js", link / "index.html",
+                           dist / "new" / "nested.js", dist):
+                why = denied_file(str(target))
+                ok(why is not None and "built HUD" in why, f"a write to {target} is refused ({why})")
+            eq(denied_file(str(box.root / "hud" / "src" / "App.tsx")), None,
+               "the HUD's source stays writable")
+            brief = brief_for(P.AUTO)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            page = str(dist / "index.html")
+            for tool, args in (("Write", {"file_path": page, "content": "<script></script>"}),
+                               ("Edit", {"file_path": page, "old_string": "a", "new_string": "b"}),
+                               ("apply_patch", {"paths": [page]}),
+                               ("write_file", {"path": page, "content": "x"})):
+                before = len(asker.seen)
+                eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write the built HUD")
+                eq(len(asker.seen), before, f"{tool}'s refusal is never put to the owner")
+            for grant in (dist, dist / "assets", box.root / "hud", link):
+                ok(denied_grant(str(grant), "write") is not None,
+                   f"a write grant on {grant} would reach the built HUD")
+            eq(denied_grant(str(dist), "read"), None, "reading it is not a lever")
+            eq(denied_grant(str(box.root / "hud" / "src"), "write"), None,
+               "a write grant on the HUD's source is not refused for this reason")
+        finally:
+            config.HUD_DIST = real
+
+
+def env_file_checks():
+    """ENV-1, the owner's `.env*` rule at layer 1: no provider's file tool
+    reads or writes a credential env file (`*.example` only), no shell line
+    writes one, and no Codex grant that is or holds one is approvable. On
+    main: Claude's read tools were not judged at all, `.env.production` was
+    writable, and a grant on a folder holding one was approvable."""
+    from jarvis.v2 import permissions as perms
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_file, denied_grant, denied_read
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        project = box.root / "proj"
+        (project / "src").mkdir(parents=True)
+        (project / "src" / "app.ts").write_text("x\n")
+        prod = project / ".env.production"
+        prod.write_text("API_KEY=FAKE-ENV1-V2\n")
+        (project / ".env.example").write_text("API_KEY=\n")
+        (project / "settings.txt").symlink_to(".env.production")
+        (project / ".env.local.example").symlink_to(".env.production")
+        brief = brief_for(P.AUTO, cwd=project)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+
+        refused = [
+            ("Read", {"file_path": str(prod)}),
+            ("Read", {"file_path": ".env.staging"}),                 # placed in the brief's folder
+            ("Read", {"file_path": str(project / "settings.txt")}),
+            ("Read", {"file_path": str(project / ".env.local.example")}),
+            ("NotebookRead", {"notebook_path": str(project / ".env.qa")}),
+            ("Grep", {"pattern": "KEY", "path": str(prod)}),
+            ("Grep", {"pattern": "KEY", "path": str(project), "glob": "{*.ts,.env.*}"}),
+            ("Grep", {"pattern": "KEY", "glob": "**/.env*"}),
+            ("Grep", {"pattern": "KEY", "glob": "config/.ENV.Prod"}),
+            # Delta review LOW-B: Grep reads what its glob selects, hidden
+            # files included — `*.env*` is `rg --hidden -g '*.env*'`.
+            ("Grep", {"pattern": "API_KEY", "glob": "*.env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/*.local"}),
+            ("Grep", {"pattern": "API_KEY", "path": "app/.env.prod/"}),
+            # …and the raw-line check the shell gives the same strings
+            # (`grep -r KEY app/.env.prod/conf`, `rg -g '!.env.production'`).
+            ("Grep", {"pattern": "API_KEY", "path": "app/.env.prod/conf"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "!.env.production"}),
+            ("read_file", {"path": str(prod)}),
+            ("grep_files", {"pattern": "KEY", "path": str(prod)}),
+            ("Write", {"file_path": str(prod), "content": "x"}),
+            ("Write", {"file_path": str(project / "settings.txt"), "content": "x"}),
+            ("Write", {"file_path": str(project / ".env.local.example"), "content": "x"}),
+            ("Edit", {"file_path": ".env.sample", "old_string": "a", "new_string": "b"}),
+            ("MultiEdit", {"file_path": str(project / ".env.dev"), "edits": []}),
+            ("NotebookEdit", {"notebook_path": str(project / ".env.test")}),
+            ("apply_patch", {"paths": [str(project / "src" / "x.ts"), str(prod)]}),
+            ("write_file", {"path": str(project / ".env.preview"), "content": "x"}),
+            ("edit_file", {"path": str(prod), "old_string": "a", "new_string": "b"}),
+            bash("cat .env.production"),
+            bash("echo X=1 > .env.staging"),
+            bash("cp src/app.ts .env.production"),
+            bash("echo X=1 > settings.txt"),                          # a symlink, in the brief's folder
+            ("shell", {"command": ["bash", "-lc", "sed -i s/a/b/ .env.local"]}),
+        ]
+        for tool, args in refused:
+            before = len(asker.seen)
+            eq(permit(tool, args, brief), Decision.DENY, f"{tool} {args} is refused")
+            eq(len(asker.seen), before, f"{tool}'s refusal is never put to the owner")
+        eq(prod.read_text(), "API_KEY=FAKE-ENV1-V2\n", "the credential env file is untouched")
+        layers = {d["layer"] for d in box.decisions if d["decision"] == "deny"}
+        eq(layers, {"deny"}, "every refusal is layer 1's")
+
+        allowed = [
+            ("Read", {"file_path": str(project / ".env.example")}),
+            ("Write", {"file_path": str(project / "config" / ".env.staging.example"), "content": "x"}),
+            ("Edit", {"file_path": ".env.example", "old_string": "=", "new_string": "=x"}),
+            ("Glob", {"pattern": "**/*.ts"}),
+            # Delta review NIT: Glob returns names only, never contents.
+            ("Glob", {"pattern": "**/.env*"}), ("Glob", {"pattern": "config/.ENV.Prod"}),
+            ("Glob", {"pattern": "**/.*"}), ("Glob", {"pattern": "**/*.env*"}),
+            ("Grep", {"pattern": "KEY", "path": str(project)}),   # a folder search: the stated limit
+            ("Grep", {"pattern": ".env.production", "path": str(project / "src")}),  # a regex, not a file
+            bash("cp .env.example .env.local.example.new.example"),
+        ]
+        for tool, args in allowed:
+            eq(permit(tool, args, brief), Decision.ALLOW, f"{tool} {args} is not refused")
+
+        # A write that only may land on one is asked, whatever the profile.
+        line = "cp src/app.ts $JARVIS_ENV1_UNSET.env"
+        before = len(asker.seen)
+        eq(permit(*bash(line), brief), Decision.ALLOW, "the owner said yes")
+        eq(len(asker.seen), before + 1, "a maybe-write onto an env file is asked under AUTO")
+        ok("env-file" in asker.seen[-1].reason, f"as the env-file rule ({asker.seen[-1].reason})")
+
+        # denied_read / denied_file directly.
+        ok(denied_read("Read", {"file_path": ".env.production"}, str(project)) is not None,
+           "a relative read is placed in the folder it runs in")
+        eq(denied_read("Read", {"file_path": str(project / ".env.example")}), None,
+           ".env.example is readable")
+        ok(denied_file(str(project / ".env.local.example")) is not None,
+           "an .example name that leads to a credential env file is refused")
+        eq(denied_file(str(project / ".env.example")), None, ".env.example is writable")
+
+        # Codex grants: a grant that is or holds one, read or write.
+        clean = box.root / "clean"
+        (clean / "venv" / ".env" / "bin").mkdir(parents=True)    # a virtualenv named .env: a folder
+        (clean / "venv" / ".env" / "bin" / "activate").write_text("x\n")
+        (clean / ".env.example").write_text("x\n")
+        linked = box.root / "linked"
+        linked.mkdir()
+        (linked / "conf").symlink_to(prod)
+        for grant, access in ((project, "write"), (project, "read"), (prod, "write"),
+                              (project / "src" / "..", "write"), (linked, "write"),
+                              (project / ".env.local.example", "read")):
+            why = denied_grant(str(grant), access)
+            ok(why is not None and "credential env file" in why, f"{access} grant on {grant} ({why})")
+        for access in ("write", "read"):
+            eq(denied_grant(str(clean), access), None, f"a {access} grant on a folder with none")
+            eq(denied_grant(str(project / "src"), access), None, f"a {access} grant on src/")
+        # ENV-1 review, NIT 1: a virtualenv named `.env` is a folder, judged
+        # by what it holds — a write grant on it is not refused for its name.
+        for access in ("write", "read"):
+            eq(denied_grant(str(clean / "venv" / ".env"), access), None,
+               f"a {access} grant on a virtualenv folder named .env")
+        saved = perms.GRANT_SCAN_ENTRIES
+        perms.GRANT_SCAN_ENTRIES = 2
+        try:
+            why = denied_grant(str(clean), "write")
+            ok(why is not None and "could not check" in why,
+               f"past the bound, a grant nobody will be asked about is refused ({why})")
+            # ENV-1 review, NIT 2: through the permit a widening reaches the
+            # owner, so a folder too large to walk is asked about, saying so.
+            before = len(asker.seen)
+            eq(permit("apply_patch", {"paths": [str(clean / "x.ts")]}, brief,
+                      widening="write grant", grants=(("write", str(clean)),)),
+               Decision.ALLOW, "past the bound a widening goes to the owner (who says yes)")
+            eq(len(asker.seen), before + 1, "it was asked")
+            headline = asker.seen[-1].headline
+            ok("could not check" in headline and "credential env files" in headline,
+               f"and the card says the folder was not checked ({headline})")
+            strict = brief_for(P.STRICT, cwd=project)
+            eq(build_permit(context(strict), asker)(
+                "apply_patch", {"paths": [str(clean / "x.ts")]}, strict,
+                widening="write grant", grants=(("write", str(clean)),)),
+               Decision.DENY, "strict still refuses the widening")
+        finally:
+            perms.GRANT_SCAN_ENTRIES = saved
+        eq(permit("apply_patch", {"paths": [str(project / "src" / "x.ts")]}, brief,
+                  widening="write grant", grants=(("write", str(project)),)),
+           Decision.DENY, "a widening whose grant holds a credential env file is refused unasked")
+
+        # ENV-1 review, MED-1: Claude's Glob and Grep on ordinary file-name
+        # globs are allowed (refused at layer 1 at 153920d); a dot-led one that
+        # can match a credential env name is refused.
+        for pattern in ("**/*test*", "src/**/*.test*", "**/*template*", "**/*.bak", "**/*dev*",
+                        "**/*.{ts,tsx}", "**/.github/*.yml", "**/*.local"):
+            eq(permit("Glob", {"pattern": pattern}, brief), Decision.ALLOW, f"Glob {pattern}")
+        for value in ("*test*", "*.production", "*.bak"):
+            eq(permit("Grep", {"pattern": "x", "glob": value}, brief), Decision.ALLOW,
+               f"Grep glob {value}")
+        for pattern in ("**/.e?v.*", "**/.[e]nv.custom", "**/.*.custom", "src/{a,.env}.*",
+                        "**/.ENV*", ".env.*", "*.env*", "*.local", "*env*", "**/*.env.ts"):
+            eq(permit("Grep", {"pattern": "x", "glob": pattern}, brief), Decision.DENY,
+               f"Grep glob {pattern}")
+            # Glob lists names, never contents (delta review NIT).
+            eq(permit("Glob", {"pattern": pattern}, brief), Decision.ALLOW, f"Glob {pattern}")
+        for value in ("*.custom", "**/*.py", "**/*.ts", "*.json", "**/*.json"):
+            eq(permit("Grep", {"pattern": "x", "glob": value}, brief), Decision.ALLOW,
+               f"Grep glob {value} (as main; the stated limit of a folder search)")
+        # NIT 5: a Codex `also_commands` line is judged in the brief's folder.
+        eq(permit("shell", {"command": "true"}, brief, widening="terminal input",
+                  also_commands=("echo x > settings.txt",)),
+           Decision.DENY, "an also-command writing through a symlink in the brief's folder")
+
+
+def installed_hud_deny_checks():
+    """C-1 (ED-4): the installed HUD is what the daemon serves, so it is what
+    BR-0's one check refuses — `config.HUD_DIST` is the install root. Every
+    provider write tool, into a build or as a newer build planted beside them,
+    is denied unasked, and a Codex grant on the root, a build or anything
+    above the root is refused. On main the install root was ordinary ground."""
+    from jarvis.v2 import hud_install
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_file, denied_grant
+    from jarvis.v2.provider import Decision
+
+    saved = (config.HUD_DIR, config.HUD_DIST, config.HUD_DEV)
+    with Sandbox() as box:
+        built = box.root / "built"
+        (built / "assets").mkdir(parents=True)
+        (built / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
+        (built / "assets" / "app-1a2b.js").write_text("console.log(1)")
+        root = box.root / "share" / "jarvis" / "hud"
+        config.HUD_DIR = config.HUD_DIST = root
+        config.HUD_DEV = False
+        try:
+            installed = hud_install.install(built, root)
+            newer = root / "29991231T235959999999Z-0123456789ab"
+            brief = brief_for(P.AUTO)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for target in (installed.path / "index.html", installed.path / "assets" / "app-1a2b.js",
+                           installed.path / "manifest.json", newer / "index.html", root / "x.js"):
+                why = denied_file(str(target))
+                ok(why is not None and "built HUD" in why and "jarvis hud install" in why,
+                   f"a write to {target} is refused ({why})")
+                for tool, args in (("Write", {"file_path": str(target), "content": "<script></script>"}),
+                                   ("apply_patch", {"paths": [str(target)]}),
+                                   ("write_file", {"path": str(target), "content": "x"})):
+                    before = len(asker.seen)
+                    eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write {target}")
+                    eq(len(asker.seen), before, f"{tool}'s refusal is never put to the owner")
+            for grant in (root, installed.path, newer, root.parent, box.root / "share"):
+                ok(denied_grant(str(grant), "write") is not None,
+                   f"a write grant on {grant} would reach the installed HUD")
+            eq(denied_grant(str(root), "read"), None, "reading it is not a lever")
+            eq(denied_grant(str(built), "write"), None, "the build output itself is ordinary ground")
+
+            # Review of PR #44, MED-2: the installer is never Jarvis's to run
+            # (layer 1 DENY, never asked, under AUTO), and a shell write into
+            # the install root always asks (layer 2) — on main, every one of
+            # these was ALLOW under AUTO.
+            for line in ("jarvis hud install", "python -m jarvis hud install",
+                         "/repo/.venv/bin/jarvis hud install --allow-dirty",
+                         "uv run python -m jarvis hud install", "python3 -m jarvis.v2.hud_install",
+                         "bash -lc 'jarvis hud install'", "env JARVIS_HUD_DIR=/tmp/x nohup jarvis hud install",
+                         'python -c "from jarvis.v2 import hud_install; hud_install.main()"'):
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"{line!r} is never put to the owner")
+            for line in (f"cp /tmp/x.js {installed.path}/assets/x.js",
+                         f"rsync -a /tmp/dist/ {root}/29991231T235959999999Z-0123456789ab/",
+                         f"echo pwned > {installed.path}/index.html"):
+                before = len(asker.seen)
+                permit(*bash(line), brief)
+                eq(len(asker.seen), before + 1, f"{line!r} is asked (always-ask: the installed HUD)")
+                ok("installed HUD" in asker.seen[-1].reason,
+                   f"{line!r} says why it asks ({asker.seen[-1].reason!r})")
+            asker_no = Asker(Decision.DENY)
+            permit_no = build_permit(context(brief), asker_no)
+            for line in ("jarvis hud", "cat jarvis/v2/hud_install.py",
+                         'git commit -m "docs: run jarvis hud install after a merge"'):
+                eq(rules.decide(line).decision != rules.DENY, True,
+                   f"{line!r} is not refused by the installer rule")
+        finally:
+            config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
+
+
+def daemon_and_rebuild_ops_checks():
+    """`jarvis restart` (and `jarvis daemon2 restart`), `jarvis hud rebuild`
+    and a `systemctl` that changes the daemon's unit (2026-10-11) are the
+    owner's, from their own terminal: layer 1 DENY, never asked, under AUTO
+    and STRICT — through `protected_state.owner_op`, the one detector.
+    Before, `jarvis restart` and `jarvis hud rebuild` were asked under AUTO
+    only if the provider's own classifier asked, and `systemctl --user
+    restart jarvis-daemon2` was ALLOW in `rules.decide`. A Claude or Codex
+    worker runs under the daemon it would restart."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in ("jarvis restart", "jarvis restart --force", "python -m jarvis restart",
+                         "jarvis daemon2 restart", "/repo/.venv/bin/jarvis hud rebuild --pull --restart",
+                         "uv run jarvis hud rebuild", "bash -lc 'jarvis restart'",
+                         "env A=1 nohup jarvis hud --pull rebuild", "python3 -m jarvis.v2.owner_ops",
+                         'python -c "from jarvis.v2 import owner_ops; owner_ops.restart()"',
+                         "systemctl --user restart jarvis-daemon2",
+                         "systemctl --user stop jarvis-daemon2.service",
+                         "nohup systemctl --user --no-block restart jarvis-daemon2"):
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        for line in ("echo Run jarvis restart", 'grep -rn "hud rebuild" docs',
+                     "git commit -m 'run `jarvis restart` after merges'",
+                     "cat > notes.md <<'EOF'\njarvis hud rebuild\nEOF",
+                     "systemctl --user status jarvis-daemon2", "journalctl --user -u jarvis-daemon2 -n 50",
+                     "curl -s localhost:8405/status"):
+            ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
+
+
+REVIEW_48_V2_DENY = (
+    # M1
+    "systemctl --user -qp status restart jarvis-daemon2", "systemctl --user -P status stop jarvis-daemon2",
+    "systemctl --user --marked restart jarvis-daemon2", "systemctl --user restart jarvis-daemon{2,}",
+    "U=jarvis-daemon2; systemctl --user restart $U", "systemctl --user stop app.slice",
+    "systemctl --user kill basic.target", "echo restart jarvis-daemon2 | xargs systemctl --user",
+    "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 "
+    "org.freedesktop.systemd1.Manager RestartUnit ss jarvis-daemon2.service replace",
+    # module runners and inline source
+    "python3 -m runpy jarvis hud install", "python3 -m cProfile -m jarvis restart",
+    "python3 -m pdb -c continue -m jarvis restart", "python3 -m coverage run -m jarvis restart",
+    'python3 -c "from jarvis.v2.owner_ops import *; restart()"',
+    "python3 -c \"import importlib; m = importlib.import_module('jarvis.v2.owner_ops'); m.restart()\"",
+    "python3 -c \"import subprocess; subprocess.run(['systemctl', '--user', 'restart', 'jarvis-daemon2'])\"",
+    # the owner's daemon2 kill rule
+    "pkill -f daemon2", "pkill -9 -f 'jarvis daemon2'", "pkill -KILL -f 'daemo[n]2'",
+    "pkill --signal KILL -f 'n2$'", "pkill -fdaemon2", "pkill -f -- 'jarvis d'",
+    "P=daemon2; pkill -f $P", "kill $(pgrep -f daemon2)", "kill -9 `pgrep -f daemon2`",
+    "kill -s KILL $(pidof daemon2)", "pgrep -f daemon2 | xargs kill -9", "killall -r daemon2",
+    "nohup pkill -f daemon2",
+)
+REVIEW_48_V2_ORDINARY = (
+    "pkill -f jarvis", "pkill -f vite", "pkill -f 'npm run dev'", "pgrep -f daemon2",
+    "echo pkill -f daemon2", "git commit -m 'stop using pkill -f daemon2'",
+    "systemctl --user reset-failed jarvis-daemon2", "systemctl --user restart pipewire",
+    "python3 -m cProfile -m pytest",
+)
+
+
+def review_48_checks():
+    """The review of PR #48 at layer 1: every new spelling is DENY under AUTO
+    and STRICT and never put to the owner; the must-stay lines are not
+    refused. On c218da8 (merged with main) v2's AUTO permit let the kill and
+    module-runner spellings run unasked."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in REVIEW_48_V2_DENY:
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        for line in REVIEW_48_V2_ORDINARY:
+            ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
+
+
+_UNIT_CGROUP = "/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service"
+# Review 2 of PR #48 at layer 1 (each allowed under AUTO on 819e58a, or — the
+# first — a permit that never returned).
+REVIEW_48_2_V2_DENY = (
+    "pkill -f 'daemo.{0,1}2'",
+    "systemctl --user show -p MainPID --value jarvis-daemon2 | xargs kill",
+    "kill -9 $(systemctl --user show -P MainPID jarvis-daemon2)",
+    f"pkill --cgroup {_UNIT_CGROUP}", f"pgrep --cgroup {_UNIT_CGROUP} | xargs kill",
+    f"cat /sys/fs/cgroup{_UNIT_CGROUP}/cgroup.procs | xargs kill",
+    "lsof -ti :8405 | xargs kill", "fuser -k 8405/tcp", "kill $(fuser 8405/tcp 2>/dev/null)",
+    "ps aux | grep daemon2 | awk '{print $2}' | xargs kill",
+    "python3 -c \"from jarvis.v2 import owner_ops; owner_ops.hand_off(['restart'], print)\"",
+    "if true; then systemctl --user restart jarvis-daemon2; fi", "while true; do pkill -f daemon2; done",
+    "if true; then jarvis hud install; fi", "case x in x) jarvis restart;; esac",
+)
+REVIEW_48_2_V2_ORDINARY = (
+    "pgrep -f daemon2 && kill -9 4321", "lsof -ti :5173 | xargs kill", "fuser -k 5173/tcp",
+    "systemctl --user show -p MainPID --value jarvis-daemon2", "pgrep -f '" + ".?" * 30 + "Z'",
+    "busctl --user get-property org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/"
+    "jarvis_2ddaemon2_2eservice org.freedesktop.systemd1.Service ActiveState",
+    "if true; then systemctl --user restart pipewire; fi",
+)
+
+
+def review_48_round2_checks():
+    """Review 2 of PR #48 at layer 1: the new spellings are DENY under AUTO
+    and STRICT and never put to the owner, each judged quickly (a kill
+    pattern that cannot be bounded fails closed instead of freezing the
+    permit); the must-stay lines are not refused."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in REVIEW_48_2_V2_DENY:
+                before = len(asker.seen)
+                start = time.perf_counter()
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                ok(time.perf_counter() - start < 0.5, f"[{profile.value}] {line!r} is judged quickly")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        for line in REVIEW_48_2_V2_ORDINARY:
+            start = time.perf_counter()
+            ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
+            ok(time.perf_counter() - start < 0.5, f"{line!r} is judged quickly")
+
+
+REVIEW_48_DELTA_V2_ASK = (
+    "pkill -f '.*.*.*.*daemon2'", "pkill -f 'python.*.*.*.*jarvis'",
+    "kill $(pgrep -f 'jarvis.*.*.*d')", "killall -r 'python.*.*.*.*2'",
+    "ps aux | grep -E 'jarvis.*.*.*.*n' | awk '{print $2}' | xargs kill",
+)
+REVIEW_48_DELTA_V2_DENY = (
+    "grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs kill",
+    "ss -ltnp | grep 8405 | grep -o 'pid=[0-9]*' | cut -d= -f2 | xargs kill",
+    "netstat -tlnp | grep :8405 | awk '{print $7}' | cut -d/ -f1 | xargs kill",
+)
+REVIEW_48_DELTA_V2_ORDINARY = (
+    "pkill -f 'node.*vite.*--port.*5173'", "pkill -f 'gunicorn.*worker.*[0-9]+'",
+    "pkill -f 'python.*celery.*worker.*--concurrency.*4'",
+    "kill $(pgrep -f 'uvicorn.*app.*--reload.*8000')",
+)
+
+
+def review_48_delta_checks():
+    """The delta review of PR #48 at layers 1 and 2: a kill pattern too
+    costly to judge is always-ask (`daemon-kill`) under AUTO and STRICT,
+    never a layer-1 DENY, even with an allowlist entry for every stem on it;
+    the new /proc and socket sources are layer-1 DENY; the review's
+    ordinary costly patterns are not refused. Each fails on 92c225b."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import L_ALWAYS_ASK, build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": stem}
+             for stem in ("pkill", "kill", "killall", "pgrep", "ps", "grep", "awk", "xargs")]))
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in REVIEW_48_DELTA_V2_ASK:
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.ALLOW,
+                   f"[{profile.value}] {line!r}: asked, and the owner's yes stands")
+                eq(len(asker.seen), before + 1, f"[{profile.value}] {line!r} is put to the owner")
+                eq(box.decisions[-1]["layer"], L_ALWAYS_ASK, f"[{profile.value}] {line!r} is always-ask")
+                ok(asker.seen[-1:] and "daemon-kill" in asker.seen[-1].reason,
+                   f"[{profile.value}] {line!r} asks under the daemon-kill rule")
+            for line in REVIEW_48_DELTA_V2_DENY:
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] {line!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        for line in REVIEW_48_DELTA_V2_ORDINARY:
+            ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
 
 
 def daemon_checks():
@@ -1002,9 +1536,11 @@ def daemon_checks():
             eq(len(queued), 1, "the always-ask command is queued for the owner")
             eq(queued[0]["command"], "git push origin main",
                "the queue shows the entire command")
-            status, body = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                     {"decision": "allow"})
-            eq(status, 200, "POST /approvals answers it")
+            approve_route_owner_only_checks(daemon, queued[0]["req_id"])
+            ok(len(provider.calls) == 1, "no refused approval reached the blocked hook")
+            status, body = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                    {"decision": "allow"})
+            eq(status, 200, "POST /approvals from the HUD window answers it")
             deadline = time.monotonic() + 5
             while len(provider.calls) < 2 and time.monotonic() < deadline:
                 time.sleep(0.005)
@@ -1018,10 +1554,10 @@ def daemon_checks():
             ok("approval_requested" in seen and "approval_resolved" in seen,
                "both approval events are published on the bus")
 
-            status, _ = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                  {"decision": "allow"})
+            status, _ = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                 {"decision": "allow"})
             eq(status, 404, "an answered request cannot be answered again")
-            status, _ = http_json(daemon.port, "POST", "/approvals/nope", {"decision": "sideways"})
+            status, _ = hud_json(daemon, "POST", "/approvals/nope", {"decision": "sideways"})
             ok(status in (400, 404), "a nonsense decision is refused")
         finally:
             daemon.stop()
@@ -1103,8 +1639,8 @@ def auto_quiet_checks():
                     break
                 time.sleep(0.01)
             eq(len(queued), 1, "the always-ask push is queued for the owner")
-            status, _ = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                  {"decision": "deny"})
+            status, _ = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                 {"decision": "deny"})
             eq(status, 200, "and answered")
             deadline = time.monotonic() + 5
             while len(provider.calls) < len(allowed) + 1 and time.monotonic() < deadline:
@@ -1317,8 +1853,10 @@ def discord_checks():
 
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
-                    human_backed_checks, log_checks, approvals_checks,
-                    daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
+                    human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
+                    env_file_checks,
+                    installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
+                    review_48_round2_checks, review_48_delta_checks, daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
     print()

@@ -49,7 +49,8 @@ or contains protected state or touches a credential dir is DENY unasked
 (`denied_grant`); the headline is Codex-supplied text, so it is one cleaned,
 capped line everywhere; unknown methods get an error, malformed approvals
 and unknown `kind`s a decline; null fields never overwrite the item's
-command; `answer()` can only deny an approval — keep all of it), a worktree per
+command; `answer()` can only deny an approval — the Claude provider's too since
+BR-0, below — keep all of it), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
 folder for three consumers plus `jarvis-mcp` (WP8), and Discord rendering
 (WP10a), Discord routing with thread-scoped approvals (WP10b), and the
@@ -58,7 +59,7 @@ task runner with the intake gate (WP11 — `TaskControl` in
 backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
 failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
-day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it;
+day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it, and since ED-4 the daemon serves only what `jarvis hud install` installed — `jarvis hud rebuild` and `jarvis restart` are the owner's two operation commands, DENY for agents;
 design §12 and §18). **Projects are archived, never deleted in place**
 (2026-10-06, decisions part B): an archived project or thread keeps every
 record and is hidden from lists, placement and schedules; permanent delete
@@ -229,6 +230,399 @@ reads the preview port from `/status` → `workshop_port`, and `hud_v2_check`
 aborts and fails any request to 8402/8403/8405 — it used to load the live
 daemon's preview.
 
+**Only the HUD window says yes, and none of Jarvis's ports is a web page to
+Jarvis (BR-0, 2026-10-11; plan `docs/plans/2026-10-10-hud-browser-plan.md`
+§1 item 4, decisions B-15).** Three approve paths closed together:
+- **`config.control_ports()`** is the one Python list of Jarvis's own
+  listeners — 8402 (face, v2 HUD), 8404 (desktop bridge), 8405 (daemon; v2's
+  API serves the same HUD page), 8406 (Spotify callback) — at their defaults
+  *and* wherever this process's config moved them. **8403, the workshop, is
+  not in it on purpose** (v1's designer screenshots its own work there; v2's
+  Browser gate admits it only as the daemon's reported workshop). v1's
+  browser (typed, and wherever the page is — see below) and `fetch_page` refuse every one
+  through `is_face_origin`, in every loopback spelling (`*.localhost`,
+  `localhost.`, `127.1`, hex/octal/integer IPv4, IPv4-mapped and expanded
+  IPv6, `0.0.0.0`, `::`) with no DNS. It used to refuse only 8402, so v1's
+  browser could open the HUD on 8405. BR-1a's gate reuses the list.
+- **`POST /approvals/{id}` is `projects.owner_only`**: the HUD's listener and
+  the HUD's Origin, or 403. A page served by the API listener sends an Origin
+  equal to its Host, which `check_origin` alone accepted. Discord and the
+  escape hatch resolve in-process; `GET /approvals` stays open (reading is
+  not a lever).
+- **An out-of-band `answer()` can only deny, on both providers.**
+  `POST /threads/{id}/answer` reaches `provider.answer` from any API client,
+  and the provider's request id is in the thread log (`gate_requested`). The
+  Codex provider always refused an ALLOW there; the Claude one accepted it —
+  and coerced `{text: "allow"}` to one — and it beat the broker's card while
+  the owner had not answered. The route tells the two kinds apart by body
+  (`text` for a question, `decision` for an approval) and the provider by the
+  pending slot (Codex marks question slots; Claude raises no questions, so
+  every Claude slot is a tool permission — a source guard in
+  `claude_provider_check` fails if that changes). Provider questions are
+  Codex's, answered from Discord; task questions go through `TaskControl`
+  and never reach `answer()`.
+- **v1's browser judges a page where it is, not where it was sent** (the
+  review's HIGH, older than BR-0). A page that passed goto's check and then
+  moved itself — a timer, `location.replace`, a meta refresh — onto the
+  HUD listener was snapshotted (the card's AUTHORIZE offered as a ref) and
+  clicked, and the click's POST left the HUD listener with the HUD's own
+  Origin, so `owner_only` passed; the guard backed out only after. Now a
+  main-frame `framenavigated` handler backs out of the control plane at once
+  (`Session._on_navigated`, on the browser thread, from whichever call pumps
+  Playwright's events); `click`/`type_text` judge the page *before* acting;
+  `snapshot`/`screenshot_b64` judge it before reading and after; every check
+  asks the page itself (`location`, which page script cannot redefine) since
+  `page.url` is stale while Python is idle; and the scan reads and stamps
+  only the document whose origin was just judged (`_ORIGIN_GATE_JS`). A
+  same-origin `pushState` trips nothing. Worth knowing: the daemon already
+  answers a *cross-site* navigation onto the HUD with 403
+  (`Sec-Fetch-Site`), so the shape needs a same-site page — any port on
+  `localhost`.
+- **A project's profile, always-ask list, extra folders and root change only
+  from the HUD** (`PATCH /projects`, `daemon._OWNER_PROJECT_FIELDS`): any
+  change to one is `owner_only`; one sent back unchanged, a rename, routing
+  and every other field are as before. Any API client could loosen what asks
+  it. `POST /projects` (create) is unchanged.
+- **`fetch_page` follows redirects itself** (up to 20, cookies carried as
+  httpx did) and judges each `Location` *before* requesting it; httpx's own
+  following had sent the GET first. **`config.ambiguous_authority`** refuses a
+  URL whose authority is empty or holds a backslash, or that holds a tab or
+  line break — Python and WHATWG read those hosts differently (Chrome loads
+  `http://<jarvis port>\@<public host>/` from Jarvis's port) — in
+  `fetch_page` and `BrowserPolicy.allows` alike.
+- **The built HUD is not writable by the write tools** (`config.HUD_DIST`,
+  which `hud_api` serves): a file there runs with the HUD's Origin on the
+  owner's next reload. `files._hud_build` refuses it to `write_file`/
+  `edit_file` by resolved path and, through `_self_protected`, to v2's layer
+  1 (Claude's Write/Edit, Codex patches); `denied_grant` refuses a Codex write
+  grant on, in or above it. **Not a SELF_PROTECTED widening** (the owner
+  declined that): the HUD's source stays writable. Since ED-4 (C-1)
+  `config.HUD_DIST` is the **installed** HUD's root and `files._hud_roots`
+  refuses the install root always (plus `hud/dist` under `JARVIS_HUD_DEV=1`),
+  so this one check covers every installed build; only `jarvis hud install`
+  writes it, and Jarvis is refused that command.
+Free checks: `tests/face/approval_check.py` (`control_port_checks`),
+`tests/browser/policy_check.py` (`control_port_*`, `fetch_redirect_checks`,
+`late_landing_checks` — a port-0 daemon with one card, a stand-in and the
+built HUD, four shapes of moving — and `read_gate_checks`),
+`tests/v2/permissions_check.py` (`approve_route_owner_only_checks`,
+`hud_build_deny_checks`), `tests/v2/claude_provider_check.py`
+(`daemon_answer_route_checks`, end to end on a daemon),
+`tests/v2/archive_check.py` (`ProjectPolicyIsTheOwners`) and
+`tests/files_check.py` (`hud_build_checks`) — each fails on a49423c, and
+the second round's on dfb1d7e (where v1's browser approved the card).
+**Not a boundary against a program running as the owner** (it can send
+the HUD's Origin to the HUD's port), the footing `/terminals` states; it
+closes the routes a v1 agent's browser and any Origin-less API client had.
+
+**The Browser's engine, gate and navigation, BR-1a (2026-10-12; plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C, the
+decisions file beside them wins; contract in `docs/hud-api.md`).** Backend
+only: the stream, input and tabs are BR-1b's, profile management BR-1c's.
+`jarvis/v2/browser/` is fully separate from v1's `jarvis.browser` (whose
+`SESSION` it never starts). Three layers keep the owner's daemon-owned
+Chrome off the control plane and his LAN:
+- **The URL judge** (`policy.judge_url`, pure): a typed or stored URL is
+  `about:blank` or absolute http(s), never userinfo, another scheme
+  (`file:`, `chrome:`, `view-source:`, typed `javascript:`/`data:`, any
+  other `about:`), an `ambiguous_authority`, a control or invisible
+  character, or Jarvis's ports in any loopback spelling (`is_face_origin`
+  plus the daemon's reported ports). Its sentences are fixed and never hold
+  the URL (the handler logs refusals). It is the only layer for `file:` and
+  friends — a browser-initiated load of those never touches the network.
+- **The SOCKS5 gate** (`gate.py`, its own thread `jarvis-browser-gate`):
+  Chrome runs with `--proxy-server=socks5://…`, `--proxy-bypass-list=
+  <-loopback>`, `MAP * ~NOTFOUND` (Chrome never resolves a name itself;
+  defense in depth, since the proxy already gets every name), no QUIC, and
+  **no UDP at all**: `--webrtc-ip-handling-policy=disable_non_proxied_udp`
+  (a SOCKS proxy carries no UDP, so WebRTC gathers no candidate and sends no
+  STUN) and WebRTC's mDNS responder off (`--disable-features=…,
+  WebRtcHideLocalIpsWithMdns`: it joined 224.0.0.251 on every interface for
+  any `RTCPeerConnection`; Chrome keeps only the last `--disable-features`).
+  **The first cut's `--force-webrtc-ip-handling-policy` does not exist**:
+  Chrome ignored it without a word, and the review measured 4 candidates, 158
+  datagrams to a loopback sink and mDNS on the LAN (PR #69's HIGH). So a
+  launch flag is held to its *effect* — `owner_browser_check`'s
+  `test_04b`, and an AF_PACKET sniffer in a private network namespace that
+  sees nothing leave on any interface but `lo` — never to its spelling.
+  **Chrome 155 sends every host as a name,
+  IP literals included** (measured), so the gate parses literals itself
+  (every spelling `inet_aton` takes, IPv6, IPv4-mapped), maps `localhost`
+  and `*.localhost` to this machine without DNS, **resolves a real name
+  exactly once and connects its own socket to the numeric address it
+  judged**. It refuses `policy.refused_ports` — the one list:
+  `control_ports()`, the daemon's reported HUD and API ports, and 8403
+  unless it is this daemon's workshop (`/status` → `refused_ports`) — and
+  its own port, **on every address, before any DNS**; a *name* that
+  resolves to loopback whatever the LAN switch (rebinding onto the owner's
+  services; only literals and `localhost` reach loopback); **this machine
+  unless the owner opened that port** (`loopback_closed`, below); private
+  space unless `browser.json` → `lan` (B-5, off); multicast, reserved and
+  the rest of 0/8; unresolvable and malformed names; anything but CONNECT
+  with no authentication; past 256 connections. A mixed DNS answer connects
+  only to its allowed addresses, and **a name keeps the address class it
+  was first allowed on** for the gate's lifetime (`rebinding`: public stays
+  public, private stays private; 8,192 names remembered, and **a pin younger
+  than 30 min is never forgotten to make room** — the delta review flushed a
+  pinned-public name with 8,193 others and it then reached a private address
+  with the LAN on; while the table is full of young pins an unpinned name may
+  not reach private space, `pins_full`). **Its DNS is bounded and waits
+  rather than fails** (PR #69's LOW and delta review): 5 s for the whole
+  lookup, 32 worker threads, connections asking for one name at once share
+  one lookup, and a domain holds at most four worker threads — counted until
+  `getaddrinfo` really returns — a lookup past that **waiting** for one
+  within its 5 s (only then `dns_busy`): refusing at once had failed 6 of 8
+  images on one CDN. The domain is `gate.domain_key`: the registrable domain
+  where a small table of two-label public suffixes can tell (`co.uk`,
+  `com.au`, `co.jp`, `github.io`, `vercel.app` … — no Public Suffix List
+  dependency; `www.bbc.co.uk` no longer shares slots with `evil.co.uk`), the
+  name's parent under a ccTLD whose second level the table does not know, the
+  last two labels anywhere else. A positive answer is reused for 5 s (1,024
+  names), judged like a fresh one, pin and LAN switch included. A
+  black-holed domain cannot starve every other lookup. It logs and counts the
+  class, never a host.
+- **Loopback is closed like the LAN** (PR #69's MED 2, the lead's decision
+  for the owner): a public page read a CORS-permissive service on this
+  machine through the gate (Local Network Access does not see behind a
+  proxy). A loopback port is reachable only after the owner opened it — a
+  URL on this machine in `POST /browser/tabs` or `…/navigate` (`owner=True`,
+  which only those owner-only routes pass) — held in the host's memory per
+  port until it stops, never one of Jarvis's ports. A page's own move,
+  history and any agent's `navigate` never open one; `browser.json` →
+  `local_servers` (default off) opens every port that is not Jarvis's.
+  **Auto-open never opens a port here** (amendment 2, decision L2): it loads
+  only in a Direct frame, and only the owner's own navigation through these
+  routes opens one. `/status` → `browser` → `loopback_opened` is a count,
+  never which.
+- **The landing guard** (`host.py`): every main-frame `framenavigated` is
+  judged again (`landed=True`, which also admits `about:blank#…`, Chrome's
+  error page and a `blob:` of an http(s) origin) and a refused one is
+  replaced with an explanation page. **A pop-up is handed over before its
+  first load with an empty URL, and that is not a landing** (PR #69's MED 1:
+  judging "" blanked every `window.open` and `target=_blank`); its first real
+  landing is judged as any other.
+
+The **host** runs Playwright's async API on `jarvis-owner-browser`, every
+call timed; nothing starts with the daemon (the first `POST /browser/tabs`
+starts the gate, Playwright and the profile's Chrome), and `Daemon.stop`
+ends it after the terminals and VEX, before the bus and listeners — final,
+with a backstop that kills, by exact PID, any process whose command line
+names the profile's folder as a whole path (Chrome's helpers rewrite their
+argv into one space-separated string, so a space is a boundary too) **and
+whose `/proc/<pid>/exe` is the launched Chrome** (`chrome` or
+`chrome_crashpad_handler` beside `CHROME_PATH`'s target; PR #69's LOW: a
+process merely naming the folder is not ours to signal). `stop()` takes
+`_start_lock`, so a stop during a start waits for it instead of leaving its
+gate, loop and driver running. **Keyed
+by profile from the start:** `profiles.json` (0600) lists `p-<8 hex>` ids,
+never a label (the first start writes **Main**; a corrupt list refuses
+rather than recreating Main over the owner's logins); one Chrome per
+persistent profile on `profiles/<id>/`; **Private** is one more Chrome on a
+throwaway `private/run-<hex>/` (removed at stop, swept with its Chrome at the
+next start — never Playwright's own temp folder in `/tmp`), each Private
+pane an off-the-record `new_context()` given the gate explicitly and closed
+with its last tab. **`config.BROWSER_DIR`** (`~/.local/share/jarvis/browser`,
+`JARVIS_BROWSER_DIR`) is 0700 throughout and refused when it or a folder in
+it is a symlink, not ours or open to anyone else; **`config.credential_dirs()`**
+is `V2_CREDENTIAL_DIRS` plus it, read at call time, and is what v2's
+permissions (`_credential_dirs`, `denied_grant`), `folders` and
+`editor_policy` ask now. **`config.BROWSER_SETTINGS_PATH`**
+(`~/.config/jarvis/browser.json`) is protected state (`files.
+_protected_state`). **A curated launch** (`launch_args`, Playwright's
+defaults replaced whole by `ignore_default_args=True`): the deb's sandbox
+kept (renderers run under seccomp), Safe Browsing, component updates,
+popup blocking and **sign-in and sync kept** (BD-5: no `--disable-sync` on a
+persistent profile; Private has it); no `--enable-automation`, no
+`--no-sandbox`, DevTools only over the private pipe, extensions off,
+permission prompts denied, the media router off (it searches the LAN around
+any proxy), `--mute-audio` (sound is BR-10's). **A clean environment** built
+from nothing — `HOME` is `BROWSER_DIR/home`, so Chrome's NSS store and font
+cache stay in the credential folder; locale variables only, no `JARVIS_*`,
+key, display, `PULSE_SERVER` or D-Bus. `TMPDIR` is left alone on purpose:
+Chrome's singleton socket lives there and a long path crashed it (measured).
+Downloads are BR-1b's (below). **Routes** (`browser/routes.py`): every one
+`projects.owner_only` plus a strict loopback Host (its own copy — a module
+importing `terminals` fails `terminal_check`) and no query, checked before a
+body is read or Chrome started; a load reports a failure by its `net::ERR_…`
+code only; `/browser` paths are logged without a query. **No URL, title or
+label** reaches `/status` → `browser`, the bus or the log. **An unknown
+field in any route's body is a 400 naming the count, never the keys**
+(`daemon._object`, every route: "unknown fields (2)"; the names are the
+client's text and the message is logged). **Only the daemon and the browser
+package reach the engine**: `browser_gate_check`'s grep pin fails if any
+other module under `jarvis/` imports `browser.host`/`browser.gate`, names
+`BrowserHost`, builds a `Gate` or a `/browser` path, or calls the daemon's
+`browser.open_tab`/`navigate`/… — no tool, MCP tool or fast-path module
+(BR-2's tools will need their own row in it). Measured under the 3G cap
+(Chrome 155): launch ~0.3 s, first tab ~0.6 s, the tree's PSS ~365 MiB with
+one tab, ~490 MiB after the attack pages and ~470 MiB for Private (RSS
+summed over its 14–19 processes 1.1–1.9 GiB, shared pages counted once per
+process), stop ~0.1 s. A first tab asked for twice at once starts one Chrome
+(`_start_lock`).
+**v1's file tools refuse every credential folder** (PR #69's LOW and delta
+review): `read_file`, `write_file`, `edit_file`, `grep_files` (both
+backends; `search.refused`) and `query_sqlite` refuse anything in
+`config.credential_dirs()` — the Browser profile, `~/.ssh`, `~/.aws`,
+`~/.config/gh`, `~/.config/jarvis`, `~/.gnupg` — as written or where it
+resolves (`files._credential_folder`); the gate's own state files keep their
+rule and stay readable by their own, un-symlinked path. Before, the fast
+path's `read_file` and `query_sqlite` could read the profile's History (a
+SQLite file). **A search judges with one `search.refuser()`**
+(`files.credential_folder_judge`): the folders and the gate's paths read
+once, each directory's real path once, a file's own only when it is a
+symlink — 20k paths in ~0.25 s, where calling the single-path rule per file
+took ~3 s; `files_check` holds it under 1 s and the two backends to parity.
+Free suites: `tests/v2/browser_gate_check.py` (no Chrome: the judge, every
+refusal family against stand-in listeners whose accept counters stay 0,
+rebinding through an injected resolver asked once, a name's class pinned,
+loopback closed until opened, a black-holed domain not starving other
+lookups, the LAN switch, every ATYP, a dev port piped both ways, the grep
+pin) and `tests/v2/owner_browser_check.py` (real headless Chrome, one
+instance at a time, 3 tabs, its gate's resolver answering only `pub.test` —
+a public address its connector carries back to the fixture — and its
+connector refusing all else but loopback, so nothing reaches DNS or the
+network: the twelve ways into the HUD — typed, 302, meta refresh,
+`location=`, iframe, fetch, XHR, WebSocket, a service worker's fetch,
+`<img>`, form POST, `window.open` — from Main and from Private, each with a
+sanity half that reaches an ordinary server by all twelve once the owner
+opened its port; a "public" page and every way refused a loopback port nobody
+opened, reaching it once the owner did, and another port still refused; no
+ICE candidate and no datagram at a loopback UDP sink (STUN, TURN, a remote
+candidate, WebTransport); pop-ups landing on their own page, one sent to
+Jarvis's port on Chrome's error page, one moved past the judge replaced;
+refused schemes; owner-only; the folder; the launch, sandbox and
+environment; persistence across a restart and forget; settings; stop during
+a start; a decoy naming the folder left alone; stop). With
+`JARVIS_NETNS_SNIFF=1` inside `unshare --user --map-current-user --net
+--keep-caps` (only `lo` and a dummy interface holding the default routes),
+its sniffer sees ~15,000 packets on `lo` and none elsewhere. `files_check`'s
+`credential_folder_checks`; `frame_check` walks `/browser`. Each of the
+plan's mutations and each review fix's guard removal bites (the PR lists
+them; the two UDP ones run only in the namespace, since the old flag sends
+mDNS onto the real LAN). **Stated limits:** the Playwright driver (a node
+process) inherits the daemon's environment, as v1's does; none of this is a
+boundary against a program running as the owner, which can read the profile
+or use the gate (no new lever: it could connect directly); the gate's name
+pins live in its memory (a restart forgets them); a public answer for an
+unpinned name is allowed while the pin table is full of young pins, so such a
+name could rebind once the pins age; **a loopback port the owner opened stays
+open to every page, every profile and Private, until the daemon stops** (a
+follow-up for BR-1c: count the panes per port and close it when the last one
+leaves). No idle stop or
+instance cap yet (BR-1c), and **BD-10's memory ceiling is not set** (BR-1c's):
+one tab ~365 MiB PSS, ~490 MiB after the attack pages, Private ~470 MiB.
+
+**The Browser's stream, input, hold, dialogs, tabs and files, BR-1b
+(2026-10-12; plan §2 "The stream", §3, §8, §11; amendment 1 §B.3 H3/H8,
+§B.4, §B.8–§B.9; contract in `docs/hud-api.md`).** Backend only; BR-3b draws
+it with BR-2's `remote.ts`/`drive.ts`. `browser/stream.py` (the socket, its
+messages, tickets, `TabStream`), `browser/files.py` (downloads, uploads) and
+the host's CDP half. **A socket per tab per window**, the terminal's pattern
+on `ws.py`: owner-only routes, a **single-use 30 s ticket bound to one tab**
+(`POST /browser/tabs/<id>/ticket`; the attach's `?ticket=` is the one query a
+`/browser` route takes), a tab another window shows taken only on its yes
+(20 s, else refused), and **every attach publishes `browser_attached` with
+exactly `{tab_id, at}`**. **Frames** are binary messages (an 8-byte header:
+uint32 id, uint16 CSS width and height, big-endian; then the JPEG,
+quality 70), **one in flight**: the next goes only after the window's `ack`
+("up to here", BR-2's `FramePipe`), and what Chrome sends meanwhile
+replaces one waiting slot — Chrome's own frames are acked at once, so it
+keeps capturing at the page's repaint rate and the newest picture is what
+goes next (a slow window costs Chrome's encoding, never a backlog); a window
+that attaches gets the current picture at once (`_last`, forgotten whenever
+the screencast stops, since an unwatched page can change); a tab no window
+streams, or a window that says `visible: false`, is not cast. **Every message
+is validated in the daemon** (`stream.parse`: exact fields, types, bounds —
+BR-2's `CdpKeyEvent`/`CdpMouseEvent`, text ≤ 16 KiB with no control but tab
+and line ends, x/y from BR-2's `OFF_PAGE` (-1) to 4096, wheel ±5000; a bad
+one is `{t:"bad", reason}`, a fixed sentence, and acts on nothing).
+**The hold** (H3): with any `daemon.approvals.pending()`, input is dropped on
+arrival and again on the Browser's thread immediately before each CDP event
+(`_pump`, one event at a time), `held` is sent, and **the moment a card is
+raised every tab's queue is dropped** (`BrowserHost._observe`, a bus observer
+on `approval_requested`, synchronous before the broker waits), with a
+`_drop_through` mark so a message received before the card is never sent
+after it — a dispatch-time check alone would have replayed input that sat in
+the queue through a card no input arrived during. The owner's `navigate`,
+`history`, `POST /browser/tabs` with a URL and `files` answer 409 under a
+card; Resume is refused (`held`). **A press a card cut off never clicks**, the
+daemon's rule and not only the window's: BR-2 assumed a release at
+`OFF_PAGE` with `clickCount: 0` fires no click, and **Chrome 155 fires
+`click` on `<html>`** (the common ancestor of the press and the release),
+`detail: 1`, whatever `clickCount` says — measured by the fixture BR-2 asked
+for. So a release of a button pressed before a hold (`tab.pressed` keeps the
+stream's `hold_count` at the press), and any release off the page, is sent
+as a pointer move with no button down (`_let_go`, Blink's own reset): no
+`mouseup`, no `click`, and the next click is ordinary; a socket that drops
+mid-press is let go the same way (never under a card). Keys also record
+the hold count before dispatch; a keyup or char from before a later card
+is dropped, so Space never activates after the card. **Owner input
+stamps** every tab it reaches (keys but a lone modifier, text, wheel, press,
+release, drag, dialog and chooser answers — never a plain move), and while
+an agent holds the tab pauses it **before** the event is queued
+(`{t:"agent", kind:"paused", by:"owner"}`); the `{t:"agent"}` channel
+(`driver`, `action` capped at 60, `paused`, `list` of 50, replayed on attach)
+and `owner_state(tab_id)` are BR-9b's to drive. **Dialogs** go to the window
+(`{t:"dialog", id, kind, message, default}`, cleaned to 1000) and are
+answered there; dismissed after `DIALOG_TIMEOUT_S` (60), and at once with no
+window attached, with automatic dismissal waiting under a card. An open
+dialog drops further input to that tab on arrival, and in the pump so does an
+earlier event Chrome has not answered within `DELIVER_WAIT_S` (never on
+arrival: every event of an ordinary burst finds its predecessor in flight,
+which dropped 190 of 200 keys — PR #77 delta review), with one
+`input_dropped` notice; nothing is banked for later. **Pop-ups** open as tabs and the
+opener's window hears
+`{t:"popup", tab_id}` (the listing carries `opener`); **the cap stays 12 in
+all** (decision B-13 "12 in all", which also bounds each profile's Chrome;
+the brief said per instance) and **past it the pop-up is refused**
+(`popup_refused`), never an older tab closed: an older tab may hold the
+owner's work, and a page could otherwise evict the owner's tabs one by one.
+`POST …/activate` brings a tab to the front. **Downloads**: Chrome writes
+into `downloads/<profile>/incoming/`; a finished one is copied by fd to
+`downloads/<profile>/<id>/<cleaned name>` (the folder 0700, made fresh, the
+file 0600 `O_EXCL|O_NOFOLLOW`; `files.clean_name`: last
+component, invisible and Windows-reserved characters out, no leading dot,
+200 UTF-8 bytes keeping the extension) and Playwright's copy deleted;
+listed and served
+owner-only (`GET /browser/downloads[/<id>]`, `application/octet-stream`,
+attachment, `nosniff`, the policy narrowed to `default-src 'none'`, and
+**refused for any `Sec-Fetch-Dest` but `document`/`empty`** — a downloaded
+HTML or script must never run on the HUD's origin, where it could POST
+`/approvals`); **an executable is held** (`act_rules.executable_download`, or
+its first bytes `MZ`/ELF/`#!`), 409 until BR-9b's card, deletable; executable
+suffixes also cover scripts and launchers (`.js`, `.py`, `.com`, `.url`,
+`.desktop` …), ignoring case and including `x.pdf.exe`; a Private
+download lives in `downloads/private/<ctx>/` and goes with its context or
+Private Chrome. **`set_files`**: a page's file
+chooser (`page.on("filechooser")`, so Playwright intercepts every one) is
+answered only by `POST …/files {chooser, files: [{project, path}]}`, each
+judged by **`act_rules.upload_refusal` (H8), called**, then read through an
+`O_NOFOLLOW` fd whose realpath and device/inode must match H8's judgment,
+and handed to Chrome
+as bytes (≤ 16 files, 50 MB in all). Ctrl+C's `{t:"selection"}` reads the
+selection in an isolated world (`jarvis-copy`; a password field gives "").
+`/status` → `browser` gains counts only (`streams`, `downloading`,
+`popups_refused`). Free suite: **`tests/v2/browser_routes_check.py`** (35:
+13 pure — every BR-2 shape parses, ~50 wrong shapes and bounds refused, names,
+tickets, a `../` name kept in its folder — and 22 on one real headless Chrome
+at 3 tabs, its resolver answering nothing and its connector loopback only:
+ticket and takeover, frames under a slow reader, keys/text/mouse/wheel at a
+logging page, the hold and no replay, the cut-off press, the agent channel,
+selection, dialogs with beforeunload, pop-ups and the cap, downloads, uploads,
+a Private tab, nothing on the bus or in the log, stop); `frame_check` walks
+the new routes and a served download's headers. Guard removals in scratch
+copies, 10 of 10 bite with a passing control: no hold, held input replayed,
+an unbounded backlog, a `../` name, no card-raised drop, a cut-off press
+released as is, a reusable ticket, downloads not owner-only, H8 not asked, a
+bad message delivered. Measured (Chrome 155, 1280×800 at DPR 1, quality 70):
+60 fps with an immediate ack on an animated page, ~6 KB a frame there; the
+tree's PSS 270–400 MiB through the suite. **Stated limits:** Chrome encodes
+at the repaint rate however slow the window (the M1 spike's question); no
+download size cap (a page can fill the disk the profile is on); the window's
+`takeover` answer is not in BR-2's `isTakeover`
+control list (BR-3b adds it); a page tracking a drag sees no `mouseup` for a
+press a card cut off.
+
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
 the HUD's catch then dropped its hold on the still-running turn (no Stop, no
@@ -276,6 +670,49 @@ retries on "already running", and a task's running thread still 409s
 (through `deliver` too). A provider's own "a turn is already running" error is
 **non-fatal**: fatal makes the daemon drop and close the session, which there
 is the running one.
+
+**A Claude turn the CLI says somebody else started is never the message's
+answer, and "Prompt is too long" is never a reply (2026-10-12, live on a
+Claude chat; free checks `injected_turn_checks` and `context_full_checks` in
+`tests/v2/claude_provider_check.py`).** After every daemon restart the
+first message to a Claude thread showed nothing and the next message got its
+answer. A resumed CLI (2.1.295) runs a queued background-task notice as a
+transcript-only turn of its own *before* the message — an empty, zero-usage
+`success` result — and on a fresh session, where the CLI is not yet known to
+echo (`prompt_echo`), `_read` took that result as the message's. Meanwhile
+the real answer sat unread in the SDK's buffer, and once that filled, the
+CLI stalled in its next PreToolUse hook until the next send drained it. The
+CLI stamps an injected turn's `origin` (kind not `"human"`) on the user
+message it replays and on its `ResultMessage`; `_read` now reads such a CLI
+turn (`owner = "injected"`) and never ends the message's turn on its result
+— whatever is known about echoing — unless the message's own echo came
+inside it (a message absorbed into a notice's turn is answered there; its
+result is taken, never waited past). **"Full" is an `is_error` result
+together with the words "Prompt is too long"** — in the result, or in that
+CLI turn's own top-level synthetic error (`error` set or model
+`<synthetic>`); a sub-agent's error (`parent_tool_use_id`) and an error the
+CLI recovered from (then a success result) are not. The synthetic text is
+never shown as a reply. `_context_full` runs the CLI's own `/compact` once (a
+stdin user message, as the Agent SDK documents; shown as one `compact` tool
+call; bounded by `COMPACT_TIMEOUT_S`, then interrupted), and on a
+`compact_boundary` **sends the message again only when the overflowing CLI
+turn was the message's own and used no tool and took in no steer** (review
+of PR #57: a `git push` ran, the context filled, and the push was sent again;
+a steer's own CLI turn overflowed and the answered message was sent in its
+place). Otherwise nothing is re-sent. The owner gets one non-fatal `ERROR`
+naming what happened, and the turn ends as an error:
+- `CONTEXT_COMPACTED_SEND_AGAIN`: compacted, not re-sent, send it again;
+- `CONTEXT_NOT_COMPACTED`: no boundary, an error or the time limit;
+- `CONTEXT_STILL_FULL`: re-sent and still full, start a New thread.
+The session is kept. **Stop means stop**: it is looked for every
+`INTERRUPT_POLL_S` during a compaction, and the turn finishes as
+`interrupted` at once, never as an error and never after the 600 s bound.
+`origin`, `error` and `parent_tool_use_id` are read through `getattr`
+(the SDK is not pinned). Logs carry thread ids, origin kinds and outcomes
+only. **Not fixed here**: the provider passes the CLI's
+`total_cost_usd`, which is the session's running total, as each turn's cost,
+and the daemon adds it per turn — a Claude thread's `cost_usd` is the sum of
+running totals (a thread whose CLI total was 23.22 read 109.97).
 
 **The Codex model table is the account's catalog, and drift degrades — never
 breaks, never rewrites (PR #20, 2026-10-09; owner's decisions: options
@@ -347,7 +784,8 @@ out-of-range are protocol errors), **nothing sent after our close** (one
 lock for the check and the put), the `101` written as `HTTP/1.1` by hand,
 and the handler's 2 s timeout lifted. **The agent never gets a lever on a
 terminal**: every route is `projects.owner_only` (HUD listener + an Origin
-that must be present), the attach also needs a **single-use 30 s ticket
+that must be present — on a plain GET, `Sec-Fetch-Site: same-origin` with no
+Origin at all instead, since 2026-10-11, below), the attach also needs a **single-use 30 s ticket
 bound to one terminal**, and a terminal another window shows is only taken
 after that window says yes (refused after 20 s) — stricter than
 `/approvals`, and still not a boundary against a program running as the
@@ -356,10 +794,18 @@ window shows), which is why **every attach publishes `terminal_attached`
 with exactly `{terminal_id, at}`** for WP-D to flag. **No tool, MCP tool,
 fast-path tool or Discord verb may reach `terminals`**;
 `tests/v2/terminal_check.py` greps every module under `jarvis/` but the
-daemon, `hud_api` and the module itself. **Terminal output never leaves
-memory**: on the bus lifecycle ids only, no log line (lifecycle only, and
-`/terminals` paths are logged without their query — the ticket rides in it),
-no thread log, Discord or disk. Startup files: `terminal_rc.bash` (bash
+daemon, `hud_api` and the module itself. **Terminal output stays in memory
+unless Jarvis reads it**: on the bus lifecycle records only
+(`terminal_attached`, and WP-F's `terminal_read` — ids, a count, a time), no
+log line (lifecycle only, and `/terminals` paths are logged without their
+query — the ticket rides in it), no thread log, Discord or disk (BR-8a's
+`dev_url` frame, below, goes to that terminal's own socket and nowhere
+else). The
+exception, since WP-F (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken); its ticker
+summary is fixed ("read N lines"), so the tool's own `tool_finished` record
+carries none of it onto the bus or into the thread's `log.jsonl` — **but the
+reply is not filtered**: it reaches `log.jsonl`, the bus, Discord and speech
+like any reply, so whatever the model repeats lands there too. Startup files: `terminal_rc.bash` (bash
 `--rcfile`, login emulation) and the POSIX `terminal_rc.sh` (`$ENV` for an
 `sh`-family shell started `-i`; kept apart because a dash parses every line,
 so bash syntax cannot hide behind an `if`); **zsh, fish and other shells get
@@ -376,13 +822,15 @@ in real bash and dash, and scans the disk); a same-uid program outside the
 terminal could only race the shell for the pipe. POSIX marks end in BEL (dash's
 PS1 expansion eats the backslash of `ESC \`). They become `CommandSpan`s
 (`Terminal.history()`: spans, `spans_from` — bytes before it lost their spans
-to the 2000 cap — `integrated`, `readable`, `prompt`) for WP-F's
-`terminal_read`, which does not exist yet. **Spans are advisory**: a
+to the 2000 cap — `integrated`, `readable`, `prompt`, and since WP-F `alt`)
+for WP-F's `terminal_read` (below). **Spans are advisory**: a
 program can print bytes between real marks, nested shells/`sudo -i`/`ssh`/
 `python` sit under the outer span, an `ignorespace` line records its first
-command only — so WP-F's text-pattern refusals apply to every read. When
-`terminal_read` lands, `terminal_check`'s no-tool test must allow exactly
-it. Each terminal has the owner's `readable` switch, **on by default**.
+command only — so WP-F's text-pattern refusals apply to every read.
+`terminal_check`'s no-tool test allows exactly `terminal_read`, whose module
+may hold one line naming this one — `from ..terminals import read_for_tool`
+— and call it once. Each terminal has the owner's `readable` switch, **on by
+default**.
 Follow-ups from the re-review (with WP-D): `integration` is what was
 *configured*, **`marked`** (listing, attach row, one `{"type": "marked"}`) is
 what *took* — a profile that `exec`s another shell reads "bash" but never
@@ -394,6 +842,109 @@ differs (rbash, `sh` for bash) is refused rather than exec'd by its link.
 Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
+
+**jarvis-mcp for chat sessions, WP-1 (2026-10-10; plan
+`docs/plans/2026-10-10-terminal-read-mcp-plan.md` §1–§2, §4, decisions file
+beside it — the peers plan's Phase 0, built once).** Plumbing only, **no
+behaviour change**: `jarvis/v2/session_tools.py` (the per-session tool list,
+flags `read_only`/`foreground_only`/`desk_only`, `for_provider`) **ships
+empty**, and with nothing in it no token is minted and no session gets a
+jarvis server. When it holds something (WP-2: `terminal_read` plus the D-3
+tools), `Daemon._run_brief` mints a caller token (`jarvis/v2/callers.py`:
+`jmcp_` + `token_urlsafe(32)`, **held only as a sha256 digest**) for an
+owner's chat thread on Claude or Codex, and puts `mcp_servers["jarvis"] =
+bridge.server_entry(...)` (`python -m jarvis.v2.mcp_session`, env
+`JARVIS_MCP_TOKEN`/`JARVIS_DAEMON_PORT`/`PYTHONPATH`) in **the run copy
+only** — never brief.json; `_open` refuses a non-chat brief naming `jarvis`.
+**Never on a command line**: the SDK puts a dict `mcp_servers` on `claude`'s
+argv as JSON (world-readable through `ps`), so Claude gets a private 0600
+`V2_DATA_DIR/claude/<thread>/mcp-<nonce>.json` in 0700 dirs and
+`--mcp-config <path>` (checked with the SDK's own command builder), reused by
+`set_model`, deleted by `close()` — **one file per session, never per
+thread** (PR #35 review): a lost session is closed outside the daemon lock
+while the next send opens its successor, and a shared `mcp.json` was deleted
+from under the new session; Codex carries it in its private `config.toml`'s `env`
+table, with `approval_mode = "approve"` per read-only tool, stripped on close
+and on a failed open.
+`Daemon.start` sweeps leftover carriers **after it holds its ports** (the bind
+is the single-instance lock, so a second daemon on the live folder fails
+before touching the live one's) and **only under the data folder it owns**
+(`stores.root == V2_DATA_DIR`), so a test daemon never touches the live
+one's; `/mcp` paths are logged without a query. The relay is **stdlib only and never runs a tool**: it pops the token
+from its environment, writes nothing to stderr, lists `[]` and answers
+`Error:` when it cannot reach the daemon. The bridge (`jarvis/v2/bridge.py`)
+serves `GET /mcp/tools` and `POST /mcp/call` **on the API listener only**
+(404 on the HUD and preview listeners), `Authorization: Bearer` only, 403
+`not a Jarvis chat session` for any `Origin` or bad/revoked token or a
+session that is not the thread's live one (`_sessions.get(id) is session` —
+a missed revoke cannot reach a newer session) or not an owner's Claude/Codex
+chat; 404 not offered, 400, 413 over 16 KiB. A call runs through the bridge's
+**one** registry dispatch in a fresh `contextvars.Context()` with
+`runtime.caller()` (`{thread_id, project_id, provider, turn_id}`, new) bound,
+depth 0 and the offered names as the toolset; a **dangerous** tool goes to
+the session's permit with `dangerous_tool=True` — the owner every time, no
+Always, never the allowlist or the reviewer. Tokens are revoked by
+`_cleanup` (close, archive, delete, a lost session), `_open`'s failure and
+`stop()` (`revoke_all` first); a model switch keeps the token (D-7). Claude's
+hook explicitly allows a read-only session tool under both profiles (after
+`permit`'s new **`jarvis-tool`** layer, which follows layer 2 so an
+always-ask rule still asks) and refuses a `foreground_only` one for a
+sub-agent (`agent_id`) without asking `permit`; Codex declines an MCP
+elicitation (before the turn-identity check, which used to kill the turn
+over it) or an MCP-approval `requestUserInput` with a non-fatal ERROR, never
+a QUESTION. The fast path binds `runtime.caller()` in its turn (the daemon
+binds it on the turn thread, so the turn id is the daemon's). All four new
+modules are SELF_PROTECTED. Free suite: `tests/v2/mcp_session_check.py`.
+
+**Owner-only reads (2026-10-11, `projects.is_owner`).** Chromium sends no
+`Origin` on a same-origin GET, and `is_owner` demanded one, so on the
+owner's live daemon **every `GET /terminals` from the HUD was 403**: the
+panel only worked through its "could not check" fallback, and opening it
+could never open a terminal. The HUD suites missed it because `MockDaemon`
+does not enforce `owner_only` — **a gate checked only against a mock is a
+gate checked against the mock's idea of the browser.** Now a request is the
+owner's when it arrives on the HUD listener and either (a) carries `Origin:
+http://<Host>`, as before, or (b) is a plain GET/HEAD — not a WebSocket
+upgrade — with **no** Origin header at all, a loopback Host and
+`Sec-Fetch-Site: same-origin` (a forbidden header no page can set; any other
+origin is `same-site`/`cross-site`). Never a missing Origin on a write or a
+socket, never `Origin: null`. DNS rebinding is refused twice over (measured
+in Chromium 149): a rebound name is not a potentially trustworthy URL, so it
+gets no fetch metadata and (b) never matches, and its Host is not loopback,
+which `hud_api.check_origin`'s strict Host test (and
+`terminals._strict_host`) refuses first — keep it. `tests/v2/owner_read_check.py`
+runs a real port-0 daemon and real headless Chromium and reads the headers
+where the daemon receives them; its same-origin read fails on main.
+
+**A Claude thread's cost is the CLI's running total, counted once
+(2026-10-12; `jarvis/v2/running_cost.py`).** `ResultMessage.total_cost_usd`
+is the CLI process's running total for the conversation, not the turn's, and a
+resumed CLI continues from the total its transcript saved (the 2.1.295 CLI's
+own field text: "read the latest result rather than summing across results").
+The provider passed it through as each turn's cost and the daemon summed it,
+so thread 447ff25e read $109.97 for $23.22. Now every result's USAGE carries
+what that result added (`running_cost.step`: a new session measured from 0, a
+resume from `Thread.provider_cost_total`, which the daemon saves from the
+event's `cost_total`, and zeroed by the CLI's `ConversationResetMessage`; a
+positive figure below the baseline is a total that started again from zero; a
+missing figure stays `None`, and so does a zero below a positive baseline,
+which the baseline outlives), so a steer's, a background notice's, a stopped
+and a `/compact` turn's result each count once. Tokens need none of it
+(`usage` is per turn). **History:** a Claude thread the daemon opens is born
+`cost_recount: 1`; one from before the fix (0) is recounted once at daemon
+start (`recount_threads`) from its own log — derived with `step` from the
+pre-fix running totals, while a record carrying `cost_total` keeps its logged
+delta (the provider saw a `/clear` the log never records; review of PR #63) —
+only when the logged figures add up to the stored total, and marked 1; one
+whose log is unreadable or does not add up is marked -1, its cost left as it
+was, said once. Never a Codex or fast-path thread. The ledger's pre-fix Claude
+rows are not rewritten: `ceiling_hit` leaves out a Claude row's dollars
+without `per_result` (each held a running total) and reads the task's threads
+as stored now rather than a status saved before the recount; the HUD's daily
+`equivalent_usd` still includes them for the day of the deploy. Free checks:
+`tests/v2/running_cost_check.py`, `running_cost_checks`/`daemon_cost_checks`
+in `claude_provider_check.py` and the ledger suite's
+`test_ceiling_reads_recounted_threads_not_pre_fix_claude_rows`.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
@@ -412,6 +963,89 @@ thread** is pinned at the top of the sidebar and starts in the last project
 worked in. A moved thread keeps the folder and permission rules it was
 opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 
+**A task's question is answered by index (2026-10-11).** `POST
+/tasks/{id}/answer` takes exactly `{index, text}`, `index` the place in
+`spec.questions`, and only a CLARIFYING task asks (`hud/src/lib/
+taskQuestions.ts`, the daemon's `open_questions` rule). The HUD sent
+`{question, answer}` and swallowed the 400, so answering from the window
+never worked — and the mock took any body. A refusal now shows its sentence
+under the box and keeps the words, and the mock calls the daemon's
+`task_verb_body` and `control.answer_refusal` instead of answering `ok`.
+Free checks: `tests/face/hud_v2_task_check.py` (own mock), `TaskView.test.ts`,
+`taskQuestions.test.ts`, `api.test.ts`. The other task verbs (steer, cancel,
+resume, start) still swallow a refusal in `App.tsx`.
+
+**Chat titles (2026-10-12; `jarvis/v2/titles.py`, design §18, contract in
+`docs/hud-api.md`).** The owner: "each chat just displays its id … keep the
+id in the three dots but have the main display be the title and have the
+title wrap". A `Titler` (one worker thread, started by daemon2's `main()` —
+**never `Daemon.start`, so no test daemon calls a model** — stopped by
+`Daemon.stop`) queues a chat thread at its first owner `user_message`
+(`origin: owner`, via hud/discord/dm, typed words present; the bus observer
+only queues an id) and, `BACKFILL_DELAY_S` after start, every untitled chat
+(archived included) with an owner message in its log. Role `chat` only,
+never a task's thread. **The words are the log's `typed`, never an inlined
+file** (a pre-PR C record, `text` only, is cut at its first fence), capped at
+2000, between v1's delimiters and labelled data. **Model**: Codex
+`config.TITLE_CODEX_MODEL` (`gpt-6-luna`, `JARVIS_TITLE_CODEX_MODEL`) at
+effort low when Codex is in the roster, the catalog lists it and its probe
+passes, through **`CodexProvider.one_shot`** — `account_metadata`'s shape
+(`MetadataBusy` before the probe, one 20 s deadline, the lock released in a
+nested `finally`, `cancel_metadata()` ends it) in a private `_titles` home
+(`codex_config.prepare_title`: read-only sandbox, approvals never, web search
+disabled, no MCP servers, no skills), a fresh empty temp cwd, an ephemeral
+thread with **`environments: []`** (experimental in 0.153.4 and 0.161.0:
+"empty disables environment access" — the closest the app-server has to a
+tool-less turn; read from the generated schema, never run live), and any
+tool item or `item/<tool>/…` notification, server request but a clock read,
+unhonoured model or wider sandbox is an error **and nothing from that turn
+is used**, agent text before it included. **The limit, stated**: if a
+ChatGPT-auth turn ignores `environments: []`, a read-only command can run
+before the turn is refused; its output is discarded. A busy lock waits in the queue (`CODEX_BUSY_TRIES` × 30
+s, others go ahead), then OpenRouter; so does any Codex failure or an
+unusable answer. **OpenRouter**: `models.tier("orchestrator")` with no tools
+and `max_tokens` 1000, **never a Chinese-hosted vendor** (`models.cn_hosted`
+by id prefix — moved from `titles` in BR-9a, one list with the Browser's
+reviewer; the configured orchestrator instead, else no title).
+`clean_title`: first non-empty line, invisible characters out, a "Title:"
+label, markdown, quotes and trailing punctuation off, more than 12 words is
+an answer and is refused. The words are `secrets.scrub`bed before they leave
+and the title before it is written. Nothing usable — or a write that raised —
+is tried once more at the next owner message (`ATTEMPTS`). **The write is
+rename's** (`projects._write_title`): `projects.auto_title` writes only if,
+**under `daemon._lock`, the thread and its live session's copy still have no
+title** — a rename before or during generation wins — unique in the project,
+onto the session's copy, and the same `thread_updated` (now with
+`title_source`), so the HUD and the Discord thread follow.
+`Thread.title_source` is `""`/`"auto"`/`"owner"`; a rename sets `"owner"`.
+**`ThreadStore.set_title` is the one writer of `title`/`title_source`**
+(`_write_title`, a restore's renumbering); `save` keeps the stored ones
+whatever the caller holds, as it keeps `surface` — a session copy read in
+`resume_thread`'s window used to put an older automatic title back over the
+owner's rename (review L1). **Tests that set a title use `set_title`**; a
+`save` with a new title is silently a no-op. **A chat archived in the HUD
+(the thread or its project) is never renamed on Discord** (review M1: Discord
+refuses with 50083, the poster unarchived to retry and never re-archived, so
+the backfill would have reopened every archived chat there): the mirror's
+`_renamed` updates only the sidecar's name and marks `rename_pending`, and
+`thread_restored` (after its "Restored." post) or `project_restored` applies
+it. Logs name the thread and the route, never the title or the words.
+**No tool can set or regenerate a title** (`titles_check` `NoTool`, by name
+and by what tool modules call); `PATCH /threads/{id}` is not `owner_only`, as
+before — an API client's rename counts as the owner's. HUD: the row's name
+is `threadLabel` (`lib/threadTitle.ts`) — the title, wrapping and clamped at
+three lines (`.nm.ttl`, the whole title its tooltip; a pinned model's badge
+gives way), or "New thread" (no turns) / "Untitled", muted italic, **never
+the id**, which is the ⋯ menu's **Copy id** (`tmenu-copyid`); a split's chat
+header and the Archive view (its id the tooltip; `quotedName` in sentences)
+name a chat the same way. Free checks: `tests/v2/titles_check.py` (35, with
+a stand-in app-server over real pipes for `one_shot`), the mirror's
+`…waits_for_its_restore` pair in `discord_mirror_check`,
+`threadTitle.test.ts`, `tests/face/hud_v2_titles_check.py` (19, its own
+`MockDaemon(0)`, run by `hud_v2_check` after the editor-marks section).
+Guard removals that bite: the owner guard in `auto_title`, the session-copy
+update, `save` keeping the stored title, the mirror's archived skip.
+
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or
@@ -429,13 +1063,14 @@ AUTHORIZE means scrolling past the whole command, so a long command's tail
 reach. **Every layout key is inert while a card is up** (`useLayout(blocked)`,
 as PTT and wake are), so nothing re-lays the card out under an unmoved
 pointer. Each side pane folds to a 36px rail: `«`/`»`, Ctrl+B for the left,
-Ctrl+Alt+B for the right (not in Monaco, where Ctrl+B finishes its Ctrl+K
-chord; not on auto-repeat or mid-composition; Ctrl+Shift+B is the browser's).
+Ctrl+Alt+B for the right (from Monaco too since ED-1, except as the second
+key of its Ctrl+K chord; not on auto-repeat or mid-composition; Ctrl+Shift+B
+is the browser's).
 The left rail keeps **+ New thread** and a shrunken orb, and the right rail
 shows pending approvals and errors. A folded pane is hidden, **never
 unmounted**, so its state survives. The inner edges are `role="separator"`:
-drag them, use the arrows, or double-click to reset; Space on one is not
-push-to-talk. Widths are unzoomed px (left 180–480, right 240–560). The
+drag them, use the arrows, or double-click to reset; Space on one does
+nothing. Widths are unzoomed px (left 180–480, right 240–560). The
 centre is kept at 480 by shrinking the panes and then, when even their
 minimums do not fit, by **folding them for the render** (right first, then
 left; `fitLayout`) — never by rewriting the stored widths or folded flags,
@@ -452,9 +1087,12 @@ wins).** A 28px window-wide **title bar** holds Model · Voice · Avatar ·
 Settings │ zoom │ ⊞ ◧ ⬓ ◨ (`components/Layout.tsx`, `TitleBar`). The
 toggles are `aria-pressed` and follow what is **drawn**: a window-folded pane
 reads closed with `data-auto`, and opening it folds the other. ⊞'s menu is
-the only way to pick one of six presets (single, cols2, rows2, cols3, main2,
-grid4). `lib/workspace.ts` is the pure pane model: four pane specs always
-stored under `jarvis.hud.workspace` (apart from `jarvis.hud.layout`), a pane
+the only way to pick a preset: eight tiles, four to a row, since WP-G1
+(single, cols2, rows2, cols3, main2, grid4, grid6, grid8; grid5 and grid7
+come from split and × — WP-G2 — or a stored value; below).
+`lib/workspace.ts` is the pure pane model: eight pane specs always stored
+under `jarvis.hud.workspace` (apart from `jarvis.hud.layout`) by **id**, with
+`order` the ids drawn in reading order and `kept` the ones ⊞ hid, a pane
 mounted on first draw and then **hidden, never unmounted**, edges as
 fractions per preset clamped to 360×200, and `fitWorkspace` (side panes fold
 first against the shape's own centre minimum, then columns drop, then — down
@@ -470,14 +1108,14 @@ the focused one; "read" is any drawn pane. **A File pane pins its project** when
 keyed by it — it used to save to whatever project was current at save time.
 An unsaved edit is never dropped silently: "follow chat" waits, a gone
 project keeps the pane pinned until "discard edit", and closing the window
-asks. Preview keeps its URL per pane, re-judged on load. The bottom panel
+asks. Preview (the Browser since BR-3a, below WP-E; the File pane reads as the editor) keeps its URL per pane, re-judged on load. The bottom panel
 (⬓, Ctrl+`) holds the terminals (WP-D, below). **Under
 a card every title-bar, fold and rail button is disabled**, the layout menu
 closes, and **the card takes focus** off a preview frame, Monaco or anything
 in the workspace or panel (a framed page got its own key events, so Escape
 never reached the card) — Enter on a focused toggle used to fold a pane
-behind the card. Ctrl+Alt+1–4 focus a pane of the preset, bringing a
-dropped one back. In the single layout — the default — every existing suite
+behind the card. Ctrl+Alt+1–8 focus the pane in that **slot** of the preset
+(never id N), bringing a dropped one back. In the single layout — the default — every existing suite
 passes unchanged; `_titlebar_checks`, `_workspace_checks`,
 `_grid_card_checks`, `_sticky_checks`, `_card_focus_checks` and
 `_seen_checks` in `hud_v2_layout_check.py` plus `workspace.test.ts` cover the
@@ -547,7 +1185,7 @@ thread meanwhile stays a new thread. **An SSE event with a
 chat pane most recently clicked — a pointer or keyboard focus into it,
 Ctrl+Alt+N, a sidebar click that opens a thread there. It is kept as an order
 (`selectedOrder`, `selectedChatOf`), so a chat pane the layout drops gives way
-to the one selected before it; clicking a Preview, File or other pane never
+to the one selected before it; clicking a Preview (Browser since BR-3a), File (editor) or other pane never
 changes it; one chat drawn is the selected one, and with none drawn there is
 none. Ambiguous means: a dictated transcript (AUTO sends, REVIEW fills the
 box — **to the selected chat as it is when the transcript lands**, so
@@ -669,11 +1307,33 @@ sees). Panel: a tab per terminal, `+` (the focused pane's folder **as an
 id**, `terminalSpecFor`; since WP-B a focused chat pane gives its *own*
 conversation, and any other pane defers to `activeChat` — the selected chat,
 else the one selected last — the chat File and Preview panes already follow,
-not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **Ctrl+` opens
-a terminal when there is none, ⬓ never does**; a dot on ⬓ means one in the
-hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
-shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
-HUD's, and every key stops at the terminal (Space is never push-to-talk).
+not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **every
+way the owner opens the panel — Ctrl+`, ⬓, the layout menu's Panel row —
+opens a terminal when there is none, and a pane the owner switches to the
+terminal view opens one there** (the owner's request, 2026-10-11: "when I
+open the terminal pane it needs to auto open a terminal instead of having me
+press another button"; WP-D had it on Ctrl+` only, ⬓ never). One path,
+`LayoutControl.ownerTogglePanel` → `TermManager.ownerOpened(where, still)`;
+`togglePanel` stays the plain flip a stored layout, a reload and
+`showPanel` use, and opens nothing. Only on that gesture — never a load, a
+restored open panel, a reload or a reattach; never under a card (every
+opener is disabled, and any card raised since the gesture drops it, answered
+or not — a card count, review of #41); only on a listing asked for then that
+came back (never on `listError`); never when any terminal is listed, another
+window's or an exited one included; never if a terminal was opened meanwhile,
+the panel was closed again or the pane switched away (`still`) — asked again
+once the daemon has made it, and if it changed meanwhile the terminal stays
+in the list and nothing opens, reopens or moves; one at a time, and on ⬓ and
+the menu row only a click's first counts (a double-click is one gesture and
+opens one, as Ctrl+` ignores auto-repeat); a refusal is said in the panel, as
+`+` says it. While it is on its way the panel and the
+pane say "Opening a terminal…" instead of offering a second button. With
+terminals open, a pane switched to the terminal view keeps its picker, "+ New
+terminal here" first. It needed the owner-only read fix above to work on the
+real daemon at all. A dot on ⬓ means one in the hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
+shell's** (`terminalTakesKey`), and so is **Ctrl+D** (end of input, never
+push-to-talk: `talkKeyAction`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
+HUD's, and every key stops at the terminal.
 **Under a card nothing reaches the shell**: `disableStdin`, a key filter
 that lets every key bubble (Escape denies), a guard on the bytes, a paste in
 flight waits, and the card takes focus (WP-A). **Pastes**: 16 KiB chunks
@@ -734,6 +1394,228 @@ The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
 read-only (`backlog` among them).
 While typing is paused the notice cannot be dismissed: it holds the only
 way to resume.
+**A terminal that ended with Jarvis continues where it was** (2026-10-12,
+the owner's option (a); no route changed). A typing key there (printable,
+Enter, Backspace, Tab, an arrow — `lib/terminal.ts` `continuesOn`), a paste
+or **Continue here** is one `POST /terminals` with its remembered `in` and
+its switch (`readableCarry`: off when unknown, so never wider; a session's
+`lastRow` now follows every listing and `PATCH`). `TermManager.rekey` moves
+the session to the new id everywhere — panel tab position (first-seen
+`ranks`), pane (`renameTerminal`, every pane holding it), selected tab,
+remembered spec, `mine` — with `aliases` for the render a pane still holds
+the old id, and the panel's view keyed by its first id (`viewKey`), so the
+**same xterm** stays mounted and focused. The old text is rebuilt from
+**xterm's cells** (`snapshotText`: characters and SGR only, wrapped lines
+joined, each row starting and ending plain; **walked from the bottom and
+stopped at 1 MiB** — built top down a full scrollback took 1.9 s on the
+keydown — and one logical line longer than that keeps its tail, cut at a
+row), never the old bytes — so it holds no query, mode, alternate screen or
+title — and written after the RIS of **every** attach, before the replay,
+then `── restarted HH:MM ──` (plain text). Keys and pastes while it starts
+are `HeldInput` (4 KiB, a paste dropped whole) and go after the replay is
+parsed, **typed, never run** (the lead's decision, PR #64 review L6:
+`HeldInput.release` sends keys up to the first Enter — never it nor anything
+after — and no paste holding a line break; the screen showed the old
+context's prompt, `pi@robot:~$` or `>>>`, and an Enter there would run the
+line in a fresh local shell; the `continued` notice says check the prompt,
+then press Enter, or paste it again). **Any refusal drops the whole hold**
+(M1: `make deploy⏎` then Ctrl+C used to run the line): a key that does not
+type, past 4 KiB, a card since the gesture (`cardCount`), a crash
+(`abortPastes` sets `crashed`), or the terminal leaving the screen (L1: the
+panel closed, another tab, its pane switched away — `dropHiddenHolds`), all
+said as `unsent`. **Only the owner's gesture in that terminal continues it**
+(`mayContinue`: ended, a shell, in this tab's `mine`, a **remembered `in`**
+— never the row's project, which is not a task's worktree (N1) — not
+crashed; never under a card, on a load, a restored panel or a reattach, for
+another window's, an exited shell or a program terminal; Ctrl+D and HUD
+keys never). After a refused continuation (six open) typing asks no more;
+only Continue here tries again (L5). **Memory only: a page reload loses the
+old text.** Running programs do not survive; real survival (a pty host)
+would reverse W-3. **Limit (L4, predates this)**: the switch comes from this
+window's last-seen row, which another window's change can leave stale; a
+full fix needs a daemon event. Free checks: `lib/terminalContinue.test.ts`
+(with a real, unopened xterm: the rebuilt text answers nothing and leaves no
+mode) and `_continue_checks` in `hud_v2_terminal_check.py`; guard removals
+that bite: a paste under a card, the held keys' card count, continuing
+without a gesture, the switch failing open, a raw-byte prefix written after
+the replay window, the `held.closed` check (M1), and L6's stop at Enter (for
+keys and for a paste).
+
+**Jarvis reads a terminal, WP-F (2026-10-10; decisions W-2 is the spec;
+design §18; contract in `docs/hud-api.md`).** `terminal_read(terminal="",
+lines=200)` — `jarvis/v2/tools/terminal_read.py`, which imports exactly
+`terminals.read_for_tool` — returns the last lines (≤ 1000) of one terminal's
+**normal buffer** as plain text, named by what the HUD shows (id, title, its
+folder part, or the panel number; never a path), fenced as untrusted web
+content and through `dispatch()`'s scrub. `jarvis/v2/terminal_text.py`
+(pure) strips CSI/OSC/DCS/APC/PM/SOS and single escapes and their C1 forms,
+split anywhere; collapses CR, backspace, cursor motion, erases and `clear`
+to what the terminal shows; and **never reads the alternate screen** — the
+ring feeds every byte it drops to an `AltTracker`, so `history().alt` knows a
+read starts inside vim even when the switch left the ring, and a switch the
+cut split in two comes back whole as `history().lead`. It also keeps `ink`,
+the states rows were in before they were changed again, erased or let go
+(lazily: a row nobody returns to is read on screen), so a command line
+cleared off the screen still counts. **The screen has the terminal's
+`cols`** (xterm's autowrap: a wrapped row continues its logical line,
+cursor numbers clamped, at most `MAX_ROWS` rows, ink capped and fail-closed
+past it), and **a C0 control inside a sequence is executed and the sequence
+goes on**, as in xterm. `jarvis/v2/terminal_guard.py` (pure) **refuses the
+whole read** with exactly "possible credential in this output" — never what,
+where or which rule — for (1) a `secret_values()` value, or one from the
+terminal folder chain's credential env files (`secrets.env_files_in`, the
+owner's `.env*` rule — since ENV-1 `.sample`/`.template` count, only
+`.example` names are open; read `O_NOFOLLOW|O_NONBLOCK`, regular
+files only, capped — a FIFO named `.env` used to hang the read), its base64
+at any alignment or its URL-encoding; (2) a format in
+`jarvis/credential_patterns.py` (one list; a private key's END footer too),
+or a read that starts inside a `BEGIN … PRIVATE KEY` block opened in the
+look-back and not closed there; (3) a secret-printing command
+(`SECRET_PRINTERS`/`READERS`/`SUBCOMMANDS`, one place; robust to whitespace,
+quoting, `sudo -k`, assignments and `x=env; $x`, paths, wrappers, the
+shell's own words — `then`/`do`/`else`/`elif`/`!`/`{`/`case … )`/`coproc` —
+leading and input redirections (`< .env cat`, `done < .env`), pipelines,
+subshells, `$(…)`/backticks/`<(…)` judged as command lines, `sh -c`, `ssh
+host cmd`, `git show HEAD:.env`, function definitions, `find -exec`/`xargs`
+readers and readers of `$f`/`{}` on a line that names one, copies onto the
+terminal (`cp .env /dev/stdout`), `file:` URLs, archive members and
+compressors to stdout, decompressing readers, whole-environment dumps
+(`tmux show-environment`, `docker compose config`, `dotenv list`, `php -i`,
+`docker inspect` unless `--format` names only safe fields), and `.env.*` —
+beyond v1's `is_protected`, inside the guard only). **What loads a file is
+not what prints it** (2026-10-11 re-review): an `--env-file` loads one
+(`node --env-file=.env server.js` is how Node 20 starts a dev server, and
+its log used to be refused for as long as it ran), `wc`/the checksums count
+one, and an interpreter prints only given inline source on a line naming a
+credential file, inline source reading the environment (`node -p
+process.env`, `os.environ`, a secret-named variable), or a credential file
+as its script. **Node and bun take a cluster's source from the next
+argument** (delta review, 2026-10-11): `-pe` read as `-p` with a glued "e"
+took the real source for a script, so `node -pe process.env` read — and
+`node --env-file=.env -pe process.env`, refused at 3393daf, read at eb718b5.
+An interpreter that names no program reads one from standard input, so a
+here-string, a piped `echo`/`printf` and a here-document's body are its
+inline source (rules.py's reading of `… | python3`, through the guard's own
+parse); a REPL's or here-document's input line at a line's start (`>>> `,
+`> `, `... `, `php > `) that reads the environment **explicitly** refuses the
+read — `process.env`, `os.environ`, `ENV[`/`ENV.`, `$ENV{`, a getenv call,
+`Bun.env`, `Deno.env`, never the bare words `ENV`, `env:`, `environ` or
+`getenv` (third review: those refused a here-doc of a Kubernetes manifest or
+a Dockerfile, a README blockquote, an email-style quote and a REPL
+assignment, and one such line refused everything after it); `--print`/
+`--eval` never take an option-looking argument as the source, after one or
+`--` the first operand left is judged as a source too (an ambiguous parse
+fails toward refusing), and `bun run`'s own options are parsed; a word
+prompt may carry git-status marks (`main*`, `main±`). **Accepted costs**: the loading
+idioms `env $(cat .env | xargs) npm run dev` and `export $(grep -v '^#' .env
+| xargs)` stay refused — `export`/`env` echo a word they cannot use in their
+error message, so part of a value can reach the terminal. Two halves: a real span overlapping the read (or one that
+backgrounds a printer), **and always the text** — any screen or `ink` line
+in the read or the `LOOKBACK` (32 KiB) before it that shows such a command
+at its start, after a prompt glyph or after a prompt made of words (`[proj]
+cat .env`; never a reader's name in prose — a commit message "Add tail call
+before loading .env.production" is not `tail`), raised only to a boundary
+the signed marks prove and never by a span record below `spans_from`.
+**Every scan is linear** (2026-10-10 review): lines are read to
+`LINE_SCAN`, at most 16 candidates of 512 characters a line, the heuristic
+in one pass, each distinct line text judged once, the command cache bounded
+by size and by count (`CACHE_ENTRIES`; ~50 MiB worst case before); **and
+bounded** (2026-10-11): a read parses at most `PARSE_BUDGET` (128 KiB) of
+commands it has not judged before — ordinary reads spend 2–12 KiB — and is
+refused past it, so a screen dense with candidates buys a refusal, not 18 s
+or 85 s. **Every parse bound fails closed**: what a bound leaves unparsed (a
+command past `COMMAND_CUT`, a candidate past its cap, candidates past the
+per-line cap, a line past `SCAN_LINE_CAP`, a runner's arguments past
+`RUNNER_TAILS`, wrappers past the unwrap, a span command past `COMMAND_CAP`
+— `CommandSpan.unseen`) refuses the read when it `could_print` (names a
+credential file or a glob onto one, a printer, a secret-named variable, an
+environment dump), never for length alone. A 1 MiB ring of adversarial
+shapes is judged in well under 2 s (`Speed` in `terminal_text_check`). Rules run on the text after
+`strip_invisible`, so a zero-width character cannot split a key past them.
+The heuristic **withholds lines** (a keyword, then within 40 characters past
+`=`/`:`/space a ≥20-character token of entropy ≥ 3 that is not a path, dotted
+name or joined words; a bare hash or UUID stays) and says `[N line(s)
+withheld: possible secret]`. The switch off refuses by name — checked again after the render, so turning
+it off mid-read refuses. **Every read that reaches a terminal publishes
+`terminal_read` with exactly `{terminal_id, lines, at, refused}`**, and the terminal's bar says "Jarvis
+read 200 lines · 15:42" / "refused a read · 15:42" (`TermManager.reads`,
+`parseRead`; HUD chrome only). **Who holds it** (the holder decision): the
+fast path only, and only for an owner's chat turn **the HUD's own window
+sent** — `UserMessage.desk`, set by the send route only on the HUD listener
+with its Origin (`projects.is_owner`); `FastPathProvider` binds
+`runtime._DESK` per turn (`runtime.at_desk()`, fail closed), drops
+`DESK_TOOLS` from the request on any other turn, refuses them in a task's
+brief, and a steer from anywhere but the desk takes the running turn off it.
+**A Discord or DM turn is not at the desk** (W-2 says "where the owner is
+present"), nor is the escape hatch, a schedule, a sub-agent (`depth() != 0`),
+a workflow, a goal, an attended task or any v1 surface —
+`tools.EXPLICIT_ONLY` keeps it out of `default_names()`. **jarvis-mcp does not
+offer it**: it is a separate process with no channel to the daemon's
+terminals and no way to tell a chat from a task worker (the peers plan's
+per-session tokens have not landed), so it fails closed. **The owner
+confirmed both limits (2026-10-10): fast-path desk turns only for now;
+Claude and Codex chats via jarvis-mcp are a follow-up; Discord, DM and
+scheduled turns never.** The guard modules and the tool are SELF_PROTECTED.
+Where read text goes: what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). **The limit**: a secret with no
+shape and no keyword beside it, or one printed in pieces or otherwise
+encoded, is not caught; rule 3 judges command lines by shape, so an alias, a
+shell function, a script or a symlink that prints a secret is invisible to it
+(its output still meets rules 1 and 2 and the heuristic), and so is a script
+handed a credential file as an argument (`python3 show.py .env`) and a
+program piped in from anything but a literal `echo`/`printf` (`cat x.py |
+python3`); a minified
+line past `SCAN_LINE_CAP` that holds a bare `process.env` or `.env` is
+refused (the fail-closed side of the bound); the switch and the note are the
+backstops. Free suites:
+`tests/v2/terminal_text_check.py` (pure), `tests/v2/terminal_read_check.py`
+(real PTY, the fake shell's new `hex` command, holders, fast-path turns), the
+updated `terminal_check` (no-tool, the reader only reads, the bus record),
+`terminal.test.ts` and `_read_note_checks` in `hud_v2_terminal_check.py`.
+**Verified to bite**, each in a scratch copy of the branch (18 of 18): drop
+the text fallback, trust spans only (skip the text when integrated), forget
+`spans_from`, read the alternate screen (the renderer ignoring the switch;
+the ring's-start state dropped; the tracker not fed evicted bytes), return
+the refusal reason, offer the tool to a task's brief, count a task's turn as
+the desk, skip the `readable` check, the tool skipping its desk check, any
+HUD-route message counting as the desk, a Discord steer leaving the desk on,
+`EXPLICIT_ONLY` not honoured, rules before `strip_invisible`, no base64
+forms, no folder `.env` values, and `ink` forgetting cleared lines.
+The review round's own, each also shown to bite (39 of 39 with round 1's,
+re-anchored): no private-key footer, no key-block state, a closed block read
+as open, shell keywords not stripped, input redirections not read,
+substitutions not judged, `find -exec` readers not printers, `.env.*` not
+protected (and templates protected), no `.env.*` folder values, no width, no
+row cap, an unbounded command cache, the ticker showing the result, a split
+switch not handed over, the tracker blind to C0 inside a switch, C0 aborting a
+CSI, the desk slot carried over between turns, no re-check of the switch
+after the render, a blocking env reader (the FIFO hangs), and URL passwords
+not withheld. At bd95320 the `Speed` rings took over 30 s, 12.6 s or ran out
+of a 3 GiB cap where they now take under 1 s. The re-review round's
+(2026-10-11; `OrdinaryReads`, `UnseenParts` and new `Speed`/`Printers`
+cases, most failing on 3393daf) — 40 of 41 mutations bite: an `--env-file`
+read as a file, interpreters judged as before, counters printing, `inspect`
+always printing, any prose word as a prompt, a loader naming a credential
+for the line, a glyph as a command word, function heads unparsed, no copy
+onto the terminal, no `file:` URLs, no archives, no environment reads, no
+compression suffix, and each fail-closed bound dropped (the cut, the whole
+line's and a prompt candidate's tails, the per-line cap, the scan, the
+runner tails, the wrappers, a span's `unseen` ignored or not recorded, the
+glob, keyword-variable and flat-form hazards), no parse budget, no dedupe,
+free hazard scans, `SCAN_LINE_CAP` out of reach, no `CANDIDATES_PER_LINE`,
+no `CANDIDATE_CAP`, no `COMMAND_CUT`, `Terminals.read` dropping the lead,
+`_worth_parsing` always true, an unbounded cache count, and five earlier
+ones re-anchored (no text fallback, input redirections, shell keywords,
+substitutions, `find -exec`). The survivor: dropping only the
+`line[:SCAN_LINE_CAP]` slice, which now costs at most ~0.5 s a read and
+nothing else (what lies past the scan is the fail-closed check's). The delta
+review's (`DeltaReview`, 4 of its 5 tests failing on eb718b5): 7 of 7 bite —
+`-pe` reading a glued source, an option taken as the source, stdin never
+read as source, a piped echo not followed, a here-document body not read,
+REPL input not read, no git marks in a word prompt. The third review's
+(`ThirdReview`, all 3 failing or erroring on 38cb5e6): 8 of 8 bite — bare
+words counted on input lines, a bare `ENV`, `env:`/`environ`, a prose
+`getenv()`, no PHP shell prompt, a long option taking an option as its
+source, a pending source never judged, a verb's options skipped.
 
 **Preview and dev servers, WP-E (2026-10-10; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md` §2.5, decisions W-4; design
@@ -750,8 +1632,8 @@ policy: `img-src 'self', frame-ancestors *` let a frame land on the HUD),
 anything outside printable ASCII (CR/LF split the header; U+2028 failed
 after the status line) or a reserved `frame-ancestors`/`sandbox`/`report-*`
 **raises** (`_own_directives`; `binary()` checks before writing a byte, so
-it is one 400, never two status lines); the editor's
-full CSP (ED-4) extends that function, never a second header. The preview
+it is one 400, never two status lines); the HUD's full CSP (ED-4, below)
+is built by that same function, never a second header. The preview
 listener (8403) carries **neither** frame header — the HUD frames it — but
 **sandboxes every document it serves** with one CSP, `sandbox allow-scripts
 allow-forms` (`workshop_security_policy`): a keep-origin frame that navigated
@@ -762,11 +1644,11 @@ is its own server, untouched.
 **fails if a route module gains a first path segment it does not walk**,
 and fails if any status line but `ws.py`'s is written by hand. `/status`
 gains `hud_port`, `api_port` and `frame_hardened` (the handler class's own
-flag, beside `end_headers`). **The Preview pane** (`lib/preview.ts`) refuses
+flag, beside `end_headers`). **The Preview pane** (the **Browser** since BR-3a, `lib/browser.ts`; below) refuses
 the HUD's and API's ports — as reported **and** 8402/8405, the live
 daemon — and the window's own, and restores nothing until `/status`
 answers (`state/daemonPorts.ts`, read once per page). **"Keep its origin"**
-(`preview-keep-origin`) adds `allow-same-origin`, the only flag ever added
+(`preview-keep-origin`, `browser-keep-origin` since BR-3a) adds `allow-same-origin`, the only flag ever added
 to `allow-scripts allow-forms` (never top navigation, popups or downloads):
 off by default, per pane, offered only for a loopback port that is none of
 the daemon's three nor the window's own, and only while `/status` says
@@ -777,20 +1659,1009 @@ every load and **dropped from storage** when it no longer passes; disabled
 and inert under a card. Safe because scripts plus same-origin are no sandbox
 only for a page on the parent's origin, which the port check refuses and
 `frame-ancestors` keeps a frame from becoming. **A Ctrl+clicked loopback
-link in a terminal opens a menu** (`term-link-menu`): Open in Preview — a
+link in a terminal opens a menu** (`term-link-menu`): Open in Preview (Open in Browser, `term-link-pane`, since BR-3a) — a
 drawn Preview pane, else the focused pane, by the sidebar's click rule;
-refused with the reason for the daemon's ports — or Open in a browser tab;
+refused with the reason for the daemon's ports — or Open in a browser tab (Open in a Chrome tab, `term-link-tab`);
 other links still open a tab directly. It is measured and placed by
 `placeMenu` (`lib/terminal.ts`): below the click, else **above** it — a dev
 server's `Local:` line is usually the panel terminal's last row, where it
 used to open below the window — and clamped on both axes, zoom-aware; its
 Escape listener is a layout effect that ignores Escape once a card is up.
-`judgePreviewUrl` refuses userinfo, as `judgeLink` does. xterm finds a link only when the
+`judgePreviewUrl` (`judgeBrowserUrl` since BR-3a) refuses userinfo, as `judgeLink` does. xterm finds a link only when the
 pointer enters a new cell, so a test that clicks the same cell twice must
 move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+
+**A framed page never takes the keyboard on its own (2026-10-12, R-1, AO-2's
+first half, shipped alone; `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`
+§E.8, §H AO-2; contract in `docs/hud-api.md`).** The gap PR #74's review
+found (Chrome 155): `el.focus()` or `window.focus()` in a Browser frame,
+with no user activation, moves focus out of the HUD, and every later key —
+chat words, an editor's `.env` value, a terminal password — goes to the
+page, which can send it home. `inert`, `display: none`, `visibility:
+hidden`, re-focusing the box and `contentWindow.blur()` do not stop it, a
+`display: none` frame included; **removing the iframe does.** So each
+Browser iframe is made by script in **`FrameHost`** (`useLayoutEffect`,
+never JSX, so a removal never trips React; `data-browser-frame="<pane>:<tab>"`,
+tab 0 until Direct tabs; a fresh frame per load), the decision is pure in
+**`lib/frameguard.ts`**, and **`state/frameguard.ts`** (installed once by
+App, a layout effect) removes a frame that gains focus without the owner's
+gesture, puts focus back **only on the HUD element that lost it to this
+theft** (caught in its own `focusout`, its text selection kept) — never on one
+that had it earlier, so a page that grabs from another page the owner was
+typing a password in can never hand the next keys to the chat box, where an
+Enter sends them (review of PR #78, H1); with no such element focus goes to
+nothing that types or sends (the notice's container, `tabIndex=-1`, never its
+Reload), or under a card the card — tells the pane — `browser-stolen`, "This page took the keyboard · Reload"
+(`browser-stolen-reload`, React text, plain chrome, disabled and inert under
+a card; the tab's URL stays; memory only) — and writes one console line
+naming the pane slot, never the URL. **Measured in Chromium 149, headless
+and headed under WSLg:** a script steal fires `blur` on the HUD element,
+`focusout`, then the window's own `blur` with `activeElement` already the
+iframe, all before any key reaches the page; no `focus`/`focusin` fires on
+the iframe element. The guard decides in that `blur`, synchronously. **A
+steal from one frame into another fires nothing at all** (contrary to
+§E.8's `focusin` claim): `focusin` is listened for anyway, and what catches
+it is a per-animation-frame check while the keyboard is in a frame, with the
+250 ms `activeElement` belt behind it. **Headed, the HUD sees no pointer
+event over a frame and the iframe never matches `:hover`** (it runs in a
+process of its own; headless it does see `pointerover`), so "the pointer is
+over it" is read from a **transparent shield** over every frame
+(`browser-shield`): a `pointermove`, `pointerdown` or `wheel` on it means
+the owner's pointer is there, and it steps aside; a pointer event anywhere
+else in the HUD brings it back, and so does **any key typed in the HUD**
+(decision: a pointer parked over a page stops counting at the owner's first
+key, narrower than §F's stated limit), and so does the window losing focus
+to another program or being hidden (the HUD never hears the pointer leave a
+frame, so one that left the window from inside a page would else count on).
+**While a HUD text control has the keyboard** (an input, a textarea, Monaco,
+a terminal, contenteditable; `isTypingTarget`), **or another Browser page
+does** (delta review: crossing page B while typing in page A gave B the
+keys), **the shield steps aside only
+on a press**, never a move or a wheel, and the HUD then puts the keyboard in
+the page with `contentWindow.focus()` (the lead's option (a) on review M2): a
+pointer crossing a page mid-typing is never "over" it. The cost, accepted:
+the first click after typing in the HUD only focuses the page, and a wheel
+there scrolls nothing until a click. **A Browser iframe is never
+`.focus()`ed** (H2): FrameHost replaces each frame's `focus` with its
+window's, since an element focus left `activeElement` on that frame after
+another frame took the keyboard, blinding the guard. The gestures: the pointer over it;
+Tab or Shift+Tab within `TAB_MS` 300 — **not cancelled** (Monaco's indent is
+not one) **and only for the frame it landed in**, the first place focus went
+after it (M1); the owner's own
+load — Load, Enter in the URL box, Project root, the keep-origin switch,
+Reload — claimed by the first frame made after it, live until 2 s after
+that frame's `load` (20 s if it never loads) and **revoked by any key in the
+HUD or a focus outside that pane** (decision); and the HUD's own give-back
+after a card (`allowRestore`, ApprovalVeil, once, 300 ms — otherwise every
+card would unmount the page the owner was typing in). A stored URL restored
+at mount and a terminal's "Open in Browser" are no gesture. **Never**,
+whatever the pointer says: a card up (read from the DOM, `#authveil`), or a
+frame not the active tab of a drawn pane (or with no box on screen); a held
+frame under a card goes; a held frame that stops being drawn loses the
+keyboard to nothing that types, without being removed. **Playwright's `locator(frame).click()`
+hit-tests before it moves the mouse and reads the shield as covering the
+frame**: suites click frames with `page.mouse` (the layout suite's
+card-focus check changed so). Free checks: `lib/frameguard.test.ts`,
+`state/frameguard.test.ts` (jsdom), and `hud_v2_browser_check`'s `_guard_*`
+sections (`BROWSER_ONLY=guard`), against the mock dev server's
+`/focus-mount`, `/focus-timer`, `/focus-load`, `/focus-none`,
+`/focus-pointer` and `/focus-reload` pages and their key log
+(`mock.dev_keys`); the review round's checks (H1's exact scenario — no POST,
+the draft unchanged — H2's give-back, M1's three Tabs, M2's crossing and
+click-then-type, and the two surviving mutants) each fail with their guard
+removed. **Limits**: a key in flight as focus moved can be lost, IME
+composition in the box may be cut, a frame-to-frame steal is caught within
+an animation frame (a key typed in that gap reaches the page), a pointer
+resting over a page while no text control has the keyboard counts until the
+owner's first key, and none of it binds a same-uid program.
+
+**Dev servers announced in a terminal, BR-8a (2026-10-12; Browser plan
+`docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1/§G/§H, the
+decisions file wins: B-2; design §18; contract in `docs/hud-api.md`).** The
+daemon half of "a dev server opens in a Browser pane by itself"; BR-8b opens
+the pane. `jarvis/v2/devurl.py` (pure) is fed a **shell** terminal's **live**
+output by `Terminal._sniff`, from `_output` under the lock it already holds,
+**only while `browser.json` → `auto_open` is on** — off, the sniffer is told
+the marks' letters and never fed a byte. It reads **only a command's
+output**: `Marks.events` hands it the letters of *signed* OSC 133 marks, and
+it skips `A`/`B` to `C` once the shell has marked a command (bash), else
+`B` to that line's line feed (the POSIX startup file marks no command), so a
+typed `curl http://localhost:3000` opens nothing; never the alternate screen.
+Escapes are stripped by **`terminal_text`'s own compiled patterns** (imported,
+not copied) — colour draws nothing (a run of text and whole SGRs is one
+C-level match, `_PLAIN`), cursor forward is a space, cursor back,
+BS or a deleted character spoils the line, any other move, CR and the line
+feeds end it. **Two cheap tests that cannot change an answer run before the
+table** (PR #70 review, LOW: a line holding `://` ran up to 17 regexes, and
+URL-dense output went through `_output` at ~9 MB/s): a loopback host
+spelling (`_HOSTS`: `localhost` in any ASCII case, `127.`, `0.0.0.0`, `[:`,
+`[0`) and one of the shapes' words (`_WORDS`; `local` only before a space or
+`:`), as plain substring searches first (`_has_host`, `_has_word` — the
+latter folds the four characters IGNORECASE equates with ASCII letters, ſ ı
+İ and the Kelvin sign, so it is the regex or wider), over a chunk's whole run
+of lines and then per line; and a chunk (or a mark) matches at most
+`MATCH_BUDGET` (32) lines against the table — only a flood of real
+announcements reaches it, and one frame a second can go anyway. **A new
+`SHAPES` row adds its word to `_WORDS` and `_WORD_LITERALS`**; devurl_check's
+`Prefilter` differential (20,000 lines, every case and fold) fails
+otherwise. Measured through `_output` with a socket that takes everything:
+another host's URLs 191 MB/s (was 9.8), a loopback access log 103 (10.9),
+plain logs 262 (124), colour 44 (21), repeated or distinct announcements
+62–69 (7.1 and 2.7); xterm draws ~14. A finished line is matched against `devurl.SHAPES` (Vite,
+Next, CRA, Angular, webpack-dev-server, `http.server`, Flask, uvicorn,
+Django, Puma, Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo,
+Jupyter, Astro, Storybook, Parcel, MkDocs, Eleventy) and `devurl.clean` keeps
+only **loopback http(s) with an explicit port** (`localhost`, `127/8`,
+`[::1]`, `0.0.0.0`, `[::]`) and **sends every one as `localhost`**, the port
+and path kept (PR #70 review: the window can frame no other loopback name,
+and `[::1]` or `127.0.0.2` only burned the server's frame), no userinfo,
+**never Jarvis's
+ports** (`devurl.jarvis_ports()` = `config.control_ports()` ∪ 8403 ∪ the
+configured workshop, plus the daemon's listeners as bound, `own_ports`), the
+query and fragment dropped (a Jupyter `?token=` never travels). **Memory: a
+512-byte line (dropped whole past it), a 64-byte escape carry, the last four
+origins and four send times** — nothing else, whatever it is fed. **One
+`{"type": "dev_url", "url"}` frame on that terminal's attached socket**,
+after the bytes that carried it; `may_send` de-duplicates by (scheme, port)
+and rate-limits (one a second, four a minute per terminal), and **`sent`
+records a URL only once `send_text` has taken its frame** (PR #70 review: it
+used to be recorded first, and a socket closing or too far behind cost the
+server its frame for good); **no window attached: dropped and not recorded**;
+a replay never reaches it; a
+sniffer that raises is dropped for that terminal (one log line, the
+exception's type) and never stops its output.
+**Nothing on the bus, in a log line, a thread log, Discord or a file carries a
+URL or a byte of the text**; the "Jarvis can read" switch is unrelated.
+**`browser.json`** (`config.BROWSER_SETTINGS_PATH`, env
+`JARVIS_BROWSER_SETTINGS` — empty means unset, never `.`, which would put the
+working folder in the protected state) holds BR-1a's `lan` and
+`local_servers` (both off) and `auto_open` (**on**). **One reader and one
+writer: `jarvis/v2/browser/settings.py`** (`BrowserSettings`), the daemon's
+`browser_settings`, which the gate (`value("lan")`, per connection), the host
+(`value("local_servers")`), `/status` → `browser` and the terminals
+(`auto_open()`) all read — never a second loader; a test fails on a second
+definition of the path, a second `load_settings`/`save_settings` or another
+module naming `browser.json`. It is **gate state** (`files.
+_protected_state_paths`, by path and by name beside the allowlist) and
+changes only by **owner-only `GET`/`PATCH /browser/settings`** in
+`browser/routes.py`, which owns every `/browser*` path (`is_owner` plus a
+strict loopback Host, no query; a body of any non-empty subset of `{lan,
+local_servers, auto_open}`, each a boolean, an unknown field counted and
+never named); written atomically at 0600 keeping keys it does not know
+(BR-10's sound); read without blocking, never through a symlink, re-`stat`ed
+at most once a second so a hand edit lands without a restart. **An embedded
+or test daemon keeps it in memory** (`BrowserSettings()`); daemon2's
+`main()` attaches the owner's file, as it loads the Codex catalog. **Auto-open
+never opens a port in the Remote gate** (amendment 2): the window loads the
+URL only in a Direct frame; only the owner's own navigation opens one. The
+HUD ignores the frame until BR-8b (`parseControl` drops unknown types). **Limits**: in bash a server
+started with `&` whose banner lands while the prompt is up is skipped
+(between `B` and `C`); typed-ahead input echoed during a running command is
+read as that command's output; text that only looks like a banner (`cat` of a
+log) is read as one — the window judges the URL again. Free suites:
+`tests/v2/devurl_check.py` (every `SHAPES` row from real banner text, whole,
+split at every byte and at random cuts, with escapes in every form; the
+refusals; the marks; 10 MB leaving at most a line; the rate limit and
+de-dup; the settings file and its gate-state refusal) and `terminal_check`'s
+`DevUrls` (one window hears it, another does not; the typed line never read;
+Jarvis's ports never sent; bus, log and disk clean; off feeds nothing; a
+replay or a second announcement sends nothing; the switch is the owner's;
+an unattached URL not remembered; a forged mark moves nothing; a failing sniffer
+never stops the output; a frame the socket refuses not remembered; five
+floods at twice xterm's rate through `_output`); `frame_check`
+walks `/browser`. Seven guard removals, each in a scratch copy, fail all nine
+of their checks (a control port passed — both suites, a URL on the bus, marks
+ignored — both suites, escapes kept, the query kept, `auto_open` ignored,
+whole lines kept); an unmutated copy passes them. The review round's seven
+fail all nine of theirs: the prefilter removed (another host's URLs spend the
+budget, so an announcement among them is missed), the prefilter and the
+budget removed (both speed checks), a prefilter too strict (no bracketed
+hosts; no `token=`: the differential), recorded before the send, the host
+sent as printed, and the empty setting read as `.`. The reconciliation with
+BR-1a's six fail theirs (`devurl_check`'s `test_one_reader_one_writer` and
+`terminal_check`'s `test_one_set_of_switches_for_every_reader`): a second
+definition of the path in `config.py`, a second reader in `host.py` (the
+gate's `local_servers` from the file), a second writer in `routes.py`, a host
+keeping a `BrowserSettings` of its own, the daemon's constructor reading the
+owner's file, and the empty setting read as `.` on the merged definition.
+
+**The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
+§B.9, §D.2, §G; the decisions file wins).** Four new files under `hud/src/lib/`,
+each with its vitest; **nothing imports them yet** — BR-3b (Remote mode),
+BR-4 (annotate), BR-8b (auto-open) and BR-9c (driving) wire them in.
+`remote.ts`: keys and the pointer to CDP `Input.dispatch*` shapes (**AltGr is
+the character it typed, never Ctrl+Alt**: `@` on a German layout arrives as
+Ctrl+Alt+@), `routeKeyDown` (held under a card and left to bubble, so Escape
+denies; the HUD's keys; the pane's own F5/Ctrl+R/Ctrl+L/Alt+←→; a paste is
+never a key, its text goes as `insertText`; copy and cut forwarded and
+marked), **`browserTakesKey`** — the page gets every key but Ctrl+D
+(push-to-talk), the zoom keys, Ctrl+Alt+1–8 (the plan's "Ctrl+Alt+N"), Ctrl+B,
+Ctrl+Alt+B and Ctrl+`; Ctrl+P, Ctrl+Shift+P, F1 and Ctrl+Shift+F are the
+page's, as Ctrl+P is the shell's; BR-3b owes it an exception in `useLayout`'s
+capture handler, beside `terminalTakesKey`'s — and **a lone modifier is never
+sent** (review of PR #66: push-to-talk's Ctrl, pressed before its D, reached the
+page and paused a driving agent; `modifiers` carries the state), `HeldKeys`
+and `HeldButtons` (a keyup only where its keydown went; nothing released under
+a card — they wait for `releaseAll(false)`; **a press a card cut off is let
+go off the page, never as a click**: a held-button move to `OFF_PAGE` (-1,-1),
+then the release there, every event `clickCount: 0` — released where it was
+pressed, Chrome would click what the owner never finished pressing),
+`pasteMessages` (`cleanPaste`, then ≤ 16 KiB per `{t:"text"}` once
+JSON-escaped, never between a CR and its LF), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
+16 Mpx), pointer positions **divided by the zoom** (`toCss`) before they are
+page points, wheel deltas (screen px ÷ zoom, lines 40 px, pages a viewport,
+Shift sideways, capped), a **generation-tagged, latest-only `FramePipe`** (a
+frame of an older socket, even one still decoding, is never drawn or acked)
+and `cleanTitle` (Cc/Cf/Zl/Zp, tags, variation selectors, U+034F and fillers out; one
+line, capped by code point). `drive.ts`: the daemon's `{t:"agent", kind:
+driver|action|paused|list}` frames (shapes proposed in its header for BR-1b),
+the banner (never Authorize/Approve/Deny), the newest 20 actions, the target's
+outline (a reattach's `driver` or running `list` restarts the banner), Resume
+refused under a card, and **`isTakeover`** (a pointer move is not, a drag is;
+a lone modifier and the socket's own messages never; an unknown kind of input
+is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
+offer | wait (under a card; 30 s) | skip (off, the WP-E judge
+`judgeBrowserUrl` or Jarvis's control ports, an origin already opened or shown, one per 10 s per terminal,
+three a minute); the query and fragment are dropped; a Browser pane already
+showing a page counts as busy. (Amendment 2, 2026-10-12, replaces `focused`
+and `offer` with a tab in a drawn Browser pane, else a prompt, and the 30 s
+wait with "until the card goes"; AO-3 rewrites it.) `annotate.ts`: the
+whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
+colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
+the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).
+**A trap found building it:** the Write tool decodes `\uXXXX` in what it
+writes, so a regex meant to name U+2028 held the character and stopped
+parsing; write `\u{…}`, or fix escapes afterwards with a script.
+
+**File reads as the editor, Preview is the Browser, BR-3a (2026-10-12; the
+owner: "also rename "File" to "Editor" and "Preview" to "Browser""; browser
+plan `docs/plans/2026-10-10-hud-browser-plan.md` §7, cut by amendment 1 to
+the rename and the migration; design §18; contract in `docs/hud-api.md`).**
+**The Browser changes in name and id both**: view `"browser"`,
+`PaneSpec.browserUrl` (`keepOrigin` unchanged), `setBrowserUrl`,
+`openBrowser`/`BrowserRequest`/`browserAsk` in App, `BrowserTab.tsx`,
+`lib/browser.ts` (`judgeBrowserUrl`), `.browserframe`, test ids `tab-browser`
+and `browser-*`, and the terminal link menu's `term-link-pane` ("Open in
+Browser") and `term-link-tab` ("Open in a Chrome tab"; WP-E's
+`term-link-browser` collided). Which links get the menu is unchanged —
+loopback only; B-11's any-http(s) waits for Remote mode — and so is every
+rule of WP-E's. **The stored layout migrates as it parses**, under the same
+`jarvis.hud.workspace` key (`parsePane`, `storedView`): `view: "preview"`
+reads as `"browser"`, `previewUrl` as `browserUrl` (only when no valid
+`browserUrl` is stored), and a `keepOrigin` is kept only while it is still
+exactly that URL's origin (`storableKeepOrigin`; the frame judges it again on
+load). A save is a parse, so it writes the new names only; a rolled-back HUD
+shows that pane's default view and loses its URL. **The editor changes in
+name only**: its view id stays `"file"` — a stored `"file"` pane, `tab-file`,
+`pane-N-…` and every editor suite are untouched — and **`VIEW_LABEL`** beside
+`PANE_VIEWS` (`lib/workspace.ts`) is the one label table, drawn by the
+strip's buttons, its compact `<select>` and the pane's `aria-label` (`Pane N:
+editor`); the CSS capitalises it. Owner-visible sentences moved with it: the
+palette's "Show Files" is "Show Editor", "No room to open …" says "switch one
+to the editor", the judge says "Refused: the Browser only loads local
+servers." **Python is left alone**: `preview_route`, `preview_only` and
+`workshop_port` name the workshop listener (8403), which the docs now call
+"the workshop origin". Not done here: WP-E's `DirectFrame` split (BR-3b's,
+with Remote mode). `hud_v2_preview_check.py` is
+**`hud_v2_browser_check.py`** (`browser_checks`), and its `_rename_checks`
+seed a pre-rename layout with the Preview pane in pane 1 (default chat, so a
+dropped view migration shows), check its URL and grant come back and the
+save writes only new names, an old grant for another origin is dropped, and a
+stored `"file"` pane opens as the editor with its tabs. Both of the plan's
+mutations bite: dropping the migration fails four `workspace.test.ts` cases
+and the headless section, carrying `keepOrigin` across an origin mismatch
+fails the grant case. A stored seed in any suite may still say `"preview"`
+(it migrates); new ones should not.
+
+**Dev servers an agent started, AO-1a (2026-10-12; plan
+`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §B and §D.4, review
+decisions R-2 and R-7; the decisions file wins).** Pure and **not wired yet**:
+AO-1b's watcher (`devservers.py`), routes and daemon hooks use it.
+`jarvis/v2/devlisten.py`:
+- **Rows.** `parse_rows` reads `/proc/net/tcp`/`tcp6`: LISTEN rows only, the
+  kernel's native word order, binds on `127.0.0.1`, `0.0.0.0`, `::1`, `::` and
+  `::ffff:127.0.0.1`. Another 127/8 address is kept as `odd_loopback`, to be
+  counted and refused; a LAN bind is dropped.
+- **Ports first.** `cheap_refusal` (rules 1-2) runs before anything about a
+  process is read. `port_rules` is `policy.refused_ports` plus the daemon's
+  HUD, API, workshop, gate and bound ports; then the seven service ports, and
+  the ephemeral range read from `ip_local_port_range` (inclusive; fallback
+  32768-60999). A socket owned by another uid (the daemon's uid is passed in)
+  and a bind class that is neither loopback nor wildcard are refused there too.
+- **Facts.** `ProcReader` reads over an injectable `/proc` and cgroup root and
+  counts every read in `Work` (counts only, for `/status`). **It never reads
+  `cwd`, `cmdline` or `exe`.** It fails closed on EACCES, a vanished pid, a
+  start time that changed, or a parent younger than its child.
+  - **The ancestor walk** reads `stat` only, at most `ANCESTRY_MAX` = 64. A
+    chain still going past that is `truncated`, and rule 6 refuses it as a
+    terminal's: fail closed, never attributed.
+  - **The fd scan is bounded.** `socket_owners` makes at most `FD_SCAN_MAX` =
+    50,000 readlinks a scan (a pid's folder is walked lazily, so a process
+    with a million fds costs no more). Past it the scan stops, counts the pids
+    it left in `Work.fd_skipped`, and answers `complete` False;
+    `attribute(scan_complete=False)` then answers pending ("scan") and
+    attributes nothing this poll. `scan_complete` has no default, so a
+    caller that forgets the scan's answer fails rather than trusting it.
+  - **A shared socket fails closed:** if any holder is Jarvis's own, a
+    terminal's, or a pid whose facts could not be read (it could be either),
+    the listener is refused, whatever another holder's tag says.
+- **The origin tag is the attribution (R-2).** There is no folder rule, and an
+  untagged process is refused. `/proc/<pid>/environ` is read only for the
+  owning pid (the earliest-started pid passing rules 4-7), only after rules
+  1-7, `O_NONBLOCK`, at most 128 KiB. The bytes go into a bytearray searched
+  raw for `JARVIS_ORIGIN_TAG=` at an entry's start (exactly 32 lowercase hex,
+  NUL-ended), which is zeroed in a `finally`. They are never decoded, logged
+  or raised with: a read error is `unreadable` with no message, and **the
+  module logs nothing**. A found tag and `untagged` are cached per `(pid,
+  start)`; **a failed read (`unreadable`) is never cached**, so the next poll
+  reads again. **Limit, stated: a cached tag outlives an `exec` of the same
+  pid** — `exec` keeps the start time, so a process that execs a program with
+  another environment is still judged by the one first read. A pid reused by
+  another process has another start time and is read afresh.
+- **Turn windows.** `Sessions` holds the tags (live, then `GRACE_S` 600 s
+  after close) and the turn windows, which only Claude and Codex turns open: a
+  listener counts if first seen in `[start, end + 600 s]` from a process
+  started at or after `start − 2 s`.
+- **`attribute()`** applies rules 1-11 in order. It answers attributed, a
+  refusal class, or pending: `scan` for an incomplete fd scan, `life` for
+  rule 10's two sightings 2 s apart, `probe` for rule 11.
+  - **A socket several processes hold fails closed.** If any holder is
+    refused as Jarvis's own (rule 5) or as a terminal's (rule 6), the listener
+    is refused with that class, even when another holder carries a live tag.
+    Only with no such holder does the earliest-started pid passing rules 4-7
+    own it (this replaced "earliest passing pid owns it" in all cases).
+  - Rules 7 and 9 are judged at the listener's first sighting, so a verdict
+    waiting on its probe cannot turn `stale_tag` as the clock passes the
+    session's grace.
+- **The probe's rules.** `parse_response` judges at most 4 KiB, and only the
+  status class and booleans survive:
+  - a page is a 3xx; a 2xx that is `text/html`, or untyped with markup; any
+    other status only `text/html` with markup;
+  - `X-Frame-Options` DENY/SAMEORIGIN (any token of a comma list), or an
+    enforced `frame-ancestors` without `*` or `http://localhost:*` in any
+    comma-joined policy, is `no_frame` (a 3xx too); the last `Content-Type`
+    wins;
+  - the header block ends at the earlier of CRLF-CRLF and LF-LF, an obs-fold
+    continuation (a line starting with a space or tab) is joined onto the
+    previous header with one space, and markup needs a tag name that ends
+    (`<header` and `<htmlx` are not `<head` or `<html`);
+  - a silent close or a TLS alert asks for one TLS probe.
+
+  `probe_address` (127.0.0.1 or `::1`, with the port judged again) and
+  `probe_request` (one plain `GET /`) are its other rules.
+- **`arbitrate()`** takes the claims within 600 ms of the first: the
+  earliest that `shows` the source, else the newest `focused_at`, ties to the
+  earliest. A later claim, or a window's second, loses. A malformed claim (a
+  field of the wrong type or out of range, or not a `Claim`) is dropped, never
+  raised on and never the one that opens the window.
+
+Free suite: `tests/v2/devlisten_check.py`, 258 checks over fixture `/proc`
+trees, plus a read-only parse of the real `/proc/net` tables.
+- A fake key in a fixture `environ` appears in no return value, exception,
+  log record or counter.
+- A monitor shows that the module opens no `cmdline`, `cwd` or `exe`, and no
+  real `environ`.
+- Work is counted, not timed: a steady poll reads 2 files, and one candidate
+  costs one fd scan.
+
+All 24 mutations bite: every one in §H's AO-1a table, plus the review's
+guards. The review round (PR #76) ran 53 guard removals against the fixed
+module, each failing the suite: the review's own 20 (13 already bit; the seven
+it had survived are the buffer zeroing, a read cut at the cap reported
+whole, the tag-cache key's start, rule 7's per-window conjunction,
+comma-joined CSPs, X-Frame-Options lists and the last `Content-Type`),
+`environ` opened following a symlink, `find_tag` taking a later occurrence,
+and every guard of the fixes above. A grep pin allows only `daemon`,
+`hud_api`, `terminals` and `devservers` to name the module.
+
+**VEX backend, VX-1 (2026-10-11; editor plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
+wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
+`jarvis/v2/vex.py` builds, downloads, opens the brain's user port and makes
+new projects with the Windows `vexcom.exe` and toolchain the owner's VS Code
+VEX extension downloaded, **run in place through WSL interop — nothing
+copied, bundled or committed**, and **never decompiled**: the only `vexcom`
+flags are DishPy's (`--name --slot --write --progress`, `--user`) and the
+two reads the owner's `vexcom --help` lists (`--json`, `--programs`). **Tests
+never run a real VEX tool or touch a device** — `tests/v2/vex_fake/` holds
+a fake `make.exe` and `vexcom.exe`. Which executables run is
+**`config.VEX_PATH` (`~/.config/jarvis/vex.json`)**, written only by the
+human-run `jarvis vex setup` (`vex_setup.py`: looks only in
+`config.VEX_STORAGE_ROOTS`/`VEX_EXTENSION_ROOTS`, checks by the daemon's own
+rule, y/N, mode 600, needs a TTY; it also offers `~/.local/bin/vexbuild`),
+and it is **gate state** (`files._protected_state`, by path and by name beside
+the allowlist). **Every path is re-checked at each use** (`load_config`:
+absolute, `realpath == path` so no symlink anywhere, a regular executable or a
+folder, inside the extension's folders; the file itself `O_NOFOLLOW |
+O_NONBLOCK`, capped). **Those folders are under AppData, which agents can
+write** (`cp payload.exe …/make.exe` is an ALLOW), so setup records **each
+tool's SHA-256** in `vex.json` (required) and **`verify_tools` hashes them
+again immediately before every spawn** — `make.exe` and the five tools it
+runs before a build, `vexcom.exe` before a download, brain or info — through
+one `O_NOFOLLOW | O_NONBLOCK` fd, then re-stats the spawned path against that
+fd (device, inode, size, mtime, ctime): a mismatch refuses with "the VEX
+tools changed since `jarvis vex setup`". **What remains, stated**: a swap in
+the instant between that stat and `exec`, the five tools `make.exe` opens
+later on the Windows side, during the build, and **a DLL planted beside a tool
+in its AppData folder** — Windows loads a program's DLLs from its own folder
+first, and the fingerprint covers the executable only. **No request names an
+executable, a path or an argument**: argv tables in `vex.py`, the project from
+its id, `{action}` / `{slot, name}` validated first (slot an int 1–8; name
+`^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$`; the settings file's own name is held to
+the `P=` rule before it names `build/<name>.bin`), Windows paths through one
+`to_windows` that refuses `"<>|?*%^&!();,=\:`, invisible characters, a
+trailing dot or space, reserved names (`NUL`, `con.txt`) and **anything outside
+ASCII** (review round 2: Windows' "best fit" for an ANSI program maps U+FF02 to
+`"`, U+FF3C to `\` and U+2215 to `/`). Programs run as
+**program terminals** — `terminals.create_program`, called from `vex.py`
+alone (grep-tested; `terminal_check`'s allowed set now includes `vex.py`):
+same ring and routes as a shell, `WSLENV` emptied, typed input refused but
+Ctrl-C except the brain's, an `on_exit` hook after EOF, six apart from the
+shells' six. One build per project (a `flock` under `V2_DATA_DIR/vex/`,
+shared with `vexbuild`), one device action at a time (download, info, brain;
+the device is reserved before the build lock, and **a reservation is released
+only by its holder, at most once** — a token, never a wildcard), 5-minute
+build timeout (SIGTERM then SIGKILL, output kept), and **a build refuses a
+project whose make files name `vexcom` and fails closed** where it cannot
+read them all: more than 32, one past 256 KB, a symlink or FIFO among them, a
+symlinked `vex/`, a glob too complex to check, an `include` named by a
+variable, holding a backslash, outside the project, or **not in the project at
+all** (make would search other folders for it; `-include` too) — and it reads
+includes as make does, a backslash-newline joining the next line on (CRLF
+too), so `include a.mk \` + `src/notes.txt` includes the second file.
+**Download is meant to be only the owner's click** (V-2/V-3): no tool, MCP
+tool, CLI or Discord verb, no "run after download", and **any agent command
+naming `vexcom`, or running something that could be it, is DENY in
+`rules.decide`** (see *Command rules*). **That is
+not a boundary, and neither is the button — the residual gap, stated**: an
+agent runs as the owner, so it can still reach a plugged-in brain through a
+script it writes and runs, a shell fed its commands through a pipe, cmd.exe's
+or PowerShell's own wildcard forms, a launcher `rules.py` does not model,
+`make -f` on a makefile of its own, a DLL beside the tool, or a POST to
+the download route with a forged Origin. What makes such a download visible
+is **one id-only bus record per device action, `vex_device {action, at}`**
+(as `terminal_attached`); closing the gap needs the device to belong to a
+user the agent is not. Agents build through **`vexbuild`** (`python -I -m
+jarvis.v2.vex build [--rebuild|--clean]`, nothing else — **isolated**, because
+a plain `-m` puts the agent-writable project folder first on `sys.path`, so a
+planted `jarvis/v2/vex.py` would have run), which asks like any command unless
+allowlisted; running it or its module through a wrapper or a runner (`python
+-Im`, `uv run --no-project`, `npx --yes`, `python -m runpy`, `uv run
+--module`; review round 2 parses each runner's options) asks too, naming it as
+an argument (`cp …/vexbuild`) does not; `vexbuild build` and plain `vexbuild`
+both build. **`terminal_read` (#33) can read a program terminal** as it reads
+a shell, under the same "Jarvis can read" switch and guard — for the brain
+terminal that includes the owner's typed input, which the PTY echoes back.
+**Every route is owner-only by the shared rule**,
+`projects.is_owner` (PR #41: the HUD's Origin, or on a plain GET, which
+Chromium sends with no Origin, `Sec-Fetch-Site: same-origin`), plus a strict
+loopback Host. New projects reuse the `project_folder` card:
+**`projects.confirm_folder` is now the one confirmation handler** (moved out
+of `discord/project_commands.py`; still the single caller of
+`make_project_folder`), templates are opened as regular files only, checked
+whole before anyone is asked, and written through directory fds (each folder
+opened `O_DIRECTORY | O_NOFOLLOW` relative to the last, the file `O_EXCL |
+O_NOFOLLOW` relative to its folder; what remains is the new folder's own path,
+resolved once after the yes). The log gets lifecycle lines only. **Device
+reads** (2026-10-12, from the owner's own `vexcom --help`, vexcom 1.0.2b2):
+`POST /vex/device/info {read?}` runs exactly `vexcom --json` ("system info in
+json format", the default `system`) or `vexcom --programs` (`programs`) —
+`vex.DEVICE_READS`, the only two; every other option it lists writes, runs,
+erases or updates firmware — through the same `verify_tools`, the one-device
+reservation (both are the `info` action) and the 10 s timeout; any other
+`read` is a 400 before anything is looked up. JSON output is pretty-printed
+as text (a JSON string's control characters stay escaped, invisibles are
+removed). The output shapes in `tests/v2/vex_fake/` are guesses: only a
+real brain shows vexcom's. Not yet, said by the routes: Python download
+(spike). Agents' task worktrees are on the Linux filesystem, so
+`vexbuild` builds only in a chat's own project folder. Tests point every
+`config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree, with a
+non-empty `WSLENV`. `tests/v2/vex_check.py` (111 checks); 69 guards of round 1
+and the guards of rounds 2–4 each shown to fail their check when removed in a
+scratch copy (the PR lists them). Open question, not done: whether `vex.py`
+and `vex_setup.py` join SELF_PROTECTED (the owner declined widening it for
+`runtime.py`).
+
+**The VEX view, VX-2 (2026-10-11; editor plan §2.9/§3; design §18; contract
+in `docs/hud-api.md`).** `View` gains `"vex"` (`components/VexView.tsx`,
+rules in `lib/vex.ts`, state outside React in `state/vex.ts`). **The strip
+offers it only when the pane's project is a VEX project** (`offersVex`: the
+settings parse, or are malformed/PROS so the view can say why; App's
+`stripProject` names the project — a chat pane's conversation's, else the
+pin, else the active chat's), and switching a pane to it **pins** it, so a
+build or download never follows the chat to another robot. Build / Rebuild
+/ Clean show ✓ or the errors list; **an error click opens the file at its
+line** (`openAt`, through ED-7's `placeFile`: a drawn File pane on that
+project, else a split beside the view, else a sentence — since the ED-7
+merge never the VEX pane itself; FileTab's `goto` sets the cursor after
+PaneEditor's own model swap; an error outside the project is text). The
+build, a download and the brain terminal are VX-1's **program terminals in
+the WP-D panel** (`terminals.showProgram`; one that ended has no Restart or
+"New terminal here" — those open a shell). **Download is only a click on
+the labelled button**: `isExplicitClick` (trusted, `detail` exactly 1 — a
+double or triple click's later clicks never count — primary button;
+Enter/Space on a focused button and `el.click()` have `detail` 0),
+`tabIndex=-1`, no focus from a press; **no key and no palette entry
+downloads, and nothing else calls `vex.download`**. One click is one chain:
+pause the brain terminal if it holds the port, build first on VX-1's 409
+`code: "build_first"` (never its wording; still `build_first` after that
+build, one rebuild; still after that, it stops and says so), download,
+reopen the brain terminal (not after a chain a card, a crash or Cancel
+dropped, nor after a card that came and went during the download). **One chain per
+window** (review M1): no other download, for any project, while one runs;
+every VEX view shows it ("Building override, then downloading to slot 1")
+with a **Cancel** that closes the build's program terminal and never sends
+the download (none once the download is sent); the VEX panes' project
+pickers, the brain terminal and device info are off meanwhile. **Under a card every VEX
+control is disabled (and inert), `vex.setBlocked` (App, above the boundary,
+beside the terminals' hold) makes the store refuse, and a card that comes up
+between the click and any step drops the rest of the chain** (a card count,
+as `ownerOpened`: one that came and went counts, and so does one that came up
+while the daemon was answering) — nothing builds or downloads behind it; a
+crash (`vex.crash()`) stops it too; **a dropped chain never reopens the brain
+terminal**, and says so. No `vex.json`: the view names `jarvis vex setup`
+and checks again every 4 s and on focus. Detection is asked again on focus
+and every 30 s, so a project that becomes a VEX project is offered the view
+without a reload. **A VEX view never follows the chat**: a pane whose pinned
+project is gone says "Pick a project". **A lone VEX pane survives a reload**
+(the boot never puts the chat over a VEX view; a window with no chat drawn is
+WP-B's refused-with-a-sentence case). `vex_device` records this window did
+not start are said in the view. **Read device info** (`vexcom --json`) and
+**List programs** (`vexcom --programs`) are one device read at a time, off
+under a card and during a chain; the answer is drawn as text in a `<pre>`
+(markup in it is characters), headed by which read it was and a non-zero
+exit. **The daemon's freshness rule** (`vex.py`
+`Vex._fresh`, review M2 and its delta review): **sources** are only what a
+build compiles or obeys (`SOURCE_SUFFIXES`: C/C++ sources and headers,
+assembly, make files — a notes file or an editor backup never counts, which
+was M2's loop). **Never while a build is unfinished**: a build marks the
+project before make runs (`mark_unfinished`, a file under `V2_DATA_DIR/vex/`,
+`vexbuild` too) and only a success clears it, so a cancelled, failed or
+timed-out build — or a daemon that died mid-build — refuses the download
+(a truncated binary has a fresh mtime). **When this daemon's last build wrote
+exactly this binary** (its `P=` name; mtime_ns and size changed, or a
+rebuild), the binary may be sent only if the sources' digest — sorted
+(path, mtime_ns, size) — is exactly what it was when that build started: an
+edit, deletion, rename or older-mtime copy since asks for a build, and a
+teammate's file dated in the future hides nothing. Otherwise (a restart, a
+binary `vexbuild` wrote) make's own rule: newer than every source. **A make
+that found nothing to do never vouches for a binary**: a header is compiled
+wherever it is included, and VEX's makefile lists only `include/*.h`, so an
+edited `include/pid.hpp` leaves make nothing to do — the daemon still says
+Build first, and the click's chain then runs **one rebuild** (make -B) and
+downloads; still stale after that, it stops and says so (never a loop). A
+rename mid-build records nothing. Its 409 is `BuildFirst`, `{error, code:
+"build_first"}`. Build errors' `./` is dropped so they stay clickable. Free
+checks: `lib/vex.test.ts`, `tests/face/hud_v2_vex_check.py` (its own
+`MockDaemon(0)`; VX-1's routes in `hud_v2_mock_vex.py`, builds and downloads
+as terminal rows, their sockets played by the terminal suite's `FakePty`);
+the four safety guards (explicit click, the chain's card check, `blocked` on
+the controls, the strip's filter) and each review fix (M1, M2's HUD half,
+L1–L7) shown to fail their checks when removed; M2's daemon half in
+`tests/v2/vex_check.py` (`Device`, the fake make's `NOOP` and `HOLD`).
+
+**New VEX project, VX-3 (2026-10-12; editor plan §2.9 "New VEX project",
+decisions V-4; design §18; contract in `docs/hud-api.md`).** A dialog
+(`components/NewVexProject.tsx`, rules in `lib/vexNew.ts`, picker
+`"newVexProject"`) reached from New project's "New VEX project from a
+template…" and the palette's **New VEX Project from a Template…**
+(`project.newVex` — the palette's one VEX entry, which opens the dialog and
+nothing else; `commands.test.ts` pins that). **The window never makes up a
+path**: the templates are `GET /vex/templates` (split by language, labelled
+from `index.json`), and **the exact folder it shows is the daemon's answer to
+the very body Create sends** — the new `POST /vex/projects/check` (VX-1's
+`_plan`, shared with `new_project`, so the same refusals word for word and the
+path the `project_folder` card names; nothing asked or made; owner-only like
+every VEX route). Create is enabled only while that answer is for exactly the
+inputs on screen (`bodyKey`), the name passes the daemon's `PROJECT_NAME`
+(mirrored, `projectNameRefusal`), and no card is up. Location defaults to
+`vex.json`'s `project_folder` (the HUD now reads it from `/vex/status`, which
+already reported it) and is sent only when changed. **A folder VEX's tools
+could never work in is refused before anyone is asked** (review MED-1):
+`_plan` runs the build's own `to_windows` on the folder, so `My (1)`, `a&b`
+or `Документы` are refused by the check and by Create in the same words — the
+owner used to approve a project whose every build answered 409. Create raises
+the card; the dialog polls `GET /vex/projects/{id}`, **one read at a time,
+riding out a failed read with a backoff** (`afterFailedRead`, review LOW-3:
+only the daemon's answer, a 404/400, or three minutes of failures end the
+tracking — one blip used to say `failed` while the card was still up), and
+says how it ended — **Deny makes nothing and the dialog stays open saying
+so**; on `created` it refreshes projects, closes and starts a new thread in it
+(as New project does). An existing empty folder is used with no card (O5),
+said beforehand. **Under any card every control is disabled (`blocked` from
+App) and inert, and Escape is left to the card** (the dialog's own Escape
+listener returns while a card is up, and its inputs never stop a key then).
+`GET /vex/templates` answers a templates folder that cannot be listed with a
+409 sentence, never a 500. **A template write that fails midway takes back
+what this request wrote** (VX-1 code, review LOW-2): `_write_new` records each
+folder it made and each file it created `O_EXCL` **with its `(st_dev,
+st_ino)`, read by `fstat` from the fd it was made through**, and
+`_remove_written` unlinks those files and `rmdir`s those folders, newest
+first, through the same `O_DIRECTORY | O_NOFOLLOW` fds — **judged by identity,
+never by name** (delta review LOW-B: `O_NOFOLLOW` stops a symlink swap, not a
+rename, and a folder renamed away with an owner folder moved into its name
+lost the owner's `mkenv.mk`): what is at the name now is `stat`ed without
+following and must be the very entry it made, else it is kept and listed as
+left. A project the store would not record takes its template back too
+(`remove_written`), **only through the very folder the template was written
+through** — reopened by path, its `(st_dev, st_ino)` must match `unpack`'s
+(LOW-A: a parent swapped for a symlink to a decoy lost the decoy's files);
+else nothing is removed, here or there. **The message is read from the
+folder** (`_listing`, through its fd; LOW-C): empty again (a retry uses it
+without asking, O5), or what it still holds and says to empty or remove it,
+or that the path is no longer the folder written to. A colliding file is named
+("src/main.cpp already exists …"), and an `OSError` is said by its
+`strerror`, never the path it names. What remains: another program swapping an
+entry in the instant between the take-back's `stat` and its `unlink`.
+Free checks: `lib/vexNew.test.ts`,
+`commands.test.ts`, `tests/v2/vex_check.py` (`NewProjectCheck`, `HalfWritten`; the check
+route in `Routes` and `Coverage`) and `tests/face/hud_v2_vex_new_check.py` (66, a
+`MockDaemon(0)` of its own; `hud_v2_mock_vex.setup_new` lays a temp "Windows
+drive" with real template zips that the daemon's own `list_templates`,
+`read_template`, `unpack` and `settings_document` read and write, and the
+mock's `POST /approvals/{id}` answers the card through
+`mock_vex.approval_decided`; run by `hud_v2_check` after the VEX view
+section; the mock judges the folder with the daemon's own `to_windows` and its
+`new["state_fail"]` fails the next reads). Guards shown to bite when removed:
+the dialog's Escape hold, its `disabled` under a card, `createReady`'s key
+match, the check never asking, the check behind `_owner`, and the review
+round's four — the toolchain refusal, the normalised path, the take-back and
+the poll's tolerance — and the delta review's identity compare (the swapped-in
+folder's `mkenv.mk` is taken without it). `HalfWritten`'s three delta-review
+tests fail on 9e1fcb6.
+
+**The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
+§2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
+response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
+header: `default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` (no
+inline, no eval; WebAssembly since ED-5),
+`worker-src`/`connect-src 'self'` (the same-origin `ws://` terminal socket
+included, CSP3), `style-src 'self' 'unsafe-inline'`, `img-src`/`font-src
+'self' data:`, `media-src 'self'`, `frame-src` on the loopback names a CSP can
+express (so the Preview judge refuses `[::1]` and `127.0.0.2` with a
+sentence), and `base-uri`/`form-action`/`object-src 'none'`.
+`'wasm-unsafe-eval'` came with ED-5's tree-sitter (below), with the test
+that loads every grammar under the policy. A response's own directives may
+only **narrow** it (`_narrowed`: restate a directive the policy sets with a
+subset of its sources; a `default-src 'none'` drops the fetch directives it
+does not restate — the avatar keeps its old lockdown); anything else raises.
+**The HUD is served from an installed copy (C-1)**, never the repo's
+agent-writable `hud/dist`: `jarvis hud install` (`jarvis/v2/hud_install.py`;
+a human/lead CLI step, **never a tool** — `tests/v2/hud_install_check.py`
+pins that only `__main__` and `hud_api`'s read side import it) runs `npm run
+build` and copies `hud/dist` into `config.HUD_DIR/<build-id>/`
+(`~/.local/share/jarvis/hud/`, `JARVIS_HUD_DIR` overrides), read-only, with a
+SHA-256 manifest, through a temp folder renamed into place, keeping three
+builds; it refuses **uncommitted changes under `hud/`** unless
+`--allow-dirty` (Jarvis's chats leave edits in the main checkout) and records
+`git_head`/`dirty` in the manifest (checked again after the build; its git
+runs hardened through `gitops._git`); it refuses a symlinked root or ancestor, a
+root in the repo or writable by others, and a build output with a link,
+special file, odd name or no `index.html`. The daemon serves the **newest
+intact** build (manifest reads, `index.html` matches — a newer broken one is
+passed over; a hostile manifest is ignored, never raised), only files its
+manifest lists, **SHA-256 checked on every read, never cached** (a stat-keyed
+cache served a same-size rewrite made within one timestamp tick), an asset
+only an older kept build has served from it (so an open window's lazy chunks
+survive an install); serving an older build because a newer one failed is
+`hud_state: "fallback"` (with `hud_passed_over`), never silent; with nothing
+intact `GET /` is a 503 saying "not installed" or "failed verification", and
+`/status` reports what is served (`hud_build`, `hud_git_head`, `hud_state`).
+daemon2 **warns at start-up** in dev mode, on a fallback, with nothing
+served, and when `hud/` changed since the served build's commit (`git diff
+--quiet <commit> HEAD -- hud`) — a forgotten install shows up in the log, a
+Python-only merge does not. `config.HUD_DIST`
+is that install root — **`hud/dist` only under `JARVIS_HUD_DEV=1`**, which
+only tests set — and BR-0's one write check (`files._hud_roots`) refuses the
+install root always, plus `hud/dist` in dev mode, to every agent write tool and
+v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
+(**the table `OWNER_OPS` is the extension point** for any other owner-only
+`jarvis` command; `OWNER_OP_MODULES` for its module), asked by `rules.decide`
+(so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
+install` — and since 2026-10-11 `jarvis hud rebuild`, `jarvis restart` and
+`jarvis daemon2 restart` (below) — DENY, judged on the **command word** after wrappers and runners
+(`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
+`ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
+own `$VAR` or `ln -s` alias, the installer module, Python source that
+*invokes* it, and shells/`eval`/here-documents/substitutions bash would run
+— never on a line that only mentions it (`echo`, `grep`, a commit message,
+single quotes, a quoted here-document): a DENY cannot be approved, so a false
+one blocks the owner. A jarvis argv word only known at run time (an unset
+`$E`, `$@`, a glob, `{hud,install}`) counts as any words, so a line that
+could expand to an op is refused; and **Jarvis's own CLI is ASK in every
+spelling** (`python -m jarvis…`, `uv run jarvis`, the venv's python —
+`protected_state.runs_jarvis`, asked by `rules.decide`), never auto-approved. A cheap line and per-segment filter (`_could_be_owner_op`)
+keeps `rules.decide` at its old speed on lines that cannot hold an op, held
+to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
+running the installer would undo C-1. A shell write *into* the install root
+asks (`protected_state.hud_trees`). A shell can still
+write it in a form nobody sees (the accepted gap). **After a merge, the lead
+runs, from a synced, clean main checkout, `jarvis hud rebuild` — adding
+`--restart` only if Python changed; a HUD-only change needs just a reload of
+the window (Ctrl+R)** — and `jarvis restart` alone when only Python changed.
+`rebuild` runs `npm ci` first when `package-lock.json` moved, refuses
+uncommitted `hud/` changes (commit or stash them; `--allow-dirty` only on
+purpose), installs, and checks `/status` shows the new `hud_build`,
+`hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"` (not
+`"fallback"`), exiting 4 if not; `--pull` fast-forwards main first. (`jarvis
+hud install` and `systemctl --user restart jarvis-daemon2` still work; the
+new commands do the checks those leave to the reader.)
+Never `jarvis hud` to restart. **Tests point
+`config.HUD_DIR`/`HUD_DIST` at temp dirs** (or set `HUD_DEV` with a temp
+dist); never install into the owner's real root. **Every context of every
+headless HUD suite runs under `hud_v2_check.watch_csp`**: a CSP violation
+anywhere fails the run, because a CSP breaks quietly (Monaco even falls back
+to a textarea). `tests/face/hud_v2_csp_check.py` (run by `hud_v2_check` after
+the browser section, on a `MockDaemon(0)` of its own) proves the HUD's needs
+work under it — SSE, the terminal socket, Monaco and its worker, the avatar,
+the mic and `/stt`, a loopback frame — and that an inline or remote script,
+`eval`, a `blob:` worker, WebAssembly, a cross-origin fetch, socket, image,
+object, `<base>`, form or non-loopback frame is refused with a violation.
+
+**The owner's restart and rebuild commands (2026-10-11, PR #48;
+`jarvis/v2/owner_ops.py`, free suite `tests/v2/owner_ops_check.py`).** The
+owner: "a way for me to restart the daemon and a command to force the hud to
+rebuild with latest changes in the jarvis cli". **`jarvis restart [--force]
+[--wait S]`** (alias `jarvis daemon2 restart [--force]`) reads `/status` and
+**refuses while a turn runs or a broker approval waits** (exit 3 — a restart
+cuts a turn off mid-step and denies what waits; `/status` gained
+`approvals_pending` for this, the escape hatch's after-the-turn asks
+included) unless `--force`. **"Can't check" is never "nothing running"**
+(review H1): a daemon systemd calls active, activating or reloading that does
+not answer `/status` is asked again for 10 s and then refused with exit 3
+too, saying whether nothing listens on this shell's `JARVIS_DAEMON_PORT` or
+the daemon is too busy to answer; only a refused connection to a unit that is
+not active, or an inactive or failed unit, is restarted unchecked, and
+`--force` over a silent daemon says what it overrode. It refuses when the
+systemd user unit is not installed or is not what runs the daemon (one
+started by `jarvis hud` or a shell would be doubled — the second cannot
+bind), and **the daemon that answered `/status` must be the unit's** (review
+2, L-4: `/status` gained `pid`, compared with systemd's MainPID or an
+ancestor of it — an idle daemon on this shell's port that is not the unit's
+is "can't check", exit 3 unless `--force`, and after the restart one that is
+not the new MainPID does not verify, exit 4; a `/status` without `pid` is
+trusted as before); **warns, never refuses, when the checkout the unit runs
+from holds uncommitted Python** (M5: `git status -- jarvis pyproject.toml`
+there — the new daemon loads it, and Jarvis's chats leave edits on main) and
+that open HUD terminals end — the warning, and a hand-off's grace pause, come
+**before** the busy check, which is the last step before the restart (review
+2); runs `systemctl --user restart jarvis-daemon2` as argv;
+waits up to 30 s for a daemon **younger than the restart** to answer
+`/status` (the old one's last answer never passes; exit 4 with systemd's
+state, the `journalctl` line and, at systemd's start limit, the
+`reset-failed` way out); and prints uptime, each provider's ok/reason and the
+HUD served, then asks for Ctrl+R. **Typed in a HUD terminal** — which runs in
+the daemon's own cgroup (`/proc/self/cgroup` names `jarvis-daemon2.service`),
+so the restart would kill the command mid-wait — the checks and the refusals
+run there, and the restart itself is handed to a transient unit outside it
+(`systemd-run --user --collect --quiet --unit=jarvis-owner-op-… -- python -P
+-m jarvis restart … --handed-off` — `-P`, so a `jarvis.py` planted in its
+working directory, `$HOME`, never runs; exit 4, its report in `journalctl
+--user -u <that unit>`; M4); a handed-off run still inside the cgroup
+refuses, and one never hands off again. **`jarvis hud rebuild [--pull] [--restart] [--force]
+[--clean] [--allow-dirty]`**: `--pull` fast-forwards `main` from `origin/main`
+through `gitops._git` (refused off `main`, on a detached HEAD, with dirty
+tracked files, when the checkout's own config names a program, and — failing
+closed — when that config cannot be listed at all; it never stashes, merges,
+resets or forces; it says when main is ahead of origin and builds what is
+there; it names Python the pull changed); then the install root and **the
+clean-`hud/` check, before `npm ci`** (M3: `npm ci` runs package.json's
+scripts and obeys `hud/.npmrc`, so an edited one ran before the refusal; an
+untracked *or ignored* `hud/.npmrc` or `npm-shrinkwrap.json` now counts as
+dirty, for `jarvis hud install` too); `npm ci` when `node_modules` is
+missing, unmarked or older than `package-lock.json` (or `--clean`); then
+**`jarvis hud install`'s own path** (`hud_install.install_checkout`, split
+out of `main`); `--restart` goes through `restart`'s code (its busy refusal
+checked before anything is pulled or built and again before restarting; from
+a HUD terminal it hands off after the install); and `/status` must then serve
+the new build from HEAD as `installed`, else exit 4 — a daemon that is up but
+slow to answer is asked again and then reported as unchecked, never called
+down. Exit codes: 0 done, 1
+refused or failed, 3 a turn runs or an approval waits (or that could not be
+checked), 4 not verified or handed off. **Both are DENY for every agent**
+through the one detector (`OWNER_OPS` gains `("hud", "rebuild")`,
+`("restart",)`, `("daemon2", "restart")`; `OWNER_OP_MODULES` gains
+`jarvis.v2.owner_ops` — its writers `hand_off` among them since review 2 —
+and `hud_install`'s writers gain `install_checkout`; a shell reserved word
+before the command is skipped (review 2, L-2: `if true; then systemctl --user
+restart jarvis-daemon2; fi` and `while …; do pkill -f daemon2; done` were
+ASK — `then`, `do`, `else`, `elif`, `if`, `while`, `until`, `!`, `{`,
+`coproc` and a `case` pattern; `jarvis hud install` gains it too);
+module runners — `python -m runpy|cProfile|profile|pdb|trace|coverage`,
+`coverage run -m` — are peeled to what they run, and inline source that
+star-imports an owner module, reaches one through `importlib.import_module`,
+or hands `subprocess`/`os.exec*` an argv list naming an op is the op).
+**`hud` and `daemon2` take no option with a value** (the detector reads their
+words, options skipped; `jarvis restart --wait` is fine, its op being the
+first word) — `owner_ops_check` pins it through `__main__.build_parser()`.
+
+**The daemon's unit, by `systemctl` and D-Bus** (the sibling rule; not "any
+changing verb"). `systemctl` is read as getopt_long reads it — systemd 259's
+option table, short clusters whose last value-taking letter takes the next
+word (`-qp status restart …` is the verb `restart`), unique prefixes of long
+names (`--us`), options anywhere, `--` — with braces expanded and the line's
+own `$VAR`s put in (review M1). **DENY:** a verb that is neither a read nor
+`reset-failed`/`daemon-reload`, on units that may be the daemon's — named
+(with or without `.service`), globbed, brace-expanded, a line-local `$VAR`, or
+an expansion only known at run time — or, in the user manager, **any**
+`.slice` or `.target` (the unit Requires= app.slice and basic.target, and
+starting exit.target stops it); `--marked`; `systemctl --user
+exit|isolate|default|rescue|emergency|halt|poweroff|reboot|kexec|soft-reboot|switch-root`;
+a verb only known at run time; an option the table does not know, or a
+globbed verb, with any operand that could be the daemon; `xargs`-fed
+systemctl with a changing verb or none (its input may name the daemon); and
+the same through D-Bus (`busctl`, `dbus-send`, `gdbus`,
+`qdbus`) naming the unit or its escaped object path, or calling systemd with a
+method that changes a unit or the manager. **ASK, never auto-approved:**
+`systemctl --user set-environment|unset-environment|import-environment` (the
+daemon reads that environment at its next start; they were ALLOW).
+**Untouched:** every read (`status`, `show`, `cat`, `is-active` …),
+`reset-failed` (how a unit at its start limit is recovered — the first round
+had it DENY), `daemon-reload`, and other named units (`systemctl --user
+restart pipewire` stays ALLOW; system-wide systemctl stays ASK).
+`systemctl --user restart jarvis-daemon2` was ALLOW before this PR, and v2's
+AUTO permit let every spelling through unasked.
+
+**The daemon2 kill rule is the owner's choice (2026-10-11, on review M2:
+"yes add the daemon2 kill rule").** `pkill -f daemon2` stopped the daemon
+with nobody asked — a plain SIGTERM is a clean exit, which
+`Restart=on-failure` does not restart. **DENY:** `pkill -f` (or a pkill with
+an option the table does not know) and `killall -r` whose pattern matches
+one of the daemon's command lines (`<repo>/.venv/bin/python -m jarvis
+daemon2`, `python[3] -m jarvis daemon2`, `jarvis daemon2`) **with a match that
+overlaps the word `daemon2`**: `pkill -f daemon2`, `'jarvis daemon2'`,
+`'daemo[n]2'`, `'daemon.'`, `'jarvis d'`, `'n2$'`, `'jarvis.*'`, `pkill -9
+-f daemon2`, `killall -r daemon2`; `pkill --cgroup|--pidfile` naming the
+unit and `fuser -k` on one of its ports, which kill it outright (review 2);
+and a `kill` **fed** PIDs on the same line — an operand only known when it
+runs (`$(…)`, backticks, `<(…)`, `$P`) or `xargs` input — by a source that
+yields the daemon's: `pgrep -f`/`pidof` with such a pattern (`kill $(pgrep
+-f daemon2)`, `pgrep -f daemon2 | xargs kill -9`) and, since review 2, a
+process listing filtered by such a `grep` (`ps`, or — since the delta
+review — a grep over `/proc/*/cmdline` itself, `grep -l daemon2
+/proc/*/cmdline | cut -d/ -f3 | xargs kill`; every grep on the line keeps the
+daemon's line and one selects it at `daemon2`), `ss -p`/`netstat -p`
+filtered onto one of its ports (by a grep, or `ss`'s own `sport = :8405`;
+delta review), `systemctl show` of the unit's
+MainPID/ControlPID/ExecMainPID (or of every property) and `systemctl status`
+of it or of the whole manager, a D-Bus read of the unit, its cgroup's
+`cgroup.procs`, `pgrep --cgroup|--pidfile` naming the unit, and `lsof
+-i`/`fuser` on one of its ports (`config.control_ports()` plus the
+workshop's 8403, which daemon2 also binds). **A source is judged only when a
+fed kill is on the line** (review 2): `pgrep -f …` alone is a read and its
+pattern never runs, and `pgrep -f daemon2 && kill -9 4321` kills a literal
+PID nothing on the line fed it. A pattern only known at run time counts as
+matching, and so does one that will not compile on a line that names
+`daemon2` (both fail closed). **A pattern whose matching cost cannot be
+bounded is never matched** (review 2, HIGH: the first round's guard counted
+only unbounded quantifiers, so `.?` thirty times took days — and `re` holds
+the GIL, so the whole daemon froze). `_regex_work` reads the pattern with
+`re`'s own parser and bounds the backtracking: a sequence multiplies, an
+alternation adds, an unbounded repeat counts as the text's length, `?` as 2,
+`{m,n}` as n−m+1, a repeat of something that itself chooses as
+(n−m+1)·inner^n (so `(.*)*` saturates), a back-reference or anything unknown
+without bound — times the starts it is tried at, against `_REGEX_BUDGET`
+(2^19 per pattern, about 10 ms at worst; two unbounded quantifiers fit on
+the owner's checkout path), a per-line budget twice that, and 4096
+characters parsed per line. **Past the budget a kill is too complex to
+judge, which is ASK — never DENY** (the delta review: the second round
+refused it, so every kill pattern with three unbounded quantifiers was an
+unapprovable DENY): `_daemon_match` answers `COSTLY`, the line is
+`protected_state.kill_unsure`, `rules.decide` asks with "too complex to
+judge", `permissions.allows` never covers it and v2's layer 2 always asks
+(rule `daemon-kill`). A provable match stays DENY. And before any cost is
+counted, a daemon line that lacks a literal run every match must contain
+(`_required_runs`: `node` in `node.*vite.*--port.*5173`) is set aside, so a
+pattern that cannot match the daemon is told so cheaply whatever its cost —
+`pkill -f 'node.*vite.*--port.*5173'`, `'gunicorn.*worker.*[0-9]+'` and
+their kin keep main's verdicts. **A quoted brace is the regex's**
+(review 2): `pkill -f 'daemo.{0,1}2'` was brace-expanded into `daemo.02` and
+`daemo.12` and allowed; `_mark_quoted` keeps quoted and escaped braces and
+commas from expansion, as bash does. **Untouched:** `pkill -f jarvis` and
+`pkill -f 'python -m jarvis'` (they match the daemon's line but not at
+`daemon2`; the owner's 2026-08-09 matrix keeps `pkill -f jarvis` ALLOW),
+`pkill -f vite`, `pgrep -f daemon2` alone (a read), `echo pkill -f daemon2`,
+signal 0 and listings, kills on other ports (`lsof -ti :5173 | xargs kill`
+ALLOW, `fuser -k 5173/tcp` ASK, as on main), and D-Bus reads of the unit
+(`busctl get-property|introspect`, a `Get`/`GetAll` call — the first round
+refused every D-Bus line naming it). **Its limits, stated:** a literal `kill
+<pid>` (`kill -9 12345`) is not seen — nothing on the line says whose pid it
+is; matching by process *name* (`pkill python`, `killall python`, `pkill
+daemon2` without `-f`) is left alone although `pkill python` reaches the
+daemon, since a process name never holds `daemon2` and refusing `pkill
+python` would refuse ordinary work; a pid looked up in one command and
+killed in a later one is two lines; other PID printers feeding a kill are
+not seen (`ps aux | awk '/daemon2/ {print $2}'`, a `/proc` scan by awk or a
+script rather than grep, `ss`/`netstat` filtered by anything but grep or
+`ss`'s own filter, `lsof -t -c python`, `fuser -k` on a file the daemon holds
+open); and a kill pattern over the budget is asked even when it could not
+have matched, if no literal of it rules the daemon out. Review 2's L-3 and L-5, recorded rather than fixed: a wrapper
+the runner table does not peel (`taskset`, `chrt`, `prlimit`, `strace -f`,
+`script -c` …) hides the command behind it from the whole detector, and
+`systemctl --user preset-all`, which acts on every unit and can disable
+`jarvis-daemon2` without naming it, is not refused. `pkill -9 -f 'jarvis
+daemon2'` is in effect a restart (Restart=on-failure brings it back in 5 s),
+and it is refused all the same.
+
+Evidence for the review round: `owner_ops_check` (91 tests; its
+`ReviewRestart`/`ReviewRebuild` classes each fail on c218da8), `rules_check`
+`review_48_checks` (69 spellings DENY in `rules.decide`, `static_verdict`,
+`command_verdict` and real `dispatch` under an allowlist of every stem, modes
+"ask" and "all", never run or asked; 40 ordinary lines never DENY; 16
+verdicts pinned) and v2 `permissions_check` `review_48_checks` (layer-1 DENY
+under AUTO and STRICT). A mutation sweep in scratch worktrees (each suite in a
+3G scope, an unmutated control passing) bit 9 of 9: H1's no-answer refusal,
+`approvals_pending` in the busy check, the M3 order, the M4 hand-off, the
+kill rule off, its overlap-at-`daemon2` narrowing, its ReDoS guard (the suite
+hangs and is killed), a systemctl cluster parse and `reset-failed`'s
+exemption. The differential against b60bf64 over 23,207 strings (every string
+literal under `tests/`, every backticked span and fenced-code line in
+`skills/`, `docs/` and CLAUDE.md): 149 moved, all stricter — 4 ALLOW→ASK (the
+three environment verbs, `python3 -m runpy jarvis chat`), 66 ALLOW→DENY, 79
+ASK→DENY — nothing looser and no ordinary line; three are prose strings
+holding a live backtick span (`` `jarvis restart` ``), which bash would run,
+as with #44's commit-message case. **Never run either command from a
+session**: the tests fake `systemctl`, `npm` and `systemd-run` behind
+`subprocess.run`, play `/status` on a fake clock and refuse any connection to
+8402/8403/8405.
+
+**Review 2 (the re-review of 819e58a, PASS with fixes; main merged up to
+fb549c3)** is folded into the paragraphs above: HIGH, the regex bound, a
+source judged only beside a fed kill, and quoted braces; MED, the new PID
+sources, `fuser -k` and `pkill --cgroup|--pidfile`; L-1 `hand_off` a writer;
+L-2 reserved words; L-4 `/status` `pid` against MainPID; the NITs (warning and
+grace before the busy check, `python -P`, and `pgrep -f daemon2 && kill -9
+4321` and D-Bus reads of the unit no longer refused); L-3 and L-5 recorded as
+limits. Evidence: `rules_check` `redos_checks` (240 pathological patterns —
+`.?` thirty times, `.*.*` and `.?` twelve times, nested groups,
+alternations, lookarounds and a seeded fuzz — as `pkill -f`, a fed `kill
+$(pgrep -f …)`, `killall -r` and `ps | grep -E … | xargs kill`, each judged
+through `rules.decide` in under 50 ms, the slowest about 2 ms; `pgrep -f …`
+alone never matched, its verdict the one it has with no kill rule) and
+`review_48_round2_checks` (45 spellings DENY in `rules.decide`,
+`static_verdict`, `command_verdict` and real `dispatch` under an allowlist of
+every stem, modes "ask" and "all", never run or asked; 23 ordinary lines
+never DENY; 6 of main's verdicts kept — on 819e58a 40 of the 45 were ALLOW
+or ASK and three hung it, and 5 of the 23 were DENY), v2
+`permissions_check` `review_48_round2_checks`, and `owner_ops_check`
+`Review2Restart` (8 tests, 7 failing on 819e58a; the eighth is the
+no-over-refusal half). Three mutations in scratch copies bite: the bound off
+(`redos_checks` fails on `.?` sixteen times, 65 ms), sources judged without a
+kill (`pgrep` alone is matched) and no `systemctl show` source (the detector
+misses `systemctl --user show -p MainPID --value jarvis-daemon2 | xargs
+kill`). The differential against fb549c3 over 25,657 strings (the usual
+corpus, from both trees; `rules.decide` and `static_verdict` agree on every
+one): 185 moved, all stricter (4 ALLOW→ASK, 78 ALLOW→DENY, 103
+ASK→DENY), nothing looser; 33 are review 2's, each a spelling from its new
+tests, and the rest are round 1's (already so on 819e58a). Against 819e58a
+the only lines that loosened are the five over-refusals the NITs named —
+three D-Bus reads of the unit and two `pgrep -f daemon2` lines whose kill it
+does not feed — back to main's verdicts.
+
+**The delta review of 92c225b (PASS with fixes)**: MED, a kill pattern too
+costly to judge is asked, never refused — `COSTLY`, `kill_unsure`, the
+`daemon-kill` always-ask rule — and a literal it needs rules the daemon out
+before any cost is counted; LOW, a grep over `/proc/*/cmdline` and `ss
+-p`/`netstat -p` filtered onto the daemon's port are PID sources. Evidence:
+`rules_check` `review_48_delta_checks` (the review's four costly lines keep
+main's verdicts; five lines too complex to judge are ASK in `decide`,
+`static_verdict` and `command_verdict`, never covered by an allowlist entry
+for every stem on them, asked through real `dispatch` and not run on a no;
+the six new sources DENY; six ordinary lines untouched) and v2
+`permissions_check` `review_48_delta_checks` (always-ask under AUTO and
+STRICT with an allowlist entry for every stem; the sources layer-1 DENY) —
+48 v2 checks and every one of those lines fail on 92c225b. Three mutations
+bite: a costly answer selecting again, no literal prefilter (the review's
+lines ask instead of keeping main's verdicts) and no /proc listing. The
+differential against 6a2bfbe over 25,725 strings: 193 moved, all stricter
+(6 ALLOW→ASK, 80 ALLOW→DENY, 107 ASK→DENY), nothing looser, each a restart,
+rebuild or install spelling, the daemon's unit, a module runner or a kill;
+against 92c225b, the ten lines that loosened are the review's costly
+patterns, and the six that tightened are the new sources.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
@@ -814,7 +2685,8 @@ inert**, and the card takes focus off them: focus left on the cycle button
 used to let Enter switch OFF to AUTO behind the card. **Model and effort are
 one button per chat pane** (`model-chip-btn`, carrying `data-model` and
 `data-effort`) opening one popover (`ModelChip.tsx` `Popover`, portaled to
-`#root`; `data-pane` says whose) with Model and Effort sections and "Set
+`#root`; `data-pane` says whose) with a Model section, the effort slider
+(below) and "Set
 <provider> default…"; the provider stays a select. It is placed by
 `placePopover` through `toCss` — upward, downward only when there is too little
 room above and more below, never taller than the room it opens into — and
@@ -822,7 +2694,7 @@ closes on Escape (focus back on the button; **under a card it never swallows
 Escape**, which denies), a click outside, focus leaving it, a resize, a zoom
 change, or its button moving (a rAF watch: a fold, a split, a re-layout). It
 opens on the chosen option, the arrows move within a list, Tab goes round its
-stops and never leaves it, none of its keys reach push-to-talk, and its
+stops and never leaves it, its keys stop there, and its
 listeners are set once (the close is read through a ref). The box grows to the
 least of 15 lines (`MAX_LINES`), 35% of its pane (`MAX_PANE_SHARE`), and what
 the pane has left once its fixed parts (header, ticker, the rest of the bar,
@@ -898,6 +2770,1585 @@ conversation's minimum would let the line take the log below it. Free checks:
 `_thinking_*` sections of `tests/face/hud_v2_multichat_check.py` (the mock's
 `thread_running(tid, since)` sets `running`/`running_since`), every mutation
 named in the plan's table shown to bite in a scratch copy.
+
+**The editor's missing half, ED-1 (2026-10-10; plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.2, decisions file beside it
+wins: E-1 no intellisense, E-10).** Monaco is **0.57.0, pinned exactly**, on
+its supported entry points: `lib/monacoBundle.ts` is `monaco-editor/editor`
+plus a **curated** `features/*/register` list (find, folding, comment,
+multi-cursor, brackets, word suggestions, sticky scroll, go to line, F1, the
+context menu …; nothing that needs a language server) and the Monarch
+definitions, one lazy chunk (3.6 MB) behind `loadMonaco()`. **No
+language-service worker exists** — no TS, JSON, CSS or HTML worker is built
+or loaded (`getWorker` refuses any label but `editorWorkerService`), so a
+`.json` file gets a small Monarch definition of ours and `.toml` borrows
+INI's; `.h` is C++ (VEX headers); a shebang names shell or Python. **The
+language comes from the registry by the model's URI** (`file:///<project>/<path>`,
+a per-editor query until ED-2's buffers share one model per absolute path);
+`languageFor` is gone. Links open only http/https, `noopener`
+(`registerLinkOpener` answers every other scheme "handled" — Monaco's own
+fallback navigates the window). ED-1's interim moves of vs-dark's amber and
+red off those hues are gone: ED-3's scheme (below) replaced them. Diff models live under
+`jarvis-diff:` and are disposed with their view (two leaked per file).
+**Under a card every editor is read-only** (`setEditorsBlocked` from App,
+above the error boundary, beside the terminals' hold) and unfocused (the
+card's own focus grab, WP-A), and `.editorhost` is `isolation: isolate`, so
+Monaco's thousand-z overlays (its context menu is 2575) stack inside it,
+under `#authveil` — they also close when the card takes focus, so the check
+for the isolation lays a layer at the veil's z-index over an open menu.
+**Monaco's context view under the HUD's zoom**: it lays the right-click menu
+(and its buttons' tooltips) out in viewport pixels and writes them as CSS
+lengths, which `#root`'s zoom scales again — at 160% the menu opened off the
+window. `monacoBundle.ts` patches `ContextView.prototype.doLayout` (Monaco
+patches its own find widget the same way) to **lay the view out again in the
+pixels it is drawn in** — its drawn size, the anchor's drawn rect, below or
+above and left or right by what fits (Monaco's preference first), then kept
+on screen (`lib/zoomfix.ts` `placePopup`), written back divided by the zoom it
+sits under, across the shadow root. Dividing Monaco's own numbers was not
+enough (review of PR #43): it flips by its *unzoomed* size, so at 70% a
+right-click near the bottom put the menu's bottom 45 px above the pointer.
+**Keys: the one interception place is still
+`useLayout`'s capture handler.** It feeds every keydown to
+`lib/editorkeys.ts`'s `chordStep`, so **the second key of a Ctrl+K chord
+typed in Monaco is Monaco's, whatever HUD key it is** (Ctrl+K Ctrl+B sets the
+selection anchor, Ctrl+K Ctrl+0 folds all, as in VS Code) and still kept from
+Chrome; a lone Ctrl+B folds the sidebar from Monaco too (E-10), a lone zoom
+key is the HUD's. **The tracker follows Monaco's own chord state**: it counts
+only keys typed in an editor (Monaco dispatches only those, so a key in the
+chat box between Ctrl+K and Ctrl+B ends neither chord), leaves the chord after
+5 s or when the window loses focus, and ignores repeat and composition.
+**Ctrl+S never reaches Chrome**: in an editor it saves **that editor's**
+buffer — an `addAction` keybinding, scoped by Monaco to its `editorId`,
+disposed with the editor and dead once it is (no editor has focus under a
+card, so it cannot run); in a terminal it is the shell's. **Never
+`addCommand`** (review of PR #43, the HIGH): in 0.57 it is a global
+keybinding with no condition, so the last editor created owned Ctrl+S for
+every editor and outlived itself — Ctrl+S in a Diff wrote the file blank (a
+disposed editor's text is ""), and Ctrl+S in one pane saved another pane's
+buffer. The other global registrations (languages, the link opener, the
+theme) are made once in `loadMonaco` and hold no editor. **A save's answer
+lands only on the buffer it was sent from** (a generation bumped per read): a
+save still on its way when another file was opened used to put the old
+file's record back over the new one's text. **An unsaved edit is never
+dropped without a word**: opening another file or Reload over one asks
+(`file-discard-ask`, Keep editing / Discard). **A File pane picks its own
+project** (decisions E-13, built here): its header's `Project ▾`
+(`pane-N-folder`) lists every project plus Follow chat and replaces the File
+pane's "in: … · follow chat" chip (a Preview pane keeps the chip); it re-pins
+that pane only, refuses with the refusal chip while the pane holds an unsaved
+edit (the select snaps back), and is disabled under a card. **The dirty flag
+the guards read is set in the keystroke's own change event** (`markDirty`
+writes App's ref at once; the state follows for drawing): read from state a
+frame behind, a project picked in the same breath as a keystroke remounted the
+pane and dropped the edit. Only project
+roots are offered — a folder becomes reachable by becoming a project, so
+`folders.py` stays the one gate. EditContext stays on (headless
+Chromium types into it). Space in Monaco **still** starts push-to-talk and
+the space is lost — confirmed headless; it is the Ctrl+D push-to-talk PR's,
+not ED-1's (the owner's decision, 2026-10-10). Test hooks (read-only):
+`__hud.monacoModels()`, `monacoEditors()`, `monacoLanguage(path, text)`; the
+editor host carries `data-language` (set once Monaco holds the file — what
+`_edit` waits on now) and `data-readonly`. Free checks: `editorkeys.test.ts`,
+`monaco.test.ts`, `zoomfix.test.ts`, `hud_v2_check`'s file and diff sections (tokens, find,
+suggest, Ctrl+S in and out of an editor, links, Ctrl+B and the chords, the
+discard ask, the diff leak, no request off loopback by a catch-all route, no
+language worker requested or built, a `file:` link opening nothing) and
+`hud_v2_layout_check`'s `_editor_card_checks` (a card over an open context
+menu or suggest list, at 100% and 160%), `_save_scope_checks` (Ctrl+S in a
+Diff after the file pane's editor went away, two editors alive, one switched
+away; an editor created under a card is read-only), `_late_save_checks` (the
+mock's `put_delays` holds a write's answer), `_chord_checks`,
+`_menu_place_checks` (70% near the bottom, 160% near the right, a window too
+short for either side) and the E-13 checks in `_workspace_checks` (a project
+picked in the same breath as a keystroke). Every one that guards a behaviour
+fails on origin/main, on the reviewed head (18381b9) or with its fix reverted
+(PR body). Monaco's `getValue()` per keystroke (the change event hands the
+whole text to React) was left for ED-2's buffers, which removed it (below).
+
+**Buffers, tabs and the guarded save, ED-2 (2026-10-11; plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.3–§2.4, decisions E-7/E-8/E-13;
+the owner's `.env*` rule; contract in `docs/hud-api.md`).** **A file's text
+lives in the buffer registry, outside React** (`hud/src/state/buffers.ts`,
+rules in `lib/buffers.ts`): **one Monaco model per file on disk, keyed by
+`abs`** (where the read route says it resolves), so one file reached from two
+projects is one buffer and the same file in two panes shares the text, the
+dirty dot and the undo stack (each pane keeps its view state, in memory). A
+buffer saves through the project it was read through. **Unmounting a view
+never loses an edit**: a pane holds a reference per tab (`<pane>|<path>`); a
+model goes when no tab holds it **and it is clean** — a dirty one nobody holds
+stays (and `beforeunload` asks) until it is reopened or the owner discards it
+(`releasePane(n, {discard})`, the project-gone "discard edit"). **The text is
+read once, at save** (`getValue()` never per keystroke). **Dirty is
+`getAlternativeVersionId() !== saved`**, said from the edit's own change event
+and only when it moves, so App's guards (`dirtyNow(pane)` =
+`buffers.paneLoses`, `mayShow`, the E-13 picker, `unpinProject`'s keep, ×'s
+question and `allocate`) read
+it in the keystroke's breath (#43's M1), and undo back to the saved text reads
+clean. **A pane "holds an unsaved edit" only when it holds the last view of a
+dirty buffer** (`buffers.paneLoses`; split-panes plan G-3): a view another
+pane still shows may switch away, re-pin or close without asking. **Tabs** (`PaneSpec.editors {paths, active, preview}`, relative to the
+pinned project, per-field fallback, only with a pin; `pinPane`/`unpinProject`
+drop them; `setEditors` pins and sets in one step; a WP-G2 `filePath` with no
+tabs reads as one): a single click opens an italic preview tab the next one
+replaces, a double click or an edit pins it (a narrow pane opens every file
+pinned and folds its tree at once), middle-click or × closes, the last
+tab on an unsaved edit asks Save / Don't save / Cancel. Past 40 tabs the
+oldest **clean** one closes; with every other tab dirty nothing opens and the
+pane says why (a dirty tab is never closed unasked). Reload over an edit
+still asks; opening another file just opens a tab. **One editor per pane**
+(`PaneEditor`), its model swapped, created at the first buffer and kept.
+**Saving is by content**: `expected_etag` (null: must not exist), 409 with the
+disk's etag, never a force; `expected_mtime` is accepted one more release.
+**The poll** (`buffers.poll`, App, every 2 s while visible and on focus):
+clean + moved → reload in place (`minimalEdit`, one undo stop each side, EOL
+followed), toast naming the writer (a `tool_started` of a **write** tool only
+— Write/Edit/MultiEdit/NotebookEdit, `apply_patch`, `write_file`/`edit_file`
+— through `writtenPaths` → `noteTouch`, **absolute paths only**, a relative
+one resolved from the thread's `cwd`, never matched by its tail); dirty +
+moved or a 409 → the amber `ConflictBar` (Compare —
+`CompareEditor`, the disk read-only left via a `jarvis-disk:` model, the
+buffer itself right, `useInlineViewWhenSpaceIsLimited: false`; Keep mine
+against the shown etag; Take theirs asks once, undoable); gone → Save to
+recreate / Close. **`jarvis/v2/editor_policy.py` is the one classifier**
+(gate → withheld → safety → env → binary → text; see `docs/hud-api.md`), and
+**every editor file route is owner-only, reads included** (E-7) — so tests
+that read a file go through the HUD listener with the HUD's Origin
+(`hud_backend_check.owner`). **Env files**: kind `env`, a lock "Jarvis can't
+read this file", Add to chat disabled (`jarvisMayRead`), model language
+`dotenv` (word suggestions draw only on same-language models, so a secret is
+never offered in a file Jarvis can read), and the text in no request but its
+own save, never localStorage or `__hud.buffers()`. **Add to chat** exists in
+its smallest form (selection or line → `path:Lx-y` + fence into the selected
+chat's box, unsent; W-6) so the env rule has something to disable; ED-7
+extends it, and anything new that carries a buffer's text toward Jarvis must
+ask `jarvisMayRead` first. Polling mock: `mock.disk_write`/`disk_delete`
+write behind the editor; the mock's `files/stat` and etag 409s follow the
+daemon's. The headless checks type no spaces (they were written while
+Space was still push-to-talk; #40 moved it to Ctrl+D). Test hook:
+`__hud.buffers()` (no text).
+Free checks: `lib/buffers.test.ts`, `state/buffers.test.ts`,
+`workspace.test.ts` (tabs), `tests/v2/editor_files_check.py` (the name rule,
+the kinds, etag/409/stat, owner-only, env content kept off the bus, logs,
+API listener, diffs, preview and attachments; real Chromium for the owner's
+own page) and `tests/face/hud_v2_editor_check.py` (run by `hud_v2_check` on a
+`MockDaemon(0)` of its own, or alone, under `hud_v2_check.guard` — no CSP
+violation).
+
+**ED-2's review round (2026-10-11, PR #49; each check failing on f869543).**
+The rules the two reviews left, in one place:
+- **An env file is never demoted** (MED1): `editor_policy.classify_bytes`
+  keeps a non-UTF-8 env file `env` (UTF-16LE from PowerShell 5.1, Latin-1)
+  with `Verdict.writable=False`; every read carries **`editable`**, and the
+  HUD's editability is `editableOf(kind, editable)` — the read's word and an
+  editable kind, both, never the kind alone — so the lock, closed Add to chat
+  and `dotenv` stay while the file is read-only (`editor-readonly-reason` too).
+- **The gate's readable exemption is the editor's own, and only for a gate
+  path that resolves to itself** (LOW2, `Policy._readable_gate`): not a
+  symlink anywhere on its way, not a protected/env name or login file, not in
+  a credential folder other than `~/.config/jarvis`. `hud_api.protected` (an
+  `@path`, the preview origin, a diff) asks `withheld_anywhere`, which has no
+  exemption — the allowlist is no longer attachable by `@path`.
+  `files._protected_state_paths()` is the unresolved list it reads.
+- **Withheld widened** (LOW3): `~/.docker/config.json` (and
+  `$DOCKER_CONFIG`), `~/.kube/config` (and `$KUBECONFIG`), `~/.npmrc` (and
+  `$NPM_CONFIG_USERCONFIG`), `~/.pypirc` as login files; v2's session
+  carriers (`V2_DATA_DIR/claude`, `V2_DATA_DIR/codex`) as credential folders;
+  a dropped file named like a store (`editor_policy.credential_name`) is never
+  attached. **The preview origin refuses any path with a hidden component
+  inside the project except `.well-known`, and anything under Jarvis's config
+  and data folders** (`hud_api._not_a_page`, which asks
+  `editor_policy.hidden_component` and `editor_policy.jarvis_dirs`): it
+  answers any loopback client, `fetch_page` included.
+- The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
+  file by name, LOW4); a save's unexpected `OSError` is 500 and a
+  `PermissionError` 403, never the dispatcher's 409 (the conflict bar); a tree
+  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED.
+- **`Buffers.releasePane` touches only buffers this pane held** (H1): × on any
+  pane used to discard every edit no tab held. **A project going away asks
+  the panes on it together** (H2, `panesLose`/`panesHolding`): two panes
+  sharing an edit each read "another pane holds it", both unpinned and the
+  edit lost every tab; now each one holding it stays pinned with
+  `pane-N-gone`, and FileTab stays keyed by the gone project (`goneHeld`).
+- Compare re-reads once per new conflict etag (M2, `rereadFor`; it looped at
+  ~340 GET/s while the disk disagreed with the poll, unbounded when hidden).
+  Loads dedupe by `abs` after the read (L1, `making`), and `makeModel` never
+  disposes a model at its URI — a second goes beside it under a query. An
+  unknown kind is `unknown`: read-only, closed to Jarvis (L2). The crash
+  prompt has **Save N unsaved files** (`hud-crashed-save`, `saveAll`; disabled
+  and inert under a card, L3). A reload in place says nothing while it runs
+  (`applying`, L4 — it used to read dirty for a moment and pin a preview
+  tab). A save's late answer lands only on its own buffer; a 409 whose etag
+  is not one asks the poll route and, still unknown, tells the owner; one
+  write at a time per buffer (a double Ctrl+S sends one PUT).
+- **A Ctrl+S during a save is never dropped** (delta review, LOW-2; the
+  owner's VEX projects live on `/mnt/c`, where writes are slow): it waits for
+  the first, then **exactly one** follow-up save runs against the etag *that
+  answer returned* — further presses join it, a first 409 or error runs none
+  (the bar), and nothing new since the first means no second PUT. The tab's
+  dot is a hollow ring and the status says **saving…** (`editor-saving`,
+  `data-saving`) until the last answers; Save stays pressable meanwhile. A
+  poll whose stat crossed a save (sent while saving, or the etag moved under
+  it) is ignored — it read the disk before the write landed. The preview
+  origin refuses a hidden path in its own words, "hidden path: not served on
+  the preview origin" (NIT-1); a credential and Jarvis's own folders stay
+  "protected file".
+Checks: `editor_files_check`'s `Review*` classes, the `review of PR #49`
+blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
+`_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
+`uneditable` and on-cue `stat_etags`).
+
+**The editor's navigation, ED-7 (2026-10-11; plan §2.8, §2.10; contract in
+`docs/hud-api.md`).** The owner replaces VS Code with this at the lab, so:
+**quick open** (Ctrl+P), **the palette** (Ctrl+Shift+P, F1), **find in
+files** (Ctrl+Shift+F), **explorer ops** (right-click: new file, new folder,
+rename, delete; `+`/`+▸` in the tree column's head), **the status bar**
+(`EditorStatus`: Ln/Col and selections, language, indentation, encoding, EOL,
+saved/unsaved, and ED-2's `saving…` — `data-queued` when a second Ctrl+S waits:
+`BufferView.queued`) and **Add selection to chat** extended (every selection,
+from the palette and Monaco's context menu — `jarvis.addSelectionToChat`,
+shown only under the `jarvisMayAddToChat` context key, i.e. `jarvisMayRead`).
+- **Backend** (`jarvis/v2/editor_nav.py`, three routes in `hud_api.route`,
+  **`owner_only` before the body is read**): `GET …/files` (`git ls-files`
+  through `gitops._git`, else a walk; dotfiles in; never a credential folder,
+  the gate's state, a withheld file, `SKIP_DIRS`, a symlinked folder or a
+  symlink out; 50k/20 deep/5 s), `POST …/search` (refused on the Inbox; 2,000
+  matches, 10 s; `.gitignore` respected unless `ignore: false`; hidden files
+  searched) and `POST …/fs`. **No copy of any rule**: `editor_policy` judges,
+  `hud_api.scope` places, `folders` names Windows names, `trash.Trash.put`
+  deletes (a project-owned `Trash`, so Jarvis's retention purge never empties
+  the owner's deletes). `_policy_for(root)` narrows the policy's credential
+  folders to the ones that can matter under the root — a speed-up, not a
+  second rule. A folder is renamed or deleted only if it holds nothing the
+  editor refuses: absolute anchors (gate files, credential folders, login
+  files, the HUD roots, Jarvis's SELF_PROTECTED) **and** a walk of ≤20,000
+  entries that never follows a symlink or enters `SKIP_DIRS`. A rename never
+  replaces; **an env file keeps an env name** (403 otherwise); a new env file
+  is 0600. One fs op at a time on its own lock, not the daemon's (a Recycle
+  Bin move takes PowerShell a while).
+- **Find in files and `grep_files` share one core and one filter**
+  (`tools/search.py`: `refused()`, `Hit`, `_rg_record`, `_python_hits`,
+  `search_bounded`). `refused` = `is_protected` **or `is_env_credential`** —
+  so `grep_files` now refuses `.env.production` and the rest on both backends
+  (ENV-1's grep half). The route adds `editor_policy`'s withheld/gate/env on
+  top (two layers: dropping either alone keeps parity; dropping both breaks
+  it, and `editor_nav_check`'s parity test says so). `_rg_args`' new options
+  are keyword-only with defaults that leave `grep_files`' argv unchanged
+  (files_check asserts it).
+- **Keys**: `shortcutFor` returns `quickOpen`/`palette`/`findInFiles`;
+  `useLayout(blocked, onEditorKey)` takes them in **the one capture handler**,
+  prevents the default (no print dialog) and **stops propagation** (Monaco's
+  F1 never opens its own quick command); a Ctrl+K chord's second key stays
+  Monaco's; in a terminal **Ctrl+P is readline's** (`terminalTakesKey`); under
+  a card they are swallowed, and `navBusy` refuses too. Quick open and the
+  palette are **`state.picker`** values, so push-to-talk refuses and the mic
+  claims nothing while one is open; Space types a space; a layout effect
+  closes both when a card arrives; FileTab closes its menu and prompt on
+  `blocked`. Targets: the focused File pane, else a drawn File pane on the
+  focused pane's project, else **`placeFile`** — VX-2's `openAt` rule, one
+  function for both since the lead merge: a split beside the focused pane
+  (focus stays put), else the focused pane only when it shows File or chat
+  (`mayShow`), else a sentence ("No room to open …"). **A file never replaces
+  a VEX view** (nor a terminal, Preview or Diff): with a VEX view focused,
+  Ctrl+P opens the file beside it. Quick open and the palette **close when
+  focus leaves them** (VS Code's way; `PickList`'s `onLeave`) — left open,
+  the palette's veil covered the VEX view's Download button. Neither ever
+  offers a download or a device entry (`hud_v2_vex_check`'s
+  `_ed7_beside_checks`). App talks to a File pane by
+  **`fileAsk`** (open at a line, search, palette file commands), acted on once
+  per nonce and cleared after the commit.
+- **Rename keeps the edit**: `Buffers.renamed(fromAbs, toAbs, kind)` moves the
+  buffer (same model: text, dirty, undo), rewrites every hold's path relative
+  to its own project and returns the moves; App's `onRenamed` renames the tabs
+  of every pane on the project (`renameTabs`, prefix-aware for folders) and of
+  any other pane the moves name; the model's language follows
+  (`monaco.relanguage`). A delete leaves an unsaved edit in its tab (the poll
+  says gone; Save recreates); the prompt says so first.
+- **Find in files never prefills from an env buffer** (`dotenv` model) — its
+  text goes in no request but its own save.
+- **The review of PR #53**, the rules it left. **The owner's search pattern
+  is never run by Python in the daemon** (HIGH 1: `(\w+\s?)+:` on one line
+  held the GIL 27.8 s): `search_bounded` takes every match and highlight span
+  from ripgrep's `--json` (byte offsets turned into UTF-16 columns), ripgrep
+  validates the pattern (`\p{L}` works), no ripgrep means a regex is refused
+  with a sentence and a literal is escaped text; a view's `key` makes its newer
+  search cancel its older one, and at most `MAX_SEARCHES` (4) run at once
+  (429). ripgrep's exit 2 with matches or a silent stderr is **`partial`**,
+  never a 500 (MED 3); `grep_files` keeps its own behaviour, its argv and its
+  fallback's walk order. **`Buffers.renamed` never takes a buffer's place**
+  (MED 2): a dirty one at the new name stays and the renamed buffer stays put;
+  a clean one gives way with its tabs; the explorer refuses first ("… has an
+  unsaved edit open"). The fs route uses the **whole** classifier (a project's
+  extra folders are roots; `_policy_for`'s narrowing is quick open's walk
+  only), refuses `~` names, anything in `editor_policy.jarvis_dirs()`, and a
+  rename or delete of any project's folder or an ancestor of one; Windows
+  names are judged where the path resolves. **Every change is made through
+  fds** (delta review): the project folder is opened (each component
+  `O_NOFOLLOW`, `editor_nav._Root`) **before** anything is judged, and the
+  folder `scope` judged must still be that fd's (device and inode) or 409 — a
+  project folder swapped for a link between the check and the act changes
+  nothing; below it each folder is opened `O_DIRECTORY | O_NOFOLLOW`,
+  existence and kind are read through the fds, a rename is
+  `trash.rename_noreplace` (`renameat2(RENAME_NOREPLACE)`, check-then-rename
+  where the filesystem cannot, 9p), and a delete is **`Trash.put_from`**: the
+  entry moved by (folder fd, name) into a trash whose every component is
+  opened `O_NOFOLLOW` (a trash folder that is a link refuses, nothing moves),
+  its `.trashinfo` written through the `info` fd. A second item under a
+  protected or env name goes into `jarvis-deleted[.<n>]/<name>` (never `.env.2`);
+  anything else is numbered as the spec does (`notes.txt.2`). `put` and its
+  other callers are unchanged. What is left: a delete on a Windows drive goes to
+  the Recycle Bin by path (PowerShell takes no fd), after the inode re-check.
+  Hits keep at most `search.LINE_CAP` (1,000) characters of their line, cut in
+  the core with their spans. `_project_roots` reads the safe list. A folder
+  named `.env` is a folder; the delete warning names unsaved buffers from any
+  project (matched by the project's `root_real`, #50's); a buffer the registry
+  kept in place keeps its tabs' paths (`Renamed.kept`).
+Free checks: `tests/v2/editor_nav_check.py` (39: parity on both
+backends, listing, search bounds/gitignore/never-withheld, fs refusals,
+trash, owner-only), `fuzzy.test.ts`, `commands.test.ts` (no download or
+device entry, keys), the ED-7 blocks in `state/buffers.test.ts` and
+`lib/buffers.test.ts`, and `tests/face/hud_v2_editor_nav_check.py` (82, a
+`MockDaemon(0)` of its own; `ONLY=card` runs one section; run by
+`hud_v2_check` after the editor section). Guard removals that bite: owner_only,
+the classifier refusal, the folder walk, the anchors (an install root under
+`node_modules`), rename-replaces, the env rename, unlink-for-trash, the
+listing's filter, the route's two search filters together, and in the HUD the
+card close, the key guards (both), FileTab's blocked effect.
+Not done: replace in files (cut), a "dev servers" list, symbol search (cut),
+Ctrl+PageUp/Down as keys (palette only), and a tab on the same file through
+*another* project's pane that never mounted keeps its old path.
+
+**Jarvis's half of the owner's `.env*` rule, ENV-1 (2026-10-12; plan
+`docs/plans/2026-10-11-env-files.md`, its Status section is the list).**
+Jarvis reads no **credential env file** (`.env`, `.env.<anything>`, any
+depth, any case, a Windows-trimmed name both ways — not a name ending
+`.example`) and writes only `*.example`, and **every layer asks the one rule,
+`secrets.is_env_credential(_name)`; nothing keeps a copy.** By layer:
+- **Names.** `secrets.is_protected` (name only, no filesystem) asks the rule,
+  so every v1 caller that judges a name covers every credential env file;
+  `secrets.is_credential` adds `is_env_credential`'s symlink hops for a real
+  path. `PROTECTED_NAMES` is the bundles plus `.env`/`.env.local`.
+- **v1 file tools.** `read_file` refuses through `is_credential` (path and
+  resolved target); `write_file`/`edit_file` refuse a credential env file
+  with "only `*.example` is Jarvis's to write" (`secrets.write_refusal`), an
+  `.example` name that leads to one included, and create, read and edit
+  `.env.example`/`.env.local.example` as ordinary files. `grep_files` was
+  ED-7's (`search.refused`), confirmed on both backends. sqlite and the
+  face's `@path` ask `is_credential`.
+- **The shells' read layer** (`protected_in_command`): a word, or an
+  option's value (`--include=.env.*`), that is one; a glob that could expand
+  onto one; and anywhere in the raw line (`env_credential_in_text`: `.env`,
+  then `.` and the rest of the word up to whitespace, a quote, an operator,
+  `/`, `:`, `,`, `=` or `}`, judged by the rule — never right after a glob
+  character, so `find -name '*.env.ts'` passes). **Mentions are refused as
+  `.env`'s always were** (the accepted cost): a commit message or a
+  `.gitignore` echo naming `.env.production` is refused.
+  **Globs are judged structurally** (PR #60 review, MED-1;
+  `secrets.env_glob_reaches`). Only a **dot-led** pattern can reach one,
+  because bash does not expand `*`, `?` or `[…]` onto a leading dot
+  unless the line turns dotglob on (below). A
+  dot-led pattern is then intersected **exactly** with the name rule (a
+  small automaton: the `.env` prefix, Windows' trim, a `.example` ending
+  watched by KMP, over the characters that matter plus one stand-in), so
+  `cat .e?v.custom`, `.[e]nv.custom`, `.*.custom` and `cp x .e*.custom` are
+  caught and `ls *.local`, `*test*`, `*.py` are not. Braces are expanded
+  first (`protected_state._brace_expand`; one too large refuses), and a
+  pattern past 512 characters refuses. The bundles keep main's glob match
+  on every word (`_bundle_glob`). **The delta review of 4043ad1** (PR #60,
+  every spelling pinned in `secrets_check`'s `DELTA_REFUSED`/
+  `DELTA_ALLOWED`) set the rule **nothing main refused is let through**, and
+  filled the gaps by context (`_judge_segment`, per command of the line):
+  - **A word bash does not expand** (quoted) keeps main's glob rule over
+    `.env`/`.env.local` (`main_env_glob`: `echo '*.local'`). Only an
+    unquoted bash word is held to the dot-led argument, so `ls *.local`
+    (bash cannot expand it onto `.env.local`) is the one line main refused
+    that this allows — deliberately, in the review's own ordinary list.
+  - **A line that turns dotglob on** — `shopt -s dotglob`, `bash -O
+    dotglob`, `GLOBIGNORE`, zsh's `globdots` (any case or underscores) or a
+    `(D)` qualifier glued to a glob — has every glob word judged by the
+    exact test alone (`shopt -s dotglob; cat *.local`, `ls *(D)`) (fix 1).
+  - **A pattern a program expands itself** matches a leading dot with `*`:
+    a name-pattern option's value, quoted or not (`find -name/-iname/-path/
+    -ipath/-wholename/-lname`, `rg -g/--glob/--iglob` and a glued
+    `-g.e?v*`, `grep --include/--exclude`, fd's `-g`), a git pathspec after
+    `--`, a `tar --wildcards` (bsdtar always), `zip -i/-x`, `unzip` or `7z`
+    member (fix 4, the lead's option A: these, not every quoted word). It
+    is refused by `pattern_reaches`: main's rule over the two names
+    (`find . -name '*.local' -exec cat`, `*env*`), the dot-led exact test,
+    or — when it names `env` and the command reads what it selects (an
+    `-exec`/`-ok`/fd `-x` action, `xargs` on the line, a content search, an
+    archiver) — the exact test alone (`find -name '*.env.production' -exec
+    cat`) (fix 2). **"Reads content" alone does not refuse**, against the
+    lead's wording: it would refuse `grep -r foo --include='*.py' .` and
+    `find -name '*.py' -exec grep`, which read no more than `grep -r foo .`
+    (the stated limit) — so `find . -name '*.custom' -exec cat` stays
+    allowed, as on main.
+  - **A string another program runs as a command line** — `-c` (any
+    cluster), `eval`, `env -S` (glued too), `watch`, `ssh host`, a
+    here-string to a shell — is judged piece by piece and then as a line of
+    its own (up to 3 deep); an interpreter's inline program (`node -e`/`-p`/
+    `--eval`, `perl -e`/`-ne`, `ruby -e`, `php -r`, a here-string to one) by
+    its string literals that hold a command line, never its regexes (fix 5).
+  **A quoted regex is not a glob** (`grep '.*error'`, `pkill -f
+  '.*daemon2'`, a jq filter) unless main's rule over the two names catches
+  it, as on main (`grep '.*env.*' log`). The exact test's cost, measured: a
+  dot-led glob that *can* spell a credential env name is refused even when
+  no such file is meant — `ls -la ~/.*rc.d` (`.env.rc.d`), `rm -f
+  .*.swp.bak.txt`, Grep's `glob: "**/.*rc.json"`. Not refused, as on main:
+  `cat ?env.custom` (bash's `?` never matches a leading dot), a remote
+  `rsync h:'.e?v*'`, `find -regex`, fd's regex positional, `find -name "$P"`.
+- **Shell writes are DENY in `rules.decide`** — never run, never asked, under
+  an allowlist entry and mode "all" — through `protected_state`'s own parse
+  of where a line writes, not a copy: a redirect target, a `_WRITERS` stem's
+  operands, a reader hazard's files (`sed -i`, a sed `w FILE`), and a copy
+  of a source named like one into a folder (`cp /tmp/.env.production
+  dir/`). `rules.decide` judges **by name only** (`env_write_refusal`: cwd
+  `/`, `_Budget.follow_links` off, a cheap `.env` prefilter on the
+  quote-stripped line), so the same line gets the same verdict anywhere;
+  where the folder is known (`static_verdict(command, cwd)`, `run_command`'s
+  `protected_state.refused`, v2's layer 1 with the brief's cwd) a target that
+  is a symlink to one is DENY too. `protected_state.denies(touch)` is the one
+  test (the allowlist or an env file, certain). An interpreter or an unknown
+  program handed one is not judged its writer — the read layer refuses the
+  line, and "writes" would misdescribe `node --env-file=.env.production`.
+  **What only may land on one asks** (`Touch.env`, uncertain): a glob the
+  structural test says can reach one but not spelled from `.env` (`cp x
+  .e*.custom`, `mv x .e?v.prod`; one spelled from `.env`, `.env.*`, is
+  DENY), a name whose ending is an unknown variable (`.env.$STAGE`,
+  `$X.env`) — never covered by an allowlist entry, always-ask in v2 (rule id
+  `env-file`). `rm *.production` is plain `rm` again (ASK, as on main).
+  Also DENY since the review (NIT 3): `git checkout -- .env.x` and `git
+  restore .env.x` (`_git_subcommand` reads past `-C`/`-c`/`--git-dir`…), a
+  bare redirect (`>.env.x`, `X=1 >.env.x`, `{ …; } > .env.x` —
+  `_redirect_touches` runs at every early return of `_segment`), `perl -pi`/
+  `-i.bak` and `awk|gawk -i inplace` (`_edits_in_place`). Reads stay the
+  secrets layer's: `cp .env.production notes.txt` is ALLOW to the rules and
+  refused in the tool.
+- **The scrub** (`secret_values`) reads every credential env file in the
+  working folder, its parents up to home, home and the checkout
+  (`secrets.env_files_in`, a fresh `scandir` each call); **nothing is cached
+  by mtime any more** — a listing keyed on the folder's mtime missed a file
+  made within one timestamp tick (measured), and so would a value cache —
+  and each file is read non-blocking, regular files only, capped
+  (`_read_regular`; a FIFO named `.env.x` hung the old blocking read). A grep
+  line attributed to one is dropped (`is_protected`). **What is taken from a
+  file is the lead's decision (PR #60 review, MED-2)**: `.env` and
+  `.env.local` give every value of 8+ characters, exactly as before; every
+  other credential env file gives only (a) the value of a **secret-named
+  key** — a whole word or an `_`/camelCase part of KEY, TOKEN, SECRET,
+  PASS/PASSWD/PASSWORD/PWD, CREDENTIAL, PRIVATE, SALT or DSN (plurals too,
+  any case) — at 4+ characters and not a boolean; AUTH, SESSION and COOKIE
+  parts count only for a value that is not plain (`SESSION_DRIVER=file`
+  stays); and (b) a **secret-looking value** under any key: a URL carrying
+  userinfo, a query or a fragment, or 16+ characters that are not plain
+  words, a number, a boolean, a path, a host or an email
+  (`secrets._secret_entry`). The cost it removes: `NODE_ENV=production` in
+  `.env.production` used to redact the word "production" from every tool
+  result; a README that mentions it comes back whole now, while
+  `STRIPE_SECRET_KEY`, a `DATABASE_URL` with a password and a 40-character
+  token under a plain key are still redacted. **The delta review (LOW-C)
+  widened it**: a joined key name counts — a part ending in KEY, SECRET,
+  PASS, TOKEN, PW, PWD, PIN or SEED, or starting with SECRET, PASS, SEED or
+  PRIVATE (`APIKEY`, `SECRETKEY`, `PASSPHRASE`, `SMTP_PW`, `ADMIN_PIN`,
+  `OTP_SEED`, `SEEDPHRASE`; never a middle: `MAPPING`, `KEYBOARD`,
+  `TOKENIZER` are settings), and under a secret-named key a number counts;
+  **a key ending in a setting's suffix** (`_TTL`, `_TIMEOUT`, `_EXPIRES`,
+  `_EXPIRY`, `_LENGTH`, `_SIZE`, `_COUNT`, `_URL`, `_HOST`, `_PORT`,
+  `_PATH`, `_ENABLED`, `_DRIVER`, `_TYPE`, `_NAME`) with a plain value is a
+  setting (`AUTH_TOKEN_TTL=3600` used to redact every "3600"); and **a
+  webhook URL is a secret** — a known webhook host (`hooks.slack.com`,
+  Discord's `/api/webhooks/`, `hooks.zapier.com`, Office's webhook hosts,
+  Telegram's `/bot…`) or a path segment of 16+ characters mixing letters and
+  digits.
+- **v2 layer 1.** `READ_TOOLS` (Claude's Read, NotebookRead, Grep, Glob, LS;
+  `read_file`/`grep_files`) are judged by `denied_read`: a path that is or
+  leads to a credential file, and **Grep's `glob`** (each brace variant and
+  `/` component) judged as the shell judges `rg --hidden -g` — Claude's Grep
+  reads hidden files — by `secrets.pattern_reaches`, plus the shell's
+  raw-line check (`secrets.raw_names_in`) on the glob and the path, so the
+  layers agree (delta review LOW-B: `glob: "*.env*"`, `*.local`,
+  `!.env.production`, `**/.e?v.*` refused; `**/*test*`, `*.custom`,
+  `*.json` allowed). **Claude's Glob pattern is not judged** (delta review
+  NIT): Glob returns names, never contents, so `**/.*` and `**/*.env*` are
+  allowed, as on main; its `path` is. Relative paths are placed in the
+  brief's folder.
+  `denied_file` refuses a credential env file through its symlinks (so
+  Write/Edit/MultiEdit/NotebookEdit, Codex's `apply_patch` paths and the
+  fast path's write tools). Bash goes through `rules.decide` +
+  `protected_in_command` + the symlink write check, and so does a Codex
+  approval's `also_commands`, now judged in the brief's folder (NIT 5).
+  **A Codex grant that is or holds one is `denied_grant`**, read or write: a
+  bounded walk (`GRANT_SCAN_ENTRIES` 50,000 entries, `GRANT_SCAN_SECONDS`
+  2 s, symlinked folders not followed, a symlinked file judged where it
+  leads). **A folder is judged by what it holds, never by its name** (NIT 1:
+  a write grant on a virtualenv named `.env` passes unless it holds a
+  credential file; `denied_file(folder=True)` skips the name checks, keeping
+  SELF_PROTECTED, `.git` and the HUD build). **Past the bound the grant goes
+  to the owner** (NIT 2): the widening card's headline gains "could not check
+  <folder> for credential env files", no Always, declined with no human; a
+  grant past the bound on an approval that is not a widening is refused.
+- **terminal_read** asks the same rule: `terminal_guard.protected_name` is
+  `is_protected` plus `CREDENTIAL_FILE`, `protected_in` uses
+  `env_credential_in_text`, `terminals._folder_env_files` is
+  `env_files_in`, and `ENV_TEMPLATES` is gone — **`.env.sample` and
+  `.env.template` are credential there now**, per the owner's Q-1. Its
+  cheap filters are case-folded (LOW-2: the `_HINTS` prefilter and
+  `last_hazard_end` read the casefolded text, `_ENV_VARIANT` is
+  `IGNORECASE`, so `cat .ENV.PROD` is refused like `cat .env.prod`), a
+  dot-led glob (`_DOT_GLOB`) always reaches the full check, and a reader's
+  operands are judged by `glob_reaches` directly (the guard re-quotes them,
+  which would otherwise hide a glob from the quote-aware read layer).
+  **Tests the review asked for** (NIT 4): an `@path` through a symlinked
+  folder (`@viadir/.env.example` leading to `.env`) refused in the face's
+  attachments, and sqlite refusing `.env.production` and a `data.db` symlink
+  to it.
+- **The trash** (ED-7) keeps a credential env name inside
+  `jarvis-deleted.<n>/` on a second delete, and every older numbered name
+  (`.env.2`, `.env.production.3`, even `.env.example.2`) is a credential env
+  name by the rule, so v1 protects them all.
+**N-1, measured without a turn:** codex 0.161.0's protocol has
+`FileSystemAccessMode` `deny` with `glob_pattern` paths and named permission
+profiles (`[permissions.<id>]`, `default_permissions`), and its binary has a
+requirements-level `[permissions.filesystem] deny_read`. So Codex *can* be
+told to deny reads; **not wired**: whether it confines on this WSL2 and the
+exact per-session TOML need a `codex sandbox` measurement, and a `.env*` deny
+glob would also deny `.env.example`. Codex keeps the plan's stated limit.
+**Limits, kept as limits:** none of this binds a program running as the
+owner (a dev server loading its `.env`, a script Jarvis writes); Claude's and
+Codex's tool *results* are never seen, so a folder-wide Grep or a shell `cat`
+inside Codex's sandbox is unscrubbed; a hard link or an 8.3 short name to an
+env file under another name, a path assembled at run time, a `cd` into a
+folder followed by a relative glob the samples miss — none is seen. The real
+boundary is still filesystem permissions. Free checks: `secrets_check`
+(`env_rule_checks`), `files_check` (`env_file_checks`), `rules_check`
+(`env_write_checks`: 31 DENY spellings, 3 symlinked, 3 asked, 11 ordinary),
+v2 `permissions_check` (`env_file_checks`), `claude_provider_check`
+(`env_hook_checks`, the real `build_permit` behind the hook) and
+`terminal_text_check`; all fail on 283d45c, and 17 guard removals each bite.
+
+**The Browser's action rules and reviewer, BR-9a (2026-10-12; amendment 1 to
+the Browser plan, §B.3–§B.5, decisions BD-1..BD-4). Pure, and not wired yet:
+BR-9b calls them from `hud_browser_act`'s gate.** Two modules in
+`jarvis/v2/browser/`. **`act_rules.pre_judge(Facts) → PreVerdict`** answers
+REFUSE, ASK(category), ALLOW or CLASSIFY with no model call. `Facts` (frozen)
+holds the action, key, text, `nav_url`, the page's `url`, the target
+`Element` and its `Form` — attributes only, **no field for a value** — the
+upload path and project folder. **Every state fact defaults to None and only
+an explicit value passes** (review of PR #71, MED 2): a flag must be the
+exact bool it needs, a number a finite non-negative int or float — `None`,
+`"no"`, a str number, a negative count, NaN and infinity all refuse, so a
+fact the caller forgot refuses (`STATE_FACTS` names them; the suite unsets
+each in turn) — and `pre_judge` turns any exception into a refusal. Order:
+H12 (desk, depth, sub-agent), H11, H5 (Private needs its own drive switch),
+H6, H3, H4 (paused; an `owner_input_age_s`, whenever one is given, must be
+valid and at least `OWNER_QUIET_S` = 5 s, `owner_has_input=True` needs one,
+and `owner_has_input=False` beside one is a contradiction that refuses — the
+delta review's regression), H9, H10's counts, H7's fact; a valid action
+(`press` takes named keys only, a printable character is refused; at most
+10,000 characters to type and 8 KB to select; `type`/`select` need a
+target); H7's belt (a navigate address: http(s) only, at most 8 KB,
+Jarvis's ports, an ambiguous authority, userinfo; a link or a submitted
+form's action: at most 8 KB, Jarvis's ports, an ambiguous authority); **H1** (type, select, Backspace/Delete/Space into `type=password`,
+an `autocomplete` token current-/new-password, one-time-code, webauthn or
+**any `cc-*` anywhere in the token list**, the label words and their joined
+spellings on name, id, label, placeholder, aria-label and accessible name
+(English only), a numeric 4–8 field labelled just "code", four or more
+one-character boxes, any field in a `PAYMENT_FRAME_HOSTS` frame, or a focused
+<iframe> showing one — clicking into one is not refused); **H2** (text, a
+navigate address, a clicked link or a submitted form's action holding a
+`secrets.secret_values()` or caller's value in `terminal_guard.value_forms`'
+spellings, or a `credential_patterns` shape); **H8** (`upload_refusal`: a
+regular file with one name on disk, under the project folder lexically and
+resolved, at most 50 MB, not `secrets.is_credential`, not `editor_policy`'s
+withheld, not the gate's state, not in Jarvis's own folders, and no hidden
+component but `.well-known` — `editor_policy.hidden_component`, the preview
+origin's own rule, moved there from `hud_api._not_a_page` so both call one
+function in a SELF_PROTECTED module; `PreVerdict.path` is what was judged, and **BR-9b must judge again
+after the card and upload a private copy opened `O_NOFOLLOW`**). Then the
+ASK floors (every upload; a click on anything but a text field or on
+anything that submits, Enter, or Space on such a control, in a form — or
+beside a field — holding a password, OTP or payment field;
+`ASK_URL_SHAPES` on the route of the address, link or submit's action — the
+path, the fragment (`#/login`) and route-query values (`?route=checkout/…`),
+decoded and lower-cased, a host's own shapes first; `chrome:` pages as
+account_security; links ending in an `EXECUTABLE_EXTENSIONS` name by
+`executable_name`, which `executable_download` shares; an editing key or Enter
+with no target named, as `no_target`), the turn's 40 judged actions (floors
+and CLASSIFY count, the ALLOW tier does not), the ALLOW tier (scroll, back,
+forward; **the nav keys only on a known target that is no frame and is in no
+form and beside no field holding a password, OTP or card** — with autofill
+on, ArrowDown or Tab in a card field accepts a saved card, MED 3, for BR-9b
+to confirm in real Chrome; **Backspace/Delete only in a text field** — on a
+mail row, a file, a grid cell or a button they delete the selection, the
+review's HIGH; at most 64 characters with no line break into `type=search`,
+`role=searchbox` or a GET form's field — never beside a sensitive field),
+else CLASSIFY. **Linear**: no regex is built from page text, labels are
+normalised by C-level passes (camelCase split for `name`/`id` only, which
+fail closed past 1024 characters), route segments go into sets; a 1 MB label
+is judged in a few tens of ms, and the URL matchers stay linear on 100,000
+characters though the rules refuse past 8 KB unread. Every refusal reason is
+a fixed `R_*` sentence.
+**`act_review.judge(facts, owner_words, *, extra_values) →
+ActVerdict(verdict, category, reason, source)`** is `command_review`'s shape:
+the owner's words (≤ 500) outside, everything else in one `untrusted.fence`
+with a tag per call, capped as §B.5 says; a flagged context, or a credential
+value (the caller's too) or shape anywhere in the request, means no call and
+ask (source `guard`); **never a Chinese-hosted model** (MED 4: the review
+tier follows the owner's selection, so a model `models.cn_hosted` names falls
+back to the configured orchestrator, and if that is CN-hosted too, no call
+and ask); JSON only, exactly three keys, each once; **every failure is ask**
+(category `unjudged`); only `ordinary` is ever allowed;
+`JARVIS_BROWSER_REVIEW_AUTOALLOW=0` turns allow into ask and leaves deny;
+only ordinary allows are cached (15 min, 512), **keyed by the profile, the
+owner's words and a digest of everything the model saw plus every text,
+address, element and form in full** (MED 1: a narrower key reused an "OK"
+after "saved" under "Delete this repository", a Download link for another
+href and a top-page button in an ad frame). **The call is `max_retries=1,
+stream=False`**: `llm.chat`'s `max_retries` is its attempt count, so the
+amendment's `max_retries=0` would send nothing and every action would ask.
+The model is `models.tier("browser_review")` once a config defines that tier
+(BD-4), else the review tier. `act_review.decide(pre, verdict)` is the gate's
+outcome: anything but exactly one of the four kinds refuses, a floor is never
+lowered, the belts apply again, and CLASSIFY with no answer asks. Free
+suites: `tests/v2/browser_act_rules_check.py` (62) and
+`tests/v2/browser_act_review_check.py` (34), with `llm.chat` raising
+throughout and `secrets._JARVIS_ROOT` a temp folder; 47 guard removals each
+fail their suite in a scratch copy (the PR lists them). The two moved
+functions are pinned where they are used: `hud_backend_check`'s
+`OneHiddenRule` and `titles_check`'s `OneVendorList` patch the one function
+and see the verdict move, so a copy fails them. Left for BR-9b: the
+wiring, the `browser_review` tier, SELF_PROTECTED for both modules, and the
+re-check and private copy for uploads.
+
+**The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
+for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
+dot (`--text-2`, `DirtyDot`, "unsaved changes" with a tooltip), and so does a
+collapsed folder holding one at any depth — an open folder never does, its
+child does (`lib/dirtyMarks.ts`, `rowDot`). **Dirty is the buffer's**, so
+every pane's tree on that project marks it, opened there or not, and a file
+read through another project is found under this one's root by its `abs` —
+**the root as it resolves**: every project the daemon answers with carries
+`root_real` (`projects.resolved_root`, display only, refused if sent back),
+and the tree looks under it (`treeRoot`), so a root reached through a
+symlink still matches. On
+a tab the dot stands where × is and hover or focus brings × back (theme.css;
+× only goes transparent, so it never moves and stays clickable); **while a
+save is out (ED-2) the same slot holds a hollow ring**, dirty or not, named
+"saving", and hover still brings × back. **The tree
+never redraws per keystroke**: `useDirtyMarks` subscribes with a string key
+of the dirty paths (the registry speaks on clean↔dirty and on a save's
+saving/queued changes, and the key ignores the latter), and
+the tree's `Node` is memoized with a stable `onOpen`, so a chat box's typing
+no longer redraws it either — `FileTab.test.ts` counts the tree's row renders
+through twenty window redraws, twenty keystrokes and a held save (dropping
+`memo(` or the stable `onOpen` fails it). Each file row has a 16px inline-SVG icon after
+the twistie's room (`components/FileIcon.tsx`; the rule is
+`lib/fileIcons.ts`: whole name, then the longest extension, case-insensitive;
+`.env*` or `policy: "env"` the lock); a folder is its chevron alone. **Icons
+are drawn in currentColor from six theme tokens** (`ICON_TOKENS`: the four
+`--syn-*`, `--text-2`, `--text-muted`) — never a hex and never amber or red,
+so VS Code's yellow `{}` and orange HTML are deliberately not copied. Free
+checks: `fileIcons.test.ts` (mapping, the colour rule from theme.css's own
+text, every icon rendering aria-hidden with no `<text>`), `dirtyMarks.test.ts`,
+`DirtyMark.test.ts` (one redraw per transition, none per keystroke or for
+another project's file), `FileTab.test.ts` (the memo), `hud_backend_check`'s
+`test_projects_say_where_their_root_resolves` and
+`tests/face/hud_v2_editor_marks_check.py` (a `MockDaemon(0)` of its own, after
+the editor section of `hud_v2_check`; the saving ring, and a linked project
+whose mock `root_real` is p1's folder — it fails with `treeRoot` ignoring it).
+
+**The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
+One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
+is the table: rows keyed by **nvim-treesitter capture names** (`LEGEND` —
+ED-5's semantic token types), Monarch's tokens styled through the same rows,
+each naming a HUD token and a style. Most code is `--text`; keywords bold,
+comments italic `--text-muted`, punctuation `--text-2`, and four new `:root`
+tokens: `--syn-fn` #8ec5d6 (functions, tags, headings), `--syn-string`
+#a6c79b, `--syn-const` #b9aade (numbers, constants, escapes), `--syn-type`
+#a8b5c2 (types, modules, directives, keys) — quieter siblings of HUD hues, so
+`--accent` and `--green` keep single meanings. **theme.css is the one place a
+colour is written**: `cssPalette()` reads the tokens off `:root` when Monaco
+loads and `themeData()` derives the hex, with `inherit: false` (nothing of
+vs-dark's survives; a token no rule names is `--text`); a vitest fails on any
+hex literal in editorTheme.ts's code. The chrome is pinned in the same file —
+the plan's list (current line `--bg-2`, line numbers `--text-muted`, cursor
+`--accent-hi`, selection and find in the accent, word highlight `--selected`,
+bracket pairs in the three syntax hues, unicode box `--syn-const`, error
+squiggles `--red`, warnings `--text-2`, diff tints, whitespace, sticky
+scroll) **plus every colour Monaco 0.57 resolves warm anywhere in its
+registry**; red only on a row marked `red: "error" | "removed"`. **A control
+character is not a registry colour**: Monaco draws ESC, BEL or ^L on its own
+`.mtkcontrol` box, white on dark red, `!important` — theme.css pins
+`.monaco-editor .mtkcontrol` to `--text-2` on `--bg-3` (review of PR #45).
+**A theme failure fails soft**: `themeOrFallback` logs the unreadable token by
+name and Monaco loads in plain vs-dark (a rejected `loadMonaco` used to drop
+every editor to its textarea, silently, until reload), and each refined
+tokenizer is compiled in its factory first (`refinedOrOwn`, with Monaco's own
+Monarch compiler) — a throw or a compile error leaves that language Monaco's
+own tokenizer, logged. A
+per-language rule is `<capture>.<lang>` (Monarch's postfix; ED-5 passes the
+language as the token's last modifier — Monaco matches a semantic token's
+type and modifiers joined by dots). **Monarch's C, C++ and Python are
+refined** (`lib/monarchRefine.ts`): a word before `(` is `function`, a C++
+word before `::` a `module`, and the builtins split into
+`constant`/`type`/`function`/`variable.builtin` (Python's keyword list *was*
+its builtins); the one identifier rule is found by its exact shape, and a
+definition that has moved keeps Monaco's own tokenizer. **Both live in the
+lazy chunk** (`monacoBundle.ts`'s `applyGraphite`, called by `loadMonaco`):
+imported from `monaco.ts` they cost 11 KB of first paint and, because
+Python's definition imports Monaco's API, split Monaco into a second chunk.
+For ED-5: the plan's "bold on `void`" test contradicts its own table (`void`
+is `@type.builtin`, `--syn-type`); the table wins. Left for ED-5's tree-sitter
+(fidelity, not safety): Markdown bullets and link URLs, untyped `=`/`*`/`::`/
+`->`, `#define SQ(x)` drawn as a function, Python's `class Foo(Base)` drawn
+as a function, `match` drawn as a keyword, and escapes inside Python strings. Vitest reads theme.css
+raw only because `test.css.include` names it (Vitest empties CSS, `?raw`
+included). Free checks: `editorTheme.test.ts` (≥ 4.5:1 on `--bg-1` and
+`--bg-2`, the warm band 340°–65° at s ≥ 0.35, strict hex, the CSS and the
+table agree, every capture and Monarch token resolved through Monaco's own
+`TokenTheme`, every warm Monaco default pinned), `monarchRefine.test.ts`
+(Monaco's own Monarch compiler and lexer on the installed definitions), and
+`tests/face/hud_v2_editor_theme_check.py` (a `MockDaemon(0)` of its own, run
+by `hud_v2_check` after the browser section, or alone: a C++ and a Python
+file's rendered tokens against the page's `:root` tokens, Monaco's `.mtkN`
+colour map, every `--vscode-*` colour it publishes, bracket pairs, find in
+the accent, control characters off Monaco's red box, and the approval card's
+computed colours unchanged once Monaco has loaded). 30 of its first 44 checks
+fail on b04d6e8, and the control-character pair without the theme.css rule;
+the rest are setup or guards (find was already pinned by ED-1), each shown to
+bite in a scratch copy.
+
+**Tree-sitter colour, ED-5 (2026-10-11; plan §2.6, the ED-5 package in §3).**
+C/C++ (`.c` and VEX's `.h` on the C++ grammar), Python, JavaScript,
+TypeScript, TSX, JSON, Bash, CSS, HTML, YAML, TOML and Markdown (block and
+inline) are coloured from a parse tree; everything else keeps Monarch.
+**`web-tree-sitter` 0.27.0 and every grammar package are pinned exactly**;
+Markdown's npm package ships no `.wasm`, so its v0.5.3 release files are
+vendored in `hud/vendor/tree-sitter/` and **every shipped `.wasm` has its
+SHA-256 in `manifest.json`** (vitest fails on a difference).
+**nvim-treesitter's queries are vendored raw at f603a2f4** under
+`hud/vendor/nvim-treesitter/` (Apache-2.0 `LICENSE`, `NOTICE`) and translated
+into `hud/src/syntax/queries/` by `hud/scripts/vendor-queries.mjs` (dev-run:
+`; inherits:` concatenated, `#lua-match?` to `#match?`, `#set! priority` a
+sort key, untranslatable patterns dropped and listed in `dropped.json` —
+only html's `#gsub!` today); **every bundled query is compiled against its
+bundled grammar in vitest**, so grammar/query drift fails the build. The
+code is `lib/syntax/`: `grammars` (pure data: Monaco language → grammar,
+fence aliases), `assets` (the loader gate), `worker` + `engine` (parse,
+incremental reparse, injections, budgets, tokens), `client` (the provider,
+in the lazy Monaco chunk), `positions`, `flatten`, `legend`, `translate`,
+`budgets`. **One syntax worker, made only through Monaco's `getWorker` by
+its own label** (`SYNTAX_WORKER`; every language-service label is still
+refused, E-1); Vite builds workers as ES modules now (`worker.format: "es"`).
+Monaco gets a `DocumentRangeSemanticTokensProvider` per covered language and
+`semanticHighlighting.enabled` on every editor; **Monarch stays underneath**,
+so colour is never missing, only quieter. Tokens are ED-3's capture names
+with the language as the last modifier (`keyword.import.cpp`), styled by the
+same table. **web-tree-sitter 0.27's query ranges are in UTF-16 bytes**
+(twice the code units): `positions.queryRange` converts, a test pins it.
+Edits go to the worker as `{offset, length, text}` with the version,
+coalesce for 30 ms and reparse incrementally — **300 random edit sequences
+(astral characters, CRLF, tabs) colour exactly as a fresh parse**.
+Injections are one level deep (a fence by its info string, Markdown inline,
+HTML `<script>`/`<style>`), capped at 256 KB of injected text per document.
+**Budgets fall back to Monarch, never to a broken file**: over 1 MiB of
+text ("syntax: basic (large file)", never sent to the worker), a first parse
+over 1 s ("slow parse"), two reparses cancelled at 250 ms running ("slow
+edits"), a grammar that fails to load ("grammar failed"), **a worker that
+errors or leaves a token request unanswered for 10 s** (`REPLY_TIMEOUT_MS`:
+it is dead — terminated, every model on Monarch, "no worker", and the
+provider answers empty rather than null, which would leave tree-sitter's
+stale tokens drawn); each editor shows the reason in a bottom-right corner
+(`data-testid="syntax-status"`) only while a covered file is on Monarch.
+**Every `Query.matches` run is budgeted** (`matchMs`, 250 ms, through its
+`progressCallback`; a cancelled run's partial matches are never colour): a
+viewport chunk stops the answer at the lines before it, the whole-document
+injections query leaves fences their host's colour (twice running, off for
+that document), an injected range keeps its host's colour. **A fence's info
+string is a lookup key, so lookups read own keys only** (`Object.hasOwn`):
+` ```constructor ` or ` ```__proto__ ` loaded Object.prototype's names (review
+of PR #54). **A grammar is code the worker runs, so
+the HUD's policy gained `'wasm-unsafe-eval'`** — in `hud_api.HUD_POLICY`'s
+`script-src`, the one header, WebAssembly only (`eval`, `new Function` and a
+string `setTimeout` stay refused, and a response may narrow it away) — **and
+the loader fetches only its map**: `assets.fetchShipped` is the one `fetch`
+in `lib/syntax/`, it resolves the URL against the worker's origin and
+refuses anything but the runtime's and the 13 grammars' Vite `?url`s —
+another origin, another path, `data:`, `blob:` — before a request is made;
+`Language.load` takes only its bytes; and Emscripten's `locateFile`
+answers its own runtime's name with the gate's URL (it is never fetched:
+`wasmBinary` holds the bytes) and **throws for any other name** (it used to
+throw for every name, which Emscripten calls even when handed the bytes, so
+the worker never started in a real browser — vitest could not see it).
+Test hooks, read-only: `window.__hudSyntax.states()` (each model's grammar,
+state, reason, `served` count and `opens` — times its text was sent to the
+worker, 0 past the size budget: the worker's own size check would hide the
+client's), `.probe(url)` (asks the gate about a URL,
+never fetches) and `.loaded()` (grammars compiled), each answering within
+10 s even with a dead worker. Sizes: first paint 613,246 B (+168),
+`monacoBundle` 3,648,370 B (+5 KB), the worker 213 KB, ~9.9 MB of `.wasm`
+loaded per language on first sight. ED-3's "bold on `void`" note stands:
+`void` is `type.builtin`, `--syn-type`, not bold. Free checks: `lib/syntax/
+*.test.ts` (167; Node, the pinned runtime and real grammars; `client.test.ts`
+on a stand-in Monaco and a silent worker) and
+`tests/face/hud_v2_syntax_check.py` (a `MockDaemon(0)` of its own, run by
+`hud_v2_check` after the editor-scheme section, or alone: a C++ call in
+`--syn-fn`, `void` `--syn-type`, a type name Monarch leaves plain drawn
+`--syn-type`; a Python fence in Markdown coloured as Python; a 1.2 MB file
+on Monarch with its corner; all 13 grammars compiled under the CSP, each
+`.wasm` from `/assets` as `application/wasm` under the one policy; the
+loader refusing URLs outside its map). **A CSP violation inside a worker
+never reaches `watch_csp`'s document listener** — the suite also reads the
+page's and the worker's console for one. Shown to bite in a scratch copy:
+the policy without `'wasm-unsafe-eval'` (12 of 39 fail), the gate returning
+any URL (5), and the size budget dropped (2). `hud_v2_editor_theme_check`
+now reads spans only after the worker has answered for the file, and
+accepts `"vex.h"` as one string and `@property` as `@` + `property`.
+Folding from the tree is ED-6, below.
+
+**Folding and sticky scroll from the tree, ED-6 (2026-10-12; plan §2.6
+"Folding from the tree", the ED-6 package in §3).** nvim-treesitter's
+`folds.scm` for every grammar ED-5 ships is vendored at the same pin
+(f603a2f4; 15 files, the inline grammar has none) and built like the other
+queries (`vendor-queries.mjs` now does three kinds; `translate.WORKER` gained
+`#trim!`); **`vendor/nvim-treesitter/manifest.json` records every vendored
+nvim file's size and SHA-256** with the commit, and vitest fails on a
+difference or an unlisted file. `lib/syntax/folds.ts` (pure) turns a folds
+query's `@fold` matches into Monaco ranges as Neovim's fold expression
+reads them — a quantified capture (`(preproc_include)+`) is one fold, first
+node to last; `#trim!` drops trailing blank lines (Markdown sections); a
+node ending at column 0 ends a line earlier; two lines at least — plus **one
+VS Code rule: the node's own closer stays in view** (a `}`, `]`, `)`, end
+tag or JSX closing element at most `CLOSER_DEPTH` = 3 last-children down,
+past a `;`/`,`, that starts the fold's last line), so `class A {` folds with
+its `};` below, while a Python `def` ending in a multi-line call folds whole
+rather than leaving a lone `)`. Ranges sharing a start keep the widest.
+`SyntaxEngine.folds(id, version)` runs the query over the whole tree and
+**shares one `matchMs` (250 ms) between the query and reading its matches**
+(near 1 MiB, 40k folds took ~200 ms to read, more than the query); over it
+answers null, twice running the document folds by indentation from then
+on; a stale tree (a reparse over budget) still answers from the edited old
+tree; answers are cached per version and tree (Monaco's folding and its
+sticky scroll both ask). Host language only: a fence is one fold. The worker
+takes `{t: "folds", id, req, version}`; the client registers a
+`FoldingRangeProvider` for exactly `COVERED_LANGUAGES` beside the tokens
+provider, matched by request number, the same `REPLY_TIMEOUT_MS` (a silent
+worker is dead, as for tokens), and **null means indentation**: Monaco's
+folding and sticky scroll fall back to the indentation provider whenever
+every provider answers null, so the provider answers null on Monarch (large
+file, slow parse/edits, grammar failed, no worker), for an answer whose
+version the model has passed, and when the query was over budget — never
+`[]`, which would mean "no folds". `dotenv` has no provider and never reaches
+the worker. **Sticky scroll follows the tree's folds** with no change of its
+own: with no document symbol provider (E-1), Monaco's `outlineModel` falls
+through to the folding providers. `__hudSyntax.states()` gains `folds`
+(answers from the tree handed to Monaco). Sizes: first paint unchanged,
+`monacoBundle` +936 B, the worker +10.6 KB. Free checks:
+`lib/syntax/folds.test.ts` (a C++ class, a Python function, a Markdown
+section, where folds end, CRLF, every grammar, versions, the stale tree, the
+budget both halves, the cache), the folds half of `client.test.ts` (stand-in
+Monaco: registration, kinds, request numbers, stale and null answers, Monarch,
+the size budget, a silent worker) and `vendor.test.ts` (the manifest, every
+folds query compiles and captures only `@fold`), and `_fold_checks` in
+`tests/face/hud_v2_syntax_check.py` (the margin's fold controls in a C++
+file are the tree's — 1, 4, 6, 7, 13 — not indentation's 5 and 15; folding
+the class keeps `};`; sticky scroll holds `void autonomousRoutine(int
+side,`, where indentation would hold `{`; a Markdown heading folds; a file
+past the size budget folds by indentation). With the provider unregistered,
+7 of those fail (sticky shows `{`); the null/`[]`, version, both budget and
+off-after-two guards each fail their vitest when removed. Not done: region
+markers (`// #region`) — the indentation provider honours them, tree folds
+do not.
+
+**The git gutter and the explorer's git colours, ED-9 (2026-10-12; plan §2.5,
+§2.8, the ED-9 package in §3; design §18; contract in `docs/hud-api.md`).**
+Two routes in `jarvis/v2/editor_git.py`, **owner-only before anything else**
+(`hud_api.route` calls `owner_only` before the project is even looked up, so
+a bare request or the API listener is 403 whatever the id). `GET
+…/git/base?path=` answers HEAD's text; **the path is judged before git
+runs** — the gate's state (resolved or as configured), anything
+`editor_policy` withholds (`withheld_anywhere`: no gate exemption) and every
+credential env file are 403 (`editor_git.refused`) — **and so is the name in
+git**: a staged rename's source (`diff-index --cached -M HEAD`; `-M` reports
+no copies, so a staged copy is `new`) is judged the same way, because `git mv
+.env notes.txt` would otherwise serve `.env`'s committed text as
+`notes.txt`'s, and **held to the project** (review of PR #61, LOW 1): placed
+by `hud_api.scope` (a root, no `SKIP_DIRS` or `.git`), so a file moved in
+from outside the project, or out of `node_modules`, is `new` and nothing of
+its source is sent. HEAD's blob is read **by object id** (`cat-file blob`: no
+textconv, filter or eol attribute applies), its size read first from `ls-tree
+-l` and capped at the editor's 2 MiB, **in bytes** (`_git_blob`: gitops' own
+binary, hardening and environment — `gitops._git` decodes with replacement)
+and judged by the editor's own `editor_policy.is_text`, so a U+FFFD the file
+holds is text and a NUL or non-UTF-8 blob is `binary` (no gutter); a file
+HEAD lacks is `new` (no gutter, untracked and added alike — the explorer's
+colour says which). `GET
+…/git/status` is `git status --porcelain=v2 -z … --ignored=traditional
+--renames --ignore-submodules=all -- .`, project-relative, **judged before it
+is returned** (SKIP_DIRS, withheld and the gate's state dropped, lexically: a
+status is names only, and a rename's source is never returned; the policy
+is `editor_nav._policy_for` narrowed to the root as resolved and as
+written), cached 2 s
+per root — or three times what the status took, when longer, so a slow `/mnt/c`
+repository rests between runs — refusals too, single-flight, 20,000 entries
+and 5 s at most.
+**Git only through `gitops._git`, and a repository whose own config names a
+program is refused by both** (`gitops._risky_config`). **`--ignore-submodules=all`
+is load-bearing**: `_risky_config` reads the superproject's config only, and
+a status that recurses runs `git status` inside the submodule, which obeys
+*its* config — measured: a submodule's `filter.x.clean` ran on a superproject
+status through `gitops._git` (a same-size, mtime-moved file forces the
+hash). **The same hole was open in the `git` tool** (`gitops.run(path,
+["status"])` and `["diff"]` each ran a submodule's filter, measured in-process)
+until 2026-10-12 (PR #65), when `gitops` itself was kept out of submodules (see *Agents
+that cannot ask* in Safety design); the editor's own flag stays, since its
+`_risky` reads the superproject's config only. A base read inside a submodule is refused anyway
+(its config sets `core.worktree`). The owner's global config (a git-lfs
+filter) still runs on a status, as in gitops. **The window**:
+`lib/linediff.ts` is Myers in linear space (middle snake, explicit stack, never
+recursion), lines interned to ints, **bounded by a work budget**
+(`DIFF_BUDGET` 2M steps, about 1,400 changed lines exact): past it the rest of
+a run is one coarse "modified" block, still a correct diff (`exact: false`);
+two runs with no line in common are an exact replace. `gutterMarks`: inserted
+runs `added`, replaced runs `modified` over the lines standing now, removed
+runs a `deleted` wedge at the foot of the line above (the head of line 1).
+`state/gitGutter.ts`: **one gutter per buffer (`abs`)**, the diff against the
+**model's lines, never the disk**, `DEBOUNCE_MS` 150 (500 past 5,000 lines)
+after the last change — so a pause, not a keystroke, reads the lines (the
+ED-2 rule bends this far and no further) — no gutter past 100,000 lines
+(counted with `getLineCount()` before the lines are read); HEAD's text read
+again **when the status poll's `head` moves** — and, **for a file whose base
+came from another HEAD than the project's** (a nested repository, a folder of
+robot repositories, the Inbox at `~`, an extra folder: the poll can never see
+that HEAD move), **every `RECHECK_MS` (10 s) while the window is visible**
+(review of PR #61, LOW 2); a late answer for a closed gutter is dropped; a
+byte-order mark in HEAD's text is the file's, as in the buffer. `PaneEditor` draws the marks in its
+own `createDecorationsCollection` (linesDecorationsClassName `jgit-add`,
+`-mod`, `-del`, `-top`; theme.css draws a 3px bar in `--syn-string` /
+`--syn-fn` and a `--red` wedge at 60%, ED-3's "removed"; no Monaco colour
+key — `editorGutter.*` is not registered in Monaco 0.57). **FileTab asks for
+a gutter only on a `text` or `safety` buffer** — never env, withheld, gate or
+binary — through the project the buffer was read through.
+`state/gitStatus.ts` polls each watched project every 3 s while visible (and
+on focus), one request at a time, and **bumps only when the answer
+changes**; a 403/404 is kept as `error` and asked again after 30 s. The tree:
+`useGitMarks` (`components/GitMarks.tsx`) hands the memoised `Node` a
+`GitMarks` built from a string key (`lib/gitMarks.ts` `gitKey`), so #50's
+rule holds — no redraw per keystroke or per unchanged poll; a row carries
+`data-git` and a tooltip, the name modified `--syn-fn`, added/renamed/
+untracked `--syn-string`, conflict `--syn-const`, ignored at 50% opacity; a
+folder wears what git reported for it whole, else the strongest state under
+it (conflict > modified/deleted > added/renamed > untracked; ignored never
+colours a folder). The mock serves `world["git"]` (`git_route`; no key: not a
+repository). Free checks: `tests/v2/editor_git_check.py` (29; owner-only with
+no git run when refused, the states, every refusal including renames from
+`.env`, a withheld file and the gate's state, renames from outside the
+project and out of `node_modules` answering `new`, a staged copy `new`, strict
+UTF-8, a repository-config filter and a submodule's that never run, the
+status's states, judging, cache and cap),
+`linediff.test.ts` (3,000 random pairs against an O(NM) LCS reference:
+correct and minimal; budgets; a 50k-line file), `gitMarks.test.ts`,
+`gitGutter.test.ts` (debounce, one read per pause, undo to clean, refetch on
+the project's HEAD, a commit in a nested repository followed by the recheck and
+none while hidden, no recheck in the project's own repository, the BOM, a long
+file never read, the poll's bumps and back-off) and `tests/face/hud_v2_git_check.py`
+(a `MockDaemon(0)` of its own, after the marks section of `hud_v2_check`: an
+added bar on an unsaved line and clean again on undo, modified and the wedge
+in their tokens, HEAD moving, an env file asking nothing, the explorer's
+colours and a recolour on the poll, a MutationObserver seeing no tree change
+while typing). Shown to bite in a scratch copy (7 of 7): the path's refusal,
+the name in git, the status's and the base's config check, the submodule
+flag (the filter ran), the status's judging, and `owner_only`; and in the
+review round, the source's project check (both new cases) and the recheck
+(vitest).
+
+**Editor settings, `.editorconfig` and vim, ED-8 (2026-10-12; plan §2.8,
+decisions E-9, E-11).** **Settings** (`lib/editorSettings.ts`, pure; the live
+copy `state/editorSettings.ts`): font family, size (8–32), tab size (1–16),
+spaces or tabs, word wrap (off) and Markdown word wrap (on), minimap (off),
+sticky scroll, whitespace, bracket-pair colours, cursor style, vim (off) —
+**auto-save and format-on-save are not settings: off, decided (E-9)**. Stored
+in localStorage `jarvis.hud.editor` behind try/catch; **every field is judged
+alone** (`FIELDS`), so garbage in one falls back to that field's default and
+never costs the others, a dialog change that is bad keeps the current value
+(`withChange`), and only the known fields are written. **The font family is a
+list of names only** (`safeFontFamily`: bare names from a letter, or quoted,
+of letters, digits, space, `_ . -`; at most 8 and 200 characters; never `;`,
+braces, parentheses, `\`, `/`, `:`, a nested quote or an invisible
+character): Monaco writes it into the window that gates approvals. The
+defaults are what the editor drew before (Monaco's font, 12px, sticky scroll,
+whitespace on selection, bracket colours, line cursor). **A change reaches
+every live editor in the call that made it** (a synchronous listener, never
+a render later; diff and Compare views take the display half,
+`displayOptions`); another window's change arrives by the `storage` event.
+The dialog (`components/EditorSettings.tsx`, `state.picker =
+"editorSettings"`) opens from the File pane's ⚙ (`editor-settings`) or the
+palette's "Editor Settings…"; it applies as you go (nothing to confirm), so
+**under a card App closes it** with quick open and the palette, the ⚙ is
+disabled, and its Escape never runs under one. **`.editorconfig`**
+(`lib/editorconfig.ts` pure, `state/editorconfig.ts`) is read **only through
+ED-2's owner-only routes**: one `files/stat` of `<dir>/.editorconfig` for the
+file's folder and each above it **to the project's root, never above**, a
+`GET /file` of each that exists (once per etag), applied nearest first,
+**stopping at `root = true`**; a folder's answer is kept 3 s, and past 2.5 s
+(a slow `/mnt/c`) opening a file goes on without it. It sets **indent style and size** (the
+model's options; kept through a settings change, which makes Monaco
+re-detect every model — `reapplyEditorConfig`) and **the line ending new
+lines take in a file with no line break yet** — never a file's existing
+endings (LF/CRLF only; `cr` ignored). **It never rewrites on save**:
+`trim_trailing_whitespace`, `insert_final_newline` and `charset` are read and
+ignored. It is applied by `BufferDeps.prepare`, awaited in `Buffers.make`
+**before the buffer records the version it was read as**, so a new file's
+`setEOL` (which moves Monaco's version) still opens clean. Globs follow the
+spec (`*`, `**`, `**/` as zero or more folders, `?`, `[…]`/`[!…]`, nested
+`{a,b}`, `{n..m}`, `\` escapes, a slash-less glob at any depth, a slash inside
+brackets literal) and **are matched by a table over tokens × path, never a
+backtracking regex**: an `.editorconfig` is agent-writable project content,
+and `[*a*a*a*a*a*a*a*a*b]` as a regex hangs the window on a long name.
+**The guard is structural, a clock and not a cost model** (the lead's
+decision on PR #59's third review: 123 maximal sections had been a 689 ms
+long task per open, and a work budget was out-counted three ways — failed
+compiles charged nothing, a thrashing compile cache, under-weighted number
+ranges — to a 1,517 ms task): (a) **a real clock** — parse, compile and
+match all spend through one `Deadline` (`RESOLVE_MS` 5 ms), which reads
+`performance.now()` every `CHECK_STEPS` (256) steps from inside the parser,
+the compiler and the matcher and throws `OutOfTime`; the file then has **no
+configuration at all, never a partial one**; (b) **poison** — the config
+(by folder and etag) that spent the time takes a strike, and **two strikes
+in a row** (one GC pause must not cost a real config its effect) **or any
+cap** poison it: every later resolution touching it, for any path, is O(1)
+and never queued, until its etag changes. **A resolution that judges a config
+in time resets its strikes** (PR #72, LOW 3): with no reset, two time-outs
+any distance apart poisoned the owner's real config, and on a loaded core
+the real-world config timed out in 2.4% of 3,000 resolutions; (c) **no batching** — resolutions run one per
+macrotask through a queue (`MessageChannel` in the window, `setTimeout` in
+Node), so restored tabs never pile into one long task; `prepare` still
+applies before the buffer records its text. Compiled globs are kept with
+their parsed file by etag (`ConfigFile.compiled`; no global map to thrash),
+caches drop their oldest entry, a path left with no configuration is said
+once in the console by path (`warned` ≤ 64), number ranges count digits
+arithmetically, and a character class remembers each character's answer.
+Caps: 64 alternatives, 512 tokens in **each** (not the first alone) and
+4,096 in all per glob, braces 16 deep, 128 sections per file, paths ≤ 1024;
+resolutions are cached by (project, path, each config's folder and etag), and
+a config the stat says is over 64 KB is never downloaded. Measured: the
+review's shapes in Node, 40 tabs at once, longest task 5.1 ms (32 heavy
+configs deep) and 5.0 ms (number ranges), 56 ms in all over 40 tasks; in
+Chromium, 32 heavy configs and 20 tabs give no long task at all (506f670's
+budget: one of 118 ms on the same shape; no clock: four of ~10 s) and the
+tabs are ready ~150 ms later than with no configs. **Vim (E-11, yes)**:
+`monaco-vim` **0.4.4, pinned exactly**, MIT, audited (no network, storage,
+`eval` or `innerHTML`; its status line is text nodes and one input), loaded
+in a lazy chunk of its own only when the setting is on (101 KB, 31 KB gzip).
+It imports Monaco by pre-0.56 deep paths, which `vite.config.ts` aliases to
+the same modules (`monaco-editor/esm/vs/*` → `monaco-editor/*`, and its ESM
+build, not the UMD `browser` export) — **the dynamic import split Monaco's
+lazy chunk in two** (`monacoBundle` + `editor.api`, 3.65 MB together as
+before). **`:w` is that editor's own guarded save** (`adapter.save`, per
+editor; monaco-vim's global `commands.save` is never set, and never
+`addCommand`), and does nothing under a card. **`:colorscheme` is a no-op**
+and the adapter's `theme` option never reaches Monaco's window-wide
+`setTheme` (it took every editor off Graphite, an unknown name to the light
+`vs`); **`u`, Ctrl+R, `:undo` and `:redo` do nothing on a read-only editor**
+(monaco-vim calls the model's `undo()` past the editor's read-only); a
+settings change keeps vim's cursor. Each File pane draws vim's
+status line (`editor-vim-status`) below its editor. **Push-to-talk keeps
+Ctrl+D in the editor, vim or not — the owner's decision (2026-10-12)**: the
+window takes it before Monaco, so vim's half-page-down is gone; the HUD's
+other window keys (Ctrl+B, Ctrl+P, zoom) are the HUD's in vim too. Test
+hook, read-only: `window.__hud.editorSettings()` (stored, in force, each
+File editor's raw options, vim, its model's indentation and EOL — never
+text). Sizes: first paint +20 KB (685,073 → 705,426 B against f1de871). Free checks: `lib/editorSettings.test.ts`,
+`lib/editorconfig.test.ts` (the parser, the spec's glob table, the
+clock on the review's shapes — real and fake clocks — and the caps),
+`state/editorconfig.test.ts` (the walk, root, caches, refusals, timeout, the
+prepare hook leaving a buffer clean; 32 configs deep, 40 batched
+resolutions and the number-range shape with no job over 16 ms, poison doing
+no work and lifting on a new etag) and
+`tests/face/hud_v2_editor_settings_check.py` (a `MockDaemon(0)` of its own,
+run by `hud_v2_check` after the navigation section, or alone, `ONLY=vim`;
+`_long_task_checks` records long tasks with a `PerformanceObserver`).
+Shown to bite in a scratch copy, 7 of 7: the font unchecked, EOL set on a
+file with endings, `prepare` not awaited, `:w` as one window-wide hook, vim
+keeping Ctrl+D, the dialog left up under a card, no alternatives cap; and the
+review round's 8 of 8: the work budget (since replaced by the clock), the
+token cap on the first alternative only, no section cap, no resolution cache,
+the size cap not read, `:colorscheme` reaching `setTheme`, vim's undo past
+read-only, and a settings change rewriting vim's cursor; and the third
+round's: the clock removed (eight vitests, and in Chromium four ~10 s long
+tasks) and poison removed (three vitests). Not
+done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
+edit to `.editorconfig` reaches files opened after it (3 s), not those open.
+
+**The Diff pane shows the project's uncommitted changes (2026-10-12; the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view; design §18; contract in
+`docs/hud-api.md`).** No new route: ED-9's `git/status` and `git/base` and
+ED-2's read. **The mode** is `lib/scm.ts` `diffMode`: **a Diff pane never
+shows another task than a drawn Task pane** (review of PR #67, L3) — while
+one is drawn and shows the window's task, the Diff shows that task's diff,
+over a pin and after a thread is picked, and its picker is off, saying why;
+else a task picked more
+recently than a thread (`taskFocus`, the rule Editor and Browser panes follow) shows
+the task's diff exactly as before (`DiffTab`) — **the task beats the pin**,
+because a pane's `projectId` is shared by its views (a File pane pins its
+project when it opens a file, and keeps the pin when switched to Diff; with
+the pin first, `hud_v2_csp_check`'s task click showed uncommitted changes),
+and `workspace.show("task")` relies on a drawn Diff pane following the task;
+else the pane's pinned live project (its header's `pane-N-diff-project`
+picker, E-13's shape) shows that project's uncommitted changes; else the
+chat's project's; else a sentence. **Picking a project in that picker sets
+`taskFocus` false** (as picking a thread does), so the choice shows at once;
+the picker reads Follow while a task is shown. The caption (`diff-mode`,
+`data-mode`, `data-why`) says what and why — `diff-mode-what` and
+`diff-mode-why`: the Task pane's task, the task picked last, this pane's
+project or the chat's project (`diffWhy`). **The list** (`components/ProjectDiff.tsx`, `scmRows`): ED-9's
+one status poller, subscribed only while the pane is drawn; **`ProjectDiff`
+is `memo(...)` with a comparator that reads its callbacks through a ref**
+(App hands it fresh closures every render) and its rows follow the status's
+version, never the answer object — unmemoized, a chat keystroke redrew the
+list, 17 ms at 2,000 changed files and 132 ms at the 20,000 cap (review M1;
+`ProjectDiff.test.ts` counts row renders); modified/added/
+untracked/renamed/deleted/conflict files and untracked folders, each with
+its letter (M A U R D C) in the explorer's `data-git` colours and
+`FileIcon`; `ignored` never; truncation and no repository/no changes said
+in a sentence. **The sides**: HEAD from `git/base` in a `jarvis-diff:`
+model this view makes and disposes; the right side **is the open buffer's
+own model** when one holds the file (found by project and path, by
+`root_real`, or by the read's `abs`) — borrowed, never copied, held or
+disposed here, released on the model's `onWillDispose` so a File pane that
+lets the buffer go never leaves a disposed model on screen (the view falls
+back to a read, saying "…" meanwhile — and one disposed before Monaco
+loaded is "…" too, never an empty side that reads as a deletion) — else
+ED-2's read in a `jarvis-diff:` model; a deletion's
+right side is empty; binary/too_large/not_a_file say so. **No diff
+computation outlives its models** (review L1): the editor's view model is
+the view's own (`createViewModel`) and is disposed — cancelling a diff the
+worker is still computing — before any model goes. Handed `{original,
+modified}`, Monaco 0.57 keeps a reference to the view model it makes that
+nothing releases, so its computation was never cancelled, and a row picked
+then opened and edited at once threw `no diff result available`, uncaught.
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` own theirs too
+since the follow-ups (below). Both sides
+read-only, side by side even in a narrow pane; ↻ reads again; the right
+side of an unopened file is re-read when the status moves. **Env files are
+listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
+`isEnvName`) to a sentence with Open — no `git/base`, no read, no model;
+`git/base` runs before any read, so an env file by resolution is refused
+there (a 403 naming an env file shows the same sentence) and never read;
+and a live buffer of kind `env` is never put in a diff. **`git/base` now
+answers a file deleted from the working tree** (`deleted: true`; nothing at
+the path, not even a broken link; judged exactly as before, before git runs;
+not in HEAD either is still 404). **Open** is `toFilePane` → `placeFile` →
+`askFile(open)` — never over the Diff pane or a VEX view. Read-only: no
+staging, reverting, committing or discarding (SCM actions are out of
+scope). Under a card the picker, Open and ↻ are disabled and a row click
+does nothing. Free checks: `lib/scm.test.ts` (19), `components/ProjectDiff.test.ts`
+(M1's render counts), `tests/v2/editor_git_check.py`
+(deletions answered, judged and 404 when absent from HEAD),
+`hud_v2_csp_check`'s single-pane task diff and `tests/face/hud_v2_scm_check.py`
+(65, a `MockDaemon(0)` of its own after the git section of `hud_v2_check`;
+the mock's `git/base` answers deletions and `states`; L1's swap with no wait,
+L2's `link.txt` whose HEAD text is refused as an env file and is never read,
+L3's chat · Task · Diff layout). Guard removals, each shown to bite: with
+`rowShows`' env rule dropped, the headless check sees a `git/base?path=.env`
+request and the vitest fails; `memo(` dropped or callbacks compared, 63 row
+renders where 3 are right; the owned view model dropped, `no diff result
+available`; `baseOk` dropped from the read's condition, a `/file?path=link.txt`
+read; the Task pane left out of the mode, the Diff follows the chat. Not
+done: SCM actions; a file not open in the
+editor that changes on disk while the project's git states stay the same is
+re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
+
+**The Diff pane's follow-ups (2026-10-12; PR #67's reviews; design §18).**
+**The change list is windowed** (`ProjectDiff.tsx` `ScmList`; the arithmetic
+is `lib/scm.ts` `scmWindow`/`revealTop`): only the rows in view, and
+`SCM_OVERSCAN` (12) either side, are in the DOM, in a spacer as tall as every
+row; **every row is `SCM_ROW_PX` (24) CSS px, pinned inline**, so where a row
+is needs no measuring, and `scrollTop` is the list's own CSS px (the HUD's
+zoom does not change it; checked at 160%). **How much is in view is the
+drawn height over `currentCSSZoom`** (`viewOf`), never `clientHeight`, which
+is rounded: at 160% a list 400.6 px tall read as 401, and End clipped 0.8
+drawn px of its row (review of PR #73, NIT). The window is
+computed each render from where the list is scrolled, kept in whole rows (a
+scroll redraws the list only when it crosses a row, and only the list: it is
+`memo`'d, with a stable pick). At git/status's 20,000 cap a DOM of every row
+made each chat keystroke beside it cost ~100 ms (the reviewer's measure;
+74–103 ms here), and drawing took 0.2–0.4 s; windowed it is ~2 ms, the same
+as no Diff pane. **Keys** (the list is a focusable `listbox`, focused by a
+row click or Tab): ↑ ↓, Page Up/Down, Home, End (`scmKeyStep`) move the
+selection and scroll it into view; Enter reads the selected row again. **A
+key moves the highlight at once and reads the row only once the keys have
+settled** (`SCM_KEY_SETTLE_MS`, 150 ms; the pane keeps `sel`, the highlight,
+apart from `shown`, the file read, and says "…" between); a click and Enter
+read at once, and a key pick never folds a narrow pane's list (a click
+does). **A read nobody waits for is aborted**: `api.gitBase`/`api.readFile`
+take a signal, aborted in `ScmFile`'s effect cleanup. Review of PR #73, MED:
+↓ held over 60 rows started 60 `git/base` requests and reads, and against a
+slow repository (the owner's VEX projects on /mnt/c) the last row's diff came
+4 s late at 0.5 s a request; now one request and one read go out, the diff
+0.65 s after the last key. **For a screen reader** each option carries an
+id, `aria-setsize` (the whole list) and `aria-posinset`, and the listbox's
+`aria-activedescendant` names the selected option whenever it is drawn (a
+key always draws it; no dangling id when it is scrolled away). **The
+selection is a path, never a drawn row**: scrolled out of the window it
+stays selected, its diff stays shown, and the keys move from it. A file the
+pane had (a reload) is scrolled into view once, when the rows first arrive —
+or, in a narrow pane where a picked file folds the list, once the list is
+shown again (ResizeObserver) — and never on a poll, which would pull the list
+back from where the owner scrolled it. **The way out of a Task pane's hold:
+the Task pane's header clears its task** (`pane-N-task` chip, `pane-N-task-clear`;
+`taskId: null`, `taskFocus: false`), disabled under a card. The default 2×2
+grid draws a Task pane (`DEFAULT_VIEWS` slot 4), and while it shows a task
+every Diff pane shows that task's diff (L3) with its picker off — nothing took
+the window off a task once one was picked. Of the brief's two ways out this
+is the simpler: `diffMode` is unchanged, and a Diff pane still never shows
+another task than a drawn Task pane (there is none to show). The held
+picker's title names it. **Every diff view owns its view model**: the task
+`DiffEditor` and `CompareEditor` (`Editor.tsx`) now do as `ScmDiffEditor`
+does since L1 — `createViewModel`, set on the editor, disposed first (which
+cancels a diff still waiting on the worker) and once on every path (`vm` is
+cleared as it goes), then `setModel(null)`, then the editor, then the
+models it made; Compare's right side is the buffer's model, which it never
+disposes, and it lets go of it on the model's `onWillDispose`. Its text,
+undo stack and dirty state are untouched (checked: edit kept, still dirty,
+Ctrl+Z still undoes it). **`ScmDiffEditor` draws with ED-8's
+`displayOptions`**, live on a settings change (`onEditorSettings`, then
+`reapplyEditorConfig()`, as the other two) — it had a fixed `fontSize: 12`.
+Free checks: `lib/scm.test.ts` (26), `components/ProjectDiff.test.ts` (4: the
+20,000-row window in jsdom and the keys past it, five keys read nothing until
+they settle and then the last row once, a click at once; the ARIA; nothing
+moved under a card) and `tests/face/hud_v2_scm_check.py` (now 110;
+`ONLY=<section>` runs one):
+`_scale_checks` (20,000 rows, a window drawn, chat typing under 15 ms a
+character, the last row reached, the keys, a selection held and moved out of
+the window, a reload's file revealed at 160%, and at 160% Page Down and End
+clipping nothing of a list 400.6 px tall), `_hold_checks` (↓ held at ~33 a
+second over 60 rows, the mock's `git/base` taking 0.5 s (`base_delay`): at
+most 3 requests and the last diff within 2 s; a row clicked away from before
+HEAD answered is aborted), `_clear_task_checks` (the 2×2
+grid with a Task pane), `_settings_checks` and `_midcompute_checks` (a
+40,000-line task-diff file keeps Monaco's one editor worker busy for its 5 s
+diff limit; a task diff, then Compare, is opened and closed while its own
+diff waits behind it — main's code threw `no diff result available` each
+time). Shown to bite in a scratch copy: every row drawn (the window and
+out-of-window checks fail; main's build also fails the typing check at
+74 ms); `clear` keeping the task id (three checks); the task diff or Compare
+back to `{original, modified}`, or the task diff's view model never
+disposed (`no diff result available`); the settings not live, or not used at
+all (12px where 16px was chosen); keys that never scroll (five checks); the
+review round's: no settle (60 `git/base`), neither settle nor abort (60, and
+the last diff 4.14 s late), no abort (the clicked-away request completes),
+the rounded `clientHeight` (End clips 0.812 px at 160%).
+
+**The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
+`components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
+<level> · default (?)", Faster … Smarter, a dot per stop, a tick with
+**Default** under the default stop, a warm-white thumb. **The stops are exactly
+the levels the pills offered** (the effective model's ladder, or the provider's
+words when it is unknown — `ultra` is a stop on Codex only, and no ladder means
+no slider), sorted Faster → Smarter; `xhigh` reads "Extra". **The default stop
+means "follow the default", as in Claude's app**: the pills' `default · high`
+is not a stop of its own but the stop it names, and **choosing it clears the
+effort to null** — so a thread on that stop follows whatever the default
+becomes, never a pinned copy of today's level (A4/A6 unchanged: `applyEffort`
++ `patchBody`, a default thread stays unpinned); a default that names no level
+becomes a leading "Default" stop. **One change, one request**: a drag previews
+and commits on release, a click commits at once, arrows/Home/End commit once
+350 ms after the last key (`SETTLE_MS`) or at once on blur or when the popover
+closes, and a commit that lands where the thread already is sends nothing.
+**A move made before a card is committed as the popover closes; keys under
+the card change nothing**: a card closes the popover (and disables its
+button), and a key move still settling then is committed like any other close
+— the owner made it before the card — while every key pressed under the card
+reaches the card (inert behind it, the slider gone), so Escape denies. **A
+move made before a crash is dropped**, though — the one exception: once the
+workspace's boundary has caught a crash (PR #32's `onCrash`, `crashedRef`),
+nothing is sent on the owner's behalf, so `change()` drops whatever the
+slider's unmount commits as the crash tears it down.
+**A move belongs to the conversation it was made on** (review of PR #30): the
+chip passes its key (`keyOf(paneChips(…))`: the thread, or **that compose
+row** — every compose row has its own `Compose.id`, minted by the store's
+`chat` reducer for a row that arrives without one, `composeSeq` keeping the
+reducer pure; a row spread from another keeps it, so New thread or a re-aim
+makes a new conversation even in the same project, where every row used to
+key as `"|true"`) as the slider's `conversation`; when the pane moves on with
+a move in hand — another thread opened there, the thread or its project
+archived from another window and the pane re-aimed at a new compose row — the
+slider drops the move and stops drawing what it sent, and `change(pane, next,
+from)` drops a commit whose pane shows another conversation by then. That
+second guard is the only one when the conversation changes and a card comes
+up in the same render (the slider unmounts without ever seeing the change),
+and a check pins it.
+Keying the slider on the thread instead would pair the old render's choice
+with the new pane in its unmount commit, and `patchBody` could add a `model`
+key. A move whose stop the model no longer offers (its model changed under it,
+from another window) is dropped too — without that, it cleared the effort to null.
+**An older answer never undoes a newer one**: a sequence number in the slider
+(what it draws), and per thread in `ThreadModelControls.change` a success is
+written (the record and the opened compose row holding the thread) unless a
+later change's success already was — so a late success whose newer change was
+refused still lands, which an opened row (a failed first send, no record, no
+`thread_updated`) needs; only the latest change's refusal is shown. The SSE
+`thread_updated` still carries every change in the daemon's order. Pointer
+math goes through `toCss` against the rail's own `offsetWidth`. Keys stop at
+the slider (Space is never push-to-talk) as well as at the popover — **except
+Tab**, which goes on to the popover's round (#29's review): the model list's
+chosen option → the slider → "Set default…" (when there is one) → round. The
+popover now stays open while the slider moves. **It lives in #29's reworked
+popover** (merged 2026-10-10): one per chat pane (`data-pane`), and a pick
+PATCHes only that pane's thread; under a card the popover closes and its
+button is disabled, and the slider's own `disabled` (out of the Tab order,
+`aria-disabled`, no key or pointer moves it) holds wherever it is mounted. The
+Model picker's per-model `<select>` and the provider-default dialog's
+`pd-effort` are still selects. Free checks: `effortSlider.test.ts`,
+`EffortSlider.test.ts` (jsdom: keys, Tab — heard by a React handler around the
+slider, since a listener on the root container hears keys React already
+stopped — disabled, settle, unmount commit, the sequence guard, a move dropped
+when the conversation or the model changes), `effort_slider_checks` in
+`hud_v2_check.py` (drives it like the owner, at 70% and 160%, and Escape under
+a card; the mock's `patch_delays` holds a PATCH's answer to make one arrive
+late), and `tests/face/hud_v2_effort_check.py` (the review's findings, a
+`MockDaemon(0)` of its own, run by `hud_v2_check` after the declutter section
+or alone: Tab on an OpenRouter popover with no footer, a pane switch, a thread
+archive, a project archive (OpenRouter and Claude rows), a fresh row in the
+same project, and a swap with a card in one render, each with a move settling;
+a model change under one; an opened row's late success; a workspace crash
+with a move settling) and `store.test.ts`
+(a compose row's id). A late HTTP success can still overwrite a newer state
+another window's SSE brought (main does too). The backend's
+`set_thread_model` does set `thread.updated`, so comparing it would work
+against the daemon; it is left open because the mock never bumps it, so no
+check could show the comparison doing anything. **Breaking the close-under-a-card alone bit no check at first**
+(shown in a scratch copy at the merge): the card taking focus closes the
+popover anyway, by #29's focus-leaving rule. So a card also arrives with focus
+on the chip's own button and the popover open — the one place only the disable
+closes it — and that check fails without it; inert still keeps every key off
+the slider. #29's own checks are ported to it: `hud_v2_declutter_check`'s F4
+(Tab round, arrows) and F6 (a card with focus on the slider), and
+`hud_v2_multichat_check`'s late-answer writeback, which clicks a stop.
+
+**Up to eight panes, WP-G1 (2026-10-10, design §18; plan
+`docs/plans/2026-10-10-hud-split-panes-plan.md` §3.1–§3.3, §3.7–§3.8,
+decisions file beside it wins: S-1 5 = 3 over 2, 6 = 3×2, 7 = 4 over 3, 8 =
+4×2; S-3 three is three columns).** The owner: "I'm not seeing the 6 and 8
+panel layouts." ⊞ now offers 3×2 and 4×2 directly (eight tiles, four to a
+row, the head "Layout · N panes"; it opens on the chosen tile, else the first
+tile — never on a toggle row, where Enter folded the sidebar with 3 over 2
+current, review of PR #37); 3 over 2 and 4 over 3 exist as presets
+(`LADDER` is the shape per count for WP-G2's split and ×, below) and draw
+from a stored value. Every pane can show chat, task,
+file, diff, preview or a terminal; panes 5–8 default to chat. **A pane's id
+is not its slot** (plan G-1): `pane-<id>`, its React key (`${id}.${incarnation}`
+— the incarnation is render-only, bumped by WP-G2's close),
+`chats[id]` and the dirty flag are by id for life; `ws.order` lists the ids
+drawn in reading order, and **every number the owner reads is the slot**
+(`slotOf`): "New thread · N", the terminal panel's "in pane N" (the manager's
+`slotOf`, fed by the workspace), the dirty-refusal chip, aria labels, each
+section's `data-slot`, and Ctrl+Alt+N (`paneAt`). A stored WP-A/WP-B value has
+no `order`, so it reads as ids 1…n — **the same fit as before**, held to a
+golden file (`workspace.legacy-fits.json`, 300 fits produced by main's
+`workspace.ts`). ⊞ to fewer panes moves the rest to `kept` (most recently
+hidden first); more panes take `kept` back first, then the lowest free ids,
+so 8 → 1 → 8 restores every pane in its place (plan G-2: ⊞ hides, never
+closes). `ShapeSpec.rows` (panes per row; null for main2) replaced the static
+grid areas: `cellsOf`/`gridTemplate` lay each row on the union of every row's
+edges, so 3 over 2 and 4 over 3 have **bottom-row edges of their own**
+(`Split.bottom`, separators `split-colb-N`, the top row's `split-col-N`
+spanning the top row only), and `slotWidths` gives each slot its own row's
+width for `narrow`/`compact`. The drops are generic over rows: a column drop
+keeps, in every row, the window as wide as the widest row less one — the
+focused pane's row the leftmost window holding it, the others the same start,
+clamped — and a row drop keeps the focused pane's row (a four-wide one also
+losing a column, so there is no drawn-only cols4); main2 keeps its own cases,
+and WP-A's drop expectations hold unchanged. **A sticky set is kept only if
+these panes in this order can draw it** (the same drops from some focused pane
+give exactly it), so a reordered workspace is never drawn from a stale set.
+Eight panes need ~1512px at 100% (4 × 360 plus two rails): 1920×1080 draws all
+eight with the side panes squeezed to 480; 1280×800 draws 6 of 8 on both
+rails; 1280×800 at 150% draws 4. Free checks: `workspace.test.ts` (the golden
+file, field-by-field parse fallback, all ten grids, the generic drops plus a
+never-drop-the-focused-pane property over every shape, focus, order and size,
+the plan's window table, ⊞ 8 → 1 → 8), `layout.test.ts` (focus5…8, AltGr
+symbols), `chats.test.ts`, `hud_v2_layout_check._eight_checks` and
+`hud_v2_multichat_check._eight_chats_checks`; each check the plan names a
+mutation for was shown to fail with it applied in a scratch copy, and so were
+the review's slot-label checks (a stored order `[1, 5, 2]`, so slot ≠ id, for
+both "shown in pane N" notices and the refusal chip).
+
+**Push-to-talk is Ctrl+D (2026-10-10, design §18; the owner: "change it to
+Ctrl + D just like it is in claude").** Held to talk, let go — D or Ctrl, in
+either order — to send; **Space is no longer push-to-talk anywhere** (it
+types a space, presses a focused button, does nothing on a separator — a
+space typed in Monaco used to start the mic and never appear). The rules are
+`hud/src/lib/talkkey.ts` (`isTalkKey`, `talkKeyAction`, `endsTalk`): Ctrl and D
+only — Shift, Alt or Meta make it another key, **AltGr (Ctrl+Alt) never
+matches**, nothing mid-composition, a layout whose D types no Latin letter
+matched on `code` KeyD. App.tsx listens **on the window, capture phase**, so
+the chat box, Monaco, menus, chips, the sidebar and pane headers (each of
+which stops its own keys) never stand in the way, and **its default is always
+prevented and it stops at the window** — no bookmark dialog, nothing under the
+cursor acts on it — under a card, muted or after a crash too; auto-repeat never
+presses twice; and **a hold is decided where it began** (review of PR #40,
+`TalkHold`): once Ctrl+D began as push-to-talk, or as a press refused under
+a card, its **auto-repeat** stays the window's when focus lands in a terminal
+mid-hold, so a card answered elsewhere, a click into a terminal or a Preview
+frame taking focus never sends the shell `\x04\x04\x04`. A window `blur`
+mid-hold lets the mic go (the keyup may never come) but not the hold; a
+**fresh** (non-repeat) press always decides afresh, so a lost keyup cannot
+keep the shell from its next Ctrl+D. What it does is `press()`/`release()`, unchanged from Space: the selected chat
+(W-6), its turn interrupted first, nothing recorded muted (`MIC MUTED`),
+refused under a card, with a picker or the chip popover open, with no chat on
+screen and after a crash. **In a focused terminal it is the shell's EOF**, left
+to xterm untouched (xterm prevents the default itself; **never
+`preventDefault` it there** — the terminal's key filter drops a key whose
+default is prevented); under a card the window takes it there too, so it is
+never an EOF behind the card. From a terminal push-to-talk is the orb (its
+tooltip names the key). **In Monaco it is push-to-talk**, and Monaco's
+add selection to next find match moved to **Ctrl+Shift+D** (`lib/monaco.ts`
+`editorKeyRules`, applied in ED-1's `loadMonaco` after `registerExtras`; the
+old binding removed, not shadowed) — free in Monaco and the HUD, and Chrome's
+"bookmark all tabs" only outside the editor. **A pending Ctrl+K chord's
+Ctrl+D is Monaco's** (E-10, as for Ctrl+B): the window has **one** chord
+tracker (`lib/editorkeys.ts` `chordSecond`/`resetChord`, a keydown stepped
+once whichever capture listener asks first — `useLayout`'s or push-to-talk's,
+whose order a re-run effect changes), and push-to-talk then keeps the key
+from Chrome but leaves it to Monaco, starting nothing; Ctrl+K Ctrl+D keeps
+Monaco's move-to-next-match. Taking it left Monaco's chord waiting to swallow
+the next key typed. A preview frame is another document:
+Ctrl+D in one is the framed page's. **Space now presses a focused button**,
+as on any page, so a button whose second press matters never takes focus
+from a pointer (`noPointerFocus`, a `mousedown` preventDefault; its click
+still works): the card's **AUTHORIZE and ALWAYS** (an aborted click — pressed,
+slid off — used to leave focus there, and the next Space or Enter
+authorized), the terminal's "Jarvis can read" switch, the folded mic's mode
+cycle and the Preview's "Keep its origin". The first Space pressed outside a
+typing target (`isTypingTarget`) says once, on the selected chat's line,
+"PUSH-TO-TALK IS CTRL+D NOW" (`jarvis.hud.spaceHint`); a card that arrives
+meanwhile clears it before paint, so ANSWER THE AUTHORIZATION is the line.
+Free checks: `talkkey.test.ts` (`TalkHold`),
+`editorkeys.test.ts` (the shared tracker), `monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal and
+browser sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
+`_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`;
+`TALK_PROBE` also counts a Ctrl+D that gets past the window, which must be
+none), and the ported checks in the terminal (`\x04` reaches the PTY; nothing
+under a card; a hold through a card, into a terminal or across a blur sends
+no EOF; the readable switch), multichat (W-6), layout (a separator) and preview (Keep its
+origin) suites. The v1 `jarvis.html`
+face keeps Space.
+
+**Split and close, WP-G2 (2026-10-11, design §18; plan
+`docs/plans/2026-10-10-hud-split-panes-plan.md` §3.4–§3.6, decisions file
+beside it wins: S-2 a split is a copy, S-6 a terminal's copy is a new shell in
+its folder, S-7 a task's copy is its diff, S-8 a dirty file is saved first —
+lifted by ED-2's shared buffers, below).**
+The owner asked for the × several times. Every pane's strip has a **split
+button** (`pane-<id>-split`, the title bar's `.tb-icon` — the rules were
+lifted off `#titlebar` — an outline with one divider), in the single layout
+too, and while more than one pane is drawn a **×** at its right end
+(`pane-<id>-close`). Both are pure in `lib/workspace.ts`: `splitPane(ws,
+source, id, spec, {focus})` inserts the id **right after its source** and
+lands on `LADDER`'s shape for the new count (rows2 and main2 are ⊞'s alone);
+`closePane(ws, id, then)` drops it, resets only its spec, leaves `kept` and
+every edge alone, and never closes the last pane; `allocate` takes the
+lowest free id, else the oldest hidden pane holding nothing, else the oldest
+whose compose row holds unsent words (`holding` — **its words are parked for
+the next new thread, `ORPHAN_DRAFT`**, never dropped: a hidden pane cannot
+ask; review of PR #47, H1), never one with an unsaved edit; `copySpec`
+copies a file pane's project and tabs (`editors`, ED-2: the same buffers), a
+diff's project and `filePath`, a preview's URL — **never
+its keep-origin grant** — turns a task into its diff, and leaves a chat or a
+terminal for App to fill; `splitVerdict` refuses past eight (`max`), when
+the next shape would not be drawn whole even with the side panes and panel
+folded (`room`, so at 1280×800 six panes cannot become seven), and when every
+free id is a hidden dirty pane. A dirty File pane splits like any other since
+ED-2: the copy holds the same buffers, edit and all. `{focus: false}` (the browser amendment's dev-server pane,
+§D.2) moves neither `ws.focused`, DOM focus nor the selected chat
+(`__hud.split(source, {focus})` is its test hook). **App does what a pane
+held** (`releasePane`): a thread's unsent words and files are parked under
+the thread (they come back when it opens anywhere), words handed back are
+held for it, a turn the pane tracked is left in `State.loose` and **the next
+pane that opens that thread takes it up, Stop and all** (`open_thread`,
+trading a turn of its own into `loose`; `turn_finished` and the 15 s
+reconcile clear it, the reconcile also when the thread is no longer listed —
+archived or deleted). **A first send whose pane closed while its thread
+opened** leaves the new turn `loose` too (`send()`: nothing tracks or shows
+it), and one that fails after the close parks its words for the next new
+thread anywhere and says so (review of PR #47, M2); one that fails at
+`/send` after the close says its words wait with that thread, by name (review
+2 of PR #47, LOW-2). **A park is never silent** (review 2, MED-2/NIT-3): a
+release that parks words says where — the thread, by title, or the next new
+thread with the project they were written in — and how many files past eight
+were left out. **Only a new thread the owner starts takes `ORPHAN_DRAFT` up**
+— New thread and a split's copy, the only patches carrying `takeOrphan:
+true` (review 3 of PR #47: any new `Compose.id` used to, so a pane × closed,
+an undrawn one or one re-aimed by a project's archive took the words and the
+window called them "back, in this new thread's box"); a pane × closed or
+never drawn gets no compose row at all until it is drawn (`inWorkspace`).
+It takes them even from a pane already composing
+— after the words it has — says so, and names the project they were written
+in when the row is in another (`Draft.projects`); the row keeps its own
+project. Notices arriving together (within `NOTICE_BREATH_MS`, one handler
+and its effects) **join** on the one error line rather than replace it. A compose row's unsent
+words are asked about (G-9) **whatever view the pane shows** — a pane
+switched to File keeps its chat, and × releases it too (review 2, MED-1) —
+and Discard drops them for good; a terminal goes back to the panel as its
+selected tab (`releaseToPanel`) — **no DELETE, no new ticket, the shell lives
+on**. × asks first, in an inline strip (`pane-<id>-close-ask`, focus on
+Keep/Cancel, never a modal), for a compose row's unsent words (Discard and
+close / Keep) or an unsaved edit **no other pane holds**
+(`buffers.paneLosing`; Save / Don't save / Cancel — `pane-<id>-close-save`,
+`-close-discard`, `-close-keep` — Save closing only once every edit is on
+disk; with both, one question names both and says the words go either way);
+the strip is dropped when the question no longer holds (the words were sent
+or cleared, a file edit joined them — a switch of view alone keeps it, the
+words still being the pane's) and Discard re-asks at the click, so it never
+answers a question nobody asked; Keep/Cancel is not `disabled` under a card
+(inert covers it), so focus comes back to it. **Focus after a close goes where
+the mic is** (W-6): the selected chat while it is another drawn pane — closing
+a File pane never hands the mic, or dropped files, to the chat that slides
+into its slot (review of PR #47, M1) — else, the selected chat closing, the
+chat selected before it, else the pane now in that slot (else the slot
+before); always the pane itself, never its box, so a held Enter cannot send.
+**One click closes one pane**: a × click within 400 ms
+of a close, or the second of a double-click, does nothing (3 over 2's top-
+right × sits exactly where 2×2's lands). A split's chat copy is a compose row
+in the source's project, written before the layout changes; a terminal's is
+`terminals.create(specOf(source), id, …, {readable})` — **`POST /terminals`
+takes `readable` now, so a copy of a terminal Jarvis may not read is made
+with the switch off from its first byte** (never PATCHed after), and a source
+whose row is unknown fails closed: a copy never widens what Jarvis can read.
+Restart and "New terminal here" keep the old terminal's switch the same way
+(`TermManager.readableOf`: its row, else its session's last; review 2 of
+PR #47, LOW-1). A
+reused id mounts fresh: Workspace unmounts a pane neither drawn nor `kept`,
+and `useLayout` bumps the incarnation on a close and when a split takes back
+a hidden pane (else its old FileTab stayed). File panes store their tabs
+(ED-2's `editors`; a WP-G2 `filePath` reads as one tab) and reopen them on
+mount; two File panes on one file share its buffer, so G2's save-and-reload
+messages (`lib/filesync.ts`) are gone; Diff panes store and seed their file
+(`filePath`).
+Open beside's two grow cases are splits now (a free id, so a pane ⊞ hid keeps
+what it showed). **A stored WP-A/WP-B value's panes 2–4 are `kept`** when its
+preset does not draw them (it has no `order` or `kept`), so a split takes a
+free id rather than writing over what pane 3 showed, and a grow brings them
+back in the order it always did. `focusPaneElement` looks for a pane a split
+just made for a few frames, since a split from a socket or a timer is drawn
+after the next frame. **Nothing assumes pane 1**: the store starts with no
+selected chat, `activePane` falls back to `home` (the pane in slot 1, which
+App syncs), `#tabs` is slot 1's, and Workspace no longer seeds pane 1;
+WP-G1's surviving unit mutants (U4 bottom edges unclamped, U34 a preferred
+panel's row drop unrecorded, U35 no side refit, U36/U37 fallbacks to id 1)
+each have a test now. Under a card every split, × and question button is
+disabled and inert, and the eight-pane card check asserts it at 160% and
+70%. Free checks: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
+the layout suite's `_split_checks`,
+`_split_close_one_checks` and `_split_file_checks`, the multichat suite's
+`_split_close_chat_checks`, `_split_close_selected_checks` and the
+`_rv47_*` review checks (each failing on bf09633), the terminal suite's
+`_split_close_terminal_checks`, the preview suite's `_split_checks` and
+`tests/v2/terminal_check.py`'s unreadable-from-the-first-byte case; the PR's
+mutation tables show each failing with its mutation. WP-G3's shared buffer
+arrived with ED-2, and WP-H's thinking line is below.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
@@ -978,6 +4429,20 @@ rather than v1's `JARVIS_REASONING_EFFORT` (`max`). Any v2 bench run must pin
 the thread's model and effort and record both (each turn's usage record now
 carries `model` and `effort`), or its numbers are not comparable across runs.
 v1 benches are unaffected: `Agent.effort` is `None` there.
+
+**Bench comparability across PR #34 and its follow-up (2026-10-10/11).**
+Before #34 a bench's toolset was only the set of schemas sent. agent-bench's
+no-network list, long-bench's `--no-shell` and cad-bench's pinned set were
+advisory, and a model that named a tool it was not offered still ran it if
+the tool was not dangerous. After #34 such calls are refused. After the
+follow-up, each bench's prompt also stops naming tools it does not hold
+(agent-bench loses the plan, sub-agent, task, session, web and desktop
+paragraphs; `orchestrate` keeps only its workflow tools, with no paragraph
+about them, and its sandboxed workflows lose the repository paragraph; every
+bench loses the browser's description but keeps its conduct rules), and
+cad-bench gains `skill_list`/`skill_read`. **Numbers taken
+before #34 are not comparable with numbers taken after it**, and the
+follow-up moves them again.
 
 ## What this is
 
@@ -1189,6 +4654,36 @@ jarvis/
    without `plan_write` never sees the plan block. Never describe a tool the
    model cannot call.
 
+   **That now holds for the system prompt too** (2026-10-11, the owner's
+   answer 5 on #34's follow-up). `config.SYSTEM_PROMPT` is written for the
+   full conversation toolset and names plan_write, run_subagent, task_start,
+   write_file and the rest, which the fast path, workflows, tasks, goals and
+   the benches do not hold. Since #34 each such mention costs a refused step.
+   `config.PROMPT_TOOL_PARAGRAPHS` lists every paragraph that names a tool,
+   keyed by its opening words, with the versions it may take.
+   `config.narrow_prompt(text, names)` picks, per paragraph, the first version
+   whose tools are all held, and drops the paragraph when none is
+   (`config.system_prompt(names)` is it applied to SYSTEM_PROMPT).
+   `Agent.__init__` applies it to the whole of any prompt that starts with
+   SYSTEM_PROMPT — a surface's own paragraphs after it included, so a
+   surface paragraph that names tools gets a rule in the same table (the
+   workflow's "For a change to a repository" paragraph, which agent-bench's
+   sandboxed workflows hold no git tools for) — and no surface needs code of
+   its own. "The browser" counts as a tool (`browser_goto` and
+   `browser_snapshot`): its paragraph and the fence's "and the browser" are
+   narrowed for agents without it, its conduct rules kept. The narrower
+   versions are the original's own sentences, with a sentence or a tool's
+   name taken out. With every tool held, the result is the text byte for byte
+   (the wording is tuned). A paragraph that names a tool but has no rule fails
+   `tests/prompt_tools_check.py`, so **adding a tool name to the prompt means
+   adding its rule** — and the narrower versions are copies, held to their
+   original sentence by sentence there, so **a change to a paragraph that has
+   them is a change to each of them** (or the check fails, naming the
+   sentence). Sub-agent types do the same through
+   `AgentType.needs`: a child that lost a tool its brief names to the parent
+   intersection is not sent, and says which. The case was a builder under
+   long-bench, which holds no git tools.
+
    Consequence worth knowing: the block is a real message, so **anything
    counting messages must exclude it** — `tests/longhorizon_check.py` has a
    `_n()` helper for exactly this, because scripts branching on
@@ -1277,9 +4772,13 @@ jarvis/
      this agent". This paragraph used to say the opposite — "dispatch has
      always let any agent call any registered tool by name (the approver is
      the actual gate)" — which was only true while every tool that mattered
-     to a boundary was `dangerous`, and it never was. **Unbound fails open**:
-     no agent context is a script or a test, and no real path dispatches
-     unbound (`tests/dispatch_toolset_check.py` walks them).
+     to a boundary was `dangerous`, and it never was. **Unbound refuses**
+     (2026-10-11; it failed open until then): no real path dispatches unbound
+     (`tests/dispatch_toolset_check.py` walks them), so an unbound dispatch is
+     a bug and runs nothing. Scripts and tests opt in with
+     `runtime.tools_bound(names)` or `runtime.unconfined()`. A group with an
+     **empty core** is refused by `register_group`, `load_tools` and
+     `_sync_tools` alike — an empty core is "held" by every agent.
 
 ## Safety design (deliberate, do not loosen without asking)
 
@@ -1309,28 +4808,62 @@ jarvis/
   turn", never "an agent once ran on this thread"), `_sync_tools`
   on a `load_tools` expansion, `_dispatch_calls`' per-worker `copy_context()`
   (now load-bearing twice: without it a pool worker would hold an unbound
-  approver, which denies, *and* an unbound toolset, which is not enforced), and
-  jarvis-mcp's worker, which binds the list it exposes. A tool an agent was
+  approver, which denies, *and* an unbound toolset, on which dispatch refuses
+  every call — a bare worker refuses even the agent's own tools),
+  jarvis-mcp's worker, which binds the list it exposes, and the daemon's
+  jarvis-mcp bridge, which binds the chat session's offered list (WP-1). A
+  tool an agent was
   handed explicitly (PR #33's `EXPLICIT_ONLY` shape) is in that set like any
-  other. **Unbound fails open** — deliberately: nothing bound means no agent is
-  calling, and the only callers of `dispatch` under `jarvis/` are
-  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind) and
-  `v2/mcp.call_tool`. `tests/dispatch_toolset_check.py` pins that set of call
-  sites by AST and checks a binding at every dispatch across sixteen surfaces;
-  **a new caller of `dispatch` must bind a toolset first**, or it runs
-  unconfined. Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
-  SELF_PROTECTED, so the binding half of this boundary is editable by an
-  agent with a write tool (the check itself, in `tools/__init__.py`, is).
+  other.
+
+  **Unbound refuses** (2026-10-11, the owner's answer 4 on #34's follow-up:
+  "tool fails. go with your recommendation"). It used to fail open: nothing
+  bound meant no agent was calling, so nothing was enforced. That was safe
+  only while no real path dispatched unbound, and a future bug would have
+  quietly handed its caller the whole registry. Now `dispatch` with no toolset
+  bound runs nothing and lists nothing back ("no agent's toolset is bound
+  here"). The only callers of `dispatch` under `jarvis/` are
+  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind),
+  `v2/mcp.call_tool` and `v2/bridge.call` (each binding its list first), so
+  no real path changed. `tests/dispatch_toolset_check.py` pins that set of
+  call sites by AST — through any alias of the tools package or the function,
+  relative and star imports, the dotted path, an uncalled reference and
+  `getattr` — checks those two bind before they call, and checks a binding at
+  every dispatch across sixteen surfaces. **A new caller of `dispatch` must
+  bind a toolset first, or every call it makes is refused.**
+
+  Scripts and tests that call `dispatch` themselves opt in, in code:
+  `runtime.tools_bound(names)` binds exactly the tools they call (and puts the
+  old binding back), and `runtime.unconfined()` — for the rare script that
+  really means "every tool" — lets an unbound dispatch run anything
+  registered. Unconfined is a ContextVar that only that context manager sets.
+  It is not an env var, a file or an argument, so nothing a model writes
+  reaches it, and nothing under `jarvis/`, `longbench/` or `swecompare/` names
+  it (the walk pins that). It changes only the unbound case: a toolset bound
+  inside the block, an agent's turn included, is enforced as ever. It does not
+  follow a bare thread; a context copied inside the block (`contextvars.
+  copy_context()`) carries it, like any ContextVar, wherever that copy runs.
+  The ~20 free suites that dispatch directly each wrap
+  their run in `tools_bound({...})`, listing what they call.
+
+  Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
+  SELF_PROTECTED (the owner declined it, 2026-10-11), so the binding half of
+  this boundary, and the opt-out, are editable by an agent with a write tool.
+  The check itself, in `tools/__init__.py`, is protected. An unknown tool name
+  is echoed as a capped `repr` (`NAME_ECHO_CAP`, 64): it is the model's own
+  text, and a 50,000-character name used to come back whole.
 - `write_file` enforces **read-before-write** — refuses to clobber a file the
   agent hasn't read this session.
 - Browser: **public internet open, private network closed** (2026-07-31).
   Named hosts in `allowed_hosts` always pass; `'*'` (in the default now)
   covers only public address space — LAN/router/metadata addresses, and any
   name that merely *resolves* private (`config.is_lan_host`), are refused.
-  Policy is re-checked on wherever the page actually lands
-  (`_guard_landing()` after goto/click/submit backs out to about:blank), so
-  redirects can't escape it; `fetch_page` applies the same rule before the
-  request and after redirects. Standing controls: **fresh context per run**
+  Policy is re-checked on wherever the page actually is
+  (`_guard_landing()` after goto/click/submit backs out to about:blank, and
+  since BR-0 the page is judged before every act and read and backed out of
+  at once when it moves onto the control plane), so redirects and a page's
+  own later moves can't escape it; `fetch_page` applies the same rule before
+  the request and before every redirect hop. Standing controls: **fresh context per run**
   (never a real Chrome profile — no cookies, no logins to misuse) and a
   **120-action budget**. vocab-bench pins its session back to
   localhost-only so bench runs stay hermetic.
@@ -1557,6 +5090,102 @@ jarvis/
   git writes **except push** (it reaches production directly) and **except
   reset --hard / clean** (they destroy uncommitted work); **never `rm`**
   (asked, not denied); auth commands deliberately **not** denied.
+
+  **A line that names `vexcom` is DENY** (2026-10-11, VX-1, decision V-2:
+  sending code to a robot is a physical act, meant to be only the owner's click in
+  the HUD). `rules.names_vexcom` reads the whole line before segmentation,
+  case-folded, in every variant a shell or Windows would collapse to the
+  word: quotes and backslashes removed (bash), `^` (cmd) and backticks
+  (PowerShell), `$'…'` decoded, empty expansions (`${X}`, `$X`, `$()`,
+  `%X%`, a backtick substitution) dropped, braces and brackets dropped, NFKC;
+  and a PowerShell `-EncodedCommand`/`-enc`/`-e`
+  payload decoded from base64 UTF-16LE (any unique prefix, `-`/`/`/a dash
+  character, `-enc VALUE` or `-enc:VALUE`), `${A:-vex}` default values read as
+  their words, and a glob only when it keeps at least four of the letters
+  (`vexc*`, `ve?com` — never `*vex*`, `v*`, `*.exe`: those DENYed ordinary VEX
+  work until review round 1). **That threshold is for arguments only** (review
+  round 2, which found `uv run /mnt/c/…/tools/v*/*/*/v*.exe --user` ALLOW and
+  run unasked): `rules._vex_line` finds every word the line will *run* —
+  command position, past each wrapper, the program a runner starts (`uv run`,
+  `poetry run`, `pipx run`, `npx`, `npm exec`, `bun x`…, each one's options
+  parsed from a table, and an option the table does not know followed both
+  ways), `sh -c` strings, `eval`, `watch`, `find -exec`, `xargs`, `$(…)`,
+  backticks, `<(…)`, a here-string to a shell — read with bash's quoting
+  (`'*'` is a file called `*`; a brace expansion runs its first word; **a
+  here-document's body is data**, moved into its operator as a here-string
+  by `_inline_heredocs` and read as commands only where a shell is fed it —
+  review round 3 found every `git commit -m "$(cat <<'EOF'` with a `* item`
+  line, every C doc comment written with `cat > f.h <<'EOF'` and every
+  crontab line DENY), and a
+  glob or an expansion there that could be `vexcom`/`vexcom.exe` by its file
+  name is DENY with no threshold (`…/*/*/win32/*.exe`, `${X}com.exe`,
+  `$(printf vex)com`). A program that **cannot be told** and could be vexcom —
+  only an expansion (`$X`, `"$@"`, `${A}.${B}`), read from input (`xargs env`,
+  `find -exec {}`), or a candidate an unknown option may have moved — is
+  asked whatever stands: ASK, never covered by an allowlist entry
+  (`permissions.allows` asks `rules.vex_uncoverable`), and always-ask at v2's
+  layer 2 under every profile. A glob past the caps (256 characters, 64 of
+  `*?[`, 512 glob words a line) is **too complex to judge** the same way, and
+  the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). Not
+  general runner unwrapping: `uv run rm -rf ~` is judged as before — and an
+  allowlist entry for `uv` or `npx` covers `uv run vexbuild`, by the general
+  stem-entry rule (an entry is a yes to everything the stem runs). The
+  here-document lexer recognises an operator only where bash does — never in
+  quotes, a comment, `${…}` or arithmetic (`$((1<<2))`, `((x<<=1))`,
+  `$[…]`), and a backtick's own here-document ends at its backtick —
+  because one recognised where bash would not hides the lines after it.
+  Round 3b: the delimiter is formed as bash forms it (`"E\"F"` is `E"F`,
+  `$"EOF"` and `$'EOF'` are `EOF`, `<<''` ends at an empty line; each checked
+  with `bash -n` on bash 5.3, which names the delimiter it wanted), and where
+  bash's reading is unsure the line is **too complex to judge**: `$(`/`${`/a
+  backtick or an unbalanced quote in the word, an unquoted backslash-newline,
+  an extglob, an ANSI-C escape it does not decode exactly, more than 64 open on
+  a line, and two `$(…)` shapes that differ between bash versions — a
+  here-document whose `$(…)` closes before its body, and a body line inside
+  `$(…)` that starts with the delimiter and holds a `)` (bash 5.3 ends the body
+  there and runs the rest of the line, `EOF)` included). Round 4: an
+  **unquoted** body is read in logical lines, as bash 5.3 reads it — a
+  backslash-newline (an odd run of backslashes only) is removed before the line
+  is compared, so `EO\` then `F` ends the body under `<<EOF` (the review's HIGH:
+  the lines after it ran as code while the lexer read them as data); `<<-`
+  compares a line before and after its tabs are stripped; `<(…)` and `>(…)`
+  are read as `$(…)` (checked with `bash -n`); and backticks join the `)` rule,
+  while a backslash in a backtick here-document, backticks that close before
+  their body, or a NUL make the line too complex (`bash -n` cannot parse
+  backticks). **The body backstop** bounds what any future misreading costs:
+  every line of every body (any here-document, any quoting, as written and with
+  its continuations joined), read alone as a command, that would be DENY makes
+  the line asked — never covered by an allowlist entry, always-ask in v2 —
+  and never DENY, because a `* bullet` or a C comment is a mention and must
+  stay approvable. A misread body end can then at worst turn a DENY into an
+  ask. Only DENY readings count, not unsure ones: a Markdown code span read
+  alone is a program that is only an expansion, and 45 of the repository's 49
+  PR bodies hold one. **Except** an unsure line the general rules alone would
+  ALLOW (`_general_verdict`: an ALLOW-stem runner given an option its table
+  does not know, `npx --frob $X x`, or a glob past the caps), which nothing
+  else would ask, so it counts too (round 4 delta review); a code-span line
+  holds a substitution, is general ASK, and still counts for nothing, so the
+  measured cost is unchanged. The cost, measured: a here-document with a `*`- or
+  `/*`-led line or a `**\`code\`**` line asks in v2 under AUTO — 0 of the
+  repository's 546 commit messages, 14 of its 49 PR bodies. It runs in `decide`, so v1's
+  `command_verdict` (before any approver, so neither an allowlist entry nor
+  mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
+  accepted cost**: a grep or a commit message that only mentions the word is
+  refused too — the `.env` trade. An accident guard, not a boundary (a
+  renamed copy, a script, `make -f` and a forged-Origin POST all remain; see
+  the VX-1 paragraph). `vexbuild` itself is ordinary (ASK), and so is running
+  it or `jarvis.v2.vex` through `python -m`, `uv run` or `npx` — they would
+  otherwise ride an ALLOW stem past the ask. Evidence (review round 1): a
+  differential sweep of 25,379 command strings against origin/main moved 62
+  verdicts — 39 lines naming vexcom, 15 non-literal spellings pinned in
+  `vex_check`, 8 that run vexbuild or its module — and nothing else. Round 2's
+  sweep (122,447 strings, `decide` and `static_verdict`) moved only vex shapes,
+  globs in command position (bare `*.exe`, `/mcp/*`, markdown bullets read as
+  commands) and runners handed an expansion as their program (`uv run $CC`);
+  round 3 added 38,199 real multi-line here-document commands (commit
+  messages, PR bodies, files written with `cat > f <<'EOF'`, `<<-`, Python on
+  stdin), of which none moves but for a body that names vexcom (round 1's
+  accepted cost) or a body fed to a shell; the PR has the tables.
 
   **`2>&1` is not a redirect to a file** (narrowed 2026-08-17, one round after
   the fixes above). The redirect check had become a raw scan for any unquoted
@@ -2100,7 +5729,40 @@ jarvis/
   gc, the `ext::` transport and implicit bare repositories off; diffs run with
   `--no-ext-diff --no-textconv`; and a repository whose *own* config names a
   program or moves where git works (`core.sshCommand`, a filter/textconv/merge
-  driver, `url.*.insteadOf`, `include.path` …) is refused outright. Output has
+  driver, `url.*.insteadOf`, `include.path` …) is refused outright. **Git is
+  kept out of submodules** (2026-10-12, PR #65): inside one it obeys *that*
+  repository's config, and on main a submodule's own filter ran through the
+  tool on `status`, `diff`, `add -A`, `commit -a` and `rm`, its textconv on
+  `log -p`/`show` under a global `diff.submodule=diff`, and a global
+  `push.recurseSubmodules` published its commits to its own remote. Every
+  `_git` call now carries recursion-off, `status.submoduleSummary=false`,
+  `diff.submodule=short` and `diff.ignoreSubmodules=dirty` pins (they travel
+  into any git that git starts, as `hooksPath` and `fsmonitor` already did) and
+  `--ignore-submodules=dirty` / `--no-recurse-submodules` on the command line
+  of the status and diff family and fetch/pull/push (a `.gitmodules` `ignore =`
+  beats the `-c`, never the flag); `judge()` refuses every `submodule` form and
+  any option that goes back in; and since `add -A`, `describe --dirty`/`--broken`, `rm`
+  and three `.gitmodules`-overridden reports still go in whatever the pins say,
+  every checked-out submodule's own config, nested ones too, is held to the
+  superproject's rule — unreadable, not resolving to its own directory, or more
+  than 64 / 4 deep fails closed (`_submodule_risk`). **`gh` gets the same
+  pins** as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+  (`_config_env`): `gh pr create` runs its own plain `git status`, which ran
+  the repository's fsmonitor and went into a submodule to run its (review of
+  #65). Judge reads option words, never a message's value, so
+  `commit -m "--submodule docs"` is a commit — only where git takes `-m`'s
+  value (commit, tag, merge, notes add/append/edit; never stash, where `stash
+  list|show -p -m --submodule=diff` is an option, measured). **The parser
+  follows git's own reading** (delta review of #65, git 2.53): a `--` after
+  an option word may be that option's value with options going on after it
+  (`commit -m -- --gpg-sign` signed with the global `gpg.program`), so every
+  reading is judged and they must agree, else refused (`_readings`); after a
+  `--`, fetch, pull, ls-remote and remote still read their words as the
+  repository (`fetch -- <url>` reached a repository no remote names); `-S` is
+  refused in merge, cherry-pick, revert, rebase, pull and am as in commit
+  (`--gpg-sign` everywhere already); and the value-letter tables hold no
+  letter git reads as a flag (rebase's `-m` hid `-x <cmd>`, fetch's `-m`
+  hid `-P`). Output has
   URL userinfo redacted. **A commit that names or carries a protected
   credential is taken back** (`reset --soft`, nothing lost) before the tool
   returns, and a push is refused if anything outgoing does. The way out — name
@@ -2128,7 +5790,9 @@ jarvis/
   tables for the verdicts, a real repository under a temp HOME for the
   properties that are about how git is *run*, each with a sanity half proving
   the trap fires under plain git. Not covered, said plainly: the owner's own
-  global git configuration and credential helpers (they run on push/fetch);
+  global git configuration and credential helpers (they run on push/fetch),
+  including a filter it defines that a submodule's attributes name, which runs
+  where git's internals still go into a submodule (`add -A`, `describe --dirty`/`--broken`, `rm` of one);
   an `include.path` / `includeIf` *already* in that global config that points
   at a file an agent can write (the agent cannot create one — writes to the
   global config and `git config` writes are both refused — but one the owner
@@ -2139,10 +5803,20 @@ jarvis/
   `workflows.start`'s `max_steps` if that bites.
 - **Jarvis may not touch his own control plane.** `config.is_face_origin()` —
   the browser and `fetch_page` refuse it, ahead of `allowed_hosts='*'`.
-  Otherwise he could drive his own HUD and approve himself. In v2 the HUD
+  Otherwise he could drive his own HUD and approve himself. Since BR-0
+  (2026-10-11) it covers every port in `config.control_ports()` — 8402,
+  8404, 8405 and 8406, configured and default; v2's API listener on 8405
+  serves the same HUD page, and only 8402 used to be refused — in every
+  loopback spelling, and **not 8403**, the workshop, which v1's designer
+  browses on purpose. The v2 approve route is owner-only too (the HUD's
+  listener and Origin), and a provider's out-of-band `answer()` can only
+  deny (see *Only the HUD window says yes* at the top). In v2 the HUD
   and API listeners also refuse to be framed on every response (WP-E,
   `frame-ancestors 'none'`), so no page in a Preview frame can become the
-  HUD by navigating itself there.
+  HUD by navigating itself there. v1's browser judges a page where it is
+  (before every act and read), `fetch_page` judges every redirect hop before
+  requesting it, and the built HUD is not writable by the write tools (BR-0
+  round 2, same note).
 - **External accounts follow use-but-never-see** (Gmail, 2026-07-31, the
   template for every future integration): a *scoped OAuth refresh token* —
   never a password — lives in `~/.config/jarvis/google_token.json` (mode
@@ -2193,15 +5867,47 @@ jarvis/
   and no cad_ tool accepts a document id for a write target — so no CAD
   tool needs `dangerous=True`. Parts libraries are read-only sources.
   `tests/onshape_check.py` asserts both properties stay true.
-- **`.env` / `.env.local` are unreadable** (`tools/secrets.py`, added
-  2026-07-30 after a real leak — see below). Three layers: `read_file` refuses
-  them by name; both shell tools refuse a command naming one, including a
-  dotted glob (`cat .env*`) and *including approved* `run_command`, because
-  approving a command is not consent to what it prints; and `dispatch()`
-  scrubs every tool result before it becomes a `tool` message. Covered
-  names: `.env`, `.env.local`, `google_token.json`, and `onshape_keys.json`
-  (JSON values pulled by sensitive key names) — `.env.example` stays
-  readable on purpose.
+- **Credential env files are unreadable** (`tools/secrets.py`, added
+  2026-07-30 after a real leak — see below — for `.env`/`.env.local`, and
+  since ENV-1, 2026-10-12, for every credential env file). Three layers:
+  `read_file` refuses them by name; both shell tools refuse a command naming
+  one, including a glob that could expand onto one (`cat .env*`) and
+  *including approved* `run_command`, because approving a command is not
+  consent to what it prints; and `dispatch()` scrubs every tool result
+  before it becomes a `tool` message. Covered: every credential env file
+  (below) and the bundles in `PROTECTED_NAMES` — `google_token.json`,
+  `onshape_keys.json`, `discord_token.json`, `spotify_token.json` (JSON
+  values pulled by sensitive key names). `.env.example` and
+  `.env.local.example` stay readable on purpose.
+
+  **The owner's `.env*` rule (2026-10-11, `docs/plans/2026-10-11-env-files.md`):
+  the owner edits every `.env*` file in the HUD, Jarvis reads none of them
+  and writes only `*.example`.** A **credential env file** is `.env` or
+  `.env.<anything>`, at any depth, except a name ending `.example`;
+  case-insensitive (Windows drives are); a name Windows would trim (trailing
+  dots or spaces) judged both ways; symlinks resolved both ways (a symlink
+  *named* `.env.example` that reaches `.env` is credential, and one *named*
+  `.env` is credential whatever it points at), a symlink it cannot follow is
+  credential. **One function, `secrets.is_env_credential(path)`** (and
+  `is_env_credential_name` for a bare name), and every caller asks it —
+  nothing keeps a copy. **ED-2 built the owner's half**: the editor's routes
+  serve and save such a file only to the owner (`editor_policy` kind `env`,
+  owner-only routes, the API listener 403), and `hud_api.protected` — what a
+  diff, the preview origin and an `@path` or dropped attachment refuse — asks
+  it too. **ENV-1 built Jarvis's half on the same function (2026-10-12; the
+  v2 section's ENV-1 paragraph has the detail).** `secrets.is_protected`
+  asks the name rule, so every v1 caller that judges a name — the shells,
+  the scrub's attribution drop, sqlite, gitops' commit guard, Discord and
+  `@path` attachments — covers every credential env file; `is_credential`
+  adds the symlink hops for a real path (`read_file`, `write_file`,
+  `edit_file`, the face's `@path`). `PROTECTED_NAMES` is now the bundles plus
+  the two env names that were there first, not the whole of what is
+  protected. The write tools refuse a credential env file and write
+  `*.example`; a shell write onto one is **DENY** in `rules.decide`; the
+  scrub reads values from every credential env file in the folder chain;
+  Claude's read and write tools and Codex's grants are refused at v2's
+  layer 1; terminal_read's guard asks the same rule (its own
+  `.sample`/`.template` exception is gone, per the owner's Q-1).
 
 ## Testing
 
@@ -2223,6 +5929,38 @@ jarvis/
   already paid for, is in `swecompare/RUNBOOK.md`.
 - Context-management tests are synthetic and free — no API, fully repeatable.
   Prefer that pattern for new logic.
+- **A check must hold under load** (2026-10-12, the flaky-test fix). The lead
+  runs several suites at once, and a check that fails only when the CPU is
+  busy hides real failures. Four rules, each from a flake this fixed:
+  - **Bind port 0** and read the port back. A fixed port fails when another
+    run holds it (attach/cancel shared 8476).
+  - **Wait for the state, never for a time.** Read a value only after the
+    thing that sets it has happened: Monaco's text after it is drawn, a
+    banner after it appears, a worker's back-off after it records it (move
+    a fake clock only then), the error page a refused load commits before
+    the next goto. In one `evaluate`, set a probe and fire the render that
+    trips it.
+  - **Time work, not the wall.** A real-clock bound measures how long the
+    work held the thread: the least of its wall time and the process's CPU
+    time (`held` in the `.editorconfig` vitests). The thread's own CPU clock
+    is a tick stale on Linux. A GC pause inflates both, so judge the best of
+    up to three fresh runs: a pause hits one run, and a break that costs
+    CPU is slow in every run. A check of a guard's logic runs on a clock
+    made of the work done (`workDeadline`). Keep the tight bound, not a
+    generous one.
+  - **Pin the constants that set a guard's strength.** A held-time bound
+    under load cannot tell a 5 ms deadline from a 20 ms one, and the work
+    clock scales with the deadline. So `RESOLVE_MS`, `CHECK_STEPS`,
+    `STRIKES`, and the real-clock default of `deadline()` are asserted
+    directly (PR #72, LOW 1).
+  - **Count the HUD's fault, not the test's.** The terminal suite's
+    fresh-ticket check still judges every socket's ticket. Only a fresh
+    ticket for a terminal the test itself removed (`_reset`, `end`; held in
+    `fake.removed`) is counted apart. A socket for a terminal the HUD closed
+    itself counts against it.
+  To reproduce, widen the window: `taskset` with busy loops, Chromium's
+  `Emulation.setCPUThrottlingRate`, late animation frames, or a sleep where
+  the race is. "Passes alone" proves nothing.
 - `tests/context_check.py` — free synthetic checks for `context.py`, and the
   one CLAUDE.md claimed existed for months but did not, which is how the
   cut-point orphan bug survived in the compaction path (it only fires past
@@ -2275,24 +6013,75 @@ jarvis/
   agent's own tools listed, capped), a parallel batch with one refused call,
   the deferred pointer only for an agent that could load the group, no
   widening into a group whose core it lacks (`load_tools` and `_sync_tools`),
-  an explicit-only tool for the agent handed it, the unbound decision, and a
-  turn's toolset being restored when the turn ends. **The surface walk** is
-  what makes "unbound fails open" safe: an AST pin that the only `dispatch`
+  an explicit-only tool for the agent handed it, and a turn's toolset being
+  restored when the turn ends, including a turn that raises (M7) and a group
+  loaded in one turn and used in the next (M12). Since 2026-10-11: **unbound
+  refuses** (nothing runs, nothing listed); the opt-ins (`tools_bound` holds a
+  script to its set and restores; `unconfined` runs anything only while nothing
+  is bound, inside the block, and not into a bare thread — a copied context
+  carries it); an unknown name echoed
+  capped and escaped; and an empty-core group refused by `register_group` and
+  widening nothing through `load_tools` or `_sync_tools`. **The surface walk**
+  is why "unbound refuses" costs no real path: an AST pin that the only `dispatch`
   callers (in `jarvis/`, `longbench/`, `swecompare/`) are
-  `Agent._dispatch_one` (from `_run_turn`, after its bind) and jarvis-mcp's
-  worker, and a probe on every dispatch across sixteen surfaces (CLI,
+  `Agent._dispatch_one` (from `_run_turn`, after its bind), jarvis-mcp's
+  worker and the daemon's jarvis-mcp bridge (each after its own bind; the
+  bridge's ordering is pinned by AST too), and a probe on every dispatch
+  across sixteen surfaces (CLI,
   Discord, the face and its designer included) asserting a toolset was
-  bound. Sixteen of its twenty checks fail on 34b6ab2 (the four that pass
-  there are the static pin, the deferred pointer, the conversation-surface
-  binding and the unbound decision — guards by design); dropping the
-  per-worker `copy_context()`, `load_tools`' core check or `_sync_tools`'
-  core filter in a scratch copy each fails its check. Since dispatch
-  enforces the caller's toolset, **a suite that binds a toolset by hand and
-  then dispatches must hold the tool it calls** (`fleet_check`'s `bound()`
-  adds the spawning tools; `longhorizon_check` binds `run_subagent`). Run
+  bound. The walk resolves aliases (`import jarvis.tools as t`, `from
+  ..tools import dispatch as d`, a star import, `jarvis.tools.dispatch`,
+  `getattr(tools, "dispatch")`, an uncalled reference). Its first version
+  followed only `tools.dispatch(...)`, and `walker_checks` runs it on each of
+  those spellings. It also pins that no product code names `unconfined`.
+  Sixteen of its first twenty checks failed on 34b6ab2. On the
+  follow-up's base, the unbound, opt-in, unknown-name and empty-core checks
+  fail. M7, M12 and the walker were shown to bite in a scratch copy, as were
+  dropping the per-worker `copy_context()`, `load_tools`' core check or
+  `_sync_tools`' core filter. Since dispatch enforces the caller's toolset, and
+  refuses with none, **a suite that dispatches directly binds what it calls**:
+  most wrap `main()` in `runtime.tools_bound({...})`, `fleet_check`'s
+  `bound()` adds the spawning tools, and `longhorizon_check` binds
+  `run_subagent`. Run
   after touching `tools._dispatch`, `runtime.py`, `Agent.run_turn`/
   `_run_turn`/`_sync_tools`/`_dispatch_calls`, `load_tools`, any new caller
   of `dispatch`, or any surface's toolset.
+- `tests/prompt_tools_check.py` — free checks that every surface's prompt
+  names only tools it holds (2026-10-11), `llm.chat` answering at once and
+  every config path temp. Each agent is the one its surface really builds,
+  through its own start path: the CLI, Discord, the face's voice agent and
+  designer, the v2 fast path, a workflow (and one started inside
+  agent-bench's sandbox, whose toolset has no git tools), an attended task, a
+  goal, agent-bench's five tasks, cad-bench, long-bench (shell and no-shell),
+  vocab-bench, and every sub-agent type under every parent that can spawn one.
+  The working-context block is rendered with something in every index (a
+  skill, a session, a task, a plan, an available group). Also checked: the
+  owner's named cases (the fast path names none of task_start, workflow_start,
+  plan_write, run_subagent, write_file; tasks, goals and workflows no
+  task_start) and what narrowing keeps (the fast path still gets the
+  untrusted-content rule and its fence; a no-web bench gets the rule without
+  the fence; a workflow keeps its repository paragraph only with the git
+  tools; the shared prompt describes the browser only to an agent holding it,
+  and keeps its conduct rules for everyone). `config.system_prompt` with every
+  tool held is SYSTEM_PROMPT byte for byte, every tool-naming paragraph has a
+  rule, each rule's opening names exactly one paragraph across every prompt
+  built on SYSTEM_PROMPT (role briefs included), and no version names a tool
+  it does not need. **Each narrower version is held to its original sentence
+  by sentence** (PR #42 review, MED-2): every sentence it has is the
+  original's, or one of the rewordings the check lists (`REWORDED`: "fetch_page,
+  web_search and the browser return" → "fetch_page and web_search return" /
+  "fetch_page returns", and "web_search or fetch_page" → "fetch_page"); every
+  sentence of the original that names no tool it lacks is kept, in order,
+  unless the check lists it as left out (`DROPPED`: the fence's last two
+  sentences without a web tool, the browser's first without the browser).
+  A dash changed in a copy, or a sentence added to the original and not to
+  its copies, fails. Each type's brief names only its `needs`, and
+  a type that would lose one is not sent. Against origin/main every
+  non-conversation surface but vocab-bench fails; against the follow-up's
+  first head (ede1320) the sandboxed workflow (told of git_worktree, git and
+  git_pull_request) and every no-browser surface fail. Run after touching
+  `config.SYSTEM_PROMPT` or `PROMPT_TOOL_PARAGRAPHS`, a surface's prompt
+  suffix or toolset, an agent type's brief, or `Agent.__init__`.
 - `tests/files_check.py` — free checks for the file and search tools:
   read_file numbered and paged (a 5000-line file reassembled byte-exact by
   paging, which is the `CLAUDE.md` case), edit_file across unique / ambiguous /
@@ -2369,6 +6158,9 @@ jarvis/
   fixture's own work must earn the agent nothing), every task surviving a
   run cut short (0/1 turns), the bench assembly deleted even when the run
   blows up, and part resolution stripping Onshape's invisible LRM marks.
+  Since 2026-10-11 it also checks that the bench's agent holds `skill_list`
+  and `skill_read`, that its context lists the cad skill, and that
+  `skill_read('cad')` runs for it. That check fails on the commit before.
   Run after touching `jarvis/cadbench.py`.
 - `tests/avatars_check.py` — free synthetic checks for avatars: the SVG
   sanitizer against a hostile file (script, `onload`, `foreignObject` drawing
@@ -2644,10 +6436,10 @@ jarvis/
   a recorder and `gh` a stand-in script, every config path and HOME a temp
   dir, nothing through a shell. Two layers because they fail differently.
   **`judge()` is pure, so its verdicts are tables** (placeholder names only):
-  59 reads that run in every context, 49 routine writes that run only in an
+  66 reads that run in every context, 68 routine writes that run only in an
   own worktree on an own branch (and are refused in the owner's checkout,
-  and for the branch-moving half off an own branch), 7 reviewed forms, and
-  ~200 refusals grouped by what each protects — including every abbreviation
+  and for the branch-moving half off an own branch), 8 reviewed forms, and
+  289 refusals grouped by what each protects — including every abbreviation
   of the dangerous long options, an alias that tries to be a subcommand,
   unknown remotes, credential names, and the "shape" cases (global options,
   non-lists, oversize). **The runner is exercised against real git** in a
@@ -2666,7 +6458,34 @@ jarvis/
   files stay writable. **Verified to bite** by an in-process mutation sweep
   (disable each protection, the matching check must fail) — 14 of 15 at
   first, the 15th being a mutation that did not mutate, now a structural
-  assertion. Run after touching `gitops.py`, `tools/gitctl.py`,
+  assertion. **Submodules** (2026-10-12, PR #65), against a real submodule cloned from
+  a local bare repository into a tool-made worktree, every trap a script that
+  writes one marker: `submodule_pin_checks` puts the drivers in the owner's
+  global config, named only by the submodule's attributes (so the config check
+  has nothing to refuse and only the pins are tested) — status, diff,
+  diff-files/-index and commit -a never run its filter, a `.gitmodules`
+  `ignore = none` included; log -p, show and diff A B never run its textconv
+  under `diff.submodule=diff`; fetch, switch, grep and push never recurse (the
+  push neither publishes the submodule's commit nor runs its pre-push hook);
+  its own fsmonitor never runs — each against plain git that does.
+  `submodule_config_checks`: a program in the submodule's own config, or a
+  nested repository's, refuses every subcommand (add -A, describe --dirty and
+  rm, which no pin keeps out, among them); a moved `core.worktree`, a broken
+  config, a `.git` file pointing nowhere and the limits fail closed; a clean
+  submodule and an unchecked-out gitlink are not refused. 16 of the scenarios
+  go into the submodule on main, none here (fsmonitor and the hook were
+  already held off by the propagated `-c`); dropping the pins, only the
+  command-line flags, the config read, or judge's option refusal each fails
+  its own check. `gh_git_checks` (review of #65): a stand-in `gh` that runs
+  `git status` from PATH, as gh does, runs neither the repository's nor the
+  submodule's fsmonitor through `open_pull_request`, and runs both in
+  gitops' environment without the pins; dropping `_gh`'s pins fails it.
+  The delta review's tables (a `--` that may be an option's value, signing,
+  a flag read as taking a value, a repository named after `--`, stash's
+  `-m`) and `signing_checks` (a trap `gpg.program` that plain git runs on
+  `commit -m -- --gpg-sign`); each of its five fixes, removed, fails its rows,
+  and a `judge()` differential against 5d5362b over 520,460 verdicts moved
+  27,183, every one toward REFUSE, none looser. Run after touching `gitops.py`, `tools/gitctl.py`,
   `tools/files.py`'s protection, or `run_readonly`.
 - `tests/tasks_check.py` — free checks for attended background tasks, with
   `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's
@@ -2918,13 +6737,56 @@ Two findings worth keeping:
 
 ## Decisions already made — don't relitigate
 
+- **The owner's Browser keeps this machine closed like the LAN
+  (2026-10-12, the lead's call on PR #69's MED 2, recorded for the owner).**
+  The gate admits a loopback port only after the owner opened it in a tab
+  through the owner-only routes, for the host's lifetime; `local_servers` in
+  `browser.json` (off) opens them all. Pages and agents never open one.
+  Auto-open never opens one (amendment 2, L2). Details in the BR-1a
+  paragraph.
+- **No Browser frame takes the keyboard without the owner's gesture
+  (2026-10-12, R-1).** One that gains focus otherwise is removed at once
+  (removal is the only thing that works); never under a card or from a
+  hidden pane. Details in the "A framed page never takes the keyboard"
+  paragraph.
 - **A toolset is enforced at dispatch, not only by what the request offers
   (2026-10-10).** An agent's bound toolset is the set it may call; naming a
   registered tool outside it is refused, dangerous or not. A deferred tool
-  gets the `load_tools` pointer only when the agent could load it. With no
-  agent bound (a script, a test) dispatch does not enforce — every real
-  caller binds first, and a new caller of `dispatch` must too. Details in
-  *A toolset is a boundary* (Safety design).
+  gets the `load_tools` pointer only when the agent could load it. **With no
+  toolset bound, dispatch refuses** (2026-10-11, owner's answer 4). Every
+  real caller binds first, and a new caller of `dispatch` must too. Scripts
+  and tests opt in with `runtime.tools_bound(names)` or
+  `runtime.unconfined()`, in code only. Details in *A toolset is a boundary*
+  (Safety design).
+- **Killing the v2 daemon by pattern is DENY for agents (2026-10-11, the
+  owner's "yes add the daemon2 kill rule" on PR #48).** A `pkill -f`,
+  `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose pattern matches the
+  daemon's command line at the word `daemon2`, and (review 2) a `kill` fed
+  the daemon's PID by `systemctl show|status`, a D-Bus read, its cgroup,
+  `lsof`/`fuser` on its ports or `ps | grep`, plus `fuser -k` on its ports
+  and `pkill --cgroup` naming its unit (and, since the delta review, a grep
+  over `/proc/*/cmdline` or `ss -p`/`netstat -p` on its ports). A source is
+  judged only when a fed kill is on the line, and a kill pattern whose
+  matching cost cannot be bounded is never matched: too complex to judge, so
+  asked, never DENY (`kill_unsure`). `pkill -f jarvis` stays ALLOW (the
+  2026-08-09 matrix); a literal `kill <pid>` and kills by process name
+  (`pkill python`) are not seen. Details with the restart commands above.
+- **Each agent's prompt names only the tools it holds (2026-10-11, owner's
+  answer 5).** `config.narrow_prompt` narrows any prompt built on
+  SYSTEM_PROMPT paragraph by paragraph, a surface's own paragraphs included
+  (invariant 7). cad-bench holds `skill_list` and `skill_read`,
+  so the CAD skill it measures can load. runtime.py and toolgroups.py are
+  **not** SELF_PROTECTED: the owner declined it (answer 3).
+- **Auto-opened dev servers are Direct only, and never open a port in the
+  Remote browser's gate (2026-10-12, the lead's decision L2,
+  `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`).** Since the
+  owner asked for servers that Jarvis, Claude and Codex start to open too,
+  an agent can trigger an auto-open. Counting one as the owner's own
+  navigation would hand agents a lever on the gate. Only the owner's typed
+  URL, click or "Open in Remote" opens a loopback port there. This
+  **reverses** the note BR-1a's review first carried: that BR-8b's auto-open
+  counted as the owner's opening. #69 merged with that note already
+  corrected, in the BR-1a paragraph and the "closed like the LAN" bullet.
 
 - **Agents that cannot ask get a typed git tool, not a broader shell
   (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach

@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   besideTarget, chatProjectId, chatTarget, composeRows, drawnShowing, eitherPane, emptyChat, emptyChats,
   giveBackPane, heldElsewhere, isEmptyChat, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
-  sidebarPanes, type ChatState, type Chats,
+  nonePerPane, sidebarPanes, type ChatState, type Chats,
 } from "./chats";
-import { defaultWorkspace, focusPane, setPreset, setView, type PaneNo, type View, type Workspace } from "./workspace";
+import {
+  PANE_NOS, defaultWorkspace, focusPane, parseWorkspace, setPreset, setView, type PaneNo, type View, type Workspace,
+} from "./workspace";
 import type { Thread } from "../types";
 
 const chats = (over: Partial<Record<PaneNo, Partial<ChatState>>> = {}): Chats => {
@@ -12,7 +14,7 @@ const chats = (over: Partial<Record<PaneNo, Partial<ChatState>>> = {}): Chats =>
   for (const [n, c] of Object.entries(over)) all[Number(n) as PaneNo] = { ...all[Number(n) as PaneNo], ...c };
   return all;
 };
-const none = { 1: null, 2: null, 3: null, 4: null } as Record<PaneNo, string | null>;
+const none = nonePerPane();
 
 /** A workspace with these views and this focus. */
 const shaped = (views: View[], preset: Workspace["preset"] = "cols2", focused: PaneNo = 1): Workspace => {
@@ -137,7 +139,7 @@ describe("the selected chat: the chat pane most recently clicked (decisions W-6)
   });
 
   it("falls back to the most recently selected chat pane still drawn", () => {
-    const w = shaped(["chat", "chat", "chat", "preview"], "grid4", 4);
+    const w = shaped(["chat", "chat", "chat", "browser"], "grid4", 4);
     // pane 3 selected last, then the window dropped it: pane 1 was selected before pane 2
     expect(selectedChatOf(w, [2, 4], [3, 2, 1])).toBe(2);
     expect(selectedChatOf(w, [1, 4], [3, 2, 1])).toBe(1);
@@ -145,7 +147,7 @@ describe("the selected chat: the chat pane most recently clicked (decisions W-6)
   });
 
   it("is the one chat pane drawn, never selected before", () => {
-    expect(selectedChatOf(shaped(["preview", "chat"], "cols2", 1), [1, 2], [])).toBe(2);
+    expect(selectedChatOf(shaped(["browser", "chat"], "cols2", 1), [1, 2], [])).toBe(2);
     expect(selectedChatOf(defaultWorkspace(), [1], [])).toBe(1);
   });
 
@@ -165,11 +167,11 @@ describe("where a thread click lands", () => {
   });
 
   it("else in a drawn chat pane, before the selected chat is known", () => {
-    expect(chatTarget(shaped(["preview", "chat"], "cols2", 1), [1, 2], 1)).toEqual({ pane: 2, switches: false });
+    expect(chatTarget(shaped(["browser", "chat"], "cols2", 1), [1, 2], 1)).toEqual({ pane: 2, switches: false });
   });
 
   it("else the focused pane switches to chat — in the single layout, today's tab switch", () => {
-    expect(chatTarget(shaped(["file", "preview"], "cols2", 2), [1, 2], 1)).toEqual({ pane: 2, switches: true });
+    expect(chatTarget(shaped(["file", "browser"], "cols2", 2), [1, 2], 1)).toEqual({ pane: 2, switches: true });
     expect(chatTarget(shaped(["task"], "single", 1), [1], 1)).toEqual({ pane: 1, switches: true });
   });
 
@@ -191,7 +193,8 @@ describe("where a thread click lands", () => {
 
 describe("open beside", () => {
   it("from one pane, two columns: pane 2", () => {
-    expect(besideTarget(defaultWorkspace(), [1])).toEqual({ preset: "cols2", pane: 2 });
+    // A split since WP-G2: pane 2 goes right after pane 1.
+    expect(besideTarget(defaultWorkspace(), [1])).toEqual({ preset: "cols2", pane: 2, source: 1 });
   });
 
   it("the next drawn pane to the right of the focused one", () => {
@@ -200,7 +203,7 @@ describe("open beside", () => {
   });
 
   it("from the right of two columns, a third column", () => {
-    expect(besideTarget(shaped(["chat", "chat"], "cols2", 2), [1, 2])).toEqual({ preset: "cols3", pane: 3 });
+    expect(besideTarget(shaped(["chat", "chat"], "cols2", 2), [1, 2])).toEqual({ preset: "cols3", pane: 3, source: 2 });
   });
 
   it("from the last pane of a grid, round to the first", () => {
@@ -239,5 +242,71 @@ describe("what the sidebar marks", () => {
     expect(composeRows(single, [1], c, 1).map((r) => r.label)).toEqual(["New thread"]);
     // A pane with a thread is not composing, whatever its compose field says.
     expect(composeRows(single, [1], chats({ 1: { threadId: "t", compose: { projectId: "p" } } }), 1)).toEqual([]);
+  });
+});
+
+describe("eight panes (WP-G1)", () => {
+  it("holds one conversation per pane id, eight of them", () => {
+    expect(Object.keys(emptyChats()).map(Number)).toEqual([...PANE_NOS]);
+    expect(Object.values(nonePerPane())).toEqual([null, null, null, null, null, null, null, null]);
+  });
+
+  it("routes an event to the one of eight panes showing its thread, and nowhere else", () => {
+    const c = chats(Object.fromEntries(PANE_NOS.map((n) => [n, { threadId: `t${n}` }])));
+    expect(routeEvent("t7", c, none, 1)).toEqual({ mine: [7], ours: [] });
+    expect(routeEvent("t8", { ...c, 6: { ...c[6], turnThreadId: "t8" } }, none, 1)).toEqual({ mine: [8], ours: [6] });
+    expect(heldElsewhere(c, 1, "t5", none)).toBe(5);
+    expect(giveBackPane("t6", c, none, null, [5, 6, 7])).toBe(6);
+  });
+
+  it("selects among eight drawn chat panes by the order they were used", () => {
+    const w = focusPane(setPreset(defaultWorkspace(), "grid8"), 3);
+    const all = setView(w, 3, "file");
+    expect(selectedChatOf(all, [1, 2, 3, 4, 5, 6, 7, 8], [6, 2])).toBe(6);
+    expect(selectedChatOf(all, [1, 2, 3, 5, 6, 7], [8, 6])).toBe(6);
+  });
+
+  it("numbers compose rows by slot — the place the owner sees — never by id", () => {
+    let w = parseWorkspace(JSON.stringify({ preset: "cols3", order: [1, 5, 2],
+                                            panes: [{ view: "chat" }, { view: "chat" }] }));
+    w = focusPane(w, 5);
+    const c = chats({ 1: { compose: { projectId: "p" } }, 2: { compose: { projectId: "p" } }, 5: { compose: { projectId: "p" } } });
+    expect(composeRows(w, [1, 5, 2], c, 5).map((r) => [r.pane, r.label])).toEqual([
+      [1, "New thread · 1"], [5, "New thread · 2"], [2, "New thread · 3"],
+    ]);
+    expect(sidebarPanes(w, [1, 5, 2], 5)).toEqual([1, 5, 2]);
+  });
+
+  it("opens beside by a split into a free id, so the panes ⊞ hid keep what they showed (WP-G2)", () => {
+    const one = setPreset(parseWorkspace(JSON.stringify({ preset: "cols3", order: [1, 5, 2],
+                                                          panes: [{ view: "chat" }, { view: "chat" }] })), "single");
+    expect(one.kept).toEqual([5, 2]);
+    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 3, source: 1 });
+    const two = setPreset(one, "cols2");
+    expect(besideTarget(focusPane(two, 5), [1, 5])).toEqual({ preset: "cols3", pane: 3, source: 5 });
+  });
+
+  it("takes the oldest hidden pane with no unsaved edit when every id is used, never a dirty one", () => {
+    // Eight panes, ⊞ to one: 2…8 hidden, 8 the oldest.
+    const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
+    expect(one.kept).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 8, source: 1 });
+    expect(besideTarget(one, [1], [8, 7])).toEqual({ preset: "cols2", pane: 6, source: 1 });
+    // All of them dirty: ⊞'s grow, as before (the window then refuses to switch a dirty pane).
+    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 2 });
+  });
+});
+
+describe("with pane 1 closed (WP-G2): the fallbacks are the first pane in reading order (U36/U37)", () => {
+  // Only pane 3 left, showing a file; nothing drawn yet (no window to fit).
+  const w = { ...defaultWorkspace(), preset: "single" as const, order: [3 as PaneNo], focused: 3 as PaneNo };
+
+  it("a chat with nothing drawn lands in that pane, which switches to chat", () => {
+    expect(chatTarget(w, [], null)).toEqual({ pane: 3, switches: true });
+  });
+
+  it("Open beside with nothing drawn splits after that pane", () => {
+    expect(besideTarget(w, [])).toMatchObject({ preset: "cols2", source: 3 });
+    expect(besideTarget(w, []).pane).not.toBe(3);
   });
 });

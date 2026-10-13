@@ -36,6 +36,7 @@ from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
                        PermissionCallback, Provider, SessionHandle, SessionLost, SteerRefused,
                        Usage, UserMessage)
 from .stores import ProjectArchived, Stores, StoreError, _validate, _write_bytes
+from . import running_cost
 from . import worktrees
 
 LOG = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ STOP_TIMEOUT = 2.0
 GATE_KINDS = {EventKind.APPROVAL_REQUESTED: "gate_requested",
               EventKind.APPROVAL_RESOLVED: "gate_resolved"}
 _TASK_VERBS = ("start", "steer", "cancel", "resume", "answer")
+# `PATCH /projects` fields only the owner may change, from the HUD (BR-0).
+_OWNER_PROJECT_FIELDS = ("profile", "always_ask", "extra_dirs", "root")
 
 # Owner messages that wait on a running chat turn (2026-10-08, steering). One
 # queue and one cap for every surface: the HUD's send and a message typed in
@@ -192,6 +195,12 @@ class _Session:
     # provider's hands when Stop landed is judged by the turn it was aimed at,
     # even after a later turn has started (Bugbot on PR #22).
     stopped_turns: deque = field(default_factory=lambda: deque(maxlen=8))
+    # The §6 permit this session's provider was handed: the jarvis-mcp bridge
+    # asks it about a dangerous Jarvis tool (`dangerous_tool=True`).
+    permit: Callable | None = None
+    # The digest of this session's jarvis-mcp caller token, while one is live
+    # (`callers.CallerTokens`); never the token itself.
+    caller_key: str | None = None
 
 
 class Daemon:
@@ -227,6 +236,10 @@ class Daemon:
         # reads it. None means no Discord on this daemon.
         self.discord = None
         self.discord_error: str | None = None   # why start_discord failed (class name)
+        # Chat titles (titles.py): attached and started by daemon2's `main()`,
+        # never by `start()`, so no test or embedded daemon calls a model.
+        # Stopped here by `stop()`.
+        self.titles = None
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -250,11 +263,37 @@ class Daemon:
         # entries in it are ever purged: `owned` is this daemon's data root.
         from .trash import Trash
         self.trash = Trash(stores.root)
+        # The Browser's switches (`browser.json`, browser/settings.py): in
+        # memory here; daemon2's `main()` attaches the owner's file. While
+        # `auto_open` is on, a terminal's live output is read for a dev
+        # server's URL (BR-8a, devurl.py), told only to that terminal's own
+        # socket — never this bus, a log line or the disk.
+        from .browser.settings import BrowserSettings
+        self.browser_settings = BrowserSettings()
         # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
         # the HUD listener; they end with the daemon. On the bus they are one
         # lifecycle record, `terminal_attached` (an id and a time), never output.
         from .terminals import Terminals
-        self.terminals = Terminals(publish=self.bus.publish)
+        self.terminals = Terminals(publish=self.bus.publish,
+                                   auto_open=self.browser_settings.auto_open,
+                                   own_ports=lambda: (self.port, self.face_port, self.workshop_port))
+        # VEX V5 (VX-1, vex.py): its builds, downloads and brain terminal run
+        # as program terminals above; owner-only routes; the bus carries only
+        # an id-only `vex_device` record per device action.
+        from .vex import Vex
+        self.vex = Vex(self)
+        # The owner's built-in Browser (BR-1a, browser/host.py): a
+        # daemon-owned Chrome behind a SOCKS gate, started lazily by the first
+        # owner-only `/browser` request that needs it, never by `start()`.
+        # On the bus and in the log it is nothing but classes and counts.
+        from .browser.host import BrowserHost
+        self.browser = BrowserHost(self)
+        # Per-session jarvis-mcp caller tokens (callers.py, plan 2026-10-10
+        # §1): minted in `_run_brief` for an owner's Claude or Codex chat that
+        # is offered session tools, held only as digests, revoked whenever
+        # the session ends. Memory only: a restart forgets every one.
+        from .callers import CallerTokens
+        self.callers = CallerTokens()
         self.started_at = time.monotonic()
 
     def start(self) -> None:
@@ -283,6 +322,16 @@ class Daemon:
                 raise DaemonError("HUD or preview port is already in use") from exc
             self._server = server
             self.port, self.face_port, self.workshop_port = [s.server_address[1] for s in servers]
+            # Only now, holding all three ports (the bind is the
+            # single-instance lock) and before anything is served: a second
+            # daemon started by hand on the live data folder fails the bind
+            # above and never reaches this, so it cannot delete the live
+            # daemon's carriers (PR #35 review).
+            self._sweep_carriers()
+            # Before any session opens (a session saves its own copy of a
+            # thread): Claude thread costs counted before 2026-10-12 summed
+            # the CLI's running totals. Once per thread, from its own log.
+            running_cost.recount_threads(self.stores, ProviderName.CLAUDE, log=LOG)
             self.started_at = time.monotonic()
             for listener in servers:
                 listener.daemon_threads = True
@@ -293,7 +342,22 @@ class Daemon:
             self._server_thread = self._listeners[0][1]
             from .hud_api import connect_controls
             connect_controls(self)
+            # `terminal_read` (WP-F) reads these terminals and no others.
+            self.terminals.install()
             self.schedules.start()
+
+    def _sweep_carriers(self) -> None:
+        """Before anything is served: remove jarvis-mcp token carriers a crash
+        left behind (plan §1.3) — their tokens died with that process. Only
+        under the data folder this daemon owns: a test or embedded daemon on a
+        folder of its own never touches the owner's live one."""
+        from .callers import sweep_carriers
+        try:
+            owned = Path(self.stores.root).resolve() == Path(config.V2_DATA_DIR).resolve()
+        except OSError:
+            owned = False
+        if owned:
+            sweep_carriers(Path(config.V2_DATA_DIR))
 
     def status(self) -> dict:
         providers = {}
@@ -306,11 +370,39 @@ class Daemon:
             cli = _cli_status(provider)
             if cli is not None:
                 providers[name.value]["cli"] = cli
+        from .hud_api import hud_served
+        try:
+            hud = hud_served()
+        except Exception:
+            hud = {"build": None, "git_head": None, "state": "failed verification"}
+        # Broker approvals waiting on the owner — a turn's, and the escape
+        # hatch's, which asks after its turn has finished. `jarvis restart`
+        # refuses while any wait (a restart denies them). Read before
+        # `self._lock`: the broker has a lock of its own.
+        try:
+            approvals_pending = len(self.approvals.pending())
+        except Exception:
+            approvals_pending = 0
+        # `/status` is how `jarvis restart` checks the daemon: the Browser
+        # can never make it fail. Without the host's view, the refused ports
+        # are still every control port and the workshop's default.
+        try:
+            browser = self.browser.status()
+            refused_ports = sorted(self.browser.refused_ports())
+        except Exception as exc:
+            from .browser.policy import refused_ports as _refused_ports
+            browser = {"available": False, "running": False, "error": type(exc).__name__}
+            refused_ports = sorted(_refused_ports())
         with self._lock:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,
                     "threads_open": sum(s.handle is not None for s in self._sessions.values()),
                     "turns_running": sum(s.worker is not None for s in self._sessions.values()),
+                    "approvals_pending": approvals_pending,
+                    # This process: `jarvis restart` checks it is systemd's
+                    # MainPID, so another daemon answering on the shell's
+                    # port cannot stand in for the unit's.
+                    "pid": os.getpid(),
                     # The HUD builds preview URLs from this rather than a
                     # hard-coded 8403: a HUD served by any other daemon (a
                     # test's, on an ephemeral port) must never reach the
@@ -327,7 +419,25 @@ class Daemon:
                     # never does.
                     "frame_hardened": bool(
                         self._server is not None
-                        and getattr(self._server.RequestHandlerClass, "frame_hardened", False))}
+                        and getattr(self._server.RequestHandlerClass, "frame_hardened", False)),
+                    # Which HUD `GET /` serves (decision C-1, ED-4): the
+                    # installed build's id, "dev" under JARVIS_HUD_DEV=1, or
+                    # null; the commit it was installed from; and why
+                    # nothing is served when nothing is (review of PR #44).
+                    "hud_build": hud["build"], "hud_git_head": hud.get("git_head"),
+                    "hud_state": hud["state"],
+                    # The newer builds passed over because they failed
+                    # verification ("fallback"), newest first.
+                    "hud_passed_over": hud.get("passed_over", []),
+                    # The Browser (BR-1a): whether Chrome is there and
+                    # running, its tabs by count, the gate's counters —
+                    # never a URL, a title or a profile's label.
+                    "browser": browser,
+                    # Every port the Browser's gate refuses on this machine
+                    # (`browser.policy.refused_ports`): BR-0's control ports,
+                    # this daemon's HUD and API ports, and 8403 unless it is
+                    # this daemon's workshop. The HUD's Direct judge reads it.
+                    "refused_ports": refused_ports}
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):
@@ -402,9 +512,12 @@ class Daemon:
             brief = self._chat_brief(provider, brief)
         with self._lock:
             self._active()
+            # A Claude thread opened now counts each result's own cost from
+            # its first turn: born marked, the start-up recount never reads it.
+            recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
                                                model=brief.model, effort=brief.effort, task_id=brief.task_id,
-                                               cwd=brief.cwd)
+                                               cwd=brief.cwd, cost_recount=recounted)
         try:
             self._open(thread, brief)
         except BaseException:
@@ -428,12 +541,16 @@ class Daemon:
             session = _Session(thread, brief, provider)
             self._sessions[thread.id] = session
         try:
+            self._refuse_jarvis_server(thread, brief)
             # The saved brief is never rewritten; a chat thread's provider is
             # handed a copy carrying the thread's current choice instead, so a
             # resume picks up a model changed since open (decisions A1). The
             # permit is built over that same copy: one brief per session.
+            # The copy is also the only place a jarvis-mcp caller token is
+            # ever written (`_run_brief`): never brief.json.
             run_brief = self._run_brief(session)
             permit = self.permit_factory(thread.id, run_brief)
+            session.permit = permit
             method = provider.resume if thread.provider_session_id else provider.start
             handle = method(thread, run_brief, permit)
             session.handle = handle
@@ -448,11 +565,25 @@ class Daemon:
                 self.stores.threads.save(thread)
             return session
         except BaseException:
+            # A session that never opened keeps no token (plan §1.4).
+            self.callers.revoke(session)
             if session.handle is not None:
                 self._cleanup(session)
             with self._lock:
                 self._sessions.pop(thread.id, None)
             raise
+
+    @staticmethod
+    def _refuse_jarvis_server(thread, brief) -> None:
+        """Only an owner's chat thread may ever have a `jarvis` MCP server,
+        and only in the run copy the daemon makes (plan §1.2). A brief that
+        names one for anything else — a runner change that copied a chat's
+        brief, say — is refused, never run with a server it was not given."""
+        from . import thread_model
+        if (brief.mcp_servers and "jarvis" in brief.mcp_servers
+                and not (thread_model.is_chat(thread) and brief.role == Role.CHAT
+                         and brief.task_id is None)):
+            raise BriefRefused("only an owner's chat thread may have a jarvis MCP server")
 
     # -- the model a chat thread runs on (decisions 2026-10-06, part A) ------
 
@@ -477,14 +608,38 @@ class Daemon:
 
     def _run_brief(self, session):
         """The brief a provider is started with: the saved one, plus — for an
-        owner's chat thread — the thread's effective (model, effort)."""
+        owner's chat thread — the thread's effective (model, effort), and on
+        Claude or Codex, when the chat is offered session tools, a `jarvis`
+        MCP server carrying a caller token minted for this session (plan
+        §1.2). The token lives only in this copy: `_open` writes the saved
+        brief, never this one, to brief.json."""
         from . import thread_model
         if not thread_model.is_chat(session.thread):
             return session.brief
         choice = thread_model.effective(session.thread)
         session.applied = session.announced = choice
         session.applied_record = (session.thread.model, session.thread.effort)
-        return replace(session.brief, model=choice[0], effort=choice[1])
+        # A saved brief never carries a jarvis server (`make_brief` refuses
+        # MCP servers from a caller); if one somehow did, it is not passed on.
+        servers = {name: server for name, server in session.brief.mcp_servers.items()
+                   if name != "jarvis"}
+        token = self._mint(session)
+        if token is not None:
+            from .bridge import server_entry
+            servers["jarvis"] = server_entry(session.thread.provider, self.port, token)
+        return replace(session.brief, model=choice[0], effort=choice[1], mcp_servers=servers)
+
+    def _mint(self, session) -> str | None:
+        """A caller token for an owner's chat on Claude or Codex that is
+        offered at least one session tool; None for anything else (the fast
+        path runs in-process and binds `runtime.caller()` itself)."""
+        from . import session_tools, thread_model
+        thread = session.thread
+        if (not thread_model.is_chat(thread)
+                or thread.provider not in (ProviderName.CLAUDE, ProviderName.CODEX)
+                or not session_tools.for_provider(thread.provider)):
+            return None
+        return self.callers.mint(session)
 
     def _apply_choice(self, session):
         """At a turn's start: hand the provider a changed choice. A default
@@ -1093,6 +1248,12 @@ class Daemon:
                 else:
                     thread.tokens += usage.work_tokens
                     thread.cost_usd += usage.cost_usd or 0
+                # Claude's running total, saved so a resumed CLI (which
+                # continues from its transcript's total) is measured from it.
+                if "cost_total" in data:
+                    running = running_cost.figure(data.get("cost_total"))
+                    if running is not None:
+                        thread.provider_cost_total = running
                 thread.updated = utcnow()
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
@@ -1159,6 +1320,12 @@ class Daemon:
         terminal = None
         failed = False
         fatal = False
+        # Who is calling, on this turn's own thread (a fresh context): an
+        # in-process provider reads it as the turn starts (the fast path
+        # hands it to its worker), so a tool knows its thread and turn.
+        from jarvis import runtime
+        runtime.bind_caller(session.thread.id, session.thread.project_id,
+                            session.thread.provider.value, session.turn_id)
         try:
             if session.cancelled.is_set():
                 return
@@ -1302,6 +1469,10 @@ class Daemon:
                           "data": {"req_id": req_id}})
 
     def _cleanup(self, session):
+        # First, before the provider is touched: the session's jarvis-mcp
+        # token dies with it (close, archive, delete, a lost session — plan
+        # §1.4). The provider's close then removes its carrier.
+        self.callers.revoke(session)
         for operation in (session.provider.interrupt, session.provider.close):
             try:
                 operation(session.handle)
@@ -1333,7 +1504,13 @@ class Daemon:
         self.bus.publish(record)
 
     def stop(self):
+        # Before anything else closes: no jarvis-mcp call is answered for a
+        # session from here on (plan §1.4).
+        self.callers.revoke_all()
         self.schedules.stop()
+        titles = self.titles
+        if titles is not None:
+            titles.stop()                       # its Codex session ends with the metadata cancel
         deadline = time.monotonic() + STOP_TIMEOUT
         with self._lock:
             if self._stopping:
@@ -1342,6 +1519,7 @@ class Daemon:
             # Terminals end with the daemon (decision W-3): every window is
             # told and every session gets SIGHUP now; what outlives it is
             # SIGKILLed below, before the listeners close.
+            self.terminals.uninstall()
             self.terminals.hangup_all()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
@@ -1365,6 +1543,8 @@ class Daemon:
                     job.start()
                     jobs.append(job)
         self._stop_codex_metadata(deadline)
+        if titles is not None and not titles.join(min(3.0, max(0, deadline - time.monotonic()))):
+            LOG.warning("Chat titler still running at shutdown; it writes nothing now")
         for job in jobs:
             job.join(max(0, deadline - time.monotonic()))
         with self._lock:
@@ -1372,6 +1552,11 @@ class Daemon:
                 session.retired = True
             self._sessions.clear()
         self.terminals.finish_all(max(deadline, time.monotonic() + 0.2))
+        self.vex.stop()
+        # The Browser's Chrome, its driver and its gate (BR-1a): after the
+        # terminals, before the listeners close. Its own bound, past the
+        # daemon's: a Chrome that will not close is killed by exact PID.
+        self.browser.stop()
         self.bus.close()
         for server, worker in self._listeners:
             server.shutdown()
@@ -1410,7 +1595,9 @@ def _object(value, allowed, required=()):
     if not isinstance(value, dict):
         raise APIError(400, "body must be a JSON object")
     if value.keys() - set(allowed):
-        raise APIError(400, "unknown fields: " + ", ".join(sorted(value.keys() - set(allowed))))
+        # The count, never the names: they are the client's own text, and an
+        # APIError's message is logged (review of PR #69).
+        raise APIError(400, f"unknown fields ({len(value.keys() - set(allowed))})")
     if set(required) - value.keys():
         raise APIError(400, "missing fields: " + ", ".join(sorted(set(required) - value.keys())))
     return value
@@ -1444,11 +1631,47 @@ def _text(value, name):
     return value
 
 
+def task_verb_body(verb: str, body) -> dict:
+    """The body of `POST /tasks/{id}/<verb>` (§11.2), checked and parsed —
+    400 for any other shape. `start` and `cancel` take `{}`; `steer`
+    `{text, spoken?}`; `resume` `{provider?}`; `answer` exactly `{index,
+    text}`, `index` being the question's place in `spec.questions`
+    (`control.answer_refusal`). The route and the HUD's test mock both call
+    this, so the mock cannot take a body the daemon refuses: it took anything,
+    and the HUD sent `{question, answer}` to `/answer` for weeks (2026-10-11).
+    A provider that is not a `ProviderName` raises ValueError, which the
+    dispatcher answers 400."""
+    if verb in ("start", "cancel"):
+        _object(body, ())
+        return {}
+    if verb == "steer":
+        _object(body, ("text", "spoken"), ("text",))
+        spoken = body.get("spoken", False)
+        if not isinstance(spoken, bool):
+            raise APIError(400, "spoken must be a boolean")
+        return {"text": _text(body["text"], "text"), "spoken": spoken}
+    if verb == "resume":
+        _object(body, ("provider",))
+        provider = body.get("provider")
+        return {"provider": ProviderName(provider) if provider else None}
+    if verb == "answer":
+        _object(body, ("index", "text"), ("index", "text"))
+        index = body["index"]
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise APIError(400, "index must be an integer")
+        return {"index": index, "text": _text(body["text"], "text")}
+    raise APIError(404, "route not found")
+
+
 def _log_path(path: str) -> str:
     """A request path for the daemon log. A terminal attach carries its
-    ticket in the query string, so `/terminals` paths are logged without one."""
+    ticket in the query string, so `/terminals` paths are logged without one;
+    so are `/mcp` paths, whose credential is a header the relay never moves
+    into a query — but a confused client could (PR #35 review) — and
+    `/browser` paths, which take no query but must never log a URL that a
+    confused client put in one (BR-1a)."""
     url = urlsplit(path)
-    return url.path if url.path.startswith("/terminals") else path
+    return url.path if url.path.startswith(("/terminals", "/mcp", "/browser")) else path
 
 
 def _handler(daemon):
@@ -1565,6 +1788,12 @@ def _handler(daemon):
             from . import hud_api
             if getattr(self.server, "preview_only", False):
                 return hud_api.preview_route(self, daemon, parts, query)
+            # jarvis-mcp for chat sessions (bridge.py): the API listener only,
+            # a caller token only; 404 on the HUD listener.
+            from . import bridge
+            mounted = bridge.route(self, daemon, parts, query)
+            if mounted is not None:
+                return mounted
             mounted = hud_api.route(self, daemon, parts, query)
             if mounted is not None:
                 return mounted
@@ -1593,23 +1822,27 @@ def _handler(daemon):
                 if method == "GET":
                     # Archived projects are hidden from every list (decisions B1);
                     # the HUD's Archive view reads them from /archive.
-                    return 200, [to_json(p) for p in safe_list(stores.projects) if not p.archived]
+                    # `root_real` beside each root: where it resolves, which a
+                    # File pane's tree finds a file's `abs` under (#50).
+                    from .projects import project_view
+                    return 200, [project_view(p) for p in safe_list(stores.projects) if not p.archived]
                 if method == "POST":
                     body = _no_channel_field(self._body())
                     body = _object(body, ("name", "root", "profile", "routing", "extra_dirs",
                                           "always_ask"), ("name", "root"))
                     # One create path for the HUD and Discord's `/project new`
                     # (B2): a colliding name is numbered, never refused.
-                    from .projects import create_project
+                    from .projects import create_project, project_view
                     values = dict(body)
                     created = create_project(daemon, values.pop("name"), values.pop("root"),
                                              **values)
-                    return 201, to_json(created)
+                    return 201, project_view(created)
             if len(parts) == 2 and parts[0] == "projects":
                 with daemon._lock:
                     project = daemon.require(stores.projects, parts[1])
                     if method == "GET":
-                        return 200, to_json(project)
+                        from .projects import project_view
+                        return 200, project_view(project)
                     if method == "PATCH":
                         daemon._active()
                         body = _no_channel_field(self._body())
@@ -1617,6 +1850,17 @@ def _handler(daemon):
                                               "always_ask"))
                         before = project
                         project = from_json(Project, {**to_json(project), **body})
+                        # What a project's threads may do and where (BR-0): a
+                        # change to its permission profile, always-ask list,
+                        # extra folders or root is the owner's, from the HUD
+                        # window — never any client of the API listener, which
+                        # could otherwise loosen what asks it. A field sent
+                        # back unchanged changes nothing and needs no owner.
+                        guarded = [k for k in _OWNER_PROJECT_FIELDS
+                                   if k in body and to_json(project).get(k) != to_json(before).get(k)]
+                        if guarded:
+                            from .projects import owner_only
+                            owner_only(self, daemon)
                         _validate(project, Project)
                         if "routing" in body:
                             # Only when written: a project saved before the
@@ -1663,7 +1907,7 @@ def _handler(daemon):
                                                 "data": {"project_id": project.id, "changed": changed,
                                                          "project": to_json(project), "by": by,
                                                          "previous": previous}})
-                        return 200, to_json(project)
+                        return 200, edits.project_view(project)
             if parts in (["threads"], ["tasks"]):
                 store = stores.threads if parts[0] == "threads" else stores.tasks
                 if method == "GET":
@@ -1736,6 +1980,13 @@ def _handler(daemon):
                 _object(query, ())
                 return 200, [r.to_json() for r in daemon.approvals.pending()]
             if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
+                # Owner-only (BR-0): the HUD's listener and the HUD's Origin.
+                # The API listener serves the same HUD page, so a page loaded
+                # there passed `check_origin` (its Origin equals its Host) and
+                # could approve — v1's agent browser could load it. Discord
+                # and the escape hatch resolve in-process and never come here.
+                from .projects import owner_only
+                owner_only(self, daemon)
                 body = _object(self._body(), ("decision", "always"), ("decision",))
                 always = body.get("always", False)
                 if not isinstance(always, bool):
@@ -1762,32 +2013,18 @@ def _handler(daemon):
             runner = daemon.runner
             if runner is None:
                 raise DaemonError("no task runner is attached to this daemon")
-            body = self._body()
+            args = task_verb_body(verb, self._body())
             try:
                 if verb == "start":
-                    _object(body, ())
                     return 200, to_json(runner.start(task_id))
                 if verb == "steer":
-                    _object(body, ("text", "spoken"), ("text",))
-                    spoken = body.get("spoken", False)
-                    if not isinstance(spoken, bool):
-                        raise APIError(400, "spoken must be a boolean")
-                    runner.steer(task_id, _text(body["text"], "text"), spoken=spoken)
+                    runner.steer(task_id, args["text"], spoken=args["spoken"])
                     return 200, {"ok": True}
                 if verb == "cancel":
-                    _object(body, ())
                     return 200, to_json(runner.cancel(task_id))
                 if verb == "resume":
-                    _object(body, ("provider",))
-                    provider = body.get("provider")
-                    return 200, to_json(runner.resume(
-                        task_id, provider=ProviderName(provider) if provider else None))
-                _object(body, ("index", "text"), ("index", "text"))
-                index = body["index"]
-                if not isinstance(index, int) or isinstance(index, bool):
-                    raise APIError(400, "index must be an integer")
-                return 200, to_json(runner.answer_question(task_id, index,
-                                                           _text(body["text"], "text")))
+                    return 200, to_json(runner.resume(task_id, provider=args["provider"]))
+                return 200, to_json(runner.answer_question(task_id, args["index"], args["text"]))
             except ControlError as exc:
                 raise APIError(409, str(exc)) from exc
 
@@ -2020,6 +2257,42 @@ def load_codex_catalog_at_start() -> bool:
     return bool(loaded)
 
 
+def _log_hud_served() -> None:
+    """Say at start-up which HUD is served, and warn when it is not today's
+    (review of PR #44, L6): dev mode, nothing installed or intact, or a
+    build installed from another commit than the checkout's — a forgotten
+    `jarvis hud install` reads as a warning, never as a silently old window.
+    Never raises: a bad install is not why the daemon fails to start (L2)."""
+    try:
+        from . import hud_install
+        from .hud_api import hud_served
+        served = hud_served()
+        if served["state"] == "dev":
+            LOG.warning("JARVIS_HUD_DEV=1: serving %s directly, not an installed build — "
+                        "the agent-writable build, for tests only", config.HUD_DIST)
+        elif served["build"] is None:
+            LOG.warning("No HUD is served from %s (%s): the window will say so. "
+                        "Run `jarvis hud install`.", config.HUD_DIR, served["state"])
+        else:
+            LOG.info("HUD build served: %s (from %s)", served["build"], served["git_head"] or "an unknown commit")
+            if served["state"] == "fallback":
+                LOG.warning("The newest HUD build (%s) failed verification; serving %s instead. "
+                            "Run `jarvis hud install`.", ", ".join(served["passed_over"]), served["build"])
+            # Only hud/ matters: a Python-only merge leaves the HUD current.
+            changed = hud_install.hud_changed_since(served["git_head"])
+            if changed:
+                LOG.warning("hud/ changed since the HUD served (%s) was installed from %s: "
+                            "run `jarvis hud install`.", served["build"], served["git_head"][:12])
+            elif changed is None:
+                LOG.warning("Cannot tell whether hud/ changed since the HUD served (%s) was "
+                            "installed (from %s).", served["build"], served["git_head"] or "an unknown commit")
+            if served.get("dirty"):
+                LOG.warning("The HUD served (%s) was installed with uncommitted changes in hud/.",
+                            served["build"])
+    except Exception:     # noqa: BLE001
+        LOG.warning("could not tell which HUD is served", exc_info=True)
+
+
 def main() -> int:
     # Imported here, not at module scope: the hatch reads the daemon it is
     # given and nothing in the daemon needs it, so keeping the edge one-way
@@ -2050,6 +2323,13 @@ def main() -> int:
     daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals)
     if approvals is not None:
         holder["daemon"] = daemon
+    # The owner's Browser switches (`browser.json`): here, not in the
+    # constructor or `start`, so no embedded or test daemon reads the owner's
+    # file. Nothing about it may stop the daemon: a failure keeps the defaults.
+    try:
+        daemon.browser_settings.attach(config.BROWSER_SETTINGS_PATH)
+    except Exception as exc:     # noqa: BLE001
+        LOG.warning("browser settings not attached (%s); using the defaults", type(exc).__name__)
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)
@@ -2063,8 +2343,14 @@ def main() -> int:
             # Reporter subscribes, then the runner serves, then the gateway.
             discord = start_discord(daemon)
         daemon.runner.serve()                   # idempotent if Discord served it
+        # Chat titles: after the surfaces, so the Discord mirror hears every
+        # `thread_updated` a title publishes (titles.py).
+        from .titles import Titler
+        daemon.titles = Titler(daemon)
+        daemon.titles.start()
         purger.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
+        _log_hud_served()
         claude_cli = _cli_status(daemon.providers.get(ProviderName.CLAUDE))
         if claude_cli is not None:
             # Once, at start-up: which `claude` every Claude session spawns.

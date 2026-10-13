@@ -48,3 +48,26 @@ plan disagree, this file wins.**
   from `vexcom --help` as the owner ran it. Tests use a fake `vexcom` and never a device.
 - **Terminal spans are advisory** (PR #25 review). Anything that relies on OSC 133 spans, such as the VEX brain terminal
   being readable through WP-F, must still apply text-pattern refusals to every read.
+
+## Added 2026-10-11
+
+- **E-13: each File pane picks its own folder** (the owner: "for the editor I should be able to select which folder to work in").
+  - **Today** a File pane shows the project of the chat selected last, and pins that project once a file is opened. "Follow chat" unpins it. The pane itself has no picker.
+  - **The change:** the File pane's header gets a project picker, `Project ▾`. It lists every project, plus **Follow chat**.
+    - Picking a project re-pins that pane only.
+    - A pane holding an unsaved edit refuses the change, with the existing refusal chip.
+    - Under an approval card the picker is disabled and inert.
+  - **Only project folders are offered.** The editor stays scoped to project roots, with credential folders withheld (E-8). A folder becomes reachable by making it a project (New project, or link an existing folder), so the folder boundary in `folders.py` stays the only gate.
+  - **Built in ED-1 or ED-2,** whichever touches the File pane's header first. The ED-1 builder takes it if it is still open.
+- **`hud/dist` write protection (§2.7) is being done early in BR-0** (PR #38). The write tools refuse the served HUD dist directory. ED-2 should reuse that one check rather than add a second.
+- **Push-to-talk is Ctrl+D (PR #40, the owner's decision).** It replaced Space. In Monaco Ctrl+D is push-to-talk, and
+  Monaco's "add selection to next find match" moved to **Ctrl+Shift+D**; Ctrl+K Ctrl+D (move selection to next match)
+  stays Monaco's, because a pending chord's second key is Monaco's (E-10) and push-to-talk stands aside for it (one
+  shared chord tracker, `editorkeys.chordSecond`). In a focused terminal Ctrl+D stays the shell's end of input. The plan's Space rule (§2.2, §2.10, ED-1) is
+  amended to match.
+  - **E-11 (vim keybindings) is affected.** Vim's Ctrl+D (half a page down) would be taken by push-to-talk, since the
+    window takes Ctrl+D before Monaco sees it. If vim mode is ever turned on, the owner has to decide: push-to-talk
+    wins in the editor (vim loses Ctrl+D), or vim mode keeps Ctrl+D in the editor (push-to-talk is the orb there).
+  - **Decided 2026-10-12 (the owner): push-to-talk keeps Ctrl+D in the editor, vim mode included.** Vim loses its
+    half-page-down. Built that way in ED-8 (`monaco-vim` 0.4.4 works on Monaco 0.57; `:w` is the buffer's guarded
+    save).

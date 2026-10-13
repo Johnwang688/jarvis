@@ -31,6 +31,11 @@ export interface Project {
   inbox: boolean;
   /** When the owner archived it; such a project is only in `/archive`. */
   archived?: string | null;
+  /**
+   * Where `root` resolves (the daemon's `projects.resolved_root`): the folder
+   * a file's `abs` sits under. Display data only — never sent back on a PATCH.
+   */
+  root_real?: string | null;
 }
 
 export interface Platform {
@@ -46,6 +51,9 @@ export interface Thread {
   provider_session_id: string | null;
   task_id: string | null;
   title: string;
+  /** Chat titles (2026-10-12): who named it — "" nobody yet, "auto" the
+   * daemon's titler, "owner" a rename. Absent from an older daemon. */
+  title_source?: "" | "auto" | "owner";
   created: string;
   updated: string;
   turns: number;
@@ -165,6 +173,8 @@ export interface TreeEntry {
   kind: "file" | "dir";
   size: number;
   mtime: number;
+  /** ED-2: a withheld credential (never opened; a folder never walked) or an env file. */
+  policy?: "withheld" | "env";
 }
 
 export interface Tree {
@@ -172,12 +182,110 @@ export interface Tree {
   entries: TreeEntry[];
 }
 
+/** `GET /projects/{id}/files` (ED-7): quick open's list. */
+export interface FileList {
+  files: string[];
+  /** The credential env files among them (a lock; Jarvis never reads them). */
+  env: string[];
+  truncated: boolean;
+  source: "git" | "walk";
+}
+
+/** `GET /projects/{id}/git/status` (ED-9): the explorer's colours, project-relative. */
+export interface GitStatus {
+  repo: boolean;
+  /** HEAD's commit id; null before the first commit or outside a repository. */
+  head: string | null;
+  branch: string | null;
+  /** File path → modified, added, untracked, ignored, renamed, deleted or conflict. */
+  files: Record<string, string>;
+  /** A folder git reported whole (untracked or ignored); "" is the project's own folder. */
+  dirs: Record<string, string>;
+  truncated: boolean;
+  note?: string;
+}
+
+/** `GET /projects/{id}/git/base?path=` (ED-9): what HEAD holds for a file, for the gutter. */
+export interface GitBase {
+  path: string;
+  /** ok, new (not in HEAD), no_repo, no_head, binary, too_large, not_a_file or unavailable. */
+  state: string;
+  head: string | null;
+  /** HEAD's text, only when `state` is ok. */
+  text: string | null;
+  size?: number;
+  renamed?: boolean;
+  /** Not on disk (deleted from the working tree): `text` is what HEAD holds. */
+  deleted?: boolean;
+}
+
+export interface SearchQuery {
+  query: string;
+  /** The searching view: its newer search cancels its older one on the daemon. */
+  key?: string;
+  regex?: boolean;
+  /** Case-sensitive. */
+  case?: boolean;
+  word?: boolean;
+  glob?: string;
+  /** Respect `.gitignore` (the default). */
+  ignore?: boolean;
+}
+
+export interface SearchMatch {
+  path: string;
+  line: number;
+  text: string;
+  /** Match spans in `text`, UTF-16 offsets. */
+  ranges: [number, number][];
+}
+
+export interface SearchResult {
+  matches: SearchMatch[];
+  files: number;
+  truncated: boolean;
+  timed_out: boolean;
+  /** A newer search from the same view took over: drop this one. */
+  cancelled?: boolean;
+  /** ripgrep could not read some files: what came back is a partial answer. */
+  partial?: boolean;
+  limit: number;
+}
+
+export interface FsResult {
+  ok: true;
+  op: string;
+  path: string;
+  abs: string;
+  from?: string;
+  from_abs?: string;
+  dir?: boolean;
+  kind?: string;
+  trash?: { where: string; location: string };
+}
+
 export interface FileRead {
   path: string;
   content?: string;
-  mtime: number;
-  size: number;
+  mtime?: number;
+  size?: number;
   protected: boolean;
+  /** ED-2: where the file resolves — one buffer per file on disk. */
+  abs?: string;
+  /** ED-2: the first 128 bits of the bytes' SHA-256: what a save is made against. */
+  etag?: string;
+  encoding?: string | null;
+  eol?: string | null;
+  /** ED-2 (`jarvis/v2/editor_policy.py`): text, env, gate, safety, binary or withheld. */
+  kind?: string;
+  /**
+   * Whether the editor may save it: the HUD follows this, never the kind
+   * alone (an env file that is not UTF-8 is `env` and not editable). Absent
+   * reads as no.
+   */
+  editable?: boolean;
+  /** The sentence beside the editor's lock (null: editable, and Jarvis may read it). */
+  readonly?: string | null;
 }
 
 export interface DiffFile {

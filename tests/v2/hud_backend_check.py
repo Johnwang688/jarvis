@@ -5,6 +5,7 @@ import base64
 from datetime import datetime, timezone
 import http.client
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
@@ -168,7 +169,10 @@ class Backend(unittest.TestCase):
                                 # Never the owner's real Discord files: the guild
                                 # file decides `GET /discord`'s answer (B1).
                                 DISCORD_GUILD_PATH=self.root / "discord_guild.json",
-                                DISCORD_TOKEN_PATH=self.root / "discord_token.json").items():
+                                DISCORD_TOKEN_PATH=self.root / "discord_token.json",
+                                # Never the owner's installed HUD (C-1, ED-4).
+                                HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
+                                HUD_DEV=False).items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -242,7 +246,8 @@ class Backend(unittest.TestCase):
             self.assertEqual(response.status, status, content[:500])
             result = json.loads(content) if response.getheader("Content-Type", "").startswith("application/json") else content
             if status >= 400:
-                self.assertEqual(set(result), {"error"})
+                # A save's 409 also says which bytes are on disk now (ED-2).
+                self.assertEqual(set(result) - ({"etag"} if status == 409 else set()), {"error"})
                 self.assertNotIn("never-expose-this", result["error"])
             self.headers = dict(response.getheaders())
             return result
@@ -250,7 +255,9 @@ class Backend(unittest.TestCase):
             conn.close()
 
     def getfile(self, name, **kw):
-        return self.request("GET", self.url + "/file?" + urlencode({"path": name}), **kw)
+        """The editor's read: the HUD's own request (every editor file route is
+        owner-only, reads included — E-7)."""
+        return self.owner("GET", self.url + "/file?" + urlencode({"path": name}), **kw)
 
     def thread(self, provider=P.FAST, task_id=None):
         return self.daemon.open_thread(self.project.id, Role.CHAT, provider,
@@ -300,20 +307,93 @@ class Backend(unittest.TestCase):
             self.assertIs(status["frame_hardened"], True)
             self.assertEqual(self.headers["X-Frame-Options"], "DENY")
             self.assertIn("frame-ancestors 'none'", self.headers["Content-Security-Policy"])
-            # Either the built HUD (title pinned for FORBIDDEN_TITLES) or, with no
-        # build present, the placeholder naming hud/dist.
-        page = self.request("GET", "/", port=port)
-        self.assertTrue(b"<title>J.A.R.V.I.S.</title>" in page or b"hud/dist" in page)
+            # Nothing installed (C-1): a 503 that names the command, with the
+            # title pinned for FORBIDDEN_TITLES.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                conn.request("GET", "/")
+                response = conn.getresponse()
+                page = response.read()
+            finally:
+                conn.close()
+            self.assertEqual(response.status, 503, page)
+            self.assertTrue(response.getheader("Content-Type", "").startswith("text/html"))
+            self.assertIn(b"<title>J.A.R.V.I.S.</title>", page)
+            self.assertIn(b"jarvis hud install", page)
         # Simulate a separately built HUD without writing hud/dist.
         dist = self.root / "dist"
         (dist / "assets").mkdir(parents=True)
         (dist / "index.html").write_text("built HUD")
         (dist / "assets" / "app.js").write_text("console.log('HUD')")
-        with patch.object(H, "HUD_DIST", dist):
+        with patch.object(config, "HUD_DIST", dist), patch.object(config, "HUD_DEV", True):
             self.assertEqual(self.request("GET", "/"), b"built HUD")
             self.assertIn(b"console", self.request("GET", "/assets/app.js"))
             self.request("GET", "/assets/no.js", status=404)
             self.request("GET", "/assets/%2e%2e/index.html", status=403)
+            self.assertEqual(self.request("GET", "/status")["hud_build"], "dev")
+        # C-1 (ED-4): the owner's daemon serves the newest installed build,
+        # only files its manifest vouches for.
+        from jarvis.v2 import hud_install
+        self.assertIsNone(self.request("GET", "/status")["hud_build"], "nothing installed yet")
+        root = config.HUD_DIST
+        first = hud_install.install(dist, root, now=1_791_500_000)
+        (dist / "index.html").write_text("built HUD, second")
+        (dist / "assets" / "app.js").unlink()
+        (dist / "assets" / "app2.js").write_text("console.log('two')")
+        second = hud_install.install(dist, root, now=1_791_500_001)
+        self.assertEqual(self.request("GET", "/status")["hud_build"], second.id)
+        self.assertEqual(self.request("GET", "/"), b"built HUD, second", "the newest build is served")
+        self.assertIn(b"two", self.request("GET", "/assets/app2.js"))
+        self.assertIn(b"console", self.request("GET", "/assets/app.js"), "an older build's chunk still loads")
+        self.request("GET", "/assets/%2e%2e/index.html", status=403)
+        self.request("GET", "/assets/..%2fmanifest.json", status=403)
+        self.request("GET", "/manifest.json", status=404)
+        # A file changed behind the manifest's back, a file it never listed,
+        # and a link: none is served.
+        os.chmod(second.path / "assets", 0o755)
+        os.chmod(second.path / "assets" / "app2.js", 0o644)
+        # The same size as what the manifest vouches for, so only the SHA-256
+        # can refuse it (review of PR #44, MED-1).
+        self.assertEqual(len("console.log('XYZ')"), len("console.log('two')"))
+        (second.path / "assets" / "app2.js").write_text("console.log('XYZ')")
+        self.request("GET", "/assets/app2.js", status=404)
+        (second.path / "assets" / "planted.js").write_text("approve()")
+        self.request("GET", "/assets/planted.js", status=404)
+        outside = self.root / "outside.js"
+        outside.write_text("console.log('HUD')")
+        (second.path / "assets" / "linked.js").symlink_to(outside)
+        self.request("GET", "/assets/linked.js", status=404)
+        self.assertNotEqual(first.id, second.id)
+        status = self.request("GET", "/status")
+        self.assertEqual((status["hud_build"], status["hud_state"]), (second.id, "installed"))
+        # Review of PR #44, L1: the newest build's page failing verification
+        # falls back to the newest intact one, and /status says what is
+        # actually served; with none intact the page says so — not "not
+        # installed" — and /status agrees.
+        os.chmod(second.path, 0o755)
+        os.chmod(second.path / "index.html", 0o644)
+        (second.path / "index.html").write_text("built HUD, SECOND")       # same size
+        self.assertEqual(self.request("GET", "/"), b"built HUD", "the newest intact build")
+        status = self.request("GET", "/status")
+        # Never silently "installed" (review of PR #44 at 62db94f).
+        self.assertEqual((status["hud_build"], status["hud_state"], status["hud_passed_over"]),
+                         (first.id, "fallback", [second.id]))
+        os.chmod(first.path, 0o755)
+        os.chmod(first.path / "index.html", 0o644)
+        (first.path / "index.html").write_text("built HUX")
+        conn = http.client.HTTPConnection("127.0.0.1", self.daemon.face_port, timeout=5)
+        try:
+            conn.request("GET", "/")
+            response = conn.getresponse()
+            page = response.read()
+        finally:
+            conn.close()
+        self.assertEqual(response.status, 503, page)
+        self.assertIn(b"failed verification", page)
+        self.assertNotIn(b"not installed", page)
+        status = self.request("GET", "/status")
+        self.assertEqual((status["hud_build"], status["hud_git_head"], status["hud_state"]),
+                         (None, None, "failed verification"))
         preview = self.daemon.workshop_port
         prefix = f"/p/{self.project.id}/"
         self.assertEqual(self.request("GET", prefix + "hello.txt", port=preview), b"hello\n")
@@ -576,17 +656,23 @@ class Backend(unittest.TestCase):
     def test_tree_depth_scope_and_platform(self):
         (self.project_root / "nested").mkdir()
         (self.project_root / "nested" / "a.txt").write_text("a")
-        first = self.request("GET", self.url + "/tree?depth=1")
+        # Owner-only, reads included (E-7): never the API listener.
+        self.request("GET", self.url + "/tree?depth=1", status=403)
+        first = self.owner("GET", self.url + "/tree?depth=1")
         self.assertNotIn("nested/a.txt", [x["name"] for x in first["entries"]])
-        second = self.request("GET", self.url + "/tree?depth=2")
+        second = self.owner("GET", self.url + "/tree?depth=2")
         names = [x["name"] for x in second["entries"]]
         self.assertIn("nested/a.txt", names)
         self.assertNotIn("leak", names)
         self.assertFalse(set(names) & H.SKIP_DIRS)
         for row in second["entries"]:
-            self.assertEqual(set(row), {"name", "kind", "size", "mtime"})
-        self.request("GET", self.url + "/tree?depth=-1", status=400)
-        self.request("GET", self.url + "/tree?path=missing", status=404)
+            # `policy` only on a row the editor treats specially (ED-2).
+            self.assertTrue({"name", "kind", "size", "mtime"} <= set(row) <= {"name", "kind", "size", "mtime", "policy"},
+                            row)
+        flags = {row["name"]: row.get("policy") for row in second["entries"]}
+        self.assertEqual((flags[".env"], flags["alias.txt"], flags["hello.txt"]), ("env", "env", None))
+        self.owner("GET", self.url + "/tree?depth=-1", status=400)
+        self.owner("GET", self.url + "/tree?path=missing", status=404)
         self.assertEqual(self.request("GET", self.url + "/platform"), {"platform": "wsl", "note": None})
         self.project.root = "/mnt/c/Users/owner"
         self.stores.projects.save(self.project)
@@ -594,27 +680,77 @@ class Backend(unittest.TestCase):
         self.assertEqual(platform["platform"], "windows")
         self.assertIn("9p", platform["note"])
 
+    def test_projects_say_where_their_root_resolves(self):
+        """`root_real` (#50's review, LOW): a project whose root goes through a
+        symlink still finds its files' `abs` under where the root resolves, so
+        a File pane's tree marks a file opened through another project."""
+        link = self.root / "link"
+        link.symlink_to(self.project_root, target_is_directory=True)
+        linked = self.request("POST", "/projects", dict(name="Linked", root=str(link)), status=201)
+        real = str(self.project_root.resolve())
+        self.assertEqual((linked["root"], linked["root_real"]), (str(link), real))
+        rows = {row["id"]: row for row in self.request("GET", "/projects")}
+        self.assertEqual(rows[linked["id"]]["root_real"], real)
+        self.assertEqual(rows[self.project.id]["root_real"], real)
+        self.assertEqual(rows[self.second.id]["root_real"], str(self.other.resolve()))
+        self.assertEqual(self.request("GET", f"/projects/{linked['id']}")["root_real"], real)
+        # The read route's `abs` sits under root_real, not under the root as
+        # written — and is the same file (one buffer) through either project.
+        through_link = self.owner("GET", f"/projects/{linked['id']}/file?" + urlencode({"path": "hello.txt"}))
+        direct = self.getfile("hello.txt")
+        self.assertEqual(through_link["abs"], direct["abs"])
+        self.assertTrue(through_link["abs"].startswith(real + "/"), through_link["abs"])
+        self.assertFalse(through_link["abs"].startswith(str(link) + "/"), through_link["abs"])
+        # Display data only: never stored, never on the bus, refused if sent back.
+        self.events_all()
+        renamed = self.request("PATCH", f"/projects/{linked['id']}", dict(name="Linked 2"))
+        self.assertEqual(renamed["root_real"], real)
+        updated = [e for e in self.events_all() if e.get("kind") == "project_updated"]
+        self.assertTrue(updated and all("root_real" not in e["data"]["project"] for e in updated), updated)
+        self.assertNotIn("root_real", json.loads(
+            next((self.root / "data").rglob(f"{linked['id']}.json")).read_text()))
+        self.request("PATCH", f"/projects/{linked['id']}", dict(root_real="/elsewhere"), status=400)
+        self.request("POST", "/projects", dict(name="X", root=str(link), root_real="/elsewhere"), status=400)
+        # Nothing to resolve, or a loop: null, never a raise (the HUD falls back to root).
+        from jarvis.v2.projects import resolved_root
+        loop = self.root / "loop"
+        loop.symlink_to(loop)
+        self.assertIsNone(resolved_root(""))
+        self.assertIn(resolved_root(str(loop)), (None, str(loop)))
+
     def test_file_read_write_conflict_and_caps(self):
         value = self.getfile("hello.txt")
-        self.assertEqual(set(value), {"path", "content", "mtime", "size", "protected"})
-        self.assertEqual(value["content"], "hello\n")
-        saved = self.request("PUT", self.url + "/file", dict(path="hello.txt", content="changed", expected_mtime=value["mtime"]))
+        self.assertEqual(set(value), {"path", "abs", "content", "etag", "mtime", "mtime_ns", "size", "encoding",
+                                      "eol", "kind", "editable", "readonly", "protected"})
+        self.assertEqual((value["content"], value["kind"], value["readonly"]), ("hello\n", "text", None))
+        saved = self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="changed", expected_etag=value["etag"]))
         self.assertIsInstance(saved["mtime"], float)
         self.assertEqual((self.project_root / "hello.txt").read_text(), "changed")
-        self.request("PUT", self.url + "/file", dict(path="hello.txt", content="bad", expected_mtime=value["mtime"]), status=409)
-        self.request("PUT", self.url + "/file", dict(path="new.txt", content="new", expected_mtime=None))
+        conflict = self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="bad", expected_etag=value["etag"]),
+                              status=409)
+        self.assertEqual(conflict["etag"], saved["etag"])
+        # `expected_mtime` still works for one release.
+        legacy = self.getfile("hello.txt")
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="bad", expected_mtime=value["mtime"]), status=409)
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="changed", expected_mtime=legacy["mtime"]))
+        self.owner("PUT", self.url + "/file", dict(path="new.txt", content="new", expected_etag=None))
         self.assertEqual(self.getfile(str(self.extra / "extra.txt"))["content"], "extra")
+        # An env file is the owner's to edit (2026-10-11), and nobody else's to read.
         for path in (".env", "alias.txt"):
-            self.assertEqual(self.getfile(path), {"protected": True})
-            self.request("PUT", self.url + "/file", dict(path=path, content="bad", expected_mtime=None), status=403)
+            env = self.getfile(path)
+            self.assertEqual((env["kind"], env["content"]), ("env", "SECRET=never-expose-this\n"))
+            self.request("GET", self.url + "/file?" + urlencode({"path": path}), status=403)
+            self.request("PUT", self.url + "/file", dict(path=path, content="bad", expected_etag=env["etag"]), status=403)
+        self.assertEqual((self.project_root / ".env").read_text(), "SECRET=never-expose-this\n")
         for path in ("../other/private.txt", "leak/private.txt", str(self.other / "private.txt"), ".git/config"):
             self.getfile(path, status=403)
-            self.request("PUT", self.url + "/file", dict(path=path, content="bad", expected_mtime=None), status=403)
+            self.owner("PUT", self.url + "/file", dict(path=path, content="bad", expected_etag=None), status=403)
         self.getfile("missing", status=404)
-        self.request("GET", self.url + "/file", status=400)
-        self.request("PUT", self.url + "/file", {"path": "hello.txt"}, status=400)
-        self.request("PUT", self.url + "/file", dict(path="hello.txt", content=4, expected_mtime=0), status=400)
-        self.request("PUT", self.url + "/file", dict(path="hello.txt", content="x" * (H.FILE_CAP + 1), expected_mtime=0), status=413)
+        self.owner("GET", self.url + "/file", status=400)
+        self.owner("PUT", self.url + "/file", {"path": "hello.txt"}, status=400)
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content=4, expected_etag=None), status=400)
+        self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="x" * (H.FILE_CAP + 1), expected_etag=None),
+                   status=413)
         (self.project_root / "big").write_bytes(b"x" * (H.FILE_CAP + 1))
         self.getfile("big", status=413)
         self.assertFalse(list(self.project_root.glob(".*.tmp")))
@@ -624,11 +760,19 @@ class Backend(unittest.TestCase):
             path = self.project_root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("guard")
-            self.request("PUT", self.url + "/file", dict(path=name, content="bad", expected_mtime=path.stat().st_mtime), status=403)
+            self.owner("PUT", self.url + "/file", dict(path=name, content="bad", expected_etag=H.editor_policy.etag(b"guard")),
+                       status=403)
+            self.owner("PUT", self.url + "/file", dict(path=name, content="bad", expected_mtime=path.stat().st_mtime),
+                       status=403)
+            self.assertEqual(path.read_text(), "guard")
         for name in ("allowlist.json", "models.json", "routing.json"):
             path = self.extra / name
             path.write_text("{}")
-            self.request("PUT", self.url + "/file", dict(path=str(path), content="bad", expected_mtime=path.stat().st_mtime), status=403)
+            self.owner("PUT", self.url + "/file", dict(path=str(path), content="bad", expected_etag=H.editor_policy.etag(b"{}")),
+                       status=403)
+            self.owner("PUT", self.url + "/file", dict(path=str(path), content="bad", expected_mtime=path.stat().st_mtime),
+                       status=403)
+            self.assertEqual(path.read_text(), "{}")
 
     def test_diff_committed_working_tree_rename_delete_and_untracked(self):
         task = self.stores.tasks.create(self.project.id, "edit files")
@@ -1306,7 +1450,8 @@ class Backend(unittest.TestCase):
         self.settled(thread)
         session = self.daemon._sessions[thread.id]
         session.thread.title = "Travelling conversation"
-        self.stores.threads.save(session.thread)
+        self.stores.threads.set_title(thread.id, "Travelling conversation", "owner")
+        session.thread.title_source = "owner"
         before = to_json(self.stores.threads.get(thread.id))
         log_path = self.stores.threads.path(thread.id).with_name("log.jsonl")
         log = log_path.read_bytes()
@@ -2128,7 +2273,7 @@ class Backend(unittest.TestCase):
         self.events_all()
 
         # Refusals first: each a 400 naming the problem, none writes anything.
-        for bad, words in (({"provider": "claude", "model": "claude-sonnet-5-5", "extra": 1}, "unknown fields: extra"),
+        for bad, words in (({"provider": "claude", "model": "claude-sonnet-5-5", "extra": 1}, "unknown fields (1)"),
                            ({"provider": "claude"}, "missing fields: model"),
                            ({"model": "claude-sonnet-5-5"}, "missing fields: provider"),
                            ({"provider": "fast", "model": "test/model"}, "Model picker"),
@@ -2208,7 +2353,9 @@ class Backend(unittest.TestCase):
         # still refused, and an archived thread still cannot change model.
         self.request("PATCH", f"/threads/{default_tid}", {"provider": "codex"}, status=400)
         self.assertEqual(self.stores.threads.get(default_tid).provider, P.CLAUDE)
-        self.request("PATCH", self.url, {"profile": "ask"})
+        # A profile change is the owner's, from the HUD window (BR-0).
+        self.request("PATCH", self.url, {"profile": "ask"}, port=self.daemon.face_port,
+                     headers={"Origin": f"http://127.0.0.1:{self.daemon.face_port}"})
         self.assertIn("auto profile", self.chat("codex", status=400)["error"])
         self.assertEqual(thread_model.set_provider_default("codex", "gpt-5.6-terra"), ("gpt-5.6-terra", None))
         self.assertIn("auto profile", self.chat("codex", status=400)["error"],
@@ -2420,6 +2567,34 @@ class CronChecks(unittest.TestCase):
         with patch("jarvis.v2.daemon.is_running", side_effect=[False, True]), patch("subprocess.Popen") as child:
             self.assertEqual(cmd_hud(SimpleNamespace(no_window=True)), 0)
             self.assertIn("daemon2", child.call_args.args[0])
+
+
+class OneHiddenRule(unittest.TestCase):
+    """The preview origin's hidden-path rule is `editor_policy.hidden_component`,
+    called — the Browser's uploads ask the same one (BR-9a review). A copy here
+    would let the two drift."""
+
+    def test_the_preview_origin_calls_editor_policy(self):
+        import inspect
+
+        from jarvis.v2 import editor_policy
+        calls = []
+
+        def recorder(path, root):
+            calls.append((path, root))
+            return True
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "page.html").write_text("x")
+            project = SimpleNamespace(root=str(root), extra_dirs=())
+            page = root / "page.html"
+            self.assertIsNone(H._not_a_page(project, page, page))
+            with patch.object(editor_policy, "hidden_component", recorder):
+                self.assertEqual(H._not_a_page(project, page, page), H.HIDDEN_PAGE)
+        self.assertEqual(calls, [(page, root)])
+        self.assertNotIn('startswith(".")', inspect.getsource(H._not_a_page))
+        self.assertTrue(editor_policy.hidden_component(root / ".GIT" / "config", root))
+        self.assertFalse(editor_policy.hidden_component(root / ".well-known" / "a.txt", root))
 
 
 if __name__ == "__main__":

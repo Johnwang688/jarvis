@@ -39,8 +39,14 @@ deliberately not pinned: the install updates itself, and that is the point.
 
 A note on money: `ResultMessage.total_cost_usd` is reported even on a
 subscription, where nothing is billed (R1: 0.28 for a three-tool turn). It is
-passed through unchanged as an **equivalent** figure; what it means is the
-ledger's decision (§8.3), not this provider's.
+an **equivalent** figure; what it means is the ledger's decision (§8.3), not
+this provider's. It is also the CLI process's **running total** for the
+conversation, not the turn's cost (2026-10-12: thread 447ff25e read $109.97
+for $23.22), and a resumed CLI continues from the total its transcript saved.
+So each result's USAGE carries what that result added (`running_cost.step`,
+measured from the last figure seen on this conversation, a resume from the
+total the thread saved), and the figure itself rides along as `cost_total`
+for the daemon to save. Tokens need none of this: `usage` is per turn.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import queue
 import uuid
@@ -64,6 +71,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    ConversationResetMessage,
     HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -80,6 +88,7 @@ from claude_agent_sdk import (
 from ... import config
 from ...tools import secrets
 from ..model import PermissionProfile, ProviderName, Thread
+from .. import running_cost
 from ..provider import (
     Brief,
     BriefRefused,
@@ -135,6 +144,33 @@ STEER_HOLD_MAX_S = 120.0
 # for the message's own turn to show itself before taking that result as its.
 LEFTOVER_WAIT_S = 10.0
 
+# A conversation past the model's context window (2026-10-12). The CLI answers
+# with a synthetic API error whose text starts with this, and a result with
+# `is_error`. The provider then runs the CLI's own `/compact` once, and sends
+# the message again only when nothing of it can have run (`_context_full`);
+# COMPACT_TIMEOUT_S bounds the compaction (one on a 1M-token conversation took
+# 53 s live), polled every INTERRUPT_POLL_S so the owner's Stop ends it at
+# once. Otherwise the owner is told in one sentence what happened.
+CONTEXT_FULL_PREFIX = "prompt is too long"
+COMPACT_TIMEOUT_S = 600.0
+INTERRUPT_POLL_S = 0.25
+# Compacted, the message sent again, and it still did not fit.
+CONTEXT_STILL_FULL = (
+    "This conversation is still too long for the model's context window after "
+    "compacting it; start a New thread to go on."
+)
+# Compacted, but nothing re-sent: some of the turn may already have run.
+CONTEXT_COMPACTED_SEND_AGAIN = (
+    "This conversation filled the model's context window partway through, so it "
+    "was compacted; nothing was re-sent, because part of the work may already "
+    "have run — send your message again to go on."
+)
+# The compaction did not finish (no compact boundary, an error, the time limit).
+CONTEXT_NOT_COMPACTED = (
+    "This conversation is too long for the model's context window and compacting "
+    "it did not finish; send your message again to retry, or start a New thread."
+)
+
 # How much of a tool result goes into TOOL_FINISHED.summary. A surface renders
 # this in a ticker; the transcript already holds the whole thing.
 SUMMARY_CHARS = 200
@@ -169,6 +205,9 @@ SETTING_SOURCES = ["user", "project"]
 # provider is the first thing in the codebase whose child process holds it.
 _TOKENISH = re.compile(r"\b(?:sk|oat|rt)[-_][A-Za-z0-9_\-]{12,}", re.IGNORECASE)
 _JWTISH = re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+")
+# A jarvis-mcp caller token (`callers.TOKEN_PREFIX`, plan 2026-10-10 §1.1):
+# the CLI's stderr could quote its MCP config back at us.
+_JMCPISH = re.compile(r"jmcp_[A-Za-z0-9_\-]{8,}")
 _REDACTED = "[redacted]"
 
 
@@ -183,7 +222,74 @@ def _safe(text: Any) -> str:
     """
     out = secrets.scrub(str(text or ""))
     out = _TOKENISH.sub(_REDACTED, out)
+    out = _JMCPISH.sub(_REDACTED, out)
     return _JWTISH.sub(_REDACTED, out)
+
+
+# --- the MCP config carrier (plan 2026-10-10 §1.3) ---------------------------
+#
+# The SDK puts a dict `mcp_servers` on the CLI's command line as one JSON
+# argument (`--mcp-config '<json>'`, env included), and a command line is
+# world-readable (`ps`, /proc/<pid>/cmdline): a chat's jarvis-mcp caller token
+# would show to anything that ran `ps aux`. So the servers go in a private
+# file instead and the SDK is handed its path, which it passes as
+# `--mcp-config <path>`. Written once per session, reused by `set_model`'s
+# reconnect, deleted by `close()`; `Daemon.start` sweeps any a crash left.
+#
+# **One file per session, never per thread** (PR #35 review): a thread's old
+# session can still be closing — the daemon drops a lost session under its
+# lock and closes it outside — while the next send opens a new session on the
+# same thread. With one `mcp.json` per thread, the old session's close deleted
+# the new session's carrier. Each session writes `mcp-<nonce>.json` and only
+# ever removes its own.
+
+_THREAD_DIR = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# A session's carrier, and the pattern the start-up sweep removes (with the
+# temporary `.mcp-*` a crash may leave mid-write).
+MCP_CONFIG_NAME = re.compile(r"mcp-[0-9a-f]{32}\.json")
+
+
+def mcp_config_dir(thread_id: str) -> Path:
+    """`V2_DATA_DIR/claude/<thread_id>/`, where a thread's sessions keep
+    their carriers."""
+    if not isinstance(thread_id, str) or not _THREAD_DIR.fullmatch(thread_id):
+        raise BriefRefused("invalid Claude thread id for an MCP config")
+    return Path(config.V2_DATA_DIR) / "claude" / thread_id
+
+
+def write_mcp_config(thread_id: str, servers: dict) -> Path:
+    """The servers as `{"mcpServers": …}` in a file of this session's own
+    (`mcp-<nonce>.json`), 0600 in 0700 directories, written aside and renamed
+    into place; never through a symlink."""
+    path = mcp_config_dir(thread_id) / f"mcp-{uuid.uuid4().hex}.json"
+    for directory in (path.parent.parent, path.parent):
+        if directory.is_symlink():
+            raise BriefRefused("the Claude MCP config directory must not be a symlink")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.chmod(0o700)
+    if path.is_symlink():
+        raise BriefRefused("the Claude MCP config must not be a symlink")
+    data = json.dumps({"mcpServers": servers}, ensure_ascii=True, allow_nan=False)
+    fd, tmp = tempfile.mkstemp(prefix=".mcp-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return path
+
+
+def remove_mcp_config(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        LOG.warning("Cannot remove a Claude MCP config (%s)", type(exc).__name__)
 
 
 # The seam the free tests replace: everything that would spawn a `claude`
@@ -511,7 +617,14 @@ class _Session:
     interrupted: bool = False
     closed: bool = False
     tools_seen: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    # What this handle's results added (the per-result deltas, summed).
     usage: Usage = field(default_factory=Usage)
+    # The CLI's running cost total as the last result on this conversation
+    # left it: what the next result's figure is measured from. 0.0 for a new
+    # session; on a resume, the total the thread saved (the CLI continues from
+    # what its transcript saved); None when that is unknown. Kept across a
+    # model switch, whose new process resumes the same conversation.
+    cost_seen: float | None = 0.0
     stderr: deque = field(default_factory=lambda: deque(maxlen=STDERR_LINES))
     # Whether the CLI holds this session on disk yet — true after a resume or
     # once a turn has produced a result. Decides how `set_model` reconnects.
@@ -533,6 +646,9 @@ class _Session:
     # as a late turn, it is interrupted and its words dropped (review of PR
     # #22, round 2): stop means stop, even across sends.
     stopped: set = field(default_factory=set)
+    # The private file the brief's MCP servers are carried in (plan
+    # 2026-10-10 §1.3), or None when the brief has none.
+    mcp_config: Path | None = None
 
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
@@ -627,13 +743,20 @@ class ClaudeProvider:
             runner=runner,
             session_id=session_id,
             resumable=resume,
+            cost_seen=(running_cost.figure(getattr(thread, "provider_cost_total", None))
+                       if resume else 0.0),
         )
-        options = self._options(brief, session, resume=resume, session_id=session_id)
         try:
+            if brief.mcp_servers:
+                session.mcp_config = write_mcp_config(thread.id, dict(brief.mcp_servers))
+            options = self._options(brief, session, resume=resume, session_id=session_id)
             session.client = _client_factory(options)
             _await(loop, session.client.connect(), CONNECT_TIMEOUT_S)
         except BaseException as exc:  # noqa: BLE001 — a failed start must not leak a thread
             _stop_loop(loop, runner)
+            remove_mcp_config(session.mcp_config)
+            if isinstance(exc, BriefRefused):
+                raise BriefRefused(_safe(exc)) from None
             raise BriefRefused(f"claude session failed to start: {_safe(exc)}") from None
         handle = SessionHandle(
             thread_id=thread.id,
@@ -658,6 +781,8 @@ class ClaudeProvider:
             raise BriefRefused(
                 f"effort {brief.effort!r} is not one of {', '.join(EFFORT_LEVELS)}"
             )
+        if brief.mcp_servers and session.mcp_config is None:
+            raise BriefRefused("the brief's MCP servers have no config file")
         auto = brief.profile is PermissionProfile.AUTO
         kwargs: dict[str, Any] = {
             "cwd": brief.cwd,
@@ -672,7 +797,10 @@ class ClaudeProvider:
             "permission_mode": "auto" if auto else "default",
             "include_partial_messages": True,
             "strict_mcp_config": True,
-            "mcp_servers": dict(brief.mcp_servers),
+            # A path, never a dict: the SDK puts a dict on the command line
+            # as JSON, env and caller token included (plan 2026-10-10 §1.3).
+            # The file is the brief's servers, written by `_open`.
+            "mcp_servers": str(session.mcp_config) if session.mcp_config is not None else {},
             # R1: an entry here is auto-approved before any callback runs.
             # Nothing gated may ever appear in it, and everything is gated.
             "allowed_tools": [],
@@ -732,6 +860,13 @@ class ClaudeProvider:
         allow decision, so the classifier (layer 3) still runs. An explicit
         allow would skip it — and would also skip `can_use_tool`, per the SDK.
         Under `ask` layer 3 is skipped by design, so ALLOW is explicit there.
+
+        Two exceptions, both for a Jarvis session tool on this session's
+        jarvis server (`session_tools`, plan 2026-10-10 §3.4/§4.1): one marked
+        `foreground_only` is denied outright when a sub-agent calls it (the
+        hook input carries `agent_id`), without asking `permit`; and one
+        marked `read_only` that `permit` ALLOWs (its `jarvis-tool` layer) gets
+        an explicit allow under both profiles.
         """
 
         async def pre_tool(input_data, tool_use_id, context):  # noqa: ANN001
@@ -739,7 +874,36 @@ class ClaudeProvider:
             name = str(data.get("tool_name") or "")
             args = data.get("tool_input")
             args = dict(args) if isinstance(args, dict) else {}
+            # A Jarvis session tool (`mcp__jarvis__<tool>`, plan 2026-10-10).
+            from .. import session_tools
+            jarvis = session_tools.claude_tool(name)
+            if jarvis is not None and jarvis.foreground_only and data.get("agent_id"):
+                # A sub-agent's call (the hook input names its agent): refused
+                # without asking `permit`, so no one is ever asked about it.
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"Jarvis refuses {jarvis.name} for a sub-agent: it runs only "
+                            "in the conversation itself. Do not retry it from a sub-agent."
+                        ),
+                    }
+                }
             decision = await self._decide(session, name, args)
+            if (decision is Decision.ALLOW and jarvis is not None and jarvis.read_only
+                    and "jarvis" in session.brief.mcp_servers):
+                # Explicit under both profiles (D-5): under ASK it pre-empts the
+                # CLI's own prompt, under AUTO it skips the classifier, whose
+                # job here the daemon does on every call. Never "approved":
+                # nobody approved anything.
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "permissionDecisionReason": "a read-only Jarvis tool",
+                    }
+                }
             if decision is Decision.ALLOW and session.brief.profile is PermissionProfile.AUTO:
                 return {}
             if decision is Decision.ALLOW:
@@ -846,15 +1010,24 @@ class ClaudeProvider:
         return Decision.DENY
 
     def answer(self, h: SessionHandle, req_id: str, decision: Decision | str) -> None:
-        """Resolve a question this session is blocked on, out of band."""
+        """Withdraw a permission this session is blocked on, out of band.
+
+        Only a DENY. A yes comes from `permit` — the broker, whose card only
+        the owner answers (BR-0) — never from here: `POST /threads/<id>/answer`
+        reaches this method from any client of the API listener, and an ALLOW
+        here used to beat a card the owner had not answered. The Codex
+        provider has always refused it the same way.
+        """
         session = _native(h)
         with session.mutex:
             pending = session.pending.get(req_id)
             if pending is None or pending.ready.is_set():
                 raise ValueError(f"Unknown or resolved Claude request id: {req_id}")
-            if isinstance(decision, str) and not isinstance(decision, Decision):
-                decision = Decision(decision)
-            pending.value = Decision(decision)
+            decision = Decision(decision)
+            if decision is not Decision.DENY:
+                raise ValueError("A Claude tool use is decided by the approval broker; "
+                                 "answer() can only deny it")
+            pending.value = decision
             pending.ready.set()
 
     # -- the turn
@@ -904,7 +1077,11 @@ class ClaudeProvider:
         async def turn() -> None:
             try:
                 await session.client.query(_prompt(message, prompt_uid, later=behind))
-                await self._read(session, events, prompt_uid)
+                held, full, resend = await self._read(session, events, prompt_uid)
+                if full:
+                    held = await self._context_full(session, events, message, held, resend)
+                if held is not None:
+                    events.put(held)
             except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
                 events.put(
                     Event(
@@ -991,8 +1168,15 @@ class ClaudeProvider:
         that, nothing could tell such a turn from the message's own."""
         return session.prompt_echo and any(g < generation for g in session.steering.values())
 
-    async def _read(self, session: _Session, events: queue.Queue, prompt_uid: str) -> None:
-        """Read this message's turn off the CLI, steers included.
+    async def _read(
+        self, session: _Session, events: queue.Queue, prompt_uid: str
+    ) -> tuple[Event | None, bool, bool]:
+        """Read this message's turn off the CLI, steers included. -> the
+        TURN_FINISHED this send hands back (None if the stream ended first),
+        whether that result said the conversation is past the model's
+        context window (`_context_full`), and whether the message may then be
+        sent again: only if the overflowing CLI turn was the message's own and
+        used no tool and took in no steer.
 
         The CLI runs turns one after another, and with `--replay-user-messages`
         echoes, under our uuid, each stdin message as it drains: the one that
@@ -1011,7 +1195,15 @@ class ClaudeProvider:
           and its words dropped: stop means stop (round 2);
         - **nobody's**: once this CLI is known to echo, a CLI turn with no
           echo before the message's own (a background task's notice) is read,
-          but its result is never taken for this message's (round 2).
+          but its result is never taken for this message's (round 2);
+        - **injected**, known whatever the CLI is known to do: a CLI turn the
+          CLI itself says somebody else started — the user message it replays
+          and the turn's result carry an `origin` whose kind is not "human"
+          (a background task's notice, a channel or peer message). Read, and
+          its result never ends this turn (2026-10-12: a resumed CLI replays
+          a queued task notice as a turn of its own before the message's, and
+          on a fresh session that empty result used to be taken as the
+          message's answer — the owner saw nothing until the next send).
 
         When this turn's result arrives with one of its steers not yet seen to
         drain, the turn holds while the CLI shows any sign of life, for its
@@ -1028,12 +1220,18 @@ class ClaudeProvider:
         loop = asyncio.get_running_loop()
         generation = session.generation
         started = False          # the message's own CLI turn has begun
+        guessed = False          # ... taken from an unechoed CLI turn, not seen
         owner = None             # who opened the CLI turn under way (None: none is)
         held = None              # the TURN_FINISHED this send hands back
+        held_full = False        # ... whether it said the context is full
+        held_resend = False      # ... and whether the message may be sent again
         candidate = None         # a result that was a leftover's, or this message's
+        candidate_full = False
         candidate_until = None
         hold_began = hold_quiet = None
         restarted = False
+        turn_full = False        # the CLI turn under way said "Prompt is too long"
+        turn_work = False        # ... or used a tool, or took in a steer
         while True:
             timeout = None
             if hold_began is not None:
@@ -1047,7 +1245,7 @@ class ClaudeProvider:
                 if hold_began is None and candidate is not None:
                     # The message's own start never showed: the CLI did not
                     # echo it, so the result taken for a leftover's was its.
-                    held = candidate
+                    held, held_full, held_resend = candidate, candidate_full, False
                 break
             if item is _END:
                 session.pump = None
@@ -1067,6 +1265,7 @@ class ClaudeProvider:
             uid = str(msg.uuid).lower() if isinstance(msg, SdkUserMessage) and msg.uuid else None
             if uid is not None and uid == prompt_uid:
                 started, owner, candidate, candidate_until = True, "prompt", None, None
+                guessed = False
                 hold_began = None
                 with session.mutex:
                     session.prompt_echo = True
@@ -1098,7 +1297,24 @@ class ClaudeProvider:
                                 await session.client.interrupt()
                         else:
                             await self._stop_if_interrupted(session)
+                    else:
+                        turn_work = True           # folded into the CLI turn under way
                     continue
+            if (owner is None and isinstance(msg, SdkUserMessage)
+                    and _injected(getattr(msg, "origin", None))):
+                # The CLI replays the message that starts a turn somebody else
+                # started (a background task's notice) with its origin: that
+                # CLI turn is never this message's, whatever this CLI is known
+                # to echo. One injected mid-turn is part of the turn under way.
+                owner = "injected"
+                hold_began = None
+                await self._stop_if_interrupted(session)
+                continue
+            if isinstance(msg, AssistantMessage):
+                if any(isinstance(b, ToolUseBlock) for b in msg.content):
+                    turn_work = True               # a sub-agent's tools count too
+                if getattr(msg, "parent_tool_use_id", None) is None and _context_full_message(msg):
+                    turn_full = True               # never a sub-agent's
             if owner is None and isinstance(msg, (AssistantMessage, StreamEvent)):
                 owner = "unknown"                  # a turn whose start was not echoed
                 hold_began = None
@@ -1108,7 +1324,7 @@ class ClaudeProvider:
                 # PR #22, round 2). Only a CLI that never echoes starts here.
                 if (not started and not session.prompt_echo
                         and not self._leftover_possible(session, generation)):
-                    started = True
+                    started = guessed = True
                     with session.mutex:
                         session.accepting = True
                 await self._stop_if_interrupted(session)
@@ -1123,8 +1339,29 @@ class ClaudeProvider:
             if finished is None:
                 continue
             ended, owner = owner, None
-            if ended in ("leftover", "stopped"):
-                # An earlier turn's steer never ends this message's turn.
+            full = _context_full_result(msg, said=turn_full)
+            with session.mutex:
+                # A steer of this turn written and not seen to drain may have
+                # been folded in silently: work of its own, as one echoed is.
+                work = turn_work or any(g == generation for g in session.steering.values())
+            turn_full = turn_work = False
+            kind = _injected(getattr(msg, "origin", None))
+            if ended in (None, "unknown") and kind is not None:
+                # The result says so even when nothing before it did (a
+                # transcript-only notice the CLI replays nothing of).
+                ended = "injected"
+            if ended == "injected":
+                LOG.info("claude %s: read a CLI turn of origin %s; not this message's",
+                         session.thread_id, _safe(kind or "?")[:40])
+                if guessed:
+                    # It was taken for the message's own start on a CLI not
+                    # yet known to echo: it was not, so that start is to come.
+                    started = guessed = False
+                    with session.mutex:
+                        session.accepting = False
+            if ended in ("leftover", "stopped", "injected"):
+                # An earlier turn's steer, or a turn somebody else started,
+                # never ends this message's turn.
                 if held is None:
                     continue                       # the message's own turn is still to come
                 # It ran in this turn's hold: the result stays the message's,
@@ -1139,9 +1376,15 @@ class ClaudeProvider:
             if not started:
                 if session.prompt_echo or self._leftover_possible(session, generation):
                     candidate, candidate_until = finished, loop.time() + LEFTOVER_WAIT_S
+                    candidate_full = full
                     continue
                 started = True                     # nothing else could have run
-            held = finished
+            # Sent again only from the message's own CLI turn, and only if it
+            # did nothing a second run would repeat (review of PR #57: a
+            # `git push` ran, then the context filled, and the push was sent
+            # again; a steer's own turn overflowed, and the answered message
+            # was sent again in its place).
+            held, held_full, held_resend = finished, full, ended == "prompt" and not work
             with session.mutex:
                 session.accepting = False
                 pending = any(g == generation for g in session.steering.values())
@@ -1155,8 +1398,105 @@ class ClaudeProvider:
                 session.steering.clear()           # nothing to recognise them by later
             elif session.interrupted:
                 session.stopped.update(u for u, g in session.steering.items() if g == generation)
-        if held is not None:
-            events.put(held)
+        full = held_full and held is not None
+        return held, full, full and held_resend
+
+    async def _context_full(
+        self, session: _Session, events: queue.Queue, message: UserMessage,
+        held: Event | None, resend: bool,
+    ) -> Event | None:
+        """The message's result said the conversation no longer fits the
+        model's context window ("Prompt is too long"). It is not a reply: run
+        the CLI's own `/compact` once. Send the message again only when
+        `resend` says the overflowing CLI turn was the message's own and did
+        nothing a second run would repeat (no tool, no steer); otherwise, and
+        when compacting fails or does not help, say what happened in one
+        sentence and end the turn as an error. Stop means stop: the turn ends
+        as interrupted, at once. The session is kept — the CLI's conversation
+        is the same on a resume. -> the TURN_FINISHED to hand back."""
+        if session.interrupted:
+            return _as_interrupted(held)
+        LOG.info("claude %s: the conversation is past the context window; compacting once",
+                 session.thread_id)
+        compacted = await self._compact(session, events)
+        if session.interrupted:
+            return _as_interrupted(held)
+        if not compacted:
+            note = CONTEXT_NOT_COMPACTED
+        elif not resend:
+            LOG.info("claude %s: compacted; the message is not sent again "
+                     "(its turn may already have done work)", session.thread_id)
+            note = CONTEXT_COMPACTED_SEND_AGAIN
+        else:
+            uid = str(uuid.uuid4())
+            with session.mutex:
+                behind = self._leftover_possible(session, session.generation)
+            await session.client.query(_prompt(message, uid, later=behind))
+            again, full, _ = await self._read(session, events, uid)
+            if not full:
+                return again
+            held = again if again is not None else held
+            if session.interrupted:
+                return _as_interrupted(held)
+            LOG.info("claude %s: still past the context window after compacting",
+                     session.thread_id)
+            note = CONTEXT_STILL_FULL
+        events.put(Event(EventKind.ERROR, session.thread_id, {"message": note, "fatal": False}))
+        return held
+
+    async def _compact(self, session: _Session, events: queue.Queue) -> bool:
+        """Run the CLI's `/compact` (the stream-json form the Agent SDK
+        documents) and read it to its result. -> whether a compact boundary
+        came back. Shown as one tool call, so the wait is visible; bounded by
+        COMPACT_TIMEOUT_S, after which the compaction is interrupted; and the
+        owner's Stop is looked for every INTERRUPT_POLL_S, so it ends the wait
+        at once (`interrupt()` has already told the CLI). A read left waiting
+        stays the pump's, for the next turn."""
+        uid = str(uuid.uuid4())
+        call_id = f"compact-{uid[:8]}"
+        events.put(Event(EventKind.TOOL_STARTED, session.thread_id,
+                         {"call_id": call_id, "name": "compact", "args": {}}))
+        compacted = False
+        try:
+            await session.client.query(_command_prompt("/compact", uid))
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + COMPACT_TIMEOUT_S
+            while True:
+                if session.interrupted:
+                    compacted = False
+                    break
+                left = deadline - loop.time()
+                if left <= 0:
+                    with contextlib.suppress(Exception):
+                        await session.client.interrupt()
+                    break
+                try:
+                    item = await self._pump(session).next(min(left, INTERRUPT_POLL_S))
+                except asyncio.TimeoutError:
+                    continue
+                if item is _END:
+                    session.pump = None
+                    break
+                if isinstance(item, _Raised):
+                    session.pump = None
+                    raise item.exc
+                if isinstance(item, SystemMessage) and item.subtype == "compact_boundary":
+                    compacted = True
+                if (isinstance(item, ResultMessage)
+                        and _injected(getattr(item, "origin", None)) is not None):
+                    self._take(session, events, item)      # somebody else's turn
+                    continue
+                if self._take(session, events, item) is not None:
+                    compacted = compacted and not item.is_error
+                    break
+        finally:
+            events.put(Event(EventKind.TOOL_FINISHED, session.thread_id, {
+                "call_id": call_id, "name": "compact", "ok": compacted,
+                "summary": "conversation compacted" if compacted else "compaction did not finish",
+            }))
+        LOG.info("claude %s: compaction %s", session.thread_id,
+                 "finished" if compacted else "did not finish")
+        return compacted
 
     async def _stop_if_interrupted(self, session: _Session) -> None:
         """A CLI turn has just begun after the owner pressed stop (a steer the
@@ -1206,6 +1546,10 @@ class ClaudeProvider:
             return out
         if isinstance(msg, AssistantMessage):
             self._note_session_id(session, msg.session_id)
+            if _context_full_message(msg):
+                # "Prompt is too long" is the CLI's error, not a reply: the
+                # turn handles it (`_context_full`) and the owner is told.
+                return out
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     if block.text:
@@ -1242,6 +1586,12 @@ class ClaudeProvider:
             self._note_session_id(session, msg.session_id)
             session.resumable = True
             out.extend(self._result(session, msg))
+            return out
+        if isinstance(msg, ConversationResetMessage):
+            # The CLI zeroes its running totals here (a `/clear`): the next
+            # result's figure starts again from nothing.
+            with session.mutex:
+                session.cost_seen = 0.0
             return out
         return out
 
@@ -1287,8 +1637,20 @@ class ClaudeProvider:
 
     def _result(self, session: _Session, msg: ResultMessage) -> list[Event]:
         reported = dict(msg.usage or {})
-        cost = msg.total_cost_usd
+        # Every result is translated here exactly once, whoever's CLI turn it
+        # ends (the message's, a steer's, a background notice's, a stopped
+        # one's, `/compact`'s), so each adds exactly what it spent.
+        running = running_cost.figure(msg.total_cost_usd)
+        with session.mutex:
+            unknown = session.cost_seen is None
+            cost, session.cost_seen = running_cost.step(session.cost_seen, running)
+            seen = session.cost_seen
+        if unknown and seen is not None:
+            LOG.info("claude %s: resumed with no saved cost total; the first figure is "
+                     "taken as the baseline, its own cost not counted", session.thread_id)
         turn = Usage(
+            # `usage` is the main loop's, per turn (the CLI's own description:
+            # "per-turn in streaming-input sessions"): no running total here.
             input_tokens=int(reported.get("input_tokens") or 0),
             output_tokens=int(reported.get("output_tokens") or 0),
             cached_tokens=int(reported.get("cache_read_input_tokens") or 0),
@@ -1299,7 +1661,7 @@ class ClaudeProvider:
         total.output_tokens += turn.output_tokens
         total.cached_tokens += turn.cached_tokens
         if cost is not None:
-            total.cost_usd = (total.cost_usd or 0.0) + float(cost)
+            total.cost_usd = (total.cost_usd or 0.0) + cost
         return [
             Event(
                 EventKind.USAGE,
@@ -1309,9 +1671,13 @@ class ClaudeProvider:
                     "output": turn.output_tokens,
                     "cached": turn.cached_tokens,
                     # An *equivalent* figure on a subscription, where nothing
-                    # is billed (R1). Passed through unchanged; what it means
-                    # is the ledger's call, not this provider's.
+                    # is billed (R1): what this result added to the CLI's
+                    # running total, or None when that cannot be told. What
+                    # it means is the ledger's call, not this provider's.
                     "cost_usd": cost,
+                    # The running total it is measured from now, for the
+                    # daemon to save: a resume starts from it.
+                    "cost_total": seen,
                     "provider_reported": reported,
                 },
             ),
@@ -1446,6 +1812,9 @@ class ClaudeProvider:
         except Exception:  # noqa: BLE001 — close must not raise
             pass
         _stop_loop(session.loop, session.runner)
+        # The carrier goes with the session: its token is already revoked.
+        remove_mcp_config(session.mcp_config)
+        session.mcp_config = None
 
 
 # --- helpers ----------------------------------------------------------------
@@ -1538,6 +1907,70 @@ def _prompt(message: UserMessage, uid: str, *, later: bool = False) -> Any:
         yield payload
 
     return one()
+
+
+def _command_prompt(text: str, uid: str) -> Any:
+    """A CLI slash command (`/compact`) as one stdin user message — the form
+    the Agent SDK documents for slash commands in streaming input."""
+    payload = {
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
+        "uuid": uid,
+    }
+
+    async def one() -> Any:
+        yield payload
+
+    return one()
+
+
+def _injected(origin: Any) -> str | None:
+    """The kind of a CLI turn somebody else started, or None for the owner's.
+
+    The CLI stamps `origin` on the user message it replays for a turn it
+    started itself (a background task's notice, a channel or peer message) and
+    on that turn's result; the SDK documents it as how a streaming-input
+    consumer tells its own prompt's result from an injected turn's. A prompt
+    of ours carries none, or `{"kind": "human"}`."""
+    if not isinstance(origin, dict):
+        return None
+    kind = origin.get("kind")
+    if not isinstance(kind, str) or kind == "human":
+        return None
+    return kind
+
+
+def _too_long(text: Any) -> bool:
+    return isinstance(text, str) and text.strip().lower().startswith(CONTEXT_FULL_PREFIX)
+
+
+def _context_full_message(msg: AssistantMessage) -> bool:
+    """The CLI's synthetic API error for a conversation past the context
+    window: an assistant message with `error` set (or the CLI's synthetic
+    model) whose text is "Prompt is too long…". A reply of the model's that
+    merely starts with those words carries neither."""
+    if getattr(msg, "error", None) is None and getattr(msg, "model", None) != "<synthetic>":
+        return False
+    return any(isinstance(b, TextBlock) and _too_long(b.text) for b in msg.content)
+
+
+def _context_full_result(msg: Any, *, said: bool = False) -> bool:
+    """A result frame that ended on "Prompt is too long": `is_error`, and the
+    words in the result itself or (`said`) in the CLI turn's own synthetic
+    error. A turn the CLI recovered from — the error, then a success — is
+    not full, and neither is one whose only such error was a sub-agent's."""
+    if not isinstance(msg, ResultMessage) or not msg.is_error:
+        return False
+    return said or _too_long(msg.result) or any(_too_long(e) for e in (msg.errors or []))
+
+
+def _as_interrupted(held: Event | None) -> Event | None:
+    """The owner's Stop landed: the turn finishes as interrupted, whatever
+    the result it holds said."""
+    if held is None:
+        return None
+    return Event(held.kind, held.thread_id, {**held.data, "stop": "interrupted"})
 
 
 def _content(message: UserMessage) -> Any:

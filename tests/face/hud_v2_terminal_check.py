@@ -12,8 +12,16 @@ refused and counted as a failure (`hud_v2_check.guard_live`, which this
 suite also proves bites on sockets).
 
 The checks worth keeping, each written to bite:
-  - typing round-trips; Space never fires push-to-talk; Ctrl+B and Ctrl+_
-    reach the shell while the zoom keys stay the HUD's;
+  - opening the panel (⬓, the layout menu's Panel row, Ctrl+`) or switching
+    a pane to the terminal view opens one terminal when there is none (the
+    owner's request, 2026-10-11) — never on a reload with the panel stored
+    open, never under a card (nor once a card that arrived mid-listing is
+    answered), never on a failed listing or with one listed, one for a
+    double- or triple-click, and a refusal said as `+` says it;
+  - typing round-trips; Space never starts the mic; Ctrl+D is the shell's
+    end of input (`\\x04`), never push-to-talk (2026-10-10, the owner's
+    answer); Ctrl+B and Ctrl+_ reach the shell while the zoom keys stay the
+    HUD's;
   - **under a card nothing reaches the shell** — not with the card holding
     focus, and not with the terminal's own textarea focused behind it — and
     Escape still denies;
@@ -37,13 +45,23 @@ The checks worth keeping, each written to bite:
     to take it back, and a refused newcomer says so;
   - exit offers Restart and Close; Jarvis's restart offers "New terminal
     here"; a busy terminal is asked about before it closes;
+  - a terminal that ended with Jarvis continues where it was (2026-10-12,
+    the owner's option (a)): a typed key, a paste or "Continue here" makes
+    one new shell in the same folder, same place, same xterm, under the old
+    text and a separator; what was typed reaches it only after its replay,
+    typed but never run (no held Enter, no held paste with a line break),
+    and not at all after any refusal while held or once it left the screen;
+    a later reattach keeps the old text and answers nothing; never under a
+    card, on a load, for another window's terminal, an exited shell or a
+    program terminal; an unreadable one (or one whose switch is unknown)
+    continues unreadable;
   - an attach this window did not make is said, quietly; its own never are;
   - an OSC title never reaches `document.title` and renders as text; a
     `javascript:` link is inert, an http link opens only on Ctrl+click;
   - a Ctrl+clicked link to a server on this machine opens a menu (WP-E):
-    "Open in Preview" lands in a drawn Preview pane, else the focused pane,
+    "Open in Browser" lands in a drawn Browser pane, else the focused pane,
     and is refused, with the reason, for the HUD's and the API's ports;
-    "Open in a browser tab" still opens it; Escape and a card close it;
+    "Open in a Chrome tab" still opens it; Escape and a card close it;
     and a link on the panel terminal's **last row** opens a menu that flips
     above the click and sits wholly on screen, both buttons clickable, at
     100% and 160% (PR #31 review: it opened below the window);
@@ -116,6 +134,8 @@ class FakePty:
         self.waiting: dict[str, dict] = {}
         self.takeover_answers: list[dict] = []
         self.refused_tickets = 0
+        self.gone_after_ticket = 0
+        self.removed: set[str] = set()  # terminals the test took out of the world itself
         self.closing: list[tuple[dict, int, str]] = []
         ctx.route_web_socket(re.compile(rf"^ws://127\.0\.0\.1:{mock.port}/terminals/"), self._attach)
 
@@ -145,8 +165,17 @@ class FakePty:
         sock = {"tid": tid, "ws": ws, "url": ws.url, "frames": [], "latched": False, "open": True,
                 "n": len(self.sockets), "replayed_at": None, "at": time.monotonic()}
         self.sockets.append(sock)
-        if not ticket or tickets.pop(ticket, None) != tid or self._row(tid) is None:
-            self.refused_tickets += 1
+        fresh = bool(ticket) and tickets.pop(ticket, None) == tid
+        if not fresh or self._row(tid) is None:
+            # Counted apart only: a fresh ticket for a terminal the *test*
+            # removed (`_reset` emptying the world, or `end`) while the HUD was
+            # still attaching — the test's race, not the HUD's. Anything else —
+            # a stale or missing ticket, or a socket for a terminal the HUD
+            # closed itself — counts against the HUD.
+            if fresh and tid in self.removed:
+                self.gone_after_ticket += 1
+            else:
+                self.refused_tickets += 1
             self._close(sock, 1008, "a fresh ticket for this terminal is required")
             return
         ws.on_message(lambda m, s=sock: self._message(s, m))
@@ -261,6 +290,7 @@ class FakePty:
         row = self._row(tid)
         if row in rows:
             rows.remove(row)
+            self.removed.add(tid)
         sock = self.holders.pop(tid, None)
         if sock and sock["open"]:
             self._send(sock, {"type": "exit", "code": None, "reason": "ended"})
@@ -404,8 +434,14 @@ def _created(mock) -> list:
     return mock.__dict__.get("terminal_created", [])
 
 
+def _posts(mock) -> int:
+    """`POST /terminals` asked for so far: the mock records one when it arrives."""
+    return len([1 for (m, p, _) in mock.calls if m == "POST" and p == "/terminals"])
+
+
 def _reset(page, mock, base, until, fake, size=(1280, 800)):
     """A clean window: no terminals in the world, default layout, panel shut."""
+    fake.removed |= {r["id"] for r in mock.world.get("terminals", [])}
     mock.world["terminals"] = []
     page.set_viewport_size({"width": size[0], "height": size[1]})
     _store(page, zoom="100", ws=None, prefs=None, layout="{}")
@@ -426,14 +462,31 @@ def _open_terminal(page, mock, until, fake) -> str:
     return tid
 
 
-def _new_terminal(page, mock, until, fake) -> str:
-    """The panel open (⬓ opens nothing by itself), then `+`: a new terminal, attached."""
-    if not _visible(page, '[data-testid="panel"]'):
-        page.locator('[data-testid="toggle-panel"]').click()
-        until(lambda: _visible(page, '[data-testid="panel-new"]'), timeout=3)
+def _show_panel(page, mock, until) -> str | None:
+    """⬓ on a hidden panel. With no terminal listed it opens one by itself
+    (the owner's call, 2026-10-11): that one's id, once it is made."""
     n = len(_created(mock))
-    page.locator('[data-testid="panel-new"]').click()
+    empty = not mock.world.get("terminals")
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="panel-new"]'), timeout=3)
+    if not empty:
+        return None
     until(lambda: len(_created(mock)) > n, timeout=4)
+    if len(_created(mock)) == n:
+        raise AssertionError("⬓ opened no terminal, with none open")
+    until(lambda: not _visible(page, '[data-testid="panel-opening"]'), timeout=4)
+    return _created(mock)[-1][0]
+
+
+def _new_terminal(page, mock, until, fake) -> str:
+    """A new terminal in the panel, attached: the one ⬓ opens when none is
+    listed, else `+` in the open panel."""
+    n = len(_created(mock))
+    if not _visible(page, '[data-testid="panel"]'):
+        _show_panel(page, mock, until)
+    if len(_created(mock)) == n:
+        page.locator('[data-testid="panel-new"]').click()
+        until(lambda: len(_created(mock)) > n, timeout=4)
     if len(_created(mock)) == n:
         raise AssertionError("+ opened no terminal")
     tid = _created(mock)[-1][0]
@@ -482,11 +535,16 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
     only = set(filter(None, (sys.argv[1] if len(sys.argv) > 1 and __name__ == "__main__" else "").split(",")))
     try:
         _boot(page, mock, base, until)
-        for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
-                        _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
-                        _integration_checks, _osc_link_checks, _preview_link_checks, _menu_edge_checks,
-                        _pane_checks, _zoom_checks, _ended_checks,
-                        _flood_checks, _chat_panes_checks, _crash_checks):
+        for section in (_open_checks, _autoopen_reload_checks, _autoopen_pane_checks, _autoopen_menu_checks,
+                        _autoopen_click_checks, _autoopen_card_checks, _autoopen_refusal_checks,
+                        _typing_checks, _card_checks, _paste_checks, _reload_checks,
+                        _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks,
+                        _closed_while_ticketing_checks, _readable_checks,
+                        _hold_checks,
+                        _read_note_checks, _integration_checks, _osc_link_checks, _browser_link_checks,
+                        _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
+                        _flood_checks, _chat_panes_checks, _split_close_terminal_checks,
+                        _rv47b_copy_readable_checks, _continue_checks, _crash_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -500,8 +558,13 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                 except Exception:
                     pass
         check("no page errors in the terminal section", not errors, "; ".join(errors[:3]))
+        # Strict for every socket: a spent, missing or another terminal's
+        # ticket fails it, and so does a socket for a terminal the HUD itself
+        # closed. Only a fresh ticket for a terminal the test removed while
+        # the HUD was attaching is not the HUD's doing (see _attach).
         check("every socket the HUD opened presented a fresh ticket", fake.refused_tickets == 0,
-              f"{fake.refused_tickets} refused")
+              f"{fake.refused_tickets} refused against the HUD; {fake.gone_after_ticket} apart "
+              "(a fresh ticket for a terminal the test removed)")
     finally:
         ctx.close()
     _guard_selftest(browser, mock, base, check, until, init_script)
@@ -511,10 +574,28 @@ def _open_checks(page, mock, base, check, until, fake):
     _reset(page, mock, base, until, fake)
     check("a fresh window opens no terminal and attaches nothing",
           not fake.sockets and not _created(mock) and not _visible(page, '[data-testid="panel"]'))
+    # ⬓ opens a terminal when there is none (the owner's call, 2026-10-11 —
+    # WP-D had it on Ctrl+` only), and none when one is open.
     page.locator('[data-testid="toggle-panel"]').click()
-    until(lambda: _visible(page, '[data-testid="panel-empty"]'), timeout=3)
-    check("⬓ shows the panel and says there is no terminal, creating none",
-          _visible(page, '[data-testid="panel-empty"]') and not _created(mock))
+    until(lambda: _created(mock), timeout=4)
+    first = _created(mock)[0][0] if _created(mock) else "none"
+    if _created(mock):
+        _attached(page, until, first)
+    page.wait_for_timeout(300)
+    check("⬓ with no terminal open shows the panel with exactly one new terminal, attached in it",
+          len(_created(mock)) == 1 and _visible(page, f'[data-testid="panel-tab-{first}"]')
+          and _state(page, first) == "attached" and page.locator(_sel(first)).get_attribute("data-where") == "panel",
+          f"{len(_created(mock))} created")
+    check("in the folder `+` would use: the focused chat's project, as an id",
+          bool(_created(mock)) and _created(mock)[0][1] == {"project": "p1"}, str(_created(mock)[:1]))
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=2)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(first)), timeout=3)
+    page.wait_for_timeout(400)
+    check("⬓ with one open shows it and opens no other", len(_created(mock)) == 1, f"{len(_created(mock))} created")
+    page.locator(f'[data-testid="panel-close-{first}"]').click()
+    until(lambda: not mock.world["terminals"] and _visible(page, '[data-testid="panel-empty"]'), timeout=3)
     page.locator('[data-testid="toggle-panel"]').click()
     until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=2)
     tid = _open_terminal(page, mock, until, fake)
@@ -542,10 +623,317 @@ def _open_checks(page, mock, base, check, until, fake):
     until(lambda: _visible(page, _sel(tid)), timeout=2)
     page.wait_for_timeout(200)
     check("hiding and showing the panel keeps the terminal and its socket (no second terminal, no reattach)",
-          len(_created(mock)) == 1 and len(fake.of(tid)) == 1 and _state(page, tid) == "attached",
+          len(_created(mock)) == 2 and len(fake.of(tid)) == 1 and _state(page, tid) == "attached",
           f"{len(_created(mock))} {len(fake.of(tid))}")
     check("its tab is selected and names it", page.locator(f'[data-testid="panel-tab-{tid}"]')
           .get_attribute("aria-selected") == "true")
+
+
+# Opening the panel, or switching a pane to the terminal view, opens a
+# terminal when there is none (the owner's request, 2026-10-11) — only on
+# the owner's gesture, never under a card, never on a failed listing, never
+# when one is listed, one per gesture, and a refusal said. Six sections, so
+# one that cannot finish (main, with none of this) never hides the next.
+
+
+def _autoopen_reload_checks(page, mock, base, check, until, fake):
+    def made():
+        return len(_created(mock))
+
+    # A stored layout that opens the panel, and a pane stored in the terminal
+    # view with no terminal: a reload opens nothing.
+    _reset(page, mock, base, until, fake, size=(1600, 900))
+    stored = json.dumps({"preset": "cols2", "focused": 1,
+                         "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": None},
+                                   {"view": "file"}, {"view": "task"}],
+                         "panel": {"open": True, "height": 260}})
+    n, socks = made(), len(fake.sockets)
+    _store(page, ws=stored)
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _visible(page, '[data-testid="panel-empty"]')
+          and _visible(page, '[data-testid="pane-2-terminal-pick"]'), timeout=4)
+    page.wait_for_timeout(800)
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _visible(page, '[data-testid="panel-empty"]'), timeout=4)
+    page.wait_for_timeout(800)
+    check("a reload with the panel stored open, and a pane stored in the terminal view, opens no terminal",
+          made() == n and _visible(page, '[data-testid="panel-empty"]')
+          and _visible(page, '[data-testid="pane-2-terminal-pick"]') and len(fake.sockets) == socks,
+          f"{made() - n} created, {len(fake.sockets) - socks} sockets")
+
+
+def _autoopen_pane_checks(page, mock, base, check, until, fake):
+    def made():
+        return len(_created(mock))
+
+    # The pane: switched to the terminal view by the owner, it opens one there.
+    _reset(page, mock, base, until, fake, size=(1600, 900))
+    _layout(page, until, "cols2")
+    n = made()
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    until(lambda: made() > n, timeout=4)
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    if made() > n:
+        _attached(page, until, tid)
+    page.wait_for_timeout(300)
+    check("a pane switched to the terminal view with none open opens one, drawn in that pane",
+          made() == n + 1 and page.locator(_sel(tid)).count() == 1
+          and page.locator(_sel(tid)).get_attribute("data-where") == "pane-2" and _state(page, tid) == "attached",
+          f"{made() - n} created")
+    check("in the folder its `+` would use (the selected chat's: p1), as an id",
+          made() > n and _created(mock)[-1][1] == {"project": "p1"}, str(_created(mock)[-1:]))
+    n = made()
+    page.locator('[data-testid="pane-1"] [data-testid="tab-terminal"]').click()
+    until(lambda: _visible(page, '[data-testid="pane-1-terminal-pick"]'), timeout=3)
+    page.wait_for_timeout(500)
+    first = page.evaluate("""() => { const b = document.querySelector('[data-testid="pane-1-terminal-pick"] button');
+                                      return b && b.getAttribute('data-testid'); }""")
+    check("with one open, a pane switched to the terminal view opens none: it offers it, 'New terminal' first",
+          made() == n and _visible(page, f'[data-testid="pane-1-pick-{tid}"]') and first == "pane-1-terminal-new",
+          f"{made() - n} created, first button {first}")
+    page.locator('[data-testid="pane-1"] [data-testid="tab-chat"]').click()
+    page.locator(_sel(tid, '[data-testid="term-close"]')).click()
+    until(lambda: not mock.world["terminals"] and _visible(page, '[data-testid="pane-2-terminal-pick"]'), timeout=3)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-chat"]').click()
+    # Switched away again before the listing came back: nothing is opened for it.
+    mock.terminal_list_delay = 1.0
+    n = made()
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    page.wait_for_timeout(150)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-chat"]').click()
+    page.wait_for_timeout(1600)
+    check("a pane switched to the terminal view and away before the listing came back opens nothing",
+          made() == n, f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # Switched away while the terminal was being made: it stays in the list,
+    # never stored on the pane (review of #41: stored, but not drawn).
+    mock.terminal_create_delay = 1.0
+    n = made()
+    before = _posts(mock)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    until(lambda: _posts(mock) > before, timeout=3)
+    page.wait_for_timeout(200)                     # the POST is on its way (the mock records it on arrival)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-chat"]').click()
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(600)
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    stored = page.evaluate("""() => { try { return JSON.parse(localStorage.getItem('jarvis.hud.workspace'))
+                                                   .panes[1].terminalId; } catch (e) { return 'unreadable'; } }""")
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    until(lambda: _visible(page, '[data-testid="pane-2-terminal-pick"]'), timeout=3)
+    page.wait_for_timeout(400)
+    check("a pane switched away while its terminal was being made: the terminal stays in the list, the pane keeps none",
+          made() == n + 1 and stored is None and _visible(page, f'[data-testid="pane-2-pick-{tid}"]')
+          and page.locator(f'[data-testid="pane-2"] {_sel(tid)}').count() == 0,
+          f"{made() - n} created, stored={stored!r}")
+    mock.__dict__.pop("terminal_create_delay", None)
+
+
+def _autoopen_menu_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # The layout menu's Panel row is ⬓.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    page.locator('[data-testid="layout-customize"]').click()
+    page.locator('[data-testid="layout-toggle-panel"]').click()
+    until(lambda: made() > n, timeout=4)
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    if made() > n:
+        _attached(page, until, tid)
+    page.wait_for_timeout(300)
+    check("the layout menu's Panel row opens the panel with one new terminal, as ⬓ does",
+          made() == n + 1 and _visible(page, panel) and _visible(page, f'[data-testid="panel-tab-{tid}"]'),
+          f"{made() - n} created")
+    if page.locator('[data-testid="layout-menu"]').count() == 0:
+        page.locator('[data-testid="layout-customize"]').click()
+    page.locator('[data-testid="layout-toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    page.locator('[data-testid="layout-toggle-panel"]').click()
+    until(lambda: _visible(page, panel), timeout=2)
+    page.wait_for_timeout(500)
+    check("and with one open, the row shows it and opens no other", made() == n + 1, f"{made() - n} created")
+    page.locator('[data-testid="layout-customize"]').click()
+    until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+
+
+def _autoopen_click_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # A double-click is one gesture, as Ctrl+` ignores auto-repeat: only its
+    # first click counts, so the panel opens with one terminal (a second
+    # click that closed it would now keep it closed and make none).
+    _reset(page, mock, base, until, fake)
+    n = made()
+    page.locator('[data-testid="toggle-panel"]').dblclick()
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(800)
+    check("a double-click on ⬓ opens exactly one terminal, and the panel shows it",
+          made() == n + 1 and _visible(page, panel)
+          and _visible(page, f'[data-testid="panel-tab-{_created(mock)[-1][0]}"]'), f"{made() - n} created")
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_list_delay = 0.8
+    page.locator('[data-testid="toggle-panel"]').click(click_count=3)
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(1000)
+    check("a triple-click while the listing is on its way: one gesture, one terminal, the panel open",
+          made() == n + 1 and _visible(page, panel), f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # Three separate presses — open, close, open — while the listing is on
+    # its way: one terminal (one at a time), in the panel the last press left open.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_list_delay = 0.8
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    for _ in range(3):
+        page.keyboard.press("Control+Backquote")
+        page.wait_for_timeout(60)
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(1000)
+    check("Ctrl+` three times (open, close, open) while the listing is on its way opens exactly one",
+          made() == n + 1 and _visible(page, panel), f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+
+    # Opened, then closed while the listing is on its way (review of #41): no
+    # terminal, and the panel stays the way the owner left it.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_list_delay = 0.8
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, panel), timeout=2)
+    page.wait_for_timeout(150)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    page.wait_for_timeout(1500)
+    check("⬓ opened, then closed while the listing is on its way: no terminal, and the panel stays closed",
+          made() == n and not _visible(page, panel), f"{made() - n} created, panel {_visible(page, panel)}")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # Closed while the terminal is being made: it stays in the list, and the
+    # panel is not reopened under the owner; ⬓ then shows it, and no other.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_create_delay = 1.0
+    before = _posts(mock)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _posts(mock) > before, timeout=3)
+    page.wait_for_timeout(200)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(800)
+    check("⬓ closed while the terminal is being made: it is made, but the panel is not reopened",
+          made() == n + 1 and not _visible(page, panel), f"{made() - n} created, panel {_visible(page, panel)}")
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(tid)), timeout=3)
+    page.wait_for_timeout(400)
+    check("and ⬓ then shows that terminal, opening no other", made() == n + 1 and _visible(page, _sel(tid)),
+          f"{made() - n} created")
+    mock.__dict__.pop("terminal_create_delay", None)
+
+
+def _autoopen_card_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # Under a card: ⬓ cannot be pressed, Ctrl+` does nothing, and a card that
+    # arrives while the listing is on its way stops the terminal it was for.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    _approval(mock, "aoc1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    disabled = page.locator('[data-testid="toggle-panel"]').is_disabled()
+    page.keyboard.press("Control+Backquote")
+    page.wait_for_timeout(600)
+    check("under a card ⬓ is disabled and Ctrl+` opens neither the panel nor a terminal",
+          disabled and made() == n and not _visible(page, panel), f"disabled={disabled} {made() - n} created")
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    mock.terminal_list_delay = 1.5
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="panel-opening"]'), timeout=3)
+    opening = _visible(page, '[data-testid="panel-opening"]') and not _visible(page, '[data-testid="panel-empty-new"]')
+    _approval(mock, "aoc2")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(1800)
+    under = made()
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(600)
+    check("while its listing is on its way the panel says so, offering no second button",
+          opening)
+    check("a card still up when the listing comes back: no terminal, not even once the card is answered",
+          under == n and made() == n and _visible(page, '[data-testid="panel-empty"]'), f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # A card raised and answered before the listing comes back still drops
+    # it (review of #41: the terminal used to be made once the card was gone).
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    n = made()
+    mock.terminal_list_delay = 1.5
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="panel-opening"]'), timeout=3)
+    _approval(mock, "aoc3")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    answered = page.locator('[data-testid="panel-opening"]').count() > 0      # the listing still on its way
+    page.wait_for_timeout(2000)
+    check("a card raised and answered while the listing is on its way: no terminal once it comes back",
+          answered and made() == n and _visible(page, '[data-testid="panel-empty"]'),
+          f"answered before the listing: {answered}, {made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+
+
+def _autoopen_refusal_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # A listing that fails opens nothing; a refused create is said, as `+` says it.
+    _reset(page, mock, base, until, fake)
+    n = made()
+
+    def broken(route):
+        if route.request.method == "GET":
+            route.fulfill(status=500, content_type="application/json", body='{"error": "the listing broke"}')
+        else:
+            route.continue_()
+    def posts():
+        return _posts(mock)
+    is_listing = lambda url: urlparse(url).path == "/terminals"  # noqa: E731
+    before = posts()
+    page.route(is_listing, broken)
+    try:
+        page.locator('[data-testid="toggle-panel"]').click()
+        until(lambda: _visible(page, '[data-testid="panel-list-error"]'), timeout=4)
+        page.wait_for_timeout(600)
+        check("a listing that fails opens no terminal (the panel says the listing failed)",
+              made() == n and posts() == before, f"{made() - n} created, {posts() - before} asked for")
+    finally:
+        page.unroute(is_listing, broken)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    mock.terminal_refuse = "6 terminals are open; close one first"
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="terminal-error"]'), timeout=4)
+    error = page.locator('[data-testid="terminal-error"]')
+    err = error.inner_text() if error.count() else ""
+    check("a refused terminal (six open) is said as a sentence in the panel, as `+` says it, and opens nothing",
+          "close one first" in err and made() == n and posts() == before + 1, f"{err!r} {made() - n} created")
+    mock.__dict__.pop("terminal_refuse", None)
+    _reset(page, mock, base, until, fake)
 
 
 def _typing_checks(page, mock, base, check, until, fake):
@@ -563,8 +951,18 @@ def _typing_checks(page, mock, base, check, until, fake):
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
     page.wait_for_timeout(100)
-    check("Space in the terminal is the shell's, never push-to-talk",
+    check("Space in the terminal is the shell's, never the mic's",
           not ptt and fake.sent(tid)[before:] == b" ", f"ptt={ptt} sent={fake.sent(tid)[before:]!r}")
+    # Push-to-talk is Ctrl+D everywhere else; in a focused terminal it is the
+    # shell's end of input, left to xterm untouched (which takes it from the
+    # browser itself, so no bookmark dialog either).
+    from tests.face.hud_v2_layout_check import _ptt_on_ctrl_d
+    before = len(fake.sent(tid))
+    held, _, key = _ptt_on_ctrl_d(page)
+    page.wait_for_timeout(100)
+    check("Ctrl+D in the terminal reaches the shell as end of input (\\x04) and never starts the mic",
+          held is None and fake.sent(tid)[before:] == b"\x04", f"ptt={held} sent={fake.sent(tid)[before:]!r}")
+    check("and xterm takes it from the browser (no bookmark dialog)", key.get("prevented") is True, str(key))
     before = len(fake.sent(tid))
     page.keyboard.press("Control+b")
     page.wait_for_timeout(150)
@@ -626,6 +1024,31 @@ def _card_checks(page, mock, base, check, until, fake):
     page.wait_for_timeout(250)
     check("and with the terminal focused behind it, keys and a paste still reach nothing",
           fake.sent(tid)[before:] == b"", repr(fake.sent(tid)[before:]))
+    # Ctrl+D there: not the shell's under a card, and push-to-talk refuses —
+    # but the window still takes it from the browser.
+    from tests.face.hud_v2_layout_check import _ptt_on_ctrl_d
+    page.evaluate(f"document.querySelector('{_sel(tid)} .xterm-helper-textarea').focus()")
+    held, _, key = _ptt_on_ctrl_d(page)
+    page.wait_for_timeout(150)
+    check("Ctrl+D under the card, the terminal asked for focus behind it: no EOF to the shell, no push-to-talk",
+          held is None and fake.sent(tid)[before:] == b"", f"ptt={held} sent={fake.sent(tid)[before:]!r}")
+    check("and the window still takes it from the browser (no bookmark dialog)", key.get("prevented") is True,
+          str(key))
+    # The card keeps focus (everything behind it is inert), so a real key never
+    # reaches the terminal under one. Sent straight at the terminal's textarea,
+    # Ctrl+D is still the window's, not the shell's: xterm's filter drops keys
+    # under a card without preventing them, so leaving it to xterm there would
+    # leave Chrome's bookmark dialog to open behind the card.
+    got = page.evaluate("""(sel) => {
+      const t = document.querySelector(sel + ' .xterm-helper-textarea');
+      const e = new KeyboardEvent('keydown', {key: 'd', code: 'KeyD', ctrlKey: true, bubbles: true, cancelable: true});
+      t.dispatchEvent(e);
+      return {prevented: e.defaultPrevented, ptt: window.__hud.capture.ptt};
+    }""", _sel(tid))
+    page.wait_for_timeout(150)
+    check("Ctrl+D sent straight at the terminal behind the card: the window takes it — no EOF, no push-to-talk, "
+          "its default prevented", got["prevented"] is True and got["ptt"] is None and fake.sent(tid)[before:] == b"",
+          f"{got} sent={fake.sent(tid)[before:]!r}")
     fake.output(tid, b"\r\noutput-under-card\r\n$ ")
     until(lambda: "output-under-card" in _text(page, tid), timeout=3)
     check("output keeps drawing under the card", "output-under-card" in _text(page, tid))
@@ -922,9 +1345,12 @@ def _elsewhere_checks(page, mock, base, check, until, fake):
     mock.world["terminals"].append(mock_terminals.row(away, "bash · elsewhere", shown=True))
     fake.ring[away] = bytearray(b"other-window-output\r\n$ ")
     sockets = len(fake.sockets)
+    made = len(_created(mock))
     page.locator('[data-testid="toggle-panel"]').click()
     until(lambda: _visible(page, _sel(away, '[data-testid="term-elsewhere"]')), timeout=4)
     page.wait_for_timeout(400)
+    check("⬓ opens no terminal while one another window shows is listed: it counts, and the panel shows it",
+          len(_created(mock)) == made, f"{len(_created(mock)) - made} created")
     check("opening the panel never takes a terminal another window shows: it says so, and attaches nothing",
           _visible(page, _sel(away, '[data-testid="term-show-here"]')) and len(fake.sockets) == sockets
           and not mock.sent("POST", f"/terminals/{away}/ticket"), f"{len(fake.sockets) - sockets} sockets")
@@ -1022,6 +1448,32 @@ def _exit_checks(page, mock, base, check, until, fake):
           page.locator('[data-testid="toggle-panel-dot"]').count() == 0 and _state(page, tid) == "exited")
 
 
+def _closed_while_ticketing_checks(page, mock, base, check, until, fake):
+    """A terminal the owner closes while its ticket is on its way is never
+    attached: the HUD looks again once the ticket lands (review of PR #72,
+    LOW 2). Such a socket would count against the HUD in the fresh-ticket
+    check, never in the bucket kept for terminals the test removed."""
+    tid = _fresh(page, mock, base, until, fake)
+
+    def asked():
+        return [p for (m, p, _) in mock.calls if m == "POST" and p == f"/terminals/{tid}/ticket"]
+
+    def socks():
+        return [s for s in fake.sockets if s["tid"] == tid]
+    n_asked, n_socks, refused = len(asked()), len(socks()), fake.refused_tickets
+    mock.terminal_ticket_delay = 1.5      # the next ticket is minted at once, answered 1.5 s late
+    fake._close(fake.holders[tid], 1011, "the daemon went away")
+    fake.flush()                          # the HUD reconnects: a new ticket first
+    until(lambda: len(asked()) > n_asked, timeout=4)
+    page.locator(f'[data-testid="panel-close-{tid}"]').click()
+    until(lambda: any(m == "DELETE" and p == f"/terminals/{tid}" for (m, p, _) in mock.calls), timeout=3)
+    page.wait_for_timeout(2500)           # the late ticket lands meanwhile
+    fake.flush()
+    check("a terminal closed while its ticket was on its way is never attached",
+          len(socks()) == n_socks and fake.refused_tickets == refused and tid not in fake.removed,
+          f"{len(socks()) - n_socks} socket(s) after the close, {fake.refused_tickets - refused} refused")
+
+
 def _busy_checks(page, mock, base, check, until, fake):
     tid = _fresh(page, mock, base, until, fake)
     fake._row(tid)["busy"] = True
@@ -1087,6 +1539,161 @@ def _readable_checks(page, mock, base, check, until, fake):
     sw.click()
     until(lambda: sw.get_attribute("aria-pressed") == "true", timeout=3)
     check("and back on", mock.sent("PATCH", f"/terminals/{tid}")[-1] == {"readable": True})
+    # Review of PR #40: Space is no longer swallowed for push-to-talk, and a
+    # privacy switch the owner just clicked must not sit under a habitual one.
+    # (Focus starts nowhere: a Space would press whatever button had it, as on
+    # any page — the "+" that made this terminal, say.)
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+    n = len(mock.sent("PATCH", f"/terminals/{tid}"))
+    focused = page.evaluate("document.activeElement && document.activeElement.getAttribute('data-testid')")
+    page.keyboard.down("Space")
+    page.wait_for_timeout(150)
+    page.keyboard.up("Space")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(300)
+    check("review #40: a click leaves no focus on the switch, so a Space or Enter after it flips nothing back",
+          focused != "term-readable" and len(mock.sent("PATCH", f"/terminals/{tid}")) == n
+          and sw.get_attribute("aria-pressed") == "false", f"focus={focused} patches={mock.sent('PATCH', f'/terminals/{tid}')[n:]}")
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "true", timeout=3)
+
+
+def _hold_checks(page, mock, base, check, until, fake):
+    """Review of PR #40: a Ctrl+D hold is decided where it began. Its auto-
+    repeat must never reach a shell as end-of-input because focus landed in a
+    terminal mid-hold — after a card it was refused under, or after a click
+    into the terminal while talking."""
+    tid = _fresh(page, mock, base, until, fake)
+    _focus_term(page, tid)
+    check("setup: typing into the terminal", _in_term(page))
+    before = len(fake.sent(tid))
+    _approval(mock, "hold1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(200)
+    page.keyboard.down("Control")
+    page.keyboard.down("d")                       # refused under the card
+    page.wait_for_timeout(100)
+    mock.emit("approval_resolved", {"req_id": "hold1", "decision": "deny"})   # answered on Discord
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(200)
+    back = _in_term(page)
+    for _ in range(3):                            # auto-repeat, focus back in the terminal
+        page.keyboard.down("d")
+        page.wait_for_timeout(40)
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    page.wait_for_timeout(200)
+    check("review #40 (a): a Ctrl+D held through a card answered elsewhere sends the shell no end-of-input "
+          "when focus comes back", back and fake.sent(tid)[before:] == b"" and
+          page.evaluate("window.__hud.capture.ptt") is None, f"back={back} sent={fake.sent(tid)[before:]!r}")
+    before = len(fake.sent(tid))
+    page.keyboard.press("Control+d")
+    until(lambda: fake.sent(tid)[before:] == b"\x04", timeout=2)
+    check("and once it is let go, Ctrl+D in the terminal is the shell's again",
+          fake.sent(tid)[before:] == b"\x04", repr(fake.sent(tid)[before:]))
+
+    # (b) Talking, then a click into the terminal mid-hold.
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    before = len(fake.sent(tid))
+    page.keyboard.down("Control")
+    page.keyboard.down("d")
+    page.wait_for_timeout(100)
+    talking = page.evaluate("window.__hud.capture.ptt")
+    page.locator(_sel(tid, ".xterm-screen")).click()
+    page.wait_for_timeout(150)
+    inside = _in_term(page)
+    for _ in range(3):
+        page.keyboard.down("d")
+        page.wait_for_timeout(40)
+    still = page.evaluate("window.__hud.capture.ptt")
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    page.wait_for_timeout(200)
+    check("review #40 (b): talking, a click into a terminal mid-hold sends the shell no end-of-input, "
+          "and the mic stays open until Ctrl+D is let go",
+          talking is not None and inside and still is not None and fake.sent(tid)[before:] == b""
+          and page.evaluate("window.__hud.capture.ptt") is None,
+          f"talking={talking} inside={inside} still={still} sent={fake.sent(tid)[before:]!r}")
+
+    # (c) Talking, the window loses focus (a Preview frame taking it), then
+    # a click into the terminal, still holding: the blur lets the mic go but
+    # not the hold, so its repeats are still the window's (delta review of #40).
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    before = len(fake.sent(tid))
+    page.keyboard.down("Control")
+    page.keyboard.down("d")
+    page.wait_for_timeout(100)
+    talking = page.evaluate("window.__hud.capture.ptt")
+    page.evaluate("window.dispatchEvent(new Event('blur'))")
+    released = page.evaluate("window.__hud.capture.ptt")
+    page.locator(_sel(tid, ".xterm-screen")).click()
+    page.wait_for_timeout(150)
+    inside = _in_term(page)
+    for _ in range(3):
+        page.keyboard.down("d")
+        page.wait_for_timeout(40)
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    page.wait_for_timeout(200)
+    check("review #40 (c): a hold that crosses a window blur lets the mic go, and its repeats in a terminal "
+          "send the shell no end-of-input", talking is not None and released is None and inside
+          and fake.sent(tid)[before:] == b"", f"talking={talking} released={released} inside={inside} "
+          f"sent={fake.sent(tid)[before:]!r}")
+    before = len(fake.sent(tid))
+    page.keyboard.press("Control+d")
+    until(lambda: fake.sent(tid)[before:] == b"\x04", timeout=2)
+    check("and a fresh Ctrl+D after it is the shell's again", fake.sent(tid)[before:] == b"\x04",
+          repr(fake.sent(tid)[before:]))
+
+
+def _read_note_checks(page, mock, base, check, until, fake):
+    """WP-F: `terminal_read` on the bus is said in that terminal's bar —
+    "Jarvis read 200 lines · 15:42" — as HUD chrome, never in the terminal."""
+    tid = _fresh(page, mock, base, until, fake)
+    other = _new_terminal(page, mock, until, fake)
+    page.locator(f'[data-testid="panel-tab-{tid}"]').click()
+    _attached(page, until, tid)
+    fake.output(tid, b"read-note-marker\r\n$ ")
+    until(lambda: "read-note-marker" in _text(page, tid), timeout=3)
+    note = page.locator(_sel(tid, '[data-testid="term-read-note"]'))
+    check("no read note until Jarvis reads", note.count() == 0)
+    screen, typed = _text(page, tid), fake.sent(tid)
+    mock.emit("terminal_read", {"terminal_id": tid, "lines": 200, "at": "2026-10-10T15:42:00+00:00",
+                                "refused": False})
+    until(lambda: note.count() > 0, timeout=3)
+    shown = note.inner_text() if note.count() else ""
+    check("a read is said in the terminal's bar: 'Jarvis read 200 lines · HH:MM'",
+          re.fullmatch(r"Jarvis read 200 lines · \d\d:\d\d(\s?[AP]M)?", shown) is not None
+          and note.get_attribute("data-refused") == "false" and note.get_attribute("role") == "status", shown)
+    page.wait_for_timeout(250)
+    check("as HUD chrome only: nothing is drawn in the terminal and nothing reaches its shell",
+          _text(page, tid) == screen and fake.sent(tid) == typed)
+    mock.emit("terminal_read", {"terminal_id": tid, "lines": 0, "at": "2026-10-10T15:43:00+00:00",
+                                "refused": True})
+    until(lambda: note.get_attribute("data-refused") == "true", timeout=3)
+    check("a refused read says so, and nothing else",
+          re.fullmatch(r"refused a read · \d\d:\d\d(\s?[AP]M)?", note.inner_text()) is not None,
+          note.inner_text())
+    for bad in ({"terminal_id": "../etc", "lines": 5, "at": "x", "refused": False},
+                {"terminal_id": tid, "lines": "5", "at": "x", "refused": False},
+                {"terminal_id": tid, "lines": 5, "at": "x"}):
+        mock.emit("terminal_read", bad)
+    page.wait_for_timeout(300)
+    check("a record of the wrong shape changes nothing",
+          note.get_attribute("data-refused") == "true" and "refused a read" in note.inner_text())
+    mock.emit("terminal_read", {"terminal_id": tid, "lines": 7, "at": "<b>12:00</b>", "refused": False,
+                                "output": "<b>LEAKED-OUTPUT</b>", "command": "printenv", "reason": "rule 1"})
+    until(lambda: "read 7 lines" in note.inner_text(), timeout=3)
+    bar = page.locator(_sel(tid, ".termbar"))
+    check("anything else in the record is never drawn, and a strange time is text, not markup",
+          "LEAKED-OUTPUT" not in bar.inner_text() and "printenv" not in bar.inner_text()
+          and bar.locator("b").count() == 0, bar.inner_text())
+    page.locator(f'[data-testid="panel-tab-{other}"]').click()
+    _attached(page, until, other)
+    check("a note belongs to its own terminal",
+          page.locator(_sel(other, '[data-testid="term-read-note"]')).count() == 0)
 
 
 def _integration_checks(page, mock, base, check, until, fake):
@@ -1162,8 +1769,8 @@ def _osc_link_checks(page, mock, base, check, until, fake):
           opened == ["http://example.com/ok-link", "https://example.org/osc8"], str(opened))
 
 
-def _preview_link_checks(page, mock, base, check, until, fake):
-    """WP-E: a link to a server on this machine offers "Open in Preview"."""
+def _browser_link_checks(page, mock, base, check, until, fake):
+    """WP-E: a link to a server on this machine offers "Open in Browser" (Preview until BR-3a)."""
     tid = _fresh(page, mock, base, until, fake, size=(1600, 900))
     dev = f"http://127.0.0.1:{mock.dev_port}/"
     hud = f"http://127.0.0.1:{mock.port}/"
@@ -1190,7 +1797,7 @@ def _preview_link_checks(page, mock, base, check, until, fake):
         page.wait_for_timeout(150)
 
     def frame(n):
-        return page.locator(f'[data-testid="pane-{n}"] [data-testid="preview-frame"]')
+        return page.locator(f'[data-testid="pane-{n}"] [data-testid="browser-frame"]')
 
     ctrl_click(0)
     until(lambda: _visible(page, menu), timeout=3)
@@ -1198,29 +1805,32 @@ def _preview_link_checks(page, mock, base, check, until, fake):
           _visible(page, menu) and page.evaluate("window.__opened") == []
           and page.locator('[data-testid="term-link-url"]').inner_text() == dev,
           str(page.evaluate("window.__opened")))
-    check("the link to a dev server may go to Preview", page.locator('[data-testid="term-link-preview"]').is_enabled())
-    page.locator('[data-testid="term-link-preview"]').click()
+    check("the link to a dev server may go to the Browser", page.locator('[data-testid="term-link-pane"]').is_enabled())
+    labels = page.locator(f"{menu} .lm-label").all_inner_texts()
+    check("BR-3a: the menu says Open in Browser, then Open in a Chrome tab",
+          labels == ["Open in Browser", "Open in a Chrome tab"], str(labels))
+    page.locator('[data-testid="term-link-pane"]').click()
     until(lambda: frame(1).count() > 0 and frame(1).get_attribute("src") == dev, timeout=4)
-    check("with no Preview pane drawn, Open in Preview shows it in the focused pane (the click rule)",
-          page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "preview"
+    check("with no Browser pane drawn, Open in Browser shows it in the focused pane (the click rule)",
+          page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "browser"
           and frame(1).get_attribute("src") == dev and not _visible(page, menu))
     ws = page.evaluate("window.__hud.workspace()")["ws"]
-    check("the URL is stored with that pane", ws["panes"][0].get("previewUrl") == dev, str(ws["panes"][0]))
-    check("and the frame is sandboxed as any preview is",
+    check("the URL is stored with that pane", ws["panes"][0].get("browserUrl") == dev, str(ws["panes"][0]))
+    check("and the frame is sandboxed as any Browser frame is",
           frame(1).get_attribute("sandbox") == "allow-scripts allow-forms")
 
     page.locator('[data-testid="pane-1"] [data-testid="tab-chat"]').click()
     until(lambda: page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "chat", timeout=2)
     _layout(page, until, "cols2")
-    if page.locator('[data-testid="pane-2"]').get_attribute("data-view") != "preview":
-        page.locator('[data-testid="pane-2"] [data-testid="tab-preview"]').click()
+    if page.locator('[data-testid="pane-2"]').get_attribute("data-view") != "browser":
+        page.locator('[data-testid="pane-2"] [data-testid="tab-browser"]').click()
     page.locator('[data-testid="pane-1"] [data-testid="input"]').click()
     until(lambda: page.locator('[data-testid="pane-1"]').get_attribute("data-focused") == "true", timeout=2)
     ctrl_click(0)
     until(lambda: _visible(page, menu), timeout=3)
-    page.locator('[data-testid="term-link-preview"]').click()
+    page.locator('[data-testid="term-link-pane"]').click()
     until(lambda: frame(2).count() > 0 and frame(2).get_attribute("src") == dev, timeout=4)
-    check("with a Preview pane drawn, it goes there, and the focused chat pane stays a chat",
+    check("with a Browser pane drawn, it goes there, and the focused chat pane stays a chat",
           frame(2).get_attribute("src") == dev
           and page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "chat"
           and page.locator('[data-testid="pane-2"]').get_attribute("data-focused") == "true")
@@ -1230,16 +1840,16 @@ def _preview_link_checks(page, mock, base, check, until, fake):
         until(lambda: _visible(page, menu), timeout=3)
         refused = page.locator('[data-testid="term-link-refused"]')
         text = refused.inner_text() if refused.count() else ""
-        check(f"a link to the {word}'s port: Open in Preview is refused, and says why",
-              page.locator('[data-testid="term-link-preview"]').is_disabled() and word in text
+        check(f"a link to the {word}'s port: Open in Browser is refused, and says why",
+              page.locator('[data-testid="term-link-pane"]').is_disabled() and word in text
               and page.locator('[data-testid="term-link-url"]').inner_text() == url, text)
         page.keyboard.press("Escape")
         until(lambda: not _visible(page, menu), timeout=2)
     check("Escape closes the menu, opening nothing", page.evaluate("window.__opened") == [])
     ctrl_click(2)
     until(lambda: _visible(page, menu), timeout=3)
-    page.locator('[data-testid="term-link-browser"]').click()
-    check("Open in a browser tab opens it in a new window, as a plain Ctrl+click used to",
+    page.locator('[data-testid="term-link-tab"]').click()
+    check("Open in a Chrome tab opens it in a new window, as a plain Ctrl+click used to",
           page.evaluate("window.__opened") == [api] and not _visible(page, menu), str(page.evaluate("window.__opened")))
 
     ctrl_click(0)
@@ -1301,7 +1911,7 @@ def _menu_edge_checks(page, mock, base, check, until, fake):
             return bool(b) and b["x"] >= 0 and b["y"] >= 0 and b["x"] + b["width"] <= vp["width"] + 0.5 \
                 and b["y"] + b["height"] <= vp["height"] + 0.5
         buttons = [page.locator(f'[data-testid="{t}"]').bounding_box()
-                   for t in ("term-link-preview", "term-link-browser")] if box else [None, None]
+                   for t in ("term-link-pane", "term-link-tab")] if box else [None, None]
         at = f"{zoom}% in a {size_px[0]}px window"
         check(f"at {at}, a link on the panel terminal's last row opens its menu wholly on screen",
               on_screen(box), f"menu {box} viewport {vp} click {x:.0f},{y:.0f}")
@@ -1310,8 +1920,8 @@ def _menu_edge_checks(page, mock, base, check, until, fake):
               bool(box) and box["y"] + box["height"] <= y + 1
               and (abs(box["x"] - x) < 40 or box["x"] + box["width"] >= vp["width"] - 12),
               f"menu {box} click {x:.0f},{y:.0f}")
-        page.locator('[data-testid="term-link-browser"]').click(timeout=2000)
-        check(f"at {at}, its buttons are clickable (Open in a browser tab opened it)",
+        page.locator('[data-testid="term-link-tab"]').click(timeout=2000)
+        check(f"at {at}, its buttons are clickable (Open in a Chrome tab opened it)",
               page.evaluate("window.__opened") == [link] and not _visible(page, menu),
               str(page.evaluate("window.__opened")))
     _store(page, zoom="100", layout="{}")
@@ -1376,6 +1986,85 @@ def _pane_checks(page, mock, base, check, until, fake):
     page.wait_for_timeout(200)
     check("a pane the layout stops drawing gives its terminal back to the panel",
           page.locator(f'[data-testid="panel-tab-{new}"]').get_attribute("data-place") == "panel")
+
+
+def _split_close_terminal_checks(page, mock, base, check, until, fake):
+    """WP-G2 (decisions S-6, plan G-7 and §3.6): splitting a terminal pane
+    opens a new terminal in the folder the source was opened in — once, never
+    retried at the cap, and unreadable to Jarvis when the source is. × on a
+    terminal pane kills nothing: no DELETE, no reattach, and the terminal is
+    the panel's tab again."""
+    # The section before ends with a terminal still attaching: let it, or the
+    # reset below empties the world under it and its ticket is refused (the
+    # suite's "fresh ticket" flake at this boundary).
+    if _created(mock):
+        _attached(page, until, _created(mock)[-1][0], timeout=4)
+    tid = _fresh(page, mock, base, until, fake, size=(1600, 900))
+    source_in = _created(mock)[-1][1]
+    page.locator('[data-testid="pane-1"] [data-testid="tab-terminal"]').click()
+    until(lambda: _visible(page, f'[data-testid="pane-1-pick-{tid}"]'), timeout=3)
+    page.locator(f'[data-testid="pane-1-pick-{tid}"]').click()
+    until(lambda: page.locator(_sel(tid)).get_attribute("data-where") == "pane-1", timeout=3)
+    sw = page.locator(_sel(tid, '[data-testid="term-readable"]'))
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+
+    posts = lambda: [c for c in mock.calls if c[0] == "POST" and c[1] == "/terminals"]  # noqa: E731
+    n = len(posts())
+    page.locator('[data-testid="pane-1-split"]').click()
+    until(lambda: len(_created(mock)) > 0 and _created(mock)[-1][0] != tid, timeout=4)
+    new = _created(mock)[-1][0]
+    _attached(page, until, new)
+    check("G2: splitting a terminal pane opens one new terminal, in the source's folder, beside it",
+          len(posts()) == n + 1 and _created(mock)[-1][1] == source_in
+          and page.locator(_sel(new)).get_attribute("data-where") == "pane-2", f"{_created(mock)[-1]} vs {source_in}")
+    made = [b for (m, p, b) in mock.calls if m == "POST" and p == "/terminals"][-1]
+    check("G2: the source was unreadable to Jarvis, so the copy is too: made with the switch off, never PATCHed",
+          made.get("readable") is False and mock.sent("PATCH", f"/terminals/{new}") == []
+          and fake._row(new)["readable"] is False
+          and page.locator(_sel(new, '[data-testid="term-readable"]')).get_attribute("aria-pressed") == "false",
+          f"{made} {mock.sent('PATCH', f'/terminals/{new}')}")
+
+    # At the cap the copy is the picker, with the daemon's sentence, and nothing retries.
+    mock.terminal_refuse = "6 terminals are open; close one first"
+    n = len(posts())
+    page.locator('[data-testid="pane-1-split"]').click()
+    until(lambda: len(posts()) > n, timeout=3)
+    pick = page.locator('[data-testid="pane-3-terminal-pick"]')
+    until(lambda: _visible(page, '[data-testid="pane-3-terminal-pick"]'), timeout=3)
+    page.wait_for_timeout(1200)
+    err = pick.locator('[data-testid="terminal-error"]')
+    check("G2: at the cap the copy shows the picker and the daemon's sentence, and asks once",
+          err.count() == 1 and "close one first" in err.inner_text() and len(posts()) == n + 1,
+          f"{len(posts()) - n} posts, {err.all_inner_texts()}")
+    mock.terminal_refuse = None
+    page.wait_for_timeout(500)
+    page.locator('[data-testid="pane-3-close"]').click()
+    until(lambda: page.locator('[data-testid="pane-3"]').count() == 0, timeout=3)
+    page.wait_for_timeout(500)
+
+    # × on the pane showing the copy: the shell lives on, in the panel.
+    tickets = lambda: [c for c in mock.calls if c[0] == "POST" and c[1] == f"/terminals/{new}/ticket"]  # noqa: E731
+    t0 = len(tickets())
+    sockets = len(fake.of(new))
+    fake.output(new, b"still-alive\r\n$ ")
+    until(lambda: "still-alive" in _text(page, new), timeout=3)
+    calls = len(mock.calls)
+    page.locator('[data-testid="pane-2-close"]').click()
+    until(lambda: page.locator('[data-testid="pane-2"]').count() == 0, timeout=3)
+    page.wait_for_timeout(600)
+    deletes = [c for c in mock.calls[calls:] if c[0] == "DELETE" and c[1].startswith("/terminals/")]
+    check("G2: × on a terminal pane sends no DELETE: the shell lives on",
+          deletes == [] and not fake._row(new).get("exited"), str(deletes))
+    check("G2: and its socket stays: no new ticket, no reattach",
+          len(tickets()) == t0 and len(fake.of(new)) == sockets, f"{len(tickets()) - t0} tickets")
+    if not _visible(page, '[data-testid="panel"]'):
+        page.locator('[data-testid="toggle-panel"]').click()
+    tab = page.locator(f'[data-testid="panel-tab-{new}"]')
+    until(lambda: tab.count() > 0 and tab.get_attribute("aria-selected") == "true", timeout=3)
+    check("G2: it is the panel's selected tab, drawn there with what it said",
+          tab.get_attribute("aria-selected") == "true" and tab.get_attribute("data-place") == "panel"
+          and page.locator(_sel(new)).get_attribute("data-where") == "panel" and "still-alive" in _text(page, new))
 
 
 def _zoom_checks(page, mock, base, check, until, fake):
@@ -1461,6 +2150,400 @@ def _ended_checks(page, mock, base, check, until, fake):
     _store(page, ws=None)
 
 
+def _rv47b_copy_readable_checks(page, mock, base, check, until, fake):
+    """Review 2 of PR #47, LOW-1: Restart and "New terminal here" make a
+    terminal in the old one's place with the old one's switch — one Jarvis
+    could not read is replaced by one he cannot read either, made that way
+    by `POST /terminals`, never PATCHed off afterwards."""
+    if _created(mock):
+        _attached(page, until, _created(mock)[-1][0], timeout=4)
+    tid = _fresh(page, mock, base, until, fake)
+    posts = lambda: [b for (m, p, b) in mock.calls if m == "POST" and p == "/terminals"]  # noqa: E731
+
+    def switch_off(t):
+        sw = page.locator(_sel(t, '[data-testid="term-readable"]'))
+        sw.click()
+        until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+
+    def made_unreadable(what, n):
+        until(lambda: len(posts()) > n, timeout=3)
+        new = _created(mock)[-1][0]
+        _attached(page, until, new)
+        body = posts()[-1]
+        check(f"review 2 #47 LOW-1: {what} of a terminal Jarvis could not read makes one he cannot read, from its first byte",
+              body.get("readable") is False and fake._row(new)["readable"] is False
+              and mock.sent("PATCH", f"/terminals/{new}") == []
+              and page.locator(_sel(new, '[data-testid="term-readable"]')).get_attribute("aria-pressed") == "false",
+              f"{body} {mock.sent('PATCH', f'/terminals/{new}')}")
+        return new
+
+    switch_off(tid)
+    fake.exit(tid, 3)
+    until(lambda: _state(page, tid) == "exited", timeout=3)
+    n = len(posts())
+    page.locator(_sel(tid, '[data-testid="term-restart"]')).click()
+    tid = made_unreadable("Restart", n)
+    fake.end(tid)
+    until(lambda: _state(page, tid) == "ended", timeout=4)
+    n = len(posts())
+    page.locator(_sel(tid, '[data-testid="term-new-here"]')).click()
+    made_unreadable("'New terminal here'", n)
+
+
+SEPARATOR = re.compile(r"── restarted \d\d:\d\d ──")
+
+
+def _next_id(mock) -> str:
+    """The id the mock gives the next terminal it makes."""
+    return f"{0xa0000000 + mock.__dict__.get('terminal_seq', 0) + 1:08x}"
+
+
+def _continue_checks(page, mock, base, check, until, fake):
+    """A terminal that ended with Jarvis continues where it was (the owner's
+    option (a), 2026-10-12): a typed key, a paste or "Continue here" starts
+    a new shell in the same folder, in the same place and the same xterm,
+    under the old text and a separator; what was typed reaches the new shell
+    only after its replay has been parsed. Never under a card, never on a
+    load, never for another window's terminal, a shell that exited on its
+    own or a program terminal; never wider for Jarvis to read."""
+    posts = lambda: [b for (m, p, b) in mock.calls if m == "POST" and p == "/terminals"]  # noqa: E731
+    tid = _fresh(page, mock, base, until, fake)
+    spec = next(s for (i, s) in _created(mock) if i == tid)
+    fake.output(tid, b"\x1b[1;32mold-marker\x1b[0m\r\n" + QUERIES + b"\r\n$ ")
+    until(lambda: "old-marker" in _text(page, tid), timeout=3)
+    page.wait_for_timeout(200)
+    fake.line[tid] = ""
+    page.evaluate("id => { document.querySelector(`[data-testid='terminal-${id}'] .xterm`).dataset.same = 'yes'; }", tid)
+    fake.end(tid)
+    until(lambda: _state(page, tid) == "ended", timeout=4)
+    strip = page.locator(_sel(tid, '[data-testid="term-ended"]'))
+    check("an ended terminal says typing continues it, and offers Continue here beside New terminal here",
+          "Jarvis restarted; this terminal ended. Type to continue in a new shell here." in strip.inner_text()
+          and _visible(page, _sel(tid, '[data-testid="term-continue"]'))
+          and _visible(page, _sel(tid, '[data-testid="term-new-here"]')), strip.inner_text())
+    nxt = _next_id(mock)
+    fake.ring[nxt] = bytearray(QUERIES + b"new-banner\r\n$ ")
+    fake.hold.add(nxt)                          # the new socket waits: no replay yet
+    n = len(posts())
+    _focus_term(page, tid)
+    page.keyboard.type("echo hi")
+    until(lambda: _state(page, nxt) == "waiting", timeout=4)
+    page.wait_for_timeout(300)
+    check("a typed key continues it: one new shell, in the same folder, the switch as it was (on)",
+          len(posts()) == n + 1 and posts()[-1] == {"in": spec} and _created(mock)[-1][0] == nxt, str(posts()[n:]))
+    check("and nothing typed reaches the new shell before its replay", fake.sent(nxt) == b"", repr(fake.sent(nxt)))
+    page.keyboard.press("Enter")                # joins what is held
+    fake.finish_waiting(nxt, allow=True)
+    until(lambda: fake.sent(nxt) == b"echo hi", timeout=5)
+    page.wait_for_timeout(400)
+    note = page.locator(_sel(nxt, '[data-testid="term-paste-notice"]'))
+    check("once the replay is parsed, the line goes typed but not run: no Enter, none of the replay's answers "
+          "(PR #64 L6: the prompt it was typed at is gone)",
+          fake.sent(nxt) == b"echo hi" and "\nhi" not in _text(page, nxt), repr(fake.sent(nxt)))
+    check("and the notice says so: a new local shell, check the prompt, then press Enter",
+          note.count() == 1 and note.get_attribute("data-kind") == "continued"
+          and "typed but not run" in note.inner_text() and "press Enter" in note.inner_text(),
+          note.inner_text()[:160] if note.count() else "no notice")
+    page.keyboard.press("Enter")
+    until(lambda: "\nhi" in _text(page, nxt), timeout=4)
+    check("the owner's own Enter then runs it, and the notice goes",
+          fake.sent(nxt) == b"echo hi\r" and note.count() == 0, repr(fake.sent(nxt)))
+    text = _text(page, nxt)
+    sep = SEPARATOR.search(text)
+    check("the old text stays above a separator, the new shell below it",
+          sep is not None and text.index("old-marker") < sep.start() < text.index("new-banner"), text[-300:])
+    check("in the same place and the same xterm: the panel's one tab is the new terminal, focus still in it",
+          page.locator(f'[data-testid="panel-tab-{nxt}"]').count() == 1
+          and page.locator(f'[data-testid="panel-tab-{tid}"]').count() == 0
+          and page.evaluate("id => document.querySelector(`[data-testid='terminal-${id}'] .xterm`).dataset.same", nxt)
+          == "yes" and _in_term(page))
+    stored = page.evaluate("""() => [JSON.parse(localStorage.getItem('jarvis.hud.terminals') || '{}'),
+                                     JSON.parse(sessionStorage.getItem('jarvis.hud.terminals.mine') || '{}')]""")
+    check("the window tracks it under its new id: the remembered folder, the selected tab and this tab's own list",
+          stored[0].get("specs", {}).get(nxt) == spec and tid not in stored[0].get("specs", {})
+          and stored[0].get("active") == nxt and nxt in stored[1].get("ids", []) and tid not in stored[1].get("ids", []),
+          json.dumps(stored)[:300])
+    # Later reattaches of the new terminal keep the old text — drawn once, never answered.
+    sockets = len(fake.of(nxt))
+    fake.drop(nxt)
+    until(lambda: len(fake.of(nxt)) > sockets and _state(page, nxt) == "attached", timeout=8)
+    page.wait_for_timeout(800)
+    text = _text(page, nxt)
+    check("a dropped socket's reattach still shows the old text above the separator, each once",
+          text.count("old-marker") == 1 and len(SEPARATOR.findall(text)) == 1
+          and text.index("old-marker") < SEPARATOR.search(text).start() < text.index("new-banner"), text[-300:])
+    check("and answers nothing: no old query, no replayed one", fake.of(nxt)[-1]["frames"] == [],
+          repr(b"".join(fake.of(nxt)[-1]["frames"])[:80]))
+
+    # A paste continues it, cleaned, bracketed as the *new* shell asks.
+    fake.end(nxt)
+    until(lambda: _state(page, nxt) == "ended", timeout=4)
+    nxt2 = _next_id(mock)
+    fake.ring[nxt2] = bytearray(b"\x1b[?2004h$ ")
+    _paste(page, nxt, "echo pasted\x1b[201~\x9bX")
+    until(lambda: _state(page, nxt2) == "attached" and fake.sent(nxt2), timeout=5)
+    page.wait_for_timeout(200)
+    check("a paste continues it, made inert (no ESC, no C1) and bracketed as the new shell asked",
+          fake.sent(nxt2) == b"\x1b[200~echo pasted[201~X\x1b[201~", repr(fake.sent(nxt2)))
+    check("and the text from before both restarts is still above two separators",
+          "old-marker" in _text(page, nxt2) and len(SEPARATOR.findall(_text(page, nxt2))) == 2)
+    # A held paste with a line break is never sent (L6): it would run at a prompt nobody has seen.
+    fake.end(nxt2)
+    until(lambda: _state(page, nxt2) == "ended", timeout=4)
+    nl = _next_id(mock)
+    _paste(page, nxt2, "make deploy\n")
+    until(lambda: _state(page, nl) == "attached", timeout=5)
+    page.wait_for_timeout(500)
+    note = page.locator(_sel(nl, '[data-testid="term-paste-notice"]'))
+    check("a paste with a line break continues it but is not sent at all; the notice says to paste it again",
+          fake.sent(nl) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "continued"
+          and "paste it again" in note.inner_text(), f"{fake.sent(nl)!r} {note.inner_text()[:160] if note.count() else ''}")
+    # Any refusal while held drops the whole hold (M1): `make deploy⏎` then Ctrl+C runs nothing.
+    fake.end(nl)
+    until(lambda: _state(page, nl) == "ended", timeout=4)
+    m1 = _next_id(mock)
+    fake.hold.add(m1)
+    _focus_term(page, nl)
+    page.keyboard.type("make deploy")
+    page.keyboard.press("Enter")
+    page.keyboard.press("Control+c")
+    until(lambda: _state(page, m1) == "waiting", timeout=4)
+    fake.finish_waiting(m1, allow=True)
+    until(lambda: _state(page, m1) == "attached", timeout=5)
+    page.wait_for_timeout(600)
+    note = page.locator(_sel(m1, '[data-testid="term-paste-notice"]'))
+    check("review M1: a refused key while held (Ctrl+C after Enter) sends nothing at all, and all of it is said",
+          fake.sent(m1) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent"
+          and "(13 bytes)" in note.inner_text(),
+          f"{fake.sent(m1)!r} {note.inner_text()[:160] if note.count() else 'no notice'}")
+    # Nobody can see it any more (L1): the panel closed while it starts, nothing held goes.
+    fake.end(m1)
+    until(lambda: _state(page, m1) == "ended", timeout=4)
+    l1 = _next_id(mock)
+    fake.hold.add(l1)
+    _focus_term(page, m1)
+    page.keyboard.type("ls")
+    until(lambda: _state(page, l1) == "waiting", timeout=4)
+    page.keyboard.press("Control+Backquote")
+    until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=3)
+    fake.finish_waiting(l1, allow=True)
+    until(lambda: fake.of(l1)[-1].get("replayed_at") is not None, timeout=5)
+    page.wait_for_timeout(600)
+    check("review L1: the panel closed while it started — nothing held reaches the hidden shell",
+          fake.sent(l1) == b"", repr(fake.sent(l1)))
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(l1)), timeout=4)
+    note = page.locator(_sel(l1, '[data-testid="term-paste-notice"]'))
+    check("and reopened, the terminal says what was not sent",
+          note.count() == 1 and note.get_attribute("data-kind") == "unsent" and fake.sent(l1) == b"",
+          note.inner_text()[:160] if note.count() else "no notice")
+    nxt2 = l1
+
+    # Under a card nothing continues: keys and a paste go to the card, the button is off.
+    fake.end(nxt2)
+    until(lambda: _state(page, nxt2) == "ended", timeout=4)
+    n = len(posts())
+    _approval(mock, "tcn1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    page.evaluate(f"document.querySelector('{_sel(nxt2)} .xterm-helper-textarea').focus()")
+    page.keyboard.type("ls")
+    page.keyboard.press("Enter")
+    _paste(page, nxt2, "rm -rf ~/scratch\n")
+    page.wait_for_timeout(400)
+    check("under a card, keys and a paste in an ended terminal start nothing, and Continue here is off",
+          len(posts()) == n and _state(page, nxt2) == "ended"
+          and page.locator(_sel(nxt2, '[data-testid="term-continue"]')).is_disabled(), str(posts()[n:]))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(600)
+    check("and once it is answered, nothing typed under it continues late", len(posts()) == n and
+          _state(page, nxt2) == "ended")
+
+    # Ctrl+D (end of input) and the HUD's own keys never start a shell.
+    _focus_term(page, nxt2)
+    page.keyboard.press("Control+d")
+    page.keyboard.press("Control+Equal")
+    page.wait_for_timeout(300)
+    page.keyboard.press("Control+0")
+    page.wait_for_timeout(200)
+    check("Ctrl+D and a zoom key in an ended terminal start nothing", len(posts()) == n and _state(page, nxt2) == "ended")
+
+    # Six already open: the refusal in the strip, nothing held.
+    mock.terminal_refuse = "6 terminals are open; close one first"
+    n0 = len(posts())
+    page.keyboard.type("ab")
+    until(lambda: page.locator(_sel(nxt2, '[data-testid="term-continue-error"]')).count() > 0, timeout=4)
+    check("six already open: the refusal is said in the strip, and it stays ended",
+          "6 terminals are open" in page.locator(_sel(nxt2, '[data-testid="term-continue-error"]')).inner_text()
+          and _state(page, nxt2) == "ended")
+    page.keyboard.type("cd")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(nxt2, '[data-testid="term-ended"]')).inner_text()
+    check("review L5: after a refusal typing asks no more — one request for the whole line — and the strip "
+          "says only Continue here tries again", len(posts()) == n0 + 1 and "Continue here tries again" in strip
+          and "Type to continue" not in strip, f"{len(posts()) - n0} posts; {strip}")
+    mock.__dict__.pop("terminal_refuse", None)
+    n = len(posts())
+    nxt3 = _next_id(mock)
+    page.locator(_sel(nxt2, '[data-testid="term-continue"]')).dblclick()
+    until(lambda: _state(page, nxt3) == "attached", timeout=5)
+    page.wait_for_timeout(500)
+    check("Continue here, double-clicked, is one new shell — and nothing of the refused try was kept to send",
+          len(posts()) == n + 1 and fake.sent(nxt3) == b"", f"{len(posts()) - n} posts, sent {fake.sent(nxt3)!r}")
+
+    # A card raised while the new shell starts: what was typed before it never goes, and that is said.
+    fake.end(nxt3)
+    until(lambda: _state(page, nxt3) == "ended", timeout=4)
+    held = _next_id(mock)
+    fake.hold.add(held)
+    _focus_term(page, nxt3)
+    page.keyboard.type("ls")
+    until(lambda: _state(page, held) == "waiting", timeout=4)
+    _approval(mock, "tcn2")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    fake.finish_waiting(held, allow=True)
+    until(lambda: _state(page, held) == "attached", timeout=5)
+    page.wait_for_timeout(600)
+    note = page.locator(_sel(held, '[data-testid="term-paste-notice"]'))
+    check("a card raised while the new shell starts: what was typed before it is never sent, and that is said",
+          fake.sent(held) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent",
+          f"{fake.sent(held)!r} {note.inner_text()[:120] if note.count() else 'no notice'}")
+
+    # Auto-repeat is one continuation; what repeats joins what is held.
+    fake.end(held)
+    until(lambda: _state(page, held) == "ended", timeout=4)
+    n = len(posts())
+    nxt4 = _next_id(mock)
+    _focus_term(page, held)
+    for _ in range(3):
+        page.keyboard.down("q")
+    page.keyboard.up("q")
+    until(lambda: _state(page, nxt4) == "attached" and fake.sent(nxt4), timeout=5)
+    page.wait_for_timeout(200)
+    check("a held key's auto-repeat is one continuation, every repeat sent after the replay",
+          len(posts()) == n + 1 and fake.sent(nxt4) == b"qqq", f"{len(posts()) - n} posts, {fake.sent(nxt4)!r}")
+
+    # Past 4 KiB what is held is dropped and said.
+    fake.end(nxt4)
+    until(lambda: _state(page, nxt4) == "ended", timeout=4)
+    nxt5 = _next_id(mock)
+    _paste(page, nxt4, "y" * 5000)
+    until(lambda: _state(page, nxt5) == "attached", timeout=5)
+    page.wait_for_timeout(400)
+    note = page.locator(_sel(nxt5, '[data-testid="term-paste-notice"]'))
+    check("a paste past 4 KiB still continues it, but is dropped whole, and that is said",
+          fake.sent(nxt5) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent",
+          f"{fake.sent(nxt5)[:20]!r} {note.inner_text()[:120] if note.count() else 'no notice'}")
+
+    # An unreadable terminal continues unreadable, made that way from its first byte.
+    sw = page.locator(_sel(nxt5, '[data-testid="term-readable"]'))
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+    fake.end(nxt5)
+    until(lambda: _state(page, nxt5) == "ended", timeout=4)
+    nxt6 = _next_id(mock)
+    _focus_term(page, nxt5)
+    page.keyboard.type("x")
+    until(lambda: _state(page, nxt6) == "attached", timeout=5)
+    check("an unreadable terminal continues unreadable: POST {readable: false}, never PATCHed",
+          posts()[-1] == {"in": spec, "readable": False} and fake._row(nxt6)["readable"] is False
+          and mock.sent("PATCH", f"/terminals/{nxt6}") == []
+          and page.locator(_sel(nxt6, '[data-testid="term-readable"]')).get_attribute("aria-pressed") == "false",
+          str(posts()[-1]))
+
+    # On a load nothing continues — and a pane holding one from before the
+    # reload, typed into, continues there, unreadable (its switch is not known).
+    fake.end(nxt6)
+    until(lambda: _state(page, nxt6) == "ended", timeout=4)
+    stale = json.dumps({"preset": "cols2", "focused": 2,
+                        "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": nxt6},
+                                  {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _store(page, ws=stale)
+    n = len(posts())
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _state(page, nxt6) == "ended", timeout=6)
+    page.wait_for_timeout(800)
+    check("a reload starts no shell, though the pane shows a terminal of this tab's that ended",
+          len(posts()) == n and "Type to continue" in page.locator(_sel(nxt6, '[data-testid="term-ended"]')).inner_text())
+    nxt7 = _next_id(mock)
+    _focus_term(page, nxt6)
+    page.keyboard.type("z")
+    until(lambda: _state(page, nxt7) == "attached", timeout=5)
+    page.wait_for_timeout(300)
+    ws_pane = page.evaluate("() => JSON.parse(localStorage.getItem('jarvis.hud.workspace')).panes[1].terminalId")
+    check("typed into, it continues in its pane; the stored pane holds the new id",
+          page.locator(_sel(nxt7)).get_attribute("data-where") == "pane-2" and ws_pane == nxt7
+          and fake.sent(nxt7) == b"z", f"{ws_pane} {fake.sent(nxt7)!r}")
+    check("and with its switch unknown after the reload, it is made unreadable (fail closed)",
+          posts()[-1].get("readable") is False, str(posts()[-1]))
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _store(page, ws=None)
+
+    # Never: a shell that exited on its own, another window's, a program terminal.
+    tid = _fresh(page, mock, base, until, fake)
+    fake.exit(tid, 0)
+    until(lambda: _state(page, tid) == "exited", timeout=3)
+    n = len(posts())
+    _focus_term(page, tid)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    check("a shell that exited on its own is not continued by typing: Restart and Close, as before",
+          len(posts()) == n and _state(page, tid) == "exited"
+          and _visible(page, _sel(tid, '[data-testid="term-restart"]'))
+          and page.locator(_sel(tid, '[data-testid="term-continue"]')).count() == 0)
+    tid = _new_terminal(page, mock, until, fake)
+    fake.ask_takeover(tid, "tk09")
+    until(lambda: _visible(page, '[data-testid="term-let"]'), timeout=3)
+    page.locator('[data-testid="term-let"]').click()
+    until(lambda: _state(page, tid) == "taken", timeout=3)
+    fake.end(tid)
+    n = len(posts())
+    _focus_term(page, tid)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    check("a terminal another window holds is not continued by typing here", len(posts()) == n
+          and _state(page, tid) == "taken" and page.locator(_sel(tid, '[data-testid="term-continue"]')).count() == 0)
+    _reset(page, mock, base, until, fake)
+    prog = "0c0d0e0f"
+    mock.world["terminals"].append(mock_terminals.row(prog, "vex build · robot", program="vex-build", input=False))
+    page.locator('[data-testid="toggle-panel"]').click()
+    _attached(page, until, prog)
+    fake.end(prog)
+    until(lambda: _state(page, prog) == "ended", timeout=4)
+    n = len(posts())
+    _focus_term(page, prog)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(prog, '[data-testid="term-ended"]')).inner_text()
+    check("a program terminal never continues: its strip as before, typing starts nothing",
+          len(posts()) == n and "Type to continue" not in strip
+          and page.locator(_sel(prog, '[data-testid="term-continue"]')).count() == 0
+          and page.locator(_sel(prog, '[data-testid="term-new-here"]')).count() == 0, strip)
+    # After a reload its row is forgotten: where it was opened is not known, so still never.
+    stale = json.dumps({"preset": "cols2", "focused": 2,
+                        "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": prog},
+                                  {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _store(page, ws=stale)
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _state(page, prog) == "ended", timeout=6)
+    n = len(posts())
+    _focus_term(page, prog)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(prog, '[data-testid="term-ended"]')).inner_text()
+    check("and after a reload, its row forgotten, still never: where it was opened is not known",
+          len(posts()) == n and "Type to continue" not in strip, strip)
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _store(page, ws=None)
+    _reset(page, mock, base, until, fake)
+
+
 def _flood_checks(page, mock, base, check, until, fake):
     """Output faster than xterm can parse it (~14 MB/s): the window's backlog
     is bounded (OUTPUT_HIGH_WATER, 8 MiB), it reattaches so the replay is the
@@ -1527,10 +2610,9 @@ def _chat_panes_checks(page, mock, base, check, until, fake):
     MC._open(page, until, 2, "t3", project="p2")
 
     def plus():
-        n = len(_created(mock))
         if not _visible(page, '[data-testid="panel"]'):
-            page.locator('[data-testid="toggle-panel"]').click()
-            until(lambda: _visible(page, '[data-testid="panel-new"]'), timeout=3)
+            _show_panel(page, mock, until)              # with none open, ⬓ opens one first
+        n = len(_created(mock))
         page.locator('[data-testid="panel-new"]').click()
         until(lambda: len(_created(mock)) > n, timeout=4)
         return _created(mock)[-1][1] if len(_created(mock)) > n else None
@@ -1661,7 +2743,7 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
             terminal_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
-                            lambda ctx: v2.guard_live(ctx, v2.FAILURES.append), v2.FAKE_RECOGNIZER)
+                            v2.guard, v2.FAKE_RECOGNIZER)
             browser.close()
     finally:
         mock.stop()

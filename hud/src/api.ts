@@ -15,12 +15,17 @@ import type { RosterView } from "./lib/roster";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 import { parseActivity, type ActivityView } from "./lib/activity";
 import { parseRow, parseRows, type InSpec } from "./lib/terminal";
+import { parseBuild, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
+import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./lib/vexNew";
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The error's whole body: `{"error": str}`, and on a save's 409 the disk's `etag` (ED-2). */
+  body: Record<string, unknown> | null;
+  constructor(status: number, message: string, body: Record<string, unknown> | null = null) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -37,7 +42,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     // Every error is `{"error": str}`; never a stack trace, never a credential.
-    throw new ApiError(res.status, (body && body.error) || `HTTP ${res.status}`);
+    throw new ApiError(res.status, (body && body.error) || `HTTP ${res.status}`,
+      body && typeof body === "object" && !Array.isArray(body) ? body : null);
   }
   return body as T;
 }
@@ -133,8 +139,11 @@ export const api = {
   steerTask: (id: string, text: string) => req<any>(`/tasks/${id}/steer`, json({ text })),
   cancelTask: (id: string) => req<any>(`/tasks/${id}/cancel`, json({})),
   resumeTask: (id: string) => req<any>(`/tasks/${id}/resume`, json({})),
-  answerTask: (id: string, body: { question: string; answer: string }) =>
-    req<any>(`/tasks/${id}/answer`, json(body)),
+  /** Exactly `{index, text}`: `index` is the question's place in
+   * `spec.questions` (lib/taskQuestions). A refusal rejects with the daemon's
+   * sentence; the caller shows it. Answers the task as it now is. */
+  answerTask: (id: string, index: number, text: string) =>
+    req<Task>(`/tasks/${id}/answer`, json({ index, text })),
   taskThreads: (id: string) => req<TaskThread[]>(`/tasks/${id}/threads`),
   journal: (id: string, after = 0) => req<any[]>(`/tasks/${id}/journal?after=${after}`),
 
@@ -143,10 +152,41 @@ export const api = {
     req<Tree>(
       `/projects/${projectId}/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
     ),
-  readFile: (projectId: string, path: string) =>
-    req<FileRead>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`),
-  writeFile: (projectId: string, body: { path: string; content: string; expected_mtime: number }) =>
-    req<{ mtime: number }>(`/projects/${projectId}/file`, put(body)),
+  // `signal` drops a read nobody waits for any more (the Diff pane's list).
+  readFile: (projectId: string, path: string, signal?: AbortSignal) =>
+    req<FileRead>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`, signal ? { signal } : undefined),
+  // The editor's save (ED-2): against the bytes it was read or saved as
+  // (`expected_etag`; null means the file must not exist). 409 carries the
+  // disk's etag in `ApiError.body`. `signal` gives up on a write that never
+  // answers (the registry's WRITE_TIMEOUT_MS).
+  writeFile: (projectId: string, body: { path: string; content: string; expected_etag: string | null },
+    signal?: AbortSignal) =>
+    req<{ etag: string; abs: string; mtime: number; mtime_ns: number; size: number }>(
+      `/projects/${projectId}/file`, { ...put(body), signal }),
+  // Where each open file stands (ED-2's change poll): at most 100 paths.
+  statFiles: (projectId: string, paths: string[]) =>
+    req<{ files: Record<string, import("./lib/buffers").StatRow> }>(
+      `/projects/${projectId}/files/stat`, json({ paths })),
+
+  // --- the editor's navigation (ED-7): owner-only, like every file route ---
+  /** Every file quick open may offer, relative to the project. */
+  listFiles: (projectId: string) =>
+    req<import("./types").FileList>(`/projects/${projectId}/files`),
+  /** Find in files: at most 2,000 matches and 10 s. Refused on the Inbox. */
+  searchFiles: (projectId: string, body: import("./types").SearchQuery) =>
+    req<import("./types").SearchResult>(`/projects/${projectId}/search`, json(body)),
+  /** New file, new folder, rename (never onto anything) or delete (to the trash). */
+  fileOp: (projectId: string, body: { op: "new_file" | "new_folder" | "rename" | "delete"; path: string; to?: string }) =>
+    req<import("./types").FsResult>(`/projects/${projectId}/fs`, json(body)),
+
+  // --- the editor's git (ED-9): owner-only, like every file route ---------
+  /** What HEAD holds for a file (the gutter's base). Refused for env, withheld and gate files. */
+  gitBase: (projectId: string, path: string, signal?: AbortSignal) =>
+    req<import("./types").GitBase>(`/projects/${projectId}/git/base?path=${encodeURIComponent(path)}`,
+      signal ? { signal } : undefined),
+  /** The explorer's colours; the daemon caches it for 2 s. */
+  gitStatus: (projectId: string) =>
+    req<import("./types").GitStatus>(`/projects/${projectId}/git/status`),
 
   // --- diff ---------------------------------------------------------------
   diff: (taskId: string) => req<Diff>(`/tasks/${taskId}/diff`),
@@ -212,7 +252,7 @@ export const api = {
   // always an id (`in`), never a path. The socket itself is in
   // components/Terminal.tsx, built from `location` with a fresh ticket.
   terminals: () => req<unknown>("/terminals").then(parseRows),
-  createTerminal: (body: { in: InSpec; cols?: number; rows?: number }) =>
+  createTerminal: (body: { in: InSpec; cols?: number; rows?: number; readable?: boolean }) =>
     req<unknown>("/terminals", json(body)).then((r) => {
       const row = parseRow(r);
       if (!row) throw new ApiError(500, "the daemon answered without a terminal");
@@ -227,6 +267,50 @@ export const api = {
   closeTerminal: (id: string) =>
     req<{ ok: boolean; id: string; exit_code: number | null }>(`/terminals/${encodeURIComponent(id)}`,
       { method: "DELETE" }),
+
+  // --- VEX (VX-1's routes; owner-only; VX-2's view) --------------------------
+  // **No request names a program, a path or an argument**: the project is an
+  // id, a build an action word, a download a slot and a name. Download is
+  // sent only from the VEX view's button, on the owner's own click
+  // (lib/vex.ts `isExplicitClick`) — never from a key, a palette or a tool.
+  vexStatus: () => req<unknown>("/vex/status").then(parseVexStatus),
+  vexProject: (projectId: string) =>
+    req<unknown>(`/projects/${encodeURIComponent(projectId)}/vex`).then((r) => parseDetection(r, projectId)),
+  vexBuild: (projectId: string, action: "build" | "rebuild" | "clean") =>
+    req<{ build_id: string; terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/build`,
+      json({ action })),
+  vexBuildState: (buildId: string) =>
+    req<unknown>(`/vex/builds/${encodeURIComponent(buildId)}`).then((r) => {
+      const b = parseBuild(r);
+      if (!b) throw new ApiError(500, "the daemon answered without a build");
+      return b;
+    }),
+  vexDownload: (projectId: string, body: { slot: number; name: string }) =>
+    req<{ terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/download`, json(body)),
+  vexBrain: () => req<{ terminal_id: string; started: boolean }>("/vex/brain", json({})),
+  vexInfo: (read: "system" | "programs" = "system") =>
+    req<{ text: string; exit_code: number | null; read?: string }>("/vex/device/info", json({ read })),
+  // A new VEX project (VX-3): the template list is the daemon's, and the
+  // folder shown is the daemon's answer to the body Create sends.
+  vexTemplates: () => req<unknown>("/vex/templates").then(parseTemplates),
+  vexCheckNew: (body: NewBody) =>
+    req<unknown>("/vex/projects/check", json(body)).then((r) => {
+      const c = parseNewCheck(r);
+      if (!c) throw new ApiError(500, "the daemon's answer was not a folder");
+      return c;
+    }),
+  vexNewProject: (body: NewBody) =>
+    req<unknown>("/vex/projects", json(body)).then((r) => {
+      const n = parseNewRequest(r);
+      if (!n) throw new ApiError(500, "the daemon answered without a request");
+      return n;
+    }),
+  vexNewState: (id: string) =>
+    req<unknown>(`/vex/projects/${encodeURIComponent(id)}`).then((r) => {
+      const n = parseNewRequest(r);
+      if (!n) throw new ApiError(500, "the daemon answered without a request");
+      return n;
+    }),
 
   // --- speech -------------------------------------------------------------
   async stt(blob: Blob): Promise<string> {

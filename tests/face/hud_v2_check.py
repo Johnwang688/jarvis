@@ -10,7 +10,7 @@ The safety checks are the ones to keep, and each is written to bite:
   - a reply carrying markup renders as **text**, and a `javascript:` link
     renders as text — this window draws authorization cards, so a reply that
     could inject markup into it could draw its own AUTHORIZE button;
-  - the preview pane refuses the HUD's own origin (an iframe that could reach
+  - the Browser pane refuses the HUD's own origin (an iframe that could reach
     `/approvals` would let an agent approve itself);
   - a hostile avatar SVG's `onload` never runs — the face is an `<img>`;
   - the approval card ignores Enter: deny is cheap, authorize is deliberate,
@@ -18,7 +18,19 @@ The safety checks are the ones to keep, and each is written to bite:
   - an `approval_requested` from a task shows its label and the **whole**
     command, never a summary;
   - dictation REVIEW never sends on its own, and OFF uploads nothing;
-  - a wake hit fires once per phrase, not once per recognizer update.
+  - a wake hit fires once per phrase, not once per recognizer update;
+  - (ED-1) the editor makes no request off loopback (a catch-all route
+    refuses and records any), no language-service worker is built or loaded,
+    a link in a file opens only http(s) with noopener, and an unsaved edit is
+    never dropped by opening another file or Reload without asking;
+  - (ED-3) no token the editor draws, and no colour Monaco publishes, is
+    amber or red except `--red` where it means an error or "removed", and a
+    C++ and a Python file show each class of token in its row's HUD token
+    (tests/face/hud_v2_editor_theme_check.py);
+  - (ED-5) tree-sitter colour: a C++ call in `--syn-fn`, a Python fence in
+    Markdown coloured as Python, a 1.2 MB file on Monarch saying "syntax:
+    basic", every grammar compiled under the CSP with no violation, and the
+    loader refusing a URL outside its map (tests/face/hud_v2_syntax_check.py).
 
 Build first:  cd hud && npm ci && npm run build
 Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
@@ -38,7 +50,7 @@ sys.path.insert(0, str(REPO))
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from tests.face.hud_v2_mock import DIST, MockDaemon  # noqa: E402
+from tests.face.hud_v2_mock import DIST, MockDaemon, etag_of  # noqa: E402
 
 # Overridable, so two worktrees can run the suite at once.
 PORT = int(os.environ.get("HUD_V2_CHECK_PORT", "8479"))
@@ -274,12 +286,13 @@ def input_checks(page, mock):
           str(sent[-1] if sent else None))
     check("and clears the box", page.locator('[data-testid="input"]').input_value() == "")
 
-    # Space typed in the box is a space, never push-to-talk.
+    # Space typed in the box is a space, and never starts the mic (push-to-
+    # talk is Ctrl+D since 2026-10-10; tests/face/hud_v2_ptt_check.py).
     page.evaluate("window.__hud.state()")
     box.click()
     box.fill("")
     box.type("a b c")
-    check("space in the box does not trigger push-to-talk",
+    check("a space typed in the box is a space and never starts the mic",
           page.evaluate("window.__hud.capture.ptt") is None
           and box.input_value() == "a b c", box.input_value())
     box.fill("")
@@ -667,6 +680,13 @@ def approval_checks(page, mock):
     page.keyboard.press("Space")
     check("space does not start recording while a card is up",
           page.evaluate("window.__hud.capture.ptt") is None)
+    page.keyboard.down("Control")
+    page.keyboard.down("d")
+    time.sleep(0.1)
+    held = page.evaluate("window.__hud.capture.ptt")
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    check("nor does push-to-talk's Ctrl+D while a card is up", held is None, str(held))
     page.keyboard.type("x")
     check("and neither Space nor typing reaches the box",
           page.locator('[data-testid="input"]').input_value() == box_before
@@ -801,17 +821,13 @@ def task_checks(page, mock):
     check("the acceptance criteria are shown",
           view.locator('[data-testid="acceptance"]').count() == 2)
 
-    # A blocking question gets an answer box; an assumable one does not park
-    # the task and is not asked.
-    qs = view.locator('[data-testid="blocking-questions"]')
-    check("a blocking question is asked", qs.count() == 1)
-    check("only the blocking one", view.locator('[data-testid="answer-1"]').count() == 0)
-    view.locator('[data-testid="answer-0"]').fill("branch")
-    view.locator('[data-testid="answer-send-0"]').click()
-    body = until(lambda: mock.sent("POST", "/tasks/k1/answer") or None)
-    check("answering calls /answer with the question and the answer",
-          bool(body) and body[-1].get("answer") == "branch"
-          and "commit" in (body[-1].get("question") or ""), str(body[-1] if body else None))
+    # A running task is waiting on no question, whatever its spec still
+    # holds: the runner takes an answer only while it is CLARIFYING, so none
+    # is asked. Answering one, and a refusal, are `hud_v2_task_check.py`'s, on
+    # a mock of their own (this check used to assert the very body the daemon
+    # refuses, `{question, answer}`, 2026-10-11).
+    check("a running task offers no answer box (the runner would refuse it)",
+          view.locator('[data-testid="blocking-questions"]').count() == 0)
 
     view.locator('[data-testid="steer-box"]').fill("skip the docstring nit")
     view.locator('[data-testid="steer-send"]').click()
@@ -849,6 +865,185 @@ def task_checks(page, mock):
           page.locator('[data-testid="task-phase"]').first.inner_text())
 
 
+# Every URL the main context requested, and every one it tried off loopback
+# (refused by a catch-all route, which also records it). ED-1.
+REQUESTS: list[str] = []
+OFF_LOOPBACK: list[str] = []
+LOOPBACK = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/")
+
+
+def guard_loopback(ctx):
+    """Refuse and record any request that is not to loopback. Routed by a
+    pattern that matches **only** such requests, so a loopback request never
+    waits on a Python handler (sync route handlers run only during a
+    Playwright call, and a wait on the mock alone would stall it)."""
+    def refuse(route):
+        OFF_LOOPBACK.append(route.request.url)
+        route.abort()
+    ctx.route(re.compile(r"^(?!https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/)https?://"), refuse)
+    ctx.on("request", lambda r: REQUESTS.append(r.url))
+
+
+def _editor_text(page, scope: str = "") -> str:
+    """What the editor shows, spaces as spaces (Monaco draws them as nbsp)."""
+    loc = page.locator(f'{scope} [data-testid="editor"] .view-lines'.strip())
+    return loc.first.inner_text().replace("\u00a0", " ")
+
+
+def monaco_language_checks(page):
+    host = page.locator('[data-testid="editor"]')
+    until(lambda: host.get_attribute("data-language") is not None, timeout=10)
+    check("the language comes from Monaco's registry, by the file's name",
+          host.get_attribute("data-language") == "python", str(host.get_attribute("data-language")))
+    until(lambda: page.locator('[data-testid="editor"] .view-line span[class*="mtk"]').count() > 3, timeout=5)
+    time.sleep(0.3)
+    distinct = page.evaluate("""() => Math.max(0, ...[...document.querySelectorAll('[data-testid="editor"] .view-line')]
+      .map(l => new Set([...l.querySelectorAll('span[class*="mtk"]')]
+        .map(s => (s.className.match(/mtk\\d+/) || [''])[0])).size))""")
+    check("a Python line is coloured: it carries two or more distinct token classes", distinct >= 2, str(distinct))
+    langs = page.evaluate("""() => Object.fromEntries([
+      ['robot-config.h', ''], ['main.cpp', ''], ['pyproject.toml', ''], ['package.json', ''],
+      ['run', '#!/usr/bin/env bash\\necho'], ['tool', '#!/usr/bin/env python3\\n'], ['notes.txt', ''],
+    ].map(([p, t]) => [p, window.__hud.monacoLanguage ? window.__hud.monacoLanguage(p, t) : null]))""")
+    want = {"robot-config.h": "cpp", "main.cpp": "cpp", "pyproject.toml": "toml", "package.json": "json",
+            "run": "shell", "tool": "python", "notes.txt": "plaintext"}
+    check(".h is C++ (VEX headers), .toml and .json have languages, a shebang names its language",
+          langs == want, str(langs))
+
+
+def _pressed(page, keys: str) -> dict:
+    """Press `keys` with focus where it is; what became of its keydown, read
+    after the event has run its course (Monaco stops a key it handles, so a
+    bubbling listener never sees it)."""
+    page.evaluate("""() => { window.__lastKey = null; window.addEventListener('keydown', function f(e) {
+      if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+      window.__lastKey = e; window.removeEventListener('keydown', f, true); }, true); }""")
+    page.keyboard.press(keys)
+    time.sleep(0.15)
+    return page.evaluate("() => { const e = window.__lastKey; return e ? {key: e.key, prevented: e.defaultPrevented} : {}; }")
+
+
+def monaco_key_checks(page, mock):
+    """The editor's missing half (ED-1): find, word suggestions, Ctrl+S, and
+    Ctrl+B with its Ctrl+K chord."""
+    lines = page.locator('[data-testid="editor"] .view-lines')
+    lines.click()
+    page.keyboard.press("Control+End")
+    seen = _pressed(page, "Control+f")
+    find = page.locator('[data-testid="editor"] .find-widget.visible')
+    until(lambda: find.count() > 0, timeout=3)
+    check("Ctrl+F opens Monaco's find widget", find.count() == 1)
+    check("and Chrome's find-in-page is kept out of it", seen.get("prevented") is True, str(seen))
+    page.keyboard.press("Escape")
+    until(lambda: find.count() == 0, timeout=3)
+
+    lines.click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("\nre")
+    page.keyboard.press("Control+Space")
+    suggest = page.locator('[data-testid="editor"] .suggest-widget.visible .monaco-list-row')
+    until(lambda: suggest.count() > 0, timeout=5)
+    labels = [suggest.nth(i).get_attribute("aria-label") or "" for i in range(suggest.count())]
+    check("Ctrl+Space suggests a word from the file (no language service: the words themselves)",
+          any(lbl.startswith("return") for lbl in labels), str(labels))
+    page.keyboard.press("Escape")
+    until(lambda: suggest.count() == 0, timeout=3)
+
+    puts = len(mock.sent("PUT", "/projects/p1/file"))
+    etag = etag_of(mock.world["files"]["calc.py"]["content"])
+    seen = _pressed(page, "Control+s")
+    body = until(lambda: len(mock.sent("PUT", "/projects/p1/file")) > puts or None, timeout=4)
+    sent = mock.sent("PUT", "/projects/p1/file")[-1] if body else {}
+    check("Ctrl+S in the editor saves it, with what the editor holds, against the bytes it was read as",
+          bool(body) and sent.get("content", "").endswith("\nre") and sent.get("expected_etag") == etag, str(sent))
+    check("and its keydown's default (Chrome's Save page as) is prevented", seen.get("prevented") is True, str(seen))
+    until(lambda: "saved" in page.locator('[data-testid="file-note"]').inner_text(), timeout=3)
+    check("and the save says so", "saved" in page.locator('[data-testid="file-note"]').inner_text())
+    # Outside an editor Ctrl+S saves nothing, and Chrome's dialog still never opens.
+    page.locator('[data-testid="file-path"]').click()
+    puts = len(mock.sent("PUT", "/projects/p1/file"))
+    seen = _pressed(page, "Control+s")
+    check("Ctrl+S outside an editor saves nothing and never reaches Chrome",
+          seen.get("prevented") is True and len(mock.sent("PUT", "/projects/p1/file")) == puts, str(seen))
+
+    # A link in the text opens on Ctrl+click — http(s) only, in a window that
+    # cannot reach this one (lib/monaco.ts, registerLinkOpener).
+    page.evaluate("() => { window.__opened = []; window.__open = window.open;"
+                  " window.open = (...a) => { window.__opened.push(a); return null; }; }")
+    lines.click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("\n#https://example.com/a")
+    link = page.locator('[data-testid="editor"] .detected-link')
+    until(lambda: link.count() > 0, timeout=5)
+    if link.count():
+        link.first.click(modifiers=["Control"])
+    opened = until(lambda: page.evaluate("window.__opened"), timeout=3)
+    check("a link in the text opens on Ctrl+click, http(s) only and with noopener",
+          opened == [["https://example.com/a", "_blank", "noopener,noreferrer"]], str(opened))
+    # Any other scheme opens nothing, and never navigates the window that
+    # gates approvals (Monaco's own fallback does).
+    page.evaluate("() => { window.__opened = []; }")
+    href = page.evaluate("location.href")
+    lines.click()
+    # Escape first: the word suggestions open while typing, and an Enter
+    # would accept one ("a" became "add") instead of starting a line, gluing
+    # the file: text onto the https link above as its fragment.
+    page.keyboard.press("Escape")
+    page.keyboard.press("Control+End")
+    page.keyboard.press("Enter")
+    page.keyboard.type("#file:///etc/hosts")
+    page.keyboard.press("Escape")
+    flink = page.locator('[data-testid="editor"] .detected-link', has_text=re.compile(r"^file:///etc/hosts$"))
+    until(lambda: flink.count() > 0, timeout=5)
+    if flink.count():
+        flink.first.click(modifiers=["Control"])
+    time.sleep(0.5)
+    check("a file: link opens nothing and the window stays where it is",
+          flink.count() > 0 and page.evaluate("window.__opened") == [] and page.evaluate("location.href") == href,
+          f"links {flink.count()}, opened {page.evaluate('window.__opened')}")
+    page.evaluate("() => { window.open = window.__open; }")
+
+    # Ctrl+B folds the sidebar from the editor too, except as the second key
+    # of Monaco's Ctrl+K chord (decisions E-10).
+    def sidebar_shown():
+        loc = page.locator("#sidebar")
+        return loc.count() > 0 and loc.first.is_visible()
+    lines.click()
+    shown = sidebar_shown()
+    page.keyboard.press("Control+b")
+    until(lambda: sidebar_shown() != shown, timeout=2)
+    check("Ctrl+B in the editor folds the sidebar", shown and not sidebar_shown())
+    page.keyboard.press("Control+b")
+    until(sidebar_shown, timeout=2)
+    in_editor = page.evaluate("!!document.activeElement.closest('.monaco-editor')")
+    page.keyboard.press("Control+k")
+    page.keyboard.press("Control+b")
+    time.sleep(0.3)
+    check("but Ctrl+K Ctrl+B is Monaco's chord (set selection anchor), not a fold",
+          in_editor and sidebar_shown()
+          and page.locator('[data-testid="editor"] .selection-anchor').count() > 0,
+          f"in editor {in_editor}, anchors {page.locator('[data-testid=editor] .selection-anchor').count()}")
+    # The zoom keys too: Ctrl+K Ctrl+0 is Monaco's fold all, a lone Ctrl+0
+    # still the HUD's zoom reset — and neither ever reaches Chrome's zoom.
+    zoom = lambda: float(page.evaluate("getComputedStyle(document.getElementById('root')).zoom") or 0)
+    page.keyboard.press("Control+Equal")
+    until(lambda: abs(zoom() - 1.1) < 1e-6, timeout=2)
+    before = page.locator('[data-testid="editor"] .view-line').count()
+    page.keyboard.press("Control+k")
+    seen = _pressed(page, "Control+0")
+    until(lambda: page.locator('[data-testid="editor"] .view-line').count() < before, timeout=2)
+    check("Ctrl+K Ctrl+0 in the editor is Monaco's fold all, not the HUD's zoom reset",
+          abs(zoom() - 1.1) < 1e-6 and page.locator('[data-testid="editor"] .view-line').count() < before
+          and seen.get("prevented") is True,
+          f"zoom {zoom()}, lines {before} -> {page.locator('[data-testid=editor] .view-line').count()}, {seen}")
+    page.keyboard.press("Control+k")
+    page.keyboard.press("Control+j")
+    seen = _pressed(page, "Control+0")
+    until(lambda: abs(zoom() - 1.0) < 1e-6, timeout=2)
+    check("and a lone Ctrl+0 there is still the HUD's", abs(zoom() - 1.0) < 1e-6 and seen.get("prevented") is True,
+          f"zoom {zoom()}, {seen}")
+
+
 def file_checks(page, mock):
     print("\nfile tab")
     # A project row only expands now; the File tab follows the active
@@ -875,6 +1070,9 @@ def file_checks(page, mock):
     # The save guard: 409 means someone else wrote it, and the only safe answer
     # is to reload rather than to clobber.
     mono = page.locator('[data-testid="editor"]').count() == 1
+    check("Monaco loaded (not the fallback textarea)", mono)
+    if mono:
+        monaco_language_checks(page)
 
     def edit(typed: str):
         """Type into whichever editor mounted. Monaco's text layer sits over its
@@ -894,33 +1092,83 @@ def file_checks(page, mock):
     until(lambda: not page.locator('[data-testid="file-save"]').is_disabled())
     check("save arms once the file is dirty",
           not page.locator('[data-testid="file-save"]').is_disabled())
+    read_as = etag_of(mock.world["files"]["calc.py"]["content"])
     page.locator('[data-testid="file-save"]').click()
     body = until(lambda: mock.sent("PUT", "/projects/p1/file") or None)
-    check("save sends the expected mtime",
-          bool(body) and body[-1].get("expected_mtime") == 1757900002,
+    check("save sends the etag it was read as (ED-2: a content precondition, not an mtime)",
+          bool(body) and body[-1].get("expected_etag") == read_as and "expected_mtime" not in body[-1],
           str(body[-1] if body else None))
     until(lambda: page.locator('[data-testid="file-note"]').count() > 0)
     check("a successful save says so",
           "saved" in page.locator('[data-testid="file-note"]').inner_text(),
           page.locator('[data-testid="file-note"]').inner_text())
+    if mono:
+        monaco_key_checks(page, mock)
 
-    # Now a stale write: the mock has moved the mtime on.
-    mock.world["files"]["calc.py"]["mtime"] = 999999
+    # Now a stale write: an agent writes the file under an unsaved edit. The
+    # save (or the poll first) brings the conflict bar; nothing is clobbered.
     edit(" more")
     until(lambda: not page.locator('[data-testid="file-save"]').is_disabled())
+    mock.disk_write("calc.py", "# an agent wrote this\n")
     page.locator('[data-testid="file-save"]').click()
-    until(lambda: "reload" in page.locator('[data-testid="file-note"]').inner_text())
-    check("a 409 prompts a reload rather than clobbering",
-          "reload" in page.locator('[data-testid="file-note"]').inner_text(),
-          page.locator('[data-testid="file-note"]').inner_text())
+    bar = page.locator('[data-testid="editor-conflict"]')
+    until(lambda: bar.count() > 0, timeout=6)
+    check("a stale write brings the conflict bar rather than clobbering",
+          bar.count() == 1 and bar.get_attribute("data-state") == "changed"
+          and mock.world["files"]["calc.py"]["content"] == "# an agent wrote this\n",
+          f"{bar.count()} {mock.world['files']['calc.py']['content']!r}")
 
-    # A protected credential file: no content, ever.
+    # An unsaved edit is never dropped without a word (ED-1): Reload over one
+    # asks first, and "keep editing" keeps it.
+    ask = page.locator('[data-testid="file-discard-ask"]')
+    page.locator('[data-testid="file-reload"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    check("Reload over an unsaved edit asks before throwing it away",
+          ask.count() == 1 and not page.locator('[data-testid="file-save"]').is_disabled())
+    if ask.count():
+        page.locator('[data-testid="file-discard-no"]').click()
+    until(lambda: ask.count() == 0, timeout=2)
+    check("and Keep editing keeps it",
+          ask.count() == 0 and not page.locator('[data-testid="file-save"]').is_disabled()
+          and page.locator('[data-testid="file-path"]').inner_text() == "calc.py")
+
+    # Another file opens in a tab of its own (ED-2): the edit stays in its tab.
     page.locator('[data-testid="file-.env"]').click()
+    until(lambda: page.locator('[data-testid="file-path"]').inner_text() == ".env", timeout=4)
+    calc_tab = page.locator('[data-testid="editor-tab-calc.py"]')
+    check("opening another file over an unsaved edit opens a tab, and the edit stays in its own",
+          calc_tab.count() == 1 and calc_tab.get_attribute("data-dirty") == "true"
+          and page.locator('[data-testid="editor-tab-.env"]').count() == 1)
+    # An env file is the owner's to edit, and says Jarvis can't read it.
+    lock = page.locator('[data-testid="editor-lock"]')
+    until(lambda: lock.count() > 0, timeout=4)
+    check("an env file opens with the lock: Jarvis can't read this file",
+          lock.count() == 1 and "Jarvis can't read" in lock.inner_text())
+    check("and Add to chat is disabled for it", page.locator('[data-testid="add-to-chat"]').is_disabled())
+
+    # A withheld credential file: no content, ever.
+    page.locator('[data-testid="file-google_token.json"]').click()
     until(lambda: page.locator('[data-testid="file-withheld"]').count() > 0)
     withheld = page.locator('[data-testid="file-withheld"]')
     check("a protected file is shown as withheld", withheld.count() == 1)
     check("with no content", "withheld" in withheld.inner_text())
     check("and cannot be saved", page.locator('[data-testid="file-save"]').is_disabled())
+
+    # Close calc.py's tab, throwing its edit away: the last tab on an unsaved
+    # edit asks Save / Don't save / Cancel.
+    calc_tab.click()
+    until(lambda: page.locator('[data-testid="file-path"]').inner_text() == "calc.py", timeout=3)
+    page.locator('[data-testid="editor-tab-close-calc.py"]').click()
+    close_ask = page.locator('[data-testid="editor-close-ask"]')
+    until(lambda: close_ask.count() > 0, timeout=2)
+    check("closing the last tab on an unsaved edit asks Save / Don't save / Cancel",
+          close_ask.count() == 1 and calc_tab.count() == 1)
+    if close_ask.count():
+        page.locator('[data-testid="close-discard"]').click()
+    until(lambda: calc_tab.count() == 0, timeout=3)
+    check("and Don't save closes it, the file on disk untouched",
+          calc_tab.count() == 0 and mock.world["files"]["calc.py"]["content"] == "# an agent wrote this\n"
+          and not any(b["dirty"] for b in page.evaluate("window.__hud.buffers()")))
 
     # Markdown opens rendered, with a toggle back to the split editor.
     page.locator('[data-testid="file-README.md"]').click()
@@ -958,34 +1206,61 @@ def diff_checks(page, mock):
           or page.locator('[data-testid="diff-fallback"]').count() == 1)
     check("the file's two sides were fetched", mock.saw("GET", "/tasks/k1/diff/file"))
 
+    # The diff view used to create two models per file viewed and dispose
+    # neither (ED-1): five files on, ten models.
+    def diff_models():
+        return [u for u in page.evaluate("window.__hud.monacoModels ? window.__hud.monacoModels() : []")
+                if u.startswith("jarvis-diff:")]
+    for f in ("test_calc.py", "calc.py", "test_calc.py", "calc.py"):
+        page.locator(f'[data-testid="diff-{f}"]').click()
+        until(lambda: any(f"/{f}?" in u for u in diff_models())
+              and all(f"/{f}?" in u for u in diff_models()), timeout=6)
+    time.sleep(0.3)
+    left = diff_models()
+    check("after five diff files, at most two diff models remain (the shown file's two sides)",
+          0 < len(left) <= 2 and all("/calc.py?" in u for u in left), str(left))
 
-def preview_checks(page, mock):
-    print("\npreview tab")
-    page.locator('[data-testid="tab-preview"]').click()
-    page.wait_for_selector('[data-testid="preview-url"]')
+    # Nothing the editor does leaves loopback, and no language-service worker
+    # exists to load (decisions E-1: no intellisense).
+    off = [u for u in OFF_LOOPBACK]
+    check("no request went off loopback (a catch-all route on everything else)", not off, str(off[:5]))
+    workers = [u for u in REQUESTS if re.search(r"(ts|typescript|json|css|html)\.worker|(ts|json|css|html)Worker", u)]
+    check("no TypeScript, JSON, CSS or HTML worker was requested", not workers, str(workers[:5]))
+    check("the editor's one worker came from the HUD's own origin",
+          any(u.startswith(BASE + "/assets/editor.worker") for u in REQUESTS),
+          str([u for u in REQUESTS if "worker" in u][:5]))
+    built = sorted(p.name for p in (DIST / "assets").iterdir()
+                   if re.search(r"(ts|typescript|json|css|html)\.worker|(ts|json|css|html)Worker", p.name))
+    check("and none is in the build", not built, str(built))
+
+
+def browser_checks(page, mock):
+    print("\nbrowser tab")
+    page.locator('[data-testid="tab-browser"]').click()
+    page.wait_for_selector('[data-testid="browser-url"]')
     # The HUD is the approval surface: an iframe that could reach /approvals
     # would let an agent approve itself.
     for bad in (f"http://127.0.0.1:{8402}/", "http://localhost:8402/index.html"):
-        page.locator('[data-testid="preview-url"]').fill(bad)
-        page.locator('[data-testid="preview-go"]').click()
-        until(lambda: page.locator('[data-testid="preview-refused"]').count() > 0)
-        check(f"the preview refuses the HUD origin ({bad})",
-              page.locator('[data-testid="preview-refused"]').count() == 1
-              and page.locator('[data-testid="preview-frame"]').count() == 0)
+        page.locator('[data-testid="browser-url"]').fill(bad)
+        page.locator('[data-testid="browser-go"]').click()
+        until(lambda: page.locator('[data-testid="browser-refused"]').count() > 0)
+        check(f"the Browser refuses the HUD origin ({bad})",
+              page.locator('[data-testid="browser-refused"]').count() == 1
+              and page.locator('[data-testid="browser-frame"]').count() == 0)
 
-    page.locator('[data-testid="preview-url"]').fill("https://example.com/")
-    page.locator('[data-testid="preview-go"]').click()
-    until(lambda: page.locator('[data-testid="preview-refused"]').count() > 0)
+    page.locator('[data-testid="browser-url"]').fill("https://example.com/")
+    page.locator('[data-testid="browser-go"]').click()
+    until(lambda: page.locator('[data-testid="browser-refused"]').count() > 0)
     check("and anything that is not a local server",
-          page.locator('[data-testid="preview-frame"]').count() == 0)
+          page.locator('[data-testid="browser-frame"]').count() == 0)
 
-    page.locator('[data-testid="preview-project"]').click()
-    until(lambda: page.locator('[data-testid="preview-frame"]').count() > 0)
-    frame = page.locator('[data-testid="preview-frame"]')
+    page.locator('[data-testid="browser-project"]').click()
+    until(lambda: page.locator('[data-testid="browser-frame"]').count() > 0)
+    frame = page.locator('[data-testid="browser-frame"]')
     src = frame.get_attribute("src") or ""
     # The serving daemon's workshop origin, from /status — never a constant
     # 8403, which is the owner's live daemon (`GET /p/p1/index.html -> 400`).
-    check("the project preview loads from the workshop origin the daemon reported",
+    check("the project root loads from the workshop origin the daemon reported",
           src == f"http://127.0.0.1:{mock.workshop_port}/p/p1/index.html", src)
     until(lambda: mock.workshop_hits or None)
     check("and the mock's own workshop served it", mock.workshop_hits == ["/p/p1/index.html"],
@@ -997,15 +1272,15 @@ def preview_checks(page, mock):
     check("and exactly allow-scripts allow-forms: never allow-same-origin, top navigation or popups",
           sandbox == "allow-scripts allow-forms", sandbox)
     check("the workshop is never offered 'keep its origin'",
-          page.locator('[data-testid="preview-keep-origin"]').count() == 0)
+          page.locator('[data-testid="browser-keep-origin"]').count() == 0)
     # The daemon's API listener (WP-E): reported on /status, never framed.
     for bad in (f"http://127.0.0.1:{mock.api_port}/", "http://127.0.0.1:8405/"):
-        page.locator('[data-testid="preview-url"]').fill(bad)
-        page.locator('[data-testid="preview-go"]').click()
-        until(lambda: page.locator('[data-testid="preview-refused"]').count() > 0)
-        check(f"the preview refuses the API listener ({bad})",
-              "API" in page.locator('[data-testid="preview-refused"]').inner_text()
-              and page.locator('[data-testid="preview-frame"]').count() == 0)
+        page.locator('[data-testid="browser-url"]').fill(bad)
+        page.locator('[data-testid="browser-go"]').click()
+        until(lambda: page.locator('[data-testid="browser-refused"]').count() > 0)
+        check(f"the Browser refuses the API listener ({bad})",
+              "API" in page.locator('[data-testid="browser-refused"]').inner_text()
+              and page.locator('[data-testid="browser-frame"]').count() == 0)
     check("and nothing reached the API listener", mock.api_hits == [], str(mock.api_hits))
 
 
@@ -1923,17 +2198,43 @@ def model_labels(page, pane=1):
     return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="model-opt"]').all_inner_texts(), pane)
 
 
-def effort_labels(page, pane=1):
-    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="effort-opt"]').all_inner_texts(), pane)
+# The effort is a slider since 2026-10-10 (components/EffortSlider): its stops
+# are `data-stops`, the thumb is `aria-valuenow`, the default stop is
+# `data-default`, and the words are `aria-valuetext` and the header. Like the
+# rest, each helper takes the pane, and finds the slider inside that pane's
+# popover.
+SLIDER = '[data-testid="effort-slider"]'
 
 
-def effort_values(page, pane=1):
-    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="effort-opt"]').evaluate_all(
-        "els => els.map(e => e.getAttribute('data-value'))"), pane)
+def slider_of(pane=1):
+    return pop_of(pane) + " " + SLIDER
+
+
+def _slider_now(page, pane=1):
+    s = page.locator(slider_of(pane))
+    if s.count() == 0:
+        return None
+    return {"stops": (s.get_attribute("data-stops") or "").split(","),
+            "now": int(s.get_attribute("aria-valuenow") or -1),
+            "default": int(s.get_attribute("data-default") or -1),
+            "min": s.get_attribute("aria-valuemin"), "max": s.get_attribute("aria-valuemax"),
+            "text": s.get_attribute("aria-valuetext"),
+            "head": " ".join(page.locator(pop_of(pane) + ' [data-testid="effort-section"] .es-head')
+                             .inner_text().split())}
+
+
+def effort_state(page, pane=1):
+    return _peek(page, lambda: _slider_now(page, pane), pane)
 
 
 def has_effort(page, pane=1):
-    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="effort-list"]').count() > 0, pane)
+    return _peek(page, lambda: page.locator(slider_of(pane)).count() > 0, pane)
+
+
+def click_stop(page, i, pane=1):
+    """Click stop `i`'s own spot on the track, as a pointer does."""
+    box = page.locator(pop_of(pane) + ' [data-testid="effort-stop"]').nth(i).bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
 
 def has_defaults_button(page, pane=1):
@@ -1947,9 +2248,14 @@ def pick_model(page, value, pane=1):
 
 
 def pick_effort(page, value, pane=1):
+    """Click the level's stop ("" is the default stop), then close the
+    popover: it stays open while the slider moves."""
     open_pop(page, pane)
-    page.locator(pop_of(pane) + f' [data-testid="effort-opt"][data-value="{value}"]').click()
-    until(lambda: page.locator(pop_of(pane)).count() == 0)
+    st = _slider_now(page, pane)
+    i = st["default"] if value == "" else st["stops"].index(value)
+    click_stop(page, i, pane)
+    until(lambda: page.locator(slider_of(pane)).get_attribute("aria-valuenow") == str(i))
+    close_pop(page, pane)
 
 
 def open_defaults(page, pane=1):
@@ -1977,9 +2283,11 @@ def thread_model_checks(page, mock):
           page.locator(CHIP_BTN).inner_text().strip().startswith("default · gpt-5.6-luna · high"),
           page.locator(CHIP_BTN).inner_text())
     open_pop(page)
-    check("the popover has a Model section and an Effort section",
-          [t.strip() for t in page.locator(POP + " .msec").all_inner_texts()] == ["MODEL", "EFFORT"]
-          or [t.strip().lower() for t in page.locator(POP + " .msec").all_inner_texts()] == ["model", "effort"],
+    check("the popover has a Model section and an Effort slider",
+          [t.strip().lower() for t in page.locator(POP + " .msec").all_inner_texts()] == ["model"]
+          and page.locator(POP + ' [data-testid="effort-section"]').count() == 1
+          and page.locator(POP + " " + SLIDER).count() == 1
+          and page.locator('[data-testid="effort-opt"]').count() == 0,
           str(page.locator(POP + " .msec").all_inner_texts()))
     page.keyboard.press("Escape")
     check("Escape closes it", until(lambda: page.locator(POP).count() == 0) is True)
@@ -1991,8 +2299,10 @@ def thread_model_checks(page, mock):
           == ["OpenRouter", "Claude", "Codex"])
     check("the catalogue search is the last model entry",
           model_labels(page)[-1] == "search catalogue…")
+    st = effort_state(page)
     check("the effort defaults to high",
-          effort_labels(page)[0] == "default · high")
+          st["stops"][st["default"]] == "high" and st["now"] == st["default"]
+          and st["text"] == "High, default" and st["head"].startswith("Effort High · default"), str(st))
 
     since = len(mock.calls)
     page.locator('[data-testid="provider-chip-select"]').select_option("claude")
@@ -2036,12 +2346,12 @@ def thread_model_checks(page, mock):
     pick_model(page, "openai/gpt-5.6-luna")
     pick_effort(page, "low")
 
-    # Space on a focused chip never starts push-to-talk.
+    # Space on a focused chip opens it and never starts the mic.
     page.locator(CHIP_BTN).focus()
     page.keyboard.press("Space")
     page.keyboard.press("Escape")
     until(lambda: page.locator(POP).count() == 0)
-    check("space on a chip does not start push-to-talk", page.evaluate("window.__hud.capture.ptt") is None)
+    check("space on a chip never starts the mic", page.evaluate("window.__hud.capture.ptt") is None)
 
     opened = len(mock.posted("/threads"))
     box = page.locator('[data-testid="input"]')
@@ -2198,6 +2508,270 @@ def thread_model_checks(page, mock):
           str(ro))
 
 
+def effort_slider_checks(page, mock):
+    """The effort slider (2026-10-10), in place of the pills: one change is one
+    request (a drag on release, a click at once, keys once they settle), the
+    default stop clears the effort to null, a click lands on the stop under the
+    pointer at any zoom, Space on it never starts the mic, nothing is reachable
+    under a card, and a late older answer never moves the thumb back."""
+    print("\nthe effort slider")
+    from tests.face import hud_v2_mock
+    w = mock.world
+    tid = "es1"
+    w["threads"].append({
+        "id": tid, "project_id": "p1", "role": "chat", "provider": "claude",
+        "provider_session_id": None, "task_id": None, "title": "effort slider", "created": "",
+        "updated": "", "turns": 1, "cost_usd": 0, "tokens": 0, "model": None, "effort": None,
+        "cwd": None})
+    mock.emit("thread_opened", {}, thread_id=tid)
+    until(lambda: any(t["id"] == tid for t in page.evaluate("window.__hud.state().threads")))
+    page.evaluate(f"window.__hud.dispatch({{type: 'patch', patch: {{threadId: '{tid}', compose: null}}}})")
+    until(lambda: page.locator(CHIP_BTN).count() > 0 and chip_model(page) == "")
+
+    def patches():
+        return mock.sent("PATCH", f"/threads/{tid}")
+
+    def record():
+        return page.evaluate(f"window.__hud.state().threads.find(t => t.id === '{tid}')") or {}
+
+    def settled(n, quiet=0.6):
+        """The PATCHes sent since `n`, once the slider has had time to send more."""
+        until(lambda: len(patches()) > n)
+        time.sleep(quiet)
+        return patches()[n:]
+
+    def centre(box):
+        return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+    slider = page.locator(slider_of())
+    open_pop(page)
+    st = _slider_now(page)
+    check("Claude's slider runs Faster → Smarter over the model's own ladder",
+          st["stops"] == ["low", "medium", "high", "xhigh", "max"] and st["min"] == "0" and st["max"] == "4"
+          and page.locator('[data-testid="effort-section"] .es-ends').inner_text().split() == ["Faster", "Smarter"],
+          str(st))
+    check("it is a focusable slider that names its level, and says default",
+          slider.get_attribute("role") == "slider" and slider.get_attribute("tabindex") == "0"
+          and st["text"] == "High, default" and st["head"] == "Effort High · default ?", str(st))
+    dflt = page.locator('[data-testid="effort-stop"]').nth(st["default"])
+    tick, label = dflt.bounding_box(), page.locator('[data-testid="effort-default-label"]').bounding_box()
+    check("the default stop carries the tick, with Default under it",
+          dflt.get_attribute("data-default") == "1" and dflt.get_attribute("class") == "es-tick"
+          and abs(centre(tick)[0] - centre(label)[0]) < 2 and label["y"] > tick["y"], f"{tick} {label}")
+    check("the (?) says what effort is",
+          "slower and smarter" in (page.locator('[data-testid="effort-help"]').get_attribute("title") or ""))
+
+    # Keys: the thumb moves at once, and one PATCH goes after they settle.
+    slider.focus()
+    n = len(patches())
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("ArrowRight")
+    moved = _slider_now(page)
+    time.sleep(0.15)
+    check("arrow keys move the thumb at once, and send nothing yet",
+          moved["now"] == 4 and moved["text"] == "Max" and len(patches()) == n, f"{moved} {patches()[n:]}")
+    check("once they settle, one PATCH of the effort alone", settled(n) == [{"effort": "max"}],
+          str(patches()[n:]))
+    check("the popover stays open while it moves", page.locator(POP).count() == 1)
+    check("and the thread stays on the default model",
+          until(lambda: record().get("effort") == "max") is True and record().get("model") is None
+          and chip_model(page) == "", str(record()))
+    for key, want in (("Home", "low"), ("End", "max")):
+        n = len(patches())
+        page.keyboard.press(key)
+        check(f"{key} commits once", settled(n) == [{"effort": want}], str(patches()[n:]))
+    n = len(patches())
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("ArrowRight")
+    time.sleep(0.8)
+    check("keys that end where they began send nothing", len(patches()) == n, str(patches()[n:]))
+
+    # The default stop clears the effort to null: the thread follows the default.
+    n = len(patches())
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("ArrowLeft")
+    check("keying back to the default stop clears the effort to null",
+          settled(n) == [{"effort": None}], str(patches()[n:]))
+    check("and the header says default again",
+          until(lambda: record().get("effort", "x") is None) is True
+          and until(lambda: _slider_now(page)["text"] == "High, default") is True, str(_slider_now(page)))
+
+    # A drag across every stop previews each and sends one PATCH, on release.
+    boxes = [page.locator('[data-testid="effort-stop"]').nth(i).bounding_box() for i in range(5)]
+    n = len(patches())
+    page.mouse.move(*centre(boxes[0]))
+    page.mouse.down()
+    seen = [_slider_now(page)["now"]]
+    for b in boxes[1:]:
+        page.mouse.move(*centre(b), steps=4)
+        seen.append(_slider_now(page)["now"])
+    during = len(patches()) - n
+    page.mouse.up()
+    check("a drag previews each stop it crosses", seen == [0, 1, 2, 3, 4], str(seen))
+    check("and sends nothing while it moves", during == 0, str(patches()[n:]))
+    check("then exactly one PATCH, on release, for where it ended", settled(n) == [{"effort": "max"}],
+          str(patches()[n:]))
+
+    n = len(patches())
+    click_stop(page, st["default"])
+    check("a click on the default stop clears the effort to null", settled(n) == [{"effort": None}],
+          str(patches()[n:]))
+    check("and leaves the thread unpinned",
+          until(lambda: record().get("effort", "x") is None) is True and record().get("model") is None
+          and chip_model(page) == "" and chip_effort(page) == "", str(record()))
+
+    # A key move still settling when the popover closes is committed, not lost.
+    slider.focus()
+    n = len(patches())
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("Escape")
+    check("closing the popover commits a key move still settling, once",
+          until(lambda: page.locator(POP).count() == 0) is True and settled(n) == [{"effort": "medium"}],
+          str(patches()[n:]))
+
+    # The HUD is CSS-zoomed: a click lands on the stop under the pointer anyway.
+    def press_on_body(keys):
+        page.evaluate("document.activeElement && document.activeElement.blur()")
+        page.keyboard.press(keys)
+
+    for zoom, keys in ((70, ["Control+Minus"] * 3), (160, ["Control+Equal"] * 9)):
+        for k in keys:
+            press_on_body(k)
+        until(lambda: abs(float(page.evaluate(
+            "getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')") or 0) - zoom / 100) < 1e-6)
+        open_pop(page)
+        st = _slider_now(page)
+        bad = []
+        for i in (4, 0, 3, 1, 2):
+            n = len(patches())
+            click_stop(page, i)
+            want = None if i == st["default"] else st["stops"][i]
+            got = settled(n, quiet=0.3)
+            until(lambda: _slider_now(page)["now"] == i, timeout=2)
+            stop = centre(page.locator('[data-testid="effort-stop"]').nth(i).bounding_box())
+            thumb = centre(page.locator('[data-testid="effort-thumb"]').bounding_box())
+            if got != [{"effort": want}] or _slider_now(page)["now"] != i or abs(stop[0] - thumb[0]) > 2:
+                bad.append(f"stop {i}: sent {got}, thumb at {_slider_now(page)['now']} ({thumb[0]:.0f} vs {stop[0]:.0f})")
+        check(f"at {zoom}% a click lands on the stop under the pointer, and the thumb with it",
+              not bad, "; ".join(bad))
+        close_pop(page)
+    press_on_body("Control+0")
+    until(lambda: abs(float(page.evaluate(
+        "getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')") or 0) - 1) < 1e-6)
+
+    # Space on the slider never starts the mic, and moves nothing.
+    open_pop(page)
+    slider.focus()
+    n = len(patches())
+    muted = page.locator('[data-testid="dictation-off"]').get_attribute("aria-pressed") == "true"
+    page.keyboard.down("Space")
+    time.sleep(0.15)
+    ptt = page.evaluate("window.__hud.capture.ptt")
+    page.keyboard.up("Space")
+    time.sleep(0.5)
+    check("Space on the slider never starts the mic",
+          not muted and ptt is None and len(patches()) == n, f"muted={muted} ptt={ptt} {patches()[n:]}")
+
+    # A late older answer: the first change's answer arrives after the second's.
+    w["patch_delays"] = [1.2]
+    n = len(patches())
+    start = _slider_now(page)
+    page.keyboard.press("ArrowRight")
+    until(lambda: len(patches()) > n)          # the first is in; its answer is held
+    page.keyboard.press("ArrowRight")
+    until(lambda: len(patches()) > n + 1)
+    time.sleep(1.6)                            # the held answer has landed now
+    end = _slider_now(page)
+    want = start["stops"][start["now"] + 2]
+    check("a late older answer does not move the thumb back",
+          [b.get("effort") for b in patches()[n:]] == [start["stops"][start["now"] + 1], want]
+          and end["stops"][end["now"]] == want and record().get("effort") == want,
+          f"{patches()[n:]} thumb={end['stops'][end['now']]} record={record().get('effort')}")
+    w.pop("patch_delays", None)
+
+    # Under a card nothing new is reachable: the popover closes, the chip is off.
+    slider.focus()
+    req = {"req_id": "es-card", "code": "ES01", "tool": "run_command", "args": {"command": "ls"},
+           "command": "ls", "reason": "", "layer": "human", "thread_id": tid, "task_id": None,
+           "provider": "claude", "origin": "", "asked_at": "2026-09-15T00:02:00+00:00",
+           "allowlistable": True, "timeout_s": 120}
+    mock.emit("approval_requested", req)
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
+    n = len(patches())
+    check("a card closes the popover: the slider is gone",
+          until(lambda: page.locator(SLIDER).count() == 0) is True)
+    check("and the chip that opens it is disabled", page.locator(CHIP_BTN).is_disabled())
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("End")
+    time.sleep(0.6)
+    check("keys reach no slider under a card", len(patches()) == n and page.locator(POP).count() == 0,
+          str(patches()[n:]))
+    # Escape is the card's (review of #29, F6): it denies, and moves nothing.
+    page.keyboard.press("Escape")
+    denied = until(lambda: mock.sent("POST", "/approvals/es-card") or None)
+    check("and Escape under it denies the card, changing no effort",
+          bool(denied) and denied[-1].get("decision") == "deny" and len(patches()) == n,
+          f"{denied} {patches()[n:]}")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+    until(lambda: not page.locator(CHIP_BTN).is_disabled())
+
+    # The one place nothing but the card's disable closes it: focus on the
+    # chip's own button with the popover open (the popover counts its button
+    # as inside it — a press on the button, still held). Focus leaving the
+    # popover cannot close it then (#29's rule); the card must.
+    open_pop(page)
+    page.locator(CHIP_BTN).focus()
+    time.sleep(0.2)
+    open_before = page.locator(POP).count() == 1 and page.locator(SLIDER).count() == 1
+    n = len(patches())
+    mock.emit("approval_requested", {**req, "req_id": "es-card2", "code": "ES02"})
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
+    check("with focus on the chip's own button, a card still closes the popover and its slider",
+          open_before and until(lambda: page.locator(SLIDER).count() == 0) is True
+          and page.locator(CHIP_BTN).is_disabled(), f"open before the card: {open_before}")
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("End")
+    page.keyboard.press("Escape")
+    denied = until(lambda: mock.sent("POST", "/approvals/es-card2") or None)
+    check("and under it no key moves the effort, and Escape denies",
+          bool(denied) and denied[-1].get("decision") == "deny" and len(patches()) == n,
+          f"{denied} {patches()[n:]}")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+    until(lambda: not page.locator(CHIP_BTN).is_disabled())
+    close_pop(page)
+
+    # Ultra is a stop on Codex, at the Smarter end, and nowhere else.
+    sol = {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "vision": True,
+           "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}
+    hud_v2_mock.CLI_MODELS["codex"].append(sol)
+    mock.emit("model", {})
+    page.locator('[data-testid="tab-chat"]').click()
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.locator('[data-testid="provider-chip-select"]').count() > 0)
+    page.locator('[data-testid="project-chip-select"]').select_option("p1")     # an auto project
+    page.locator('[data-testid="provider-chip-select"]').select_option("codex")
+    open_pop(page)
+    until(lambda: page.locator('[data-testid="model-opt"][data-value="gpt-6.1-sol"]').count() > 0)
+    pick_model(page, "gpt-6.1-sol")
+    st = until(lambda: (lambda x: x if x and x["stops"][-1:] == ["ultra"] else None)(_slider_now(page)))
+    check("Codex's slider ends at Ultra", bool(st), str(_slider_now(page)))
+    slider.focus()
+    page.keyboard.press("End")
+    check("and names it", until(lambda: _slider_now(page)["head"].startswith("Effort Ultra")) is True,
+          str(_slider_now(page)))
+    for provider in ("claude", "fast"):
+        page.locator('[data-testid="provider-chip-select"]').select_option(provider)
+        st = until(lambda: (lambda x: x if x and "ultra" not in x["stops"] and x["stops"] != [] else None)(
+            effort_state(page)))
+        check(f"{PROVIDER_NAMES[provider]}'s slider has no Ultra stop", bool(st), str(effort_state(page)))
+    close_pop(page)
+    hud_v2_mock.CLI_MODELS["codex"].remove(sol)
+    mock.emit("model", {})
+
+
+PROVIDER_NAMES = {"fast": "OpenRouter", "claude": "Claude", "codex": "Codex"}
+
+
 def provider_default_checks(page, mock):
     """Claude's and Codex's default, set from the model chip (2026-10-08)."""
     print("\nClaude and Codex defaults, from the model chip")
@@ -2311,14 +2885,19 @@ def provider_default_checks(page, mock):
     body = until(lambda: [b for b in mock.sent("POST", "/thread-models") if b.get("effort")] or None)
     check("an effort on the default posts {provider, model, effort}",
           bool(body) and body[-1] == {"provider": "claude", "model": "claude-opus-5-5", "effort": "low"}, str(body))
-    # Read in the chip's own effort list: its first entry names the default's
-    # effort (review of #29 — reading "· low" off the button passed a list
-    # still saying "default · high"). The list cannot open under the dialog's
+    # Read in the chip's own effort slider: its default stop is the default's
+    # effort and the thumb sits on it (review of #29 — reading "· low" off the
+    # button passed a list still saying "default · high"; the pills it read
+    # are a slider since PR #30). The popover cannot open under the dialog's
     # veil, so the dialog closes for the read and opens again after it.
     page.locator('[data-testid="pd-close"]').click()
     until(lambda: page.locator('[data-testid="provider-defaults"]').count() == 0)
+    def default_stop():
+        st = effort_state(page)
+        return st and st["stops"][st["default"]] == "low" and st["now"] == st["default"] \
+            and st["text"] == "Low, default"
     check("and the default thread's effort chip follows it",
-          until(lambda: (effort_labels(page) or [""])[0] == "default · low") is True, str(effort_labels(page)[:1]))
+          until(default_stop) is True, str(effort_state(page)))
     open_defaults(page)
     page.wait_for_selector('[data-testid="provider-defaults"]')
 
@@ -2415,6 +2994,43 @@ def guard_live(ctx, record, ports=LIVE_PORTS):
     ctx.route_web_socket(sock, refuse_socket)
 
 
+# Every `securitypolicyviolation` the HUD's CSP (ED-4) raises, reported to
+# the suite through a binding (CDP-injected, so the policy itself cannot stop
+# the report). A CSP breaks quietly — a blocked worker, socket or style is a
+# feature that silently degrades (Monaco even has a textarea fallback) — so
+# **every** context of every section runs under this watch, and any violation
+# fails the run. tests/face/hud_v2_csp_check.py proves the watch bites.
+CSP_WATCH = """
+document.addEventListener('securitypolicyviolation', (e) => {
+  try {
+    window.__hudCspViolation({
+      directive: String(e.effectiveDirective || e.violatedDirective || ''),
+      blocked: String(e.blockedURI || ''), sample: String(e.sample || '').slice(0, 80),
+      source: String(e.sourceFile || ''), line: e.lineNumber || 0,
+    });
+  } catch (_) {}
+}, true);
+"""
+
+
+def watch_csp(ctx, record):
+    """Record every CSP violation any page of `ctx` raises (see CSP_WATCH)."""
+    def seen(source, v):
+        page = source.get("page") if isinstance(source, dict) else None
+        where = page.url if page is not None else "?"
+        record(f"CSP violation at {where}: {v.get('directive')} blocked {v.get('blocked')!r}"
+               f" ({v.get('source')}:{v.get('line')} {v.get('sample')!r})")
+    ctx.expose_binding("__hudCspViolation", seen)
+    ctx.add_init_script(CSP_WATCH)
+
+
+def guard(ctx):
+    """What every context of this suite runs under: no live daemon port, and
+    no CSP violation."""
+    guard_live(ctx, FAILURES.append)
+    watch_csp(ctx, FAILURES.append)
+
+
 def main():
     if not (DIST / "index.html").exists():
         print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
@@ -2431,9 +3047,6 @@ def main():
             # suite loads may reach it, over HTTP or a WebSocket: a hard-coded
             # preview port once did, and its log filled with
             # `GET /p/p1/index.html -> 400`.
-            def guard(ctx):
-                guard_live(ctx, FAILURES.append)
-
             # Zoom, folding panes, resizing and the workspace (2026-10-08/09)
             # first, in a context of its own **and against a mock of its own**
             # on an ephemeral port: its localStorage, its reloads, its saves,
@@ -2468,6 +3081,16 @@ def main():
             finally:
                 declutter_mock.stop()
 
+            # The effort slider's review (PR #30): a context and a mock of
+            # their own too — it archives a thread and opens new ones.
+            from tests.face.hud_v2_effort_check import effort_checks
+            effort_mock = MockDaemon(0).start()
+            try:
+                effort_checks(browser, effort_mock, f"http://127.0.0.1:{effort_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                effort_mock.stop()
+
             # The terminals (WP-D): a context and a mock of their own too, the
             # PTY played in the browser (no shell, no HOME).
             from tests.face.hud_v2_terminal_check import terminal_checks
@@ -2478,19 +3101,157 @@ def main():
             finally:
                 terminal_mock.stop()
 
-            # The Preview pane's ports and "keep its own origin" (WP-E): a
+            # The Browser pane's ports and "keep its own origin" (WP-E), and the rename (BR-3a): a
             # context and a mock of their own, the dev server and the API
             # listener on ephemeral ports of the mock's.
-            from tests.face.hud_v2_preview_check import preview_checks as preview_origin_checks
-            preview_mock = MockDaemon(0).start()
+            from tests.face.hud_v2_browser_check import browser_checks as browser_origin_checks
+            browser_mock = MockDaemon(0).start()
             try:
-                preview_origin_checks(browser, preview_mock, f"http://127.0.0.1:{preview_mock.port}", check, until,
+                browser_origin_checks(browser, browser_mock, f"http://127.0.0.1:{browser_mock.port}", check, until,
                                       guard, FAKE_RECOGNIZER)
             finally:
-                preview_mock.stop()
+                browser_mock.stop()
+
+            # The CSP (ED-4): what the HUD needs runs with no violation, and
+            # what an attacker needs is refused — on a mock of its own, in a
+            # context whose violations it counts itself (it raises some on
+            # purpose). Every other context runs under `watch_csp` too.
+            from tests.face.hud_v2_csp_check import csp_checks
+            csp_mock = MockDaemon(0).start()
+            try:
+                csp_checks(browser, csp_mock, f"http://127.0.0.1:{csp_mock.port}", check, until,
+                           lambda ctx: guard_live(ctx, FAILURES.append), FAKE_RECOGNIZER)
+            finally:
+                csp_mock.stop()
+
+            # The Graphite editor scheme (ED-3): a context and a mock of their
+            # own — its world gains a C++ and a Python file, and its card
+            # snapshot needs a window where Monaco has not loaded yet.
+            from tests.face.hud_v2_editor_theme_check import editor_theme_checks
+            theme_mock = MockDaemon(0).start()
+            try:
+                editor_theme_checks(browser, theme_mock, f"http://127.0.0.1:{theme_mock.port}", check, until,
+                                    guard, FAKE_RECOGNIZER)
+            finally:
+                theme_mock.stop()
+
+            # Tree-sitter colour (ED-5): a context and a MockDaemon(0) of its own.
+            from tests.face.hud_v2_syntax_check import syntax_section
+            syntax_section(browser, check, until, lambda ctx: guard_live(ctx, FAILURES.append), FAKE_RECOGNIZER)
+
+            # Push-to-talk's key, Ctrl+D (2026-10-10): a context and a mock of
+            # their own, for the same reasons.
+            from tests.face.hud_v2_ptt_check import ptt_checks
+            ptt_mock = MockDaemon(0).start()
+            try:
+                ptt_checks(browser, ptt_mock, f"http://127.0.0.1:{ptt_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                ptt_mock.stop()
+
+            # Answering a task's question (2026-10-11): a context and a mock
+            # of their own — it rewrites task k1's state and questions.
+            from tests.face.hud_v2_task_check import task_answer_checks
+            task_mock = MockDaemon(0).start()
+            try:
+                task_answer_checks(browser, task_mock, f"http://127.0.0.1:{task_mock.port}", check, until,
+                                   guard, FAKE_RECOGNIZER)
+            finally:
+                task_mock.stop()
+
+            # The editor's buffers, tabs and guarded save (ED-2): a context and
+            # a mock of their own — the mock writes files behind the editor.
+            from tests.face.hud_v2_editor_check import editor_checks
+            editor_mock = MockDaemon(0).start()
+            try:
+                editor_checks(browser, editor_mock, f"http://127.0.0.1:{editor_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                editor_mock.stop()
+
+            # The editor's navigation (ED-7): quick open, the palette, find in
+            # files, the explorer's operations — a context and a mock of their own.
+            from tests.face.hud_v2_editor_nav_check import nav_checks
+            nav_mock = MockDaemon(0).start()
+            try:
+                nav_checks(browser, nav_mock, f"http://127.0.0.1:{nav_mock.port}", check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                nav_mock.stop()
+
+            # The editor settings, .editorconfig and vim (ED-8): a context and
+            # a mock of their own — its world gains an .editorconfig.
+            from tests.face.hud_v2_editor_settings_check import settings_checks
+            settings_mock = MockDaemon(0).start()
+            try:
+                settings_checks(browser, settings_mock, f"http://127.0.0.1:{settings_mock.port}", check, until,
+                                guard, FAKE_RECOGNIZER)
+            finally:
+                settings_mock.stop()
+
+            # The VEX view (VX-2): a context and a mock of their own — its
+            # world gains VEX projects, builds and downloads are terminal rows
+            # there, and their sockets are played in the browser.
+            from tests.face.hud_v2_vex_check import vex_checks
+            vex_mock = MockDaemon(0).start()
+            try:
+                vex_checks(browser, vex_mock, f"http://127.0.0.1:{vex_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                vex_mock.stop()
+
+            # New VEX project (VX-3): a mock of its own, whose VEX world is a
+            # temp "Windows drive" with real template zips.
+            from tests.face.hud_v2_vex_new_check import vex_new_checks
+            vex_new_mock = MockDaemon(0).start()
+            try:
+                vex_new_checks(browser, vex_new_mock, f"http://127.0.0.1:{vex_new_mock.port}", check, until,
+                               guard, FAKE_RECOGNIZER)
+            finally:
+                vex_new_mock.stop()
+
+            # The tree's unsaved-changes dots and file icons: a mock of their
+            # own, whose world gains a nested C++ folder for the run.
+            from tests.face.hud_v2_editor_marks_check import marks_checks
+            marks_mock = MockDaemon(0).start()
+            try:
+                marks_checks(browser, marks_mock, f"http://127.0.0.1:{marks_mock.port}", check, until,
+                             guard, FAKE_RECOGNIZER)
+            finally:
+                marks_mock.stop()
+
+            # Chat titles (2026-10-12): the row's title, wrapped and clamped,
+            # Copy id in ⋯, and a title arriving live — a mock of their own.
+            from tests.face.hud_v2_titles_check import titles_checks
+            titles_mock = MockDaemon(0).start()
+            try:
+                titles_checks(browser, titles_mock, f"http://127.0.0.1:{titles_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                titles_mock.stop()
+
+            # The git gutter and the explorer's git colours (ED-9): a mock of
+            # their own, whose world gains a repository for the run.
+            from tests.face.hud_v2_git_check import git_checks
+            git_mock = MockDaemon(0).start()
+            try:
+                git_checks(browser, git_mock, f"http://127.0.0.1:{git_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                git_mock.stop()
+
+            # The Diff pane's uncommitted changes (2026-10-12): a mock of its
+            # own, whose world gains a repository for the run.
+            from tests.face.hud_v2_scm_check import scm_checks
+            scm_mock = MockDaemon(0).start()
+            try:
+                scm_checks(browser, scm_mock, f"http://127.0.0.1:{scm_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                scm_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
+            guard_loopback(ctx)
             ctx.add_init_script(FAKE_RECOGNIZER)
             page = ctx.new_page()
             page.on("pageerror", lambda e: FAILURES.append(f"page error: {e}"))
@@ -2513,7 +3274,7 @@ def main():
             task_checks(page, mock)
             file_checks(page, mock)
             diff_checks(page, mock)
-            preview_checks(page, mock)
+            browser_checks(page, mock)
             panels_checks(page, mock)
             picker_checks(page, mock)
             # WP12c last: these add a project and re-parent a thread, so they
@@ -2525,6 +3286,7 @@ def main():
             newproject_checks(page, mock)
             move_checks(page, mock)
             thread_model_checks(page, mock)
+            effort_slider_checks(page, mock)
             provider_default_checks(page, mock)
             # B1: project channels, before part B archives what they link.
             from tests.face.hud_v2_discord_check import discord_link_checks

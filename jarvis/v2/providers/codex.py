@@ -50,7 +50,9 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Iterator
@@ -80,12 +82,51 @@ _STALE_STEERS = 64
 # One deadline for a whole account-metadata session, which holds `_auth_lock`
 # and so keeps every Codex turn from starting while it runs.
 METADATA_DEADLINE_S = 10.0
+# The same, for a one-shot turn (`one_shot`, the chat titler): it holds the
+# lock as long, so no Codex turn waits behind it for more than this.
+ONE_SHOT_DEADLINE_S = 20.0
+# The only items a one-shot turn may produce; any other is a tool.
+_ONE_SHOT_ITEMS = frozenset({"userMessage", "agentMessage", "reasoning"})
+# `item/<this>/…` notifications a one-shot turn may carry: lifecycle, and the
+# deltas of the items above. Any other (`commandExecution`, `fileChange`,
+# `mcpToolCall`, `autoApprovalReview` …) is a tool.
+_ONE_SHOT_ITEM_METHODS = frozenset({"started", "completed"}) | _ONE_SHOT_ITEMS
 MODEL_PAGE_LIMIT = 100
 MODEL_PAGE_CAP = 20
 # Held while a session prepares and starts, and by `send` for a whole turn.
 _auth_lock = threading.Lock()
 _state_lock = threading.Lock()
 _open_homes: set[Path] = set()
+
+
+# Codex asking to approve an MCP tool call (plan 2026-10-10 §4.2). The
+# jarvis server's read-only tools are `approval_mode = "approve"` in the
+# private config, so none should arrive; if one does — an elicitation, or a
+# `requestUserInput` marked as an MCP tool approval — it is declined with a
+# non-fatal ERROR, never a QUESTION for the owner, never an accept.
+MCP_ELICITATION = "mcpServer/elicitation/request"
+MCP_DECLINED = ("Codex asked to approve a Jarvis tool call; declined "
+                "(Jarvis decides its own tools)")
+# What marks a `requestUserInput` as an MCP tool approval (strings in the
+# 0.161 binary: the question id `mcp_tool_call_approval…`, and the
+# `codex_approval_kind` metadata key).
+_MCP_APPROVAL_MARKS = ("mcp_tool_call_approval", "codex_approval_kind")
+
+
+def _mcp_approval(params, depth: int = 0) -> bool:
+    """Whether a server request's params carry an MCP-approval mark, in any
+    key or string value, a few levels down. Wrongly true only declines a
+    question; wrongly false would put an approval in front of the owner."""
+    if depth > 6:
+        return True
+    if isinstance(params, str):
+        return any(mark in params for mark in _MCP_APPROVAL_MARKS)
+    if isinstance(params, dict):
+        return any(_mcp_approval(k, depth + 1) or _mcp_approval(v, depth + 1)
+                   for k, v in list(params.items())[:200])
+    if isinstance(params, list):
+        return any(_mcp_approval(v, depth + 1) for v in params[:200])
+    return False
 
 
 class MetadataBusy(RuntimeError):
@@ -487,6 +528,143 @@ class CodexProvider:
             raise RpcError("Codex rate-limit response is invalid")
         return rate_limits
 
+    def one_shot(self, text: str, *, model: str, effort: str | None = None,
+                 instructions: str = "", deadline_s: float = ONE_SHOT_DEADLINE_S) -> str:
+        """One tool-less model turn on a short-lived app-server, for the chat
+        titler (titles.py): `text` in, the final agent message out.
+
+        `account_metadata`'s shape, for the same reason — it holds
+        `_auth_lock`, which every Codex turn needs to start: `MetadataBusy`
+        at once if the lock is held (before the probe), one deadline for the
+        whole session, the lock released whatever `close()` does, and
+        `cancel_metadata()` ends it at the transport's next poll.
+
+        And as little as a turn can be: a private home with no MCP servers
+        and no skills (`codex_config.prepare_title`), a fresh empty temporary
+        cwd, a read-only sandbox with the network off, approvals `never`, web
+        search disabled, an ephemeral thread, and **no environment**
+        (`environments: []`, experimental in 0.153.4 and 0.161.0: "Empty
+        disables environment access", so the turn has no shell or file
+        tools). The app-server has no "no tools at all" switch beyond that;
+        so any tool item, any server request but a clock read, a model the
+        reply did not honour, or a sandbox wider than read-only ends the
+        session with an error, never a title, and nothing from that turn is
+        used. Failures carry the error class only, never the text.
+
+        **The limit, stated** (review of PR #62, L2): `environments: []` has
+        not been verified against a live ChatGPT-auth turn. If such a turn
+        ignores it, a read-only command can run before the turn is refused;
+        its output is discarded."""
+        stop = self._metadata_stop
+        if stop.is_set():
+            raise RpcCancelled("Codex one-shot cancelled (shutting down)")
+        if _auth_lock.locked():
+            raise MetadataBusy("a Codex session holds the login lock")
+        binary, reason = self._probe()
+        if binary is None:
+            raise BriefRefused(reason)
+        if stop.is_set():
+            raise RpcCancelled("Codex one-shot cancelled (shutting down)")
+        if not _auth_lock.acquire(blocking=False):
+            raise MetadataBusy("a Codex session holds the login lock")
+        try:
+            rpc = None
+            cwd = None
+            try:
+                deadline = time.monotonic() + deadline_s
+                argv, env, home = codex_config.prepare_title(binary, model, effort)
+                cwd = tempfile.mkdtemp(prefix="cwd-", dir=home / "tmp")
+                rpc = RpcProcess(argv, cwd=cwd, env=env, stop=stop.is_set)
+                rpc.start().initialize(deadline=deadline)
+                account = rpc.request("account/read", {"refreshToken": False}, deadline=deadline)
+                if not isinstance(account, dict) or not isinstance(account.get("account"), dict) \
+                        or account["account"].get("type") != "chatgpt":
+                    raise BriefRefused("Codex requires ChatGPT authentication; API-key billing refused")
+                sandbox = {"type": "readOnly", "networkAccess": False}
+                params = {"cwd": cwd, "modelProvider": "openai", "model": model,
+                          "sandbox": "read-only", "approvalPolicy": "never",
+                          "ephemeral": True, "environments": [],
+                          "allowProviderModelFallback": False}
+                if instructions:
+                    params["developerInstructions"] = instructions
+                if effort:
+                    params["config"] = {"model_reasoning_effort": effort}
+                started = rpc.request("thread/start", params, deadline=deadline)
+                thread = started.get("thread") if isinstance(started, dict) else None
+                native = thread.get("id") if isinstance(thread, dict) else None
+                granted = started.get("sandbox") if isinstance(started, dict) else None
+                if (not isinstance(native, str) or not native
+                        or started.get("model") != model
+                        or started.get("modelProvider", "openai") != "openai"
+                        or started.get("approvalPolicy") != "never"
+                        or not isinstance(granted, dict) or granted.get("type") != "readOnly"
+                        or granted.get("networkAccess")):
+                    raise BriefRefused("Codex did not honour the title turn's model or sandbox")
+                turn = {"threadId": native, "input": [{"type": "text", "text": text}],
+                        "approvalPolicy": "never", "sandboxPolicy": sandbox, "environments": []}
+                if effort:
+                    turn["effort"] = effort
+                request = rpc.send("turn/start", turn, deadline=deadline)
+                return self._one_shot_reply(rpc, native, request, deadline)
+            finally:
+                if rpc is not None:
+                    rpc.close()
+                if cwd is not None:
+                    shutil.rmtree(cwd, ignore_errors=True)
+        finally:
+            _auth_lock.release()
+
+    @staticmethod
+    def _one_shot_reply(rpc, native: str, request, deadline: float) -> str:
+        """Read one turn to its end: the final agent message, or an error."""
+        text, turn_id = None, None
+        while True:
+            msg = rpc.next_message(deadline=deadline)
+            if "method" not in msg:
+                if msg.get("id") == request:
+                    if "error" in msg or not isinstance(msg.get("result"), dict):
+                        raise RpcError("Codex turn/start failed")
+                    turn_id = ((msg["result"].get("turn") or {}).get("id")) or turn_id
+                continue
+            method, params = msg["method"], msg.get("params")
+            if not isinstance(params, dict):
+                params = {}
+            if "id" in msg:
+                if method == "currentTime/read" and params.get("threadId") == native:
+                    rpc.reply(msg["id"], {"currentTimeAt": int(time.time())}, deadline=deadline)
+                    continue
+                # Nothing is asked or granted in a title turn.
+                rpc.reply(msg["id"], error={"code": -32601, "message": "Not available in this session"},
+                          deadline=deadline)
+                raise RpcError("Codex asked for something during a one-shot turn")
+            if method == "model/rerouted":
+                raise RpcError("Codex substituted the requested model")
+            if method == "account/updated" and params.get("authMode") not in (None, "chatgpt"):
+                raise RpcError("Codex changed away from ChatGPT authentication")
+            if params.get("threadId") not in (None, native):
+                continue
+            # Any sign of a tool ends the turn with an error and **nothing
+            # from it is used** — not even agent text that came before (the
+            # local `text` is dropped with the raise): if a ChatGPT-auth turn
+            # ignored `environments: []`, what a read-only command read can
+            # never become a title (review of PR #62, L2).
+            if method.startswith("item/") and method.split("/")[1] not in _ONE_SHOT_ITEM_METHODS:
+                raise RpcError("Codex used a tool during a one-shot turn")
+            if method in ("item/started", "item/completed"):
+                item = params.get("item")
+                kind = item.get("type") if isinstance(item, dict) else None
+                if kind not in _ONE_SHOT_ITEMS:
+                    raise RpcError("Codex used a tool during a one-shot turn")
+                if method == "item/completed" and kind == "agentMessage" and isinstance(item.get("text"), str):
+                    text = item["text"]
+            elif method == "turn/completed":
+                status = (params.get("turn") or {}).get("status")
+                if status != "completed":
+                    raise RpcError("Codex one-shot turn did not complete")
+                if text is None:
+                    raise RpcError("Codex one-shot turn produced no message")
+                return text
+
     def start(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
         return self._open(thread, brief, permit, resume=False)
 
@@ -557,6 +735,15 @@ class CodexProvider:
                                      _Session(rpc, brief, permit, home, returned_id, accounting))
             except BaseException:
                 rpc.close()
+                if brief.mcp_servers:
+                    # The token the config carries died with this session.
+                    try:
+                        codex_config.strip_mcp_servers(home / "config.toml")
+                    except Exception:  # noqa: BLE001
+                        try:
+                            os.unlink(home / "config.toml")
+                        except OSError:
+                            pass
                 with _state_lock:
                     _open_homes.discard(home)
                 raise
@@ -673,6 +860,21 @@ class CodexProvider:
                             s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
                             raise RpcError("Codex server request identity mismatch")
                         s.rpc.reply(msg["id"], {"currentTimeAt": int(time.time())})
+                        continue
+                    if method == MCP_ELICITATION:
+                        # Codex asking to approve an MCP tool call (2026-10-10,
+                        # plan §4.2). It carries no turnId, so it is answered
+                        # here, before the turn-identity check would kill the
+                        # turn over it: declined, never a QUESTION, never an
+                        # accept — Jarvis's own gate decides its tools.
+                        if params.get("threadId") not in (None, s.thread_id):
+                            s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                            raise RpcError("Codex server request identity mismatch")
+                        s.rpc.reply(msg["id"], {"action": "decline", "content": None})
+                        if not started:
+                            started = True
+                            yield self._event(h, EventKind.TURN_STARTED)
+                        yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED)
                         continue
                     if (params.get("threadId") != s.thread_id
                             or not isinstance(params.get("turnId"), str) or not params["turnId"]
@@ -939,6 +1141,14 @@ class CodexProvider:
             if s.rpc.failed.is_set():
                 raise RpcError("Codex transport failed during approval")
             return
+        if method in ("item/tool/requestUserInput", "tool/requestUserInput") and _mcp_approval(p):
+            # "MCP tool approval via request_user_input" (codex 0.161): an
+            # approval in a question's clothes. Declined like an elicitation —
+            # an error answer, so nothing reads as the owner's choice — never
+            # put to the owner as a QUESTION and never accepted.
+            self._reply(s, request, error={"code": -32603, "message": "Jarvis declines MCP tool approvals"})
+            yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED)
+            return
         if method in ("item/tool/requestUserInput", "tool/requestUserInput"):
             answers = {}
             questions = p.get("questions", [])
@@ -1136,5 +1346,18 @@ class CodexProvider:
             s.closed.set()
             s.pending.clear()
         s.rpc.close()
+        if s.brief.mcp_servers:
+            # A jarvis server's env holds the session's caller token (plan
+            # §1.3): a closed session's config keeps none. The daemon has
+            # already revoked it; this takes it off the disk.
+            try:
+                codex_config.strip_mcp_servers(s.home / "config.toml")
+            except Exception as exc:  # noqa: BLE001 — close must not raise
+                LOG.warning("Cannot strip MCP servers from a closed Codex config (%s); "
+                            "removing it", type(exc).__name__)
+                try:
+                    os.unlink(s.home / "config.toml")
+                except OSError:
+                    pass
         with _state_lock:
             _open_homes.discard(s.home)

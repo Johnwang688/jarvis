@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import runtime  # noqa: E402
 from jarvis.tools import dispatch  # noqa: E402
 from jarvis.tools.files import read_file  # noqa: E402
 from jarvis.tools.secrets import (  # noqa: E402
@@ -190,6 +191,330 @@ def run_checks(root: Path) -> None:
     assert scrub("port 1 and DEBUG=1") == "port 1 and DEBUG=1"
     print("ok  scrub: short values (DEBUG=1) do not mangle unrelated output")
 
+    env_rule_checks(root)
+
+
+# --- ENV-1: every credential env file, not only .env and .env.local --------------
+#
+# The owner's `.env*` rule (docs/plans/2026-10-11-env-files.md): Jarvis reads
+# none of `.env` / `.env.<anything>` at any depth, except names ending
+# `.example`. Each check below names a file main let through.
+
+STAGING = "sk-staging-FAKEVALUEFORTESTSONLY-777777"
+PROD = "postgres://app:FAKEPRODPASS999@db.example/app"
+
+
+# The review's over-refused lines (MED-1): each allowed on main, refused at
+# 153920d, allowed again — a non-dot-led glob cannot expand onto a dotfile.
+ORDINARY_GLOBS = [
+    "rm -f *.orig", "rm -f *.bak", "ls *.bak", "rm *.test", "ls .git/hooks/*.sample",
+    "ls *test*", "ls *dev*", "ls *prod*", "ls *2*", "find . -name '*test*'",
+    "find src -name '*.test*'", "find . -name '*template*'", "rg -g '*test*' foo",
+    "grep -rl foo --include='*test*' .", "grep -r KEY --include=*.production .",
+    "fd -g '*test*'", "find . -iname '*.bak' -delete", "tar czf out.tgz *.log",
+]
+
+
+def env_rule_checks(root: Path) -> None:
+    from jarvis.tools import search as search_mod
+    from jarvis.tools.secrets import (env_credential_in_text, env_glob_reaches, glob_reaches,
+                                      is_credential)
+
+    (root / ".env.staging").write_text(f"API_KEY={STAGING}\n", encoding="utf-8")
+    (root / ".env.production").write_text(f"DATABASE_URL={PROD}\nPORT=8080\n", encoding="utf-8")
+    (root / ".env.local.example").write_text("API_KEY=put-yours-here\n", encoding="utf-8")
+    (root / "link-to-prod").symlink_to(".env.production")
+    (root / "fake.env.example").write_text("x\n", encoding="utf-8")
+
+    # 7. the name rule, through `is_protected` (by name) and `is_credential`
+    # (symlinks too) — every listed name, case variants, the templates.
+    for name in (".env.production", ".env.staging", ".env.development.local", ".env.prod.bak",
+                 ".env.sample", ".env.template", ".ENV.Production", ".env.example.bak",
+                 "x/.env.test", "~/app/.env.staging.local", ".env.2"):
+        assert is_protected(name), name
+    for name in (".env.example", ".env.local.example", ".envrc", "myapp.env", "env.production",
+                 ".env-cmdrc"):
+        assert not is_protected(name), name
+    assert is_credential(root / "link-to-prod") and not is_protected(root / "link-to-prod")
+    print("ok  names: every .env.<anything> is protected (case-insensitive), .example names are not")
+
+    # 8. read_file, every credential env file — and the symlink — refused.
+    for path in (".env.production", ".env.staging", str(root / "link-to-prod")):
+        out = read_file(path)
+        assert out.startswith("Error:") and "protected" in out, (path, out)
+        assert PROD not in out and STAGING not in out, path
+    assert "put-yours-here" in read_file(".env.local.example")
+    print("ok  read_file: refuses .env.production/.env.staging and a symlink to one; "
+          "reads .env.local.example")
+
+    # 9. the shells, every smuggled spelling of the old list with the new names.
+    smuggled = [
+        "cat .env.production", "cat<.env.staging", "sh -c 'cat .env.production'",
+        'bash -c "cat .env.staging"', "env sh -c 'cat .env.production'",
+        "python -c \"print(open('.env.staging').read())\"", "F=.env.production; cat $F",
+        "cat $(echo .env.staging)", "cat .ENV.PRODUCTION", "cat .env.p*", "cat .env.[sp]*", "cat .env.zz?",
+        "head -1 ./x/../.env.staging", "node --env-file=.env.production -p 1",
+        "docker compose --env-file .env.production up",
+        "cp .env.production notes.txt", "cat .env.sample", "cat .env.example.bak",
+        "cat .e\\\nnv.production",
+        # ENV-1 review, LOW-1: dot-led globs that can match a credential env
+        # name though none is spelled out — judged structurally, exactly.
+        "cat .e?v.custom", "cat .[e]nv.custom", "cat .*.custom", "cp x .e*.custom",
+        "sh -c 'cat .e?v.custom'", "grep -r KEY --include='.env.*' .", "find . -name '.env*'",
+        "rg -g '.e?v.*' KEY", "ls -la ~/.*rc",       # `.*rc` can expand onto `.env.<x>rc`
+    ]
+    for command in smuggled:
+        assert protected_in_command(command), command
+        for tool in (run_readonly, run_command):
+            out = tool(command) if tool is run_readonly else tool(command, reason="test")
+            assert out.startswith(("Error:", "Refused:")), (command, out)
+            assert PROD not in out and STAGING not in out, command
+    for command in ("cat .env.example", "cat .env.local.example", "cp .env.example .env.local.example",
+                    "ls *.py", "grep -r KEY --include=*.py .", "cat .envrc", "ls .git*",
+                    "cat .env.*.example", "cat myapp.env.production", "echo env.production",
+                    "ls -d .*.example", "ls ~/.bash*"):
+        assert protected_in_command(command) is None, command
+    # ENV-1 review, MED-1: ordinary globs main allowed stay allowed — a glob
+    # that is not dot-led never expands onto a dotfile in bash, and an option
+    # value like `*test*` is the class of `grep -r foo .`.
+    for command in ORDINARY_GLOBS:
+        assert protected_in_command(command) is None, command
+    assert env_credential_in_text("x .env.local.example y") is None
+    assert env_credential_in_text("--env-file=.env.prod") == ".env.prod"
+    for pattern in (".env.zz?", ".env.p*", ".e??", ".*", ".e?v.custom", ".[e]nv.custom",
+                    ".*.custom", "[.]env.x", ".?nv.x[0-9]", ".ENV.P*", ".env.example?",
+                    "{a,.env}.x*", ".*rc"):
+        assert glob_reaches(pattern) and env_glob_reaches(pattern), pattern
+    for pattern in ("*.py", ".env.*.example", "*", "*.production", "*test*", "*.local", ".git*",
+                    ".[!e]*", ".*.example", "**", "*.{bak,orig}"):
+        assert not env_glob_reaches(pattern), pattern
+    assert glob_reaches("google_token.*") and glob_reaches("*.json")   # bundles, by name, as on main
+    assert not env_glob_reaches("*.json")
+    print(f"ok  shell: {len(smuggled)} spellings of a credential env file refused in both tools; "
+          f"{len(ORDINARY_GLOBS)} ordinary globs allowed")
+
+    # 10. grep_files, both backends, every mode: .env.staging is never searched.
+    real_which = search_mod.shutil.which
+    for kwargs in (dict(pattern="API_KEY", path=str(root)),
+                   dict(pattern="API_KEY", path=str(root), context_lines=2),
+                   dict(pattern="API_KEY", path=str(root), mode="files"),
+                   dict(pattern="API_KEY", path=str(root / ".env.staging"), mode="count"),
+                   dict(pattern="DATABASE", path=str(root / "link-to-prod"))):
+        outs = [dispatch("grep_files", json.dumps(kwargs)).text]
+        search_mod.shutil.which = lambda name: None
+        try:
+            outs.append(dispatch("grep_files", json.dumps(kwargs)).text)
+        finally:
+            search_mod.shutil.which = real_which
+        for out in outs:
+            body = "" if out.startswith("No matches") else out
+            assert STAGING not in body and PROD not in body, (kwargs, out)
+            assert ".env.staging" not in body and ".env.production" not in body, (kwargs, out)
+    print("ok  grep_files: .env.staging and a symlink to .env.production filtered on both backends")
+
+    # 11. the scrub reads every credential env file in the folder chain: a
+    # value copied anywhere is redacted, and a grep line attributed to one is
+    # dropped — through real dispatch().
+    (root / "copied.md").write_text(f"stray: {STAGING} and {PROD}\n", encoding="utf-8")
+    copied = dispatch("read_file", '{"path": "copied.md"}')
+    assert STAGING not in copied.text and PROD not in copied.text, copied.text
+    assert copied.text.count(REDACTED) == 2, copied.text
+    leak = dispatch("run_readonly", json.dumps({"command": f"grep -rn -C1 API_KEY {root}"}))
+    assert STAGING not in leak.text and ".env.staging" not in leak.text, leak.text
+    assert "were withheld" in leak.text, leak.text
+    # A file made, or rewritten, right after the last scrub (within one
+    # timestamp tick) is read at once: nothing is cached by mtime.
+    qa = "qa-FAKEVALUE-made-in-the-same-tick"
+    (root / ".env.qa").write_text(f"QA_KEY={qa}\n", encoding="utf-8")
+    assert qa not in scrub(f"x {qa}"), "a new env file's value was missed"
+    qa2 = "qa-FAKEVALUE-rewritten-same-tick"
+    (root / ".env.qa").write_text(f"QA_KEY={qa2}\n", encoding="utf-8")
+    assert qa2 not in scrub(f"x {qa2}"), "a rewritten env file's value was missed"
+    # A FIFO named like one cannot hang the scrub (it is now read by listing).
+    os.mkfifo(root / ".env.fifo")
+    assert scrub("nothing secret here") == "nothing secret here"
+    print("ok  scrub: values from .env.staging/.env.production redacted; a FIFO named .env.* "
+          "does not hang it")
+
+    scrub_rule_checks(root)
+
+
+TOKEN40 = "Zx9Qp2Lm8Rt5Wv3Yk7Hb1Nc4Df6Gj0Ks8Lq2MxA"
+STRIPE = "sk_live_FAKE51HxYzTESTONLY"
+DB_PASS = "FAKEpw9zz"
+
+
+def scrub_rule_checks(root: Path) -> None:
+    """ENV-1 review, MED-2: from a newly covered env file only secrets are
+    withheld — a secret-named key's value, or a secret-looking value — so
+    settings (`NODE_ENV=production`, `API_URL=https://…`) no longer mangle
+    ordinary output. `.env` and `.env.local` are scrubbed whole, as before."""
+    (root / ".env.preview").write_text(
+        "NODE_ENV=production\nAPI_URL=https://api.example.com\nCOOKIE_SECURE=true\n"
+        "SESSION_DRIVER=redis\nAPP_NAME=My Great Application\n"
+        f"STRIPE_SECRET_KEY={STRIPE}\nDATABASE_URL=postgres://app:{DB_PASS}@db.internal/app\n"
+        f"BUILD_ID={TOKEN40}\nDB_PASS=correcthorse\nexport ADMIN_PASSWORD=sunshine99\n"
+        "SESSION_LIFETIME=120\n", encoding="utf-8")
+    readme = ("Deploy to production with NODE_ENV=production; the API lives at "
+              "https://api.example.com. COOKIE_SECURE=true, SESSION_DRIVER=redis, "
+              "My Great Application.\n")
+    (root / "README.md").write_text(readme, encoding="utf-8")
+    out = dispatch("read_file", '{"path": "README.md"}').text
+    assert "Deploy to production with NODE_ENV=production" in out, out
+    assert "https://api.example.com" in out and "redis" in out and "=true" in out, out
+    assert REDACTED not in out, out
+    leaky = (f"key {STRIPE} url postgres://app:{DB_PASS}@db.internal/app build {TOKEN40} "
+             "pass correcthorse admin sunshine99 lifetime 120")
+    cleaned = scrub(leaky)
+    # A secret-named key's value is withheld even when it reads as a word
+    # (`DB_PASS=correcthorse`) — only the key rule catches that one.
+    for value in (STRIPE, DB_PASS, TOKEN40, "correcthorse", "sunshine99"):
+        assert value not in cleaned, (value, cleaned)
+    assert "lifetime 120" in cleaned, cleaned
+    # `.env` and `.env.local` keep today's rule: every value of 8+ characters.
+    whole = root / "whole"
+    whole.mkdir()
+    (whole / ".env").write_text("MODE=production-ish\n", encoding="utf-8")
+    previous = Path.cwd()
+    os.chdir(whole)
+    try:
+        assert "production-ish" not in scrub("mode is production-ish"), "the .env rule moved"
+    finally:
+        os.chdir(previous)
+    print("ok  scrub: a .env.preview's settings left alone (README intact); its secret key, "
+          "DSN password and 40-char token withheld; .env still scrubbed whole")
+    delta_review_checks(root)
+
+
+# --- the delta review of 4043ad1 (PR #60): pinned, every spelling -----------------
+#
+# Refused: each spelling main refused that 4043ad1 allowed (LOW-A, fix 4), and
+# each the lead asked to close (fixes 1, 2, 3, 5, LOW-B's shell form).
+DELTA_REFUSED = [
+    # LOW-A — refused on main, allowed at 4043ad1.
+    "find . -name '*.local' -exec cat {} +", "shopt -s dotglob; cat *.local",
+    "find -name '*env*' -exec cat", "find . -name '*env*' -exec cat {} +",
+    "find . -name '*.local'", "rg -g '*.local' KEY",
+    # Fix 1: a line that turns dotglob on judges every glob word exactly.
+    "shopt -s dotglob; cat *custom*", "bash -O dotglob -c 'cat *custom*'",
+    "GLOBIGNORE=x; cat *.custom", "zsh -c 'cat *custom*(D)'", "setopt GLOB_DOTS; cat *.custom",
+    "cat *(D)", "ls *(D)",
+    # Fix 2: a name pattern that names env and can match one, its files read.
+    "find . -name '*.env.production' -exec cat {} +",
+    "find . -name '*.env.prod' -print0 | xargs -0 cat", "grep -r KEY --include='*.env.prod' .",
+    "rg --hidden -g '*.env*' API_KEY", "fd -H -g '*.env*' -x cat",
+    "grep -r API_KEY --include='*.env*' .", "find . -name '*.env*' -exec cat {} +",
+    "find . -name '*.env.local' -exec cat {} +", "grep -r KEY --include=*.env* .",
+    "zip -r o.zip . -i '*.env.prod'",
+    # Fix 3: a glued short option's value.
+    "rg --hidden -g'.e?v*' KEY", "rg --hidden -g.e?v* KEY .", "rg -g.e?v* KEY .",
+    # Fix 4 (option A): patterns a program expands itself.
+    "git grep --no-index KEY -- '.e?v*'", "git grep --no-index -h KEY -- '.e?v*'",
+    "tar --wildcards -xOf b '.e?v*'", "tar --wildcards -xOf b.tar '.e?v*'", "zip -i '.e?v*'",
+    "zip -r o.zip . -i '.e?v*'", "git grep KEY -- '.e?v.custom'", "git ls-files -- '.e?v.c*'",
+    "tar --wildcards -xOf b.tar '.e?v.custom'", "unzip -p a.zip '.e?v.custom'",
+    "7z e a.7z '.e?v.custom'",
+    # Fix 5: strings another program runs as a command line.
+    "node -e \"require('child_process').execSync('cat .e?v.custom')\"",
+    "node --eval \"require('child_process').execSync('cat .e?v.custom')\"",
+    "perl -e 'system(\"cat .e?v.custom\")'", "perl -e 'print `cat .e?v.custom`'",
+    "env -S 'cat .e?v.custom'", "env -S'cat .e?v.custom'", "watch 'cat .e?v.custom'",
+    "watch -n1 'cat .e?v.custom'", "ssh h 'cat .e?v.custom'", "bash <<< 'cat .e?v.custom'",
+    "python3 <<< \"import os; os.system('cat .e?v.custom')\"",
+    "sh -c \"find . -name '.e?v*' -exec cat {} +\"",
+    # The delta review's LOW-1 list, refused at 4043ad1 and kept.
+    "cat .e?v.custom", "cat .[e]nv.custom", "cat .*.custom", "cat .e*.custom", "cat [.]env.custom",
+    "cat .E?V.CUSTOM", "find . -name '.e?v*' -exec cat {} +", "find . -iname '.E*' -exec cat {} +",
+    "rg -g '.e?v*' --hidden KEY", "rg --glob='.e?v*' --hidden KEY",
+    "grep -r KEY --include='.e?v*' .", "grep -r KEY --include .e?v* .", "fd -H -g '.e?v*' -x cat",
+    "sh -c 'cat .e?v.custom'", "bash -lc \"cat .e*.custom\"", "eval 'cat .e?v.custom'",
+    "find . -type f -exec sh -c 'cat .e?v.custom' \\;",
+    "python3 -c \"import os; os.system('cat .e?v.custom')\"", "cat .e{n,x}v.custom",
+    "printf '%s\\n' .e?v* | xargs cat", "find . -path './.e?v*' -exec cat {} +",
+    "su u -c 'cat .e?v.custom'", "git -c alias.x='!cat .e?v.custom' x",
+    # Main's floor on a word bash does not expand.
+    "echo '*.local'", "grep '.*env.*' log",
+]
+# Allowed: the review's ordinary list, and lines each fix must not catch.
+DELTA_ALLOWED = [
+    "rm -f *.orig", "find . -name '*.orig' -delete", "rm -f *.bak", "ls *.bak",
+    "ls .git/hooks/*.sample", "rm *.test", "ls *test*", "find . -name '*test*'",
+    "find src -name '*.test*'", "find . -name '*template*'", "ls *dev*", "ls *prod*", "ls *2*",
+    "rg -g '*test*' foo", "grep -rl foo --include='*test*' .", "ls *.local", "cat *.production",
+    "pkill -f '.*daemon2'", "grep -E '.*error.*' log.txt", "jq '.items[] | .name' x.json",
+    "find . -name '*.env.ts'", "git log --grep='.*fix'", "ls .git*", "ls -d .bash*",
+    "cat .env.example", "cat .env.*.example",
+    # Not dot-led: bash's `?` never matches a leading dot (the review's 21st spelling).
+    "cat ?env.custom",
+    # Fix 2 needs `env` in the pattern (or main's names): these read no more
+    # than `grep -r foo .`, the stated limit.
+    "find . -name '*.py' -exec grep -l foo {} +", "grep -r foo --include='*.py' .",
+    "rg -g '*.py' foo", "rg --hidden -g '*.py' foo", "find . -name '*.ts' | xargs wc -l",
+    "find . -name '*.custom' -exec cat {} +", "grep -r KEY --include='*.custom' .",
+    "rg --hidden -g '*.custom' KEY", "fd -H -g '*.custom' -x cat",
+    "find . -name '*.env.ts' -delete",
+    # Fix 5 reads string literals that hold a command line, not a program's regexes.
+    "perl -ne 'print if /(.*)foo/' x.txt", "perl -pe 's/.*: //' x.txt",
+    "node -e \"console.log(/.*foo/.test('a b'))\"", "grep -e '.* failed' log",
+    "watch 'ls -la'", "ssh h 'ls *.log'", "ssh h 'tail -f /var/log/syslog'",
+    "env -S 'python3 -u'", "bash <<< 'echo hi'",
+    # Fix 4 judges only dot-led (or main's) patterns.
+    "git grep -n '.*TODO' -- src", "git ls-files -- '*.py'", "tar --wildcards -xf b.tar '*.py'",
+    "zip -r o.zip . -x '*.pyc'", "unzip -l a.zip",
+    # Fix 1 needs dotglob; `$(date)` is not a zsh qualifier; a glued `-g` without a glob.
+    "echo $(date) && ls *.py", "gcc -g3 -o x x.c", "npm install -g pnpm",
+    "git commit -m 'fix: date $(date)'", "timeout 5 git grep foo",
+]
+
+
+def delta_review_checks(root: Path) -> None:
+    from jarvis.tools.secrets import secret_values
+
+    for command in DELTA_REFUSED:
+        assert protected_in_command(command), f"want refused: {command}"
+    for command in DELTA_ALLOWED:
+        assert protected_in_command(command) is None, f"want allowed: {command}"
+    print(f"ok  delta review: {len(DELTA_REFUSED)} spellings refused, "
+          f"{len(DELTA_ALLOWED)} ordinary lines allowed")
+
+    # LOW-C: the selective scrub, both directions.
+    withheld = {
+        "SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/T0FAKE/B0FAKE/fakeFAKEfake1234",
+        "DISCORD_WEBHOOK": "https://discord.com/api/webhooks/123456/fakeTOKENfake",
+        "SOME_CALLBACK": "https://api.example.com/v1/cb/a1B2c3D4e5F6g7H8i9J0",
+        "APIKEY": "fk12ab34cd", "SECRETKEY": "fk98zy76xw",
+        "PASSPHRASE": "correct horse battery staple", "SMTP_PW": "fakepw7788",
+        "ADMIN_PIN": "48291357", "OTP_SEED": "JBSWYDPEHPKPXPQR", "ACCESSTOKEN": "abcd1234",
+        "SEEDPHRASE": "apple banana cherry", "REDIS_PASSWORD_URL": "redis://:fakepw@cache:6379",
+    }
+    passing = {
+        "AUTH_TOKEN_TTL": "3600", "SESSION_TIMEOUT": "1800", "PASSWORD_LENGTH": "12",
+        "TOKEN_URL": "https://auth.example.com/oauth/token", "KEY_NAME": "prod-key",
+        "SECRET_PATH": "/etc/app/secrets", "PIN_ENABLED": "false", "EMAIL_FROM": "noreply@example.com",
+        "DOCS_URL": "https://github.com/acme/app/tree/main/docs", "KEYBOARD_LAYOUT": "dvorak",
+        "MAPPING_FILE": "config/map.json", "TOKENIZER_MODEL": "bert", "LOG_LEVEL": "debug",
+    }
+    delta = root / "delta"
+    delta.mkdir()
+    (delta / ".env.production").write_text(
+        "".join(f"{k}={v}\n" for k, v in {**withheld, **passing}.items()), encoding="utf-8")
+    previous = Path.cwd()
+    os.chdir(delta)
+    try:
+        values = set(secret_values())
+        for key, value in withheld.items():
+            assert value in values, f"want withheld: {key}"
+        for key, value in passing.items():
+            assert value not in values, f"want passing: {key}"
+        assert "expires in 3600 seconds" in scrub("expires in 3600 seconds")
+    finally:
+        os.chdir(previous)
+    print(f"ok  scrub (delta review): {len(withheld)} webhook URLs, joined keys, PINs and "
+          f"seeds withheld; {len(passing)} settings (AUTH_TOKEN_TTL=3600 …) left alone")
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"read_file", "run_readonly", "run_command", "grep_files"}):
+        sys.exit(main())

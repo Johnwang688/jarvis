@@ -158,7 +158,13 @@ class Base(unittest.TestCase):
                                 AVATAR_ENV="",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
-                                TERMINAL_SHELL=str(FAKE_SHELL)).items():
+                                # The Browser (BR-1a): no route below starts Chrome.
+                                BROWSER_DIR=self.root / "browser",
+                                BROWSER_SETTINGS_PATH=self.root / "browser.json",
+                                TERMINAL_SHELL=str(FAKE_SHELL),
+                                # Never the owner's installed HUD (C-1, ED-4).
+                                HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
+                                HUD_DEV=False).items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -231,11 +237,16 @@ class Base(unittest.TestCase):
         self.seen.append((listener, method, path, status))
         return status, got, content
 
-    def assert_hardened(self, got, what):
+    def assert_hardened(self, got, what, own=None):
+        """One CSP header, and it is the whole HUD policy (ED-4) with the frame
+        rule (WP-E) — narrowed only where the response states its own
+        directives (`own`: the avatar's) — plus `X-Frame-Options: DENY`."""
         csp = [v for n, v in got if n.lower() == CSP.lower()]
         xfo = [v for n, v in got if n.lower() == XFO.lower()]
         self.assertEqual(len(csp), 1, f"{what}: exactly one CSP header, got {csp}")
-        self.assertIn("frame-ancestors 'none'", csp[0], what)
+        self.assertEqual(csp[0], H.content_security_policy(own), what)
+        self.assertTrue(csp[0].endswith("; frame-ancestors 'none'"), what)
+        self.assertEqual(csp[0].count("frame-ancestors"), 1, what)
         self.assertEqual(xfo, ["DENY"], f"{what}: X-Frame-Options")
 
     def assert_workshop(self, got, what):
@@ -284,6 +295,8 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("PATCH", f"/projects/{p}", {"name": "Calc"}), ("PATCH", f"/projects/{p}", {"bogus": 1}),
         ("GET", f"/projects/{p}/tree", None), ("GET", f"/projects/{p}/file?path=hello.txt", None),
         ("GET", f"/projects/{p}/file?path=.env", None), ("PUT", f"/projects/{p}/file?path=x.txt", {"bogus": 1}),
+        ("POST", f"/projects/{p}/files/stat", {"paths": ["hello.txt"]}),
+        ("GET", f"/projects/{p}/git/base?path=hello.txt", None), ("GET", f"/projects/{p}/git/status", None),
         ("GET", f"/projects/{p}/platform", None), ("GET", f"/projects/{p}/impact", None),
         ("POST", f"/projects/{p}/archive", {}), ("POST", f"/projects/{p}/restore", {}),
         ("DELETE", f"/projects/{p}", None), ("GET", f"/projects/{p}/discord", None),
@@ -317,6 +330,23 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
         ("GET", "/terminals/deadbeef/attach", None), ("DELETE", "/terminals/deadbeef", None),
+        ("GET", "/vex/status", None), ("GET", "/vex/builds/deadbeef", None),
+        ("POST", "/vex/brain", {"bogus": 1}), ("GET", f"/projects/{p}/vex", None),
+        ("POST", f"/projects/{p}/vex/build", {"bogus": 1}),
+        # The Browser (BR-1a): every one owner-only, and none starts Chrome.
+        ("GET", "/browser", None), ("GET", "/browser/tabs", None), ("POST", "/browser/tabs", {"bogus": 1}),
+        ("POST", "/browser/tabs", {"url": "file:///etc/hostname"}),
+        ("GET", "/browser/settings", None), ("PATCH", "/browser/settings", {"bogus": 1}),
+        ("DELETE", "/browser/tabs/deadbeef", None),
+        ("POST", "/browser/tabs/deadbeef/navigate", {"url": "about:blank"}),
+        ("POST", "/browser/profiles/p-00000000/forget", {}),
+        # BR-1b: the socket's ticket and attach, a switch, a file chooser's
+        # answer and the downloads — none of which starts Chrome either.
+        ("POST", "/browser/tabs/deadbeef/ticket", {}), ("GET", "/browser/tabs/deadbeef/attach", None),
+        ("POST", "/browser/tabs/deadbeef/activate", {}),
+        ("POST", "/browser/tabs/deadbeef/files", {"chooser": "x", "files": []}),
+        ("GET", "/browser/downloads", None), ("GET", "/browser/downloads/deadbeef", None),
+        ("DELETE", "/browser/downloads/deadbeef", None),
     ]
 
 
@@ -330,10 +360,38 @@ class FrameHeaders(Base):
                     status, got, _ = self.ask(listener, method, path, body,
                                               read_body=not path.startswith("/events"))
                     statuses.add(status)
-                    self.assert_hardened(got, f"{listener} {method} {path} -> {status}")
+                    own = H.AVATAR_CSP if path.split("?")[0] == "/avatar.svg" and status == 200 else None
+                    self.assert_hardened(got, f"{listener} {method} {path} -> {status}", own)
         # The walk really spans successes, refusals and errors.
         for status in (200, 201, 400, 403, 404, 409):
             self.assertIn(status, statuses, f"the walk never produced a {status}")
+        # And the Browser's routes answered without starting Chrome (BR-1a).
+        self.assertFalse(self.daemon.browser.status()["running"])
+        self.assertFalse((self.root / "browser").exists())
+
+    def test_a_browser_download_refuses_to_be_framed_and_runs_nothing(self):
+        # BR-1b: a saved download is served on the HUD's own origin, so its
+        # response carries the frame headers and narrows the policy to
+        # `default-src 'none'` (nothing in it can run), as an attachment.
+        from jarvis.v2.browser import routes as browser_routes
+        folder = self.root / "browser" / "downloads" / "p-00000000" / "0123abcd"
+        for path in (self.root / "browser", self.root / "browser" / "downloads", folder.parent, folder):
+            path.mkdir(mode=0o700)
+        (folder / "page.html").write_bytes(b"<script>parent.postMessage(1, '*')</script>")
+        try:
+            status, got, content = self.ask("hud", "GET", "/browser/downloads/0123abcd")
+            self.assertEqual(status, 200)
+            self.assert_hardened(got, "a download", browser_routes.DOWNLOAD_CSP)
+            headers = {n.lower(): v for n, v in got}
+            self.assertEqual(headers["content-type"], "application/octet-stream")
+            self.assertEqual(headers["x-content-type-options"], "nosniff")
+            self.assertTrue(headers["content-disposition"].startswith("attachment; "))
+            status, got, _ = self.ask("api", "GET", "/browser/downloads/0123abcd")
+            self.assertEqual(status, 403)
+            self.assert_hardened(got, "a download on the API listener")
+        finally:
+            import shutil
+            shutil.rmtree(self.root / "browser")
 
     def test_refusals_before_any_route_runs(self):
         for listener in ("hud", "api"):
@@ -393,7 +451,7 @@ class FrameHeaders(Base):
         (dist / "assets").mkdir(parents=True)
         (dist / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
         (dist / "assets" / "app.js").write_text("console.log('HUD')")
-        with patch.object(H, "HUD_DIST", dist):
+        with patch.object(config, "HUD_DIST", dist), patch.object(config, "HUD_DEV", True):
             for listener in ("hud", "api"):
                 for path in ("/", "/assets/app.js"):
                     with self.subTest(listener=listener, path=path):
@@ -402,18 +460,105 @@ class FrameHeaders(Base):
                         self.assertTrue(content)
                         self.assert_hardened(got, f"{listener} {path}")
 
+    def test_the_installed_hud_and_its_assets_carry_the_policy(self):
+        # C-1: what the owner's daemon serves is an installed build. The page,
+        # a script, a worker and a `.wasm` (a worker takes its policy from its
+        # own response, so the policy must ride on every asset), on both
+        # listeners; and the "not installed" page too.
+        from jarvis.v2 import hud_install
+        root = self.root / "hud-installed"
+        for listener in ("hud", "api"):
+            status, got, content = self.ask(listener, "GET", "/")
+            self.assertEqual(status, 503, content)
+            self.assertIn(b"jarvis hud install", content)
+            self.assert_hardened(got, f"{listener} not installed")
+        dist = self.root / "built"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
+        (dist / "assets" / "app-1a2b.js").write_text("console.log('HUD')")
+        (dist / "assets" / "editor.worker-3c4d.js").write_text("self.onmessage = () => {}")
+        (dist / "assets" / "grammar-5e6f.wasm").write_bytes(b"\0asm\1\0\0\0")
+        hud_install.install(dist, root)
+        for listener in ("hud", "api"):
+            for path, mime in (("/", "text/html"), ("/assets/app-1a2b.js", "javascript"),
+                               ("/assets/editor.worker-3c4d.js", "javascript"),
+                               ("/assets/grammar-5e6f.wasm", "application/wasm"),
+                               ("/status", "application/json")):
+                with self.subTest(listener=listener, path=path):
+                    status, got, content = self.ask(listener, "GET", path)
+                    self.assertEqual(status, 200, content)
+                    self.assertIn(mime, dict(got)["Content-Type"])
+                    self.assert_hardened(got, f"{listener} installed {path}")
+            status, got, _ = self.ask(listener, "GET", "/assets/absent.js")
+            self.assertEqual(status, 404)
+            self.assert_hardened(got, f"{listener} absent asset")
+
     def test_a_response_with_its_own_policy_keeps_both_halves_in_one_header(self):
         # The avatar's SVG locks itself down further; the frame rule rides in
         # the same header (two policies would both apply, but one builder
         # keeps the next change from dropping the frame rule).
         status, got, content = self.ask("hud", "GET", "/avatar.svg")
         self.assertEqual(status, 200, content)
-        self.assert_hardened(got, "avatar.svg")
+        self.assert_hardened(got, "avatar.svg", H.AVATAR_CSP)
         csp = next(v for n, v in got if n == CSP)
-        self.assertIn("default-src 'none'", csp)
-        self.assertIn("style-src 'unsafe-inline'", csp)
-        self.assertEqual(H.content_security_policy(), "frame-ancestors 'none'")
-        self.assertEqual(H.content_security_policy("img-src 'self'"), "img-src 'self'; frame-ancestors 'none'")
+        # Exactly the lockdown the avatar had before the HUD had a policy, plus
+        # the HUD's base-uri/form-action: no script, no fetch of any kind.
+        self.assertEqual(csp, "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+                              "form-action 'none'; frame-ancestors 'none'")
+
+    def test_the_policy_says_what_the_plan_says(self):
+        # Editor plan §2.7, read directive by directive, so a change to the
+        # policy is a change to this test too.
+        policy = H.content_security_policy()
+        directives = [d.split() for d in policy.split("; ")]
+        names = [d[0] for d in directives]
+        self.assertEqual(len(names), len(set(names)), "no directive twice")
+        got = {d[0]: d[1:] for d in directives}
+        self.assertEqual(got["default-src"], ["'none'"])
+        self.assertEqual(got["script-src"], ["'self'", "'wasm-unsafe-eval'"],
+                         "no inline, no eval; WebAssembly compiles (ED-5's tree-sitter)")
+        self.assertEqual(got["worker-src"], ["'self'"])
+        self.assertEqual(got["connect-src"], ["'self'"])
+        self.assertEqual(got["style-src"], ["'self'", "'unsafe-inline'"])
+        self.assertEqual(got["img-src"], ["'self'", "data:"])
+        self.assertEqual(got["font-src"], ["'self'", "data:"])
+        self.assertEqual(got["media-src"], ["'self'"])
+        self.assertEqual(got["frame-src"], ["http://localhost:*", "http://*.localhost:*", "http://127.0.0.1:*",
+                                            "http://0.0.0.0:*"])
+        for name in ("base-uri", "form-action", "object-src", "frame-ancestors"):
+            self.assertEqual(got[name], ["'none'"], name)
+        self.assertEqual(names[-1], "frame-ancestors")
+        for word in ("'unsafe-eval'", "'unsafe-hashes'", "blob:", " * ", "https:"):
+            self.assertNotIn(word, f" {policy} ", word)
+        self.assertEqual(policy.count("'wasm-unsafe-eval'"), 1, "WebAssembly in script-src only")
+
+    def test_a_response_may_only_narrow_the_policy(self):
+        base = H.content_security_policy()
+        self.assertEqual(H.content_security_policy("img-src 'self'"),
+                         base.replace("img-src 'self' data:", "img-src 'self'"))
+        self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF' 'WASM-UNSAFE-EVAL'"), base,
+                         "keywords fold case")
+        self.assertEqual(H.content_security_policy("script-src 'none'"),
+                         base.replace("script-src 'self' 'wasm-unsafe-eval'", "script-src 'none'"))
+        # A response may drop WebAssembly (ED-5) and keep its script.
+        self.assertEqual(H.content_security_policy("script-src 'self'"),
+                         base.replace("script-src 'self' 'wasm-unsafe-eval'", "script-src 'self'"))
+        self.assertEqual(H.content_security_policy("connect-src 'none'; img-src 'none'"),
+                         base.replace("connect-src 'self'", "connect-src 'none'")
+                             .replace("img-src 'self' data:", "img-src 'none'"))
+        for loosening in ("script-src 'self' 'unsafe-eval'", "script-src 'self' 'unsafe-inline'",
+                          "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'",
+                          "script-src 'wasm-unsafe-eval' 'unsafe-hashes'", "script-src *", "script-src https:",
+                          "connect-src https://example.com", "connect-src ws:", "img-src 'self' blob:",
+                          "img-src *", "default-src 'self'", "frame-src *", "frame-src http://example.com",
+                          "worker-src blob:", "base-uri 'self'", "form-action 'self'", "object-src 'self'",
+                          "manifest-src 'self'", "script-src-elem 'self'", "upgrade-insecure-requests",
+                          "require-trusted-types-for 'script'", "img-src 'self'; img-src data:",
+                          "img-src 'none' 'self'", "script-src"):
+            with self.subTest(loosening=loosening), self.assertRaises(ValueError):
+                H.content_security_policy(loosening)
+            with self.subTest(loosening=loosening, where="binary"), self.assertRaises(ValueError):
+                H.binary(SimpleNamespace(server=SimpleNamespace()), b"x", "text/plain", csp=loosening)
 
     def test_a_response_cannot_change_the_frame_rule_through_its_own_directives(self):
         # PR #31 review, shown in Chromium: a comma starts a second policy, so
@@ -544,6 +689,11 @@ class Status(Base):
                 self.assertEqual(body["workshop_port"], self.daemon.workshop_port)
                 self.assertIs(body["frame_hardened"], True)
                 self.assertFalse({body["hud_port"], body["api_port"], body["workshop_port"]} & {0})
+                # The Browser's gate refuses the HUD and the API, never this
+                # daemon's own workshop (BR-1a).
+                self.assertLessEqual({body["hud_port"], body["api_port"], 8402, 8405}, set(body["refused_ports"]))
+                self.assertNotIn(body["workshop_port"], body["refused_ports"])
+                self.assertFalse(body["browser"]["running"])
 
     def test_frame_hardened_comes_from_the_handler_that_adds_the_headers(self):
         # A daemon not started has no listener, so nothing is hardened yet;
@@ -557,7 +707,8 @@ class Status(Base):
 
 class Coverage(Base):
     ROUTE_FILES = ("jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/projects.py",
-                   "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py")
+                   "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py", "jarvis/v2/vex.py",
+                   "jarvis/v2/browser/routes.py")
 
     def families(self) -> set[str]:
         """Every first path segment a route module matches on."""

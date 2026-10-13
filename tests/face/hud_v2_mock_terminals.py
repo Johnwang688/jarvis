@@ -6,7 +6,7 @@ with Playwright's `route_web_socket`, so the socket never leaves the
 browser. This file only keeps the world's terminal rows and their tickets:
 
   - `GET /terminals` → the rows;
-  - `POST /terminals {in, cols?, rows?}` → 201 row; `in` is "home" or exactly
+  - `POST /terminals {in, cols?, rows?, readable?}` → 201 row; `in` is "home" or exactly
     one of `{"thread"|"project"|"task": id}`, any other shape 400, an unknown
     id 404, the seventh terminal 409 with the daemon's sentence;
   - `PATCH /terminals/{id} {readable}` → row, exactly that key and a bool;
@@ -84,8 +84,11 @@ def handle(h, mock, method: str, path: str, body) -> bool:
             h._json(snapshot)
             return True
         if method == "POST":
-            if not isinstance(body, dict) or set(body) - {"in", "cols", "rows"} or "in" not in body:
-                h._err(400, "expected {in, cols?, rows?}")
+            if not isinstance(body, dict) or set(body) - {"in", "cols", "rows", "readable"} or "in" not in body:
+                h._err(400, "expected {in, cols?, rows?, readable?}")
+                return True
+            if not isinstance(body.get("readable", True), bool):
+                h._err(400, "readable must be a boolean")
                 return True
             resolved, refused = _resolve(w, body["in"])
             if refused:
@@ -98,12 +101,18 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                 h._err(409, f"{CAP} terminals are open; close one first")
                 return True
             label, pid = resolved
+            # `terminal_create_delay` (one-shot): made that many seconds
+            # later — a terminal on its way while the window changes.
+            delay = mock.__dict__.pop("terminal_create_delay", 0)
+            if delay:
+                time.sleep(delay)
             seq = mock.__dict__.get("terminal_seq", 0) + 1
             mock.terminal_seq = seq
             # `terminal_defaults`: what the next terminals are like (a shell
             # with no integration, one whose startup file never ran).
             rec = row(f"{0xa0000000 + seq:08x}", f"bash · {label}", project_id=pid,
                       **mock.__dict__.get("terminal_defaults", {}))
+            rec["readable"] = body.get("readable", True)
             rows.append(rec)
             mock.__dict__.setdefault("terminal_created", []).append((rec["id"], body["in"]))
             h._json(rec, 201)
@@ -130,6 +139,11 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                 return True
             ticket = secrets.token_urlsafe(16)
             tickets[ticket] = rec["id"]
+            # `terminal_ticket_delay` (one-shot): a ticket minted now, answered
+            # that many seconds later — the terminal may be closed meanwhile.
+            delay = mock.__dict__.pop("terminal_ticket_delay", 0)
+            if delay:
+                time.sleep(delay)
             h._json({"ticket": ticket, "expires_in": 30})
             return True
     h._err(404, "route not found")

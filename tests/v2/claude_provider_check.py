@@ -782,7 +782,17 @@ def cli_options_checks(cli_path: str) -> None:
 def options_checks() -> None:
     print("\n-- options built from the brief")
     provider = claude.ClaudeProvider()
+    from jarvis import config
+    data = tempfile.TemporaryDirectory(prefix="wp3-data-")
+    saved_data, config.V2_DATA_DIR = config.V2_DATA_DIR, Path(data.name)
+    try:
+        _options_checks(provider)
+    finally:
+        config.V2_DATA_DIR = saved_data
+        data.cleanup()
 
+
+def _options_checks(provider) -> None:
     with fake():
         handle = provider.start(
             thread(),
@@ -819,14 +829,27 @@ def options_checks() -> None:
         eq(options.effort, "high", "effort comes from the brief")
         eq(options.max_turns, 12, "max_turns comes from the brief")
         check(options.strict_mcp_config is True, "strict MCP config")
+        # Carried in a private file, never as a dict (which the SDK would put
+        # on the command line as JSON, env and all — plan 2026-10-10 §1.3).
+        check(isinstance(options.mcp_servers, str), "MCP servers are passed as a file path")
+        carrier = Path(options.mcp_servers)
         eq(
-            options.mcp_servers,
-            {"jarvis": {"type": "stdio", "command": "jarvis-mcp"}},
-            "MCP servers come from the brief",
+            json.loads(carrier.read_text()),
+            {"mcpServers": {"jarvis": {"type": "stdio", "command": "jarvis-mcp"}}},
+            "MCP servers come from the brief, through the file",
         )
+        eq(carrier.stat().st_mode & 0o777, 0o600, "the MCP config file is 0600")
+        eq(carrier.parent.stat().st_mode & 0o777, 0o700, "...in a 0700 directory")
         check(options.include_partial_messages is True, "partial messages on, for TEXT_DELTA")
         eq(options.session_id, handle.provider_session_id, "start mints the session id it reports")
         check(options.resume is None, "start does not resume")
+        provider.close(handle)
+        check(not carrier.exists(), "close removes the MCP config file")
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        options = FakeClient.instances[0].options
+        eq(options.mcp_servers, {}, "no MCP servers: no file and no --mcp-config")
         provider.close(handle)
 
     with fake():
@@ -1101,6 +1124,84 @@ def hook_checks() -> None:
         provider.close(handle)
 
 
+def env_hook_checks() -> None:
+    """ENV-1: the owner's `.env*` rule reaches Claude through the PreToolUse
+    hook — the real `build_permit`, layer 1. On main every Read, Grep, Glob
+    and NotebookRead of a credential env file was allowed (no read tool was
+    judged), and so was a Write to `.env.production`."""
+    print("\n-- ENV-1: the hook refuses a credential env file to every file tool")
+    from jarvis.v2.permissions import PermitContext, build_permit
+
+    class Owner:
+        human_backed = True
+        asked: list = []
+
+        def ask(self, request):
+            self.asked.append(request.tool)
+            return "allow"
+
+    with _temp_config() as root:
+        project = root / "app"
+        project.mkdir()
+        (project / ".env.production").write_text("API_KEY=FAKE-ENV1-HOOK\n")
+        (project / ".env.example").write_text("API_KEY=\n")
+        (project / "settings.txt").symlink_to(".env.production")
+        prod, example = str(project / ".env.production"), str(project / ".env.example")
+        denied = [
+            ("Read", {"file_path": prod}),
+            ("Read", {"file_path": str(project / "settings.txt")}),
+            ("Read", {"file_path": str(project / ".ENV.Staging")}),
+            ("NotebookRead", {"notebook_path": str(project / ".env.dev")}),
+            ("Grep", {"pattern": "API_KEY", "path": prod}),
+            ("Grep", {"pattern": "API_KEY", "path": str(project), "glob": ".env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/.e?v.*"}),
+            # Delta review LOW-B: Claude's Grep reads hidden files, so a glob
+            # naming env files is `rg --hidden -g '*.env*'`.
+            ("Grep", {"pattern": "API_KEY", "glob": "*.env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "*.local", "path": str(project)}),
+            ("Write", {"file_path": prod, "content": "X=1"}),
+            ("Write", {"file_path": str(project / "deep" / ".env.local"), "content": "X=1"}),
+            ("Edit", {"file_path": prod, "old_string": "a", "new_string": "b"}),
+            ("MultiEdit", {"file_path": str(project / ".env.sample"), "edits": []}),
+            ("Bash", {"command": "cat .env.production"}),
+            ("Bash", {"command": "echo X=1 > .env.staging"}),
+            ("Bash", {"command": "echo X=1 > settings.txt"}),
+        ]
+        allowed = [
+            ("Read", {"file_path": example}),
+            ("Write", {"file_path": str(project / ".env.local.example"), "content": "X="}),
+            ("Edit", {"file_path": example, "old_string": "=", "new_string": "=x"}),
+            ("Glob", {"pattern": "**/*.ts"}),
+            ("Grep", {"pattern": "API_KEY", "path": str(project)}),   # a folder: the stated limit
+            # ENV-1 review, MED-1: ordinary file-name globs (refused at 153920d).
+            ("Glob", {"pattern": "**/*test*"}), ("Glob", {"pattern": "**/*.bak"}),
+            # Delta review NIT: Glob returns names, never contents.
+            ("Glob", {"pattern": "**/.env.*"}), ("Glob", {"pattern": ".env.p*", "path": str(project)}),
+            ("Glob", {"pattern": "**/.*"}), ("Glob", {"pattern": "**/*.env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "*test*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/*.production"}),
+            ("Bash", {"command": "cat .env.example"}),
+        ]
+        script = [Hook(n, a, f"c{i}") for i, (n, a) in enumerate(denied + allowed)]
+        provider = claude.ClaudeProvider()
+        b = brief(cwd=str(project))
+        owner = Owner()
+        permit = build_permit(PermitContext(thread_id="t1", brief=b, provider="claude"), owner)
+        with fake(script + [result_message()]):
+            handle = provider.start(thread(), b, permit)
+            drain(provider, handle)
+            results = FakeClient.instances[0].hook_results
+            for (name, args), out in zip(denied, results):
+                decision = (out.get("hookSpecificOutput") or {}).get("permissionDecision")
+                eq(decision, "deny", f"{name} {args} is refused by the hook")
+            for (name, args), out in zip(allowed, results[len(denied):]):
+                eq(out, {}, f"{name} {args} goes on to Claude's classifier (AUTO)")
+            eq(owner.asked, [], "a refusal is never put to the owner")
+            provider.close(handle)
+        eq((project / ".env.production").read_text(), "API_KEY=FAKE-ENV1-HOOK\n",
+           "the credential env file is untouched")
+
+
 def answer_checks() -> None:
     print("\n-- answer() resolves a blocked question out of band")
     provider = claude.ClaudeProvider()
@@ -1133,6 +1234,165 @@ def answer_checks() -> None:
         except ValueError:
             check(True, "a spent request id is dead")
         provider.close(handle)
+
+    # BR-0: an out-of-band answer may only withdraw. The broker's card is the
+    # one place a yes comes from; `POST /threads/<id>/answer` on the API
+    # listener reaches this method, and on a49423c its ALLOW beat the card the
+    # owner had not answered yet (the Codex provider already refused it).
+    released = threading.Event()
+    asked = threading.Event()
+    with fake([Hook("Bash", {"command": "git push origin main"}), result_message()]):
+        handle = provider.start(thread("t-oob"), brief(), lambda *a: (asked.set(), released.wait(10),
+                                                                       Decision.DENY)[-1])
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)  # turn_started
+        request = next(stream)  # approval_requested
+        check(asked.wait(5), "the broker is asking the owner")
+        refused = []
+        for decision in (Decision.ALLOW, "allow"):
+            try:
+                provider.answer(handle, request.data["req_id"], decision)
+            except ValueError:
+                refused.append(decision)
+        eq(len(refused), 2, "an out-of-band ALLOW is refused, as the Codex provider refuses it")
+        released.set()  # the owner (the broker) says no
+        rest = list(stream)
+        resolved = [e for e in rest if e.kind is EventKind.APPROVAL_RESOLVED][0]
+        eq(resolved.data["decision"], "deny", "the broker's answer stands")
+        # (On a49423c the hook got `{}`: under AUTO an ALLOW hands the call to
+        # Claude Code's own classifier, with the owner's card still open.)
+        out = FakeClient.instances[-1].hook_results[0].get("hookSpecificOutput", {})
+        eq(out.get("permissionDecision"), "deny", "...and is what reaches the hook")
+        provider.close(handle)
+
+
+@contextlib.contextmanager
+def _temp_config():
+    """Every config path a daemon writes, pointed at a temp dir and restored."""
+    from jarvis import config
+
+    names = ("ALLOWLIST_PATH", "MODELS_PATH", "PROVIDER_DEFAULTS_PATH", "V2_DATA_DIR",
+             "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH")
+    saved = {name: getattr(config, name) for name in names}
+    with tempfile.TemporaryDirectory(prefix="br0-") as tmp:
+        root = Path(tmp)
+        home = root / "home" / ".config" / "jarvis"
+        home.mkdir(parents=True)
+        config.ALLOWLIST_PATH = home / "allowlist.json"
+        config.MODELS_PATH = home / "models.json"
+        config.PROVIDER_DEFAULTS_PATH = home / "provider_defaults.json"
+        config.V2_DATA_DIR = root / "v2data"
+        config.V2_ALWAYS_ASK = home / "always-ask.json"
+        config.DISCORD_GUILD_PATH = home / "discord_guild.json"
+        config.ROUTING_PATH = home / "routing.json"
+        config.CODEX_CATALOG_PATH = root / "codex-models.json"
+        try:
+            yield root
+        finally:
+            for name, value in saved.items():
+                setattr(config, name, value)
+
+
+def _http(port, method, path, body=None, origin=None):
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        payload = None if body is None else json.dumps(body).encode()
+        headers = {"Content-Type": "application/json"} if payload else {}
+        if origin:
+            headers["Origin"] = origin
+        conn.request(method, path, payload, headers)
+        response = conn.getresponse()
+        return response.status, json.loads(response.read() or b"null")
+    finally:
+        conn.close()
+
+
+def daemon_answer_route_checks() -> None:
+    """BR-0, end to end on a real daemon: on a Claude thread, the API route that
+    answers a provider (`POST /threads/<id>/answer`) cannot approve a tool use;
+    only the owner's card can. Fails on a49423c, where the route's ALLOW was
+    200 and the tool ran with the card still open.
+
+    How the route tells questions from approvals: its body carries exactly one
+    of `text` (a question's answer, passed on as a str) or `decision` (an
+    approval's, a `Decision`), and the provider then checks what the pending
+    slot is. Codex marks question slots (`pending.question`) and takes only
+    text there, and only a DENY for an approval. Claude raises no questions at
+    all — every pending slot is a tool permission from `_decide` — so on a
+    Claude thread every answer is a withdrawal or nothing. The source guard at
+    the end fails first if that ever changes, so whoever gives Claude
+    questions also gives `answer()` a text path for them.
+    """
+    print("\n-- the API's answer route cannot approve a Claude tool use (BR-0)")
+    from jarvis.v2 import daemon as daemon_mod
+    from jarvis.v2.stores import Stores
+
+    with _temp_config() as root, fake([Hook("Bash", {"command": "git push origin main"}),
+                                       result_message()]):
+        from jarvis import config
+
+        project_root = root / "project"
+        project_root.mkdir()
+        daemon = daemon_mod.Daemon(Stores(config.V2_DATA_DIR),
+                                   {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+        daemon.start()
+        worker = None
+        try:
+            hud = f"http://127.0.0.1:{daemon.face_port}"
+            status, project = _http(daemon.port, "POST", "/projects",
+                                    {"name": "p", "root": str(project_root)})
+            eq(status, 201, "project created")
+            thread_ = daemon.open_thread(project["id"], Role.IMPLEMENTER, ProviderName.CLAUDE,
+                                         Brief(Role.IMPLEMENTER, str(project_root),
+                                               profile=PermissionProfile.ASK))
+            worker = threading.Thread(
+                target=lambda: daemon.send(thread_.id, UserMessage(text="push it")), daemon=True)
+            worker.start()
+            card = []
+            deadline = time.monotonic() + 10
+            while not card and time.monotonic() < deadline:
+                card = _http(daemon.port, "GET", "/approvals")[1] or []
+                time.sleep(0.02)
+            eq(len(card), 1, "the always-ask push is a card for the owner")
+            gate = [r for r in _http(daemon.port, "GET", f"/threads/{thread_.id}/log")[1]
+                    if r.get("kind") == "gate_requested"]
+            check(bool(gate), "the provider's request id is in the thread log (readable by any client)")
+            req_id = (gate[-1].get("data") or {}).get("req_id", "") if gate else ""
+            # `text` first: on a49423c a text of "allow" was coerced to an ALLOW too.
+            for body in ({"req_id": req_id, "text": "allow"}, {"req_id": req_id, "decision": "allow"}):
+                status, _ = _http(daemon.port, "POST", f"/threads/{thread_.id}/answer", body)
+                key = "decision" if "decision" in body else "text"
+                eq(status, 400, f"the answer route refuses {key}=allow for a tool use")
+            eq([r["req_id"] for r in _http(daemon.port, "GET", "/approvals")[1]],
+               [card[0]["req_id"]], "and the owner's card is still open")
+            decided = []
+            deadline = time.monotonic() + 0.5     # time for a winning answer to land
+            while not decided and time.monotonic() < deadline:
+                decided = [r for c in FakeClient.instances for r in c.hook_results]
+                time.sleep(0.02)
+            eq(decided, [], "and the tool use has not been decided while the card is open")
+            status, _ = _http(daemon.face_port, "POST", f"/approvals/{card[0]['req_id']}",
+                              {"decision": "allow"}, origin=hud)
+            eq(status, 200, "the owner approves from the HUD window")
+            results = []
+            deadline = time.monotonic() + 10
+            while not results and time.monotonic() < deadline:
+                results = [r for c in FakeClient.instances for r in c.hook_results]
+                time.sleep(0.02)
+            out = (results[0] if results else {}).get("hookSpecificOutput", {})
+            eq(out.get("permissionDecision"), "allow", "and the owner's yes is what reaches the hook")
+        finally:
+            daemon.stop()
+            if worker is not None:
+                worker.join(5)
+
+    source = Path(claude.__file__).read_text()
+    check("EventKind.QUESTION" not in source,
+          "the Claude provider raises no questions (if it starts to, answer() needs a text path)")
+    check(source.count("session.pending[") == 1 and "session.pending[req_id] = pending" in source,
+          "its one pending slot is the tool permission `_decide` opens")
 
 
 # --- the escape hatch -------------------------------------------------------
@@ -1313,14 +1573,15 @@ def usage_checks() -> None:
         handle = provider.start(thread(), brief(), allow)
         client = FakeClient.instances[0]
         eq(provider.usage(handle).cost_usd, None, "a session with no turn has no cost")
-        for _ in range(2):
-            client.script = [result_message()]
+        # The CLI's figure is its running total (2026-10-12): 0.25, then 0.5.
+        for running in (0.25, 0.5):
+            client.script = [result_message(total_cost_usd=running)]
             drain(provider, handle)
         total = provider.usage(handle)
-        eq(total.input_tokens, 200, "input tokens sum")
+        eq(total.input_tokens, 200, "input tokens sum (they are per turn)")
         eq(total.output_tokens, 40, "output tokens sum")
         eq(total.cached_tokens, 80, "cached tokens sum")
-        eq(round(total.cost_usd, 4), 0.5, "the equivalent cost sums")
+        eq(round(total.cost_usd, 4), 0.5, "the equivalent cost is the last running total")
         eq(total.work_tokens, (200 - 80) + 40, "work_tokens is §8.3's figure")
         provider.close(handle)
 
@@ -1994,6 +2255,726 @@ def stopped_late_steer_checks() -> None:
         provider.close(handle)
 
 
+NOTICE_ORIGIN = {"kind": "task-notification"}
+ZERO_USAGE = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}
+
+
+def notice_replay() -> SdkUserMessage:
+    """The CLI's replay of a background task's notice it runs as a turn of
+    its own (2.1.295 stamps the injected turn's origin on it)."""
+    return SdkUserMessage(content="<task-notification>a background task ended</task-notification>",
+                          uuid="9e2f0c4a-0000-4000-8000-000000000001", origin=dict(NOTICE_ORIGIN))
+
+
+def notice_result(**kw) -> ResultMessage:
+    """A transcript-only notice's result: no model call, zero usage, success,
+    the injected origin — exactly what a resumed CLI put ahead of the owner's
+    message live (2026-10-12)."""
+    base = dict(num_turns=0, duration_api_ms=0, usage=dict(ZERO_USAGE), origin=dict(NOTICE_ORIGIN))
+    base.update(kw)
+    return result_message(**base)
+
+
+def drain_bounded(provider, handle, text: str, timeout: float = 5.0):
+    """`drain`, but a hang fails the check instead of the suite."""
+    box: dict = {}
+
+    def run():
+        box["events"] = drain(provider, handle, text)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return box.get("events")
+
+
+def injected_turn_checks() -> None:
+    """2026-10-12, live on thread 447ff25e: after every daemon restart the
+    first message to a Claude thread showed nothing, and the next message got
+    its answer. The resumed CLI runs a queued background-task notice as a
+    transcript-only turn of its own before the message (an empty, zero-usage
+    result), and on a fresh session — where the CLI is not yet known to echo —
+    that result was taken as the message's. The CLI stamps such a turn's
+    origin on its replay and its result; neither is ever the message's."""
+    print("\n-- turns the CLI says somebody else started")
+    provider = claude.ClaudeProvider()
+
+    # The live shape: the notice's replay and empty result, then the message.
+    with steer_fake([notice_replay(), notice_result(), PromptEcho(),
+                     assistant("the answer"), result_message()]):
+        handle = provider.resume(thread(session_id=SESSION_ID), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "the first message after a restart")
+        check(events is not None, "injected: the first send ends")
+        events = events or []
+        eq(text_of(events), ["the answer"], "injected: the first send on a fresh session reads its own answer")
+        eq(kinds(events).count("turn_finished"), 1, "injected: and finishes once")
+        eq(events[-1].data.get("stop") if events else None, "end", "injected: on its own result")
+        client.script.extend([PromptEcho(), assistant("two"), result_message()])
+        eq(text_of(drain_bounded(provider, handle, "two") or []), ["two"],
+           "injected: the next send reads its own answer — nothing shifted by one")
+        provider.close(handle)
+
+    # The result alone says so (no replay of the notice).
+    with steer_fake([notice_result(), PromptEcho(), assistant("the answer"), result_message()]):
+        handle = provider.resume(thread(session_id=SESSION_ID), brief(), allow)
+        events = drain_bounded(provider, handle, "go") or []
+        eq(text_of(events), ["the answer"], "injected: a notice's result with no replay is not the message's")
+        provider.close(handle)
+
+    # A notice that makes the model answer, ahead of the message, on a fresh
+    # session: its words reach the owner, its result does not end the turn,
+    # and while it runs the message's turn has not begun (no steer is taken
+    # ahead of the message it would steer — review of PR #22, finding 2).
+    gate = threading.Event()
+    with steer_fake([notice_replay(), assistant("the build finished"), Pause(gate),
+                     notice_result(usage=None), PromptEcho(), assistant("the answer"),
+                     result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        stream = provider.send(handle, UserMessage(text="go"))
+        first = [next(stream), next(stream)]
+        eq(text_of(first), ["the build finished"], "injected: a notice's words reach the owner")
+        check(not accepting(handle, timeout=0.3),
+              "injected: while a notice's turn runs, the message's has not begun")
+        gate.set()
+        events = first + list(stream)
+        eq(text_of(events), ["the build finished", "the answer"],
+           "injected: a notice's turn is read, then the message's own")
+        eq(kinds(events).count("turn_finished"), 1, "injected: one finish, on the message's result")
+        provider.close(handle)
+
+    # The same with no replay: the unechoed turn is taken for the message's
+    # start on a fresh session until its result says whose it was — then the
+    # message's start is still to come, and no steer is taken meanwhile.
+    gate = threading.Event()
+    with steer_fake([assistant("the build finished"), notice_result(usage=None), Pause(gate),
+                     PromptEcho(), assistant("the answer"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        stream = provider.send(handle, UserMessage(text="go"))
+        first = [next(stream), next(stream), next(stream)]
+        eq(kinds(first), ["turn_started", "text", "usage"], "injected, no replay: the notice is read")
+        time.sleep(0.2)
+        check(not handle.native.accepting,
+              "injected, no replay: once its result names it, the message's turn has not begun")
+        gate.set()
+        events = first + list(stream)
+        eq(text_of(events), ["the build finished", "the answer"],
+           "injected, no replay: then the message's own answer")
+        eq(kinds(events).count("turn_finished"), 1, "injected, no replay: one finish")
+        provider.close(handle)
+
+    # The message absorbed into the notice's turn: the result carries the
+    # notice's origin but answers the message — taken, never waited past.
+    with steer_fake([notice_replay(), assistant("a notice"), PromptEcho(),
+                     assistant("the answer"), notice_result(usage=None)]):
+        handle = provider.start(thread(), brief(), allow)
+        events = drain_bounded(provider, handle, "go")
+        check(events is not None, "injected: a message absorbed into a notice's turn never hangs")
+        eq(text_of(events or []), ["a notice", "the answer"], "injected: absorbed: both read")
+        eq(kinds(events or []).count("turn_finished"), 1, "injected: absorbed: one finish")
+        provider.close(handle)
+
+    # A notice injected in the middle of the message's own turn is part of it.
+    with steer_fake([PromptEcho(), assistant("a"), notice_replay(), assistant("b"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        events = drain_bounded(provider, handle, "go") or []
+        eq(text_of(events), ["a", "b"], "injected: mid-turn, the turn goes on")
+        eq(kinds(events).count("turn_finished"), 1, "injected: mid-turn: one finish")
+        provider.close(handle)
+
+
+def too_long() -> AssistantMessage:
+    """The CLI's synthetic API error for a conversation past the window."""
+    return AssistantMessage(content=[TextBlock(text="Prompt is too long")], model="<synthetic>",
+                            error="invalid_request")
+
+
+def too_long_result() -> ResultMessage:
+    return result_message(is_error=True, result="Prompt is too long", usage=dict(ZERO_USAGE))
+
+
+def compacted() -> list:
+    return [SystemMessage(subtype="compact_boundary", data={"compact_metadata": {"trigger": "manual"}}),
+            result_message(num_turns=0, duration_api_ms=0)]
+
+
+def context_full_checks() -> None:
+    """2026-10-12, live on thread 447ff25e: "Prompt is too long" came back as
+    an ordinary reply. It is the CLI saying the conversation no longer fits:
+    the provider runs the CLI's `/compact` once and sends the message again,
+    and when that does not help it says so in one sentence and ends the turn.
+    Never a hang, never the error text as a reply."""
+    print("\n-- a conversation past the context window")
+    provider = claude.ClaudeProvider()
+
+    # Compacting makes room: the message is answered.
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), *compacted(),
+                     PromptEcho(), assistant("the real answer"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "are the PRs up?")
+        check(events is not None, "context full: the turn ends")
+        events = events or []
+        check("Prompt is too long" not in [t for t in text_of(events)],
+              "context full: the CLI's error is never shown as a reply")
+        eq(text_of(events), ["the real answer"], "context full: compacted, the message is answered")
+        sent = [q[0]["message"]["content"] for q in client.queries if isinstance(q, list)]
+        eq(sent, ["are the PRs up?", "/compact", "are the PRs up?"],
+           "context full: the CLI's own /compact, then the message once more")
+        compact = [e.data for e in events if e.kind.value in ("tool_started", "tool_finished")]
+        eq([(d["name"], d.get("ok")) for d in compact], [("compact", None), ("compact", True)],
+           "context full: the compaction shows as one tool call that finished")
+        eq(kinds(events).count("turn_finished"), 1, "context full: one finish")
+        eq(events[-1].data.get("stop"), "end", "context full: on the answer's result")
+        check(all(e.kind is not EventKind.ERROR for e in events), "context full: no error once it worked")
+        provider.close(handle)
+
+    # Compacting does not help: one sentence, a clean end, one attempt only.
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), *compacted(),
+                     PromptEcho(), too_long(), too_long_result()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "hello?") or []
+        errors = [e.data for e in events if e.kind is EventKind.ERROR]
+        eq(errors, [{"message": claude.CONTEXT_STILL_FULL, "fatal": False}],
+           "context full: still full after compacting — the owner is told, non-fatal")
+        eq(len(client.queries), 3, "context full: compacted once, retried once")
+        eq(text_of(events), [], "context full: no error text as a reply")
+        eq(events[-1].data.get("stop") if events else None, "error", "context full: ends as an error")
+        check(handle.native.closed is False, "context full: the session is kept")
+        provider.close(handle)
+
+    # The CLI answers /compact without compacting: no retry.
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), result_message(num_turns=0)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "go") or []
+        eq(len(client.queries), 2, "context full: no compact boundary — no retry")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_NOT_COMPACTED], "context full: and the owner is told it did not finish")
+        provider.close(handle)
+
+    # Compaction that never finishes is bounded, interrupted, and told.
+    gate = threading.Event()
+    with timings(COMPACT_TIMEOUT_S=0.3), \
+            steer_fake([PromptEcho(), too_long(), too_long_result(), Pause(gate)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        started = time.monotonic()
+        events = drain_bounded(provider, handle, "go")
+        check(events is not None and time.monotonic() - started < 3,
+              "context full: a compaction that never ends does not hang the turn")
+        eq(client.interrupts, 1, "context full: the stalled compaction is interrupted")
+        eq([e.data["message"] for e in events or [] if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_NOT_COMPACTED], "context full: and the owner is told it did not finish")
+        gate.set()
+        provider.close(handle)
+
+    context_full_review_checks()
+
+    # The owner stopped the turn: no compaction, no retry.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), too_long(), too_long_result()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.interrupt(handle)
+        gate.set()
+        events = list(stream)
+        eq(len(client.queries), 1, "context full: stopped — nothing more is sent")
+        eq(events[-1].data["stop"], "interrupted", "context full: stopped — finishes as interrupted")
+        provider.close(handle)
+
+    # A model's reply that only starts with the words is a reply.
+    with steer_fake([PromptEcho(), assistant("Prompt is too long — that was the error"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "what went wrong?") or []
+        eq(text_of(events), ["Prompt is too long — that was the error"], "context full: a real reply is shown")
+        eq(len(client.queries), 1, "context full: and nothing is compacted")
+        provider.close(handle)
+
+
+def sent_texts(client) -> list:
+    """Every stdin user message the client was given, steers included."""
+    return [q[0]["message"]["content"] for q in client.queries
+            if isinstance(q, list) and q and isinstance(q[0], dict)]
+
+
+def wait_for(predicate, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def context_full_review_checks() -> None:
+    """Review of PR #57. The message is sent again only when the CLI turn
+    that overflowed was its own and did nothing a second run would repeat:
+    P11, a `git push` ran and then the context filled — it was pushed again;
+    P12, a steer's own CLI turn overflowed — the answered message was sent
+    again in its place. "Full" needs the error result and the words, never a
+    sub-agent's (P1) nor a turn the CLI recovered from (P1b). The owner's Stop
+    during a compaction ends the turn as interrupted, at once."""
+    print("\n-- a conversation past the context window: what is sent again")
+    provider = claude.ClaudeProvider()
+    push = AssistantMessage(content=[ToolUseBlock(id="toolu_1", name="Bash",
+                                                  input={"command": "git push origin feature"})],
+                            model="claude-test")
+    pushed = SdkUserMessage(content=[ToolResultBlock(tool_use_id="toolu_1", content="pushed",
+                                                     is_error=False)])
+
+    # P11: a tool ran in the message's own turn, then the context filled.
+    with steer_fake([PromptEcho(), push, pushed, too_long(), too_long_result(), *compacted(),
+                     # what a wrong re-send would read
+                     PromptEcho(), push, pushed, assistant("pushed again"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "push my branch") or []
+        eq(sent_texts(client), ["push my branch", "/compact"],
+           "P11: a tool already ran — compacted, the message never sent again")
+        eq([e.data["name"] for e in events if e.kind is EventKind.TOOL_STARTED], ["Bash", "compact"],
+           "P11: the push runs once")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_COMPACTED_SEND_AGAIN], "P11: the owner is told to send it again")
+        eq(events[-1].data.get("stop") if events else None, "error", "P11: the turn ends as an error")
+        provider.close(handle)
+
+    # P12: the message is answered; a steer's own CLI turn overflows.
+    gate = threading.Event()
+    with timings(STEER_QUIET_S=0.5), \
+            steer_fake([PromptEcho(), assistant("answer one"), Pause(gate), result_message(),
+                        Echo(), too_long(), too_long_result(), *compacted(),
+                        PromptEcho(), assistant("answer one AGAIN"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="the first message"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="the steer"))
+        gate.set()
+        box: dict = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", list(stream)), daemon=True)
+        worker.start()
+        worker.join(5)
+        events = box.get("events") or []
+        eq(sent_texts(client), ["the first message", "the steer", "/compact"],
+           "P12: a steer's turn overflowed — the answered message is not sent again")
+        eq(text_of(events), ["answer one"], "P12: the first answer, once")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_COMPACTED_SEND_AGAIN], "P12: the owner is told to send again")
+        provider.close(handle)
+
+    # A steer folded into the message's own turn counts as work too.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), Echo(), too_long(), too_long_result(), *compacted(),
+                     PromptEcho(), assistant("again"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="and this"))
+        gate.set()
+        list(stream)
+        eq(sent_texts(client), ["go", "and this", "/compact"],
+           "context full: a folded steer — compacted, nothing sent again")
+        provider.close(handle)
+
+    # P1: a sub-agent's synthetic error, then the turn succeeds.
+    sub_error = AssistantMessage(content=[TextBlock(text="Prompt is too long")], model="<synthetic>",
+                                 parent_tool_use_id="toolu_sub", error="invalid_request")
+    with steer_fake([PromptEcho(), sub_error, assistant("the answer"), result_message(),
+                     *compacted(), PromptEcho(), assistant("answer AGAIN"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "run the build") or []
+        eq(sent_texts(client), ["run the build"], "P1: a sub-agent's error — nothing compacted or sent again")
+        eq(text_of(events), ["the answer"], "P1: the answer is read")
+        eq(events[-1].data.get("stop") if events else None, "end", "P1: and ends the turn")
+        provider.close(handle)
+
+    # P1b: the CLI's own error mid-turn, recovered from: a success result.
+    with steer_fake([PromptEcho(), too_long(), assistant("recovered answer"), result_message(),
+                     *compacted(), PromptEcho(), assistant("answer AGAIN"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        events = drain_bounded(provider, handle, "go") or []
+        eq(sent_texts(client), ["go"], "P1b: an error the CLI recovered from — nothing compacted or sent again")
+        eq(text_of(events), ["recovered answer"], "P1b: the recovered answer, not the error text")
+        provider.close(handle)
+
+    # Stop while compacting, and the CLI answers: interrupted, not an error.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), Pause(gate),
+                     result_message(terminal_reason="aborted_streaming", num_turns=0)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        box = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", drain(provider, handle, "go")),
+                                  daemon=True)
+        worker.start()
+        check(wait_for(lambda: len(client.queries) == 2), "stop while compacting: /compact was sent")
+        provider.interrupt(handle)
+        gate.set()
+        worker.join(5)
+        events = box.get("events") or []
+        eq(events[-1].data.get("stop") if events else None, "interrupted",
+           "stop while compacting: the turn finishes as interrupted")
+        eq([e for e in events if e.kind is EventKind.ERROR], [], "stop while compacting: no error")
+        eq(len(client.queries), 2, "stop while compacting: nothing sent again")
+        provider.close(handle)
+
+    # Stop while the CLI goes on compacting: the turn ends at once, not
+    # after COMPACT_TIMEOUT_S (600 s live).
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), too_long(), too_long_result(), Pause(gate)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        box = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", drain(provider, handle, "go")),
+                                  daemon=True)
+        worker.start()
+        wait_for(lambda: len(client.queries) == 2)
+        stopped = time.monotonic()
+        provider.interrupt(handle)
+        worker.join(5)
+        check("events" in box and time.monotonic() - stopped < 2,
+              f"stop while compacting: the turn ends promptly ({time.monotonic() - stopped:.2f}s)")
+        events = box.get("events") or []
+        eq(events[-1].data.get("stop") if events else None, "interrupted",
+           "stop while compacting: finishes as interrupted")
+        gate.set()
+        provider.close(handle)
+
+
+def unechoed_steer_resend_checks() -> None:
+    """Delta review of PR #57 (its P16): a steer written during the turn that
+    overflowed, never echoed, may have been folded into it — work a second
+    run would repeat. `_read`'s `work = turn_work or any(g == generation ...)`
+    is the only thing that says so; with that term dropped the message was
+    sent again after the compaction."""
+    print("\n-- a conversation past the context window: an unechoed steer of the turn")
+    provider = claude.ClaudeProvider()
+    gate, compacting = threading.Event(), threading.Event()
+    with timings(STEER_QUIET_S=0.3, STEER_HOLD_MAX_S=1.0), \
+            steer_fake([PromptEcho(), Pause(gate), too_long(), too_long_result(), Pause(compacting),
+                        *compacted(),
+                        # what a wrong re-send would read
+                        PromptEcho(), assistant("would be a repeat"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        check(accepting(handle), "unechoed steer: the turn takes steers")
+        provider.steer(handle, UserMessage(text="the steer"))
+        gate.set()
+
+        def release():  # the compaction's frames only once /compact is written
+            wait_for(lambda: len(client.queries) >= 3, timeout=6)
+            compacting.set()
+
+        threading.Thread(target=release, daemon=True).start()
+        box: dict = {}
+        worker = threading.Thread(target=lambda: box.setdefault("events", list(stream)), daemon=True)
+        worker.start()
+        worker.join(8)
+        events = box.get("events") or []
+        eq(sent_texts(client), ["go", "the steer", "/compact"],
+           "unechoed steer: compacted, the message never sent again")
+        eq(text_of(events), [], "unechoed steer: nothing is read as an answer")
+        eq([e.data["message"] for e in events if e.kind is EventKind.ERROR],
+           [claude.CONTEXT_COMPACTED_SEND_AGAIN], "unechoed steer: the owner is told to send it again")
+        compacting.set()
+        provider.close(handle)
+
+
+# --- cost: the CLI's running total, each result counted once (2026-10-12) ----
+
+
+def costs(events) -> list:
+    """The `cost_usd` of every USAGE, in order."""
+    return [e.data["cost_usd"] for e in events if e.kind is EventKind.USAGE]
+
+
+def same_costs(got, want, label: str) -> None:
+    ok = len(got) == len(want) and all(
+        (g is None and w is None) or (g is not None and w is not None and abs(g - w) < 1e-9)
+        for g, w in zip(got, want))
+    check(ok, f"{label} (got {got!r}, want {want!r})")
+
+
+def near(value, want) -> bool:
+    return value is not None and abs(value - want) < 1e-9
+
+
+def saved_thread(total) -> Thread:
+    """A thread whose Claude session exists, with the running total its last
+    result left (`None`: nothing saved)."""
+    t = thread(session_id=SESSION_ID)
+    t.provider_cost_total = total
+    return t
+
+
+def turn_costs(provider, handle, client, *turns) -> list:
+    """One send per turn on the plain fake — a running total, or the turn's
+    whole script as a list; -> the USAGE costs."""
+    out = []
+    for turn in turns:
+        client.script = list(turn) if isinstance(turn, list) else [result_message(total_cost_usd=turn)]
+        out += costs(drain(provider, handle))
+    return out
+
+
+def running_cost_checks() -> None:
+    """2026-10-12: thread 447ff25e read $109.97 for $23.22. The CLI's
+    `total_cost_usd` is its running total for the conversation ("read the
+    latest result rather than summing across results"), and a resumed CLI
+    continues from the total its transcript saved; the provider passed it
+    through as each turn's cost, and the daemon summed it."""
+    print("\n-- cost: each result adds what it spent, once")
+    from claude_agent_sdk import ConversationResetMessage
+
+    provider = claude.ClaudeProvider()
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        got = turn_costs(provider, handle, client, 0.10, 0.25, 0.45)
+        same_costs(got, [0.10, 0.15, 0.20], "three turns on one CLI process: each adds only its own")
+        check(near(sum(got), 0.45) and near(provider.usage(handle).cost_usd, 0.45),
+              f"three turns sum to the last running total, never to the 0.80 of the totals "
+              f"(got {sum(got)!r})")
+        client.script = [result_message(total_cost_usd=0.50)]
+        usage = [e for e in drain(provider, handle) if e.kind is EventKind.USAGE][0]
+        check(near(usage.data["cost_total"], 0.50), "USAGE carries the running total as cost_total")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.resume(saved_thread(0.45), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.55, 0.70), [0.10, 0.15],
+                   "resumed, the CLI restored its total: only what it adds counts, never the history")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.resume(saved_thread(0.45), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.03, 0.08), [0.03, 0.05],
+                   "resumed, the total started again from zero: counted from its own zero")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.resume(saved_thread(None), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 2.00, 2.10), [None, 0.10],
+                   "resumed with nothing saved: the first figure is the baseline, never counted whole")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.10, [result_message(total_cost_usd=None)], 0.20),
+                   [0.10, None, 0.10], "a missing figure stays missing, and the baseline holds")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.30, 0.0, 0.35), [0.30, None, 0.05],
+                   "a zeroed figure (a crash or startup error) is no reading")
+        reset = ConversationResetMessage(new_conversation_id="c2", uuid="u-reset", session_id=SESSION_ID)
+        same_costs(turn_costs(provider, handle, client, [reset, result_message(total_cost_usd=0.40)]),
+                   [0.40], "after the CLI's conversation reset the total starts from nothing")
+        provider.close(handle)
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stopped = result_message(total_cost_usd=0.10, terminal_reason="aborted_streaming")
+        same_costs(turn_costs(provider, handle, client, [stopped], 0.12), [0.10, 0.02],
+                   "a stopped turn's result counts, once")
+        provider.close(handle)
+
+    # A steer the CLI ran as its own turn, then a background notice's turn.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), assistant("first"), result_message(total_cost_usd=0.10),
+                     Echo(), assistant("the steer's answer"), result_message(total_cost_usd=0.18)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="first"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="then this"))
+        gate.set()
+        first = list(stream)
+        same_costs(costs(first), [0.10, 0.08], "a steer's own CLI turn: its result counted once")
+        client.script.extend([notice_replay(), notice_result(total_cost_usd=0.20), PromptEcho(),
+                              assistant("x"), result_message(total_cost_usd=0.30)])
+        second = drain_bounded(provider, handle, "next") or []
+        same_costs(costs(second), [0.02, 0.10], "a background notice's turn: its result counted once")
+        check(near(provider.usage(handle).cost_usd, 0.30),
+              "steer and notice: the session's sum is the last running total")
+        provider.close(handle)
+
+    # The overflowing turn, `/compact`, and the message sent again.
+    with steer_fake([PromptEcho(), too_long(),
+                     result_message(is_error=True, result="Prompt is too long", usage=dict(ZERO_USAGE),
+                                    total_cost_usd=0.40),
+                     SystemMessage(subtype="compact_boundary", data={"compact_metadata": {"trigger": "manual"}}),
+                     result_message(num_turns=0, duration_api_ms=0, total_cost_usd=0.45),
+                     PromptEcho(), assistant("answer"), result_message(total_cost_usd=0.60)]):
+        handle = provider.start(thread(), brief(), allow)
+        events = drain_bounded(provider, handle, "go") or []
+        same_costs(costs(events), [0.40, 0.05, 0.15],
+                   "context full: the overflow, the compaction and the answer, each once")
+        provider.close(handle)
+
+    # A model switch resumes the same conversation in a new process.
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        same_costs(turn_costs(provider, handle, client, 0.10), [0.10], "before a switch")
+        provider.set_model(handle, "claude-sonnet-5-5", "low")
+        second = FakeClient.instances[-1]
+        check(second is not client, "a model switch connects a new client")
+        same_costs(turn_costs(provider, handle, second, 0.25), [0.15],
+                   "after a model switch the restored total is not counted again")
+        provider.close(handle)
+
+
+def daemon_cost_checks() -> None:
+    """End to end on a real daemon over the real provider: a Claude thread's
+    `cost_usd` is the CLI's last running total across turns, a restart (a
+    resumed CLI that restores its total) and one that restores nothing; the
+    running total is saved on the thread; and a thread counted before the fix
+    is recounted once, at start."""
+    print("\n-- cost: a Claude thread's total on a real daemon")
+    from jarvis.v2 import daemon as daemon_mod
+    from jarvis.v2.stores import Stores
+
+    def run(daemon, thread_id, text):
+        daemon.send(thread_id, UserMessage(text=text))
+        return wait_for(lambda: (daemon._sessions.get(thread_id) is not None
+                                 and daemon._sessions[thread_id].worker is None), timeout=10)
+
+    with _temp_config() as root:
+        from jarvis import config
+
+        project_root = root / "project"
+        project_root.mkdir()
+        stores = Stores(config.V2_DATA_DIR)
+        project = stores.projects.create("p", str(project_root))
+        # A thread from before the fix: the log holds the CLI's running totals,
+        # the record their sum.
+        old = stores.threads.create(project.id, Role.CHAT, ProviderName.CLAUDE,
+                                    provider_session_id=SESSION_ID, cost_usd=0.1 + 0.3 + 0.6)
+        stores.threads.save(old)
+        for running in (0.1, 0.3, 0.6):
+            stores.threads._append(old.id, "log.jsonl", {"kind": "usage", "data": {
+                "input": 1, "output": 1, "cached": 0, "cost_usd": running}})
+
+        with fake():
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                recounted = stores.threads.get(old.id)
+                check(near(recounted.cost_usd, 0.6) and near(recounted.provider_cost_total, 0.6)
+                      and recounted.cost_recount == 1,
+                      f"start: a thread counted before the fix is recounted to its last total "
+                      f"(got {recounted.cost_usd!r})")
+                opened = daemon.open_thread(project.id, Role.IMPLEMENTER, ProviderName.CLAUDE,
+                                            Brief(Role.IMPLEMENTER, str(project_root),
+                                                  profile=PermissionProfile.ASK))
+                eq(stores.threads.get(opened.id).cost_recount, 1,
+                   "a Claude thread opened since the fix is born marked: no recount ever reads it")
+                client = FakeClient.instances[-1]
+                for text, running in (("one", 0.10), ("two", 0.25), ("three", 0.45)):
+                    client.script = [result_message(total_cost_usd=running)]
+                    check(run(daemon, opened.id, text), f"turn {text} ends")
+                record = stores.threads.get(opened.id)
+                check(near(record.cost_usd, 0.45),
+                      f"three turns: the thread's total is the last running total, not 0.80 "
+                      f"(got {record.cost_usd!r})")
+                check(near(record.provider_cost_total, 0.45), "and the running total is saved on it")
+                logged = [r["data"] for r in stores.threads.read_log(opened.id) if r.get("kind") == "usage"]
+                same_costs([d["cost_usd"] for d in logged], [0.10, 0.15, 0.20],
+                           "the log's usage records carry each result's own cost")
+            finally:
+                daemon.stop()
+
+        # A restart: the resumed CLI continues from its transcript's total.
+        with fake([result_message(total_cost_usd=0.55)]):
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                check(run(daemon, opened.id, "four"), "after a restart: the turn ends")
+                record = stores.threads.get(opened.id)
+                check(near(record.cost_usd, 0.55),
+                      f"after a restart: the restored history is not counted again (got {record.cost_usd!r})")
+                check(near(stores.threads.get(old.id).cost_usd, 0.6),
+                      "and the recount is not repeated")
+            finally:
+                daemon.stop()
+
+        # A restart whose CLI restored nothing: its total starts at zero.
+        with fake([result_message(total_cost_usd=0.03)]):
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                check(run(daemon, opened.id, "five"), "a reset restart: the turn ends")
+                record = stores.threads.get(opened.id)
+                check(near(record.cost_usd, 0.58),
+                      f"a total that started again from zero is counted from its own zero "
+                      f"(got {record.cost_usd!r})")
+                check(near(record.provider_cost_total, 0.03), "and that total is the one saved")
+            finally:
+                daemon.stop()
+
+    # Review of PR #63 (MED-1, its probe P1): 0.50, the owner's `/clear` (the
+    # CLI's ConversationResetMessage, which the log never records), then 1.00.
+    # Live is 1.50; the next start's recount used to rewrite it to 1.00.
+    from claude_agent_sdk import ConversationResetMessage
+
+    with _temp_config() as root:
+        from jarvis import config
+
+        project_root = root / "project"
+        project_root.mkdir()
+        stores = Stores(config.V2_DATA_DIR)
+        project = stores.projects.create("p", str(project_root))
+        with fake():
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                cleared = daemon.open_thread(project.id, Role.IMPLEMENTER, ProviderName.CLAUDE,
+                                             Brief(Role.IMPLEMENTER, str(project_root),
+                                                   profile=PermissionProfile.ASK))
+                client = FakeClient.instances[-1]
+                client.script = [result_message(total_cost_usd=0.50)]
+                run(daemon, cleared.id, "one")
+                reset = ConversationResetMessage(new_conversation_id="c2", uuid="u-reset",
+                                                 session_id=SESSION_ID)
+                client.script = [reset, result_message(total_cost_usd=1.00)]
+                run(daemon, cleared.id, "/clear, then a bigger turn")
+                check(near(stores.threads.get(cleared.id).cost_usd, 1.50),
+                      "a /clear: live, the thread holds both sides of the reset")
+            finally:
+                daemon.stop()
+        with fake():
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                after = stores.threads.get(cleared.id).cost_usd
+                check(near(after, 1.50), f"a /clear: the next start's recount leaves it so (got {after!r})")
+            finally:
+                daemon.stop()
+
+
 def main() -> int:
     # Hermetic: every client in this suite resolves to a fake executable in a
     # temp dir, never the owner's real `claude` (which nothing here may run).
@@ -2008,12 +2989,19 @@ def main() -> int:
     options_checks()
     sequence_checks()
     hook_checks()
+    env_hook_checks()
     answer_checks()
+    daemon_answer_route_checks()
     reviewer_declined_checks()
     interrupt_checks()
     steering_checks()
+    injected_turn_checks()
+    context_full_checks()
+    unechoed_steer_resend_checks()
     error_checks()
     usage_checks()
+    running_cost_checks()
+    daemon_cost_checks()
     isolation_checks()
     skill_checks()
     secrets_checks()

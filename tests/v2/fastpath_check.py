@@ -894,9 +894,12 @@ def guarded_text(path: Path) -> str:
     from jarvis.tools import files
     text = path.read_text()
     if path.resolve() == Path(files.__file__).resolve():
-        body = inspect.getsource(files._protected_state)
-        assert body in text, "files._protected_state moved; the exemption must follow it"
-        text = text.replace(body, "")
+        # `_protected_state` and the path list it resolves (ED-2's
+        # `_protected_state_paths`) name the state files only to refuse them.
+        for fn in (files._protected_state_paths, files._protected_state):
+            body = inspect.getsource(fn)
+            assert body in text, f"files.{fn.__name__} moved; the exemption must follow it"
+            text = text.replace(body, "")
     return text
 
 

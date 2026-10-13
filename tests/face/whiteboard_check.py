@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from playwright.sync_api import sync_playwright
 
-from jarvis import config, tools
+from jarvis import config, runtime, tools
 
 FACE_PORT = 8436
 WORKSHOP_PORT = 8437
@@ -219,4 +219,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"whiteboard_close"}):
+        sys.exit(main())

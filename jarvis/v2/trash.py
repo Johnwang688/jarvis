@@ -104,6 +104,82 @@ def recycle_windows(path: Path) -> None:
         raise TrashError("Recycle Bin refused: " + (done.stderr.strip()[:300] or "still on disk"))
 
 
+# -- moving through directory fds (the HUD editor's delete, ED-7) ------------
+#
+# `Trash.put` moves by path. The editor's delete must not: a folder on the way
+# swapped for a link between the check and the move would carry someone else's
+# file into the trash, or put the project's file somewhere it plants something
+# (review of PR #53). So `put_from` takes the item as (folder fd, name), opens
+# every component of the trash from `/` with O_NOFOLLOW, writes the
+# `.trashinfo` relative to the `info` fd and renames relative to both fds,
+# never replacing anything.
+
+_DIRF = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+_RENAME_NOREPLACE = 1
+
+
+def rename_noreplace(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
+    """`renameat2(…, RENAME_NOREPLACE)`: never over anything. Where the
+    filesystem cannot (9p on `/mnt/c`), a check just before the rename."""
+    import ctypes
+    try:
+        fn = ctypes.CDLL(None, use_errno=True).renameat2
+    except (OSError, AttributeError):
+        fn = None
+    if fn is not None:
+        if fn(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), _RENAME_NOREPLACE) == 0:
+            return
+        err = ctypes.get_errno()
+        if err not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+            raise OSError(err, os.strerror(err))
+    try:
+        os.stat(dst, dir_fd=dst_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        os.rename(src, dst, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+        return
+    raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST))
+
+
+def open_dir_nofollow(path: Path, *, make: bool = False, mode: int = 0o700) -> int:
+    """An fd on `path`, opened component by component from `/`, never
+    through a link; `make` creates a missing component (`mode`)."""
+    path = Path(os.path.abspath(path))
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            try:
+                nxt = os.open(part, _DIRF, dir_fd=fd)
+            except FileNotFoundError:
+                if not make:
+                    raise
+                os.mkdir(part, mode, dir_fd=fd)
+                nxt = os.open(part, _DIRF, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _child_dir(parent_fd: int, name: str, *, make: bool) -> int:
+    try:
+        return os.open(name, _DIRF, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not make:
+            raise
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        return os.open(name, _DIRF, dir_fd=parent_fd)
+
+
+def _exists_at(dir_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+
+
 class Trash:
     def __init__(self, owned: Path, *, root: Path | None = None,
                  retention: float | None = None,
@@ -154,6 +230,84 @@ class Trash:
             record.unlink(missing_ok=True)
             raise TrashError(f"could not move {path.name} to the trash: {exc.strerror or exc}") from exc
         return {"where": "linux", "location": str(self.root), "name": name, "path": str(path)}
+
+    def put_from(self, parent_fd: int, name: str, original: Path, *, wrap: bool = False) -> dict:
+        """Move the entry `name` in the folder open at `parent_fd` (whose path
+        is `original`'s parent) into the home trash, through fds only (see the
+        section note). `wrap`: when the item's own name is taken in the trash,
+        it goes into a fresh folder `jarvis-deleted[.<n>]` under its own name
+        instead of being renamed `<name>.<n>` — for a name a credential rule
+        protects (a second `.env` must stay `.env`); everything else takes the
+        spec's numbered name. A trash reached through a link anywhere on its
+        path is refused (nothing moves)."""
+        original = Path(original)
+        try:
+            root_fd = open_dir_nofollow(self.root, make=True)
+        except OSError as exc:
+            raise TrashError("the trash folder is reached through a link, or cannot be opened: "
+                             f"nothing was moved ({type(exc).__name__})") from exc
+        try:
+            try:
+                files_fd = _child_dir(root_fd, "files", make=True)
+                info_fd = _child_dir(root_fd, "info", make=True)
+            except OSError as exc:
+                raise TrashError("the trash folder is reached through a link, or cannot be opened: "
+                                 f"nothing was moved ({type(exc).__name__})") from exc
+            try:
+                taken = _exists_at(files_fd, name) or _exists_at(info_fd, name + ".trashinfo")
+                held = wrap and taken
+                entry, record = self._reserve_at(info_fd, files_fd, original, "jarvis-deleted" if held else name)
+                holder_fd = None
+                try:
+                    if held:
+                        os.mkdir(entry, 0o700, dir_fd=files_fd)
+                        holder_fd = os.open(entry, _DIRF, dir_fd=files_fd)
+                        rename_noreplace(parent_fd, name, holder_fd, name)
+                    else:
+                        rename_noreplace(parent_fd, name, files_fd, entry)
+                except OSError as exc:
+                    try:
+                        os.unlink(record, dir_fd=info_fd)
+                    except OSError:
+                        pass
+                    if held:
+                        try:
+                            os.rmdir(entry, dir_fd=files_fd)
+                        except OSError:
+                            pass
+                    if exc.errno == errno.EXDEV:
+                        raise TrashError(f"{name} is on another filesystem than the trash: "
+                                         "delete it in a terminal") from exc
+                    raise TrashError(f"could not move {name} to the trash: {exc.strerror or exc}") from exc
+                finally:
+                    if holder_fd is not None:
+                        os.close(holder_fd)
+            finally:
+                os.close(files_fd)
+                os.close(info_fd)
+        finally:
+            os.close(root_fd)
+        where = f"{entry}/{name}" if held else entry
+        return {"where": "linux", "location": str(self.root), "name": where, "path": str(original)}
+
+    def _reserve_at(self, info_fd: int, files_fd: int, path: Path, base: str) -> tuple[str, str]:
+        """`_reserve`, relative to the trash's own fds: the `.trashinfo` made
+        exclusively first, which is what reserves a name in the spec."""
+        stamp = datetime.fromtimestamp(self.clock()).strftime("%Y-%m-%dT%H:%M:%S")
+        body = f"[Trash Info]\nPath={quote(str(path), safe='/')}\nDeletionDate={stamp}\n".encode()
+        for n in range(1, 10_000):
+            name = base if n == 1 else f"{base}.{n}"
+            record = name + ".trashinfo"
+            if _exists_at(files_fd, name):
+                continue
+            try:
+                fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=info_fd)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(body)
+            return name, record
+        raise TrashError("no free name in the trash")
 
     def _reserve(self, info: Path, path: Path) -> tuple[str, Path]:
         """Create the .trashinfo first, exclusively, which is what reserves a

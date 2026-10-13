@@ -19,7 +19,51 @@
 // itself still prints a caught error to this window's own devtools console,
 // as it does for every caught error; nothing leaves the machine.)
 
-import { Component, type ReactNode } from "react";
+import { Component, useState, useSyncExternalStore, type ReactNode } from "react";
+import { buffers } from "../state/buffers";
+
+/**
+ * The editor's unsaved edits, after a crash: the buffer registry lives
+ * outside React, so the edits outlive the workspace that showed them — and
+ * this is how they reach the disk without a reload (review of PR #49, L3).
+ * Each is saved as Ctrl+S would, against the etag it was read as: a file that
+ * moved meanwhile is a conflict, never overwritten. Disabled under a card,
+ * where the veil makes it inert too.
+ */
+function SaveUnsaved(props: { blocked?: boolean }) {
+  useSyncExternalStore(buffers.subscribe, buffers.version);
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState("");
+  const n = buffers.dirtyCount();
+  if (!n && !said) return null;
+  return (
+    <p>
+      {n ? (
+        <button
+          type="button"
+          data-testid="hud-crashed-save"
+          disabled={busy || props.blocked}
+          onKeyDown={ownKey}
+          onKeyUp={ownKey}
+          onClick={async () => {
+            if (busy || props.blocked) return;
+            setBusy(true);
+            try {
+              const ok = await buffers.saveAll();
+              const left = buffers.dirtyCount();
+              setSaid(ok ? "Saved." : `${left} file${left === 1 ? "" : "s"} could not be saved: it changed on disk, or the save failed.`);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Save {n} unsaved file{n === 1 ? "" : "s"}
+        </button>
+      ) : null}{" "}
+      {said ? <span data-testid="hud-crashed-saved">{said}</span> : null}
+    </p>
+  );
+}
 
 /** A thrown value's name, when it is a plain identifier; "Error" otherwise. */
 export function errorName(e: unknown): string {
@@ -33,14 +77,18 @@ export function errorName(e: unknown): string {
 }
 
 /**
- * Space and Enter on Reload are Reload's: never push-to-talk (App listens on
- * the document). Only those two: Escape must still reach a card's handler.
+ * Space and Enter on Reload are Reload's: they press it and reach nothing
+ * behind it. Only those two: Escape must still reach a card's handler.
+ * (Push-to-talk is Ctrl+D, taken at the window, and refuses after a crash.)
  */
 const ownKey = (e: React.KeyboardEvent) => {
   if (e.code === "Space" || e.key === " " || e.key === "Enter") e.stopPropagation();
 };
 
-export class WorkspaceBoundary extends Component<{ children?: ReactNode; onCrash?: () => void }, { failed: boolean }> {
+export class WorkspaceBoundary extends Component<
+  { children?: ReactNode; onCrash?: () => void; blocked?: boolean },
+  { failed: boolean }
+> {
   state = { failed: false };
 
   static getDerivedStateFromError(): { failed: boolean } {
@@ -61,6 +109,7 @@ export class WorkspaceBoundary extends Component<{ children?: ReactNode; onCrash
         <p>Something in this window broke and it stopped drawing.</p>
         <p>An approval card, if one is up, still works. Reload to get the window back.</p>
         <p>Reloading loses anything not yet sent: words typed in a box and files staged for it.</p>
+        <SaveUnsaved blocked={this.props.blocked} />
         <button
           type="button"
           data-testid="hud-crashed-reload"

@@ -25,8 +25,8 @@
 // header, capped, and never `document.title`; a link opens only for http(s),
 // and only on Ctrl+click; there is no clipboard addon (no OSC 52). A link to
 // a server on this machine (a dev server's `Local:` line) opens a small menu
-// instead — "Open in Preview" or "Open in a browser tab" (WP-E) — and the
-// Preview half is judged like a typed URL: never one of the daemon's ports. xterm
+// instead — "Open in Browser" or "Open in a Chrome tab" (WP-E) — and the
+// Browser half is judged like a typed URL: never one of the daemon's ports. xterm
 // answers some output — a cursor-position, device or colour query — through
 // the owner's own input channel, so **a reattach sends nothing until its
 // replay has been parsed** (the ring's old queries are answered into a
@@ -38,27 +38,41 @@
 //
 // **A terminal another window shows is never taken unasked**: it is drawn as
 // "in another window · Show it here" until the owner says so here.
+//
+// **A terminal that ended with Jarvis continues where it was** (the owner's
+// option (a), 2026-10-12): a key typed in it, a paste, or "Continue here"
+// starts a new shell in the same folder, with the same "Jarvis can read"
+// switch, in the same place and the same xterm, under the old text and a
+// separator line. Only the owner's gesture in that terminal does it — never a
+// load, a restored panel, a reattach, a card or a crashed window — and what
+// was typed waits until the new shell's replay has been parsed, then is typed
+// but never run (no held Enter: the prompt it was typed at is gone). The old text
+// is kept in memory only (rebuilt from xterm's cells, never the old bytes) and
+// written back after the RIS of every later attach.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { IDisposable, Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { api } from "../api";
 import {
-  AttachLedger, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, counterZoom, encodeInput,
-  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, menuWidth, pageNonce, parseControl,
-  placeMenu, saveMine,
-  savePrefs,
-  SPECS_KEPT, type InSpec, type TerminalRow,
+  AttachLedger, HeldInput, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, continuationPrefix,
+  continuesOn, counterZoom, encodeInput, fontSizeFor, hhmm, integrationNote, isTerminalId, judgeLink, loadMine,
+  loadPrefs, mayContinue, menuWidth, pageNonce, parseControl, parseRead, placeMenu, readableCarry, readNoteText,
+  saveMine, savePrefs,
+  SPECS_KEPT, type InSpec, type ReadNote, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
-import { judgePreviewUrl } from "../lib/preview";
+import { judgeBrowserUrl } from "../lib/browser";
+import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
 import { useDaemonPorts } from "../state/daemonPorts";
 import type { PaneNo } from "../lib/workspace";
 import type { Project } from "../types";
 
 export type SessionState =
-  | "idle" | "connecting" | "waiting" | "attached" | "taken" | "refused" | "exited" | "ended" | "closed" | "lost";
+  | "idle" | "connecting" | "waiting" | "attached" | "taken" | "refused" | "exited" | "ended" | "closed" | "lost"
+  // An ended terminal whose new shell is being made (`continueHere`).
+  | "continuing";
 
 /** Between paste chunks: a paste is paced, so `input_dropped` can stop the rest. */
 const PACE_MS = 8;
@@ -85,12 +99,15 @@ export interface PasteNotice {
   /**
    * dropped: the program was not reading; lost: the socket closed mid-paste;
    * stopped: a Ctrl-C ended it; unsent: typed or pasted while the terminal
-   * was connecting (or not running here), so it went nowhere.
+   * was connecting (or not running here), so it went nowhere; continued: a
+   * continuation typed what was held but ran nothing (`stopped`).
    */
-  kind: "dropped" | "lost" | "stopped" | "unsent";
+  kind: "dropped" | "lost" | "stopped" | "unsent" | "continued";
   bytes: number;
   /** For "unsent": still connecting, or not running in this window. */
   why?: "connecting" | "offline";
+  /** For "continued": the held line stopped at its Enter, or a paste with a line break was kept back. */
+  stopped?: "enter" | "paste";
   /** An `input_resume` is out (or being retried). */
   resuming: boolean;
   /** The daemon's last word on a refused resume. */
@@ -127,7 +144,7 @@ if (typeof window !== "undefined") {
 const GONE_ROW: TerminalRow = {
   id: "", title: "", folder: "", project_id: null, created: "", cols: 80, rows: 24, shown: false,
   exited: false, exit_code: null, readable: true, busy: false, integration: "none", integrated: false,
-  marked: false,
+  marked: false, program: null, input: true,
 };
 
 function kib(bytes: number): string {
@@ -138,8 +155,24 @@ function kib(bytes: number): string {
 // one terminal in this window
 
 export class TermSession {
-  readonly id: string;
+  /** The terminal's id: a continuation moves the session to its new one (`TermManager.rekey`). */
+  id: string;
   state: SessionState = "idle";
+  /** Why the last continuation was refused (six already open…), in the daemon's words. */
+  continueError = "";
+  /**
+   * A continued terminal's old text and separator (lib/terminal.ts,
+   * `continuationPrefix`), written after the RIS of every attach, before the
+   * replay — inside the replay's window, so nothing in it is ever answered.
+   * Memory only: a page reload loses it.
+   */
+  private prefix: Uint8Array | null = null;
+  /** The prefix taken at the gesture, kept only once the new shell exists. */
+  private pendingPrefix: Uint8Array | null = null;
+  /** What the owner typed or pasted while the continuation starts, until its replay is parsed. */
+  private held: HeldInput | null = null;
+  /** The card count when the hold began: a card since drops it (`TermManager.cardCount`). */
+  private heldCards = 0;
   exitCode: number | null = null;
   /** A title the program set (OSC 0/2), cleaned. */
   title = "";
@@ -227,10 +260,11 @@ export class TermSession {
     this.id = id;
     this.wrap = document.createElement("div");
     this.wrap.className = "termhost";
-    // Every key typed into a terminal is the shell's: Space is never push-to-
-    // talk, Escape never closes a menu behind it. The window's own capture-
-    // phase listener has already run (its zoom keys, Ctrl+`). Under a card
-    // nothing is stopped, so Escape reaches the card and denies.
+    // Every key typed into a terminal is the shell's: Ctrl+D is its end of
+    // input, never push-to-talk (lib/talkkey.ts), and Escape never closes a
+    // menu behind it. The window's own capture-phase listeners have already
+    // run (its zoom keys, Ctrl+`; push-to-talk stands aside here). Under a
+    // card nothing is stopped, so Escape reaches the card and denies.
     const stop = (e: Event) => {
       if (!this.mgr.blocked) e.stopPropagation();
     };
@@ -264,6 +298,16 @@ export class TermSession {
     const text = cleanPaste(e.clipboardData?.getData("text/plain") ?? "");
     if (!text) return;
     this.markGesture();
+    // A paste into an ended terminal continues it, and one while it starts
+    // waits with the keys: both held, cleaned, until the new replay is parsed.
+    if (this.held) {
+      this.holdPaste(text);
+      return;
+    }
+    if (!this.continueError && this.mgr.mayContinue(this)) {   // after a refusal only Continue here retries
+      this.startContinue({ paste: text });
+      return;
+    }
     this.term.paste(text);
   }
 
@@ -557,6 +601,7 @@ export class TermSession {
     this.clearRetry();
     if (this.disposed || unloading) return;
     if (this.attempts >= RECONNECT_MS.length) {
+      this.dropHeld();                    // never typed into a shell long after, on a Reconnect
       this.set("lost");
       void this.mgr.refresh();
       return;
@@ -577,6 +622,7 @@ export class TermSession {
   private end(why: "gone" | "ended") {
     this.wanted = false;
     this.endedWhy = why;
+    this.dropHeld();
     this.set("ended");
     this.mgr.ended(this.id);
   }
@@ -603,6 +649,9 @@ export class TermSession {
         // holds be drawn again after it. Nothing is sent until "replayed".
         this.replaying = true;
         this.out.data(gen, RIS);
+        // A continued terminal: its old text and the separator, again after
+        // every RIS — in band, inside this replay's window.
+        if (this.prefix) this.out.data(gen, this.prefix);
         if (msg.terminal) {
           this.mgr.updateRow(msg.terminal);
           this.lastRow = msg.terminal;
@@ -624,10 +673,13 @@ export class TermSession {
           this.replayed = true;
           this.fitNow();
           this.sendResize(true);
+          // What the owner typed while this continuation started goes now.
+          this.flushHeld();
         });
         return;
       case "exit":
         this.exitCode = msg.code;
+        this.dropHeld();
         if (msg.reason === "ended") {
           this.end("ended");
         } else if (msg.reason === "closed") {
@@ -658,12 +710,14 @@ export class TermSession {
       case "taken":
         this.wanted = false;
         this.takeover = null;
+        this.dropHeld();
         // Another window has it now: a reload here asks before taking it back.
         this.mgr.unclaim(this.id);
         this.set("taken");
         return;
       case "refused":
         this.wanted = false;
+        this.dropHeld();
         this.refused = msg.reason;
         this.mgr.unclaim(this.id);
         this.set("refused");
@@ -732,6 +786,21 @@ export class TermSession {
   private input(bytes: Uint8Array) {
     // Held under a card: a `y⏎` typed at the wrong moment goes nowhere.
     if (this.mgr.blocked || this.disposed) return;
+    // A continuation on its way: the owner's keys wait for the new shell's
+    // replay, in order; anything xterm says on its own goes nowhere.
+    if (this.held) {
+      if (this.gesture) this.holdKey(bytes);
+      return;
+    }
+    // A typing key in a terminal that ended with Jarvis continues it there —
+    // until a continuation was refused: then only Continue here tries again
+    // (review L5: at the cap every key asked, and a slot freed mid-line gave
+    // the new shell the line's tail).
+    if (this.state === "ended" && this.gesture && !this.continueError && continuesOn(bytes)
+        && this.mgr.mayContinue(this)) {
+      this.startContinue({ key: bytes });
+      return;
+    }
     // Not connected, or the replay is still being parsed: nothing is sent —
     // not a query's answer, and not a key. A key or a paste is said.
     if (this.state !== "attached" || this.replaying) {
@@ -742,6 +811,15 @@ export class TermSession {
       this.paste = null;                      // typing reaches the shell again: the notice has done its job
       this.mgr.changed();
     }
+    if (this.gesture && this.paste?.kind === "continued" && bytes.some((b) => b === 0x0d)) {
+      this.paste = null;                      // the owner ran the line, having seen the new prompt
+      this.mgr.changed();
+    }
+    this.deliver(bytes);
+  }
+
+  /** Owner input to the shell, through this socket's gate (a paste in paced chunks). */
+  private deliver(bytes: Uint8Array) {
     const r = this.gate.input(bytes);
     if (r.send && this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(r.send);
     if (r.dropped) this.notePaste("stopped", r.dropped);
@@ -802,7 +880,7 @@ export class TermSession {
   private noteUnsent(bytes: number) {
     // Never over the notice that holds the only way to resume.
     if (this.paste?.kind === "dropped" && this.gate.latched) return;
-    const why = ["connecting", "waiting", "attached"].includes(this.state) ? "connecting" : "offline";
+    const why = ["connecting", "waiting", "attached", "continuing"].includes(this.state) ? "connecting" : "offline";
     const prev = this.paste?.kind === "unsent" ? this.paste : null;
     this.paste = { kind: "unsent", bytes: (prev?.bytes ?? 0) + bytes, resuming: false, refused: "", why };
     this.mgr.changed();
@@ -829,6 +907,143 @@ export class TermSession {
   private clearResume() {
     if (this.resumeTimer) clearTimeout(this.resumeTimer);
     this.resumeTimer = null;
+  }
+
+  // -- continuing after Jarvis restarted ---------------------------------------
+
+  /** "Continue here": the owner's click, with nothing typed yet. */
+  continueHere() {
+    if (this.mgr.blocked || this.held || !this.mgr.mayContinue(this)) return;
+    this.startContinue(null);                 // the one way to try again after a refusal (review L5)
+  }
+
+  /**
+   * The owner's gesture in this ended terminal: a new shell where it was. The
+   * old text is taken now, from xterm's cells (`continuationPrefix`), and kept
+   * only once the shell exists; what was typed waits (`held`).
+   */
+  private startContinue(first: { key: Uint8Array } | { paste: string } | null) {
+    // An older "not running here" notice is done with: typing goes somewhere now.
+    if (this.paste?.kind === "unsent") this.paste = null;
+    this.continueError = "";
+    this.held = new HeldInput();
+    this.heldCards = this.mgr.cardCount;
+    this.set("continuing");
+    if (first && "key" in first) this.holdKey(first.key);
+    else if (first) this.holdPaste(first.paste);
+    const prefix = this.term ? continuationPrefix(this.term.buffer.normal, hhmm(new Date())) : "";
+    this.pendingPrefix = prefix ? encodeInput(prefix) : null;
+    void this.mgr.continueSession(this);
+  }
+
+  /**
+   * A key while the continuation starts: held in order, or refused — past
+   * 4 KiB, a key that does not type, or a card since the hold began. **A
+   * refusal drops the whole hold** (PR #64 review M1): nothing after it is
+   * kept and nothing before it is sent, and all of it is said with the
+   * `unsent` notice.
+   */
+  private holdKey(bytes: Uint8Array) {
+    const held = this.held;
+    if (!held) return;
+    const was = { closed: held.closed, dropped: held.dropped };
+    if (this.mgr.cardCount !== this.heldCards || this.mgr.crashed) held.refuse(bytes.length);
+    else held.key(bytes);
+    this.sayRefused(held, was);
+  }
+
+  private holdPaste(text: string) {
+    const held = this.held;
+    if (!held) return;
+    const was = { closed: held.closed, dropped: held.dropped };
+    if (this.mgr.cardCount !== this.heldCards || this.mgr.crashed) held.refuse(encodeInput(text).length);
+    else held.paste(text);
+    this.sayRefused(held, was);
+  }
+
+  /** What a refusal costs, said: at the first one, everything held so far as well. */
+  private sayRefused(held: HeldInput, was: { closed: boolean; dropped: number }) {
+    const refused = held.dropped - was.dropped;
+    if (!refused) return;
+    this.noteUnsent(refused + (was.closed ? 0 : held.bytes));
+  }
+
+  /**
+   * The new shell's replay has been parsed: what was held goes through this
+   * socket's gate, a paste through xterm (bracketed as the *new* shell asked)
+   * — **typed, never run** (`HeldInput.release`): the keys up to the first
+   * Enter, and a paste only without a line break; the notice says the line is
+   * waiting at a new local shell's prompt. Nothing at all if anything was
+   * refused while held (M1), a card came up since the hold began, the window
+   * crashed, or nobody can see the terminal any more (review L1): then it is
+   * said instead.
+   */
+  private flushHeld() {
+    const held = this.held;
+    if (!held) return;
+    this.held = null;
+    if (held.closed || this.mgr.blocked || this.mgr.crashed || this.mgr.cardCount !== this.heldCards
+        || this.state !== "attached" || !this.term || !this.mgr.visible(this.id)) {
+      if (held.bytes && !held.closed) this.noteUnsent(held.bytes);
+      return;
+    }
+    const out = held.release();
+    for (const part of out.parts) {
+      if ("key" in part) this.deliver(part.key);
+      else this.term.paste(part.paste);
+    }
+    if (out.stopped) {
+      this.paste = { kind: "continued", bytes: out.withheld, resuming: false, refused: "", stopped: out.stopped };
+      this.mgr.changed();
+    }
+  }
+
+  /** The continuation went nowhere (it ended, was lost, taken…): what was held is said, never sent later. */
+  private dropHeld() {
+    const held = this.held;
+    if (!held) return;
+    this.held = null;
+    if (held.bytes && !held.closed) this.noteUnsent(held.bytes);
+  }
+
+  /**
+   * Nobody can see this terminal any more while it starts — the panel was
+   * closed, its pane switched away, it went back to a hidden panel (review
+   * L1): what was held is dropped, and said, as auto-open drops its terminal.
+   */
+  dropHiddenHold() {
+    this.dropHeld();
+  }
+
+  /** The daemon refused the new shell (six already open…): said in the strip, nothing kept. */
+  continueFailed(reason: string) {
+    if (this.disposed) return;
+    this.held = null;
+    this.pendingPrefix = null;
+    this.continueError = reason;
+    this.set("ended");
+  }
+
+  /** The new shell exists, and this session is now its (`TermManager.rekey`): attach, in place. */
+  continued(row: TerminalRow) {
+    if (this.disposed) return;
+    this.prefix = this.pendingPrefix;
+    this.pendingPrefix = null;
+    this.lastRow = row;
+    this.title = "";
+    this.marked = false;
+    this.exitCode = null;
+    this.endedWhy = "ended";
+    this.attachedAt = 0;
+    this.skipped = 0;
+    this.attempts = 0;
+    this.refused = "";
+    this.state = "idle";
+    void this.attach();
+  }
+
+  get continuing(): boolean {
+    return !!this.held;
   }
 
   /** The window came back from the back/forward cache: attach again if it was. */
@@ -862,6 +1077,9 @@ export class TermSession {
     if (this.gestureTimer) clearTimeout(this.gestureTimer);
     this.gestureTimer = null;
     this.out.clear();
+    this.held = null;
+    this.prefix = null;
+    this.pendingPrefix = null;
     const ws = this.ws;
     this.ws = null;
     this.gate.close();
@@ -906,10 +1124,19 @@ export class TermManager {
   sessions = new Map<string, TermSession>();
   /** Attaches this window did not make (`terminal_attached`): quiet, dismissible. */
   notices: AttachNotice[] = [];
+  /** The last `terminal_read` per terminal (WP-F): "Jarvis read 200 lines · 15:42" in its bar. */
+  reads = new Map<string, ReadNote>();
   /** A busy terminal the owner asked to close: asked once more. `unsure`: the listing failed. */
   confirm: { id: string; title: string; unsure: boolean } | null = null;
   /** A Ctrl+clicked link to a server on this machine: where to open it (WP-E). Screen px. */
   linkMenu: { url: string; x: number; y: number } | null = null;
+  /** Where the terminal an owner's gesture is opening will show, while it is on its way (`ownerOpened`). */
+  opening: "panel" | PaneNo | null = null;
+  private ownerOpening: Promise<void> | null = null;
+  /** Every create counts, `+` included: an `ownerOpened` that one overtook adds nothing. */
+  private creations = 0;
+  /** Every card that goes up counts: an `ownerOpened` a card came between drops its terminal. */
+  private cards = 0;
   /**
    * The terminals this tab has shown (sessionStorage; lib/terminal.ts,
    * MINE_KEY): inherited only by a reload of the page that released them,
@@ -936,23 +1163,39 @@ export class TermManager {
   panelOpen = false;
   ledger = new AttachLedger();
   prefs = loadPrefs();
-  /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals). */
+  /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals): pane ids. */
   place = new Map<string, number>();
+  /** Each pane id's slot, the number the owner reads ("in pane 2"): ids are not slots (WP-G1). */
+  private slots = new Map<number, number>();
   /** Exited while nobody could see it: the dot on ⬓. */
   private unseenExits = new Set<string>();
   private noticeSeq = 0;
   private version = 0;
   private listeners = new Set<() => void>();
   private refreshing: Promise<void> | null = null;
+  /** A render error stopped the window drawing (`abortPastes`): nothing continues from then on. */
+  crashed = false;
+  /**
+   * Ids a continuation replaced (old → new): a view or a pane still holding
+   * the old one for a render finds the same session, never a new one.
+   */
+  private aliases = new Map<string, string>();
+  /** The panel view's React key: a continued terminal keeps its first id's, so its xterm is never remounted. */
+  private viewKeys = new Map<string, string>();
+  /** The panel's tab order: as first seen, and a continuation takes the old tab's place. */
+  private ranks = new Map<string, number>();
+  private rankSeq = 0;
 
   // Set by the workspace (Workspace.tsx, useTerminalBridge).
   defaultIn: () => InSpec = () => "home";
   setPaneTerminal: (pane: PaneNo, id: string | null) => void = () => {};
   forgetTerminal: (id: string) => void = () => {};
+  /** A terminal continued under a new id: every pane holding the old one holds the new one. */
+  renameTerminal: (from: string, to: string) => void = () => {};
   focusPane: (pane: PaneNo) => void = () => {};
   showPanel: () => void = () => {};
-  /** Load a URL in a Preview pane (App's click rule); false when it did not. */
-  openPreview: (url: string) => boolean = () => false;
+  /** Load a URL in a Browser pane (App's click rule); false when it did not. */
+  openBrowser: (url: string) => boolean = () => false;
 
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
@@ -969,12 +1212,39 @@ export class TermManager {
   }
 
   session(id: string): TermSession {
+    id = this.resolve(id);
     let s = this.sessions.get(id);
     if (!s) {
       s = new TermSession(id, this);
       this.sessions.set(id, s);
     }
     return s;
+  }
+
+  /** The id a terminal goes by now: a continued one's newest. */
+  resolve(id: string): string {
+    for (let i = 0; i < 64 && this.aliases.has(id); i++) id = this.aliases.get(id)!;
+    return id;
+  }
+
+  /** The panel view's key for terminal `id`: its first id's, through every continuation. */
+  viewKey(id: string): string {
+    const r = this.resolve(id);
+    return this.viewKeys.get(r) ?? r;
+  }
+
+  private rank(id: string): number {
+    let n = this.ranks.get(id);
+    if (n === undefined) {
+      n = ++this.rankSeq;
+      this.ranks.set(id, n);
+    }
+    return n;
+  }
+
+  /** Cards raised so far: a hold begun under one count is dropped under another. */
+  get cardCount(): number {
+    return this.cards;
   }
 
   row(id: string): TerminalRow | null {
@@ -985,6 +1255,9 @@ export class TermManager {
     this.rows = this.rows.some((r) => r.id === row.id)
       ? this.rows.map((r) => (r.id === row.id ? row : r))
       : [...this.rows, row];
+    // The last row each session saw is its latest: "Jarvis can read" is carried from it (`readableOf`).
+    const s = this.sessions.get(row.id);
+    if (s) s.lastRow = row;
   }
 
   markRow(id: string) {
@@ -1005,11 +1278,14 @@ export class TermManager {
   tabs(): TerminalRow[] {
     const out = this.rows.slice();
     for (const s of this.sessions.values()) {
-      if ((s.state === "ended" || s.state === "lost") && !out.some((r) => r.id === s.id)) {
+      if ((s.state === "ended" || s.state === "lost" || s.state === "continuing") && !out.some((r) => r.id === s.id)) {
         out.push(s.lastRow ?? { ...GONE_ROW, id: s.id, title: `terminal ${s.id}` });
       }
     }
-    return out;
+    // In the order first seen: an ended tab stays where it was, and its continuation takes its place.
+    const order = new Map(out.map((r) => [r.id, this.rank(r.id)]));
+    for (const id of Array.from(this.ranks.keys())) if (!order.has(id)) this.ranks.delete(id);   // review N2
+    return out.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
   }
 
   /**
@@ -1059,7 +1335,54 @@ export class TermManager {
   selectTab(id: string) {
     this.prefs = { ...this.prefs, active: id };
     savePrefs(this.prefs);
+    this.dropHiddenHolds();
     this.changed();
+  }
+
+  /**
+   * A continuation whose terminal nobody can see any more (the panel closed,
+   * another tab chosen, its pane switched away or dropped) sends nothing of
+   * what was typed for it: held input goes into a terminal only while it is
+   * on screen (PR #64 review L1). Asked after every change of where
+   * terminals are drawn.
+   */
+  private dropHiddenHolds() {
+    for (const s of this.sessions.values()) if (s.continuing && !this.visible(s.id)) s.dropHiddenHold();
+  }
+
+  /**
+   * A program terminal the daemon just started for this window's own click
+   * (VX-2: a VEX build, download or the brain terminal): listed now, held as
+   * this window's (`claim`), and shown — in the pane already showing it,
+   * else as the panel's tab, the panel opened. Never under a card.
+   */
+  async showProgram(id: string): Promise<void> {
+    if (!isTerminalId(id)) return;
+    await this.refresh();
+    if (this.blocked || !this.rows.some((r) => r.id === id)) return;
+    this.claim(id);
+    if (this.place.has(id)) {
+      this.changed();
+      return;
+    }
+    this.selectTab(id);
+    this.showPanel();
+  }
+
+  /** A program terminal (VX-1): it ends with its program, so Restart would open a shell instead. */
+  isProgram(id: string): boolean {
+    const s = this.sessions.get(id);
+    return !!(this.row(id)?.program ?? s?.lastRow?.program);
+  }
+
+  /**
+   * The pane showing terminal `id` was closed (WP-G2, plan §3.6): the
+   * terminal goes back to the panel as its selected tab. The shell lives on —
+   * no DELETE — its session stays attached, and the panel is left open or
+   * closed as it was.
+   */
+  releaseToPanel(id: string) {
+    this.selectTab(id);
   }
 
   get dot(): boolean {
@@ -1075,9 +1398,12 @@ export class TermManager {
    * Resume or the card it should wait for. (The hold under a card is driven
    * from App, above the boundary, so it still holds after a crash.) A link
    * menu waiting for a choice goes too (WP-E): it was opened for a window
-   * that is gone, and Reload must not bring it back.
+   * that is gone, and Reload must not bring it back. And no ended terminal
+   * continues from then on, nor does anything held for one go out
+   * (`crashed`): App calls this only from its crash handler.
    */
   abortPastes() {
+    this.crashed = true;
     for (const s of this.sessions.values()) s.abortPaste();
     this.closeLinkMenu();
   }
@@ -1086,6 +1412,7 @@ export class TermManager {
     if (this.blocked === blocked) return;
     this.blocked = blocked;
     if (blocked) {
+      this.cards++;
       this.confirm = null;
       this.linkMenu = null;
     }
@@ -1106,14 +1433,31 @@ export class TermManager {
       this.unseenExits.clear();
       void this.refresh();
     }
+    this.dropHiddenHolds();
     this.changed();
   }
 
-  setPlace(place: Map<string, number>) {
+  setSlots(slots: Map<number, number>) {
+    const same = slots.size === this.slots.size && [...slots].every(([k, v]) => this.slots.get(k) === v);
+    if (same) return;
+    this.slots = slots;
+    this.changed();
+  }
+
+  /** The slot pane `pane` (an id) is drawn in: what "in pane N" says. */
+  slotOf(pane: number): number {
+    return this.slots.get(pane) ?? pane;
+  }
+
+  setPlace(given: Map<string, number>) {
+    // A pane may still hold a continued terminal's old id for a render.
+    const place = new Map<string, number>();
+    for (const [id, n] of given) if (!place.has(this.resolve(id))) place.set(this.resolve(id), n);
     const same = place.size === this.place.size && [...place].every(([k, v]) => this.place.get(k) === v);
     if (same) return;
     this.place = place;
     for (const id of place.keys()) this.unseenExits.delete(id);
+    this.dropHiddenHolds();
     this.changed();
   }
 
@@ -1126,6 +1470,10 @@ export class TermManager {
           this.rows = await api.terminals();
           this.loaded = true;
           this.listError = "";
+          for (const r of this.rows) {
+            const s = this.sessions.get(r.id);
+            if (s) s.lastRow = r;                 // the latest row each session has seen (`readableOf`)
+          }
           const live = new Set(this.rows.map((r) => r.id));
           // A terminal this window has never drawn that ended while it was not looking.
           for (const r of this.rows) {
@@ -1173,13 +1521,25 @@ export class TermManager {
     savePrefs(this.prefs);
   }
 
-  /** A new terminal, shown in the panel or in a pane. Null when refused (said in `error`). */
-  async create(spec: InSpec, where: "panel" | PaneNo): Promise<string | null> {
+  /**
+   * A new terminal, shown in the panel or in a pane. Null when refused (said
+   * in `error`). `place`, asked once the daemon has made it: false leaves it
+   * in the list, shown nowhere and opening nothing (`ownerOpened`).
+   * `readable: false` (a split of a terminal Jarvis may not read, WP-G2): the
+   * daemon makes it with the switch off — a copy never widens what Jarvis
+   * can read, not even for a round trip.
+   */
+  async create(
+    spec: InSpec, where: "panel" | PaneNo, place?: () => boolean, opts: { readable?: boolean } = {},
+  ): Promise<string | null> {
     if (this.blocked) return null;
+    this.creations++;
     this.error = "";
     let row: TerminalRow;
     try {
-      row = await api.createTerminal({ in: spec });
+      // Unreadable from its first byte: the daemon makes it with the switch
+      // off (review of PR #47), never readable for a round trip.
+      row = await api.createTerminal({ in: spec, ...(opts.readable === false ? { readable: false } : {}) });
     } catch (e: any) {
       this.error = e?.message || "the terminal could not be opened";
       this.changed();
@@ -1189,6 +1549,10 @@ export class TermManager {
     this.claimed.add(row.id);
     saveMine(this.claimed, PAGE);
     this.remember(row.id, spec);
+    if (place && !place()) {
+      this.changed();
+      return row.id;
+    }
     if (where === "panel") {
       this.prefs = { ...this.prefs, active: row.id };
       savePrefs(this.prefs);
@@ -1200,11 +1564,46 @@ export class TermManager {
     return row.id;
   }
 
-  /** Ctrl+` opened the panel: like VS Code, a terminal if there is none. */
-  async keyOpened() {
-    if (this.blocked) return;
-    await this.refresh();
-    if (this.loaded && !this.listError && this.rows.length === 0) await this.create(this.defaultIn(), "panel");
+  /**
+   * The owner opened the panel (Ctrl+`, ⬓, the layout menu's Panel row) or
+   * switched a pane to the terminal view: like VS Code, a terminal when there
+   * is none — in the panel, or in that pane as its `+` would (the owner's
+   * call, 2026-10-11; WP-D had it on Ctrl+` only). Called from those gestures
+   * and nothing else: never a page load, a restored layout, a reload or a
+   * reattach. Nothing under a card, and nothing once a card has come and
+   * gone since the gesture (answered or not); nothing unless a listing asked
+   * for now came back (never one already on its way, which may predate a
+   * terminal another window opened); nothing when any terminal is listed —
+   * one another window shows, or one that exited, included: the panel or the
+   * picker shows it instead; nothing if a terminal was opened meanwhile
+   * (`+`), or if `still` says the place no longer wants one (the panel was
+   * closed, the pane switched away). `still` and the cards are asked again
+   * once the daemon has made it: if either changed while it was being made,
+   * it stays in the list and nothing opens or moves. One at a time: a gesture
+   * while one is on its way adds nothing. A refusal (six already open) is
+   * said in `error`, as `+` says it.
+   */
+  ownerOpened(where: "panel" | PaneNo, still: () => boolean): Promise<void> {
+    if (this.blocked) return Promise.resolve();
+    if (this.ownerOpening) return this.ownerOpening;
+    const made = this.creations;
+    const cards = this.cards;
+    const holds = () => !this.blocked && this.cards === cards && still();
+    this.opening = where;
+    this.changed();
+    this.ownerOpening = (async () => {
+      try {
+        const listed = await this.freshList();
+        if (!listed || !this.loaded || !holds()) return;
+        if (this.rows.length > 0 || this.creations !== made) return;
+        await this.create(this.defaultIn(), where, holds);
+      } finally {
+        this.opening = null;
+        this.ownerOpening = null;
+        this.changed();
+      }
+    })();
+    return this.ownerOpening;
   }
 
   /**
@@ -1214,11 +1613,12 @@ export class TermManager {
    */
   async requestClose(id: string) {
     if (this.blocked) return;
+    id = this.resolve(id);                    // continued meanwhile: the terminal it is now
     const listed = await this.freshList();
     if (this.blocked) return;
     const row = this.row(id);
     const s = this.sessions.get(id);
-    const gone = s && (s.state === "ended" || s.state === "closed");
+    const gone = s && (s.state === "ended" || s.state === "closed" || s.state === "continuing");
     if (row && !row.exited && !gone && (row.busy || !listed)) {
       this.confirm = { id, title: row.title || id, unsure: !listed };
       this.changed();
@@ -1229,11 +1629,12 @@ export class TermManager {
 
   async close(id: string) {
     if (this.blocked) return;
+    id = this.resolve(id);
     this.confirm = null;
     this.error = "";
     const s = this.sessions.get(id);
     const known = this.rows.some((r) => r.id === id);
-    if (known || (s && s.state !== "ended" && s.state !== "closed")) {
+    if (known || (s && s.state !== "ended" && s.state !== "closed" && s.state !== "continuing")) {
       try {
         await api.closeTerminal(id);
       } catch (e: any) {
@@ -1265,6 +1666,13 @@ export class TermManager {
     this.prefs = { active: this.prefs.active === id ? null : this.prefs.active, specs };
     savePrefs(this.prefs);
     this.forgetTerminal(id);
+    // The ids it was continued from go with it.
+    for (const from of Array.from(this.aliases.keys()).filter((a) => this.resolve(a) === id)) {
+      this.aliases.delete(from);
+      this.forgetTerminal(from);
+    }
+    this.viewKeys.delete(id);
+    this.ranks.delete(id);
     this.changed();
   }
 
@@ -1283,22 +1691,116 @@ export class TermManager {
     this.changed();
   }
 
-  /** Exited: the same folder again, in the same place. */
+  /**
+   * Whether Jarvis may read terminal `id`, for a terminal made in its place:
+   * only when it is known to be readable — its live row, else the last row
+   * its session saw. Unknown fails closed (review 2 of PR #47: a restart or
+   * "New terminal here" made a copy of an unreadable terminal readable).
+   */
+  readableOf(id: string): boolean {
+    return readableCarry(this.row(id) ?? this.sessions.get(id)?.lastRow ?? null);
+  }
+
+  /** Whether `s` may continue now (lib/terminal.ts, `mayContinue`), a card aside. */
+  mayContinue(s: TermSession): boolean {
+    return mayContinue({
+      state: s.state, program: this.isProgram(s.id), mine: this.claimed.has(s.id),
+      // Only a remembered `in`, never a guess from the row (review N1).
+      known: !!this.prefs.specs[s.id], crashed: this.crashed,
+    });
+  }
+
+  /**
+   * An ended terminal continues (`TermSession.startContinue`, the owner's
+   * gesture there): a new shell through `POST /terminals` — the folder it was
+   * opened in, as an id; its "Jarvis can read" switch, off when unknown, made
+   * that way from the first byte — then the session becomes the new
+   * terminal's, in place (`rekey`), and attaches. A refusal (six already
+   * open) is said in its strip. Closed meanwhile (×): the new shell goes too.
+   */
+  async continueSession(s: TermSession): Promise<void> {
+    const old = s.id;
+    const spec = this.specOf(old);
+    const readable = this.readableOf(old);
+    this.creations++;
+    let row: TerminalRow;
+    try {
+      row = await api.createTerminal({ in: spec, ...(readable ? {} : { readable: false }) });
+    } catch (e: any) {
+      s.continueFailed(e?.message || "a new shell could not be started here");
+      return;
+    }
+    if (this.sessions.get(old) !== s || s.state !== "continuing") {
+      try {
+        await api.closeTerminal(row.id);
+      } catch {
+        /* still listed: the owner can close it */
+      }
+      void this.refresh();
+      return;
+    }
+    this.rekey(s, old, row, spec);
+    s.continued(row);
+  }
+
+  /**
+   * Terminal `old` is now terminal `row.id`, everywhere this window tracks it:
+   * the session and its view's key, the panel's tab (same place), the
+   * selected tab, this tab's own list (`mine`), the remembered folder, and
+   * every pane holding it.
+   */
+  private rekey(s: TermSession, old: string, row: TerminalRow, spec: InSpec) {
+    const id = row.id;
+    this.updateRow(row);
+    this.sessions.delete(old);
+    this.sessions.set(id, s);
+    s.id = id;
+    this.aliases.set(old, id);
+    this.viewKeys.set(id, this.viewKeys.get(old) ?? old);
+    this.viewKeys.delete(old);
+    this.ranks.set(id, this.rank(old));
+    this.ranks.delete(old);
+    this.claimed.delete(old);
+    this.claimed.add(id);
+    saveMine(this.claimed, PAGE);
+    const specs = { ...this.prefs.specs };
+    delete specs[old];
+    this.prefs = { active: this.prefs.active === old ? id : this.prefs.active, specs };
+    this.remember(id, spec);
+    this.unseenExits.delete(old);
+    if (this.reads.has(old)) {
+      this.reads = new Map(this.reads);
+      this.reads.delete(old);
+    }
+    if (this.confirm?.id === old) this.confirm = null;
+    if (this.place.has(old)) {
+      const place = new Map(this.place);
+      place.set(id, place.get(old)!);
+      place.delete(old);
+      this.place = place;
+    }
+    this.renameTerminal(old, id);
+    this.changed();
+  }
+
+  /** Exited: the same folder again, in the same place, with the same switch. */
   async restart(id: string) {
     if (this.blocked) return;
     const spec = this.specOf(id);
     const pane = this.place.get(id) as PaneNo | undefined;
+    const readable = this.readableOf(id);
     await this.close(id);
-    await this.create(spec, pane ?? "panel");
+    await this.create(spec, pane ?? "panel", undefined, { readable });
   }
 
-  /** Ended with Jarvis (or gone): a new one where it was. */
+  /** Ended with Jarvis (or gone): a new one where it was, with the same switch. */
   async newHere(id: string) {
     if (this.blocked) return;
     const spec = this.specOf(id);
     const pane = this.place.get(id) as PaneNo | undefined;
+    const readable = this.readableOf(id);
     this.gone(id);
-    await this.create(spec, pane ?? "panel");
+    await this.create(spec, pane ?? "panel", undefined, { readable });
   }
 
   async setReadable(id: string, readable: boolean) {
@@ -1324,6 +1826,17 @@ export class TermManager {
     this.notices = [...this.notices.filter((n) => n.terminalId !== id),
       { key: ++this.noticeSeq, terminalId: id, title, at }].slice(-3);
     void this.refresh();
+    this.changed();
+  }
+
+  /**
+   * `terminal_read` on the bus: Jarvis read this terminal (or was refused).
+   * HUD chrome only — the note never touches the terminal's stream.
+   */
+  heardRead(data: unknown) {
+    const note = parseRead(data);
+    if (!note) return;
+    this.reads = new Map(this.reads).set(note.terminalId, note);
     this.changed();
   }
 
@@ -1355,15 +1868,15 @@ export class TermManager {
     this.changed();
   }
 
-  /** The link menu's "Open in Preview": a Preview pane, by the click rule (App). */
-  linkToPreview() {
+  /** The link menu's "Open in Browser": a Browser pane, by the click rule (App). */
+  linkToPane() {
     const menu = this.linkMenu;
     this.closeLinkMenu();
-    if (menu && !this.blocked) this.openPreview(menu.url);
+    if (menu && !this.blocked) this.openBrowser(menu.url);
   }
 
-  /** The link menu's "Open in a browser tab". */
-  linkToBrowser() {
+  /** The link menu's "Open in a Chrome tab". */
+  linkToTab() {
     const menu = this.linkMenu;
     this.closeLinkMenu();
     if (menu && !this.blocked) window.open(menu.url, "_blank", "noopener,noreferrer");
@@ -1376,6 +1889,11 @@ export const terminals = new TermManager();
 /** The SSE `terminal_attached` record (App's one event stream). */
 export function terminalAttached(data: unknown) {
   terminals.heardAttached(data);
+}
+
+/** The SSE `terminal_read` record (App's one event stream). */
+export function terminalRead(data: unknown) {
+  terminals.heardRead(data);
 }
 
 if (typeof window !== "undefined") {
@@ -1425,9 +1943,11 @@ function useNow(active: boolean, ms = 1000): number {
 export function TerminalView(props: { id: string; where: string; pane?: PaneNo; onChoose?: () => void }) {
   const mgr = useTerminals();
   const s = mgr.session(props.id);
+  // Its id now: a continued terminal's new one, even while a pane still holds the old.
+  const id = s.id;
   const slot = useRef<HTMLDivElement>(null);
   // Another window shows it: drawn as a choice, never attached to unasked.
-  const away = mgr.elsewhere(props.id);
+  const away = mgr.elsewhere(id);
 
   useLayoutEffect(() => {
     const el = slot.current;
@@ -1448,17 +1968,18 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
 
   const now = useNow(s.state === "waiting" || (s.attachedAt > 0 && Date.now() - s.attachedAt < SETTLE_MS + 1000));
   // The daemon's row while the terminal exists; its last one only for a name after.
-  const live = mgr.row(props.id);
+  const live = mgr.row(id);
   const row = live ?? s.lastRow;
   const settled = s.attachedAt > 0 && now - s.attachedAt >= SETTLE_MS;
   const note = integrationNote(live ? { integration: live.integration, marked: s.marked || live.marked } : null,
                                settled);
   const readable = row ? row.readable : true;
-  const name = s.title || row?.title || `terminal ${props.id}`;
+  const read = mgr.reads.get(id);
+  const name = s.title || row?.title || `terminal ${id}`;
   const blocked = mgr.blocked;
 
   return (
-    <div className="termview" data-testid={`terminal-${props.id}`} data-state={s.state} data-where={props.where}>
+    <div className="termview" data-testid={`terminal-${id}`} data-state={s.state} data-where={props.where}>
       <div className="termbar">
         <span className="termname" data-testid="term-name" title={row?.folder ? `${name} — ${row.folder}` : name}>
           {name}
@@ -1469,16 +1990,28 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
             {note.badge}
           </span>
         ) : null}
+        {read ? (
+          <span className={"termreadnote" + (read.refused ? " refused" : "")} data-testid="term-read-note"
+                data-refused={read.refused ? "true" : "false"} role="status"
+                title={read.refused
+                  ? "Jarvis asked to read this terminal and was refused: reading is off, or the output may hold a credential"
+                  : "Jarvis read this terminal's recent output (text only; it never types here)"}>
+            {readNoteText(read, clock(read.at))}
+          </span>
+        ) : null}
         <button
           type="button"
           className={"termread" + (readable ? " on" : "")}
           data-testid="term-readable"
           aria-pressed={readable}
           disabled={blocked || !live}
+          // A privacy switch: a click must not leave it focused under a
+          // habitual Space (lib/talkkey.ts, noPointerFocus).
+          onMouseDown={noPointerFocus}
           title={readable
             ? "Jarvis can read this terminal's recent output (a read never includes a recognisable secret). Click to stop."
             : "Jarvis cannot read this terminal. Click to allow."}
-          onClick={() => void mgr.setReadable(props.id, !readable)}
+          onClick={() => void mgr.setReadable(id, !readable)}
         >
           {readable ? "Jarvis can read" : "Jarvis can't read"}
         </button>
@@ -1489,7 +2022,7 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
           title="Close this terminal"
           aria-label="Close this terminal"
           disabled={blocked}
-          onClick={() => void mgr.requestClose(props.id)}
+          onClick={() => void mgr.requestClose(id)}
         >
           ×
         </button>
@@ -1497,7 +2030,7 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
       {away ? (
         <div className="termstrip" data-testid="term-elsewhere">
           <span>This terminal is in another window.</span>
-          <button type="button" data-testid="term-show-here" disabled={blocked} onClick={() => mgr.showHere(props.id)}
+          <button type="button" data-testid="term-show-here" disabled={blocked} onClick={() => mgr.showHere(id)}
                   title="Show it here; the window showing it is asked first">
             Show it here
           </button>
@@ -1539,7 +2072,15 @@ function PasteStrip(props: { s: TermSession; blocked: boolean }) {
         : p.kind === "unsent"
           ? `This terminal ${p.why === "offline" ? "is not running here" : "was still connecting"}, so what you `
             + `typed or pasted (${kib(p.bytes)}) was not sent.`
-          : `Ctrl-C stopped the paste: the rest of it (${kib(p.bytes)}) was not sent.`;
+          : p.kind === "continued"
+            // A held line is typed, never run (PR #64 review L6): the prompt it was typed at is gone.
+            ? (p.stopped === "paste"
+              ? `Continued in a new local shell: your paste has a line break, so it was not sent (${kib(p.bytes)}`
+                + " with anything after it). Check the prompt, then paste it again."
+              : "Continued in a new local shell: your line is typed but not run"
+                + (p.bytes > 1 ? `, and what you typed after its Enter (${kib(p.bytes - 1)}) was not sent` : "")
+                + ". Check the prompt, then press Enter.")
+            : `Ctrl-C stopped the paste: the rest of it (${kib(p.bytes)}) was not sent.`;
   return (
     <div className="termnote" data-testid="term-paste-notice" data-kind={p.kind} data-held={s.heldAt ? "true" : undefined}
          role="status">
@@ -1601,25 +2142,54 @@ function StateStrip(props: { s: TermSession; now: number; blocked: boolean; onCh
       return (
         <div className="termstrip" data-testid="term-exited">
           <span>exited (code {s.exitCode ?? "?"})</span>
-          <button type="button" data-testid="term-restart" disabled={blocked} onClick={() => void mgr.restart(s.id)}>
-            Restart
-          </button>
+          {mgr.isProgram(s.id) ? null : (
+            <button type="button" data-testid="term-restart" disabled={blocked} onClick={() => void mgr.restart(s.id)}>
+              Restart
+            </button>
+          )}
           <button type="button" data-testid="term-exit-close" disabled={blocked} onClick={() => void mgr.close(s.id)}>
             Close
           </button>
         </div>
       );
-    case "ended":
+    case "continuing":
       return (
-        <div className="termstrip" data-testid="term-ended">
+        <div className="termstrip quiet" data-testid="term-continuing" role="status">
+          Starting a new shell here…
+        </div>
+      );
+    case "ended": {
+      // Typing continues it — a shell this window showed, not a program terminal.
+      const goOn = mgr.mayContinue(s);
+      return (
+        <div className="termstrip" data-testid="term-ended" data-continue={goOn ? "true" : "false"}>
           <span>
             {s.endedWhy === "ended"
               ? "Jarvis restarted; this terminal ended."
               : "This terminal has ended (Jarvis restarted, or it was closed)."}
+            {goOn && !s.continueError ? " Type to continue in a new shell here." : ""}
           </span>
-          <button type="button" data-testid="term-new-here" disabled={blocked} onClick={() => void mgr.newHere(s.id)}>
-            New terminal here
-          </button>
+          {s.continueError ? (
+            // After a refusal typing continues nothing; only the button tries again (review L5).
+            <span className="err" data-testid="term-continue-error">
+              A new shell could not be started here: {s.continueError.replace(/[.\s]+$/, "")}.
+              {goOn ? " Continue here tries again." : ""}
+            </span>
+          ) : null}
+          {goOn ? (
+            <button type="button" data-testid="term-continue" disabled={blocked}
+                    title="A new shell in the same folder, under this terminal's text"
+                    onClick={() => s.continueHere()}>
+              Continue here
+            </button>
+          ) : null}
+          {mgr.isProgram(s.id) ? null : (
+            <button type="button" className={goOn ? "quiet" : undefined} data-testid="term-new-here" disabled={blocked}
+                    title="A new shell in the same folder, without this terminal's text"
+                    onClick={() => void mgr.newHere(s.id)}>
+              New terminal here
+            </button>
+          )}
           {props.onChoose ? (
             <button type="button" className="quiet" data-testid="term-choose" disabled={blocked} onClick={props.onChoose}>
               Choose another
@@ -1627,6 +2197,7 @@ function StateStrip(props: { s: TermSession; now: number; blocked: boolean; onCh
           ) : null}
         </div>
       );
+    }
     case "lost":
       return (
         <div className="termstrip" data-testid="term-lost">
@@ -1644,7 +2215,8 @@ function StateStrip(props: { s: TermSession; now: number; blocked: boolean; onCh
 /** A pane showing the terminal view: its terminal, or the choice of one. */
 export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; drawn: boolean }) {
   const mgr = useTerminals();
-  const id = props.terminalId;
+  // A continued terminal's newest id, while the pane may still hold the old one for a render.
+  const id = props.terminalId ? mgr.resolve(props.terminalId) : null;
   useEffect(() => {
     if (props.drawn && !mgr.loaded) void mgr.refresh();
   }, [props.drawn, mgr]);
@@ -1654,7 +2226,7 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
     if (at && at !== props.pane) {
       return (
         <div className="tabbody pad muted" data-testid={`pane-${props.pane}-terminal-elsewhere`}>
-          This terminal is shown in pane {at}.{" "}
+          This terminal is shown in pane {mgr.slotOf(at)}.{" "}
           <button type="button" className="quiet" onClick={() => mgr.focusPane(at as PaneNo)}>Go there</button>
         </div>
       );
@@ -1668,7 +2240,7 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
   }
   const where = (r: TerminalRow) => {
     const n = mgr.place.get(r.id);
-    if (n) return `in pane ${n}`;
+    if (n) return `in pane ${mgr.slotOf(n)}`;
     if (r.exited) return "exited";
     if (mgr.elsewhere(r.id)) return "in another window";
     return "in the panel";
@@ -1676,7 +2248,8 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
   return (
     <div className="tabbody termpick" data-testid={`pane-${props.pane}-terminal-pick`}>
       <div className="pad">
-        <button type="button" data-testid={`pane-${props.pane}-terminal-new`} disabled={mgr.blocked}
+        <button type="button" data-testid={`pane-${props.pane}-terminal-new`}
+                disabled={mgr.blocked || mgr.opening === props.pane}
                 onClick={() => void mgr.create(mgr.defaultIn(), props.pane)}>
           + New terminal here
         </button>
@@ -1697,6 +2270,8 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
             </button>
           ))}
         </div>
+      ) : mgr.opening === props.pane ? (
+        <div className="pad muted" data-testid={`pane-${props.pane}-terminal-opening`}>Opening a terminal…</div>
       ) : (
         <div className="pad muted">No terminals are open.</div>
       )}
@@ -1758,13 +2333,15 @@ export function TerminalPanel(props: {
                   aria-selected={r.id === active && !pane}
                   data-testid={`panel-tab-${r.id}`}
                   data-place={pane ? `pane-${pane}` : "panel"}
-                  title={pane ? `${r.title} — shown in pane ${pane}; click to go there` : r.title}
+                  data-program={r.program ?? undefined}
+                  title={pane ? `${r.title} — shown in pane ${mgr.slotOf(pane)}; click to go there` : r.title}
                   disabled={props.blocked}
                   onClick={() => (pane ? mgr.focusPane(pane as PaneNo) : mgr.selectTab(r.id))}
                 >
                   <span className="paneltab-name">{r.title || r.id}</span>
-                  {pane ? <span className="paneltab-where">in pane {pane}</span> : null}
-                  {ended ? <span className="paneltab-where">ended</span>
+                  {pane ? <span className="paneltab-where">in pane {mgr.slotOf(pane)}</span> : null}
+                  {s?.state === "continuing" ? <span className="paneltab-where">starting…</span>
+                    : ended ? <span className="paneltab-where">ended</span>
                     : exited ? <span className="paneltab-where">exited</span>
                       : away ? <span className="paneltab-where">in another window</span> : null}
                 </button>
@@ -1839,12 +2416,6 @@ export function TerminalPanel(props: {
           data-testid="panel-new-menu-list"
           style={{ right: menu.right, bottom: menu.bottom }}
           onMouseDown={(e) => e.stopPropagation()}
-          onKeyDown={(e) => {
-            if (e.code === "Space" || e.key === " ") e.stopPropagation();
-          }}
-          onKeyUp={(e) => {
-            if (e.code === "Space" || e.key === " ") e.stopPropagation();
-          }}
         >
           <div className="lm-head">New terminal in</div>
           <button type="button" role="menuitem" className="lm-row" data-testid="panel-new-home" onClick={() => openIn("home")}>
@@ -1871,6 +2442,8 @@ export function TerminalPanel(props: {
           <div className="pad muted">…</div>
         ) : mgr.listError && !tabs.length ? (
           <div className="pad err" data-testid="panel-list-error">{mgr.listError}</div>
+        ) : (!tabs.length || !active) && mgr.opening === "panel" ? (
+          <div className="pad muted" data-testid="panel-opening">Opening a terminal…</div>
         ) : !tabs.length || !active ? (
           <div className="pad muted" data-testid="panel-empty">
             No terminals are open.{" "}
@@ -1881,7 +2454,7 @@ export function TerminalPanel(props: {
           </div>
         ) : mgr.place.has(active) ? (
           <div className="pad muted" data-testid="panel-elsewhere">
-            This terminal is shown in pane {mgr.place.get(active)}.{" "}
+            This terminal is shown in pane {mgr.slotOf(mgr.place.get(active)!)}.{" "}
             <button type="button" className="quiet" data-testid="panel-jump"
                     onClick={() => mgr.focusPane(mgr.place.get(active) as PaneNo)}>
               Go there
@@ -1891,7 +2464,8 @@ export function TerminalPanel(props: {
           // Only while the panel is open: a hidden panel attaches nothing
           // (a reload must not ask another window for a terminal nobody is
           // looking at here). Once attached, a session stays attached hidden.
-          <TerminalView key={active} id={active} where="panel" />
+          // Keyed by its first id: a continuation keeps its xterm (and focus) in place.
+          <TerminalView key={mgr.viewKey(active)} id={active} where="panel" />
         ) : null}
       </div>
     </>
@@ -1958,8 +2532,8 @@ export function TerminalToasts(props: { blocked: boolean }) {
 
 /**
  * Where a Ctrl+clicked link to a server on this machine opens (WP-E): in a
- * Preview pane (a drawn one, else the focused pane — App's click rule) or in
- * a browser tab. "Open in Preview" is judged like a typed URL with the ports
+ * Browser pane (a drawn one, else the focused pane — App's click rule) or in
+ * a Chrome tab. "Open in Browser" is judged like a typed URL with the ports
  * the daemon reported, so a link to the HUD or the API is refused here, with
  * the reason. Placed at the click (screen px through `toCss`); Escape or a
  * click elsewhere closes it, and a card closes it (TermManager.setBlocked).
@@ -1997,7 +2571,7 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
       document.removeEventListener("keydown", esc, true);
     };
   }, [menu, mgr]);
-  const verdict = !menu || status === "pending" ? null : judgePreviewUrl(menu.url, ports);
+  const verdict = !menu || status === "pending" ? null : judgeBrowserUrl(menu.url, ports);
   // Never wider than the window (less 4px a side), so it can always be placed inside it.
   const width = menuWidth(toCss(window.innerWidth, props.zoom));
   useLayoutEffect(() => {
@@ -2024,12 +2598,6 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
       data-testid="term-link-menu"
       style={pos ? { left: pos.left, top: pos.top, width } : { left: 0, top: 0, width, visibility: "hidden" }}
       onMouseDown={(e) => e.stopPropagation()}
-      onKeyDown={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
-      }}
-      onKeyUp={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
-      }}
     >
       <div className="lm-head">A server on this machine</div>
       <div className="lm-url" data-testid="term-link-url" title={menu.url}>
@@ -2040,11 +2608,11 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
         ref={verdict?.ok ? first : undefined}
         role="menuitem"
         className="lm-row"
-        data-testid="term-link-preview"
+        data-testid="term-link-pane"
         disabled={!verdict?.ok}
-        onClick={() => mgr.linkToPreview()}
+        onClick={() => mgr.linkToPane()}
       >
-        <span className="lm-label">Open in Preview</span>
+        <span className="lm-label">Open in Browser</span>
       </button>
       {verdict && !verdict.ok ? (
         <div className="lm-note" data-testid="term-link-refused">{verdict.reason}</div>
@@ -2054,10 +2622,10 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
         ref={verdict?.ok ? undefined : first}
         role="menuitem"
         className="lm-row"
-        data-testid="term-link-browser"
-        onClick={() => mgr.linkToBrowser()}
+        data-testid="term-link-tab"
+        onClick={() => mgr.linkToTab()}
       >
-        <span className="lm-label">Open in a browser tab</span>
+        <span className="lm-label">Open in a Chrome tab</span>
       </button>
     </div>
   );

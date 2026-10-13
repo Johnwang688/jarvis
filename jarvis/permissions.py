@@ -172,6 +172,17 @@ def allows(tool_name: str, args: dict[str, Any], cwd: str | None = None) -> bool
     # neighbours. See `protected_state_verdict`.
     if protected_state.command_touch(command, cwd) is not None:
         return False
+    # A line that may run VEX's device tool and cannot be told, or is too
+    # complex to judge, is never covered: an entry for `uv` was a yes to
+    # running Python, not to whatever `uv run $X` turns out to start (VX-1,
+    # `rules.vex_uncoverable`).
+    if rules.vex_uncoverable(command):
+        return False
+    # A kill whose pattern is too costly to judge against the v2 daemon: an
+    # entry for `pkill` was a yes to killing what the owner meant, not to a
+    # pattern nobody could check (`protected_state.kill_unsure`).
+    if protected_state.kill_unsure(command):
+        return False
     targets = rules.command_targets(command)
     if not targets:
         return False
@@ -208,11 +219,18 @@ def protected_state_verdict(command: str, cwd: str | None = None) -> rules.Verdi
     reach the allowlist — is ASK: those change what he runs on rather than
     what runs unasked, the owner can see and undo the effect, and restoring a
     backup is a legitimate request.
+
+    A write that provably lands on a **credential env file** is DENY too
+    (ENV-1, the owner's `.env*` rule: Jarvis writes only `*.example`); one
+    that only might (a glob, an unknown ending) is ASK.
     """
     touch = protected_state.command_touch(command, cwd)
     if touch is None:
         return None
-    if touch.certain and touch.path in protected_state.gate_paths():
+    # The allowlist, and since ENV-1 a credential env file (the owner's
+    # `.env*` rule; here the folder is known, so a write behind a symlink
+    # counts too): refused, never asked.
+    if protected_state.denies(touch):
         return rules.Verdict(rules.DENY, protected_state.refusal(touch))
     return rules.Verdict(rules.ASK, protected_state.ask_reason(touch))
 

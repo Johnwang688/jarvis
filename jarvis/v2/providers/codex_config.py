@@ -24,6 +24,8 @@ def validate(brief: Brief) -> None:
 
 
 def atomically_write(path: Path, text: str) -> None:
+    """0600 (mkstemp's mode), written aside and renamed into place. The
+    config may carry a jarvis-mcp caller token (plan §1.3)."""
     if path.is_symlink():
         raise BriefRefused("Codex private metadata must not be a symlink")
     fd, tmp = tempfile.mkstemp(prefix=".write-", dir=path.parent)
@@ -68,12 +70,68 @@ def config_text(brief: Brief) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _mcp_header(line: str) -> bool:
+    """`[mcp_servers]`, `[mcp_servers.x]`, `[mcp_servers."x"]` (any spacing)."""
+    if not line.startswith("["):
+        return False
+    inner = line.lstrip("[").lstrip()
+    return inner.startswith("mcp_servers") and inner[len("mcp_servers"):].lstrip()[:1] in (".", "]")
+
+
+def without_mcp_servers(text: str) -> str:
+    """`config_text`'s output with every `[mcp_servers.*]` table removed.
+
+    A session's jarvis server carries its caller token in its `env` table
+    (plan §1.3), so a closed session's config must not keep it. `config_text`
+    writes each server as one header and inline values, last in the file, and
+    no value spans a line (`_value` is JSON), so a line-wise cut is exact; the
+    result is checked by parsing it, and anything that still names
+    `mcp_servers` is refused rather than written."""
+    import tomllib
+    kept, skipping = [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            skipping = _mcp_header(stripped)
+        if not skipping:
+            kept.append(line)
+    out = "\n".join(kept) + "\n"
+    if "mcp_servers" in tomllib.loads(out):
+        raise ValueError("mcp_servers survived the cut")
+    return out
+
+
+def strip_mcp_servers(path: Path) -> bool:
+    """Rewrite a private Codex `config.toml` without its MCP servers. True
+    if the file changed. Atomic, refuses a symlink (`atomically_write`)."""
+    import tomllib
+    text = Path(path).read_text(encoding="utf-8")
+    if "mcp_servers" not in tomllib.loads(text):
+        return False
+    atomically_write(Path(path), without_mcp_servers(text))
+    return True
+
+
 def metadata_config_text() -> str:
     """Minimal strict config for account/model/quota reads (no thread starts)."""
     values = dict(model_provider="openai", forced_login_method="chatgpt",
                   cli_auth_credentials_store="file", sandbox_mode="workspace-write",
                   approval_policy="on-request", approvals_reviewer="auto_review",
                   check_for_update_on_startup=False)
+    return "\n".join(f"{k} = {_value(v)}" for k, v in values.items()) + "\n"
+
+
+def title_config_text(model: str, effort: str | None) -> str:
+    """The chat titler's one-turn config (titles.py): read-only sandbox,
+    never asks, no web search, no MCP servers, nothing trusted. Each of
+    these is also requested on `thread/start`/`turn/start` and checked in
+    the reply (`CodexProvider.one_shot`)."""
+    values = dict(model_provider="openai", forced_login_method="chatgpt",
+                  cli_auth_credentials_store="file", sandbox_mode="read-only",
+                  approval_policy="never", web_search="disabled",
+                  check_for_update_on_startup=False, model=model)
+    if effort is not None:
+        values["model_reasoning_effort"] = effort
     return "\n".join(f"{k} = {_value(v)}" for k, v in values.items()) + "\n"
 
 
@@ -89,7 +147,8 @@ def clean_env(home: Path, auth_home: Path | None = None) -> dict[str, str]:
     return env
 
 
-def _prepare_home(name: str, text: str, binary: str | None) -> tuple[list[str], dict[str, str], Path]:
+def _prepare_home(name: str, text: str, binary: str | None, *,
+                  skills: bool = True) -> tuple[list[str], dict[str, str], Path]:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise BriefRefused("Invalid Codex private thread directory id")
     auth_home = owner_home()
@@ -118,8 +177,9 @@ def _prepare_home(name: str, text: str, binary: str | None) -> tuple[list[str], 
     else:
         link.symlink_to(auth.resolve())
     # Preserve installed skills without importing personal config or plugins.
+    link_skills = skills
     skills = home / "skills"
-    if not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
+    if link_skills and not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
         skills.symlink_to(auth_home / "skills", target_is_directory=True)
     atomically_write(home / "config.toml", text)
     return [str(Path(binary).resolve()), "app-server", "--strict-config", "--stdio"], clean_env(home), home
@@ -139,3 +199,9 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
 def prepare_metadata(binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:
     """An isolated app-server home for read-only account metadata RPCs."""
     return _prepare_home("_metadata", metadata_config_text(), binary)
+
+
+def prepare_title(binary: str, model: str, effort: str | None) -> tuple[list[str], dict[str, str], Path]:
+    """The chat titler's private home: its own config (`title_config_text`),
+    the owner's login linked as every session's is, and no skills."""
+    return _prepare_home("_titles", title_config_text(model, effort), binary, skills=False)

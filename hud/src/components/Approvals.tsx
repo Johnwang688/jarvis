@@ -17,6 +17,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
+import { noPointerFocus } from "../lib/talkkey";
+import { allowRestore } from "../state/frameguard";
 
 export function approvalChime(ctx?: AudioContext | null) {
   try {
@@ -103,13 +105,18 @@ export function ApprovalCard(props: {
         {/* AUTHORIZE and ALWAYS are out of the Tab order (tabIndex -1): they
             take a deliberate click, so no Tab or Shift+Tab ever puts one under
             an Enter (re-review of PR #27). DENY, the cheap action, is the only
-            stop for Tab. */}
+            stop for Tab. Nor does a pointer ever focus them (`noPointerFocus`): a
+            press that slid off before its release used to leave focus on the
+            button, and the next Space or Enter authorized (review of PR #40 —
+            Space was push-to-talk until then, the key the owner's thumb is
+            trained to hold). The click itself still works. */}
         {r.allowlistable === false ? null : (
           <button
             type="button"
             className="always"
             disabled={busy}
             tabIndex={-1}
+            onMouseDown={noPointerFocus}
             data-testid="approval-always"
             title="authorize AND allowlist this, so it stops asking (persists across restarts)"
             onClick={() => decide(true, true)}
@@ -117,7 +124,8 @@ export function ApprovalCard(props: {
             ALWAYS
           </button>
         )}
-        <button type="button" disabled={busy} tabIndex={-1} onClick={() => decide(true)} data-testid="approval-allow">
+        <button type="button" disabled={busy} tabIndex={-1} onMouseDown={noPointerFocus} onClick={() => decide(true)}
+                data-testid="approval-allow">
           AUTHORIZE
         </button>
       </div>
@@ -189,7 +197,12 @@ export function ApprovalVeil(props: {
       for (const el of made) el.removeAttribute("inert");
       const back = restore.current;
       restore.current = null;
-      if (back && back.isConnected) back.focus({ preventScroll: true });
+      if (back && back.isConnected) {
+        // Giving the keyboard back to a Browser page the owner had it in is
+        // the HUD's act, not the page's (state/frameguard.ts): said first.
+        allowRestore(back);
+        back.focus({ preventScroll: true });
+      }
     };
   }, [up]);
   // The next queued card is a new card (it is keyed by its request): it takes

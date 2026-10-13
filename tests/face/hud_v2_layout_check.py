@@ -19,8 +19,9 @@ The checks worth keeping, each written to bite:
   - every layout key is inert while a card is up, so nothing re-lays the card
     out under a pointer that has not moved;
   - the zoom keys are the HUD's in the input bar and in Monaco too (else they
-    are Chrome's page zoom, which the control cannot see), while Ctrl+B stands
-    aside in Monaco and ignores auto-repeat, composition and Ctrl+Shift+B;
+    are Chrome's page zoom, which the control cannot see); Ctrl+B folds from
+    Monaco too except as the second key of its Ctrl+K chord (ED-1, decisions
+    E-10), and ignores auto-repeat, composition and Ctrl+Shift+B;
   - folding a pane keeps the sidebar's expanded projects, the selected thread
     and a compose draft, and New thread stays reachable from the rail;
   - at 1024x700 and 160% the window folds both panes for the render, without
@@ -48,7 +49,17 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
     to another project, its save still goes to the first one;
   - in a 2×2 grid with Monaco and a preview frame on screen, at 160% and 70%,
     the card is wholly on screen, AUTHORIZE is below the fold for a long
-    command, and every button is topmost at its own point.
+    command, and every button is topmost at its own point;
+  - (ED-1) with Monaco's context menu or suggest list open, at 100% and 160%,
+    a card that arrives is topmost at every button, the editor behind it is
+    unfocused and read-only, a typed `y` and Ctrl+S do nothing, and Escape
+    denies;
+  - (ED-1, review of PR #43) Ctrl+S saves the editor it is pressed in and
+    nothing else — not after that editor went away, not another pane's — an
+    editor created under a card is read-only, a save answered after another
+    file opened leaves that file alone, a key outside the editor does not end
+    Monaco's Ctrl+K chord, and the context menu opens at the pointer flipped
+    up or left at 70% and 160% and stays on screen in a short window.
 
 A render error (review of PR #29):
   - three clicks in one task on ⊞, and on ⋯ when the title bar is folded,
@@ -63,7 +74,7 @@ A render error (review of PR #29):
     first, and says a reload loses what was not sent; after a crash nothing
     heard is sent — a transcript landing after it, speech in the follow-up
     window or after a wake hit — the wake recognizer stops, and Space on
-    Reload presses Reload rather than push-to-talk; a dialog that throws is
+    Reload presses Reload and never starts the mic; a dialog that throws is
     closed and the window carries on.
 """
 from __future__ import annotations
@@ -81,7 +92,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
     guard(ctx)                      # live ports refused, HTTP and WebSocket alike
     ctx.add_init_script(init_script)
-    # Ctrl+` opens a terminal when there is none, and the 2×2 grid shows one:
+    # ⬓ and Ctrl+` open a terminal when there is none, and the 2×2 grid shows one:
     # the PTY is played in the browser (no shell), on this mock's own port.
     from tests.face.hud_v2_terminal_check import FakePty
     mock.fake_pty = FakePty(ctx, mock)
@@ -96,7 +107,10 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
                         _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks,
                         _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
-                        _card_focus_checks, _seen_checks, _crash_checks):
+                        _card_focus_checks, _editor_card_checks, _save_scope_checks, _late_save_checks,
+                        _chord_checks,
+                        _menu_place_checks, _seen_checks, _eight_checks, _split_checks, _split_close_one_checks,
+                        _split_file_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -522,7 +536,15 @@ def _resize_checks(page, mock, check, until):
     time.sleep(0.15)
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
-    check("Space on a focused separator is not push-to-talk", ptt is None, str(ptt))
+    check("Space on a focused separator never starts the mic", ptt is None, str(ptt))
+    # Push-to-talk's Ctrl+D (2026-10-10) works from a focused separator, and
+    # moves nothing.
+    width = _width(page, "#sidebar")
+    sep.focus()
+    held, after, key = _ptt_on_ctrl_d(page)
+    check("Ctrl+D held on a focused separator starts and stops push-to-talk, and moves nothing",
+          held is not None and after is None and key.get("prevented") is True and _width(page, "#sidebar") == width,
+          f"{held} {after} {key}")
     sep.dblclick()
 
     rsep = page.locator('[data-testid="split-right"]')
@@ -706,7 +728,7 @@ def _reachable(page, sel: str) -> tuple[bool, str]:
 
 
 TOOLS = ['[data-testid="tab-chat"]', '[data-testid="tab-task"]', '[data-testid="tab-file"]',
-         '[data-testid="tab-diff"]', '[data-testid="tab-preview"]', '[data-testid="profile"]',
+         '[data-testid="tab-diff"]', '[data-testid="tab-browser"]', '[data-testid="profile"]',
          '[data-testid="open-model"]', '[data-testid="open-voice"]', '[data-testid="open-avatar"]',
          '[data-testid="open-settings"]', '[data-testid="input"]', '[data-testid="model-chip"]',
          '[data-testid="project-chip"]', '[data-testid="dictation"]']
@@ -749,7 +771,7 @@ def _small_window_checks(page, mock, check, until):
 
 
 CHIP_CONTROLS = ['[data-testid="provider-chip-select"]', '[data-testid="model-chip-btn"]']
-POP_CONTROLS = ['[data-testid="model-opt"][data-value=""]', '[data-testid="effort-opt"][data-value=""]',
+POP_CONTROLS = ['[data-testid="model-opt"][data-value=""]', '[data-testid="effort-slider"]',
                 '[data-testid="provider-defaults-open"]']
 
 
@@ -835,10 +857,18 @@ def _monaco_zoom_checks(page, mock, check, until):
           str(_last_key(page)))
     in_monaco = page.evaluate("!!document.activeElement.closest('.monaco-editor')")
     sidebar = _visible(page, "#sidebar")
+    # Ctrl+B folds the sidebar from Monaco too, except as the second key of
+    # its Ctrl+K chord (decisions E-10; it used to stand aside entirely).
+    page.keyboard.press("Control+k")
     page.keyboard.press("Control+b")
     time.sleep(0.3)
-    check("Ctrl+B inside Monaco is Monaco's (its Ctrl+K Ctrl+B chord), not a fold",
-          in_monaco and _visible(page, "#sidebar") == sidebar, f"in monaco {in_monaco}")
+    check("Ctrl+K Ctrl+B inside Monaco is Monaco's chord, not a fold",
+          in_monaco and sidebar and _visible(page, "#sidebar"), f"in monaco {in_monaco}")
+    page.keyboard.press("Control+b")
+    until(lambda: not _visible(page, "#sidebar"), timeout=2)
+    check("and a lone Ctrl+B inside Monaco folds the sidebar", not _visible(page, "#sidebar"))
+    page.keyboard.press("Control+b")
+    until(lambda: _visible(page, "#sidebar"), timeout=2)
     time.sleep(0.3)
     fit = page.evaluate("""() => {
       const host = document.querySelector('[data-testid="editor"]').getBoundingClientRect();
@@ -939,12 +969,85 @@ def _pane(n: int, sel: str = "") -> str:
 
 
 def _ptt_on_space(page) -> object:
-    """Hold Space where focus is now; what push-to-talk made of it."""
+    """Hold Space where focus is now; what push-to-talk made of it (Space is
+    no key of push-to-talk's since 2026-10-10: it must never start the mic)."""
     page.keyboard.down("Space")
     time.sleep(0.15)
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
     return ptt
+
+
+# Push-to-talk's key is Ctrl+D (2026-10-10, hud/src/lib/talkkey.ts). Every
+# keydown of D or Space is kept, so a check can read afterwards whether the
+# window took it from the browser: `defaultPrevented` is final once the event
+# has been dispatched, whichever capture listener ran first (an init script
+# or this, run again after a reload).
+TALK_PROBE = """
+if (!window.__talkKeys) {
+  window.__talkKeys = [];
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyD' || e.code === 'Space') window.__talkKeys.push(e);
+  }, true);
+  // The first listener after the window's own capture phase: a Ctrl+D the
+  // window took for push-to-talk must never get this far (review of PR #40 —
+  // nothing behind the window may act on it).
+  window.__talkPast = 0;
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.code === 'KeyD') window.__talkPast++;
+  }, true);
+}
+true;
+"""
+
+
+def _talk_past(page) -> int:
+    """How many Ctrl+D keydowns got past the window to the document."""
+    return page.evaluate("window.__talkPast || 0")
+
+
+def _talk_probe(page):
+    page.evaluate(TALK_PROBE)
+
+
+def _talk_keys(page, n: int = 1) -> list[dict]:
+    """The last N D/Space keydowns, as the window left them."""
+    return page.evaluate("""(n) => (window.__talkKeys || []).slice(-n).map((e) => ({
+      key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, repeat: e.repeat,
+      prevented: e.defaultPrevented }))""", n)
+
+
+def _last_talk_key(page) -> dict:
+    got = _talk_keys(page, 1)
+    return got[0] if got else {}
+
+
+def _hold_keys(page, keys, hold: float = 0.15, ctrl_first: bool = False):
+    """Hold `keys` (pressed in order) where focus is now. Returns push-to-talk
+    while held and after the first key let go (D, or Ctrl when `ctrl_first`)."""
+    _talk_probe(page)
+    for k in keys:
+        page.keyboard.down(k)
+    time.sleep(hold)
+    held = page.evaluate("window.__hud.capture.ptt")
+    order = list(reversed(keys))
+    if ctrl_first and "Control" in order:
+        order.remove("Control")
+        order.insert(0, "Control")
+    page.keyboard.up(order[0])
+    time.sleep(0.05)
+    after = page.evaluate("window.__hud.capture.ptt")
+    for k in order[1:]:
+        page.keyboard.up(k)
+    time.sleep(0.05)
+    return held, after
+
+
+def _ptt_on_ctrl_d(page, hold: float = 0.15, ctrl_first: bool = False):
+    """Hold Ctrl+D where focus is now: (push-to-talk while held, push-to-talk
+    once D — or Ctrl, `ctrl_first` — is let go, the keydown as the window left it)."""
+    held, after = _hold_keys(page, ["Control", "d"], hold, ctrl_first)
+    return held, after, _last_talk_key(page)
 
 
 def _edit(page, until, pane: int, typed: str):
@@ -960,11 +1063,15 @@ def _edit(page, until, pane: int, typed: str):
     editor = page.locator(_pane(pane, '[data-testid="editor"] .view-lines'))
     fallback = page.locator(_pane(pane, '[data-testid="editor-fallback"]'))
     save = page.locator(_pane(pane, '[data-testid="file-save"]'))
+    host = page.locator(_pane(pane, '[data-testid="editor"]'))
+
     def shows_file() -> bool:
-        # One editor (not the old one beside the new), holding the file's text
-        # (not an empty buffer it is about to replace).
+        # One editor (not the old one beside the new), that Monaco has given
+        # its model (`data-language` is set only then, ED-1), holding the
+        # file's text (not an empty buffer it is about to replace).
         try:
-            return editor.count() == 1 and editor.inner_text(timeout=1000).strip() != ""
+            return (editor.count() == 1 and host.get_attribute("data-language", timeout=1000) is not None
+                    and editor.inner_text(timeout=1000).strip() != "")
         except Exception:
             return False
 
@@ -996,6 +1103,8 @@ def _approval(mock, req: str, command: str = "ls"):
 
 
 TOGGLES = ("left", "panel", "right")
+# ⊞'s tiles, in order (WP-G1, decisions S-1: 6 and 8 in the menu; 5 and 7 by split or close).
+MENU_TILES = ("single", "cols2", "rows2", "cols3", "main2", "grid4", "grid6", "grid8")
 
 
 def _fills(page) -> list:
@@ -1065,7 +1174,8 @@ def _titlebar_checks(page, mock, check, until):
     page.locator('[data-testid="toggle-right"]').click()
     until(lambda: _visible(page, "#right"), timeout=2)
 
-    # ⬓: the bottom panel, an empty dock until WP-D's terminals arrive.
+    # ⬓: the bottom panel, holding the terminals (WP-D). With none open, ⬓
+    # opens one (the owner's call, 2026-10-11).
     panel = '[data-testid="panel"]'
     check("the panel starts hidden and takes no room",
           not _visible(page, panel) and _attr(page, panel, "data-open") == "false"
@@ -1085,8 +1195,10 @@ def _titlebar_checks(page, mock, check, until):
           abs(panel_box["x"] - main_box["x"]) < 1 and abs(panel_box["width"] - main_box["width"]) < 1
           and abs(panel_box["y"] + panel_box["height"] - (main_box["y"] + main_box["height"])) < 1,
           f"{panel_box} in {main_box}")
-    check("it says no terminal is open, and ⬓ opened none", _visible(page, '[data-testid="panel-empty"]')
-          and not mock.world.get("terminals"))
+    until(lambda: len(mock.world.get("terminals", [])) == 1, timeout=4)
+    check("with none open, ⬓ opened exactly one terminal, and the panel shows it",
+          len(mock.world.get("terminals", [])) == 1 and not _visible(page, '[data-testid="panel-empty"]'),
+          str(len(mock.world.get("terminals", []))))
     psep = page.locator('[data-testid="panel-split"]')
     check("its top edge is a horizontal separator",
           psep.get_attribute("role") == "separator" and psep.get_attribute("aria-orientation") == "horizontal")
@@ -1097,7 +1209,7 @@ def _titlebar_checks(page, mock, check, until):
     page.keyboard.press("Shift+ArrowDown")
     check("Shift+ArrowDown shorter by a bigger step", _height(page, panel) == 212, str(_height(page, panel)))
     psep.focus()
-    check("Space on the edge is not push-to-talk", _ptt_on_space(page) is None)
+    check("Space on the edge never starts the mic", _ptt_on_space(page) is None)
     psep.dblclick()
     until(lambda: _height(page, panel) == 260, timeout=2)
     _drag_y(page, '[data-testid="panel-split"]', -100)
@@ -1159,21 +1271,22 @@ def _titlebar_checks(page, mock, check, until):
     _set_storage(page, zoom="100")
     _boot(page, mock, None, until, reload=True)
     _open_layout_menu(page, until)
-    checked = [p for p in ("single", "cols2", "rows2", "cols3", "main2", "grid4")
+    checked = [p for p in MENU_TILES
                if _attr(page, f'[data-testid="layout-preset-{p}"]', "aria-checked") == "true"]
-    check("six preset tiles, the current one checked", checked == ["single"]
-          and page.locator('[data-testid^="layout-preset-"]').count() == 6, str(checked))
+    check("eight preset tiles (WP-G1: 6 and 8 among them), the current one checked", checked == ["single"]
+          and page.locator('[data-testid^="layout-preset-"]').count() == 8, str(checked))
     check("the menu opens with focus on the current preset", _active_testid(page) == "layout-preset-single",
           str(_active_testid(page)))
     page.keyboard.press("ArrowRight")
     check("ArrowRight moves to the next tile", _active_testid(page) == "layout-preset-cols2", str(_active_testid(page)))
     page.keyboard.press("ArrowDown")
-    check("ArrowDown to the tile below", _active_testid(page) == "layout-preset-main2", str(_active_testid(page)))
+    check("ArrowDown to the tile below, four to a row", _active_testid(page) == "layout-preset-grid4",
+          str(_active_testid(page)))
     check("and the arrows chose nothing", _attr(page, '[data-testid="workspace"]', "data-preset") == "single")
-    check("Space in the menu is not push-to-talk", _ptt_on_space(page) is None)
-    until(lambda: _attr(page, '[data-testid="workspace"]', "data-preset") == "main2", timeout=2)
+    check("Space in the menu never starts the mic", _ptt_on_space(page) is None)
+    until(lambda: _attr(page, '[data-testid="workspace"]', "data-preset") == "grid4", timeout=2)
     check("it activates the tile under focus instead",
-          _attr(page, '[data-testid="workspace"]', "data-preset") == "main2")
+          _attr(page, '[data-testid="workspace"]', "data-preset") == "grid4")
     rows = [r for r in TOGGLES if page.locator(f'[data-testid="layout-toggle-{r}"]').count() == 1]
     keys = page.locator('[data-testid="layout-menu"] .lm-key').all_inner_texts()
     check("the menu writes the three toggles out with their shortcuts",
@@ -1247,9 +1360,9 @@ def _workspace_checks(page, mock, check, until):
           "focused" not in (_attr(page, _pane(1), "class") or "") and page.locator(".panectx").count() == 0)
 
     _choose(page, until, "cols2")
-    check("two side by side: a second pane, showing Preview",
+    check("two side by side: a second pane, showing the Browser",
           _attr(page, ws, "data-drawn-preset") == "cols2" and _visible(page, _pane(2))
-          and _attr(page, _pane(2), "data-view") == "preview")
+          and _attr(page, _pane(2), "data-view") == "browser")
     b1 = page.locator(_pane(1)).bounding_box()
     b2 = page.locator(_pane(2)).bounding_box()
     check("beside the first, as tall, the centre halved",
@@ -1257,7 +1370,7 @@ def _workspace_checks(page, mock, check, until):
           and abs(b1["width"] - b2["width"]) <= 3, f"{b1} {b2}")
     check("the chat is still one conversation with one box, in pane 1",
           page.locator('[data-testid="input"]').count() == 1 and page.locator(_pane(1, '[data-testid="input"]')).count() == 1)
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
     until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
     check("a click in a pane focuses it, and only it, with a line under its header",
           _attr(page, _pane(2), "data-focused") == "true" and _attr(page, _pane(1), "data-focused") == "false"
@@ -1276,7 +1389,7 @@ def _workspace_checks(page, mock, check, until):
     check("ArrowLeft on it moves it a step", abs(_width(page, _pane(1)) - (w1 - 16)) <= 2,
           f"{w1} -> {_width(page, _pane(1))}")
     sep.focus()
-    check("Space on it is not push-to-talk", _ptt_on_space(page) is None)
+    check("Space on it never starts the mic", _ptt_on_space(page) is None)
     w1 = _width(page, _pane(1))
     _boot(page, mock, None, until, reload=True)
     check("the preset and the edge survive a reload",
@@ -1296,11 +1409,11 @@ def _workspace_checks(page, mock, check, until):
           _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(1), "data-view") == "chat"
           and page.locator(_pane(1, '[data-testid="input"]')).count() == 1
           and page.locator(_pane(2, '[data-testid="input"]')).count() == 1)
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
-    until(lambda: _attr(page, _pane(2), "data-view") == "preview", timeout=2)
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "browser", timeout=2)
 
     # Hidden, never unmounted: the same frame after one pane and back.
-    page.locator(_pane(2, '[data-testid="preview-project"]')).click()
+    page.locator(_pane(2, '[data-testid="browser-project"]')).click()
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
     page.evaluate("document.querySelector('[data-testid=\"pane-2\"] iframe').__kept = 42")
     src = page.locator(_pane(2, "iframe")).get_attribute("src")
@@ -1314,18 +1427,18 @@ def _workspace_checks(page, mock, check, until):
           and page.evaluate("document.querySelector('[data-testid=\"pane-2\"] iframe').__kept") == 42)
     _boot(page, mock, None, until, reload=True)
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
-    check("a pane's preview URL survives a reload, judged again and loaded",
+    check("a pane's Browser URL survives a reload, judged again and loaded",
           page.locator(_pane(2, "iframe")).get_attribute("src") == src, str(src))
 
     # Where a sidebar click goes.
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
     until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
     page.locator('[data-testid="thread-t1"]').click()
     until(lambda: page.evaluate("window.__hud.state().threadId") == "t1")
     check("a thread click goes to the pane already showing the chat",
-          _attr(page, _pane(1), "data-view") == "chat" and _attr(page, _pane(2), "data-view") == "preview"
+          _attr(page, _pane(1), "data-view") == "chat" and _attr(page, _pane(2), "data-view") == "browser"
           and _attr(page, _pane(1), "data-focused") == "true")
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
     page.locator('[data-testid="task-k1"]').click()
     until(lambda: _attr(page, _pane(2), "data-view") == "task", timeout=2)
     check("a task click, with no task or diff pane on screen, switches the focused pane",
@@ -1342,33 +1455,78 @@ def _workspace_checks(page, mock, check, until):
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
     check("opening a file pins its pane to that project", _ws(page)["ws"]["panes"][1]["projectId"] == "p1",
           str(_ws(page)["ws"]["panes"][1]))
-    check("and says nothing while the chat is in the same project",
-          page.locator('[data-testid="pane-2-project"]').count() == 0)
+    # E-13: the File pane's own Project ▾ (every project, plus Follow chat)
+    # replaced the "in: … · follow chat" chip the File pane used to carry.
+    folder = page.locator('[data-testid="pane-2-folder"]')
+    options = page.evaluate("[...document.querySelectorAll('[data-testid=\"pane-2-folder\"] option')]"
+                            ".map(o => o.value)")
+    check("E-13: the File pane's own picker names the project it is pinned to, offering every project and "
+          "Follow chat", folder.count() == 1 and folder.input_value() == "p1"
+          and options == ["", "p1", "p2"], f"{folder.input_value() if folder.count() else None} {options}")
     page.locator('[data-testid="project-chip-select"]').select_option("p2")
-    until(lambda: page.locator('[data-testid="pane-2-project"]').count() > 0, timeout=3)
+    time.sleep(0.3)
     check("with the chat moved to another project the file stays open, and the pane says where it is",
           page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py"
-          and "jarvis" in page.locator('[data-testid="pane-2-project"]').inner_text())
-    _edit(page, until, 2, "\n# pinned")
+          and folder.input_value() == "p1")
+    edited = _edit(page, until, 2, "\n# pinned")
     save = page.locator(_pane(2, '[data-testid="file-save"]'))
     until(lambda: not save.is_disabled(), timeout=3)
-    follow = page.locator('[data-testid="pane-2-follow"]')
-    until(lambda: follow.is_disabled(), timeout=3)
-    check("with an unsaved edit, follow chat waits and says why",
-          follow.is_disabled() and "Save" in (follow.get_attribute("title") or ""),
-          str(follow.get_attribute("title")))
+    check("setup: the edit landed", edited and not save.is_disabled())
+    until(lambda: "Save or reload" in (folder.get_attribute("title") or ""), timeout=2)
+    refused = page.locator('[data-testid="pane-2-refused"]')
+    for choice, what in (("", "Follow chat"), ("p2", "another project")):
+        folder.select_option(choice)
+        until(lambda: refused.count() > 0, timeout=2)
+        time.sleep(0.15)
+        check(f"E-13: with an unsaved edit, {what} is refused with the chip, and the pane stays where it was",
+              refused.count() == 1 and folder.input_value() == "p1"
+              and _ws(page)["ws"]["panes"][1]["projectId"] == "p1"
+              and page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py",
+              f"{folder.input_value()} {_ws(page)['ws']['panes'][1]}")
     save.click()
     until(lambda: any(m == "PUT" for m, _p, _b in mock.calls[calls_before:]), timeout=4)
     puts = [p for m, p, _b in mock.calls[calls_before:] if m == "PUT"]
     check("and its save goes to the project it was read from, never the one the chat moved to",
           puts == ["/projects/p1/file"], str(puts))
-    until(lambda: not follow.is_disabled(), timeout=3)
-    check("once saved, follow chat is offered again", not follow.is_disabled())
-    follow.click()
+    until(lambda: save.is_disabled(), timeout=3)
+    # The keystroke itself makes the pane dirty for the guard: a pick in the
+    # same breath is refused, never a remount that drops the edit (review of
+    # PR #43, M1 — the guard read state a frame behind the edit).
+    # A clean pane: the keystroke is what makes it dirty.
+    page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("Z")
+    folder.select_option("p2")
+    time.sleep(0.3)
+    check("M1: a project picked in the same breath as a keystroke is refused, and the edit is kept",
+          _ws(page)["ws"]["panes"][1]["projectId"] == "p1"
+          and "Z" in page.locator(_pane(2, '[data-testid="editor"] .view-lines')).inner_text(),
+          str(_ws(page)["ws"]["panes"][1]))
+    if not save.is_disabled():  # (on the old code the edit is gone with the remount)
+        save.click()
+        until(lambda: save.is_disabled(), timeout=3)
+    _approval(mock, "fold1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.2)
+    check("E-13: under a card the picker is disabled", folder.is_disabled())
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    until(lambda: not folder.is_disabled(), timeout=2)
+    folder.select_option("")
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open", timeout=3)
-    check("follow chat unpins it: a fresh tree in the chat's project, nothing open",
-          _ws(page)["ws"]["panes"][1]["projectId"] is None
-          and page.locator('[data-testid="pane-2-project"]').count() == 0)
+    check("once saved, Follow chat unpins it: a fresh tree in the chat's project, nothing open",
+          _ws(page)["ws"]["panes"][1]["projectId"] is None and folder.input_value() == "")
+    others = [q.get("projectId") for i, q in enumerate(_ws(page)["ws"]["panes"]) if i != 1]
+    folder.select_option("p1")
+    until(lambda: _ws(page)["ws"]["panes"][1]["projectId"] == "p1", timeout=3)
+    until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+    check("E-13: picking a project re-pins this pane only, to a fresh tree there",
+          _ws(page)["ws"]["panes"][1]["projectId"] == "p1" and folder.input_value() == "p1"
+          and page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open"
+          and [q.get("projectId") for i, q in enumerate(_ws(page)["ws"]["panes"]) if i != 1] == others,
+          str(_ws(page)["ws"]["panes"]))
+    folder.select_option("")
+    until(lambda: _ws(page)["ws"]["panes"][1]["projectId"] is None, timeout=3)
 
     # A project that goes away under an unsaved edit: the edit is kept, and
     # the pane asks before it lets go of it.
@@ -1519,7 +1677,7 @@ def _grid_card_checks(page, mock, check, until):
         mock.world["terminals"].append(row(tid, "bash · jarvis"))
     fake = mock.fake_pty
     term = f'[data-testid="terminal-{tid}"]'
-    grid = json.dumps({"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"},
+    grid = json.dumps({"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"},
                                                      {"view": "terminal", "terminalId": tid}]})
     for zoom in ("160", "70"):
         page.set_viewport_size({"width": 1280, "height": 800})
@@ -1531,7 +1689,7 @@ def _grid_card_checks(page, mock, check, until):
         page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
         until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0
               or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-        page.locator(_pane(3, '[data-testid="preview-project"]')).click()
+        page.locator(_pane(3, '[data-testid="browser-project"]')).click()
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
         until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
         check(f"at {zoom}% Monaco, a preview frame and a terminal are on screen",
@@ -1567,7 +1725,7 @@ def _sticky_checks(page, mock, check, until):
     different pair and the pane under the pointer jumped."""
     ws = '[data-testid="workspace"]'
     three = json.dumps({"preset": "cols3", "focused": 3,
-                        "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+                        "panes": [{"view": "chat"}, {"view": "browser"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1280, "height": 800})
     _set_storage(page, zoom="150", layout="{}")
     _set_ws(page, three)
@@ -1576,7 +1734,7 @@ def _sticky_checks(page, mock, check, until):
           _attr(page, ws, "data-drawn-preset") == "cols2" and _visible(page, _pane(2)) and _visible(page, _pane(3))
           and not _visible(page, _pane(1)))
     before = [page.locator(_pane(n)).bounding_box() for n in (2, 3)]
-    url = page.locator(_pane(2, '[data-testid="preview-url"]'))
+    url = page.locator(_pane(2, '[data-testid="browser-url"]'))
     url.click()
     page.keyboard.type("http://localhost:5173/")
     time.sleep(0.2)
@@ -1593,7 +1751,7 @@ def _sticky_checks(page, mock, check, until):
 
     # One large plus two stacked, too short for the stack: two columns.
     main = json.dumps({"preset": "main2", "focused": 3,
-                       "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+                       "panes": [{"view": "chat"}, {"view": "browser"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 420})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, main)
@@ -1616,15 +1774,19 @@ def _card_focus_checks(page, mock, check, until):
     card, and Monaco kept its focus under one (review of PR #26). A card now
     takes focus off both, onto itself — never onto a button."""
     two = json.dumps({"preset": "cols2", "focused": 2,
-                      "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+                      "panes": [{"view": "chat"}, {"view": "browser"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, two)
     _boot(page, mock, None, until, reload=True)
-    page.locator(_pane(2, '[data-testid="preview-project"]')).click()
+    page.locator(_pane(2, '[data-testid="browser-project"]')).click()
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
     time.sleep(0.3)
-    page.locator(_pane(2, "iframe")).click()
+    # A click as a hand makes it: the pointer moves over the frame first (its
+    # shield steps aside, R-1), then presses. Playwright's own locator click
+    # checks the hit target before it moves, and reads the shield as covering.
+    box = page.locator(_pane(2, "iframe")).bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     until(lambda: page.evaluate("document.activeElement && document.activeElement.tagName") == "IFRAME", timeout=2)
     check("setup: keys are going into the preview frame",
           page.evaluate("document.activeElement.tagName") == "IFRAME")
@@ -1674,20 +1836,440 @@ def _card_focus_checks(page, mock, check, until):
     _reset_all(page, mock, until)
 
 
+def _monaco_editors(page) -> list:
+    return page.evaluate("window.__hud.monacoEditors ? window.__hud.monacoEditors() : []")
+
+
+def _editor_card_checks(page, mock, check, until):
+    """ED-1 loads Monaco's overlays — the context menu, the suggest list —
+    which carry z-indexes in the thousands. With one open, a card that
+    arrives is still on top at every one of its buttons; the editor behind it
+    is unfocused and read-only, Escape denies, and a typed `y` lands nowhere.
+    At 100% and 160%."""
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
+    host = _pane(2, '[data-testid="editor"]')
+    lines = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
+    menu = page.locator(_pane(2, ".monaco-menu"))
+    suggest = page.locator(_pane(2, ".suggest-widget.visible .monaco-list-row"))
+    for zoom in ("100", "160"):
+        page.set_viewport_size({"width": 1600, "height": 900})
+        _set_storage(page, zoom=zoom, layout="{}")
+        _set_ws(page, two)
+        _boot(page, mock, None, until, reload=True)
+        page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+        until(lambda: page.locator(host).count() > 0
+              and page.locator(host).get_attribute("data-language") is not None, timeout=10)
+        if page.locator(host).count() == 0:
+            check(f"at {zoom}% Monaco loads in a split pane (fell back to a textarea)", False)
+            break
+        for n, (what, opened) in enumerate((("its context menu", menu), ("its suggest list", suggest))):
+            if what == "its context menu":
+                lines.click()
+                line = page.locator(_pane(2, '[data-testid="editor"] .view-line')).first.bounding_box()
+                at = (line["x"] + 30, line["y"] + line["height"] / 2)
+                page.mouse.click(at[0], at[1], button="right")
+            else:
+                lines.click()
+                page.keyboard.press("Control+End")
+                page.keyboard.type("\nre")
+                page.keyboard.press("Control+Space")
+            until(lambda: opened.count() > 0 and opened.first.is_visible(), timeout=4)
+            check(f"at {zoom}% setup: Monaco shows {what}", opened.count() > 0 and opened.first.is_visible())
+            if what == "its context menu":
+                # Monaco places it in viewport pixels and the zoom on #root
+                # used to scale that again: at 160% it opened 60% further out,
+                # off the window's right edge (lib/zoomfix.ts).
+                box = page.evaluate("""() => {
+                  const hosts = [...document.querySelectorAll('[data-testid="pane-2"] .shadow-root-host')];
+                  const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu'))
+                    .find(Boolean);
+                  if (!menu) return null;
+                  const r = menu.getBoundingClientRect();
+                  return {x: r.left, y: r.top, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight};
+                }""")
+                check(f"at {zoom}% the context menu opens at the pointer, wholly on screen",
+                      bool(box) and abs(box["x"] - at[0]) <= 4 and abs(box["y"] - at[1]) <= 4
+                      and box["right"] <= box["vw"] and box["bottom"] <= box["vh"], f"{box} vs click {at}")
+                # The menu closes when a card takes focus, so the card check
+                # below cannot see where it would have stacked. Lay a layer at
+                # #authveil's z-index over the whole window instead: it must be
+                # what is under the menu's middle — the menu (z 2575) stacks
+                # inside the editor host, never above the veil.
+                top = page.evaluate("""() => {
+                  const hosts = [...document.querySelectorAll('[data-testid="pane-2"] .shadow-root-host')];
+                  const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu'))
+                    .find(Boolean);
+                  if (!menu) return 'no menu';
+                  const r = menu.getBoundingClientRect();
+                  const probe = document.createElement('div');
+                  probe.style.cssText = 'position:fixed;inset:0;z-index:100';
+                  document.getElementById('root').appendChild(probe);
+                  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                  probe.remove();
+                  return hit === probe ? 'veil' : (hit && hit.className) || String(hit);
+                }""")
+                check(f"at {zoom}% Monaco's context menu stacks inside the editor, under a layer at the veil's z-index",
+                      top == "veil", str(top))
+            before = lines.inner_text()
+            req = f"edcard{zoom}{n}"
+            _approval(mock, req, LONG_COMMAND)
+            until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+            time.sleep(0.25)
+            ok, why = _card_on_screen(page)
+            check(f"at {zoom}% with {what} open, the card arrives on top: every button topmost at its point",
+                  ok, why)
+            eds = _monaco_editors(page)
+            focused = page.evaluate("!!(document.activeElement && document.activeElement.closest('.monaco-editor'))")
+            check(f"at {zoom}% the editor behind the card is unfocused and read-only",
+                  bool(eds) and all(e["readOnly"] and not e["focused"] for e in eds) and not focused
+                  and page.locator(host).get_attribute("data-readonly") == "true", f"{eds} focus in editor {focused}")
+            page.keyboard.type("y")
+            time.sleep(0.15)
+            check(f"at {zoom}% a typed y lands nowhere", lines.inner_text() == before, lines.inner_text()[-40:])
+            puts = len(mock.sent("PUT", "/projects/p1/file"))
+            page.keyboard.press("Control+s")
+            time.sleep(0.2)
+            check(f"at {zoom}% and Ctrl+S saves nothing", len(mock.sent("PUT", "/projects/p1/file")) == puts)
+            page.keyboard.press("Escape")
+            body = until(lambda: mock.sent("POST", f"/approvals/{req}") or None, timeout=4)
+            check(f"at {zoom}% and Escape denies", bool(body) and body[-1].get("decision") == "deny",
+                  str(body[-1] if body else None))
+            until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+            until(lambda: not any(e["readOnly"] for e in _monaco_editors(page)), timeout=2)
+            check(f"at {zoom}% once it is answered the editor takes edits again",
+                  not any(e["readOnly"] for e in _monaco_editors(page))
+                  and page.locator(host).get_attribute("data-readonly") == "false")
+            page.keyboard.press("Escape")
+            # Throw the setup's edit away (Reload asks first, ED-1), so the
+            # reload that follows is not held by beforeunload.
+            save = page.locator(_pane(2, '[data-testid="file-save"]'))
+            if not save.is_disabled():
+                page.locator(_pane(2, '[data-testid="file-reload"]')).click()
+                page.locator(_pane(2, '[data-testid="file-discard-yes"]')).click()
+                until(lambda: save.is_disabled(), timeout=3)
+    _reset_all(page, mock, until)
+
+
+def expand(page, until, project_id: str, child: str, tries: int = 4) -> bool:
+    """Click a project row until the child row is on screen (a project row toggles)."""
+    for _ in range(tries):
+        if page.locator(f'[data-testid="{child}"]').count() > 0:
+            return True
+        page.locator(f'[data-testid="project-{project_id}"]').click()
+        until(lambda: page.locator(f'[data-testid="{child}"]').count() > 0, timeout=1.0)
+    return page.locator(f'[data-testid="{child}"]').count() > 0
+
+
+def _puts(mock) -> list:
+    return [b for m, p, b in mock.calls if m == "PUT" and p == "/projects/p1/file"]
+
+
+def _open_file(page, until, pane: int, name: str) -> bool:
+    """Open `name` from pane N's tree in an editor (Markdown's split, not its
+    rendered view); True once Monaco holds it."""
+    row = page.locator(_pane(pane, f'[data-testid="file-{name}"]'))
+    picker = page.locator(f'[data-testid="pane-{pane}-folder"]')
+    path = page.locator(_pane(pane, '[data-testid="file-path"]'))
+    # A File pane gets its tabs back when it mounts again (ED-2; WP-G2 before
+    # it), and a narrow one hides its tree behind "Files": already open is open.
+    if not (path.count() and path.inner_text() == name):
+        if not until(lambda: row.count() > 0, timeout=2) and picker.count():
+            picker.select_option("p1")  # no chat to follow: the pane picks its project (E-13)
+        until(lambda: row.count() > 0, timeout=4)
+        toggle = page.locator(_pane(pane, '[data-testid="tree-toggle"]'))
+        if row.count() and not row.first.is_visible() and toggle.count():
+            toggle.click()
+            until(lambda: row.first.is_visible(), timeout=2)
+        row.click()
+    until(lambda: path.inner_text() == name, timeout=4)
+    if name.endswith(".md"):
+        until(lambda: page.locator(_pane(pane, '[data-testid="toggle-rendered"]')).count() > 0, timeout=3)
+        if page.locator(_pane(pane, '[data-testid="md-split"]')).count() == 0:
+            page.locator(_pane(pane, '[data-testid="toggle-rendered"]')).click()
+    host = page.locator(_pane(pane, '[data-testid="editor"]'))
+    return bool(until(lambda: host.count() == 1 and host.get_attribute("data-language") is not None, timeout=10))
+
+
+def _save_scope_checks(page, mock, check, until):
+    """Ctrl+S saves the editor it is pressed in, and nothing else (review of
+    PR #43, H1). In 0.57 `addCommand` is a global keybinding: the last editor
+    created took Ctrl+S for every editor and outlived itself, so Ctrl+S in a
+    Diff wrote a file blank, and in one pane saved another pane's buffer.
+
+    A 2x2 grid with a chat in pane 1 (the window puts a chat in the focused
+    pane at boot when none is drawn): file in 2, diff in 3, task in 4."""
+    files = mock.world["files"]
+    kept = {k: dict(v) for k, v in files.items()}
+    grid = json.dumps({"preset": "grid4", "focused": 2,
+                       "panes": [{"view": "chat"}, {"view": "file"}, {"view": "diff"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, grid)
+    _boot(page, mock, None, until, reload=True)
+
+    def restore():
+        # Content only, before the files are opened again: a write that went
+        # astray (the old code's blank calc.py) must not leak into the next
+        # scenario, and the mtime stays what the server last said.
+        for k, v in kept.items():
+            files[k]["content"] = v["content"]
+
+    try:
+        # An editor that went away leaves no Ctrl+S behind.
+        check("setup: calc.py open in pane 2's editor", _open_file(page, until, 2, "calc.py"))
+        expand(page, until, "p1", "task-k1")
+        page.locator('[data-testid="task-k1"]').click()
+        until(lambda: page.locator(_pane(3, '[data-testid="diff-calc.py"]')).count() > 0, timeout=4)
+        page.locator(_pane(3, '[data-testid="diff-calc.py"]')).click()
+        diff = page.locator(_pane(3, '[data-testid="diff-editor"] .editor.modified .view-lines'))
+        until(lambda: diff.count() > 0, timeout=10)
+        _show(page, until, 2, "browser")
+        until(lambda: page.locator(_pane(2, '[data-testid="editor"]')).count() == 0, timeout=3)
+        diff.first.click()
+        before = len(_puts(mock))
+        page.keyboard.press("Control+s")
+        time.sleep(0.5)
+        check("H1: with pane 2's editor gone, Ctrl+S in a diff saves nothing (no file written blank)",
+              len(_puts(mock)) == before and files["calc.py"]["content"] == kept["calc.py"]["content"],
+              str(_puts(mock)[before:]))
+        restore()
+
+        # Two editors alive: each Ctrl+S is its own pane's.
+        _show(page, until, 2, "file")
+        _show(page, until, 3, "file")
+        opened = _open_file(page, until, 2, "calc.py") and _open_file(page, until, 3, "README.md")
+        check("setup: calc.py in pane 2 and README.md in pane 3, both in editors", opened)
+        _edit(page, until, 2, "\n#one")
+        _edit(page, until, 3, "\n#two")
+        page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+        before = len(_puts(mock))
+        page.keyboard.press("Control+s")
+        until(lambda: len(_puts(mock)) > before, timeout=3)
+        time.sleep(0.3)
+        sent = _puts(mock)[before:]
+        check("H1: with two editors alive, Ctrl+S in pane 2 saves pane 2's file, and only it",
+              len(sent) == 1 and sent[0].get("path") == "calc.py" and sent[0].get("content", "").endswith("#one")
+              and not page.locator(_pane(3, '[data-testid="file-save"]')).is_disabled(), str(sent))
+        for n in (2, 3):  # each scenario starts clean, whichever pane the last Ctrl+S wrote
+            button = page.locator(_pane(n, '[data-testid="file-save"]'))
+            if not button.is_disabled():
+                button.click()
+                until(lambda: button.is_disabled(), timeout=3)
+
+        # Pane 3 switched away: Ctrl+S in pane 2 is still pane 2's.
+        _show(page, until, 3, "browser")
+        until(lambda: page.locator(_pane(3, '[data-testid="editor"]')).count() == 0, timeout=3)
+        readme = files["README.md"]["content"]
+        _edit(page, until, 2, "\n#three")
+        page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+        before = len(_puts(mock))
+        page.keyboard.press("Control+s")
+        until(lambda: len(_puts(mock)) > before, timeout=3)
+        time.sleep(0.3)
+        sent = _puts(mock)[before:]
+        check("H1: pane 3 switched away, Ctrl+S in pane 2 saves pane 2, and pane 3's file is byte-identical",
+              len(sent) == 1 and sent[0].get("path") == "calc.py" and sent[0].get("content", "").endswith("#three")
+              and files["README.md"]["content"] == readme, str(sent))
+        restore()
+
+        # An editor that opens while a card is up opens read-only (the first
+        # editor of a session, Monaco loading as a card arrives).
+        _show(page, until, 2, "browser")
+        _show(page, until, 2, "file")
+        until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+        _approval(mock, "edro1")
+        until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+        time.sleep(0.2)
+        page.evaluate("document.querySelector('[data-testid=\"pane-2\"] [data-testid=\"file-calc.py\"]').click()")
+        host = page.locator(_pane(2, '[data-testid="editor"]'))
+        until(lambda: host.count() == 1 and host.get_attribute("data-language") is not None, timeout=10)
+        eds = _monaco_editors(page)
+        check("an editor that opens while a card is up opens read-only",
+              host.count() == 1 and host.get_attribute("data-readonly") == "true"
+              and bool(eds) and all(e["readOnly"] for e in eds), str(eds))
+        page.keyboard.press("Escape")
+        until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+        until(lambda: host.get_attribute("data-readonly") == "false", timeout=2)
+        check("and takes edits once the card is answered", host.get_attribute("data-readonly") == "false")
+    finally:
+        files.clear()
+        files.update(kept)
+        _reset_all(page, mock, until)
+
+
+def _late_save_checks(page, mock, check, until):
+    """A save's answer lands on the file it was sent for, or nowhere (review
+    of PR #43, L4). The old save closed over the file it started with and
+    wrote that record back when the answer came: a save still on its way
+    when another file was opened turned the new file's record into the old
+    one (its path, its mtime, its content), so the pane named the wrong file
+    and called the buffer dirty."""
+    files = mock.world["files"]
+    kept = {k: dict(v) for k, v in files.items()}
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, two)
+    _boot(page, mock, None, until, reload=True)
+    save = page.locator(_pane(2, '[data-testid="file-save"]'))
+    path = page.locator(_pane(2, '[data-testid="file-path"]'))
+    try:
+        check("setup: calc.py open in pane 2's editor", _open_file(page, until, 2, "calc.py"))
+        check("setup: an edit to save", _edit(page, until, 2, "\n#late"))
+        before = len(_puts(mock))
+        mock.world["put_delays"] = [1.5]
+        save.click()
+        until(lambda: len(_puts(mock)) > before, timeout=2)
+        row = page.locator(_pane(2, '[data-testid="file-README.md"]'))
+        if not row.is_visible():  # a narrow pane folds its tree behind "Files"
+            page.locator(_pane(2, '[data-testid="tree-toggle"]')).click()
+        row.click()
+        discard = page.locator(_pane(2, '[data-testid="file-discard-yes"]'))
+        if until(lambda: discard.count() > 0 or path.inner_text() == "README.md", timeout=2) and discard.count():
+            discard.click()
+        until(lambda: path.inner_text() == "README.md", timeout=3)
+        time.sleep(2.0)  # the answer lands
+        check("L4: a save answered after another file was opened leaves that file's record alone",
+              path.inner_text() == "README.md" and save.is_disabled(),
+              f"{path.inner_text()!r} save {'disabled' if save.is_disabled() else 'enabled'}")
+        if page.locator(_pane(2, '[data-testid="md-split"]')).count() == 0:
+            page.locator(_pane(2, '[data-testid="toggle-rendered"]')).click()
+        _edit(page, until, 2, "\n#mine")
+        before = len(_puts(mock))
+        save.click()
+        until(lambda: len(_puts(mock)) > before, timeout=3)
+        time.sleep(0.3)
+        sent = _puts(mock)[before:]
+        check("and the next save is that file's own, sent against its own etag (no conflict)",
+              len(sent) == 1 and sent[0].get("path") == "README.md" and files["README.md"]["content"].endswith("#mine")
+              and save.is_disabled(), str(sent))
+    finally:
+        mock.world.pop("put_delays", None)
+        files.clear()
+        files.update(kept)
+        _reset_all(page, mock, until)
+
+
+def _sidebar_shown(page) -> bool:
+    return _visible(page, "#sidebar")
+
+
+def _chord_checks(page, mock, check, until):
+    """The chord tracker waits as Monaco does (review of PR #43, L1): a key
+    typed outside any editor neither ends Monaco's chord nor ours, so Ctrl+K
+    in the editor, a letter in the chat box, then Ctrl+B in the editor is the
+    chord — the anchor, not a fold too."""
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, two)
+    _boot(page, mock, None, until, reload=True)
+    _open_file(page, until, 2, "calc.py")
+    lines = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
+    lines.click()
+    page.keyboard.press("Control+End")
+    shown = _sidebar_shown(page)
+    page.keyboard.press("Control+k")
+    page.locator('[data-testid="input"]').first.click()
+    page.keyboard.type("x")
+    lines.click()
+    page.keyboard.press("Control+b")
+    time.sleep(0.3)
+    anchors = page.locator(_pane(2, '[data-testid="editor"] .selection-anchor')).count()
+    check("L1: Ctrl+K in the editor, a key in the chat box, then Ctrl+B in the editor is Monaco's chord, not a fold",
+          shown and _sidebar_shown(page) and anchors > 0, f"sidebar {_sidebar_shown(page)}, anchors {anchors}")
+    page.keyboard.press("Control+b")
+    until(lambda: not _sidebar_shown(page), timeout=2)
+    check("and the next lone Ctrl+B folds the sidebar again", not _sidebar_shown(page))
+    page.keyboard.press("Control+b")
+    until(lambda: _sidebar_shown(page), timeout=2)
+    page.locator('[data-testid="input"]').first.fill("")
+    _reset_all(page, mock, until)
+
+
+def _menu_box(page, pane: int):
+    return page.evaluate("""(n) => {
+      const hosts = [...document.querySelectorAll(`[data-testid="pane-${n}"] .shadow-root-host`)];
+      const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu')).find(Boolean);
+      if (!menu) return null;
+      const r = menu.getBoundingClientRect();
+      return {x: r.left, y: r.top, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight};
+    }""", pane)
+
+
+def _menu_place_checks(page, mock, check, until):
+    """Monaco's context menu where the pointer is, at any zoom and any edge
+    (review of PR #43, L2): it flipped by its unzoomed size, and at 70% a
+    right-click near the bottom put the menu's bottom 45 px above the
+    pointer. And in a window too short for either side, it stays on screen."""
+    # The window puts a chat in the focused pane at boot when none is drawn,
+    # so the file sits beside one; both side panes folded, so the editor's
+    # right edge is near the window's at 160%.
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
+    folded = json.dumps({"left": 260, "right": 300, "leftCollapsed": True, "rightCollapsed": True})
+    cases = (
+        ("70", (1600, 900), "bottom", lambda b, at: abs(b["bottom"] - at[1]) <= 4 and abs(b["x"] - at[0]) <= 4),
+        ("160", (1600, 900), "right", lambda b, at: abs(b["right"] - at[0]) <= 4 and abs(b["y"] - at[1]) <= 4),
+        ("160", (1600, 400), "short", lambda b, at: True),
+    )
+    for zoom, (w, h), where, at_pointer in cases:
+        page.set_viewport_size({"width": w, "height": h})
+        _set_storage(page, zoom=zoom, layout=folded)
+        _set_ws(page, two)
+        _boot(page, mock, None, until, reload=True)
+        if not _open_file(page, until, 2, "calc.py"):
+            check(f"at {zoom}% Monaco loads ({where})", False)
+            continue
+        ed = page.locator(_pane(2, '[data-testid="editor"]')).bounding_box()
+        # The first line Monaco has drawn (a line can exist before its layout).
+        first_line = """() => { const ls = [...document.querySelectorAll('[data-testid="pane-2"] [data-testid="editor"] .view-line')]
+            .map(l => l.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0).sort((a, b) => a.top - b.top);
+            return ls.length ? {x: ls[0].left, y: ls[0].top, width: ls[0].width, height: ls[0].height} : null; }"""
+        line = until(lambda: page.evaluate(first_line), timeout=5)
+        if not ed or not line:
+            check(f"at {zoom}% the editor is drawn ({where})", False, f"{ed} {line}")
+            continue
+        # In the text, never the gutter (a right-click there opens no menu).
+        if where == "bottom":
+            at = (line["x"] + 30, ed["y"] + ed["height"] - 12)
+        elif where == "right":
+            at = (ed["x"] + ed["width"] - 30, line["y"] + line["height"] / 2)
+        else:
+            at = (line["x"] + 30, line["y"] + line["height"] / 2)
+        page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+        page.mouse.click(at[0], at[1], button="right")
+        until(lambda: _menu_box(page, 2) is not None, timeout=3)
+        time.sleep(0.2)
+        b = _menu_box(page, 2)
+        on_screen = bool(b) and b["x"] >= -0.5 and b["y"] >= -0.5 and b["right"] <= b["vw"] + 0.5 \
+            and b["bottom"] <= b["vh"] + 0.5
+        what = {"bottom": "near the bottom it opens above the pointer, its bottom on it",
+                "right": "near the right edge it opens left of the pointer, its right edge on it",
+                "short": "in a window too short for either side it stays wholly on screen"}[where]
+        check(f"L2: at {zoom}% on {w}x{h} the context menu {what}", on_screen and at_pointer(b, at),
+              f"{b} vs click {at}")
+        page.keyboard.press("Escape")
+    _reset_all(page, mock, until)
+
+
 def _seen_checks(page, mock, check, until):
     """"Read" is a thread or task shown in **any** drawn pane, not only the
     focused one (review of PR #26: a focused-pane-only mutation passed every
     check before these)."""
     seen = lambda path: len(mock.posted(path))  # noqa: E731
     two = json.dumps({"preset": "cols2", "focused": 1,
-                      "panes": [{"view": "preview"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
+                      "panes": [{"view": "browser"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, two)
     _boot(page, mock, None, until, reload=True)
     page.locator('[data-testid="thread-t1"]').click()
     until(lambda: page.evaluate("window.__hud.state().threadId") == "t1")
-    page.locator(_pane(1, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(1, '[data-testid="tab-browser"]')).click()
     until(lambda: _attr(page, _pane(1), "data-focused") == "true", timeout=2)
     check("setup: t1's chat in pane 2, pane 1 focused",
           _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(2), "data-focused") == "false")
@@ -1698,8 +2280,8 @@ def _seen_checks(page, mock, check, until):
           seen("/threads/t1/seen") > before)
 
     _choose(page, until, "single")
-    check("setup: one pane, showing Preview; the chat is hidden",
-          _attr(page, _pane(1), "data-view") == "preview" and not _visible(page, _pane(2)))
+    check("setup: one pane, showing the Browser; the chat is hidden",
+          _attr(page, _pane(1), "data-view") == "browser" and not _visible(page, _pane(2)))
     before = seen("/threads/t1/seen")
     mock.activity("thread", "t1", "unread")
     time.sleep(0.8)
@@ -1708,7 +2290,7 @@ def _seen_checks(page, mock, check, until):
 
     # The same for a task.
     _choose(page, until, "cols2")
-    page.locator(_pane(1, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(1, '[data-testid="tab-browser"]')).click()
     page.locator('[data-testid="task-k1"]').click()
     until(lambda: _attr(page, _pane(1), "data-view") == "task", timeout=2)
     page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
@@ -1734,6 +2316,301 @@ def _seen_checks(page, mock, check, until):
     time.sleep(0.8)
     check("a task finishing while no pane shows it is not read", seen("/tasks/k1/seen") == before)
     mock.activity("task", "k1", "idle")
+    _reset_all(page, mock, until)
+
+
+# ---------------------------------------------------------------------------
+# six and eight panes (WP-G1, docs/plans/2026-10-10-hud-split-panes-plan.md
+# §3.1–§3.3, §3.7, §3.8; decisions S-1)
+
+def _geo(page, ids) -> list:
+    """Each pane's [x, y, offsetWidth, offsetHeight, data-slot] (offsets in the HUD's own px)."""
+    return page.evaluate("""(ids) => ids.map(n => {
+      const el = document.querySelector(`[data-testid="pane-${n}"]`);
+      if (!el || el.offsetParent === null) return null;
+      const r = el.getBoundingClientRect();
+      return [Math.round(r.x), Math.round(r.y), el.offsetWidth, el.offsetHeight, el.getAttribute('data-slot')];
+    })""", list(ids))
+
+
+def _no_hscroll(page) -> tuple[bool, str]:
+    got = page.evaluate("""() => {
+      const d = document.documentElement, w = document.getElementById('workspace');
+      return [d.scrollWidth, d.clientWidth, w.scrollWidth, w.clientWidth];
+    }""")
+    return got[0] <= got[1] and got[2] <= got[3], str(got)
+
+
+def _reading_order(geo) -> bool:
+    """Left to right, then top to bottom: each pane after the previous one."""
+    pts = [(g[1], g[0]) for g in geo]
+    return all(pts[i] < pts[i + 1] for i in range(len(pts) - 1))
+
+
+def _show(page, until, n: int, view: str):
+    """Pane N shows `view`: its words, or its `view ▾` menu when the pane is narrow."""
+    sel = page.locator(f'[data-testid="pane-{n}-view-select"]')
+    if sel.count():
+        sel.select_option(view)
+    else:
+        page.locator(_pane(n, f'[data-testid="tab-{view}"]')).click()
+    until(lambda: _attr(page, _pane(n), "data-view") == view, timeout=2)
+
+
+def _eight_checks(page, mock, check, until):
+    """The owner's words: "I'm not seeing the 6 and 8 panel layouts". ⊞ offers
+    them; at 1920x1080 every pane is drawn at least the pane minimum with no
+    horizontal scroll, and every pane can show chat, file, preview, diff or a
+    terminal; smaller windows draw what fits and say so; Ctrl+Alt+N is a slot,
+    never an id; 3 over 2's bottom row has edges of its own; and over eight
+    panes holding Monaco, a preview frame, a terminal and chats the card is
+    still whole and on top."""
+    from tests.face.hud_v2_mock_terminals import row
+    ws = '[data-testid="workspace"]'
+    # A terminal to show in a pane, there before the window lists them.
+    tid = "0e0e0e08"
+    if not any(r["id"] == tid for r in mock.world.setdefault("terminals", [])):
+        mock.world["terminals"].append(row(tid, "bash · eight"))
+    _reset_all(page, mock, until, (1920, 1080))
+    _open_layout_menu(page, until)
+    tiles = [t.get_attribute("data-testid") for t in page.locator('[data-testid^="layout-preset-"]').all()]
+    check("⊞ offers eight shapes, four to a row, 3×2 and 4×2 among them",
+          tiles == [f"layout-preset-{p}" for p in MENU_TILES], str(tiles))
+    boxes = [page.locator(f'[data-testid="layout-preset-{p}"]').bounding_box() for p in ("single", "grid4", "main2")]
+    check("the tiles sit four to a row: the fifth starts the second row",
+          abs(boxes[0]["x"] - boxes[2]["x"]) < 1 and boxes[2]["y"] > boxes[0]["y"]
+          and boxes[1]["y"] > boxes[0]["y"], str(boxes))
+    check("its head counts the panes", page.locator('[data-testid="layout-head"]').inner_text().strip().lower()
+          == "layout · 1 pane", page.locator('[data-testid="layout-head"]').inner_text())
+    page.keyboard.press("Escape")
+
+    for preset, n in (("grid6", 6), ("grid8", 8)):
+        _choose(page, until, preset)
+        geo = _geo(page, range(1, n + 1))
+        check(f"⊞ → {n}: all {n} panes drawn, at 1920x1080",
+              _attr(page, ws, "data-drawn-preset") == preset and all(geo)
+              and page.locator('[data-testid="layout-badge"]').count() == 0, str(geo))
+        check(f"⊞ → {n}: every pane at least the 360px minimum (less the 1px rules between them)",
+              all(g and g[2] >= 358 for g in geo), str([g and g[2] for g in geo]))
+        check(f"⊞ → {n}: in reading order, each pane carrying its slot",
+              all(geo) and _reading_order(geo) and [g[4] for g in geo] == [str(i) for i in range(1, n + 1)],
+              str(geo))
+        ok, why = _no_hscroll(page)
+        check(f"⊞ → {n}: and nothing scrolls sideways", ok, why)
+        _open_layout_menu(page, until)
+        check(f"⊞ → {n}: the menu checks that tile and counts {n} panes",
+              _attr(page, f'[data-testid="layout-preset-{preset}"]', "aria-checked") == "true"
+              and page.locator('[data-testid="layout-head"]').inner_text().strip().lower() == f"layout · {n} panes")
+        page.keyboard.press("Escape")
+        until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+    geo8 = _geo(page, range(1, 9))
+    check("4×2: two rows of four, the halves equal",
+          len({g[1] for g in geo8}) == 2 and len({g[0] for g in geo8}) == 4
+          and max(g[2] for g in geo8) - min(g[2] for g in geo8) <= 2, str(geo8))
+
+    # Every pane can show what any pane shows: chat, file, preview, diff, a terminal.
+    views = {1: "chat", 2: "file", 3: "browser", 4: "diff", 5: "terminal", 6: "chat", 7: "file", 8: "browser"}
+    for n, view in views.items():
+        _show(page, until, n, view)
+    page.locator('[data-testid="task-k1"]').click()
+    until(lambda: page.locator(_pane(4, '[data-testid="difflist"]')).count() > 0, timeout=4)
+    until(lambda: page.locator(f'[data-testid="pane-5-pick-{tid}"]').count() > 0, timeout=4)
+    page.locator(f'[data-testid="pane-5-pick-{tid}"]').click()
+    term = f'[data-testid="terminal-{tid}"]'
+    until(lambda: page.locator(_pane(5, term)).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
+    page.locator(_pane(7, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    page.locator(_pane(8, '[data-testid="browser-project"]')).click()
+    until(lambda: page.locator(_pane(8, "iframe")).count() > 0, timeout=4)
+    shows = {
+        1: _visible(page, _pane(1, '[data-testid="input"]')),
+        2: _visible(page, _pane(2, '[data-testid="filetree"]')) or _visible(page, _pane(2, '[data-testid="tree-toggle"]')),
+        3: _visible(page, _pane(3, '[data-testid="browser-url"]')),
+        4: page.locator(_pane(4, '[data-testid="difflist"]')).count() > 0,
+        5: _visible(page, _pane(5, f"{term} .xterm-screen")),
+        6: _visible(page, _pane(6, '[data-testid="input"]')),
+        7: page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py",
+        8: _visible(page, _pane(8, "iframe")),
+    }
+    check("in 4×2 every pane shows what it was given: two chats, two files, two Browsers, a diff, a terminal",
+          all(shows.values()) and all(_attr(page, _pane(n), "data-view") == v for n, v in views.items()), str(shows))
+    check("the chats in panes 1 and 6 are two conversations, each with its own box",
+          page.locator(_pane(1, '[data-testid="input"]')).count() == 1
+          and page.locator(_pane(6, '[data-testid="input"]')).count() == 1
+          and page.locator('[data-testid="compose-row"]').count() == 2)
+    page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept = 88")
+    _choose(page, until, "single")
+    check("⊞ to one pane: panes 2–8 are hidden, not unmounted",
+          all(page.locator(_pane(n)).count() == 1 and not _visible(page, _pane(n)) for n in range(2, 9))
+          and page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept") == 88)
+    _choose(page, until, "grid8")
+    check("and back to eight: the very panes, still showing what they showed (pane 8's frame not reloaded)",
+          all(_attr(page, _pane(n), "data-view") == v for n, v in views.items())
+          and page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py"
+          and _visible(page, _pane(8, "iframe")) and _visible(page, _pane(5, f"{term} .xterm-screen"))
+          and page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept") == 88)
+
+    # Smaller windows draw what fits, and say so.
+    page.set_viewport_size({"width": 1280, "height": 800})
+    page.locator(_pane(1, '[data-testid="input"]')).click()
+    until(lambda: _attr(page, ws, "data-drawn-preset") == "grid6", timeout=3)
+    note = ""
+    _open_layout_menu(page, until)
+    if page.locator('[data-testid="layout-dropped"]').count():
+        note = page.locator('[data-testid="layout-dropped"]').inner_text()
+    page.keyboard.press("Escape")
+    drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+    check("1280x800: eight panes draw as six, with a badge and \"Showing 6 of 8\"",
+          _attr(page, ws, "data-drawn-preset") == "grid6" and len(drawn) == 6
+          and page.locator('[data-testid="layout-badge"]').inner_text().strip() == "2"
+          and "Showing 6 of 8 panes" in note, f"{drawn} {note!r}")
+    check("1280x800: the focused pane is one of them, and every drawn pane keeps the minimum",
+          1 in drawn and all(g and g[2] >= 358 for g in _geo(page, drawn)), str(_geo(page, drawn)))
+    _set_storage(page, zoom="150")
+    _boot(page, mock, None, until, reload=True)
+    drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+    check("1280x800 at 150%: four of the eight", _attr(page, ws, "data-drawn-preset") == "grid4" and len(drawn) == 4
+          and page.locator('[data-testid="layout-badge"]').inner_text().strip() == "4", str(drawn))
+    check("setup: pane 7 is not among them", 7 not in drawn, str(drawn))
+    _press_on_body(page, "Control+Alt+7")
+    until(lambda: _visible(page, _pane(7)), timeout=3)
+    check("Ctrl+Alt+7 brings the dropped pane 7 into the drawn set, focused",
+          _visible(page, _pane(7)) and _attr(page, _pane(7), "data-focused") == "true"
+          and _attr(page, ws, "data-drawn-preset") == "grid4" and _last_key(page).get("prevented") is True)
+
+    # Ctrl+Alt+N is a slot, never an id: a stored order of 1, 5, 2.
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    _set_storage(page, zoom="100", layout="{}")
+    # Pane 2 (slot 3) holds the same terminal as pane 5 (slot 2): one terminal
+    # is drawn in one place, the first in reading order, so pane 2 says where.
+    # The panel's selected tab is that terminal too (review of PR #37: both
+    # "shown in pane N" labels survived an id-for-slot mutant).
+    _set_ws(page, json.dumps({"preset": "cols3", "order": [1, 5, 2], "focused": 1,
+                              "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": tid}, {"view": "file"},
+                                        {"view": "task"}, {"view": "terminal", "terminalId": tid}]}))
+    page.evaluate("t => localStorage.setItem('jarvis.hud.terminals', JSON.stringify({active: t, specs: {}}))", tid)
+    _boot(page, mock, None, until, reload=True)
+    g = _geo(page, (1, 5, 2))
+    check("a stored order [1, 5, 2] draws pane 5 in the middle, slot 2",
+          all(g) and g[0][0] < g[1][0] < g[2][0] and [x[4] for x in g] == ["1", "2", "3"], str(g))
+    _press_on_body(page, "Control+Alt+2")
+    until(lambda: _attr(page, _pane(5), "data-focused") == "true", timeout=2)
+    check("Ctrl+Alt+2 focuses the pane in slot 2 (id 5), not pane 2",
+          _attr(page, _pane(5), "data-focused") == "true" and _attr(page, _pane(2), "data-focused") == "false")
+    _press_on_body(page, "Control+Alt+3")
+    until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
+    check("and Ctrl+Alt+3 the pane in slot 3 (id 2)", _attr(page, _pane(2), "data-focused") == "true")
+    _press_on_body(page, "Control+Alt+4")
+    time.sleep(0.15)
+    check("Ctrl+Alt+4 does nothing in three panes and is left to the browser",
+          _attr(page, _pane(2), "data-focused") == "true" and _last_key(page).get("prevented") is False)
+    check("the panes' labels name their slots", _attr(page, _pane(5), "aria-label").startswith("Pane 2:"),
+          str(_attr(page, _pane(5), "aria-label")))
+    elsewhere = page.locator('[data-testid="pane-2-terminal-elsewhere"]')
+    until(lambda: elsewhere.count() > 0, timeout=3)
+    check("pane 2 (slot 3), holding the terminal pane 5 draws, says \"shown in pane 2\" — the slot, not id 5",
+          elsewhere.count() == 1 and "shown in pane 2." in elsewhere.inner_text()
+          and page.locator(_pane(5, f'[data-testid="terminal-{tid}"]')).count() == 1,
+          elsewhere.inner_text() if elsewhere.count() else "no notice")
+    page.locator('[data-testid="toggle-panel"]').click()
+    tab = page.locator(f'[data-testid="panel-tab-{tid}"]')
+    until(lambda: tab.count() > 0 and "in pane" in tab.inner_text(), timeout=3)
+    check("the terminal in pane 5 (slot 2): its panel tab says \"in pane 2\"",
+          tab.count() == 1 and "in pane 2" in tab.inner_text() and tab.get_attribute("data-place") == "pane-5",
+          tab.inner_text() if tab.count() else "no tab")
+    there = page.locator('[data-testid="panel-elsewhere"]')
+    until(lambda: there.count() > 0, timeout=3)
+    check("and the panel, on that terminal's tab, says \"shown in pane 2\" too",
+          there.count() == 1 and "shown in pane 2." in there.inner_text(),
+          there.inner_text() if there.count() else "no notice")
+    page.locator('[data-testid="toggle-panel"]').click()
+    page.evaluate("localStorage.removeItem('jarvis.hud.terminals')")
+
+    # A stored 3 over 2 has no tile in ⊞: the menu opens on a tile, never on a
+    # toggle row (review of PR #37: Enter on the focused sidebar toggle folded it).
+    _set_ws(page, json.dumps({"preset": "grid5"}))
+    _boot(page, mock, None, until, reload=True)
+    _open_layout_menu(page, until)
+    time.sleep(0.1)
+    checked = [p for p in MENU_TILES if _attr(page, f'[data-testid="layout-preset-{p}"]', "aria-checked") == "true"]
+    check("with 3 over 2 stored, ⊞ checks no tile and opens with focus on the first tile, not a toggle",
+          checked == [] and _active_testid(page) == "layout-preset-single", f"{checked} {_active_testid(page)}")
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+    check("and the sidebar is still open", _visible(page, "#sidebar"))
+
+    # 3 over 2: the bottom row's edge is its own.
+    _set_ws(page, json.dumps({"preset": "grid5"}))
+    _boot(page, mock, None, until, reload=True)
+    top0 = [g[2] for g in _geo(page, (1, 2, 3))]
+    bot0 = [g[2] for g in _geo(page, (4, 5))]
+    check("3 over 2: three panes over two, the bottom row's edges its own",
+          _attr(page, ws, "data-drawn-preset") == "grid5" and page.locator('[data-testid="split-colb-1"]').count() == 1
+          and page.locator('[data-testid="split-col-2"]').count() == 1 and abs(bot0[0] - bot0[1]) <= 2, f"{top0} {bot0}")
+    _drag(page, '[data-testid="split-colb-1"]', 120)
+    top1 = [g[2] for g in _geo(page, (1, 2, 3))]
+    bot1 = [g[2] for g in _geo(page, (4, 5))]
+    check("dragging split-colb-1 moves only the bottom row's edge",
+          abs(bot1[0] - (bot0[0] + 120)) <= 3 and abs(bot1[1] - (bot0[1] - 120)) <= 3 and top1 == top0,
+          f"top {top0} -> {top1}, bottom {bot0} -> {bot1}")
+    _drag(page, '[data-testid="split-col-1"]', -60)
+    top2 = [g[2] for g in _geo(page, (1, 2, 3))]
+    bot2 = [g[2] for g in _geo(page, (4, 5))]
+    check("and the top row's edge only the top row's", bot2 == bot1 and abs(top2[0] - (top1[0] - 60)) <= 3,
+          f"top {top1} -> {top2}, bottom {bot1} -> {bot2}")
+    stored = json.loads(page.evaluate("localStorage.getItem('jarvis.hud.workspace')") or "{}")
+    check("both survive in what is stored", len(stored.get("splits", {}).get("grid5", {}).get("bottom", [])) == 1,
+          str(stored.get("splits", {}).get("grid5")))
+
+    # Eight panes under a card: Monaco, a preview frame, a terminal and chats.
+    grid8 = json.dumps({"preset": "grid8", "focused": 1, "panes": [
+        {"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"},
+        {"view": "terminal", "terminalId": tid}, {"view": "chat"}, {"view": "chat"}, {"view": "file"}]})
+    fake = mock.fake_pty
+    for zoom in ("160", "70"):
+        page.set_viewport_size({"width": 1920, "height": 1080})
+        _set_storage(page, zoom=zoom, layout="{}")
+        _set_ws(page, grid8)
+        _boot(page, mock, None, until, reload=True)
+        page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+        until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0
+              or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
+        page.locator(_pane(3, '[data-testid="browser-project"]')).click()
+        until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
+        until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
+        drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+        check(f"at {zoom}% on 1920x1080 eight panes draw ({len(drawn)} of them), Monaco, a frame and a terminal on screen",
+              {1, 2, 3, 5, 6}.issubset(drawn) and _visible(page, _pane(2, '[data-testid="editor"]'))
+              and _visible(page, _pane(3, "iframe")) and _visible(page, _pane(5, f"{term} .xterm-screen")),
+              f"{drawn} {_attr(page, ws, 'data-drawn-preset')}")
+        page.locator(_pane(5, f"{term} .xterm-screen")).click(position={"x": 20, "y": 8})
+        sent = len(fake.sent(tid))
+        req = f"eight{zoom}"
+        _approval(mock, req, LONG_COMMAND)
+        until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+        time.sleep(0.2)
+        if zoom == "160":
+            ok, why = _authorize_below_fold(page)
+            check(f"at {zoom}% over eight panes, AUTHORIZE is below the fold until the command is scrolled past", ok, why)
+        ok, why = _card_on_screen(page)
+        check(f"at {zoom}% over eight panes, the card is wholly on screen and every button topmost at its point", ok, why)
+        got = page.evaluate("""() => {
+          const b = [...document.querySelectorAll('[data-testid$="-split"], [data-testid$="-close"]')]
+            .filter(e => /^pane-\\d-(split|close)$/.test(e.getAttribute('data-testid')));
+          const panes = [...document.querySelectorAll('section.wpane')];
+          const drawn = panes.filter(e => e.offsetParent !== null).length;
+          return [panes.length, drawn, b.length, b.filter(e => !e.disabled).map(e => e.getAttribute('data-testid'))];
+        }""")
+        # A split button in every mounted pane, a × in every drawn one: all disabled.
+        check(f"at {zoom}% under the card every pane's split and × is disabled (WP-G2)",
+              got[1] >= 4 and got[2] == got[0] + got[1] and got[3] == [], str(got))
+        page.keyboard.type("y")
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(150)
+        check(f"at {zoom}% a y⏎ typed with a terminal among eight panes reaches no shell",
+              fake.sent(tid)[sent:] == b"", repr(fake.sent(tid)[sent:]))
+        page.locator('[data-testid="approval-card"] button.deny').click()
+        until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     _reset_all(page, mock, until)
 
 
@@ -1903,7 +2780,7 @@ def _crash_checks(page, mock, check, until):
         page.locator('[data-testid="hud-crashed-reload"]').focus()
         ptt: list[object] = []
         reloaded = _reload_to_window(page, mock, until, lambda: ptt.append(_ptt_on_space(page)))
-        check("Space on the focused Reload starts no push-to-talk", ptt == [None], str(ptt))
+        check("Space on the focused Reload never starts the mic", ptt == [None], str(ptt))
         ok, why = _window_whole(page)
         check("it presses Reload: the window comes back", reloaded and ok, why)
         check("with no page error", not errors, "; ".join(errors[:2]))
@@ -1931,15 +2808,23 @@ def _crash_checks(page, mock, check, until):
         errors.clear()
         page.locator('[data-testid="open-settings"]').click()
         until(lambda: page.locator('[data-testid="picker"]').count() > 0, timeout=3)
-        page.evaluate("window.__hudCrashProbe = 'dialog'")
-        page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'dialog probe render'}})")
+        # The probe and the render that trips it in one evaluate: set apart, a
+        # render of the window's own on a slow machine tripped it first, its
+        # "dialog hit an error" was then overwritten by this patch's text, and
+        # "and says so" below failed (20x CPU throttling: 3 of 3).
+        page.evaluate("window.__hudCrashProbe = 'dialog';"
+                      " window.__hud.dispatch({type: 'patch', patch: {error: 'dialog probe render'}})")
         until(lambda: page.locator('[data-testid="picker"]').count() == 0, timeout=3)
         time.sleep(0.2)
         ok, why = _window_whole(page)
         check("a dialog that throws is closed and the window stays drawn",
               page.locator('[data-testid="picker"]').count() == 0 and ok, why)
-        check("and says so", "dialog hit an error" in (page.evaluate(
-            "document.querySelector('[data-testid=\"error\"]')?.textContent") or ""))
+        # The sentence is drawn a render after the dialog goes (the boundary's
+        # onCrash patches it in): under load one read 0.2 s later missed it.
+        line = lambda: page.evaluate(  # noqa: E731
+            "document.querySelector('[data-testid=\"error\"]')?.textContent") or ""
+        until(lambda: "dialog hit an error" in line(), timeout=4)
+        check("and says so", "dialog hit an error" in line(), repr(line()))
         check("and is caught: no page error", not errors, "; ".join(errors[:2]))
         page.evaluate("delete window.__hudCrashProbe")
         page.locator('[data-testid="open-settings"]').click()
@@ -1950,4 +2835,349 @@ def _crash_checks(page, mock, check, until):
     finally:
         page.remove_listener("pageerror", listen)
         mock.stt_gate = None
+    _reset_all(page, mock, until)
+
+
+# ---------------------------------------------------------------------------
+# WP-G2: the one-click split and the × (plan §3.4–§3.6, decisions S-1..S-8)
+
+STYLE_JS = """(sel) => {
+  const e = document.querySelector(sel);
+  if (!e) return null;
+  const c = getComputedStyle(e);
+  return [e.offsetWidth, e.offsetHeight, c.color, c.backgroundColor, c.borderTopColor, c.borderRadius];
+}"""
+
+
+def _order(page) -> list:
+    return _ws(page)["ws"]["order"]
+
+
+def _drawn(page) -> list:
+    return _ws(page)["fit"]["panes"]
+
+
+def _close(page, until, n: int):
+    """× on pane N, and the window settled (past the double-click guard)."""
+    page.locator(f'[data-testid="pane-{n}-close"]').click()
+    until(lambda: n not in _order(page), timeout=2)
+    time.sleep(0.5)
+
+
+def _split_checks(page, mock, check, until):
+    """The owner's words: a split button VS Code style, and a × to close
+    exactly one pane. One pane to eight a click at a time, each copy right
+    after its source and focused; never a ninth, never a shape the window
+    cannot draw whole; nothing under a card; Space is never push-to-talk;
+    one click on × closes one pane, even when the second click of a
+    double-click lands on the × that moved under the pointer."""
+    ws = '[data-testid="workspace"]'
+    _reset_all(page, mock, until, (1920, 1080))
+    split1 = page.locator('[data-testid="pane-1-split"]')
+    check("the single layout's strip has the split button, and no ×",
+          split1.count() == 1 and split1.is_visible() and page.locator('[data-testid="pane-1-close"]').count() == 0)
+    mine, theirs = page.evaluate(STYLE_JS, '[data-testid="pane-1-split"]'), page.evaluate(STYLE_JS, '[data-testid="toggle-panel"]')
+    check("it is the title bar's toggles' button: their computed size and colour", mine == theirs, f"{mine} vs {theirs}")
+    check("it says what it does", split1.get_attribute("title") == "Split: a copy of this pane beside it"
+          and split1.get_attribute("aria-label") == "Split pane", str(split1.get_attribute("title")))
+
+    for preset, order in (("cols2", [1, 2]), ("cols3", [1, 3, 2]), ("grid4", [1, 4, 3, 2])):
+        split1.click()
+        until(lambda: _attr(page, ws, "data-preset") == preset, timeout=2)
+        new = order[1]
+        until(lambda: _attr(page, _pane(new), "data-focused") == "true", timeout=2)
+        check(f"a click: {preset}, the copy right after pane 1 (slot 2) and focused",
+              _order(page) == order and _attr(page, _pane(new), "data-slot") == "2"
+              and _attr(page, _pane(new), "data-focused") == "true" and _attr(page, _pane(new), "data-view") == "chat",
+              f"{_order(page)} {_attr(page, _pane(new), 'data-focused')}")
+    check("every pane carries a ×", all(page.locator(f'[data-testid="pane-{n}-close"]').count() == 1 for n in (1, 2, 3, 4)))
+
+    # Space presses the button, and is never push-to-talk.
+    split1.focus()
+    ptt = _ptt_on_space(page)
+    until(lambda: len(_order(page)) == 5, timeout=2)
+    check("Space on the split button splits (grid5) and is never push-to-talk",
+          not ptt and _attr(page, ws, "data-preset") == "grid5", f"ptt={ptt} {_attr(page, ws, 'data-preset')}")
+
+    while len(_order(page)) < 8:
+        n = len(_order(page))
+        split1.click()
+        until(lambda: len(_order(page)) == n + 1, timeout=2)
+    geo = _geo(page, _order(page))
+    check("on to eight at 1920x1080: 4×2, all eight drawn in reading order",
+          _attr(page, ws, "data-drawn-preset") == "grid8" and all(geo) and _reading_order(geo)
+          and _order(page) == [1, 8, 7, 6, 5, 4, 3, 2], f"{_order(page)} {geo}")
+    until(lambda: split1.is_disabled(), timeout=2)
+    check("at eight the split button is disabled and says why",
+          all(page.locator(f'[data-testid="pane-{n}-split"]').is_disabled() for n in range(1, 9))
+          and split1.get_attribute("title") == "Eight panes is the most", str(split1.get_attribute("title")))
+    check("and every one of the eight has a ×", all(page.locator(f'[data-testid="pane-{n}-close"]').count() == 1
+                                                     for n in range(1, 9)))
+
+    # × closes exactly that pane. A chat pane is the selected chat the moment
+    # its × is pressed, so focus goes to the chat selected before it (W-6):
+    # a drawn pane, never the page. (The slot rule, for a pane that is not the
+    # selected chat, is in the File checks and workspace.test.)
+    for _ in range(3):
+        gone = _order(page)[1]
+        before = [n for n in page.evaluate("window.__hud.state().selectedOrder") if n != gone]
+        _close(page, until, gone)
+        focused = _ws(page)["ws"]["focused"]
+        check(f"× on pane {gone} (slot 2) closes it; focus is on the chat selected before it (pane {focused}), never the page",
+              gone not in _order(page) and page.locator(_pane(gone)).count() == 0
+              and _active_testid(page) == f"pane-{focused}" and focused in _drawn(page)
+              and focused == (before[0] if before else None)
+              and page.evaluate("window.__hud.state().selectedChat") == focused,
+              f"{_order(page)} {_active_testid(page)} {before}")
+    check("eight less three is 3 over 2", _attr(page, ws, "data-preset") == "grid5" and _order(page) == [1, 5, 4, 3, 2],
+          str(_order(page)))
+
+    # A double-click on slot 3's × (top right): after the first click 2×2's
+    # slot 2 × sits under the pointer. One pane goes, never two.
+    box = page.locator('[data-testid="pane-4-close"]').bounding_box()
+    page.mouse.dblclick(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    until(lambda: 4 not in _order(page), timeout=2)
+    time.sleep(0.6)
+    check("a double-click on a × closes one pane: 3 over 2 → 2×2, never 2×2 → three",
+          _order(page) == [1, 5, 3, 2] and _attr(page, ws, "data-preset") == "grid4", str(_order(page)))
+    landed = page.locator('[data-testid="pane-5-close"]').bounding_box()
+    check("(the pane now top right has its × where the double-click landed)",
+          abs(landed["x"] - box["x"]) < 3 and abs(landed["y"] - box["y"]) < 3, f"{landed} vs {box}")
+
+    # Under a card: every split and ×, and Enter on a focused one, do nothing.
+    split1.focus()
+    before = _order(page)
+    _approval(mock, "split-card")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.2)
+    disabled = page.evaluate("""() => [...document.querySelectorAll('button')]
+      .filter(b => /^pane-\\d-(split|close)$/.test(b.getAttribute('data-testid') || ''))
+      .every(b => b.disabled)""")
+    check("under a card every split and × is disabled", disabled)
+    check("and the card took focus off the split button", _active_testid(page) != "pane-1-split", str(_active_testid(page)))
+    page.keyboard.press("Enter")
+    page.keyboard.press("Space")
+    time.sleep(0.3)
+    check("Enter and Space under the card split and close nothing", _order(page) == before, str(_order(page)))
+    page.locator('[data-testid="approval-card"] button.deny').click()
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+
+    # At 1280x800 six panes fit, seven do not: split says so.
+    page.set_viewport_size({"width": 1280, "height": 800})
+    until(lambda: not split1.is_disabled(), timeout=2)
+    check("at 1280x800 four panes can still split", not split1.is_disabled())
+    for n in (5, 6):
+        split1.click()
+        until(lambda: len(_order(page)) == n, timeout=2)
+    until(lambda: split1.is_disabled(), timeout=2)
+    title = split1.get_attribute("title") or ""
+    check("at 1280x800, six panes cannot become seven (4 over 3 would not be drawn whole): disabled, saying so",
+          split1.is_disabled() and title == "No room for 7 panes in this window: widen it, zoom out (Ctrl+-) or close a pane"
+          and _attr(page, ws, "data-drawn-preset") == "grid6", title)
+
+    # Down to one: no × with one pane drawn.
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    while len(_order(page)) > 1:
+        _close(page, until, _order(page)[-1])
+    check("closed down to one pane: single, and no ×", _attr(page, ws, "data-preset") == "single"
+          and page.locator('[data-testid$="-close"]').count() == 0 and split1.is_visible())
+    _reset_all(page, mock, until)
+
+
+def _split_close_one_checks(page, mock, check, until):
+    """After pane 1 is closed nothing assumes it is there (plan G-1): the
+    header id, Ctrl+Alt+1, the window's chat, a reload and the next split all
+    follow the slot."""
+    ws = '[data-testid="workspace"]'
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, json.dumps({"preset": "cols2", "focused": 1, "panes": [{"view": "chat"}, {"view": "chat"}]}))
+    _boot(page, mock, None, until, reload=True)
+    until(lambda: page.evaluate("window.__hud.state().chats['2'].compose") is not None, timeout=3)
+    _close(page, until, 1)
+    check("× on pane 1: one pane left, pane 2, and pane 1 is unmounted",
+          _order(page) == [2] and _attr(page, ws, "data-preset") == "single" and page.locator(_pane(1)).count() == 0)
+    check("the slot-1 header is pane 2's now", page.locator(_pane(2, "#tabs")).count() == 1)
+    st = page.evaluate("(() => { const s = window.__hud.state(); return [s.selectedChat, s.home, !!s.compose]; })()")
+    check("the window's chat is pane 2's: selected, home, its compose row", st == [2, 2, True], str(st))
+    box = page.locator(_pane(2, '[data-testid="input"]'))
+    box.click()
+    box.fill("still here")
+    check("pane 2's box takes typing", page.evaluate("window.__hud.state().input") == "still here")
+    _press_on_body(page, "Control+Alt+1")
+    time.sleep(0.15)
+    check("Ctrl+Alt+1 focuses the pane in slot 1, pane 2", _attr(page, _pane(2), "data-focused") == "true"
+          and _last_key(page).get("prevented") is True)
+    _boot(page, mock, None, until, reload=True)
+    check("a reload keeps the order without pane 1", _order(page) == [2] and page.locator(_pane(1)).count() == 0
+          and _visible(page, _pane(2, '[data-testid="input"]')), str(_order(page)))
+    st = page.evaluate("(() => { const s = window.__hud.state(); return [s.selectedChat, s.home]; })()")
+    check("and after it the window's chat is still pane 2's", st == [2, 2], str(st))
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: len(_order(page)) == 2, timeout=2)
+    check("the next split takes the free id 1, in slot 2 after its source",
+          _order(page) == [2, 1] and _attr(page, _pane(1), "data-slot") == "2", str(_order(page)))
+    _reset_all(page, mock, until)
+
+
+def _file_text(page, n: int) -> str:
+    """The text in pane N's editor, every space taken out: Monaco draws them as
+    no-break spaces, or not at all, depending on the line."""
+    ed = page.locator(_pane(n, '[data-testid="editor"] .view-lines'))
+    if ed.count():
+        text = ed.first.inner_text()
+    else:
+        fb = page.locator(_pane(n, '[data-testid="editor-fallback"]'))
+        text = fb.first.input_value() if fb.count() else ""
+    return "".join(text.split()).replace("\xa0", "")
+
+
+def _split_file_checks(page, mock, check, until):
+    """A File pane's copy holds the same tabs on the same buffers (ED-2, which
+    lifted decisions S-8's "save first"): an edit in one shows in the other at
+    once, and one save cleans both. × asks only for an edit no other pane
+    holds — Save / Don't save / Cancel, as closing the last tab on one does —
+    and an id a split takes back mounts fresh, never the old FileTab. (A chat
+    in pane 1: the window puts its chat on screen at boot, so a lone File pane
+    would boot as chat.)"""
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, json.dumps({"preset": "cols2", "focused": 2, "panes": [{"view": "chat"}, {"view": "file"}]}))
+    _boot(page, mock, None, until, reload=True)
+    page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    page.locator('[data-testid="pane-2-split"]').click()
+    path3 = page.locator(_pane(3, '[data-testid="file-path"]'))
+    until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
+    tabs3 = (_ws(page)["ws"]["panes"][2].get("editors") or {})
+    check("a File pane's copy opens the same tabs, right after it",
+          _order(page) == [1, 2, 3] and path3.inner_text() == "calc.py" and tabs3.get("paths") == ["calc.py"],
+          f"{_order(page)} {tabs3}")
+    until(lambda: len(page.evaluate("window.__hud.buffers()")) == 1
+          and len(page.evaluate("window.__hud.buffers()")[0]["refs"]) == 2, timeout=6)
+    bufs = page.evaluate("window.__hud.buffers()")
+    check("on the same buffer: one model for the file, held by both panes",
+          len(bufs) == 1 and sorted(bufs[0]["refs"]) == ["2|calc.py", "3|calc.py"], str(bufs))
+
+    assert _edit(page, until, 2, "\n# edited in two")
+    s2 = page.locator('[data-testid="pane-2-split"]')
+    until(lambda: "editedintwo" in _file_text(page, 3), timeout=3)
+    check("an edit in one shows in the copy at once, and a pane holding one still splits (the same buffers)",
+          "editedintwo" in _file_text(page, 3) and not s2.is_disabled(), str(s2.get_attribute("title")))
+    page.locator(_pane(2, '[data-testid="file-save"]')).click()
+    save3 = page.locator(_pane(3, '[data-testid="file-save"]'))
+    until(lambda: save3.is_disabled(), timeout=4)
+    check("one save cleans both", save3.is_disabled() and page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled())
+
+    # A shared unsaved edit: × on one pane loses nothing, so it does not ask.
+    assert _edit(page, until, 3, "\n# shared")
+    page.locator('[data-testid="pane-3-close"]').click()
+    until(lambda: 3 not in _order(page), timeout=2)
+    check("× on a pane whose unsaved edit another pane also holds closes at once, the edit kept there",
+          _order(page) == [1, 2] and "shared" in _file_text(page, 2)
+          and not page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled())
+    page.locator(_pane(2, '[data-testid="file-save"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled(), timeout=4)
+
+    # An edit only this pane holds: × asks Save / Don't save / Cancel.
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
+    time.sleep(0.5)  # past the one-click-one-close guard
+    _open_file(page, until, 3, "README.md")
+    assert _edit(page, until, 3, "\n# dirty in three")
+    readme = mock.world["files"]["README.md"]["content"]
+    page.locator('[data-testid="pane-3-close"]').click()
+    ask = page.locator('[data-testid="pane-3-close-ask"]')
+    until(lambda: ask.count() > 0, timeout=2)
+    check("× on a pane holding an edit no other pane holds asks Save / Don't save / Cancel, inline, focus on Cancel",
+          ask.is_visible() and _order(page) == [1, 2, 3] and _active_testid(page) == "pane-3-close-keep"
+          and page.locator('[data-testid="pane-3-close-save"]').inner_text() == "Save"
+          and page.locator('[data-testid="pane-3-close-discard"]').inner_text() == "Don't save"
+          and page.locator('[data-testid="pane-3-close-keep"]').inner_text() == "Cancel"
+          and "README.md" in ask.inner_text(), str(_active_testid(page)))
+    # A card arriving while it asks: nothing in the question can be pressed.
+    _approval(mock, "close-ask-card")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.2)
+    # Discard is disabled; Keep is only inert behind the veil (disabling it
+    # would drop focus to the page before the card could record it).
+    check("under a card Discard is disabled, Keep cannot be reached, and the card has the focus",
+          page.locator('[data-testid="pane-3-close-discard"]').is_disabled()
+          and page.evaluate("!!document.querySelector('[data-testid=\"pane-3-close-keep\"]').closest('[inert]')")
+          and page.locator('[data-testid="pane-3-close-save"]').is_disabled()
+          and _active_testid(page) == "approval-card", str(_active_testid(page)))
+    page.keyboard.press("Enter")
+    time.sleep(0.3)
+    check("and Enter there discards nothing", _order(page) == [1, 2, 3])
+    page.locator('[data-testid="approval-card"] button.deny').click()
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    check("once the card is answered, focus is back on Keep",
+          bool(until(lambda: _active_testid(page) == "pane-3-close-keep", timeout=2)), str(_active_testid(page)))
+    page.locator('[data-testid="pane-3-close-keep"]').click()
+    until(lambda: ask.count() == 0, timeout=2)
+    check("Cancel keeps the pane and its edit", _order(page) == [1, 2, 3] and "dirtyinthree" in _file_text(page, 3))
+    time.sleep(0.5)
+    page.locator('[data-testid="pane-3-close"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    puts = len(_puts(mock))
+    page.locator('[data-testid="pane-3-close-save"]').click()
+    until(lambda: 3 not in _order(page), timeout=4)
+    sent = _puts(mock)[puts:]
+    check("Save saves the edit, then closes the pane",
+          _order(page) == [1, 2] and len(sent) == 1 and sent[0].get("path") == "README.md"
+          and "dirtyinthree" in "".join(mock.world["files"]["README.md"]["content"].split()), str(sent))
+    mock.world["files"]["README.md"]["content"] = readme
+    # And Don't save: the edit goes, the file untouched.
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
+    time.sleep(0.5)
+    _open_file(page, until, 3, "README.md")
+    assert _edit(page, until, 3, "\n# thrown away")
+    page.locator('[data-testid="pane-3-close"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    page.locator('[data-testid="pane-3-close-discard"]').click()
+    until(lambda: 3 not in _order(page), timeout=2)
+    check("Don't save closes it, the file untouched and no edit left anywhere",
+          _order(page) == [1, 2] and page.locator(_pane(3)).count() == 0
+          and mock.world["files"]["README.md"]["content"] == readme
+          and not any(b["dirty"] for b in page.evaluate("window.__hud.buffers()"))
+          and page.evaluate("window.__hud.workspace().ws.preset") == "cols2")
+    # Where the mic is (review of PR #47, M1): the selected chat, pane 1 —
+    # not the File pane in the slot before, and never the page.
+    until(lambda: _active_testid(page) == "pane-1", timeout=2)
+    check("and focus goes to the selected chat (pane 1), never the page", _active_testid(page) == "pane-1"
+          and page.evaluate("window.__hud.state().selectedChat") == 1, str(_active_testid(page)))
+
+    # Close a File pane on calc.py, then split one on README.md into the same id.
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
+    time.sleep(0.5)
+    _close(page, until, 3)
+    page.locator(_pane(2, '[data-testid="file-README.md"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "README.md", timeout=4)
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: _order(page) == [1, 2, 3], timeout=2)
+    until(lambda: path3.count() > 0 and path3.inner_text() == "README.md", timeout=4)
+    check("an id a close freed and a split reuses shows the new copy (README.md), never the old file",
+          path3.inner_text() == "README.md", path3.inner_text())
+
+    # Every id used: ⊞ hid seven panes, and a split takes back the oldest.
+    _set_ws(page, json.dumps({"preset": "grid8", "order": [2, 1, 3, 4, 5, 6, 7, 8], "focused": 2, "panes": [
+        {"view": "chat"}, {"view": "file"}, {"view": "chat"}, {"view": "chat"},
+        {"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "file"}]}))
+    _boot(page, mock, None, until, reload=True)
+    page.locator(_pane(8, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(8, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    page.locator(_pane(2, '[data-testid="file-README.md"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "README.md", timeout=4)
+    _choose(page, until, "single")
+    check("setup: one pane, the other seven hidden by ⊞ (pane 8 still mounted on calc.py)",
+          _order(page) == [2] and _ws(page)["ws"]["kept"] == [1, 3, 4, 5, 6, 7, 8]
+          and page.locator(_pane(8, '[data-testid="file-path"]')).inner_text() == "calc.py", str(_ws(page)["ws"]["kept"]))
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: _order(page) == [2, 8], timeout=2)
+    p8 = page.locator(_pane(8, '[data-testid="file-path"]'))
+    until(lambda: p8.count() > 0 and p8.inner_text() == "README.md", timeout=4)
+    check("a split that takes back a hidden pane mounts it fresh: the copy (README.md), not its old calc.py",
+          p8.inner_text() == "README.md" and _ws(page)["ws"]["kept"] == [1, 3, 4, 5, 6, 7], p8.inner_text())
     _reset_all(page, mock, until)

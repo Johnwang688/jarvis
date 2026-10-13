@@ -973,6 +973,44 @@ class LifecycleChecks(Harness):
         self.assertFalse(M.sidecar_path(self.stores, chat.id).parent.exists(),
                          "the mirror recreated a deleted chat's folder")
 
+    def _no_rename_while_archived(self, chat, place, title):
+        """The review of PR #62 (M1): Discord answers a rename of an archived
+        thread with 50083, and the poster used to unarchive it to retry — so
+        the start-up title backfill reopened every archived chat on Discord."""
+        self.transport.fail.append(("PATCH", lambda path: path == f"/channels/{place}", 400,
+                                    {"code": 50083, "message": "Thread is archived"}, 1))
+        before = len(self.transport.patches(place))
+        self.assertTrue(P.auto_title(self.daemon, chat.id, title))
+        wait_for(lambda: M.read_sidecar(self.stores, chat.id).get("name") == title, what="the stored name")
+        time.sleep(0.4)
+        self.assertEqual(self.transport.patches(place)[before:], [],
+                         "an archived chat's Discord thread was renamed or unarchived")
+        self.assertTrue(M.read_sidecar(self.stores, chat.id).get("rename_pending"))
+        self.transport.fail.clear()
+
+    def test_a_title_for_an_archived_chat_waits_for_its_restore(self):
+        chat = self.open_chat()
+        place = self.started(chat)
+        P.archive_thread(self.daemon, chat.id)
+        wait_for(lambda: {"archived": True} in self.transport.patches(place), what="archive")
+        self._no_rename_while_archived(chat, place, "Biology Essay Plan")
+        P.restore_thread(self.daemon, chat.id)
+        wait_for(lambda: {"name": "Biology Essay Plan"} in self.transport.patches(place), what="the rename")
+        posts, names = self.transport.texts(place), self.transport.patches(place)
+        self.assertIn("Restored.", posts)
+        self.assertNotIn("rename_pending", M.read_sidecar(self.stores, chat.id))
+        self.assertEqual(names[-1], {"name": "Biology Essay Plan"})
+
+    def test_a_title_in_an_archived_project_waits_for_its_restore(self):
+        chat = self.open_chat()
+        place = self.started(chat)
+        token = P.impact(self.daemon, self.school.id)["token"]
+        P.archive_project(self.daemon, self.school.id, token)
+        self._no_rename_while_archived(chat, place, "Chemistry Lab Notes")
+        P.restore_project(self.daemon, self.school.id)
+        wait_for(lambda: {"name": "Chemistry Lab Notes"} in self.transport.patches(place), what="the rename")
+        self.assertNotIn("rename_pending", M.read_sidecar(self.stores, chat.id))
+
     def test_an_archive_the_bot_may_not_do_is_reported(self):
         chat = self.open_chat()
         place = self.started(chat)
@@ -1137,12 +1175,28 @@ class ReviewFixChecks(Harness):
                        503, {"message": "unavailable"}, None)
         self.transport.fail.append(unavailable)
         chat = self.open_chat()
+
+        # The worker records each back-off a moment after Discord answers (it
+        # logs the failure first). The fake clock must not move in between:
+        # a back-off measured from a clock already moved on came due later
+        # than the test moved it, and `place` below timed out under load (the
+        # flake). So each step waits for the worker's own record of the
+        # failure it just saw — which also says exactly when it will retry.
+        def backoff(delay):
+            def recorded():
+                with self.mirror._lock:
+                    entry = self.mirror._create_retry.get(chat.id)
+                return entry if entry is not None and entry[1] == delay else None
+            return wait_for(recorded, what=f"the {delay:g} s back-off recorded")
+
         self.hud_send(chat, "hello")
         wait_for(lambda: creates(), what="a first create")
+        self.assertEqual(backoff(M.RETRY_S), (self.now[0] + M.RETRY_S, M.RETRY_S))
         time.sleep(1.0)
         self.assertEqual(len(creates()), 1, "creates retried with no back-off")
         self.now[0] += 5.1
         wait_for(lambda: len(creates()) == 2, what="the retry after 5 s")
+        self.assertEqual(backoff(2 * M.RETRY_S), (self.now[0] + 2 * M.RETRY_S, 2 * M.RETRY_S))
         self.transport.fail.remove(unavailable)
         limited = ("POST", lambda path: path == f"/channels/{SCHOOL_CHANNEL}/threads",
                    429, {"message": "slow down", "retry_after": 30}, None)
@@ -1150,6 +1204,7 @@ class ReviewFixChecks(Harness):
         self.now[0] += 10.1
         wait_for(lambda: len(creates()) == 3, what="the retry after 10 s")
         # The back-off alone would be 20 s now; Discord asked for 30.
+        self.assertEqual(backoff(4 * M.RETRY_S), (self.now[0] + 30, 4 * M.RETRY_S))
         self.now[0] += 21
         time.sleep(0.8)
         self.assertEqual(len(creates()), 3, "Discord's retry_after was not honoured")

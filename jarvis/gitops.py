@@ -51,6 +51,27 @@ for git to run (`core.sshCommand`, a filter or textconv driver, `url.*.insteadOf
 tools/files.py), so such a config is either the owner's or something to look at
 by hand.
 
+**Submodules are other repositories, so git is kept out of them.** Inside a
+submodule git obeys *that* repository's config and attributes, not the one
+checked here: a plain `status` or `diff` runs `git status` inside each
+checked-out submodule (its clean filter ran, 2026-10-12), `log -p` under a
+`diff.submodule=diff` runs `git diff` there (its textconv ran — the
+`--no-textconv` pin does not reach that child), and fetch, push, switch and
+grep recurse when a config says so (a push published the submodule's commits
+to *its* remote, past the outgoing scan). Two layers. Every invocation is
+pinned out of submodules — recursion off, `diff.submodule=short`, and
+`--ignore-submodules=dirty` on the command line of the status and diff family
+(a `-c diff.ignoreSubmodules` is overridden by a `.gitmodules` `ignore =`,
+which the agent can write; the command line is not) — and the `-c` pins
+travel into any git that git itself starts (`GIT_CONFIG_PARAMETERS`), so a
+submodule's hooks and fsmonitor are off as well. And because some of git's
+own internals still go in whatever the pins say (`add -A`, `describe
+--dirty`/`--broken`, `rm` of a submodule, and — when `.gitmodules` sets `ignore` —
+commit's status, `stash apply`'s and checkout's change report), every
+checked-out submodule's own config is read like the superproject's, nested
+ones too, and a program-naming key there, or a submodule that cannot be
+read, refuses the repository.
+
 **And what is published is checked.** A commit whose changes name a protected
 credential file or carry a value from one is undone (`reset --soft`, nothing
 lost) before the tool returns, and a push is refused if anything outgoing does.
@@ -60,7 +81,9 @@ with a very large grammar, written to fail closed: an option it does not
 recognise as a value is judged as a flag, a form it cannot place is refused or
 reviewed, and the hardening above does not depend on the matching being right.
 What stays outside it: the owner's own global git configuration and credential
-helpers (which run on push and fetch), and `gh`, which lives in a user-writable
+helpers (which run on push and fetch) — including a filter the global config
+defines that a submodule's attributes name, which runs where git's internals
+still go into a submodule — and `gh`, which lives in a user-writable
 directory like everything else on PATH.
 
 This module is SELF_PROTECTED (tools/files.py): it decides what git runs
@@ -109,7 +132,58 @@ _HARDENING = (
     "-c", "gc.auto=0",                     # auto-gc prunes; the owner's runs still do
     "-c", "maintenance.auto=false",
     "-c", "rebase.updateRefs=false",       # would move other branches mid-rebase
+    # Submodules are other repositories with their own config (see the module
+    # docstring). Recursion off for every command that has it; no submodule
+    # summary (it runs `git log` inside each one); a submodule's diff shown as
+    # two commit ids, never by `git diff` run inside it; and the dirty check
+    # (`git status` inside it) off by default. These reach any git that git
+    # starts, but a `.gitmodules` `ignore =` overrides the last, so `_git`
+    # also puts `--ignore-submodules=dirty` on the command line where it is
+    # accepted (`_SUBMODULE_FLAGS`).
+    "-c", "submodule.recurse=false",
+    "-c", "fetch.recurseSubmodules=false",
+    "-c", "push.recurseSubmodules=no",
+    "-c", "status.submoduleSummary=false",
+    "-c", "diff.submodule=short",
+    "-c", "diff.ignoreSubmodules=dirty",
 )
+
+# Command-line options `_git` adds right after these subcommands. The status
+# and diff family otherwise run `git status` inside each checked-out submodule
+# to see whether it has local changes; `dirty` skips exactly that and still
+# reports a submodule whose commit moved. On the command line it also beats a
+# `submodule.<name>.ignore` in `.gitmodules`, which the `-c` pin does not
+# (measured). Fetch, pull and push get the recursion switch here as well as
+# in the pins. `judge()` refuses any caller option that would turn either back
+# on — the caller's tokens come after these, and the last one wins.
+_SUBMODULE_FLAGS: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(("status", "diff", "diff-files", "diff-index", "diff-tree", "log",
+                     "show", "whatchanged"), ("--ignore-submodules=dirty",)),
+    **dict.fromkeys(("fetch", "pull", "push"), ("--no-recurse-submodules",)),
+}
+
+
+# git's global options that take the next word as their value (the `=` forms
+# are one word). Internal callers pass `-c core.quotePath=false`; the tool's
+# own requests never start with an option (`_shape`).
+_GLOBAL_VALUE_OPTIONS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace",
+                                   "--config-env", "--attr-source"})
+
+
+def _with_submodule_flags(args) -> list[str]:
+    """`args` with `_SUBMODULE_FLAGS` added right after the subcommand: the
+    first word that is neither a global option nor the value of one."""
+    args = list(args)
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in _GLOBAL_VALUE_OPTIONS:
+            i += 2
+        elif token.startswith("-"):
+            i += 1
+        else:
+            return [*args[:i + 1], *_SUBMODULE_FLAGS.get(token, ()), *args[i + 1:]]
+    return args
 
 _ENV_PINS = {
     "GIT_TERMINAL_PROMPT": "0",
@@ -139,6 +213,7 @@ class RepoContext:
     toplevel: Path = Path(".")
     common_dir: Path = Path(".")
     risky: str = ""                    # a repository config key that runs a program
+    submodule_risk: str = ""           # why a checked-out submodule makes git here unsafe
 
     @property
     def own(self) -> bool:
@@ -186,7 +261,100 @@ _PROGRAM_LONG = {
 }
 _PROGRAM_EXACT_OK = frozenset({"text"})
 
+# Options that take git into a submodule or turn `_git`'s pins back off:
+# recursion on in any form (`--recurse-submodules[=…]`,
+# `--recurse-submodules-default`), a submodule shown by `git log` or
+# `git diff` run inside it (`--submodule=log|diff`), or a dirty check that
+# runs `git status` inside it (`--ignore-submodules=none|untracked`,
+# `--no-ignore-submodules`). Any long option naming a submodule is refused,
+# and every abbreviation of these, except the spellings that keep git out.
+_SUBMODULE_OPTIONS = ("submodule", "ignore-submodules", "no-ignore-submodules",
+                      "recurse-submodules", "recurse-submodules-default",
+                      "no-recurse-submodules")
+_SUBMODULE_OK = frozenset({"--no-recurse-submodules", "--ignore-submodules",
+                           "--ignore-submodules=all", "--ignore-submodules=dirty"})
+
+
+# The short options whose next word is their value, in the subcommands that
+# carry a message, so `commit -m "--submodule docs"` is words, not an option
+# (review of PR #65). Measured on git 2.53 by argv in a temp repository, a word
+# that is no option of anything put after each letter, and checked against the
+# command's own `-h` table:
+#   commit  -m -F -c -C -t take the next word (and --message, --file); -U does
+#           too, but its value is a number, so it is left as a flag;
+#   tag     -m -F -u take it in create, list (-l) and delete (-d) modes alike;
+#   merge   -m -F -s -X take it, with --abort and --continue too;
+#   notes   -m -F -c -C take it in add, append and edit only. In copy, show,
+#           list, merge, remove, prune and get-ref git refuses the switch
+#           outright, so nothing is skipped there; `--ref <ref>` comes first.
+# Not stash (delta review of PR #65): `stash list` hands its options to `git
+# log` and `stash show` to the diff machinery, and there -m is a flag
+# (measured), so in `stash show -p -m --submodule=diff` the last word is an
+# option — and stash push/save, the only stash actions with a message, are
+# refused anyway. git accepts no submodule option at all in commit, tag, merge
+# or notes add/append/edit (measured: 36 of 36 refused), so a value misread
+# here cannot hide one that does something.
+_MESSAGE_VALUE_SHORTS = {"commit": "mFcCt", "tag": "mFu", "merge": "mFsX", "notes": "mFcC"}
+_MESSAGE_VALUE_LONGS = frozenset({"--message", "--file"})
+_NOTES_MESSAGE_ACTIONS = frozenset({"add", "append", "edit"})
+
+
+def _notes_action(tokens: list[str]) -> str:
+    """The notes action: the first word that is not `--ref <ref>` or an option."""
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif token == "--ref":
+            skip = True
+        elif not token.startswith("-"):
+            return token.lower()
+    return ""
+
+
+def _option_words(sub: str, tokens: list[str]) -> list[str]:
+    """`tokens` without the values of a message's -m/-F (and the other
+    value-taking short options of that subcommand, separate or ending a
+    cluster)."""
+    shorts = _MESSAGE_VALUE_SHORTS.get(sub)
+    if shorts is None or (sub == "notes" and _notes_action(tokens) not in _NOTES_MESSAGE_ACTIONS):
+        return tokens
+    out: list[str] = []
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+            continue
+        out.append(token)
+        if token in _MESSAGE_VALUE_LONGS:
+            skip = True
+        elif token.startswith("-") and not token.startswith("--") and len(token) > 1:
+            for j, letter in enumerate(token[1:], start=1):
+                if letter in shorts:
+                    skip = j == len(token) - 1      # glued to its value, or the next word is
+                    break
+    return out
+
+
+def _submodule_hit(tokens: list[str]) -> str:
+    """The first token that would take git into a submodule."""
+    for token in tokens:
+        name = _long_name(token)
+        if not name or token in _SUBMODULE_OK:
+            continue
+        if "submodule" in name or any(full.startswith(name) for full in _SUBMODULE_OPTIONS):
+            return token
+    return ""
+
 _BUILTIN_STRATEGIES = frozenset({"ort", "recursive", "resolve", "octopus", "ours", "subtree"})
+
+# The short options of the history-writing commands read as taking the next
+# word. Checked against each command's own `-h` table (git 2.53): no letter
+# git reads as a flag is here — rebase's -m (--merge) and cherry-pick's -x
+# were, and hid the word after them (delta review of PR #65). A letter the
+# command does not accept at all may stay: git refuses the line on it.
+_HISTORY_VALUE_SHORTS = {"merge": "smFXxC", "rebase": "sFXxC", "pull": "smFXxC",
+                         "cherry-pick": "mFXC", "revert": "mFXC"}
 
 
 def _long_name(token: str) -> str:
@@ -253,12 +421,49 @@ def _values(options, *names: str) -> list[str]:
     return [value or "" for name, value in options if name in names]
 
 
-def _split(rest: list[str]) -> tuple[list[str], list[str]]:
-    """(tokens before `--`, pathspecs after it). Nothing after `--` is an option."""
+_SEPARATORS = ("--", "--end-of-options")
+MAX_VALUE_SEPARATORS = 8
+_VALUE = "<value>"   # stands in for a `--` read as an option's value
+
+
+def _may_take_next(token: str) -> bool:
+    """Whether git could read the word after `token` as its value: any option
+    word but a long one whose value is glued on with `=`."""
+    if token in _SEPARATORS or token == "-" or not token.startswith("-"):
+        return False
+    return "=" not in token if token.startswith("--") else True
+
+
+def _readings(rest: list[str]) -> list[tuple[list[str], list[str]]] | None:
+    """Every way git may split `rest` into option words and pathspecs, as
+    (options, paths); None past the bound.
+
+    A `--` (or `--end-of-options`) ends the options unless the word before it
+    is an option that takes a value: then git hands it to that option and
+    options go on after it (delta review of PR #65, measured on git 2.53:
+    `commit -m -- --gpg-sign` signed with the global gpg.program, and `merge
+    -m -- -s evil x` reads `-s evil`). Which options of which subcommand take a
+    value is not modelled here, so a `--` after any option word may be either,
+    every reading is judged, and `judge` refuses unless they agree — when the
+    parser cannot tell, it fails closed. In a reading where a `--` is a value,
+    it is replaced by a word that is no option and names nothing."""
+    ends: list[int | None] = []
     for i, token in enumerate(rest):
-        if token in ("--", "--end-of-options"):
-            return rest[:i], rest[i + 1:]
-    return rest, []
+        if token not in _SEPARATORS:
+            continue
+        ends.append(i)
+        if not (i and _may_take_next(rest[i - 1])):
+            break                     # nothing before it could take it: options end here
+        if len(ends) > MAX_VALUE_SEPARATORS:
+            return None
+    else:
+        ends.append(None)             # every `--` may be a value: options never end
+    readings = []
+    for end in ends:
+        head = rest if end is None else rest[:end]
+        readings.append(([_VALUE if t in _SEPARATORS else t for t in head],
+                         [] if end is None else rest[end + 1:]))
+    return readings
 
 
 def _shape(args) -> str:
@@ -380,6 +585,9 @@ _REFUSED_SUBCOMMANDS = {
     "read-tree": "overwrites the index",
     "checkout-index": "overwrites working-tree files",
     "merge-file": "overwrites a file in place",
+    # Every form, `status` and `summary` included: each runs git inside the
+    # submodules (describe, log, checkout …), under their own configuration.
+    "submodule": "runs git inside other repositories, under their own configuration",
 }
 
 # `git branch` / `git tag`: the listing form reads, the argument form writes.
@@ -391,7 +599,6 @@ _READ_FLAGS_WITH_VALUE = frozenset({
 _SUBSUB_READS: dict[str, frozenset[str]] = {
     "remote": frozenset({"", "get-url", "show"}),
     "worktree": frozenset({"", "list"}),
-    "submodule": frozenset({"", "status", "summary"}),
     "notes": frozenset({"", "list", "show"}),
 }
 _WRITE_FLAGS = frozenset({
@@ -463,6 +670,13 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
     if sub in _READS:
         return Ruling(READ)
 
+    if sub in ("fetch", "pull", "ls-remote", "remote") and paths:
+        # After `--` these still read a repository and refspecs (measured on git
+        # 2.53: `fetch -- <path>`, `pull -- <path>` and `ls-remote -- <path>`
+        # each reached a repository no remote names), so those words are judged
+        # as positionals: only a configured remote is contacted.
+        rest = [*rest, *paths]
+
     if sub == "grep":
         options, _ = _parse(rest, "efABCm", {"max-depth", "threads", "context",
                                              "after-context", "before-context", "max-count"})
@@ -518,8 +732,6 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
             return _refuse("changing remotes changes where git fetches from and pushes to")
         if sub == "worktree":
             return _refuse("worktrees are made with the git_worktree tool, and never removed by this one")
-        if sub == "submodule":
-            return _refuse("submodule commands fetch other repositories and can run commands")
         return Ruling(REVIEW, f"'notes {action}' writes notes")
 
     if sub == "bisect":
@@ -600,16 +812,24 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
         return _judge_checkout(rest, paths, ctx)
 
     if sub in ("merge", "cherry-pick", "revert", "rebase", "pull"):
-        # `-s` is --strategy for merge, rebase and pull, and --signoff (no
-        # value) for cherry-pick and revert, where the strategy is spelled out.
-        shorts = "smFXxC" if sub in ("merge", "rebase", "pull") else "mFXxC"
+        # The short options whose next word is their value, from each command's
+        # own `-h` table (git 2.53). A flag read as taking one hides the word
+        # after it: `rebase -m -x <cmd>` (rebase's -m is --merge) ran the
+        # command, and `cherry-pick -x -S` would sign. `-s` is --strategy for
+        # merge, rebase and pull and --signoff (a flag) for cherry-pick and
+        # revert; pull's `-j`/`--jobs` take a value only glued on.
+        shorts = _HISTORY_VALUE_SHORTS[sub]
         options, _ = _parse(rest, shorts, {
             "strategy", "strategy-option", "message", "file", "into-name", "cleanup",
             "onto", "exec", "mainline", "depth", "deepen", "shallow-since",
-            "shallow-exclude", "server-option", "jobs"})
+            "shallow-exclude", "server-option"})
         problem = _strategy_problem(options, short=sub in ("merge", "rebase", "pull"))
         if problem:
             return _refuse(problem)
+        # -S[<keyid>] signs with the owner's key, as in commit; --gpg-sign and
+        # its abbreviations are refused for every subcommand (_PROGRAM_LONG).
+        if _has(options, "-S"):
+            return _refuse("-S signs with the owner's key")
         if sub == "rebase":
             if _has(options, "-i", "-x", "--interactive", "--edit-todo", "--update-refs") or \
                     _long_hit(rest, ("interactive", "edit-todo", "update-refs")):
@@ -624,6 +844,8 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
                                           "resolvemsg", "quoted-cr", "empty"})
         if _has(options, "-i", "--interactive") or _long_hit(rest, ("interactive", "directory")):
             return _refuse("interactive am needs a terminal, and --directory moves where the patch is applied")
+        if _has(options, "-S"):
+            return _refuse("-S signs with the owner's key")
         return Ruling(OWN, check="commits")
 
     if sub == "apply":
@@ -738,9 +960,13 @@ def _judge_checkout(rest: list[str], paths: list[str], ctx: RepoContext) -> Ruli
 
 
 def _judge_fetch(rest: list[str], ctx: RepoContext, *, pull: bool) -> Ruling:
-    options, positionals = _parse(rest, "ojsXm", {
-        "depth", "deepen", "shallow-since", "shallow-exclude", "refmap", "server-option",
-        "jobs", "negotiation-tip", "filter", "strategy", "strategy-option", "upload-pack"})
+    # From each command's `-h` table (git 2.53): fetch's -j/--jobs take the next
+    # word and its -m is --multiple (a flag, which used to hide the word after
+    # it: `fetch -m -P` pruned tags); pull's -j/--jobs take a value only glued.
+    longs = {"depth", "deepen", "shallow-since", "shallow-exclude", "refmap", "server-option",
+             "negotiation-tip", "filter", "strategy", "strategy-option", "upload-pack"}
+    options, positionals = _parse(rest, "osXm" if pull else "ojsX",
+                                  longs if pull else longs | {"jobs"})
     if _long_hit(rest, ("prune-tags", "update-head-ok", "refmap"), exact_ok={"prune"}) or \
             _has(options, "-P", "-u"):
         return _refuse("--prune-tags deletes local tags, and --update-head-ok/--refmap "
@@ -751,7 +977,7 @@ def _judge_fetch(rest: list[str], ctx: RepoContext, *, pull: bool) -> Ruling:
         rebase = _values(options, "--rebase")
         if any(v.startswith("i") for v in rebase if v):
             return _refuse("interactive rebase needs a terminal")
-    if not pull and _has(options, "--multiple", "--all"):
+    if not pull and _has(options, "-m", "--multiple", "--all"):
         for name in positionals:
             problem = _remote_problem(name, ctx)
             if problem:
@@ -837,24 +1063,46 @@ def _place(ruling: Ruling, sub: str, ctx: RepoContext) -> Ruling:
     return ruling
 
 
+def _judge_reading(sub: str, rest: list[str], options: list[str], paths: list[str],
+                   ctx: RepoContext) -> Ruling:
+    """The verdict for one reading of where the options end (`_readings`)."""
+    hit = _long_hit(options, _PROGRAM_LONG, _PROGRAM_EXACT_OK)
+    if hit:
+        name = _long_name(hit)
+        full = next(f for f in _PROGRAM_LONG if f == name or f.startswith(name))
+        return _refuse(f"'{hit}' {_PROGRAM_LONG[full]}, and this tool decides that, not the caller")
+    hit = _submodule_hit(_option_words(sub, options))
+    if hit:
+        return _refuse(f"'{hit}' would take git into a submodule, another repository whose own "
+                       "configuration decides what runs there; this tool never goes into one")
+    named = "" if _only_unstages(sub, options) else _protected_named(sub, rest)
+    if named:
+        from .tools.secrets import refusal
+
+        return _refuse(refusal(named).removeprefix("Error: "))
+    return _place(_judge_sub(sub, options, paths, ctx), sub, ctx)
+
+
 def judge(args: list[str], ctx: RepoContext) -> Ruling:
     """The verdict for one git invocation. Pure: no git runs."""
     problem = _shape(args)
     if problem:
         return _refuse(problem)
     sub, rest = args[0], list(args[1:])
-    options, paths = _split(rest)
-    hit = _long_hit(options, _PROGRAM_LONG, _PROGRAM_EXACT_OK)
-    if hit:
-        name = _long_name(hit)
-        full = next(f for f in _PROGRAM_LONG if f == name or f.startswith(name))
-        return _refuse(f"'{hit}' {_PROGRAM_LONG[full]}, and this tool decides that, not the caller")
-    named = "" if _only_unstages(sub, options) else _protected_named(sub, rest)
-    if named:
-        from .tools.secrets import refusal
-
-        return _refuse(refusal(named).removeprefix("Error: "))
-    ruling = _place(_judge_sub(sub, options, paths, ctx), sub, ctx)
+    readings = _readings(rest)
+    if readings is None:
+        return _refuse(f"more than {MAX_VALUE_SEPARATORS} '--' words that may each be an option's "
+                       "value or the end of the options")
+    rulings = [_judge_reading(sub, rest, options, paths, ctx) for options, paths in readings]
+    refused = next((r for r in rulings if r.kind == REFUSE), None)
+    if refused:
+        return refused
+    ruling = rulings[0]
+    shape = (ruling.kind, ruling.argv, ruling.network, ruling.check, ruling.remote)
+    if any((r.kind, r.argv, r.network, r.check, r.remote) != shape for r in rulings[1:]):
+        return _refuse("a '--' here may be the value of the option before it or the end of the "
+                       "options, and the two readings are judged differently; leave the '--' out "
+                       "or put the option's value right after it with '='")
     if ruling.kind == READ and not ruling.argv:
         # A diff driver or textconv program is configuration, and the
         # repository's own is refused up front; the owner's global one is
@@ -902,6 +1150,21 @@ def _env() -> dict[str, str]:
     return env
 
 
+def _config_env() -> dict[str, str]:
+    """`_HARDENING`'s `-c` pins as git's own environment form (command scope,
+    like `-c`), for a program that starts git itself: `gh pr create` runs a
+    plain `git status`, which went into a submodule and ran its fsmonitor (and
+    the superproject's — review of PR #65). Every git that gh starts is pinned
+    as ours are: hooks and fsmonitor off, the submodule pins, `ext::` refused."""
+    pairs = [_HARDENING[i + 1] for i, token in enumerate(_HARDENING[:-1]) if token == "-c"]
+    env = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for n, pair in enumerate(pairs):
+        key, _, value = pair.partition("=")
+        env[f"GIT_CONFIG_KEY_{n}"] = key
+        env[f"GIT_CONFIG_VALUE_{n}"] = value
+    return env
+
+
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
@@ -915,7 +1178,7 @@ def _git(cwd: Path, args, *, timeout: float = LOCAL_TIMEOUT_S) -> tuple[int, str
     """Run hardened git. Never raises for git's own failures."""
     try:
         proc = subprocess.run(
-            [git_binary(), *_HARDENING, *args], cwd=str(cwd), env=_env(),
+            [git_binary(), *_HARDENING, *_with_submodule_flags(args)], cwd=str(cwd), env=_env(),
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             errors="replace", timeout=timeout,
         )
@@ -960,17 +1223,100 @@ _RISKY_KEYS = (
 )
 
 
-def _risky_config(cwd: Path) -> str:
+def _config_risk(cwd: Path, skip: frozenset[str] = frozenset()) -> str | None:
+    """The first key in the repository's own config (local or worktree scope)
+    that names a program or moves where git works; "" for none; None when the
+    config cannot be listed."""
     code, out, _ = _git(cwd, ["config", "--list", "--name-only", "--show-scope"])
     if code != 0:
-        return ""
+        return None
     for line in out.splitlines():
         scope, _, key = line.partition("\t")
         if scope not in ("local", "worktree"):
             continue
         lowered = key.lower()
+        if lowered in skip:
+            continue
         if any(fnmatch(lowered, pattern) for pattern in _RISKY_KEYS):
             return key
+    return ""
+
+
+def _risky_config(cwd: Path) -> str:
+    return _config_risk(cwd) or ""
+
+
+# --- submodules: the belt under the pins ------------------------------------------
+#
+# The pins keep the status and diff family, recursion and submodule diffs out of
+# submodules, but some of git's own internals go in whatever they say (`add -A`,
+# `describe --dirty`/`--broken`, `rm` of a submodule, and under a `.gitmodules` `ignore =`
+# commit's status, `stash apply`'s and checkout's change report — measured
+# against git 2.53). So every checked-out submodule's own config is held to
+# the superproject's rule. Git enters exactly the gitlinks in the index whose
+# directory holds a `.git`, so those are the ones read, nested ones too.
+
+MAX_SUBMODULES = 64
+MAX_SUBMODULE_DEPTH = 4
+
+# Git sets `core.worktree` in every submodule whose repository lives in the
+# superproject's `.git/modules`. It is checked instead by asking the submodule
+# where its top level is: it must be the submodule's own directory.
+_SUBMODULE_OWN_KEYS = frozenset({"core.worktree"})
+
+
+def _gitlinks(top: Path) -> list[str] | None:
+    """The submodule paths in the index at `top`, or None if it cannot be read."""
+    code, out, _ = _git(top, ["ls-files", "--stage", "-z"])
+    if code != 0:
+        return None
+    found: dict[str, None] = {}
+    for record in out.split("\x00"):
+        meta, tab, path = record.partition("\t")
+        if tab and meta.split(" ", 1)[0] == "160000":
+            found[path] = None
+    return list(found)
+
+
+def _submodule_risk(top: Path, prefix: str = "", depth: int = 0,
+                    budget: list[int] | None = None) -> str:
+    """Why a checked-out submodule under `top` makes git there unsafe, or "".
+    Fails closed: a submodule that cannot be read, does not resolve to its
+    own directory, or is past the limits is a reason too."""
+    budget = [MAX_SUBMODULES] if budget is None else budget
+    links = _gitlinks(top)
+    if links is None:
+        where = f"the repository at '{prefix}'" if prefix else "the repository"
+        return f"the submodules of {where} could not be listed"
+    for rel in links:
+        label = f"{prefix}/{rel}" if prefix else rel
+        if "�" in rel:
+            return f"a submodule's path ('{label}') is not UTF-8, so it cannot be checked"
+        where = top / rel
+        if not os.path.lexists(where / ".git"):
+            continue                    # not checked out: git does not go in
+        budget[0] -= 1
+        if budget[0] < 0 or depth >= MAX_SUBMODULE_DEPTH:
+            return (f"it has more checked-out submodules than this tool reads "
+                    f"({MAX_SUBMODULES}, {MAX_SUBMODULE_DEPTH} levels deep)")
+        code, out, _ = _git(where, ["rev-parse", "--show-toplevel"])
+        try:
+            own = code == 0 and Path(out.rstrip("\n")).resolve() == where.resolve()
+        except (OSError, RuntimeError, ValueError):
+            own = False
+        if not own:
+            return f"the submodule at '{label}' does not resolve to a repository of its own directory"
+        key = _config_risk(where, _SUBMODULE_OWN_KEYS)
+        # Defence only: a config git cannot read fails `rev-parse` above first,
+        # so this is reached by a listing that fails on its own (a timeout).
+        if key is None:
+            return f"the submodule at '{label}' has a git config that could not be read"
+        if key:
+            return (f"the submodule at '{label}' has its own git config setting '{key}', which "
+                    "names a program for git to run or moves where it works")
+        deeper = _submodule_risk(where, label, depth + 1, budget)
+        if deeper:
+            return deeper
     return ""
 
 
@@ -1013,15 +1359,22 @@ def repo_context(path: str) -> RepoContext | str:
     _, out, _ = _git(cwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
     branches = frozenset(line.strip().removeprefix("refs/heads/")
                          for line in out.splitlines() if line.strip())
+    risky = _risky_config(cwd)
     return RepoContext(managed=managed, branch=branch, remotes=remotes, branches=branches,
-                       cwd=cwd, toplevel=toplevel, common_dir=common,
-                       risky=_risky_config(cwd))
+                       cwd=cwd, toplevel=toplevel, common_dir=common, risky=risky,
+                       submodule_risk="" if risky else _submodule_risk(toplevel))
 
 
 def _risky_refusal(ctx: RepoContext) -> str:
-    return (f"Refused: this repository's own git config sets '{ctx.risky}', which names a "
-            "program for git to run or moves where it works. Git here is the owner's to run "
-            "by hand; say so in your report.")
+    """Why nothing runs in this repository, or "" when git may run here."""
+    if ctx.risky:
+        return (f"Refused: this repository's own git config sets '{ctx.risky}', which names a "
+                "program for git to run or moves where it works. Git here is the owner's to run "
+                "by hand; say so in your report.")
+    if ctx.submodule_risk:
+        return (f"Refused: {ctx.submodule_risk}. Git obeys a submodule's own config whenever it "
+                "goes into one, so git here is the owner's to run by hand; say so in your report.")
+    return ""
 
 
 def _secret_in(texts) -> bool:
@@ -1100,8 +1453,9 @@ def _outgoing_problem(ctx: RepoContext, remote: str) -> str:
 
 def _execute(ctx: RepoContext, args: list[str]) -> tuple[bool, str]:
     """Judge, review if needed, check, run. (ran-and-succeeded, text)."""
-    if ctx.risky:
-        return False, _risky_refusal(ctx)
+    blocked = _risky_refusal(ctx)
+    if blocked:
+        return False, blocked
     ruling = judge(args, ctx)
     if ruling.kind == REFUSE:
         return False, (f"Refused: {ruling.reason}. This is a fixed rule of the git tool, not "
@@ -1186,8 +1540,9 @@ def create_worktree(repo: str, branch: str, base: str = "") -> str:
     ctx = repo_context(repo)
     if isinstance(ctx, str):
         return ctx
-    if ctx.risky:
-        return _risky_refusal(ctx)
+    blocked = _risky_refusal(ctx)
+    if blocked:
+        return blocked
     name = (branch or "").strip().removeprefix("refs/heads/")
     if not name:
         return "Error: name the branch to work on, e.g. jarvis/fix-typo."
@@ -1241,6 +1596,7 @@ def _gh(cwd: Path, args: list[str]) -> tuple[int, str]:
     if gh is None:
         return 127, "gh (the GitHub CLI) is not installed"
     env = _env()
+    env.update(_config_env())
     env.update({"GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat", "NO_COLOR": "1",
                 "GH_NO_UPDATE_NOTIFIER": "1", "GH_SPINNER_DISABLED": "1", "GH_EDITOR": "true",
                 "GH_BROWSER": "true", "BROWSER": "true"})
@@ -1260,8 +1616,9 @@ def open_pull_request(worktree: str, title: str, body: str, base: str = "",
     ctx = repo_context(worktree)
     if isinstance(ctx, str):
         return ctx
-    if ctx.risky:
-        return _risky_refusal(ctx)
+    blocked = _risky_refusal(ctx)
+    if blocked:
+        return blocked
     if not ctx.managed:
         return ("Refused: pull requests are opened from a worktree made by git_worktree. "
                 "Make one, commit there, and call this with its path.")

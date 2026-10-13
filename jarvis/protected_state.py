@@ -49,6 +49,12 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 
+try:                     # `re`'s own parser: what a pattern will run as (`_regex_work`)
+    from re import _constants as _sre_c, _parser as _sre_parse
+except ImportError:      # pragma: no cover — Python before 3.11
+    import sre_constants as _sre_c
+    import sre_parse as _sre_parse
+
 from . import config, rules
 
 
@@ -81,6 +87,37 @@ def protected_paths() -> set[Path]:
     from .tools.files import _protected_state
 
     return _protected_state()
+
+
+def hud_trees() -> set[Path]:
+    """The installed HUD's folders (`files._hud_roots`: the install root, and
+    `hud/dist` under JARVIS_HUD_DEV=1). Not files but trees: a command that
+    writes anything at or below one — `cp`, `rsync`, a redirect — is **asked**
+    (review of PR #44, MED-2), the same way an uncertain gate-state write is;
+    the write tools refuse it outright. Empty when a root cannot be resolved —
+    the write tools refuse then, and a shell write is not the boundary."""
+    from .tools.files import _hud_roots
+
+    try:
+        return _hud_roots()
+    except (OSError, RuntimeError):
+        return set()
+
+
+def _in_tree(text: str, trees: set[Path]) -> Path | None:
+    """The HUD tree `text` lies in (or is), or one it holds within two levels
+    (`rm -rf ~/.local/share/jarvis`), else None."""
+    if not trees:
+        return None
+    if _GLOB.search(text):
+        text = str(Path(*[p for p in Path(text).parts if not _GLOB.search(p)] or ["."]))
+    resolved = _resolve(text)
+    for tree in trees:
+        if resolved == tree or tree in resolved.parents:
+            return tree
+        if resolved in tree.parents and len(tree.relative_to(resolved).parts) <= 2:
+            return tree
+    return None
 
 
 # --- how a command relates to a path ------------------------------------------
@@ -183,6 +220,8 @@ class Touch:
     certain: bool
     why: str
     opaque: bool = False
+    hud: bool = False              # inside the installed HUD's tree (always uncertain: asks)
+    env: bool = False              # a credential env file (ENV-1): certain is refused, like the allowlist
 
     @property
     def name(self) -> str:
@@ -191,7 +230,12 @@ class Touch:
 
 @dataclass
 class _Budget:
+    """What one analysis shares across every level of it: the substitution
+    count, and whether a write target may be resolved on the filesystem to
+    judge it a credential env file (`follow_links`; off for `rules.decide`'s
+    name-only reading, which has no folder to resolve in)."""
     spans: int = 0
+    follow_links: bool = True
 
 
 @dataclass
@@ -288,6 +332,61 @@ def _ancestor_of(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str,
     resolved = _resolve(text)
     return [(path, path.relative_to(resolved).parts)
             for path in protected if resolved != path and resolved in path.parents]
+
+
+# --- credential env files (ENV-1, 2026-10-12) ---------------------------------
+#
+# The owner's `.env*` rule: Jarvis never reads a credential env file and
+# writes only the `*.example` ones (docs/plans/2026-10-11-env-files.md). A
+# shell **write** onto one is DENY — never run, never asked, under an
+# allowlist entry and under `--dangerously-skip-permissions` alike — through
+# this module's own parse of where a line writes (redirects, writers'
+# operands, a copier's destination, the reader hazards' files), with the
+# name judged by the one rule, `secrets.is_env_credential_name`, and a
+# target that exists resolved through its symlinks (`is_env_credential`).
+# A write it cannot pin down — a glob that only *may* expand onto one
+# (`rm *.production`), a name whose ending is an unknown variable
+# (`.env.$STAGE` may be `.env.example`) — asks. Reads are the secrets
+# layer's (`protected_in_command`), as for `.env` since 2026-07-30.
+
+def _secrets():
+    """Late: `jarvis.tools` imports the shell tool, which imports this module."""
+    from .tools import secrets
+
+    return secrets
+
+
+_EXPANSION = re.compile(r"\$\{[^}]*\}|\$\w+|\$.")
+
+
+def _env_target(operand: str, text: str | None, state: _State, verb: str) -> Touch | None:
+    """The credential env file a write of `operand` lands on, or None.
+    `text` is the operand expanded (None when a variable or the folder is
+    unknown); `verb` heads the reason ("a redirect onto", "cp on")."""
+    s = _secrets()
+    shown = text if text is not None else operand
+    name = os.path.basename(shown.rstrip("/")) or shown
+    where = Path(shown)
+    if "$" in name:
+        # Only when unexpanded: try the unknown parts as nothing and as a word.
+        if any(s.is_env_credential_name(_EXPANSION.sub(fill, name)) for fill in ("", "x")):
+            return Touch(where, False, f"{verb} {operand}, which may be a credential env file",
+                         env=True)
+        return None
+    if s.is_env_credential_name(name):
+        return Touch(where, True, f"{verb} {name}", env=True)
+    if _GLOB.search(name):
+        # Only a dot-led glob can expand onto one (`secrets.env_glob_reaches`,
+        # exact); `rm *.production` never reaches `.env.production` in bash.
+        if s.env_glob_reaches(name):
+            # Spelled from `.env`, whatever it expands to (or, matching
+            # nothing, the literal name bash leaves) is a credential env file.
+            return Touch(where, name.casefold().startswith(".env"),
+                         f"{verb} {name}, a glob that reaches credential env files", env=True)
+        return None
+    if text is not None and state.budget.follow_links and s.is_env_credential(text):
+        return Touch(where, True, f"{verb} {name}, which leads to a credential env file", env=True)
+    return None
 
 
 def _strip_comment(segment: str) -> str:
@@ -610,6 +709,71 @@ def _nested(strings: list[str], local: _State, state: _State, protected: set[Pat
     return True
 
 
+def _redirect_touches(segment: str, local: _State, protected: set[Path], ids: dict,
+                      seen: _Seen) -> None:
+    """Every protected file a redirect in this segment writes, into `seen`:
+    gate state, the installed HUD's tree, and credential env files."""
+    for target in _redirect_targets(segment):
+        text = _expand(target, local)
+        env = _env_target(target, text, local, "a redirect onto")
+        if env is not None:
+            seen.touches.append(env)
+        if text is None:
+            for path in protected:
+                if Path(target).name == path.name:
+                    seen.touches.append(Touch(path, False, f"a redirect into {target}"))
+            continue
+        hit = _exact(text, protected, ids)
+        if hit is not None:
+            seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
+        tree = _in_tree(text, hud_trees())
+        if tree is not None:
+            seen.touches.append(Touch(tree, False, f"a redirect into {text}", hud=True))
+
+
+# `git checkout -- PATH` and `git restore PATH` overwrite PATH with a stored
+# version (ENV-1 review, NIT 3): for the env rule they write their operands.
+_GIT_PATH_WRITERS = frozenset({"checkout", "restore"})
+
+
+def _git_subcommand(tokens: list[str]) -> str | None:
+    """git's subcommand: the first word after git's own options (`-C DIR`,
+    `-c K=V`, `--git-dir=…` …)."""
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return token
+    return None
+
+
+def _edits_in_place(stem: str, tokens: list[str]) -> bool:
+    """`perl -pi`/`-i.bak` (an `i` in a short-option cluster) and `awk`/`gawk
+    -i inplace` rewrite the files they are handed (ENV-1 review, NIT 3)."""
+    if stem == "perl":
+        for token in tokens[1:]:
+            if not token.startswith("-") or token.startswith("--") or token == "-":
+                continue
+            for letter in token[1:]:
+                if letter == "i":
+                    return True
+                if letter in "MmIeExCdDF0l":     # the rest of the cluster is a value
+                    break
+        return False
+    if stem in ("awk", "gawk"):
+        for k, token in enumerate(tokens[1:], 1):
+            if token in ("-i", "--include") and k + 1 < len(tokens) and tokens[k + 1] == "inplace":
+                return True
+            if token in ("-iinplace", "--include=inplace"):
+                return True
+    return False
+
+
 def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
              depth: int) -> _Seen:
     seen = _Seen()
@@ -627,12 +791,17 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         raw, parsed = words_only.split(), False
     raw = _strip_closers(raw)
     if not raw:
+        # A redirect with no command still opens its target for writing:
+        # `>.env.x`, or the `} > .env.x` left of `{ …; } > .env.x` (ENV-1
+        # review, NIT 3).
+        _redirect_touches(segment, state, protected, ids, seen)
         return seen
 
     # `D=~/.config/jarvis` on its own, or `export D=…`: remembered for the
     # segments after it, which is when the shell would expand it.
     words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
     if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+        _redirect_touches(segment, state, protected, ids, seen)
         for word in words:
             name, value = word.split("=", 1)
             expanded = _expand(value, state) if value else ""
@@ -644,6 +813,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
 
     tokens, chdir = _peel(raw, state)
     if not tokens:
+        _redirect_touches(segment, state, protected, ids, seen)
         return seen
     stem = rules._basename(tokens[0])
 
@@ -660,16 +830,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
     local = _State(chdir if chdir is not None else state.cwd, state.variables, state.budget)
 
     # A redirect writes its target whatever the stem is: `echo x>~/…/allowlist.json`.
-    for target in _redirect_targets(segment):
-        text = _expand(target, local)
-        if text is None:
-            for path in protected:
-                if Path(target).name == path.name:
-                    seen.touches.append(Touch(path, False, f"a redirect into {target}"))
-            continue
-        hit = _exact(text, protected, ids)
-        if hit is not None:
-            seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
+    _redirect_touches(segment, local, protected, ids, seen)
 
     # A shell handed a string is a command line in its own right — from `-c`
     # (in any cluster), `eval`, or a here-string on its standard input.
@@ -753,9 +914,37 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         if hit is not None:
             seen.read.add(hit)
 
+    # Credential env files (ENV-1): only what a writing program is handed —
+    # a writer's operands, a reader's writing form (`sed -i`, `sort -o`, a
+    # sed `w FILE`), a copier's destination. An interpreter or an unknown
+    # program handed one is not judged a writer of it here: the secrets layer
+    # refuses any line naming one, and "writes a credential env file" would
+    # misdescribe `node --env-file=.env.production server.js`. Three that
+    # rewrite their operands without a writing stem count too: `git checkout
+    # -- PATH`/`git restore PATH`, `perl -pi`, `awk -i inplace`.
+    env_writer = (stem in _WRITERS or hazard is not None or _edits_in_place(stem, tokens)
+                  or (stem == "git" and _git_subcommand(tokens) in _GIT_PATH_WRITERS))
+    if env_writer and split is not None and read_only and written:
+        # `cp /tmp/.env.production dir/` writes `dir/.env.production`: a
+        # source named like one lands under its own name in a folder.
+        dest = written[0]
+        dest_text = _expand(dest, local)
+        into = (dest.endswith("/") or os.path.basename(dest) in (".", "..")
+                or (dest_text is not None and local.budget.follow_links
+                    and os.path.isdir(dest_text)))
+        if into:
+            for source in read_only:
+                env = _env_target(os.path.basename(source.rstrip("/")) or source, None, local,
+                                  f"{stem} into {dest}:")
+                if env is not None:
+                    seen.touches.append(env)
     everyone = written + read_only
     for operand in written:
         text = _expand(operand, local)
+        if env_writer:
+            env = _env_target(operand, text, local, f"{stem} on")
+            if env is not None:
+                seen.touches.append(env)
         if text is None:
             # `$UNSET/allowlist.json`, or a relative name after a `cd` that
             # could not be followed: the right name, an unknowable place.
@@ -766,6 +955,10 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         hit = _exact(text, protected, ids)
         if hit is not None:
             seen.touches.append(Touch(hit, kind == "writer", f"{stem} on {hit.name}"))
+            continue
+        tree = _in_tree(text, hud_trees())
+        if tree is not None and kind != "reader":
+            seen.touches.append(Touch(tree, False, f"{stem} on {text}", hud=True))
             continue
         others = [o for o in everyone if o is not operand]
         other_names = {rules._basename(o.rstrip("/")) for o in others}
@@ -903,36 +1096,2277 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
 def command_touch(command: str, cwd: str | Path | None = None) -> Touch | None:
     """The most serious protected file this line reaches, or None.
 
-    Order: a certain write to the allowlist, any other certain write, then the
-    uncertain ones in the same order.
+    Order: a certain write to the allowlist or to a credential env file (both
+    refused, `denies`), any other certain write, then the uncertain ones in
+    the same order.
     """
     touches = command_touches(command, cwd)
     if not touches:
         return None
     gate = gate_paths()
-    return min(touches, key=lambda t: (not t.certain, t.path not in gate))
+    return min(touches, key=lambda t: (not t.certain, not (t.env or t.path in gate)))
+
+
+def denies(touch: Touch | None) -> bool:
+    """True for a touch no one may approve: a write that provably lands on
+    the allowlist, or on a credential env file (ENV-1). The one test v1's
+    gate, `run_command` and v2's layer 1 share."""
+    return (touch is not None and touch.certain
+            and (touch.env or touch.path in gate_paths()))
 
 
 def refused(command: str, cwd: str | Path | None = None) -> Touch | None:
     """The touch that makes this line unrunnable by Jarvis, or None: a write
-    that provably lands on the allowlist. Everything else this module sees is
-    an ASK, decided by the caller."""
+    that provably lands on the allowlist or on a credential env file.
+    Everything else this module sees is an ASK, decided by the caller."""
     touch = command_touch(command, cwd)
-    if touch is not None and touch.certain and touch.path in gate_paths():
-        return touch
-    return None
+    return touch if denies(touch) else None
 
 
 def refusal(touch: Touch) -> str:
+    if touch.env:
+        return (f"{touch.why}: a credential env file is the owner's, edited in the HUD's "
+                "editor; Jarvis never reads or writes one, asked or not (only names ending "
+                "in .example, like .env.example, are Jarvis's to write)")
     return (f"{touch.why}: {touch.name} is the approval gate's own allowlist, and "
             "a command that writes it would decide what runs without anyone "
             "being asked. Only the owner changes it, by hand")
 
 
+def env_write_refusal(command: str) -> str | None:
+    """`rules.decide`'s reading (ENV-1): the refusal for a line that provably
+    writes a credential env file **by name** — no folder, no filesystem, so
+    the same line gets the same verdict wherever it is judged — else None.
+    A write behind a symlink is seen where the folder is known
+    (`command_touches(command, cwd)`: v1's `static_verdict`, `run_command`,
+    v2's layer 1 with the brief's folder)."""
+    text = _ansi_c(rules.join_continuations(command or ""))
+    # Cheap first: a line that cannot spell `.env` once its quotes and
+    # backslashes are gone names no env file (`.e''nv` and `.e\nv` do).
+    if ".env" not in text.casefold().translate(_UNQUOTE):
+        return None
+    state = _State(Path("/"), budget=_Budget(follow_links=False))
+    touches = [t for t in _analyse(command, state, set(), {}).touches if t.env and t.certain]
+    return refusal(touches[0]) if touches else None
+
+
+_UNQUOTE = str.maketrans("", "", "'\"\\")
+
+
 def ask_reason(touch: Touch) -> str:
+    if touch.env:
+        return (f"{touch.why}: this may write a credential env file, which only the owner "
+                "changes; it never runs unasked and no allowlist entry covers it")
+    if touch.hud:
+        return (f"{touch.why}: {touch.path} holds the installed HUD, the code the "
+                "approval window runs, so this never runs unasked and no allowlist "
+                "entry covers it; `jarvis hud install` is how a build gets there")
     if touch.opaque:
         return (f"this line is too complex to judge ({touch.why}), so whether it "
                 "writes Jarvis's own configuration cannot be told; it never runs "
                 "unasked and no allowlist entry covers it")
     return (f"{touch.why}: {touch.name} is Jarvis's own configuration, so this "
             "never runs unasked and no allowlist entry covers it")
+
+
+# --- owner-only operations (decision C-1; review of PR #44, MED-2) ---------------
+#
+# Some `jarvis` commands are the owner's and the lead's alone — today `jarvis
+# hud install`, the one thing that writes the installed HUD, the code the
+# approval window runs (an agent can edit `hud/src`, so letting it install
+# would undo C-1). They run them from their own shells, outside Jarvis's gate,
+# so refusing them to Jarvis costs nothing. **DENY, never asked**, through
+# this one detector: `rules.decide` asks it (so v1's `static_verdict`/
+# `command_verdict` and v2's layer 1, which both start from `rules.decide`,
+# refuse it) and `run_command` refuses it even with no approver.
+#
+# **The extension point is `OWNER_OPS`** (and `OWNER_OP_MODULES` for a command
+# whose implementing module can also be run or called directly): add a path
+# there and every spelling below covers it.
+#
+# What counts as running one, judged per command and never by words merely
+# appearing on the line (a DENY cannot be approved, so a false one blocks the
+# owner too — review of PR #44 at 62db94f):
+#   * the **command word** — after assignments, `env` (`-S` split, `-C`,
+#     `-u`), `builtin`, and the wrappers and runners in `_RUNNERS` (`nohup`,
+#     `timeout`, `nice`, `flock FILE`, `xargs`, `systemd-run`, `uv run`,
+#     `uvx`, `poetry/pdm/hatch/rye/pipx run`, `ssh HOST …`) — is `jarvis` (any
+#     path to it, a `$VAR` the line set to it, or a link the line made to it
+#     with `ln`), or a Python run with `-m jarvis` / `-m jarvis.__main__`, and
+#     its argv, options skipped, begins with an owner path; behind `xargs`, a
+#     *prefix* of one is enough (its input may complete it);
+#   * a Python run of an owner module itself: `-m jarvis.v2.hud_install`, or
+#     the file `hud_install.py`;
+#   * Python source — `-c`, a here-string or a here-document fed to it — that
+#     *invokes* an owner op: calls the module's writers (`main()`,
+#     `install(…)`, …) under whatever name it was imported as, runs the module
+#     or the CLI with `runpy`, calls the CLI's entry with the path's words, or
+#     hands a command line that is one to `os.system`/`subprocess`. Importing
+#     the module and reading from it (`hud_install.builds(…)`) is not;
+#   * a shell or `eval` handed a string (`-c` in any cluster), its standard
+#     input from a here-document or here-string, and `$(…)`/backticks — each
+#     a command line of its own, judged the same way.
+# Not seen — the stated limits: a link made earlier under another name
+# (`~/bin/jv hud install`), words built at run time (`jarvis $(echo hud)
+# install`, a word from the environment rather than the line's own
+# assignments), `runpy` or `sys.argv` assembled at run time
+# (`run_module("jar"+"vis")`), a Makefile, alias, function or script file. None of this is a
+# boundary; the installed HUD's real protection is that the write tools and
+# v2's grants refuse its folder, and a shell write into it asks.
+
+_RESTART_WHY = (
+    "this restarts the v2 daemon (`jarvis restart`), the process that runs Jarvis's agents and "
+    "holds the owner's pending approvals — Jarvis's own control plane. Only the owner restarts "
+    "it, from their own terminal; Jarvis never does, asked or not")
+OWNER_OPS: dict[tuple[str, ...], str] = {
+    ("hud", "install"): (
+        "this runs `jarvis hud install`, which writes the installed HUD — the code the "
+        "approval window runs. Only the owner or the lead runs it, from their own shell "
+        "(decision C-1); Jarvis never does, asked or not"),
+    # `jarvis hud rebuild` and `jarvis restart` (2026-10-11, `v2/owner_ops.py`).
+    ("hud", "rebuild"): (
+        "this runs `jarvis hud rebuild`, which installs a new HUD — the code the approval "
+        "window runs — and can pull the checkout and restart the v2 daemon. Only the owner runs "
+        "it, from their own terminal (decision C-1); Jarvis never does, asked or not"),
+    ("restart",): _RESTART_WHY,
+    ("daemon2", "restart"): _RESTART_WHY,
+}
+# A module that implements an owner op: (the op's path, the functions whose
+# call performs it). Running the module, or calling one of those from inline
+# source, is the op.
+OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "jarvis.v2.hud_install": (("hud", "install"),
+                              ("main", "install", "install_checkout", "npm_build", "prune")),
+    "jarvis.v2.owner_ops": (("hud", "rebuild"),
+                            ("restart", "_restart", "rebuild", "pull", "npm_ci", "systemctl",
+                             "hand_off")),
+}
+
+# The daemon's systemd unit, changed directly (2026-10-11): `systemctl
+# --user restart jarvis-daemon2` was ALLOW in `rules.decide` — run with nobody
+# asked on every human-backed surface — and `stop` ends it for good (a clean
+# exit is not one `Restart=on-failure` restarts).
+#
+# DENY: a changing verb whose units may be the daemon's — named, globbed,
+# brace-expanded, behind a line-local `$VAR`, or an expansion only known at
+# run time; any `.slice`/`.target` of the user manager (the unit has
+# Requires= on app.slice and basic.target, so stopping, restarting, killing
+# or freezing either reaches it, and starting exit.target or shutdown.target
+# stops it); `--marked` (it restarts whatever was marked); the user manager's
+# `exit`/`isolate`/`default`/`rescue`/… ; and the same through D-Bus
+# (`busctl`, `dbus-send`, `gdbus`, `qdbus`). ASK, never auto-approved:
+# `set-environment`, `unset-environment`, `import-environment` (the daemon
+# reads that environment at its next start). Neither: `reset-failed` (a
+# recovery verb that stops nothing) and every read.
+#
+# Killing the daemon's process is the kill rule's, below (the owner's
+# decision on review M2): a pattern that matches its command line at
+# `daemon2` is DENY; a literal `kill <pid>` and kills by process name are not
+# seen. `pkill -9 -f 'jarvis daemon2'` is in effect a restart
+# (Restart=on-failure brings it back in 5 s); a plain SIGTERM stops it until
+# `jarvis restart`.
+DAEMON_UNIT = "jarvis-daemon2"
+_DAEMON_UNIT_NAMES = (DAEMON_UNIT, DAEMON_UNIT + ".service")
+# The prefilter's words: a line that changes the unit names one of these (or
+# `daemon2`, an op word, which every spelling of the unit holds).
+_DAEMON_WORDS = ("systemctl", "busctl", "dbus-send", "gdbus", "qdbus")
+# The slices and targets a glob is tried against: what the live unit requires
+# (`systemctl --user list-dependencies jarvis-daemon2`: app.slice, -.slice,
+# basic.target), what conflicts with it, and the user manager's standard
+# targets. A literal `.slice`/`.target` needs no list — any one counts.
+_REACHES_DAEMON = ("app.slice", "-.slice", "background.slice", "session.slice", "basic.target",
+                   "default.target", "exit.target", "shutdown.target", "sockets.target",
+                   "paths.target", "timers.target")
+
+# systemctl's own option grammar, systemd 259 — every option in `systemctl
+# --help`, the compatibility flags it hides, and the getopt string in
+# /usr/bin/systemctl (`hC:t:p:P:alqvfs:H:M:n:o:iTr.::`). Each long option was
+# checked against the installed binary with `systemctl --user --NAME
+# --version` (2026-10-11, review of PR #48): a flag prints the version, a
+# value-taking option swallows it. Parsed the way getopt_long parses it —
+# short clusters whose last value-taking letter takes the rest or the next
+# word (`-qp status restart …` was read as the verb `status`), unique prefixes
+# of long names (`--us` is `--user`), options anywhere (permutation), `--`.
+# 1 takes a value; 2 takes an optional one, glued only (`-.`, which is why
+# `-.slice` needs a `--` before it).
+_SYSTEMCTL_SHORT = {"C": 1, "t": 1, "p": 1, "P": 1, "s": 1, "H": 1, "M": 1, "n": 1, "o": 1,
+                    ".": 2, "h": 0, "a": 0, "l": 0, "q": 0, "v": 0, "f": 0, "i": 0, "T": 0, "r": 0}
+_SYSTEMCTL_LONG = {
+    **dict.fromkeys(("capsule", "host", "machine", "type", "state", "property", "job-mode",
+                     "check-inhibitors", "signal", "kill-whom", "kill-value", "kill-subgroup",
+                     "what", "message", "preset-mode", "root", "image", "image-policy", "lines",
+                     "output", "boot-loader-menu", "boot-loader-entry", "reboot-argument",
+                     "timestamp", "when", "drop-in", "legend"), 1),
+    **dict.fromkeys(("help", "version", "system", "user", "all", "failed", "full", "reverse",
+                     "before", "after", "with-dependencies", "show-transaction", "show-types",
+                     "value", "wait", "no-block", "no-wall", "dry-run", "quiet", "verbose",
+                     "no-warn", "no-reload", "no-pager", "no-ask-password", "global", "runtime",
+                     "force", "plain", "recursive", "firmware-setup", "now", "read-only", "mkdir",
+                     "marked", "stdin", "no-legend", "fail", "irreversible", "ignore-dependencies",
+                     "ignore-inhibitors"), 0),
+}
+_SYSTEMCTL_SHORT_LONG = {"h": "help", "a": "all", "l": "full", "q": "quiet", "v": "verbose",
+                         "f": "force", "r": "recursive", "T": "show-transaction", "C": "capsule"}
+# Verbs that only read.
+_SYSTEMCTL_READS = frozenset({
+    "status", "show", "cat", "help", "is-active", "is-enabled", "is-failed", "list-units",
+    "list-unit-files", "list-dependencies", "list-jobs", "list-timers", "list-sockets",
+    "list-paths", "list-automounts", "list-machines", "show-environment", "get-default",
+    "is-system-running", "whoami", "log-level", "log-target", "service-watchdogs"})
+# Verbs that change state but stop nothing: clearing a failed state is how a
+# unit at its start limit is recovered.
+_SYSTEMCTL_HARMLESS = frozenset({"reset-failed", "daemon-reload"})
+# The manager's environment, which the daemon reads at its next start: asked.
+_SYSTEMCTL_ENVIRONMENT = frozenset({"set-environment", "unset-environment", "import-environment"})
+# Verbs that stop every unit of the *user* manager, the daemon's among them.
+_SYSTEMCTL_USER_STOPS_ALL = frozenset({"exit", "isolate", "default", "rescue", "emergency", "halt",
+                                       "poweroff", "reboot", "kexec", "soft-reboot", "switch-root"})
+# D-Bus methods of systemd's manager and unit objects that change a unit or
+# the manager (`busctl`, `dbus-send`, `gdbus`, `qdbus`).
+_SYSTEMD_METHODS = frozenset({
+    "StartUnit", "StartUnitReplace", "StartUnitWithFlags", "StopUnit", "ReloadUnit",
+    "RestartUnit", "TryRestartUnit", "ReloadOrRestartUnit", "ReloadOrTryRestartUnit",
+    "EnqueueUnitJob", "KillUnit", "QueueSignalUnit", "CleanUnit", "FreezeUnit", "ThawUnit",
+    "SetUnitProperties", "BindMountUnit", "MountImageUnit", "EnqueueMarkedJobs", "Exit",
+    "Reboot", "SoftReboot", "PowerOff", "Halt", "KExec", "SwitchRoot", "SetEnvironment",
+    "UnsetEnvironment", "UnsetAndSetEnvironment", "DisableUnitFiles", "DisableUnitFilesWithFlags",
+    "DisableUnitFilesWithFlagsAndInstallInfo", "MaskUnitFiles", "LinkUnitFiles",
+    "RevertUnitFiles", "SetDefaultTarget", "PresetAllUnitFiles", "AttachProcessesToUnit",
+    "AbandonScope", "Reexecute", "Start", "Stop", "Reload", "Restart", "TryRestart",
+    "ReloadOrRestart", "ReloadOrTryRestart", "EnqueueJob", "Kill", "QueueSignal", "Clean",
+    "Freeze", "Thaw", "SetProperties"})
+_DBUS_TOOLS = frozenset({"busctl", "dbus-send", "gdbus", "qdbus", "qdbus6", "qdbus-qt5",
+                         "qdbus-qt6"})
+_DAEMON_UNIT_WHY = (
+    "this {how} — the v2 daemon, the process that runs Jarvis's agents and holds the owner's "
+    "pending approvals, Jarvis's own control plane. Only the owner stops or restarts it, from "
+    "their own terminal (`jarvis restart`); Jarvis never does, asked or not")
+_BRACE_CAP = 256
+
+
+_BRACE = re.compile(r"(?<!\$)\{([^{}]*)\}")
+
+
+def _brace_expand(word: str) -> list[str] | None:
+    """Bash's brace expansion of one word — `{a,b}` lists (nested) and
+    `{1..3}`/`{a..e}` sequences, never `${…}` — in bash's order, or None past
+    `_BRACE_CAP` words or expansions."""
+    if "{" not in word:
+        return [word]
+    pending, done, steps = [word], [], 0
+    while pending:
+        current = pending.pop()
+        found = next(((m, parts) for m in _BRACE.finditer(current)
+                      if (parts := _brace_parts(m.group(1))) is not None), None)
+        if found is None:
+            done.append(current)
+            continue
+        m, parts = found
+        steps += 1
+        if steps > _BRACE_CAP or len(pending) + len(done) + len(parts) > _BRACE_CAP:
+            return None
+        head, tail = current[:m.start()], current[m.end():]
+        pending.extend(head + part + tail for part in reversed(parts))
+    return done
+
+
+def _brace_parts(inside: str) -> list[str] | None:
+    """The alternatives one `{…}` (with no braces inside) expands to, or None
+    when bash leaves it as it is (no comma and no sequence)."""
+    if "," in inside:
+        return inside.split(",")
+    m = re.fullmatch(r"(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?", inside)
+    if m:
+        start, end = int(m.group(1)), int(m.group(2))
+        step = abs(int(m.group(3) or 1)) or 1
+        if abs(end - start) // step > _BRACE_CAP:
+            return [str(start)] * (_BRACE_CAP + 1)
+        rng = range(start, end + 1, step) if start <= end else range(start, end - 1, -step)
+        return [str(n) for n in rng]
+    m = re.fullmatch(r"([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?", inside)
+    if m:
+        start, end = ord(m.group(1)), ord(m.group(2))
+        step = abs(int(m.group(3) or 1)) or 1
+        rng = range(start, end + 1, step) if start <= end else range(start, end - 1, -step)
+        return [chr(n) for n in rng]
+    return None
+
+
+# A brace, or a comma, that was quoted or escaped on the line: bash never
+# expands it, so `pkill -f 'daemo.{0,1}2'` hands pkill that regex whole
+# (review 2 of PR #48 — expanded, it was judged as `daemo.02` and `daemo.12`,
+# and one pattern could become 256 to match). `_owner_line` marks them
+# before splitting a segment into words, `_unit_words` expands only the
+# unmarked ones, and `_owner_command` hands every other path the plain text.
+_QUOTED = str.maketrans({"{": "", "}": "", ",": ""})
+_UNQUOTED = str.maketrans({"": "{", "": "}", "": ","})
+
+
+def _mark_quoted(text: str) -> str:
+    """`text` with each quoted or backslash-escaped `{`, `}` and `,` marked."""
+    if "{" not in text:
+        return text
+    out, quote, i, n = [], "", 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(c + text[i + 1].translate(_QUOTED))
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = ""
+            out.append(c if c == '"' or c == "'" else c.translate(_QUOTED))
+        else:
+            if c in "'\"":
+                quote = c
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _unmark(word: str) -> str:
+    return word.translate(_UNQUOTED)
+
+
+def _unit_words(tokens: list[str], state: "_Owner") -> list[str] | None:
+    """A command's arguments as the shell will hand them over: the line's own
+    `$VAR`s put in and split on whitespace (an expansion it did not assign
+    stays as it is, and counts as any words), unquoted braces expanded
+    (`_mark_quoted`). None past the brace cap."""
+    out: list[str] = []
+    for token in tokens:
+        word = _owner_word(token, state, environ=False)
+        expanded = _brace_expand(word)
+        if expanded is None:
+            return None
+        for one in expanded:
+            one = _unmark(one)
+            out.extend(one.split() if word != token else [one])
+    return out
+
+
+def _wild_word(word: str) -> bool:
+    """A word only known when it runs: an expansion the line did not assign
+    (it may split into several words, or vanish)."""
+    return "$" in word or "`" in word
+
+
+def _may_be_daemon(word: str, user: bool) -> bool:
+    """Whether a unit operand may name the daemon's unit, or (in the user
+    manager) a slice or target that reaches it. A glob can only become names
+    it matches, so it is tried against them."""
+    if _wild_word(word):
+        return True
+    base = rules._basename(word.rstrip("/")) or word
+    if _GLOB.search(word):
+        names = _DAEMON_UNIT_NAMES + (_REACHES_DAEMON if user else ())
+        return any(fnmatch(name, pattern) for name in names for pattern in {word, base})
+    if base in _DAEMON_UNIT_NAMES:
+        return True
+    return user and base.endswith((".slice", ".target"))
+
+
+@dataclass
+class _Systemctl:
+    operands: list[str]
+    user: bool = False        # the user manager (`--user`, `--capsule`)
+    marked: bool = False
+    unknown: bool = False     # an option the table does not know: the verb is a guess
+    wild_head: bool = False   # an expansion before or at the verb: the verb is not known
+    info: bool = False        # --help/--version: nothing runs
+    properties: list[str] = field(default_factory=list)   # `-p`/`-P`/`--property` values
+
+    @property
+    def verb(self) -> str | None:
+        return self.operands[0] if self.operands else None
+
+    @property
+    def units(self) -> list[str]:
+        return self.operands[1:]
+
+
+def _systemctl_parse(words: list[str]) -> _Systemctl:
+    """systemctl's arguments as getopt_long reads them (`_SYSTEMCTL_LONG`)."""
+    out = _Systemctl([])
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if not out.operands and _wild_word(word):
+            out.wild_head = True
+        if word == "--":
+            if not out.operands and any(_wild_word(w) for w in words[i:i + 1]):
+                out.wild_head = True
+            out.operands.extend(words[i:])
+            break
+        if word.startswith("--"):
+            name, eq, _ = word[2:].partition("=")
+            exact = [n for n in _SYSTEMCTL_LONG if n == name]
+            matches = exact or [n for n in _SYSTEMCTL_LONG if name and n.startswith(name)]
+            if len(matches) != 1:
+                out.unknown = True
+                continue
+            full = matches[0]
+            value = word[2:].partition("=")[2]
+            if _SYSTEMCTL_LONG[full] and not eq:
+                if i >= len(words):
+                    out.unknown = True
+                    break
+                if not out.operands and _wild_word(words[i]):
+                    out.wild_head = True
+                value = words[i]
+                i += 1
+            elif eq and not _SYSTEMCTL_LONG[full]:
+                out.unknown = True
+            if full == "property":
+                out.properties.extend(value.split(","))
+            out.user = {"user": True, "capsule": True, "system": False}.get(full, out.user)
+            out.marked = out.marked or full == "marked"
+            out.info = out.info or full in ("help", "version")
+            continue
+        if word.startswith("-") and len(word) > 1:
+            letters = word[1:]
+            for k, letter in enumerate(letters):
+                takes = _SYSTEMCTL_SHORT.get(letter)
+                if takes is None:
+                    out.unknown = True
+                    break
+                full = _SYSTEMCTL_SHORT_LONG.get(letter, "")
+                out.user = out.user or full == "capsule"
+                out.info = out.info or full == "help"
+                if takes == 2:
+                    break
+                if takes == 1:
+                    value = letters[k + 1:]
+                    if k == len(letters) - 1:
+                        if i >= len(words):
+                            out.unknown = True
+                        elif not out.operands and _wild_word(words[i]):
+                            out.wild_head = True
+                        value = words[i] if i < len(words) else ""
+                        i += 1
+                    if letter in "pP":
+                        out.properties.extend(value.split(","))
+                    break
+            continue
+        out.operands.append(word)
+    return out
+
+
+def _systemctl_verdict(tokens: list[str], appends: bool, state: "_Owner") -> tuple[str, str] | None:
+    """("deny" | "ask", why) for a `systemctl` command, or None."""
+    words = _unit_words(tokens[1:], state)
+    if words is None:
+        return "deny", _DAEMON_UNIT_WHY.format(
+            how=f"runs systemctl with more brace expansions than are judged here, "
+                f"{DAEMON_UNIT} perhaps among them")
+    parsed = _systemctl_parse(words)
+    if parsed.wild_head:
+        # `systemctl --user $ARGS`: the verb, and its units, are only known
+        # when it runs.
+        return "deny", _DAEMON_UNIT_WHY.format(
+            how=f"runs systemctl with a verb only known when it runs (an expansion), "
+                f"which may change {DAEMON_UNIT}")
+    if parsed.info and not parsed.unknown:
+        return None
+    verb = parsed.verb
+    if parsed.unknown or (verb is not None and _GLOB.search(verb)):
+        # An option the table does not know (it may have taken a value, so
+        # any operand may be the verb), or a verb a glob stands for: judge
+        # every operand as the verb and as a unit.
+        risky = any(_may_be_daemon(w, True) or any(fnmatch(v, w) for v in _SYSTEMCTL_USER_STOPS_ALL)
+                    for w in parsed.operands)
+        if risky or appends:
+            return "deny", _DAEMON_UNIT_WHY.format(
+                how=f"runs systemctl with an option or verb not known here, on words that may "
+                    f"name {DAEMON_UNIT}")
+        return None
+    if verb is None:
+        if appends:
+            return "deny", _DAEMON_UNIT_WHY.format(
+                how=f"runs systemctl with a verb and units its input names (`xargs`), "
+                    f"{DAEMON_UNIT} perhaps")
+        return None
+    if verb in _SYSTEMCTL_READS or verb in _SYSTEMCTL_HARMLESS:
+        return None
+    if verb in _SYSTEMCTL_ENVIRONMENT:
+        return "ask", (f"`systemctl {verb}` changes the service manager's environment, which "
+                       f"{DAEMON_UNIT} reads at its next start")
+    if parsed.user and verb in _SYSTEMCTL_USER_STOPS_ALL:
+        return "deny", _DAEMON_UNIT_WHY.format(
+            how=f"stops every user unit (`systemctl --user {verb}`), {DAEMON_UNIT} among them")
+    if parsed.marked:
+        return "deny", _DAEMON_UNIT_WHY.format(
+            how=f"runs `systemctl {verb} --marked`, which acts on every marked unit, "
+                f"{DAEMON_UNIT} perhaps")
+    hit = next((u for u in parsed.units if _may_be_daemon(u, parsed.user)), None)
+    if hit is not None:
+        if _GLOB.search(hit) and not _wild_word(hit):
+            how = (f"changes the units matching {hit} (`systemctl {verb}`), which may be "
+                   f"{DAEMON_UNIT} or a slice or target it requires")
+        elif rules._basename(hit) in _DAEMON_UNIT_NAMES or _wild_word(hit):
+            how = f"changes systemd's {DAEMON_UNIT} (`systemctl {verb}`)"
+        else:
+            how = (f"changes the user manager's {rules._basename(hit)} (`systemctl {verb}`), "
+                   f"which {DAEMON_UNIT} requires or which stops it")
+        return "deny", _DAEMON_UNIT_WHY.format(how=how)
+    if appends:
+        return "deny", _DAEMON_UNIT_WHY.format(
+            how=f"runs `systemctl {verb}` on units its input names (`xargs`), {DAEMON_UNIT} perhaps")
+    return None
+
+
+def _systemctl_op(tokens: list[str], appends: bool = False, state: "_Owner | None" = None) -> str | None:
+    """The refusal for a `systemctl` command that may change the daemon's
+    unit, or None (an ask is `systemctl_asks`'s)."""
+    verdict = _systemctl_verdict(tokens, appends, state if state is not None else _Owner())
+    return verdict[1] if verdict and verdict[0] == "deny" else None
+
+
+def systemctl_asks(tokens: list[str]) -> str | None:
+    """Why a `systemctl` command must be asked although `systemctl --user` is
+    otherwise auto-approved (`set-environment` and its kin), or None.
+    `rules.decide` asks it."""
+    try:
+        verdict = _systemctl_verdict(list(tokens), False, _Owner())
+    except Exception:     # noqa: BLE001 — a parse failure is not a verdict
+        return None
+    return verdict[1] if verdict and verdict[0] == "ask" else None
+
+
+def _dbus_op(tokens: list[str], state: "_Owner") -> str | None:
+    """A D-Bus call (`busctl`, `dbus-send`, `gdbus`, `qdbus`) that names the
+    daemon's unit, or that calls systemd with a method that changes a unit
+    or the manager. A read (`busctl get-property`, a `Get`/`GetAll` call …)
+    changes nothing (review 2 of PR #48); one that names the unit prints its
+    PID, a source for a fed `kill` (`_note_kill`)."""
+    words = _unit_words(tokens[1:], state)
+    if words is None:
+        words = tokens[1:]
+    escaped = DAEMON_UNIT.replace("-", "_2d")
+    names = any(DAEMON_UNIT in word or escaped in word for word in words)
+    tool = rules._basename(tokens[0])
+    if _dbus_read("qdbus" if tool.startswith("qdbus") else tool, words):
+        if names:
+            state.kills.sources.append(lambda: "a D-Bus read of its unit")
+        return None
+    if names:
+        return _DAEMON_UNIT_WHY.format(how=f"calls systemd over D-Bus on {DAEMON_UNIT}")
+    systemd = any("systemd1" in w for w in words)
+    if not systemd:
+        return None
+    for word in words:
+        parts = set(re.split(r"[.=:/\s]+", word))
+        if parts & _SYSTEMD_METHODS or _wild_word(word):
+            method = next(iter(parts & _SYSTEMD_METHODS), "a method only known when it runs")
+            return _DAEMON_UNIT_WHY.format(
+                how=f"calls systemd over D-Bus ({method}), which can stop or restart "
+                    f"{DAEMON_UNIT}")
+    return None
+
+
+# Killing the daemon by pattern (2026-10-11, the owner's decision on PR #48's
+# M2): `pkill -f daemon2` stopped it with nobody asked — a plain SIGTERM is a
+# clean exit, which `Restart=on-failure` does not restart. DENY:
+#   * `pkill -f` and `killall -r` whose pattern matches one of the daemon's
+#     command lines **at `daemon2`** — a match whose span overlaps that word —
+#     so `jarvis daemon2`, `daemo[n]2`, `daemon.`, `jarvis d` and `n2$` are
+#     refused, while `jarvis` and `python -m jarvis` alone, which do not reach
+#     the word, keep the owner's 2026-08-09 matrix (`pkill -f jarvis` stays
+#     ALLOW);
+#   * a `kill` **fed** PIDs on the same line — through `$(…)`, backticks,
+#     `<(…)`, a variable or `xargs` — by a source that yields the daemon's:
+#     `pgrep -f`/`pidof` with such a pattern, `ps` (or a grep over
+#     `/proc/*/cmdline` itself) filtered by such a `grep`, and (review 2 of
+#     PR #48) `systemctl show|status` of its unit, a D-Bus read of it, its
+#     cgroup's `cgroup.procs`, `pgrep --cgroup|--pidfile` naming the unit,
+#     `lsof`/`fuser` on one of its ports, and `ss -p`/`netstat -p` filtered
+#     onto one;
+#   * `pkill --cgroup|--pidfile` naming the unit, and `fuser -k` on one of its
+#     ports, which kill it outright.
+# A pattern only known when it runs counts as matching, and so does one that
+# will not compile on a line naming `daemon2`. One whose matching cost
+# cannot be bounded (`_regex_work`) is never matched: it is too complex to
+# judge (`COSTLY`), which asks — never DENY (the delta review of PR #48) —
+# unless a literal it needs rules the daemon out first (`_required_runs`).
+# **A source is judged only when a fed `kill` is on the line**:
+# `pgrep -f daemon2` alone is a read and is never matched, and `pgrep -f
+# daemon2 && kill -9 4321` kills a literal PID nothing on the line fed it.
+# Matching by process *name* (`pkill python`, `killall python`, `pkill`
+# without `-f`) reaches the daemon too, but never at `daemon2` — its names are
+# `python` and `jarvis` — so it is left alone, the stated limit with a `kill`
+# of a literal PID, which nothing here can see.
+_KILL_WORDS = ("kill", "pgrep", "pidof", "fuser")
+_DAEMON_NAMES = ("python", "python3", "jarvis")
+_SIGNALS = frozenset({
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "IOT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+    "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG",
+    "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "POLL", "IO", "PWR", "SYS", "UNUSED", "RTMIN",
+    "RTMAX"})
+# pkill's and pgrep's options (procps-ng 4.0.4, `--help`, and which letters
+# each binary refuses): 1 takes a value.
+_PKILL_SHORT = {**dict.fromkeys("qgGOPstuUFr", 1), **dict.fromkeys("HecfinoxLAhV", 0)}
+_PGREP_SHORT = {**dict.fromkeys("dgGOPstuUFr", 1), **dict.fromkeys("lavwcfinoxLAHhV", 0)}
+_PROC_LONG = {
+    **dict.fromkeys(("pgroup", "group", "older", "parent", "session", "signal", "terminal", "euid",
+                     "uid", "pidfile", "runstates", "cgroup", "ns", "nslist"), 1),
+    **dict.fromkeys(("count", "full", "ignore-case", "newest", "oldest", "exact", "logpidfile",
+                     "ignore-ancestors", "require-handler", "help", "version"), 0)}
+_PKILL_LONG = {**_PROC_LONG, "queue": 1, "echo": 0}
+_PGREP_LONG = {**_PROC_LONG, "delimiter": 1, "list-name": 0, "list-full": 0, "inverse": 0,
+               "lightweight": 0}
+_PROC_SHORT_LONG = {"F": "pidfile"}
+# killall (psmisc 23.7): its options with a value.
+_KILLALL_SHORT = {**dict.fromkeys("yosunZ", 1), **dict.fromkeys("eIgilqrvVw", 0)}
+_KILLALL_LONG = {**dict.fromkeys(("younger-than", "older-than", "signal", "user", "ns", "context"), 1),
+                 **dict.fromkeys(("exact", "ignore-case", "process-group", "interactive", "list",
+                                  "quiet", "regexp", "verbose", "version", "wait", "help"), 0)}
+# grep (GNU grep 3.12; ugrep reads the same patterns): options with a value,
+# and the long ones whose value may only be glued (`--color=always`).
+_GREP_SHORT_VALUE = frozenset("efmABCdD")
+_GREP_LONG = {
+    **dict.fromkeys(("regexp", "file", "max-count", "after-context", "before-context", "context",
+                     "devices", "directories", "exclude", "include", "exclude-dir", "exclude-from",
+                     "label", "binary-files", "group-separator"), 1),
+    **dict.fromkeys(("fixed-strings", "basic-regexp", "extended-regexp", "perl-regexp",
+                     "ignore-case", "no-ignore-case", "invert-match", "word-regexp", "line-regexp",
+                     "count", "color", "colour", "files-with-matches", "files-without-match",
+                     "only-matching", "quiet", "silent", "no-messages", "byte-offset",
+                     "with-filename", "no-filename", "line-number", "initial-tab", "null",
+                     "null-data", "text", "recursive", "dereference-recursive", "line-buffered",
+                     "no-group-separator", "help", "version"), 0)}
+_POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "upper": "A-Z",
+                  "lower": "a-z", "space": r"\s", "blank": r" \t", "punct": r"!-/:-@\[-`{-~",
+                  "xdigit": "0-9A-Fa-f", "print": " -~", "graph": "!-~", "cntrl": r"\x00-\x1f\x7f",
+                  "word": r"\w"}
+_PATTERN_CAP = 1024        # past it a kill pattern is too complex to judge (asked)
+# What matching one pattern may cost, and every pattern on one line together,
+# in `_regex_work`'s units (review 2 of PR #48). Python's `re` has no timeout
+# and holds the GIL while it matches, so a match past these would freeze the
+# whole daemon, every turn and the approval broker with it — `.?` thirty times
+# took days. The per-pattern budget fits two unbounded quantifiers on the
+# owner's checkout (`node.*vite.*dev`), and the worst pattern under it matches
+# in about 10 ms (`redos_checks` in tests/rules_check.py holds every one under
+# 50 ms). Parsing costs too: a line's patterns share `_LINE_PATTERN_CHARS`.
+_REGEX_BUDGET = 1 << 19
+_LINE_REGEX_BUDGET = 1 << 20
+_LINE_PATTERN_CHARS = 4096
+_PID_PROPERTIES = frozenset({"MainPID", "ControlPID", "ExecMainPID"})
+# D-Bus calls that only read: busctl's and gdbus's reading verbs, and the
+# methods that return state (`Get`, `GetAll`, `Introspect` …).
+_BUSCTL_READS = frozenset({"list", "status", "monitor", "capture", "tree", "introspect",
+                           "get-property", "wait", "help"})
+_GDBUS_READS = frozenset({"introspect", "monitor", "wait", "help"})
+_DBUS_READ_METHODS = frozenset({
+    "Get", "GetAll", "Introspect", "Ping", "GetMachineId", "GetUnit", "GetUnitByPID",
+    "GetUnitByInvocationID", "GetUnitByControlGroup", "GetUnitProcesses", "GetUnitFileState",
+    "GetUnitFileLinks", "GetDefaultTarget", "GetJob", "ListUnits", "ListUnitsFiltered",
+    "ListUnitsByPatterns", "ListUnitsByNames", "ListUnitFiles", "ListUnitFilesByPatterns",
+    "ListJobs", "Dump"})
+
+
+def _daemon_command_lines() -> tuple[str, ...]:
+    """The daemon's command lines as `pkill -f` reads them: the unit's, and
+    the other ways it is started."""
+    return (f"{Path(config.REPO_ROOT)}/.venv/bin/python -m jarvis daemon2",
+            "python3 -m jarvis daemon2", "python -m jarvis daemon2", "jarvis daemon2")
+
+
+def _daemon_ports() -> frozenset[int]:
+    """The ports whose holder may be the daemon: the control plane's
+    (`config.control_ports()`) and the workshop's, which the v2 daemon binds
+    as its preview listener (8403)."""
+    return config.control_ports() | {8403, config.WORKSHOP_PORT}
+
+
+def _signal_word(word: str) -> str | None:
+    """The signal a `-SIG` word names (`-9`, `-KILL`, `-SIGTERM`), or None."""
+    if not re.fullmatch(r"-[A-Za-z0-9+]+", word):
+        return None
+    name = word[1:].upper()
+    name = name[3:] if name.startswith("SIG") else name
+    if name.isdigit() or name in _SIGNALS or re.fullmatch(r"RTM(?:IN|AX)[+-]?\d*", name):
+        return name
+    return None
+
+
+_REPEATS = tuple(getattr(_sre_c, name) for name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")
+                 if hasattr(_sre_c, name))
+_PLAIN_OPS = tuple(getattr(_sre_c, name) for name in ("LITERAL", "NOT_LITERAL", "ANY", "IN", "AT",
+                                                      "CATEGORY") if hasattr(_sre_c, name))
+
+
+def _regex_choices(items, n: int, cap: int) -> int:
+    """An upper bound on the ways a backtracking matcher can try a parsed
+    pattern against `n` characters, saturating at `cap`: a sequence
+    multiplies, an alternation adds, an unbounded repeat counts as the text
+    (n+1 lengths), `?` as 2, `{m,k}` as k−m+1, and a repeat of something
+    that itself chooses as (k−m+1)·inner^k — nested repeats multiply out, so
+    `(.*)*` saturates. A back-reference, or anything not understood here,
+    saturates too: a cost that cannot be bounded is never run."""
+    total = 1
+    for op, av in getattr(items, "data", items):
+        total = min(cap, total * _regex_node(op, av, n, cap))
+        if total >= cap:
+            return cap
+    return total
+
+
+def _regex_node(op, av, n: int, cap: int) -> int:
+    if op in _PLAIN_OPS:
+        return 1
+    if op in _REPEATS:
+        low, high, sub = av
+        most = n if high == _sre_c.MAXREPEAT else min(high, n)
+        if low > most:
+            return 1                   # it cannot match: sre checks the width first
+        inner = _regex_choices(sub, n, cap)
+        out = most - low + 1
+        if inner > 1:
+            for _ in range(most):
+                out *= inner
+                if out >= cap:
+                    return cap
+        return min(cap, out)
+    if op is _sre_c.SUBPATTERN:
+        return _regex_choices(av[-1], n, cap)
+    if op is _sre_c.BRANCH:
+        return min(cap, sum(_regex_choices(branch, n, cap) for branch in av[1]))
+    if op in (_sre_c.ASSERT, _sre_c.ASSERT_NOT):
+        return _regex_choices(av[1], n, cap)
+    if op is getattr(_sre_c, "ATOMIC_GROUP", None):
+        return _regex_choices(av, n, cap)
+    if op is _sre_c.GROUPREF_EXISTS:
+        return min(cap, _regex_choices(av[1], n, cap)
+                   + (_regex_choices(av[2], n, cap) if av[2] is not None else 1))
+    return cap
+
+
+def _regex_work(tree, runs: list[tuple[int, int]], cap: int) -> int:
+    """What matching a parsed pattern costs, bounded from above: per text of
+    length n, the choices it can try (`_regex_choices`) times the starts it is
+    tried at, summed over `runs` [(n, starts)], saturating at `cap`."""
+    total = 0
+    for n, starts in runs:
+        total += _regex_choices(tree, n, cap) * starts
+        if total >= cap:
+            return cap
+    return total
+
+
+def _required_text(items, out: list[str], run: list[str]) -> None:
+    """The literal runs every match of a parsed pattern contains: consecutive
+    literal characters of its top-level sequence, a plain group's included
+    (`(ab)c` is `abc`). Anything else — a repeat, an alternation, a class, an
+    anchor, a lookaround — ends a run; it is never treated as text."""
+    for op, av in getattr(items, "data", items):
+        if op is _sre_c.LITERAL:
+            run.append(chr(av))
+        elif op is _sre_c.SUBPATTERN and not av[1] and not av[2]:
+            _required_text(av[-1], out, run)
+        else:
+            if run:
+                out.append("".join(run))
+                run.clear()
+
+
+def _required_runs(tree) -> list[str]:
+    out: list[str] = []
+    run: list[str] = []
+    _required_text(tree, out, run)
+    if run:
+        out.append("".join(run))
+    return out
+
+
+def _ere(pattern: str) -> str:
+    """POSIX ERE (pkill, killall -r, grep -E) in Python's spelling: bracket
+    classes and GNU word boundaries."""
+    pattern = re.sub(r"\[:(\w+):\]", lambda m: _POSIX_CLASSES.get(m.group(1), m.group(0)), pattern)
+    return pattern.replace(r"\<", r"\b").replace(r"\>", r"\b")
+
+
+def _bre(pattern: str) -> str:
+    """POSIX BRE with GNU's escapes (grep's default) as ERE: `\\(`, `\\|`,
+    `\\+`, `\\?`, `\\{` are the operators, and the bare characters are text."""
+    out, i, n = [], 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "[":
+            j = i + 1 + (pattern[i + 1:i + 2] == "^")
+            j += pattern[j:j + 1] == "]"
+            while j < n and pattern[j] != "]":
+                if pattern[j] == "[" and pattern[j + 1:j + 2] in (":", ".", "="):
+                    end = pattern.find(pattern[j + 1] + "]", j + 2)
+                    j = end + 1 if end != -1 else j
+                j += 1
+            out.append(pattern[i:j + 1])
+            i = j + 1
+            continue
+        if c == "\\" and i + 1 < n:
+            nxt = pattern[i + 1]
+            out.append(nxt if nxt in "(){}|+?" else c + nxt)
+            i += 2
+            continue
+        out.append("\\" + c if c in "(){}|+?" else c)
+        i += 1
+    return "".join(out)
+
+
+# What `_daemon_match` answers when a pattern's matching cost is past what is
+# judged here (`_regex_work` against the budgets) or it is too long to parse:
+# not "matches" and not "does not match" — **too complex to judge**, which is
+# ASK, never covered by an allowlist entry and always-ask in v2, and never
+# DENY (the delta review of PR #48: `pkill -f 'node.*vite.*--port.*5173'` and
+# every kill pattern with three unbounded quantifiers was an unapprovable
+# DENY, though it could never match the daemon).
+COSTLY = "too costly to judge"
+
+
+def _daemon_spans(full: bool = True) -> list[tuple[str, int, int]]:
+    """The daemon's command lines (or, not `full`, its process names) as a
+    process pattern reads them, each with the span of `daemon2` a selection
+    must reach — (-1, -1) where there is none."""
+    texts = _daemon_command_lines() if full else _DAEMON_NAMES
+    return [(t, t.find("daemon2"), t.find("daemon2") + 7) if "daemon2" in t else (t, -1, -1)
+            for t in texts]
+
+
+def _socket_spans() -> list[tuple[str, int, int]]:
+    """The daemon's listening sockets as `ss -ltnp` and `netstat -tlnp` print
+    them, each with the span of its port a selection must reach."""
+    out = []
+    for port in sorted(_daemon_ports()):
+        for text in (f'LISTEN 0 5 127.0.0.1:{port} 0.0.0.0:* users:(("python3",pid=4242,fd=5))',
+                     f"tcp 0 0 127.0.0.1:{port} 0.0.0.0:* LISTEN 4242/python3"):
+            at = text.find(f":{port}") + 1
+            out.append((text, at, at + len(str(port))))
+    return out
+
+
+def _holds(run: str, text: str, ci: bool) -> bool:
+    """Whether `text` holds the literal `run` (case-folded under IGNORECASE;
+    a non-ASCII run is assumed held, since `re`'s folding is not `lower()`'s)."""
+    if not ci:
+        return run in text
+    return not run.isascii() or run.lower() in text.lower()
+
+
+def _daemon_match(pattern: str, *, how: str, full: bool = True, icase: bool = False,
+                  literal: bool = False, syntax: str = "ere", line: str = "",
+                  budget: list[int] | None = None,
+                  spans: list[tuple[str, int, int]] | None = None):
+    """Whether a process pattern matches the daemon: `how` is "overlap" (a
+    match whose span overlaps the part of a text a selection must reach —
+    `daemon2` on its command lines, or a port, `spans`), "exact" (a whole
+    text) or "anywhere". True or False when it can be told; None when it
+    cannot and every caller fails closed — an expansion only known when it
+    runs, or a pattern that will not compile on a line that names `daemon2`
+    (one that will not compile anywhere else selects nothing: the tool
+    refuses it); and `COSTLY` when matching it would cost more than is judged
+    here — the caller asks rather than refusing.
+
+    Before any cost is counted, a text that lacks a literal run every match
+    of the pattern contains (`_required_runs`: `node` in `node.*vite`) is set
+    aside, so a pattern that cannot match the daemon is told so cheaply,
+    however costly matching it would be."""
+    if _wild_word(pattern):
+        return None
+    spans = spans if spans is not None else _daemon_spans(full)
+    if how == "overlap":
+        spans = [s for s in spans if s[1] >= 0]
+        if not spans:
+            return False
+    if literal:
+        source = re.escape(pattern)
+    elif len(pattern) > _PATTERN_CAP:
+        return COSTLY
+    else:
+        source = {"bre": lambda p: _ere(_bre(p)), "python": str}.get(syntax, _ere)(pattern)
+    flags = re.IGNORECASE if icase else 0
+    if budget is not None:
+        # Parsing costs too (about 2 µs a character): a line's patterns share
+        # `_LINE_PATTERN_CHARS` of it, so a word that expands to 256 patterns
+        # cannot buy a long parse.
+        if len(source) > budget[1]:
+            return COSTLY
+        budget[1] -= len(source)
+    try:
+        tree = _sre_parse.parse(source, flags)
+        ci = bool((flags | getattr(getattr(tree, "state", None), "flags", 0)) & re.IGNORECASE)
+        runs = _required_runs(tree)
+        spans = [s for s in spans if all(_holds(r, s[0], ci) for r in runs)]
+        if not spans:
+            return False
+        work = _regex_work(tree, [(len(t), end if how == "overlap" else 1 if how == "exact"
+                                   else len(t) + 1) for t, _, end in spans], _REGEX_BUDGET + 1)
+        if work > _REGEX_BUDGET or (budget is not None and work > budget[0]):
+            return COSTLY
+        rx = re.compile(source, flags)
+    except Exception:     # noqa: BLE001 — `re` refuses it (re.error, OverflowError, RecursionError)
+        if "daemon2" in re.sub(r"[\\()\[\]{}|*+?.^$'\"]", "", line or pattern):
+            return None
+        return False
+    if budget is not None:
+        budget[0] -= work
+    for text, at, end in spans:
+        if how == "exact":
+            if rx.fullmatch(text):
+                return True
+            continue
+        if how == "anywhere":
+            if rx.search(text):
+                return True
+            continue
+        for start in range(end):
+            m = rx.match(text, start)
+            if m and m.start() < end and m.end() > at:
+                return True
+    return False
+
+
+def _selects_daemon(pattern: str, *, full: bool, exact: bool = False, icase: bool = False,
+                    inverse: bool = False, literal: bool = False, line: str = "",
+                    budget: list[int] | None = None):
+    """Whether a pkill/pgrep/killall/pidof pattern selects the daemon at
+    `daemon2` (`_daemon_match`); `inverse` (pgrep -v) selects it when nothing
+    matches. True, False, or `COSTLY`; what cannot be told selects it."""
+    found = _daemon_match(pattern, how=("exact" if exact else "anywhere" if inverse else "overlap"),
+                          full=full, icase=icase, literal=literal, line=line, budget=budget)
+    if found is None:
+        return True
+    if found == COSTLY:
+        return COSTLY
+    return (not found) if inverse else found
+
+
+def _too_complex(what: str) -> str:
+    return (f"it is too complex to judge whether {what} matches the v2 daemon "
+            f"(`jarvis daemon2`, the process that holds the owner's approvals): matching its "
+            f"pattern would cost more than is judged here, since Python's `re` cannot be stopped "
+            f"mid-match. Asked, never covered by an allowlist entry")
+
+
+def _judge_patterns(results, kills: "_Kills", what: str) -> bool:
+    """Whether one of `results` (`_selects_daemon` answers, read lazily)
+    selects the daemon. One that is `COSTLY` selects nothing; it marks the
+    line too complex to judge (`kills.unsure`), which asks."""
+    costly = False
+    for result in results:
+        if result is True:
+            return True
+        costly = costly or result == COSTLY
+    if costly and not kills.unsure:
+        kills.unsure = _too_complex(what)
+    return False
+
+
+def _proc_args(words: list[str], short: dict, long: dict, signals: bool,
+               signal_letter: str = "") -> tuple[set, list, bool, dict]:
+    """(the options seen, by long name or letter; the operands; whether an
+    option was not known; the value-taking options' values, by long name)
+    for pkill, pgrep and killall."""
+    seen, operands, unknown, values, i = set(), [], False, {}, 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--":
+            operands.extend(words[i:])
+            break
+        if signals and _signal_word(word):
+            seen.add("signal=" + _signal_word(word))
+            continue
+        if word.startswith("--") and len(word) > 2:
+            name, eq, value = word[2:].partition("=")
+            matches = [n for n in long if n == name] or [n for n in long if n.startswith(name)]
+            if len(matches) != 1:
+                unknown = True
+                operands.append(word)
+                continue
+            full = matches[0]
+            if long[full] and not eq:
+                value = words[i] if i < len(words) else ""
+                i += 1
+            seen.add(full)
+            if long[full]:
+                values.setdefault(full, []).append(value)
+            if full == "signal":
+                seen.add("signal=" + (value or "").upper().removeprefix("SIG"))
+            continue
+        if word.startswith("-") and len(word) > 1:
+            for k, letter in enumerate(word[1:]):
+                takes = short.get(letter)
+                if takes is None:
+                    unknown = True
+                    operands.append(word[1 + k:])     # it may be a pattern after all
+                    break
+                seen.add(letter)
+                if takes:
+                    value = word[2 + k:] or (words[i] if i < len(words) else "")
+                    if not word[2 + k:]:
+                        i += 1
+                    values.setdefault(_PROC_SHORT_LONG.get(letter, letter), []).append(value)
+                    if letter == signal_letter:
+                        seen.add("signal=" + value.upper().removeprefix("SIG"))
+                    break
+            continue
+        operands.append(word)
+    return seen, operands, unknown, values
+
+
+def _names_unit(value: str) -> bool:
+    """Whether an option's value — a cgroup path, a PID file — may name the
+    daemon's unit: an expansion only known when it runs, `daemon2` in it, or
+    a glob the unit's name matches."""
+    if _wild_word(value) or "daemon2" in value:
+        return True
+    return bool(_GLOB.search(value)) and any(
+        fnmatch(name, part) for part in value.split("/") if part for name in _DAEMON_UNIT_NAMES)
+
+
+def _kill_why(tool: str) -> str:
+    return _DAEMON_UNIT_WHY.format(
+        how=f"kills processes by a pattern that matches the v2 daemon's command line at "
+            f"`daemon2` ({tool})")
+
+
+def _fed_why(source: str) -> str:
+    return _DAEMON_UNIT_WHY.format(
+        how=f"kills the v2 daemon's process: a `kill` on this line is fed the PIDs of {source}")
+
+
+def _pkill_op(tokens: list[str], state: "_Owner", appends: bool) -> str | None:
+    words = _unit_words(tokens[1:], state)
+    if words is None:
+        return _kill_why("`pkill`, with more brace expansions than are judged here")
+    seen, operands, unknown, values = _proc_args(words, _PKILL_SHORT, _PKILL_LONG, signals=True)
+    if "signal=0" in seen or {"h", "V", "help", "version"} & seen:
+        return None
+    if any(_names_unit(v) for v in values.get("cgroup", []) + values.get("pidfile", [])):
+        return _DAEMON_UNIT_WHY.format(
+            how="kills the processes of the v2 daemon's unit (`pkill --cgroup`/`--pidfile` naming it)")
+    full = unknown or bool({"f", "full"} & seen)
+    if not operands:
+        return _kill_why("`xargs pkill`, its pattern from the input") if appends and full else None
+    kills = state.kills
+    exact, icase = bool({"x", "exact"} & seen), bool({"i", "ignore-case"} & seen)
+    if _judge_patterns((_selects_daemon(p, full=full, exact=exact, icase=icase, line=kills.line,
+                                        budget=kills.work) for p in operands), kills, "`pkill -f`"):
+        return _kill_why("`pkill -f`")
+    return None
+
+
+def _killall_op(tokens: list[str], state: "_Owner", appends: bool) -> str | None:
+    words = _unit_words(tokens[1:], state)
+    if words is None:
+        return _kill_why("`killall`, with more brace expansions than are judged here")
+    seen, operands, unknown, _ = _proc_args(words, _KILLALL_SHORT, _KILLALL_LONG, signals=True,
+                                            signal_letter="s")
+    if "signal=0" in seen or {"l", "list", "V", "version", "help"} & seen:
+        return None
+    regex = unknown or bool({"r", "regexp"} & seen)
+    if not regex:
+        return None            # by name: the daemon's names never hold `daemon2`
+    if not operands:
+        return _kill_why("`xargs killall -r`, its pattern from the input") if appends else None
+    kills = state.kills
+    icase = bool({"I", "ignore-case"} & seen)
+    if _judge_patterns((_selects_daemon(p, full=True, icase=icase, line=kills.line, budget=kills.work)
+                        for p in operands), kills, "`killall -r`"):
+        return _kill_why("`killall -r`")
+    return None
+
+
+def _note_kill(tokens: list[str], state: "_Owner", appends: bool) -> None:
+    """A `kill` that sends a signal (not `-0`, not a listing) to PIDs fed to
+    it on this line — an operand only known when it runs (`$(…)`, backticks,
+    `$P`, `<(…)`) or `xargs` input — marks the line; its sources are judged
+    at the line's end. A kill of literal PIDs or jobs (`kill -9 4321`, `kill
+    %1`) is fed by nothing on the line (review 2 of PR #48)."""
+    words = tokens[1:]
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in ("-l", "-L", "--list", "--table") or word.startswith("--list="):
+            return
+        if word in ("-s", "-n", "--signal") and i + 1 < len(words):
+            if words[i + 1].upper().removeprefix("SIG") == "0":
+                return
+            i += 2
+            continue
+        if re.fullmatch(r"-(?:s|n|-signal=)?(?:SIG)?0", word, re.IGNORECASE):
+            return
+        i += 1
+    if appends or any(_wild_word(w) or w.startswith(("<(", ">(")) for w in words):
+        state.kills.kill = True
+
+
+def _note_pid_source(stem: str, tokens: list[str], state: "_Owner", appends: bool) -> None:
+    """`pgrep` or `pidof` on the line: whether the PIDs it prints include the
+    daemon's, judged only if a fed `kill` is on the line (`pidof`'s names as
+    fixed text, failing closed)."""
+    words = _unit_words(tokens[1:], state)
+    kills = state.kills
+    if words is None:
+        kills.sources.append(lambda: f"`{stem}`, with more brace expansions than are judged here")
+        return
+    if stem == "pidof":
+        names, i = [], 0
+        while i < len(words):
+            if words[i] in ("-o", "-d") and i + 1 < len(words):
+                i += 2
+                continue
+            if not words[i].startswith("-") or words[i] == "-":
+                names.append(words[i])
+            i += 1
+        kills.sources.append(lambda: "`pidof`" if _judge_patterns(
+            (_selects_daemon(name, full=True, literal=True, line=kills.line, budget=kills.work)
+             for name in names), kills, "a `pidof` feeding a `kill`") else None)
+        return
+    seen, operands, unknown, values = _proc_args(words, _PGREP_SHORT, _PGREP_LONG, signals=False)
+    if {"h", "V", "help", "version"} & seen:
+        return
+    if any(_names_unit(v) for v in values.get("cgroup", []) + values.get("pidfile", [])):
+        kills.sources.append(lambda: "`pgrep --cgroup`/`--pidfile` naming the daemon's unit")
+        return
+    full = unknown or bool({"f", "full"} & seen)
+    if not operands:
+        if appends:
+            kills.sources.append(lambda: "`xargs pgrep`, its pattern from the input")
+        return
+    exact, icase = bool({"x", "exact"} & seen), bool({"i", "ignore-case"} & seen)
+    inverse = bool({"v", "inverse"} & seen)
+    kills.sources.append(lambda: "`pgrep -f` with a pattern that matches its command line at `daemon2`"
+                         if _judge_patterns(
+                             (_selects_daemon(p, full=full, exact=exact, icase=icase, inverse=inverse,
+                                              line=kills.line, budget=kills.work) for p in operands),
+                             kills, "a `pgrep -f` feeding a `kill`")
+                         else None)
+
+
+# A file a grep reads that lists processes by their command lines: every
+# process's `/proc/<pid>/cmdline` (or `comm`, `status`, `stat`, `environ`),
+# by glob, by PID, behind a variable (`$p/cmdline`), or the whole of /proc
+# read recursively. `grep -l daemon2 /proc/*/cmdline | cut -d/ -f3 | xargs
+# kill` is pgrep spelled long (the delta review of PR #48).
+_PROC_FILE = re.compile(r"(?:^|/)proc/+(?:[^/]*[*?\[\]][^/]*|\d+|\$[^/]*|\{[^/]*\})/+"
+                        r"(?:cmdline|comm|status|stat|environ)$")
+
+
+def _proc_listing(word: str) -> bool:
+    return (bool(_PROC_FILE.search(word)) or bool(re.fullmatch(r"/+proc/*", word))
+            or (_wild_word(word) and bool(re.search(r"/(?:cmdline|comm|status|stat)$", word))))
+
+
+def _note_grep(tokens: list[str], state: "_Owner") -> None:
+    """A `grep` on the line: kept with its patterns, for a process or socket
+    listing it may filter (`ps aux | grep daemon2 | awk '{print $2}' | xargs
+    kill`); one that reads `/proc/*/cmdline` itself is such a listing."""
+    stem = rules._basename(tokens[0])
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    syntax = {"egrep": "ere", "fgrep": "fixed"}.get(stem, "bre")
+    patterns: list[str] = []
+    operands: list[str] = []
+    icase = invert = False
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--":
+            operands.extend(words[i:])
+            break
+        if word.startswith("--") and len(word) > 2:
+            name, eq, value = word[2:].partition("=")
+            matches = [n for n in _GREP_LONG if n == name] or [n for n in _GREP_LONG if n.startswith(name)]
+            full = matches[0] if len(matches) == 1 else ""
+            if full and _GREP_LONG[full] and not eq:
+                value = words[i] if i < len(words) else ""
+                i += 1
+            if full == "regexp":
+                patterns.append(value)
+            elif full == "file":
+                patterns.append("$FILE")             # read from a file: not known here
+            syntax = {"fixed-strings": "fixed", "extended-regexp": "ere", "basic-regexp": "bre",
+                      "perl-regexp": "python"}.get(full, syntax)
+            icase = (icase or full == "ignore-case") and full != "no-ignore-case"
+            invert = invert or full == "invert-match"
+            continue
+        if word.startswith("-") and len(word) > 1 and not word[1:].isdigit():
+            for k, letter in enumerate(word[1:]):
+                if letter in _GREP_SHORT_VALUE:
+                    value = word[2 + k:] or (words[i] if i < len(words) else "")
+                    if not word[2 + k:]:
+                        i += 1
+                    if letter == "e":
+                        patterns.append(value)
+                    elif letter == "f":
+                        patterns.append("$FILE")
+                    break
+                syntax = {"F": "fixed", "E": "ere", "G": "bre", "P": "python"}.get(letter, syntax)
+                icase = icase or letter in "iy"
+                invert = invert or letter == "v"
+            continue
+        operands.append(word)
+    files = operands if patterns else operands[1:]
+    if not patterns and operands:
+        patterns.append(operands[0])
+    if patterns:
+        state.kills.greps.append((patterns, syntax, icase, invert))
+    if any(_proc_listing(f) for f in files):
+        state.kills.listings.add("processes")
+
+
+def _socket_source(stem: str, tokens: list[str], state: "_Owner") -> None:
+    """`ss -p` or `netstat -p` on the line — they print each socket's PID —
+    is a socket listing a grep may filter onto the daemon's port (`ss -ltnp |
+    grep :8405 | … | xargs kill`); `ss -p` with a filter naming one of its
+    ports (`sport = :8405`) is a source by itself."""
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    processes = any(w in ("--processes", "--program", "--programs")
+                    or (re.fullmatch(r"-[A-Za-z]+", w) and "p" in w[1:]) for w in words)
+    if not processes:
+        return
+    if stem == "ss":
+        ports = _daemon_ports()
+        for word in words:
+            if word.startswith("-"):
+                continue
+            named = {int(n) for n in re.findall(r"(?<![\d.])(\d{2,5})(?![\d.])", word)}
+            if _wild_word(word) or named & ports:
+                state.kills.sources.append(lambda: "`ss -p` filtered to the daemon's port")
+                return
+    state.kills.listings.add("sockets")
+
+
+def _grep_chain(kills: "_Kills", spans: list[tuple[str, int, int]]):
+    """Whether the line's greps, between them, pass on one of `spans`' texts
+    and select it at its span: every grep keeps it (a match anywhere, or none
+    for `-v`) and one that is not `-v` matches it there. True, False, or
+    `COSTLY` when only a pattern too costly to match stands between them and
+    an answer. What cannot be told keeps and selects (fails closed)."""
+    def tell(pattern, syntax, icase, how):
+        found = _daemon_match(pattern, how=how, icase=icase, literal=syntax == "fixed", syntax=syntax,
+                              line=kills.line, budget=kills.work, spans=spans)
+        return True if found is None else found
+
+    def any_of(results):
+        results = list(results)
+        if True in results:
+            return True
+        return COSTLY if COSTLY in results else False
+
+    sure_keep, sure_at, maybe_at = True, False, False
+    for patterns, syntax, icase, invert in kills.greps:
+        hit = any_of(tell(p, syntax, icase, "anywhere") for p in patterns)
+        if hit == COSTLY:
+            sure_keep = False
+        elif hit == invert:
+            return False                         # this grep drops the daemon's line
+        if not invert:
+            at = any_of(tell(p, syntax, icase, "overlap") for p in patterns)
+            sure_at = sure_at or at is True
+            maybe_at = maybe_at or at == COSTLY
+    if sure_keep and sure_at:
+        return True
+    return COSTLY if (sure_at or maybe_at) else False
+
+
+def _listings_filtered_by_grep(kills: "_Kills") -> str | None:
+    """A process or socket listing on the line (`ps`, a grep over
+    `/proc/*/cmdline`, `ss -p`, `netstat -p`) and greps that select the
+    daemon in it (`_grep_chain`): processes at `daemon2`, sockets at one of
+    its ports. One too costly to judge marks the line `kills.unsure`."""
+    if not kills.greps:
+        return None
+    for kind, spans, name in (
+            ("processes", _daemon_spans, "a process listing (`ps`, `/proc/*/cmdline`) filtered by a "
+                                         "`grep` that matches its command line at `daemon2`"),
+            ("sockets", _socket_spans, "a socket listing (`ss -p`, `netstat -p`) filtered by a `grep` "
+                                       "on the daemon's port")):
+        if kind not in kills.listings:
+            continue
+        found = _grep_chain(kills, spans())
+        if found is True:
+            return name
+        if found == COSTLY and not kills.unsure:
+            kills.unsure = _too_complex(f"a `grep` over {kind} feeding a `kill`")
+    return None
+
+
+def _note_systemctl_source(tokens: list[str], state: "_Owner") -> None:
+    """`systemctl show` of the unit's MainPID, ControlPID or ExecMainPID (or
+    of every property), and `systemctl status` of it or of the whole user
+    manager: each prints the daemon's PID."""
+    words = _unit_words(tokens[1:], state)
+    if words is None:
+        return
+    parsed = _systemctl_parse(words)
+    verbs = parsed.operands if parsed.unknown else parsed.operands[:1]
+    units = parsed.operands if parsed.unknown else parsed.units
+    daemon = any(_may_be_daemon(u, parsed.user) for u in units)
+    shows = "show" in verbs and daemon and (
+        not parsed.properties or any(p in _PID_PROPERTIES or _wild_word(p) for p in parsed.properties))
+    status = "status" in verbs and (daemon or (parsed.user and not units))
+    if shows or status:
+        state.kills.sources.append(lambda: "`systemctl show`/`status` of its unit")
+
+
+def _cgroup_source(segment: str) -> bool:
+    """A segment that reads the daemon's cgroup's PIDs: `cgroup.procs` (or
+    `cgroup.threads`) under a path naming the unit, or behind a glob or an
+    expansion that may."""
+    flat = segment.replace("'", "").replace('"', "").replace("\\", "")
+    if "cgroup.procs" not in flat and "cgroup.threads" not in flat:
+        return False
+    return "daemon2" in flat or "$" in flat or "`" in flat or bool(_GLOB.search(flat))
+
+
+def _port_spec_hits(spec: str, ports: frozenset[int]) -> bool:
+    """Whether a list of ports and ranges (`8405`, `8400-8410`, `8402,8405`)
+    may hold one of `ports`: a word only known when it runs may."""
+    if _wild_word(spec):
+        return True
+    for item in spec.split(","):
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", item.strip())
+        if m:
+            low, high = int(m.group(1)), int(m.group(2) or m.group(1))
+            if any(low <= port <= high for port in ports):
+                return True
+    return False
+
+
+def _lsof_source(tokens: list[str], state: "_Owner") -> None:
+    """`lsof -i` that lists the holders of one of the daemon's ports — an
+    address whose port is one of them, or none (every socket)."""
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    ports = _daemon_ports()
+    specs: list[str] = []
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if not word.startswith("-") or word.startswith("--") or len(word) < 2:
+            continue
+        letters = word[1:]
+        for k, letter in enumerate(letters):
+            if letter == "i":
+                rest = letters[k + 1:]
+                if rest:
+                    specs.append(rest)
+                elif i < len(words) and not words[i].startswith(("-", "+")):
+                    specs.append(words[i])
+                    i += 1
+                else:
+                    specs.append("")
+                break
+            if letter in "cdDgkoprsSTux":
+                break                                  # the rest is that option's value
+    for spec in specs:
+        m = re.search(r":([^:\]]*)$", spec)
+        if m is None or _port_spec_hits(m.group(1), ports) or _wild_word(spec):
+            state.kills.sources.append(lambda: "`lsof -i` on the daemon's port")
+            return
+
+
+def _fuser_op(tokens: list[str], state: "_Owner") -> str | None:
+    """`fuser` on one of the daemon's ports (`8405/tcp`, `-n tcp 8405`): with
+    `-k` it kills the daemon; without, it prints its PID."""
+    words = _unit_words(tokens[1:], state) or tokens[1:]
+    ports = _daemon_ports()
+    kill = listing = False
+    namespace = ""
+    hit = False
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word.startswith("-") and len(word) > 1 and not _signal_word(word):
+            for k, letter in enumerate(word[1:]):
+                if letter == "n":
+                    namespace = word[2 + k:] or (words[i] if i < len(words) else "")
+                    if not word[2 + k:]:
+                        i += 1
+                    break
+                kill = kill or letter == "k"
+                listing = listing or letter in "lV"
+            continue
+        if word.startswith("-"):
+            continue                                   # a signal
+        m = re.fullmatch(r"([^,/]*)(?:,[^,/]*(?:,[^,/]*)?)?(?:/(tcp|udp))?", word)
+        if (m and m.group(1) and (m.group(2) or namespace in ("tcp", "udp") or _wild_word(namespace))
+                and _port_spec_hits(m.group(1), ports)):
+            hit = True
+    if listing or not hit:
+        return None
+    if kill:
+        return _DAEMON_UNIT_WHY.format(how="kills whatever holds the v2 daemon's port (`fuser -k`)")
+    state.kills.sources.append(lambda: "`fuser` on the daemon's port")
+    return None
+
+
+def _dbus_read(tool: str, words: list[str]) -> bool:
+    """Whether a D-Bus command only reads: busctl's and gdbus's reading
+    verbs, or a call whose method returns state (`Get`, `GetAll`,
+    `Introspect` …). False when it cannot be told."""
+    positionals = []
+    method = ""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word.startswith("-"):
+            name, eq, value = word.partition("=")
+            if tool == "gdbus" and name in ("-m", "--method"):
+                method = value if eq else (words[i] if i < len(words) else "")
+                i += 0 if eq else 1
+            elif not eq and name in ("-H", "--host", "-M", "--machine", "-a", "--address", "-d",
+                                     "--dest", "-o", "--object-path", "-t", "--timeout", "--bus"):
+                i += 1
+            continue
+        positionals.append(word)
+    verb = positionals[0] if positionals else ""
+    if tool == "busctl":
+        if verb in _BUSCTL_READS:
+            return True
+        method = positionals[4] if verb == "call" and len(positionals) > 4 else ""
+    elif tool == "gdbus":
+        if verb in _GDBUS_READS:
+            return True
+        method = method if verb == "call" else ""
+    elif tool == "dbus-send":
+        method = positionals[1] if len(positionals) > 1 else ""
+    else:                                              # qdbus: SERVICE PATH METHOD …
+        if len(positionals) < 3:
+            return True                                # a listing
+        method = positionals[2]
+    return method.rpartition(".")[2] in _DBUS_READ_METHODS
+
+
+_CLI_MODULES = frozenset({"jarvis", "jarvis.__main__"})
+_LAUNCHERS = frozenset({"jarvis", "jarvis.exe"})
+_PYTHON = re.compile(r"(?:python|pypy)[0-9.]*")
+_OWNER_DEPTH = 4
+_OWNER_BUDGET = 64 * 1024
+
+# Wrappers and runners that run the command in their arguments: the options
+# that take a value, how many positionals precede the command, a subcommand
+# that must come first (`uv run`), whether the rest is one command *string*
+# (ssh), and whether its input is appended as more arguments (xargs).
+@dataclass(frozen=True)
+class _Runner:
+    values: frozenset = frozenset()
+    positionals: int = 0
+    subcommand: tuple = ()
+    joined: bool = False
+    appends: bool = False
+
+
+_RUN_VALUES = frozenset({"--directory", "--project", "--with", "--with-requirements", "--with-editable",
+                         "--python", "-p", "--package", "--env-file", "--extra", "--group", "--index",
+                         "--default-index", "--from", "--index-url", "--extra-index-url", "-w",
+                         "--only-group", "--no-group", "--cache-dir", "--config-file", "-e", "--env",
+                         "--spec", "--pip-args"})
+_RUNNERS: dict[str, _Runner] = {
+    "nohup": _Runner(), "setsid": _Runner(), "command": _Runner(), "chronic": _Runner(),
+    "time": _Runner(frozenset({"-f", "--format", "-o", "--output"})),
+    "exec": _Runner(frozenset({"-a"})),
+    "nice": _Runner(frozenset({"-n", "--adjustment"})),
+    "ionice": _Runner(frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid",
+                                 "-u", "--uid"})),
+    "stdbuf": _Runner(frozenset({"-i", "-o", "-e", "--input", "--output", "--error"})),
+    "timeout": _Runner(frozenset({"-s", "--signal", "-k", "--kill-after"}), positionals=1),
+    "flock": _Runner(frozenset({"-w", "--timeout", "-E", "--conflict-exit-code"}), positionals=1),
+    "watch": _Runner(frozenset({"-n", "--interval", "-d", "--differences", "-q", "--equexit"}), joined=True),
+    "xargs": _Runner(frozenset({"-I", "-i", "-n", "--max-args", "-L", "-l", "--max-lines", "-d",
+                                "--delimiter", "-a", "--arg-file", "-E", "-e", "--eof", "-P",
+                                "--max-procs", "-s", "--max-chars", "--process-slot-var"}), appends=True),
+    "systemd-run": _Runner(frozenset({"-p", "--property", "-u", "--unit", "--description", "-E",
+                                      "--setenv", "--working-directory", "-M", "--machine", "--slice",
+                                      "-H", "--host", "--uid", "--gid", "--nice", "--on-calendar",
+                                      "--on-active", "--timer-property", "--path-property",
+                                      "--socket-property", "--service-type", "--expand-environment"})),
+    "uv": _Runner(_RUN_VALUES, subcommand=("run", "tool run")),
+    "uvx": _Runner(_RUN_VALUES),
+    "poetry": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "pdm": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "hatch": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "rye": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "pipx": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "ssh": _Runner(frozenset({"-p", "-i", "-l", "-o", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I",
+                              "-L", "-m", "-O", "-Q", "-R", "-S", "-W", "-w", "-B"}), positionals=1,
+                   joined=True),
+}
+
+
+@dataclass
+class _Kills:
+    """Per command line, shared by every level of it: a `kill` that sends a
+    signal to PIDs fed to it, the PID sources on the line (each judged only
+    when there is such a kill — a callable naming the source when it yields
+    the daemon's PIDs), the process and socket listings on it and the greps
+    that may filter them, the line, whether it holds a kill word at all, the
+    regex budget its patterns share, and — when a kill's pattern was too
+    costly to judge and nothing on the line provably selects the daemon —
+    why it must be asked (`kill_unsure`)."""
+    kill: bool = False
+    sources: list = field(default_factory=list)
+    line: str = ""
+    armed: bool = False
+    listings: set = field(default_factory=set)
+    greps: list = field(default_factory=list)
+    work: list[int] = field(default_factory=lambda: [_LINE_REGEX_BUDGET, _LINE_PATTERN_CHARS])
+    unsure: str | None = None
+
+
+@dataclass
+class _Owner:
+    """Per command line: the line's own assignments, links made to the
+    launcher, and the here-document bodies still to be handed out."""
+    variables: dict[str, str] = field(default_factory=dict)
+    launchers: set[str] = field(default_factory=set)
+    bodies: list[str] = field(default_factory=list)
+    # Characters the nested parses (substitutions, shell strings, source) may
+    # still spend — shared by every level, so a line cannot make the parse
+    # cost more than about twice its own length. Past it, nothing deeper is
+    # judged here; `rules.decide` already ASKs any substitution, and no
+    # allowlist entry covers one, so what is not seen is asked, never run.
+    budget: list[int] = field(default_factory=lambda: [_OWNER_BUDGET])
+    filtered: bool = True          # the per-segment cheap test (off only to test it)
+    kills: _Kills = field(default_factory=_Kills)
+
+    def child(self) -> "_Owner":
+        return _Owner(dict(self.variables), set(self.launchers), budget=self.budget,
+                      filtered=self.filtered, kills=self.kills)
+
+
+def _owner_substitutions(text: str) -> list[str]:
+    """The command lines inside `$(…)`, backticks and `<(…)`/`>(…)` that bash
+    would run — **not** inside single quotes. (`_substitutions` ignores
+    quoting on purpose, for refusals where checking text that never runs can
+    only add a refusal; a false DENY here would block the owner's own
+    `git commit -m 'run `jarvis hud install` after merging'`.)"""
+    if "(" not in text and "`" not in text:
+        return []
+    live = set(rules.unquoted_indices(text, double_is_quote=False))
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n and len(out) < _MAX_SPANS:
+        opener = (2 if i in live and text.startswith(("$(", "<(", ">("), i)
+                  and not text.startswith("$((", i) else 0)
+        if opener:
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+            out.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+            i = j
+            continue
+        if i in live and text[i] == "`":
+            j = text.find("`", i + 1)
+            while j > 0 and text[j - 1] == "\\":
+                j = text.find("`", j + 1)
+            out.append(text[i + 1:j] if j != -1 else text[i + 1:])
+            i = j + 1 if j != -1 else n
+            continue
+        i += 1
+    return out
+
+
+def _owner_word(token: str, state: _Owner, environ: bool = True) -> str:
+    """A word with the line's own `$VAR`/`${VAR}` assignments put in (and,
+    for the command word only, the environment's)."""
+    return re.sub(r"\$\{?(\w+)\}?",
+                  lambda m: state.variables.get(m.group(1), os.environ.get(m.group(1), "") if environ else
+                                                m.group(0)), token)
+
+
+def _is_launcher(token: str, state: _Owner) -> bool:
+    word = _owner_word(token, state)
+    return (rules._basename(word) in _LAUNCHERS or word in state.launchers
+            or (bool(word) and rules._basename(word) in {rules._basename(l) for l in state.launchers}
+                and "/" in word))
+
+
+# A word whose value is only known when it runs: an expansion the line did not
+# assign (unset ones vanish), `$@`/`$*`, a glob, a brace expansion.
+_WILD = re.compile(r"\$|[*?\[]|\{[^{}]*(?:,|\.\.)[^{}]*\}")
+
+
+def _could_spell(words: list[str], path: tuple[str, ...], open_ended: bool) -> bool:
+    """Whether `words` can begin with `path` once the shell is done with them:
+    a wild word may become no word, the next word, or several (`$@`, a glob,
+    `{hud,install}`); a plain one only itself; an open end (xargs input) may
+    supply whatever is still missing."""
+    if not path:
+        return True
+    if not words:
+        return open_ended
+    head, rest = words[0], words[1:]
+    if _WILD.search(head):
+        return _could_spell(rest, path, open_ended) or _could_spell(words, path[1:], open_ended) \
+            or _could_spell(rest, path[1:], open_ended)
+    return head == path[0] and _could_spell(rest, path[1:], open_ended)
+
+
+def _owner_path(argv: list[str], open_ended: bool) -> str | None:
+    """The refusal for a jarvis argv that is, or may become, an owner op —
+    fed more words by xargs, or once the shell expands a word only known at
+    run time (review of PR #44 at 75f14c2: `python3 -m jarvis hud $E install`
+    with `$E` unset, `h${UNSET}ud`, `h?d`, `{hud,install}` all ran)."""
+    words = [t for t in argv if not t.startswith("-")]
+    for path, why in OWNER_OPS.items():
+        if tuple(words[:len(path)]) == path:
+            return why
+        if _could_spell(words, path, open_ended):
+            if any(_WILD.search(w) for w in words):
+                return why + (" (its words are only known when it runs — an expansion, a glob or a "
+                              "brace — and could spell it; write the command out)")
+            return why + " (its input may complete the command)"
+    return None
+
+
+def _python_parse(args: list[str]) -> tuple[str, str | None, list[str]]:
+    """How a Python is told what to run: ("module", name, argv), ("source",
+    text, argv), ("script", path, argv) or ("stdin", None, argv)."""
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "-":
+            return "stdin", None, args[i:]
+        if token == "--":
+            break
+        if token.startswith("--"):
+            if token in ("--check-hash-based-pycs",):
+                i += 1
+            continue
+        if not token.startswith("-") or len(token) == 1:
+            return "script", token, args[i:]
+        letters = token[1:]
+        for k, letter in enumerate(letters):
+            rest = letters[k + 1:]
+            if letter in "mc":
+                value = rest if rest else (args[i] if i < len(args) else "")
+                if not rest:
+                    i += 1
+                return ("module" if letter == "m" else "source"), value, args[i:]
+            if letter in "WX":
+                if not rest:
+                    i += 1
+                break
+    if i < len(args):
+        return "script", args[i], args[i + 1:]
+    return "stdin", None, []
+
+
+# Modules that run another module or script (review of PR #48: `python3 -m
+# runpy jarvis hud install` scored ALLOW): how each is told what to run — its
+# options that take a value, the option that says "a module", and whether that
+# option takes the module as its value. The module or script it runs is judged
+# as `-m` and a script are. An option a runner's table does not know may have
+# taken a value, so then every word left is tried as the target.
+@dataclass(frozen=True)
+class _ModuleRunner:
+    values: frozenset = frozenset()
+    module_flag: frozenset = frozenset()     # the next positional is a module
+    module_value: frozenset = frozenset()    # the option's value is the module
+    flags: frozenset = frozenset()
+
+
+_MODULE_RUNNERS: dict[str, _ModuleRunner] = {
+    "runpy": _ModuleRunner(module_flag=frozenset({""})),          # `-m runpy MODULE …`
+    "cProfile": _ModuleRunner(frozenset({"-o", "--outfile", "-s", "--sort"}), frozenset({"-m"}),
+                              flags=frozenset({"-h", "--help"})),
+    "profile": _ModuleRunner(frozenset({"-o", "--outfile", "-s", "--sort"}), frozenset({"-m"}),
+                             flags=frozenset({"-h", "--help"})),
+    "pdb": _ModuleRunner(frozenset({"-c", "--command", "-p", "--pid"}), module_value=frozenset({"-m"}),
+                         flags=frozenset({"-h", "--help"})),
+    "trace": _ModuleRunner(frozenset({"-f", "--file", "-C", "--coverdir", "--ignore-module",
+                                      "--ignore-dir"}), frozenset({"--module"}),
+                           flags=frozenset({"-c", "--count", "-t", "--trace", "-l", "--listfuncs",
+                                            "-T", "--trackcalls", "-r", "--report", "-R",
+                                            "--no-report", "-m", "--missing", "-s", "--summary",
+                                            "-g", "--timing", "-h", "--help", "--version"})),
+    "coverage": _ModuleRunner(frozenset({"--concurrency", "--context", "--data-file", "--source",
+                                         "--include", "--omit", "--rcfile", "--debug",
+                                         "--save-signal", "--core"}), frozenset({"-m", "--module"}),
+                              flags=frozenset({"-a", "--append", "--branch", "-L", "--pylib", "-p",
+                                               "--parallel-mode", "--timid", "-h", "--help"})),
+}
+
+
+def _runner_targets(name: str, args: list[str]) -> list[tuple[str, str | None, list[str]]]:
+    """What a module runner runs: [(kind, what, argv)], one entry when its
+    options parse, one per remaining word when one does not."""
+    runner = _MODULE_RUNNERS[name]
+    if name == "coverage":
+        if not args or args[0] != "run":
+            return []
+        args = args[1:]
+    if name == "runpy" or "" in runner.module_flag:
+        return [("module", args[0], args[1:])] if args else []
+    module, i = False, 0
+    while i < len(args):
+        token = args[i]
+        if token == "--":
+            i += 1
+            break
+        if not token.startswith("-") or token == "-":
+            break
+        option, eq, value = token.partition("=")
+        if option in runner.module_value:
+            target = value if eq else (args[i + 1] if i + 1 < len(args) else "")
+            return [("module", target, args[i + (1 if eq else 2):])]
+        if option in runner.module_flag:
+            module = True
+            i += 1
+            continue
+        if option in runner.values:
+            i += 1 if eq else 2
+            continue
+        if option in runner.flags:
+            i += 1
+            continue
+        if re.fullmatch(r"-[A-Za-z]{2,}", token):        # a short cluster: judge it whole
+            if any(f"-{c}" in runner.module_value for c in token[1:]):
+                return [("module", w, args[k + 1:]) for k, w in enumerate(args[i + 1:], i + 1)]
+            module = module or any(f"-{c}" in runner.module_flag for c in token[1:])
+            if all(f"-{c}" in runner.flags | runner.module_flag for c in token[1:]):
+                i += 1
+                continue
+        # Not known here: it may have taken a value, so try every word left.
+        return [(kind, w, args[k + 1:]) for k, w in enumerate(args[i + 1:], i + 1)
+                for kind in ("module", "script")]
+    if i >= len(args):
+        return []
+    return [("module" if module else "script", args[i], args[i + 1:])]
+
+
+def _python_targets(args: list[str], state: "_Owner") -> list[tuple[str, str | None, list[str]]]:
+    """`_python_parse`, with module runners peeled (`-m runpy`, `-m cProfile
+    -m`, `-m pdb -c continue -m`, `-m trace --module`, `-m coverage run -m`),
+    each module name with the line's own `$VAR`s put in."""
+    found: list[tuple[str, str | None, list[str]]] = []
+    todo = [_python_parse(args)]
+    for _ in range(64):
+        if not todo:
+            break
+        kind, what, argv = todo.pop()
+        if kind == "module":
+            what = _owner_word(what or "", state, environ=False)
+            if what in _MODULE_RUNNERS:
+                todo.extend(_runner_targets(what, argv))
+                continue
+        found.append((kind, what, argv))
+    return found
+
+
+_CALL_SITES = ("system", "popen", "run", "call", "check_call", "check_output", "Popen", "getoutput",
+               "getstatusoutput", "spawnlp", "execlp", "execvp")
+# A Python list or tuple of two or more string literals.
+_STR_LIST = re.compile(r"[\[(]\s*(?:[rbuRBU]?(?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*)+"
+                       r"[rbuRBU]?(?:'[^'\n]*'|\"[^\"\n]*\")\s*,?\s*[\])]")
+
+
+def _source_invokes(source: str, state: _Owner, depth: int) -> str | None:
+    """Python source that performs an owner op — not one that only names or
+    reads from the module (review of PR #44 at 62db94f)."""
+    if not source:
+        return None
+    for module, (path, writers) in OWNER_OP_MODULES.items():
+        parent, _, last = module.rpartition(".")
+        dotted = re.escape(module).replace(r"\.", r"\s*\.\s*")
+        names = {dotted}
+        for m in re.finditer(r"\bimport\s+" + dotted + r"(?:\s+as\s+(\w+))?", source):
+            names.add(re.escape(m.group(1)) if m.group(1) else dotted)
+        for m in re.finditer(r"\bfrom\s+" + re.escape(parent).replace(r"\.", r"\s*\.\s*")
+                             + r"\s+import\s+([^\n;]+)", source):
+            for item in m.group(1).replace("(", " ").replace(")", " ").split(","):
+                bits = item.split()
+                if bits and bits[0] == last:
+                    names.add(re.escape(bits[2] if len(bits) == 3 and bits[1] == "as" else last))
+        funcs = set()
+        for m in re.finditer(r"\bfrom\s+" + dotted + r"\s+import\s+([^\n;]+)", source):
+            for item in m.group(1).replace("(", " ").replace(")", " ").split(","):
+                bits = item.split()
+                if bits and bits[0] == "*":          # every writer, under its own name
+                    funcs.update(map(re.escape, writers))
+                elif bits and bits[0] in writers:
+                    funcs.add(re.escape(bits[2] if len(bits) == 3 and bits[1] == "as" else bits[0]))
+        writer = "|".join(map(re.escape, writers))
+        # `importlib.import_module("jarvis.v2.owner_ops")` / `__import__(…)`:
+        # the name it is bound to is the module; and since what it returns can
+        # be reached any way (`getattr`, `__import__(…).v2.owner_ops`), a
+        # writer's name anywhere beside it counts (review of PR #48).
+        literal = r"\s*\(\s*[rbuf]*['\"]" + re.escape(module) + r"['\"]"
+        dynamic = re.search(r"\b(?:import_module|__import__)" + literal, source)
+        for m in re.finditer(r"\b(\w+)\s*=\s*(?:[\w.]+\s*\.\s*)?(?:import_module|__import__)" + literal,
+                             source):
+            names.add(re.escape(m.group(1)))
+        if dynamic and re.search(r"\b(?:" + writer + r")\b", source):
+            return OWNER_OPS[path]
+        if re.search(r"(?:" + "|".join(names) + r")\s*\.\s*(?:" + writer + r")\s*\(", source):
+            return OWNER_OPS[path]
+        if funcs and re.search(r"(?<![\w.])(?:" + "|".join(funcs) + r")\s*\(", source):
+            return OWNER_OPS[path]
+        if re.search(r"\brun_module\s*\(\s*['\"]" + re.escape(module) + r"['\"]", source):
+            return OWNER_OPS[path]
+        if re.search(r"\brun_path\s*\([^)]*" + re.escape(last) + r"\.py", source):
+            return OWNER_OPS[path]
+    # The CLI itself, with an owner path's words: `runpy.run_module("jarvis")`
+    # with `sys.argv` set, `jarvis.__main__.main([...])`, `cmd_hud(…install…)`.
+    cli = re.search(r"\brun_module\s*\(\s*['\"]jarvis(?:\.__main__)?['\"]"
+                    r"|\b(?:from\s+jarvis(?:\s*\.\s*__main__)?\s+import|import\s+jarvis\s*\.\s*__main__)"
+                    r"|\bjarvis\s*\.\s*__main__\s*\.", source)
+    for path, why in OWNER_OPS.items():
+        literals = r"\s*,\s*".join(r"['\"]" + re.escape(word) + r"['\"]" for word in path)
+        if cli and re.search(literals, source):
+            return why
+        if re.search(r"\bcmd_" + re.escape(path[0]) + r"\s*\(", source) and all(
+                re.search(r"['\"]" + re.escape(word) + r"['\"]", source) for word in path[1:]):
+            return why
+        # An argv list naming the CLI: `["jarvis", "hud", "install"]`.
+        if re.search(r"['\"](?:[^'\"\s]*/)?jarvis['\"]\s*,\s*" + literals, source):
+            return why
+    if depth < _OWNER_DEPTH:
+        # An argv list of string literals, judged as the command it spells:
+        # `["systemctl", "--user", "restart", "jarvis-daemon2"]`, `["python",
+        # "-m", "jarvis", "restart"]` (review of PR #48).
+        for m in _STR_LIST.finditer(source):
+            words = [text for _, text in re.findall(r"[rbuRBU]?(['\"])(.*?)\1", m.group(0))]
+            why = _owner_command(words, "", state.child(), depth + 1) if words else None
+            if why:
+                return why
+    # A command line handed to a shell from Python: `os.system("jarvis …")`.
+    if depth < _OWNER_DEPTH:
+        call = r"\b(?:" + "|".join(_CALL_SITES) + r")\s*\(\s*[rbuf]*(['\"])(.*?)\1"
+        for m in re.finditer(call, source, re.S):
+            why = _owner_line(m.group(2), state.child(), depth + 1)
+            if why:
+                return why
+    return None
+
+
+def _peel_runner(tokens: list[str], state: _Owner) -> tuple[list[str], bool, bool]:
+    """(the command a line of words runs, whether more words may be appended
+    to it from input, whether it is one command *string*). Peels assignments,
+    `builtin`, `env` and everything in `_RUNNERS`, as far as they nest."""
+    tokens = [t for t in tokens]
+    while tokens and tokens[0] in ("(", "{", "!"):
+        tokens = tokens[1:]
+    if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
+        tokens[0] = tokens[0][1:]
+    appends = joined = False
+    for _ in range(12):
+        while tokens and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0]):
+            tokens = tokens[1:]
+        if tokens and tokens[0] == "builtin":
+            tokens = tokens[1:]
+            continue
+        if not tokens:
+            break
+        stem = rules._basename(tokens[0])
+        if stem == "env":
+            rest, k = tokens[1:], 0
+            split = None
+            while k < len(rest) and (rest[k].startswith("-") or "=" in rest[k]):
+                if rest[k] == "--":
+                    k += 1
+                    break
+                found = _env_split(rest, k)
+                if found is not None:
+                    split, k = found
+                    break
+                k += 2 if rest[k] in ("-C", "--chdir", "-u", "--unset") else 1
+            if split is not None:
+                try:
+                    words = shlex.split(split)
+                except ValueError:
+                    words = split.split()
+                tokens = ["env"] + words + rest[k:]
+                continue
+            tokens = rest[k:]
+            continue
+        runner = _RUNNERS.get(stem)
+        if runner is None:
+            break
+        rest = tokens[1:]
+        if runner.subcommand:
+            matched = next((sub for sub in runner.subcommand
+                            if rest[:len(sub.split())] == sub.split()), None)
+            if matched is None:
+                break
+            rest = rest[len(matched.split()):]
+        k, positionals = 0, runner.positionals
+        while k < len(rest):
+            token = rest[k]
+            if token == "--":
+                k += 1
+                break
+            if token.startswith("-") and len(token) > 1:
+                name = token.split("=", 1)[0]
+                k += 2 if (name in runner.values and "=" not in token) else 1
+                continue
+            if stem == "timeout" and re.fullmatch(r"[\d.]+[smhd]?", token) and positionals:
+                positionals -= 1
+                k += 1
+                continue
+            if positionals:
+                positionals -= 1
+                k += 1
+                continue
+            break
+        tokens = rest[k:]
+        if stem == "flock" and tokens and tokens[0] in ("-c", "--command"):
+            return tokens[1:2], False, True
+        appends = appends or runner.appends
+        if runner.joined:
+            return tokens, appends, True
+    return tokens, appends, joined
+
+
+def _python_target_op(kind: str, what: str | None, argv: list[str], segment: str, state: _Owner,
+                      depth: int, appends: bool) -> str | None:
+    """The refusal for what a Python is told to run (`_python_targets`)."""
+    if kind == "module":
+        what = _owner_word(what or "", state, environ=False)
+        if what in _CLI_MODULES:
+            return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends)
+        if what in OWNER_OP_MODULES:
+            return OWNER_OPS[OWNER_OP_MODULES[what][0]]
+        return None
+    if kind == "script":
+        script = _owner_word(what or "", state, environ=False)
+        stem_of = rules._basename(script)
+        for module, (path, _) in OWNER_OP_MODULES.items():
+            if stem_of == module.rpartition(".")[2] + ".py":
+                return OWNER_OPS[path]
+        # The CLI run as a script: its console-script launcher
+        # (`python3 ~/.local/bin/jarvis restart`) or the package itself.
+        if (stem_of in _LAUNCHERS or script in state.launchers
+                or (stem_of == "__main__.py" and rules._basename(os.path.dirname(script)) == "jarvis")):
+            return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends)
+        return None
+    source = what if kind == "source" else ""
+    if kind == "stdin":
+        source = "\n".join(_here_strings(segment) + _take_bodies(segment, state))
+    return _source_invokes(source or "", state, depth)
+
+
+def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -> str | None:
+    tokens, appends, joined = _peel_runner(tokens, state)
+    # `marked` keeps quoted braces marked (`_mark_quoted`) for the paths that
+    # expand braces as bash does (`_unit_words`); every other path, and every
+    # nested command line, reads the plain text.
+    marked, tokens = tokens, [_unmark(t) for t in tokens]
+    if not tokens:
+        return None
+    if joined:
+        return _owner_line(" ".join(tokens), state, depth + 1) if depth < _OWNER_DEPTH else None
+    # The command word as bash runs it (review of PR #48): the line's own
+    # `$VAR`s put in (`S=systemctl; $S --user …`) and a brace expanded
+    # (`{systemctl,--user} …`); an expansion that vanishes hands the command
+    # to the next word.
+    head = _owner_word(tokens[0], state)
+    if head != tokens[0] or "{" in head:
+        words = _brace_expand(head) or [head]
+        if head != tokens[0]:
+            words = [part for word in words for part in word.split()]
+        tokens, marked = words + tokens[1:], words + marked[1:]
+        if not tokens:
+            return None
+    stem = rules._basename(tokens[0])
+    if _is_launcher(tokens[0], state):
+        return _owner_path([_owner_word(t, state, environ=False) for t in tokens[1:]], appends)
+    if stem == "ln":
+        # `ln -s …/jarvis /tmp/jv && /tmp/jv hud install`: the link is a launcher.
+        operands = [t for t in tokens[1:] if not t.startswith("-")]
+        if len(operands) >= 2 and rules._basename(_owner_word(operands[0], state)) in _LAUNCHERS:
+            link = _owner_word(operands[-1], state)
+            state.launchers.add(link.rstrip("/"))
+        return None
+    if stem == "systemctl":
+        why = _systemctl_op(marked, appends, state)
+        if why is None:
+            _note_systemctl_source(marked, state)
+        return why
+    if stem in _DBUS_TOOLS:
+        return _dbus_op(marked, state)
+    if stem == "pkill":
+        return _pkill_op(marked, state, appends)
+    if stem == "killall":
+        return _killall_op(marked, state, appends)
+    if stem == "kill":
+        _note_kill(tokens, state, appends)
+        return None
+    if stem in ("pgrep", "pidof"):
+        _note_pid_source(stem, marked, state, appends)
+        return None
+    if stem == "fuser":
+        return _fuser_op(marked, state)
+    if stem == "lsof":
+        _lsof_source(marked, state)
+        return None
+    if stem == "ps":
+        state.kills.listings.add("processes")
+        return None
+    if stem in ("ss", "netstat"):
+        _socket_source(stem, marked, state)
+        return None
+    if stem in ("grep", "egrep", "fgrep"):
+        _note_grep(marked, state)
+        return None
+    if _PYTHON.fullmatch(stem) or stem == "coverage":
+        targets = (_python_targets(tokens[1:], state) if stem != "coverage"
+                   else _runner_targets("coverage", tokens[1:]))
+        for kind, what, argv in targets:
+            why = _python_target_op(kind, what, argv, segment, state, depth, appends)
+            if why:
+                return why
+        return None
+    if stem in _SHELLS and depth < _OWNER_DEPTH:
+        strings, stdin = _shell_strings(tokens)
+        if stdin:
+            strings = strings + _here_strings(segment) + _take_bodies(segment, state)
+        for text in strings:
+            why = _owner_line(text, state, depth + 1)
+            if why:
+                return why
+    return None
+
+
+def _take_bodies(segment: str, state: _Owner) -> list[str]:
+    """The here-document bodies this segment's `<<` redirections read, in order."""
+    count = sum(1 for r in rules.redirections(segment) if r.op in ("<<", "<<-"))
+    taken, state.bodies = state.bodies[:count], state.bodies[count:]
+    return taken
+
+
+def _split_heredocs(command: str) -> tuple[str, list[tuple[str, bool]]]:
+    """The command with every here-document body cut out, and the bodies in
+    order. A body is data to the command that reads it — `cat > notes.md
+    <<EOF` holding the words `jarvis hud install` runs nothing — and is judged
+    only where a shell or a Python reads it as its program."""
+    lines = command.split("\n")
+    kept: list[str] = []
+    bodies: list[tuple[str, bool]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        delimiters = []
+        for r in (rules.redirections(line) if "<<" in line else ()):
+            if r.op in ("<<", "<<-") and r.word:
+                word = r.word.replace("'", "").replace('"', "").replace("\\", "")
+                delimiters.append((word, r.op == "<<-", word == r.word))
+        for word, tabs, expands in delimiters:
+            body = []
+            while i < len(lines):
+                text = lines[i].lstrip("\t") if tabs else lines[i]
+                i += 1
+                if text == word:
+                    break
+                body.append(lines[i - 1])
+            bodies.append(("\n".join(body), expands))
+    return "\n".join(kept), bodies
+
+
+def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
+    if depth:
+        if state.budget[0] < len(command):
+            return None
+        state.budget[0] -= len(command)
+    command = _ansi_c(rules.join_continuations(command))
+    command, bodies = _split_heredocs(command)
+    state.bodies = [body for body, _ in bodies] + state.bodies
+    if depth < _OWNER_DEPTH:
+        # The line's own substitutions, and those in a here-document whose
+        # delimiter was not quoted — bash expands those bodies too.
+        inner = _owner_substitutions(command)
+        for body, expands in bodies:
+            if expands:
+                inner += _owner_substitutions(body.replace("'", " ").replace('"', " "))
+        for text in inner:
+            why = _owner_line(text, state.child(), depth + 1)
+            if why:
+                return why + (" — a backtick or $(…) runs its command, even inside double quotes; "
+                              "single-quote the text to only mention it")
+    for segment in rules.segments(command):
+        # The same cheap test per segment: one that cannot hold an op (and
+        # sets no variable, reads no here-document and names no launcher a
+        # later `ln` could alias) is not parsed — on a long line this is
+        # where the time goes.
+        # A line that kills is parsed whole: any segment may be the source
+        # that feeds the kill its PIDs (`lsof -ti :8405 | xargs kill`).
+        if state.filtered and not (state.kills.armed or _could_be_owner_op(segment) or "<<" in segment
+                                   or "jarvis" in segment or "=" in segment or state.variables
+                                   or state.launchers):
+            continue
+        segment = _strip_comment(segment)
+        if _cgroup_source(segment):
+            state.kills.sources.append(lambda: "its cgroup's `cgroup.procs`")
+        words_only = _mark_quoted(rules.strip_redirections(segment))
+        try:
+            raw = shlex.split(words_only)
+        except ValueError:
+            raw = words_only.split()
+        raw = _strip_reserved(_strip_closers(raw))
+        if not raw:
+            continue
+        words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
+        if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+            for word in words:
+                name, value = word.split("=", 1)
+                state.variables[name] = _unmark(_owner_word(value, state))
+            continue
+        why = _owner_command(raw, segment, state, depth)
+        if why:
+            return why
+    if depth == 0 and state.kills.kill:
+        # A `kill` fed PIDs, on this line, by a source that yields the
+        # daemon's: `kill $(pgrep -f daemon2)`, `pgrep -f daemon2 | xargs
+        # kill`, `lsof -ti :8405 | xargs kill`. The sources are judged only
+        # now — `pgrep -f …` alone is a read, and its pattern never runs.
+        for source in state.kills.sources:
+            name = source()
+            if name:
+                return _fed_why(name)
+        name = _listings_filtered_by_grep(state.kills)
+        if name:
+            return _fed_why(name)
+    return None
+
+
+# Shell reserved words a command may follow (review 2 of PR #48: `if true;
+# then systemctl --user restart jarvis-daemon2; fi` split into a segment
+# whose first word was `then`, and was not judged).
+_RESERVED = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "{", "coproc"})
+
+
+def _strip_reserved(tokens: list[str]) -> list[str]:
+    """The command a segment runs, past the shell's reserved words (`then
+    jarvis restart`, `do pkill -f daemon2`, `! cmd`, `{ cmd`, `coproc cmd`)
+    and a `case` pattern (`case x in a) cmd`, `b) cmd`)."""
+    for _ in range(32):
+        if not tokens:
+            break
+        head = tokens[0]
+        if head in _RESERVED:
+            tokens = tokens[1:]
+        elif head == "case":
+            tokens = tokens[tokens.index("in") + 1:] if "in" in tokens else []
+        elif head.endswith(")") and head.count(")") > head.count("("):
+            tokens = tokens[1:]                      # a case pattern: `a)`, `*)`, `(a|b)`
+        elif head.startswith("(") and head.endswith(")") and len(tokens) > 1 and head.count("(") == 1:
+            tokens = tokens[1:]                      # `(a)` — a case pattern with its paren
+        else:
+            break
+    return tokens
+
+
+def runs_jarvis(tokens: list[str]) -> str | None:
+    """What of Jarvis's own this command runs — "the jarvis CLI" or a module
+    `python -m jarvis…` — after the same wrappers and runners `owner_op`
+    peels; None for anything else. `rules.decide` asks it so that Jarvis's
+    own CLI is never auto-approved in any spelling (review of PR #44 at
+    75f14c2: `python -m jarvis …` and `uv run jarvis …` were ALLOW, and the
+    CLI has human-only verbs — `auth`, `voice clone`, `discord commands
+    --sync`, the owner ops)."""
+    state = _Owner()
+    try:
+        tokens, _, joined = _peel_runner(list(tokens), state)
+    except Exception:     # noqa: BLE001 — a parse failure is not a verdict
+        return None
+    if joined or not tokens:
+        return None
+    if _is_launcher(tokens[0], state):
+        return "the jarvis CLI"
+    stem = rules._basename(tokens[0])
+    if _PYTHON.fullmatch(stem) or stem == "coverage":
+        # Module runners peeled (`-m runpy jarvis …`, `-m cProfile -m jarvis …`).
+        targets = (_python_targets(tokens[1:], state) if stem != "coverage"
+                   else _runner_targets("coverage", tokens[1:]))
+        for kind, what, _ in targets:
+            if kind == "module" and what and (what.split(".")[0] == "jarvis" or _WILD.search(what)):
+                return f"Jarvis's own `{what}`"
+            if kind == "script" and what and rules._basename(what) in _LAUNCHERS:
+                return "the jarvis CLI"
+    return None
+
+
+def _could_be_owner_op(command: str) -> bool:
+    """A cheap test the full parse can never beat: can this line hold an
+    owner op at all? The full parse resolves quotes, backslashes,
+    continuations, ANSI-C `$'…'` text and the line's own `$VAR`s, but every
+    path it can find still spells, in the line's text once quotes and
+    backslashes are gone, an op's first word (`hud`, `restart`, `daemon2`),
+    an owner module's name (`hud_install`, `owner_ops` — a module named on
+    its own spells no op word: `python -m jarvis.v2.owner_ops`), or
+    `systemctl` — or goes through `xargs`, whose input may
+    supply it. A line with none of them is skipped, so a
+    pathological one (`$($($(…`) costs a substring search, not a parse.
+    `owner_op_check` in tests/v2/hud_install_check.py holds the two to
+    agreement over a corpus and every spelling."""
+    if "$'" in command:
+        return True
+    # Continuations first (bash drops `\<newline>` before anything), then
+    # every quote and backslash: `h"u"d`, `h\ud` and `hu\<newline>d` all
+    # read as `hud` to the shell, and so they do here.
+    flat = command.replace("\\\n", "")
+    for ch in ("'", '"', "\\"):
+        flat = flat.replace(ch, "")
+    if ("xargs" in flat or any(path[0] in flat for path in OWNER_OPS)
+            or any(module.rpartition(".")[2] in flat for module in OWNER_OP_MODULES)
+            or any(word in flat for word in _DAEMON_WORDS)
+            or any(word in flat for word in _KILL_WORDS)):
+        return True
+    # The CLI with a word only known at run time (`jarvis h${E}ud install`).
+    if "jarvis" in flat and _WILD.search(flat):
+        return True
+    # A word the line assembles from its own variables (`x=h; jarvis ${x}ud
+    # install`) need not spell the op's word anywhere: such a line is parsed.
+    return "$" in flat and re.search(r"(?:^|[\s;&|(])[A-Za-z_]\w*=", flat) is not None
+
+
+def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, str | None]:
+    """(why this line runs an owner-only operation — a refusal, never an ask —
+    or None; and, when it does not, why it must be asked whatever stands: a
+    kill on it whose pattern is too costly to judge against the daemon, and
+    nothing on it provably selects the daemon, or None). `prefilter=False`
+    turns both cheap tests off (the line's and each segment's), for the test
+    that holds them to the full parse."""
+    if not command or not command.strip():
+        return None, None
+    if prefilter and not _could_be_owner_op(command):
+        return None, None
+    flat = command.replace("\\\n", "")
+    for ch in ("'", '"', "\\"):
+        flat = flat.replace(ch, "")
+    kills = _Kills(line=command, armed="kill" in flat or "fuser" in flat)
+    try:
+        why = _owner_line(command, _Owner(filtered=prefilter, kills=kills), 0)
+    except RecursionError:
+        return None, None
+    return why, (None if why else kills.unsure)
+
+
+def owner_op(command: str, *, prefilter: bool = True) -> str | None:
+    """Why this line runs an owner-only `jarvis` operation, or None — a
+    refusal, never an ask (`owner_reading`)."""
+    return owner_reading(command, prefilter=prefilter)[0]
+
+
+def kill_unsure(command: str) -> str | None:
+    """Why no allowlist entry and no v2 profile may answer for this line
+    without asking: a kill on it is too costly to judge against the daemon
+    (`COSTLY`; the delta review of PR #48 — too complex to judge is ASK,
+    never DENY). `rules.decide` asks it through `owner_reading`;
+    `permissions.allows` and v2's layer 2 ask it here."""
+    return owner_reading(command)[1]
+
+
+def installs_hud(command: str, cwd: str | Path | None = None) -> str | None:
+    """`owner_op`, under the name the first callers used."""
+    return owner_op(command)

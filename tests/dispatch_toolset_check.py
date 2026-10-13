@@ -27,19 +27,35 @@ What must hold, each against the surface that claims it:
     group's core cannot load it;
   * a tool an agent was handed explicitly (PR #33's EXPLICIT_ONLY shape) runs
     for that agent and no other;
-  * a turn's toolset is bound only while the turn runs (restored after).
+  * a turn's toolset is bound only while the turn runs (restored after),
+    including a turn that raises (M7), and a group loaded in one turn is still
+    the agent's in the next (M12);
+  * **unbound refuses** (owner's answer 4, 2026-10-11): with no toolset bound
+    nothing runs and no registry listing goes back; a script or a test opts in
+    with `runtime.tools_bound(names)` (held to that set, restored after) or
+    `runtime.unconfined()` (anything, only while nothing is bound, only inside
+    the block, and not into a bare thread — a context copied inside the block
+    carries it, as it carries any ContextVar);
+  * an unknown name is echoed capped and escaped, and a group with an empty
+    core widens nothing (#34 review).
 
-And the surface walk, which is what makes "unbound fails open" safe: the only
-callers of `dispatch` under `jarvis/` are `Agent._dispatch_one` (reached only
-from `_run_turn`, after its bind) and jarvis-mcp's worker, and every dispatch
-made by every surface this suite drives — workflow, task, goal, sub-agent,
-fleet, fast path, mcp, agent-bench, the CLI, the Discord agent, the face's
-voice agent and its designer — ran with a toolset bound, equal to that agent's.
+And the surface walk, which is why "unbound refuses" costs no real path: the
+only references to `dispatch` in jarvis/, longbench/ and swecompare/ are
+`Agent._dispatch_one` (reached only from `_run_turn`, after its bind),
+jarvis-mcp's worker and the daemon's jarvis-mcp bridge (`v2/bridge.py`), each
+of the last two binding its list first — found through any alias of the tools
+package or the function, a relative or star import, the dotted path, an
+uncalled reference or getattr (the walker is checked on those spellings, which
+its first version missed) — no product code names `unconfined`, and every
+dispatch made by every surface this suite drives — workflow, task, goal,
+sub-agent, fleet, fast path, mcp, agent-bench, the CLI, the Discord agent, the
+face's voice agent and its designer — ran with a toolset bound, equal to that
+agent's.
 
-Run against origin/main (34b6ab2), sixteen of the twenty checks fail. The four
-that pass there do so by design: the static call-site pin, the deferred
-pointer (marked "regression guard"), the conversation-surface binding and the
-unbound decision.
+Against origin/main (4272008) the unbound, opt-in, unknown-name and
+empty-core checks fail; M7, M12 and the walker were shown to bite in a scratch
+copy (the restore's `finally`, `_run_turn` binding the base set, and the old
+walker, each reverted).
 
 `llm.chat` is scripted; tools that would touch the world (browser, desktop,
 shell, task spawning, Spotify, the network) are replaced by recorders under
@@ -158,7 +174,10 @@ class Script:
             for marker, queue in self.plans.items():
                 if marker in first:
                     self.calls[marker].append((list(messages), offered))
-                    return queue.pop(0) if queue else reply("done")
+                    item = queue.pop(0) if queue else reply("done")
+                    if isinstance(item, BaseException):
+                        raise item
+                    return item
         return reply("done")
 
     def tool_results(self, marker: str) -> list[dict]:
@@ -677,22 +696,185 @@ def explicit_tool_checks() -> None:
     print("ok  explicit tool: runs for the agent handed it, refused for one that was not")
 
 
+UNBOUND = "no agent's toolset is bound"
+
+
 def unbound_checks() -> None:
-    """The decision, pinned: nothing bound means no agent is calling, so
-    dispatch does not enforce — a fresh thread's empty context, as a script or
-    a test has. Safe only because no real path is unbound (walk below)."""
+    """The decision, pinned (owner's answer 4, 2026-10-11): nothing bound
+    refuses. A fresh thread's empty context — what a script or a test has —
+    runs nothing, and an unknown name does not get the registry listed back.
+    Every real caller binds first (the walks below), so this only ever catches
+    a bug."""
     SURFACE[0] = "unbound (expected)"
     out = {}
 
     def direct():
         out["held"] = runtime.parent_tools()
         out["text"] = tools.dispatch("get_datetime", "{}").text
+        out["unknown"] = tools.dispatch("teleport", "{}").text
 
-    worker = threading.Thread(target=direct)
-    worker.start()
-    worker.join()
-    assert out["held"] is None and NOT_AVAILABLE not in out["text"], out
-    print("ok  unbound: a direct call with no agent bound is not enforced (documented)")
+    with recorders("get_datetime"):
+        worker = threading.Thread(target=direct)
+        worker.start()
+        worker.join()
+        assert ran("get_datetime") == 0, RAN
+    assert out["held"] is None, out
+    assert UNBOUND in out["text"] and "'get_datetime'" in out["text"], out["text"]
+    assert UNBOUND in out["unknown"] and "Available" not in out["unknown"], out["unknown"]
+    print("ok  unbound: a direct call with no toolset bound is refused, and nothing runs")
+
+
+def opt_in_checks() -> None:
+    """The opt-ins a script or a test uses instead: `tools_bound(names)` holds
+    the calls to that set and puts the old binding back; `unconfined()` runs
+    anything registered while nothing is bound — never over a bound set, only
+    inside the block, and not into a bare thread. A context copied inside the
+    block carries it, as it carries every ContextVar (PR #42 review, LOW-3: the
+    docstring used to say it did not follow another thread at all)."""
+    SURFACE[0] = "opt-in (expected)"
+    out = {}
+
+    def scripted():
+        with runtime.tools_bound({"get_datetime"}) as held:
+            out["held"] = held
+            out["inside"] = tools.dispatch("get_datetime", "{}").text
+            out["outside_set"] = tools.dispatch("list_dir", json.dumps({"path": "."})).text
+        out["after_bound"] = (runtime.parent_tools(), tools.dispatch("get_datetime", "{}").text)
+        with runtime.unconfined():
+            out["unconfined"] = tools.dispatch("get_datetime", "{}").text
+            out["unknown"] = tools.dispatch("teleport", "{}").text
+            other = {}
+            thread = threading.Thread(
+                target=lambda: other.update(text=tools.dispatch("get_datetime", "{}").text))
+            thread.start()
+            thread.join()
+            out["new_thread"] = other["text"]
+            copied = contextvars.copy_context()
+            thread = threading.Thread(target=lambda: other.update(
+                copied=copied.run(tools.dispatch, "get_datetime", "{}").text))
+            thread.start()
+            thread.join()
+            out["copied"] = other["copied"]
+            with runtime.tools_bound({"read_file"}):
+                out["bound_inside"] = tools.dispatch("get_datetime", "{}").text
+        out["after_unconfined"] = tools.dispatch("get_datetime", "{}").text
+
+    with recorders("get_datetime", "list_dir"):
+        worker = threading.Thread(target=scripted)
+        worker.start()
+        worker.join()
+        runs = ran("get_datetime")
+        assert ran("list_dir") == 0, RAN
+    assert out["held"] == frozenset({"get_datetime"}), out
+    assert out["inside"] == "ran get_datetime", out["inside"]
+    assert NOT_AVAILABLE in out["outside_set"], out["outside_set"]
+    assert out["after_bound"][0] is None and UNBOUND in out["after_bound"][1], out["after_bound"]
+    assert out["unconfined"] == "ran get_datetime", out["unconfined"]
+    assert "no tool named 'teleport'" in out["unknown"], out["unknown"]
+    assert UNBOUND in out["new_thread"], "unconfined() must not follow a bare thread"
+    assert out["copied"] == "ran get_datetime", "a context copied inside the block carries it"
+    assert NOT_AVAILABLE in out["bound_inside"], "a bound set is enforced inside unconfined()"
+    assert UNBOUND in out["after_unconfined"], out["after_unconfined"]
+    assert runs == 3, f"get_datetime ran {runs} times, wanted 3"
+    print("ok  opt-ins: tools_bound holds a script to its set and restores; unconfined runs "
+          "anything only while nothing is bound, inside the block, not into a bare thread "
+          "(a copied context carries it)")
+
+
+def name_echo_checks() -> None:
+    """An unknown name is the model's own text, so it comes back capped and
+    escaped (#34 review: a 50,000-character name came back whole)."""
+    SURFACE[0] = "direct agent"
+    agent = agent_mod.Agent(tool_names=["get_datetime"], approve=deny)
+    long_name = "x" * 50_000
+    hidden = "tele\u200bport\x1b[2J"
+    SCRIPT.add("[echo]", reply(calls=[(long_name, "{}"), (hidden, "{}")]), reply("done"))
+    agent.run_turn("[echo] go")
+    results = [m["content"] for m in agent.messages if m.get("role") == "tool"]
+    assert len(results) == 2, results
+    assert len(results[0]) < 1_000 and "(50000 characters)" in results[0], len(results[0])
+    assert "\u200b" not in results[1] and "\x1b" not in results[1], results[1]
+    assert "no tool named" in results[1], results[1]
+    assert_wire_valid(agent.messages)
+    print("ok  unknown names: echoed capped and escaped")
+
+
+def empty_core_checks() -> None:
+    """A group with no core tools would be "held" by every agent, so any agent
+    holding load_tools could widen into it (#34 review)."""
+    SURFACE[0] = "deferred group"
+    probe = "zz_empty_core_probe"
+    tools.REGISTRY[probe] = tools.Tool(name=probe, description="probe", schema=_OPEN_SCHEMA,
+                                       func=lambda **kw: "probe ran")
+    try:
+        try:
+            tools.register_group("zz_empty", "probe", (), (probe,), lambda: True)
+            refused = False
+        except ValueError:
+            refused = True
+        assert refused and "zz_empty" not in tools.GROUPS, "register_group took an empty core"
+        # Written in some other way, it still widens nothing.
+        tools.GROUPS["zz_empty"] = tools.ToolGroup("zz_empty", "probe", (), (probe,), lambda: True)
+        agent = agent_mod.Agent(tool_names=["get_datetime", "load_tools"], approve=deny)
+        SCRIPT.add("[empty-core]",
+                   reply(calls=[("load_tools", json.dumps({"group": "zz_empty"}))]),
+                   reply(calls=[(probe, "{}")]),
+                   reply("done"))
+        agent.run_turn("[empty-core] widen")
+        results = [m["content"] for m in agent.messages if m.get("role") == "tool"]
+        assert "Loaded" not in results[0] and "not available" in results[0], results[0]
+        assert results[1] != "probe ran" and NOT_AVAILABLE in results[1], results[1]
+        agent.loaded_groups.add("zz_empty")
+        agent._sync_tools()
+        assert probe not in {s["function"]["name"] for s in agent.tool_specs}
+        assert all(g.name != "zz_empty" for g in tools.loadable({"get_datetime", "load_tools"}))
+    finally:
+        tools.GROUPS.pop("zz_empty", None)
+        tools.REGISTRY.pop(probe, None)
+    print("ok  empty core: register_group refuses it; load_tools and _sync_tools widen nothing")
+
+
+def raising_turn_checks() -> None:
+    """(M7) A turn that raises still puts back the binding it found."""
+    SURFACE[0] = "restore"
+    outer = frozenset({"read_file", "get_datetime"})
+
+    def nested():
+        runtime.bind(tool_names=outer)
+        agent = agent_mod.Agent(tool_names=["get_datetime"], approve=deny)
+        SCRIPT.add("[raises]", RuntimeError("provider 500"))
+        try:
+            agent.run_turn("[raises] hi")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the scripted error did not raise")
+        return runtime.parent_tools()
+
+    after = contextvars.copy_context().run(nested)
+    assert after == outer, f"a raising turn left {after} bound, not {outer}"
+    print("ok  restore: a turn that raises puts the previous toolset back")
+
+
+def loaded_group_later_turn_checks() -> None:
+    """(M12) A group loaded in one turn is still the agent's in the next: the
+    next turn binds the expanded set, so its tools run."""
+    SURFACE[0] = "deferred group"
+    with spotify_connected():
+        agent = agent_mod.Agent(tool_names=tools.default_names(), approve=deny)
+        # One plan for both turns: the script keys a conversation by its first
+        # user message, which is turn 1's in turn 2 as well.
+        SCRIPT.add("[later]", reply(calls=[("load_tools", json.dumps({"group": "spotify"}))]),
+                   reply("loaded"), reply(calls=[("spotify_pause", "{}")]), reply("done"))
+        agent.run_turn("[later] load the music tools")
+        with recorders("spotify_pause"):
+            agent.run_turn("now pause")
+            assert ran("spotify_pause") == 1, RAN
+            bound = [held for name, held in RAN if name == "spotify_pause"][-1]
+    assert "spotify_pause" in bound, sorted(bound)
+    result = [m["content"] for m in agent.messages if m.get("role") == "tool"][-1]
+    assert result == "ran spotify_pause", result
+    print("ok  deferred: a group loaded in one turn is still usable in the next")
 
 
 def restore_checks() -> None:
@@ -728,6 +910,11 @@ def restore_checks() -> None:
 
 # --- the surface walk -------------------------------------------------------
 
+TOOLS_MODULE = "jarvis.tools"
+DISPATCH_NAMES = ("dispatch", "_dispatch")
+# Where the opt-out may be named at all: its definition, and dispatch reading it.
+UNCONFINED_HOMES = {"jarvis/runtime.py", "jarvis/tools/__init__.py"}
+
 
 def _calls_named(tree: ast.AST, attr: str):
     for node in ast.walk(tree):
@@ -756,37 +943,210 @@ def _enclosing(tree: ast.AST) -> dict[int, str]:
     return owner
 
 
+def _package(rel: str) -> list[str]:
+    parts = rel[:-len(".py")].split("/")
+    return parts[:-1]  # a module's package; for __init__.py, the package itself
+
+
+def _absolute(rel: str, level: int, module: str | None) -> str:
+    """The absolute module an import names, relative imports resolved."""
+    if level == 0:
+        return module or ""
+    base = _package(rel)
+    base = base[: len(base) - (level - 1)] if level > 1 else base
+    return ".".join(base + ([module] if module else []))
+
+
+def _dotted(expr) -> str:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        inner = _dotted(expr.value)
+        return f"{inner}.{expr.attr}" if inner else ""
+    return ""
+
+
+def dispatch_sites(source: str, rel: str) -> set[tuple[str, str]]:
+    """(enclosing def, spelling) for every reference to the registry's
+    dispatch in one module — not only `tools.dispatch(...)`: any alias of the
+    tools package (`import jarvis.tools as t`, `from .. import tools as T`),
+    any alias of the function (`from jarvis.tools import dispatch as run`, a
+    relative import, a star import), the dotted `jarvis.tools.dispatch`, a
+    reference passed along uncalled (`pool.submit(tools.dispatch, …)`), and
+    `getattr(tools, "dispatch")`. A bare `dispatch(...)`/`_dispatch(...)` call
+    counts wherever it appears, as it always did, so the walk errs toward a
+    site; a bare name merely referenced counts where it is the registry's
+    (an import of it, or inside the tools package) — an HTTP handler's own
+    `_dispatch` method is not."""
+    tree = ast.parse(source)
+    owner = _enclosing(tree)
+    package_names: set[str] = set()   # names bound to the jarvis.tools package
+    # Names that are the function wherever they are read.
+    function_names = set(DISPATCH_NAMES) if rel == "jarvis/tools/__init__.py" else set()
+    called = {id(node.func) for node in ast.walk(tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id in DISPATCH_NAMES}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == TOOLS_MODULE and alias.asname:
+                    package_names.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom):
+            base = _absolute(rel, node.level, node.module)
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if base == "jarvis" and alias.name == "tools":
+                    package_names.add(bound)
+                elif base == TOOLS_MODULE and alias.name in DISPATCH_NAMES:
+                    function_names.add(bound)
+    package_names.add("tools")  # the conventional spelling, whatever it is bound to
+
+    def is_package(expr) -> bool:
+        return _dotted(expr) in package_names or _dotted(expr) == TOOLS_MODULE
+
+    sites: set[tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        where = owner.get(getattr(node, "lineno", 0), "<module>")
+        if isinstance(node, ast.Attribute) and node.attr in DISPATCH_NAMES and is_package(
+                node.value):
+            sites.add((where, node.attr))
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
+                node.id in function_names or id(node) in called):
+            sites.add((where, node.id))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "getattr" and len(node.args) >= 2
+              and is_package(node.args[0]) and isinstance(node.args[1], ast.Constant)
+              and node.args[1].value in DISPATCH_NAMES):
+            sites.add((where, node.args[1].value))
+        elif isinstance(node, ast.ImportFrom) and _absolute(rel, node.level, node.module) \
+                == TOOLS_MODULE and any(a.name == "*" for a in node.names):
+            sites.add((where, "import *"))
+    return sites
+
+
+def func_references(source: str) -> list[int]:
+    """Lines that reach a tool's function around dispatch: a `.func(...)` or
+    `func(...)` call (`args.func` is argparse's subcommand handler in the CLI,
+    not a tool), and any `.func` taken off the registry, called or not —
+    `f = tools.REGISTRY[name].func; f()` is the same thing. (`node.func` on an
+    AST node, which the benches read, is neither.)"""
+    lines = []
+    tree = ast.parse(source)
+    for call in _calls_named(tree, "func"):
+        receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+        if isinstance(receiver, ast.Name) and receiver.id == "args":
+            continue
+        lines.append(call.lineno)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "func" and any(
+                isinstance(n, (ast.Name, ast.Attribute))
+                and (getattr(n, "id", None) == "REGISTRY" or getattr(n, "attr", None) == "REGISTRY")
+                for n in ast.walk(node.value)):
+            lines.append(node.lineno)
+    return sorted(set(lines))
+
+
+def unconfined_references(source: str) -> list[int]:
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        names = []
+        if isinstance(node, ast.Attribute):
+            names = [node.attr]
+        elif isinstance(node, ast.Name):
+            names = [node.id]
+        elif isinstance(node, ast.ImportFrom):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names = [node.value]
+        if any(n in ("unconfined", "is_unconfined", "_UNCONFINED") for n in names):
+            lines.append(node.lineno)
+    return lines
+
+
+def walker_checks() -> None:
+    """The walk itself, on spellings the first version missed (#34 review):
+    it followed only `tools.dispatch(...)` and a bare `dispatch(...)`."""
+    rel = "jarvis/v2/probe.py"
+    cases = {
+        "import jarvis.tools as t\ndef a():\n    t.dispatch('x', '{}')\n": {("a", "dispatch")},
+        "from jarvis.tools import dispatch as run_tool\ndef b():\n    run_tool('x', '{}')\n":
+            {("b", "run_tool")},
+        "from ..tools import dispatch as d\ndef c():\n    d('x', '{}')\n": {("c", "d")},
+        "from .. import tools as T\ndef f(pool):\n    pool.submit(T.dispatch, 'x', '{}')\n":
+            {("f", "dispatch")},
+        "import jarvis.tools\ndef e():\n    jarvis.tools.dispatch('x', '{}')\n":
+            {("e", "dispatch")},
+        "from jarvis import tools as kit\ndef g():\n    getattr(kit, 'dispatch')('x', '{}')\n":
+            {("g", "dispatch")},
+        "from jarvis.tools import *\ndef s():\n    pass\n": {("<module>", "import *")},
+        "from jarvis import tools\ndef h():\n    tools._dispatch('x', '{}')\n": {("h", "_dispatch")},
+        # Someone else's .dispatch(), or a handler's own _dispatch method
+        # referenced by name, is not a site; a bare call still is.
+        "def r(router):\n    router.dispatch('x')\n": set(),
+        "class H:\n    def _dispatch(self):\n        pass\n    do_GET = _dispatch\n": set(),
+        "def q():\n    dispatch('x', '{}')\n": {("q", "dispatch")},
+    }
+    for source, wanted in cases.items():
+        found = dispatch_sites(source, rel)
+        assert found == wanted, f"walker: {source!r} -> {found}, wanted {wanted}"
+    assert func_references("from jarvis import tools\ndef i():\n"
+                           "    f = tools.REGISTRY['x'].func\n    f()\n") == [3]
+    assert func_references("def j(args):\n    args.func(args)\n") == []
+    assert func_references("def k(node):\n    func = node.func\n") == []
+    assert unconfined_references("from jarvis import runtime\n"
+                                 "with runtime.unconfined():\n    pass\n") == [2]
+    assert unconfined_references("from jarvis.runtime import unconfined as u\n") == [1]
+    print("ok  walker: finds dispatch through module and function aliases, relative and "
+          "star imports, the dotted path, an uncalled reference and getattr")
+
+
+def _binds_before_dispatch(source: str, rel: str, function: str) -> bool:
+    tree = ast.parse(source)
+    body = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == function)
+    binds = [c.lineno for c in _calls_named(body, "bind")
+             if any(k.arg == "tool_names" for k in c.keywords)]
+    sites = [n.lineno for n in ast.walk(body)
+             if isinstance(n, ast.Attribute) and n.attr in DISPATCH_NAMES]
+    return bool(binds and sites and min(binds) < min(sites))
+
+
 def static_walk_checks() -> None:
-    """Every caller of dispatch in the code (jarvis/ and the bench packages
-    beside it), and how Agent reaches it."""
+    """Every reference to dispatch in the code (jarvis/ and the bench
+    packages beside it), how Agent reaches it, that each other caller binds a
+    toolset before it calls, and that the opt-out is named nowhere in it."""
     sites = set()
     sources = [p for package in ("jarvis", "longbench", "swecompare")
                for p in sorted((REPO / package).rglob("*.py"))]
     for path in sources:
         rel = path.relative_to(REPO).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        owner = _enclosing(tree)
-        for attr in ("dispatch", "_dispatch"):
-            for call in _calls_named(tree, attr):
-                func = call.func
-                receiver = func.value.id if isinstance(func, ast.Attribute) and isinstance(
-                    func.value, ast.Name) else None
-                if isinstance(func, ast.Attribute) and receiver != "tools":
-                    continue  # some other object's .dispatch()
-                sites.add((rel, owner.get(call.lineno, "?"), attr))
-        # Nothing may call a tool's function around dispatch. (`args.func` is
-        # argparse's subcommand handler in the CLI, not a tool.)
-        for call in _calls_named(tree, "func"):
-            receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
-            if isinstance(receiver, ast.Name) and receiver.id == "args":
-                continue
-            assert rel == "jarvis/tools/__init__.py", f"{rel}:{call.lineno} calls .func() directly"
+        source = path.read_text(encoding="utf-8")
+        sites |= {(rel, where, spelling) for where, spelling in dispatch_sites(source, rel)}
+        # Nothing may reach a tool's function around dispatch.
+        if rel != "jarvis/tools/__init__.py":
+            lines = func_references(source)
+            assert not lines, f"{rel}:{lines} reaches a tool's .func directly"
+        # `runtime.unconfined()` is for scripts and tests: no code path in the
+        # product may switch enforcement off.
+        if rel not in UNCONFINED_HOMES:
+            lines = unconfined_references(source)
+            assert not lines, f"{rel}:{lines} names the dispatch opt-out"
     expected = {
         ("jarvis/tools/__init__.py", "dispatch", "_dispatch"),
         ("jarvis/agent.py", "_dispatch_one", "dispatch"),
         ("jarvis/v2/mcp.py", "run", "dispatch"),
+        # The daemon's jarvis-mcp bridge for Claude/Codex chat sessions
+        # (WP-1, 2026-10-10): it binds the session's offered names first.
+        ("jarvis/v2/bridge.py", "run", "dispatch"),
     }
     assert sites == expected, f"dispatch callers changed: {sorted(sites ^ expected)}"
+
+    # jarvis-mcp's worker and the bridge, like `_run_turn`, bind their toolset
+    # before they dispatch.
+    for rel in ("jarvis/v2/mcp.py", "jarvis/v2/bridge.py"):
+        source = (REPO / rel).read_text(encoding="utf-8")
+        assert _binds_before_dispatch(source, rel, "run"), \
+            f"{rel}: run must bind its toolset before it dispatches"
 
     agent_tree = ast.parse((REPO / "jarvis" / "agent.py").read_text(encoding="utf-8"))
     owner = _enclosing(agent_tree)
@@ -799,8 +1159,9 @@ def static_walk_checks() -> None:
              if any(k.arg == "tool_names" for k in c.keywords)]
     dispatches = list(_calls_named(run_turn, "_dispatch_calls"))
     assert binds and min(b.lineno for b in binds) < min(d.lineno for d in dispatches)
-    print("ok  static walk: dispatch is called only by Agent._dispatch_one (from _run_turn, "
-          "after its bind) and jarvis-mcp's worker")
+    print("ok  static walk: dispatch is reached only by Agent._dispatch_one (from _run_turn, "
+          "after its bind), jarvis-mcp's worker and the bridge (each after its bind); no "
+          "product code names the opt-out")
 
 
 def dynamic_walk_checks() -> None:
@@ -809,6 +1170,8 @@ def dynamic_walk_checks() -> None:
         if surface == "unbound (expected)":
             assert held is None
             continue
+        if surface == "opt-in (expected)":
+            continue  # a script's own binding, or deliberately none (unconfined)
         assert held is not None, f"{surface}: {name} dispatched with no toolset bound"
         by_surface[surface] = by_surface.get(surface, 0) + 1
     wanted = {"workflow", "sub-agent", "fleet (CLI parent)", "attended task", "goal",
@@ -822,6 +1185,7 @@ def dynamic_walk_checks() -> None:
 
 
 def main() -> int:
+    walker_checks()
     static_walk_checks()
     refusal_shape_checks()
     parallel_checks()
@@ -840,7 +1204,12 @@ def main() -> int:
     explicit_tool_checks()
     conversation_surface_checks()
     unbound_checks()
+    opt_in_checks()
+    name_echo_checks()
+    empty_core_checks()
     restore_checks()
+    raising_turn_checks()
+    loaded_group_later_turn_checks()
     dynamic_walk_checks()
     print("\nall dispatch toolset checks passed")
     return 0

@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Annotated
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -31,6 +31,24 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
+
+# fetch_page follows redirects itself (BR-0), as many as httpx's default.
+MAX_REDIRECTS = 20
+_REDIRECTS = frozenset({301, 302, 303, 307, 308})
+
+
+def _refusal(url: str) -> str | None:
+    """Why fetch_page may not request `url` — "control", "ambiguous", "lan" —
+    or None. Asked before the first request and before every redirect hop."""
+    if not url.startswith(("http://", "https://")):
+        return "lan"  # a redirect to another scheme is nowhere fetch_page goes
+    if config.ambiguous_authority(url):
+        return "ambiguous"
+    if config.is_face_origin(url):
+        return "control"
+    if config.is_lan_host(urlparse(url).hostname or ""):
+        return "lan"
+    return None
 
 
 def _brave(query: str, count: int) -> list[dict]:
@@ -179,31 +197,54 @@ def fetch_page(
     """
     if not url.startswith(("http://", "https://")):
         return "Error: url must start with http:// or https://"
-    if config.is_face_origin(url):
+    refused = _refusal(url)
+    if refused == "control":
         return "Error: that is Jarvis's own control plane, not a web page."
-    if config.is_lan_host(urlparse(url).hostname or ""):
+    if refused == "ambiguous":
+        return ("Error: that URL's host is ambiguous (a backslash or nothing where the "
+                "host goes, or a tab or line break); write it plainly.")
+    if refused:
         return (
             "Error: that address is on the private network (or does not "
             "resolve). Public sites and localhost are reachable; LAN hosts "
             "are not."
         )
 
-    try:
-        response = httpx.get(
-            url, headers={"User-Agent": UA}, timeout=30, follow_redirects=True
-        )
-    except httpx.HTTPError as exc:
-        # Not str(exc): a protocol error quotes the raw header bytes the server
-        # sent, which is page-supplied text arriving outside the fence.
-        return (
-            f"Error: could not fetch {url} ({type(exc).__name__}). The server did not "
-            "return a usable response; it may be down, slow or refusing the request."
-        )
-
-    # follow_redirects means the final URL may not be the one just vetted.
-    final_host = response.url.host or ""
-    if config.is_face_origin(str(response.url)) or config.is_lan_host(final_host):
-        return f"Error: {url} redirected to {final_host!r}, which is blocked."
+    # Redirects are followed here, one hop at a time, so each Location is
+    # judged *before* it is requested (BR-0): httpx's own following sent the
+    # request first and let this function refuse only where it landed — a
+    # GET to the hop's host had already happened. Cookies a hop sets ride
+    # the next one, as they did inside httpx.
+    current, cookies = url, httpx.Cookies()
+    for _hop in range(MAX_REDIRECTS + 1):
+        try:
+            response = httpx.get(current, headers={"User-Agent": UA}, timeout=30,
+                                 follow_redirects=False, cookies=cookies)
+        except httpx.HTTPError as exc:
+            # Not str(exc): a protocol error quotes the raw header bytes the server
+            # sent, which is page-supplied text arriving outside the fence.
+            return (
+                f"Error: could not fetch {url} ({type(exc).__name__}). The server did not "
+                "return a usable response; it may be down, slow or refusing the request."
+            )
+        # Where it answered from is judged too, whatever was asked.
+        if _refusal(str(response.url)):
+            host = untrusted.one_line(response.url.host or "", cap=80)
+            return f"Error: {url} redirected to {host!r}, which is blocked."
+        location = response.headers.get("location") if response.status_code in _REDIRECTS else None
+        if not location:
+            break
+        try:
+            cookies.extract_cookies(response)
+        except Exception:
+            pass  # a stand-in response carries no cookie jar
+        current = urljoin(str(response.url), location)
+        if _refusal(current):
+            # The host is the server's text: one capped line.
+            host = untrusted.one_line(urlparse(current).hostname or "", cap=80)
+            return f"Error: {url} redirected to {host!r}, which is blocked."
+    else:
+        return f"Error: {url} redirected more than {MAX_REDIRECTS} times."
 
     if response.status_code >= 400:
         return f"Error: {url} returned HTTP {response.status_code}."

@@ -1,0 +1,411 @@
+{
+  "cpp": {
+    "highlights": {
+      "files": [
+        "c",
+        "cpp"
+      ],
+      "patterns": 122,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "c",
+        "cpp"
+      ],
+      "patterns": 10,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "c",
+        "cpp"
+      ],
+      "patterns": 3,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "python": {
+    "highlights": {
+      "files": [
+        "python"
+      ],
+      "patterns": 86,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "python"
+      ],
+      "patterns": 4,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "python"
+      ],
+      "patterns": 2,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "javascript": {
+    "highlights": {
+      "files": [
+        "ecma",
+        "jsx",
+        "javascript"
+      ],
+      "patterns": 119,
+      "dropped": [],
+      "stripped": [
+        {
+          "file": "jsx/highlights.scm",
+          "line": 153,
+          "reason": "#set! on a capture is nvim-only metadata"
+        },
+        {
+          "file": "jsx/highlights.scm",
+          "line": 156,
+          "reason": "#set! on a capture is nvim-only metadata"
+        }
+      ]
+    },
+    "injections": {
+      "files": [
+        "ecma",
+        "jsx",
+        "javascript"
+      ],
+      "patterns": 21,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "ecma",
+        "jsx",
+        "javascript"
+      ],
+      "patterns": 2,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "typescript": {
+    "highlights": {
+      "files": [
+        "ecma",
+        "typescript"
+      ],
+      "patterns": 124,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "ecma",
+        "typescript"
+      ],
+      "patterns": 22,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "ecma",
+        "typescript"
+      ],
+      "patterns": 2,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "tsx": {
+    "highlights": {
+      "files": [
+        "ecma",
+        "typescript",
+        "jsx",
+        "tsx"
+      ],
+      "patterns": 156,
+      "dropped": [],
+      "stripped": [
+        {
+          "file": "jsx/highlights.scm",
+          "line": 153,
+          "reason": "#set! on a capture is nvim-only metadata"
+        },
+        {
+          "file": "jsx/highlights.scm",
+          "line": 156,
+          "reason": "#set! on a capture is nvim-only metadata"
+        }
+      ]
+    },
+    "injections": {
+      "files": [
+        "ecma",
+        "typescript",
+        "jsx",
+        "tsx"
+      ],
+      "patterns": 23,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "ecma",
+        "typescript",
+        "jsx",
+        "tsx"
+      ],
+      "patterns": 3,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "json": {
+    "highlights": {
+      "files": [
+        "json"
+      ],
+      "patterns": 12,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "json"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "json"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "bash": {
+    "highlights": {
+      "files": [
+        "bash"
+      ],
+      "patterns": 49,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "bash"
+      ],
+      "patterns": 8,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "bash"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "css": {
+    "highlights": {
+      "files": [
+        "css"
+      ],
+      "patterns": 26,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "css"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "css"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "html": {
+    "highlights": {
+      "files": [
+        "html_tags",
+        "html"
+      ],
+      "patterns": 25,
+      "dropped": [],
+      "stripped": [
+        {
+          "file": "html_tags/highlights.scm",
+          "line": 94,
+          "reason": "#set! on a capture is nvim-only metadata"
+        }
+      ]
+    },
+    "injections": {
+      "files": [
+        "html_tags",
+        "html"
+      ],
+      "patterns": 15,
+      "dropped": [
+        {
+          "file": "html_tags/injections.scm",
+          "line": 36,
+          "reason": "#gsub! is not supported"
+        }
+      ],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "html"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "yaml": {
+    "highlights": {
+      "files": [
+        "yaml"
+      ],
+      "patterns": 22,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "yaml"
+      ],
+      "patterns": 9,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "yaml"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "toml": {
+    "highlights": {
+      "files": [
+        "toml"
+      ],
+      "patterns": 11,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "toml"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "toml"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "markdown": {
+    "highlights": {
+      "files": [
+        "markdown"
+      ],
+      "patterns": 30,
+      "dropped": [],
+      "stripped": []
+    },
+    "injections": {
+      "files": [
+        "markdown"
+      ],
+      "patterns": 5,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "markdown"
+      ],
+      "patterns": 2,
+      "dropped": [],
+      "stripped": []
+    }
+  },
+  "markdown_inline": {
+    "highlights": {
+      "files": [
+        "markdown_inline"
+      ],
+      "patterns": 25,
+      "dropped": [],
+      "stripped": [
+        {
+          "file": "markdown_inline/highlights.scm",
+          "line": 48,
+          "reason": "#set! on a capture is nvim-only metadata"
+        },
+        {
+          "file": "markdown_inline/highlights.scm",
+          "line": 52,
+          "reason": "#set! on a capture is nvim-only metadata"
+        },
+        {
+          "file": "markdown_inline/highlights.scm",
+          "line": 99,
+          "reason": "#set! on a capture is nvim-only metadata"
+        }
+      ]
+    },
+    "injections": {
+      "files": [
+        "markdown_inline"
+      ],
+      "patterns": 2,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [],
+      "patterns": 0,
+      "dropped": [],
+      "stripped": []
+    }
+  }
+}

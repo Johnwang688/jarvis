@@ -1,0 +1,14 @@
+The highlight, injection and fold queries in this directory are derived from
+nvim-treesitter (https://github.com/nvim-treesitter/nvim-treesitter), runtime/queries/,
+at commit f603a2f4da48728f80257fb5fbb90145fd1dc173 (2026-09-19), licensed under the Apache License,
+Version 2.0 (LICENSE beside this file). The unmodified files are vendored under
+hud/vendor/nvim-treesitter/queries/.
+
+Modifications, made by hud/scripts/vendor-queries.mjs (lib/syntax/translate.ts):
+  - each language's `; inherits:` files are concatenated ahead of its own;
+  - `#lua-match?` (Lua patterns) is rewritten as `#match?` (JavaScript regular
+    expressions), and its `not-`/`any-` forms likewise;
+  - `#set! @capture key value` (nvim-only metadata) is removed from the pattern;
+  - patterns using a predicate or directive web-tree-sitter and the HUD's
+    syntax worker do not support, or naming a node the pinned grammar does not
+    have, are removed. dropped.json lists every one, with its reason.

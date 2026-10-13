@@ -356,9 +356,12 @@ Five layers, evaluated in this order for every tool call from every provider.
 The first layer to answer wins.
 
 1. **DENY** — v1 `rules.py`'s never-approvable set (sudo, dd, `rm -rf` at a
-   root, fork bombs, raw block writes) and the secrets layer (`.env`, token
-   bundles, the allowlist file). Not approvable by anyone, from any path,
-   including the escape hatch.
+   root, fork bombs, raw block writes, and since ENV-1 a shell write onto a
+   credential env file) and the secrets layer (every credential env file —
+   `.env`, `.env.<anything>`, not `*.example` — token bundles, the allowlist
+   file), for file tools, read tools (Claude's Read, Grep, Glob,
+   NotebookRead) and sandbox grants that are or hold one alike. Not
+   approvable by anyone, from any path, including the escape hatch.
 2. **ALWAYS-ASK** — a short, explicit list that goes to the owner regardless
    of the reviewer: prod deploys (`vercel --prod`, `gh release`, anything
    the project marks as a deploy), prod database migrations, pushes to
@@ -445,7 +448,9 @@ match wins.
 Rule 4 is where judgement enters, and it is bounded structurally: **the fast
 path has no tool that can change anything.** Its toolset is read-only files,
 `grep_files`, a single-page `fetch_page`, memory, threads/sessions read,
-`task_status`, and one new tool, `task_propose`. It cannot edit, run a
+`task_status`, and one new tool, `task_propose` — plus, since WP-F and only
+for the owner's own chat turn typed in the HUD, the read-only
+`terminal_read` (§18). It cannot edit, run a
 command, browse interactively, or spawn anything. So a fast-path turn that
 misjudges a request as chat can only *answer badly*; it cannot half-do work.
 
@@ -574,8 +579,14 @@ model selector, re-homed).
 The UsageLedger keeps, per provider: tokens per task and per day (uncached
 input plus output, the firm's `work_tokens`), dollars where reported
 (OpenRouter, BYOK upstream cost — the v1 lesson: a number that arrives as
-zero is not zero), and the provider's own signals. From those it publishes
-one of four states, shown on the HUD's SYSTEMS panel and in `status`:
+zero is not zero), and the provider's own signals. Every usage event carries
+what that one result spent: Claude's figure arrives as the CLI's running total
+for the conversation (continued, not restarted, by a resume), so the provider
+turns it into a per-result delta before it reaches the ledger or a thread's
+total (2026-10-12, `running_cost.py`); Codex's cumulative counters are
+differenced the same way against the session's baseline. From those it
+publishes one of four states, shown on the HUD's SYSTEMS panel and in
+`status`:
 
 - **available.**
 - **over threshold** — above the project's or global `no_new_work` fraction
@@ -1686,7 +1697,7 @@ rules live in `hud/src/lib/layout.ts`; `components/Layout.tsx` applies them.
 - **Resizing.** The inner edge of each pane is a `role="separator"`. It can
   be dragged (pointer capture) or moved with the arrows (Shift for a bigger
   step, Home/End for the ends), and a double-click resets it. Space on a
-  focused separator is not push-to-talk. The left pane runs 180–480px and
+  focused separator does nothing. The left pane runs 180–480px and
   the right 240–560px, **in the HUD's own unzoomed pixels**, so a pane keeps
   its proportion to its text as the zoom changes. Monaco relayouts through
   `automaticLayout`.
@@ -1728,13 +1739,15 @@ title bar.
   the bar wraps rather than clipping.
 - **⊞ Customize Layout is the one entry point for presets**: six tiles
   (single, two side by side, two stacked, three side by side, one large plus
-  two stacked, 2×2), the three toggles written out with their shortcuts,
+  two stacked, 2×2; eight since WP-G1, below, adding 3×2 and 4×2, four to a
+  row), the three toggles written out with their shortcuts,
   Reset layout (one pane, default widths, panel closed) and, when the window
   is drawing fewer panes than the preset has, "Showing 2 of 3 panes: the
   window is too narrow" plus a badge on ⊞. It is placed from the button's
   rect through `toCss()`, right-aligned; Escape closes it and gives focus
-  back; the arrows move between tiles; Space in it is never push-to-talk.
-- **The pane model.** All four pane specs are always stored
+  back; the arrows move between tiles; Space on a tile presses it.
+- **The pane model.** All four pane specs (eight since WP-G1, by id, with
+  the drawn ids' reading order beside them) are always stored
   (`jarvis.hud.workspace`, apart from `jarvis.hud.layout` so damage to one
   never resets the other; each field falls back on its own, an unknown
   preset is `single`, the panel opens only on a literal `true`). A pane is
@@ -1742,7 +1755,7 @@ title bar.
   unmounted**. Edges are stored as fractions per preset and clamped to a
   360×200 pane minimum when drawn; they drag, take the arrows (Shift for a
   bigger step, Home/End) and reset to equal on a double-click. Ctrl+Alt+1 … 4
-  focus a pane of the preset, bringing back one the window dropped
+  (… 8 since WP-G1, by slot) focus a pane of the preset, bringing back one the window dropped
   (AltGr+digit types a symbol, so it never fires mid-word); the focused pane
   of a split has an accent line under its header.
 - **Chat stayed a singleton in WP-A** (lifted by WP-B, below): choosing
@@ -2073,11 +2086,18 @@ terminal is drawn in one place at a time** (W-1), and its panel tab says
 which pane has it. A window keeps one session per terminal: it attaches on
 first draw with a fresh ticket and a URL from its own location, resizes only
 after the replay, and stays attached while hidden, so moving a terminal
-between the panel and a pane, or hiding the panel, never reattaches. Ctrl+`
-opens a terminal when there is none (⬓ only shows the panel), and a dot on
-⬓ says one in the hidden panel exited. In a terminal Ctrl+B, Ctrl+Alt+B and
-Ctrl+_ are the shell's; the zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's;
-Space is never push-to-talk. **Under a card nothing reaches the shell** —
+between the panel and a pane, or hiding the panel, never reattaches. Opening
+the panel — Ctrl+`, ⬓ or the layout menu's Panel row — opens a terminal when
+there is none, and so does switching a pane to the terminal view (the
+owner's request, 2026-10-11: one click, not two; WP-D had ⬓ only show the
+panel). Only on that owner gesture: never on a load, a restored layout, a
+reload or a reattach, never under a card (nor once one has come and gone
+since), never on a failed listing or when any terminal is listed, never once
+the panel was closed again or the pane switched away (the terminal then stays
+in the list, shown nowhere), and one per gesture — a double-click is one. A dot on ⬓ says one in the
+hidden panel exited. In a terminal Ctrl+B, Ctrl+Alt+B and
+Ctrl+_ are the shell's, and so is Ctrl+D (end of input, never push-to-talk);
+the zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's. **Under a card nothing reaches the shell** —
 input held, a paste in flight paused, every key left to bubble so Escape
 denies — and output keeps drawing. **A paste never splices**: it goes out in
 paced 16 KiB chunks from a queue that belongs to one socket, stops the
@@ -2101,6 +2121,100 @@ counter-zoomed with its font scaled instead; the 160% and 70% checks guard
 fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
+
+**A terminal that ended with Jarvis continues where it was (2026-10-12, the
+owner's option (a)).** The owner typed into a terminal whose history was
+still on screen after a restart and got only "New terminal here". Now a
+typing key there, a paste or **Continue here** starts a new shell in the same
+folder, with the same "Jarvis can read" switch (off when unknown), in the
+same place and the same xterm, under the old text and a `── restarted HH:MM
+──` line; what was typed waits (4 KiB) until the new shell's replay has been
+parsed, and is then **typed, never run** (the lead's decision on review):
+the keys up to the first Enter, and no paste with a line break, because the
+line was typed at the old context's prompt (a robot's shell, `>>>`, a root
+shell) and must not run in a fresh local one; the window says so. Any
+refusal while held — a key that does not type, past 4 KiB, a card, the
+terminal leaving the screen — drops all of it. The old text is rebuilt from
+xterm's cells (characters and colours, the last 1 MiB, read from the bottom),
+kept in this page's memory only, and written back after the RIS of every
+later attach of the new terminal. Running programs do not survive —
+only their text — and a page reload loses the text: real survival would need
+a pty host outside the daemon, which would reverse W-3 (option (b), not
+taken). Only the owner's gesture in that terminal continues it: never a
+card, a crash, a load, a reattach, another window's terminal, a shell that
+exited on its own, a program terminal, Ctrl+D or a HUD key. No route changed.
+
+**Jarvis can read a terminal (2026-10-10, WP-F; decisions W-2).**
+`terminal_read(terminal, lines=200)` returns the last lines (at most 1000) of
+one terminal's **normal buffer** as plain text — escape sequences stripped,
+CR/backspace/cursor redraws collapsed to what the terminal shows, the
+alternate screen (vim, less, top) never read, even when the switch into it has
+left the ring (`terminal_text.AltTracker` is fed every byte the ring drops) —
+fenced as untrusted like a fetched page, and through `dispatch()`'s scrub. It
+is read-only structurally: the tool imports exactly `terminals.read_for_tool`.
+**Three rules refuse the whole read** with one sentence, "possible credential
+in this output", that never says what, where or which rule: an exact known
+value (every `.env` and token-bundle value Jarvis reaches plus the terminal
+folder's `.env` files, and their base64 at any alignment and URL-encodings),
+a known credential format (`jarvis/credential_patterns.py`), or a
+secret-printing command (`env`, `printenv`, `cat .env`, `gh auth token`, …,
+one list in `terminal_guard`). The last has two halves and the second always
+runs: a signed span overlapping the read (or one that backgrounds a printer),
+and the text — any line drawn in the read, or in the 32 KiB before it, that
+shows such a command after a prompt, judged on every state a line was in (a
+cleared command line still counts) — narrowed only at a boundary the signed
+marks prove, never at a span record below `spans_from`. A heuristic withholds
+lines (a keyword with a long high-entropy token after it; a bare hash or UUID
+stays) and says how many. The owner's per-terminal switch refuses by name,
+and every read that reaches a terminal publishes `terminal_read`
+`{terminal_id, lines, at, refused}` so its bar says "Jarvis read 200 lines ·
+15:42". **Who holds it**: the fast path, for an owner's chat turn the HUD's
+own window sent (`UserMessage.desk`, set only through the HUD listener with
+its Origin) — not a task's thread, a Discord or DM turn (the owner is not at
+the desk), the escape hatch, a schedule, a sub-agent, a workflow, a goal or
+any v1 surface (`tools.EXPLICIT_ONLY` keeps it out of "the whole registry"),
+and not jarvis-mcp, which cannot tell a chat from a task worker until the
+peers plan's per-session tokens land, so it fails closed. A steer from
+anywhere but the desk takes the running turn off it. The owner confirmed both
+limits on 2026-10-10: fast-path desk turns only for now (Claude and Codex
+chats via jarvis-mcp are a follow-up), and never Discord, DM or scheduled
+turns. **Where read text goes**: like any tool result, into the fast-path
+transcript (and so OpenRouter), that conversation's v1 session
+`messages.json`, `SPILL_DIR` if truncation cuts it later, and whatever the
+model's reply repeats (mirrored to Discord, spoken). The tool's ticker
+summary is fixed ("read N lines"), so the tool's own `tool_finished` record
+carries none of it — that is all the fixed summary promises: the model's
+reply is not filtered, and goes to the thread's `log.jsonl`, the bus, Discord
+and speech like any reply, so whatever it repeats lands there too.
+**The review round (2026-10-10)** gave the renderer the terminal's width
+(xterm's autowrap, clamped cursor numbers, capped rows), refused a read that
+starts inside a private key's block or shows its END footer, taught rule 3
+the shell's compound shapes (`then`/`do`/`!`/`case … )`, redirections,
+substitutions, `find -exec`/`xargs` readers, `.env.*`), made every scan
+linear (a 1 MiB adversarial ring is judged in well under 2 s), handed a
+switch the ring's cut split in two over whole, executed C0 controls inside a
+sequence as xterm does, re-checked the switch after the render, and read
+folder env files so a FIFO cannot hang a read. **The re-review
+(2026-10-11)** made the headline read readable again — a dev server started
+with `node --env-file=.env` (an `--env-file` loads a file; an interpreter
+prints one only from inline source, an environment read, or as its script),
+`wc -l < .env`, `docker inspect` with a safe `--format`, and a reader's name
+in a commit message or banner were refused — and closed the other side:
+copies onto the terminal, `file:` URLs, archive members and compressors to
+stdout, whole-environment dumps, and every parse bound, which now fails
+closed when the part it leaves unread could hold a printer. A read parses
+at most a 128 KiB budget of commands it has not judged before and is refused
+past it (an adversarial screen took 18.6 s and 85.7 s). **The limit**: a
+secret with no recognisable shape and no keyword beside it, or one printed in
+pieces or encoded otherwise, is not caught, and rule 3 cannot see through an
+alias, a shell function, a script, a symlink, a script handed a credential
+file as an argument, or a program piped in from anything but a literal
+`echo`/`printf`; the switch and the note are the backstops. The delta review
+(same day) made node's and bun's `-pe` take the next argument as its source
+(eb718b5 read `node -pe process.env`, and `node --env-file=.env -pe
+process.env`, refused at 3393daf), judged source fed on standard input and
+REPL input lines, and kept the `env $(cat .env | xargs)` loading idioms
+refused as an accepted cost.
 
 **Preview and dev servers (2026-10-10, WP-E; decisions W-4).** **No HUD or
 API response may be framed**: every response on 8402 and 8405 — the page,
@@ -2137,9 +2251,882 @@ other link opens in a new tab as before; the menu flips above a click on
 the panel terminal's last row and stays inside the window at any zoom.
 Free suites: `tests/v2/
 frame_check.py` (every route family on both listeners, checked against the
-route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` and
+route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` (now `browser.test.ts` and `hud_v2_browser_check.py`, BR-3a) and
 the terminal suite's link section. Not yet: a "dev servers in your
-terminals" list (§2.5 item 5).
+terminals" list (§2.5 item 5). **No framed page takes the keyboard on its
+own** (2026-10-12, R-1, AO-2's guard): a Browser frame that gains focus
+without the owner's gesture (the pointer over it, Tab, their own load, a
+card's give-back) is removed at once, focus goes back only to the HUD element
+that lost it to that theft (else to nothing that types or sends), and the
+pane says "This page took the keyboard · Reload" — always under a card or
+from a hidden pane. While a HUD text control has the keyboard, only a click on
+a page gives it the keyboard (the first click only focuses it).
+
+**Dev servers announced in a terminal (2026-10-12, BR-8a of
+`docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1; decisions
+B-2).** The daemon half of "a dev server started in a HUD terminal opens in a
+Browser pane by itself"; BR-8b, the window half, opens the pane
+(`lib/devopen.ts`, BR-2). While the owner's **Open dev servers
+automatically** switch is on (`browser.json` → `auto_open`, on by default,
+protected state, changed only by the owner-only `PATCH /browser/settings`;
+one file beside BR-1a's `lan` and `local_servers`, read and written only by
+`jarvis/v2/browser/settings.py`, which the gate, the host, `/status` and the
+terminals all share),
+`Terminal._output` feeds each shell terminal's **live** output to
+`jarvis/v2/devurl.py`, under the lock it already holds. It reads only a
+command's output — from the shell's signed OSC 133 marks it skips the prompt
+and the typed line (bash: `B` to `C`; a shell that marks no command, like the
+POSIX startup file: `B` to the end of that line), so typing `curl
+http://localhost:3000` opens nothing — never the alternate screen, and it
+strips escapes by `terminal_text`'s own grammar. A line that announces a
+server in one of the known shapes (Vite, Next, Create React App, Angular,
+webpack-dev-server, `python -m http.server`, Flask, uvicorn, Django, Puma,
+Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo, Jupyter, Astro,
+Storybook …) gives its URL, kept only if it is loopback http(s) with an
+explicit port, no user name, and none of Jarvis's ports
+(`config.control_ports()`, the workshop's, and the daemon's listeners as
+bound), with the query and fragment dropped and the host always written
+`localhost` (the window can frame no other loopback name). Two cheap tests
+run first and change no answer — a loopback host spelling and one of the
+shapes' words, as substring searches over a chunk's whole run of lines — and
+a chunk matches at most 32 lines against the table, so URL-dense output stays
+far above what xterm draws (PR #70 review: another host's URLs had slowed
+the terminal to ~9 MB/s). It is sent
+as one `{"type": "dev_url", "url"}` frame **on that terminal's own attached
+socket**, after the bytes that carried it — once per origin among the last
+four, at most one a second and four a minute per terminal, recorded only once
+the socket has taken the frame; with no window attached it is dropped and not
+remembered, and a ring replay never sends one. **Nothing else ever carries it**: no bus record,
+log line, thread log, Discord post or file, and Jarvis never sees it (the
+"Jarvis can read" switch is unrelated: this is the owner's window).
+**Auto-open never opens a port in the Remote gate** (amendment 2): the
+window loads the URL only in a Direct frame, and only the owner's own
+navigation opens a loopback port there. The sniffer holds at most a 512-byte line, a 64-byte escape carry and four
+origins. Its limits: a server started with `&` in bash whose banner lands
+while the prompt is up is skipped (it sits between `B` and `C`); input typed
+ahead while a command runs is echoed inside its output and read as output;
+text that only looks like a banner (`cat` of a log) is read as one, and the
+window judges every URL again. Free suites: `tests/v2/devurl_check.py` (every
+shape split anywhere with escapes, the refusals, the marks, the bounds, the
+rate limit, the settings file) and `terminal_check`'s `DevUrls` (the frame
+on that socket alone; nothing on the bus, in a log or a file; the switch
+off feeds the sniffer nothing; the switch is the owner's).
+
+**The VEX backend (2026-10-11, VX-1 of
+`docs/plans/2026-10-09-hud-editor-plan.md`; decisions V-1 to V-5).** The HUD
+can build a VEX V5 C++ project, download it to a slot on the brain, open the
+brain's user port as a terminal and make a new project from VEX's own
+templates — with the Windows `vexcom.exe` and toolchain the owner's VS Code
+VEX extension already downloaded, **run in place through WSL interop**:
+nothing copied, bundled or committed (VEX's licence forbids redistribution
+and decompiling, so the only `vexcom` flags used are DishPy's: `--name
+--slot --write --progress` and `--user` — plus the two reads the owner's
+own `vexcom --help` lists, `--json` and `--programs`). **Which files those are is
+`vex.json`**, written only by the human-run `jarvis vex setup` (it looks in
+the extension's own folders for VS Code and Cursor, prints what it found,
+checks it by the daemon's own rule, asks y/N, writes mode 600) and refused to
+every agent write tool, v1 and v2, as gate state; **every path in it is
+re-checked at each use** — absolute, no symlink anywhere in it, a regular
+executable (or folder), inside the extension's downloads or a
+`vexrobotics.vexcode-*` install — or the action is refused with "run `jarvis
+vex setup` again". Because those folders are under AppData, which an agent can
+write, setup also records each tool's SHA-256 and every spawn hashes the tools
+it is about to run first (review round 1); a swap between the final check and
+`exec`, the tools `make.exe` opens later, and a DLL planted beside a tool in
+its AppData folder (Windows loads a program's DLLs from its own folder first;
+the fingerprint covers the executable only) remain. This is the narrow, deliberate exception to "nothing under
+`/mnt/` ever runs" (which is about resolving the Claude and Codex CLIs). A
+request never names an executable, a path or an argument (the `DESKTOP_APPS`
+pattern): the argv tables live in `vex.py`, a project comes from its id, a
+build takes `{action}` and a download `{slot, name}`, validated first; Windows
+paths come from one function that refuses a character a command line or
+make's `cmd.exe` recipes could misread, and anything outside ASCII (Windows'
+"best fit" maps fullwidth quotes and slashes to syntax). Programs run as **program terminals**
+(`terminals.create_program`, called from `vex.py` alone): the same PTY, ring,
+attach and close as the owner's shells, with an environment that empties
+`WSLENV` so nothing of the daemon's crosses into Windows, no typed input but
+Ctrl-C except the brain's, and an exit hook that parses `file:line:col:
+error|warning:` into an errors list. One build per project (a lock file shared
+with `vexbuild`), one device action at a time (download, info, the brain
+port; a reservation released only by its holder), a 5-minute build timeout,
+and a build refuses a project whose make files name `vexcom`, failing closed
+wherever it cannot read them all (a glob too complex to check, an `include`
+continued onto the next line read as make reads it, one that does not resolve
+in the project refused rather than skipped) — a makefile is project content
+`make` runs, and one that downloaded would make a build a download. **Download is only the owner's
+click** (V-2, V-3): no tool, MCP tool, CLI or Discord verb reaches it, no "run
+after download", and **any agent command line that names `vexcom` is DENY in
+`rules.decide`** — so in v1's dispatch and v2's layer 1 alike, under an
+allowlist entry or `--dangerously-skip-permissions`, never put to the owner —
+in every spelling the rule lists: a path (the `/mnt/c` interop path, the Linux
+binary, `C:\…`), a wrapper, a `sh -c`/`cmd /c`/`powershell -c` string, quote
+and escape splits (bash, cmd's `^` and `%X%`, PowerShell's backtick), `$'…'`,
+empty and default-value expansions, brace expansion, a glob argument that keeps
+at least four of its letters, and a
+PowerShell `-EncodedCommand` that decodes to it — **and any line that runs
+something that could be it** (review round 2): a glob or an expansion in
+program position, past wrappers, as the program a runner starts (options
+parsed), in `sh -c` or `$(…)`, with no letter threshold; a program that cannot
+be told and could be vexcom is asked whatever stands, never allowlist-covered,
+always-ask in v2; a glob past the caps is too complex to judge, asked the same
+way. A here-document's body is data, read as commands only where a shell is
+fed it (review round 3: a `* item` in a commit message or a C doc comment
+written through `cat > f <<'EOF'` had made the whole line DENY). An allowlist
+entry for `uv` or `npx` still covers `uv run vexbuild` (the general stem-entry
+rule), and `terminal_read` can read the brain terminal, the owner's echoed
+typing included, while its "Jarvis can read" switch is on. Like every DENY it is an
+accident guard, not a boundary — and the button is not one either: an agent
+running as the owner can still reach a plugged-in brain through a script, a
+shell fed through a pipe, cmd's or PowerShell's own wildcards, `make -f`, a
+DLL beside the tool, or a forged-Origin POST to the route. Each device action therefore
+publishes an id-only `vex_device {action, at}` record, so one nobody clicked
+is visible. **Agents build through `vexbuild`** (`python -I -m jarvis.v2.vex
+build [--rebuild|--clean]`, isolated so a package planted in the project folder
+never runs, the same argv table and lock, no other subcommand), which asks like
+any command unless the owner allowlists exactly it, as does running it or its
+module through `python -m`, `uv run` or `npx`. A new project goes through the
+same `project_folder` card Discord's `/project new` raises —
+`projects.confirm_folder` is now the one confirmation handler both call — and
+the template is checked whole (no absolute paths, `..`, drive letters,
+symlinks or `.git`; at most 200 entries, 1 MB each, 10 MB in all, read with a
+cap) before anyone is asked, then written by Jarvis's code with `O_EXCL |
+O_NOFOLLOW`, then the settings file in the extension's v2 shape. **Device
+reads** (2026-10-12): the owner's `vexcom --help` lists `--json` ("system
+info in json format") and `--programs` ("shows programs") as its reads, so
+device info runs exactly `vexcom --json` (pretty-printed as text) and a
+second read, `vexcom --programs`, lists the programs on the brain — the same
+device reservation and fingerprint check, and nothing else from that help.
+Not yet, and said so by the routes: Python download (its flag is a spike
+item). Spike items, the
+owner's: the build against VS Code's own build log, and whether stopping the
+Linux side of an interop process ends `make.exe` on Windows. Agents' task
+worktrees live on the Linux filesystem, so `vexbuild` builds only in a chat's
+own project folder; Codex workers may not reach interop from their sandbox.
+Contract: `docs/hud-api.md`; free suite `tests/v2/vex_check.py`.
+
+**The VEX view (2026-10-11, VX-2 of the same plan).** A pane view, `vex`,
+that the view strip offers **only when the pane's project is a VEX project**
+(its settings file parses — or is there and cannot be used, so the view can
+say why). Switching a pane to it pins the pane to that project, so choosing
+another chat never moves a build or a download to another robot; its header
+has a project picker. It shows the project's card (name, language, slot,
+SDK), Build / Rebuild / Clean with **✓ or the errors list**, Download (a slot
+picker 1–8 defaulting to the project's, a name box defaulting to the
+project's name and held to the daemon's rule), the brain terminal and device
+info. The build's output, a download's progress and the brain's user port
+are VX-1's **program terminals in the WP-D panel** (opened there for the
+click that started them; no Restart on one that ended — it would open a
+shell). **An error click opens the file at its line** through ED-2's
+buffers: a drawn File pane on that project, else a new pane beside the VEX
+view (a split, so the list stays in sight), else the VEX pane itself; an
+error outside the project (an SDK header) is text only. **Download is only a
+click on the labelled button** — "Download to slot 3: replaces whatever is in
+slot 3 on the brain" — and the button counts only a trusted pointer click
+(`lib/vex.ts` `isExplicitClick`: Enter or Space on it and a script's
+`.click()` make clicks with `detail` 0, and a double click's second click
+`detail` 2; only `detail` 1 counts), takes no focus from a press and is
+out of the Tab order; there is no key and no palette entry. One click is one
+chain (`state/vex.ts`): the brain terminal paused when it holds the port, a
+build first when the daemon's 409 carries `code: "build_first"`, the
+download, then the brain terminal again. **One chain per window**: while it
+runs no other download starts, for any project; every VEX view shows it with
+a Cancel that stops its build and sends nothing; the VEX pickers are off.
+**Under an approval card every VEX control is disabled and inert, and the
+store refuses; a card that comes up between the click and a step drops the
+rest of the chain** — nothing is built or sent behind it, the brain terminal
+is not reopened — and the view says so. The daemon counts only C/C++
+sources, headers, assembly and make files as sources (a notes file never
+asks for a build), refuses while a build is unfinished (a mark on disk only a
+success clears), trusts a binary its last build wrote only while the
+sources' digest is unchanged since that build started, and never lets a make
+that found nothing to do vouch for one: an edited header the makefile does
+not list makes the click's chain run one rebuild, then download (review
+rounds M2 and MED-1). With no `vex.json` the view says the one command to
+run, `jarvis vex setup`, and checks again every few seconds and on focus. Device
+info, the programs list (**Read device info** and **List programs**, one
+device read at a time, headed by which it was and a non-zero exit) and every
+error message are drawn as text. A `vex_device` record this
+window cannot match to its own click is said in the view. Not yet: a Python
+project's download (VX-1's spike), a "dev servers" style list of past builds (only the last build per
+project is kept, across a reload by id). Free checks: `lib/vex.test.ts`,
+`tests/face/hud_v2_vex_check.py`.
+
+**New VEX project (2026-10-12, VX-3 of the same plan; decisions V-4).** New
+project's dialog offers "New VEX project from a template…", and the palette
+offers **New VEX Project from a Template…** — the palette's one VEX entry,
+which only opens the dialog. The dialog asks for a name (held to the daemon's
+rule: letters, digits, `_` and `-`, not starting with `-`, at most 64 — VEX's
+make refuses spaces), the language (C++ or Python), a template from the
+extension's own VS Code templates (the daemon's list, labelled from the
+extension's `index.json`), and the folder it goes in, defaulting to the one
+`jarvis vex setup` recorded (V-4). **It shows the exact folder it will create,
+and its Windows spelling**, as the daemon answers for exactly those inputs (a
+check that asks nothing and makes nothing); a folder the daemon refuses is
+said in its own words and Create stays off — **including a folder VEX's
+Windows tools could never build in** (a `(`, an `&`, anything outside ASCII:
+`My (1)`, `Документы`), which used to pass and be made, and then refuse every
+build. **Create raises the
+`project_folder` card** — the exact path, Approve/Deny, never Always — and the
+dialog waits on it: **Deny makes nothing** and the dialog stays open saying
+so; Approve makes the folder, unpacks the template (Jarvis's own code), writes
+the settings file in the extension's v2 shape so the project also opens in VS
+Code, and the new project appears in the sidebar and opens as a new thread. A
+Python template gives `src/main.py` and the settings file. A template write
+that fails after the yes takes back what it wrote — only what it made, judged
+by identity, never anything renamed or swapped into its place — and says what
+the folder holds now (empty again, or what is still there). While the card is up the dialog
+reads its request one read at a time and rides out a failed read, so a blip
+never turns an approved project into a failed one. An existing empty
+folder is used without a card, and the dialog says so before Create. **Under
+any approval card every control of the dialog is disabled and inert, and
+Escape belongs to the card** (it denies; the dialog stays, its words kept).
+With no `vex.json` it names `jarvis vex setup` and creates nothing. Free
+checks: `lib/vexNew.test.ts`, `tests/face/hud_v2_vex_new_check.py`,
+`tests/v2/vex_check.py`.
+
+**Up to eight panes (2026-10-10, WP-G1 of
+`docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions beside it).** The
+owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
+layouts"). Ten shapes now: WP-A's six plus 3 over 2, 3×2, 4 over 3 and 4×2
+(decisions S-1); ⊞ offers eight tiles, four to a row, 3×2 and 4×2 among them,
+with "Layout · N panes" at the head and no tile checked while a 5- or 7-pane
+shape is current (it then opens on the first tile, never on a toggle row). 5 and 7 are reached by split and close (WP-G2,
+below; `LADDER` is the shape per count, three being three columns, S-3) or a
+stored value. Every pane can show chat, task, file, diff, preview or a
+terminal (panes 5–8 default to chat), and the chats, terminals and dirty
+guards of WP-B and WP-D work in all eight.
+
+- **Ids are not slots.** A pane keeps its id for life — `pane-<id>`, its React
+  key (with a render-only incarnation WP-G2's close bumps), `chats[id]`,
+  its dirty flag — and `ws.order` lists the ids drawn in reading order; `kept`
+  holds the ones ⊞ hid. Everything the owner reads is the **slot**: "New
+  thread · N", the panel's "in pane N", the refusal chip, aria labels and
+  Ctrl+Alt+1 … 8. A stored WP-A/WP-B value has no `order` and reads as ids 1…n,
+  so it draws exactly what it drew (a golden file of 300 fits made by the old
+  code holds that). ⊞ to fewer panes hides the rest; more panes bring the
+  hidden ones back first, so 8 → 1 → 8 returns every pane where it was.
+- **The grid is derived from rows.** A shape is its panes per row (main2
+  aside); the CSS grid lays each row on the union of all rows' column edges,
+  so 3 over 2 and 4 over 3 have bottom-row edges of their own that drag
+  independently, and each pane's width (for the compact view menu and the
+  folded tree) is read from its own row.
+- **Fitting is generic.** A column drop keeps, in every row, a window one
+  narrower than the widest row — the focused pane's row the leftmost window
+  that holds it — and a row drop keeps the focused pane's row, a four-wide one
+  losing a column too. WP-A's drop tables hold unchanged, the focused pane is
+  never dropped (a property over every shape, focus, order and window size),
+  and a dropped set stays sticky only while these panes in this order could
+  draw it. Eight panes want ~1512px at 100%: 1920×1080 draws all eight (the
+  side panes squeezed to 480, columns at the 360 minimum), 1280×800 draws six
+  with the badge and "Showing 6 of 8", and 150% on that screen draws four;
+  zooming out is the lever on a laptop.
+- **Free checks**: `workspace.test.ts`, `layout.test.ts`, `chats.test.ts`,
+  `hud_v2_layout_check._eight_checks` (⊞ → 6 and → 8 at 1920×1080 with every
+  pane at the minimum and no sideways scroll, every view in a 4×2 grid, the
+  smaller windows, Ctrl+Alt+7 bringing a dropped pane back, a stored `[1, 5,
+  2]` focusing id 5 on Ctrl+Alt+2, 3 over 2's bottom edge, and eight panes
+  with Monaco, a frame and a terminal under a card at 160% and 70%) and
+  `hud_v2_multichat_check._eight_chats_checks` (eight chats on eight threads:
+  a turn in pane 7 draws only there, Stop in 8 leaves 7, voice lands in the
+  selected pane 6).
+
+**The editor's missing half (2026-10-10, ED-1 of
+`docs/plans/2026-10-09-hud-editor-plan.md`; decisions E-1, E-4, E-10).** The
+File tab had loaded only Monaco's bare API: no language was registered, so no
+file had colour, Ctrl+F was Chrome's find, Ctrl+S Chrome's "Save page as",
+and none of find/replace, folding, comment toggle, word suggestions or the
+command list existed. Monaco is now 0.57.0 (pinned) on its supported entry
+points, with a curated feature list and every Monarch definition (each
+tokenizer fetched only when a file of its language opens) — a whole editor
+**without intellisense**: no language server, and no TypeScript, JSON, CSS or
+HTML worker built or loaded ("Claude Code is my intellisense"). The language
+comes from Monaco's registry by the model's URI; `.h` is C++ for VEX, `.json`
+and `.toml` get small definitions of ours, a shebang names its language.
+Links open only http(s), with `noopener`. Until ED-3's Graphite scheme (below),
+vs-dark's salmon strings, its red tokens and the orange and gold chrome of
+find matches, bracket pairs and the unicode box are moved off amber and red.
+Under an approval card every editor is read-only and unfocused, and the
+editor host is its own stacking context so Monaco's overlays (context menu,
+suggest list, quick input) stay under the card; the checks open each and
+raise a card over it at 100% and 160%. Keys stay in the window's one capture
+handler: Ctrl+B folds the sidebar from the editor too, except as the second
+key of a Ctrl+K chord, which is Monaco's whatever it is (Ctrl+K Ctrl+0 folds
+all, as in VS Code; a lone Ctrl+0 is still the HUD's zoom reset, and neither
+reaches Chrome's zoom); the window's chord tracker follows Monaco's, counting
+only keys typed in an editor and leaving the chord after 5 s or when the
+window loses focus. Ctrl+S saves the editor it is pressed in — an action
+scoped to that editor and disposed with it, never Monaco's global
+`addCommand`, whose last-created editor owned Ctrl+S everywhere and outlived
+itself (the review of PR #43 found Ctrl+S in a diff writing a file blank) —
+and never opens Chrome's dialog; a save's answer lands only on the buffer it
+was sent from. Opening another file, or Reload, over an unsaved edit asks
+first. Each File pane picks its own project (decision E-13): a `Project ▾` in
+its header lists every project and Follow chat, re-pins that pane only,
+refuses while the pane holds an unsaved edit — known from the keystroke's own
+change event, never a frame later — and is disabled under a card.
+Monaco's right-click menu is placed in viewport pixels, which the HUD's CSS
+zoom scaled a second time (off the window at 160%), and flipped by its
+unzoomed size; it is laid out again after Monaco's own layout, in drawn
+pixels, and opens at the pointer at any zoom and edge. The diff view
+disposes its models (it leaked two per file viewed).
+Measured: the editor chunk went from 2.30 MB (bare API) to 3.63 MB, the
+worker from 232 KB to 277 KB, the first-paint chunk +5 KB. EditContext stays
+on: headless Chromium types into it. One defect is left on purpose: a space
+typed in Monaco still starts push-to-talk and is lost (confirmed headless);
+the owner moved push-to-talk to Ctrl+D (2026-10-10), which its own PR
+delivers. The `monaco-vim` spike is ED-8's (E-11), not this package's.
+
+**The HUD's CSP and installed build (2026-10-11, ED-4 of the same plan;
+decision C-1; contract in `docs/hud-api.md`).** Every HUD and API response
+carries one full Content-Security-Policy (`hud_api.HUD_POLICY` with WP-E's
+`frame-ancestors 'none'`, in the one header): only bundled script, no inline
+script, no `eval`, no `blob:` worker, same-origin `connect-src` (the terminal
+socket included), loopback `frame-src`, and — since ED-5's tree-sitter, below
+— `'wasm-unsafe-eval'`: WebAssembly compiles, a string never becomes
+JavaScript. A response may only narrow it
+(the avatar). The window that gates approvals is no longer served from the
+repo's agent-writable `hud/dist`: `jarvis hud install` — the owner's or the
+lead's, from their own shell; Jarvis is refused it in every spelling —
+builds `hud/` from a **clean** checkout (uncommitted `hud/` changes are
+refused unless `--allow-dirty`) and installs a read-only copy with a SHA-256
+manifest recording the commit under `~/.local/share/jarvis/hud/<build-id>/`.
+The daemon serves the newest **intact** build, checking every file's hash on
+every read, falls back past a newer build whose page fails, says on `GET /`
+whether nothing is installed or nothing passes, reports what it serves on
+`/status` (`hud_build`, `hud_git_head`, `hud_state`), and warns at start-up
+when that build's commit is not the checkout's HEAD — so a forgotten install
+shows up in the log rather than as a silently old window. An install needs a
+window reload, not a restart (an open window's lazy chunks are still served
+from the older build). Every headless HUD suite runs under the policy with a
+violation watch; `tests/face/hud_v2_csp_check.py` proves the HUD's needs work
+and an attacker's are refused.
+
+**Restart and rebuild from the CLI (2026-10-11).** `jarvis restart` (alias
+`jarvis daemon2 restart`) restarts systemd's `jarvis-daemon2` — refused while a
+turn runs or a broker approval waits (`/status` → `approvals_pending`) unless
+`--force`, and refused the same way when systemd says the daemon is up but it
+does not answer `/status` twice ("can't check" is never "nothing running");
+then it waits for a new daemon to answer `/status` and reports it. Typed in a
+HUD terminal, which lives in the daemon's own cgroup, it checks there and hands
+the restart itself to a transient unit (`systemd-run --user`), so the restart
+does not kill the command doing it. `jarvis hud rebuild [--pull] [--restart]`
+refuses an uncommitted `hud/` (an untracked or ignored `hud/.npmrc` included)
+**before** `npm ci` runs package.json's scripts, runs `npm ci` when the lock
+file moved, installs through `jarvis hud install`'s own path and checks
+`/status` serves the new build. Both warn of uncommitted Python in the
+daemon's checkout. Both are the owner's and DENY for every agent
+(`jarvis/v2/owner_ops.py`), as is changing the daemon's unit through
+`systemctl` or D-Bus, and — the owner's choice the same day — killing it by a
+`pkill -f`/`killall -r`/`pgrep -f`-fed `kill` pattern that matches its command
+line at `daemon2` (`pkill -f jarvis` stays ALLOW; a literal `kill <pid>` and
+kills by process name are not seen) or, since the re-review, by a `kill` fed
+its PID from its unit, cgroup, ports or `/proc`. A kill pattern whose
+matching cost cannot be bounded is never matched, since `re` holds the GIL:
+it is too complex to judge, so it is asked, never refused; `/status`
+reports the daemon's `pid`, and `jarvis restart` trusts a `/status` only from
+systemd's MainPID.
+
+**Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
+to talk button? change it to Ctrl + D just like it is in claude." It was
+Space, which is a character in every box the owner types in: each typing
+surface had to keep Space from bubbling to a document handler, and Monaco
+did not, so a space typed in the editor started the mic and never appeared.
+Now Ctrl+D is held to talk and let go — D or Ctrl, in either order — to
+send (`lib/talkkey.ts`, App.tsx). Ctrl and D only: Shift, Alt or Meta make
+it another key, AltGr (Ctrl+Alt) never matches, auto-repeat never presses
+twice, and nothing fires mid-composition; a layout whose D key types no
+Latin letter (Cyrillic, Greek) is matched on the physical key, as Chrome's
+own Ctrl+D is. The window takes it in the capture phase, so it works from the
+chat box, Monaco, a menu, a chip, the sidebar or a pane header, and nothing
+under the cursor acts on it: its default (Chrome's bookmark dialog) is always
+prevented and it stops at the window — under a card, muted or after a crash
+too. What it then does is what Space did: it goes to the selected chat
+(W-6), interrupts that chat's turn first, records nothing while the mic is
+muted, refuses under a card, with a picker open, with no chat on screen and
+after a crash. A window that loses focus mid-hold lets go (its keyup never
+comes). A hold is decided where it began: once Ctrl+D began as push-to-talk,
+or as a press refused under a card, its auto-repeat stays the window's when
+focus lands in a terminal mid-hold (a card answered elsewhere hands focus
+back, or the owner clicks into one), so the shell never gets a run of
+end-of-input from it — and a window blur mid-hold (a Preview frame taking
+focus) releases the mic but not the hold, so the repeats after it are still
+the window's, until D or Ctrl comes up or a fresh press, which always decides
+afresh (`TalkHold`). **In a focused terminal Ctrl+D is the shell's** end of input, left to
+xterm untouched (the owner's answer), the way Ctrl+B, Ctrl+Alt+B and Ctrl+_
+are; from a terminal push-to-talk is the orb, whose tooltip names the key.
+Under a card the window takes it there too, so it is never an EOF behind the
+card. **In Monaco Ctrl+D is push-to-talk**, and Monaco's own Ctrl+D, add
+selection to next find match, moves to **Ctrl+Shift+D** (`editorKeyRules`,
+applied in ED-1's `loadMonaco` after its extras; the old binding is removed,
+not shadowed, so Monaco's own record says where it went). Nothing in Monaco
+or the HUD binds Ctrl+Shift+D (D is otherwise only a Mac Ctrl binding in
+Monaco), and outside the editor it is Chrome's "bookmark all tabs", which the
+editor's binding prevents. **A pending Ctrl+K chord's Ctrl+D is Monaco's**
+(decisions E-10, as for Ctrl+B): the window's one chord tracker
+(`lib/editorkeys.ts`, now shared by the layout keys and push-to-talk, a
+keydown stepped once whichever asks first) says so, and push-to-talk then
+keeps the key from Chrome and leaves it to Monaco — Ctrl+K Ctrl+D, move last
+selection to next match, keeps its key. Taking it would leave Monaco's chord
+waiting to swallow the next key typed. (Before ED-1 loaded Monaco's chords,
+this PR loaded multi-cursor and find itself and unbound the chord; ED-1's
+bundle replaced both.) **Space is no longer push-to-talk anywhere**:
+it types a space, presses a focused button, and does nothing on a separator.
+So a button whose second press matters never takes focus from a pointer (its
+click still works): the approval card's AUTHORIZE and ALWAYS (an aborted
+click — pressed, slid off — used to leave focus there, and the next Space or
+Enter authorized), the terminal's "Jarvis can read" switch, the folded mic's
+mode cycle and the Preview's "Keep its origin". The first Space pressed
+outside a typing target says once, under the orb, that push-to-talk is
+Ctrl+D now; a card that arrives meanwhile takes the line at once. A preview frame is another document, so Ctrl+D inside one is the
+framed page's. Free checks: `talkkey.test.ts`, `monaco.test.ts` and
+`tests/face/hud_v2_ptt_check.py` (run by `hud_v2_check` after the terminal
+and preview sections, on a `MockDaemon(0)` of its own, or alone), plus the
+ported checks in the terminal (`\x04` to the PTY, nothing under a card, no
+EOF from a hold that moved into a terminal, the readable switch), multichat
+(W-6), layout (a separator) and preview (Keep its origin) suites.
+
+**The editor's colours (2026-10-11, ED-3 of the editor plan, §2.5;
+decisions E-4).** One Graphite scheme, in the spirit of Neovim 0.10's
+default: most code is the HUD's own text colour, told apart by weight and
+slant — keywords bold, comments italic and muted, punctuation dimmer — and
+colour is kept for four kinds of thing, in four new tokens beside the HUD's on
+`:root`: functions, tags and headings in glacier (`--syn-fn`), strings in
+sage (`--syn-string`), numbers, constants and escapes in lavender
+(`--syn-const`), types, modules, directives and keys in steel
+(`--syn-type`). Each is a quieter sibling of a HUD hue rather than the hue,
+so the accent still means only focus, selection, links and "running", and
+green only "done". No syntax colour is amber or red, and in the chrome red
+appears only for an error squiggle (nothing raises one) and a diff's
+low-alpha "removed"; every colour Monaco would otherwise draw orange, gold
+or amber — find matches, the first bracket pair, the unicode box, warnings,
+and the rest of its registry — is pinned off it. Every pair passes WCAG AA on
+the pane and on the current line. The scheme is one table keyed by
+nvim-treesitter's capture names, ready for ED-5's tree-sitter colour, and
+the same rows style Monaco's own Monarch tokens, which stay as the fallback;
+Monarch's C, C++ and Python are refined so a call, a builtin, a type and a
+constant show there too. The colours are written once, in theme.css: the
+editor's theme is built from the tokens when Monaco loads, and the tests
+recompute every contrast and hue from that file and read the rendered
+tokens back against it.
+
+**Buffers, tabs and the guarded save (2026-10-11, ED-2 of the editor plan,
+§2.3–§2.4; decisions E-7, E-8, E-13; the owner's `.env*` rule,
+`docs/plans/2026-10-11-env-files.md`).** A file's text lives in a buffer
+registry outside React (`hud/src/state/buffers.ts`): one Monaco model per
+file on disk, keyed by the absolute path the read route now returns, so one
+file reached from two projects (the Inbox is rooted at `~`) is one buffer, and
+the same file in two panes shares the text, the dirty dot and the undo stack
+while each pane keeps its own cursor and scroll. A view that unmounts never
+takes an edit with it, and the text is read once, at save — never per
+keystroke (#43's L3). Dirty is "not the version last read or saved" (the
+model's alternative version id), so undoing back to the saved text reads
+clean. Each File pane has tabs (`PaneSpec.editors {paths, active, preview}`,
+stored with per-field fallback, re-read from disk after a reload; unsaved
+text is never stored, and `beforeunload` asks while anything is dirty): a
+single click opens an italic preview tab the next single click replaces, a
+double click or an edit pins it, middle-click or × closes, and the last tab
+on an unsaved edit asks Save / Don't save / Cancel. One editor per pane, its
+model swapped. **Saving is guarded by content, not by mtime**: a read returns
+an `etag` (the first 128 bits of SHA-256), a save sends `expected_etag`
+(`null`: must not exist), and the daemon hashes the disk again under its lock
+and answers 409 with the current etag — an mtime missed a same-size rewrite
+on the 9p `/mnt/c` mount (or one `utime`d back) and called a bare `touch` a
+conflict. **The HUD polls** (`POST …/files/stat`, every 2 s while visible and
+on focus, hashing again only when the stat moved, because inotify cannot see
+a write made from Windows): a clean buffer whose file moved reloads in place
+as one undo step, with a toast naming the writer when the activity feed saw a
+running turn's tool call name the file; an edited one gets an amber conflict
+bar — Compare (the disk read-only on the left, the buffer on the right, side
+by side even in a narrow pane), Keep mine (saved against the disk etag the
+bar was shown, so a write meanwhile brings the bar back), Take theirs (asks
+once; Ctrl+Z brings the edit back); a gone file offers Save to recreate or
+Close. There is no force-save anywhere. **One classifier,
+`jarvis/v2/editor_policy.py`**, decides what the editor may do: withheld (a
+credential bundle, anything in a credential folder, Claude's and Codex's
+login files, git's credential store, `.netrc` — no content, ever; a withheld
+folder is never listed, except the gate's own files inside
+`~/.config/jarvis`), read-only (the gate's state, the safety layer and the
+served HUD build, bytes that are not UTF-8 — which a save never overwrites),
+the owner's env files, and text. **Every editor file route is owner-only,
+reads included** (E-7: the HUD's listener and its own page). **The owner
+edits `.env*` files here, and Jarvis never reads them**: `secrets.is_env_credential`
+is the one name rule (`.env` or `.env.<anything>` at any depth, not ending
+`.example`, case-insensitive, symlinks resolved both ways); such a buffer
+carries a lock — "Jarvis can't read this file" — Add to chat is disabled for
+it, its model has a language of its own so its words are never suggested in
+another file, and its text goes nowhere but its own save: not the bus, a log,
+localStorage, an `@path` attachment, a diff or the preview origin (which
+also refuse withheld files now — the preview origin had served a key out of
+the Inbox's `.ssh`). The Jarvis-side refusals of env files (v1 tools, the
+shell, the scrub, Claude's hook, Codex's grants, terminal_read) are ENV-1's,
+on this rule, built 2026-10-12 (CLAUDE.md's ENV-1 paragraph).
+"Add to chat" is here in its smallest form (the selection or the line, as
+`path:Lx-y` and a fence, into the selected chat's box, unsent) so the env
+rule has something to disable; ED-7 extends it.
+
+**ED-2's review round (2026-10-11, PR #49).** An env file is never demoted
+to `binary`: one that is not UTF-8 (UTF-16 from PowerShell 5.1 on `/mnt/c`,
+Latin-1) stays `env`, read-only, and every read now says `editable`, which
+the HUD follows rather than the kind. The gate's readable exemption holds
+only for a gate path that resolves to itself and is no credential by another
+rule, and only in the editor's own routes — an `@path`, a diff and the preview
+origin have none (a `models.json` symlinked to a key had made the key
+readable through all three). Withheld now also covers docker's, kube's,
+npm's and PyPI's credential stores and v2's session carriers, and **the
+preview origin refuses any dotfile path but `.well-known` and anything in
+Jarvis's own folders** — it answers every loopback client. In the window: a
+pane's × lets go of that pane's buffers only; a project going away keeps
+every pane on it that holds an edit no pane outside them holds (two panes
+sharing one edit used to let go together and orphan it); past 40 tabs only a
+clean one closes; Compare re-reads once per new conflict, never in a loop;
+one file reached through two projects at once is one model; a kind the window
+does not know is read-only and closed to Jarvis; the crash prompt can save
+every unsaved edit; a reload in place never reads as an edit; and the "changed
+on disk by …" toast names only a write tool, by absolute path.
+
+**The editor's navigation (2026-10-11, ED-7 of the editor plan, §2.8 and
+§2.10).** What made the HUD's editor a replacement for VS Code at the robotics
+lab: **quick open** (Ctrl+P: a fuzzy list of the project's files —
+`git ls-files` in a repository, gitignored output left out, dotfiles in;
+`file:line` jumps), **find in files** (Ctrl+Shift+F: the File pane's tree
+column turns to a search with case, word, regex and a `.gitignore` toggle and
+a file filter; a hit opens at its line; at most 2,000 matches and 10 s; never
+on the Inbox), **the command palette** (Ctrl+Shift+P or F1: the HUD's commands
+plus Monaco's own actions when an editor had focus; never a download or a VEX
+device), **the explorer's** new file, new folder, rename and delete (a
+right-click menu; a delete moves to the trash after asking), **the status
+bar** (Ln/Col and selection, language, indentation, encoding, line endings,
+saved/unsaved/saving), and **Add selection to chat** extended to every
+selection and to the palette and Monaco's context menu. Three owner-only
+routes carry it (`docs/hud-api.md`); find in files runs on `grep_files`'
+own core, so the two refuse exactly the same credential files, and the
+explorer refuses through `editor_policy`, `scope` and the trash — never a
+copy of a rule. A rename moves the open buffer with it (its unsaved edit and
+undo stack included) and every pane's tab follows; a delete leaves an
+unsaved edit in its tab, where Save puts the file back. Under an approval
+card quick open, the palette and the explorer's menu close, their keys do
+nothing, and the search is inert with the rest of the window.
+
+**Split and close (2026-10-11, WP-G2 of
+`docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions S-2, S-6–S-8).**
+The owner asked for a × on every pane, more than once, and a VS Code split
+button. Every pane's strip now carries both: the split button
+(the title bar's icon button, an outline with one divider) in every layout,
+the × whenever more than one pane is drawn. A split adds a **copy of the
+pane right after it** and focuses it, on the ladder's shape for the new
+count (2 columns, 3 columns, 2×2, 3 over 2, 3×2, 4 over 3, 4×2); a × removes
+exactly that pane and the rest reflow onto the ladder's shape for one fewer.
+⊞ still hides and restores; × discards — the pane's spec goes back to its
+default, and an id a later split reuses mounts fresh.
+
+- **What a copy shows**: a chat, a new thread in the same project (a thread
+  is open in one pane only); a file, its tabs on the same buffers (since
+  ED-2, below: one text, dirty dot and undo stack for both, so a pane with
+  an unsaved edit splits too — S-8's "save first" was for two copies that
+  could diverge); a diff, the same task and file; a task, that task's
+  diff (S-7); a preview, the same URL, judged again, never the keep-origin
+  grant; a terminal, a new shell in the folder the source was opened in
+  (S-6), unreadable to Jarvis if the source is — switched off before it is
+  ever shown (`POST /terminals` takes `readable`). Split is refused at
+  eight, when the next shape would not be drawn whole in this window (at
+  1280×800, six cannot become seven), and when the only ids left are hidden
+  panes holding unsaved edits. A split takes a free id first, then an empty
+  hidden pane, then one whose compose row holds unsent words, which wait for
+  the next new thread; a stored pre-G1 workspace's panes 2–4 count as
+  hidden, so a split never writes over them.
+- **What × keeps**: a thread's turn keeps running, its sidebar dot stays,
+  and the pane that next opens that thread has its Stop; words in its box and
+  words a Stop handed back wait for the thread; a composing chat's unsent
+  words and a File pane's unsaved edit — one no other pane holds — are asked
+  about first, inline, never in a modal (for an edit: Save / Don't save /
+  Cancel, as closing the last tab on one asks; the question goes when it no
+  longer holds); a terminal goes back to the panel, alive, attached, as the
+  selected tab. A compose pane closed while its first message opens the
+  thread leaves that turn for the pane that opens the thread next, Stop and
+  all. Focus goes where the mic is: the selected chat while it is still
+  drawn, else the chat selected before it, else the pane now in that slot —
+  never the page, and never a chat that merely slid into the closed slot.
+  One click closes one pane, even when a double-click's second click lands
+  on the × that moved under the pointer.
+- **Nothing assumes pane 1**: after it is closed, the window's chat falls
+  back to the pane in slot 1, the header ids and Ctrl+Alt+1 follow the slot,
+  and a reload keeps the order.
+- **Under a card** every split, × and close question is disabled and inert,
+  the card keeps focus and stays on top at 160% and 70% over eight panes.
+- **Free checks**: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
+  and sections of the layout, multichat, terminal and preview suites; each
+  was shown to fail against its mutation (the PR's table). WP-G3's shared
+  buffer came with ED-2's buffers (its `filesync` went with it); not built:
+  WP-H's thinking line.
+
+**Syntax colour the Neovim way (2026-10-11, ED-5 of the editor plan, §2.6).**
+C/C++ (VEX's `.h` and `.c` included), Python, JavaScript, TypeScript and TSX,
+JSON, Bash, CSS, HTML, YAML, TOML and Markdown are coloured from a real parse
+tree: tree-sitter (`web-tree-sitter` 0.27.0 and each language's MIT grammar,
+pinned exactly) in a syntax worker of its own, with nvim-treesitter's own
+highlight and injection queries, vendored at a pinned commit and translated
+once by a dev-run script. Monaco asks for the visible lines, the worker
+answers with semantic tokens styled by ED-3's table, and Monarch stays
+underneath, so colour is never missing — only quieter. Edits reparse
+incrementally (tested against a fresh parse over 300 random edit sequences);
+a Markdown fence is coloured as its language, Markdown paragraphs by the
+inline grammar, HTML's `<script>` and `<style>` as JavaScript and CSS. Past a
+budget a file stays on Monarch and its editor says so in a corner: over 1 MB
+("syntax: basic (large file)"), a first parse over 1 s, or reparses cancelled
+twice running. The grammars are code the worker runs, so the HUD's policy
+gained `'wasm-unsafe-eval'` (WebAssembly only) and the worker's loader fetches
+only the runtime and the grammars built into its map, from the HUD's own
+`/assets/`, refusing any other URL before a request is made. Nothing loads
+until the first file of a covered language opens: first paint grows by 168 bytes,
+the worker is 213 KB, and the grammars (about 10 MB in all) load one by one
+as their languages first appear. Folding and sticky scroll from the tree
+followed in ED-6 (below).
+
+**Folding and sticky scroll from the tree (2026-10-12, ED-6 of the editor
+plan, §2.6).** In the same languages, folds follow the code rather than its
+indentation: nvim-treesitter's own `folds.scm` (vendored at ED-5's pin, each
+file's size and SHA-256 in a manifest) is run by the syntax worker over the
+tree it already holds, so a C++ file folds at its includes, classes,
+functions (at the signature, even with the brace on a line of its own),
+`if`s, `for`s, lambdas and block comments, a Python file at its defs,
+classes, docstrings and multi-line brackets, and a Markdown file at each
+heading's whole section and each fence. As in VS Code, a block's own closing
+`}` (or `]`, `)`, end tag) stays visible below a folded block, so `class A {`
+folds to `class A { ⋯` over its `};`. **Sticky scroll reads the same
+ranges**: deep in a function, the line held at the top is the function's
+signature. Wherever tree-sitter is not serving a file — past 1 MB, on a slow
+parse, with the worker gone, in a language it does not cover, and always for
+an env file, which never reaches the worker — Monaco folds by indentation, as
+before; and the fold query has the colour queries' 250 ms budget (twice over
+it, that file folds by indentation from then on).
+
+**Chat titles (2026-10-12).** The owner: "right now each chat just displays
+its id. we should keep the id in the three dots but have the main display be
+the title and have the title wrap after a certain length." A chat names
+itself from the owner's first message (`jarvis/v2/titles.py`): Codex
+`gpt-6-luna` at effort low when Codex is healthy and the account lists it,
+in a tool-less, read-only, one-turn app-server that never waits on the login
+lock (a busy lock is tried again over ~90 s, then OpenRouter); else the
+default OpenRouter model. The Codex turn has no environment
+(`environments: []`), which no live run has verified: if a ChatGPT-auth turn
+ignores it, a read-only command can run before the turn is refused; its
+output is discarded, and the title comes from OpenRouter. Chats from before are titled by a backfill at
+start-up. A title is written only onto an empty one, so **a rename always
+wins**, before or during generation, and it follows to the chat's Discord
+thread like a rename — except for a chat archived in the HUD, whose Discord
+thread keeps its name (and stays archived) until the chat or its project is
+restored. The Archive view names archived chats by title as well. In the sidebar the title **wraps**, clamped at three
+lines with the whole title as its tooltip; an untitled chat reads "New
+thread" (or "Untitled" for an older one the backfill has not reached), muted
+and italic, never its id — the id is "Copy id" in the row's ⋯ menu. A split's
+chat header names it the same way. No agent can set or regenerate a title.
+
+**The git gutter and the explorer's git colours (2026-10-12, ED-9 of the
+editor plan, §2.5 and §2.8).** Beside the line numbers each open file shows
+what changed since HEAD, as VS Code does: a bar in sage (`--syn-string`) on
+added lines, in glacier (`--syn-fn`) on modified ones, and a small red wedge
+at 60% where lines were removed — the diff's "removed" colour, the only red,
+never amber. It is diffed against the **buffer**, not the disk, so it follows
+an unsaved edit as it is typed (after a short pause) and is clean again once
+the edit is undone; a file HEAD does not hold, a binary one or one past
+100,000 lines has none, and an env file never has one. The File pane's tree
+colours names the same way — modified glacier, added and untracked sage, a
+merge conflict lavender, ignored dimmed — and a folder takes the strongest
+state inside it. HEAD's text and the status come from two owner-only routes
+(`docs/hud-api.md`) that refuse what the editor withholds, every env file and
+the gate's state, by path and by the name git has for a renamed file (which
+must also lie in the project), and that refuse a repository whose own config
+names a program; the status never goes into a submodule. The status is polled
+every 3 s per project while something shows it (the daemon caches it 2 s); a
+poll that sees nothing new redraws nothing, and typing never redraws the
+tree. A file in another repository than the project's — a nested robot repo,
+a file reached through the Inbox — checks its own HEAD every 10 s while the
+window is visible, so a commit there clears its marks.
+
+**The Browser's engine (2026-10-12, BR-1a of
+`docs/plans/2026-10-10-hud-browser-plan.md`; amendment 1 and the decisions
+file win).** The daemon owns a Google Chrome (stable, from apt) for the
+HUD's coming Browser pane, headless and streamed later (BR-1b); this package
+is its engine and its fences, no HUD yet. Chrome starts at the first
+`POST /browser/tabs`, one instance per profile — **Main** at first, plus one
+**Private** instance whose panes are each an off-the-record context — and
+stops with the daemon (anything left is killed by exact PID). Every
+connection it makes, loopback included, goes through a loopback **SOCKS5
+gate** in the daemon that resolves a name once and connects to the address
+it judged: Jarvis's own ports (the control ports, the HUD and API ports,
+8403 unless it is this daemon's workshop) are refused on every address in
+every spelling, a public name that resolves to loopback is refused, the LAN
+only with the owner's switch (`browser.json`, off), and **this machine like
+the LAN**: a loopback port only once the owner opened it in a tab (the
+lead's decision on PR #69's review; a page or an agent never opens one), and
+then only by a literal or `localhost`. A name keeps the kind of address it
+was first allowed on. Chrome sends no UDP at all — no QUIC, WebRTC held to
+proxied transports and its mDNS responder off — checked by its effect, a
+packet sniffer in a private network namespace seeing nothing leave but on
+loopback. Typed URLs pass a **judge** first (http,
+https or about:blank; no user name, no `file:` and friends, which never
+touch the network), and wherever a page lands is judged again and replaced
+with an explanation when refused. Its folder (`~/.local/share/jarvis/
+browser`) is a 0700 credential folder holding the profiles, Chrome's HOME and
+the Private run folder; the launch keeps Chrome's sandbox, Safe Browsing,
+component updates and sign-in and sync (BD-5), and drops automation, the
+DevTools port, extensions and permission prompts; Chrome's environment is
+built from nothing. Every `/browser` route is owner-only on the HUD
+listener, and no URL, title or profile label reaches `/status`, the bus or
+the log. `/status` gains `browser` and `refused_ports`. The same review
+closed v1's file tools (`read_file`, `grep_files` and the write tools) to
+every credential folder, the Browser's profile included.
+
+**The Browser's stream and the owner's input (2026-10-12, BR-1b of the
+browser plan, §2 "The stream", §3, §8; amendment 1 §B.8–§B.9).** Backend
+only; BR-3b draws it. A HUD window sees one tab over a socket of its own —
+the terminal's pattern: a single-use 30 s ticket for that tab from an
+owner-only route, and a tab another window shows is asked for first — as a
+JPEG screencast, **one frame in flight and the newest next**, so a slow
+window never falls behind; a tab no window shows is not streamed. The
+owner's keys, pointer, wheel and pasted text go back in BR-2's shapes and
+become real CDP input events; every message is held to its shape and bounds
+by the daemon, whatever the window sent. **While any approval card is up,
+nothing reaches a page**: input is dropped (the window hears `held`), the
+owner's own navigation routes answer 409, and the moment a card is raised
+everything queued is dropped, so nothing sent before or during it is ever
+delivered after. A press a card cut off ends with no click anywhere: Chrome
+would click the page's root for a release outside it (measured), so the
+daemon ends such a press as a pointer move with no button down. The page's
+dialogs (alert, confirm, prompt, leave-page) go to the window and are
+answered there, dismissed after 60 s or at once when no window shows the
+tab. A pop-up opens as a tab and its opener's window is told, to place it in
+the same pane; past the cap of 12 tabs in all the pop-up is refused rather
+than an older tab closed. Downloads are saved owner-only (0600, a folder of
+their own, a cleaned name) in the profile's private folder and offered to
+the window as an attachment that can never run on the HUD's origin; an
+executable is held until the owner's card (BR-9b). A page's file chooser is
+answered only through an owner-only route with files the owner picked in a
+project, judged by BR-9a's upload rule. The owner's input pauses a driving
+agent before it is delivered and is timestamped for BR-9b's gate; the
+banner's channel (`driver`, `action`, `paused`, `list`) is there for BR-9c.
+On the bus, only `browser_attached` (a tab id and a time); no URL, title,
+typed text or frame reaches the bus or the log.
+
+**Editor settings, `.editorconfig` and vim (2026-10-12, ED-8 of the editor
+plan, §2.8; decisions E-9, E-11).** A File pane's ⚙, or "Editor Settings…" in
+the palette, opens one dialog for every editor in the window: font family
+(names only — nothing that could end a CSS value), size, tab size, spaces or
+tabs, word wrap (Markdown wraps by its own setting, on), minimap (off), sticky
+scroll, whitespace, bracket-pair colours, cursor style and vim keys (off).
+A change applies to every open editor as it is made and is kept in the
+window's storage, each setting checked alone, so a bad stored value costs
+only itself. Auto-save and format on save stay off (E-9). A project's
+`.editorconfig` — read through the editor's own owner-only routes, from the
+file's folder up to the project's root and never above, stopping at `root =
+true` — sets a matching file's indentation and the line ending a file with
+no line break takes for its new lines; it never touches a file's existing
+line endings and **never rewrites anything on save**, whatever its
+`trim_trailing_whitespace` or `insert_final_newline` say. An `.editorconfig`
+is project content an agent can write, so judging one **never holds the
+window**: one file's judgement is one task, stopped by a 5 ms clock, and a
+config that runs out of time twice, or is past a limit no real config
+reaches, configures nothing until its content changes. Vim (E-11) is
+`monaco-vim` 0.4.4, loaded only when switched on, with its mode and `:`
+command line under the editor; `:w` saves that editor's buffer through ED-2's
+guarded save. **Push-to-talk keeps Ctrl+D in the editor in vim mode too —
+the owner's decision (2026-10-12)**; vim loses its half-page-down. Under an
+approval card the dialog closes and the ⚙ is disabled with the rest of the
+window.
+
+**File reads as the editor, Preview is the Browser (2026-10-12, BR-3a of
+`docs/plans/2026-10-10-hud-browser-plan.md` §7, cut by its amendment 1 to the
+rename and the migration).** The owner: "also rename "File" to "Editor" and
+"Preview" to "Browser"". The strip says **Editor** and **Browser**. The
+Browser changes in name and id both — view `"browser"`, `browserUrl`,
+`lib/browser.ts`, `BrowserTab.tsx`, `browser-*` test ids — and the terminal
+link menu says **Open in Browser** (`term-link-pane`) and **Open in a Chrome
+tab** (`term-link-tab`); which links get the menu is unchanged until Remote
+mode (B-11). A layout stored before the rename migrates as it is read, under
+the same key: a Preview pane opens as the Browser with its URL, and its
+keep-origin grant only while that grant is still exactly the URL's origin;
+the next save writes only the new names. The editor changes in name only:
+its id stays `"file"`, so stored layouts and the editor suites need nothing,
+and one label table (`VIEW_LABEL`) names every view for the strip, its
+compact menu and the pane's `aria-label`; the palette's "Show Files" is
+"Show Editor". The workshop listener (8403) keeps its Python names
+(`preview_route`, `preview_only`) and is "the workshop origin" in the docs.
+Free checks: `workspace.test.ts` (the migration, the grant, the label table,
+a stored `"file"` pane) and `tests/face/hud_v2_browser_check.py` (was
+`hud_v2_preview_check.py`; its `_rename_checks` seed a pre-rename layout).
+
+**The Diff pane shows the project's uncommitted changes (2026-10-12, the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view).** With no task to show, a Diff pane
+lists what changed in its project since HEAD — modified, added, untracked,
+renamed, deleted and conflicted files, and untracked folders, each with its
+letter (M, A, U, R, D, C) in the explorer's colours and the editor's file
+icon; ignored files never — headed "Uncommitted changes in <project>". A
+click shows HEAD's text on the left and, on the right, the file as the
+editor shows it: **the open buffer itself** when the file is open in a File
+pane, so an unsaved edit is there and the diff follows typing, else the file
+as read; a deleted file's right side is empty, and a binary, too-large or
+non-regular file says so. **An env file is listed and never diffed** — the
+pane says so and offers Open, and nothing about it is asked of the daemon.
+Open puts the file in the editor where every other open does (a drawn File
+pane on the project, else a split beside — never over this view or a VEX
+view). It is **read-only**: no staging, reverting or committing here. Which
+it shows: **never another task than a drawn Task pane** — while one is drawn
+and shows a task, the Diff shows that task's diff, even after a thread is
+picked, and its picker is off; else a task picked more recently than a
+thread shows the task's diff, exactly as before (so a task click always
+shows in a drawn Diff pane); else the project the pane is pinned to (its
+header's picker, as the File pane's; a File pane that opened a file keeps its
+pin when it becomes a Diff pane); else the chat's project. The caption says
+which and why ("the Task pane's task", "the task picked last", "this pane's
+project", "the chat's project"). Picking a project in that picker takes the
+window off the task, as picking a thread does. Under a card its picker, Open
+and ↻ are disabled. The list
+is ED-9's status poll (only while the pane is drawn), and typing anywhere
+else in the window never redraws it; HEAD's text is ED-9's
+base route, which now also answers for a file deleted from the working tree.
+A file opened and edited while its diff is still being computed swaps to the
+buffer quietly (the computation is cancelled first), and a buffer that goes
+away while shown reads "…" until the file is read again, never as an empty
+side.
+
+**The Diff pane's follow-ups (2026-10-12).** The change list draws only the
+rows in view, so the status's 20,000-file cap costs typing elsewhere in the
+window nothing (about 2 ms a character beside it, where every row drawn cost
+~100 ms). It takes keys: ↑ ↓, Page Up/Down, Home and End move the selection
+and scroll it into view, Enter reads it again; a selection scrolled out of
+view stays selected, its diff still shown, and the keys move on from it; a
+reload scrolls the pane's file into view. A held key moves the highlight at
+once and reads only the row it stops on (after 150 ms of no keys), and a
+read no longer wanted is dropped, so on a slow repository the last row's
+diff is not stuck behind every row passed. A screen reader hears each row's
+place in the whole list and the selected row as the keys move. **The Task pane's header clears its
+task** ("task <id> · clear", off under a card): the 2×2 grid draws a Task
+pane, and while it shows a task every Diff pane shows that task's diff, so
+clearing is the way back to a project's uncommitted changes — a Diff pane
+still never shows another task than the Task pane. The task diff and Compare
+cancel a diff still being computed when they close, as the uncommitted
+changes' diff already did, and never touch the buffer Compare shows; and the
+uncommitted changes' diff is drawn with the owner's editor settings (font,
+size, whitespace, bracket colours, sticky scroll), live, as the task diff and
+Compare are.
+
+**The Browser's action rules and reviewer (2026-10-12, BR-9a; amendment 1 to
+the Browser plan, §B.3–§B.5).** Before an agent's click, keystroke or
+navigation in a Browser pane runs, fixed rules refuse what no model may allow
+(typing into a password, one-time-code or card field, a credential in what it
+types or where it goes, an upload from outside the chat's project, acting
+while a card is up or the owner holds the pane) and ask about logins,
+payments, uploads and executables; a reviewer model judges the rest, and
+every failure of it asks. Not wired yet: nothing drives a pane until BR-9b.
+
+**Finding the dev servers an agent started (2026-10-12, AO-1a; amendment 2
+to the Browser plan, §B).** A pure module, not wired yet: nothing opens until
+AO-1b and AO-3. It finds new loopback listeners in `/proc/net` and refuses
+Jarvis's ports, service ports and the ephemeral range first. It attributes a
+listener to a chat or task only by the origin tag in its owning process's
+environment, read as raw bytes and never decoded or logged. It also judges
+the probe's answer and picks the one window that acts.
 
 **A thinking line at the foot of each chat (2026-10-10, WP-H of
 `docs/plans/2026-10-10-hud-split-panes-plan.md`, §4; decisions S-4).** The

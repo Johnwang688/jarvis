@@ -9,7 +9,8 @@ Read-only is enforced by SQLite itself, not by prose: the connection opens
 with the `mode=ro` URI flag, so INSERT/UPDATE/CREATE fail at the engine no
 matter what SQL arrives — which is what lets this stay a safe tool with no
 approval gate. Protected credential files are refused by name before the
-open, same rule as read_file.
+open, and anything in a credential folder (the Browser's profile among them)
+by where it is, the same rules as read_file.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from pathlib import Path
 from typing import Annotated
 
 from . import tool
-from .secrets import is_protected, refusal
+from .files import _credential_folder, _credential_folder_refusal
+from .secrets import is_credential, refusal
 
 MAX_ROWS = 200
 MAX_CHARS = 20_000
@@ -39,8 +41,13 @@ def query_sqlite(
     rather than paging through everything.
     """
     path = Path(db_path).expanduser()
-    if is_protected(path):
+    if is_credential(path):
         return refusal(path.name)
+    # The HUD Browser's History, Cookies and Web Data are SQLite files in a
+    # credential folder (review of PR #69). `_credential_folder` judges the
+    # path as written and where it resolves, so a symlink in is refused too.
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     if not path.is_file():
         return f"Error: no database file at {path}"
     try:

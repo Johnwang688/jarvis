@@ -45,8 +45,11 @@ class ScheduleTools(unittest.TestCase):
         self.events = self.daemon.bus.subscribe()
 
     def dispatch(self, name, **arguments):
-        return tools.dispatch(name, json.dumps(arguments),
-                              approve=lambda *_: self.fail("schedule tools are not dangerous")).text
+        # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+        # the suite says what it calls — the three schedule tools — and is held to it.
+        with runtime.tools_bound({"schedule_create", "schedule_list", "schedule_delete"}):
+            return tools.dispatch(name, json.dumps(arguments),
+                                  approve=lambda *_: self.fail("schedule tools are not dangerous")).text
 
     def create(self, **kw):
         return json.loads(self.dispatch("schedule_create", **(dict(brief="Check the project", when="every 15 minutes") | kw)))

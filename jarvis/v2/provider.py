@@ -90,6 +90,8 @@ class Event:
     #   reviewer_declined: {"tool", "args", "command": str|None, "reason": str}
     #   question: {"req_id", "text", "options": list[str]}
     #   usage: {"input", "output", "cached", "cost_usd": float|None, "provider_reported": dict}
+    #     (Claude also: "cost_total": float|None, the CLI's running total its
+    #     `cost_usd` was measured against, which the daemon saves on the thread)
     #   turn_finished: {"stop": "end"|"max_turns"|"interrupted"|"error"}
     #   error: {"message": str, "fatal": bool}
 
@@ -144,6 +146,12 @@ class UserMessage:
     spoken: bool = False
     discord_message_id: str | None = None
     discord_channel_id: str | None = None
+    # The owner is at the desk (WP-F): set only by the HUD's own send route,
+    # and only when the request came through the HUD's listener with the
+    # HUD's Origin (`projects.is_owner`) — never by Discord, the API
+    # listener every tool's HTTP client uses, the escape hatch or a schedule.
+    # The fast path holds `terminal_read` only for such a turn.
+    desk: bool = False
 
 
 # Permission callback the daemon hands every provider: the five layers of §6

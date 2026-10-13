@@ -18,21 +18,38 @@
 // Input that belongs to a thread — typed words, a steer, a hand-back, a first
 // send, a transcript — stays with that thread.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, subscribe } from "./api";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
-  type ChatPatch,
+  type ChatPatch, type State,
 } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
-import { FileTab } from "./components/FileTab";
+import { FileTab, type FileAsk } from "./components/FileTab";
+import { VexView } from "./components/VexView";
+import { DETECT_STALE_MS, vex } from "./state/vex";
+import { offersVex } from "./lib/vex";
+import { ENV_LANGUAGE, makeModel, monacoEditors, monacoLanguage, monacoModels, relanguage, setEditorsBlocked } from "./lib/monaco";
+import { buffers, PlainModel } from "./state/buffers";
+import { NO_TABS, openTab, renameTabs, sameTabs, writtenPaths } from "./lib/buffers";
+import { Palette, QuickOpen } from "./components/QuickOpen";
+import { focusedEditor } from "./components/Editor";
+import { EditorSettingsDialog } from "./components/EditorSettings";
+import { applyEditorConfig } from "./state/editorconfig";
+import { editorSettingsProbe } from "./state/editorSettings";
+import { commandOf, paletteEntries, type CommandContext, type CommandId, type EditorAction, type Entry } from "./lib/commands";
+import type { EditorShortcut } from "./lib/layout";
+import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
-import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
-import { judgePreviewUrl } from "./lib/preview";
+import { ProjectDiff } from "./components/ProjectDiff";
+import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
+import { BrowserTab, type BrowserRequest } from "./components/BrowserTab";
+import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
+import { installFrameGuard } from "./state/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
@@ -42,27 +59,35 @@ import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
-import type { Attachment, AvatarDesc, ChatMessage, Schedule, VoiceEntry } from "./types";
+import type { Attachment, AvatarDesc, ChatMessage, Schedule, Thread, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
 import { composeChoice, threadBody } from "./lib/threadmodel";
+import { threadLabel } from "./lib/threadTitle";
 import { HeldBack, nextNonce } from "./lib/giveback";
 import { useThreadModel } from "./components/ThreadModelControls";
 import { ProjectDialog } from "./components/Pickers";
+import { NewVexProject } from "./components/NewVexProject";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
 import { guildConfigured, ownerLine } from "./lib/discord";
-import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./components/Layout";
+import { CollapseButton, Rail, Splitter, TitleBar, focusPaneElement, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
-import { terminalAttached, terminals } from "./components/Terminal";
-import { terminalSpecFor } from "./lib/terminal";
-import { maxWidth } from "./lib/layout";
-import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
+import { terminalAttached, terminalRead, terminals } from "./components/Terminal";
+import { inTerminal, terminalSpecFor } from "./lib/terminal";
+import { SPACE_HINT, SPACE_HINT_KEY, TalkHold, isTalkKey, isTypingTarget, wantsSpaceHint } from "./lib/talkkey";
+import { inMonaco, maxWidth } from "./lib/layout";
+import { chordSecond } from "./lib/editorkeys";
+import {
+  PANE_NOS, SHAPES, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, show as showOf, slotOf, splitTitle,
+  type PaneNo, type PaneSpec, type View,
+} from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
-  besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane, heldElsewhere,
-  isEmptyChat, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
+  ORPHAN_DRAFT, besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane,
+  heldElsewhere,
+  isEmptyChat, nonePerPane, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
 import { useStableHandlers, useStableValue } from "./lib/stable";
 import { thinkingLine, type ThinkingLine } from "./lib/thinking";
@@ -87,7 +112,82 @@ const REFUSED_MS = 6000;
 const MIC_TIGHT_H = 560;
 
 /** One value per pane, all null: the window's per-pane refs start here. */
-const perPane = (): Record<PaneNo, string | null> => ({ 1: null, 2: null, 3: null, 4: null });
+const perPane = nonePerPane;
+
+/** The editor's change poll (ED-2, plan §2.4): every 2 s while the window is visible. */
+const BUFFER_POLL_MS = 2000;
+
+// The window's one buffer registry talks to the daemon through the API and
+// makes Monaco models — or, when Monaco cannot load, the fallback's shim, so
+// the save path stays reachable.
+buffers.configure({
+  read: (projectId, path) => api.readFile(projectId, path),
+  write: (projectId, body, signal) => api.writeFile(projectId, body, signal),
+  stat: (projectId, paths) => api.statFiles(projectId, paths),
+  makeModel: (text, abs, kind) => makeModel(text, abs, kind).catch(() => new PlainModel(text)),
+  now: () => Date.now(),
+  // A renamed file's model takes its new name's language (ED-7).
+  relanguage: (model, abs, kind) => relanguage(model, abs, kind),
+  // `.editorconfig` (ED-8), read through the same owner-only routes.
+  prepare: (model, projectId, path) => applyEditorConfig(
+    { stat: (id, paths) => api.statFiles(id, paths), read: (id, p) => api.readFile(id, p) },
+    model as any, projectId, path),
+});
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+type FileAskBody = DistributiveOmit<FileAsk, "nonce">;
+
+/** What quick open and the palette act on, taken the moment they open (ED-7). */
+interface NavContext {
+  /** The File pane they act in (or the pane that becomes one). */
+  pane: PaneNo;
+  projectId: string | null;
+  /** The pane is not a File pane yet: it switches when something is opened. */
+  switchTo: boolean;
+  activePath: string | null;
+  /** The editor that had focus, for Monaco's actions in the palette. */
+  editor: any | null;
+  ctx: CommandContext;
+  actions: EditorAction[];
+  /** Where focus goes back to when the box closes with nothing done. */
+  returnTo: HTMLElement | null;
+}
+
+const PROVIDER_LABEL: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
+
+/** Who a thread is, for the editor's "changed on disk by …" toast. */
+function writerOf(threadId: string | undefined, at: { threads: { id: string; provider: string; task_id: string | null; title: string }[]; tasks: { id: string; thread_ids: string[] }[] }): string {
+  const thread = threadId ? at.threads.find((t) => t.id === threadId) : undefined;
+  const task = threadId
+    ? at.tasks.find((k) => k.id === thread?.task_id || k.thread_ids.includes(threadId)) : undefined;
+  const who = thread ? PROVIDER_LABEL[thread.provider] || thread.provider : "an agent";
+  if (task) return `${who} · task ${task.id.slice(0, 6)}`;
+  return thread?.title ? `${who} · ${thread.title}` : who;
+}
+
+/**
+ * The project a pane is about, for the VEX view (VX-2): whether its strip
+ * offers "vex", and the project a pane switched to it is pinned to. A chat
+ * pane is its own conversation's; any other pane its pin while that project
+ * exists, else the chat the window is about (as File and Preview follow it)
+ * — **except a VEX view, which never follows the chat**: its pin, or none
+ * (review L7: a VEX pane whose project is gone says "Pick a project" rather
+ * than building or downloading another robot's program).
+ */
+function stripProject(at: State, spec: PaneSpec, pane: PaneNo): string | null {
+  if (spec.view === "chat") return chatProjectId(at.chats[pane], at.threads);
+  if (spec.projectId && at.projects.some((p) => p.id === spec.projectId)) return spec.projectId;
+  if (spec.view === "vex") return null;
+  return currentProjectId(at);
+}
+
+/** A line to go to in a File pane (VX-2: a build error clicked in the VEX view). */
+interface FileGoto {
+  path: string;
+  line: number;
+  col: number;
+  n: number;
+}
 
 export default function App() {
   const { state, dispatch } = useStore();
@@ -96,13 +196,50 @@ export default function App() {
   // lib/workspace.ts. Every layout key is inert while an authorization card
   // is up (as PTT is), and every layout button is disabled.
   const blocked = state.approvals.length > 0;
-  const view = useLayout(blocked);
+  // ED-7's keys (Ctrl+P, Ctrl+Shift+P / F1, Ctrl+Shift+F) are taken by
+  // `useLayout`'s capture handler — the one interception place — and acted on
+  // here with the latest render (`editorKeyRef`, set below).
+  const editorKeyRef = useRef<(what: EditorShortcut) => void>(() => {});
+  const view = useLayout(blocked, (what) => editorKeyRef.current(what));
   // Under a card nothing reaches a shell (WP-D). Said from here, above the
   // workspace's error boundary: a render error unmounts the workspace, but
   // the terminals' sockets and paste pumps live on, and a hold driven from in
   // there froze with it (review of PR #32). A layout effect, so the hold is on
   // before a paste's next chunk can leave.
   useLayoutEffect(() => terminals.setBlocked(blocked), [blocked]);
+  // And nothing reaches an editor: every Monaco goes read-only while a card
+  // is up (ED-1; the card takes focus itself), said from here for the same
+  // reason.
+  useLayoutEffect(() => setEditorsBlocked(blocked), [blocked]);
+  // And nothing builds or downloads to a VEX brain (VX-2): every VEX action
+  // refuses while a card is up, and a download's chain a card came into is
+  // dropped (state/vex.ts) — said from here for the same reason.
+  useLayoutEffect(() => vex.setBlocked(blocked), [blocked]);
+  // And no Browser page takes the keyboard on its own (R-1, state/frameguard):
+  // the window-level listeners, installed from here, above the boundary, in a
+  // layout effect so they are on before any frame can load.
+  useLayoutEffect(() => installFrameGuard(), []);
+  useSyncExternalStore(vex.subscribe, vex.getVersion);
+  // Whether each drawn pane's project is a VEX project: the strip offers the
+  // VEX view only then (lib/vex.ts `offersVex`). Asked once per project.
+  const vexWanted = Array.from(new Set(view.fit.panes
+    .map((n) => stripProject(state, view.ws.panes[n - 1], n))
+    .filter((x): x is string => !!x))).join("\u0000");
+  useEffect(() => {
+    const pids = vexWanted.split("\u0000").filter(Boolean);
+    for (const pid of pids) vex.want(pid);
+    // Asked again on the window's focus and when stale (review L4), so a
+    // project that becomes a VEX project is offered the view without a reload.
+    const fresh = () => vex.refreshDetections(pids, 0);
+    const stale = setInterval(() => {
+      if (document.visibilityState === "visible") vex.refreshDetections(pids, DETECT_STALE_MS);
+    }, DETECT_STALE_MS);
+    window.addEventListener("focus", fresh);
+    return () => {
+      clearInterval(stale);
+      window.removeEventListener("focus", fresh);
+    };
+  }, [vexWanted]);
   // A render error stopped the title bar, the shell and the orb drawing
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
   // else, so nothing is heard or sent on their behalf from then on — no
@@ -111,20 +248,25 @@ export default function App() {
   // wake recognizer's effect, which stops it.
   const [crashed, setCrashed] = useState(false);
   const crashedRef = useRef(false);
-  // File panes holding an unsaved edit (FileTab's `onDirty`): such a buffer
-  // is never closed behind the owner's back — "follow chat" waits, a project
-  // that goes away keeps the pane pinned until the owner discards the edit,
-  // closing the window asks (2026-10-09, the minimal guard), and since WP-B
-  // nothing switches the pane to another view — a tab, a sidebar click, a
-  // chat landing there — until the edit is saved or discarded.
-  const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
-  const dirtyNow = useRef(dirtyPanes);
-  dirtyNow.current = dirtyPanes;
-  const markDirty = useCallback(
-    (pane: PaneNo, dirty: boolean) => setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty })),
-    [],
-  );
-  const anyDirty = Object.values(dirtyPanes).some(Boolean);
+  // File panes holding an unsaved edit: such a buffer is never closed behind
+  // the owner's back — "follow chat" waits, a project that goes away keeps
+  // the pane pinned until the owner discards the edit, closing the window
+  // asks (2026-10-09, the minimal guard), and since WP-B nothing switches the
+  // pane to another view — a tab, a sidebar click, a chat landing there —
+  // until the edit is saved or discarded.
+  //
+  // Since ED-2 the truth is the buffer registry (`state/buffers.ts`): a pane
+  // "holds an unsaved edit" when it holds the last view of a dirty buffer —
+  // one no other pane has open (split-panes plan G-3): letting go of a view
+  // another pane still shows loses nothing. It is read where it is needed
+  // (`dirtyNow`), never copied a frame behind: the registry says so in the
+  // keystroke's own change event (#43's M1), and this render follows.
+  useSyncExternalStore(buffers.subscribe, buffers.version);
+  const dirtyNow = useCallback((pane: PaneNo) => buffers.paneLoses(pane), []);
+  const dirtyPanes: Partial<Record<PaneNo, boolean>> = {};
+  for (const n of PANE_NOS) if (buffers.paneLoses(n)) dirtyPanes[n] = true;
+  // Any unsaved edit at all — a buffer no tab holds any more included.
+  const anyDirty = buffers.anyDirty();
   useEffect(() => {
     if (!anyDirty) return;
     const ask = (e: BeforeUnloadEvent) => {
@@ -134,6 +276,22 @@ export default function App() {
     window.addEventListener("beforeunload", ask);
     return () => window.removeEventListener("beforeunload", ask);
   }, [anyDirty]);
+  // The change poll (ED-2, plan §2.4): every 2 s while the window is visible,
+  // and the moment it is shown or focused again. inotify cannot see a write
+  // made from Windows on the 9p `/mnt/c` mount, where VEX projects live.
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === "visible") void buffers.poll();
+    };
+    const t = setInterval(tick, BUFFER_POLL_MS);
+    window.addEventListener("focus", tick);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", tick);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, []);
   // A refused switch away from an unsaved edit says why, briefly, in a pane
   // the owner can see (by where it is shown): the File pane itself when it
   // is drawn, else the focused pane, naming the File pane — Open beside can
@@ -233,7 +391,7 @@ export default function App() {
    */
   const giveBack = useCallback(
     (threadId: string | null, text: string, files: Attachment[], from: PaneNo | null = null,
-     parkKey: string | null = null): "box" | "held" | "parked" | "lost" => {
+     parkKey: string | null = null, projectId: string | null = null): "box" | "held" | "parked" | "lost" => {
       const at = live.current;
       const onScreen = chatsOnScreen();
       // A compose row under that key already on screen (New thread pressed
@@ -250,7 +408,7 @@ export default function App() {
         return "held";
       }
       if (parkKey) {
-        dispatch({ type: "park", key: parkKey, text, files });
+        dispatch({ type: "park", key: parkKey, text, files, projectId });
         return "parked";
       }
       dispatch({ type: "patch", patch: { error: "Words that were not sent had no chat to go back to: open a chat." } });
@@ -260,7 +418,9 @@ export default function App() {
     [dispatch],
   );
   // provider ▾ · model ▾ · effort ▾ in each chat pane's input bar (decisions 2026-10-06, A).
-  const threadModel = useThreadModel(state, dispatch, () => void loadModels());
+  // A crashed window sends nothing (PR #32): not even an effort move the
+  // slider was settling when the workspace fell over (review of PR #30).
+  const threadModel = useThreadModel(state, dispatch, () => void loadModels(), () => crashedRef.current);
   const reloadThreadModels = useRef(threadModel.reload);
   reloadThreadModels.current = threadModel.reload;
   // The chip's own dialogs (catalogue, provider default) are hook state, not
@@ -286,7 +446,13 @@ export default function App() {
     view.fit.panes.includes(view.ws.focused) && view.ws.panes[view.ws.focused - 1].view === "chat"
       ? view.ws.focused : null;
   const selected = selectedChatOf(view.ws, view.fit.panes, state.selectedOrder);
-  const activeNow: PaneNo = selected ?? state.selectedOrder[0] ?? 1;
+  // The pane in slot 1: the chat the window is about when none was ever
+  // selected. Never id 1, which a close may have taken away (WP-G2).
+  const home: PaneNo = view.fit.panes[0] ?? orderOf(view.ws)[0];
+  const activeNow: PaneNo = selected ?? state.selectedOrder[0] ?? home;
+  useLayoutEffect(() => {
+    if (live.current.home !== home) dispatch({ type: "home", pane: home });
+  }, [home, dispatch]);
   useLayoutEffect(() => {
     const at = live.current;
     const front = focusedChat !== null && focusedChat === selected && at.selectedOrder[0] !== focusedChat;
@@ -465,6 +631,8 @@ export default function App() {
         const n = which();
         if (n !== null) chatPatch(n, p);
       };
+      // The thread this send opened, if it opened one.
+      let opened: Thread | null = null;
       try {
         let projectId = threadId ? at.threads.find((t) => t.id === threadId)?.project_id ?? null : null;
         if (!threadId) {
@@ -482,6 +650,7 @@ export default function App() {
             });
             const n = conversation();
             threadId = t.id;
+            opened = t;
             // Remembered, so a retry after a failed send reuses this thread.
             // The whole compose row is kept, provider, model and effort with
             // it, so a failed first send retries on the same choice.
@@ -549,6 +718,12 @@ export default function App() {
           dispatch({ type: "mark", local, patch: { mark: undefined } });
           onPane(conversation, { busy: true, turnThreadId: threadId, orb: "thinking", status: "THINKING" });
         }
+        // A first send whose pane was closed while the thread opened (review
+        // of PR #47, M2): nothing tracks or shows the turn now running, so it
+        // is left loose — the pane that opens the thread next has its Stop.
+        if (!steering && status === "started" && turn() === null) {
+          dispatch({ type: "loose", threadId, status: "THINKING" });
+        }
         if (projectId) saveLastProject(projectId);
         if (!chat.threadId) {
           // The compose row becomes the thread — in the pane that still holds
@@ -580,12 +755,33 @@ export default function App() {
         if (threadId) dispatch({ type: "turn", event: "send_failed", threadId, by: local });
         // A first send whose compose row no pane holds any more (the owner
         // opened another thread there meanwhile): its words are parked under
-        // that row, never put in a box showing another thread.
+        // that row, never put in a box showing another thread. A pane that
+        // was closed meanwhile has no next new thread: they wait for the next
+        // one anywhere (review of PR #47).
         const back = conversation();
-        const parkKey = !threadId && back === null ? `compose:${pane}` : null;
-        const went = giveBack(threadId, text, attachments, back, parkKey);
+        const { ws } = layoutNow.current;
+        const closed = !ws.order.includes(pane) && !ws.kept.includes(pane);
+        const parkKey = !threadId && back === null ? (closed ? ORPHAN_DRAFT : `compose:${pane}`) : null;
+        const went = giveBack(threadId, text, attachments, back, parkKey, compose?.projectId ?? null);
+        // Held for a thread no drawn pane shows (a first send that failed at
+        // `/send` after its pane closed): said, naming the thread, so the
+        // words are found again (review 2 of PR #47).
+        const named = (id: string) => {
+          const title = live.current.threads.find((t) => t.id === id)?.title || (id === opened?.id ? opened.title : "");
+          if (title) return `“${title}”`;
+          const pid = compose?.projectId;
+          const project = pid ? live.current.projects.find((p) => p.id === pid)?.name : null;
+          return project ? `the new thread in ${project}` : "the new thread";
+        };
         const error = `Could not send: ${e.message}`
-          + (went === "parked" ? " — what you wrote is kept for the next new thread in this pane." : "");
+          + (went === "parked"
+            ? (closed ? " — what you wrote is kept for the next new thread you start."
+              : " — what you wrote is kept for the next new thread in this pane.")
+            : went === "held" && threadId
+              ? ` — what you wrote waits with ${named(threadId)}: it is back in the box when you open that thread.`
+              : "");
+        // A thread this send opened is listed, so the sidebar has it to open.
+        if (opened && went === "held") void refreshThreads();
         if (steering) {
           // A refused steer leaves the running turn as it was: still tracked,
           // still stoppable.
@@ -651,7 +847,9 @@ export default function App() {
       const chat = live.current.chats[n];
       if (chat.busy && chat.turnThreadId) turns[n] = chat.turnThreadId;
     }
-    if (!PANE_NOS.some((n) => turns[n])) return;
+    // Turns closed panes left running (WP-G2) are checked the same way.
+    const loose = Object.keys(live.current.loose);
+    if (!PANE_NOS.some((n) => turns[n]) && !loose.length) return;
     let threads: any[];
     try {
       threads = await api.threads();
@@ -659,6 +857,13 @@ export default function App() {
       return;
     }
     dispatch({ type: "patch", patch: { threads } });
+    // A loose turn is over once its thread says so — or is no longer listed
+    // (archived or deleted: `GET /threads` hides it, and the 15 s poll would
+    // otherwise run for good; review of PR #47).
+    for (const id of loose) {
+      const record = threads.find((t) => t.id === id);
+      if (!record || record.running === false) dispatch({ type: "turn_over", threadId: id });
+    }
     for (const n of PANE_NOS) {
       const turn = turns[n];
       if (!turn) continue;
@@ -670,7 +875,7 @@ export default function App() {
     }
   }, [dispatch, chatPatch]);
 
-  const anyBusy = PANE_NOS.some((n) => state.chats[n].busy);
+  const anyBusy = PANE_NOS.some((n) => state.chats[n].busy) || Object.keys(state.loose).length > 0;
   useEffect(() => {
     if (!anyBusy) return;
     const timer = setInterval(() => void reconcileBusy(), 15_000);
@@ -788,7 +993,13 @@ export default function App() {
         case "text":
           for (const n of mine) dispatch({ type: "settle", pane: n, text: data.text || "" });
           break;
-        case "tool_started":
+        case "tool_started": {
+          // A running turn's write tool named a file (any thread, a task's
+          // included): if that file is open and reloads in place, the toast
+          // says who wrote it. Absolute paths only — a relative one is judged
+          // from the thread's own folder, never matched by its tail.
+          const cwd = tid ? at.threads.find((t) => t.id === tid)?.cwd : null;
+          for (const p of writtenPaths(data.name, data.args, cwd)) buffers.noteTouch(p, writerOf(tid, at));
           for (const n of mine) {
             chatPatch(n, { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" });
             dispatch({
@@ -797,6 +1008,7 @@ export default function App() {
             });
           }
           break;
+        }
         case "tool_finished":
           for (const n of mine) {
             chatPatch(n, { status: "THINKING", orb: "thinking" });
@@ -820,6 +1032,8 @@ export default function App() {
           // follow-up mic window over a turn about to start. Its own
           // `turn_finished` (or the 15 s reconcile) frees the pane.
           if (data.next) break;
+          // A turn a closed pane left running is over: no pane takes it up now.
+          if (tid && tid in at.loose) dispatch({ type: "turn_over", threadId: tid });
           let followUp = false;
           for (const n of ours) {
             chatPatch(n, { busy: false, turnThreadId: null, orb: "idle", status: "" });
@@ -966,6 +1180,16 @@ export default function App() {
           // this window's own attach (components/Terminal.tsx).
           terminalAttached(data);
           break;
+        case "terminal_read":
+          // `{terminal_id, lines, at, refused}` only: the terminal's bar says
+          // "Jarvis read 200 lines · 15:42" (components/Terminal.tsx).
+          terminalRead(data);
+          break;
+        case "vex_device":
+          // `{action, at}` only (VX-1): one this window did not start is said
+          // in the VEX view (state/vex.ts).
+          vex.heardDevice(data);
+          break;
         default:
           break;
       }
@@ -993,6 +1217,15 @@ export default function App() {
       /* the window keeps what it had rather than blanking */
     }
   }, [dispatch]);
+  // A task's question, answered from the task view: exactly `{index, text}`
+  // (lib/taskQuestions). A refusal rejects with the daemon's sentence, which
+  // the view shows under the box it was typed in, keeping the words — this
+  // used to send `{question, answer}` and swallow the 400 (2026-10-11).
+  const answerQuestion = useCallback(
+    (taskId: string, index: number, text: string) =>
+      api.answerTask(taskId, index, text).then(() => { void refreshTasks(); }),
+    [refreshTasks],
+  );
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
     (id: string) => void api.cancelTask(id).then(refreshTasks).catch(() => {}),
@@ -1041,6 +1274,24 @@ export default function App() {
     [dispatch],
   );
 
+  // ---- the editor --------------------------------------------------------------
+
+  /**
+   * "Add to chat" from a File pane (ED-2, the minimal half of ED-7's "Add
+   * selection to chat"): the excerpt goes into the selected chat's box,
+   * unsent (decisions W-6). With no chat on screen it is refused with a
+   * sentence — never sent, never anywhere else. An env file never gets here
+   * (FileTab asks `jarvisMayRead` first).
+   */
+  const addToChat = useCallback((text: string): string | null => {
+    const at = live.current;
+    const n = at.selectedChat;
+    if (n === null) return "No chat is open to add it to.";
+    const had = at.chats[n].input;
+    dispatch({ type: "input", pane: n, text: had && !had.endsWith("\n") ? `${had}\n${text}` : had + text });
+    return null;
+  }, [dispatch]);
+
   // ---- placing a view in a pane ----------------------------------------------
 
   /**
@@ -1049,18 +1300,43 @@ export default function App() {
    * landing in it (WP-B, review of PR #26): the switch is refused and the
    * pane says why. True when `pane` may show `next`.
    */
+  /** The project pane `pane` is about (VX-2's strip and pin): see `stripProject`. */
+  const stripProjectNow = (pane: PaneNo): string | null =>
+    stripProject(live.current, layoutNow.current.ws.panes[pane - 1], pane);
+
   const mayShow = useCallback((pane: PaneNo, next: View): boolean => {
     const { ws, fit } = layoutNow.current;
     const spec = ws.panes[pane - 1];
-    if (spec.view !== "file" || next === "file" || !dirtyNow.current[pane]) return true;
+    if (spec.view !== "file" || next === "file" || !dirtyNow(pane)) return true;
     const shownIn: PaneNo = fit.panes.includes(pane) ? pane : fit.panes.includes(ws.focused) ? ws.focused : fit.panes[0];
     setRefused((r) => ({ ...r, [shownIn]: { at: Date.now(), pane } }));
     return false;
   }, []);
 
-  /** The view strip's buttons and menu: switch a pane, unless that drops an unsaved edit. */
+  /**
+   * The view strip's buttons and menu: switch a pane, unless that drops an
+   * unsaved edit. Switched to the terminal view with no terminal of its own,
+   * the pane opens one, as its `+` would, when none is open anywhere (the
+   * owner's call, 2026-10-11; with some open it offers them, `+` first).
+   */
   const setPaneView = useCallback((pane: PaneNo, next: View) => {
-    if (mayShow(pane, next)) view.setView(pane, next);
+    if (!mayShow(pane, next)) return;
+    const was = layoutNow.current.ws.panes[pane - 1];
+    // The VEX view stays on the project it was opened for (VX-2): a pane
+    // that followed the chat is pinned to the project it showed, so choosing
+    // another chat never moves a build or a download to another robot. Read
+    // before the switch: a VEX view itself never follows the chat (L7).
+    const vexPin = next === "vex" && was.view !== "vex"
+      && !(was.projectId && live.current.projects.some((p) => p.id === was.projectId))
+      ? stripProjectNow(pane) : null;
+    view.setView(pane, next);
+    if (vexPin) view.pin(pane, vexPin);
+    if (next === "terminal" && was.view !== "terminal" && !was.terminalId) {
+      void terminals.ownerOpened(pane, () => {
+        const now = layoutNow.current.ws.panes[pane - 1];
+        return now.view === "terminal" && !now.terminalId;
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mayShow]);
 
@@ -1080,28 +1356,78 @@ export default function App() {
   }, [mayShow]);
 
   /**
-   * "Open in Preview" from a terminal link (WP-E): the URL, judged with the
-   * daemon's ports, goes to a drawn Preview pane — the focused one if it is
-   * one — else the focused pane switches to Preview (the sidebar's click
+   * "Open in Browser" from a terminal link (WP-E): the URL, judged with the
+   * daemon's ports, goes to a drawn Browser pane — the focused one if it is
+   * one — else the focused pane switches to Browser (the sidebar's click
    * rule, lib/workspace `show`), unless that pane holds an unsaved edit. The
    * pane loads it as a request, judged again there, and stores it.
    */
-  const [previewAsk, setPreviewAsk] = useState<Partial<Record<PaneNo, PreviewRequest>>>({});
-  const previewSeq = useRef(0);
-  const openPreview = useCallback((url: string): boolean => {
+  const [browserAsk, setBrowserAsk] = useState<Partial<Record<PaneNo, BrowserRequest>>>({});
+  const browserSeq = useRef(0);
+
+  // ---- the editor's navigation (ED-7) ------------------------------------------
+
+  // What App asks of a File pane (open at a line, the search, a palette
+  // command), acted on once by its nonce and cleared after the commit that
+  // carried it, so a pane that mounts again later never acts on it twice.
+  const [fileAsk, setFileAsk] = useState<Partial<Record<PaneNo, FileAsk>>>({});
+  const fileSeq = useRef(0);
+  const askFile = useCallback((n: PaneNo, ask: FileAskBody) => {
+    const nonce = ++fileSeq.current;
+    setFileAsk((a) => ({ ...a, [n]: { ...ask, nonce } as FileAsk }));
+  }, []);
+  useEffect(() => {
+    if (Object.keys(fileAsk).length) setFileAsk({});
+  }, [fileAsk]);
+  const [nav, setNav] = useState<NavContext | null>(null);
+  // Under a card quick open, the palette and the editor settings (ED-8) close
+  // (editor plan §2.10); their keys are already inert there (`useLayout`).
+  // Before paint, so the card is the first thing drawn without them.
+  useLayoutEffect(() => {
+    if (blocked && (state.picker === "quickOpen" || state.picker === "palette" || state.picker === "editorSettings")) {
+      dispatch({ type: "patch", patch: { picker: null } });
+      setNav(null);
+    }
+  }, [blocked, state.picker, dispatch]);
+
+  /**
+   * The explorer renamed `from` to `to` in `projectId` (FileTab; the buffers
+   * have followed already): every pane's tabs follow — the project's own by
+   * path, any other project reaching the same file through the registry's
+   * holds — so an open tab keeps its edit under the new name.
+   */
+  const onRenamed = useCallback((projectId: string, from: string, to: string,
+                                 moves: { pane: string; from: string; to: string }[],
+                                 kept: { pane: string; path: string }[] = []) => {
+    const { ws } = layoutNow.current;
+    for (const n of PANE_NOS) {
+      const spec = ws.panes[n - 1];
+      const tabs = spec.editors;
+      if (!tabs || !spec.projectId) continue;
+      let next = tabs;
+      // A tab whose buffer the registry kept in place (an unsaved edit
+      // already at the new name) keeps its path.
+      const keep = new Set(kept.filter((k) => k.pane === String(n)).map((k) => k.path));
+      if (spec.projectId === projectId) next = renameTabs(next, from, to, keep);
+      else for (const m of moves) if (m.pane === String(n)) next = renameTabs(next, m.from, m.to);
+      if (!sameTabs(next, tabs)) view.setEditors(n, spec.projectId, next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const openBrowser = useCallback((url: string): boolean => {
     const { status, ports } = daemonPortsNow();
     if (status === "pending") return false;
-    const v = judgePreviewUrl(url, ports);
+    const v = judgeBrowserUrl(url, ports);
     if (!v.ok) return false;
     const lay = layoutNow.current;
-    const pane = showOf(lay.ws, "preview", lay.fit.panes).focused;
-    if (!showView("preview")) return false;
-    const n = ++previewSeq.current;
-    setPreviewAsk((asks) => ({ ...asks, [pane]: { url: v.url, n } }));
+    const pane = showOf(lay.ws, "browser", lay.fit.panes).focused;
+    if (!showView("browser")) return false;
+    const n = ++browserSeq.current;
+    setBrowserAsk((asks) => ({ ...asks, [pane]: { url: v.url, n } }));
     return true;
   }, [showView]);
-  const previewHandled = useCallback((pane: PaneNo, n: number) => {
-    setPreviewAsk((asks) => {
+  const browserHandled = useCallback((pane: PaneNo, n: number) => {
+    setBrowserAsk((asks) => {
       if (asks[pane]?.n !== n) return asks;
       const next = { ...asks };
       delete next[pane];
@@ -1174,7 +1500,16 @@ export default function App() {
       return;
     }
     if (beside) {
-      const to = besideTarget(lay.ws, lay.fit.panes);
+      const to = besideTarget(lay.ws, lay.fit.panes, dirtyIds(), holdingIds());
+      if (to.source !== undefined) {
+        // From one pane, or the right of two columns: a split, the thread's
+        // chat in the new pane (WP-G2, plan §3.5).
+        if (blockedNow.current) return;
+        if (lay.ws.kept.includes(to.pane)) releasePane(to.pane, { keep: true });
+        view.split(to.source, to.pane, { view: "chat", projectId: null, terminalId: null });
+        openIn(to.pane, id);
+        return;
+      }
       if (!mayShow(to.pane, "chat")) return;
       if (to.preset !== lay.ws.preset) view.setPreset(to.preset);
       view.setView(to.pane, "chat");
@@ -1186,6 +1521,244 @@ export default function App() {
     openIn(pane, id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch, mayShow, placeChat, openIn]);
+
+  // ---- split and close (WP-G2, plan §3.4–§3.6) --------------------------------
+
+  /** The panes holding an unsaved edit, by id. */
+  const dirtyIds = (): PaneNo[] => PANE_NOS.filter((n) => dirtyNow(n));
+  /**
+   * The panes ⊞ hid whose compose row holds unsent words, files or words
+   * handed back: a split takes an empty hidden pane before one of these, and
+   * when it must take one, its words are parked for the next new thread
+   * (review of PR #47, H1) — a hidden pane cannot ask.
+   */
+  const holdingIds = (): PaneNo[] => {
+    const { ws } = layoutNow.current;
+    const chats = live.current.chats;
+    return ws.kept.filter((n) => {
+      const c = chats[n];
+      return !!c.compose && !c.threadId && (!!c.input.trim() || c.files.length > 0 || c.restore.length > 0);
+    });
+  };
+  const blockedNow = useRef(blocked);
+  blockedNow.current = blocked;
+
+  /**
+   * A pane's conversation, terminal and notes let go of it: before × removes
+   * it, and before a split takes back a pane ⊞ had hidden. Unsent words and
+   * files in a thread's box are parked under the thread (they come back when
+   * it opens again), words handed back to the box are held for the thread,
+   * and a turn it tracked is left for the next pane that opens the thread —
+   * its Stop goes there. A compose row's words are dropped after × asked, and
+   * parked for the next new thread when a split takes a hidden pane back
+   * (`keep`). A terminal it showed goes back to the panel, alive.
+   */
+  const releasePane = useCallback((n: PaneNo, opts: { keep?: boolean } = {}) => {
+    const at = live.current;
+    const spec = layoutNow.current.ws.panes[n - 1];
+    const chat = at.chats[n];
+    const thread = shownThread(chat, pendingThread.current[n]);
+    if (thread) for (const r of chat.restore) heldBack.current.hold(thread, r.text, r.files);
+    pendingThread.current[n] = null;
+    // `keep`: a hidden pane a split takes back could not ask, so a compose
+    // row's unsent words are parked for the next new thread, not dropped.
+    dispatch({ type: "release_chat", pane: n, keep: !!opts.keep });
+    if (spec.view === "terminal" && spec.terminalId && layoutNow.current.fit.panes.includes(n)) {
+      terminals.releaseToPanel(spec.terminalId);
+    }
+    // Its tabs let go of their buffers; an edit only it held was given up
+    // (× asked first; a pane a split takes back holds none).
+    buffers.releasePane(n, { discard: true });
+    setRefused((r) => {
+      if (!r[n] && !Object.values(r).some((x) => x?.pane === n)) return r;
+      const next = { ...r };
+      delete next[n];
+      for (const k of PANE_NOS) if (next[k]?.pane === n) delete next[k];
+      return next;
+    });
+    setBrowserAsk((asks) => {
+      if (!asks[n]) return asks;
+      const next = { ...asks };
+      delete next[n];
+      return next;
+    });
+  }, [dispatch]);
+
+  /**
+   * What × asks before it closes (G-9): a File pane's unsaved edit only it
+   * holds (ED-2: a file another pane also has open loses nothing), and a
+   * compose row's unsent words — they belong to no thread, so they cannot be
+   * parked. Words in a thread's box are parked, so that × does not ask.
+   * The pane's conversation is judged **whatever it shows** (review 2 of
+   * PR #47): switching a pane to File keeps its chat, words and all, and ×
+   * releases that chat too — so the question, and the strip asking it, stay
+   * while the words are there.
+   */
+  const closeQuestion = useCallback((n: PaneNo): string | null => {
+    const spec = layoutNow.current.ws.panes[n - 1];
+    const losing = spec.view === "file" ? buffers.paneLosing(n) : [];
+    const chat = live.current.chats[n];
+    const unsent = !shownThread(chat, pendingThread.current[n])
+      && (!!chat.input.trim() || chat.files.length > 0 || chat.restore.length > 0);
+    if (losing.length) {
+      const names = losing.map((b) => b.path).join(", ");
+      const edits = `${names} ${losing.length === 1 ? "has an" : "have"} unsaved edit${losing.length === 1 ? "" : "s"}`;
+      // Save keeps the edits; the words go with the pane either way, and say so.
+      if (unsent) return `${edits}, and this pane's new thread an unsent message, which closing loses. Save before closing?`;
+      return `${edits}. Save before closing?`;
+    }
+    return unsent ? "Discard the unsent message?" : null;
+  }, []);
+
+  /**
+   * × (plan §3.6): the pane lets go of what it held (`releasePane`), leaves
+   * the workspace, and focus goes to the pane now in its slot — the pane
+   * itself, never its box, so a held Enter cannot send what is typed there.
+   * The last pane is never closed, nor anything under a card.
+   */
+  const closePane = useCallback((n: PaneNo) => {
+    if (blockedNow.current) return;
+    const lay = layoutNow.current;
+    const at = live.current;
+    // Focus goes where the mic already is (W-6: the chat the owner selected
+    // last): the selected chat when it is another drawn pane — closing a File
+    // pane must not hand the mic to the chat that slides into its slot
+    // (review of PR #47, M1) — else, the selected chat closing, the chat
+    // selected before it; else the pane now in that slot.
+    const drawnChat = (k: PaneNo | null): k is PaneNo =>
+      k !== null && k !== n && lay.fit.panes.includes(k) && lay.ws.panes[k - 1].view === "chat";
+    const then = drawnChat(at.selectedChat) ? at.selectedChat
+      : at.selectedChat === n ? at.selectedOrder.find(drawnChat) ?? null : null;
+    const next = closePaneOf(lay.ws, n, then);
+    if (next === lay.ws) return;
+    releasePane(n);
+    lay.close(n, then);
+    requestAnimationFrame(() => {
+      if (blockedNow.current) return;
+      document.querySelector<HTMLElement>(`[data-testid="pane-${next.focused}"]`)?.focus({ preventScroll: true });
+    });
+  }, [releasePane]);
+
+  /**
+   * The split button (plan §3.4–§3.5): a copy of pane `source` right after
+   * it, focused. A chat's copy is a new compose row in the source's project,
+   * written before the layout changes; a terminal's is a new terminal in the
+   * folder the source was opened in, unreadable to Jarvis if the source is.
+   * Refused under a card, past eight, and when the next shape would not be
+   * drawn whole. A File pane's copy holds the same buffers (ED-2), so one
+   * holding an unsaved edit splits too.
+   */
+  const splitFrom = useCallback((source: PaneNo, opts: { focus?: boolean } = {}): PaneNo | null => {
+    if (blockedNow.current) return null;
+    const lay = layoutNow.current;
+    const spec = lay.ws.panes[source - 1];
+    const dirty = dirtyIds();
+    if (!lay.splitVerdict(dirty).ok) return null;
+    const id = allocate(lay.ws, dirty, holdingIds());
+    if (id === null) return null;
+    if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
+    const copy = copySpec(spec);
+    if (copy.view === "chat") {
+      const at = live.current;
+      const projectId = (spec.view === "chat" ? chatProjectId(at.chats[source], at.threads) : null)
+        ?? lastProject(at.projects, at.threads, loadLastProject());
+      pendingThread.current[id] = null;
+      // A new thread the owner started, drawn once the split lands: it takes
+      // up words no pane's row holds any more (`takeOrphan`).
+      chatPatch(id, {
+        threadId: null, compose: { projectId }, messages: [], loadedThread: null, draft: "", ops: [], status: "",
+        takeOrphan: true,
+      });
+    }
+    lay.split(source, id, copy, opts);
+    if (spec.view === "terminal" && spec.terminalId) {
+      const from = spec.terminalId;
+      // Readable only when the source is known to be (a copy never widens
+      // what Jarvis can read; an unknown source fails closed).
+      const readable = terminals.readableOf(from);
+      void terminals.create(terminals.specOf(from), id, undefined, { readable });
+    }
+    if (opts.focus !== false) focusPaneElement(id);
+    return id;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [releasePane, chatPatch]);
+
+  /**
+   * A build error clicked in the VEX view (VX-2): its file, at its line, in
+   * the editor — ED-2's buffers, so an edit already open there is the one
+   * shown. Where: a drawn File pane on that project; else a new pane beside
+   * the VEX view (a split, so the errors list stays in sight); else the VEX
+   * pane itself becomes the File pane. Never under a card.
+   */
+  const [fileGoto, setFileGoto] = useState<Partial<Record<PaneNo, FileGoto>>>({});
+  const gotoSeq = useRef(0);
+
+  /**
+   * **Where a file opens**, the one rule for every way one is opened — ED-7's
+   * quick open, find in files and palette, VX-2's build-error click: a drawn
+   * File pane on that project (`from` itself first, when it is one); else a
+   * new pane beside `from` (a split: what `from` shows stays — a VEX view is
+   * never replaced, nor a terminal, a task or a preview); else `from` itself,
+   * **only when it is a File or chat pane** (and `mayShow` lets it go). Null
+   * when there is nowhere: the caller says so. The pane is pinned to
+   * `projectId`; never under a card.
+   */
+  const placeFile = useCallback((from: PaneNo, projectId: string): PaneNo | null => {
+    if (blockedNow.current || crashedRef.current) return null;
+    const lay = layoutNow.current;
+    const at = live.current;
+    const projectOf = (n: PaneNo) => stripProject(at, lay.ws.panes[n - 1], n);
+    const fileOn = (n: PaneNo) => lay.ws.panes[n - 1].view === "file" && projectOf(n) === projectId;
+    if (lay.fit.panes.includes(from) && fileOn(from)) return from;
+    const drawn = lay.fit.panes.find(fileOn);
+    if (drawn !== undefined) return drawn;
+    const id = splitFrom(from, { focus: false });
+    if (id !== null) {
+      view.setEditors(id, projectId, null);
+      view.setView(id, "file");
+      return id;
+    }
+    const v = lay.ws.panes[from - 1].view;
+    if ((v === "file" || v === "chat") && mayShow(from, "file")) {
+      if (lay.ws.panes[from - 1].projectId !== projectId) view.pin(from, projectId);
+      view.setView(from, "file");
+      return from;
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitFrom, mayShow]);
+
+  const openAt = useCallback((from: PaneNo, projectId: string, path: string, line: number, col: number) => {
+    if (blockedNow.current || crashedRef.current) return;
+    const lay = layoutNow.current;
+    const target = placeFile(from, projectId);
+    if (target === null) {
+      dispatch({ type: "patch", patch: { error: `No room to open ${path} beside this view: close a pane, or switch one to the editor.` } });
+      return;
+    }
+    const spec = lay.ws.panes[target - 1];
+    // A pane just made by the split has no tabs yet; one already showing the
+    // project keeps its own.
+    const tabs = spec.view === "file" && spec.projectId === projectId ? spec.editors ?? NO_TABS : NO_TABS;
+    // Pinned, never the preview: the owner asked for this file. Past the tab
+    // cap only a clean tab closes — and every tab counts as holding an edit
+    // here, so a full pane says so in FileTab rather than losing one.
+    const next = openTab(tabs, path, { pin: true, dirty: () => true }) ?? tabs;
+    view.setEditors(target, projectId, next.paths.includes(path) ? next : tabs);
+    const n = ++gotoSeq.current;
+    const pane = target;
+    setFileGoto((g) => ({ ...g, [pane]: { path, line, col, n } }));
+    focusPaneElement(pane);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placeFile]);
+  const gotoDone = useCallback((pane: PaneNo, n: number) => {
+    setFileGoto((g) => {
+      if (g[pane]?.n !== n) return g;
+      const next = { ...g };
+      delete next[pane];
+      return next;
+    });
+  }, []);
 
   /**
    * A project went away — archived or deleted, here or in another window. Its
@@ -1230,6 +1803,8 @@ export default function App() {
         if (!gone) continue;
         displaced = true;
         if (pendingThread.current[n] && after.threadId === null) pendingThread.current[n] = null;
+        // A re-aim, in drawn and hidden panes alike, is not a new thread the
+        // owner started: it never takes up parked words (no `takeOrphan`).
         chatPatch(n, {
           threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [], status,
         });
@@ -1237,8 +1812,12 @@ export default function App() {
       // The task view it showed is empty now: the status line says why.
       if (taskGone && !displaced) chatPatch(activePane(at), { status });
       // A File or Preview pane pinned to it follows the chat again — except
-      // one holding an unsaved edit, which waits for the owner to discard it.
-      view.unpinProject(id, PANE_NOS.filter((n) => dirtyNow.current[n]));
+      // the ones holding an unsaved edit no pane outside them holds, which
+      // wait for the owner to discard it. Asked of the pinned panes together
+      // (`panesHolding`): pane by pane, two panes sharing one edit each let
+      // go and the edit lost every tab (review of PR #49, H2).
+      const pinned = PANE_NOS.filter((n) => layoutNow.current.ws.panes[n - 1].projectId === id);
+      view.unpinProject(id, buffers.panesHolding(pinned).map((k) => Number(k) as PaneNo));
       if (displaced || taskGone) placeChat(chatPaneNow());
       void refreshThreads();
       void refreshTasks();
@@ -1263,6 +1842,7 @@ export default function App() {
         const after = next[n - 1];
         if (!after.displaced) continue;
         pendingThread.current[n] = null;
+        // As in `projectGone`: a re-aim never takes up parked words.
         chatPatch(n, {
           threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [],
         });
@@ -1321,6 +1901,9 @@ export default function App() {
         draft: "",
         ops: [],
         status: chat.turnThreadId ? chat.status : "",
+        // The owner started it, in a pane on screen: it takes up words no
+        // pane's row holds any more.
+        takeOrphan: true,
       });
     },
     // `placeChat` is stable (a callback over refs).
@@ -1407,21 +1990,27 @@ export default function App() {
       );
       dispatch({ type: "patch", patch: { projects, threads, tasks, platforms } });
       // The window opens on a new thread in the last project worked in, as
-      // Claude Code opens on a new session — in every pane that shows chat,
-      // and in the pane the conversation is put on screen in. Nothing is sent
-      // until the owner speaks.
+      // Claude Code opens on a new session — in every pane of the workspace
+      // that shows chat (a free id gets one when it is drawn), and in the
+      // pane the conversation is put on screen in. Nothing is sent until the
+      // owner speaks.
       const lay = layoutNow.current;
       const pane = chatTarget(lay.ws, lay.fit.panes, live.current.selectedChat).pane;
       const projectId = lastProject(projects, threads, loadLastProject());
       for (const n of PANE_NOS) {
-        if (n === pane || lay.ws.panes[n - 1].view === "chat") {
+        if (n === pane || (inWorkspace(lay.ws, n) && lay.ws.panes[n - 1].view === "chat")) {
           dispatch({ type: "chat", pane: n, patch: { threadId: null, compose: { projectId } } });
         }
       }
       setBooted(true);
       // The conversation is on screen: in a drawn pane that already shows
       // chat, else in the focused pane — in the single layout, today's chat tab.
-      placeChat(pane);
+      // Never over a VEX view (review L5): a window with no chat drawn is
+      // allowed (WP-B: speech waits, a press is refused with a sentence), and
+      // a lone VEX pane at the lab must come back as itself after a reload.
+      if (lay.ws.panes[pane - 1].view !== "vex" || lay.fit.panes.some((n) => lay.ws.panes[n - 1].view === "chat")) {
+        placeChat(pane);
+      }
       void refreshActivity();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
@@ -1438,16 +2027,21 @@ export default function App() {
 
   // A pane that shows chat for the first time — a second chat pane, chosen
   // from its tabs or a preset — opens on a new thread in the last project
-  // worked in, as the window does.
+  // worked in, as the window does. Only a pane in the workspace (drawn, or
+  // hidden by ⊞): a pane × closed, or one no layout has drawn yet, holds no
+  // conversation until it is drawn (review 3 of PR #47 — a closed pane was
+  // given a row here at once). Never `takeOrphan`: words parked for the next
+  // new thread wait for one the owner starts.
   const emptyChatPanes = PANE_NOS.filter(
-    (n) => view.ws.panes[n - 1].view === "chat" && isEmptyChat(state.chats[n]),
+    (n) => inWorkspace(view.ws, n) && view.ws.panes[n - 1].view === "chat" && isEmptyChat(state.chats[n]),
   ).join(",");
   useEffect(() => {
     if (!booted || !emptyChatPanes) return;
     const at = live.current;
+    const { ws } = layoutNow.current;
     const projectId = lastProject(at.projects, at.threads, loadLastProject());
     for (const n of PANE_NOS) {
-      if (layoutNow.current.ws.panes[n - 1].view === "chat" && isEmptyChat(at.chats[n])) {
+      if (inWorkspace(ws, n) && ws.panes[n - 1].view === "chat" && isEmptyChat(at.chats[n])) {
         chatPatch(n, { compose: { projectId } });
       }
     }
@@ -1660,36 +2254,102 @@ export default function App() {
 
   const release = useCallback(() => capture.release(), [capture]);
 
+  // Space was push-to-talk until 2026-10-10. The first Space pressed outside a
+  // typing target afterwards says, once per browser profile, what the key is
+  // now (on the selected chat's line under the orb, for a few seconds); Space
+  // itself does what it does on any page. Storage that throws says it once
+  // per load.
+  const hintSaid = useRef(false);
+  const sayTalkKeyOnce = useCallback(() => {
+    if (hintSaid.current) return;
+    // Said where it is read — the selected chat's line — and never over a
+    // turn's own status: with no chat on screen, or one busy, it waits.
+    const pane = live.current.selectedChat;
+    if (pane === null || live.current.chats[pane].busy) return;
+    hintSaid.current = true;
+    try {
+      if (window.localStorage.getItem(SPACE_HINT_KEY)) return;
+      window.localStorage.setItem(SPACE_HINT_KEY, "1");
+    } catch {
+      /* said once for this load */
+    }
+    chatPatch(pane, { status: SPACE_HINT });
+    setTimeout(() => {
+      if (live.current.chats[pane]?.status === SPACE_HINT) chatPatch(pane, { status: "" });
+    }, 8000);
+  }, [chatPatch]);
+  // A card that arrives while the hint is up takes the line: a status reads
+  // ahead of ANSWER THE AUTHORIZATION under the orb (`orbLine`), and a hint is
+  // not worth holding the owner's attention off a card (review of PR #40).
+  // Before paint, so the card's line is the first one drawn.
+  useLayoutEffect(() => {
+    if (!blocked) return;
+    for (const n of PANE_NOS) {
+      if (live.current.chats[n]?.status === SPACE_HINT) chatPatch(n, { status: "" });
+    }
+  }, [blocked, chatPatch]);
+
   // What the workspace's error boundary calls once it has caught a render
   // error: a paste going out to a shell stops (nothing on screen could show
   // its notice or Resume), and nothing in the microphone's hands is sent.
   const onCrash = useCallback(() => {
     crashedRef.current = true;
     terminals.abortPastes();
+    vex.crash();
     capture.abandon();
     setCrashed(true);
   }, [capture]);
 
+  // Push-to-talk's key is Ctrl+D (2026-10-10, lib/talkkey.ts): held to talk,
+  // let go (D or Ctrl) to send. The capture phase on the window, so the chat
+  // box, Monaco, a menu or a chip — each of which keeps its own keys from
+  // bubbling — never stands between the owner and the mic, and nothing under
+  // the cursor acts on the key: its default (Chrome's bookmark dialog) is
+  // always prevented and it stops here, under a card, muted or crashed alike.
+  // A focused terminal is the one exception: there it is the shell's end of
+  // input, untouched.
+  //
+  // **A hold is one key, decided where it began** (review of PR #40;
+  // `TalkHold` in lib/talkkey.ts, kept for the window's life so a re-run of
+  // this effect cannot lose a hold): its auto-repeat keydowns stay the
+  // window's when focus lands in a terminal mid-hold — a click into one, a
+  // card answered by mouse, Discord or its timeout handing focus back, or a
+  // Preview frame taking focus and giving it back — so the shell never gets
+  // a run of end-of-input from it. A window that loses focus mid-hold may
+  // never see the keyup, so the blur lets the mic go, but not the hold.
+  const talkHold = useMemo(() => new TalkHold(), []);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !e.repeat) {
-        e.preventDefault();
-        press();
-      }
+      const blocked = live.current.approvals.length > 0;
+      if (wantsSpaceHint(e, { typing: isTypingTarget(e.target), blocked })) sayTalkKeyOnce();
+      // **A pending Monaco chord's second key is Monaco's** (decisions E-10,
+      // the window's one tracker in lib/editorkeys.ts, shared with the layout
+      // keys): Ctrl+K then Ctrl+D in an editor is Monaco's chord, not
+      // push-to-talk — taking it would leave the chord waiting to swallow the
+      // next key typed. Its default is still kept from Chrome; Monaco hears it.
+      const chord = isTalkKey(e) && !e.repeat && chordSecond(e, inMonaco(e.target));
+      const verdict = talkHold.down(e, { terminal: inTerminal(e.target), blocked, chordSecond: chord });
+      if (verdict === "pass") return;
+      e.preventDefault();
+      if (verdict === "monaco") return;
+      e.stopPropagation();
+      if (verdict === "press") press();
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === "Space") {
-        e.preventDefault();
-        release();
-      }
+      if (talkHold.up(e)) release();
     };
-    document.addEventListener("keydown", down);
-    document.addEventListener("keyup", up);
+    const lost = () => {
+      if (talkHold.blur()) release();
+    };
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
+    window.addEventListener("blur", lost);
     return () => {
-      document.removeEventListener("keydown", down);
-      document.removeEventListener("keyup", up);
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
+      window.removeEventListener("blur", lost);
     };
-  }, [press, release]);
+  }, [press, release, sayTalkKeyOnce, talkHold]);
 
   // ---- microphone ---------------------------------------------------------
 
@@ -1826,8 +2486,20 @@ export default function App() {
       // The thinking lines' one clock (WP-H): how many drawn lines tick, and
       // whether its interval runs at all. Read-only.
       thinkingClock: () => ({ subscribers: thinkingClock.subscribers(), running: thinkingClock.running() }),
+      // A split the owner did not click (WP-G2's `{focus: false}`, for the
+      // browser's dev-server pane): the id it took, or null when refused.
+      split: (source: PaneNo, opts: { focus?: boolean } = {}) => splitFrom(source, opts),
+      // Monaco, read-only (lib/monaco.ts): live model URIs, live editors, and
+      // the language the registry gives a path.
+      monacoModels,
+      monacoEditors,
+      monacoLanguage,
+      // The editor's buffers (ED-2), read-only: never any text.
+      buffers: () => buffers.snapshot(),
+      // The editor settings (ED-8), read-only: stored, in force, and each File editor's own.
+      editorSettings: () => editorSettingsProbe(),
     };
-  }, [capture, dispatch, onWakeHit, reconcileBusy]);
+  }, [capture, dispatch, onWakeHit, reconcileBusy, splitFrom]);
 
   // ---- actions ------------------------------------------------------------
 
@@ -1889,6 +2561,17 @@ export default function App() {
   };
   /** The pane's pinned project went away (archived, deleted). */
   const pinGone = (spec: PaneSpec) => !!spec.projectId && !state.projects.some((p) => p.id === spec.projectId);
+  // The File panes pinned to a project that went away which hold an unsaved
+  // edit no pane outside that project's panes holds: they stay on it, with
+  // the gone prompt. Asked of the panes on the project together — two panes
+  // sharing the edit each hold a view another pane also shows, so a per-pane
+  // last-view rule let both go and the edit lost its every tab (review of PR
+  // #49, H2).
+  const goneHeld: Partial<Record<PaneNo, boolean>> = {};
+  for (const pid of new Set(ws.panes.filter(pinGone).map((p) => p.projectId as string))) {
+    const on = PANE_NOS.filter((k) => ws.panes[k - 1].projectId === pid);
+    for (const k of buffers.panesHolding(on)) goneHeld[Number(k) as PaneNo] = true;
+  }
   /**
    * A File or Preview pane's project: its pin while that project exists, else
    * the chat's. A File pane whose pinned project went away while it held an
@@ -1896,10 +2579,222 @@ export default function App() {
    * would remount it and drop the edit; the header asks first instead.
    */
   const paneProject = (spec: PaneSpec, pane: PaneNo): string | null =>
-    spec.projectId && (!pinGone(spec) || (spec.view === "file" && dirtyPanes[pane]))
+    spec.projectId && (!pinGone(spec) || (spec.view === "file" && goneHeld[pane]))
       ? spec.projectId : activeProjectId;
   const pinnedElsewhere = (spec: PaneSpec, pane: PaneNo) =>
-    (spec.view === "file" || spec.view === "preview") && paneProject(spec, pane) !== activeProjectId;
+    (spec.view === "file" || spec.view === "browser") && paneProject(spec, pane) !== activeProjectId;
+
+  // ---- quick open, the palette, find in files (ED-7) ----------------------------
+
+  /**
+   * What the editor's navigation is about: the focused pane when it is a File
+   * pane (its project); else the focused pane's own project (a chat's
+   * conversation's, a VEX view's pin) and a drawn File pane on it, if there
+   * is one; else nothing is decided until something is opened — then
+   * `placeFile` decides (a split beside the focused pane, which is never
+   * replaced unless it is a File or chat pane).
+   */
+  const fileTarget = (): { pane: PaneNo; projectId: string | null; switchTo: boolean } => {
+    const f = focusedDrawn;
+    const spec = ws.panes[f - 1];
+    if (spec.view === "file") return { pane: f, projectId: paneProject(spec, f), switchTo: false };
+    const projectId = stripProjectNow(f) ?? (spec.view === "vex" ? null : activeProjectId);
+    const drawn = fit.panes.find((n) => ws.panes[n - 1].view === "file" && paneProject(ws.panes[n - 1], n) === projectId);
+    if (drawn !== undefined && projectId) return { pane: drawn, projectId, switchTo: false };
+    return { pane: f, projectId, switchTo: true };
+  };
+  const activePathOf = (n: PaneNo): string | null => {
+    const spec = ws.panes[n - 1];
+    return spec.view === "file" ? spec.editors?.active ?? null : null;
+  };
+  /** The File pane to act in, placed by the one rule (`placeFile`), focused; null when there is none. */
+  const toFilePane = (t: { pane: PaneNo; projectId: string | null; switchTo: boolean }): PaneNo | null => {
+    if (!t.projectId) {
+      patch({ error: "Pick a project first: the editor works in a project." });
+      return null;
+    }
+    const n = t.switchTo ? placeFile(t.pane, t.projectId) : t.pane;
+    if (n === null) {
+      patch({ error: "No room to open a file beside this view: close a pane, or switch one to the editor." });
+      return null;
+    }
+    view.focus(n);
+    return n;
+  };
+  /**
+   * What a Diff pane shows (lib/scm `diffMode`): the task a drawn Task pane
+   * shows (a Diff pane never shows another), else the task the window is
+   * about, else its pinned project's uncommitted changes, else the chat's.
+   */
+  // A drawn Task pane shows the window's task (`taskShown`, above): a Diff pane shows that one.
+  const taskInPane = !!task && taskShown;
+  const diffModeOf = (spec: PaneSpec): DiffMode => diffMode({
+    pin: spec.projectId, projectIds: state.projects.map((p) => p.id),
+    taskId: state.taskId, taskFocus: state.taskFocus, taskShown: taskInPane, taskIds: state.tasks.map((t) => t.id),
+    follow: activeProjectId,
+  });
+  const diffHeading = (mode: DiffMode): string =>
+    mode.kind === "project" ? `Uncommitted changes in ${projectName(mode.projectId)}`
+      : mode.kind === "task" ? `Task ${mode.taskId.slice(0, 6)}${task?.brief ? ` · ${task.brief}` : ""}` : "";
+  /** "Open" on a Diff pane's changed file: where `placeFile` says — never over the Diff or a VEX view. */
+  const openFromDiff = (n: PaneNo, projectId: string, path: string) => {
+    if (blockedNow.current || crashedRef.current) return;
+    const pane = toFilePane({ pane: n, projectId, switchTo: true });
+    if (pane !== null) askFile(pane, { kind: "open", path });
+  };
+  /** Another dialog is open, or the window crashed: ED-7's keys do nothing. */
+  const navBusy = () => !!live.current.picker || threadModel.overlayOpen || crashedRef.current
+    || live.current.approvals.length > 0;
+  const openNav = (kind: "quickOpen" | "palette") => {
+    if (navBusy()) return;
+    const t = fileTarget();
+    if (kind === "quickOpen" && !t.projectId) {
+      patch({ error: "Pick a project first: quick open lists a project's files." });
+      return;
+    }
+    const editor = focusedEditor();
+    const focused = !!editor && !!editor.hasTextFocus?.();
+    let actions: EditorAction[] = [];
+    if (kind === "palette" && focused) {
+      try {
+        actions = (editor.getSupportedActions?.() ?? [])
+          .filter((a: any) => a.isSupported?.() !== false)
+          .map((a: any) => ({ id: String(a.id), label: String(a.label || "") }));
+      } catch {
+        actions = [];
+      }
+    }
+    const activePath = t.switchTo ? null : activePathOf(t.pane);
+    setNav({
+      ...t, activePath, editor: focused ? editor : null, actions,
+      ctx: { filePane: !t.switchTo, activeFile: !!activePath, editor: focused },
+      returnTo: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    });
+    patch({ picker: kind });
+  };
+  /** The editor settings (ED-8), from a File pane's ⚙ or the palette: never over another dialog or a card. */
+  const settingsReturn = useRef<HTMLElement | null>(null);
+  const openEditorSettings = () => {
+    if (navBusy()) return;
+    settingsReturn.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    patch({ picker: "editorSettings" });
+  };
+  const closeEditorSettings = () => {
+    const back = settingsReturn.current;
+    settingsReturn.current = null;
+    patch({ picker: null });
+    if (back && back.isConnected && !live.current.approvals.length) requestAnimationFrame(() => back.focus());
+  };
+  const closeNav = (refocus: boolean) => {
+    const back = nav?.returnTo;
+    patch({ picker: null });
+    setNav(null);
+    if (refocus && back && back.isConnected && !live.current.approvals.length) requestAnimationFrame(() => back.focus());
+  };
+  const openFindInFiles = () => {
+    if (navBusy()) return;
+    const t = fileTarget();
+    // The selection, when it is one short line of a file Jarvis may read: an
+    // env file's text goes in no request but its own save.
+    let query: string | undefined;
+    const editor = focusedEditor();
+    if (editor?.hasTextFocus?.()) {
+      const model = editor.getModel?.();
+      const sel = editor.getSelection?.();
+      if (model && sel && !sel.isEmpty() && sel.startLineNumber === sel.endLineNumber
+          && model.getLanguageId?.() !== ENV_LANGUAGE) {
+        const text = model.getValueInRange(sel);
+        if (text.length <= 200) query = text;
+      }
+    }
+    const pane = toFilePane(t);
+    if (pane === null) return;
+    askFile(pane, { kind: "search", query });
+  };
+  editorKeyRef.current = (what) => {
+    if (what === "findInFiles") openFindInFiles();
+    else openNav(what);
+  };
+  /** A palette entry: a HUD command, or one of Monaco's actions in the editor it was opened from. */
+  const runEntry = (key: string) => {
+    const at = nav;
+    closeNav(false);
+    if (!at || live.current.approvals.length) return;
+    if (key.startsWith("monaco:")) {
+      const ed = at.editor;
+      const id = key.slice("monaco:".length);
+      if (!ed) return;
+      requestAnimationFrame(() => {
+        if (live.current.approvals.length) return;
+        ed.focus?.();
+        void ed.getAction?.(id)?.run?.();
+      });
+      return;
+    }
+    const id: CommandId | null = commandOf(key);
+    if (!id) return;
+    const later = (f: () => void) => requestAnimationFrame(() => {
+      if (!live.current.approvals.length) f();
+    });
+    const toPane = (kind: FileAskBody["kind"]) => {
+      if (!at.ctx.filePane) return;
+      view.focus(at.pane);
+      askFile(at.pane, { kind } as FileAskBody);
+    };
+    switch (id) {
+      case "file.quickOpen":
+        return later(() => editorKeyRef.current("quickOpen"));
+      case "search.findInFiles":
+        return later(() => editorKeyRef.current("findInFiles"));
+      case "file.newFile":
+        return toPane("newFile");
+      case "file.newFolder":
+        return toPane("newFolder");
+      case "file.save":
+        return toPane("save");
+      case "file.reload":
+        return toPane("reload");
+      case "file.closeTab":
+        return toPane("closeTab");
+      case "file.nextTab":
+        return toPane("nextTab");
+      case "file.prevTab":
+        return toPane("prevTab");
+      case "file.copyPath":
+        return toPane("copyPath");
+      case "chat.addSelection":
+        return toPane("addToChat");
+      case "file.saveAll":
+        void buffers.saveAll();
+        return;
+      case "chat.newThread":
+        newThread();
+        return;
+      case "view.files":
+        toFilePane(fileTarget());
+        return;
+      case "view.toggleSidebar":
+        return view.toggle("left");
+      case "view.toggleRight":
+        return view.toggle("right");
+      case "view.togglePanel":
+        return view.ownerTogglePanel();
+      case "view.zoomIn":
+        return view.zoomBy(1);
+      case "view.zoomOut":
+        return view.zoomBy(-1);
+      case "view.zoomReset":
+        return view.setZoom(100);
+      case "view.editorSettings":
+        return later(openEditorSettings);
+      case "project.newVex":
+        // VX-3: the dialog only; nothing is made until the owner approves its card.
+        return later(() => {
+          if (!live.current.picker) patch({ picker: "newVexProject" });
+        });
+    }
+  };
+  const paletteList: Entry[] = nav && state.picker === "palette" ? paletteEntries(nav.ctx, nav.actions) : [];
 
   /** One chat pane: its conversation, its box, its chips, its Send/Steer and Stop. */
   const renderChat = (n: PaneNo) => {
@@ -1988,9 +2883,7 @@ export default function App() {
             <TaskView
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
-              onAnswer={(question, answer) =>
-                task && api.answerTask(task.id, { question, answer }).then(refreshTasks).catch(() => {})
-              }
+              onAnswer={answerQuestion}
               onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
               onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
               onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
@@ -1999,31 +2892,90 @@ export default function App() {
           </div>
         );
       case "file": {
-        // Keyed by its project: a save can only ever go where the file was read.
+        // Keyed by its project: its tabs are paths there, and a buffer saves
+        // through the project it was read through (state/buffers.ts).
         const pid = paneProject(spec, n);
         return (
           <FileTab
             key={pid ?? "none"}
+            pane={n}
             projectId={pid}
+            tabs={spec.projectId && spec.projectId === pid ? spec.editors ?? null : null}
+            onTabs={(id, tabs) => view.setEditors(n, id, tabs)}
             narrow={info.narrow}
-            onOpened={(id) => view.pin(n, id)}
-            onDirty={(dirty) => markDirty(n, dirty)}
+            blocked={blocked}
+            onAddToChat={addToChat}
+            ask={fileAsk[n] ?? null}
+            onRenamed={onRenamed}
+            goto={fileGoto[n] ?? null}
+            onGotoDone={(k) => gotoDone(n, k)}
+            onEditorSettings={openEditorSettings}
+            root={pid ? treeRoot(state.projects.find((p) => p.id === pid)) : null}
           />
         );
       }
-      case "diff":
-        return <DiffTab taskId={state.taskId} narrow={info.narrow} />;
-      case "preview":
+      case "vex": {
+        // Its pinned project (pinned when the pane switched to it), else the chat's.
+        const pid = stripProject(state, spec, n);
         return (
-          <PreviewTab
-            projectId={paneProject(spec, n)}
-            url={spec.previewUrl}
-            keepOrigin={spec.keepOrigin}
-            request={previewAsk[n] ?? null}
+          <VexView
+            pane={n}
+            projectId={pid}
+            projectName={projectName(pid)}
             blocked={blocked}
-            onLoaded={(url) => view.setPreviewUrl(n, url)}
+            onOpenError={(path, line, col) => pid && openAt(n, pid, path, line, col)}
+          />
+        );
+      }
+      case "diff": {
+        // A task's diff as before, or a project's uncommitted changes (lib/scm).
+        const mode = diffModeOf(spec);
+        return (
+          <div className="diffpane">
+            {mode.kind !== "none" ? (
+              // What it shows, and why (review of PR #67, L3): the Task pane's
+              // task, the task picked last, this pane's project or the chat's.
+              <div className="diffhead" data-testid="diff-mode" data-mode={mode.kind}
+                   data-why={mode.kind === "task" ? mode.why : mode.pinned ? "pin" : "chat"}>
+                <span data-testid="diff-mode-what">{diffHeading(mode)}</span>
+                <span className="muted" data-testid="diff-mode-why"> · {diffWhy(mode)}</span>
+              </div>
+            ) : null}
+            {mode.kind === "project" ? (
+              <ProjectDiff
+                key={mode.projectId}
+                projectId={mode.projectId}
+                root={treeRoot(state.projects.find((p) => p.id === mode.projectId))}
+                drawn={info.drawn}
+                narrow={info.narrow}
+                filePath={spec.filePath}
+                blocked={blocked}
+                onSelect={(path) => view.setFilePath(n, path)}
+                onOpen={(path) => openFromDiff(n, mode.projectId, path)}
+              />
+            ) : mode.kind === "task" ? (
+              <DiffTab taskId={mode.taskId} narrow={info.narrow} filePath={spec.filePath}
+                       onSelect={(path) => view.setFilePath(n, path)} />
+            ) : (
+              <div className="pad muted" data-testid="diff-none">Pick a project, or a task, to see its changes.</div>
+            )}
+          </div>
+        );
+      }
+      case "browser":
+        return (
+          <BrowserTab
+            pane={n}
+            slot={info.slot}
+            drawn={info.drawn}
+            projectId={paneProject(spec, n)}
+            url={spec.browserUrl}
+            keepOrigin={spec.keepOrigin}
+            request={browserAsk[n] ?? null}
+            blocked={blocked}
+            onLoaded={(url) => view.setBrowserUrl(n, url)}
             onKeepOrigin={(origin) => view.setKeepOrigin(n, origin)}
-            onRequestHandled={(k) => previewHandled(n, k)}
+            onRequestHandled={(k) => browserHandled(n, k)}
             onProjectRoot={(id) => view.pin(n, id)}
           />
         );
@@ -2044,10 +2996,10 @@ export default function App() {
                 title="Switching that pane away would close its file and drop the edit">
             {refusal.pane === n
               ? "unsaved edit · save or reload first"
-              : `pane ${refusal.pane} has an unsaved edit · save or reload it first`}
+              : `pane ${slotOf(ws, refusal.pane)} has an unsaved edit · save or reload it first`}
           </span>
         ) : null}
-        {dirty && pinGone(spec) ? (
+        {spec.view === "file" && goneHeld[n] && pinGone(spec) ? (
           // The one remount nothing can avoid: ask before it drops the edit.
           <span className="chip panepin warn" data-testid={`pane-${n}-gone`}
                 title="The project this file was read from is gone; the unsaved edit is kept here until you discard it">
@@ -2057,11 +3009,117 @@ export default function App() {
               className="quiet"
               data-testid={`pane-${n}-discard`}
               onClick={() => {
-                markDirty(n, false);
+                // The owner threw the edit away: the pane's holds go, and with
+                // them every buffer of this pane's no other pane holds — one
+                // another pane on the gone project still holds stays, with its
+                // own prompt there.
+                buffers.releasePane(n, { discard: true });
                 view.pin(n, null);
               }}
             >
               discard edit
+            </button>
+          </span>
+        ) : spec.view === "file" ? (
+          // A File pane picks its own project (decisions E-13): every project,
+          // or Follow chat. Only project roots are offered — a folder becomes
+          // reachable by becoming a project, so folders.py stays the one gate.
+          // A pane holding an unsaved edit refuses, with the refusal chip, and
+          // the select snaps back; under a card it is disabled (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-folder`}
+            value={spec.projectId && !pinGone(spec) ? spec.projectId : ""}
+            disabled={blocked}
+            title={dirty
+              ? "Save or reload the file first: another project closes it"
+              : "The project this pane's files come from"}
+            onChange={(e) => {
+              if (dirtyNow(n)) {
+                setRefused((r) => ({ ...r, [n]: { at: Date.now(), pane: n } }));
+                return;
+              }
+              view.pin(n, e.target.value || null);
+            }}
+          >
+            <option value="">Follow chat{activeProjectId ? ` · ${projectName(activeProjectId)}` : ""}</option>
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        ) : spec.view === "vex" ? (
+          // The VEX view's project (VX-2): its own, picked here; never the
+          // chat's by surprise — a build or a download goes to the project
+          // this says. Disabled under a card (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-vex-project`}
+            value={stripProject(state, spec, n) ?? ""}
+            // Off while a download's chain runs (review M1): the chain never
+            // goes on to a robot this pane no longer shows.
+            disabled={blocked || !!vex.chain}
+            title={vex.chain ? "A download is running: wait for it, or Cancel it, first"
+              : "The VEX project this pane builds and downloads"}
+            onChange={(e) => e.target.value && view.pin(n, e.target.value)}
+          >
+            {stripProject(state, spec, n) ? null : <option value="">Pick a project</option>}
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        ) : spec.view === "diff" ? (
+          // The Diff pane's project (2026-10-12): a task picked shows its diff
+          // (Follow); else the pinned project's uncommitted changes, else the
+          // chat's. Picking a project here takes the window off the task, as
+          // picking a thread does, so the choice shows at once — except while
+          // a drawn Task pane shows the task: the Diff then shows that task
+          // (it never shows another, review of PR #67 L3), and the picker is
+          // off and says so. Disabled under a card (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-diff-project`}
+            value={(() => {
+              const mode = diffModeOf(spec);
+              return mode.kind === "project" && mode.pinned ? mode.projectId : "";
+            })()}
+            disabled={blocked || taskInPane}
+            title={taskInPane
+              ? "A Task pane shows a task, so this pane shows that task's diff: clear the task in the Task pane's header, or switch that pane away, to see a project's uncommitted changes"
+              : "Whose changes this pane shows: a project's uncommitted changes, or the selected task's"}
+            onChange={(e) => {
+              const id = e.target.value || null;
+              if (id && live.current.taskFocus) patch({ taskFocus: false });
+              view.pin(n, id);
+            }}
+          >
+            <option value="">
+              {(state.taskFocus || taskInPane) && task ? `Follow · task ${task.id.slice(0, 6)}`
+                : `Follow chat${activeProjectId ? ` · ${projectName(activeProjectId)}` : ""}`}
+            </option>
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        ) : spec.view === "task" && task ? (
+          // The way out of a task (the Diff follow-ups, 2026-10-12): the
+          // default 2×2 grid draws a Task pane, and while one shows a task
+          // every Diff pane shows that task's diff (review of PR #67, L3) —
+          // nothing could take the window off it. Clearing unpicks the task
+          // everywhere, so no Diff pane ever shows another task than this one.
+          <span className="chip panepin" data-testid={`pane-${n}-task`} title={task.brief || task.id}>
+            task {task.id.slice(0, 6)}
+            <button
+              type="button"
+              className="quiet"
+              data-testid={`pane-${n}-task-clear`}
+              disabled={blocked}
+              title="Unpick this task: the Task pane shows none, and a Diff pane shows its project's uncommitted changes"
+              onClick={() => {
+                if (blockedNow.current || crashedRef.current) return;
+                patch({ taskId: null, taskFocus: false });
+              }}
+            >
+              clear
             </button>
           </span>
         ) : pinnedElsewhere(spec, n) ? (
@@ -2104,20 +3162,35 @@ export default function App() {
     );
   };
 
+  // The split button's state, shared by every pane (it depends on the count).
+  // A File pane with an unsaved edit splits too since ED-2: the copy holds
+  // the same buffers, edit and all (decisions S-8's "save first" was for two
+  // copies of one file that could diverge).
+  const verdict = view.splitVerdict(PANE_NOS.filter((n) => dirtyPanes[n]));
+  const paneCount = orderOf(ws).length;
+  const splitFor = (_n: PaneNo) => ({ ok: verdict.ok, title: splitTitle(verdict.why, paneCount) });
+
   const paneContext = (spec: PaneSpec, info: PaneInfo): string => {
     switch (spec.view) {
       case "chat": {
         const chat = state.chats[info.pane];
-        return threadOf(chat.threadId)?.title
-          || (chat.compose ? `New thread in ${projectName(chat.compose.projectId)}` : "");
+        // Its title, or "New thread"/"Untitled" — never the id (chat titles).
+        const thread = threadOf(chat.threadId);
+        if (thread) return threadLabel(thread).text;
+        return chat.compose ? `New thread in ${projectName(chat.compose.projectId)}` : "";
       }
       case "task":
-      case "diff":
         return task?.brief || "";
+      case "diff": {
+        const mode = diffModeOf(spec);
+        return mode.kind === "task" ? task?.brief || "" : diffHeading(mode);
+      }
       case "file":
         return `in: ${projectName(paneProject(spec, info.pane))}`;
-      case "preview":
-        return spec.previewUrl || "";
+      case "vex":
+        return `VEX · ${projectName(stripProject(state, spec, info.pane))}`;
+      case "browser":
+        return spec.browserUrl || "";
       default:
         return "";
     }
@@ -2188,7 +3261,7 @@ export default function App() {
       {/* A render error in here — the title bar, the shell, the orb — shows a
           Reload prompt in their place and goes no further: the card below is
           outside it, so it stays up and answerable (components/Boundary.tsx). */}
-      <WorkspaceBoundary onCrash={onCrash}>
+      <WorkspaceBoundary onCrash={onCrash} blocked={blocked}>
       <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
       <div
         id="shell"
@@ -2258,8 +3331,9 @@ export default function App() {
             context={paneContext}
             selectedPane={selected}
             onView={setPaneView}
+            offersVex={(spec, info) => offersVex(vex.detection(stripProject(state, spec, info.pane)))}
             projects={state.projects}
-            openPreview={openPreview}
+            openBrowser={openBrowser}
             // Where `+` opens a terminal: the folder of what the focused pane
             // shows, as an id. A chat pane is its own conversation; any other
             // pane defers to the chat the window is about (`activeChat`: the
@@ -2275,6 +3349,11 @@ export default function App() {
                 project: paneProject(spec, n), task: state.taskId,
               });
             }}
+            splitFor={splitFor}
+            onSplit={(n) => void splitFrom(n)}
+            closeQuestion={closeQuestion}
+            closeSave={(n) => (buffers.paneLosing(n).length ? () => buffers.savePane(n) : null)}
+            onClose={closePane}
           />
         </div>
         {drawn.rightFolded ? null : (
@@ -2300,9 +3379,7 @@ export default function App() {
             <TaskView
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
-              onAnswer={(question, answer) =>
-                task && api.answerTask(task.id, { question, answer }).then(refreshTasks).catch(() => {})
-              }
+              onAnswer={answerQuestion}
               onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
               onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
               onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
@@ -2374,6 +3451,25 @@ export default function App() {
         }}
       >
       <CrashProbe where="dialog" />
+      {state.picker === "quickOpen" && nav?.projectId ? (
+        <QuickOpen
+          projectId={nav.projectId}
+          projectName={projectName(nav.projectId)}
+          activePath={nav.activePath}
+          onOpen={(path, line, col) => {
+            const at = nav;
+            closeNav(false);
+            const pane = at ? toFilePane(at) : null;
+            if (pane !== null) askFile(pane, { kind: "open", path, line, col });
+          }}
+          onClose={() => closeNav(true)}
+          onLeave={() => closeNav(false)}
+        />
+      ) : null}
+      {state.picker === "palette" && nav ? (
+        <Palette entries={paletteList} onRun={runEntry} onClose={() => closeNav(true)} onLeave={() => closeNav(false)} />
+      ) : null}
+      {state.picker === "editorSettings" && !blocked ? <EditorSettingsDialog onClose={closeEditorSettings} /> : null}
       {state.picker === "model" ? (
         <ModelPicker
           view={roster}
@@ -2444,6 +3540,22 @@ export default function App() {
               })
           }
           taken={projectNamesTaken(state.projects, null, state.archivedNames)}
+          onVex={() => patch({ picker: "newVexProject" })}
+          onClose={() => patch({ picker: null })}
+        />
+      ) : null}
+      {state.picker === "newVexProject" ? (
+        // VX-3: a VEX project from the extension's templates, through the
+        // `project_folder` card. Its controls are off under any card.
+        <NewVexProject
+          blocked={blocked}
+          onCreated={(id) => {
+            void refreshProjects(id).then(() => {
+              if (live.current.picker === "newVexProject") patch({ picker: null });
+              // A new project starts as a new thread in it, as New project's do.
+              if (!live.current.approvals.length) newThread(id);
+            });
+          }}
           onClose={() => patch({ picker: null })}
         />
       ) : null}
