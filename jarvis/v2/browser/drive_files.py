@@ -71,7 +71,9 @@ def _staging_root():
         parent=os.open(path.anchor,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);fds.append(parent)
         for name in path.parts[1:]:
             before=os.stat(name,dir_fd=parent,follow_symlinks=False)
-            child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent);fds.append(child)
+            try:child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+            except FileNotFoundError:raise OSError("staging ancestor changed") from None
+            fds.append(child)
             info=os.fstat(child)
             if (before.st_dev,before.st_ino)!=(info.st_dev,info.st_ino):raise OSError("staging ancestor changed")
             links.append((parent,name,child,info));parent=child
@@ -79,7 +81,8 @@ def _staging_root():
             if info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:raise OSError("staging directory is not private")
         def current():
             for parent,name,child,info in links:
-                now=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                try:now=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                except FileNotFoundError:raise OSError("staging ancestor changed") from None
                 if not stat.S_ISDIR(now.st_mode) or (now.st_dev,now.st_ino)!=(info.st_dev,info.st_ino):
                     raise OSError("staging ancestor changed")
         current();yield parent,current

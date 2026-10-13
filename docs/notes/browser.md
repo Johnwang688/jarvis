@@ -1278,3 +1278,24 @@ jarvis/v2/tools/hud_browser_act.py, in addition to act_rules.py and act_review.p
 They enforce OFF, caller/turn ownership, credentials, private approval, actual input
 and exact-file release. Only the owner may change these gate files; runtime.py and
 toolgroups.py retain the owner's existing non-protected decision.
+
+
+### BR9b full-size upload test resource accommodation
+
+Lead review approved an explicit exception to amendment1 section H for the one
+full50MiB upload fixture: summed Chrome sampled-peak and endpoint RSS below1.75GiB,
+plus actual entire cgroup memory.peak below1.5GiB. Ordinary Browser fixtures retain
+1.5GiB summed RSS; all test trees retain MemoryMax3GiB/MemorySwapMax0. The fixture
+refreshes owned Chrome PIDs every20ms and at transfer phases, records baseline,
+phase maxima, sampled peak, endpoint and actual cgroup peak, and uses no forced GC.
+A sampled peak is not a mathematically exact continuous maximum. The exception
+changes neither production driving OFF nor the50MiB file cap.
+
+Unmodified standalone full-cap tests exceeded the original summed-RSS target:
+about1559–1581MiB, versus actual complete cgroup peaks below827MiB. Shared pages
+are multiply counted by summed RSS. Baseline-only GC and temporary buffer
+retirement did not reliably reach the original target; their failures were kept.
+Transport now passes constant functions with bounded data arguments, decodes raw
+192KiB chunks natively, transfers temporary ArrayBuffers to zero after immutable
+Blob ownership, and composes a byte-backed File. Neither production nor the
+accepted fixture forces page-global collection to conceal a previous peak.

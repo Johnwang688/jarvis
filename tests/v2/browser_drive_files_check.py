@@ -148,4 +148,21 @@ class Uploads(unittest.TestCase):
                 self.assertEqual((old/'browser/drive-staging'/('a'*32)/'report.txt').read_bytes(),b'preserve-on-race')
 
 
+    def test_missing_already_pinned_ancestor_is_not_reported_clean(self):
+        from jarvis.v2.browser.host import secure_dir
+        parent=secure_dir(self.root/'state');browser=secure_dir(parent/'browser')
+        root=secure_dir(browser/'drive-staging');folder=secure_dir(root/('a'*32))
+        (folder/'report.txt').write_bytes(b'keep');(folder/'report.txt').chmod(0o600)
+        renamed=parent.with_name('old-state');original=F.os.fstat;changed=False
+        def fstat(fd):
+            nonlocal changed
+            info=original(fd)
+            if not changed and os.path.realpath('/proc/self/fd/'+str(fd))==str(root):
+                parent.rename(renamed);changed=True
+            return info
+        with patch.object(config,'BROWSER_DIR',browser),patch.object(F.os,'fstat',side_effect=fstat):
+            self.assertFalse(F.sweep_staging())
+        self.assertTrue(changed)
+        self.assertEqual((renamed/'browser/drive-staging'/('a'*32)/'report.txt').read_bytes(),b'keep')
+
 if __name__=='__main__':unittest.main()

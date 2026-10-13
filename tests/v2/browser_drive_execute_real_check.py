@@ -216,21 +216,6 @@ class Real(V.Real):
         self.assertEqual(self.run_on(self.pg.evaluate('events')),['input'])
 
 
-    def test_upload_full_50_mib_cap_uses_bounded_transport(self):
-        from pathlib import Path
-        project=Path(self.turn.project_root);project.mkdir(exist_ok=True)
-        source=project/'large.txt'
-        block=b'a'*(1024*1024)
-        with source.open('wb') as output:
-            for _ in range(50):output.write(block)
-        self.html("<input type='file' aria-label='Choose file'>")
-        target=self.choose('Choose file')
-        with patch.object(self.daemon.approvals,'ask',return_value=Decision.ALLOW):
-            result=self.service.act(D.Action('upload','2',target,file='large.txt'))
-        self.assertEqual(result.outcome,'acted',result);source.unlink()
-        result=self.run_on(self.pg.locator('input').evaluate("async e=>{const f=e.files[0];return [f.size,await f.slice(0,8).text(),await f.slice(-8).text()]}"))
-        self.assertEqual(result,[R.MAX_UPLOAD_BYTES,'aaaaaaaa','aaaaaaaa'])
-
 
     def test_control_port_spellings_and_unleased_navigation_have_zero_accepts(self):
         self.html('<p>Control-port refusal fixture</p>')
@@ -304,7 +289,79 @@ class Real(V.Real):
         self.assertEqual(capability.snapshot.url,self.pg.url)
 
 
+class FullCap(Real):
+    """Explicit BR9b full50MiB resource exception; ordinary Real stays1.5GiB.
+
+    Lead-approved amendment: summed Chrome sampled/endpoint RSS<1.75GiB,
+    actual entire cgroup memory.peak<1.5GiB; outer3GiB/0swap unchanged. No GC.
+    """
+    def setUp(self):
+        super().setUp()
+        from jarvis import config
+        from tests.v2 import owner_browser_check as O
+        self._rss_lock=threading.Lock();self._rss_stop=threading.Event()
+        self._rss_samples={};self._rss_peak=0;self._rss_phase='baseline'
+        def measure():
+            # Refresh the owned tree every sample, including newly spawned PIDs.
+            rss=O.rss_bytes(O.chrome_tree(config.BROWSER_DIR))
+            with self._rss_lock:
+                self._rss_peak=max(self._rss_peak,rss)
+                self._rss_samples[self._rss_phase]=max(self._rss_samples.get(self._rss_phase,0),rss)
+            return rss
+        self._rss_measure=measure;self._rss_baseline=measure()
+        def watch():
+            while not self._rss_stop.wait(.02):measure()
+        self._rss_thread=threading.Thread(target=watch);self._rss_thread.start()
+        cdp=self.run_on(self.host._ensure_cdp(self.tab));original=cdp.send
+        async def send(method,params=None):
+            if method=='Runtime.callFunctionOn':
+                args=(params or {}).get('arguments',[{}])[0].get('value',{})
+                if 'phase' in args:self._rss_phase=args['phase'];measure()
+            result=await original(method,params)
+            measure();return result
+        patcher=patch.object(cdp,'send',side_effect=send);patcher.start();self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        from pathlib import Path
+        from jarvis import config
+        from tests.v2 import owner_browser_check as O
+        self._rss_stop.set();self._rss_thread.join(timeout=2)
+        endpoint=self._rss_measure()
+        group=next(line.split(':',2)[2] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0:'))
+        cgroup_peak=int((Path('/sys/fs/cgroup'+group)/'memory.peak').read_text())
+        print('full50MiB resources:',json.dumps({'baseline_mib':round(self._rss_baseline/2**20,1),
+            'phase_sampled_mib':{key:round(value/2**20,1) for key,value in self._rss_samples.items()},
+            'sampled_peak_mib':round(self._rss_peak/2**20,1),'endpoint_mib':round(endpoint/2**20,1),
+            'cgroup_peak_mib':round(cgroup_peak/2**20,1)}),flush=True)
+        try:
+            self.assertFalse(self._rss_thread.is_alive())
+            self.assertLess(self._rss_peak,1.75*2**30)
+            self.assertLess(endpoint,1.75*2**30)
+            self.assertLess(cgroup_peak,1.5*2**30)
+        finally:
+            for profile in list(self.host._instances):self.host.close_profile(profile)
+            self.assertEqual(O.chrome_tree(config.BROWSER_DIR),[])
+
+    def test_upload_full_50_mib_cap_uses_bounded_transport(self):
+        from pathlib import Path
+        project=Path(self.turn.project_root);project.mkdir(exist_ok=True)
+        source=project/'large.txt'
+        block=b'a'*(1024*1024)
+        with source.open('wb') as output:
+            for _ in range(50):output.write(block)
+        self.html("<input type='file' aria-label='Choose file'>")
+        target=self.choose('Choose file')
+        with patch.object(self.daemon.approvals,'ask',return_value=Decision.ALLOW):
+            result=self.service.act(D.Action('upload','2',target,file='large.txt'))
+        self.assertEqual(result.outcome,'acted',result);source.unlink()
+        result=self.run_on(self.pg.locator('input').evaluate("async e=>{const f=e.files[0],r=f.stream().getReader();let size=0,valid=true;for(;;){const c=await r.read();if(c.done)break;size+=c.value.length;valid=valid&&c.value.every(b=>b===97)}return [f.size,size,valid]}"))
+        self.assertEqual(result,[R.MAX_UPLOAD_BYTES,R.MAX_UPLOAD_BYTES,True])
+
+
+
+
 def load_tests(loader,tests,pattern):
-    return unittest.TestSuite(Real(name) for name in sorted(Real.__dict__) if name.startswith("test_"))
+    return unittest.TestSuite([Real(name) for name in sorted(Real.__dict__) if name.startswith("test_")] +
+        [FullCap("test_upload_full_50_mib_cap_uses_bounded_transport")])
 
 if __name__=="__main__":unittest.main(verbosity=2)

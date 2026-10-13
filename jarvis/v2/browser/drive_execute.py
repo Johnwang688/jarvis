@@ -126,7 +126,8 @@ if(args.phase==='chunk'){
  if(typeof Uint8Array.fromBase64!=='function')return false;
  const bytes=Uint8Array.fromBase64(args.data,{lastChunkHandling:'strict'});
  if(bytes.length>786432||u.offset+bytes.length>u.size)return false;
- u.parts.push(new Blob([bytes]));u.offset+=bytes.length;return true;
+ if(typeof bytes.buffer.transfer!=='function')return false;
+ u.parts.push(new Blob([bytes]));u.offset+=bytes.length;bytes.buffer.transfer(0);return true;
 }
 if(args.phase==='assign'){
  if(u.file||u.offset!==u.size||typeof args.name!=='string'||args.name.length>255||
