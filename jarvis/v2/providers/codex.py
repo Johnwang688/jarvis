@@ -1022,7 +1022,11 @@ class CodexProvider:
                         removed = sum(x.startswith("-") and not x.startswith("---") for x in lines)
                         summary = f"{len(changes)} files, +{added}/-{removed} lines"
                         ok = item.get("status") == "completed"
-                    yield self._event(h, EventKind.TOOL_FINISHED, call_id=item["id"], name=name, ok=ok, summary=summary)
+                    # generate-ts, Codex 0.161.0: CommandExecutionStatus and
+                    # PatchApplyStatus both include `declined`.
+                    outcome = "denied" if item.get("status") == "declined" else "ok" if ok else "failed"
+                    yield self._event(h, EventKind.TOOL_FINISHED, call_id=item["id"], name=name,
+                                      ok=ok, outcome=outcome, summary=summary)
             elif done and kind == "agentMessage":
                 yield self._event(h, EventKind.TEXT, text=item["text"])
             elif done and kind == "reasoning":

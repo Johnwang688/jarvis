@@ -185,6 +185,11 @@ STDERR_LINES = 40
 CLASSIFIER_DENIAL_PREFIX = (
     "Permission for this action was denied by the Claude Code auto mode classifier"
 )
+# Verified in CLI 2.1.295: PreToolUse permissionDecisionReason becomes
+# tool_result.content verbatim (with hook context appended).
+HOOK_DENIAL_PREFIX = "Jarvis denied "
+HOOK_REFUSAL_PREFIX = "Jarvis refuses "
+HOOK_DENIAL_MESSAGE = HOOK_DENIAL_PREFIX + "this call"
 _REASON = re.compile(
     r"Reason:\s*(?P<reason>.+?)\.\s+If you have other tasks", re.DOTALL
 )
@@ -617,6 +622,8 @@ class _Session:
     interrupted: bool = False
     closed: bool = False
     tools_seen: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    denied_tools: set[str] = field(default_factory=set)
+    denial_without_id: bool = False
     # What this handle's results added (the per-result deltas, summed).
     usage: Usage = field(default_factory=Usage)
     # The CLI's running cost total as the last result on this conversation
@@ -880,6 +887,10 @@ class ClaudeProvider:
             from .. import session_tools
             jarvis = session_tools.claude_tool(name)
             if jarvis is not None and jarvis.foreground_only and data.get("agent_id"):
+                if tool_use_id:
+                    session.denied_tools.add(tool_use_id)
+                else:
+                    session.denial_without_id = True
                 # A sub-agent's call (the hook input names its agent): refused
                 # without asking `permit`, so no one is ever asked about it.
                 return {
@@ -887,7 +898,7 @@ class ClaudeProvider:
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
                         "permissionDecisionReason": (
-                            f"Jarvis refuses {jarvis.name} for a sub-agent: it runs only "
+                            f"{HOOK_REFUSAL_PREFIX}{jarvis.name} for a sub-agent: it runs only "
                             "in the conversation itself. Do not retry it from a sub-agent."
                         ),
                     }
@@ -916,6 +927,10 @@ class ClaudeProvider:
                         "permissionDecisionReason": "approved by Jarvis",
                     }
                 }
+            if tool_use_id:
+                session.denied_tools.add(tool_use_id)
+            else:
+                session.denial_without_id = True
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -923,7 +938,7 @@ class ClaudeProvider:
                     # The model reads this, so it says what happened rather
                     # than only that something did.
                     "permissionDecisionReason": _safe(
-                        f"Jarvis denied {name}. The owner's rules or the owner "
+                        f"{HOOK_DENIAL_PREFIX}{name}. The owner's rules or the owner "
                         "refused this call; do not retry it or work around it."
                     ),
                 }
@@ -937,7 +952,12 @@ class ClaudeProvider:
             decision = await self._decide(session, str(tool_name or ""), args)
             if decision is Decision.ALLOW:
                 return PermissionResultAllow()
-            return PermissionResultDeny(message=_safe("Jarvis denied this call"))
+            tool_use_id = getattr(context, "tool_use_id", None)
+            if tool_use_id:
+                session.denied_tools.add(tool_use_id)
+            else:
+                session.denial_without_id = True
+            return PermissionResultDeny(message=_safe(HOOK_DENIAL_MESSAGE))
 
         return can_use_tool
 
@@ -1065,6 +1085,8 @@ class ClaudeProvider:
         session.events = events
         session.interrupted = False
         session.tools_seen.clear()
+        session.denied_tools.clear()
+        session.denial_without_id = False
         with session.mutex:
             session.accepting = False
             session.generation += 1
@@ -1494,6 +1516,7 @@ class ClaudeProvider:
         finally:
             events.put(Event(EventKind.TOOL_FINISHED, session.thread_id, {
                 "call_id": call_id, "name": "compact", "ok": compacted,
+                "outcome": "ok" if compacted else "failed",
                 "summary": "conversation compacted" if compacted else "compaction did not finish",
             }))
         LOG.info("claude %s: compaction %s", session.thread_id,
@@ -1603,6 +1626,14 @@ class ClaudeProvider:
         name, args = session.tools_seen.get(block.tool_use_id, ("", {}))
         text = _safe(_result_text(block.content))
         declined = text.startswith(CLASSIFIER_DENIAL_PREFIX)
+        denied = declined or block.tool_use_id in session.denied_tools
+        # Older SDK contexts may omit the id. Only an error can then be a
+        # hook refusal; successful output bearing those words stays success.
+        if (session.denial_without_id and block.is_error
+                and text.startswith((HOOK_DENIAL_PREFIX, HOOK_REFUSAL_PREFIX))):
+            denied = True
+            session.denial_without_id = False
+        session.denied_tools.discard(block.tool_use_id)
         out: list[Event] = []
         if declined:
             # §6.1: the owner's judgement outranks a classifier, but only
@@ -1631,6 +1662,7 @@ class ClaudeProvider:
                     "call_id": block.tool_use_id,
                     "name": name,
                     "ok": not bool(block.is_error) and not declined,
+                    "outcome": "denied" if denied else "failed" if block.is_error else "ok",
                     "summary": text[:SUMMARY_CHARS],
                 },
             )

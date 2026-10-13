@@ -84,7 +84,8 @@ class Event:
     data: dict[str, Any] = field(default_factory=dict)
     # Conventions for `data`, per kind:
     #   text_delta/text/thinking: {"text": str}
-    #   tool_started: {"call_id", "name", "args": dict}   tool_finished: {"call_id", "name", "ok": bool, "summary": str}
+    #   tool_started: {"call_id", "name", "args": dict} (+ daemon label)
+    #   tool_finished: {"call_id", "name", "ok": bool, "outcome": "ok"|"failed"|"denied", "summary": str}
     #   approval_requested: {"req_id", "tool", "args", "command": str|None}
     #     ("the gate was consulted": the daemon logs these two as gate_requested/
     #     gate_resolved and never publishes them; owner questions are the broker's)

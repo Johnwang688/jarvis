@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -970,7 +971,7 @@ def sequence_checks() -> None:
             # "hi", not "hi\n": every string goes through the scrub, and v1's
             # `_drop_attributed_lines` rejoins on newlines. A ticker summary
             # can lose a trailing newline; a credential may not survive one.
-            {"call_id": "call-1", "name": "Bash", "ok": True, "summary": "hi"},
+            {"call_id": "call-1", "name": "Bash", "ok": True, "outcome": "ok", "summary": "hi"},
             "TOOL_FINISHED is keyed to the call id",
         )
         usage = by_kind["usage"].data
@@ -1015,6 +1016,7 @@ def sequence_checks() -> None:
         events = drain(provider, handle)
         finished = [e for e in events if e.kind is EventKind.TOOL_FINISHED][0]
         check(finished.data["ok"] is False, "an is_error result is not ok")
+        eq(finished.data["outcome"], "failed", "ordinary error outcome")
         provider.close(handle)
 
     print("\n-- images ride the turn as content blocks")
@@ -1427,6 +1429,7 @@ def reviewer_declined_checks() -> None:
         )
         decline = [e for e in events if e.kind is EventKind.REVIEWER_DECLINED][0]
         eq(decline.data["tool"], "Bash", "the decline names the tool")
+        eq(next(e for e in events if e.kind is EventKind.TOOL_FINISHED).data["outcome"], "denied", "classifier denial outcome")
         eq(
             decline.data["command"],
             "vercel --prod",
@@ -1439,6 +1442,58 @@ def reviewer_declined_checks() -> None:
             finished.data["ok"] is False,
             "a refused call must never render as one that happened",
         )
+        provider.close(handle)
+
+    # The CLI's actual PreToolUse deny reason and permission-callback message,
+    # as built by this provider (not a synthetic generic denial string).
+    for source in ("hook", "callback", "foreground", "callback_no_id"):
+        with fake([result_message()]):
+            handle = provider.start(thread(), brief(), lambda *_: Decision.DENY)
+            session = handle.native
+            if source == "hook":
+                output = claude._await(session.loop, provider._pre_tool_hook(session)({"tool_name": "Bash", "tool_input": {"command": "rm a"}}, "c", None), 3)
+                text = output["hookSpecificOutput"]["permissionDecisionReason"]
+            elif source == "foreground":
+                from jarvis.v2 import session_tools
+                name = "tc1_foreground"
+                session_tools.register(session_tools.SessionTool(name, foreground_only=True))
+                try:
+                    output = claude._await(session.loop, provider._pre_tool_hook(session)({"tool_name": "mcp__jarvis__" + name, "tool_input": {}, "agent_id": "subagent"}, "c", None), 3)
+                    text = output["hookSpecificOutput"]["permissionDecisionReason"]
+                finally:
+                    session_tools.unregister(name)
+            else:
+                text = claude._await(session.loop, provider._can_use_tool(session)("Bash", {"command": "rm a"}, None if source == "callback_no_id" else SimpleNamespace(tool_use_id="c")), 3).message
+            if source == "callback_no_id":
+                successful = provider._tool_result(session, ToolResultBlock(tool_use_id="own", content=text, is_error=False))
+                finish = next(e for e in successful if e.kind is EventKind.TOOL_FINISHED)
+                eq(finish.data["outcome"], "ok", "unknown-id fallback requires an SDK error")
+                eq(finish.data["ok"], True, "unknown-id fallback preserves success")
+            if source != "callback_no_id":
+                check("c" in session.denied_tools, source + " records the denied id")
+                text = "Permission blocked without any prefix"
+            translated = provider._tool_result(session, ToolResultBlock(tool_use_id="c", content=text, is_error=True))
+            finish = next(e for e in translated if e.kind is EventKind.TOOL_FINISHED)
+            eq(finish.data["outcome"], "denied", source + " denial outcome")
+            check(finish.data["ok"] is False, source + " denial is not ok")
+            check(not any(e.kind is EventKind.REVIEWER_DECLINED for e in translated), source + " denial is not the classifier")
+            provider.close(handle)
+
+    # A tool is free to print the hook's words, even as its own error.
+    with fake([result_message()]):
+        handle = provider.start(thread(), brief(), lambda *_: Decision.DENY)
+        for prefix in (claude.HOOK_DENIAL_PREFIX, claude.HOOK_REFUSAL_PREFIX):
+            for is_error in (False, True):
+                translated = provider._tool_result(handle.native, ToolResultBlock(tool_use_id="own", content=prefix + "everything\n", is_error=is_error))
+                finish = next(e for e in translated if e.kind is EventKind.TOOL_FINISHED)
+                eq(finish.data["ok"], not is_error, "own output preserves ok")
+                eq(finish.data["outcome"], "failed" if is_error else "ok", "own output is not a denial")
+        # Even an inconsistent SDK success for a tracked denial keeps old ok.
+        claude._await(handle.native.loop, provider._pre_tool_hook(handle.native)({"tool_name": "Bash", "tool_input": {}}, "tracked", None), 3)
+        translated = provider._tool_result(handle.native, ToolResultBlock(tool_use_id="tracked", content="done", is_error=False))
+        finish = next(e for e in translated if e.kind is EventKind.TOOL_FINISHED)
+        eq(finish.data["ok"], True, "tracked denial preserves pre-TC-1 ok")
+        eq(finish.data["outcome"], "denied", "tracked denial is independent of text")
         provider.close(handle)
 
     print("\n-- an ordinary error is not a reviewer decline")
@@ -2421,6 +2476,7 @@ def context_full_checks() -> None:
         sent = [q[0]["message"]["content"] for q in client.queries if isinstance(q, list)]
         eq(sent, ["are the PRs up?", "/compact", "are the PRs up?"],
            "context full: the CLI's own /compact, then the message once more")
+        eq(next(e for e in events if e.kind is EventKind.TOOL_FINISHED).data["outcome"], "ok", "compact outcome")
         compact = [e.data for e in events if e.kind.value in ("tool_started", "tool_finished")]
         eq([(d["name"], d.get("ok")) for d in compact], [("compact", None), ("compact", True)],
            "context full: the compaction shows as one tool call that finished")

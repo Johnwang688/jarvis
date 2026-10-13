@@ -1572,6 +1572,8 @@ personal chat off; the owner should reset that selection.
 
 ## 18. HUD v2 landed (2026-09-16)
 
+TC-1 (2026-10-12): opt-in `transcript?tools=1` adds safe labels and provider outcomes; legacy bytes stay unchanged, unfinished calls track the current turn, and old-label derivation is capped at 500 (contract `docs/hud-api.md`).
+
 2026-10-12: Settings installs the HUD as a Chrome app with orb PNG icons; `jarvis hud` pins the Default profile and launches its installed app id when present.
 
 V2 boot (2026-10-12): the approved seeded binary-dust/orb and sharp pen-drawn J.A.R.V.I.S. plate play once per window from the first frame, silently; automation and reduced motion suppress it, clicks are consumed, keys keep working, approvals take precedence, and `hud_v2_boot_check.py` checks it under CSP.

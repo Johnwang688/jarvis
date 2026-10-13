@@ -1046,6 +1046,32 @@ a stand-in app-server over real pipes for `one_shot`), the mirror's
 Guard removals that bite: the owner guard in `auto_title`, the session-copy
 update, `save` keeping the stored title, the mirror's archived skip.
 
+**Tool-call transcript, daemon half (TC-1, 2026-10-12; design §18,
+contract `docs/hud-api.md`, plan `docs/plans/2026-10-12-hud-tool-calls-in-transcript.md`).**
+`GET /threads/{id}/transcript?tools=1` interleaves tool starts with existing
+rows, pairing finishes within their turn; no parameter preserves the old
+bytes. `summary` and `args` never leave this route. `tool_calls.label` reads
+only display fields, never file contents or diffs, makes cwd paths relative,
+then scrubs known credential values (including the thread folder's credential
+env files) and every format in `credential_patterns.PATTERNS`. URLs in any
+label lose userinfo, query and fragment, keeping scheme, host, port and path.
+Grep shows its pattern with ` in <path>` when scoped.
+A value split by shell quoting can still appear in a label;
+labels do not parse or evaluate shell commands. Also still visible: a password with a bare `/` in a URL, and scheme-less `user:pass@host` or `curl -u user:pass`. Only the first 4,096 characters are judged, so every pass stays linear (a 1 MB argument takes a millisecond). The env values come from the thread's folder and its parents up to home. Labels end as one cleaned
+120-character line; tool names are cleaned to 40 characters. `_record` computes it once
+**before `_lock`** (scrub reads files), onto the existing start's log and bus
+data; a label exception silently falls back to the cleaned tool name. History
+reuses it; only the newest 500 starts may derive old labels. Providers own
+`ok`/`failed`/`denied` and preserve the pre-TC-1 `ok` calculation. Claude tracks
+Jarvis-denied tool ids (only an actual denial lacking an id uses an error
+flag plus hook prefix); its classifier signal stays unchanged. Fast path
+recognizes dispatch/approval refusal wording, and never assigns an outcome
+from raw-content tools' text. An older finish maps from `ok`.
+An unfinished call runs only for the thread's current running turn, otherwise
+it is stopped, including after restart. No new log lines or bus kinds.
+Free suites: `tool_calls_check`, the backend golden and all three providers;
+TC-2 supplies the HUD's collapsed groups.
+
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or
