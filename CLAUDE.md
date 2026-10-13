@@ -3248,8 +3248,10 @@ detector (`X=1 time -o <allowlist> … ls` ran unasked under an `ls` entry,
 in modes ask and all); `rules.strip_assignments` and `rules.command_start`
 are now the one reading of a command's first word, `c`/`e` in an option
 cluster carries an unknown program's string (LOW 1), a systemd `Exec…=`
-property is a command line (LOW 2), and `run_readonly` sets only the
-locale and time zone (details in *Program runners* in Safety design;
+property is a command line (LOW 2), `run_readonly` sets only the locale
+and time zone, and v2's always-ask rules see the program past a reserved
+word (`if true; then git push --force origin main; fi` matched none, on
+main too) (details in *Program runners* in Safety design;
 `rules_check` `third_delta_review_75_checks`, v2 `permissions_check`
 `third_delta_75_checks`; 7 guard removals bite).
 
@@ -5654,8 +5656,13 @@ jarvis/
   segment's first word is found: the gate-state detector (`_peel`,
   `_segment`, a find `-exec` program), the owner-op detector
   (`_peel_runner`, `_strip_reserved`), the vex reading (`_command_words`),
-  `decide`'s readers (`_judge_started`, `started_commands`), `starts()` and
-  `unwrap`. `D+=…` and `D[0]=…` are tracked as the shell sets them (`D=$HOME;
+  `decide`'s readers (`_judge_started`, `started_commands`), `starts()`,
+  `unwrap` and v2's layer 2 (`_tokens_of`: `if true; then git push --force
+  origin main; fi`, `( npx vercel --prod )` and `f() { vercel --prod; }`
+  matched no always-ask rule, on main too, so under AUTO the provider's
+  reviewer decided them). `decide` and the allowlist's stems strip only the
+  assignments: a reserved word in front is an unknown program there, asked
+  and never covered, as on main. `D+=…` and `D[0]=…` are tracked as the shell sets them (`D=$HOME;
   D+=/.config/jarvis; cp x $D/allowlist.json` ran). `command_strings` reads
   `c`/`e` anywhere in a short-option cluster, both as a glued value and as
   taking the next word (`uv run mysh -lc '<an owner op>'` was the ALLOW of
