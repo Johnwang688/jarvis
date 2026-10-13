@@ -26,7 +26,8 @@ What it pins (§H's table for `browser_act_review_check.py`):
     `extra_values`, the look's flag, the owner's words): no model call, ask;
   - the call: the review tier, never a Chinese-hosted model (the configured
     orchestrator instead, else no call), `temperature=0`, `max_tokens=150`,
-    `timeout=8`, one request (`max_retries=1`, no stream), no effort;
+    `timeout=8`, one request (`max_retries=1`, no stream); exact Haiku 5.5
+    disables thinking and omits sampling, all other models keep no effort;
   - `decide`: a floor is never lowered, the belts apply again, an unknown
     kind refuses.
 
@@ -264,6 +265,29 @@ class Failures(World):
             self.assertEqual(call[key], value, key)
         self.assertNotIn("effort", call)
         self.assertNotIn("tools", call)
+
+    def test_haiku_small_response_envelope_disables_default_thinking(self):
+        with patch.object(models, "tier", lambda name: "anthropic/claude-haiku-5.5"):
+            verdict, script = self.run_one(page(), answer())
+        self.assertEqual(verdict.verdict, V.ALLOW)
+        call = script.calls[0]
+        self.assertIsNone(call["temperature"])
+        self.assertEqual(call["effort"], "none")
+        self.assertEqual(call["max_tokens"], 150)
+        self.assertEqual(call["max_retries"], 1)
+        self.assertEqual(call["timeout"], 8.0)
+        self.assertIs(call["stream"], False)
+
+    def test_truncated_valid_json_is_never_permission_or_cached(self):
+        script = Script(lambda _: SimpleNamespace(text=answer(), finish_reason="length"),
+                        lambda _: SimpleNamespace(text=answer(), finish_reason="stop"))
+        verdict = V.judge(page(), "read me the next page", chat=script)
+        self.assertEqual((verdict.verdict, verdict.source), (V.ASK, "failure"))
+        self.assertEqual(V.cache_size(), 0)
+        positive = V.judge(page(), "read me the next page", chat=script)
+        self.assertEqual(positive.verdict, V.ALLOW)
+        self.assertEqual(len(script.calls), 2)
+        self.assertEqual(V.cache_size(), 1)
 
     def test_never_a_chinese_hosted_model(self):
         # The review tier follows the owner's selection; page context is

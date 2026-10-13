@@ -239,3 +239,26 @@ The no-tool guards (`fastpath_check`, `models_check`) cover every roster
 write.
 
 <!-- claude-source:009492-009596:end -->
+
+## Browser classifier response envelope (2026-10-13)
+
+The synthetic M11 probe on Haiku 5.5 returned 42 truncated responses out of
+50 at the existing 150-token limit. All failed toward ASK. Measured p50 was
+1.5043 s, p95 2.131825 s, and billed cost $0.005680050; these are classifier
+request measurements, not Browser action success or a safety benchmark.
+
+[OpenRouter's Haiku 5.5 migration guide](https://openrouter.ai/docs/cookbook/evaluate-and-optimize/model-migrations/claude-5-5)
+documents adaptive thinking on by default, shared thinking/output budgets,
+optional disabled thinking, and removal of non-default sampling parameters.
+The Browser review call now uses `effort="none"` and `temperature=None` only
+for the exact `anthropic/claude-haiku-5.5` slug. `llm.chat` omits temperature
+only when explicitly passed None; every other caller retains its prior
+default. This does not change the owner's selected model or other reasoning
+settings. Unknown models and aliases keep their existing request shape.
+The 150-token, 8-second, single non-streaming attempt limits remain. An
+explicit non-stop finish reason always asks and never populates the allow
+cache, even when its visible text happens to be complete JSON.
+
+Free request-wire and classifier tests cover this contract. A corrected paid
+probe remains pending a new scoped credential-loader approval; the completed
+50-action exception does not authorize additional calls.

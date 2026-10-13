@@ -293,7 +293,7 @@ def chat(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
-    temperature: float = 0.2,
+    temperature: float | None = 0.2,
     max_tokens: int | None = None,
     timeout: float = 120.0,
     max_retries: int = 3,
@@ -327,11 +327,14 @@ def chat(
             _cache_messages(model, messages, volatile_tail, cache_points)
             if cache else list(messages)
         ),
-        "temperature": temperature,
         "max_tokens": config.MAX_TOKENS if max_tokens is None else max_tokens,
         # Ask OpenRouter to bill-report each call so the bench can compare cost.
         "usage": {"include": True},
     }
+    # Explicit None omits sampling for models that reject non-default values.
+    # Ordinary callers retain their prior default, including an explicit 0.0.
+    if temperature is not None:
+        payload["temperature"] = temperature
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
