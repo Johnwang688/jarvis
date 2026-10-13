@@ -344,6 +344,52 @@ class Restart(unittest.IsolatedAsyncioTestCase):
     async def test_retired_owner_on_then_master_off_restores_quiet(self):
         await self.popup_retirement(owner_on=True,master_after_on=True)
 
+    async def retired_native_newer(self, *, master_off=False):
+        import threading
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.old.audio=A.InstanceAudio(True);await self.sound.change(old.id,False)
+        for _ in range(self.host._tab_cap()+3):
+            page=Page('https://popup.test/');self.context.pages.append(page);self.host._adopt(self.old,page,None)
+        await asyncio.gather(*self.old.popup_cleanup,return_exceptions=True);await asyncio.sleep(0)
+        self.assertTrue(self.sound.retirement_current(self.old))
+        self.sound.probe=lambda:A.Availability(True,True);self.sound.sync(explicit=True)
+        entered=threading.Event();release=threading.Event()
+        def mute(*args):
+            entered.set()
+            if not release.wait(3):raise AssertionError('native mute release missing')
+            return A.MuteResult(1,True)
+        self.sound.pulse.mute_owned=Mock(side_effect=mute)
+        with patch.object(H,'chrome_pids',side_effect=lambda _:[] if self.context.closed else [12345]),patch.object(A.OwnedChrome,'pin',return_value=object()):
+            self.sound._reconcile()
+            for _ in range(100):
+                if entered.is_set():break
+                await asyncio.sleep(0.005)
+            try:
+                self.assertTrue(entered.is_set())
+                await self.sound.change(old.id,True)
+                if master_off:
+                    self.host._settings.update(sound=False);self.sound.sync()
+                self.sound._reconcile()
+                self.host._launch.assert_not_awaited()
+            finally:release.set()
+            await self.sound._mute_tasks[self.profile]
+            await asyncio.sleep(0);await asyncio.sleep(0)
+            task=self.sound.restarts.tasks.get(self.profile)
+            if task:await task
+        current=self.host._instances[self.profile]
+        self.assertEqual(self.host._launch.await_count,1)
+        self.assertIsNot(current,self.old);self.assertFalse(current.closing)
+        self.assertTrue(current.audio.synchronized(not master_off))
+        self.assertEqual(set(self.host._tabs),{old.id})
+        self.assertEqual(self.sound._retirements,{})
+        self.assertEqual(self.sound._recoveries,{})
+
+    async def test_retired_native_completion_advances_new_owner_on(self):
+        await self.retired_native_newer()
+
+    async def test_retired_native_completion_obeys_master_off_after_new_owner_on(self):
+        await self.retired_native_newer(master_off=True)
+
     async def test_retirement_is_consumed_at_commit_before_context_wait(self):
         old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
         self.old.audio=A.InstanceAudio(True);await self.sound.change(old.id,False)

@@ -282,7 +282,7 @@ class BrowserSound:
             if self.host._stopped:
                 return
             desired_now, generation_now, route_now = self.preference(profile)
-            if self.host._instances.get(profile) is instance and not instance.closing:
+            if self.host._instances.get(profile) is instance and (not instance.closing or self.retirement_current(instance)):
                 if instance.profile != "private" and (not desired_now or route_now.routing):
                     self.restarts.consider(instance, generation_now)
                 if not desired_now and instance.audio.applied and generation_now == generation:
