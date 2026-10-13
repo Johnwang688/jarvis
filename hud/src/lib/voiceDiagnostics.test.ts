@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import { VoiceDiagnostics, normalizeMicSettings, openMicrophone } from "./voiceDiagnostics";
+
+describe("window-only bounded voice metadata", () => {
+  it("falls back only for unsupported constraints, not microphone permission refusal", async () => {
+    const calls: MediaStreamConstraints[] = []; const stream = {} as MediaStream;
+    const result = await openMicrophone(async c => { calls.push(c); if (calls.length === 1) throw { name: "OverconstrainedError", message: "private" }; return stream; });
+    expect(result).toBe(stream); expect(calls).toEqual([{ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }, { audio: true }]);
+    let deniedCalls = 0;
+    await expect(openMicrophone(async () => { deniedCalls++; throw { name: "NotAllowedError", message: "private" }; })).rejects.toMatchObject({ name: "NotAllowedError" });
+    expect(deniedCalls).toBe(1);
+  });
+  it("retains exactly the last 50 utterances, replacing a pending row once", () => {
+    let clock = 0; const d = new VoiceDiagnostics(() => ++clock);
+    for (let i = 0; i < 100; i++) d.add(1250, "wake", "unclaimed");
+    expect(d.snapshot().rows).toHaveLength(50);
+    expect(d.snapshot().rows[0].id).toBe(51);
+    const id = d.add(2000, "ptt", "transcribing");
+    d.finish(id, "stt_failed", 777); d.finish(id, "handed_to_chat", 123);
+    expect(d.snapshot().rows.at(-1)).toMatchObject({ id, outcome: "stt_failed", latencyMs: 777 });
+    expect(d.snapshot().rows).toHaveLength(50);
+    expect(new VoiceDiagnostics().snapshot().rows).toEqual([]);
+  });
+  it("only accepts bounded numbers and known source/outcome fields", () => {
+    const d = new VoiceDiagnostics(() => Infinity);
+    d.add(NaN, "private transcript" as any, "secret exception" as any);
+    d.add(1e20, "wake", "unclaimed");
+    const rows = d.snapshot().rows;
+    expect(rows[0]).toEqual({ id: 1, at: 0, ms: 0, source: "unclaimed", detector: "energy", outcome: "unclaimed" });
+    expect(rows[1].ms).toBe(900000);
+    expect(JSON.stringify(rows)).not.toMatch(/private|secret|Infinity|NaN/);
+  });
+  it("normalizes actual readback without retaining device IDs or unexpected values", () => {
+    expect(normalizeMicSettings({ echoCancellation: true, noiseSuppression: false, autoGainControl: "remote-only", deviceId: "private", groupId: "private", channelCount: 2 })).toEqual({ echoCancellation: true, noiseSuppression: false, autoGainControl: "unknown" });
+    expect(normalizeMicSettings({ echoCancellation: [true, false], noiseSuppression: { value: true } })).toEqual(normalizeMicSettings(null));
+    expect(normalizeMicSettings([true])).toEqual(normalizeMicSettings(null));
+    expect(normalizeMicSettings({ get echoCancellation() { throw Error("private"); } })).toEqual(normalizeMicSettings(null));
+    const d = new VoiceDiagnostics(); d.microphone("available", { echoCancellation: true, deviceId: "private" });
+    expect(JSON.stringify(d.snapshot())).not.toContain("private");
+  });
+  it("has a stable external-store snapshot until metadata changes", () => {
+    const d = new VoiceDiagnostics(); const first = d.snapshot(); let calls = 0;
+    const off = d.subscribe(() => calls++); d.subscribe(() => { throw Error("observer"); });
+    expect(d.snapshot()).toBe(first); d.add(1, "wake", "unclaimed");
+    expect(d.snapshot()).not.toBe(first); expect(calls).toBe(1); off();
+    d.add(1, "wake", "unclaimed"); expect(calls).toBe(1);
+  });
+});
