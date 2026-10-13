@@ -132,7 +132,7 @@ markdown.
 | V-11 | **STT robustness:** timeouts, retries, errors surfaced, audio kept for retry. Local STT and local keyword spotting are evaluated with a recommendation. |
 | V-12 | **The speaker store is not added to the protected-path detector** (owner, 2026-10-13, answering this plan's sign-off request). It is non-destructive configuration the owner can easily put back, so it does not need another agent-blocked path. It stays local, mode 0700, and is never uploaded. |
 | V-13 | **Spoken summaries default to Haiku 5.5** (`anthropic/claude-haiku-5.5`) and stay under the 90k-token threshold, as compaction does now (`JARVIS_COMPACT_AT_TOKENS`). The owner reports Haiku at about 100–200 tokens/s, fast enough for speech. |
-| V-14 | **A switch turns speaker verification off ("Guest voice")** so a friend can demo or use Jarvis by voice. It does not change ML VAD, noise suppression or any approval rule (§3.4.1). |
+| V-14 | **A switch turns speaker verification off ("Guest voice")** so a friend can demo or use Jarvis by voice. It does not change ML VAD, noise suppression or any approval rule (§3.4.1). It **stays on until the owner turns it off**, surviving HUD reloads and daemon restarts. |
 
 ## 3. Design
 
@@ -283,7 +283,10 @@ Capture (main): claim (PTT | wake | follow-up | continuation) → UtteranceRecor
   `verify_skipped_guest` instead of a score.
 - **Before enrollment.** It reads "Guest voice (no voice enrolled)" and is
   effectively always on, since there is nothing to verify against.
-- **How long it lasts.** See open question 17.
+- **How long it lasts (owner, 2026-10-13).** Until the owner switches it
+  off. It is persisted beside the store, so it survives HUD reloads and
+  daemon restarts. There is no timer. The always-visible **GUEST VOICE**
+  label is what keeps it from being forgotten.
 
 ### 3.5 STT reliability (V-11)
 
@@ -722,10 +725,9 @@ Chrome-for-Testing fallback or Playwright in WSL.
 16. **KWS engine and placement.** *Recommend:* sherpa-onnx open-vocabulary
     KWS in the window if V0 shows ≤ 15% of a core and acceptable misses;
     otherwise on the daemon. Retire Chrome's cloud recognizer either way.
-17. **How long Guest voice stays on.** *Recommend:* until you switch it
-    off, with **GUEST VOICE** always shown while it is on, and it survives a
-    HUD reload. The alternatives are turning off on daemon restart, or after
-    a timer you pick when switching it on (for example 2 hours).
+17. ~~How long Guest voice stays on.~~ **Answered (2026-10-13):** until you
+    switch it off. It survives reloads and restarts, and is always labelled
+    (V-14, §3.4.1).
 
 ## 8. Out of scope
 
