@@ -52,6 +52,7 @@ export function BrowserTab(props: {
   pane: number; slot: number; drawn: boolean; projectId: string | null;
   browser?: BrowserTabs; liveFrames: readonly string[]; blocked?: boolean; limitMessage?: boolean;
   onLoaded: (id: string, url: string) => void;
+  onSubmitted: (id: string, url: string) => void;
   onKeepOrigin: (id: string, origin: string | null) => void;
   onAdd: (id: string) => void; onClose: (id: string) => void; onActivate: (id: string) => void;
   onProjectRoot?: (projectId: string) => void;
@@ -92,6 +93,7 @@ function DirectTab(props: {
   tab: BrowserTabSpec; active: boolean; live: boolean; blocked?: boolean;
   focusUrl: boolean; onFocused: () => void;
   onLoaded: (id: string, url: string) => void;
+  onSubmitted: (id: string, url: string) => void;
   onKeepOrigin: (id: string, origin: string | null) => void;
   onProjectRoot?: (projectId: string) => void;
 }) {
@@ -128,7 +130,7 @@ function DirectTab(props: {
   const verdict = known && attempt ? judgeBrowserUrl(attempt, ports) : null;
   const src = verdict?.ok ? verdict.url : "";
   const reason = verdict && !verdict.ok ? verdict.reason : "";
-  const go = (raw: string) => {
+  const go = (raw: string, ownerAddress = false) => {
     if (props.blocked || !known) return false;
     const v = judgeBrowserUrl(raw, ports);
     setAttempt(raw);
@@ -137,7 +139,8 @@ function DirectTab(props: {
     setStolen(false);
     setLoad((n) => n + 1);
     setTyped(v.url);
-    props.onLoaded(props.tab.id, v.url);
+    if (ownerAddress) props.onSubmitted(props.tab.id, v.url);
+    else props.onLoaded(props.tab.id, v.url);
     return true;
   };
   // Includes dormant/evicted tabs: stale grants leave storage, not merely the DOM.
@@ -157,8 +160,8 @@ function DirectTab(props: {
         <input ref={input} data-testid="browser-url" value={typed} disabled={props.blocked}
           placeholder="http://localhost:5173/ or the project's workshop path"
           onChange={(e) => setTyped(e.target.value)}
-          onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") go(typed); }} />
-        <button type="button" data-testid="browser-go" disabled={!known || props.blocked} onClick={() => go(typed)}>Load</button>
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") go(typed, true); }} />
+        <button type="button" data-testid="browser-go" disabled={!known || props.blocked} onClick={() => go(typed, true)}>Load</button>
         <button type="button" data-testid="browser-project" disabled={!props.projectId || workshopPort === null || props.blocked}
           onClick={() => {
             if (!props.projectId || workshopPort === null) return;

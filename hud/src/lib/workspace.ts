@@ -143,14 +143,24 @@ function topColumns(preset: Preset): number {
 }
 
 export const BROWSER_TABS_MAX = 12;
+/** Privacy provenance, distinct from the optional auto-open display label.
+ * Missing/invalid legacy provenance is unknown, never an owner disclosure. */
+export type BrowserSource = { kind: "dev_server"; entryId: string } | { kind: "unknown" };
+function parseBrowserSource(raw: unknown): BrowserSource {
+  return isObj(raw) && raw.kind === "dev_server" && typeof raw.entryId === "string"
+    && /^ds_[0-9a-f]{8}$/.test(raw.entryId)
+    ? { kind: "dev_server", entryId: raw.entryId } : { kind: "unknown" };
+}
+
 export interface BrowserTabSpec {
   id: string;
   url: string;
   keepOrigin?: string;
   auto?: { kind: "thread" | "task" | "terminal"; label: string };
+  source?: BrowserSource;
 }
 export interface BrowserTabs { tabs: BrowserTabSpec[]; active: string }
-export interface BrowserTabOptions { activate?: boolean; auto?: BrowserTabSpec["auto"]; id?: string }
+export interface BrowserTabOptions { activate?: boolean; auto?: BrowserTabSpec["auto"]; source?: BrowserSource; id?: string }
 
 /** Stable identity local to a pane: closing a sibling cannot change it. */
 export function browserTabId(taken: readonly string[] = []): string {
@@ -627,6 +637,7 @@ export function parseBrowserTabs(raw: unknown): BrowserTabs | null {
       tab.auto = { kind: v.auto.kind as NonNullable<BrowserTabSpec["auto"]>["kind"],
                    label: cleanTitle(v.auto.label, 60) };
     }
+    if ("source" in v || "auto" in v) tab.source = parseBrowserSource(v.source);
     ids.add(tab.id);
     tabs.push(tab);
   }
@@ -655,6 +666,7 @@ export function addBrowserTab(ws: Workspace, pane: PaneNo, url: string, opts: Br
   const id = opts.id && /^[a-z0-9]{6}$/.test(opts.id) && !used.includes(opts.id) ? opts.id : browserTabId(used);
   const tab: BrowserTabSpec = { id, url };
   if (opts.auto) tab.auto = { ...opts.auto, label: cleanTitle(opts.auto.label, 60) };
+  if ("source" in opts || opts.auto) tab.source = parseBrowserSource(opts.source);
   return changeBrowser(ws, pane, { tabs: [...browser.tabs, tab], active: opts.activate === false && browser.active ? browser.active : id });
 }
 
@@ -683,6 +695,26 @@ export function setBrowserUrl(ws: Workspace, pane: PaneNo, url: string, id?: str
   const next = { ...tab, url };
   if (next.keepOrigin && originOf(url) !== next.keepOrigin) delete next.keepOrigin;
   return changeBrowser(ws, pane, { ...browser, tabs: browser.tabs.map((t) => t.id === target ? next : t) });
+}
+
+/**
+ * Only the owner's address-field Enter/Load action calls this, after URL
+ * judging. Passive navigation, reload, project-root and programmatic URL
+ * updates use setBrowserUrl and preserve provenance. Same-URL submission is
+ * still an explicit disclosure. Drop the stale auto label too, so a later
+ * storage parse cannot mistake this owner-entered tab for a legacy auto tab.
+ */
+export function submitBrowserUrl(ws: Workspace, pane: PaneNo, url: string, id?: string): Workspace {
+  if (url.length > URL_MAX) return ws;
+  const updated = setBrowserUrl(ws, pane, url, id);
+  const browser = updated.panes[pane - 1].browser;
+  const target = id ?? browser?.active;
+  const tab = browser?.tabs.find((t) => t.id === target);
+  if (!browser || !tab || (!tab.source && !tab.auto)) return updated;
+  const next = { ...tab };
+  delete next.source;
+  delete next.auto;
+  return changeBrowser(updated, pane, { ...browser, tabs: browser.tabs.map((t) => t.id === target ? next : t) });
 }
 
 export function setTabKeepOrigin(ws: Workspace, pane: PaneNo, id: string, origin: string | null): Workspace {
@@ -837,7 +869,8 @@ export function copySpec(spec: PaneSpec): PaneSpec {
         const tabs = spec.browser.tabs.map((t) => {
           const id = browserTabId(ids);
           ids.push(id);
-          return { id, url: t.url };
+          return { id, url: t.url,
+            ...(t.source || t.auto ? { source: parseBrowserSource(t.source) } : {}) };
         });
         const active = tabs[spec.browser.tabs.findIndex((t) => t.id === spec.browser!.active)]?.id ?? tabs[0]?.id ?? "";
         return mirrorBrowser(out, { tabs, active });

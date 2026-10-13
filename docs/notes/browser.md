@@ -959,3 +959,16 @@ are revoked, and claim/renew/placed refuse while disabled; a later ON does not
 revive old ownership. Owner-only listing includes effective `auto_open`.
 No URL, port or source text is added to that settings event. UI placement wiring
 belongs to the remaining AO-3 work, not to this backend contract alone.
+## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
+
+Auto-open display labels do not authorize reading. Each tab independently keeps
+`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
+and invalid source records become unknown; copies retain source even when they
+drop the display mark and origin grant. Passive URL changes, tab selection,
+reload and project-root actions preserve source. Only a successfully judged
+owner address-field Enter/Load submission clears it, including the same URL;
+that also drops the obsolete auto label so storage cannot recreate a legacy
+restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
+The later daemon pane binding resolves the entry to immutable source identity;
+labels and client-supplied terminal IDs never authorize BR5. Unknown stays
+fail-closed. This shared model change alone does not enable Remote or a tool.
