@@ -4,8 +4,8 @@
 // to push it past the window's top — and every screen rect divided by the zoom
 // through lib/layout's `toCss`, like every other menu here.
 
-import { describe, expect, it } from "vitest";
-import { placePopover } from "./ModelChip";
+import { describe, expect, it, vi } from "vitest";
+import { ModelChip, placePopover } from "./ModelChip";
 
 const WIN = { w: 1280, h: 800 };
 const at = (top: number, left = 300, height = 18) => ({ left, top, bottom: top + height });
@@ -50,4 +50,22 @@ describe("placePopover", () => {
     const q = placePopover(at(700, 1200), 100, WIN);
     expect(q.left + q.width).toBeLessThanOrEqual(1280 - 8);
   });
+});
+
+
+it("cancels the popover's latest animation watch when it unmounts", async () => {
+  const {act,createElement}=await import("react");const {createRoot}=await import("react-dom/client");
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
+  const frames=new Map<number,FrameRequestCallback>();let seq=0;
+  vi.stubGlobal("requestAnimationFrame", (fn:FrameRequestCallback)=>{frames.set(++seq,fn);return seq;});
+  vi.stubGlobal("cancelAnimationFrame", (id:number)=>frames.delete(id));
+  const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+  try {
+    act(()=>root.render(createElement(ModelChip,{models:null,choice:{provider:"fast",model:null,effort:null},providerEditable:true,modelEditable:true,onChange:()=>{},onSearch:()=>{}})));
+    const button=host.querySelector<HTMLButtonElement>('[data-testid="model-chip-btn"]')!;
+    vi.spyOn(button,"getBoundingClientRect").mockReturnValue({left:100,top:300,bottom:320,right:240,width:140,height:20,x:100,y:300,toJSON:()=>({})});
+    act(()=>button.click());expect(frames.size).toBe(1);
+    const [id,fn]=[...frames][0];frames.delete(id);act(()=>fn(0));expect(frames.size).toBe(1);
+    act(()=>root.unmount());expect(frames.size).toBe(0);
+  } finally {host.remove();vi.restoreAllMocks();vi.unstubAllGlobals();}
 });

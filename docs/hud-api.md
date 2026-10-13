@@ -823,6 +823,15 @@ runs, because the runner retries on exactly that.
   HUD puts the words it sent back in that thread's box — held until the
   thread is opened if another is on screen), the thread was closed, could
   not resume, or Jarvis stopped. Each is also a `queued_dropped` log record.
+- `POST /threads/{id}/interrupt` accepts `{}` for the current turn or
+  `{"expected_turn_id":"<32 lowercase hex>"}` for a delayed send's exact turn.
+  An ended/replaced turn returns `200 {"ok":false,"stale":true}` without
+  cancelling the current turn or clearing its queue. A matching stop returns
+  `{"ok":true}`; malformed identities are `400`. While provider delivery is
+  pending, this thread cannot start or resume a successor; retry after its
+  `409`. Delivery holds no daemon lock and releases its reservation even on
+  provider failure. The HUD remembers Stop across thread creation and `/send`
+  acknowledgement, names only acknowledged turn IDs, and displays errors.
 - `POST /threads/{id}/interrupt` (the owner's Stop) now also drops what waits
   behind the turn (`queue_cleared`). Unchanged otherwise.
 - Every thread record (`GET /threads`, `POST /threads`, `thread_updated`)

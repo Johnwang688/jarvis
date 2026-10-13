@@ -7,7 +7,7 @@
 // encodes: a surface that shows the owner something the record does not carry
 // is a surface inventing it.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Task, TaskThread } from "../types";
 import { routingLine } from "../state/store";
 import { openQuestions } from "../lib/taskQuestions";
@@ -24,10 +24,10 @@ export function TaskView(props: {
   /** `index` is the question's place in `spec.questions` (lib/taskQuestions).
    * Rejects with the daemon's sentence when the answer is refused. */
   onAnswer: (taskId: string, index: number, text: string) => Promise<unknown>;
-  onSteer: (text: string) => void;
-  onCancel: () => void;
-  onResume: () => void;
-  onStart: () => void;
+  onSteer: (taskId: string, text: string) => Promise<unknown>;
+  onCancel: (taskId: string) => Promise<unknown>;
+  onResume: (taskId: string) => Promise<unknown>;
+  onStart: (taskId: string) => Promise<unknown>;
 }) {
   // Keyed `${task}:${index}`, so words typed under one task's question never
   // show under another's.
@@ -35,8 +35,34 @@ export function TaskView(props: {
   // A refused answer's sentence, shown under its box; the box keeps the words.
   const [refused, setRefused] = useState<Record<string, string>>({});
   const [sending, setSending] = useState<Record<string, true>>({});
-  const [steer, setSteer] = useState("");
+  const [steers, setSteers] = useState<Record<string, { text: string; version: number }>>({});
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [pendingActions, setPendingActions] = useState<Record<string, boolean>>({});
+  const pendingNow = useRef(new Set<string>());
   const t = props.task;
+  const steer = t ? steers[t.id]?.text ?? "" : "";
+  const act = async (taskId: string, verb: "steer" | "cancel" | "resume" | "start") => {
+    const draft = steers[taskId];
+    if (pendingNow.current.has(taskId) || (verb === "steer" && !draft?.text.trim())) return;
+    pendingNow.current.add(taskId);
+    setPendingActions((all) => ({ ...all, [taskId]: true }));
+    setActionErrors((all) => ({ ...all, [taskId]: "" }));
+    try {
+      if (verb === "steer") await props.onSteer(taskId, draft!.text.trim());
+      else if (verb === "cancel") await props.onCancel(taskId);
+      else if (verb === "resume") await props.onResume(taskId);
+      else await props.onStart(taskId);
+      // An edit away and back to the same words is still a newer draft.
+      if (verb === "steer") setSteers((all) => all[taskId]?.version !== draft!.version ? all
+        : { ...all, [taskId]: { text: "", version: draft!.version + 1 } });
+    } catch (error: unknown) {
+      const why = error instanceof Error && error.message || "the daemon could not be reached";
+      setActionErrors((all) => ({ ...all, [taskId]: `Could not ${verb}: ${why}` }));
+    } finally {
+      pendingNow.current.delete(taskId);
+      setPendingActions((all) => ({ ...all, [taskId]: false }));
+    }
+  };
 
   const answer = (taskId: string, index: number) => {
     const key = `${taskId}:${index}`;
@@ -90,16 +116,16 @@ export function TaskView(props: {
         <h3>Controls</h3>
         <div className="row" style={{ flexWrap: "wrap" }}>
           {t.state === "intake" ? (
-            <button type="button" data-testid="task-start" onClick={props.onStart}>Start</button>
+            <button type="button" data-testid="task-start" disabled={!!pendingActions[t.id]} onClick={() => void act(t.id, "start")}>Start</button>
           ) : null}
-          <button type="button" data-testid="task-cancel" onClick={props.onCancel}>Cancel</button>
+          <button type="button" data-testid="task-cancel" disabled={!!pendingActions[t.id]} onClick={() => void act(t.id, "cancel")}>Cancel</button>
           {/* resume applies to BLOCKED only; FAILED is terminal (WP11). */}
           <button
             type="button"
             data-testid="task-resume"
-            disabled={t.state !== "blocked"}
+            disabled={t.state !== "blocked" || !!pendingActions[t.id]}
             title={t.state !== "blocked" ? "resume applies to a blocked task" : ""}
-            onClick={props.onResume}
+            onClick={() => void act(t.id, "resume")}
           >
             Resume
           </button>
@@ -110,21 +136,22 @@ export function TaskView(props: {
             rows={2}
             placeholder="steer…"
             value={steer}
-            onChange={(e) => setSteer(e.target.value)}
+            onChange={(e) => {
+              const text = e.target.value;
+              setSteers((all) => ({ ...all, [t.id]: { text, version: (all[t.id]?.version ?? 0) + 1 } }));
+            }}
             onKeyDown={(e) => e.stopPropagation()}
           />
           <button
             type="button"
             data-testid="steer-send"
-            onClick={() => {
-              if (!steer.trim()) return;
-              props.onSteer(steer.trim());
-              setSteer("");
-            }}
+            disabled={!!pendingActions[t.id]}
+            onClick={() => void act(t.id, "steer")}
           >
             Steer
           </button>
         </div>
+        {actionErrors[t.id] ? <div className="err" role="alert" data-testid="task-action-error">{actionErrors[t.id]}</div> : null}
       </div>
 
       <div className="block">
