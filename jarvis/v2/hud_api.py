@@ -1811,7 +1811,9 @@ def route(handler, daemon, parts, query):
             # still 409.
             return 202, daemon.deliver(thread.id, message)
         if parts[2] == "transcript" and method == "GET":
-            _object(query, ())
+            _object(query, ("tools",))
+            if "tools" in query and query["tools"] != "1":
+                fail(400, "tools must be 1")
             messages = []
             rows = stores.threads.read_log(thread.id)
             # What became of each owner message that reached a running turn
@@ -1830,7 +1832,22 @@ def route(handler, daemon, parts, query):
                     requeued.add(mid)
             with daemon._lock:
                 live = {item.message_id for item in daemon._queues.get(thread.id) or ()}
-            for row in rows:
+                session = daemon._sessions.get(thread.id)
+                running_turn = session.turn_id if session is not None and session.worker is not None else None
+                cwd = session.brief.cwd if session is not None else None
+            tools = {}
+            if query.get("tools") == "1":
+                from .tool_calls import transcript_tools
+                if cwd is None:
+                    try:
+                        cwd = json.loads(stores.threads.path(thread.id).with_name("brief.json").read_text()).get("cwd")
+                    except (OSError, ValueError, AttributeError):
+                        pass
+                tools = transcript_tools(rows, cwd, running_turn)
+            for index, row in enumerate(rows):
+                if index in tools:
+                    messages.append(tools[index])
+                    continue
                 kind = row.get("kind")
                 if kind not in (None, "text", "user", "model_set"):
                     continue

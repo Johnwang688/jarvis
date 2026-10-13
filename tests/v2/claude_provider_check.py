@@ -970,7 +970,7 @@ def sequence_checks() -> None:
             # "hi", not "hi\n": every string goes through the scrub, and v1's
             # `_drop_attributed_lines` rejoins on newlines. A ticker summary
             # can lose a trailing newline; a credential may not survive one.
-            {"call_id": "call-1", "name": "Bash", "ok": True, "summary": "hi"},
+            {"call_id": "call-1", "name": "Bash", "ok": True, "outcome": "ok", "summary": "hi"},
             "TOOL_FINISHED is keyed to the call id",
         )
         usage = by_kind["usage"].data
@@ -1015,6 +1015,7 @@ def sequence_checks() -> None:
         events = drain(provider, handle)
         finished = [e for e in events if e.kind is EventKind.TOOL_FINISHED][0]
         check(finished.data["ok"] is False, "an is_error result is not ok")
+        eq(finished.data["outcome"], "failed", "ordinary error outcome")
         provider.close(handle)
 
     print("\n-- images ride the turn as content blocks")
@@ -1427,6 +1428,7 @@ def reviewer_declined_checks() -> None:
         )
         decline = [e for e in events if e.kind is EventKind.REVIEWER_DECLINED][0]
         eq(decline.data["tool"], "Bash", "the decline names the tool")
+        eq(next(e for e in events if e.kind is EventKind.TOOL_FINISHED).data["outcome"], "denied", "classifier denial outcome")
         eq(
             decline.data["command"],
             "vercel --prod",
@@ -1440,6 +1442,33 @@ def reviewer_declined_checks() -> None:
             "a refused call must never render as one that happened",
         )
         provider.close(handle)
+
+    # The CLI's actual PreToolUse deny reason and permission-callback message,
+    # as built by this provider (not a synthetic generic denial string).
+    for source in ("hook", "callback", "foreground"):
+        with fake([result_message()]):
+            handle = provider.start(thread(), brief(), lambda *_: Decision.DENY)
+            session = handle.native
+            if source == "hook":
+                output = claude._await(session.loop, provider._pre_tool_hook(session)({"tool_name": "Bash", "tool_input": {"command": "rm a"}}, "c", None), 3)
+                text = output["hookSpecificOutput"]["permissionDecisionReason"]
+            elif source == "foreground":
+                from jarvis.v2 import session_tools
+                name = "tc1_foreground"
+                session_tools.register(session_tools.SessionTool(name, foreground_only=True))
+                try:
+                    output = claude._await(session.loop, provider._pre_tool_hook(session)({"tool_name": "mcp__jarvis__" + name, "tool_input": {}, "agent_id": "subagent"}, "c", None), 3)
+                    text = output["hookSpecificOutput"]["permissionDecisionReason"]
+                finally:
+                    session_tools.unregister(name)
+            else:
+                text = claude._await(session.loop, provider._can_use_tool(session)("Bash", {"command": "rm a"}, None), 3).message
+            translated = provider._tool_result(session, ToolResultBlock(tool_use_id="c", content=text, is_error=True))
+            finish = next(e for e in translated if e.kind is EventKind.TOOL_FINISHED)
+            eq(finish.data["outcome"], "denied", source + " denial outcome")
+            check(finish.data["ok"] is False, source + " denial is not ok")
+            check(not any(e.kind is EventKind.REVIEWER_DECLINED for e in translated), source + " denial is not the classifier")
+            provider.close(handle)
 
     print("\n-- an ordinary error is not a reviewer decline")
     with fake(
@@ -2421,6 +2450,7 @@ def context_full_checks() -> None:
         sent = [q[0]["message"]["content"] for q in client.queries if isinstance(q, list)]
         eq(sent, ["are the PRs up?", "/compact", "are the PRs up?"],
            "context full: the CLI's own /compact, then the message once more")
+        eq(next(e for e in events if e.kind is EventKind.TOOL_FINISHED).data["outcome"], "ok", "compact outcome")
         compact = [e.data for e in events if e.kind.value in ("tool_started", "tool_finished")]
         eq([(d["name"], d.get("ok")) for d in compact], [("compact", None), ("compact", True)],
            "context full: the compaction shows as one tool call that finished")

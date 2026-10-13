@@ -813,6 +813,30 @@ class Backend(unittest.TestCase):
         self.request("GET", f"/tasks/{blank.id}/diff", status=409)
         self.request("GET", "/tasks/deadbeef/diff", status=404)
 
+    def test_transcript_without_tools_golden_bytes(self):
+        """Pin main's exact HTTP body, including legacy, steer and queue rows."""
+        thread = self.thread()
+        rows = [
+            {"t": 1, "role": "assistant", "text": "legacy"},
+            {"kind": "user", "at": "u", "data": {"text": "go", "via": "discord", "message_id": "s", "steer": True}},
+            {"kind": "tool_started", "at": "start", "turn_id": "old", "data": {"call_id": "c", "name": "Bash", "args": {"command": "pwd"}}},
+            {"kind": "thinking", "data": {"text": "interim"}},
+            {"kind": "user", "at": "q", "data": {"text": "later", "message_id": "q", "queued": True}},
+            {"kind": "model_set", "at": "m", "data": {"text": "model changed"}},
+            {"kind": "text", "at": "a", "data": {"text": "settled"}},
+            {"kind": "tool_finished", "at": "finish", "turn_id": "old", "data": {"call_id": "c", "ok": False, "summary": "PRIVATE SUMMARY"}},
+        ]
+        for row in rows:
+            self.stores.threads._append(thread.id, "log.jsonl", row)
+        conn = http.client.HTTPConnection("127.0.0.1", self.daemon.port, timeout=5)
+        try:
+            conn.request("GET", f"/threads/{thread.id}/transcript")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b'{"messages": [{"role": "assistant", "text": "legacy", "at": 1}, {"role": "user", "text": "go", "at": "u", "via": "discord", "message_id": "s", "mark": "steering"}, {"role": "user", "text": "later", "at": "q", "message_id": "q", "mark": "not sent"}, {"role": "system", "text": "model changed", "at": "m"}, {"role": "assistant", "text": "settled", "at": "a"}]}')
+        finally:
+            conn.close()
+
     def test_transcript_attachments_and_task_views(self):
         task = self.stores.tasks.create(self.project.id, "linked task")
         self.stores.tasks.save(task)

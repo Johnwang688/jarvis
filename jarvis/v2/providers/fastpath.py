@@ -828,6 +828,8 @@ class _TurnState:
                 # returns — which is a call that did not happen and must not
                 # render as one that did.
                 "ok": not text.startswith(_NOT_OK),
+                "outcome": ("denied" if text.startswith(_NOT_OK[1:]) else
+                            "failed" if text.startswith(_NOT_OK) else "ok"),
                 "summary": _summary(name, text),
             },
         )

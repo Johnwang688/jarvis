@@ -1572,6 +1572,8 @@ personal chat off; the owner should reset that selection.
 
 ## 18. HUD v2 landed (2026-09-16)
 
+TC-1 (2026-10-12): opt-in `transcript?tools=1` adds safe labels and provider outcomes; legacy bytes stay unchanged, unfinished calls track the current turn, and old-label derivation is capped at 500 (contract `docs/hud-api.md`).
+
 AO-1b-i (2026-10-12): `devservers.py` watches tagged Claude/Codex listeners, holds the memory-only registry and owner-only claims/leases; id-only `dev_server` events and `/status.dev_watch` follow amendment 2 §B–§D.
 
 WP12a (Codex) and WP12b (Opus) merged the same day, built against

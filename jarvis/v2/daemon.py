@@ -1316,6 +1316,12 @@ class Daemon:
                 "decision": Decision(decision).value, "allowlisted": entry}
 
     def _record(self, session, event):
+        # Scrub reads credential files: never do this while holding _lock.
+        tool_label = None
+        if event.kind == EventKind.TOOL_STARTED:
+            from .tool_calls import label
+            data = event.data or {}
+            tool_label = label(data.get("name"), data.get("args"), session.brief.cwd)
         with self._lock:
             if session.retired:
                 return
@@ -1348,6 +1354,8 @@ class Daemon:
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
+            if tool_label is not None:
+                record["data"] = {**record.get("data", {}), "label": tool_label}
             if event.kind == EventKind.QUESTION and (event.data or {}).get("req_id"):
                 # The turn now waits on the owner: a message sent meanwhile
                 # queues rather than steers (`_waiting_on_owner`).

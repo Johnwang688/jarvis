@@ -288,6 +288,7 @@ def sequence_checks() -> None:
     assert started.data["name"] == "get_datetime" and started.data["args"] == {}, started.data
     assert started.data["call_id"] == finished.data["call_id"], "call_id must pair the two"
     assert finished.data["ok"] is True and finished.data["summary"], finished.data
+    assert finished.data["outcome"] == "ok", finished.data
     assert len(finished.data["summary"]) <= fastpath.SUMMARY_CHARS
 
     assert one(events, EventKind.THINKING).data["text"] == "checking the clock"
@@ -322,6 +323,7 @@ def unparseable_args_checks() -> None:
     assert started.data["args"] == {"raw": "{not json"}, started.data
     # v1 returns a tool failure as text (invariant 4); the stream says so.
     assert one(events, EventKind.TOOL_FINISHED).data["ok"] is False
+    assert one(events, EventKind.TOOL_FINISHED).data["outcome"] == "failed"
     provider.close(handle)
     print("ok  events: unparseable args are reported as raw, a failed tool is not ok")
 
@@ -710,6 +712,7 @@ def approver_checks() -> None:
         assert asked == [("fastpath_test_danger", {})], asked
         assert ran["n"] == 0, "DENY must mean the tool never runs"
         assert one(events, EventKind.TOOL_FINISHED).data["ok"] is False
+        assert one(events, EventKind.TOOL_FINISHED).data["outcome"] == "denied"
         provider.close(handle)
 
         allowed = Widened().start(thread("gate2"), brief(), allow_all)
@@ -936,7 +939,21 @@ def no_self_switch_checks() -> None:
           "provider or a provider's default")
 
 
+def outcome_checks() -> None:
+    import queue
+    for text, expected in (("The user declined this call", "denied"), ("Refused by policy", "denied"),
+                           ("Error: broke", "failed"), ("a result mentioning Error or declined", "ok")):
+        events = queue.Queue()
+        state = fastpath._TurnState("t", events)
+        state._on_tool_start(("get_datetime", {}))
+        state._on_tool_end(("get_datetime", text))
+        events.get_nowait()
+        assert events.get_nowait().data["outcome"] == expected, (text, expected)
+    print("ok  outcomes: declined/refused denied, Error failed, success ok")
+
+
 def main() -> int:
+    outcome_checks()
     boundary_checks()
     validation_checks()
     brief_checks()
