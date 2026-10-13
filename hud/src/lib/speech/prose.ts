@@ -86,6 +86,8 @@ const DIFF_BODY = /^(?:[+\- ]|\\ No newline|diff --git |@@ |index |new file mode
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+\S/;
 const INDENTED = /^(?: {4}|\t)/;
 const SENTENCE_END = /[.!?…](?=\s)/g;
+const QUOTE_LEAD = /^(?:\s*>\s?)+/;
+const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+/;
 
 /** Is `line` a table row? Two pipes, or a leading pipe (the same test speakable() applies). */
 function isTableRow(line: string): boolean {
@@ -101,7 +103,7 @@ function balanced(s: string): boolean {
 export class ProseFilter {
   private pending = "";
   private lineEmitted = false;
-  private fence: { ch: string; len: number } | null = null;
+  private fence: { ch: string; len: number; quoted: boolean } | null = null;
   private diff = false;
   private indented = false;
   private afterBlank = true;
@@ -164,8 +166,13 @@ export class ProseFilter {
     if (/^\s*(?:[-*+]|\d+[.)])(?:\s|$)/.test(p) && !LIST_ITEM.test(p)) return "";
     if (first === "#" && !/^\s{0,3}#{1,6}\s+\S/.test(p)) return "";
     if (/^(?:diff |index |---|===)/.test(lead)) return "";
+    // A fence marker anywhere in the line: wait for the whole line.
+    if (/`{3,}|~{3,}/.test(p)) return "";
+    // A leading list number ("1.") is not a sentence end.
+    const marker = LIST_MARKER.exec(p)?.[0].length ?? 0;
     let cut = -1;
     for (const m of p.matchAll(SENTENCE_END)) {
+      if ((m.index ?? 0) < marker) continue;
       const end = (m.index ?? 0) + 1;
       if (balanced(p.slice(0, end))) cut = end;
     }
@@ -195,25 +202,48 @@ export class ProseFilter {
   /** A complete line (`terminated`: it ended in a newline). */
   private line(raw: string, terminated: boolean): string {
     const nl = terminated ? "\n" : "";
-    // Inside fenced code everything is dropped until the closing marker.
+    // Inside fenced code everything is dropped until the closing marker: the
+    // same character, at least as long, at any indent (a fence nested under a
+    // list item is indented), and inside a blockquote when it opened in one.
     if (this.fence) {
-      const m = /^\s{0,3}(`{3,}|~{3,})\s*$/.exec(raw);
+      const body = this.fence.quoted ? raw.replace(QUOTE_LEAD, "") : raw;
+      const m = /^\s*(`{3,}|~{3,})\s*$/.exec(body);
       if (m && m[1][0] === this.fence.ch && m[1].length >= this.fence.len) this.fence = null;
       return "";
     }
-    const open = MD_FENCE.test(raw) ? /^\s{0,3}(`{3,}|~{3,})/.exec(raw) : null;
+    // A fence opens at any indent, in a blockquote too.
+    const quoted = QUOTE_LEAD.test(raw);
+    const bare = quoted ? raw.replace(QUOTE_LEAD, "") : raw;
+    const open = /^\s*(`{3,}|~{3,})/.exec(bare);
     if (open) {
       const table = this.flushTable();
-      this.fence = { ch: open[1][0], len: open[1].length };
+      const ch = open[1][0];
+      const len = open[1].length;
+      // "```code```" on one line is a span that opens nothing.
+      const rest = bare.slice(open[0].length);
+      const closing = new RegExp((ch === "`" ? "`" : "~") + `{${len},}`).exec(rest);
+      if (!closing) this.fence = { ch, len, quoted };
       this.diff = false;
       this.indented = false;
       this.afterBlank = false;
+      if (closing) {
+        // What follows the span is prose again.
+        const after = rest.slice(closing.index + closing[0].length);
+        return table + (after.trim() ? this.line(after.replace(/^\s+/, ""), terminated) : "");
+      }
       return table;
+    }
+    // A fence in the middle of a line ("Here is the code: ```python"): the words
+    // before it are prose, and the rest is the fence.
+    const mid = /`{3,}/.exec(raw);
+    if (mid && mid.index > 0) {
+      return this.line(raw.slice(0, mid.index), true) + this.line(raw.slice(mid.index), terminated);
     }
     const blank = raw.trim() === "";
     // An unfenced diff runs while its lines look like diff lines.
     if (this.diff) {
-      if (!blank && DIFF_BODY.test(raw)) return "";
+      // A context line for an empty source line is a single space: not blank.
+      if (raw !== "" && DIFF_BODY.test(raw)) return "";
       this.diff = false;
     }
     if (!blank && DIFF_HEADER.test(raw) && !isTableRow(raw)) {

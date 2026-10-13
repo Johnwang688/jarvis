@@ -41,7 +41,9 @@ def _warn_once(message: str) -> None:
 # never invent words, only remove punctuation the owner was never meant to
 # hear. `speakable()` is idempotent — plain prose passes through unchanged.
 
-_MD_FENCE = re.compile(r"^\s{0,3}(?:```|~~~)")
+# A fence at any indent: one nested under a list item is indented four or more
+# spaces, and reading its code (a shell command, a key) aloud is the failure.
+_MD_FENCE = re.compile(r"^\s*(?:```|~~~)")
 _MD_RULE = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$")
 _MD_TABLE_RULE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
 _MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")

@@ -173,3 +173,68 @@ describe("early release", () => {
     expect(g.push("` now. Next")).toBe("Use a. b now. ");
   });
 });
+
+describe("fences the review found leaking", () => {
+  const NESTED = "1. Do this:\n    ```bash\n    cat ~/.config/jarvis/.env\n    export KEY=sk-abcdef\n    ```\nDone.\n";
+  const LISTED = "- a\n  - b\n    ```py\n    secret_value = 1\n    ```\nAfter it.\n";
+  const MIDLINE = "Here is the code: ```python\nprint('leaked')\n```\nThen prose.\n";
+  const QUOTED = "> Look at this:\n> ```py\n> quoted_secret = 1\n> ```\nBack to prose.\n";
+  const DIFF = "Changed:\n\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,3 @@\n keep one\n \n-removed_line\n+added_line\n keep two\n\nDiff over.\n";
+
+  /** Whole, then in every delta size and every two-way split: never leaks, never loses the prose. */
+  function everyway(text: string, leaks: RegExp, keeps: string[]) {
+    const outs = [proseOf(text)];
+    for (const size of [1, 2, 3, 7]) outs.push(chunked(text, size));
+    for (let i = 1; i < text.length; i++) {
+      const f = new ProseFilter();
+      outs.push(f.push(text.slice(0, i)) + f.push(text.slice(i)) + f.end());
+    }
+    for (const out of outs) {
+      expect(out).not.toMatch(leaks);
+      for (const k of keeps) expect(out).toContain(k);
+    }
+  }
+
+  it("does not speak a fence nested under a list item", () => {
+    everyway(NESTED, /cat|\.env|KEY|sk-abc|export/, ["Do this:", "Done."]);
+    everyway(LISTED, /secret_value|py\b/, ["After it."]);
+  });
+
+  it("honours an indented closing fence, a longer fence, and a fence that never closes", () => {
+    expect(proseOf("A.\n  ```\n  code\n  ```\nB.")).not.toContain("code");
+    expect(proseOf("A.\n    ````\n    ```\n    inner\n    ```\n    ````\nB.")).not.toContain("inner");
+    const open = proseOf("Start.\n    ```sh\n    never_closed\n    still code");
+    expect(open).toContain("Start.");
+    expect(open).not.toContain("never_closed");
+  });
+
+  it("opens a fence in the middle of a line", () => {
+    everyway(MIDLINE, /leaked|python/, ["Here is the code:", "Then prose."]);
+    expect(proseOf("Use ```x = 1``` inline, then go on.")).not.toContain("x = 1");
+    expect(proseOf("Use ```x = 1``` inline, then go on.")).toContain("then go on.");
+  });
+
+  it("opens a fence inside a blockquote, and closes it there", () => {
+    everyway(QUOTED, /quoted_secret/, ["Look at this:", "Back to prose."]);
+  });
+
+  it("keeps a diff going through a context line that is a single space", () => {
+    everyway(DIFF, /removed_line|added_line|keep one|keep two/, ["Changed:", "Diff over."]);
+  });
+});
+
+describe("list numbers are not sentences", () => {
+  it("never speaks '1.' on its own, whatever the delta size", () => {
+    const text = "1. First thing happens.\n2. Second thing follows after it.\n10) Tenth item arrives last.\n";
+    for (const size of [1, 2, 3, 5]) {
+      const f = new ProseFilter();
+      const pieces: string[] = [];
+      for (let i = 0; i < text.length; i += size) pieces.push(f.push(text.slice(i, i + size)));
+      pieces.push(f.end());
+      const out = pieces.join("");
+      expect(out, `size ${size}`).toBe(proseOf(text));
+      expect(out).toContain("First thing happens.");
+      expect(pieces.filter(Boolean).some((p) => /^\s*\d+[.)]\s*$/.test(p)), `size ${size}`).toBe(false);
+    }
+  });
+});

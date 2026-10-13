@@ -308,6 +308,14 @@
   {
    "in": "Tight   spacing  and trailing spaces   \nnext line",
    "out": "Tight   spacing  and trailing spaces\nnext line"
+  },
+  {
+   "in": "1. Do this:\n    ```bash\n    cat ~/.config/jarvis/.env\n    export KEY=sk-abcdef\n    ```\nDone.",
+   "out": "Do this:\nDone."
+  },
+  {
+   "in": "- a\n  - b\n    ```py\n    secret = 1\n    ```\nAfter.",
+   "out": "a\n  b\nAfter."
   }
  ],
  "stable": [

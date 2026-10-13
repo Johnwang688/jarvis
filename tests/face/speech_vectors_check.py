@@ -56,6 +56,8 @@ SPEAKABLE_TEXT = [s for s, _ in speak.STRIPPED] + speak.UNTOUCHED + [
     "Intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nOutro",
     "## Title\n\n> quote **bold** and `code`\n\n1. one\n2. two",
     "Tight   spacing  and trailing spaces   \nnext line",
+    "1. Do this:\n    ```bash\n    cat ~/.config/jarvis/.env\n    export KEY=sk-abcdef\n    ```\nDone.",
+    "- a\n  - b\n    ```py\n    secret = 1\n    ```\nAfter.",
 ]
 
 

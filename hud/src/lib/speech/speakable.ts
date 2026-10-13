@@ -9,7 +9,8 @@
 // delta-by-delta read and a whole-text read agree. `vectors.json` (generated
 // from the Python original) holds this port to it.
 
-export const MD_FENCE = /^\s{0,3}(?:```|~~~)/;
+// A fence at any indent: one nested under a list item is indented four or more spaces.
+export const MD_FENCE = /^\s*(?:```|~~~)/;
 export const MD_RULE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$/;
 export const MD_TABLE_RULE = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
 const MD_HEADING = /^\s{0,3}#{1,6}\s+/;
