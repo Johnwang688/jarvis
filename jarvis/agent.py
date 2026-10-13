@@ -588,16 +588,11 @@ class Agent:
             turn = Turn(text=compacted)
             self.on_event("text", turn.text)
         else:
-            # The toolset `_run_turn` binds is what dispatch() enforces, and
-            # only for as long as the turn runs: afterwards it is put back as
-            # it was, so a thread that ran a turn does not go on holding this
-            # agent's toolset — a later direct dispatch on it would otherwise
-            # be judged against an agent that is no longer running.
-            held_before = runtime.parent_tools()
-            try:
+            # A turn owns its plan, approver, cancellation, depth, toolset
+            # and loaded-group bindings only while it runs. Nested turns
+            # and exceptions restore the caller's exact previous context.
+            with runtime.turn_scope():
                 turn = self._run_turn(user_input, images)
-            finally:
-                runtime.restore_tools(held_before)
         if self.session is not None:
             try:
                 # Never persist the working-context block: it is regenerated

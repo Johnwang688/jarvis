@@ -1,0 +1,637 @@
+{
+  "format": 1,
+  "source_commit": "5ef4e545432ff632fa47343743fd4b075828aa46",
+  "source_path": "CLAUDE.md",
+  "source_sha256": "f4142115ab9dc5c2239f6571a12e328ceed3f000b8a10d29b82aeee6a46a7236",
+  "source_bytes": 679171,
+  "source_lines": 9706,
+  "archive_model": "Every source line occurs once in archive payloads; guide excerpts are additional copies.",
+  "blocks": [
+    {
+      "start": 1,
+      "end": 24,
+      "path": "docs/notes/orientation.md",
+      "sha256": "2086ca43a3658424146420a8f8388b7166778beeef078e71a3a17ce5a2447c38",
+      "bytes": 1320
+    },
+    {
+      "start": 25,
+      "end": 99,
+      "path": "docs/notes/providers-runtime.md",
+      "sha256": "5372638b0e7447d26648458ae50b78f908492b0816e407fd2dd6a4c60faf6f46",
+      "bytes": 5502
+    },
+    {
+      "start": 100,
+      "end": 234,
+      "path": "docs/notes/discord.md",
+      "sha256": "b8a4051572a61279b5c960c5f7604739adbd8b66ba99af7b5a3e53cef9304a3a",
+      "bytes": 9359
+    },
+    {
+      "start": 235,
+      "end": 337,
+      "path": "docs/notes/control-plane.md",
+      "sha256": "4cee23a9c6d0eb6fab6d90ee225ba5dd3596fa1bbf228fc4ebdd64580ce004f2",
+      "bytes": 7142
+    },
+    {
+      "start": 338,
+      "end": 645,
+      "path": "docs/notes/browser.md",
+      "sha256": "adf8db0b2b999a121b35deacdbce05b4202e4b0b4ae024c139e2d6ee7240ce54",
+      "bytes": 21941
+    },
+    {
+      "start": 646,
+      "end": 778,
+      "path": "docs/notes/providers-runtime.md",
+      "sha256": "88e06244810fe3f1bbe295d5abeb4a545d1e9b2511672b9299163934793afbc8",
+      "bytes": 9325
+    },
+    {
+      "start": 779,
+      "end": 865,
+      "path": "docs/notes/terminals.md",
+      "sha256": "1d7e3d0c4362c6bda22cf24ac9f5655bf89dc4fa1e9c9a72288e909ee7444365",
+      "bytes": 6513
+    },
+    {
+      "start": 866,
+      "end": 938,
+      "path": "docs/notes/control-plane.md",
+      "sha256": "9ede70af39e99131a91c6d7ab77a6ac3d2df82d176f9b93921aac4e553382d32",
+      "bytes": 5231
+    },
+    {
+      "start": 939,
+      "end": 997,
+      "path": "docs/notes/providers-runtime.md",
+      "sha256": "c30ea6e546557c2183c5979be9a1e846c41953cdb5a0b131306bec42a08ba835",
+      "bytes": 3882
+    },
+    {
+      "start": 998,
+      "end": 1555,
+      "path": "docs/notes/hud-workspace.md",
+      "sha256": "36780b674db8ac357e61545a5f944d6acc726e33f0a02fe7ecfc202c1c2c1007",
+      "bytes": 41005
+    },
+    {
+      "start": 1556,
+      "end": 1731,
+      "path": "docs/notes/terminals.md",
+      "sha256": "a76cf58b89316fb83f6b7d9757544747c658f8d9e0a591d1e8362bae9d57d216",
+      "bytes": 13276
+    },
+    {
+      "start": 1732,
+      "end": 2230,
+      "path": "docs/notes/browser.md",
+      "sha256": "6e3db3a8a10f1b2cd8f2a78166c108c76787d90f6bb23831937181d3fba56f60",
+      "bytes": 35649
+    },
+    {
+      "start": 2231,
+      "end": 2491,
+      "path": "docs/notes/vex.md",
+      "sha256": "ca959cd2388ce73545a489779f9edc1570df7e41c8b552dbc47cc86a6ac55f23",
+      "bytes": 19094
+    },
+    {
+      "start": 2492,
+      "end": 2582,
+      "path": "docs/notes/hud-workspace.md",
+      "sha256": "29c3f571a743fe7e7ae9cf374e3fbbe916f604b577e1aa0972c1348edbccdc9e",
+      "bytes": 6657
+    },
+    {
+      "start": 2583,
+      "end": 2843,
+      "path": "docs/notes/safety-permissions.md",
+      "sha256": "8b679af999264d2be77af8cd608e3f21a80d74e05f104a0679686a0b5e59780e",
+      "bytes": 18698
+    },
+    {
+      "start": 2844,
+      "end": 2954,
+      "path": "docs/notes/hud-workspace.md",
+      "sha256": "86ae7673f17d5be279eaf30d5bece91982306b93d30637efdad613a9d59c1cb0",
+      "bytes": 8113
+    },
+    {
+      "start": 2955,
+      "end": 3301,
+      "path": "docs/notes/editor.md",
+      "sha256": "14217127d42b8519a8a8829037cf999f6f27ba9bd7d8d74a2af388396357ffce",
+      "bytes": 25187
+    },
+    {
+      "start": 3302,
+      "end": 3563,
+      "path": "docs/notes/safety-permissions.md",
+      "sha256": "226048e58539354026bba1af2943960f36f63daf7420c125cc39e2f2c1e29119",
+      "bytes": 18528
+    },
+    {
+      "start": 3564,
+      "end": 3657,
+      "path": "docs/notes/browser.md",
+      "sha256": "cfbddf97e73e2126e2649fa5ddc64fd235ca98b1b0a6229ae9412b7e6ea93d5d",
+      "bytes": 6895
+    },
+    {
+      "start": 3658,
+      "end": 4278,
+      "path": "docs/notes/editor.md",
+      "sha256": "9ba530722ed68c133ba6a326950110eb4c0a0d52ffceec79323eeb779d290c34",
+      "bytes": 45030
+    },
+    {
+      "start": 4279,
+      "end": 4659,
+      "path": "docs/notes/hud-workspace.md",
+      "sha256": "d7370f59da0916677f8572e1f84835b4483b51016a3af1557aed895cfafc73e2",
+      "bytes": 28490
+    },
+    {
+      "start": 4660,
+      "end": 4682,
+      "path": "docs/notes/testing-benchmarks.md",
+      "sha256": "890fa7dba0a1fcbefb1304b62cdac1ffcd4f8ee198c670ceb39df13ea9a7cd2f",
+      "bytes": 1493
+    },
+    {
+      "start": 4683,
+      "end": 4779,
+      "path": "docs/notes/orientation.md",
+      "sha256": "df1d37099d4b710f2a9349578f9dc5fa28919513ab5364d5bd332261cd69d53a",
+      "bytes": 5997
+    },
+    {
+      "start": 4780,
+      "end": 5018,
+      "path": "docs/notes/invariants.md",
+      "sha256": "19e35813a474d1746fd0c23907079b755c0a96df9eccd039838221c61ae9c9cc",
+      "bytes": 15282
+    },
+    {
+      "start": 5019,
+      "end": 6372,
+      "path": "docs/notes/safety-permissions.md",
+      "sha256": "3242103443d310b34647e80efa8e7dfc81ed4915bf6bd7a255ba6d0b70b06d14",
+      "bytes": 94687
+    },
+    {
+      "start": 6373,
+      "end": 7176,
+      "path": "docs/notes/testing-benchmarks.md",
+      "sha256": "198357d51e0ff83ca616bc6ff4396ef9a4562680ad9aac4073cc612a39c7a1c9",
+      "bytes": 57923
+    },
+    {
+      "start": 7177,
+      "end": 7198,
+      "path": "docs/notes/models.md",
+      "sha256": "7712fc26fb52bd03540627b678fb4a06c666f220e96c8ba6a6632b18e986787e",
+      "bytes": 1022
+    },
+    {
+      "start": 7199,
+      "end": 7334,
+      "path": "docs/notes/decisions.md",
+      "sha256": "a1f6731fe9c485fd52ba7872a20d2dd2b3f99d5e05408ccce4ad8f0e26d84d7f",
+      "bytes": 9206
+    },
+    {
+      "start": 7335,
+      "end": 7494,
+      "path": "docs/notes/testing-benchmarks.md",
+      "sha256": "68440cca745adf9934157aea03534cb35853491ba04567835753939544d52507",
+      "bytes": 10615
+    },
+    {
+      "start": 7495,
+      "end": 7530,
+      "path": "docs/notes/safety-permissions.md",
+      "sha256": "532e1c94a8a5243e94cbd2dd205feab6abebdde5e863f6ca108fb263fa66f177",
+      "bytes": 2322
+    },
+    {
+      "start": 7531,
+      "end": 7902,
+      "path": "docs/notes/voice-face.md",
+      "sha256": "8ede3c0f3f10a53b82d1188a6d8e9d9029383d06f2840c022ba10b0471e07a7a",
+      "bytes": 24794
+    },
+    {
+      "start": 7903,
+      "end": 7935,
+      "path": "docs/notes/integrations.md",
+      "sha256": "5ac50433b96fd6b6ff5dfdc5380423bc5a949961b4c478aa08e683c0e1683df3",
+      "bytes": 2203
+    },
+    {
+      "start": 7936,
+      "end": 8065,
+      "path": "docs/notes/legacy-runtime.md",
+      "sha256": "71c93689d5828060ee902778ce568c8a44082a41446f34101dd39e98bd9a7b83",
+      "bytes": 9105
+    },
+    {
+      "start": 8066,
+      "end": 8385,
+      "path": "docs/notes/voice-face.md",
+      "sha256": "7555691865247ff66bbd1691a7ad2e6d07f7b801335e14ff4fa36fdb70622ec6",
+      "bytes": 20864
+    },
+    {
+      "start": 8386,
+      "end": 8478,
+      "path": "docs/notes/integrations.md",
+      "sha256": "c1515b35ec4994f8fdd90de4bdd862e5f7bb572269031602f7f4e7ff4afd201b",
+      "bytes": 6168
+    },
+    {
+      "start": 8479,
+      "end": 8533,
+      "path": "docs/notes/discord.md",
+      "sha256": "52de9418177e65541c0b69f9218fe20ce8c25902b4196fda4ba978d7c310a65f",
+      "bytes": 3723
+    },
+    {
+      "start": 8534,
+      "end": 8612,
+      "path": "docs/notes/legacy-runtime.md",
+      "sha256": "1c9f25a90c6eb7a2cf06d6ce27de8d7200b44287a51eaa5cf21033908b189bc4",
+      "bytes": 5510
+    },
+    {
+      "start": 8613,
+      "end": 8631,
+      "path": "docs/notes/integrations.md",
+      "sha256": "7887c60c8caaaf780d730456ca306d3947c95d2e04c2792bc3656a49b36a34d9",
+      "bytes": 1220
+    },
+    {
+      "start": 8632,
+      "end": 8688,
+      "path": "docs/notes/desktop.md",
+      "sha256": "d4c32737c575e90c0f226c6e0bee9eb99ae526f48e68a9b87fc7248f3ffce6cc",
+      "bytes": 3808
+    },
+    {
+      "start": 8689,
+      "end": 8731,
+      "path": "docs/notes/discord.md",
+      "sha256": "2765a425771b2259341339a0d54be2039232e34a6443194e2fb874c539aecfc3",
+      "bytes": 2569
+    },
+    {
+      "start": 8732,
+      "end": 8943,
+      "path": "docs/notes/legacy-runtime.md",
+      "sha256": "574f065be7c54fbd7bcc971f5febaeb84e5c0a70e0c3a80484f818d52329d238",
+      "bytes": 13892
+    },
+    {
+      "start": 8944,
+      "end": 9194,
+      "path": "docs/notes/safety-permissions.md",
+      "sha256": "0828c6bdd40491dc6273d4ee3a65efa059cdc6d1b83ea3aa704e86b7094b685b",
+      "bytes": 16499
+    },
+    {
+      "start": 9195,
+      "end": 9286,
+      "path": "docs/notes/testing-benchmarks.md",
+      "sha256": "87c5ef8208cbfd6b2246de858e4e3abf0a1f1177900397b8b42e36fb440e6bec",
+      "bytes": 5635
+    },
+    {
+      "start": 9287,
+      "end": 9312,
+      "path": "docs/notes/legacy-runtime.md",
+      "sha256": "6e40b023c8e83108e21b2048f574aa1324c37eb1c1c8ae3b04a13ace5109029b",
+      "bytes": 1840
+    },
+    {
+      "start": 9313,
+      "end": 9356,
+      "path": "docs/notes/integrations.md",
+      "sha256": "2e602876acad05ac66db60e4e1c6f96663c4908a74718a221337fdd7c66ade01",
+      "bytes": 2807
+    },
+    {
+      "start": 9357,
+      "end": 9445,
+      "path": "docs/notes/models.md",
+      "sha256": "454fcb66612cb56addcc4a53e056b3992c277e66ee9e2b99e9b541da78e8e2fd",
+      "bytes": 5664
+    },
+    {
+      "start": 9446,
+      "end": 9491,
+      "path": "docs/notes/voice-face.md",
+      "sha256": "4a27795cb49305be2911e3ca2eda078853eff7d55058c39662886cca8770c299",
+      "bytes": 2822
+    },
+    {
+      "start": 9492,
+      "end": 9596,
+      "path": "docs/notes/models.md",
+      "sha256": "922b58a65c8fcf6e639a03da63bd3d2ed0ed01f914095aa6807c8f083d48747c",
+      "bytes": 7123
+    },
+    {
+      "start": 9597,
+      "end": 9623,
+      "path": "docs/notes/integrations.md",
+      "sha256": "035383026fc45d44ddbc890d0cf3538244a530f65427828e852df9ec884c0c65",
+      "bytes": 1776
+    },
+    {
+      "start": 9624,
+      "end": 9706,
+      "path": "docs/notes/live-validation.md",
+      "sha256": "d6eb49faf6eb9440812e843be15583145f61563eecf793d8dbbbb72dfdde2472",
+      "bytes": 5765
+    }
+  ],
+  "notes_sha256_at_migration": {
+    "docs/notes/browser.md": "e76c6dc6f7734c4d035f700a856c870af526c9379cad2a1bc8c5335e87289b1e",
+    "docs/notes/control-plane.md": "368b55badad0b743fb4cf356c6bc91236bdfb7fab74b93d48f96009e8e381417",
+    "docs/notes/decisions.md": "93731166c889a8879233cbbd5937843111727315aba2ed6c3de56f1d6fb6d63c",
+    "docs/notes/desktop.md": "dd4dd7e3322f51e52b448edaab7c9bae4938c6f87c3e2ebe1ae4bed135e2214b",
+    "docs/notes/discord.md": "ac88c258f49ff85eaa38d86f53f8847d2da752a85bf8f1b6eb46fd3b97931c00",
+    "docs/notes/editor.md": "363948ddc025f9ce9a5b6625cc7a8374a77fc10d0b02b16efa87a28a3982fca6",
+    "docs/notes/hud-workspace.md": "86b2642e6fa7127df31bde08567e3ee30075e96f457a09bd59852a23cd830749",
+    "docs/notes/integrations.md": "367efdc533d8d37fcca2f40501ae07f93ec4b9979a3253bc82a2550c60892f38",
+    "docs/notes/invariants.md": "1d45f2fc9fe8a6f6f3c6bacf19f3475b034c53a73dac84c6928f0584f989e614",
+    "docs/notes/legacy-runtime.md": "b00f302516e06db913214e021327b04e540c4943fee3d9f4d019c2452011b4f3",
+    "docs/notes/live-validation.md": "0f88d54261c69c575a81eeb4ec5cbdfa814030162c0a2b3d0bc45ab0337ac0d4",
+    "docs/notes/models.md": "1a9992e02c103e16ec7b3fef004235c07c29a5685394215391ea82232cdff996",
+    "docs/notes/orientation.md": "b780c9c2d6076cbaca9978fdd9c5b3956f2c34b0675d63d773611df24a0eea1d",
+    "docs/notes/providers-runtime.md": "3a02ca5e012629d37a3f55d655d7e4e0af0a96c7d48132731e034d81d8a6e419",
+    "docs/notes/safety-permissions.md": "143b2326b05a071d6d11253475429387f649d6860a7a551631b4ca15cbb3c9ca",
+    "docs/notes/terminals.md": "9c9142bf88a58699475090afc692ea4e5fc7006b8c3a2d2d2454b847a396a833",
+    "docs/notes/testing-benchmarks.md": "baf2839e3d6f4d793c24c6f7e8b8c5a45a13c34b76bab09378cb07bc7c349fe2",
+    "docs/notes/vex.md": "93d7463daa6fb721e857644e7ea8395e5172ee9681175b0e83acd2da1ce54e4c",
+    "docs/notes/voice-face.md": "55b3256faf827171254bee2e085df397d434854703ebf60cd70f8503be36af87"
+  },
+  "retained_guide": [
+    {
+      "start": 9,
+      "end": 32,
+      "name": "chat-git-and-v2",
+      "sha256": "c5b184020fae9c5ab1da3cc04bc3bdbd0e7351fb0985e8d60da29706498dda81"
+    },
+    {
+      "start": 4683,
+      "end": 4716,
+      "name": "purpose-and-environment",
+      "sha256": "ff9bbde4f23dd10a7a70a9cea47aef3c016d0e85c4264294668d5dece1808449"
+    },
+    {
+      "start": 4780,
+      "end": 5018,
+      "name": "invariants",
+      "sha256": "19e35813a474d1746fd0c23907079b755c0a96df9eccd039838221c61ae9c9cc"
+    },
+    {
+      "start": 7199,
+      "end": 7334,
+      "name": "decisions",
+      "sha256": "a1f6731fe9c485fd52ba7872a20d2dd2b3f99d5e05408ccce4ad8f0e26d84d7f"
+    }
+  ],
+  "guide_bytes_at_migration": 39579,
+  "guide_sha256_at_migration": "29714c26132c0417786dc8df74b4f00b75fcd52cc7f5a2b58552cc7d5b698d39",
+  "section_map": {
+    "source_lines": 9706,
+    "areas": [
+      [
+        1,
+        "orientation"
+      ],
+      [
+        25,
+        "providers-runtime"
+      ],
+      [
+        100,
+        "discord"
+      ],
+      [
+        235,
+        "control-plane"
+      ],
+      [
+        338,
+        "browser"
+      ],
+      [
+        646,
+        "providers-runtime"
+      ],
+      [
+        779,
+        "terminals"
+      ],
+      [
+        866,
+        "control-plane"
+      ],
+      [
+        939,
+        "providers-runtime"
+      ],
+      [
+        998,
+        "hud-workspace"
+      ],
+      [
+        1556,
+        "terminals"
+      ],
+      [
+        1732,
+        "browser"
+      ],
+      [
+        2231,
+        "vex"
+      ],
+      [
+        2492,
+        "hud-workspace"
+      ],
+      [
+        2583,
+        "safety-permissions"
+      ],
+      [
+        2844,
+        "hud-workspace"
+      ],
+      [
+        2955,
+        "editor"
+      ],
+      [
+        3302,
+        "safety-permissions"
+      ],
+      [
+        3564,
+        "browser"
+      ],
+      [
+        3658,
+        "editor"
+      ],
+      [
+        4279,
+        "hud-workspace"
+      ],
+      [
+        4660,
+        "testing-benchmarks"
+      ],
+      [
+        4683,
+        "orientation"
+      ],
+      [
+        4780,
+        "invariants"
+      ],
+      [
+        5019,
+        "safety-permissions"
+      ],
+      [
+        6373,
+        "testing-benchmarks"
+      ],
+      [
+        7177,
+        "models"
+      ],
+      [
+        7199,
+        "decisions"
+      ],
+      [
+        7335,
+        "testing-benchmarks"
+      ],
+      [
+        7495,
+        "safety-permissions"
+      ],
+      [
+        7531,
+        "voice-face"
+      ],
+      [
+        7903,
+        "integrations"
+      ],
+      [
+        7936,
+        "legacy-runtime"
+      ],
+      [
+        8066,
+        "voice-face"
+      ],
+      [
+        8386,
+        "integrations"
+      ],
+      [
+        8479,
+        "discord"
+      ],
+      [
+        8534,
+        "legacy-runtime"
+      ],
+      [
+        8613,
+        "integrations"
+      ],
+      [
+        8632,
+        "desktop"
+      ],
+      [
+        8689,
+        "discord"
+      ],
+      [
+        8732,
+        "legacy-runtime"
+      ],
+      [
+        8944,
+        "safety-permissions"
+      ],
+      [
+        9195,
+        "testing-benchmarks"
+      ],
+      [
+        9287,
+        "legacy-runtime"
+      ],
+      [
+        9313,
+        "integrations"
+      ],
+      [
+        9357,
+        "models"
+      ],
+      [
+        9446,
+        "voice-face"
+      ],
+      [
+        9492,
+        "models"
+      ],
+      [
+        9597,
+        "integrations"
+      ],
+      [
+        9624,
+        "live-validation"
+      ]
+    ],
+    "core": [
+      [
+        9,
+        32,
+        "chat-git-and-v2"
+      ],
+      [
+        4683,
+        4716,
+        "purpose-and-environment"
+      ],
+      [
+        4780,
+        5018,
+        "invariants"
+      ],
+      [
+        7199,
+        7334,
+        "decisions"
+      ]
+    ]
+  }
+}
