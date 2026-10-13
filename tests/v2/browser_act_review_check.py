@@ -289,6 +289,19 @@ class Failures(World):
         self.assertEqual(len(script.calls), 2)
         self.assertEqual(V.cache_size(), 1)
 
+    def test_normalized_stop_cannot_hide_falsey_wire_metadata(self):
+        for reason in (None, "", 0, False):
+            with self.subTest(reason=reason):
+                script = Script(lambda _: SimpleNamespace(text=answer(), finish_reason="stop",
+                                raw={"choices": [{"finish_reason": reason}]}))
+                verdict = V.judge(page(), "read me the next page", chat=script)
+                self.assertEqual((verdict.verdict, verdict.source), (V.ASK, "failure"))
+                self.assertEqual(V.cache_size(), 0)
+        for wire in ({}, {"choices": []}, {"choices": [{}]}, {"choices": None}):
+            script = Script(lambda _: SimpleNamespace(text=answer(), finish_reason="stop", raw=wire))
+            self.assertEqual(V.judge(page(), "read me the next page", chat=script).verdict, V.ASK)
+            self.assertEqual(V.cache_size(), 0)
+
     def test_never_a_chinese_hosted_model(self):
         # The review tier follows the owner's selection; page context is
         # logged-in personal data (the 2026-07-30 routing rule).
