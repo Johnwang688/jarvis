@@ -1,3 +1,4 @@
+import { isWindowId } from "./windowId";
 // The owner's terminals, the rules (WP-D; plan docs/plans/2026-10-09-hud-
 // workspace-plan.md §2.3–§2.4, decisions W-1, W-2, W-5; contract in
 // docs/hud-api.md, "terminal backend"). Pure, like layout.ts and
@@ -122,9 +123,9 @@ export function parseRows(raw: unknown): TerminalRow[] {
  * a hard-coded port once sent the test suite to the owner's live daemon.
  * `https:` becomes `wss:`.
  */
-export function attachUrl(loc: { protocol: string; host: string }, id: string, ticket: string): string {
+export function attachUrl(loc: { protocol: string; host: string }, id: string, ticket: string, window?: string): string {
   const scheme = loc.protocol === "https:" ? "wss:" : "ws:";
-  return `${scheme}//${loc.host}/terminals/${encodeURIComponent(id)}/attach?ticket=${encodeURIComponent(ticket)}`;
+  return `${scheme}//${loc.host}/terminals/${encodeURIComponent(id)}/attach?ticket=${encodeURIComponent(ticket)}${isWindowId(window) ? "&window=" + window : ""}`;
 }
 
 const encoder = new TextEncoder();
@@ -758,6 +759,7 @@ export function continuationPrefix(buf: SnapBuffer, time: string, max = PREFIX_M
 
 /** The daemon's text frames (docs/hud-api.md). Anything else is ignored. */
 export type Control =
+  | { type: "dev_url"; url: string; id?: string }
   | { type: "attached"; terminal: TerminalRow | null; replay: number }
   | { type: "replayed" }
   | { type: "exit"; code: number | null; reason: "" | "closed" | "ended" }
@@ -784,6 +786,10 @@ export function parseControl(text: string): Control | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const m = v as Record<string, unknown>;
   switch (m.type) {
+    case "dev_url":
+      if (typeof m.url !== "string" || !m.url || m.url.length > 2048
+          || m.id !== undefined && (typeof m.id !== "string" || !/^ds_[0-9a-f]{8}$/.test(m.id))) return null;
+      return { type: "dev_url", url: m.url, ...(m.id === undefined ? {} : { id: m.id as string }) };
     case "attached": {
       const replay = int(m.replay);
       return { type: "attached", terminal: parseRow(m.terminal), replay: replay !== null && replay > 0 ? replay : 0 };
@@ -1233,13 +1239,5 @@ export function saveMine(mine: Set<string>, holder: string | null, storage?: Pic
   }
 }
 
-/** A per-page-load nonce, in memory only. */
-export function pageNonce(): string {
-  try {
-    const b = new Uint8Array(8);
-    crypto.getRandomValues(b);
-    return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-  } catch {
-    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
-  }
-}
+// Compatibility export; the shared live-page value is WINDOW_ID in windowId.ts.
+export { pageNonce } from "./windowId";

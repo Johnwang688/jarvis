@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { addBrowserTab, activateBrowserTab, closeBrowserTab, copySpec, defaultWorkspace, parseWorkspace,
-  parseBrowserTabs, setBrowserUrl, setTabKeepOrigin, setView, type PaneNo } from "./workspace";
+  parseBrowserTabs, setBrowserUrl, submitBrowserUrl, setTabKeepOrigin, setView, type PaneNo } from "./workspace";
 import { browserFrames, EMPTY_FRAMES } from "./browserframes";
 import { browserLabel } from "./browser";
 
@@ -127,5 +127,62 @@ describe("Direct frame budgets", () => {
     expect(state.recent).toHaveLength(2);
     expect(state.recent).not.toContain("2:" + oldest);
     expect(browserFrames(state, ws, [2])).toBe(state);
+  });
+});
+
+describe("Browser source privacy provenance", () => {
+  const source = { kind: "dev_server" as const, entryId: "ds_0123abcd" };
+  const auto = { kind: "terminal" as const, label: "Build terminal" };
+  const url = "http://localhost:5173/private/path";
+  const active = (ws: ReturnType<typeof defaultWorkspace>) => ws.panes[1].browser!.tabs[0];
+  it("normalizes legacy or malformed source to unknown without trusting display metadata", () => {
+    for (const raw of [undefined, null, {}, [], "owner", { kind: "owner" },
+      { kind: "dev_server", entryId: "ds_0123ABCD" }, { kind: "dev_server", entryId: "../terminal" }]) {
+      const parsed = parseBrowserTabs({ tabs: [{ id: "abcdef", url, auto, source: raw }], active: "abcdef" })!;
+      expect(parsed.tabs[0].source).toEqual({ kind: "unknown" });
+    }
+    const legacy = parseBrowserTabs({ tabs: [{ id: "abcdef", url, auto }], active: "abcdef" })!;
+    expect(legacy.tabs[0].source).toEqual({ kind: "unknown" });
+    const owner = parseBrowserTabs({ tabs: [{ id: "abcdef", url }], active: "abcdef" })!;
+    expect(owner.tabs[0]).not.toHaveProperty("source");
+    const raw = parseBrowserTabs({ tabs: [{ id: "abcdef", url,
+      source: { ...source, terminal_id: "not-authority" } }], active: "abcdef" })!;
+    expect(raw.tabs[0].source).toEqual(source);
+  });
+  it("keeps source through passive URL changes, tab selection, grants and copies without auto labels", () => {
+    let ws = addBrowserTab(defaultWorkspace(), 2, url, { auto, source });
+    const id = active(ws).id;
+    ws = setBrowserUrl(ws, 2, "http://localhost:5174/redirected", id);
+    ws = setTabKeepOrigin(ws, 2, id, "http://localhost:5174");
+    ws = addBrowserTab(ws, 2, "http://localhost:5175/");
+    ws = activateBrowserTab(ws, 2, id);
+    expect(active(ws).source).toEqual(source);
+    const copy = copySpec(ws.panes[1]);
+    expect(copy.browser!.tabs[0].source).toEqual(source);
+    expect(copy.browser!.tabs[0]).not.toHaveProperty("auto");
+    expect(copy.browser!.tabs[0]).not.toHaveProperty("keepOrigin");
+    expect(copy.browser!.tabs[0].id).not.toBe(id);
+    expect(copy.browser!.tabs[0].source).not.toBe(active(ws).source);
+    const saved = parseWorkspace(JSON.stringify(ws));
+    expect(active(saved).source).toEqual(source);
+  });
+  it("keeps an unknown source on copies even when its legacy display label is discarded", () => {
+    const ws = addBrowserTab(defaultWorkspace(), 2, url, { auto });
+    expect(active(ws).source).toEqual({ kind: "unknown" });
+    expect(copySpec(ws.panes[1]).browser!.tabs[0].source).toEqual({ kind: "unknown" });
+  });
+  it("only owner address submission clears source, including submitting the same URL", () => {
+    const ws = addBrowserTab(defaultWorkspace(), 2, url, { auto, source });
+    expect(setBrowserUrl(ws, 2, url)).toBe(ws);
+    for (const nextUrl of [url, "http://localhost:5174/owner"]) {
+      const submitted = submitBrowserUrl(ws, 2, nextUrl, active(ws).id);
+      expect(active(submitted).url).toBe(nextUrl);
+      expect(active(submitted)).not.toHaveProperty("source");
+      expect(active(submitted)).not.toHaveProperty("auto");
+      expect(active(parseWorkspace(JSON.stringify(submitted)))).not.toHaveProperty("source");
+      expect(active(ws).source).toEqual(source);
+    }
+    expect(submitBrowserUrl(ws, 2, "x".repeat(5000))).toBe(ws);
+    expect(submitBrowserUrl(ws, 2, url, "absent")).toBe(ws);
   });
 });

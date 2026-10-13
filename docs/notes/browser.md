@@ -946,6 +946,62 @@ hidden/inert, and every strip/control is disabled under a card. Labels are
 cleaned host/path text, capped at 40; auto-source names cap at 60 and appear in
 visible chrome. Remote mode and autonomous placement remain later packages.
 
+## Current automatic-opening identity and OFF contract (AO-3, 2026-10-13)
+
+The HUD's shared `lib/windowId.ts` provides one fresh memory-only 32-lowercase-hex
+identity per live page. Terminal holder records, dev-server ownership and future
+Remote front-window reporting use that same identity; copied storage is never
+its source. Missing secure random bytes yields no valid auto-open identity.
+
+An owner settings change publishes a fixed `dev_server_settings` boolean-only
+record before invalidating pending claims on OFF. Existing arbitration and claims
+are revoked, and claim/renew/placed refuse while disabled; a later ON does not
+revive old ownership. Owner-only listing includes effective `auto_open`.
+No URL, port or source text is added to that settings event. UI placement wiring
+belongs to the remaining AO-3 work, not to this backend contract alone.
+## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
+
+Auto-open display labels do not authorize reading. Each tab independently keeps
+`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
+and invalid source records become unknown; copies retain source even when they
+drop the display mark and origin grant. Passive URL changes, tab selection,
+reload and project-root actions preserve source. Only a successfully judged
+owner address-field Enter/Load submission clears it, including the same URL;
+that also drops the obsolete auto label so storage cannot recreate a legacy
+restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
+The later daemon pane binding resolves the entry to immutable source identity;
+labels and client-supplied terminal IDs never authorize BR5. Unknown stays
+fail-closed. This shared model change alone does not enable Remote or a tool.
+
+## Current: automatic Direct opening (AO-3)
+
+A memory-only 32-hex page identity now binds HUD event streams, terminal
+attachments and dev-server claims. Agent announcements and terminal preclaims
+flow through the owner-only registry; initial unclaimed entries are quiet
+notices. Claims renew while waiting, and a fresh ownership check precedes
+every placement. OFF is broadcast as a boolean-only event and invalidates
+pending work across windows; stale OFF/ON replies cannot restore it.
+
+Automatic placement splits without moving focus or folding visible areas,
+reuses only strictly blank kept panes, then appends to a drawn normal Browser
+pane, then offers the bounded nonblocking pane-choice prompt. Private panes
+are excluded. Cards and Settings defer placement. Prompts rearm for 500ms
+after movement; their keys stay local and dirty-editor/VEX choices are
+disabled. Busy terminals move to the panel alive on explicit pane choice.
+
+Automatic tabs are Direct, query/fragment-free, without keep-origin grants,
+and retain immutable dev-server source provenance. Existing frame guards
+apply to every resulting frame. No automatic action calls /browser/*;
+Settings uses /browser/settings only for explicit preference writes, while
+the registry listing supplies the effective preference on connect/reconnect.
+The rates are one action per source per 10 seconds and three per window
+per minute (amendment E.2; the older H summary row is superseded).
+
+Validation lives in devopen/state unit tests and hud_v2_autoopen_check.py:
+real production claim arbitration over isolated mock SSE/HTTP, fake terminal
+sockets, focus/card/Settings/lease/window races, and a zero-Remote-route
+request log assertion in every scenario.
+
 ## Current BR-1c implementation (2026-10-13)
 
 This current note supersedes the archived BR-1a host-lifetime loopback rule and

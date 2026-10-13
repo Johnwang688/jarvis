@@ -27,11 +27,12 @@ import {
   forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
   renameTerminal as renameTerminalOf,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
-  setBrowserUrl as setBrowserUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  setBrowserUrl as setBrowserUrlOf, submitBrowserUrl as submitBrowserUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
   setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
   unpinProject as unpinProjectOf, setEditors as setEditorsOf,
   type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
   type WorkspaceFit, type BrowserTabOptions,
+  autoSplitVerdict as autoSplitVerdictOf,
   addBrowserTab as addBrowserTabOf, closeBrowserTab as closeBrowserTabOf,
   activateBrowserTab as activateBrowserTabOf, setTabKeepOrigin as setTabKeepOriginOf,
 } from "../lib/workspace";
@@ -70,6 +71,7 @@ export interface LayoutControl {
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
   setBrowserUrl: (pane: PaneNo, url: string, id?: string) => void;
+  submitBrowserUrl: (pane: PaneNo, url: string, id?: string) => void;
   addBrowserTab: (pane: PaneNo, url: string, opts?: BrowserTabOptions) => void;
   closeBrowserTab: (pane: PaneNo, id: string) => void;
   activateBrowserTab: (pane: PaneNo, id: string) => void;
@@ -110,6 +112,7 @@ export interface LayoutControl {
   close: (pane: PaneNo, then?: PaneNo | null) => void;
   /** Whether one more pane can be drawn in this window now (`dirty`: ids holding an unsaved edit). */
   splitVerdict: (dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
+  autoSplitVerdict: (held?: readonly PaneNo[]) => { ok: boolean; id: PaneNo | null };
   /**
    * Render-only, by pane id: how many times that id has been closed (or
    * taken back from ⊞'s hidden panes by a split). The workspace keys a pane
@@ -234,6 +237,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
   const setBrowserUrl = useCallback((pane: PaneNo, url: string, id?: string) => setWs((w) => setBrowserUrlOf(w, pane, url, id)), []);
+  const submitBrowserUrl = useCallback((pane: PaneNo, url: string, id?: string) => setWs((w) => submitBrowserUrlOf(w, pane, url, id)), []);
   const addBrowserTab = useCallback((pane: PaneNo, url: string, opts?: BrowserTabOptions) => setWs((w) => addBrowserTabOf(w, pane, url, opts)), []);
   const closeBrowserTab = useCallback((pane: PaneNo, id: string) => setWs((w) => closeBrowserTabOf(w, pane, id)), []);
   const activateBrowserTab = useCallback((pane: PaneNo, id: string) => setWs((w) => activateBrowserTabOf(w, pane, id)), []);
@@ -284,6 +288,10 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     bump(pane);
     setWs((w) => closePaneOf(w, pane, then));
   }, [bump]);
+  const autoSplitVerdict = useCallback((held: readonly PaneNo[] = []) => {
+    const at = now.current;
+    return autoSplitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, held);
+  }, []);
   const splitVerdict = useCallback((dirty: readonly PaneNo[] = []) => {
     const at = now.current;
     return splitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, dirty);
@@ -415,10 +423,10 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     ownerTogglePanel,
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, setFilePath, setKeepOrigin,
+    setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
     addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin,
     setTerminal, forgetTerminal, renameTerminal, setSplit,
-    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
+    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplitVerdict, incarnation,
   };
 }
 

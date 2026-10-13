@@ -18,6 +18,8 @@ import { parseRow, parseRows, type InSpec } from "./lib/terminal";
 import { parseBuild, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
 import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./lib/vexNew";
 
+import { WINDOW_ID, isWindowId } from "./lib/windowId";
+
 export class ApiError extends Error {
   status: number;
   /** The error's whole body: `{"error": str}`, and on a save's 409 the disk's `etag` (ED-2). */
@@ -61,6 +63,14 @@ export const api = {
   // --- status / config ----------------------------------------------------
   status: () => req<any>("/status"),
   config: () => req<any>("/config").catch(() => ({})),
+
+  // Automatic Direct opening uses only owner registry routes.
+  devServers: (window: string) => req<unknown>("/dev-servers?window=" + encodeURIComponent(window)),
+  claimDevServer: (id: string, body: { window: string; shows: boolean; focused_at: number }) =>
+    req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/claim", json(body)),
+  actDevServer: (id: string, action: "renew" | "placed" | "dismiss", window: string) =>
+    req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/" + action, json({ window })),
+  setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
 
   // --- projects -----------------------------------------------------------
   projects: () => req<Project[]>("/projects"),
@@ -357,15 +367,18 @@ export function subscribe(onEvent: (e: any) => void, onReopen?: () => void): () 
   let source: EventSource | null = null;
   let closed = false;
   let opened = 0;
+  let retry: ReturnType<typeof setTimeout> | null = null;
   const open = () => {
-    if (closed) return;
-    source = new EventSource("/events");
+    if (closed || source) return;
+    source = new EventSource("/events" + (isWindowId(WINDOW_ID) ? "?window=" + WINDOW_ID : ""));
+    const current = source;
     // Every (re)connect, as a pseudo-record: what the window holds from
     // before a daemon restart (a running turn, say) is read again. And every
     // open after the first is a reconnect: whatever was published in the gap
     // is gone, so the window re-reads what it cannot afford to have missed
     // (a turn finishing, above all).
     source.onopen = () => {
+      if (closed || source !== current) return;
       try {
         onEvent({ kind: "_connected" });
       } catch {
@@ -375,6 +388,7 @@ export function subscribe(onEvent: (e: any) => void, onReopen?: () => void): () 
       if (opened > 1) onReopen?.();
     };
     source.onmessage = (m) => {
+      if (closed || source !== current) return;
       try {
         onEvent(JSON.parse(m.data));
       } catch {
@@ -382,15 +396,26 @@ export function subscribe(onEvent: (e: any) => void, onReopen?: () => void): () 
       }
     };
     source.onerror = () => {
+      if (closed || source !== current) return;
+      onEvent({ kind: "_disconnected" });
       // The daemon restarts; the window reconnects rather than going quiet.
       source?.close();
       source = null;
-      if (!closed) setTimeout(open, 1000);
+      if (!closed) retry = setTimeout(() => { retry = null; open(); }, 1000);
     };
   };
+  const hide = () => {
+    closed = true; source?.close(); source = null;
+    if (retry) clearTimeout(retry);
+    retry = null; onEvent({ kind: "_disconnected" });
+  };
+  const show = (e: PageTransitionEvent) => { if (e.persisted) { closed = false; open(); } };
+  window.addEventListener("pagehide", hide);
+  window.addEventListener("pageshow", show);
   open();
   return () => {
-    closed = true;
-    source?.close();
+    hide();
+    window.removeEventListener("pagehide", hide);
+    window.removeEventListener("pageshow", show);
   };
 }
