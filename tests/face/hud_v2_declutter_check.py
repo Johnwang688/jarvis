@@ -87,10 +87,13 @@ def declutter_checks(browser, mock, base, check, until, guard, init_script):
         page.goto(base + "/")
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
         mock.await_reconnect(before)
-        for section in (_card_lever_checks, _cap_checks, _min_log_checks, _folded_status_checks,
+        for section in (_card_lever_checks, _cap_checks, _min_log_checks, _checkpoint_fit_checks, _folded_status_checks,
                         _popover_keyboard_checks,
                         _popover_place_checks, _escape_under_card_checks, _short_window_checks,
                         _orb_line_checks, _steer_look_checks, _listener_checks, _project_gone_checks):
+            only = set((sys.argv[1] if len(sys.argv) > 1 and __name__ == "__main__" else "").split(",")) - {""}
+            if only and section.__name__.strip("_") not in only:
+                continue
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -389,6 +392,80 @@ def _min_log_checks(page, mock, check, until):
                   " minimum, so the box stops at two lines and scrolls and the log keeps the rest",
                   abs(box - two) <= 1.5 and p["scrolls"] and log >= pane - fixed - two - 1, detail)
         page.locator(_pane(1, '[data-testid="input"]')).fill("")
+
+
+def _checkpoint_fit_checks(page, mock, check, until):
+    """Geometry changes independent of text must preserve the log minimum.
+    Synthetic fixed rows isolate sizing from model/notice network behavior.
+    """
+    ws = json.loads(SINGLE)
+    ws["panel"] = {"open": False, "height": 120}
+    _fresh(page, mock, until, json.dumps(ws), size=(1920, 760), zoom="160")
+    _type_long(page, 1)
+    before = _box_parts(page, 1)["box"]["h"]
+    _press_on_body(page, "Control+`")
+    until(lambda: _visible(page, '[data-testid="panel"]'))
+    check("fit: opening the panel refits an already long draft",
+          bool(until(lambda: _box_parts(page, 1)["box"]["h"] < before)))
+
+    def minimum(label):
+        def okay():
+            p = _box_parts(page, 1)
+            two = (MIN_LINES*p["lineH"]+p["edges"])*1.6
+            return (p["log"]["h"] >= max(MIN_LOG_PX*1.6, MIN_LOG_SHARE*p["pane"]["h"])-2
+                    or abs(p["box"]["h"]-two) <= 2)
+        check(f"fit: {label} preserves the minimum without typing", bool(until(okay)), str(_box_parts(page,1)))
+
+    minimum("panel")
+    for selector, label in (('[data-testid="model-chip"]', "model error"), ('.tabs', "header notice")):
+        original = _box_parts(page, 1)["box"]["h"]
+        page.evaluate("""s => {
+          const parent=document.querySelector('[data-testid="pane-1"]').querySelector(s);
+          const row=document.createElement('span');row.id='sizing-fixed-row';row.textContent='Synthetic fixed-height notice';
+          row.style.cssText='display:block;height:50px;min-height:50px;flex-shrink:0';parent.append(row);
+        }""", selector)
+        minimum(label)
+        check(f"fit: {label} growth actually shrinks the long box",
+              bool(until(lambda: _box_parts(page,1)["box"]["h"] < original-2)), str(_box_parts(page,1)))
+        page.evaluate("document.getElementById('sizing-fixed-row').remove()")
+        check(f"fit: removing {label} restores the available input height",
+              bool(until(lambda: abs(_box_parts(page, 1)["box"]["h"]-original) <= 2)))
+
+    _fresh(page, mock, until, ROWS_CHATS, size=(1280,800))
+    _type_long(page, 2)
+    # Keep pane2 unselected so its own status row is drawn.
+    page.locator(_pane(1, '[data-testid="input"]')).click()
+    page.evaluate("window.__hud.dispatch({type:'chat',pane:2,patch:{status:'A status row that was empty is now visible'}})")
+    p = _box_parts(page,2)
+    check("fit: a status change without typing keeps the input inside its pane",
+          bool(until(lambda: _inside(_box_parts(page,2)["send"],_box_parts(page,2)["pane"]))))
+    page.locator(_pane(2, '[data-testid="filepicker"]')).set_input_files({"name":"fit.txt","mimeType":"text/plain","buffer":b"x"})
+    check("fit: staging a file refits without another keystroke",
+          bool(until(lambda: page.locator(_pane(2,'[data-testid="chips"]')).count()
+                     and _inside(_box_parts(page,2)["send"],_box_parts(page,2)["pane"]))))
+
+    eight={"preset":"grid8","order":list(range(1,9)),"focused":1,"panes":[{"view":"chat"} for _ in range(8)]}
+    _fresh(page,mock,until,json.dumps(eight),size=(2400,1600))
+    # Focus changes which pane draws status; settle that legitimate geometry
+    # change before measuring the separate text edit.
+    page.locator(_pane(5,'[data-testid="input"]')).click()
+    page.wait_for_timeout(200)
+    # Count actual fit writes (one-line, auto, final), not React renders.
+    page.evaluate("""() => {
+      window.__fitWrites=Array(8).fill(0);window.__fitObservers=[];
+      document.querySelectorAll('.wpane [data-testid="input"]').forEach((el,i)=>{
+        const observer=new MutationObserver(rows=>window.__fitWrites[i]+=rows.filter(x=>x.attributeName==='style').length);
+        observer.observe(el,{attributes:true,attributeFilter:['style']});window.__fitObservers.push(observer);
+      });
+    }""")
+    page.locator(_pane(5,'[data-testid="input"]')).fill(FORTY_LINES)
+    page.wait_for_timeout(200)
+    writes=page.evaluate("window.__fitWrites")
+    check("fit: typing measures only its pane among eight",writes[4]>0 and not any(n for i,n in enumerate(writes) if i!=4),str(writes))
+    page.wait_for_timeout(300)
+    after=page.evaluate("window.__fitWrites")
+    check("fit: no observer/animation loop continues after settling",after==writes and writes[4]<=8,str(after))
+    page.evaluate("window.__fitObservers.forEach(o=>o.disconnect())")
 
 
 # ---- F3: a folded sidebar still says what the selected chat is doing --------
