@@ -350,11 +350,16 @@ export const api = {
     }),
 
   // --- speech -------------------------------------------------------------
-  async stt(blob: Blob): Promise<string> {
-    const res = await fetch("/stt", {
+  /** `utteranceId`/`seq` name the clip for the daemon, which echoes them (V2). */
+  async stt(blob: Blob, opts: { signal?: AbortSignal; utteranceId?: number; seq?: number } = {}): Promise<string> {
+    const ids = new URLSearchParams();
+    if (Number.isSafeInteger(opts.utteranceId) && opts.utteranceId! >= 0) ids.set("utterance_id", String(opts.utteranceId));
+    if (Number.isSafeInteger(opts.seq) && opts.seq! >= 0) ids.set("seq", String(opts.seq));
+    const res = await fetch(ids.size ? `/stt?${ids}` : "/stt", {
       method: "POST",
       headers: { "Content-Type": blob.type || "audio/wav" },
       body: blob,
+      signal: opts.signal,
     });
     if (!res.ok) {
       // The daemon says which models failed and how (`speech-to-text
