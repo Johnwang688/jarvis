@@ -1158,7 +1158,8 @@ def _tabframe(pane, ident):
 def _tabs_checks(page, mock, check, until):
     url = _focus_url(mock, "focus-none")
     tabs = [{"id": "first1", "url": url, "keepOrigin": f"http://127.0.0.1:{mock.dev_port}",
-             "auto": {"kind": "thread", "label": "Project chat"}},
+             "auto": {"kind": "thread", "label": "Project chat"},
+             "source": {"kind": "dev_server", "entryId": "ds_0123abcd"}},
             {"id": "second", "url": url + "?second=1"}]
     _setup(page, mock, until, {"browser": {"tabs": tabs, "active": "first1"}})
     until(lambda: _sandbox(page) == ON, timeout=4)
@@ -1185,6 +1186,25 @@ def _tabs_checks(page, mock, check, until):
     page.keyboard.press("Escape")
     body = until(lambda: mock.sent("POST", "/approvals/tabs-card") or None, timeout=4)
     check("AO2: Escape denies while the strip is inert", bool(body) and body[-1].get("decision") == "deny")
+
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    first = lambda: _ws(page)["ws"]["panes"][1]["browser"]["tabs"][0]
+    check("source: selection and approval leave daemon provenance intact",
+          first().get("source") == {"kind": "dev_server", "entryId": "ds_0123abcd"})
+    address = page.locator(_pane(2, '[data-testid="browser-url"]'))
+    address.fill("http://localhost:8405/")
+    page.locator(_pane(2, '[data-testid="browser-go"]')).click()
+    check("source: a refused owner URL cannot clear provenance",
+          first().get("source") == {"kind": "dev_server", "entryId": "ds_0123abcd"})
+    address.fill(url)
+    address.press("Enter")
+    until(lambda: "source" not in first(), timeout=3)
+    check("source: actual same-URL owner submission clears provenance and obsolete auto label",
+          "source" not in first() and "auto" not in first()
+          and page.locator(_pane(2, '[data-testid="browser-auto"]')).count() == 0)
+    page.reload()
+    until(lambda: _sandbox(page) == ON, timeout=4)
+    check("source: owner submission remains owner-entered after storage reload", "source" not in first())
 
     # A markup/bidi URL is still only text; Direct never borrows document.title.
     hostile = f"http://localhost:{mock.dev_port}/%E2%80%AE%3Cimg%3E" + "x" * 1700

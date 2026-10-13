@@ -3122,6 +3122,10 @@ def main():
             finally:
                 terminal_mock.stop()
 
+            # AO-3 owns isolated per-scenario mocks and the real claim registry.
+            from tests.face.hud_v2_autoopen_check import autoopen_checks
+            autoopen_checks(browser, check, until, guard, FAKE_RECOGNIZER)
+
             # The Browser pane's ports and "keep its own origin" (WP-E), and the rename (BR-3a): a
             # context and a mock of their own, the dev server and the API
             # listener on ephemeral ports of the mock's.

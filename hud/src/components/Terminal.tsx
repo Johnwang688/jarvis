@@ -1,3 +1,4 @@
+import { devservers } from "../state/devserverClient";
 // The owner's terminals in the window (WP-D; plan docs/plans/2026-10-09-hud-
 // workspace-plan.md §2.3–§2.4, decisions W-1, W-2, W-5; contract in
 // docs/hud-api.md). lib/terminal.ts decides every rule; this file holds the
@@ -57,11 +58,12 @@ import { api } from "../api";
 import {
   AttachLedger, HeldInput, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, continuationPrefix,
   continuesOn, counterZoom, encodeInput, fontSizeFor, hhmm, integrationNote, isTerminalId, judgeLink, loadMine,
-  loadPrefs, mayContinue, menuWidth, pageNonce, parseControl, parseRead, placeMenu, readableCarry, readNoteText,
+  loadPrefs, mayContinue, menuWidth, parseControl, parseRead, placeMenu, readableCarry, readNoteText,
   saveMine, savePrefs,
   SPECS_KEPT, type InSpec, type ReadNote, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
+import { WINDOW_ID } from "../lib/windowId";
 import { judgeBrowserUrl } from "../lib/browser";
 import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
@@ -120,7 +122,7 @@ let unloading = false;
  * terminals as held by a live page (lib/terminal.ts, MINE_KEY), so a copy of
  * the list in a duplicated or reopened tab is never taken for its own.
  */
-const PAGE = pageNonce();
+const PAGE = WINDOW_ID;
 if (typeof window !== "undefined") {
   // Leaving (a reload, the window closing): say goodbye with a normal close,
   // so the daemon detaches at once rather than when TCP notices — and never
@@ -521,7 +523,7 @@ export class TermSession {
     if (this.disposed || !this.wanted || this.ws) return;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(attachUrl(window.location, this.id, ticket));
+      ws = new WebSocket(attachUrl(window.location, this.id, ticket, PAGE));
     } catch {
       this.scheduleReconnect();
       return;
@@ -631,7 +633,7 @@ export class TermSession {
   endedWhy: "gone" | "ended" = "ended";
 
   private onMessage(ws: WebSocket, gen: number, ev: MessageEvent) {
-    if (ws !== this.ws) return;
+    if (ws !== this.ws || gen !== this.gen) return;
     if (typeof ev.data !== "string") {
       this.out.data(gen, new Uint8Array(ev.data as ArrayBuffer));
       return;
@@ -639,6 +641,9 @@ export class TermSession {
     const msg = parseControl(ev.data);
     if (!msg) return;
     switch (msg.type) {
+      case "dev_url":
+        if (this.sawAttached && this.state === "attached") devservers.terminal(this.id, msg.url, msg.id);
+        return;
       case "attached":
         this.sawAttached = true;
         this.attempts = 0;

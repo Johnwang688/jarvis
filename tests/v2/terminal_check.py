@@ -1376,7 +1376,9 @@ class DevUrls(Base):
                 drained.append(events.get_nowait())
             except Exception:
                 break
-        self.assertEqual([r["kind"] for r in drained], ["terminal_attached", "dev_server"], drained)
+        self.assertEqual([r["kind"] for r in drained],
+                         ["terminal_attached", "dev_server", "dev_server_settings"], drained)
+        self.assertEqual(drained[2], {"kind": "dev_server_settings", "data": {"auto_open": True}})
         record = drained[1]
         self.assertEqual(set(record), {"kind", "data"})
         self.assertEqual(set(record["data"]), {"id", "state", "source", "at"})
