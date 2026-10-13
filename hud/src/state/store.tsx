@@ -12,7 +12,7 @@
 
 import { applyEvent, fold, historyOps, outcome, type TranscriptEvent } from "../lib/toolCalls";
 import type { ToolEntry, ToolOutcome } from "../types";
-import React, { createContext, useContext, useReducer } from "react";
+import React, { createContext, useCallback, useContext, useReducer } from "react";
 import type {
   ApprovalRequest, Attachment, AvatarDesc, ChatMessage, Project, Schedule, Task, TaskThread,
   Thread, ToolOp, Usage, RouteView, DiscordStatus } from "../types";
@@ -138,7 +138,7 @@ export const initialState: State = {
  */
 export type ChatPatch = Partial<ChatState> & { orb?: OrbState; error?: string; takeOrphan?: boolean };
 
-export type Action =
+export type Action = (
   | { type: "patch"; patch: Partial<State> }
   /** One pane's conversation fields; `orb` lands only when it is the selected chat. */
   | { type: "chat"; pane: PaneNo; patch: ChatPatch }
@@ -206,7 +206,8 @@ export type Action =
   /** A turn running in a thread no pane shows (a first send whose pane was closed meanwhile). */
   | { type: "loose"; threadId: string; status: string }
   /** A turn finished in a thread no pane tracks: nothing is loose there any more. */
-  | { type: "turn_over"; threadId: string };
+  | { type: "turn_over"; threadId: string }
+) & { /** Captured once by dispatch; old direct reducer callers use zero. */ issuedAt?: number };
 
 function withChat(s: State, pane: PaneNo, next: ChatState): State {
   return { ...s, chats: { ...s.chats, [pane]: next } };
@@ -301,8 +302,8 @@ function orphanTaken(
 export const NOTICE_BREATH_MS = 1000;
 
 /** A plain write to the error line (a failure, or clearing it): it replaces what was there. */
-function wrote(s: State, error: string): State {
-  return { ...s, error, errorAt: error ? Date.now() : 0, orphanNotice: undefined };
+function wrote(s: State, error: string, at: number): State {
+  return { ...s, error, errorAt: error ? at : 0, orphanNotice: undefined };
 }
 
 /**
@@ -311,8 +312,7 @@ function wrote(s: State, error: string): State {
  * written over it (review 3 of PR #47, LOW): a split that reuses a hidden pane
  * says both that its words were kept and that the new thread took them.
  */
-function noticed(s: State, notice: string, orphan = false, append = false): State {
-  const now = Date.now();
+function noticed(s: State, notice: string, now: number, orphan = false, append = false): State {
   // Replace only our own exact location notice; an unrelated refusal is retained.
   const previous = orphan && s.orphanNotice && s.error.includes(s.orphanNotice) ? s.orphanNotice : null;
   const together = !!s.error && (append || now - s.errorAt < NOTICE_BREATH_MS);
@@ -336,6 +336,7 @@ function transcriptEvent(c: ChatState, event: TranscriptEvent): ChatState {
 }
 
 export function reduce(s: State, a: Action): State {
+  const noticeAt = typeof a.issuedAt === "number" && Number.isFinite(a.issuedAt) ? a.issuedAt : 0;
   switch (a.type) {
     case "patch": {
       let next = { ...s, ...a.patch };
@@ -346,7 +347,7 @@ export function reduce(s: State, a: Action): State {
         next = { ...next, turns: turnsAfterActivity(next.turns, s.activity, next.activity, next.threads, Date.now()) };
       }
       if (a.patch.threads) next = { ...next, turns: turnsAfterThreads(next.turns, next.threads) };
-      return a.patch.error !== undefined && a.patch.errorAt === undefined ? wrote(next, a.patch.error) : next;
+      return a.patch.error !== undefined && a.patch.errorAt === undefined ? wrote(next, a.patch.error, noticeAt) : next;
     }
 
     case "turn": {
@@ -367,9 +368,9 @@ export function reduce(s: State, a: Action): State {
       const moved = reconverse(s, a.pane, was, { ...was, ...fields }, !!takeOrphan);
       let next = { ...withChat(s, a.pane, moved.next), drafts: moved.drafts, composeSeq };
       if (orb !== undefined && a.pane === s.selectedChat) next = { ...next, orb };
-      if (error !== undefined) next = wrote(next, error);
+      if (error !== undefined) next = wrote(next, error, noticeAt);
       // Words taken up from a pane that let them go are never back unsaid.
-      if (moved.notice) next = noticed(next, moved.notice, moved.orphan);
+      if (moved.notice) next = noticed(next, moved.notice, noticeAt, moved.orphan);
       return next;
     }
 
@@ -390,7 +391,7 @@ export function reduce(s: State, a: Action): State {
     }
 
     case "notice":
-      return a.text ? noticed(s, a.text, false, true) : s;
+      return a.text ? noticed(s, a.text, noticeAt, false, true) : s;
 
     case "restore_compose": {
       const c = s.chats[a.pane];
@@ -403,7 +404,7 @@ export function reduce(s: State, a: Action): State {
       const all = [...c.files, ...had.files];
       const text = c.input && had.text ? `${c.input}\n${had.text}` : c.input || had.text;
       const next = { ...withChat(s, a.pane, { ...c, input: text, files: all.slice(0, MAX_FILES) }), drafts };
-      return noticed(next, "Words that were not sent are back in this box." + filesLeftOut(Math.max(0, all.length - MAX_FILES)));
+      return noticed(next, "Words that were not sent are back in this box." + filesLeftOut(Math.max(0, all.length - MAX_FILES)), noticeAt);
     }
 
     case "stage": {
@@ -414,7 +415,7 @@ export function reduce(s: State, a: Action): State {
       const files = all.slice(0, MAX_FILES);
       const next = n !== undefined ? withChat(s, n, { ...s.chats[n], files })
         : { ...s, drafts: { ...s.drafts, [a.key]: { ...had, text: had?.text ?? "", files } } };
-      return all.length > MAX_FILES ? noticed(next, filesLeftOut(all.length - MAX_FILES).trim()) : next;
+      return all.length > MAX_FILES ? noticed(next, filesLeftOut(all.length - MAX_FILES).trim(), noticeAt) : next;
     }
 
     case "message":
@@ -669,8 +670,8 @@ export function reduce(s: State, a: Action): State {
         chats: { ...s.chats, [a.pane]: { ...emptyChat(), status: keep } },
         selectedOrder: s.selectedOrder.filter((n) => n !== a.pane),
       };
-      const said = notice ? noticed(next, notice) : next;
-      return orphanText ? noticed(said, orphanText, true) : said;
+      const said = notice ? noticed(next, notice, noticeAt) : next;
+      return orphanText ? noticed(said, orphanText, noticeAt, true) : said;
     }
 
     case "loose":
@@ -723,7 +724,13 @@ const Ctx = createContext<{ state: State; dispatch: React.Dispatch<Action> }>({
 });
 
 export function StoreProvider({ children, initial }: { children: React.ReactNode; initial?: Partial<State> }) {
-  const [state, dispatch] = useReducer(reduce, { ...initialState, ...initial });
+  const [state, applyAction] = useReducer(reduce, { ...initialState, ...initial });
+  // React may reduce an action later or replay it. Notice timing belongs to
+  // the event, not whichever wall-clock time that reduction happens to see.
+  const dispatch = useCallback((action: Action) => applyAction({
+    ...action, issuedAt: typeof action.issuedAt === "number" && Number.isFinite(action.issuedAt)
+      ? action.issuedAt : Date.now(),
+  }), [applyAction]);
   return <Ctx.Provider value={{ state, dispatch }}>{children}</Ctx.Provider>;
 }
 
