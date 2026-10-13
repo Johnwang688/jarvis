@@ -2026,10 +2026,12 @@ fails the grant case. A stored seed in any suite may still say `"preview"`
 
 **Repeated terminal banners refresh liveness (AO-1b-ii review).** Frame
 deduplication does not suppress a same-terminal registry restart: an already
-announced origin refreshes only its existing same-source entry, retaining its
-id, first path and placed/dismissed state. It never preclaims or sends a second
-frame; a different terminal cannot revive that tombstone through this path.
-The terminal-output regression covers all prior states and startup grace.
+announced origin refreshes its same-source entry, retaining its id, first path
+and placed/dismissed state. After the 60-second tombstone expires, a new
+unclaimed entry uses the normal source/global rates and registry cap. Neither
+path preclaims or sends a second frame; a different terminal cannot revive a
+retained tombstone through this path. Terminal-output regressions cover all
+prior states, startup grace, expiry, switch-off and the caps.
 
 **Dev servers an agent started, AO-1a (2026-10-12; plan
 `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §B and §D.4, review

@@ -930,7 +930,7 @@ class Terminal:
             may_send = sniffer.may_send(url)
         if not may_send:
             # A repeated banner still proves this terminal's retained server
-            # came back. Refresh liveness outside the terminal lock, but never
+            # came back. Refresh/register outside the terminal lock, but never
             # preclaim or send another frame for an already announced origin.
             if self._dev_announce is not None:
                 self._dev_announce(self.id, url, refresh=True)

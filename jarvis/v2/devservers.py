@@ -509,8 +509,9 @@ class DevServers:
         Never probes. The first source on a port wins. A delivery receipt is
         private to the terminal reader, so an old failed send cannot release
         a later claim, even when both attachments use the same page nonce.
-        A deduplicated banner only refreshes an existing same-source entry:
-        no new registration, preclaim, frame, or second placement.
+        A deduplicated banner refreshes a same-source entry, or registers an
+        unclaimed entry after expiry under the normal caps. Never a preclaim,
+        frame, replacement of another source, or second placement of a live id.
         """
         if not self.enabled() or self._stopped:
             return None
@@ -526,10 +527,11 @@ class DevServers:
             self._expire(self.clock())
             previous = self._entries.get(parsed.port)
             if refresh:
-                if previous is None or previous.source != source:
+                if previous is not None and previous.source != source:
                     return None
-                # _register preserves id, path, first source and prior state;
-                # a down claimed entry becomes unclaimed, never preclaimed.
+                # Retained entries keep id, path, source and prior state.
+                # After expiry, normal caps govern a new unclaimed entry.
+                # Neither path preclaims a window or sends another frame.
                 e = self._register(parsed.port, parsed.scheme, parsed.path or "/",
                                    source, self.clock())
                 return e.id if e is not None else None

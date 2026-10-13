@@ -1629,6 +1629,58 @@ class DevUrls(Base):
                         watch._liveness(set(), now[0])
                     self.assertTrue(entry.listening, "the restart gets its startup grace")
 
+    def test_repeat_after_tombstone_expiry_registers_unclaimed_under_normal_gates(self):
+        from jarvis.v2 import devservers
+        watch = self.daemon.devservers
+        now = [1000.0]
+        watch.clock = lambda: now[0]
+        terminal = T.Terminal("0000000e", shell="/bin/sh", folder="/", project_id=None,
+                              label="~", cols=80, rows=24, nonce=NONCE)
+        self.addCleanup(terminal.finish)
+        terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
+        terminal._dev_on = lambda: True
+        terminal._dev_announce = watch.announce_terminal
+        terminal._dev_release = watch.terminal_delivery_failed
+        terminal._dev_send = watch.deliver_terminal
+        line = b"  Local: http://localhost:24635/app/\r\n"
+        with patch.object(watch, "_ensure_thread"):
+            terminal._output(line)
+            entry = watch._entries[24635]
+            ident = entry.id
+            with watch._lock:
+                now[0] += 5
+                watch._liveness(set(), now[0])
+                watch._liveness(set(), now[0])
+            now[0] += devservers.DOWN_KEEP_S + 1
+            frames = []
+            terminal._attachment_window = self.WINDOW
+            terminal._attachment = SimpleNamespace(
+                send_binary=lambda d: True, send_text=lambda t: frames.append(json.loads(t)) or True,
+                closed=threading.Event())
+            with patch.object(watch, "enabled", return_value=False):
+                terminal._output(line)
+                self.assertIs(watch._entries[24635], entry, "off creates or revives nothing")
+                self.assertFalse(entry.listening)
+            with patch.object(devservers, "ENTRIES_MAX", 0):
+                terminal._output(line)
+                self.assertEqual(watch.listing()["servers"], [], "entry cap still applies")
+            with patch.object(devservers, "SOURCE_RATE_S", 1000):
+                watch._rates[("terminal", terminal.id)] = now[0]
+                terminal._output(line)
+                self.assertEqual(watch.listing()["servers"], [], "source rate still applies")
+            with patch.object(devservers, "GLOBAL_RATE_MAX", 0):
+                terminal._output(line)
+                self.assertEqual(watch.listing()["servers"], [], "global rate still applies")
+            terminal._output(line)
+            self.assertIn(24635, watch._entries, "a fresh post-expiry banner is discoverable")
+            fresh = watch._entries[24635]
+            self.assertNotEqual(fresh.id, ident)
+            self.assertTrue(fresh.listening)
+            self.assertEqual((fresh.state, fresh.window, fresh.delivery), ("up", None, None))
+            self.assertEqual(fresh.source, {"kind": "terminal", "terminal_id": terminal.id})
+            self.assertEqual(watch.listing()["servers"][0]["url"], "http://localhost:24635/app/")
+            self.assertEqual(frames, [], "no duplicate frame even with an attached window")
+
     def test_duplicate_from_a_different_terminal_cannot_revive_the_first_source(self):
         watch = self.daemon.devservers
         now = [1000.0]
