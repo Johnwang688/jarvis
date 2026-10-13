@@ -50,6 +50,8 @@ class Sound(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.applied);self.assertNotIn("--mute-audio",result.args)
         self.assertEqual(result.env,{"FONTCONFIG_FILE":"synthetic","PULSE_SERVER":A.PULSE_SERVER})
         self.assertFalse(self.sound.launch(["--mute-audio"],{},profile="p-87654321",restart_token=token).applied)
+        await self.sound.change(self.tab.id,True)
+        self.assertFalse(self.sound.launch(["--mute-audio"],{},profile=self.profile,restart_token=token).applied)
         await self.sound.change(self.tab.id,False)
         self.assertFalse(self.sound.launch(["--mute-audio"],{},profile=self.profile,restart_token=token).applied)
     async def test_master_off_clears_pending_gesture_and_on_does_not_restore_it(self):
