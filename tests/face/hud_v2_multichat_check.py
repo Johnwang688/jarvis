@@ -130,7 +130,7 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _w6_grid_checks, _w6_fallback_checks, _w6_one_and_none_checks, _w6_handback_held_checks,
                         # re-review of PR #27 (feb61ff)
                         _rr_compose_fail_moved_checks, _rr_two_cards_checks, _rr_tab_never_authorizes_checks,
-                        _rr_placeholder_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks,
+                        _rr_placeholder_stop_checks, _checkpoint_send_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks,
                         # the thinking line (WP-H)
                         _thinking_pane_checks, _thinking_discord_checks, _thinking_adopt_checks,
                         _thinking_motion_checks, _thinking_many_checks, _thinking_log_checks,
@@ -1602,6 +1602,81 @@ def _rr_placeholder_stop_checks(page, mock, check, until):
           bool(new) and bool(until(lambda: mock.saw("POST", f"/threads/{new}/interrupt"), timeout=3)), str(new))
     if new:
         mock.emit("turn_finished", {"stop": "interrupted"}, thread_id=new)
+
+
+
+def _checkpoint_send_stop_checks(page, mock, check, until):
+    """A Stop during /send waits for its exact identity, even without SSE.
+    Covers the thread-created/ACK gap, known threads, stale and queued ACKs,
+    and request failure. The backend separately proves a stale ID is inert.
+    """
+    interrupt_url = re.compile(r".*/threads/t\d+/interrupt$")
+    for case in ("new", "known", "stale", "queued", "failed", "no-id", "dropped"):
+        _fresh(page, mock, until, SINGLE)
+        if case != "new":
+            _open(page, until, 1, "t1")
+        held, stops = [], []
+        def stopped(route):
+            stops.append(route.request.post_data_json)
+            stale = case == "stale" or (case == "queued" and len(stops) == 1)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": not stale, "stale": stale}))
+        page.route(SEND_URL, lambda route: held.append(route))
+        page.route(interrupt_url, stopped)
+        try:
+            _box(page, 1).fill("words awaiting their send reply")
+            _box(page, 1).press("Enter")
+            check(f"send/stop {case}: send is held after the thread exists",
+                  bool(until(lambda: _pumped(page) and held, timeout=3))
+                  and not str(_chat(page, 1)["turnThreadId"]).startswith("local-"))
+            if case == "new":
+                # A compose row offers the orb's interrupt until ACK makes it
+                # an open conversation; its Send control is not Steer yet.
+                page.evaluate("document.activeElement && document.activeElement.blur()")
+                _hold_keys(page, ["Control", "d"], hold=0.1)
+            else:
+                stop = page.locator(_pane(1, '[data-testid="stop"]'))
+                stop.click()
+                stop.click()
+            page.wait_for_timeout(100)
+            check(f"send/stop {case}: Stop waits for send acknowledgement", not stops, str(stops))
+            outcome = {"status": "started", "turn_id": "a" * 32}
+            if case == "queued":
+                outcome.update(status="queued", queued_turn_id="b" * 32, message_id="held-message")
+            elif case == "no-id":
+                outcome.pop("turn_id")
+            elif case == "dropped":
+                outcome["status"] = "dropped"
+            elif case == "failed":
+                outcome = {"error": "synthetic send failure"}
+            held[0].fulfill(status=500 if case == "failed" else 202,
+                            content_type="application/json", body=json.dumps(outcome))
+            if case in ("new", "known", "stale", "queued"):
+                wanted = [{"expected_turn_id": "a" * 32}]
+                if case == "queued":
+                    wanted.append({"expected_turn_id": "b" * 32})
+                until(lambda: _pumped(page) and len(stops) >= len(wanted), timeout=3)
+                page.wait_for_timeout(100)
+                check(f"send/stop {case}: only the acknowledged exact turn identities are stopped",
+                      stops == wanted, str(stops))
+            else:
+                page.wait_for_timeout(150)
+                check(f"send/stop {case}: no unguarded or failed-send interrupt escapes", not stops, str(stops))
+            if case == "no-id":
+                err = page.locator('[data-testid="error"]')
+                check("send/stop no-id: the safe refusal is visible",
+                      err.count() and "no turn identity" in err.inner_text())
+            if case == "failed":
+                # The earlier failed request cannot consume this later Stop.
+                until(lambda: not _chat(page, 1)["busy"], timeout=3)
+                mock.emit("turn_started", {"turn_id": "c" * 32}, thread_id="t1")
+                until(lambda: _chat(page, 1)["busy"], timeout=3)
+                page.locator(_pane(1, '[data-testid="stop"]')).click()
+                until(lambda: _pumped(page) and stops, timeout=3)
+                check("send/stop failure: a later normal Stop is not swallowed", stops == [{}], str(stops))
+        finally:
+            page.unroute(SEND_URL)
+            page.unroute(interrupt_url)
 
 
 def _rr_chip_writeback_checks(page, mock, check, until):
