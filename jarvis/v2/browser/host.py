@@ -606,6 +606,7 @@ class _Tab:
     page_identity: int = 0              # host-issued lifetime, never a Python address
     document_generation: int = 0        # includes same-URL/same-document navigation
     pane_ready: bool = False             # false until the landing guard accepts it
+    loading: bool = False                # main-frame request has not finished loading
     activity_holds: dict = field(default_factory=dict)
 
 
@@ -1221,7 +1222,8 @@ class BrowserHost:
         self._tabs[tab.id] = tab
         page.on("framenavigated", lambda frame: self._landed(tab, frame))
         page.on("close", lambda _page: self._dropped(tab))
-        page.on("load", lambda _page: asyncio.ensure_future(self._quietly(self._titled(tab))))
+        page.on("request", lambda request: self._loading(tab, request))
+        page.on("load", lambda _page: self._loaded(tab))
         page.on("dialog", lambda dialog: self._dialog(tab, dialog))
         page.on("filechooser", lambda chooser: self._chooser(tab, chooser))
         page.on("download", lambda download: self._start_download(tab, download))
@@ -1352,6 +1354,22 @@ class BrowserHost:
                 return value
 
     # -- the landing guard ------------------------------------------------------------
+
+    def _loading(self, tab: _Tab, request) -> None:
+        if self._tabs.get(tab.id) is not tab or self._stopped:
+            return
+        try:
+            if request.is_navigation_request() and request.frame is tab.page.main_frame:
+                tab.loading = True
+        except Exception:
+            pass
+
+    def _loaded(self, tab: _Tab) -> None:
+        if self._tabs.get(tab.id) is not tab or self._stopped:
+            return
+        tab.loading = False
+        asyncio.ensure_future(self._quietly(self._titled(tab)))
+        self._activity_changed()
 
     def _landed(self, tab: _Tab, frame) -> None:
         if self._tabs.get(tab.id) is not tab or self._stopped:

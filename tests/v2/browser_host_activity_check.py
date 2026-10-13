@@ -116,6 +116,16 @@ class Host(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.host.activity.try_restart(self.profile,1,1))
         self.host.release_page_hold(self.tab,'download:1234abcd',token)
         self.assertEqual(self.host.activity.counts(self.profile)[0],0)
+    async def test_only_current_main_frame_request_marks_restore_as_loading(self):
+        request=SimpleNamespace(is_navigation_request=lambda:True,frame=self.page.main_frame)
+        self.host._loading(self.tab,request);self.assertTrue(self.tab.loading)
+        self.host._titled=AsyncMock();self.host._loaded(self.tab);await asyncio.sleep(0)
+        self.assertFalse(self.tab.loading)
+        self.host._loading(self.tab,SimpleNamespace(is_navigation_request=lambda:True,frame=object()))
+        self.assertFalse(self.tab.loading)
+        self.host._tabs.pop(self.tab.id)
+        self.host._loading(self.tab,request);self.assertFalse(self.tab.loading)
+
     async def test_popup_adoption_cannot_register_a_retired_instance(self):
         stale=H._Instance(self.profile,Path('/synthetic'),Mock(),Mock(),generation=0)
         page=Mock();self.host._refuse_popup=AsyncMock()
