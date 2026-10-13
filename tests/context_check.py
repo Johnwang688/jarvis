@@ -20,16 +20,101 @@ Run:  .venv/bin/python tests/context_check.py
 
 from __future__ import annotations
 
+import os
+import runpy
+import subprocess
 import sys
 import tempfile
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import agent as agent_mod
 from jarvis import config, context, llm
 from jarvis.agent import Agent
+
+
+def config_default_checks() -> None:
+    """Defaults and env overrides, without loading any real .env or state."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("JARVIS_")}
+    with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, clean, clear=True):
+        os.environ["HOME"] = raw
+        source = Path(raw) / "jarvis" / "config.py"
+        source.parent.mkdir()
+        source.write_text(Path(config.__file__).read_text())
+        defaults = runpy.run_path(str(source))
+        assert defaults["COMPACT_AT_TOKENS"] == 90_000, "compaction default must be 90k"
+        for tier in ("orchestrator", "subagent", "compaction", "review"):
+            assert defaults["TIERS"][tier] == "anthropic/claude-haiku-5.5", tier
+        for tier in ("worker", "cheap"):
+            assert defaults["TIERS"][tier] == "openai/gpt-oss-20b", tier
+
+        os.environ.update(JARVIS_COMPACT_AT_TOKENS="42000", JARVIS_ORCHESTRATOR="test/leader")
+        overrides = runpy.run_path(str(source))
+        assert overrides["COMPACT_AT_TOKENS"] == 42_000
+        assert all(overrides["TIERS"][tier] == "test/leader"
+                   for tier in ("orchestrator", "subagent", "compaction", "review"))
+        os.environ.update(JARVIS_SUBAGENT="test/child", JARVIS_COMPACTION="test/summary",
+                          JARVIS_REVIEW_MODEL="test/review")
+        overrides = runpy.run_path(str(source))
+        assert overrides["TIERS"]["subagent"] == "test/child"
+        assert overrides["TIERS"]["compaction"] == "test/summary"
+        assert overrides["TIERS"]["review"] == "test/review"
+
+    assert context.ContextPolicy().compact_at_tokens == config.COMPACT_AT_TOKENS
+    assert Agent(tool_names=["get_datetime"]).policy.compact_at_tokens == config.COMPACT_AT_TOKENS
+    with patch.object(config, "COMPACT_AT_TOKENS", 37_000):
+        assert context.ContextPolicy().compact_at_tokens == 37_000
+        assert Agent(tool_names=["get_datetime"]).policy.compact_at_tokens == 37_000
+    explicit = context.ContextPolicy(compact_at_tokens=1800)
+    assert Agent(tool_names=["get_datetime"], policy=explicit).policy is explicit
+    print("ok  config: Haiku defaults, 90k compaction, env overrides and explicit policies")
+
+
+def config_env_validation_checks() -> None:
+    """Import validation uses a subprocess and a temporary HOME/config copy."""
+    with tempfile.TemporaryDirectory() as raw:
+        package = Path(raw) / "jarvis"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "config.py").write_text(Path(config.__file__).read_text())
+        env = {"HOME": raw, "PATH": os.defpath}
+        command = [sys.executable, "-c",
+                   "from jarvis import config; print(config.COMPACT_AT_TOKENS)"]
+        for value, expected in ((None, 90_000), ("1000", 1000), ("42000", 42_000),
+                                ("0", None), ("999", None), ("-1000", None),
+                                ("abc", None), ("1.5", None), ("", 90_000)):
+            case_env = dict(env)
+            if value is not None:
+                case_env["JARVIS_COMPACT_AT_TOKENS"] = value
+            result = subprocess.run(command, cwd=raw, env=case_env, capture_output=True, text=True)
+            if expected is not None:
+                assert result.returncode == 0, result.stderr
+                assert int(result.stdout) == expected
+            else:
+                assert result.returncode != 0, value
+                assert "ValueError: JARVIS_COMPACT_AT_TOKENS must be an integer of at least 1000." in result.stderr
+    print("ok  config: import rejects invalid compaction env values in isolated subprocesses")
+
+
+def default_threshold_checks() -> None:
+    """The production policy keeps 90k tokens and compacts just above it."""
+    with tempfile.TemporaryDirectory() as raw:
+        policy = context.ContextPolicy(spill_dir=Path(raw))
+        messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "goal"}]
+        messages += [{"role": "user", "content": f"turn {i}"} for i in range(30)]
+        meter = context.TokenMeter()
+        for tokens in (70_000, policy.compact_at_tokens):
+            meter.observe(messages, tokens)
+            stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY", meter=meter)
+            assert not stats.messages_compacted, f"compacted prematurely at {tokens}"
+        meter.observe(messages, policy.compact_at_tokens + 1)
+        stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY", meter=meter)
+        assert stats.messages_compacted, "default threshold did not trigger compaction"
+        _assert_wire_valid(messages)
+    print("ok  context: default compacts above 90k, preserves history below and at threshold")
 
 
 def _image_msg(tag: str = "AAA") -> dict:
@@ -478,6 +563,9 @@ def main() -> int:
     # the same reason every suite that touches the allowlist points it at a
     # temp file first.
     config.MODELS_PATH = Path(tempfile.mkdtemp()) / "models.json"
+    config_default_checks()
+    config_env_validation_checks()
+    default_threshold_checks()
     orphan_checks()
     cut_point_checks()
     goal_anchor_checks()

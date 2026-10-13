@@ -119,7 +119,7 @@ def catalogue_checks() -> None:
 
 
 def model_checks() -> None:
-    """Every child is Luna. A type carries a brief, never a model."""
+    """Every child follows the orchestrator. A type carries a brief, never a model."""
     assert config.TIERS["subagent"] == config.TIERS["orchestrator"], (
         "sub-agents must run on the orchestrator model"
     )

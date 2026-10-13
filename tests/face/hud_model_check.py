@@ -34,7 +34,7 @@ BASE = f"http://127.0.0.1:{PORT}"
 SSE: queue.Queue = queue.Queue()
 POSTS: list[tuple[str, dict]] = []  # what the window POSTed, in order
 
-DEFAULT = "openai/gpt-5.6-luna"
+DEFAULT = "anthropic/claude-haiku-5.5"
 
 
 def model(model_id, name, iq=None, out=4.0, vision=False, ctx=128000, efforts=()):
@@ -49,7 +49,7 @@ def model(model_id, name, iq=None, out=4.0, vision=False, ctx=128000, efforts=()
 
 CATALOG = [
     model("anthropic/claude-opus-5", "Anthropic: Opus 5", iq=63.1, out=25.0, vision=True),
-    model(DEFAULT, "OpenAI: Luna", iq=58, out=4.0, vision=True,
+    model(DEFAULT, "Anthropic: Haiku 5.5", iq=58, out=4.0, vision=True,
           efforts=["max", "high", "medium", "low"]),
     model("google/gemini-3.7-flash", "Google: Gemini 3.7 Flash", iq=51, out=0.6,
           efforts=["max", "high", "low"]),
@@ -153,7 +153,7 @@ def texts(page, selector: str) -> list[str]:
 
 def run_checks(page) -> None:
     # 1. The CORE readout is the way in, and it names the running model.
-    assert page.inner_text("#cfg-llm") == "gpt-5.6-luna"
+    assert page.inner_text("#cfg-llm") == "claude-haiku-5.5"
     page.click("#model-row")
     page.wait_for_selector("#models.on")
     rows = texts(page, "#modellist .sess")
@@ -180,7 +180,7 @@ def run_checks(page) -> None:
     note = page.inner_text("#catalog-note")
     assert "6 MATCHES" in note and "6 ELIGIBLE" in note, note
     listed = texts(page, "#cataloglist .sess.here")
-    assert len(listed) == 1 and "OpenAI: Luna" in listed[0], listed
+    assert len(listed) == 1 and "Anthropic: Haiku 5.5" in listed[0], listed
     print("ok  catalog: ADD MODEL browses the eligible catalog and marks what is on the list")
 
     # 4. A hostile model name is text, not markup — this window gates approvals.
@@ -194,8 +194,9 @@ def run_checks(page) -> None:
     page.wait_for_function("() => document.querySelectorAll('#cataloglist .sess').length === 1")
     assert "Gemini" in texts(page, "#cataloglist .sess")[0]
     page.fill("#model-search", "anthropic/")
-    page.wait_for_function("() => document.querySelectorAll('#cataloglist .sess').length === 1")
-    assert "Opus" in texts(page, "#cataloglist .sess")[0]
+    page.wait_for_function("() => document.querySelectorAll('#cataloglist .sess').length === 2")
+    rows = " ".join(texts(page, "#cataloglist .sess"))
+    assert "Opus" in rows and "Haiku" in rows, rows
     # Typing a space must not grab the microphone: Space is push-to-talk at
     # the document level, so the box has to stop the event like the input bar.
     page.fill("#model-search", "")
@@ -214,7 +215,7 @@ def run_checks(page) -> None:
     page.select_option("#model-price", "1")
     page.wait_for_function("() => document.querySelectorAll('#cataloglist .sess').length === 3")
     rows = " ".join(texts(page, "#cataloglist .sess"))
-    assert "Opus" not in rows and "Luna" not in rows, rows
+    assert "Opus" not in rows and "Haiku" not in rows, rows
     page.select_option("#model-price", "")
 
     # 7. Intelligence filter, and it says that unrated models fall out of it.
@@ -317,7 +318,7 @@ def run_checks(page) -> None:
     page.wait_for_function("() => document.querySelectorAll('#modellist .sess').length === 2")
     assert POSTS[-1] == ("/models", {"remove": "anthropic/claude-opus-5"}), POSTS[-1]
     # Removing what was selected falls back to the default, live.
-    assert page.inner_text("#cfg-llm") == "gpt-5.6-luna"
+    assert page.inner_text("#cfg-llm") == "claude-haiku-5.5"
     assert page.is_visible("#models"), "removing a row closed the picker"
     page.keyboard.press("Escape")
     print("ok  remove: × drops the row without selecting it, selection falls back")

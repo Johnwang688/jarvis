@@ -1522,7 +1522,9 @@ class DevUrls(Base):
         # PR #70 review: 50 MB of "Network: http://192.168…" lines went through
         # `_output` at 8.9 MB/s with the sniffer (543 without). xterm draws
         # ~14 MB/s; every flood must stay at twice that, through `_output`
-        # with a socket that takes everything. Best of two runs each.
+        # with a synchronous fake socket that takes everything. Measure calling-thread
+        # CPU throughput so concurrent suites cannot spend this budget by descheduling
+        # it; also check elapsed wall time when it returns. Best of two runs each.
         mb = 1 << 20
         floods = {
             "network URLs": b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n",
@@ -1542,13 +1544,17 @@ class DevUrls(Base):
                 terminal._attachment = sock
                 terminal._sniffer = devurl.DevUrlSniffer(lambda: set())
                 terminal._dev_on = lambda: True
-                started = time.perf_counter()
+                wall = time.perf_counter()
+                started = time.thread_time()
                 for i in range(0, len(data), 65536):
                     terminal._output(data[i:i + 65536])
-                best = max(best, len(data) / mb / (time.perf_counter() - started))
+                elapsed = time.thread_time() - started
+                self.assertGreater(elapsed, 0, "CPU clock must measure the 12 MB workload")
+                self.assertLess(time.perf_counter() - wall, 20.0, f"{name}: elapsed wall limit")
+                best = max(best, len(data) / mb / elapsed)
                 terminal.finish()
             with self.subTest(flood=name):
-                self.assertGreater(best, 28.0, f"{name}: {best:.1f} MB/s")
+                self.assertGreater(best, 28.0, f"{name}: {best:.1f} MB/CPU-s")
 
     def test_a_sniffer_that_fails_never_breaks_the_terminal(self):
         terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None, label="~",

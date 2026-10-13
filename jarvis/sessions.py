@@ -227,6 +227,7 @@ class Session:
             config.TIERS["cheap"],
             [{"role": "user", "content": _SUMMARY_PROMPT + body + _END}],
             max_tokens=1200,
+            cache=False,
         ).text.strip()
         with _lock:
             self.meta["summary"] = {"turns": self.turns, "text": text}
@@ -286,6 +287,7 @@ class Session:
                 # Generous for six words: the cheap tier is a reasoning model
                 # and returns empty content if it spends the budget thinking.
                 max_tokens=200,
+                cache=False,
             ).text
         except Exception:
             return  # the fallback title is already saved and perfectly fine

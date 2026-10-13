@@ -336,6 +336,20 @@ broker alone.
 - Shared-login serialization and the daily admission allowance carried over as
   the Codex half of the UsageLedger (§8).
 
+**Chat git worktrees (2026-10-13; owner-approved).** Chat briefs alone add
+verified git/common directories and a private CHAT_WORKTREES_DIR to the
+workspace-write sandbox. Git pointers are bounded regular files; symlinks,
+malformed metadata, credential/protected-state overlaps in either direction,
+and uncertain credential-name scans grant nothing. Unsafe worktree-root
+overrides refuse session startup. The root is created 0700 with no-follow
+directory traversal. Tasks retain their existing confinement. Both providers'
+chat role brief says the shared checkout requires a separate worktree for
+real edits. Codex's additive developer instructions name the worktree root
+and tell the agent to request escalation for push/gh. Networking remains off
+and is checked in both effective config and the returned thread policy;
+existing human approval for sandbox widening remains intact. The owner
+accepted writable git hooks/config as part of this explicit metadata grant.
+
 ### 5.5 FastPath
 
 - v1 `agent.py` + `context.py` + the safe half of `tools/`, OpenRouter model,
@@ -1572,6 +1586,47 @@ personal chat off; the owner should reset that selection.
 
 ## 18. HUD v2 landed (2026-09-16)
 
+Model defaults (2026-10-12): the owner chose `anthropic/claude-haiku-5.5`
+for OpenRouter's orchestrator and following tiers. Below 100k prompt tokens it
+lists at `openai/gpt-6-luna`'s price: $0.10 in and $0.50 out per M, cache reads
+$0.01. From 100k the whole request costs 5x: $0.50 in and $2.50 out per M.
+Compaction therefore defaults to 90k tokens. A turn can grow before a safe cut
+point exists. `JARVIS_COMPACT_AT_TOKENS` overrides; empty means unset, and a
+non-empty value must be an integer of at least 1000. Saved HUD selections still
+take precedence. The rule against Chinese-hosted vendors stands.
+
+Claude requests use up to four explicit ephemeral cache breakpoint positions:
+the system message, separate image and full-tool-result window boundaries from
+`context.manage()`, and the newest markable message before the volatile tail.
+The earlier middle prefix is already truncated/evicted. The later prefix can
+be invalidated by the other window, but reuses more result text between sparse
+image evictions; one minimum boundary let old live images hold it back.
+Compaction can invalidate either prefix. Each window contributes only once its
+keep count is reached; coincident boundaries use one point.
+Each boundary walks back to nonblank text,
+never an image part or an assistant message with tool calls. Only the wire
+copy is marked. Points are deduped and capped at four, dropping oldest middle
+points while keeping the system and tail. One-shot summaries, delegation and
+reviews use `cache=False`. At handoff, the prompt follows the context block,
+so `volatile_tail` is 0.
+The old top-level breakpoint landed on the working-context block, rebuilt at
+the tail every step, so it never hit for agents with that block. A live Haiku
+5.5 probe with the default toolset, about 20k prompt tokens and six steps read
+zero cached tokens each step. It paid a 1.25x cache write, $0.0026 per step.
+The explicit breakpoints read about 19.2k of 20k tokens from step 2 on,
+$0.00035 per step. This was a short turn with small results. Middle breakpoints
+preserve reusable prefixes as context management rewrites older messages.
+A breakpoint on a tool message worked. The final separate-window delta has
+synthetic regression coverage; its live long-turn cache savings remain unverified.
+
+A live three-step tool turn on Haiku 5.5 at a reasoning effort ran without
+error although `_stream_once` does not pass `reasoning_details` back.
+Nothing changed for reasoning.
+
+Default threads, sub-agents, compaction summaries and the review tier now run
+on Haiku 5.5. A bench given `-m` still runs its children and summaries through
+`models.tier()`. Pin `JARVIS_ORCHESTRATOR` for comparable runs. Numbers taken
+before this PR are not comparable with numbers after it.
 TC-1 (2026-10-12): opt-in `transcript?tools=1` adds safe labels and provider outcomes; legacy bytes stay unchanged, unfinished calls track the current turn, and old-label derivation is capped at 500 (contract `docs/hud-api.md`).
 
 TC-2 (2026-10-13): the HUD replaces its separate ticker with initially collapsed transcript groups of consecutive calls within one turn. Text, owner/system messages and new turns split groups. Expanded rows show only cleaned names/labels, status words and duration; no result text or args. Live events and loaded history use one grouping rule, with stable-id replay and stopped-turn reconciliation. A 400 alone retries the legacy transcript route. The existing thinking/orb/status ops remain. Disclosure state is window-local (500 keys, including turn identity), rows are memoized, and large groups are windowed. The log follows new entries only when already at its bottom; toggles preserve scroll. Native buttons keep keyboard and talk behavior and inherit approval-card inertness. The mock browser suite covers race/fallback, reload, pane isolation, scrolling, keyboard/card behavior and long histories.
@@ -2925,8 +2980,12 @@ start-up. A title is written only onto an empty one, so **a rename always
 wins**, before or during generation, and it follows to the chat's Discord
 thread like a rename — except for a chat archived in the HUD, whose Discord
 thread keeps its name (and stays archived) until the chat or its project is
-restored. The Archive view names archived chats by title as well. In the sidebar the title **wraps**, clamped at three
-lines with the whole title as its tooltip; an untitled chat reads "New
+restored. The Archive view names archived chats by title as well. In the
+sidebar the title **truncates to one line with an ellipsis** (owner update,
+2026-10-12). Hovering an overflowing title slowly scrolls through its
+full text, pausing at the ends; leaving resets it. Resizing or a live title
+update recalculates the scroll, and reduced motion keeps it still. The
+whole title remains its tooltip; an untitled chat reads "New
 thread" (or "Untitled" for an older one the backfill has not reached), muted
 and italic, never its id — the id is "Copy id" in the row's ⋯ menu. A split's
 chat header names it the same way. No agent can set or regenerate a title.
