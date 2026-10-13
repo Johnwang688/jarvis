@@ -2748,7 +2748,10 @@ idle/unread deletes it — never one a send in flight made, never an ended one.
 **A running turn no pane tracks is adopted** (H-3) by the drawn chat pane
 showing it when that pane waits on nothing, so Stop and Enter-to-steer return
 after a reload — only with a live entry *and* "working", so a pane a finish
-just freed is never adopted back; the 15 s reconcile undoes a wrong one.
+just freed is never adopted back; the 15 s reconcile undoes a wrong one. It
+never meets WP-G2's `State.loose`: a loose turn's pane closed, so no pane shows
+the thread, and `open_thread` takes the loose turn up before the adopt effect
+looks (it adopts only a turn no pane tracks).
 **The mini orb is an 18px inline SVG, never a canvas** (`components/MiniOrb.tsx`,
 H-2): CSS `transform` keyframes only, no requestAnimationFrame, `aria-hidden`;
 the word is the `role="status"`, the time is not; reduced motion stops every
@@ -4348,7 +4351,7 @@ the layout suite's `_split_checks`,
 `_split_close_terminal_checks`, the preview suite's `_split_checks` and
 `tests/v2/terminal_check.py`'s unreadable-from-the-first-byte case; the PR's
 mutation tables show each failing with its mutation. WP-G3's shared buffer
-arrived with ED-2, and WP-H's thinking line is below.
+arrived with ED-2, and WP-H's thinking line is above.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

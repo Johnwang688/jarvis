@@ -1751,18 +1751,23 @@ def _clock(page) -> dict:
     return page.evaluate("window.__hud.thinkingClock()")
 
 
+THINKING_TIDS = ("t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
+
+
 def _seed_thinking(mock):
-    """A fourth chat thread (t4), for a grid of lines."""
+    """Chat threads t4–t8, for a grid of lines in up to eight panes."""
     w = mock.world
-    if not any(t["id"] == "t4" for t in w["threads"]):
-        base = next(t for t in w["threads"] if t["id"] == "t1")
-        w["threads"].append({**base, "id": "t4", "title": "fourth chat", "updated": "2026-09-12T00:00:00+00:00",
-                             "model": None})
-        w["transcripts"]["t4"] = [{"role": "user", "text": "fourth thread question",
-                                   "at": "2026-09-12T00:00:00+00:00"}]
+    base = next(t for t in w["threads"] if t["id"] == "t1")
+    for n in range(4, 9):
+        tid = f"t{n}"
+        if not any(t["id"] == tid for t in w["threads"]):
+            w["threads"].append({**base, "id": tid, "title": f"chat {n}",
+                                 "updated": f"2026-09-12T00:00:0{n}+00:00", "model": None})
+            w["transcripts"][tid] = [{"role": "user", "text": f"thread {n} question",
+                                      "at": "2026-09-12T00:00:00+00:00"}]
 
 
-def _idle_all(page, mock, until, tids=("t1", "t2", "t3", "t4")):
+def _idle_all(page, mock, until, tids=THINKING_TIDS):
     """End every turn the section left running, here and in the mock's world
     (a start first, so an ended error is cleared too)."""
     for tid in tids:
@@ -1975,13 +1980,14 @@ def _thinking_motion_checks(page, mock, check, until):
 def _thinking_many_checks(page, mock, check, until):
     """Every chat pane at once, a line in each: no canvas in any line, and no
     animation frame loop of its own (CSS on the compositor). Eight once the
-    workspace has eight panes (WP-G1); four until then."""
+    workspace has eight panes (WP-G1), each its own thread (review of the
+    merge onto main: a cap at four tested four lines in an eight-pane grid)."""
     _seed_thinking(mock)
     count = len(page.evaluate("window.__hud.state().chats"))
     preset = {4: "grid4", 8: "grid8"}.get(count, "grid4")
     ws = json.dumps({"preset": preset, "focused": 1, "panes": [{"view": "chat"}] * count})
     _fresh(page, mock, until, ws, size=(1920, 1080))
-    tids = ["t1", "t2", "t3", "t4"][:count]
+    tids = list(THINKING_TIDS[:count])
     for n, tid in enumerate(tids, 1):
         _open(page, until, n, tid, "p2" if tid == "t3" else "p1")
     raf = """() => new Promise((done) => {
