@@ -19,13 +19,14 @@ class Fonts(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.home = self.root / "home & <fixture>"
+        H.secure_dir(self.home)
         self.windows = self.root / "Windows & <Fonts>"
         self.windows.mkdir()
         guard = patch.object(H, "_WINDOWS_FONTS", self.windows)
         guard.start(); self.addCleanup(guard.stop)
 
     def test_missing_fonts_preserves_existing_environment_and_writes_nothing(self):
-        self.windows.rmdir()
+        self.windows.rmdir(); self.home.rmdir()
         source = {"LANG": "C.UTF-8", "FONTCONFIG_FILE": "/bad", "XDG_CONFIG_HOME": "/bad"}
         self.assertEqual(H.font_environment(self.home, source), H.chrome_environment(self.home, source))
         self.assertFalse(self.home.exists())
@@ -85,6 +86,23 @@ class Fonts(unittest.TestCase):
                 chosen.rmdir(); chosen.symlink_to(target, target_is_directory=True)
                 with self.assertRaises(H.BrowserRefused): H.font_environment(home, {})
                 self.assertEqual(list(target.iterdir()), [])
+
+    def test_parent_swap_before_file_creation_cannot_redirect_write(self):
+        H.font_environment(self.home, {})
+        folder = self.home / "fontconfig"
+        outside = H.secure_dir(self.root / "unrelated")
+        victim = outside / "fonts.conf"; victim.write_text("KEEP OWNER CONFIG"); victim.chmod(0o600)
+        real = H.os.open
+        def swap(path, flags, mode=0o777, *, dir_fd=None):
+            if isinstance(path, str) and path.startswith(".fonts-"):
+                folder.rename(self.home / "original-fontconfig")
+                folder.symlink_to(outside, target_is_directory=True)
+            return real(path, flags, mode, dir_fd=dir_fd)
+        with patch.object(H.os, "open", side_effect=swap):
+            with self.assertRaises(H.BrowserRefused): H.font_environment(self.home, {})
+        self.assertEqual(victim.read_text(), "KEEP OWNER CONFIG")
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["fonts.conf"])
+        self.assertFalse(list((self.home / "original-fontconfig").glob(".fonts-*")))
 
     def test_failed_replace_keeps_previous_file_and_removes_temporary(self):
         env = H.font_environment(self.home, {})

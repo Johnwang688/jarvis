@@ -92,7 +92,6 @@ import secrets
 import shutil
 import signal
 import stat
-import tempfile
 import threading
 import time
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -279,23 +278,65 @@ _WINDOWS_FONTS = Path("/mnt/c/Windows/Fonts")
 _SYSTEM_FONTS = Path("/etc/fonts/fonts.conf")
 
 
+def _font_home_fd(home: Path) -> int:
+    """Pin an existing home without traversing any substituted symlink."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", flags)
+    try:
+        for part in home.absolute().parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        _private_font_fd(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _private_font_fd(fd: int) -> None:
+    st = os.fstat(fd)
+    if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+            or stat.S_IMODE(st.st_mode) & 0o077):
+        raise BrowserRefused(409, "the Browser's font folder must be private")
+
+
+def _font_child_fd(parent: int, name: str, *, create: bool) -> int:
+    if create:
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        _private_font_fd(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def font_environment(home: Path, source=None) -> dict[str, str]:
-    """Add reachable Windows fonts without changing the host's Fontconfig.
+    """Add reachable Windows fonts using only pinned private directories.
 
     The first writable cache is ours. The distro include retains its aliases,
     Linux fallbacks and rendering rules; its user includes use this private
     HOME. Private Chrome's home and font cache die with its run directory.
+    The caller has created home; this function never creates a parent path.
     """
     env = chrome_environment(home, source)
     if not _WINDOWS_FONTS.is_dir():
         return env
+    pinned: list[int] = []
     temporary = None
     try:
-        folder = secure_dir(secure_dir(home) / "fontconfig")
-        cache = secure_dir(folder / "cache")
+        home_fd = _font_home_fd(home); pinned.append(home_fd)
+        folder_fd = _font_child_fd(home_fd, "fontconfig", create=True); pinned.append(folder_fd)
+        cache_fd = _font_child_fd(folder_fd, "cache", create=True); pinned.append(cache_fd)
+        folder = home / "fontconfig"
         path = folder / "fonts.conf"
         try:
-            st = path.lstat()
+            st = os.stat("fonts.conf", dir_fd=folder_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
@@ -305,27 +346,46 @@ def font_environment(home: Path, source=None) -> dict[str, str]:
         body = ('<?xml version="1.0"?>\n'
                 '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">\n'
                 '<fontconfig>\n'
-                f'  <cachedir>{xml_escape(str(cache))}</cachedir>\n'
+                f'  <cachedir>{xml_escape(str(folder / "cache"))}</cachedir>\n'
                 f'  <include>{xml_escape(str(_SYSTEM_FONTS))}</include>\n'
                 f'  <dir>{xml_escape(str(_WINDOWS_FONTS))}</dir>\n'
                 '</fontconfig>\n')
-        fd, temporary = tempfile.mkstemp(prefix=".fonts-", dir=folder)
+        temporary = ".fonts-" + secrets.token_hex(12)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=folder_fd)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+            written = os.fstat(stream.fileno())
+        os.replace(temporary, "fonts.conf", src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
         temporary = None
+        # Writes above never follow the pathname again. Re-open the complete
+        # path before handing it to Chrome, so a swapped parent is a refusal.
+        current: list[int] = []
+        try:
+            current.append(_font_home_fd(home))
+            current.append(_font_child_fd(current[-1], "fontconfig", create=False))
+            current.append(_font_child_fd(current[-1], "cache", create=False))
+            same = lambda left, right: (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+            if (not all(same(os.fstat(old), os.fstat(new)) for old, new in zip(pinned, current))
+                    or not same(written, os.stat("fonts.conf", dir_fd=current[1], follow_symlinks=False))):
+                raise BrowserRefused(409, "the Browser's font folder changed during preparation")
+        finally:
+            for current_fd in reversed(current):
+                os.close(current_fd)
         env["FONTCONFIG_FILE"] = str(path)
         return env
     except OSError:
         raise BrowserRefused(409, "the Browser's font configuration could not be prepared") from None
     finally:
-        if temporary is not None:
+        if temporary is not None and len(pinned) >= 2:
             try:
-                os.unlink(temporary)
+                os.unlink(temporary, dir_fd=pinned[1])
             except OSError:
                 pass
+        for pinned_fd in reversed(pinned):
+            os.close(pinned_fd)
 
 
 def _remove_tree(path: Path, *, strict: bool = False) -> None:
