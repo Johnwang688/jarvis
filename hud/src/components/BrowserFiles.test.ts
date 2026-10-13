@@ -36,3 +36,48 @@ it("discards a pending download after tab replacement or hiding its downloads pa
   const pending=deferred<Blob>();mocks.download.mockReturnValue(pending.promise);await render();await act(async()=>button("Save a copy").click());
   await render({downloads:false,tabId:"abcd1234"});await act(async()=>pending.resolve(new Blob(["late"])));expect(mocks.click).not.toHaveBeenCalled();
 });
+
+it("independent: does not relabel old folder entries as a pending new folder",async()=>{
+  const pending=deferred<any>();
+  mocks.tree.mockReset().mockImplementation((_p,path)=>path===""?Promise.resolve({entries:[{name:"nested",kind:"dir"},{name:"visible-root.txt",kind:"file"}]}):pending.promise);
+  await render({downloads:false,chooser:{id:"chooser1",multiple:false}});
+  await act(async()=>button("nested/").click());
+  expect(mocks.tree).toHaveBeenLastCalledWith("project-one","nested",1);
+  expect(host.textContent).not.toContain("visible-root.txt");
+});
+it("independent: rejected folder listing cannot offer old names under the new path",async()=>{
+  mocks.tree.mockReset().mockImplementation((_p,path)=>path===""?Promise.resolve({entries:[{name:"nested",kind:"dir"},{name:"visible-root.txt",kind:"file"}]}):Promise.reject(new Error("unavailable")));
+  await render({downloads:false,chooser:{id:"chooser1",multiple:false}});
+  await act(async()=>button("nested/").click());
+  expect(host.textContent).toContain("could not be listed");
+  expect(host.querySelector('input[type="checkbox"]')).toBeNull();
+});
+
+it("keeps previously selected references unchanged while another folder fails",async()=>{
+  mocks.tree.mockReset().mockImplementation((_p,path)=>path===""?Promise.resolve({entries:[{name:"nested",kind:"dir"},{name:"visible-root.txt",kind:"file"}]}):Promise.reject(new Error("unavailable")));
+  await render({downloads:false,chooser:{id:"chooser1",multiple:true}});
+  await act(async()=>host.querySelector<HTMLInputElement>("input")!.click());
+  await act(async()=>button("nested/").click());
+  expect(host.querySelector("input")).toBeNull();
+  await act(async()=>button("Use selected file").click());
+  expect(mocks.write).toHaveBeenCalledWith("/tabs/0123abcd/files",{chooser:"chooser1",files:[{project:"project-one",path:"visible-root.txt"}]});
+});
+it.each(["project","chooser","tab","generation"])("never carries old names or selections across a %s replacement",async(kind)=>{
+  const pending=deferred<any>();
+  await render({downloads:false,chooser:{id:"chooser1",multiple:true}});
+  await act(async()=>host.querySelector<HTMLInputElement>("input")!.click());
+  mocks.tree.mockReturnValue(pending.promise);
+  await render(kind==="project"?{projectId:"project-two"}:kind==="chooser"?{chooser:{id:"chooser2",multiple:true}}:kind==="tab"?{tabId:"abcd1234"}:{generation:2});
+  expect(host.querySelector("input")).toBeNull();expect(button("Use selected files").disabled).toBe(true);
+  await act(async()=>button("Use selected files").click());expect(mocks.write).not.toHaveBeenCalled();
+  await act(async()=>pending.resolve({entries:[{name:"replacement.txt",kind:"file"}]}));
+  expect(host.textContent).not.toContain("safe.txt");expect(host.querySelector<HTMLInputElement>("input")!.checked).toBe(false);
+});
+it("ignores a late folder listing after the chooser binding changes",async()=>{
+  const pending=deferred<any>();mocks.tree.mockReturnValueOnce(pending.promise);
+  await render({downloads:false,chooser:{id:"chooser1",multiple:true}});
+  await render({projectId:"project-two"});
+  await act(async()=>pending.resolve({entries:[{name:"old-project.txt",kind:"file"}]}));
+  expect(host.textContent).not.toContain("old-project.txt");
+  expect(host.textContent).toContain("safe.txt");
+});
