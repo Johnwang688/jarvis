@@ -1325,3 +1325,35 @@ Transport now passes constant functions with bounded data arguments, decodes raw
 192KiB chunks natively, transfers temporary ArrayBuffers to zero after immutable
 Blob ownership, and composes a byte-backed File. Neither production nor the
 accepted fixture forces page-global collection to conceal a previous peak.
+
+
+## BR9c owner driving presentation (current)
+
+Production agent driving remains OFF, with both Settings and pane switches disabled.
+The ticketed Remote socket alone supplies the memory-only driver banner and last
+20 actions. Displayed chat slots are resolved from the current workspace; hidden
+chats use fixed wording. Reattachment needs a fresh paused/list replay. Successful
+owner input mirrors takeover, Stop uses the current socket, and Resume stays
+paused until daemon confirmation. Cards, annotations, hidden panes and disconnects
+block these controls. AO3 adds an inactive Direct tab to a driven destination.
+
+Only the current top HUD-only Browser card fetches its private owner detail. Exact
+request metadata, bounded action fields and complete command/argument equality
+are checked; details never enter the public approval store or browser storage.
+Replacement, unmount and expiry invalidate old replies and consent callbacks.
+Deny remains available, Authorize requires deliberate pointer activation, and
+Always is absent. Long exact commands scroll without hiding consent controls.
+Held downloads expose deletion and explain closing/reopening a fresh owner tab;
+there is no manual executable release route.
+
+The installed Chrome155 screencast timestamp is processing time, not proven
+capture time. Therefore cards say **Preview unavailable** and no target outline
+is drawn. Amendment B.6/B.9 positive pixel identity remains capability-blocked,
+not verified by the synthetic stream tests. No screenshot or capture call is
+created to manufacture that proof.
+
+The named always-ask layer uses a distinct private delegation card with exactly
+`{kind: "delegation", tool: "hud_browser_act"}`, empty args and null command. It
+permits only reaching subsequent Browser checks, never authorizes a page action.
+It shares the same deadline, identity and one-shot no-Always consent lifecycle;
+no page identity, target, command or preview is invented for that card.

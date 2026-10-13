@@ -3144,6 +3144,13 @@ def main():
             finally:
                 remote_mock.stop()
 
+            from tests.face.hud_v2_drive_check import drive_checks
+            drive_mock = MockDaemon(0).start()
+            try:
+                drive_checks(browser, drive_mock, f"http://127.0.0.1:{drive_mock.port}", check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                drive_mock.stop()
+
             from tests.face.hud_v2_browser_check import browser_checks as browser_origin_checks
             browser_mock = MockDaemon(0).start()
             try:

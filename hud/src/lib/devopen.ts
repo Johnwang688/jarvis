@@ -39,6 +39,8 @@ export interface PaneShows {
   usedAt?: number;
   /** Private panes are Remote-only and never an automatic Direct destination. */
   browserProfile?: string;
+  /** Fresh ticketed state only, never persisted with a pane. */
+  driving?: boolean;
 }
 export interface DevWindow {
   enabled: boolean;
@@ -120,7 +122,7 @@ export function autoOpenPlan(entry: DevEntry, s: DevOpenState, w: DevWindow, now
     : Math.abs(slot(a.id) - sourceSlot) - Math.abs(slot(b.id) - sourceSlot) || slot(b.id) - slot(a.id));
   const target = browsers[0];
   if (target) {
-    const inUse = target.id === w.focused || target.id === w.activePane
+    const inUse = target.driving === true || target.id === w.focused || target.id === w.activePane
       || target.usedAt !== undefined && now >= target.usedAt && now - target.usedAt < IN_USE_MS;
     return { state: record(s, entry, now), plan: { kind: "tab", pane: target.id, url, activate: !inUse } };
   }

@@ -418,6 +418,8 @@ export interface RouteView {
 }
 
 export interface ApprovalRequest {
+  /** Public marker only; private details stay in the active card component. */
+  hud_only?: boolean;
   req_id: string;
   code: string;
   tool: string;

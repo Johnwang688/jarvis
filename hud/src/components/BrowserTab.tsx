@@ -56,6 +56,7 @@ export const BROWSER_FULL = "This pane has 12 tabs. Close one to open another.";
 export function BrowserTab(props: {
   pane: number; slot: number; drawn: boolean; projectId: string | null;
   control?: BrowserControl; spec?: PaneSpec; zoom?: number; captureDestination?: CaptureDestination;
+  slotOf?:(threadId:string)=>number|null;
   unseen?: readonly string[]; newTabNote?: string;
   browser?: BrowserTabs; liveFrames: readonly string[]; blocked?: boolean; limitMessage?: boolean;
   onLoaded: (id: string, url: string) => void;
@@ -236,7 +237,7 @@ function DirectTab(props: {
 }
 
 function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string|null;tab:BrowserTabSpec;
-  active:boolean;blocked?:boolean;control?:BrowserControl;spec?:PaneSpec;zoom?:number;captureDestination?:CaptureDestination;focusUrl:boolean;onFocused:()=>void}) {
+  active:boolean;blocked?:boolean;control?:BrowserControl;spec?:PaneSpec;zoom?:number;captureDestination?:CaptureDestination;slotOf?:(threadId:string)=>number|null;focusUrl:boolean;onFocused:()=>void}) {
   const input=useRef<HTMLInputElement>(null);
   const [annotating, setAnnotating] = useState(false);
   const pageBlocked = !!props.blocked || annotating;
@@ -272,7 +273,7 @@ function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string
       destination={props.captureDestination} onAnnotating={setAnnotating}
       onRemote={() => void action(() => control.ensure(pane, props.tab.id))} /> : null}
     {props.tab.remoteTabId&&control?<RemoteView key={props.tab.remoteTabId} tabId={props.tab.remoteTabId} live={live} blocked={pageBlocked} zoom={props.zoom??100} projectId={props.projectId}
-      onRetry={()=>control.ensure(pane,props.tab.id)} onOwnerFocus={()=>control.focus(pane)} onLocation={(url,title)=>control.location(pane,props.tab.id,props.tab.remoteTabId!,url,title)}
+      slotOf={props.slotOf} onRetry={()=>control.ensure(pane,props.tab.id)} onOwnerFocus={()=>control.focus(pane)} onLocation={(url,title)=>control.location(pane,props.tab.id,props.tab.remoteTabId!,url,title)}
       onPopup={id=>void control.adopt(pane,props.tab.remoteTabId!,id)}
       onAction={what=>{if(what==="address")input.current?.focus();else void action(()=>control.history(pane,props.tab.id,what==="hardReload"?"reload":what));}} />:
       !runtime?.busy?<div className="pad muted">{props.spec?.browserPrivateEnded?"This Private session ended. Choose Private again to start a new session.":"Enter an address to open a Remote page."}</div>:null}

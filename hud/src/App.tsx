@@ -66,6 +66,7 @@ import { daemonPortsNow } from "./state/daemonPorts";
 import { allowRestore, cancelLoad, installFrameGuard } from "./state/frameguard";
 import { frameKey } from "./lib/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
+import { driving } from "./state/driving";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, GeneralSettings, RoutingSettings, VoicePicker } from "./components/Pickers";
@@ -1839,6 +1840,9 @@ export default function App() {
     return { pane: n, slot: slotOf(layoutNow.current.ws, n), label: VIEW_LABEL[spec.view],
       disabled: dirty || chain || privatePane, reason, terminalId: spec.view === "terminal" ? spec.terminalId ?? undefined : undefined };
   });
+  useEffect(() => {
+    driving.retain(view.ws.panes.flatMap(p => p.browser?.tabs.flatMap(t => t.remoteTabId ? [t.remoteTabId] : []) ?? []));
+  }, [view.ws]);
   const devAttempt = (row: PendingDev): DevAttempt => {
     const lay = layoutNow.current, ports = daemonPortsNow();
     if (crashedRef.current) return "drop";
@@ -1852,6 +1856,7 @@ export default function App() {
         const spec = lay.ws.panes[n - 1];
         return { id: n, view: spec.view, source: devSourceAt(n), urls: spec.browser?.tabs.map(t => t.url) ?? [],
           tabCount: spec.browser?.tabs.length ?? 0, usedAt: devUsed.current[n],
+          driving: driving.active(spec.browser?.tabs.find(t => t.id === spec.browser?.active)?.remoteTabId, Date.now()),
           browserProfile: (spec as PaneSpec & { browserProfile?: string }).browserProfile };
       }),
       drawn: lay.fit.panes, focused: lay.ws.focused, activePane: activeMatch ? Number(activeMatch[1]) as PaneNo : undefined,
@@ -2734,6 +2739,9 @@ export default function App() {
   };
 
   const decide = async (reqId: string, allow: boolean, always = false) => {
+    const current = live.current.approvals.find(r => r.req_id === reqId);
+    if (current?.hud_only && (always || (allow && live.current.approvals[0]?.req_id !== reqId))) return;
+    if (current?.hud_only) always = false;
     try {
       await api.resolveApproval(reqId, { decision: allow ? "allow" : "deny", always });
     } catch {
@@ -3214,6 +3222,12 @@ export default function App() {
           <BrowserTab
             pane={n}
             captureDestination={pageDestination}
+            slotOf={threadId => {
+              if (settingsNow.current) return null;
+              const lay = layoutNow.current;
+              const pane = lay.fit.panes.find(id => lay.ws.panes[id - 1].view === "chat" && live.current.chats[id].threadId === threadId);
+              return pane === undefined ? null : slotOf(lay.ws, pane);
+            }}
             slot={info.slot}
             drawn={info.drawn}
             projectId={paneProject(spec, n)}
