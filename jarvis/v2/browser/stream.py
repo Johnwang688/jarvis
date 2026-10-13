@@ -409,6 +409,7 @@ class TabStream:
         self.actions: deque = deque(maxlen=AGENT_LIST_MAX)
         self.last_action_at: float | None = None
         self.owner_input_at: float | None = None
+        self.owner_input_serial = 0
 
     # -- sending --------------------------------------------------------------------
 
@@ -631,6 +632,7 @@ class TabStream:
         now = self._clock()
         with self._lock:
             self.owner_input_at = now
+            self.owner_input_serial += 1
             if not self.paused and self._agent_active(now):
                 self.paused, self.paused_by = True, "owner"
                 self._send(self._sock, self._paused_message())
@@ -736,6 +738,10 @@ class TabStream:
                "target": _clean(action.get("target", ""), AGENT_TEXT_CAP),
                "text": _clean(action.get("text", ""), AGENT_TEXT_CAP),
                "outcome": str(action.get("outcome", ""))[:16]}
+        for name in ("page_identity", "document_generation"):
+            value = action.get(name)
+            if type(value) is int and value >= 0:
+                row[name] = value
         if isinstance(action.get("rect"), dict) and row["outcome"] in ("running", "asking"):
             row["rect"] = {k: action["rect"].get(k) for k in ("x", "y", "width", "height")}
         with self._lock:
@@ -769,7 +775,9 @@ class TabStream:
         with self._lock:
             quiet = None if self.owner_input_at is None else now - self.owner_input_at
             return {"paused": self.paused, "by": self.paused_by, "owner_quiet_s": quiet,
-                    "agent_active": self._agent_active(now), "shown": self._sock is not None}
+                    "agent_active": self._agent_active(now), "shown": self._sock is not None,
+                    "visible": self.visible, "input_serial": self.owner_input_serial,
+                    "attachment_generation": self.gen, "hold_count": self.hold_count}
 
 
 # -- a socket session (the HTTP handler's thread) -----------------------------------------------

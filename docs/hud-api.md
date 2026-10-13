@@ -2788,6 +2788,40 @@ placed refuse with 409 {error, code: "off"} while disabled; dismiss remains
 an explicit owner action. ON does not revive an old placement response.
 No automatic opening calls browser manager or navigation routes.
 
+`POST /browser/tabs/<id>/restore` is an owner-only lazy restore with exact
+`{url}`. It uses the ordinary URL/card checks with `owner=False`, so it never
+creates a loopback gate lease. The HUD creates a blank tab only when a stored
+persistent Remote tab is first drawn, then calls restore; an existing live
+handle reattaches without navigation. A refused local restore stays visibly
+failed until an actual owner address submission. Ended Private sessions never
+replay stored URLs (Private storage contains none).
+
+## Private Browser approval infrastructure (BR9b)
+
+A Browser action card has hud_only: true. Its public broker projection contains
+only req_id, code, tool, layer, thread_id, asked_at, allowlistable: false,
+timeout_s and hud_only. General approval listings and request/resolution events
+contain no page URL, typed text, file path, command, headline or classifier
+reason. Ordinary approval JSON stays unchanged.
+
+GET /browser/approvals/<req_id> serves a still-pending private card through the
+existing owner-only HUD listener, Origin/fetch metadata and strict loopback Host
+checks. It adds args, command, reason, headline and browser details.
+Missing, resolved and ordinary requests return a fixed 404. Owner answers use
+the existing POST /approvals/<req_id> path. A private ALLOW requires that exact
+HUD answering path; code and non-HUD callers can deny but cannot consent. Always
+never writes a rule. Private requests wait at most 120 seconds even with a remote
+broker, and cancellation denies and withdraws the pending card. Discord neither
+delivers nor selects these cards.
+
+The registry's internal after_navigation(snapshot) is only for reconciliation
+after completed judged input. It accepts URL/document generation advancement
+while requiring the exact same page identity, window, pane, selected tab, source,
+profile/context, generation and permissions. Ordinary still_current is
+unchanged. Current production snapshots keep drive:false, so this helper
+cannot enable driving. This infrastructure does not expose a driving tool by
+itself.
+
 ## Owner immutable Browser captures (BR4)
 
 GET /browser/tabs/<id>/capture accepts exactly window, pane (stable pane ID1–8),
@@ -2812,3 +2846,33 @@ title and page text. Other callers, missing/expired references and daemon
 restart receive fixed notes. The memory-only store keeps at most16 entries and
 8MiB for24h; it stores no screenshots. Later credential checks cover retained
 text, not already-staged image pixels. Nothing here sends a chat automatically.
+
+
+## Dormant Browser action tool (BR9b)
+
+Production `hud_browser_act` always refuses because Agents may drive is OFF.
+There is no enable or execute HTTP endpoint. The typed tool accepts action, pane
+(empty/front or slot 1–8), target (current eN ref where required), text and file;
+it never accepts JavaScript, coordinates, tab IDs or a release-download action.
+The explicit fast-path toolset does not grant provider session tools driving.
+
+The private card browser detail is {tab_id,action_id,pane,page_identity,
+document_generation,rect,action,category,host,path,target,text}. Rect is nullable
+{x,y,width,height}; action_id is 32 hex, host/path/target are bounded to 200/400/120
+characters after full guarding, and text is the exact type/select argument only.
+Heuristic-withheld page facts use fixed text, empty host/path and no rectangle.
+Download release cards add download:{id,name,size}, action:release_download,
+category:executable_download, rect:null; this is owner approval detail only.
+Neither the stream nor page/document metadata proves screenshot crop identity.
+
+`browser_acted` emits only {tab_id:view_id,action_id,at,outcome}; outcome is
+acted/refused/asked/stopped. Tool transcript arguments are empty and result labels
+fixed. Owner socket action notices carry current page/document identity and a
+bounded target label, without putting private commands onto the public bus.
+
+GET /browser/downloads/<id> continues to use existing owner checks and attachment
+headers. A BR9b release authorizes one exact file buffer, returned through a sealed
+anonymous descriptor. Fixed on-disk hold markers survive restart; release grants
+do not. Ambiguous/late files have no release route and stay held/deletable; close
+the tainted tab and open a fresh owner tab before downloading again. No approval
+executes downloaded bytes and no file content/digest is published.
