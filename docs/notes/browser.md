@@ -1190,3 +1190,9 @@ Direct capture remains unverified on this host. The real app-mode capability
 probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels;
 synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
 “Open this in Remote to annotate” and converts only on that second owner gesture.
+
+## BR10 sound helper groundwork (2026-10-13)
+
+The protected BrowserSettings schema now recognizes `sound`, a strict owner boolean defaulting OFF. `audio.py` contains the isolated WSLg launch composition and bounded owned-Pulse-stream helper: OFF keeps the original argument order and strips ambient PULSE_SERVER, ON removes only the mute flag and uses the fixed WSLg socket after capability checks. Font environment composition is retained by the caller. Process ownership pins Chrome's profile, executable, UID, start time and ancestry; mute uses fresh stream/process checks and fixed reasons, never global volume or unmute. Pulse index attribution remains best effort between its last check and command.
+
+A mute attempt taints that instance before command dispatch, including timeout or a late completion after ON. Only a fresh ON instance clears the taint. A killed utility whose exit has not settled keeps the instance pending until actual cleanup; the bounded caller returning does not release that reservation. Pure helper tests exercise these races with synthetic processes/Pulse replies and disposable utility children. This is implementation groundwork: Chrome launch/restart and HUD wiring are separate pending changes, and this paragraph is not a production sound or physical audibility receipt.

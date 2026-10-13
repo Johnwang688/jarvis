@@ -568,27 +568,27 @@ class Settings(unittest.TestCase):
     def test_on_by_default_and_memory_only_without_a_file(self):
         memory = S.BrowserSettings()
         self.assertIs(memory.auto_open(), True)
-        self.assertEqual(memory.snapshot(), {"lan": False, "local_servers": False, "auto_open": True})
+        self.assertEqual(memory.snapshot(), {"lan": False, "local_servers": False, "auto_open": True, "sound": False})
         self.assertEqual(memory.update(auto_open=False),
-                         {"lan": False, "local_servers": False, "auto_open": False})
+                         {"lan": False, "local_servers": False, "auto_open": False, "sound": False})
         self.assertIs(memory.auto_open(), False)
         self.assertIs(memory.value("auto_open"), False)
         with self.assertRaises(KeyError):
-            memory.value("sound")
+            memory.value("future_switch")
         self.assertIsNone(memory.path)
         self.assertIs(self.settings().auto_open(), True)              # no file yet
         self.assertFalse(self.path.exists())
 
     def test_saved_owner_only_keeping_what_it_does_not_know(self):
         self.path.parent.mkdir(parents=True)
-        self.path.write_text(json.dumps({"auto_open": True, "lan": True, "sound": False}))
+        self.path.write_text(json.dumps({"auto_open": True, "lan": True, "future_switch": False}))
         settings = self.settings()
         self.assertEqual(settings.update(auto_open=False),
-                         {"lan": True, "local_servers": False, "auto_open": False})
-        self.assertEqual(json.loads(self.path.read_text()), {"auto_open": False, "lan": True, "sound": False})
+                         {"lan": True, "local_servers": False, "auto_open": False, "sound": False})
+        self.assertEqual(json.loads(self.path.read_text()), {"auto_open": False, "lan": True, "future_switch": False})
         self.assertEqual(settings.update(local_servers=True)["local_servers"], True)
         self.assertEqual(json.loads(self.path.read_text()),
-                         {"auto_open": False, "lan": True, "local_servers": True, "sound": False})
+                         {"auto_open": False, "lan": True, "local_servers": True, "future_switch": False})
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual([p.name for p in self.path.parent.iterdir()], ["browser.json"], "no temp left")
         for bad in ({"auto_open": "no"}, {"auto_open": 1}, {"other": True}):

@@ -19,8 +19,11 @@ owner's switches for the HUD's Browser, each a boolean:
   by default. Auto-open loads only in a Direct frame and never opens a port in
   the Remote gate: only the owner's own navigation does (amendment 2).
 
+- **`sound`** (BR-10): WSLg audio for daemon-owned Remote Chrome only. **Off**
+  by default; each live engine reports its applied state separately.
+
 A missing, unreadable or malformed file, or a value that is not a boolean,
-reads as the default. Later packages add their switches here (sound), and a
+reads as the default. Later packages add their switches here, and a
 write keeps every key it does not change — one a later package added
 included.
 
@@ -59,7 +62,7 @@ import time
 
 LOG = logging.getLogger(__name__)
 
-DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True}
+DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": False}
 FILE_CAP = 64 * 1024
 RECHECK_S = 1.0
 
