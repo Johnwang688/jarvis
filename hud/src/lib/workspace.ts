@@ -155,12 +155,15 @@ function parseBrowserSource(raw: unknown): BrowserSource {
 export interface BrowserTabSpec {
   id: string;
   url: string;
+  mode?: "direct" | "remote";
+  remoteTabId?: string;
+  title?: string;
   keepOrigin?: string;
   auto?: { kind: "thread" | "task" | "terminal"; label: string };
   source?: BrowserSource;
 }
 export interface BrowserTabs { tabs: BrowserTabSpec[]; active: string }
-export interface BrowserTabOptions { activate?: boolean; auto?: BrowserTabSpec["auto"]; source?: BrowserSource; id?: string }
+export interface BrowserTabOptions { activate?: boolean; auto?: BrowserTabSpec["auto"]; source?: BrowserSource; id?: string; mode?: "direct" | "remote" }
 
 /** Stable identity local to a pane: closing a sibling cannot change it. */
 export function browserTabId(taken: readonly string[] = []): string {
@@ -179,6 +182,12 @@ export interface PaneSpec {
   browserUrl?: string;
   /** Canonical tabs; legacy fields mirror the active tab for one release. */
   browser?: BrowserTabs;
+  browserProfile?: string;
+  browserCtx?: string;
+  /** Stored only when off. Navigation/profile/copy never enable seeing. */
+  see?: false;
+  /** A stored Private session is reattached, never implicitly recreated. */
+  browserPrivateEnded?: true;
   /**
    * Browser (WP-E, decisions W-4): the origin this pane lets its page keep
    * (`allow-same-origin`), off when absent. Stored as the origin it was given
@@ -356,6 +365,23 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
       Object.assign(spec, mirrorBrowser(spec, { tabs: [tab], active: tab.id }));
     }
   }
+  if (v.browserProfile === "private" || (typeof v.browserProfile === "string" && /^p-[0-9a-f]{8}$/.test(v.browserProfile))) {
+    spec.browserProfile = v.browserProfile;
+  }
+  if (v.see === false) spec.see = false;
+  if (spec.browserProfile === "private") {
+    if (typeof v.browserCtx === "string" && /^[0-9a-f]{8}$/.test(v.browserCtx)) spec.browserCtx = v.browserCtx;
+    if (v.browserPrivateEnded === true || (v.browserCtx != null && !spec.browserCtx)) spec.browserPrivateEnded = true;
+    if (spec.browser) {
+      const tabs = spec.browser.tabs.map((t): BrowserTabSpec => {
+        const next = { ...t, mode: "remote" as const };
+        delete next.keepOrigin;
+        return next;
+      });
+      Object.assign(spec, mirrorBrowser(spec, { ...spec.browser, tabs }));
+    }
+    delete spec.keepOrigin;
+  }
   if (typeof v.filePath === "string" && v.filePath && v.filePath.length <= PATH_MAX) {
     spec.filePath = v.filePath;
   }
@@ -456,9 +482,29 @@ export function loadWorkspace(storage?: Getter): Workspace {
   }
 }
 
+/** Storage projection is separate from runtime parsing: saving Private state
+ * must not blank a live page. Only opaque handles and structural state persist. */
+type StoredBrowserTab = Omit<BrowserTabSpec, "url"> & { url?: string };
+type StoredPane = Omit<PaneSpec, "browser"> & { browser?: { tabs: StoredBrowserTab[]; active: string } };
+export function workspaceStorage(ws: Workspace): Omit<Workspace, "panes"> & { panes: StoredPane[] } {
+  const clean = parseWorkspace(JSON.stringify(ws));
+  return { ...clean, panes: clean.panes.map((pane): StoredPane => {
+    if (pane.browserProfile !== "private") return pane;
+    const out: StoredPane = { ...pane, browserPrivateEnded: true };
+    delete out.browserUrl;
+    delete out.keepOrigin;
+    if (pane.browser) out.browser = { ...pane.browser, tabs: pane.browser.tabs.map((tab) => ({
+      id: tab.id, mode: "remote" as const,
+      ...(tab.remoteTabId ? { remoteTabId: tab.remoteTabId } : {}),
+      ...(tab.source ? { source: { ...tab.source } } : {}),
+    })) };
+    return out;
+  }) };
+}
+
 export function saveWorkspace(ws: Workspace, storage?: Setter) {
   try {
-    const clean = parseWorkspace(JSON.stringify(ws));
+    const clean = workspaceStorage(ws);
     (storage ?? window.localStorage).setItem(WORKSPACE_KEY, JSON.stringify(clean));
   } catch {
     /* storage blocked: the window still splits, it just forgets */
@@ -628,9 +674,16 @@ export function parseBrowserTabs(raw: unknown): BrowserTabs | null {
   for (const v of raw.tabs) {
     if (tabs.length >= BROWSER_TABS_MAX) break;
     if (!isObj(v) || typeof v.id !== "string" || !/^[a-z0-9]{6}$/.test(v.id) || ids.has(v.id)
-        || typeof v.url !== "string" || v.url.length > URL_MAX) continue;
-    const tab: BrowserTabSpec = { id: v.id, url: v.url };
-    const keep = storableKeepOrigin(v.keepOrigin, v.url);
+        || (v.mode !== undefined && v.mode !== "direct" && v.mode !== "remote")) continue;
+    const url = v.url === undefined && v.mode === "remote" ? "" : v.url;
+    if (typeof url !== "string" || url.length > URL_MAX) continue;
+    const tab: BrowserTabSpec = { id: v.id, url };
+    if (v.mode === "remote") {
+      tab.mode = "remote";
+      if (typeof v.remoteTabId === "string" && /^[0-9a-f]{8}$/.test(v.remoteTabId)) tab.remoteTabId = v.remoteTabId;
+      if (typeof v.title === "string") tab.title = cleanTitle(v.title);
+    }
+    const keep = tab.mode !== "remote" ? storableKeepOrigin(v.keepOrigin, url) : null;
     if (keep) tab.keepOrigin = keep;
     if (isObj(v.auto) && ["thread", "task", "terminal"].includes(String(v.auto.kind))
         && typeof v.auto.label === "string") {
@@ -665,6 +718,7 @@ export function addBrowserTab(ws: Workspace, pane: PaneNo, url: string, opts: Br
   const used = browser.tabs.map((t) => t.id);
   const id = opts.id && /^[a-z0-9]{6}$/.test(opts.id) && !used.includes(opts.id) ? opts.id : browserTabId(used);
   const tab: BrowserTabSpec = { id, url };
+  if (opts.mode === "remote" || ws.panes[pane - 1].browserProfile === "private") tab.mode = "remote";
   if (opts.auto) tab.auto = { ...opts.auto, label: cleanTitle(opts.auto.label, 60) };
   if ("source" in opts || opts.auto) tab.source = parseBrowserSource(opts.source);
   return changeBrowser(ws, pane, { tabs: [...browser.tabs, tab], active: opts.activate === false && browser.active ? browser.active : id });
@@ -717,10 +771,61 @@ export function submitBrowserUrl(ws: Workspace, pane: PaneNo, url: string, id?: 
   return changeBrowser(updated, pane, { ...browser, tabs: browser.tabs.map((t) => t.id === target ? next : t) });
 }
 
+/** Host-acknowledged runtime metadata. It never clears provenance or see. */
+export function setBrowserRemote(ws: Workspace, pane: PaneNo, id: string,
+  value: { mode: "direct" | "remote"; remoteTabId?: string; url?: string; title?: string; ctx?: string }): Workspace {
+  const spec = ws.panes[pane - 1];
+  const browser = spec.browser;
+  const tab = browser?.tabs.find((t) => t.id === id);
+  if (!browser || !tab || (spec.browserProfile === "private" && value.mode !== "remote")) return ws;
+  if (value.remoteTabId && !/^[0-9a-f]{8}$/.test(value.remoteTabId)) return ws;
+  if (value.ctx && (!/^[0-9a-f]{8}$/.test(value.ctx) || spec.browserProfile !== "private")) return ws;
+  if (value.url !== undefined && value.url.length > URL_MAX) return ws;
+  const next = { ...tab, mode: value.mode };
+  delete next.remoteTabId;
+  delete next.title;
+  if (value.mode === "remote") {
+    delete next.keepOrigin;
+    if (value.remoteTabId) next.remoteTabId = value.remoteTabId;
+    if (value.title) next.title = cleanTitle(value.title);
+  }
+  if (value.url !== undefined) next.url = value.url;
+  let updated = changeBrowser(ws, pane, { ...browser, tabs: browser.tabs.map((t) => t.id === id ? next : t) });
+  if (value.ctx) updated = { ...updated, panes: updated.panes.map((p, i) => i === pane - 1 ? { ...p, browserCtx: value.ctx } : p) as Panes };
+  return updated;
+}
+
+export function setBrowserProfile(ws: Workspace, pane: PaneNo, profile: string): Workspace {
+  if (profile !== "private" && !/^p-[0-9a-f]{8}$/.test(profile)) return ws;
+  const spec = ws.panes[pane - 1];
+  if (spec.browserProfile === profile && !spec.browserPrivateEnded) return ws;
+  const next = { ...spec, browserProfile: profile };
+  delete next.browserCtx;
+  delete next.browserPrivateEnded;
+  if (next.browser) next.browser = { ...next.browser, tabs: next.browser.tabs.map((t) => {
+    const tab = { ...t };
+    delete tab.remoteTabId;
+    delete tab.title;
+    if (profile === "private") { tab.mode = "remote"; delete tab.keepOrigin; }
+    return tab;
+  }) };
+  const mirrored = next.browser ? mirrorBrowser(next, next.browser) : next;
+  return { ...ws, panes: ws.panes.map((p, i) => i === pane - 1 ? mirrored : p) as Panes };
+}
+
+/** Call only after the host acknowledges the pane permission mutation. */
+export function setBrowserSee(ws: Workspace, pane: PaneNo, see: boolean): Workspace {
+  const spec = ws.panes[pane - 1];
+  if ((spec.see !== false) === see) return ws;
+  const next = { ...spec };
+  if (see) delete next.see; else next.see = false;
+  return { ...ws, panes: ws.panes.map((p, i) => i === pane - 1 ? next : p) as Panes };
+}
+
 export function setTabKeepOrigin(ws: Workspace, pane: PaneNo, id: string, origin: string | null): Workspace {
   const browser = ws.panes[pane - 1].browser;
   const tab = browser?.tabs.find((t) => t.id === id);
-  if (!browser || !tab) return ws;
+  if (!browser || !tab || tab.mode === "remote") return ws;
   const keep = origin === null ? null : storableKeepOrigin(origin, tab.url);
   if (origin !== null && !keep || (tab.keepOrigin ?? null) === keep) return ws;
   const next = { ...tab };
@@ -864,12 +969,15 @@ export function copySpec(spec: PaneSpec): PaneSpec {
       break;
     case "browser":
       out.projectId = spec.projectId;
+      if (spec.browserProfile) out.browserProfile = spec.browserProfile;
+      if (spec.see === false) out.see = false;
       if (spec.browser) {
         const ids = spec.browser.tabs.map((t) => t.id);
         const tabs = spec.browser.tabs.map((t) => {
           const id = browserTabId(ids);
           ids.push(id);
           return { id, url: t.url,
+            ...(t.mode === "remote" || spec.browserProfile === "private" ? { mode: "remote" as const } : {}),
             ...(t.source || t.auto ? { source: parseBrowserSource(t.source) } : {}) };
         });
         const active = tabs[spec.browser.tabs.findIndex((t) => t.id === spec.browser!.active)]?.id ?? tabs[0]?.id ?? "";
