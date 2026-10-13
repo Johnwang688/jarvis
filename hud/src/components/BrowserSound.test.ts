@@ -7,31 +7,31 @@ const fixture = vi.hoisted(() => {
   const state = { current: {} as any };
   return { listeners, state, store: {
     start: vi.fn(), subscribe: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn); },
-    getSnapshot: () => state.current, change: vi.fn(async () => {}), refresh: vi.fn(async () => {}),
+    getSnapshot: () => state.current, change: vi.fn(async () => {}), refresh: vi.fn(async () => {}), toggle: vi.fn(async () => {}),
   } };
 });
 vi.mock("../state/browserSoundClient", () => ({ browserSound: fixture.store }));
-import { BrowserSoundSetting, BrowserSpeaker } from "./BrowserSound";
+import { BrowserSoundSetting, BrowserSpeaker, speakerGesture } from "./BrowserSound";
 let host: HTMLDivElement, root: Root;
 const open = vi.fn();
 function ready(desired = false) { return { status: "ready", busy: false, error: "", value: {
-  desired, generation: 1, available: true, reason: null, instances: [],
+  desired, generation: 1, available: true, reason: null, instances: [{profile:"p-12345678", requested:false, applied:false,generation:1,phase:"ready",reason:null}],
 } }; }
 async function publish(next: any) { await act(async () => { fixture.state.current = next; fixture.listeners.forEach(fn => fn()); }); }
 async function show(kind: "setting" | "speaker", props: Record<string, unknown> = {}) {
   await act(async () => root.render(kind === "setting"
     ? React.createElement(BrowserSoundSetting, { blocked: false, ...props })
-    : React.createElement(BrowserSpeaker, { direct: false, blocked: false, onSettings: open, ...props })));
+    : React.createElement(BrowserSpeaker, { direct: false, blocked: false, tabId:"1234abcd",profile:"p-12345678",profileLabel:"Main", ...props })));
 }
 beforeEach(() => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
-  fixture.state.current = ready(); fixture.store.start.mockClear(); fixture.store.change.mockClear(); fixture.store.refresh.mockClear(); open.mockClear();
+  fixture.state.current = ready(); fixture.store.start.mockClear(); fixture.store.change.mockClear(); fixture.store.refresh.mockClear(); fixture.store.toggle.mockClear(); open.mockClear();
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 describe("owner Browser sound controls", () => {
   it("switch uses daemon readback, explains Direct scope and sends one explicit preference gesture", async () => {
-    await show("setting"); expect(host.textContent).toContain("Direct pages use this window's audio.");
+    await show("setting"); expect(host.textContent).toContain("Direct pages use this window's audio after a page click.");
     const input = host.querySelector("input")!;
     expect(input.checked).toBe(false);
     await act(async () => input.click()); expect(fixture.store.change).toHaveBeenCalledExactlyOnceWith(true);
@@ -53,22 +53,39 @@ describe("owner Browser sound controls", () => {
     await show("setting", { blocked: true }); await act(async () => host.querySelector("button")!.click());
     expect(fixture.store.refresh).toHaveBeenCalledTimes(1); expect(fixture.store.change).not.toHaveBeenCalled();
   });
-  it("speaker opens Settings without toggling sound or granting Remote focus", async () => {
-    await show("speaker"); const button = host.querySelector("button")!;
-    expect(button.hasAttribute("data-browser-settings")).toBe(true);
-    await act(async () => button.click()); expect(open).toHaveBeenCalledTimes(1);
-    expect(fixture.store.change).not.toHaveBeenCalled(); expect(fixture.store.refresh).not.toHaveBeenCalled();
-    expect(button.getAttribute("aria-label")).toContain("Open Browser settings");
+  it("speaker is a direct profile control and ignores synthetic activation", async () => {
+    await publish(ready(true));await show("speaker");const button=host.querySelector("button")!;
+    expect(button.hasAttribute("data-browser-sound")).toBe(true);
+    expect(button.getAttribute("aria-label")).toContain("Turn on sound for Main");
+    expect(button.title).toContain("New tabs inherit it");
+    expect(button.title).toContain("changing sites does not mute");
+    await act(async()=>button.click());
+    expect(fixture.store.toggle).not.toHaveBeenCalled();expect(open).not.toHaveBeenCalled();
+    expect(speakerGesture(true,false)).toBe(true);
+    expect(speakerGesture(false,false)).toBe(false);expect(speakerGesture(true,true)).toBe(false);
   });
-  it("Direct speaker wording never claims to mute its iframe", async () => {
-    await publish(ready(true)); await show("speaker", { direct: true });
-    expect(host.querySelector("button")?.getAttribute("aria-label")).toContain("Direct audio is unchanged");
+  it("master off hides Remote speaker and Direct explains its independent browser policy", async () => {
+    await show("speaker");expect(host.querySelector("button")).toBeNull();
+    await show("speaker",{direct:true});
+    expect(host.textContent).toContain("Sound after a page click");expect(host.querySelector("button")).toBeNull();
   });
-  it("blocked speaker is inert and Private pending explanation is visible", async () => {
-    const state = ready(true); state.value.instances = [{ profile: "private", applied: false, phase: "pending", reason: "private", generation: 1 }] as any;
-    await publish(state); await show("speaker", { blocked: true });
-    await act(async () => host.querySelector("button")!.click()); expect(open).not.toHaveBeenCalled();
-    expect(host.querySelector("button")?.title).toContain("Close all Private panes");
-    expect(host.querySelector("button")?.classList.contains("warn")).toBe(true);
+  it("blocked, unknown, pending write and Private speakers remain inert", async () => {
+    await publish(ready(true));await show("speaker",{blocked:true});
+    expect(host.querySelector("button")!.disabled).toBe(true);
+    await show("speaker");await publish({...ready(true),status:"loading"});
+    expect(host.querySelector("button")!.disabled).toBe(true);
+    await publish({...ready(true),busy:true});expect(host.querySelector("button")!.disabled).toBe(true);
+    const state=ready(true);state.value.instances=[{profile:"private",requested:false,applied:false,generation:1,phase:"ready",reason:null}];
+    await publish(state);await show("speaker",{profile:"private"});
+    expect(host.querySelector("button")!.disabled).toBe(true);
+    expect(host.textContent).toContain("Close Private panes to allow sound");
+    expect(fixture.store.toggle).not.toHaveBeenCalled();
+  });
+  it("renders the audible profile as text without autofocus", async () => {
+    const state=ready(true);state.value.instances[0].requested=true;state.value.instances[0].applied=true;
+    await publish(state);await show("speaker");
+    expect(host.textContent).toContain("Sound on for Main");
+    expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).not.toBe(host.querySelector("button"));
   });
 });

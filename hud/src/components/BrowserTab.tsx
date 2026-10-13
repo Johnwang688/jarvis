@@ -67,6 +67,8 @@ export function BrowserTab(props: {
   onAdd: (id: string) => void; onClose: (id: string) => void; onActivate: (id: string) => void;
   onProjectRoot?: (projectId: string) => void; onSoundSettings?: () => void;
 }) {
+  const sound = useSyncExternalStore(browserSound.subscribe, browserSound.getSnapshot);
+  useEffect(browserSound.start, []);
   const [emptyId] = useState(() => browserTabId());
   const [focusUrl, setFocusUrl] = useState<string | null>(null);
   const [full, setFull] = useState(false);
@@ -79,13 +81,14 @@ export function BrowserTab(props: {
   };
   const shown = tabs.length ? tabs : [{ id: emptyId, url: "" }];
   const profile=props.control?.selectedProfile(props.pane as PaneNo)??null;
-  return <div className="tabbody browserbody" onPointerDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture],[data-browser-settings]")&&!props.blocked)props.control?.focus(props.pane as PaneNo);}}
-    onKeyDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture],[data-browser-settings]")&&!props.blocked&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&e.key!=="Tab")props.control?.focus(props.pane as PaneNo);}}>
+  return <div className="tabbody browserbody" onPointerDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture],[data-browser-settings],[data-browser-sound]")&&!props.blocked)props.control?.focus(props.pane as PaneNo);}}
+    onKeyDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture],[data-browser-settings],[data-browser-sound]")&&!props.blocked&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&e.key!=="Tab")props.control?.focus(props.pane as PaneNo);}}>
     {props.control?<BrowserProfile pane={props.pane as PaneNo} control={props.control} selected={profile}
       see={props.spec?.see!==false} blocked={!!props.blocked} privateEnded={props.spec?.browserPrivateEnded} />:null}
     {props.control?.error?<div className="pad err" data-testid="browser-owner-error">{props.control.error}</div>:null}
     {props.control?.cleanupError?<div className="pad err" role="status">{props.control.cleanupError} <button disabled={props.blocked||!props.control.online} onClick={()=>void props.control!.retryCleanup()}>Retry closing Browser sessions</button></div>:null}
     <BrowserTabStrip tabs={tabs} active={active} blocked={props.blocked} unseen={props.unseen}
+      soundOn={sound.value?.instances.some(i=>i.profile===profile&&i.applied)}
       onActivate={activate} onClose={(id) => { if (!props.blocked) { setFull(false); props.onClose(id); } }}
       onNew={() => {
         if (props.blocked) return;
@@ -193,7 +196,7 @@ function DirectTab(props: {
     {...(!props.active ? { inert: "" } as Record<string, string> : {})}>
     {props.active ? <>
       <div className="toolbar">
-        {props.onSoundSettings ? <BrowserSpeaker direct blocked={!!props.blocked} onSettings={props.onSoundSettings} /> : null}
+        <BrowserSpeaker direct blocked={!!props.blocked} />
         <input ref={input} data-testid="browser-url" value={typed} disabled={props.blocked}
           placeholder="http://localhost:5173/ or the project's workshop path"
           onChange={(e) => setTyped(e.target.value)}
@@ -262,7 +265,8 @@ function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string
   return <div className="tabbody browserpage remotepage" data-browser-page={props.tab.id}
     style={props.active?undefined:{display:"none"}} aria-hidden={!props.active} {...(!props.active?{inert:""} as Record<string,string>:{})}>
     <div className="toolbar">
-      {props.onSoundSettings ? <BrowserSpeaker direct={false} blocked={pageBlocked} onSettings={props.onSoundSettings} /> : null}
+      <BrowserSpeaker direct={false} blocked={pageBlocked || !live} tabId={props.tab.remoteTabId} profile={profile ?? undefined}
+        profileLabel={profile==="private"?"Private":control?.profiles.find(p=>p.id===profile)?.label} />
       <button aria-label="Back" disabled={pageBlocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"back"))}>←</button>
       <button aria-label="Forward" disabled={pageBlocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"forward"))}>→</button>
       <button aria-label="Reload" title="Reload page (ordinary reload)" disabled={pageBlocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"reload"))}>↻</button>
@@ -271,13 +275,14 @@ function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string
       <button data-testid="browser-go" disabled={pageBlocked||runtime?.busy} onClick={()=>void action(()=>control!.submit(pane,props.tab.id,typed,"remote"))}>Load</button>
       <select aria-label="Browser mode" value="remote" disabled={pageBlocked||profile==="private"} onChange={()=>void action(()=>control!.convert(pane,props.tab.id,"direct"))}><option value="direct">Direct</option><option value="remote">Remote</option></select>
     </div>
+    {soundInstance?.applied ? <div className="small muted" role="status">Sound on for {control?.profiles.find(p=>p.id===profile)?.label ?? "this profile"} · all Remote tabs, including new tabs. Changing sites does not mute sound.</div> : null}
     {props.tab.auto?<div className="browserauto">Opened for {props.tab.auto.label}</div>:null}
     {runtime?.viewed?<div className="small muted" data-testid="browser-viewed">{runtime.viewed.refused?"Jarvis look refused":"Jarvis looked"} · {new Date(runtime.viewed.at).toLocaleTimeString()}</div>:null}
     {error||runtime?.error?<div className="pad err" role="status">{error||runtime?.error}</div>:null}
     {runtime?.busy?<div className="pad muted" role="status">Opening Remote page…</div>:null}
     {soundInstance?.phase === "restarting" ? <div className="pad muted" role="status">Restarting this Remote profile to apply sound…</div> : null}
     {soundInstance?.phase === "failed" ? <div className="pad err" role="status">This Remote profile could not restart.
-      <button disabled={!!props.blocked || !control?.online || !props.tab.remoteTabId} onClick={()=>{
+      <button disabled={!!props.blocked || annotating || !props.active || !props.drawn || !control?.online || control.covered || !props.tab.remoteTabId} onClick={()=>{
         const id=props.tab.remoteTabId;if(!id)return;
         void browserApi.write(`/tabs/${id}/sound-retry`,{}).then(()=>browserSound.refresh()).catch(()=>setError("The sound restart could not be requested. Try again."));
       }}>Retry sound restart</button></div> : null}

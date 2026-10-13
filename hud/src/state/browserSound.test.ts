@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BrowserSoundStore, SOUND_READ_ERROR, SOUND_WRITE_ERROR, soundMessage, soundStatus } from "./browserSound";
 const packet = (desired = false, applied = desired, phase = "ready", reason: string | null = null, generation = 1) => ({ browser: {
   sound: { desired, generation, available: true, reason: null },
-  instances: [{ profile: "p-12345678", sound: { applied, generation: 1, phase, reason } }],
+  instances: [{ profile: "p-12345678", sound: { requested: desired, applied, generation: 1, phase, reason } }],
 } });
 function deferred<T>() { let resolve!: (v: T) => void; let reject!: (e: unknown) => void;
   const promise = new Promise<T>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
@@ -110,5 +110,21 @@ describe("one authoritative window store", () => {
     const store = new BrowserSoundStore({ status, set: vi.fn() }); store.start(); await flush();
     expect(store.getSnapshot().error).toBe(SOUND_READ_ERROR); expect(store.getSnapshot().value).toBeNull();
     expect(status).toHaveBeenCalledTimes(1);
+  });
+});
+describe("memory-only pane sound gesture",()=>{
+  it("sends only owner tab sound route, then reads authoritative instance state",async()=>{
+    const status=vi.fn().mockResolvedValue(packet(true,false));
+    const set=vi.fn();const sound=vi.fn().mockResolvedValue({on:true});
+    const store=new BrowserSoundStore({status,set,sound});await store.refresh();
+    status.mockResolvedValue(packet(true,true));await store.toggle("1234abcd",true);
+    expect(sound).toHaveBeenCalledExactlyOnceWith("1234abcd",true);
+    expect(set).not.toHaveBeenCalled();expect(store.getSnapshot().value?.instances[0].applied).toBe(true);
+  });
+  it("ambiguous gesture readback does not allow another unmute",async()=>{
+    const sound=vi.fn().mockResolvedValue({on:false});
+    const store=new BrowserSoundStore({status:async()=>packet(true,false),set:vi.fn(),sound});
+    await store.refresh();await store.toggle("1234abcd",true);await store.toggle("1234abcd",true);
+    expect(sound).toHaveBeenCalledTimes(1);expect(store.getSnapshot().error).toBe(SOUND_WRITE_ERROR);
   });
 });

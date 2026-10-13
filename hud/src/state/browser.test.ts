@@ -116,3 +116,15 @@ it("keeps cleanup failure visible across receipts and lets the owner retry",asyn
   expect(browser.cleanupError).toContain("finish closing");await act(async()=>browser.focus(1));expect(browser.cleanupError).toContain("finish closing");
   mocks.remove.mockResolvedValue({});await act(async()=>browser.retryCleanup());expect(mocks.remove).toHaveBeenCalledTimes(2);expect(browser.cleanupError).toBe("");
 });
+
+it("owner profile change mutes exact old Remote profile before changing pane state",async()=>{
+  source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd"});
+  await connected();const held=deferred<unknown>();
+  const original=mocks.write.getMockImplementation()!;
+  mocks.write.mockImplementation((path,...rest)=>path==="/tabs/0123abcd/sound"?held.promise:original(path,...rest));
+  let job!:Promise<void>;await act(async()=>{job=browser.profile(1,"private");});
+  expect(mocks.write).toHaveBeenCalledWith("/tabs/0123abcd/sound",{on:false});
+  expect(workspace.panes[0].browserProfile).toBe("p-11111111");
+  await act(async()=>{held.resolve({on:false});await job;});
+  expect(workspace.panes[0].browserProfile).toBe("private");
+});

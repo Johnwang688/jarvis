@@ -186,7 +186,13 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   },[allowed,publish,publisher]);
   const profile=useCallback(async(pane:PaneNo,value:string)=>{
     if(!allowed(pane))return;
-    const before=now.current.view.ws.panes[pane-1].browser?.active;
+    const oldPane=now.current.view.ws.panes[pane-1];
+    const before=oldPane.browser?.active;
+    const oldRemote=oldPane.browser?.tabs.find(t=>t.remoteTabId)?.remoteTabId;
+    if(selectedProfile(pane)!==value && oldRemote) {
+      await browserApi.write("/tabs/"+oldRemote+"/sound",{on:false});
+      if(!allowed(pane)||now.current.view.ws.panes[pane-1]!==oldPane)return;
+    }
     const key=before?tabKey(pane,before):null;
     if(key)transitions.current.add(key);
     try {now.current.view.setBrowserProfile(pane,value);await frame();}

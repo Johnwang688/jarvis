@@ -2,7 +2,7 @@
 export type SoundPhase = "ready" | "pending" | "restarting" | "failed";
 export type SoundReason = "busy" | "private" | "unavailable" | "mute_unavailable" | "mute_uncertain" | "restart_failed";
 export interface SoundInstance {
-  profile: string; applied: boolean; generation: number; phase: SoundPhase; reason: SoundReason | null;
+  profile: string; requested: boolean; applied: boolean; generation: number; phase: SoundPhase; reason: SoundReason | null;
 }
 export interface SoundStatus {
   desired: boolean; generation: number; available: boolean; reason: "unavailable" | null;
@@ -30,11 +30,11 @@ export function soundStatus(raw: unknown): SoundStatus | null {
     if (!record(row) || typeof row.profile !== "string" || !/^(private|p-[0-9a-f]{8})$/.test(row.profile)
         || seen.has(row.profile) || !record(row.sound)) return null;
     const state = row.sound;
-    if (typeof state.applied !== "boolean" || !count(state.generation) || state.generation < 1
+    if (typeof state.requested !== "boolean" || typeof state.applied !== "boolean" || !count(state.generation) || state.generation < 1
         || typeof state.phase !== "string" || !phases.has(state.phase)
         || (state.reason !== null && (typeof state.reason !== "string" || !reasons.has(state.reason)))) return null;
     seen.add(row.profile);
-    instances.push({ profile: row.profile, applied: state.applied, generation: state.generation,
+    instances.push({ profile: row.profile, requested: state.requested, applied: state.applied, generation: state.generation,
       phase: state.phase as SoundPhase, reason: state.reason as SoundReason | null });
   }
   return { desired: sound.desired, generation: sound.generation, available: sound.available,
@@ -47,12 +47,12 @@ export function soundMessage(value: SoundStatus | null): string {
   if (value.instances.some(row => row.phase === "failed")) return "A Browser profile could not restart. Retry from its Remote pane.";
   if (value.desired && (!value.available || value.reason === "unavailable")) return "Sound isn't available on this machine yet.";
   if (value.instances.some(row => row.phase === "restarting")) return "Restarting Remote Browser pages to apply sound…";
-  if (value.instances.some(row => row.phase === "pending" || row.applied !== value.desired))
+  if (value.instances.some(row => row.phase === "pending" || row.applied !== row.requested))
     return "Sound will change when current Browser work finishes.";
-  return value.desired ? "Remote Browser sound is on." : "Remote Browser sound is off.";
+  return value.desired ? "Browser sound is allowed. Use a Remote pane speaker to turn it on." : "Browser sound is disabled.";
 }
 
-interface Transport { status(): Promise<unknown>; set(desired: boolean): Promise<unknown> }
+interface Transport { status(): Promise<unknown>; set(desired: boolean): Promise<unknown>; sound?(tab: string, on: boolean): Promise<unknown> }
 export class BrowserSoundStore {
   private state: SoundState = { status: "loading", value: null, busy: false, error: "" };
   private listeners = new Set<() => void>();
@@ -95,14 +95,19 @@ export class BrowserSoundStore {
       if (epoch === this.epoch) this.publish({ ...this.state, status: "error", busy: false, error: SOUND_READ_ERROR });
     }
   };
-  change = async (desired: boolean) => {
+  toggle = async (tab: string, on: boolean) => {
+    if (!/^[0-9a-f]{8}$/.test(tab) || !this.transport.sound) return;
+    return this.mutate(on, () => this.transport.sound!(tab, on), "on");
+  };
+  change = async (desired: boolean) => this.mutate(desired, () => this.transport.set(desired), "sound");
+  private mutate = async (desired: boolean, send: () => Promise<unknown>, key: "on" | "sound") => {
     if (!this.online || this.state.status !== "ready" || this.state.busy || typeof desired !== "boolean") return;
     const epoch = ++this.epoch;
     this.publish({ ...this.state, busy: true, error: "" });
     try {
-      const saved = await this.transport.set(desired);
+      const saved = await send();
       if (epoch !== this.epoch) return;
-      if (!record(saved) || typeof saved.sound !== "boolean") throw Error(SOUND_WRITE_ERROR);
+      if (!record(saved) || typeof saved[key] !== "boolean" || saved[key] !== desired) throw Error(SOUND_WRITE_ERROR);
       // The PATCH acknowledges persistence; only status says what is applied.
       const value = soundStatus(await this.transport.status());
       if (epoch !== this.epoch) return;
