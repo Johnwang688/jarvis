@@ -143,6 +143,12 @@ CLI_MODELS: dict[str, dict[str, dict]] = {
 }
 
 
+def cli_images(provider: str, model: str | None) -> bool:
+    """Known image support for one already-applied native model; no lookup/guess."""
+    with _CONFIG_LOCK:
+        return CLI_MODELS.get(provider, {}).get(model, {}).get("vision") is True
+
+
 def set_codex_models(rows) -> dict[str, dict]:
     """Install the account's `model/list` rows as the Codex table, replacing
     it whole, save them for the next start (`config.CODEX_CATALOG_PATH`), and

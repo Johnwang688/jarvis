@@ -1076,8 +1076,8 @@ class CodexProvider:
                         or p.get("turnId") != s.turn_id):
                     return
                 name = mcp[2] if mcp is not None else "mcp"
-                if action.get("server") == "jarvis" and action.get("toolName") == "terminal_read":
-                    name = "terminal_read"
+                if action.get("server") == "jarvis" and action.get("toolName") in ("terminal_read", "hud_browser_view"):
+                    name = action["toolName"]
                 yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name,
                                   args={}, command=None, reason="refused")
                 return
@@ -1148,7 +1148,7 @@ class CodexProvider:
         if method != "item/completed":
             return
         s.mcp_items[call_id] = (*identity, True)
-        private = server == "jarvis" and tool == "terminal_read"
+        private = server == "jarvis" and tool in ("terminal_read", "hud_browser_view")
         result = item.get("result")
         content = result.get("content") if isinstance(result, dict) else None
         # Text blocks only, bounded before concatenating; structured metadata,
@@ -1168,7 +1168,7 @@ class CodexProvider:
                   or (server == "jarvis" and text.startswith("Error:")))
         if private:
             from jarvis import tools
-            summary = tools.private_summary("terminal_read", "Refused" if denied else "Error" if failed else text)
+            summary = tools.private_summary(tool, "Refused" if denied else "Error" if failed else text)
         else:
             summary = text[:200] or ("error" if failed else "completed")
         yield self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name=name,
@@ -1180,7 +1180,7 @@ class CodexProvider:
             if not done:
                 h.native.mcp_items[call_id] = (server, tool, name, True)
                 yield self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name=name,
-                                  ok=False, outcome="failed", summary="error" if server == "jarvis" and tool == "terminal_read" else "interrupted")
+                                  ok=False, outcome="failed", summary=("refused" if tool == "hud_browser_view" else "error") if server == "jarvis" and tool in ("terminal_read", "hud_browser_view") else "interrupted")
 
     @staticmethod
     def _reply(s, request, result=None, **kwargs):

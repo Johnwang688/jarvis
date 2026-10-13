@@ -114,16 +114,16 @@ class NativeSteerChecks(unittest.TestCase):
 class CatalogChecks(unittest.TestCase):
     def test_exact_shared_catalog_flags_and_availability(self):
         self.assertIs(mcp.MCP_TOOLS, MCP_TOOLS)
-        self.assertEqual(set(CATALOG), MCP_TOOLS | {'terminal_read'})
+        self.assertEqual(set(CATALOG), MCP_TOOLS | {'terminal_read', 'hud_browser_view'})
         self.assertEqual(len(MCP_TOOLS), 23)
         self.assertEqual(MCP_TOOLS - MCP_READ_ONLY, {
             'memory_write', 'memory_delete', 'gmail_send', 'discord_dm_owner',
             'spotify_play', 'spotify_pause', 'schedule_create', 'schedule_delete'})
         for name, entry in CATALOG.items():
             self.assertEqual(entry.providers, frozenset({'claude', 'codex'}))
-            self.assertEqual(entry.read_only, name in MCP_READ_ONLY or name == 'terminal_read')
-            self.assertEqual(entry.foreground_only, name == 'terminal_read')
-            self.assertEqual(entry.desk_only, name == 'terminal_read')
+            self.assertEqual(entry.read_only, name in MCP_READ_ONLY or name in ('terminal_read', 'hud_browser_view'))
+            self.assertEqual(entry.foreground_only, name in ('terminal_read', 'hud_browser_view'))
+            self.assertEqual(entry.desk_only, name in ('terminal_read', 'hud_browser_view'))
         # Both chat providers share availability; terminal stays out of external MCP.
         with patch.dict(session_tools.SESSION_TOOLS, CATALOG, clear=True):
             self.assertEqual(session_tools.for_provider('codex'), session_tools.for_provider('claude'))
