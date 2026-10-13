@@ -569,7 +569,13 @@ def always_ask_for(brief: Brief | None = None, project: Project | None = None) -
 
 
 def _tokens_of(segment: str) -> list[str]:
-    return rules.unwrap(rules._tokens(segment))
+    """The command a segment runs, from its program on: past the shell's
+    reserved words, a `case` pattern, a function header, parens and the
+    assignments (`rules.command_start`), and its wrappers (`rules.unwrap`).
+    `if true; then git push --force origin main; fi` split into a segment
+    whose first word was `then`, so no kind rule saw the push (third delta
+    review of PR #75's audit; older than the PR)."""
+    return rules.unwrap(rules.command_start(rules._tokens(segment)))
 
 
 def _any_token(patterns: Iterable[str], tokens: list[str]) -> bool:
@@ -654,9 +660,25 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str]) 
         return (any(_phrase_ordered(p, tokens) for p in _CREDENTIAL_PHRASES)
                 or any(stem in _CREDENTIAL_STEMS for stem in stems))
     if kind == "credential_path":
-        return any(_under_credential_dir(token) for token in tokens)
+        return any(_under_credential_dir(token) for token in tokens + _path_words(segment))
     LOG.warning("Ignoring always-ask rule with unknown kind %r", kind)
     return False
+
+
+def _path_words(segment: str) -> list[str]:
+    """Words of the segment a path rule reads besides the unwrapped command's:
+    every word as written (a wrapper's option values — `env -C DIR`, `time -o
+    FILE` — are not the command's), the value of each `--name=VALUE`, and the
+    files the wrappers at its front write themselves (`time -oFILE`,
+    `script FILE`; delta review of PR #75, H-B)."""
+    raw = rules._tokens(segment)
+    words = raw + [t.split("=", 1)[1] for t in raw if t.startswith("--") and "=" in t]
+    written: list[str] = []
+    try:
+        rules.unwrap_sure(raw, None, written)
+    except Exception:     # noqa: BLE001 — a parse failure adds nothing here
+        pass
+    return words + written
 
 
 def _credential_dirs() -> list[Path]:
@@ -736,9 +758,23 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
     segments: list[tuple[str, list[str], list[str]]] = []
     for segment in rules.segments(command) if command.strip() else []:
         tokens = _tokens_of(segment)
-        stems = [s for s, _ in rules.command_targets(segment)] or (
-            [tokens[0].rsplit("/", 1)[-1]] if tokens else [])
+        stems = [s for s, _ in rules.command_targets(segment)]
+        if tokens and tokens[0].rsplit("/", 1)[-1].lower() not in stems:
+            # The program past a reserved word (`then vercel --prod`), which
+            # the allowlist's stems do not peel.
+            stems.append(tokens[0].rsplit("/", 1)[-1].lower())
         segments.append((segment, tokens, stems))
+        # What a wrapper or runner in front starts is judged too, from rules'
+        # one table: `npx vercel --prod` is a production deploy, and `uv run
+        # git push --force origin main` a force push (2026-10-12).
+        # Past the line's work budget or a nesting cap, what it starts cannot
+        # be told: asked, whatever the rules say (review of PR #75).
+        try:
+            started = rules.started_commands(segment)
+        except rules.TooComplex:
+            return "too-complex", rules.RUNNERS_TOO_COMPLEX
+        for inner in started:
+            segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
     for rule in always_ask_for(brief, project):
         matched, rule_id, reason = _rule_matches(rule, tool, segments, targets)
@@ -891,6 +927,13 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             unsure = protected_state.kill_unsure(command)
             if unsure:
                 match = ("daemon-kill", unsure)
+        if match is None and command.strip():
+            # What the line's wrappers and runners start is too complex to
+            # judge within its work budget (review of PR #75): asked, never
+            # the reviewer's call under AUTO and never the allowlist's.
+            unsure = rules.runners_unsure(command)
+            if unsure:
+                match = ("too-complex", unsure)
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")

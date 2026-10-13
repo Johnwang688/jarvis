@@ -504,7 +504,12 @@ _INLINE_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 _CODE_FLAG = re.compile(r"-[A-Za-z]*[eE][A-Za-z]*|--eval|--print|-p|-r")
 _CODE_LITERAL = re.compile(r"'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"|`((?:[^`\\]|\\.)*)`",
                            re.DOTALL)
-_SHELL_STEMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "busybox"})
+# Every shell `rules.SHELLS` names (delta review of PR #75, M-B; this module
+# imports only config, so the list is spelled out here and rules_check holds
+# the two equal), and busybox.
+_SHELL_STEMS = frozenset({"sh", "bash", "rbash", "dash", "zsh", "ksh", "ksh93", "lksh", "oksh",
+                          "mksh", "posh", "ash", "sash", "yash", "fish", "csh", "tcsh", "nu",
+                          "xonsh", "elvish", "ion", "osh", "ysh", "busybox"})
 _INTERPRETER_STEMS = frozenset({"node", "nodejs", "perl", "ruby", "php", "deno", "bun",
                                 "python", "python2", "python3", "lua"})
 # Programs that run a command line they are handed as a string.

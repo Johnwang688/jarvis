@@ -697,7 +697,10 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
         return Ruling(READ)
 
     if sub == "ls-remote":
-        options, positionals = _parse(rest, "", {"sort", "server-option"})
+        # `-o`/`--server-option` take the next word (git 2.53's `-h`): read as
+        # a flag, `ls-remote -o origin <url>` judged `origin` and reached the
+        # unnamed <url> (PR #65's round-3 review).
+        options, positionals = _parse(rest, "o", {"sort", "server-option"})
         if _has(options, "-u"):
             return _refuse("-u names a program to run on the other end")
         if positionals:
@@ -965,8 +968,10 @@ def _judge_fetch(rest: list[str], ctx: RepoContext, *, pull: bool) -> Ruling:
     # it: `fetch -m -P` pruned tags); pull's -j/--jobs take a value only glued.
     longs = {"depth", "deepen", "shallow-since", "shallow-exclude", "refmap", "server-option",
              "negotiation-tip", "filter", "strategy", "strategy-option", "upload-pack"}
+    # pull's `--cleanup <mode>` takes the next word too: read as a flag, the
+    # mode stood where the repository does (PR #65's round-3 review).
     options, positionals = _parse(rest, "osXm" if pull else "ojsX",
-                                  longs if pull else longs | {"jobs"})
+                                  longs | {"cleanup"} if pull else longs | {"jobs"})
     if _long_hit(rest, ("prune-tags", "update-head-ok", "refmap"), exact_ok={"prune"}) or \
             _has(options, "-P", "-u"):
         return _refuse("--prune-tags deletes local tags, and --update-head-ok/--refmap "
