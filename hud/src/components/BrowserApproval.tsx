@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { browserApi } from "../api";
+import { noPointerFocus } from "../lib/talkkey";
 import { browserApprovalDeadline, browserApprovalKey, parseBrowserApproval, type BrowserApprovalDetail, type BrowserApprovalPublic } from "../lib/browserapproval";
 import "./BrowserApproval.css";
 
@@ -54,5 +55,41 @@ export function BrowserApprovalBody({ detail }: { detail: BrowserApprovalDetail 
     <p className="muted" data-testid="browser-approval-preview">Preview unavailable</p>
     <p>{release ? "This releases the file to you. It does not run it." : "Page labels are untrusted page text. Read the exact action below."}</p>
     <pre className="arg" data-testid="approval-command"><bdi>{detail.command}</bdi></pre>
+  </div>;
+}
+
+/** The veil supplies inertness/focus trapping; this card permits one deliberate click. */
+export function BrowserApprovalCard({ request, onDecide, onPresent }: {
+  request: BrowserApprovalPublic;
+  onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
+  onPresent: () => void;
+}) {
+  const details = useBrowserApproval(request);
+  const key = browserApprovalKey(request);
+  const latest = useRef(key); latest.current = key;
+  const [deciding, setDeciding] = useState<string | null>(null);
+  const sent = useRef<string | null>(null);
+  const busy = deciding === key;
+  useEffect(() => { onPresent(); }, [key, onPresent]);
+  const decide = (allow: boolean) => {
+    if (latest.current !== key || sent.current === key || (allow && !details.canAuthorize())) return;
+    sent.current = key; setDeciding(key);
+    onDecide(request.req_id, allow, false);
+  };
+  return <div className="auth" data-testid="approval-card" data-req={request.req_id} tabIndex={-1}
+    role="alertdialog" aria-modal="true" aria-label="Browser authorization required"
+    onKeyDownCapture={event => {
+      if ((event.key === "Enter" || event.key === " ") && !(event.target instanceof Element && event.target.closest('[data-testid="approval-deny"]'))) event.preventDefault();
+    }}>
+    <h3>AUTHORIZATION REQUIRED</h3>
+    <div className="tool" data-testid="approval-tool">Browser action</div>
+    {details.detail ? <BrowserApprovalBody detail={details.detail} /> : null}
+    {details.message ? <p role="status">{details.message}</p> : null}
+    <div className="btns">
+      <button type="button" className="deny" disabled={busy} onClick={() => decide(false)} data-testid="approval-deny">DENY</button>
+      <button type="button" disabled={busy || !details.canAuthorize()} tabIndex={-1} onMouseDown={noPointerFocus}
+        onClick={() => decide(true)} data-testid="approval-allow">AUTHORIZE</button>
+    </div>
+    <div className="foot">DENIES AUTOMATICALLY IN {details.left}s · ESC TO DENY · HUD ONLY</div>
   </div>;
 }

@@ -1,6 +1,6 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { BrowserApprovalBody, useBrowserApproval } from "./BrowserApproval";
+import { BrowserApprovalBody, BrowserApprovalCard, useBrowserApproval } from "./BrowserApproval";
 import type { BrowserApprovalPublic } from "../lib/browserapproval";
 const mocks=vi.hoisted(()=>({get:vi.fn()}));vi.mock("../api",()=>({browserApi:{get:mocks.get}}));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
@@ -47,4 +47,26 @@ it("never fetches invalid, expired or future-issued requests",async()=>{
 it("hides already-loaded private A immediately when B replaces it",async()=>{
   await render();expect(host.textContent).toContain("example.test");const b=deferred();mocks.get.mockReturnValueOnce(b.promise);
   await render({...request,req_id:"request_5678"});expect(host.textContent).not.toContain("example.test");expect(current.canAuthorize()).toBe(false);
+});
+
+it("private card never has Always, shows full exact command, and sends only one ordinary allow",async()=>{
+  const onDecide=vi.fn();await act(async()=>root.render(createElement(BrowserApprovalCard,{request:{...request,allowlistable:true} as BrowserApprovalPublic,onDecide,onPresent:vi.fn()})));
+  expect(host.querySelector('[data-testid="approval-always"]')).toBeNull();expect(host.querySelector('[data-testid="approval-command"]')!.textContent).toBe(details().command);
+  const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!;expect(allow.tabIndex).toBe(-1);
+  await act(async()=>{allow.click();allow.click();});expect(onDecide).toHaveBeenCalledExactlyOnceWith(request.req_id,true,false);
+});
+it("loading and failed private cards keep Deny available and cannot authorize by removing disabled",async()=>{
+  const pending=deferred();mocks.get.mockReturnValueOnce(pending.promise);const onDecide=vi.fn();
+  await act(async()=>root.render(createElement(BrowserApprovalCard,{request,onDecide,onPresent:vi.fn()})));
+  const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!,deny=host.querySelector<HTMLButtonElement>('[data-testid="approval-deny"]')!;
+  expect(allow.disabled).toBe(true);expect(deny.disabled).toBe(false);allow.disabled=false;await act(async()=>allow.click());expect(onDecide).not.toHaveBeenCalled();
+  await act(async()=>pending.resolve({...details(),tool:"wrong"}));allow.disabled=false;await act(async()=>allow.click());expect(onDecide).not.toHaveBeenCalled();
+  await act(async()=>deny.click());expect(onDecide).toHaveBeenCalledExactlyOnceWith(request.req_id,false,false);
+});
+it("private authorization cancels Enter and Space defaults even if a button is focused directly",async()=>{
+  const onDecide=vi.fn();await act(async()=>root.render(createElement(BrowserApprovalCard,{request,onDecide,onPresent:vi.fn()})));
+  const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!;allow.focus();
+  for(const key of ["Enter"," "]){const event=new KeyboardEvent("keydown",{key,bubbles:true,cancelable:true});await act(async()=>allow.dispatchEvent(event));expect(event.defaultPrevented).toBe(true);}
+  expect(onDecide).not.toHaveBeenCalled();
+  const down=new MouseEvent("mousedown",{bubbles:true,cancelable:true});await act(async()=>allow.dispatchEvent(down));expect(down.defaultPrevented).toBe(true);
 });
