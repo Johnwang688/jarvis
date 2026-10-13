@@ -298,7 +298,7 @@ def upload_payloads(daemon, files) -> list[dict]:
     return out
 
 
-def _read_judged(resolved: str, cap: int, judged: os.stat_result) -> bytes:
+def _read_judged(resolved: str, cap: int, judged: os.stat_result, *, stable: bool = False) -> bytes:
     """The bytes of exactly the file judged: opened `O_NOFOLLOW`, a regular
     file with one name, no larger than `cap`, and still the path judged
     (its realpath through the descriptor and the judged device/inode)."""
@@ -315,6 +315,11 @@ def _read_judged(resolved: str, cap: int, judged: os.stat_result) -> bytes:
             raise refused
         if os.path.realpath(f"/proc/self/fd/{fd}") != resolved:
             raise refused
+        def identity(row):
+            return (row.st_dev, row.st_ino, row.st_mode, row.st_nlink,
+                    row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+        if stable and identity(info) != identity(judged):
+            raise refused
         chunks, size = [], 0
         while True:
             chunk = os.read(fd, COPY_CHUNK)
@@ -324,6 +329,25 @@ def _read_judged(resolved: str, cap: int, judged: os.stat_result) -> bytes:
             if size > cap:
                 raise refused
             chunks.append(chunk)
-        return b"".join(chunks)
+        data = b"".join(chunks)
+        if stable:
+            if identity(os.fstat(fd)) != identity(judged) or size != judged.st_size:
+                raise refused
+            # Same-size writes can share an mtime/ctime tick. Compare a second
+            # bounded descriptor pass with the exact buffer returned to staging.
+            os.lseek(fd, 0, os.SEEK_SET)
+            offset = 0
+            while True:
+                chunk = os.read(fd, COPY_CHUNK)
+                if not chunk:
+                    break
+                if chunk != data[offset:offset + len(chunk)]:
+                    raise refused
+                offset += len(chunk)
+                if offset > cap:
+                    raise refused
+            if offset != size or identity(os.fstat(fd)) != identity(judged):
+                raise refused
+        return data
     finally:
         os.close(fd)

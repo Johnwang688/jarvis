@@ -302,6 +302,8 @@ class Daemon:
         self.browser = BrowserHost(self)
         from .browser.look import BrowserLook
         self.browser_look = BrowserLook(self)
+        from .browser.drive import BrowserDrive
+        self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
         self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
         from .browser.panes import BrowserPanes
@@ -363,6 +365,7 @@ class Daemon:
             # `terminal_read` (WP-F) reads these terminals and no others.
             self.terminals.install()
             self.browser_look.install()
+            self.browser_drive.install()
             self.devservers.start()
             self.schedules.start()
 
@@ -1356,7 +1359,8 @@ class Daemon:
             from .tool_calls import label
             data = event.data or {}
             try:
-                tool_label = label(data.get("name"), data.get("args"), session.brief.cwd)
+                tool_label = ("Browser action" if data.get("name")=="hud_browser_act" else
+                              label(data.get("name"), data.get("args"), session.brief.cwd))
             except Exception:
                 from .approvals import clean_line
                 tool_label = clean_line(data.get("name"), 40)
@@ -1392,6 +1396,17 @@ class Daemon:
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
+            data=record.get("data") or {}
+            if data.get("name")=="hud_browser_act":
+                if event.kind==EventKind.TOOL_STARTED:
+                    record["data"]={"call_id":data.get("call_id"),"name":"hud_browser_act","args":{}}
+                elif event.kind==EventKind.TOOL_FINISHED:
+                    from jarvis.tools import private_summary
+                    summary=data.get("summary")
+                    safe=summary if summary in ("acted","refused","asked","stopped") else private_summary("hud_browser_act",str(summary or ""))
+                    record["data"]={"call_id":data.get("call_id"),"name":"hud_browser_act",
+                        "ok":data.get("ok") is True,"outcome":data.get("outcome") if data.get("outcome") in ("ok","denied","failed") else "failed",
+                        "summary":safe}
             if tool_label is not None:
                 record["data"] = {**record.get("data", {}), "label": tool_label}
             if event.kind == EventKind.QUESTION and (event.data or {}).get("req_id"):
@@ -1715,6 +1730,7 @@ class Daemon:
         # The Browser's Chrome, its driver and its gate (BR-1a): after the
         # terminals, before the listeners close. Its own bound, past the
         # daemon's: a Chrome that will not close is killed by exact PID.
+        self.browser_drive.stop()
         self.browser_look.stop()
         self.browser_panes.stop()
         self.browser.stop()

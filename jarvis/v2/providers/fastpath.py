@@ -53,6 +53,7 @@ from ..provider import (
 from ..tools import propose as _propose  # noqa: F401  (registers task_propose)
 from ..tools import schedules as _schedules  # noqa: F401  (registers schedule_*)
 from ..tools import hud_browser_view as _hud_browser_view  # noqa: F401
+from ..tools import hud_browser_act as _hud_browser_act  # noqa: F401
 from ..tools import terminal_read as _terminal_read  # noqa: F401  (registers terminal_read)
 
 # Eight steps, per §8.1. Not a work limit — a *definition*: anything that needs
@@ -108,6 +109,8 @@ answer.
 # `config.DESKTOP_APPS`: "can this change something" has to be answered once per
 # tool by a person, because the cost of guessing wrong is a chat turn quietly
 # doing half a job. A denylist would silently admit every tool added later.
+DRIVE_TOOLS: frozenset[str] = frozenset({"hud_browser_act"})
+
 FAST_TOOLS: frozenset[str] = frozenset(
     {
         # read-only files
@@ -148,7 +151,7 @@ FAST_TOOLS: frozenset[str] = frozenset(
         "terminal_read",
         "hud_browser_view",
     }
-)
+) | DRIVE_TOOLS
 
 # Tools a fast-path handle holds only for a turn where the owner is present:
 # an owner's chat thread (not a task's), the message typed in the HUD's own
@@ -156,7 +159,7 @@ FAST_TOOLS: frozenset[str] = frozenset(
 # hatch, a schedule — runs without them in the request, and the tool itself
 # refuses unless `runtime.at_desk()` (fail closed). A steer from anywhere but
 # the desk takes the turn off the desk for the rest of it.
-DESK_TOOLS: frozenset[str] = frozenset({"terminal_read", "hud_browser_view"})
+DESK_TOOLS: frozenset[str] = frozenset({"terminal_read", "hud_browser_view"}) | DRIVE_TOOLS
 
 # Names that must never be in FAST_TOOLS, asserted below and again in the
 # suite. Kept as data rather than left to a reader's eye because the failure
@@ -655,16 +658,25 @@ class FastPathProvider:
                   "provider": ProviderName.FAST.value,
                   "turn_id": bound.get("turn_id") if bound.get("thread_id") == thread_id else None}
 
+        from ..browser.drive_state import DriveTurn, turn_scope as drive_scope
+        from ..browser.drive import retire_turn
+        driving=DriveTurn(thread_id,caller["turn_id"] or "",
+                          native.brief.profile is PermissionProfile.STRICT,
+                          str(native.brief.cwd or ""),message.text)
+
         def work() -> None:
+            previous_ending=getattr(native.agent,"exhaustion_message",None)
             try:
                 runtime.bind(proposal=proposal, caller=caller)
-                with runtime.turn_scope(desk=desk):
+                native.agent.exhaustion_message=driving.exhaustion
+                with runtime.turn_scope(desk=desk), drive_scope(driving,retire_turn):
                     result["turn"] = native.agent.run_turn(
                         text, images=list(message.images) or None
                     )
             except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
                 result["error"] = exc
             finally:
+                native.agent.exhaustion_message=previous_ending
                 events.put(done)
 
         worker = threading.Thread(
@@ -706,7 +718,7 @@ class FastPathProvider:
         yield Event(
             EventKind.TURN_FINISHED,
             thread_id,
-            {"stop": _stop_reason(turn), "proposal": _proposal(proposal, turn)},
+            {"stop": _stop_reason(turn), "proposal": _proposal(proposal, turn, driving=driving.attempted)},
         )
 
 
@@ -736,7 +748,7 @@ def _stop_reason(turn) -> str:
     return "end"
 
 
-def _proposal(slot: dict[str, Any], turn) -> dict[str, Any] | None:
+def _proposal(slot: dict[str, Any], turn, *, driving: bool = False) -> dict[str, Any] | None:
     """The task this turn wants opened, or None. Design §8.1.
 
     An explicit `task_propose` wins over exhaustion: the model saying what the
@@ -749,7 +761,7 @@ def _proposal(slot: dict[str, Any], turn) -> dict[str, Any] | None:
     """
     if slot:
         return dict(slot)
-    if turn.stopped_early:
+    if turn.stopped_early and not driving:
         return {
             "brief": "[fast path ran out of steps] " + (turn.text or ""),
             "project": None,
@@ -812,7 +824,7 @@ class _TurnState:
         self.pending.append((call_id, name))
         self.emit(
             EventKind.TOOL_STARTED,
-            {"call_id": call_id, "name": name, "args": _args(raw)},
+            {"call_id": call_id, "name": name, "args": {} if name in DRIVE_TOOLS else _args(raw)},
         )
 
     def _on_tool_end(self, data: Any) -> None:

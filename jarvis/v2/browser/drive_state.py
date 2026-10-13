@@ -34,11 +34,17 @@ class DriveTurn:
     project_root: str = field(repr=False)
     owner_words: str = field(repr=False)
     attempted: bool = False
+    pane: str = ""
     closed: bool = False
 
     @property
     def key(self):
         return self.thread_id, self.turn_id
+
+    def exhaustion(self):
+        if not self.attempted:return None
+        pane="Browser pane "+self.pane if self.pane else "the Browser pane"
+        return "Stopped after eight steps in "+pane+". Say 'go on' to continue."
 
 
 _TURN: ContextVar[DriveTurn | None] = ContextVar("jarvis_browser_drive_turn", default=None)

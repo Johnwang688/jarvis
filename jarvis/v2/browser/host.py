@@ -731,6 +731,60 @@ class BrowserHost:
         return self._call(capture(self, snapshot, whole, images, forms, current, deadline),
                           max(0.1, deadline-time.monotonic()) + CLOSE_TIMEOUT_S*3)
 
+    def prepare_action(self, snapshot, action, capability, pin, forms, guard, *, prepared=None):
+        """BR9b private adapter: read facts, never grant a network lease."""
+        from .drive_execute import prepare
+        guard()
+        return self._call(prepare(self, snapshot, action, capability, pin, forms, guard, prepared), 20)
+
+    def execute_action(self, snapshot, action, prepared, pin, forms, guard, *, upload_path=None):
+        """Wait through cancelled in-flight input cleanup before releasing a driver."""
+        from .drive_execute import ACTION_TIMEOUT_S, execute
+        from .drive import ActResult
+        guard()
+        if not self._running():
+            return ActResult("stopped", "Stopped: the Browser closed.")
+        done = threading.Event()
+        async def run():
+            try:
+                return await execute(self, snapshot, action, prepared, pin, forms, guard, upload_path=upload_path)
+            finally:
+                done.set()
+        future = asyncio.run_coroutine_threadsafe(run(), self._loop)
+        try:
+            return future.result(ACTION_TIMEOUT_S + 10)
+        except FuturesTimeout:
+            future.cancel()
+            # A cancelled concurrent Future is marked done before its coroutine
+            # has settled. Wait on the coroutine's finally, not future.done().
+            # Browser shutdown's exact-process kill also settles a stuck CDP.
+            while not done.wait(.1):
+                pass
+            return ActResult("stopped", "Stopped: the Browser action timed out; look again.")
+
+    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text):
+        tab = self.require_tab(tab_id)
+        target = "" if prepared.context_flagged or prepared.target is None else prepared.target.name
+        rect = None
+        if prepared.rect and not prepared.context_flagged:
+            left, top, right, bottom = prepared.rect
+            rect = {"x": left, "y": top, "width": right-left, "height": bottom-top}
+        tab.stream.agent_driver(thread_id, "fast")
+        tab.stream.agent_action({"id": action_id, "at": datetime.now(timezone.utc).isoformat(), "action": action,
+            "target": target, "text": text if action in ("type", "select") else "",
+            "outcome": outcome, "rect": rect, "page_identity": tab.page_identity,
+            "document_generation": tab.document_generation})
+
+    def drive_finished(self, tab_id, action_id, outcome):
+        tab = self._tabs.get(tab_id)
+        if tab is None:
+            return
+        with tab.stream._lock:
+            row = next((dict(row) for row in tab.stream.actions if row["id"] == action_id), None)
+        if row is not None:
+            row["outcome"] = outcome
+            tab.stream.agent_action(row)
+
     # -- profiles (BR-1c) ---------------------------------------------------
 
     def profiles(self) -> list[dict]:
@@ -1902,7 +1956,9 @@ class BrowserHost:
         """What BR-9b's gate reads (H3, H4): the hold, whether the owner
         paused the tab, and how long since the owner's last input to it."""
         tab = self.require_tab(tab_id)
-        return {**tab.stream.owner_state(), "held": self.input_held()}
+        return {**tab.stream.owner_state(), "held": self.input_held(),
+                "depressed": bool(tab.pressed or tab.keys_pressed),
+                "input_busy": bool(tab.input_task is not None and not tab.input_task.done())}
 
     # -- pane identity (BR-3b/BR-5; in-process only) --------------------------------------
 

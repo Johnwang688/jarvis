@@ -99,6 +99,13 @@ if(args.action==='press' && focused && /^(IFRAME|FRAME)$/.test(focused.tagName))
 const e=args.action==='press'?(focused===document.body||focused===document.documentElement?null:focused):
     (args.target?state.refs.get(args.target):null);
 if(args.target && (!e || !e.isConnected))return {changed:true};
+// Equal labels do not make two nodes the same target. Pin the exact object
+// in this isolated world, including the actual focused object for press.
+if(args.pin) {
+    if(args.pinReplace)state.prepared={pin:args.pin,element:e};
+    else if(!state.prepared || state.prepared.pin!==args.pin || state.prepared.element!==e)
+        return {changed:true};
+}
 let rect=null,target=null,form=null,options=[];
 if(e) {
     if(!visible(e))return {changed:true};

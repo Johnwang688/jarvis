@@ -61,6 +61,8 @@ SELF_PROTECTED = frozenset(
         # itself, which is why they join the list rather than sitting beside it.
         "jarvis/rules.py",
         "jarvis/command_review.py",
+        "jarvis/v2/browser/act_rules.py",
+        "jarvis/v2/browser/act_review.py",
         # Decides which shell commands may write the gate's own state files
         # (2026-10-08). Editing it is editing what never runs.
         "jarvis/protected_state.py",
