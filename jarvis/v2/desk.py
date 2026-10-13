@@ -42,8 +42,13 @@ class DeskState:
         self.revocations.clear()
         self.turn_id = turn_id
         self.active = True
-        self.slot = {"present": self.base}
+        self.slot = {"present": self.base, "images": False}
         return self.slot
+
+    def images(self, slot: dict, turn_id: str, capable: bool) -> None:
+        """Pin capability without granting or restoring desk presence."""
+        if self.active and self.slot is slot and self.turn_id == turn_id:
+            self.slot["images"] = capable is True
 
     def reserve(self) -> SteerReservation:
         key = object()

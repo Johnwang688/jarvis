@@ -1623,9 +1623,10 @@ class ClaudeProvider:
 
     @staticmethod
     def _tool_summary(name: str, text: str) -> str:
-        if name in ("terminal_read", "mcp__jarvis__terminal_read"):
+        canonical = name.removeprefix("mcp__jarvis__")
+        if canonical in ("terminal_read", "hud_browser_view"):
             from jarvis import tools
-            return tools.private_summary("terminal_read", text)
+            return tools.private_summary(canonical, text)
         return text[:SUMMARY_CHARS]
 
     def _tool_result(self, session: _Session, block: Any) -> list[Event]:
@@ -1642,9 +1643,9 @@ class ClaudeProvider:
             denied = True
             session.denial_without_id = False
         session.denied_tools.discard(block.tool_use_id)
-        private_terminal = name in ("terminal_read", "mcp__jarvis__terminal_read")
+        private_read = name.removeprefix("mcp__jarvis__") in ("terminal_read", "hud_browser_view")
         summary = self._tool_summary(name, text)
-        if private_terminal:
+        if private_read:
             if denied:
                 summary = self._tool_summary(name, "Refused")
             elif block.is_error and summary not in ("refused", "error"):
@@ -1663,7 +1664,7 @@ class ClaudeProvider:
                         "tool": name,
                         "args": args,
                         "command": _command(args),
-                        "reason": (summary if private_terminal
+                        "reason": (summary if private_read
                                    else match.group("reason").strip() if match
                                    else text[:SUMMARY_CHARS]),
                     },

@@ -1087,7 +1087,8 @@ The landing guard captures the offending document generation when scheduling its
 ## Current read-only Browser look (2026-10-13, BR5)
 
 `hud_browser_view(pane="", whole_page=False)` is an explicit HUD owner-chat
-fast-path tool. The pane number is its displayed slot (1–8), not a tab ID;
+tool in the fast path and the foreground Claude/Codex session MCP catalog.
+The pane number is its displayed slot (1–8), not a tab ID;
 empty selects the last owner-focused eligible Browser pane. It uses BR3b's live
 owner-window registry and never discovers background tabs or hidden windows.
 The registry, see switch, source, terminal readability, hold/approval state,
@@ -1132,10 +1133,35 @@ Page data is fenced as untrusted and enters only the owner's tool conversation.
 `PRIVATE_RESULT` summaries say only `looked at a page` or `refused`; the
 `browser_viewed` bus record contains exactly the bound opaque `tab_id`, timestamp
 and refusal flag. Direct uses the registry's host-minted view ID, never a hidden
-page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
-background tasks, workflows, subagents or default session tools. This backend
-package does not establish the pending BR3b UI or BR6 session/MCP interface,
-real account authentication, a live-provider call or deployment verification.
+page ID or a pane-local ID. The tool is not parallel-safe and is not available to
+background tasks, workflows, subagents or default session tools. The foreground
+MCP catalog uses the existing WP2/WP3 host provenance and desk ticket: child,
+missing, stale and replayed calls refuse before capture. Revocation during a
+capture withholds text and pixels together. Normal assistant prose can describe
+the result; private normalization protects tool/event summaries, not that prose.
+
+## Current foreground Browser MCP (2026-10-13, BR6)
+
+Claude and Codex receive the same parent-only `hud_browser_view` catalog entry.
+The exact applied provider/model is pinned after the provider's apply-choice
+callback, only for the current session, worker, turn and desk slot. A requested
+model switch that fails retains the surviving model's capability. Only a model
+entry with the boolean `vision: true` enables images; unknown models receive
+text. Updating that capability cannot restore a lost desk presence.
+
+The existing relay carries PNG image blocks without a new capture path. Shared
+Browser presentation limits the image to 6 MiB of base64 so the bounded text and
+JSON envelope fit the relay's unchanged 8 MiB response limit. Oversized images
+are omitted with an explicit size note and the guarded text remains available;
+there is no second capture or image degradation. Foreground, see/source,
+credential, document and post-capture checks are otherwise unchanged. Provider
+events use fixed looked/refused summaries, including interrupted calls and
+unmatched Codex MCP approval-review completions.
+
+Synthetic acceptance checks cover actual Chrome pixels, masks, no page mutation,
+the real relay, current-model pinning, child refusal and revocation. Native CLI
+image acceptance and deployment are separate release gates; this implementation
+does not establish real account authentication or browser driving.
 
 ## Current owner capture boundary (2026-10-13, BR4)
 

@@ -55,8 +55,9 @@ SESSION_TOOLS: dict[str, SessionTool] = {
     name: SessionTool(name, providers=_CHAT_PROVIDERS, read_only=name in MCP_READ_ONLY)
     for name in MCP_TOOLS
 }
-SESSION_TOOLS["terminal_read"] = SessionTool(
-    "terminal_read", providers=_CHAT_PROVIDERS, read_only=True, foreground_only=True, desk_only=True)
+for _name in ("terminal_read", "hud_browser_view"):
+    SESSION_TOOLS[_name] = SessionTool(
+        _name, providers=_CHAT_PROVIDERS, read_only=True, foreground_only=True, desk_only=True)
 
 
 def register(entry: SessionTool) -> SessionTool:
@@ -90,7 +91,7 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
-    from .tools import terminal_read, schedules  # noqa: F401 — register implementations
+    from .tools import terminal_read, hud_browser_view, schedules  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:

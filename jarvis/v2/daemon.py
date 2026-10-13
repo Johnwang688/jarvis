@@ -1461,10 +1461,31 @@ class Daemon:
         except Exception:
             return False
 
+    def _desk_images(self, session, worker, turn_id, slot):
+        """Pin the applied native model after a switch, for this exact turn."""
+        from .router import cli_images
+        def current():
+            return (self._sessions.get(session.thread.id) is session
+                    and session.worker is worker and session.turn_id == turn_id
+                    and session.desk.slot is slot and not session.cancelled.is_set()
+                    and not session.closing and not session.retired and not session.lost
+                    and not self._stopping)
+        with self._lock:
+            if not current():
+                return
+            applied = session.applied
+            model = applied[0] if applied else None
+            provider = session.thread.provider.value
+        capable = cli_images(provider, model)
+        with self._lock:
+            if current() and session.applied == applied:
+                session.desk.images(slot, turn_id, capable)
+
     def _turn(self, session, message):
         # Wait for _begin to finish the start hook before this turn can end.
         with self._lock:
             terminal = None
+            worker, turn_id, desk_slot = session.worker, session.turn_id, session.desk.slot
         failed = False
         fatal = False
         # Who is calling, on this turn's own thread (a fresh context): an
@@ -1477,6 +1498,7 @@ class Daemon:
             if session.cancelled.is_set():
                 return
             self._apply_choice(session)
+            self._desk_images(session, worker, turn_id, desk_slot)
             cancel_forwarded = False
             for event in session.provider.send(session.handle, message):
                 if event.thread_id != session.thread.id:

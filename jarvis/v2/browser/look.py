@@ -27,6 +27,8 @@ NOT_AT_DESK = "hud_browser_view works only in a chat the owner is typing in at t
 TEXT_CAP = 4000
 IMAGE_EDGE = 1568
 IMAGE_BYTES = 16 * 1024 * 1024
+# Leaves room for all bounded page text/refs inside the session relay's8MiB body.
+IMAGE_B64_CAP = 6 * 1024 * 1024
 PIXEL_CAP = 16_000_000
 
 
@@ -122,6 +124,9 @@ def presented(scan: dict, image: str | None, *, fresh: bool, vision: bool, withh
     if not vision:notes.append("no image: this turn's model is not known to accept images")
     notes.append("form values and embedded frames omitted; canvas/image and inaccessible DOM text cannot be credential-scanned")
     if vision and image is None and not (count or withheld):notes.append("image omitted because the page changed during capture")
+    if image is not None and len(image)>IMAGE_B64_CAP:
+        image=None
+        notes.append("image omitted because it exceeds the transport size limit")
     source=f"HUD Browser page {untrusted.one_line(url,2048)} — {untrusted.one_line(title,120)}"
     return LookResult(text,source,tuple(notes),image if not(count or withheld) else None)
 
