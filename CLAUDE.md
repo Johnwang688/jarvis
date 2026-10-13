@@ -6,6 +6,22 @@ Notes for agents working on this codebase. Read before changing anything.
 make a decision worth not relitigating, update the relevant section in the same
 session — especially *Current state* and *Decisions already made*.
 
+## Chat git worktrees (2026-10-13)
+
+Claude and Codex chats share the project checkout with the owner and must use
+separate worktrees for real edits. Codex chat configs explicitly grant only
+validated repository git/common directories and config.CHAT_WORKTREES_DIR
+(default ~/.local/share/jarvis/chat-worktrees, override JARVIS_CHAT_WORKTREES);
+the root is created privately (0700). Task briefs get no extra grants.
+Symlinked/malformed metadata, credential directories, protected state and their
+ancestors are excluded; uncertain credential-name scans fail closed. Sandbox
+networking stays off, including effective-config and returned-policy checks.
+Push/gh therefore request escalation through the existing Jarvis gate; a
+sandbox-widening request still asks the owner. Writable git metadata permits
+hooks/config writes, an explicit owner-approved risk. Provider regressions
+are in tests/v2/codex_provider_check.py; deployed/live status belongs in the
+work checkpoint, not an inference from unit tests.
+
 ## Jarvis v2 is underway (2026-09-15) — read `docs/jarvis-v2-design.md` first
 
 The v1 notes below remain the truth for everything **not** under

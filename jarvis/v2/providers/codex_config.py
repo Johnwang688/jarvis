@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 
 from jarvis import config
@@ -14,75 +15,157 @@ from jarvis.v2.provider import Brief, BriefRefused
 _GITFILE_CAP = 4096
 
 
+def _plain_path(path: Path) -> Path:
+    """Absolute path with no symlink component, even before resolving '..'."""
+    path = path.expanduser()
+    if not path.is_absolute():
+        raise ValueError("expected an absolute path")
+    for part in (path, *path.parents):
+        if part.is_symlink():
+            raise ValueError("symlink component")
+    return path.resolve()
+
+
 def _small_text(path: Path) -> str:
-    """A `.git` or `commondir` file's first line; a regular file only, capped."""
-    with open(path, "rb") as stream:
-        return stream.read(_GITFILE_CAP).decode("utf-8", "replace").strip()
+    """One bounded UTF-8 line, from a regular, non-symlink file only."""
+    path = _plain_path(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _GITFILE_CAP:
+            raise ValueError("not a small regular git pointer")
+        raw = stream.read(_GITFILE_CAP + 1)
+    if len(raw) > _GITFILE_CAP:
+        raise ValueError("oversized git pointer")
+    text = raw.decode("utf-8").strip()
+    if not text or len(text.splitlines()) != 1 or any(ord(c) < 32 for c in text):
+        raise ValueError("malformed git pointer")
+    return text
+
+
+def _overlaps(path: Path, other: Path) -> bool:
+    return path == other or path in other.parents or other in path.parents
+
+
+def _safe_root(path: Path) -> bool:
+    """No writable subtree may contain or sit inside credentials/gate state.
+
+    Reuse the gate's definitions, not denied_grant: that deliberately
+    forbids .git itself. This chat-only grant is the owner's explicit
+    exception for repository git metadata, never for the rest of the gate.
+    """
+    from jarvis.tools import files
+    from jarvis.v2.permissions import _env_file_within, protected_paths
+
+    barred = [Path(p).expanduser().resolve() for p in config.credential_dirs()]
+    barred += [Path(config.V2_DATA_DIR).resolve(), owner_home(),
+               Path.home() / ".claude", Path.home() / ".codex",
+               Path(config.SESSIONS_DIR).resolve(), Path(config.SPILL_DIR).resolve()]
+    barred += list(protected_paths()) + list(files._hud_roots())
+    barred += [(Path(config.REPO_ROOT) / rel).resolve() for rel in files.SELF_PROTECTED]
+    if any(_overlaps(path, item) for item in barred):
+        return False
+    # Names only, never env contents. A large/uncertain scan fails closed.
+    env, unchecked = _env_file_within(path, path)
+    return not env and not unchecked
+
+
+def _head(path: Path) -> bool:
+    text = _small_text(path / "HEAD")
+    return bool(re.fullmatch(r"(?:ref: refs/[^\s]+|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", text))
+
+
+def _common_dir(path: Path) -> bool:
+    return (_head(path) and all(_plain_path(path / name).is_dir()
+                               for name in ("objects", "refs")))
 
 
 def git_dirs(cwd: str) -> list[Path]:
-    """Where the repository at or above `cwd` keeps its history: its git dir
-    and, for a linked worktree, the common one. [] outside a repository, when
-    one cannot be read, or when it sits in a credential folder or Jarvis's own
-    data."""
-    here = Path(cwd).resolve()
-    found: list[Path] = []
+    """Validated git metadata for a repository or linked worktree.
+
+    Unsafe/malformed metadata grants nothing. No git command is invoked:
+    discovering roots must not run repository hooks or configuration.
+    """
     try:
+        here = _plain_path(Path(cwd))
         for folder in (here, *here.parents):
             dot = folder / ".git"
-            if dot.is_symlink():
-                return []
+            if not dot.exists() and not dot.is_symlink():
+                continue
+            dot = _plain_path(dot)
             if dot.is_dir():
-                found = [dot.resolve()]
-                break
-            if dot.is_file():
+                found = [dot] if _safe_root(dot) and _common_dir(dot) else []
+            else:
                 text = _small_text(dot)
-                if not text.startswith("gitdir:"):
+                if not text.startswith("gitdir: "):
                     return []
-                gitdir = Path(text[len("gitdir:"):].strip())
-                gitdir = (gitdir if gitdir.is_absolute() else folder / gitdir).resolve()
-                found = [gitdir]
-                common = gitdir / "commondir"
-                if common.is_file():
-                    shared = Path(_small_text(common))
-                    found.append((shared if shared.is_absolute() else gitdir / shared).resolve())
-                break
-    except OSError:
+                target = Path(text[len("gitdir: "):])
+                gitdir = _plain_path(target if target.is_absolute() else folder / target)
+                if not _safe_root(gitdir):
+                    return []
+                common_file = gitdir / "commondir"
+                if common_file.exists() or common_file.is_symlink():
+                    shared = Path(_small_text(common_file))
+                    common = _plain_path(shared if shared.is_absolute() else gitdir / shared)
+                    if not _safe_root(common):
+                        return []
+                    # Linked metadata must belong to this common directory and
+                    # point back to this checkout, not merely look like a repo.
+                    backlink = Path(_small_text(gitdir / "gitdir"))
+                    backlink = _plain_path(backlink if backlink.is_absolute() else gitdir / backlink)
+                    if (gitdir.parent != common / "worktrees" or backlink != dot
+                            or not _head(gitdir) or not _common_dir(common)):
+                        return []
+                    found = [gitdir, common]
+                else:
+                    found = [gitdir] if _common_dir(gitdir) else []
+            return found if all(_safe_root(path) for path in found) else []
+    except (OSError, RuntimeError, ValueError):
         return []
-    barred = [Path(p).expanduser().resolve() for p in config.credential_dirs()]
-    barred.append(Path(config.V2_DATA_DIR).resolve())
-    out = []
-    for path in found:
-        if not path.is_dir() or any(path == b or b in path.parents for b in barred):
-            return []
-        if path not in out:
-            out.append(path)
-    return out
+    return []
+
+
+def chat_worktrees_dir() -> Path:
+    """Validate a dedicated root before creation or any permission grant."""
+    try:
+        path = _plain_path(Path(config.CHAT_WORKTREES_DIR))
+        if not _safe_root(path) or (path.exists() and not path.is_dir()):
+            raise ValueError("unsafe directory")
+        if path.exists() and path.stat().st_uid != os.getuid():
+            raise ValueError("not owned by the current user")
+        return path
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BriefRefused("Unsafe Codex chat worktrees directory") from exc
 
 
 def git_roots(brief: Brief) -> list[str]:
-    """What a Codex chat's sandbox may write outside its project: the
-    repository's git dirs (commits, branches, worktrees) and
-    `config.CHAT_WORKTREES_DIR`. Task workers get none; their worktrees are
-    Jarvis's. The network stays off: a push or `gh` has to ask to leave the
-    sandbox, so Jarvis's gate still judges it (a push to main or a force push
-    asks the owner)."""
-    if brief.role != Role.CHAT:
+    """Chats alone may write verified git metadata and their worktree root."""
+    if brief.role != Role.CHAT or brief.task_id is not None:
         return []
-    return [str(p) for p in git_dirs(brief.cwd)] + [str(Path(config.CHAT_WORKTREES_DIR).expanduser())]
+    root = chat_worktrees_dir()
+    git = git_dirs(brief.cwd)
+    # A configured worktree root must not swallow the project or its git
+    # directory; in particular it must never chmod the shared checkout.
+    cwd = _plain_path(Path(brief.cwd))
+    if root == cwd or cwd in root.parents or any(root == p or p in root.parents for p in git):
+        raise BriefRefused("Codex chat worktrees must be separate from the project")
+    return [str(p) for p in git] + [str(root)]
 
 
 def git_note(brief: Brief) -> str:
-    """The sentence a Codex chat is told about git, or "" for anything else."""
+    """Truthful guidance; network escalation still goes through Jarvis."""
     roots = git_roots(brief)
     if not roots:
         return ""
     where = roots[-1]
-    return (f"Git in this session: the sandbox lets you write this repository's .git (commit, branch, "
-            f"worktree) and {where}. Make new git worktrees under {where}/<name>; other folders outside "
-            "the project are read-only. The network is off inside the sandbox, so run `git push` and `gh` "
-            "with escalated permissions; Jarvis decides those, and a push to main or a force push asks the owner.")
-
+    metadata = ("Validated repository git metadata is writable for commits, branches and worktrees. "
+                if len(roots) > 1 else "No writable repository git metadata was found. ")
+    return ("Git in this session: " + metadata
+            + f"Make new git worktrees under {where}/<unique-name>. "
+            "The project checkout is shared; use a separate worktree for real edits. "
+            "The network is off inside the sandbox. Request escalated permissions for "
+            "git push and gh; Jarvis judges the request, and sandbox widening "
+            "requires the owner's approval.")
 
 def validate(brief: Brief) -> None:
     if brief.profile != PermissionProfile.AUTO:
@@ -136,6 +219,10 @@ def config_text(brief: Brief) -> str:
     lines = [f"{k} = {_value(v)}" for k, v in values.items()]
     lines += ["[shell_environment_policy]", 'inherit = "all"',
               f"[projects.{_value(str(Path(brief.cwd).resolve()))}]", 'trust_level = "trusted"']
+    roots = git_roots(brief)
+    if roots:
+        lines += ["[sandbox_workspace_write]", f"writable_roots = {_value(roots)}",
+                  "network_access = false"]
     for name, server in brief.mcp_servers.items():
         lines.append(f"[mcp_servers.{_value(name)}]")
         lines.extend(f"{_value(k)} = {_value(v)}" for k, v in server.items())
@@ -265,6 +352,28 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
     PATH lookup that could land on the Windows shim.
     """
     validate(brief)
+    roots = git_roots(brief)
+    if roots:
+        root = Path(roots[-1])
+        # Traverse with directory fds: neither mkdir nor chmod follows a
+        # symlink inserted into a parent between validation and creation.
+        fd = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in root.parts[1:]:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            info = os.fstat(fd)
+            if (info.st_uid != os.getuid() or chat_worktrees_dir() != root
+                    or (info.st_dev, info.st_ino) != (root.stat().st_dev, root.stat().st_ino)):
+                raise BriefRefused("Codex chat worktrees directory changed")
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
     return _prepare_home(thread_id, config_text(brief), binary)
 
 

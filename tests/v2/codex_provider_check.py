@@ -120,7 +120,7 @@ def peer(script_path, log_path, thread_name):
                 continue
             result = script.get("rate_limits", {"rateLimits": None, "rateLimitsByLimitId": {}})
         elif method == "config/read":
-            result = {"config": settings}
+            result = {"config": {**settings, **script.get("config_override", {})}}
         elif method in ("thread/start", "thread/resume"):
             if method == "thread/resume":
                 native = p["threadId"]
@@ -131,7 +131,7 @@ def peer(script_path, log_path, thread_name):
             result = {"thread": {"id": native}, "model": settings.get("model", "fake-model"),
                       "reasoningEffort": settings.get("model_reasoning_effort"),
                       "approvalPolicy": "on-request", "approvalsReviewer": "auto_review",
-                      "sandbox": {"type": "workspaceWrite"}}
+                      "sandbox": script.get("sandbox", {"type": "workspaceWrite", "networkAccess": False})}
         elif method == "turn/start":
             if mode == "start_stall":
                 continue
@@ -340,6 +340,7 @@ class Checks(unittest.TestCase):
         self.work.mkdir()
         self.brain = Brain(self.root)
         self.stack.enter_context(patch.object(config, "V2_DATA_DIR", self.root / "data"))
+        self.stack.enter_context(patch.object(config, "CHAT_WORKTREES_DIR", self.root / "chat-worktrees"))
         self.stack.enter_context(patch.object(codex_config, "owner_home", return_value=self.auth))
         self.stack.enter_context(patch.object(codex, "RpcProcess", self.brain.rpc))
         self.stack.enter_context(patch.object(codex.CodexProvider, "_probe", return_value=("/fake/codex", "fake")))
@@ -392,6 +393,234 @@ class Checks(unittest.TestCase):
         events = list(self.provider.send(h, UserMessage("Look", [{"b64": "YWJj", "mime": "image/png"}])))
         self.assertEqual(events[-1].kind, K.TURN_FINISHED)
         self.assertEqual(self.brain.calls("turn/start")[0]["params"]["input"][1], {"type": "image", "url": "data:image/png;base64,YWJj"})
+
+    def git(self, *args, cwd=None):
+        # Empty temporary HOME and disabled global/system config: fixtures
+        # cannot read the owner's credentials, hooks or repository settings.
+        return subprocess.run(["git", "-C", str(cwd or self.work), *args], check=True,
+                              capture_output=True, text=True,
+                              env={"PATH": os.environ["PATH"], "HOME": str(self.root),
+                                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"})
+
+    def repo(self):
+        self.git("init", "-q")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "fixture")
+        return self.work / ".git"
+
+    def chat(self):
+        return replace(self.brief, role=Role.CHAT)
+
+    def test_chat_git_config_and_instructions(self):
+        gitdir = self.repo()
+        h = self.start(brief=self.chat())
+        cfg = tomllib.loads((h.native.home / "config.toml").read_text())
+        self.assertEqual(cfg["sandbox_workspace_write"],
+                         {"writable_roots": [str(gitdir), str(config.CHAT_WORKTREES_DIR)],
+                          "network_access": False})
+        self.assertEqual(config.CHAT_WORKTREES_DIR.stat().st_mode & 0o777, 0o700)
+        params = self.brain.calls("thread/start")[0]["params"]
+        self.assertEqual(params["developerInstructions"],
+                         self.brief.system_append + "\n\n" + codex_config.git_note(self.chat()))
+        self.assertIn("shared", params["developerInstructions"])
+        self.assertIn("escalated permissions", params["developerInstructions"])
+
+    def test_chat_linked_worktree_and_nested_cwd_include_common_dir(self):
+        common = self.repo()
+        linked = self.root / "linked"
+        self.git("worktree", "add", "-q", "--detach", str(linked))
+        nested = linked / "nested"
+        nested.mkdir()
+        gitdir = common / "worktrees" / "linked"
+        brief = replace(self.chat(), cwd=str(nested))
+        self.assertEqual(codex_config.git_roots(brief),
+                         [str(gitdir), str(common), str(config.CHAT_WORKTREES_DIR)])
+
+    def test_chat_can_open_inside_its_worktree_root(self):
+        common = self.repo()
+        root = config.CHAT_WORKTREES_DIR
+        root.mkdir()
+        linked = root / "continued"
+        self.git("worktree", "add", "-q", "--detach", str(linked))
+        brief = replace(self.chat(), cwd=str(linked))
+        self.assertEqual(codex_config.git_roots(brief)[-1], str(root))
+        self.assertIn(str(common), codex_config.git_roots(brief))
+
+    def test_chat_outside_repo_only_gets_worktree_root(self):
+        roots = codex_config.git_roots(self.chat())
+        self.assertEqual(roots, [str(config.CHAT_WORKTREES_DIR)])
+        self.assertIn("No writable repository git metadata", codex_config.git_note(self.chat()))
+
+    def test_task_has_no_extra_roots_or_git_instructions_or_directory(self):
+        self.repo()
+        h = self.start()
+        cfg = tomllib.loads((h.native.home / "config.toml").read_text())
+        self.assertNotIn("sandbox_workspace_write", cfg)
+        self.assertFalse(config.CHAT_WORKTREES_DIR.exists())
+        self.assertEqual(codex_config.git_note(self.brief), "")
+        self.assertEqual(codex_config.git_roots(replace(self.chat(), task_id="task")), [])
+        self.assertEqual(self.brain.calls("thread/start")[0]["params"]["developerInstructions"],
+                         self.brief.system_append)
+        # A bad chat-only override does not disable otherwise valid tasks.
+        with patch.object(config, "CHAT_WORKTREES_DIR", Path("/")):
+            self.assertEqual(codex_config.git_roots(self.brief), [])
+
+    def test_common_chat_role_tells_both_providers_to_use_worktrees(self):
+        from jarvis.v2.roles import brief_for
+        note = brief_for(Role.CHAT).system_append
+        self.assertIn("checkout is shared", note)
+        self.assertIn("separate git worktree", note)
+        self.assertNotIn("checkout is shared", brief_for(Role.IMPLEMENTER).system_append)
+
+    def test_resume_also_gets_chat_git_instructions(self):
+        self.repo()
+        h = self.start(brief=self.chat())
+        self.provider.close(h)
+        thread = replace(self.thread, provider_session_id=h.provider_session_id, role=Role.CHAT)
+        resumed = self.provider.resume(thread, self.chat(), lambda *_: Decision.ALLOW)
+        self.handles.append(resumed)
+        self.assertIn(codex_config.git_note(self.chat()),
+                      self.brain.calls("thread/resume")[0]["params"]["developerInstructions"])
+
+    def test_git_directory_cannot_overlap_credentials_or_protected_state(self):
+        gitdir = self.repo()
+        for protected in (gitdir, gitdir / "nested", self.work):
+            with self.subTest(credential=protected), patch.object(config, "credential_dirs", return_value=(str(protected),)):
+                self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+        for protected in (gitdir, gitdir / "models.json"):
+            with self.subTest(state=protected), patch.object(config, "MODELS_PATH", protected):
+                self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+        for name in ("V2_DATA_DIR", "HUD_DIR"):
+            with self.subTest(setting=name), patch.object(config, name, gitdir):
+                self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+
+    def test_git_symlinks_and_nonregular_pointers_are_refused(self):
+        gitdir = self.repo()
+        moved = self.root / "metadata"
+        gitdir.rename(moved)
+        gitdir.symlink_to(moved, target_is_directory=True)
+        self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+        gitdir.unlink()
+        os.mkfifo(gitdir)
+        self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+        gitdir.unlink()
+        gitdir.write_text("gitdir: " + str(moved))
+        objects = moved / "objects"
+        moved_objects = self.root / "objects"
+        objects.rename(moved_objects)
+        objects.symlink_to(moved_objects, target_is_directory=True)
+        self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+
+    def test_git_pointer_malformed_oversized_or_arbitrary_directory_refused(self):
+        pointer = self.work / ".git"
+        for value in ("gitdir: /", "gitdir: " + str(self.root), "gitdir: ",
+                      "wrong", "gitdir: ../metadata\nextra",
+                      "gitdir: /" + "a" * codex_config._GITFILE_CAP, "gitdir: /bad\0path"):
+            with self.subTest(value=value[:60]):
+                pointer.write_text(value)
+                self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+
+    def test_linked_common_pointer_symlink_or_wrong_backlink_refused(self):
+        common = self.repo()
+        linked = self.root / "linked"
+        self.git("worktree", "add", "-q", "--detach", str(linked))
+        gitdir = common / "worktrees" / "linked"
+        (gitdir / "gitdir").write_text(str(self.work / ".git"))
+        self.assertEqual(codex_config.git_dirs(str(linked)), [])
+        (gitdir / "gitdir").write_text(str(linked / ".git"))
+        pointer = gitdir / "commondir"
+        text = self.root / "common-pointer"
+        text.write_text("../..")
+        pointer.unlink()
+        pointer.symlink_to(text)
+        self.assertEqual(codex_config.git_dirs(str(linked)), [])
+
+    def test_worktree_root_validation_precedes_any_creation_or_chmod(self):
+        self.repo()
+        unsafe = [Path("/"), Path("relative"), self.work, self.work / "nested",
+                  self.auth, self.auth / "nested", self.root / "data",
+                  self.root / "data" / "nested"]
+        for target in unsafe:
+            with self.subTest(target=target), patch.object(config, "CHAT_WORKTREES_DIR", target):
+                with self.assertRaises(BriefRefused):
+                    codex_config.prepare("invalid", self.chat(), "/fake/codex")
+        self.assertEqual(self.work.stat().st_mode & 0o777, 0o755)
+        self.assertFalse((self.work / "nested").exists())
+        self.assertFalse((self.auth / "nested").exists())
+        # A protected file anywhere beneath an override makes the whole root unsafe.
+        target = self.root / "protected-holder"
+        with patch.object(config, "CHAT_WORKTREES_DIR", target), \
+                patch.object(config, "MODELS_PATH", target / "models.json"):
+            with self.assertRaises(BriefRefused):
+                codex_config.prepare("invalid", self.chat(), "/fake/codex")
+        self.assertFalse(target.exists())
+
+    def test_protected_git_pointer_is_rejected_before_metadata_is_read(self):
+        self.work.joinpath(".git").write_text("gitdir: " + str(self.auth))
+        read = codex_config._small_text
+        seen = []
+        def observed(path):
+            seen.append(path)
+            return read(path)
+        with patch.object(codex_config, "_small_text", side_effect=observed):
+            self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+        self.assertEqual(seen, [self.work / ".git"])
+
+    def test_credential_env_names_and_uncertain_scans_refuse_roots(self):
+        gitdir = self.repo()
+        # Empty, synthetic name only; no real credentials or env contents.
+        (gitdir / ".env.fixture").touch()
+        self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+        root = config.CHAT_WORKTREES_DIR
+        root.mkdir()
+        (root / ".env.fixture").touch()
+        with self.assertRaises(BriefRefused):
+            codex_config.chat_worktrees_dir()
+        with patch("jarvis.v2.permissions._env_file_within", return_value=(None, "scan limit")):
+            self.assertEqual(codex_config.git_dirs(str(self.work)), [])
+            with self.assertRaises(BriefRefused):
+                codex_config.chat_worktrees_dir()
+
+    def test_worktree_root_symlink_ancestor_or_file_refused(self):
+        target = self.root / "real"
+        target.mkdir()
+        link = self.root / "link"
+        link.symlink_to(target, target_is_directory=True)
+        file = self.root / "file"
+        file.write_text("ordinary fixture")
+        for root in (link, link / "child", file):
+            with self.subTest(root=root), patch.object(config, "CHAT_WORKTREES_DIR", root):
+                with self.assertRaises(BriefRefused):
+                    codex_config.prepare("invalid", self.chat(), "/fake/codex")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+        self.assertFalse((target / "child").exists())
+
+    def test_existing_worktree_root_is_private_and_config_survives_mcp_removal(self):
+        root = config.CHAT_WORKTREES_DIR
+        root.mkdir(mode=0o755)
+        brief = replace(self.chat(), mcp_servers={"fixture": {"command": "fixture"}})
+        h = self.start(brief=brief)
+        self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+        codex_config.strip_mcp_servers(h.native.home / "config.toml")
+        cfg = tomllib.loads((h.native.home / "config.toml").read_text())
+        self.assertNotIn("mcp_servers", cfg)
+        self.assertFalse(cfg["sandbox_workspace_write"]["network_access"])
+        self.assertEqual(cfg["sandbox_workspace_write"]["writable_roots"], [str(root)])
+
+    def test_changed_effective_network_roots_or_returned_network_are_refused(self):
+        for script in (
+            {"config_override": {"sandbox_workspace_write": {"network_access": True}}},
+            {"config_override": {"sandbox_workspace_write": {"writable_roots": ["/"]}}},
+            {"sandbox": {"type": "workspaceWrite", "networkAccess": True}},
+        ):
+            with self.subTest(script=script):
+                self.brain.script.update(script)
+                try:
+                    with self.assertRaises(BriefRefused):
+                        self.start()
+                finally:
+                    for key in script:
+                        self.brain.script.pop(key)
 
     def test_a_named_skill_is_a_directive_on_turn_start(self):
         """S1: Codex has the skill installed, so it is told to use it. (A native

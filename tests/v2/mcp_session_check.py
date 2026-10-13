@@ -104,6 +104,7 @@ def patch_config(stack: ExitStack, root: Path) -> None:
     creds = root / "creds"
     for name, value in {
         "V2_DATA_DIR": root / "v2",
+        "CHAT_WORKTREES_DIR": root / "chat-worktrees",
         "ALLOWLIST_PATH": root / "cfg" / "allowlist.json",
         "MODELS_PATH": root / "cfg" / "models.json",
         "PROVIDER_DEFAULTS_PATH": root / "cfg" / "provider_defaults.json",
@@ -1207,6 +1208,7 @@ class CodexProviderChecks(unittest.TestCase):
         self.work.mkdir()
         self.brain = cpc.Brain(self.root)
         self.stack.enter_context(patch.object(config, "V2_DATA_DIR", self.root / "data"))
+        self.stack.enter_context(patch.object(config, "CHAT_WORKTREES_DIR", self.root / "chat-worktrees"))
         self.stack.enter_context(patch.object(codex_config, "owner_home", return_value=self.auth))
         self.stack.enter_context(patch.object(codex, "RpcProcess", self.brain.rpc))
         self.stack.enter_context(patch.object(codex.CodexProvider, "_probe",
@@ -1341,7 +1343,9 @@ class SweepChecks(unittest.TestCase):
         bystander.write_text("not a carrier")
         home = data / "codex" / "cafebabe"
         home.mkdir(parents=True)
-        brief = Brief(Role.CHAT, str(self.root), model="m",
+        cwd = self.root / "project"
+        cwd.mkdir(exist_ok=True)
+        brief = Brief(Role.CHAT, str(cwd), model="m",
                       mcp_servers={"jarvis": bridge.server_entry(CODEX, 4242, PLACEHOLDER)})
         (home / "config.toml").write_text(codex_config.config_text(brief))
         return carriers, home / "config.toml", bystander

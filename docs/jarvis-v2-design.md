@@ -336,6 +336,20 @@ broker alone.
 - Shared-login serialization and the daily admission allowance carried over as
   the Codex half of the UsageLedger (§8).
 
+**Chat git worktrees (2026-10-13; owner-approved).** Chat briefs alone add
+verified git/common directories and a private CHAT_WORKTREES_DIR to the
+workspace-write sandbox. Git pointers are bounded regular files; symlinks,
+malformed metadata, credential/protected-state overlaps in either direction,
+and uncertain credential-name scans grant nothing. Unsafe worktree-root
+overrides refuse session startup. The root is created 0700 with no-follow
+directory traversal. Tasks retain their existing confinement. Both providers'
+chat role brief says the shared checkout requires a separate worktree for
+real edits. Codex's additive developer instructions name the worktree root
+and tell the agent to request escalation for push/gh. Networking remains off
+and is checked in both effective config and the returned thread policy;
+existing human approval for sandbox widening remains intact. The owner
+accepted writable git hooks/config as part of this explicit metadata grant.
+
 ### 5.5 FastPath
 
 - v1 `agent.py` + `context.py` + the safe half of `tools/`, OpenRouter model,
