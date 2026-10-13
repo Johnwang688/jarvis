@@ -107,6 +107,13 @@ class Events(unittest.TestCase):
             got=self.emit(row)[-1]
             self.assertEqual((got.data["summary"],got.data["outcome"]),(summary,outcome))
             self.assertNotIn("PRIVATE_MARKER",json.dumps(got.data))
+    def test_malformed_terminal_results_report_fixed_error(self):
+        for index, result in enumerate((None, {}, {"content": None}, {"content": "wrong"},
+                                        {"content": []}, {"content": [{"type": "image", "data": "PRIVATE_MARKER"}]},
+                                        {"content": [{"type": "text", "text": 17}]})):
+            got = self.emit(self.item(id="malformed-" + str(index), result=result))[-1]
+            self.assertEqual((got.data["summary"], got.data["outcome"]), ("error", "failed"))
+            self.assertNotIn("PRIVATE_MARKER", json.dumps(got.data))
     def test_stale_wrong_thread_and_identity_change(self):
         self.assertEqual(self.emit(turnId="old"),[])
         self.assertEqual(self.emit(threadId="child"),[])

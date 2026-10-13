@@ -1154,7 +1154,8 @@ class CodexProvider:
         text = "".join(parts)
         denied = server == "jarvis" and text.startswith(("Refused", "The user declined"))
         failed = (item.get("status") != "completed" or item.get("error") is not None
-                  or not isinstance(content, list) or (server == "jarvis" and text.startswith("Error:")))
+                  or not isinstance(content, list) or (private and not text)
+                  or (server == "jarvis" and text.startswith("Error:")))
         if private:
             from jarvis import tools
             summary = tools.private_summary("terminal_read", "Refused" if denied else "Error" if failed else text)
