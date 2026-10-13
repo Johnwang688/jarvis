@@ -1935,12 +1935,14 @@ class NoTool(Base):
 
     def test_no_tool_is_named_for_a_terminal(self):
         from jarvis import tools
-        from jarvis.v2 import mcp
+        from jarvis.v2 import mcp, session_tools
         from jarvis.v2.providers import fastpath
-        reachable = set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(tools.REGISTRY)
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | set(tools.REGISTRY))
         self.assertTrue({"task_propose", "schedule_delete"} <= reachable)
         self.assertEqual(sorted(n for n in reachable if "terminal" in n.lower()), ["terminal_read"])
-        # jarvis-mcp cannot tell a chat from a task worker: it does not offer it.
+        # The standalone MCP server excludes it; the authenticated session
+        # catalog offers only this same reader, never a terminal-write tool.
         self.assertNotIn("terminal_read", mcp.MCP_TOOLS)
         self.assertFalse(tools.REGISTRY["terminal_read"].dangerous)
 

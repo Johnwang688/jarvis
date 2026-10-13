@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2077,7 +2078,8 @@ class Backend(unittest.TestCase):
                              ({"always_ask": ["rm"]}, "always_ask"),
                              ({"cwd": str(self.other)}, "cwd"),
                              ({"cwd": "/"}, "cwd"),
-                             ({"mcp_servers": {"git": {"command": "git-mcp"}}}, "mcp_servers")):
+                             ({"mcp_servers": {"git": {"command": "git-mcp"}}}, "mcp_servers"),
+                             ({"mcp_servers": {"jarvis": {"command": "untrusted-relay"}}}, "mcp_servers")):
             with self.subTest(brief=brief):
                 error = self.request("POST", "/threads", {"project_id": project.id, "role": "chat",
                                                           "provider": "claude", "brief": brief}, status=400)
@@ -2085,12 +2087,31 @@ class Backend(unittest.TestCase):
         self.assertEqual({t.id for t in self.stores.threads.list()}, before)
         self.assertEqual(fakes[P.CLAUDE].opened, [])
         # The project's own values, or stricter ones, are accepted.
-        self.request("POST", "/threads", {"project_id": project.id, "role": "chat", "provider": "claude",
+        created = self.request("POST", "/threads", {"project_id": project.id, "role": "chat", "provider": "claude",
                                           "brief": {"cwd": str(self.project_root), "profile": "ask",
                                                     "always_ask": ["make deploy"]}}, status=201)
         _, brief = fakes[P.CLAUDE].opened[-1]
-        self.assertEqual((brief.cwd, brief.profile, brief.always_ask, brief.mcp_servers),
-                         (str(self.project_root), PermissionProfile.ASK, ["make deploy"], {}))
+        tid = created["id"]
+        self.assertEqual((brief.cwd, brief.profile, brief.always_ask),
+                         (str(self.project_root), PermissionProfile.ASK, ["make deploy"]))
+        # The caller supplies no servers; the daemon's run copy adds only its
+        # authenticated session relay. Never print that carrier in assertions.
+        from jarvis.v2 import bridge
+        self.assertEqual(set(brief.mcp_servers), {"jarvis"})
+        entry = brief.mcp_servers["jarvis"]
+        self.assertEqual(set(entry), {"command", "args", "env"})
+        self.assertEqual(entry["command"], str(Path(sys.executable).absolute()))
+        self.assertEqual(entry["args"], ["-m", bridge.RELAY_MODULE])
+        env = entry["env"]
+        self.assertEqual(set(env), {bridge.TOKEN_VARIABLE, bridge.PORT_VARIABLE, "PYTHONPATH"})
+        self.assertEqual(env[bridge.PORT_VARIABLE], str(self.daemon.port))
+        self.assertEqual(env["PYTHONPATH"], str(config.REPO_ROOT.resolve()))
+        caller = self.daemon.callers.resolve(env[bridge.TOKEN_VARIABLE])
+        self.assertTrue(caller is not None, "daemon relay must have a live caller")
+        self.assertTrue(caller.session is self.daemon._sessions[tid], "caller must bind this exact session")
+        self.assertEqual((caller.thread_id, caller.provider), (tid, "claude"))
+        saved = json.loads(self.brief_bytes(tid))
+        self.assertTrue(saved.get("mcp_servers") == {}, "relay credentials must stay out of the saved brief")
         self.request("POST", "/threads", {"project_id": project.id, "role": "chat", "provider": "fast",
                                           "brief": {"always_ask": ["make deploy", "git push"]}}, status=201)
         self.assertEqual(fakes[P.FAST].opened[-1][1].always_ask, ["make deploy", "git push"])

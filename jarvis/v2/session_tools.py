@@ -2,22 +2,22 @@
 
 The daemon's per-session list (plan `docs/plans/2026-10-10-terminal-read-mcp-
 plan.md` §2, decisions D-3). A tool named here is offered to an owner's chat
-thread on the providers it names, and only there: task workers, reviewers,
-orchestrators and sub-agents never get a jarvis server or a token (§1.2). A
+thread on the providers it names. Task workers, reviewers and orchestrators
+receive no session server or token (§1.2). Claude CLI subagents may use the
+parent's D-3 tools; the foreground hook refuses terminal_read for them. A
 listed tool runs **in the daemon**, through the bridge's single
 `tools.dispatch` (`bridge.py`), never in the jarvis-mcp process the CLI starts.
 
-**It ships empty.** WP-1 is plumbing with no behaviour change: with nothing
-here, `for_provider` is empty for every provider, so the daemon mints no token
-and no session gets a jarvis server. WP-2 adds `terminal_read` (and the D-3
-tools); a test registers its own entries with `register` and removes them.
+WP-2 offers Claude owner chats `terminal_read` and the D-3 catalog, filtered
+by installed tool availability. Codex stays empty until WP-3. Tests may
+register temporary entries without widening the production catalog.
 
 The flags, each read by exactly one place:
 
 - `read_only` — the tool changes nothing. Claude's `PreToolUse` hook returns
-  an explicit allow for it and `permissions.build_permit`'s `jarvis-tool`
-  layer ALLOWs it without asking anyone (an always-ask rule naming it still
-  asks); Codex's config marks it `approval_mode = "approve"` and the relay's
+  an explicit delegation allow for it and `permissions.build_permit`'s
+  `jarvis-tool` layer ALLOWs it without asking anyone (an always-ask rule
+  naming it still asks); Codex's config marks it `approval_mode = "approve"` and the relay's
   listing marks it `readOnlyHint`.
 - `foreground_only` — the conversation itself may call it, a sub-agent may
   not. Claude's hook refuses it when the hook input carries `agent_id`,
@@ -29,7 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .model import ProviderName
+from .model import ProviderName, Role
+from .mcp_catalog import MCP_TOOLS, MCP_READ_ONLY
 
 # What a Claude tool name looks like for a tool of the jarvis server:
 # `mcp__<server>__<tool>`.
@@ -46,12 +47,18 @@ class SessionTool:
     desk_only: bool = False
 
 
-# Empty in production (WP-1). Keyed by registry name.
-SESSION_TOOLS: dict[str, SessionTool] = {}
+# WP-2 enables owner Claude chats only. Codex remains empty until WP-3.
+_CLAUDE = frozenset({ProviderName.CLAUDE.value})
+SESSION_TOOLS: dict[str, SessionTool] = {
+    name: SessionTool(name, providers=_CLAUDE, read_only=name in MCP_READ_ONLY)
+    for name in MCP_TOOLS
+}
+SESSION_TOOLS["terminal_read"] = SessionTool(
+    "terminal_read", providers=_CLAUDE, read_only=True, foreground_only=True, desk_only=True)
 
 
 def register(entry: SessionTool) -> SessionTool:
-    """Offer `entry` to chat sessions. For WP-2 and for tests."""
+    """Offer `entry` to chat sessions. Primarily for isolated test probes."""
     if not isinstance(entry, SessionTool) or not entry.name:
         raise ValueError("a session tool needs a name")
     bad = set(entry.providers) - {ProviderName.CLAUDE.value, ProviderName.CODEX.value}
@@ -81,6 +88,7 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
+    from .tools import terminal_read, schedules  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:
@@ -109,3 +117,11 @@ def read_only_claude_names() -> frozenset[str]:
     the names `build_permit`'s `jarvis-tool` layer ALLOWs."""
     return frozenset(CLAUDE_PREFIX + entry.name
                      for entry in for_provider(ProviderName.CLAUDE) if entry.read_only)
+
+
+def claude_session_tool(brief, name: str) -> SessionTool | None:
+    """An exact offered tool on this owner's session server, never a worker's."""
+    if (brief is None or brief.role != Role.CHAT or brief.task_id is not None
+            or "jarvis" not in brief.mcp_servers):
+        return None
+    return claude_tool(name)

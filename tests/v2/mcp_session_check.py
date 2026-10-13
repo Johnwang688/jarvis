@@ -17,8 +17,8 @@ Plan `docs/plans/2026-10-10-terminal-read-mcp-plan.md` §1, §2, §4 and §7.1,
 
 Two probe tools are registered for the run and offered as session tools:
 `mcp_probe_read` (read-only, foreground-only) and `mcp_probe_send`
-(`dangerous=True`). Production ships `session_tools.SESSION_TOOLS` empty,
-which a check below asserts in a fresh interpreter.
+(`dangerous=True`). These plumbing checks isolate their two-entry catalog;
+a fresh interpreter verifies the production Claude-only WP-2 catalog.
 
 Run: PYTHONPATH=. .venv/bin/python tests/v2/mcp_session_check.py
 """
@@ -87,7 +87,13 @@ def mcp_probe_send(to: Annotated[str, "Who to send to"]) -> str:
     return f"sent to {to}"
 
 
+_saved_catalog = None
+
+
 def setUpModule():
+    global _saved_catalog
+    _saved_catalog = dict(session_tools.SESSION_TOOLS)
+    session_tools.SESSION_TOOLS.clear()
     tools.tool(mcp_probe_read)
     tools.tool(dangerous=True)(mcp_probe_send)
     session_tools.register(session_tools.SessionTool(READ, read_only=True, foreground_only=True))
@@ -98,6 +104,7 @@ def tearDownModule():
     for name in (READ, SEND):
         session_tools.unregister(name)
         tools.REGISTRY.pop(name, None)
+    session_tools.SESSION_TOOLS.update(_saved_catalog)
 
 
 def patch_config(stack: ExitStack, root: Path) -> None:
@@ -822,14 +829,18 @@ class BridgeChecks(DaemonHarness):
         finally:
             session_tools.SESSION_TOOLS.update(saved)
 
-    def test_session_tools_ship_empty(self):
+    def test_production_catalog_is_claude_only(self):
         out = subprocess.run(
             [sys.executable, "-c", "from jarvis.v2 import session_tools as s; "
-                                   "print(len(s.SESSION_TOOLS), len(s.for_provider('claude')), "
-                                   "len(s.for_provider('codex')))"],
+                                   "from jarvis.v2.mcp_catalog import MCP_TOOLS; "
+                                   "assert set(s.SESSION_TOOLS) == MCP_TOOLS | {'terminal_read'}; "
+                                   "assert all(t.providers == frozenset({'claude'}) for t in s.SESSION_TOOLS.values()); "
+                                   "assert any(t.name == 'terminal_read' for t in s.for_provider('claude')); "
+                                   "assert not s.for_provider('codex'); print('ok')"],
             cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)},
             capture_output=True, text=True, timeout=60)
-        self.assertEqual(out.stdout.split(), ["0", "0", "0"], out.stderr)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "ok", out.stderr)
 
 
 # --- 7.2: task workers never get it -----------------------------------------------
@@ -907,6 +918,7 @@ class GateChecks(unittest.TestCase):
 
     def brief(self, profile, **kw):
         kw.setdefault("role", Role.CHAT)
+        kw.setdefault("mcp_servers", {"jarvis": {"command": "/bin/true"}})
         return Brief(cwd=str(self.cwd), profile=profile, **kw)
 
     def decisions(self):
@@ -940,7 +952,7 @@ class GateChecks(unittest.TestCase):
         cases = [
             ("a task's brief", self.brief(ask, role=Role.IMPLEMENTER, task_id="aaaa1111"), READ),
             ("a chat with a task", self.brief(ask, task_id="aaaa1111"), READ),
-            ("a tool that writes", self.brief(ask), SEND),
+            ("no session server", self.brief(ask, mcp_servers={}), READ),
             ("not a session tool", self.brief(ask), "get_datetime"),
         ]
         for label, brief, tool in cases:
@@ -1142,7 +1154,8 @@ class ClaudeProviderChecks(unittest.TestCase):
         for profile in (PermissionProfile.AUTO, PermissionProfile.ASK):
             with self.subTest(profile=profile.value):
                 asker = Asker(Decision.DENY)
-                brief = Brief(Role.CHAT, str(self.cwd), profile=profile)
+                brief = Brief(Role.CHAT, str(self.cwd), profile=profile,
+                              mcp_servers={"jarvis": {"command": "/bin/true"}})
                 permit, calls = self.real_permit(brief, asker)
                 handle, _ = self.start(profile, permit, thread_id=f"mcpcl{profile.value[:3]}")
                 out = self.hook(handle, name)
@@ -1152,11 +1165,9 @@ class ClaudeProviderChecks(unittest.TestCase):
                 self.assertEqual(len(calls), 1, "permit decided it (its jarvis-tool layer)")
                 self.assertEqual(asker.seen, [], "nobody was asked")
 
-    def test_the_explicit_allow_is_exactly_the_read_only_tools(self):
-        """Only a read-only session tool gets the hook's explicit allow: a
-        tool that writes, ALLOWed by `permit`, keeps today's behaviour — `{}`
-        under AUTO (the classifier still decides), "approved by Jarvis" under
-        ASK."""
+    def test_the_explicit_allow_delegates_only_offered_session_tools(self):
+        """The hook delegates offered tools; execution still goes through the
+        bridge, which separately asks the owner for dangerous tools."""
         offered = session_tools.for_provider(CLAUDE)
         self.assertEqual({t.name for t in offered}, {READ, SEND})
         for profile in (PermissionProfile.AUTO, PermissionProfile.ASK):
@@ -1168,14 +1179,13 @@ class ClaudeProviderChecks(unittest.TestCase):
                     reason = (out.get("hookSpecificOutput") or {}).get("permissionDecisionReason")
                     if tool.read_only:
                         self.assertEqual(reason, "a read-only Jarvis tool")
-                    elif profile is PermissionProfile.AUTO:
-                        self.assertEqual(out, {}, "the classifier still decides a writing tool")
                     else:
-                        self.assertEqual(reason, "approved by Jarvis")
+                        self.assertEqual(reason, "the daemon checks this Jarvis tool")
 
     def test_the_hook_refuses_a_foreground_tool_for_a_sub_agent_without_permit(self):
         asker = Asker(Decision.ALLOW)
-        brief = Brief(Role.CHAT, str(self.cwd))
+        brief = Brief(Role.CHAT, str(self.cwd),
+                      mcp_servers={"jarvis": {"command": "/bin/true"}})
         permit, calls = self.real_permit(brief, asker)
         handle, _ = self.start(permit=permit)
         out = self.hook(handle, session_tools.CLAUDE_PREFIX + READ, agent_id="sub-1")
@@ -1457,7 +1467,8 @@ class RelayChecks(unittest.TestCase):
 
     def test_the_new_modules_are_self_protected(self):
         from jarvis.tools.files import SELF_PROTECTED
-        for name in ("callers.py", "bridge.py", "session_tools.py", "mcp_session.py"):
+        for name in ("callers.py", "bridge.py", "session_tools.py", "mcp_session.py",
+                     "desk.py", "mcp_catalog.py"):
             self.assertIn(f"jarvis/v2/{name}", SELF_PROTECTED)
 
 

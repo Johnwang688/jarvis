@@ -36,6 +36,7 @@ from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
                        PermissionCallback, Provider, SessionHandle, SessionLost, SteerRefused,
                        Usage, UserMessage)
 from .stores import ProjectArchived, Stores, StoreError, _validate, _write_bytes
+from .desk import DeskState, desk_message
 from . import running_cost
 from . import worktrees
 
@@ -206,6 +207,7 @@ class _Session:
     # (`callers.CallerTokens`); never the token itself.
     caller_key: str | None = None
     origin_tag: str | None = field(default=None, repr=False)
+    desk: DeskState = field(default_factory=DeskState, repr=False)
 
 
 class Daemon:
@@ -1066,17 +1068,27 @@ class Daemon:
             # ends meanwhile hands it back (`undelivered`) by identity.
             item = _Queued(message, data, uuid.uuid4().hex, session.turn_id or "")
             session.steered.append(item)
+            reservation = (session.desk.reserve()
+                           if not desk_message(session.brief, message) else None)
             self._log_user(session.thread, item, steer=True)
         try:
             steer(handle, message)
         except SteerRefused as exc:
             fallback, reason = exc.fallback, str(exc)
+            if exc.before_write and reservation is not None:
+                with self._lock:
+                    if self._sessions.get(thread_id) is session:
+                        session.desk.refused_before_write(reservation)
         except Exception as exc:  # noqa: BLE001 — a failed steer queues, never errors
             LOG.warning("Steering thread %s failed (%s)", thread_id, type(exc).__name__)
             fallback, reason = "queue", type(exc).__name__
         else:
             return {"status": "steered", "mode": "native", "turn_id": item.turn_id,
                     "message_id": item.message_id}
+        finally:
+            if reservation is not None:
+                with self._lock:
+                    session.desk.settled(reservation)
         interrupt, drain = False, False
         with self._lock:
             session.steered = [other for other in session.steered if other is not item]
@@ -1099,6 +1111,7 @@ class Daemon:
                 item.message = replace(message, text=INTERRUPTED_NOTE + message.text)
                 item.interrupting = True
                 session.cancelled.set()
+                session.desk.end()
                 interrupt = True
             elif len(waiting) >= QUEUE_MAX:
                 self._drop_waiting(session.thread, "three messages were already waiting", [item])
@@ -1174,6 +1187,7 @@ class Daemon:
         session.steered = []
         session.questions.clear()
         session.turn_id = queued.turn_id if queued is not None else uuid.uuid4().hex
+        session.desk.begin(session.brief, message, session.turn_id)
         worker = threading.Thread(target=self._turn, args=(session, message),
                                   name=f"jarvis-turn-{thread_id}", daemon=True)
         turn_id = session.turn_id
@@ -1486,6 +1500,8 @@ class Daemon:
             except Exception:
                 LOG.exception("Cannot record turn error for %s", session.thread.id)
         finally:
+            with self._lock:
+                session.desk.end()
             # Steered messages the provider took but never delivered (the fast
             # path's final answer came first): they run next, as turns of their
             # own — unless the owner stopped this one.
@@ -1586,6 +1602,7 @@ class Daemon:
             if thread_id in self._interrupting:
                 return {"ok": True}  # this turn's stop is already on its way
             session.cancelled.set()
+            session.desk.end()
             session.owner_stopped = True
             if session.turn_id:
                 session.stopped_turns.append(session.turn_id)
@@ -1624,6 +1641,8 @@ class Daemon:
         # First, before the provider is touched: the session's jarvis-mcp
         # token dies with it (close, archive, delete, a lost session — plan
         # §1.4). The provider's close then removes its carrier.
+        with self._lock:
+            session.desk.end()
         self.callers.revoke(session)
         self._dev_hook("session_closed", session.origin_tag)
         for operation in (session.provider.interrupt, session.provider.close):
@@ -1637,6 +1656,7 @@ class Daemon:
         with self._lock:
             session.closing = True
             session.cancelled.set()
+            session.desk.end()
             worker = session.worker
         cleanup = threading.Thread(target=self._cleanup, args=(session,), daemon=True)
         cleanup.start()
@@ -1691,6 +1711,7 @@ class Daemon:
             for session in sessions:
                 session.closing = True
                 session.cancelled.set()
+                session.desk.end()
                 if session.handle is not None:
                     job = threading.Thread(target=self._cleanup, args=(session,), daemon=True)
                     job.start()

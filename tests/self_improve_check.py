@@ -56,7 +56,8 @@ def guard_checks() -> None:
         path = config.REPO_ROOT / rel
         before = path.read_text(encoding="utf-8")
         tools.dispatch("read_file", json.dumps({"path": str(path)}))
-        anchor = next(ln for ln in before.split("\n") if ln.startswith(("import ", "from ")))
+        # Data-only protected modules need no imports; the edit must match once.
+        anchor = next(ln for ln in before.splitlines() if ln.strip() and before.count(ln) == 1)
         out = tools.dispatch(
             "edit_file",
             json.dumps({"path": str(path), "old_string": anchor, "new_string": "# pwned"}),

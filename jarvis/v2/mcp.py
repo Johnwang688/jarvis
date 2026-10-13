@@ -14,6 +14,7 @@ import sys
 import threading
 
 from jarvis import config, runtime, tools
+from .mcp_catalog import MCP_TOOLS
 from .tools import schedules as _schedules  # noqa: F401  (registers schedule_*)
 from jarvis.tools.secrets import scrub
 
@@ -23,14 +24,7 @@ MCP_TOOL_TIMEOUT = float(os.environ.get("MCP_TOOL_TIMEOUT", "120"))
 if not math.isfinite(MCP_TOOL_TIMEOUT) or MCP_TOOL_TIMEOUT <= 0:
     raise ValueError("MCP_TOOL_TIMEOUT must be a positive finite number of seconds")
 
-MCP_TOOLS = frozenset({
-    "memory_list", "memory_read", "memory_search", "memory_write", "memory_delete",
-    "session_list", "session_read", "session_search", "session_summary",
-    "get_datetime", "gmail_search", "gmail_read", "gmail_send", "discord_dm_owner",
-    "spotify_play", "spotify_status", "spotify_search", "spotify_pause",
-    "cad_status", "cad_find_part",
-    "schedule_create", "schedule_list", "schedule_delete",
-})
+
 _missing = MCP_TOOLS - tools.REGISTRY.keys()
 if _missing:
     raise RuntimeError("MCP_TOOLS names tools that are not registered: " + ", ".join(sorted(_missing)))
