@@ -1642,3 +1642,8 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .voice-diagnostics p { color: var(--text-muted); font-size: 11px; }
 .voice-diagnostic-rows { padding: 0; list-style: none; max-height: 250px; overflow: auto; font: 11px var(--mono); }
 .voice-diagnostic-rows li { border-top: 1px solid var(--border); padding: 6px 0; overflow-wrap: anywhere; }
+
+/* V2: a clip that could not be transcribed, kept for Retry. */
+.stt-retry-row { display: flex; flex-direction: column; gap: 6px; }
+.stt-retry-row + .stt-retry-row { margin-top: 8px; }
+.stt-retry-row .row { gap: 6px; }

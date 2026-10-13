@@ -375,14 +375,17 @@ def _stt_reason(exc: Exception) -> str:
     return "failed after retries" if "attempts" in str(exc) else type(exc).__name__
 
 
-def stt(audio: bytes, mime: str = "audio/webm") -> str:
+def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
+        max_retries: int | None = None) -> str:
     """Transcribe spoken audio to text.
 
     Tries `config.STT_MODEL`, then each of `config.STT_FALLBACK_MODELS`. A
     model whose only provider is down answers `HTTP 404: Provider returned
     404` (parakeet, 2026-10-08), so the fallback is a different provider, not
     a retry. Raises `STTUnavailable` naming each model and its status when
-    none answers.
+    none answers. `timeout` (seconds per attempt) and `max_retries` (attempts
+    per model) override `llm.transcribe`'s defaults; the HUD's dictation route
+    passes tighter ones (config.STT_DICTATION_*).
     """
     if not audio:
         raise ValueError("no audio")
@@ -390,9 +393,14 @@ def stt(audio: bytes, mime: str = "audio/webm") -> str:
     models = [config.STT_MODEL] + [
         m for m in config.STT_FALLBACK_MODELS if m != config.STT_MODEL]
     failures: list[str] = []
+    limits: dict = {}
+    if timeout is not None:
+        limits["timeout"] = timeout
+    if max_retries is not None:
+        limits["max_retries"] = max_retries
     for model in models:
         try:
-            text = llm.transcribe(audio, model=model, filename=f"audio.{ext}", mime=mime)
+            text = llm.transcribe(audio, model=model, filename=f"audio.{ext}", mime=mime, **limits)
         except llm.LLMError as exc:
             if _STT_FINAL.match(str(exc)):
                 raise STTUnavailable(f"speech-to-text refused ({_stt_reason(exc)}): "

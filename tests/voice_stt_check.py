@@ -138,6 +138,50 @@ def main():
     except ValueError:
         ok(True, "empty audio is refused")
 
+    # V2: dictation passes tighter limits through to every model it tries; the
+    # default callers (Discord voice notes) pass none and keep llm's defaults.
+    seen: list[dict] = []
+    saved_t = llm.transcribe
+
+    def limited(audio, model, filename="audio.webm", mime="audio/webm", **kw):
+        seen.append(kw)
+        return "ok"
+
+    llm.transcribe = limited
+    try:
+        voice.stt(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2)
+        voice.stt(b"RIFFaudio", mime="audio/wav")
+    finally:
+        llm.transcribe = saved_t
+    ok(seen == [{"timeout": 20.0, "max_retries": 2}, {}],
+       f"timeout and attempts reach llm.transcribe only when given: {seen!r}")
+    ok(config.STT_DICTATION_TIMEOUT_S <= 20 and config.STT_DICTATION_ATTEMPTS == 2,
+       "the shipped dictation bounds are 20 s and two attempts")
+
+    # llm.transcribe itself: bounded attempts, and no sleep after the last one
+    # (it used to wait 2**n s before raising, so a failure came late).
+    import httpx
+    sleeps: list[float] = []
+    posts: list[float] = []
+
+    class DeadClient:
+        def post(self, *a, timeout=None, **kw):
+            posts.append(timeout)
+            raise httpx.ConnectTimeout("simulated")
+
+    real = (llm._client, llm.time.sleep, config.api_key)
+    llm._client, llm.time.sleep, config.api_key = DeadClient(), sleeps.append, lambda: "sk-dummy-not-a-key"
+    try:
+        try:
+            llm.transcribe(b"x", "m/x", timeout=20.0, max_retries=2)
+            ok(False, "a dead provider raises")
+        except llm.LLMError as exc:
+            ok("after 2 attempts" in str(exc), f"two attempts, named: {exc}")
+    finally:
+        llm._client, llm.time.sleep, config.api_key = real
+    ok(posts == [20.0, 20.0], f"each attempt used the 20 s timeout: {posts!r}")
+    ok(sleeps == [1], f"one backoff between two attempts and none after the last: {sleeps!r}")
+
     print()
     if FAILURES:
         print(f"{len(FAILURES)} of {CHECKS} voice stt checks FAILED")
