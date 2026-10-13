@@ -188,10 +188,15 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     if(!allowed(pane))return;
     const oldPane=now.current.view.ws.panes[pane-1];
     const before=oldPane.browser?.active;
-    const oldRemote=oldPane.browser?.tabs.find(t=>t.remoteTabId)?.remoteTabId;
-    if(selectedProfile(pane)!==value && oldRemote) {
-      await browserApi.write("/tabs/"+oldRemote+"/sound",{on:false});
-      if(!allowed(pane)||now.current.view.ws.panes[pane-1]!==oldPane)return;
+    const oldRemotes=[...new Set(oldPane.browser?.tabs.map(t=>t.remoteTabId).filter((id):id is string=>!!id)??[])];
+    if(selectedProfile(pane)!==value) {
+      for(const oldRemote of oldRemotes) {
+        let muted=false;
+        try {await browserApi.write("/tabs/"+oldRemote+"/sound",{on:false});muted=true;}
+        catch(e) {if(!(e instanceof ApiError)||e.status!==404)throw e;}
+        if(!allowed(pane)||now.current.view.ws.panes[pane-1]!==oldPane)return;
+        if(muted)break;
+      }
     }
     const key=before?tabKey(pane,before):null;
     if(key)transitions.current.add(key);
