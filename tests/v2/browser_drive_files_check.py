@@ -17,20 +17,14 @@ class Uploads(unittest.TestCase):
         self.browser=self.root/'browser';patcher=patch.object(config,'BROWSER_DIR',self.browser)
         patcher.start();self.addCleanup(patcher.stop)
 
-    def test_exact_bytes_are_private_and_removed_after_success_or_failure(self):
-        for fail in (False,True):
-            approved=F.judge_upload('report.txt',str(self.project))
-            try:
-                with F.stage_upload(approved,'report.txt',str(self.project),lambda:None) as name:
-                    staged=Path(name)
-                    self.assertNotEqual(staged,self.file);self.assertEqual(staged.read_bytes(),b'owner-approved-file')
-                    self.assertEqual(stat.S_IMODE(staged.stat().st_mode),0o600)
-                    self.assertEqual(stat.S_IMODE(staged.parent.stat().st_mode),0o700)
-                    if fail:raise RuntimeError('scripted stop')
-            except RuntimeError:
-                self.assertTrue(fail)
-            self.assertFalse(staged.exists());self.assertFalse(staged.parent.exists())
-            self.assertEqual(self.file.read_bytes(),b'owner-approved-file')
+    def test_exact_bytes_are_immutable_private_and_need_no_disk_copy(self):
+        approved=F.judge_upload('report.txt',str(self.project))
+        loaded=F.load_upload(approved,'report.txt',str(self.project),lambda:None)
+        self.assertIsInstance(loaded.data,bytes);self.assertEqual(loaded.data,b'owner-approved-file')
+        self.assertEqual(loaded.name,'report.txt');self.assertNotIn('owner-approved',repr(loaded))
+        self.file.unlink()
+        self.assertEqual(loaded.data,b'owner-approved-file')
+        self.assertFalse(self.browser.exists())
 
     def test_post_yes_replacement_same_inode_rewrite_and_hardlink_refuse(self):
         for mode in ('replace','rewrite','hardlink','symlink'):
@@ -41,7 +35,7 @@ class Uploads(unittest.TestCase):
             elif mode=='hardlink':os.link(self.file,self.project/'alias.txt')
             else:self.file.unlink();self.file.symlink_to(other)
             with self.subTest(mode=mode),self.assertRaises(LookRefused):
-                with F.stage_upload(approved,'report.txt',str(self.project),lambda:None):self.fail('unsafe upload reached Chrome')
+                F.load_upload(approved,'report.txt',str(self.project),lambda:None)
             self.assertFalse((self.browser/'drive-staging').exists())
             self.file.unlink()
             alias=self.project/'alias.txt'
@@ -56,7 +50,7 @@ class Uploads(unittest.TestCase):
                 changed=True;self.file.write_bytes(b'changed-during-copy')
             return out
         with patch.object(files.os,'read',side_effect=read),self.assertRaises(LookRefused):
-            with F.stage_upload(approved,'report.txt',str(self.project),lambda:None):self.fail('changed bytes used')
+            F.load_upload(approved,'report.txt',str(self.project),lambda:None)
         self.assertTrue(changed, 'the concurrent write fixture must actually modify the opened source')
         self.assertFalse(self.browser.exists())
 
@@ -72,15 +66,15 @@ class Uploads(unittest.TestCase):
             return result
         with patch.object(F,'upload_refusal',side_effect=judge),patch.object(files.os,'fstat',return_value=approved.info):
             with self.assertRaisesRegex(LookRefused,'contents changed'):
-                with F.stage_upload(approved,'report.txt',str(self.project),lambda:None):self.fail('reused content approval')
+                F.load_upload(approved,'report.txt',str(self.project),lambda:None)
         self.assertFalse(self.browser.exists())
 
-    def test_approved_digest_binds_the_staged_buffer_and_never_appears_in_repr(self):
+    def test_approved_digest_binds_the_returned_buffer_and_never_appears_in_repr(self):
         approved=F.judge_upload('report.txt',str(self.project))
         self.assertNotIn(approved.digest.hex(),repr(approved))
-        with F.stage_upload(approved,'report.txt',str(self.project),lambda:None) as name:
-            import hashlib
-            self.assertEqual(hashlib.sha256(Path(name).read_bytes()).digest(),approved.digest)
+        loaded=F.load_upload(approved,'report.txt',str(self.project),lambda:None)
+        import hashlib
+        self.assertEqual(hashlib.sha256(loaded.data).digest(),approved.digest)
 
     def test_stop_after_read_creates_no_private_copy(self):
         approved=F.judge_upload('report.txt',str(self.project));calls=0
@@ -89,7 +83,7 @@ class Uploads(unittest.TestCase):
             calls+=1
             if calls==2:raise LookRefused('stopped')
         with self.assertRaises(LookRefused):
-            with F.stage_upload(approved,'report.txt',str(self.project),stopped):self.fail('stopped upload used')
+            F.load_upload(approved,'report.txt',str(self.project),stopped)
         self.assertFalse(self.browser.exists())
 
     def test_hidden_and_outside_project_sources_refuse_before_copy(self):
@@ -99,12 +93,23 @@ class Uploads(unittest.TestCase):
             with self.assertRaises(LookRefused):F.judge_upload(name,str(self.project))
         self.assertFalse(self.browser.exists())
 
-    def test_replaced_staging_file_is_retained_as_unfinished_cleanup(self):
-        approved=F.judge_upload('report.txt',str(self.project))
-        with self.assertRaisesRegex(LookRefused,'cleanup'):
-            with F.stage_upload(approved,'report.txt',str(self.project),lambda:None) as name:
-                staged=Path(name);other=staged.parent/'other';other.write_bytes(b'not-the-staged-inode');os.replace(other,staged)
-        self.assertEqual(staged.read_bytes(),b'not-the-staged-inode')
+    def test_staging_parent_or_ancestor_swap_cannot_redirect_an_upload_write(self):
+        for swap_ancestor in (False,True):
+            with self.subTest(ancestor=swap_ancestor):
+                outside=self.root/('outside-'+str(swap_ancestor));outside.mkdir()
+                parent=self.root/('state-'+str(swap_ancestor));parent.mkdir()
+                browser=parent/'browser';browser.mkdir();(browser/'drive-staging').mkdir()
+                approved=F.judge_upload('report.txt',str(self.project));calls=0
+                def current():
+                    nonlocal calls
+                    calls+=1
+                    if calls==2:
+                        target=parent if swap_ancestor else browser/'drive-staging'
+                        target.rename(target.with_name(target.name+'-original'));target.symlink_to(outside,target_is_directory=True)
+                with patch.object(config,'BROWSER_DIR',browser):
+                    loaded=F.load_upload(approved,'report.txt',str(self.project),current)
+                self.assertEqual(loaded.data,b'owner-approved-file')
+                self.assertEqual(list(outside.iterdir()),[])
 
     def test_startup_sweep_only_private_single_file_folders(self):
         from jarvis.v2.browser.host import secure_dir
@@ -116,15 +121,31 @@ class Uploads(unittest.TestCase):
         self.assertFalse(owned.exists());self.assertTrue((unknown/'link').is_symlink())
         self.assertTrue((multiple/'one').exists());self.assertEqual(self.file.read_bytes(),b'owner-approved-file')
 
-    def test_cancel_during_private_copy_removes_only_staging(self):
-        approved=F.judge_upload('report.txt',str(self.project));calls=0
-        def current():
-            nonlocal calls
-            calls+=1
-            if calls==3:raise LookRefused('stopped while copying')
-        with self.assertRaisesRegex(LookRefused,'stopped'):
-            with F.stage_upload(approved,'report.txt',str(self.project),current):self.fail('copy continued after stop')
-        self.assertEqual(list((self.browser/'drive-staging').iterdir()),[])
-        self.assertEqual(self.file.read_bytes(),b'owner-approved-file')
+    def test_sweep_refuses_ancestor_symlinks_and_swaps_after_open(self):
+        from jarvis.v2.browser.host import secure_dir
+        for during in (False,True):
+            with self.subTest(during=during):
+                parent=secure_dir(self.root/('state-'+str(during)));browser=secure_dir(parent/'browser')
+                root=secure_dir(browser/'drive-staging');folder=secure_dir(root/('a'*32))
+                target=folder/'report.txt';target.write_bytes(b'preserve-on-race');target.chmod(0o600)
+                outside=secure_dir(self.root/('elsewhere-'+str(during)))
+                outside_browser=secure_dir(outside/'browser');outside_root=secure_dir(outside_browser/'drive-staging')
+                outside_folder=secure_dir(outside_root/('a'*32));foreign=outside_folder/'report.txt'
+                foreign.write_bytes(b'foreign');foreign.chmod(0o600)
+                old=parent.with_name(parent.name+'-old');changed=False
+                def swap():
+                    nonlocal changed
+                    if not changed:parent.rename(old);parent.symlink_to(outside,target_is_directory=True);changed=True
+                original=F.os.scandir
+                def scan(fd):
+                    result=original(fd)
+                    if during and isinstance(fd,int):swap()
+                    return result
+                if not during:swap()
+                with patch.object(config,'BROWSER_DIR',browser),patch.object(F.os,'scandir',side_effect=scan):
+                    self.assertFalse(F.sweep_staging())
+                self.assertEqual(foreign.read_bytes(),b'foreign')
+                self.assertEqual((old/'browser/drive-staging'/('a'*32)/'report.txt').read_bytes(),b'preserve-on-race')
+
 
 if __name__=='__main__':unittest.main()

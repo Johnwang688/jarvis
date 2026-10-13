@@ -6,7 +6,7 @@ injection; the public pane registry continues refusing drive:true.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import math
@@ -67,6 +67,8 @@ class Action:
 class ActResult:
     outcome: str
     text: str
+    ref_snapshot: object = field(default=None,repr=False,compare=False)
+    ref_scan: object = field(default=None,repr=False,compare=False)
 
 
 @dataclass
@@ -81,6 +83,7 @@ class Guard:
     hold_count: int
     stop: object
     desk: object
+    download: object = None
 
     def __call__(self, *, own_card=None, navigation=False):
         return self.service._current(self,own_card=own_card,navigation=navigation)
@@ -92,6 +95,8 @@ class BrowserDrive:
         self.enabled=enabled
         self.state=state if state is not None else DriveState()
         self.closed=False
+        from .drive_downloads import Downloads
+        self.downloads=Downloads(self)
 
     def _turn(self):
         if self.closed or self.enabled() is not True:raise LookRefused(OFF)
@@ -273,15 +278,27 @@ class BrowserDrive:
             refreshed=self.daemon.browser.prepare_action(snapshot,action,capability,action_id,forms,guard,
                                                           prepared=prepared)
             if refreshed.fingerprint!=prepared.fingerprint:raise LookRefused(CHANGED_ACTION)
-            def execute(upload_path=None):
+            def execute(upload_bytes=None):
                 guard()
                 self.state.charge_action(lease)
                 self.daemon.browser.drive_notice(snapshot.tab_id,turn.thread_id,action_id,action.action,"running",refreshed,action.text)
-                return self.daemon.browser.execute_action(snapshot,action,refreshed,action_id,forms,guard,upload_path=upload_path)
+                token=self.downloads.begin(snapshot.tab_id,action_id,guard,refreshed)
+                guard.download=token
+                try:
+                    result=self.daemon.browser.execute_action(snapshot,action,refreshed,action_id,forms,guard,upload_bytes=upload_bytes)
+                    self.daemon.browser.wait_action_downloads(token)
+                    notices=self.downloads.review(token)
+                    if notices:result=replace(result,text=result.text+"\n"+"\n".join(notices))
+                    if result.outcome=="acted" and result.ref_snapshot is not None:
+                        fresh,_=guard(navigation=True)
+                        if fresh!=result.ref_snapshot:raise LookRefused(CHANGED_ACTION)
+                        scan=result.ref_scan
+                        self.state.publish(turn,fresh,scan["serial"],[row["ref"] for row in scan["refs"]])
+                    return result
+                finally:self.downloads.end(token)
             if upload is not None:
-                from .drive_files import stage_upload
-                with stage_upload(upload,action.file,turn.project_root,guard) as staged:
-                    result=execute(staged)
+                from .drive_files import load_upload
+                result=execute(load_upload(upload,action.file,turn.project_root,guard))
             else:result=execute()
             outcome=result.outcome
             return result
@@ -308,7 +325,7 @@ class BrowserDrive:
 
     def stop(self):
         global _installed
-        self.closed=True;self.state.stop()
+        self.closed=True;self.state.stop();self.downloads.stop()
         with _installed_lock:
             if _installed is self:_installed=None
 

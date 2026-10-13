@@ -3,6 +3,7 @@ from typing import Annotated
 from jarvis import runtime
 from jarvis.tools import EXPLICIT_ONLY, PRIVATE_RESULT, tool
 from ..browser.drive import act_for_tool
+from ..browser.drive_state import mark_attempt
 
 
 @tool
@@ -24,6 +25,7 @@ def hud_browser_act(
     """
     if not runtime.at_desk() or runtime.depth()!=0:
         return "Refused: Browser driving requires the owner's HUD chat."
+    mark_attempt(pane)
     result=act_for_tool(action,pane,target,text,file)
     prefix={"acted":"Acted: ","refused":"Refused: ","asked":"Asked: ","stopped":"Stopped: "}[result.outcome]
     return prefix+result.text

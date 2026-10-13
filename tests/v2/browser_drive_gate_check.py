@@ -90,6 +90,22 @@ class Gate(unittest.TestCase):
         self.registry.resolve.return_value=self.snap;self.registry.still_current.return_value=False
         self.refused_without_io()
 
+    def test_source_readability_is_checked_even_with_a_current_valid_capability(self):
+        from jarvis.v2.browser.panes import ResolvedSource
+        self.snap=replace(self.snap,source=ResolvedSource('terminal',terminal_id='source-terminal'))
+        self.registry.resolve.return_value=self.snap
+        self.service.state.publish(self.turn,self.snap,'a'*32,['e1'])
+        self.daemon.terminals.readable_source.return_value=False
+        self.refused_without_io()
+
+    def test_unreferenced_navigation_still_requires_drive_permission_and_visibility(self):
+        for snap in (replace(self.snap,drive=False),replace(self.snap,see=False),replace(self.snap,mode='direct'),
+                     replace(self.snap,drawn=False),replace(self.snap,covered=True)):
+            self.registry.resolve.return_value=snap
+            with self.subTest(snapshot=snap):
+                self.assertEqual(self.action('navigate',text=self.snap.url).outcome,'refused')
+                self.host.prepare_action.assert_not_called();self.judge.assert_not_called()
+
     def test_owner_quiet_exact_boundary_pause_socket_and_cards(self):
         for key,value in (("paused",True),("shown",False),("visible",False),("owner_quiet_s",4.999),
                           ("owner_quiet_s",float("nan")),("input_serial",None),("held",True),("depressed",True),("input_busy",True)):

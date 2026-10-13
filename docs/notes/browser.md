@@ -1191,3 +1191,85 @@ Direct capture remains unverified on this host. The real app-mode capability
 probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels;
 synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
 “Open this in Remote to annotate” and converts only on that second owner gesture.
+
+
+## BR9b dormant Browser action backend (2026-10-13)
+
+`hud_browser_act` is explicit-only and serial in the fast path, with typed click,
+type, press, scroll, select, upload, navigate/back/forward operations. Production
+`_shipping_enabled()` unconditionally returns false; no environment flag, owner
+route or profile setting enables it. The checkpoint's global OFF decision wins.
+This is implemented infrastructure exercised with a fixture-only policy injection,
+not evidence that production driving, BR9c UI or BR9d live model drills work.
+
+A private turn scope binds the actual fast caller, original owner words, thread,
+turn, project and strict flag. Only a successful presented Remote look publishes
+refs, scoped to that exact page/document and caller. Direct/owner captures do not.
+Every action needs live desk/depth zero, non-strict uncancelled session, see+drive,
+drawn uncovered Remote binding, readable terminal provenance, current refs where
+required, attached visible owner socket, no held/paused/depressed input, and five
+seconds without owner input. Budgets are 40 judged actions/turn and 200 actions/tab
+per rolling hour. The same tab cannot be driven concurrently; cancellation retires
+its reservation but holds it through actual in-flight CDP settlement and cleanup.
+No navigation creates a local-port lease. Post-input reconciliation pins physical
+page, pane/window/source/profile/permission identity; only URL/document generation
+may advance. The eight-step fast-path ending reports the pane and asks the owner
+to say "go on"; it does not automatically create a task or reset caller scope.
+
+BR9a H1 refusals run before the model. Its stricter static rules/floors remain;
+uncertain/sensitive actions ask the owner even if the configured browser review
+model says safe. Private cards expire after 120 seconds, cannot create an Always
+rule, and accept ALLOW only from the authenticated owner HUD route. Public bus,
+transcript and audit retain fixed summaries and digests, never command/typed text,
+URL, file path, page labels or model reasons. The owner detail includes the exact
+command and selected text plus fixed action/category, bounded host/path/target,
+and page/document identity. Current Chrome lacks proven stream capture identity,
+so BR9c's separately accepted fallback is Preview unavailable/no target outline.
+
+Full raw bounded facts and credential checks precede truncation. Isolated-world
+pins retain the exact DOM node, never field values. Pointer press AND release
+hit-test the original dispatch coordinates; an inserted overlay stops the release.
+Text chunks recheck focus/type and every event rechecks the gate/fingerprint.
+Select assignment, input and change are separate awaited guarded operations.
+A handler replacing or sensitizing the control stops later events. Cancellation
+waits for each already dispatched event to settle, sends no subsequent event, and
+reports truthful partial input; neutral mouse cleanup never manufactures a click.
+
+Uploads supersede the old proposed filesystem private-copy mechanism above.
+H8 judges one permitted project file; before review, a bounded stable no-follow
+read records identity and a content digest. After yes, path, metadata and digest
+must match the exact stable immutable buffer sent to Chrome. There are no new
+staging-tree writes or lazy path references. A fixed isolated-world helper receives
+at most 1 MiB of base64 per CDP message, uses bounded Uint8Array storage, then
+creates a byte-backed File (50 MiB cap). Assignment/input/change are separately
+awaited with exact-node, type, enabled, directory and gate checks. A later source
+edit/deletion cannot change submission bytes. Old staging-remnant recovery walks
+and pins every ancestor with directory descriptors, never follows symlinks, and
+only deletes bounded private one-file remnants; unknown/replaced entries remain
+and close the service. No content or digest goes to the bus/log. Owner chooser
+uploads retain their existing route and behavior.
+
+Agent-caused downloads retain at most eight URL-digest/MIME response entries and
+four downloads per action, with no headers or navigation history. Unknown/overflow
+or late attribution fails closed. Every such save writes a fixed private hold marker
+before file bytes, so an owner GET cannot race classification. A confidently
+attributed executable name/magic/MIME gets one private release card (not an agent
+`release_download` operation). Approval rechecks exact identity+digest of the
+buffer served from a sealed anonymous descriptor; mutable disk cannot change the
+response. Release never executes a file. Denial/stop deletes only the exact file;
+replacement or cleanup failure stays held. Content and hashes are not persisted.
+
+A conservatively tainted tab stays tainted until closure, even after later owner
+input. Thus a later owner download in that tab can remain held. There is no manual
+release endpoint for ambiguous/late files: the current limit is owner deletion and
+reopening a fresh owner tab for a new download. Untouched owner tabs retain ordinary
+behavior. Restart forgets all memory-only release grants, including ordinary agent
+files; their persistent marker keeps them held. Files over the 50 MiB release cap
+stay held. Owner download/delete UI remains the only applicable existing control.
+
+New SELF_PROTECTED modules: browser/drive.py, drive_state.py, drive_scan.py,
+drive_execute.py, drive_files.py, drive_downloads.py (under jarvis/v2/) and
+jarvis/v2/tools/hud_browser_act.py, in addition to act_rules.py and act_review.py.
+They enforce OFF, caller/turn ownership, credentials, private approval, actual input
+and exact-file release. Only the owner may change these gate files; runtime.py and
+toolgroups.py retain the owner's existing non-protected decision.

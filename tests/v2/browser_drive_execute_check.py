@@ -1,5 +1,6 @@
 """Repeated cancellation must settle dispatched input and cleanup first."""
 import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock,Mock,patch
@@ -15,7 +16,7 @@ class Cancellation(unittest.IsolatedAsyncioTestCase):
         snap=pane();prepared=replace(prepare_result(row(),"e1",()),focused_target=True)
         tab=SimpleNamespace(input_task=None,dialogs=[],pressed={})
         host=SimpleNamespace(_look_lock=None,_look_tasks=set(),_let_go=lambda params:{"type":"mouseMoved","button":"none","buttons":0})
-        guard=Mock();guard.return_value=(snap,{})
+        guard=Mock();guard.download=None;guard.return_value=(snap,{})
         entered=asyncio.Event();release=asyncio.Event();calls=[]
         block="Input.insertText" if action=="type" else "Input.dispatchMouseEvent"
         async def send(method,params):
@@ -58,5 +59,41 @@ class Cancellation(unittest.IsolatedAsyncioTestCase):
         tab.pressed["left"]=4;task.cancel();release.set();await asyncio.wait_for(task,1)
         self.assertEqual(tab.pressed,{"left":4})
         self.assertEqual([p["type"] for m,p in calls if m=="Input.dispatchMouseEvent"],["mousePressed"])
+
+class ControlCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_cancellation_settles_each_control_phase_without_following_event(self):
+        from jarvis.v2.browser.drive_files import UploadBytes
+        for kind,phases in (('upload',('begin','chunk','assign','input','change')),('select',('assign','input','change'))):
+            for blocked in phases:
+                with self.subTest(kind=kind,phase=blocked):
+                    raw=row();raw['target']['tag']='input' if kind=='upload' else 'select'
+                    raw['target']['type']='file' if kind=='upload' else ''
+                    raw['options']=[{'index':0,'label':'B','disabled':False}] if kind=='select' else []
+                    prepared=prepare_result(raw,'e1',());snap=pane()
+                    tab=SimpleNamespace(input_task=None,dialogs=[],pressed={})
+                    host=SimpleNamespace(_look_lock=None,_look_tasks=set())
+                    guard=Mock(return_value=(snap,{}));guard.download=None
+                    entered=asyncio.Event();release=asyncio.Event();sent=[]
+                    script=E.UPLOAD_JS if kind=='upload' else E.SELECT_JS;declaration='function(args){return ('+script+')(args)}'
+                    async def send(method,params):
+                        if method=='Runtime.callFunctionOn' and params['functionDeclaration']==declaration:
+                            args=params['arguments'][0]['value'];sent.append(args['phase'])
+                            if args['phase']==blocked:entered.set();await release.wait()
+                        return {'result':{'value':True}}
+                    cdp=SimpleNamespace(send=send)
+                    async def evaluate(*a,**kw):return {'x':20,'y':20}
+                    with patch.object(E,'_world',new=AsyncMock(return_value=(tab,cdp,1))),patch.object(E,'_prepared',new=AsyncMock(return_value=prepared)),patch.object(E,'_evaluate',side_effect=evaluate):
+                        task=asyncio.create_task(E.execute(host,snap,Action(kind,'1','e1','B' if kind=='select' else ''),prepared,'pin',(),guard,
+                            upload_bytes=UploadBytes('report.txt',b'verified') if kind=='upload' else None))
+                        await asyncio.wait_for(entered.wait(),1)
+                        task.cancel();await asyncio.sleep(0);task.cancel()
+                        for _ in range(5):await asyncio.sleep(0)
+                        self.assertFalse(task.done());self.assertIn(task,host._look_tasks)
+                        self.assertIsNotNone(tab.input_task);self.assertFalse(tab.input_task.done())
+                        release.set();result=await asyncio.wait_for(task,1)
+                    self.assertEqual(result.outcome,'stopped');self.assertEqual(sent,list(phases[:phases.index(blocked)+1]))
+                    self.assertIsNone(tab.input_task);self.assertEqual(host._look_tasks,set())
+                    if blocked in ('assign','input','change'):self.assertIn('page events may be incomplete',result.text)
+
 
 if __name__=="__main__":unittest.main()

@@ -23,9 +23,10 @@ path here, since the file is always one level inside its own folder.
 
 **An executable download is held** (amendment §B.4): by its name
 (`act_rules.executable_download`, the one rule) or by its first bytes (`MZ`,
-ELF, `#!`). It is saved like any other but never served: the card that lets
-the owner release it is BR-9b's, so for now it stays held — said in the
-listing and on the socket — and the owner can delete it.
+ELF, `#!`). Agent-attributed files also receive a private hold marker before
+any bytes are saved. BR-9b can release only one confidently attributed exact
+file after its private owner card; ambiguous/late files stay held and deletable.
+Released bytes are served from a sealed anonymous descriptor, never executed.
 
 **Uploads** (`upload_payloads`): only through the owner-only files route,
 answering a file chooser the page opened, with files the owner chose by
@@ -52,6 +53,7 @@ from jarvis import config, untrusted
 NAME_CAP = 200
 DOWNLOAD_ID = re.compile(r"[0-9a-f]{8}")
 INCOMING = "incoming"
+HELD_MARKER = ".agent-held"
 MAX_UPLOAD_FILES = 16
 COPY_CHUNK = 1024 * 1024
 _WINDOWS = set('<>:"/\\|?*')
@@ -191,28 +193,47 @@ def listing() -> list[dict]:
                 continue
             rows.append({"id": entry.name, "profile": "private" if profile.parent.name == "private" else profile.name,
                          "name": path.name,
-                         "size": info.st_size, "held": executable(path.name, _head(path)),
+                         "size": info.st_size, "held": executable(path.name, _head(path)) or os.path.lexists(path.parent / HELD_MARKER),
                          "at": datetime.fromtimestamp(info.st_mtime, timezone.utc)
                          .isoformat(timespec="seconds")})
     rows.sort(key=lambda r: r["at"], reverse=True)
     return rows
 
 
-def open_download(download_id) -> tuple[int, str, int]:
-    """(fd, name, size) of a saved download to serve; `FileRefused` otherwise."""
+def open_download(download_id, *, authorize=None) -> tuple[int, str, int]:
+    """Open an ordinary file or an immutable copy of one exact owner release."""
     found = _find(download_id)
     path = _entry(found[1]) if found else None
-    if path is None:
-        raise FileRefused(404, "no such download")
-    if executable(path.name, _head(path)):
-        raise FileRefused(409, "this download is an executable and is held until you approve it "
-                               "(the card for that is not built yet); delete it instead")
+    if path is None:raise FileRefused(404, "no such download")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        os.close(fd)
-        raise FileRefused(404, "no such download")
-    return fd, path.name, info.st_size
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise FileRefused(404, "no such download")
+        head=os.read(fd,8);os.lseek(fd,0,os.SEEK_SET)
+        held=executable(path.name,head) or os.path.lexists(path.parent / HELD_MARKER)
+        if held:
+            data=authorize(download_id,path,info) if authorize is not None else None
+            if not isinstance(data,bytes):
+                raise FileRefused(409,"this download is held until the owner approves this exact file")
+            # Serve the exact verified buffer, not a mutable disk file after a
+            # separate digest check. No persistent second copy is created.
+            import fcntl
+            copy=os.memfd_create("jarvis-download",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING)
+            try:
+                view=memoryview(data)
+                while view:
+                    wrote=os.write(copy,view)
+                    if wrote<=0:raise OSError('short download copy')
+                    view=view[wrote:]
+                os.lseek(copy,0,os.SEEK_SET)
+                fcntl.fcntl(copy,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL)
+            except BaseException:os.close(copy);raise
+            os.close(fd);fd=None
+            return copy,path.name,len(data)
+        result=(fd,path.name,info.st_size);fd=None;return result
+    finally:
+        if fd is not None:os.close(fd)
 
 
 def delete(download_id) -> dict:
@@ -224,7 +245,7 @@ def delete(download_id) -> dict:
     return {"id": download_id, "deleted": True}
 
 
-def save(source: str, profile: str, name: str, download_id: str, ctx: str | None = None) -> dict:
+def save(source: str, profile: str, name: str, download_id: str, ctx: str | None = None, *, agent_held: bool = False) -> dict:
     """Copy a finished download into its own folder (`download_id`, made
     here and never one that exists), 0600, under its cleaned name. Returns
     `{id, name, size, held}`."""
@@ -239,6 +260,10 @@ def save(source: str, profile: str, name: str, download_id: str, ctx: str | None
     folder = folder_root / download_id
     os.mkdir(folder, 0o700)                     # FileExistsError: never into another's folder
     secure_dir(folder, create=False)
+    if agent_held:
+        marker=os.open(folder/HELD_MARKER,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try:os.write(marker,b"held\n");os.fsync(marker)
+        finally:os.close(marker)
     clean = clean_name(name)
     src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
@@ -262,7 +287,7 @@ def save(source: str, profile: str, name: str, download_id: str, ctx: str | None
             os.close(dst)
     finally:
         os.close(src)
-    return {"id": download_id, "name": clean, "size": size, "held": executable(clean, head)}
+    return {"id": download_id, "name": clean, "size": size, "held": bool(agent_held) or executable(clean, head)}
 
 
 # -- uploads -------------------------------------------------------------------------------

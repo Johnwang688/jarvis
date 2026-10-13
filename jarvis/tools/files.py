@@ -63,6 +63,15 @@ SELF_PROTECTED = frozenset(
         "jarvis/command_review.py",
         "jarvis/v2/browser/act_rules.py",
         "jarvis/v2/browser/act_review.py",
+        # BR9b's dormant OFF gate, caller/ref ownership, credential scan,
+        # per-event execution and exact-file release are authorization code.
+        "jarvis/v2/browser/drive.py",
+        "jarvis/v2/browser/drive_state.py",
+        "jarvis/v2/browser/drive_scan.py",
+        "jarvis/v2/browser/drive_execute.py",
+        "jarvis/v2/browser/drive_files.py",
+        "jarvis/v2/browser/drive_downloads.py",
+        "jarvis/v2/tools/hud_browser_act.py",
         # Decides which shell commands may write the gate's own state files
         # (2026-10-08). Editing it is editing what never runs.
         "jarvis/protected_state.py",

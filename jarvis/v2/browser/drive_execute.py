@@ -7,6 +7,8 @@ an already dispatched event to settle and never schedules subsequent typing.
 from __future__ import annotations
 
 import asyncio
+import base64
+import mimetypes
 import json
 import secrets
 import time
@@ -77,7 +79,8 @@ const s=globalThis.__jarvisLook;
 if(!s||s.serial!==args.serial||!s.prepared||s.prepared.pin!==args.pin)return null;
 const e=s.prepared.element;if(!e||!e.isConnected||e.disabled||e.readOnly)return null;
 if(args.scroll){e.scrollIntoView({block:'center',inline:'center',behavior:'instant'});return true;}
-const r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+const r=e.getBoundingClientRect(),x=args.point?args.point.x:r.left+r.width/2,y=args.point?args.point.y:r.top+r.height/2;
+if(x<r.left||x>=r.right||y<r.top||y>=r.bottom)return null;
 if(r.width<8||r.height<8||x<0||y<0||x>=innerWidth||y>=innerHeight)return null;
 let hit=document.elementFromPoint(x,y),depth=0;
 while(hit&&hit.shadowRoot){if(++depth>64)return null;const inner=hit.shadowRoot.elementFromPoint(x,y);if(!inner||inner===hit)break;hit=inner;}
@@ -95,9 +98,47 @@ if(!e||!e.isConnected||e.tagName!=='SELECT'||e.disabled||!Number.isInteger(args.
 const option=e.options[args.index];
 if(!option||option.disabled||option.closest('optgroup[disabled]')||
    (option.getAttribute('label')||option.textContent||'')!==args.label)return false;
-e.selectedIndex=args.index;
-e.dispatchEvent(new Event('input',{bubbles:true}));
-e.dispatchEvent(new Event('change',{bubbles:true}));return true;
+if(args.phase==='assign'){e.selectedIndex=args.index;return true;}
+if(e.selectedIndex!==args.index)return false;
+if(args.phase==='input'){e.dispatchEvent(new Event('input',{bubbles:true,composed:true}));return true;}
+if(args.phase==='change'){e.dispatchEvent(new Event('change',{bubbles:true}));return true;}
+return false;
+}"""
+
+# A bounded buffer in the isolated world becomes a byte-backed File. Chrome
+# never receives a source path or a lazy filesystem reference. At most 1 MiB
+# of base64 is serialized in one CDP message; decoding creates no JS number
+# array proportional to a 50 MiB upload. Every phase pins the same DOM object.
+UPLOAD_CHUNK_BYTES=192*1024
+UPLOAD_JS=r"""(args)=>{
+const s=globalThis.__jarvisLook;
+if(!s||s.serial!==args.serial||!s.prepared||s.prepared.pin!==args.pin)return false;
+const e=s.prepared.element;
+if(!e||!e.isConnected||e.tagName!=='INPUT'||e.type!=='file'||e.disabled||e.readOnly||
+   e.webkitdirectory||e.hasAttribute('webkitdirectory')||e.hasAttribute('directory'))return false;
+if(args.phase==='begin'){
+ if(!Number.isInteger(args.size)||args.size<0||args.size>52428800)return false;
+ s.prepared.upload={parts:[],size:args.size,offset:0};return true;
+}
+const u=s.prepared.upload;if(!u)return false;
+if(args.phase==='chunk'){
+ if(u.file||args.offset!==u.offset||typeof args.data!=='string'||args.data.length>1048576)return false;
+ if(typeof Uint8Array.fromBase64!=='function')return false;
+ const bytes=Uint8Array.fromBase64(args.data,{lastChunkHandling:'strict'});
+ if(bytes.length>786432||u.offset+bytes.length>u.size)return false;
+ u.parts.push(new Blob([bytes]));u.offset+=bytes.length;return true;
+}
+if(args.phase==='assign'){
+ if(u.file||u.offset!==u.size||typeof args.name!=='string'||args.name.length>255||
+    /[\\/\x00-\x1f]/.test(args.name))return false;
+ const file=new File(u.parts,args.name,{type:args.mime,lastModified:0});
+ const list=new DataTransfer();list.items.add(file);e.files=list.files;
+ u.parts=null;u.file=e.files[0];return !!u.file;
+}
+if(!u.file||e.files.length!==1||e.files[0]!==u.file)return false;
+if(args.phase==='input'){e.dispatchEvent(new Event('input',{bubbles:true,composed:true}));return true;}
+if(args.phase==='change'){e.dispatchEvent(new Event('change',{bubbles:true}));return true;}
+return false;
 }"""
 
 _KEYS={"Enter":("Enter",13),"Space":("Space",32),"Tab":("Tab",9),"Escape":("Escape",27),
@@ -106,15 +147,19 @@ _KEYS={"Enter":("Enter",13),"Space":("Space",32),"Tab":("Tab",9),"Escape":("Esca
        "Home":("Home",36),"End":("End",35),"Backspace":("Backspace",8),"Delete":("Delete",46)}
 
 
-async def execute(host,snapshot,action,prepared,pin,forms,guard,*,upload_path=None):
+async def execute(host,snapshot,action,prepared,pin,forms,guard,*,upload_bytes=None):
     from .drive import ActResult,CHANGED_ACTION
     task=asyncio.current_task();host._look_tasks.add(task)
-    inserted=0;mouse_down=False;keys={};tab=cdp=world=None
+    inserted=0;mouse_down=False;assigned=False;keys={};tab=cdp=world=None;response_handler=None
     if host._look_lock is None:host._look_lock=asyncio.Lock()
     try:
         async with host._look_lock:
             async with asyncio.timeout(ACTION_TIMEOUT_S):
                 tab,cdp,world=await _world(host,snapshot,guard)
+                if guard.download is not None:
+                    response_handler=lambda params:guard.service.downloads.response(guard.download,params)
+                    cdp.on("Network.responseReceived",response_handler)
+                    await cdp.send("Network.enable",{"maxTotalBufferSize":0,"maxResourceBufferSize":0})
                 identity={"serial":prepared.serial,"pin":pin}
                 async def checked(*,focused=False,tab_release=False):
                     guard()
@@ -134,9 +179,17 @@ async def execute(host,snapshot,action,prepared,pin,forms,guard,*,upload_path=No
                     elif now.fingerprint!=prepared.fingerprint:raise LookRefused(CHANGED_ACTION)
                     if focused and not now.focused_target:raise LookRefused("the Browser focus changed; typing stopped")
                     return now
-                async def send(method,params,*,focused=False,tab_release=False):
+                async def send(method,params,*,focused=False,tab_release=False,ack=None):
                     nonlocal inserted,mouse_down
                     await checked(focused=focused,tab_release=tab_release)
+                    if method=="Input.dispatchMouseEvent" and action.target:
+                        # Revalidate the original dispatch point before BOTH
+                        # press and release. Never move a pending click to a
+                        # new centre or release into a newly inserted overlay.
+                        point_now=await _evaluate(cdp,world,TARGET_JS,{**identity,
+                            "point":{"x":params["x"],"y":params["y"]}})
+                        if not point_now:raise LookRefused("the Browser target moved or became covered; stopped")
+                        guard()
                     # Mark before yielding so owner input observes a busy page;
                     # owner input still stamps takeover before it is queued.
                     if method=="Input.dispatchMouseEvent" and params.get("type")=="mousePressed":mouse_down=True
@@ -145,9 +198,22 @@ async def execute(host,snapshot,action,prepared,pin,forms,guard,*,upload_path=No
                     try:return await _settle(wait_pending())
                     finally:
                         if pending.done() and not pending.cancelled() and pending.exception() is None:
+                            if ack is not None:ack(pending.result())
                             if method=="Input.insertText":inserted+=len(params["text"])
                             if method=="Input.dispatchMouseEvent" and params.get("type")=="mouseReleased":mouse_down=False
                         if pending.done() and tab.input_task is pending:tab.input_task=None
+                async def apply(script,args,*,assignment=False):
+                    nonlocal assigned
+                    def acknowledged(reply):
+                        nonlocal assigned
+                        if assignment and not reply.get("exceptionDetails") and (reply.get("result") or {}).get("value") is True:
+                            assigned=True
+                    result=await send("Runtime.callFunctionOn",{
+                        "functionDeclaration":"function(args){return ("+script+")(args)}",
+                        "arguments":[{"value":args}],"executionContextId":world,
+                        "returnByValue":True,"silent":True},ack=acknowledged)
+                    if result.get("exceptionDetails") or (result.get("result") or {}).get("value") is not True:
+                        raise LookRefused("the Browser control changed; look again")
                 async def key(name,down,*,modifiers=0,focused=False):
                     code,vk=_KEYS.get(name,(name,0))
                     params={"type":"rawKeyDown" if down else "keyUp","key":" " if name=="Space" else name,
@@ -196,15 +262,24 @@ async def execute(host,snapshot,action,prepared,pin,forms,guard,*,upload_path=No
                 elif action.action=="select":
                     matches=[index for index,label,disabled in prepared.options if label==action.text and not disabled]
                     if len(matches)!=1:raise LookRefused("choose one unique enabled option label from this Browser control")
-                    await checked()
-                    if not await _evaluate(cdp,world,SELECT_JS,{**identity,"index":matches[0],"label":action.text}):
-                        raise LookRefused("the Browser option changed; look again")
+                    args={**identity,"index":matches[0],"label":action.text}
+                    await apply(SELECT_JS,{**args,"phase":"assign"},assignment=True)
+                    await apply(SELECT_JS,{**args,"phase":"input"})
+                    await apply(SELECT_JS,{**args,"phase":"change"})
                 elif action.action=="upload":
-                    if not upload_path or not prepared.target or prepared.target.tag!="input" or prepared.target.type.lower()!="file":
+                    from .drive_files import UploadBytes
+                    if (not isinstance(upload_bytes,UploadBytes) or not isinstance(upload_bytes.data,bytes)
+                            or len(upload_bytes.data)>rules.MAX_UPLOAD_BYTES or not prepared.target
+                            or prepared.target.tag!="input" or prepared.target.type.lower()!="file"):
                         raise LookRefused("the Browser upload target or approved file is no longer available")
-                    obj=await _evaluate(cdp,world,TARGET_JS,{**identity,"object":True},by_value=False)
-                    if not obj:raise LookRefused("the Browser upload target is no longer available")
-                    await send("DOM.setFileInputFiles",{"objectId":obj,"files":[upload_path]})
+                    await apply(UPLOAD_JS,{**identity,"phase":"begin","size":len(upload_bytes.data)})
+                    for offset in range(0,len(upload_bytes.data),UPLOAD_CHUNK_BYTES):
+                        chunk=base64.b64encode(upload_bytes.data[offset:offset+UPLOAD_CHUNK_BYTES]).decode("ascii")
+                        await apply(UPLOAD_JS,{**identity,"phase":"chunk","offset":offset,"data":chunk})
+                    await apply(UPLOAD_JS,{**identity,"phase":"assign","name":upload_bytes.name,
+                        "mime":mimetypes.guess_type(upload_bytes.name)[0] or "application/octet-stream"},assignment=True)
+                    await apply(UPLOAD_JS,{**identity,"phase":"input"})
+                    await apply(UPLOAD_JS,{**identity,"phase":"change"})
                 elif action.action=="navigate":
                     await checked();guard.service._url(action.text)
                     await send("Page.navigate",{"url":action.text})
@@ -235,18 +310,25 @@ async def execute(host,snapshot,action,prepared,pin,forms,guard,*,upload_path=No
                     scan=None
                 if scan is None:raise LookRefused("the Browser changed after the action; look again")
                 guard(navigation=True)
-                guard.service.state.publish(guard.turn,fresh,scan["serial"],[row["ref"] for row in scan["refs"]])
                 labels=[]
                 for row in scan["refs"]:
                     label="[withheld]" if terminal_guard.withhold(row["label"]) else untrusted.one_line(row["label"],120)
                     labels.append(row["ref"]+" ("+row["tag"]+"): "+label)
                 return ActResult("acted","Acted in Browser pane "+str(fresh.slot)+"."+
-                    ("\nFresh interactive refs (page text):\n"+"\n".join(labels) if labels else "\nNo visible interactive refs."))
+                    ("\nFresh interactive refs (page text):\n"+"\n".join(labels) if labels else "\nNo visible interactive refs."),fresh,scan)
     except (Exception,asyncio.CancelledError):
+        if assigned:
+            text=("Stopped after selecting the approved file" if action.action=="upload" else "Stopped after updating the Browser control")
+            return ActResult("stopped",text+"; page events may be incomplete. Look again.")
         return ActResult("stopped","Stopped after sending "+str(inserted)+" characters; look again." if action.action=="type" else "Stopped; look again before another Browser action.")
     finally:
         async def cleanup():
             if cdp is not None:
+                if response_handler is not None:
+                    try:cdp.remove_listener("Network.responseReceived",response_handler)
+                    except Exception:pass
+                    try:await asyncio.wait_for(cdp.send("Network.disable"),1)
+                    except Exception:pass
                 if mouse_down and tab is not None and not tab.pressed:
                     # Blink's neutral reset, never mouseReleased/click.
                     try:await asyncio.wait_for(cdp.send("Input.dispatchMouseEvent",host._let_go({})),1)

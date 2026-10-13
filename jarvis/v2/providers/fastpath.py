@@ -8,10 +8,11 @@ the cheap loop and everything that resembles *work* is handed to a task.
 
 Two rules make that split safe, and both are mechanical rather than prompted:
 
-**The structural boundary (§8.1).** `FAST_TOOLS` has no tool that can change
-anything — no write, no shell, no browser, no desktop, nothing dangerous, no
-way to spawn. So a turn that misjudges a request as chat can only answer badly;
-it cannot half-do work and leave the owner to find out. The prompt carries the
+**The structural boundary (§8.1).** `FAST_TOOLS` has no generic write, shell,
+desktop or spawn tool. Its typed Browser action exception is independently
+gated and unconditionally OFF in production. Read-only Browser looks require
+the live desk and pane permission. Toolset and per-tool gates enforce this;
+prompts do not authorize an action. The prompt carries the
 escalation *test*, but the toolset is what makes a misjudgement harmless.
 
 **The budget rule (§8.1).** A fast-path turn that burns its eight steps with

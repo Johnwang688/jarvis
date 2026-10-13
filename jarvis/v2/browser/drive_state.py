@@ -61,6 +61,13 @@ def current_turn() -> DriveTurn | None:
     return turn
 
 
+def mark_attempt(pane):
+    turn=current_turn()
+    if turn is not None and runtime.at_desk() and runtime.depth()==0:
+        turn.attempted=True
+        turn.pane=pane if isinstance(pane,str) and pane in tuple(str(i) for i in range(1,9)) else ""
+
+
 @contextmanager
 def turn_scope(turn: DriveTurn, retire: Callable[[tuple[str, str]], None]):
     token = _TURN.set(turn)
