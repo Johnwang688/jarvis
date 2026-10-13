@@ -1579,6 +1579,12 @@ TC-1 (2026-10-12): opt-in `transcript?tools=1` adds safe labels and provider out
 V2 boot (2026-10-12): the approved seeded binary-dust/orb and sharp pen-drawn J.A.R.V.I.S. plate play once per window from the first frame, silently; automation and reduced motion suppress it, clicks are consumed, keys keep working, approvals take precedence, and `hud_v2_boot_check.py` checks it under CSP.
 
 AO-1b-i (2026-10-12): `devservers.py` watches tagged Claude/Codex listeners, holds the memory-only registry and owner-only claims/leases; id-only `dev_server` events and `/status.dev_watch` follow amendment 2 §B–§D.
+AO-1b-ii (2026-10-13) joins shell-terminal banners to that registry, including
+unattached terminals. A validated optional 32-hex `window` nonce on the attach
+query preclaims for that socket and adds `id` to `dev_url`; older attaches
+keep their legacy frame. AO-3 must use the same 32-hex nonce for attach, events
+and claims (the current terminal frontend helper generates only 16 hex).
+
 
 WP12a (Codex) and WP12b (Opus) merged the same day, built against
 `docs/hud-api.md` in parallel and joined at the end: the built HUD served
@@ -2299,14 +2305,27 @@ run first and change no answer — a loopback host spelling and one of the
 shapes' words, as substring searches over a chunk's whole run of lines — and
 a chunk matches at most 32 lines against the table, so URL-dense output stays
 far above what xterm draws (PR #70 review: another host's URLs had slowed
-the terminal to ~9 MB/s). It is sent
-as one `{"type": "dev_url", "url"}` frame **on that terminal's own attached
-socket**, after the bytes that carried it — once per origin among the last
-four, at most one a second and four a minute per terminal, recorded only once
-the socket has taken the frame; with no window attached it is dropped and not
-remembered, and a ring replay never sends one. **Nothing else ever carries it**: no bus record,
-log line, thread log, Discord post or file, and Jarvis never sees it (the
-"Jarvis can read" switch is unrelated: this is the owner's window).
+the terminal to ~9 MB/s). AO-1b-ii registers each eligible cleaned URL
+outside the terminal lock. With an attached window nonce it preclaims and sends
+`{"type": "dev_url", "url", "id"}` after the output bytes, and publishes one
+id-only `claimed` record. A different source, existing claim, placement or
+dismissal wins over a later banner. Failed or stale socket delivery releases
+only the matching private delivery receipt's claim. Queueing checks that
+receipt under the registry lock, so an expired or replaced claim cannot send
+a stale actionable frame. A legacy socket without
+the optional nonce receives `{type, url}` and leaves the entry unclaimed.
+Unattached banners are retained as `up` in memory for an owner window to claim
+(AD-12); this supersedes BR-8a's drop rule. Replay never re-announces. Sniffer
+limits remain one per origin among the last four, one per second and four per
+minute; registry creation also has its shared caps. A URL is recorded after
+successful frame delivery or unattached registry retention. Terminal entries
+wake the lazy watcher without an agent turn and are never HTTP-probed; two
+polls without a LISTEN port after a five-second banner grace mark down,
+including a first baseline poll. A restart within 60 seconds keeps id and
+dismissal and gets a fresh grace. **Only the owner-only registry/claim routes
+and attached socket carry URLs**; bus records contain id/state/source/time,
+never URLs, ports or window nonces, and no log, thread log, Discord post or
+file receives them. The "Jarvis can read" switch is unrelated.
 **Auto-open never opens a port in the Remote gate** (amendment 2): the
 window loads the URL only in a Direct frame, and only the owner's own
 navigation opens a loopback port there. The sniffer holds at most a 512-byte line, a 64-byte escape carry and four

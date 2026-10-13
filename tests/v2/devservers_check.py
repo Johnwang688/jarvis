@@ -881,6 +881,72 @@ class Routes(Base):
             self.assertIsNotNone(self.watch.announce_terminal("cap1", "http://localhost:23601/"))
             self.assertIsNone(self.watch.announce_terminal("cap2", "http://localhost:23602/"))
 
+    def test_terminal_delivery_first_source_wins_and_claims_are_not_replaced(self):
+        receipt = object()
+        ident = self.watch.announce_terminal("terminal", "http://localhost:23456/path",
+                                             window=W1, delivery=receipt)
+        entry = self.watch._entry(ident)
+        for terminal, window in (("other", W1), ("terminal", W2), ("terminal", W1)):
+            self.assertIsNone(self.watch.announce_terminal(terminal, "http://localhost:23456/changed",
+                                                           window=window, delivery=object()))
+        self.assertEqual((entry.window, entry.path, entry.state), (W1, "/path", "claimed"))
+        self.assertEqual(len(self.records), 1)
+        self.watch.act(ident, "placed", W1)
+        self.assertIsNone(self.watch.announce_terminal("terminal", "http://localhost:23456/",
+                                                       window=W1, delivery=object()))
+        self.watch.act(ident, "dismiss", W1)
+        self.assertIsNone(self.watch.announce_terminal("terminal", "http://localhost:23456/",
+                                                       delivery=object()))
+        self.assertEqual(entry.state, "dismissed")
+        # An agent-owned port must not be claimed or redelivered by a terminal.
+        with self.watch._lock:
+            agent = self.watch._register(23457, "http", "/",
+                                        {"kind": "thread", "thread_id": self.thread.id, "task_id": None},
+                                        self.clock.now)
+        self.assertIsNone(self.watch.announce_terminal("terminal", "http://localhost:23457/",
+                                                       window=W1, delivery=object()))
+        self.assertEqual((agent.state, agent.window, agent.source["kind"]), ("up", None, "thread"))
+
+    def test_failed_terminal_delivery_cannot_release_a_newer_same_window_claim(self):
+        old, new = object(), object()
+        ident = self.watch.announce_terminal("terminal", "http://localhost:23456/", window=W1, delivery=old)
+        self.watch.terminal_delivery_failed("wrong", ident, W1, old)
+        self.watch.terminal_delivery_failed("terminal", ident, W2, old)
+        self.assertEqual(self.watch._entry(ident).state, "claimed")
+        self.watch.window_ended(W1)
+        self.assertEqual(self.watch.announce_terminal("terminal", "http://localhost:23456/",
+                                                      window=W1, delivery=new), ident)
+        self.watch.terminal_delivery_failed("terminal", ident, W1, old)
+        self.assertEqual(self.watch._entry(ident).state, "claimed")
+        self.watch.terminal_delivery_failed("terminal", ident, W1, new)
+        self.assertEqual(self.watch._entry(ident).state, "up")
+        self.assertEqual(self.watch.announce_terminal("terminal", "http://localhost:23456/",
+                                                      window=W1, delivery=new), ident)
+        self.watch.act(ident, "placed", W1)
+        self.watch.terminal_delivery_failed("terminal", ident, W1, new)
+        self.assertEqual(self.watch._entry(ident).state, "placed")
+
+    def test_terminal_restart_resets_startup_grace_and_retains_id_and_dismissal(self):
+        ident = self.entry()
+        self.clock.now += 5
+        self.watch.poll()
+        self.watch.poll()
+        self.assertEqual(self.watch._entry(ident).state, "down")
+        self.clock.now += 10
+        self.assertEqual(self.watch.announce_terminal("fixture-terminal", "http://localhost:23456/"), ident)
+        self.watch.poll()
+        self.watch.poll()
+        self.assertTrue(self.watch._entry(ident).listening, "new banner gets a fresh five seconds")
+        self.assertEqual(sum(r["data"]["state"] == "up" for r in self.records), 1)
+        self.watch.act(ident, "dismiss", W1)
+        self.clock.now += 5
+        self.watch.poll()
+        self.watch.poll()
+        self.assertIsNone(self.watch.announce_terminal("fixture-terminal", "http://localhost:23456/",
+                                                       window=W1, delivery=object()))
+        self.assertEqual(self.watch._entry(ident).state, "dismissed")
+
+
 
 class Lifecycle(Base):
     def test_known_roots_from_real_provider_handle_shapes(self):
@@ -1029,6 +1095,36 @@ class Lifecycle(Base):
             daemon.devservers.poll()
         self.assertIsNone(daemon.devservers.reader)
         self.assertIsNone(daemon.devservers._thread)
+
+    def test_terminal_only_entry_wakes_watch_without_http_probe_or_agent_session(self):
+        watch = ds.DevServers(self.daemon, proc_root=self.tree.proc, cgroup_root=self.tree.cg, clock=self.clock)
+        self.addCleanup(watch.stop)
+        watch.start()
+        self.assertIsNone(watch._thread)
+        with patch.object(watch, "_exchange", side_effect=AssertionError("terminal must not be probed")):
+            ident = watch.announce_terminal("alone", "http://localhost:23456/app/")
+            eventually(lambda: watch.status()["polls"] > 0)
+            self.assertEqual(watch._thread.name, "jarvis-devwatch")
+            self.assertEqual(watch.cadence(), 5)
+            self.assertEqual(watch.status()["work"]["probes"], 0)
+            self.assertEqual(watch.reader.work.environ_reads, 0)
+            self.clock.now += 5
+            watch.poll()
+            self.assertTrue(watch._entry(ident).listening)
+            watch.poll()
+            self.assertFalse(watch._entry(ident).listening)
+            self.assertIsNone(watch.cadence())
+
+    def test_terminal_liveness_counts_the_initial_baseline_poll(self):
+        watch = ds.DevServers(self.daemon, proc_root=self.tree.proc, cgroup_root=self.tree.cg, clock=self.clock)
+        self.addCleanup(watch.stop)
+        with patch.object(watch, "_ensure_thread"):    # deterministic first poll at grace boundary
+            ident = watch.announce_terminal("alone", "http://localhost:23456/")
+        self.clock.now += 5
+        watch.poll()
+        self.assertEqual(watch._entry(ident).misses, 1)
+        watch.poll()
+        self.assertFalse(watch._entry(ident).listening)
 
     def test_lazy_watch_thread_baseline_off_and_cadence(self):
         s = self.server()

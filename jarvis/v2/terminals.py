@@ -91,13 +91,14 @@ spoken like any other. The tool's ticker summary is fixed ("read N lines",
 text onto the bus or into the thread's `log.jsonl`; the model's reply is not
 filtered, and reaches both (and Discord, and speech) like any reply.
 
-**Dev servers (BR-8a, `devurl.py`).** While the owner's "open dev servers
-automatically" switch is on (`browser.json` → `auto_open`), a shell
-terminal's live output — a command's own, by the signed marks — is read for a
-dev server's loopback URL, in memory under `_lock`, and one `{"type":
-"dev_url", "url"}` frame goes to **that terminal's attached socket and
-nowhere else**: no bus record, no log line, no file, and nothing Jarvis can
-read. No window attached, it is dropped. Off, no byte reaches the sniffer.
+**Dev servers (BR-8a, AO-1b-ii).** While auto_open is on, signed live
+shell output is parsed in memory under the terminal lock. Outside that lock,
+the cleaned URL joins the devservers registry, even with no attached window.
+A socket attached with a valid page nonce gets a preclaimed {type: dev_url,
+url, id} frame; legacy sockets get {type: dev_url, url} and leave it unclaimed.
+Only owner routes and the socket carry URLs. Bus records contain ids, state,
+source and time; no output, URL, port, nonce, log line or file. Off, no byte
+reaches the sniffer. Program terminals never have a sniffer.
 
 **Shell integration (W-2, item 3).** bash reads `terminal_rc.bash` as its
 --rcfile; a POSIX `sh`-family shell (sh, dash, ash, ksh, mksh, …) reads
@@ -760,9 +761,13 @@ class Terminal:
         # automatically" switch (`browser.json` → `auto_open`). Memory only.
         self._sniffer: devurl.DevUrlSniffer | None = None
         self._dev_on = None
+        self._dev_announce = None
+        self._dev_release = None
+        self._dev_send = None
         self._lock = threading.Lock()           # ring, marks, attachment, state
         self._io_lock = threading.RLock()       # the master fd's life
         self._attachment: ws.WebSocket | None = None
+        self._attachment_window: str | None = None
         self._takeover: _Takeover | None = None
         self._closing = False
         self._finished = False
@@ -855,6 +860,14 @@ class Terminal:
         self._fire_exit()
 
     def _output(self, data: bytes) -> None:
+        # Settings/registry callbacks may publish or inspect this terminal.
+        # They must never run while its state lock is held.
+        enabled, failure = False, None
+        if self._sniffer is not None:
+            try:
+                enabled = self._dev_on()
+            except Exception as exc:  # noqa: BLE001
+                failure = exc
         with self._lock:
             start = self._ring.end
             self._ring.append(data)
@@ -865,32 +878,41 @@ class Terminal:
             if attached is not None and not attached.send_binary(data):
                 # Too far behind: dropped. The window reattaches and replays.
                 self._attachment = None
+                self._attachment_window = None
                 attached = None
+            window = self._attachment_window if attached is not None else None
             if attached is not None and self._marks.marked and not was_marked:
-                # The startup file is running: the window drops its "no
-                # integration" note. Sent once, after the bytes that carried it.
                 attached.send_text(json.dumps({"type": "marked"}))
-            if self._sniffer is not None:
+            found = []
+            if self._sniffer is not None and failure is None:
                 try:
-                    self._sniff(data, start, attached)
-                except Exception as exc:  # noqa: BLE001 — a convenience never breaks the terminal
-                    self._sniffer = None
-                    LOG.warning("terminal %s: dev-server detection stopped (%s)", self.id,
-                                type(exc).__name__)
+                    found = self._sniff(data, start, enabled)
+                except Exception as exc:  # noqa: BLE001
+                    failure = exc
+        if failure is None:
+            try:
+                for url in found:
+                    self._announce(url, attached, window)
+            except Exception as exc:  # noqa: BLE001
+                failure = exc
+        if failure is not None:
+            with self._lock:
+                self._sniffer = None
+            LOG.warning("terminal %s: dev-server detection stopped (%s)", self.id,
+                        type(failure).__name__)
 
-    def _sniff(self, data: bytes, start: int, attached) -> None:
-        """Dev servers this live output announces (BR-8a, devurl.py), told
-        to the attached window as `{"type": "dev_url", "url"}` after the bytes
-        that carried them — to that socket and nowhere else: no bus record, no
-        log line, nothing on disk. Off (`auto_open` false), the sniffer is
-        told the marks' letters and never fed a byte. No window attached: the
-        URL is dropped, and not remembered. The caller holds `_lock`."""
+    def _sniff(self, data: bytes, start: int, enabled: bool) -> list[str]:
+        """Parse live command output under the state lock; no registry calls.
+
+        Off means no bytes reach the sniffer. Successful registration while
+        unattached retains the cleaned URL in memory for owner claiming.
+        """
         sniffer, events = self._sniffer, self._marks.events
-        if not self._dev_on():
+        if not enabled:
             for _, kind in events:
                 sniffer.mark(kind)
             sniffer.pause()
-            return
+            return []
         found, pos = [], 0
         for end, kind in events:
             cut = max(pos, min(len(data), end - start))
@@ -898,15 +920,43 @@ class Terminal:
             found += sniffer.mark(kind)
             pos = cut
         found += sniffer.feed(data[pos:])
-        if attached is None:
-            return
-        for url in dict.fromkeys(found):
-            # Recorded only once the frame is queued: a socket that refuses
-            # it (closing, too far behind) leaves the server's next
-            # announcement free to go to the window that reattaches.
-            if (sniffer.may_send(url)
-                    and attached.send_text(json.dumps({"type": "dev_url", "url": url}))):
-                sniffer.sent(url)
+        return list(dict.fromkeys(found))
+
+    def _announce(self, url, attached, window) -> None:
+        with self._lock:
+            sniffer = self._sniffer
+            if sniffer is None or not sniffer.may_send(url):
+                return
+        receipt = object()                         # binds rollback to this delivery only
+        entry_id = None
+        if self._dev_announce is not None:
+            entry_id = self._dev_announce(self.id, url, window=window, delivery=receipt)
+            if entry_id is None:
+                return                            # rate-limited or an existing source/claim won
+        elif attached is None:
+            return                                # standalone terminals without a registry
+        def enqueue():
+            sent = False
+            with self._lock:
+                if attached is None:
+                    sent = True                   # registered for owner-only discovery
+                elif self._attachment is attached and self._attachment_window == window:
+                    frame = {"type": "dev_url", "url": url}
+                    if window is not None and entry_id is not None:
+                        frame["id"] = entry_id
+                    sent = attached.send_text(json.dumps(frame))
+                if sent:
+                    sniffer.sent(url)
+            return sent
+        sent = False
+        try:
+            if entry_id is not None and window is not None and self._dev_send is not None:
+                sent = self._dev_send(self.id, entry_id, window, receipt, enqueue)
+            else:
+                sent = enqueue()
+        finally:
+            if not sent and entry_id is not None and window is not None:
+                self._dev_release(self.id, entry_id, window, receipt)
 
     def _check_exit(self, wait: bool = False) -> None:
         proc = self._proc
@@ -1074,10 +1124,11 @@ class Terminal:
     def holds(self, sock) -> bool:
         return self._attachment is sock
 
-    def _install(self, sock) -> None:
+    def _install(self, sock, window=None) -> None:
         """Attach `sock` and replay the ring into it, atomically with output
         (the caller holds `_lock`, which `_output` takes too)."""
         self._attachment = sock
+        self._attachment_window = window
         start, data = self._ring.snapshot()
         sock.send_text(json.dumps({"type": "attached", "terminal": self.row(),
                                    "replay": len(data)}))
@@ -1087,7 +1138,7 @@ class Terminal:
         if self.exited:
             sock.send_text(json.dumps({"type": "exit", "code": self.exit_code}))
 
-    def attach(self, sock, timeout: float) -> str | None:
+    def attach(self, sock, timeout: float, *, window=None) -> str | None:
         """Attach a window's socket. None when attached; otherwise why not.
         A terminal another window shows asks that window first."""
         with self._lock:
@@ -1095,7 +1146,7 @@ class Terminal:
                 return "this terminal is closing"
             holder = self._attachment
             if holder is None or holder.closed.is_set():
-                self._install(sock)
+                self._install(sock, window)
                 LOG.info("terminal %s attached", self.id)
                 return None
             if self._takeover is not None:
@@ -1119,7 +1170,7 @@ class Terminal:
                     holder.close(ws.NORMAL, "taken by another window")
                 if self._attachment is not None:
                     return "another window has this terminal"
-                self._install(sock)
+                self._install(sock, window)
                 LOG.info("terminal %s taken over by another window", self.id)
                 return None
         LOG.info("terminal %s: takeover refused", self.id)
@@ -1131,6 +1182,7 @@ class Terminal:
         with self._lock:
             if self._attachment is sock:
                 self._attachment = None
+                self._attachment_window = None
             request = self._takeover
             if request is not None and request.holder is sock:
                 request.event.set()             # nobody left to ask
@@ -1275,7 +1327,8 @@ class Terminals:
     sniffs nothing. `own_ports` gives the daemon's bound listeners, which a
     dev-server URL may never name (beside `devurl.jarvis_ports()`)."""
 
-    def __init__(self, *, clock=time.monotonic, publish=None, auto_open=None, own_ports=None):
+    def __init__(self, *, clock=time.monotonic, publish=None, auto_open=None, own_ports=None,
+                 dev_announce=None, dev_release=None, dev_send=None):
         self._lock = threading.Lock()
         self._terminals: dict[str, Terminal] = {}
         self._tickets: dict[str, tuple[str, float]] = {}
@@ -1283,6 +1336,9 @@ class Terminals:
         self._publish = publish
         self._auto_open = auto_open
         self._own_ports = own_ports
+        self._dev_announce = dev_announce
+        self._dev_release = dev_release
+        self._dev_send = dev_send
         self._rc_text: dict[str, bytes] = {}
         self._stopped = False
 
@@ -1354,6 +1410,9 @@ class Terminals:
                 if self._auto_open is not None:     # before the shell runs: its first bytes count
                     terminal._sniffer = devurl.DevUrlSniffer(self._refused_ports)
                     terminal._dev_on = self._auto_open
+                    terminal._dev_announce = self._dev_announce
+                    terminal._dev_release = self._dev_release
+                    terminal._dev_send = self._dev_send
             except BaseException:
                 if rc_fd is not None:
                     os.close(rc_fd)
@@ -1556,9 +1615,9 @@ class Terminals:
         except Exception as exc:  # noqa: BLE001 — a bus problem never ends a session
             LOG.warning("terminal %s: attach not published (%s)", terminal.id, type(exc).__name__)
 
-    def serve(self, terminal: Terminal, sock) -> None:
+    def serve(self, terminal: Terminal, sock, *, window=None) -> None:
         try:
-            refused = terminal.attach(sock, TAKEOVER_TIMEOUT_S)
+            refused = terminal.attach(sock, TAKEOVER_TIMEOUT_S, window=window)
             if refused is not None:
                 sock.send_text(json.dumps({"type": "refused", "reason": refused}))
                 sock.close(ws.POLICY, "refused")
@@ -1848,7 +1907,11 @@ def route(handler, daemon, parts, query):
             _object(handler._body(), ())
             return 200, {"ticket": terminals.ticket(terminal.id), "expires_in": TICKET_TTL_S}
         if parts[2:] == ["attach"] and method == "GET":
-            _object(query, ("ticket",))
+            _object(query, ("ticket", "window"))
+            from .devservers import valid_window
+            window = query.get("window")
+            if "window" in query and not valid_window(window):
+                _fail(400, "window must be 32 lowercase hex characters")
             try:
                 key = ws.handshake_key(handler.headers)
             except ws.HandshakeError as exc:
@@ -1859,6 +1922,6 @@ def route(handler, daemon, parts, query):
             # listener's frame headers explicitly (WP-E, every response).
             from .hud_api import frame_headers
             sock = ws.upgrade(handler, key, headers=frame_headers(handler))
-            terminals.serve(terminal, sock)
+            terminals.serve(terminal, sock, window=window)
             return 200, None
     _fail(404, "route not found")
