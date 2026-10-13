@@ -134,9 +134,43 @@ class Events(unittest.TestCase):
     def test_reviewer_refusal_cannot_copy_terminal_rationale(self):
         self.emit(method="item/started")
         events=list(self.provider._notification(self.h,"item/autoApprovalReview/completed",{
+            "threadId":"native-parent","turnId":"native-turn",
             "targetItemId":"call","review":{"status":"denied","rationale":"PRIVATE_MARKER"}}))
         self.assertEqual(events[0].data["reason"],"refused")
         self.assertNotIn("PRIVATE_MARKER",json.dumps(events[0].data))
+
+
+    def test_early_unmatched_mcp_reviews_never_copy_private_fields(self):
+        for target in (None, "unknown"):
+            for action in ({"type": "mcpToolCall", "server": "jarvis", "toolName": "terminal_read",
+                            "toolTitle": "PRIVATE_MARKER"},
+                           {"type": "mcpToolCall", "server": "PRIVATE_MARKER", "toolName": "PRIVATE_MARKER"},
+                           {"type": "mcpToolCall"}):
+                params = {"threadId": "native-parent", "turnId": "native-turn", "targetItemId": target,
+                          "action": action, "review": {"status": "denied", "rationale": "PRIVATE_MARKER"}}
+                events = list(self.provider._notification(self.h, "item/autoApprovalReview/completed", params))
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].data["reason"], "refused")
+                self.assertEqual(events[0].data["args"], {})
+                self.assertNotIn("PRIVATE_MARKER", json.dumps(events[0].data))
+                for field, value in (("threadId", "child"), ("turnId", "old"), ("turnId", None)):
+                    self.assertEqual(list(self.provider._notification(self.h,
+                        "item/autoApprovalReview/completed", {**params, field: value})), [])
+        self.emit(method="item/started")
+        for action in (None, [], "malformed"):
+            params = {"threadId": "native-parent", "turnId": "native-turn", "targetItemId": "call",
+                      "action": action, "review": {"status": "denied", "rationale": "PRIVATE_MARKER"}}
+            event = list(self.provider._notification(self.h, "item/autoApprovalReview/completed", params))[0]
+            self.assertEqual(event.data["tool"], "terminal_read")
+            self.assertNotIn("PRIVATE_MARKER", json.dumps(event.data))
+
+    def test_ordinary_command_review_keeps_its_existing_explanation(self):
+        params = {"threadId": "native-parent", "turnId": "native-turn", "targetItemId": None,
+                  "action": {"type": "command", "command": "echo synthetic", "cwd": "/tmp"},
+                  "review": {"status": "denied", "rationale": "Ordinary command reason"}}
+        event = list(self.provider._notification(self.h, "item/autoApprovalReview/completed", params))[0]
+        self.assertEqual(event.data["reason"], "Ordinary command reason")
+        self.assertEqual(event.data["command"], "echo synthetic")
 
 
 

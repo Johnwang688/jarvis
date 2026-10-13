@@ -1066,12 +1066,22 @@ class CodexProvider:
                 yield self._event(h, EventKind.PLAN_UPDATED, text=item["text"])
         elif method == "item/autoApprovalReview/completed" and p.get("review", {}).get("status") == "denied":
             mcp = s.mcp_items.get(p.get("targetItemId"))
-            if mcp is not None and mcp[:2] == ("jarvis", "terminal_read"):
-                yield self._event(h, EventKind.REVIEWER_DECLINED, tool="terminal_read",
+            action = p.get("action")
+            action = action if isinstance(action, dict) else {}
+            if mcp is not None or action.get("type") == "mcpToolCall":
+                # The installed schema permits a missing/null targetItemId.
+                # Early or unmatched reviews must not copy private rationale,
+                # titles or action metadata into the daemon's event stream.
+                if (p.get("threadId") != s.thread_id or not s.turn_id
+                        or p.get("turnId") != s.turn_id):
+                    return
+                name = mcp[2] if mcp is not None else "mcp"
+                if action.get("server") == "jarvis" and action.get("toolName") == "terminal_read":
+                    name = "terminal_read"
+                yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name,
                                   args={}, command=None, reason="refused")
                 return
             item = s.items.get(p.get("targetItemId"), {})
-            action = p.get("action", {})
             if action.get("type") in ("command", "execve", "writeStdin"):
                 name, args = "shell", dict(action)
             elif action.get("type") == "applyPatch":
