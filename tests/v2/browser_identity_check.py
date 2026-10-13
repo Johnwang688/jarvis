@@ -61,6 +61,53 @@ class NavigationIdentity(unittest.IsolatedAsyncioTestCase):
         self.host._publish_snapshot()
         self.assertIsNone(self.host.pane_tab(self.tab.id))
 
+    async def test_queued_landing_replacement_cannot_blank_a_newer_document(self):
+        self.page.goto = AsyncMock()
+        self.page.set_content = AsyncMock()
+        self.frame.url = "file:///refused"
+        self.host._landed(self.tab, self.frame)
+        # A newer accepted landing wins before the queued guard gets CPU.
+        self.frame.url = "https://example.test/owner"
+        self.host._landed(self.tab, self.frame)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.page.goto.assert_not_awaited()
+        self.page.set_content.assert_not_awaited()
+        self.assertEqual(self.host.pane_tab(self.tab.id)["url"], self.frame.url)
+
+    async def test_replacement_waits_for_navigation_lock_then_rechecks_generation(self):
+        self.page.goto = AsyncMock()
+        self.page.set_content = AsyncMock()
+        lock = self.host._launching.setdefault(self.tab.profile, asyncio.Lock())
+        await lock.acquire()
+        self.frame.url = "file:///refused"
+        self.host._landed(self.tab, self.frame)
+        await asyncio.sleep(0)
+        self.page.goto.assert_not_awaited()
+        self.frame.url = "https://example.test/newer"
+        self.host._landed(self.tab, self.frame)
+        lock.release()
+        await asyncio.sleep(0)
+        self.page.goto.assert_not_awaited()
+
+    async def test_current_replacement_explains_but_close_during_goto_prevents_content(self):
+        async def goto(url, **_kwargs):
+            self.frame.url = self.page.url = url
+            self.host._landed(self.tab, self.frame)
+        self.page.goto = AsyncMock(side_effect=goto)
+        self.page.set_content = AsyncMock()
+        generation = self.tab.document_generation
+        await self.host._replace(self.tab, generation)
+        self.page.goto.assert_awaited_once()
+        self.page.set_content.assert_awaited_once()
+        self.page.set_content.reset_mock()
+        async def close_during_goto(url, **_kwargs):
+            await goto(url)
+            self.host._tabs.clear()
+        self.page.goto.side_effect = close_during_goto
+        await self.host._replace(self.tab, self.tab.document_generation)
+        self.page.set_content.assert_not_awaited()
+
     def test_stopping_or_bad_identity_never_returns_cached_url(self):
         self.host._landed(self.tab, self.frame)
         for bad in (None, True, "", "../path", "0123ABCD"):
