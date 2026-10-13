@@ -1581,14 +1581,15 @@ point exists. `JARVIS_COMPACT_AT_TOKENS` overrides; empty means unset, and a
 non-empty value must be an integer of at least 1000. Saved HUD selections still
 take precedence. The rule against Chinese-hosted vendors stands.
 
-Claude requests use three explicit ephemeral cache breakpoint positions: the
-system message, an optional middle boundary already finalised by
+Claude requests use up to four explicit ephemeral cache breakpoint positions:
+the system message, separate image and full-tool-result window boundaries from
 `context.manage()`, and the newest markable message before the volatile tail.
-The middle boundary precedes
-both the newest full tool results and the newest live images according to the
-agent's policy. Truncation and eviction are idempotent before it; compaction
-can still invalidate the prefix. With fewer results/images than both keep
-counts, no middle point is needed. Each boundary walks back to nonblank text,
+The earlier middle prefix is already truncated/evicted. The later prefix can
+be invalidated by the other window, but reuses more result text between sparse
+image evictions; one minimum boundary let old live images hold it back.
+Compaction can invalidate either prefix. Each window contributes only once its
+keep count is reached; coincident boundaries use one point.
+Each boundary walks back to nonblank text,
 never an image part or an assistant message with tool calls. Only the wire
 copy is marked. Points are deduped and capped at four, dropping oldest middle
 points while keeping the system and tail. One-shot summaries, delegation and
@@ -1599,9 +1600,10 @@ the tail every step, so it never hit for agents with that block. A live Haiku
 5.5 probe with the default toolset, about 20k prompt tokens and six steps read
 zero cached tokens each step. It paid a 1.25x cache write, $0.0026 per step.
 The explicit breakpoints read about 19.2k of 20k tokens from step 2 on,
-$0.00035 per step. This was a short turn with small results. In long turns with
-big results, the middle breakpoint is what keeps reads as context management
-rewrites older messages. A breakpoint on a tool message worked.
+$0.00035 per step. This was a short turn with small results. Middle breakpoints
+preserve reusable prefixes as context management rewrites older messages.
+A breakpoint on a tool message worked. The final separate-window delta has
+synthetic regression coverage; its live long-turn cache savings remain unverified.
 
 A live three-step tool turn on Haiku 5.5 at a reasoning effort ran without
 error although `_stream_once` does not pass `reasoning_details` back.
