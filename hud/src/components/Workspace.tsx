@@ -109,6 +109,7 @@ export interface PaneInfo {
 
 export function Workspace(props: {
   view: LayoutControl;
+  covered?: boolean;
   blocked: boolean;
   /** The view's body, under the pane's header. */
   render: (spec: PaneSpec, info: PaneInfo) => ReactNode;
@@ -232,7 +233,7 @@ export function Workspace(props: {
     const drawn = at >= 0;
     const width = drawn ? (split ? widths[at] : fit.width) : NaN;
     return {
-      pane: n, slot: slotOf(ws, n), drawn, split, width,
+      pane: n, slot: slotOf(ws, n), drawn: drawn && !props.covered, split, width,
       narrow: split && width < NARROW_W,
       compact: split && width < COMPACT_W,
       focused: ws.focused === n,
@@ -508,7 +509,7 @@ export function Workspace(props: {
           onReset={v.resetPanelHeight}
         />
       ) : null}
-      <Panel open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} zoom={v.zoom}
+      <Panel covered={props.covered} open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} zoom={v.zoom}
              projects={props.projects ?? []} onHide={v.togglePanel} />
       <TerminalToasts blocked={props.blocked} />
       <TerminalLinkMenu blocked={props.blocked} zoom={v.zoom} />
