@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOAD_GRACE_MS, RESTORE_MS, TAB_MS } from "../lib/frameguard";
 import {
   allowRestore, cancelLoad, check, frameGuardProbe, installFrameGuard, ownLoad, registerFrame,
-  resetFrameGuardForTests, setClock,
+  resetFrameGuardForTests, setClock, selectFrame,
 } from "./frameguard";
 
 let t = 1000;
@@ -413,5 +413,31 @@ describe("frame to frame", () => {
     check();
     expect(frame.isConnected).toBe(true);
     expect(document.activeElement).toBe(document.body);
+  });
+});
+
+
+describe("tab selection is bound to one frame", () => {
+  it("allows the selected existing frame but never its sibling", () => {
+    const a = frameIn(2), b = frameIn(3);
+    selectFrame("2:0");
+    a.frame.focus();
+    expect(a.frame.isConnected).toBe(true);
+    b.frame.focus();
+    expect(b.frame.isConnected).toBe(false);
+  });
+  it("still rejects a selected background frame and a selected frame under a card", () => {
+    const a = frameIn(2, { drawn: false });
+    selectFrame("2:0");
+    a.frame.focus();
+    expect(a.frame.isConnected).toBe(false);
+    const card = document.createElement("div");
+    card.id = "authveil";
+    card.innerHTML = '<div data-testid="approval-card" tabindex="-1"></div>';
+    document.body.append(card);
+    const b = frameIn(3);
+    selectFrame("3:0");
+    b.frame.focus();
+    expect(b.frame.isConnected).toBe(false);
   });
 });

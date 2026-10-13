@@ -41,6 +41,7 @@
 import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./layout";
 import { originOf, storableKeepOrigin } from "./browser";
 import { parseTabs, sameTabs, type Tabs } from "./buffers";
+import { cleanTitle } from "./remote";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
@@ -141,6 +142,23 @@ function topColumns(preset: Preset): number {
   return SHAPES[preset].rows?.[0] ?? 2;
 }
 
+export const BROWSER_TABS_MAX = 12;
+export interface BrowserTabSpec {
+  id: string;
+  url: string;
+  keepOrigin?: string;
+  auto?: { kind: "thread" | "task" | "terminal"; label: string };
+}
+export interface BrowserTabs { tabs: BrowserTabSpec[]; active: string }
+export interface BrowserTabOptions { activate?: boolean; auto?: BrowserTabSpec["auto"]; id?: string }
+
+/** Stable identity local to a pane: closing a sibling cannot change it. */
+export function browserTabId(taken: readonly string[] = []): string {
+  let id: string;
+  do { id = Math.floor(Math.random() * 36 ** 6).toString(36).padStart(6, "0"); } while (taken.includes(id));
+  return id;
+}
+
 export interface PaneSpec {
   view: View;
   /** File and Browser panes: the project they are pinned to, or null to follow the chat. */
@@ -149,6 +167,8 @@ export interface PaneSpec {
   terminalId: string | null;
   /** Browser: the URL last loaded here, judged again before it is loaded again (`previewUrl` until BR-3a). */
   browserUrl?: string;
+  /** Canonical tabs; legacy fields mirror the active tab for one release. */
+  browser?: BrowserTabs;
   /**
    * Browser (WP-E, decisions W-4): the origin this pane lets its page keep
    * (`allow-same-origin`), off when absent. Stored as the origin it was given
@@ -313,18 +333,19 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
     projectId: id(v.projectId),
     terminalId: id(v.terminalId),
   };
-  // The Browser's URL; a value stored before BR-3a names it `previewUrl`
-  // (read only when there is no `browserUrl`). Saves write the new name only,
-  // since a save is a parse of the workspace.
-  const url = (x: unknown) => (typeof x === "string" && x && x.length <= URL_MAX ? x : null);
-  const browserUrl = url(v.browserUrl) ?? url(v.previewUrl);
-  if (browserUrl) spec.browserUrl = browserUrl;
-  // Only a grant for exactly the stored URL's origin, on a loopback port that
-  // is none of the daemon's defaults; the reported ports are judged on load.
-  // An old value's grant is kept only while it still matches the URL it is
-  // read with.
-  const keep = storableKeepOrigin(v.keepOrigin, spec.browserUrl);
-  if (keep) spec.keepOrigin = keep;
+  // Explicit empty tabs beat stale mirrors: the final close stays empty.
+  const browser = parseBrowserTabs(v.browser);
+  if (browser) Object.assign(spec, mirrorBrowser(spec, browser));
+  else {
+    const url = (x: unknown) => typeof x === "string" && x && x.length <= URL_MAX ? x : null;
+    const legacy = url(v.browserUrl) ?? url(v.previewUrl);
+    if (legacy) {
+      const tab: BrowserTabSpec = { id: "legacy", url: legacy };
+      const keep = storableKeepOrigin(v.keepOrigin, legacy);
+      if (keep) tab.keepOrigin = keep;
+      Object.assign(spec, mirrorBrowser(spec, { tabs: [tab], active: tab.id }));
+    }
+  }
   if (typeof v.filePath === "string" && v.filePath && v.filePath.length <= PATH_MAX) {
     spec.filePath = v.filePath;
   }
@@ -589,46 +610,95 @@ export function renameTerminal(ws: Workspace, from: string, to: string): Workspa
   return { ...ws, panes: ws.panes.map((p) => (p.terminalId === from ? { ...p, terminalId: to } : p)) as Panes };
 }
 
-/**
- * The URL a Browser pane loaded. A keep-origin grant survives only while the
- * new URL has the origin it was given for: another port, host or scheme turns
- * it off (W-4).
- */
-export function setBrowserUrl(ws: Workspace, pane: PaneNo, url: string): Workspace {
-  const cur = ws.panes[pane - 1].browserUrl ?? "";
-  if (cur === url || url.length > URL_MAX) return ws;
-  const panes = ws.panes.map((p, i) => {
-    if (i !== pane - 1) return p;
-    const next = { ...p };
-    if (url) next.browserUrl = url;
-    else delete next.browserUrl;
-    if (next.keepOrigin && (!url || originOf(url) !== next.keepOrigin)) delete next.keepOrigin;
-    return next;
-  }) as Panes;
-  return { ...ws, panes };
+/** Storage shape only; URLs and grants face the live port judge before loading. */
+export function parseBrowserTabs(raw: unknown): BrowserTabs | null {
+  if (!isObj(raw) || !Array.isArray(raw.tabs)) return null;
+  const tabs: BrowserTabSpec[] = [];
+  const ids = new Set<string>();
+  for (const v of raw.tabs) {
+    if (tabs.length >= BROWSER_TABS_MAX) break;
+    if (!isObj(v) || typeof v.id !== "string" || !/^[a-z0-9]{6}$/.test(v.id) || ids.has(v.id)
+        || typeof v.url !== "string" || v.url.length > URL_MAX) continue;
+    const tab: BrowserTabSpec = { id: v.id, url: v.url };
+    const keep = storableKeepOrigin(v.keepOrigin, v.url);
+    if (keep) tab.keepOrigin = keep;
+    if (isObj(v.auto) && ["thread", "task", "terminal"].includes(String(v.auto.kind))
+        && typeof v.auto.label === "string") {
+      tab.auto = { kind: v.auto.kind as NonNullable<BrowserTabSpec["auto"]>["kind"],
+                   label: cleanTitle(v.auto.label, 60) };
+    }
+    ids.add(tab.id);
+    tabs.push(tab);
+  }
+  if (raw.tabs.length && !tabs.length) return null;
+  return { tabs, active: typeof raw.active === "string" && ids.has(raw.active) ? raw.active : tabs[0]?.id ?? "" };
 }
 
-/**
- * Let a Browser pane's page keep its own origin (an origin), or not (null).
- * Only for exactly the origin of the URL the pane holds, and only one the
- * static judge allows; anything else leaves the workspace as it was.
- */
+function mirrorBrowser(spec: PaneSpec, browser: BrowserTabs): PaneSpec {
+  const next = { ...spec, browser };
+  const tab = browser.tabs.find((t) => t.id === browser.active);
+  delete next.browserUrl;
+  delete next.keepOrigin;
+  if (tab?.url) next.browserUrl = tab.url;
+  if (tab?.keepOrigin) next.keepOrigin = tab.keepOrigin;
+  return next;
+}
+
+function changeBrowser(ws: Workspace, pane: PaneNo, browser: BrowserTabs): Workspace {
+  return { ...ws, panes: ws.panes.map((p, i) => i === pane - 1 ? mirrorBrowser(p, browser) : p) as Panes };
+}
+
+export function addBrowserTab(ws: Workspace, pane: PaneNo, url: string, opts: BrowserTabOptions = {}): Workspace {
+  const browser = ws.panes[pane - 1].browser ?? { tabs: [], active: "" };
+  if (browser.tabs.length >= BROWSER_TABS_MAX || url.length > URL_MAX) return ws;
+  const used = browser.tabs.map((t) => t.id);
+  const id = opts.id && /^[a-z0-9]{6}$/.test(opts.id) && !used.includes(opts.id) ? opts.id : browserTabId(used);
+  const tab: BrowserTabSpec = { id, url };
+  if (opts.auto) tab.auto = { ...opts.auto, label: cleanTitle(opts.auto.label, 60) };
+  return changeBrowser(ws, pane, { tabs: [...browser.tabs, tab], active: opts.activate === false && browser.active ? browser.active : id });
+}
+
+export function closeBrowserTab(ws: Workspace, pane: PaneNo, id: string): Workspace {
+  const browser = ws.panes[pane - 1].browser;
+  if (!browser || !browser.tabs.some((t) => t.id === id)) return ws;
+  const at = browser.tabs.findIndex((t) => t.id === id);
+  const tabs = browser.tabs.filter((t) => t.id !== id);
+  return changeBrowser(ws, pane, { tabs, active: browser.active === id ? tabs[Math.min(at, tabs.length - 1)]?.id ?? "" : browser.active });
+}
+
+export function activateBrowserTab(ws: Workspace, pane: PaneNo, id: string): Workspace {
+  const browser = ws.panes[pane - 1].browser;
+  return !browser || browser.active === id || !browser.tabs.some((t) => t.id === id) ? ws
+    : changeBrowser(ws, pane, { ...browser, active: id });
+}
+
+/** An explicit id also addresses a dormant tab without altering the active one. */
+export function setBrowserUrl(ws: Workspace, pane: PaneNo, url: string, id?: string): Workspace {
+  const browser = ws.panes[pane - 1].browser;
+  if (url.length > URL_MAX) return ws;
+  if (!browser?.tabs.length) return url ? addBrowserTab(ws, pane, url, { id }) : ws;
+  const target = id ?? browser.active;
+  const tab = browser.tabs.find((t) => t.id === target);
+  if (!tab || tab.url === url) return ws;
+  const next = { ...tab, url };
+  if (next.keepOrigin && originOf(url) !== next.keepOrigin) delete next.keepOrigin;
+  return changeBrowser(ws, pane, { ...browser, tabs: browser.tabs.map((t) => t.id === target ? next : t) });
+}
+
+export function setTabKeepOrigin(ws: Workspace, pane: PaneNo, id: string, origin: string | null): Workspace {
+  const browser = ws.panes[pane - 1].browser;
+  const tab = browser?.tabs.find((t) => t.id === id);
+  if (!browser || !tab) return ws;
+  const keep = origin === null ? null : storableKeepOrigin(origin, tab.url);
+  if (origin !== null && !keep || (tab.keepOrigin ?? null) === keep) return ws;
+  const next = { ...tab };
+  if (keep) next.keepOrigin = keep;
+  else delete next.keepOrigin;
+  return changeBrowser(ws, pane, { ...browser, tabs: browser.tabs.map((t) => t.id === id ? next : t) });
+}
+
 export function setKeepOrigin(ws: Workspace, pane: PaneNo, origin: string | null): Workspace {
-  const spec = ws.panes[pane - 1];
-  if (origin === null) {
-    if (!spec.keepOrigin) return ws;
-    const panes = ws.panes.map((p, i) => {
-      if (i !== pane - 1) return p;
-      const next = { ...p };
-      delete next.keepOrigin;
-      return next;
-    }) as Panes;
-    return { ...ws, panes };
-  }
-  const keep = storableKeepOrigin(origin, spec.browserUrl);
-  if (!keep || spec.keepOrigin === keep) return ws;
-  const panes = ws.panes.map((p, i) => (i === pane - 1 ? { ...p, keepOrigin: keep } : p)) as Panes;
-  return { ...ws, panes };
+  return setTabKeepOrigin(ws, pane, ws.panes[pane - 1].browser?.active ?? "", origin);
 }
 
 export function setSplit(ws: Workspace, preset: Preset, split: Partial<Split>): Workspace {
@@ -762,7 +832,20 @@ export function copySpec(spec: PaneSpec): PaneSpec {
       break;
     case "browser":
       out.projectId = spec.projectId;
-      if (spec.browserUrl) out.browserUrl = spec.browserUrl;
+      if (spec.browser) {
+        const ids = spec.browser.tabs.map((t) => t.id);
+        const tabs = spec.browser.tabs.map((t) => {
+          const id = browserTabId(ids);
+          ids.push(id);
+          return { id, url: t.url };
+        });
+        const active = tabs[spec.browser.tabs.findIndex((t) => t.id === spec.browser!.active)]?.id ?? tabs[0]?.id ?? "";
+        return mirrorBrowser(out, { tabs, active });
+      }
+      if (spec.browserUrl) {
+        const id = browserTabId();
+        return mirrorBrowser(out, { tabs: [{ id, url: spec.browserUrl }], active: id });
+      }
       break;
     case "vex":
       out.projectId = spec.projectId;
