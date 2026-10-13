@@ -482,8 +482,9 @@ def cache_control_checks() -> None:
     many = [{"role": "user", "content": str(i)} for i in range(10)]
     many[0]["role"] = "system"
     # Drop oldest middle boundaries after walking/deduping, regardless of order.
-    wire = request(model, many, 1, False, cache_points=(7, 1, 6, 2, 6, 0, 8))["messages"]
-    assert _breakpoints(wire) == [0, 6, 7, 8]
+    for stream in (True, False):
+        wire = request(model, many, 1, stream, cache_points=(7, 1, 6, 2, 6, 0, 8))["messages"]
+        assert _breakpoints(wire) == [0, 6, 7, 8]
     for stream in (True, False):
         wire = request(model, many, 1, stream, cache_points=(1, 2, 3), cache=False)["messages"]
         assert wire == many and not _breakpoints(wire)
@@ -586,7 +587,7 @@ def agent_cache_prefix_checks() -> None:
 
 
 def agent_long_cache_prefix_checks() -> None:
-    """Large results and image eviction leave each middle prefix unchanged."""
+    """Separate windows retain a stable prefix and reuse a longer one when possible."""
     with tempfile.TemporaryDirectory() as raw, \
             patch.object(llm.config, "SKILLS_DIR", Path(raw) / "skills"), \
             patch.object(llm.config, "SPILL_DIR", Path(raw) / "spill"), \
@@ -597,10 +598,10 @@ def agent_long_cache_prefix_checks() -> None:
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\ndescription: Large-result test\n---\nFollow the plan.\n")
         agent = agent_mod.Agent(model="anthropic/claude-haiku-5.5",
-                               tool_names=["skill_read", "plan_write"], max_steps=12)
+                               tool_names=["skill_read", "plan_write"], max_steps=18)
         assert agent.policy == agent_mod.context.ContextPolicy()
         responses = []
-        for step in range(1, 11):
+        for step in range(1, 17):
             call = {"index": 0, "id": f"long{step}", "type": "function",
                     "function": {"name": "skill_read", "arguments": '{"name":"test"}'}}
             responses.append(FakeStream(sse([{"choices": [{"delta": {"tool_calls": [call]},
@@ -611,11 +612,11 @@ def agent_long_cache_prefix_checks() -> None:
         def dispatch(call):
             step = int(call["id"][4:])
             return agent_mod.tools.ToolResult(text=f"result {step}: " + "R" * 4000,
-                                             image_b64="ZmFrZQ==" if step in (2, 5, 8) else None)
+                                             image_b64="ZmFrZQ==" if step in (2, 9, 14) else None)
 
         with patch.object(agent, "_dispatch_one", dispatch), no_post(), streaming(*responses) as sent:
-            assert agent.run_turn("ten large tool results, with images").text == "done"
-        assert len(sent) == 11
+            assert agent.run_turn("sixteen large tool results, with sparse images").text == "done"
+        assert len(sent) == 17
         plains = [_plain_messages(payload["messages"]) for payload in sent]
         assert all(plain[-1]["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX) for plain in plains), \
             [(i, plain[-1]["content"][:100]) for i, plain in enumerate(plains)]
@@ -623,16 +624,37 @@ def agent_long_cache_prefix_checks() -> None:
                    for m in plains[-1] if m["role"] == "tool")
         assert any(p.get("text") == agent_mod.context.EVICTED_IMAGE
                    for m in sent[-1]["messages"] for p in agent_mod.context._parts(m))
-        middle_count = 0
+        middle_count = four_count = longer_reused = longer_invalidated = 0
         for current, following in zip(sent, sent[1:]):
             points = _breakpoints(current["messages"])
             assert 0 in points and len(points) <= 4
-            if len(points) == 3:
+            if len(points) >= 3:
                 middle_count += 1
                 end = points[1] + 1
                 assert _plain_messages(current["messages"][:end]) == \
-                    _plain_messages(following["messages"][:end]), "middle cached prefix changed"
+                    _plain_messages(following["messages"][:end]), "earliest middle cached prefix changed"
+            if len(points) == 4:
+                four_count += 1
+                end = points[2] + 1
+                before = _plain_messages(current["messages"][:end])
+                after = _plain_messages(following["messages"][:end])
+                if before == after:
+                    longer_reused += 1
+                    # The extra point saves actual result text beyond the older
+                    # point; merely adding a nearby empty/image block is no fix.
+                    extra = before[points[1] + 1:]
+                    assert sum(len(m.get("content", "")) for m in extra
+                               if m["role"] == "tool") > 1500
+                else:
+                    longer_invalidated += 1
+                    # The other window may still rewrite this longer prefix;
+                    # the earlier point above remains the stable fallback.
+                    assert all(old["role"] in ("tool", "user")
+                               for old, new in zip(before, after) if old != new)
         assert middle_count >= 5, "long turn never acquired a useful middle breakpoint"
+        assert four_count >= 4, "sparse images held back the independent tool boundary"
+        assert longer_reused >= 3, "extra boundary never reused a longer result prefix"
+        assert longer_invalidated >= 1, "fixture never exercised the other window crossing a boundary"
         assert '"cache_control"' not in json.dumps(agent.messages)
 
         # The boundary follows the actual policy, counting images, not carriers.
@@ -643,14 +665,21 @@ def agent_long_cache_prefix_checks() -> None:
                           {"role": "tool", "content": "new"}]
         assert agent._cache_points() == (1,)
         agent.policy.keep_full_results = 1
-        assert agent._cache_points() == (1,)
+        assert agent._cache_points() == (1, 2)
         agent.policy.keep_images = 3
         assert agent._cache_points() == (2,)
         agent.policy.keep_full_results = 3
         assert agent._cache_points() == ()
         agent.policy.keep_full_results = agent.policy.keep_images = 0
         assert agent._cache_points() == ()
-    print("ok  caching: real Agent, ten 4k tool results, three images, finalised middle prefixes")
+        # Both raw window boundaries can walk back to the same text block.
+        agent.policy.keep_full_results = agent.policy.keep_images = 1
+        assert agent._cache_points() == (1, 2)
+        wire = llm._cache_messages(agent.model, agent.messages, 0, agent._cache_points())
+        assert _breakpoints(wire) == [0, 1, 3]
+        agent.policy.enabled = False
+        assert agent._cache_points() == ()
+    print("ok  caching: real Agent, sixteen 4k results, independent image/tool windows and four points")
 
 
 def summarize_cache_checks() -> None:

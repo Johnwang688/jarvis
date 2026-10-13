@@ -439,11 +439,12 @@ class Agent:
         return int(bool(self.messages) and self.messages[-1] is self._context_block)
 
     def _cache_points(self) -> tuple[int, ...]:
-        """End of the prefix already finalised by context management.
+        """Separate cache boundaries for the tool-result and image windows.
 
-        Recent full results and live images may be rewritten next step. The
-        prefix before both windows has already been truncated/evicted, whose
-        rewrites are idempotent. Compaction can still invalidate it.
+        The earlier prefix is finalised by both idempotent context rewrites.
+        The later one can be invalidated by the other window, but reuses a
+        longer prefix between those rewrites (notably sparse image evictions).
+        Compaction can invalidate either; system and tail use the other two slots.
         """
         if not self.policy.enabled:
             return ()
@@ -455,7 +456,7 @@ class Agent:
                               (images_at, self.policy.keep_images)):
             if keep > 0 and len(indices) >= keep:
                 limits.append(indices[-keep] - 1)
-        return (min(limits),) if limits and min(limits) >= 0 else ()
+        return tuple(sorted({point for point in limits if point >= 0}))
 
     def _summarize(self, transcript: str) -> str:
         """Compress old history into fixed sections, on the orchestrator tier.

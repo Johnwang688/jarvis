@@ -7219,13 +7219,15 @@ Two findings worth keeping:
   `-m` still runs its children and summaries through `models.tier()`; pin
   `JARVIS_ORCHESTRATOR` for comparable runs. Numbers taken before this PR
   are not comparable with numbers after it.
-- **Claude prompt caching (2026-10-12).** Three explicit ephemeral breakpoint
-  positions: the system message, an optional middle boundary already finalised by
-  `context.manage()`, and the newest markable message before the volatile tail.
-  The middle boundary precedes both the newest full tool results and the newest
-  live images, using the agent's context policy. Once truncated or evicted,
-  that prefix stays unchanged on subsequent steps; compaction can invalidate it.
-  With fewer results/images than both keep counts, no middle point is needed.
+- **Claude prompt caching (2026-10-12).** Up to four explicit ephemeral breakpoint
+  positions: the system message, separate image and full-tool-result window
+  boundaries from `context.manage()`, and the newest markable message before
+  the volatile tail. The earlier middle prefix is already truncated/evicted
+  and stays unchanged on subsequent steps. The later middle prefix can be
+  invalidated by the other window, but reuses more result text between sparse
+  image evictions; a single minimum boundary let old live images hold it back.
+  Compaction can invalidate either prefix. Each window contributes only once
+  its keep count is reached; coincident boundaries use one point.
   Breakpoints walk back to nonblank text only, never image parts or assistant
   messages with tool calls. Caller boundaries are deduped and capped at four,
   dropping oldest middle points while preserving the system and tail.
@@ -7238,9 +7240,10 @@ Two findings worth keeping:
   six steps read zero cached tokens each step and paid a 1.25x cache write,
   $0.0026 per step. Explicit breakpoints read about 19.2k of 20k tokens from
   step 2 on, $0.00035 per step. That was a short turn with small results;
-  in long turns with big results, the middle breakpoint is what keeps reads
+  in long turns with big results, middle breakpoints preserve reusable prefixes
   as context management rewrites older messages. A breakpoint on a tool
-  message worked.
+  message worked. The separate-window fix has synthetic regression coverage;
+  its provider cache-read improvement still needs a live long-turn probe.
   A live three-step tool turn on Haiku 5.5 at a reasoning effort ran without
   error although `_stream_once` does not pass `reasoning_details` back.
   Nothing changed for reasoning.

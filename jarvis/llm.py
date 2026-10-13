@@ -316,9 +316,10 @@ def chat(
     render text as it arrives.
 
     `volatile_tail` counts trailing messages rebuilt each step. Claude cache
-    breakpoints stop before them. `cache_points` are message indices the caller
-    vouches will not be rewritten; each walks back to nonblank text. Only the
-    wire copy is marked. One-off prompts can opt out with `cache=False`.
+    breakpoints stop before them. `cache_points` are candidate prefix ends
+    chosen by the caller's context windows; each walks back to nonblank text.
+    A later rewrite invalidates affected prefixes normally. Only the wire
+    copy is marked. One-off prompts can opt out with `cache=False`.
     """
     payload: dict[str, Any] = {
         "model": model,
