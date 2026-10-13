@@ -761,3 +761,43 @@ sequences Chrome actually produces, chimes counted rather than played); it is
 verified to fail against the old handler with "the final result chimed again".
 
 <!-- claude-source:009446-009491:end -->
+
+
+## 2026-10-13: V1 microphone diagnostics
+
+V1 adds a window-local ring of the latest 50 utterance dispositions under
+Settings → Voice. It contains only a local numeric sequence, monotonic time,
+bounded duration, a closed claim-source/outcome enum, energy-detector identity
+and STT latency. No audio, transcript, title, device ID or exception text is
+stored in the ring, logged, sent to the daemon or persisted. Reload clears it.
+`handed_to_chat` means the transcript reached the chat send function; it does
+not claim the daemon accepted a send. REVIEW placement and STT failure are
+separate outcomes, and each pending row settles at most once.
+
+Capture's existing claim, muted-upload refusal, unmute pre-roll clamp,
+suppression, 30-second cap and PTT behavior remain. An observational energy
+detector groups speech under existing suppressors into one drop row per
+segment; it cannot claim audio or upload. Observer failures cannot prevent
+the real capture callback. The live level is zero and explicitly labelled
+MIC MUTED in OFF; the local room floor continues tracking as before.
+
+The microphone explicitly requests echo cancellation, noise suppression and
+automatic gain. Unsupported constraints fall back to the existing `audio:
+true` request. Permission denial never triggers a second request. Actual
+`getSettings()` readback is normalized to booleans or "not reported"; requested
+constraints are not presented as proof of effective processing.
+
+Free checks: full HUD vitest, production build,
+`hud_v2_voice_diagnostics_check.py` (isolated fake microphone/STT, real fetch,
+the daemon CSP and mock ephemeral listeners), and capture mutations removing
+the unmute clamp, allowing muted PTT, or omitting drop observations. Each
+mutant fails a relevant test; source is restored byte for byte afterward.
+The browser checks include no upload under Settings or OFF, failed STT with
+no exception in diagnostics, failed chat send with no false "sent" outcome,
+reload clearing, normalized settings and fixed permission-failure wording.
+
+V0 acoustic/ML measurements remain pending: Windows speaker AEC/ERLE, TV
+false holds, WASM Silero/RNNoise/KWS CPU, local Parakeet RTF/WER and speaker
+EER. Synthetic diagnostics checks establish none of those measurements.
+This package does not change wake recognition, add speech playback, alter
+approvals, retain retry clips, add continuation, or claim a live deployment.

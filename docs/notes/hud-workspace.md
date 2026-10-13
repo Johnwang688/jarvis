@@ -1169,3 +1169,31 @@ project's own `routing.models` (on `POST`/`PATCH /projects`) all read; **its Cod
 key — the HUD sent the wrong keys for weeks and every click reset itself (A6).
 
 <!-- claude-source:004279-004659:end -->
+
+
+## Shared Markdown math (2026-10-13)
+
+Replies and Markdown file previews render paired dollar and backslash math
+delimiters through local KaTeX 0.19.0; its CSS/fonts ship in the HUD build and
+use the existing CSP. Drafts remain plain text until completion. Code spans,
+fences, escaped delimiters and ordinary unpaired prices retain their text.
+Unsupported or unfinished math stays readable as source.
+
+The existing prose HTML allowlist and link scheme checks are unchanged.
+Markdown math tokens emit a per-render random placeholder; only its registered
+entry is replaced after prose sanitization, with separately sanitized
+KaTeX HTML/MathML. Math admits no links, images, controls, handlers, ids or data
+attributes. Rendering uses trust=false, strict errors, 100 macro expansions,
+a 20-em user size cap and a fresh macro dictionary per expression. Generated
+negative lengths below -20 em or positioning/margin offsets beyond +/-20 em
+fall back to source; natural positive widths remain available for scrolling. Math work is
+limited to 64 expressions, 8192 source code units each, 32768 in total; excess
+math stays literal and ordinary prose is retained. Inline closing positions
+are indexed once and display-block lookahead is bounded.
+
+Checks: markdownMath.test.ts covers the reported Mean Value Theorem fraction,
+numeric formulas, all four delimiter forms, partial completion, code/currency,
+hostile TeX commands, macro/size/source bounds and delimiter floods.
+hud_v2_math_check.py runs actual chat under the CSP on MockDaemon(0), verifying
+MathML, local font loads, fraction geometry, stream completion, hostile
+commands and narrow-viewport scrolling. It is part of hud_v2_check.py.

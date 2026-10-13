@@ -5,6 +5,9 @@ It records how it was started — argv, working folder, and the *names* of its
 environment (never a value) — to `calls.jsonl` beside itself, then behaves by
 what the test planted in the project:
 
+STARTUP_DSR beside the makefile emits a split Windows startup query, waits
+for its fixed cursor reply, then prints both streams before normal behavior.
+
 * `clean` in argv: removes `build/`, prints `clean project`, exits 0;
 * `src/SLOW`: sleeps (the timeout check kills it);
 * `src/FAIL`: prints that file's text (a fixture build log) and exits 2;
@@ -29,6 +32,27 @@ args = sys.argv[1:]
 with open(HERE / "calls.jsonl", "a", encoding="utf-8") as log:
     log.write(json.dumps({"tool": "make", "argv": args, "cwd": os.getcwd(),
                           "env": sorted(os.environ), "wslenv": os.environ.get("WSLENV")}) + "\n")
+# Model Windows interop's startup handshake without a Windows dependency.
+# No bytes are printed until the input-disabled build gets its cursor reply.
+if Path("STARTUP_DSR").is_file():
+    import select
+    import termios
+    import tty
+    attrs = termios.tcgetattr(0)
+    tty.setraw(0)
+    for part in (b"\x1b", b"[", b"6", b"n"):
+        os.write(1, part)
+        time.sleep(0.01)
+    reply = b""
+    until = time.monotonic() + 2
+    while len(reply) < 6 and time.monotonic() < until:
+        if select.select([0], [], [], 0.1)[0]:
+            reply += os.read(0, 6 - len(reply))
+    if reply != b"\x1b[1;1R":
+        sys.exit(91)
+    termios.tcsetattr(0, termios.TCSANOW, attrs)
+    print("WINDOWS-STARTUP-STDOUT", flush=True)
+    print("WINDOWS-STARTUP-STDERR", file=sys.stderr, flush=True)
 project = next((a[2:] for a in args if a.startswith("P=")), "project")
 src = Path("src")
 if (src / "MARKER").is_file():
