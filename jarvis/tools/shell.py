@@ -8,6 +8,7 @@ one catch-all `run_command` would leave the harness nothing to reason about.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from typing import Annotated
@@ -54,6 +55,11 @@ _OPERATORS = (">", ">>", "<", "|", ";", "&", "\n", "\r")
 # The two the shell expands *inside* double quotes, so a quote is not a reason
 # to stop looking for them: `grep "$(cat .env)" f` is still substitution.
 _SUBSTITUTIONS = ("$(", "`")
+
+# The only variables `run_readonly` lets a line set before its program: the
+# locale and the time zone, with a plain value (no `$`, no quote, no space).
+_SAFE_ENV_NAME = re.compile(r"LC_[A-Z]+|LANG|LANGUAGE|TZ")
+_SAFE_ENV_VALUE = re.compile(r"[A-Za-z0-9_.:@+,/-]*")
 
 TIMEOUT_S = 60
 
@@ -135,6 +141,23 @@ def run_readonly(
     if "xargs" in peeled:
         return ("Error: xargs passes its program arguments this check cannot see. "
                 "Use run_command.")
+    # An assignment before the program — the shell's (`X=1 ls`) or env's
+    # (`env X=1 ls`) — sets what it runs with, and some names make any
+    # program load code: `LD_PRELOAD=./x.so ls` ran here, with nobody asked
+    # (found in the third delta review of PR #75, older than the PR; also
+    # `LD_AUDIT`, `GCONV_PATH`, `PATH` …). Only the locale and time zone may
+    # be set; a line whose program is not a plain tail of its words (`env
+    # -S`) sets nothing here.
+    tail = len(tokens) - len(sure)
+    if tail < 0 or tokens[tail:] != sure:
+        return ("Error: what this runs, or what it runs with, cannot be told. "
+                "Use run_command.")
+    for word in tokens[:tail]:
+        parts = rules.assignment(word)
+        if parts is not None and not (_SAFE_ENV_NAME.fullmatch(parts[0]) and parts[1] is None
+                                      and _SAFE_ENV_VALUE.fullmatch(parts[3])):
+            return (f"Error: setting {parts[0]} changes what the program runs with, so it is "
+                    "not a read. Use run_command.")
     tokens = sure
     if not tokens:
         return "Error: empty command."

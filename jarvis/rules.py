@@ -1084,10 +1084,7 @@ def _unwrap_reading(tokens: list[str], peeled: list | None = None,
             writes.extend(started.writes)
         if started is None or not started.programs:
             return tokens, sure and not (started and started.strings)
-        if not started.sure or started.strings:
-            # A command line it runs beside its program (`systemd-run -p
-            # ExecStartPost=CMD true`; third delta review of PR #75, LOW 2)
-            # is not the program's: which commands run cannot be told from it.
+        if not started.sure:
             sure = False
         if peeled is not None:
             peeled.append(stem)
