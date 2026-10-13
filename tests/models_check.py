@@ -71,6 +71,9 @@ def _entry(model_id, **kw):
 FIXTURE = [
     _entry("openai/gpt-5.6-luna", name="OpenAI: Luna", intelligence=58, vision=True,
            reasoning={"supported_efforts": ["max", "high", "medium", "low"]}),
+    _entry("anthropic/claude-haiku-5.5", name="Anthropic: Haiku 5.5", vision=True,
+           context=1_000_000, prompt="0.0000001", completion="0.0000005",
+           reasoning={"supported_efforts": ["max", "high", "medium", "low"]}),
     _entry("anthropic/claude-opus-5", name="Anthropic: Opus 5", intelligence=63.1,
            vision=True, prompt="0.000005", completion="0.000025"),
     _entry("tiny/free-model", name="Tiny: Free", prompt="0", completion="0"),
@@ -498,6 +501,8 @@ def effort_checks() -> None:
     config.MODEL_CACHE_PATH = shared_cache.parent / "effort-cache.json"
     _reset_catalog()
     _serve([
+        _entry("anthropic/claude-haiku-5.5",
+               reasoning={"supported_efforts": ["max", "high", "medium", "low"]}),
         # Luna's real ladder, and a model that stops short of it.
         _entry("openai/gpt-5.6-luna", intelligence=58,
                reasoning={"supported_efforts": ["max", "xhigh", "high", "medium", "low"]}),
@@ -579,8 +584,8 @@ def effort_checks() -> None:
     rows = {m["id"]: m for m in models.describe()["models"]}
     assert rows["cheap/short-ladder"]["effort"] == "low"
     assert rows["cheap/short-ladder"]["effective_effort"] == "low"
-    assert rows["openai/gpt-5.6-luna"]["effort"] == ""
-    assert rows["openai/gpt-5.6-luna"]["effective_effort"] == "max"
+    assert rows[config.TIERS["orchestrator"]]["effort"] == ""
+    assert rows[config.TIERS["orchestrator"]]["effective_effort"] == "max"
     assert models.describe()["default_effort"] == "max"
     models.remove("cheap/short-ladder")
     print("ok  effort: a per-model pin beats the global, is refused off-ladder, "
@@ -704,7 +709,7 @@ def route_checks() -> None:
         assert [m["id"] for m in data["models"]] == [default], data
 
         status, data = _request("GET", "/models/catalog")
-        assert status == 200 and len(data["models"]) == 4, data
+        assert status == 200 and len(data["models"]) == 5, data
         assert data["roster"] == [default] and data["stale"] == ""
 
         agent = server._get_agent()

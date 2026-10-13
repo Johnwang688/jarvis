@@ -56,7 +56,7 @@ class ContextPolicy:
     image_token_cost: int = 1500
     """Rough per-image token cost, for budget estimation."""
 
-    compact_at_tokens: int = 60_000
+    compact_at_tokens: int = config.COMPACT_AT_TOKENS
     """Summarize the oldest history once the estimate crosses this."""
 
     keep_recent_messages: int = 14

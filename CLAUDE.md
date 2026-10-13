@@ -6881,6 +6881,9 @@ Two findings worth keeping:
   comparisons remain opt-in by naming models explicitly on `jarvis bench`.
   If Luna hits a capability wall, escalate the orchestrator to GPT-5.6 Terra
   or Claude Sonnet 5.
+- **Model default update (2026-10-12).** The owner moved the default orchestrator to
+  `anthropic/claude-haiku-5.5` (same listed price as Luna, faster, judged better),
+  with compaction at 100k; Claude models get OpenRouter's top-level `cache_control`.
 - **Semantic/RAG memory deferred.** Memory is one markdown file per fact, pulled
   on demand via tools, so nothing is auto-injected. The upgrade ladder is
   substring → SQLite FTS5/BM25 → embeddings, and the tool interface
@@ -8351,7 +8354,7 @@ failure — a run that goes long enough to forget what it was doing.
 - **The cut-point orphan bug** (invariant 1) — found by inspection, reproduced,
   fixed, and now covered by the `context.py` test suite that this file had been
   claiming existed. Worth internalizing: it lived in a code path that *only*
-  executes past 60k tokens, so every short test in the repo ran straight past
+  executes past 100k tokens by default, so every short test in the repo ran straight past
   it. Long-horizon code needs long-horizon tests.
 - **The working plan** (`tools/plan.py`). One tool, `plan_write`, holding a
   markdown checklist rewritten whole each time. It renders into `messages[0]`,
@@ -9204,7 +9207,7 @@ CLAUDE.md once it has been, with the results folded into the notes above:**
 4. **A real run past the compaction threshold.** Nothing has yet exercised
    compaction against a live model — the orphan fix is proven synthetically
    only. A long browser or CAD session (parallel `cad_render` calls are the
-   exact shape that triggered the bug) crossing 60k tokens would confirm no
+   exact shape that triggered the bug) crossing 100k tokens would confirm no
    400s and that the pinned goal reads sensibly after a summary lands.
 4b. **Does the model actually use `edit_file` and `grep_files`?** (Added
    2026-08-09.) Both are mechanically tested; the *prompting* is not. Watch a

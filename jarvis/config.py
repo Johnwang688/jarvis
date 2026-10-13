@@ -839,10 +839,14 @@ STREAM = os.environ.get("JARVIS_STREAM", "1") not in ("0", "false", "no")
 # once, tighter, if it still overruns.
 COMPACTION_MAX_TOKENS = int(os.environ.get("JARVIS_COMPACTION_MAX_TOKENS", "2400"))
 
+# Prompt-token threshold for automatic context compaction. Explicit policies
+# (for example, benchmark windows) can still choose their own threshold.
+COMPACT_AT_TOKENS = int(os.environ.get("JARVIS_COMPACT_AT_TOKENS", "100000"))
+
 # How hard the model running the loop is asked to think, sent as OpenRouter's
-# unified `reasoning.effort`. Luna's own default is **medium**; this asks for
-# the top of its ladder, because the orchestrator is the call that plans, picks
-# tools and recovers from errors — the one place in this system where a better
+# unified `reasoning.effort`. This asks for the top of the model's ladder,
+# because the orchestrator plans, picks tools and recovers from errors — the
+# one place in this system where a better
 # answer is worth more than a faster one. Set JARVIS_REASONING_EFFORT to
 # medium/low, or to "" / "default", to hand the decision back to the provider.
 #
@@ -858,28 +862,28 @@ REASONING_EFFORT = os.environ.get("JARVIS_REASONING_EFFORT", "max")
 
 TIERS: dict[str, str] = {
     # Runs the agent loop: plans, picks tools, recovers from errors.
-    "orchestrator": os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna"),
+    "orchestrator": os.environ.get("JARVIS_ORCHESTRATOR", "anthropic/claude-haiku-5.5"),
     # Runs run_subagent's children. Defaults to the orchestrator — a delegated
     # job is still real work — but sub-agents were pinned to it by omission
     # rather than by choice, and on a delegating run they are the largest line
     # item, so it is worth being movable without an edit.
     "subagent": os.environ.get(
-        "JARVIS_SUBAGENT", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
+        "JARVIS_SUBAGENT", os.environ.get("JARVIS_ORCHESTRATOR", "anthropic/claude-haiku-5.5")
     ),
-    # Compacts a transcript when it outgrows the window. Luna, not the cheap
-    # tier (2026-08-09): compaction is the one summarization whose output the
+    # Compacts a transcript when it outgrows the window. The orchestrator,
+    # not the cheap tier (2026-08-09): compaction is the one summarization whose output the
     # model then *works from* for the rest of the run. Everything the summary
     # drops is gone — gpt-oss-20b's paraphrases lost which of several attempts
     # had actually worked, and a run that forgets that repeats it. The cheap
     # tier is right for bulk text nobody acts on; this is not that.
     "compaction": os.environ.get(
-        "JARVIS_COMPACTION", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
+        "JARVIS_COMPACTION", os.environ.get("JARVIS_ORCHESTRATOR", "anthropic/claude-haiku-5.5")
     ),
     # Judges a script a `curl … | sh` would run (command_review.py). The
     # orchestrator tier on purpose: this decides whether arbitrary remote code
     # executes on the owner's machine, which is the last place to save money.
     "review": os.environ.get(
-        "JARVIS_REVIEW_MODEL", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
+        "JARVIS_REVIEW_MODEL", os.environ.get("JARVIS_ORCHESTRATOR", "anthropic/claude-haiku-5.5")
     ),
     # Handles delegated single-shot work (drafting, summarizing, extracting).
     # Bench 2026-07-30: 8/8 on tool tasks at half Luna's cost.

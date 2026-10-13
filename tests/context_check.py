@@ -20,16 +20,72 @@ Run:  .venv/bin/python tests/context_check.py
 
 from __future__ import annotations
 
+import os
+import runpy
 import sys
 import tempfile
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import agent as agent_mod
 from jarvis import config, context, llm
 from jarvis.agent import Agent
+
+
+def config_default_checks() -> None:
+    """Defaults and env overrides, without loading any real .env or state."""
+    keys = ("JARVIS_COMPACT_AT_TOKENS", "JARVIS_ORCHESTRATOR", "JARVIS_SUBAGENT",
+            "JARVIS_COMPACTION", "JARVIS_REVIEW_MODEL", "JARVIS_WORKER", "JARVIS_CHEAP")
+    clean = {k: v for k, v in os.environ.items() if k not in keys}
+    with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, clean, clear=True):
+        source = Path(raw) / "jarvis" / "config.py"
+        source.parent.mkdir()
+        source.write_text(Path(config.__file__).read_text())
+        defaults = runpy.run_path(str(source))
+        assert defaults["COMPACT_AT_TOKENS"] == 100_000, "compaction default must be 100k"
+        for tier in ("orchestrator", "subagent", "compaction", "review"):
+            assert defaults["TIERS"][tier] == "anthropic/claude-haiku-5.5", tier
+        for tier in ("worker", "cheap"):
+            assert defaults["TIERS"][tier] == "openai/gpt-oss-20b", tier
+
+        os.environ.update(JARVIS_COMPACT_AT_TOKENS="42000", JARVIS_ORCHESTRATOR="test/leader")
+        overrides = runpy.run_path(str(source))
+        assert overrides["COMPACT_AT_TOKENS"] == 42_000
+        assert all(overrides["TIERS"][tier] == "test/leader"
+                   for tier in ("orchestrator", "subagent", "compaction", "review"))
+        os.environ.update(JARVIS_SUBAGENT="test/child", JARVIS_COMPACTION="test/summary",
+                          JARVIS_REVIEW_MODEL="test/review")
+        overrides = runpy.run_path(str(source))
+        assert overrides["TIERS"]["subagent"] == "test/child"
+        assert overrides["TIERS"]["compaction"] == "test/summary"
+        assert overrides["TIERS"]["review"] == "test/review"
+
+    assert context.ContextPolicy().compact_at_tokens == config.COMPACT_AT_TOKENS
+    assert Agent(tool_names=["get_datetime"]).policy.compact_at_tokens == config.COMPACT_AT_TOKENS
+    explicit = context.ContextPolicy(compact_at_tokens=1800)
+    assert Agent(tool_names=["get_datetime"], policy=explicit).policy is explicit
+    print("ok  config: Haiku defaults, 100k compaction, env overrides and explicit policies")
+
+
+def default_threshold_checks() -> None:
+    """The production policy keeps 100k tokens and compacts just above it."""
+    with tempfile.TemporaryDirectory() as raw:
+        policy = context.ContextPolicy(spill_dir=Path(raw))
+        messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "goal"}]
+        messages += [{"role": "user", "content": f"turn {i}"} for i in range(30)]
+        meter = context.TokenMeter()
+        for tokens in (70_000, policy.compact_at_tokens):
+            meter.observe(messages, tokens)
+            stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY", meter=meter)
+            assert not stats.messages_compacted, f"compacted prematurely at {tokens}"
+        meter.observe(messages, policy.compact_at_tokens + 1)
+        stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY", meter=meter)
+        assert stats.messages_compacted, "default threshold did not trigger compaction"
+        _assert_wire_valid(messages)
+    print("ok  context: default compacts above 100k, preserves history below and at threshold")
 
 
 def _image_msg(tag: str = "AAA") -> dict:
@@ -478,6 +534,8 @@ def main() -> int:
     # the same reason every suite that touches the allowlist points it at a
     # temp file first.
     config.MODELS_PATH = Path(tempfile.mkdtemp()) / "models.json"
+    config_default_checks()
+    default_threshold_checks()
     orphan_checks()
     cut_point_checks()
     goal_anchor_checks()

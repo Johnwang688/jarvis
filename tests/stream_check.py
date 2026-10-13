@@ -24,7 +24,9 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -337,7 +339,58 @@ def provider_pin_checks() -> None:
     print("ok  provider pin: single tag, ordered list, config default, and no pin")
 
 
+def cache_control_checks() -> None:
+    """Only Anthropic requests get one top-level breakpoint on either path."""
+    messages = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    tools = [{"type": "function", "function": {"name": "test", "parameters": {"type": "object"}}}]
+    chunks = [{"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}]
+
+    class Body:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    for model, expected in (("anthropic/claude-haiku-5.5", {"type": "ephemeral"}),
+                            ("~anthropic/claude-sonnet-latest", {"type": "ephemeral"}),
+                            ("openai/gpt-5.6-luna", None), ("google/gemini-3.7-flash", None),
+                            ("other/anthropic/claude", None), ("anthropic-not/claude", None),
+                            ("", None)):
+        assert llm.cache_control(model) == expected, model
+        for stream in (True, False):
+            posts = []
+
+            def fake_post(url, json=None, **kwargs):
+                posts.append(json)
+                return Body()
+
+            with patch.object(llm._client, "post", fake_post), streaming(FakeStream(sse(chunks))) as sent:
+                reply = llm.chat(model, messages, tools=tools, stream=stream)
+            assert reply.text == "ok"
+            assert len(sent) == int(stream) and len(posts) == int(not stream)
+            payload = (sent if stream else posts)[0]
+            if expected is None:
+                assert "cache_control" not in payload, (model, stream, payload)
+            else:
+                assert payload.get("cache_control") == {"type": "ephemeral"}, (model, stream, payload)
+                assert json.dumps(payload).count('"cache_control"') == 1, payload
+            assert payload["messages"] == messages and payload["tools"] == tools
+
+    # A stream that never starts carries the same cache hint into its fallback.
+    posts = []
+    with patch.object(llm._client, "post", fake_post), patch.object(llm.time, "sleep"), \
+            streaming(FakeStream([], status=500, body="unavailable")) as sent:
+        llm.chat("anthropic/claude-haiku-5.5", messages, stream=True, max_retries=1)
+    assert len(sent) == len(posts) == 1
+    assert sent[0]["cache_control"] == posts[0]["cache_control"] == {"type": "ephemeral"}
+    print("ok  caching: Anthropic only, one top-level field, streaming/plain/fallback")
+
+
 def main() -> int:
+    llm.config.MODELS_PATH = Path(tempfile.mkdtemp()) / "models.json"
+    cache_control_checks()
     assembly_checks()
     tool_call_checks()
     cancel_checks()

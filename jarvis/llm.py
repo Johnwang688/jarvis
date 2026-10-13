@@ -228,6 +228,13 @@ def provider_order(pin: str | None) -> list[str]:
     return [tag.strip() for tag in pin.split(",") if tag.strip()]
 
 
+def cache_control(model: str) -> dict[str, str] | None:
+    """OpenRouter's moving cache breakpoint is opt-in for Claude models."""
+    if model.startswith(("anthropic/", "~anthropic/")):
+        return {"type": "ephemeral"}
+    return None
+
+
 def chat(
     model: str,
     messages: list[dict[str, Any]],
@@ -258,6 +265,9 @@ def chat(
         # Ask OpenRouter to bill-report each call so the bench can compare cost.
         "usage": {"include": True},
     }
+    caching = cache_control(model)
+    if caching is not None:
+        payload["cache_control"] = caching
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
