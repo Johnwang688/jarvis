@@ -259,6 +259,17 @@ The 150-token, 8-second, single non-streaming attempt limits remain. An
 explicit non-stop finish reason always asks and never populates the allow
 cache, even when its visible text happens to be complete JSON.
 
-Free request-wire and classifier tests cover this contract. A corrected paid
-probe remains pending a new scoped credential-loader approval; the completed
-50-action exception does not authorize additional calls.
+Free request-wire and classifier tests cover this contract, including the
+original wire finish reason before normalization: null, empty, false, zero,
+missing or malformed reasons cannot produce a cached allow.
+
+A separately approved 50-call synthetic confirmation probe on reviewed source
+`81f1fd0` produced 49 valid model replies and one provider timeout, which stayed
+ASK. No replies were truncated. Classifier wall-time p50 was 1.364650 s and p95
+1.734687 s (including that timeout); the 49 known costs total $0.004222625.
+The timeout retains a $0.000988900 reservation. Including the original probe
+and earlier conservative reservation, total charged-or-reserved spending is
+$0.01187951250, below the approved $0.10 cumulative cap. The interrupted probe
+resumed only its remaining 35 calls, preserving all 15 prior attempts. This
+measures response format, latency and cost on inert synthetic facts; it does
+not establish Browser action reliability or classifier safety accuracy.
