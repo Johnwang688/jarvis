@@ -136,6 +136,24 @@ def bind(
         _CALLER.set({key: caller.get(key) for key in CALLER_KEYS})
 
 
+
+@contextmanager
+def turn_scope() -> Iterator[None]:
+    """Restore the six bindings an agent turn owns, even on a nested failure.
+
+    Snapshot with tokens so originally unbound values become unbound again.
+    Mutable plan/loaded objects stay the agent's; only the context bindings
+    are restored. Provider-owned origin, caller, desk and proposal stay live.
+    """
+    variables = (_PLAN, _APPROVE, _SHOULD_STOP, _DEPTH, _TOOLS, _LOADED)
+    tokens = [(variable, variable.set(variable.get())) for variable in variables]
+    try:
+        yield
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+
+
 def bind_caller(thread_id: str, project_id: str | None, provider: str,
                 turn_id: str | None) -> None:
     """Bind who is calling, from the four facts that name a v2 turn."""
