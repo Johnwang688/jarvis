@@ -32,6 +32,7 @@ import {
   unpinProject as unpinProjectOf, setEditors as setEditorsOf,
   type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
   type WorkspaceFit, type BrowserTabOptions,
+  autoSplitVerdict as autoSplitVerdictOf,
   addBrowserTab as addBrowserTabOf, closeBrowserTab as closeBrowserTabOf,
   activateBrowserTab as activateBrowserTabOf, setTabKeepOrigin as setTabKeepOriginOf,
 } from "../lib/workspace";
@@ -110,6 +111,7 @@ export interface LayoutControl {
   close: (pane: PaneNo, then?: PaneNo | null) => void;
   /** Whether one more pane can be drawn in this window now (`dirty`: ids holding an unsaved edit). */
   splitVerdict: (dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
+  autoSplitVerdict: (held?: readonly PaneNo[]) => { ok: boolean; id: PaneNo | null };
   /**
    * Render-only, by pane id: how many times that id has been closed (or
    * taken back from ⊞'s hidden panes by a split). The workspace keys a pane
@@ -284,6 +286,10 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     bump(pane);
     setWs((w) => closePaneOf(w, pane, then));
   }, [bump]);
+  const autoSplitVerdict = useCallback((held: readonly PaneNo[] = []) => {
+    const at = now.current;
+    return autoSplitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, held);
+  }, []);
   const splitVerdict = useCallback((dirty: readonly PaneNo[] = []) => {
     const at = now.current;
     return splitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, dirty);
@@ -418,7 +424,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, setFilePath, setKeepOrigin,
     addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin,
     setTerminal, forgetTerminal, renameTerminal, setSplit,
-    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
+    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplitVerdict, incarnation,
   };
 }
 

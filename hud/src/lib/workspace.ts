@@ -859,6 +859,39 @@ export function copySpec(spec: PaneSpec): PaneSpec {
   return out;
 }
 
+/** Only an untouched default spec is safe for an unsolicited split to reclaim. */
+export function blankKeptPane(ws: Workspace, id: PaneNo): boolean {
+  const spec = ws.panes[id - 1];
+  const def = defaultPane(id);
+  return ws.kept.includes(id) && spec.view === def.view && spec.projectId === null && spec.terminalId === null
+    && spec.browser === undefined && spec.browserUrl === undefined && spec.keepOrigin === undefined
+    && spec.filePath === undefined && spec.editors === undefined
+    && Object.keys(spec).every(key => key in def);
+}
+
+/** Automatic placement never falls through to allocate's owner-only destructive tiers. */
+export function freeId(ws: Workspace, held: readonly PaneNo[] = []): PaneNo | null {
+  const free = PANE_NOS.find(id => !inWorkspace(ws, id) && !held.includes(id));
+  if (free !== undefined) return free;
+  return [...ws.kept].reverse().find(id => !held.includes(id) && blankKeptPane(ws, id)) ?? null;
+}
+
+/** Fit without folding anything the owner can currently see or dropping any pane. */
+export function autoSplitVerdict(
+  layout: PaneLayout, ws: Workspace, available: number, availableH: number,
+  prefer: Side | null = null, preferPanel = false, held: readonly PaneNo[] = [],
+): { ok: boolean; id: PaneNo | null } {
+  const order = orderOf(ws);
+  const id = freeId(ws, held);
+  if (order.length >= MAX_PANES || id === null) return { ok: false, id: null };
+  const before = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel);
+  const trial = splitPane(ws, order[order.length - 1], id, defaultPane(id), { focus: false });
+  const after = fitWorkspace(layout, trial, available, availableH, prefer, preferPanel);
+  const folds = !before.sides.leftFolded && after.sides.leftFolded
+    || !before.sides.rightFolded && after.sides.rightFolded || before.panel.open && !after.panel.open;
+  return { ok: after.dropped === 0 && !folds, id };
+}
+
 export type SplitWhy = "" | "max" | "room" | "hidden-edit";
 
 /**
