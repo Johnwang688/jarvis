@@ -99,7 +99,7 @@ SNIFF = os.environ.get("JARVIS_NETNS_SNIFF") == "1"
 PSS_LIMIT = 1.5 * 1024 ** 3
 WAYS = ("iframe", "img", "fetch", "xhr", "ws", "form", "sw", "open")
 NAV_WAYS = ("302", "meta", "loc")
-ENV_ALLOWED = {"HOME", "PATH", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ"}
+ENV_ALLOWED = {"HOME", "PATH", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "FONTCONFIG_FILE"}
 
 
 class Fake:
@@ -762,6 +762,8 @@ class OwnerBrowser(unittest.TestCase):
                        "DISPLAY", "JARVIS_"):
             self.assertNotIn(secret, blob)
         self.assertEqual(env.get("LC_ALL"), "C.UTF-8", "the locale passes")
+        if H._WINDOWS_FONTS.is_dir():
+            self.assertEqual(env.get("FONTCONFIG_FILE"), str(config.BROWSER_DIR / "home" / "fontconfig" / "fonts.conf"))
 
     def test_04b_no_udp_leaves_chrome(self):
         """WebRTC and WebTransport, effect not flags (review of PR #69, HIGH:
