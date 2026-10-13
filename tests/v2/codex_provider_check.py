@@ -130,7 +130,8 @@ def peer(script_path, log_path, thread_name):
                 event("thread/tokenUsage/updated", tokenUsage={"total": UNIT, "last": UNIT}, turnId="old")
             result = {"thread": {"id": native}, "model": settings.get("model", "fake-model"),
                       "reasoningEffort": settings.get("model_reasoning_effort"),
-                      "approvalPolicy": "on-request", "approvalsReviewer": "auto_review",
+                      "approvalPolicy": "on-request",
+                      "approvalsReviewer": script.get("reviewer", p.get("approvalsReviewer")),
                       "sandbox": script.get("sandbox", {"type": "workspaceWrite", "networkAccess": False,
                                                        "writableRoots": settings.get("sandbox_workspace_write", {}).get("writable_roots", [])})}
         elif method == "turn/start":
@@ -411,6 +412,47 @@ class Checks(unittest.TestCase):
 
     def chat(self):
         return replace(self.brief, role=Role.CHAT)
+
+    def test_chat_and_task_reviewer_selection_on_start_and_resume(self):
+        for brief, expected in ((self.chat(), "user"), (self.brief, "auto_review"),
+                                (replace(self.chat(), task_id="task"), "auto_review")):
+            with self.subTest(role=brief.role, task=brief.task_id):
+                thread = replace(self.thread, id=f"reviewer-{len(self.brain.rpcs)}")
+                h = self.start(thread=thread, brief=brief)
+                self.send(h)
+                cfg = tomllib.loads((h.native.home / "config.toml").read_text())
+                self.assertEqual(cfg["approvals_reviewer"], expected)
+                self.assertEqual(self.brain.calls("thread/start")[-1]["params"]["approvalsReviewer"], expected)
+                self.provider.close(h)
+                thread.provider_session_id = h.provider_session_id
+                resumed = self.provider.resume(thread, brief, lambda *a, **k: Decision.DENY)
+                self.handles.append(resumed)
+                self.assertEqual(self.brain.calls("thread/resume")[-1]["params"]["approvalsReviewer"], expected)
+                self.provider.close(resumed)
+
+    def test_chat_reviewer_mismatch_fails_closed_on_start_and_resume(self):
+        for mismatch in ("config", "receipt"):
+            for resume in (False, True):
+                for wrong in ("auto_review", "guardian_subagent", None):
+                    with self.subTest(mismatch=mismatch, resume=resume, wrong=wrong):
+                        self.brain.script.clear()
+                        thread = replace(self.thread, id=f"mismatch-{len(self.brain.rpcs)}")
+                        if resume:
+                            h = self.start(thread=thread, brief=self.chat())
+                            self.send(h)
+                            self.provider.close(h)
+                            thread.provider_session_id = h.provider_session_id
+                        if mismatch == "config":
+                            self.brain.script["config_override"] = {"approvals_reviewer": wrong}
+                        else:
+                            self.brain.script["reviewer"] = wrong
+                        before = len(self.brain.rpcs)
+                        operation = self.provider.resume if resume else self.provider.start
+                        with self.assertRaises(BriefRefused):
+                            operation(thread, self.chat(), lambda *a, **k: Decision.ALLOW)
+                        self.assertEqual(len(self.brain.rpcs), before + 1)
+                        self.assertIsNotNone(self.brain.rpcs[-1].process.poll())
+        self.brain.script.clear()
 
     def test_chat_git_config_and_instructions(self):
         gitdir = self.repo()
@@ -1014,10 +1056,10 @@ class Checks(unittest.TestCase):
             self.stack.enter_context(patch.object(config, name, value))
         return build_permit(PermitContext("abcd1234", self.brief, provider="codex"), asker)
 
-    def scripted(self, method, params, permit, *, item=None, no_turn=False):
+    def scripted(self, method, params, permit, *, item=None, no_turn=False, brief=None):
         self.brain.script.update(method=method, params=params, item=item, no_turn=no_turn)
         name = f"s{len(self.brain.rpcs)}"
-        h = self.start("scripted", permit, thread=replace(self.thread, id=name))
+        h = self.start("scripted", permit, thread=replace(self.thread, id=name), brief=brief)
         events = self.send(h)
         replies = [m for m in h.native.rpc.replies if m["id"] == "special"]
         self.assertEqual(len(replies), 1, replies)
@@ -1200,6 +1242,54 @@ class Checks(unittest.TestCase):
         self.assertRegex(line, r"… \(\+\d+ more\)$")
         shown = line.count(f"write {self.root}/w")
         self.assertEqual(int(line.rsplit("+", 1)[1].split()[0]), 30 - shown)
+
+    def test_chat_bare_approvals_require_owner_even_for_rules_allow(self):
+        from jarvis.v2.approvals import PendingApprovals
+        from jarvis.v2.permissions import L_WIDENING, deny_all
+        brief = self.chat()
+        shapes = [(CMD, {"itemId": "c", "command": "git status"}),
+                  (CMD, {"itemId": "c", "command": "docker build .", "kind": "command",
+                         "additionalPermissions": {"network": {"enabled": False}}}),
+                  ("item/fileChange/requestApproval", {"itemId": "f"})]
+        for method, params in shapes:
+            with self.subTest(method=method, params=params):
+                for asker in (deny_all("no owner surface"), PendingApprovals(timeout_s=.01),
+                              RecordingAsker(Decision.DENY)):
+                    _, _, reply = self.scripted(method, params, self.real_permit(asker), brief=brief)
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+                    if isinstance(asker, RecordingAsker):
+                        self.assertEqual(len(asker.seen), 1)
+                        self.assertEqual(asker.seen[0].layer, L_WIDENING)
+                        self.assertFalse(asker.seen[0].allowlistable)
+                asker = RecordingAsker(Decision.ALLOW)
+                _, _, reply = self.scripted(method, params, self.real_permit(asker), brief=brief)
+                self.assertEqual(reply["result"], {"decision": "accept"})
+                self.assertEqual(len(asker.seen), 1)
+                self.assertIn("owner approval required", asker.seen[0].headline)
+                self.assertFalse(asker.seen[0].allowlistable)
+                # An older callback that cannot receive the widening keyword
+                # must not silently approve this through its positional API.
+                _, _, reply = self.scripted(method, params, lambda *a: Decision.ALLOW, brief=brief)
+                self.assertEqual(reply["result"], {"decision": "decline"})
+
+    def test_chat_explicit_network_and_unknown_grants_still_require_owner(self):
+        for extra in ({"networkApprovalContext": {"host": "example.invalid", "protocol": "https"}},
+                      {"additionalPermissions": {"network": {"enabled": True}}},
+                      {"futureGrant": {"scope": "unknown"}}):
+            asker = RecordingAsker(Decision.DENY)
+            _, _, reply = self.scripted(CMD, {"itemId": "c", "command": "git status", **extra},
+                                         self.real_permit(asker), brief=self.chat())
+            self.assertEqual(reply["result"], {"decision": "decline"})
+            self.assertEqual(len(asker.seen), 1)
+            self.assertFalse(asker.seen[0].allowlistable)
+        asker = RecordingAsker(Decision.ALLOW)
+        permit = self.real_permit(asker)
+        for params in ({"itemId": "c", "command": "sudo rm -rf /"},
+                       {"itemId": "c", "command": "git status",
+                        "additionalPermissions": {"fileSystem": {"write": [str(self.creds)]}}}):
+            _, _, reply = self.scripted(CMD, params, permit, brief=self.chat())
+            self.assertEqual(reply["result"], {"decision": "decline"})
+        self.assertEqual(asker.seen, [], "hard denials precede every owner approval")
 
     def test_plain_command_approvals_are_unchanged(self):
         from jarvis.v2.permissions import deny_all

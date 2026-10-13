@@ -48,17 +48,21 @@ past `CLAUDE_VERIFIED`, with `JARVIS_CLAUDE_STRICT=1` restoring the old
 major.minor match, and a failed `--version` probe is retried after 60 s
 rather than cached),
 the Codex provider over the app-server (WP4 — lifted from the trading firm's
-transport; its reviewer escalates nothing to us, design R8; **a version floor,
+transport; task `auto_review` has design R8's callback limit, while owner
+chats route approvals to native `user` review; **a version floor,
 not a pin** since 2026-10-08 — `providers/codex_cli.py` runs codex ≥ 0.153.4,
 warns once above the verified 0.161.0, `JARVIS_CODEX_STRICT=1` restores the
 exact match, `JARVIS_CODEX_CLI` picks the binary and nothing under `/mnt/`
 ever runs. Unlike Claude's resolver it *refuses* a relative/Windows/broken
 override rather than warning, launches the realpath it checked rather than
 the symlink, and resolves per session rather than per process — on purpose,
-design §5.4. **A Codex approval arrives already passed by Codex's reviewer,
-so under AUTO nobody decides it** unless we make someone: a sandbox-widening
-approval — extra permissions, network, grant root, `writeStdin`, or any field
-outside the verified schema — goes to a human via `permit(...,
+design §5.4. **Owner Codex chats use `approvals_reviewer = "user"`**
+(2026-10-13): private config, effective config and start/resume receipts must
+agree. Tasks retain `auto_review`. Every chat command/file approval, even a
+bare callback, takes the owner-required widening path before AUTO or static
+ALLOW; normal sandboxed work needs no callback. A task's explicit widening
+— extra permissions, network, grant root, `writeStdin`, or any field
+outside the verified schema — also goes to a human via `permit(...,
 widening=...)` with no Always and a "SANDBOX WIDENING: …" headline, and
 declines with no human, and its grants pass layer 1 first — a grant that is
 or contains protected state or touches a credential dir is DENY unasked

@@ -299,8 +299,8 @@ broker alone.
 - **What actually keeps the floor from loosening the gate** (corrected
   2026-10-08 after review — the first draft claimed "anything not understood
   gets an error or a decline", which was not the whole truth). A Codex
-  approval reaches us only *after* its `auto_review` reviewer passed it, and
-  under AUTO `permit`'s layer 5 answered ALLOW, so a sandbox-widening grant
+  approval under the original `auto_review` policy could bypass Jarvis entirely;
+  when one reached `permit`, AUTO layer 5 answered ALLOW, so a sandbox-widening grant
   riding on an approval (extra permissions, network, a grant root, terminal
   input) was accepted with no human — and the `{decision}` reply cannot strip
   it. Now: unknown server methods get an error; malformed approvals and
@@ -318,16 +318,25 @@ broker alone.
   subcommands both commands are judged and shown, and a human asked. A
   `command: null` can no longer erase the item's real command, and
   a command approval with none is declined; `provider.answer()` can only
-  deny an approval. A plain in-sandbox approval under AUTO is still accepted
-  on the reviewer's word — that is R8, not a regression.
+  deny an approval. Task `auto_review` retains its existing plain-approval
+  fallback. Since 2026-10-13 owner chats select `user` review instead:
+  every chat command/file callback takes the human widening path, even with
+  no explicit permissions overlay. A bare request is not proof of confinement.
 - Approval requests `item/commandExecution/requestApproval`,
   `item/fileChange/requestApproval`, `item/permissions/requestApproval` are
   **routed to the broker**, where the firm denies them. `requestUserInput`
   becomes a clarification question (§10.1). Unknown server requests still fail
   closed.
-- Sandbox `workspace-write`, approval policy `on-request`, and Codex's own
-  automatic reviewer (`--approve-for-me` / `approvals_reviewer =
-  "auto_review"`, already in the owner's config) as the auto-mode analogue.
+- Sandbox `workspace-write` and approval policy `on-request`. Owner chats
+  (Role.CHAT, no task_id) use `approvals_reviewer = "user"`; task threads keep
+  `auto_review`. Config generation, config/read and exact thread/start and
+  thread/resume receipts enforce that choice. A resumed chat that still
+  reports auto_review is refused. Existing roots and network-off checks stay.
+  This followed a synthetic live fixture where auto_review performed a
+  network escalation with zero Jarvis callbacks; user routing alone would
+  be insufficient without the all-chat-callback widening rule above.
+  Metadata/title helpers and task policy are unchanged. No GitHub credential
+  helper or credential-directory grant is added.
   On the CLI, `--approve-for-me` *implies* the workspace-write sandbox and
   refuses an explicit `-s` beside it (verified 0.153.4); over the app-server
   the two are separate fields and the provider sets both.
@@ -1508,7 +1517,10 @@ for everything not under `jarvis/v2/`.
   pre-execution hook is the first thing to verify) or gate always-ask
   tools structurally (a `jarvis-mcp` tool that asks, with the native
   equivalent removed from the toolset). Until then, a project with
-  always-ask additions routes its tasks to Claude.
+  always-ask additions routes its tasks to Claude. **2026-10-13 chat update:**
+  native `user` routing makes chat escalations reach Jarvis and all chat
+  command/file callbacks require owner approval; it does not introduce a
+  universal hook for ordinary sandboxed operations or change task routing.
 - **R6, Codex half answered (WP12a, 2026-09-16):** the app-server protocol
   on 0.153.4 (unchanged in 0.161.0 but for an optional `normalModelSlug`)
   declares `account/rateLimits/updated` with `usedPercent`,
