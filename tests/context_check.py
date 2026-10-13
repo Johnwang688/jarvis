@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import runpy
+import subprocess
 import sys
 import tempfile
 import types
@@ -37,15 +38,14 @@ from jarvis.agent import Agent
 
 def config_default_checks() -> None:
     """Defaults and env overrides, without loading any real .env or state."""
-    keys = ("JARVIS_COMPACT_AT_TOKENS", "JARVIS_ORCHESTRATOR", "JARVIS_SUBAGENT",
-            "JARVIS_COMPACTION", "JARVIS_REVIEW_MODEL", "JARVIS_WORKER", "JARVIS_CHEAP")
-    clean = {k: v for k, v in os.environ.items() if k not in keys}
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("JARVIS_")}
     with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, clean, clear=True):
+        os.environ["HOME"] = raw
         source = Path(raw) / "jarvis" / "config.py"
         source.parent.mkdir()
         source.write_text(Path(config.__file__).read_text())
         defaults = runpy.run_path(str(source))
-        assert defaults["COMPACT_AT_TOKENS"] == 100_000, "compaction default must be 100k"
+        assert defaults["COMPACT_AT_TOKENS"] == 90_000, "compaction default must be 90k"
         for tier in ("orchestrator", "subagent", "compaction", "review"):
             assert defaults["TIERS"][tier] == "anthropic/claude-haiku-5.5", tier
         for tier in ("worker", "cheap"):
@@ -65,13 +65,42 @@ def config_default_checks() -> None:
 
     assert context.ContextPolicy().compact_at_tokens == config.COMPACT_AT_TOKENS
     assert Agent(tool_names=["get_datetime"]).policy.compact_at_tokens == config.COMPACT_AT_TOKENS
+    with patch.object(config, "COMPACT_AT_TOKENS", 37_000):
+        assert context.ContextPolicy().compact_at_tokens == 37_000
+        assert Agent(tool_names=["get_datetime"]).policy.compact_at_tokens == 37_000
     explicit = context.ContextPolicy(compact_at_tokens=1800)
     assert Agent(tool_names=["get_datetime"], policy=explicit).policy is explicit
-    print("ok  config: Haiku defaults, 100k compaction, env overrides and explicit policies")
+    print("ok  config: Haiku defaults, 90k compaction, env overrides and explicit policies")
+
+
+def config_env_validation_checks() -> None:
+    """Import validation uses a subprocess and a temporary HOME/config copy."""
+    with tempfile.TemporaryDirectory() as raw:
+        package = Path(raw) / "jarvis"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "config.py").write_text(Path(config.__file__).read_text())
+        env = {"HOME": raw, "PATH": os.defpath}
+        command = [sys.executable, "-c",
+                   "from jarvis import config; print(config.COMPACT_AT_TOKENS)"]
+        for value, expected in ((None, 90_000), ("1000", 1000), ("42000", 42_000),
+                                ("0", None), ("999", None), ("-1000", None),
+                                ("abc", None), ("1.5", None), ("", None)):
+            case_env = dict(env)
+            if value is not None:
+                case_env["JARVIS_COMPACT_AT_TOKENS"] = value
+            result = subprocess.run(command, cwd=raw, env=case_env, capture_output=True, text=True)
+            if expected is not None:
+                assert result.returncode == 0, result.stderr
+                assert int(result.stdout) == expected
+            else:
+                assert result.returncode != 0, value
+                assert "ValueError: JARVIS_COMPACT_AT_TOKENS must be an integer of at least 1000." in result.stderr
+    print("ok  config: import rejects invalid compaction env values in isolated subprocesses")
 
 
 def default_threshold_checks() -> None:
-    """The production policy keeps 100k tokens and compacts just above it."""
+    """The production policy keeps 90k tokens and compacts just above it."""
     with tempfile.TemporaryDirectory() as raw:
         policy = context.ContextPolicy(spill_dir=Path(raw))
         messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "goal"}]
@@ -85,7 +114,7 @@ def default_threshold_checks() -> None:
         stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY", meter=meter)
         assert stats.messages_compacted, "default threshold did not trigger compaction"
         _assert_wire_valid(messages)
-    print("ok  context: default compacts above 100k, preserves history below and at threshold")
+    print("ok  context: default compacts above 90k, preserves history below and at threshold")
 
 
 def _image_msg(tag: str = "AAA") -> dict:
@@ -535,6 +564,7 @@ def main() -> int:
     # temp file first.
     config.MODELS_PATH = Path(tempfile.mkdtemp()) / "models.json"
     config_default_checks()
+    config_env_validation_checks()
     default_threshold_checks()
     orphan_checks()
     cut_point_checks()

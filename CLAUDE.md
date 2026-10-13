@@ -7200,15 +7200,38 @@ Two findings worth keeping:
   difficulty profile. That is also the better benchmark: repeatable, shareable,
   CI-able, no bans.
 - **Model routing policy (2026-07-30).** Default all real work to
-  `openai/gpt-5.6-luna`. Do not route personal data (chat, transcripts,
+  `openai/gpt-5.6-luna`. That Luna default is superseded by the owner's
+  choice of Haiku 5.5 on 2026-10-12. Do not route personal data (chat, transcripts,
   compaction summaries) to Chinese-hosted models — the cheap tier moved
   qwen3.7-flash → gpt-oss-20b for exactly this reason. Multi-model
   comparisons remain opt-in by naming models explicitly on `jarvis bench`.
   If Luna hits a capability wall, escalate the orchestrator to GPT-5.6 Terra
   or Claude Sonnet 5.
-- **Model default update (2026-10-12).** The owner moved the default orchestrator to
-  `anthropic/claude-haiku-5.5` (same listed price as Luna, faster, judged better),
-  with compaction at 100k; Claude models get OpenRouter's top-level `cache_control`.
+- **Model default update (2026-10-12).** The owner chose
+  `anthropic/claude-haiku-5.5`. Below 100k prompt tokens it lists at
+  `openai/gpt-6-luna`'s price: $0.10 in and $0.50 out per M, cache reads $0.01.
+  From 100k, the whole request costs 5x: $0.50 in and $2.50 out per M.
+  Compaction therefore defaults to 90k (`JARVIS_COMPACT_AT_TOKENS` overrides;
+  it must be an integer of at least 1000). A turn can grow past the threshold
+  before a safe cut point exists (invariant 1).
+  Default threads, sub-agents, compaction summaries and the review tier now
+  run on Haiku 5.5. Saved HUD selections still take precedence. A bench given
+  `-m` still runs its children and summaries through `models.tier()`; pin
+  `JARVIS_ORCHESTRATOR` for comparable runs. Numbers taken before this PR
+  are not comparable with numbers after it.
+- **Claude prompt caching (2026-10-12).** Two explicit ephemeral breakpoints
+  go on the wire: the system message and the newest stable message with
+  content before the volatile tail. Content-less assistant turns are skipped.
+  The caller's transcript stays verbatim. The old top-level breakpoint landed
+  on the working-context tail, rebuilt every step (invariant 7), so it never
+  hit for real agents with that block. A live Haiku 5.5 probe with the default
+  toolset, about 20k prompt tokens and six steps read zero cached tokens each
+  step and paid a 1.25x cache write, $0.0026 per step. Explicit breakpoints
+  read 19.2k of 20k tokens from step 2 on, $0.00035 per step. A breakpoint on
+  a tool message worked.
+  A live three-step tool turn on Haiku 5.5 at a reasoning effort ran without
+  error although `_stream_once` does not pass `reasoning_details` back.
+  Nothing changed for reasoning.
 - **Semantic/RAG memory deferred.** Memory is one markdown file per fact, pulled
   on demand via tools, so nothing is auto-injected. The upgrade ladder is
   substring → SQLite FTS5/BM25 → embeddings, and the tool interface
@@ -8679,7 +8702,7 @@ failure — a run that goes long enough to forget what it was doing.
 - **The cut-point orphan bug** (invariant 1) — found by inspection, reproduced,
   fixed, and now covered by the `context.py` test suite that this file had been
   claiming existed. Worth internalizing: it lived in a code path that *only*
-  executes past 100k tokens by default, so every short test in the repo ran straight past
+  executes past 90k tokens by default, so every short test in the repo ran straight past
   it. Long-horizon code needs long-horizon tests.
 - **The working plan** (`tools/plan.py`). One tool, `plan_write`, holding a
   markdown checklist rewritten whole each time. It renders into `messages[0]`,

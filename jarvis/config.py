@@ -862,7 +862,15 @@ COMPACTION_MAX_TOKENS = int(os.environ.get("JARVIS_COMPACTION_MAX_TOKENS", "2400
 
 # Prompt-token threshold for automatic context compaction. Explicit policies
 # (for example, benchmark windows) can still choose their own threshold.
-COMPACT_AT_TOKENS = int(os.environ.get("JARVIS_COMPACT_AT_TOKENS", "100000"))
+# Haiku 5.5 lists at $0.10 in / $0.50 out per M below 100,000 prompt tokens;
+# from 100,000 the whole request costs $0.50 in / $2.50 out (5x). Use 90,000
+# for headroom: a turn can grow before a safe compaction cut point exists.
+try:
+    COMPACT_AT_TOKENS = int(os.environ.get("JARVIS_COMPACT_AT_TOKENS", "90000"))
+except ValueError:
+    raise ValueError("JARVIS_COMPACT_AT_TOKENS must be an integer of at least 1000.") from None
+if COMPACT_AT_TOKENS < 1000:
+    raise ValueError("JARVIS_COMPACT_AT_TOKENS must be an integer of at least 1000.")
 
 # How hard the model running the loop is asked to think, sent as OpenRouter's
 # unified `reasoning.effort`. This asks for the top of the model's ladder,

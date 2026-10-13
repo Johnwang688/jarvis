@@ -22,6 +22,7 @@ Run:  .venv/bin/python tests/stream_check.py
 from __future__ import annotations
 
 import contextlib
+from copy import deepcopy
 import json
 import sys
 import tempfile
@@ -78,7 +79,7 @@ def streaming(*responses):
     real = llm._client.stream
 
     def fake(method, url, json=None, headers=None, timeout=None):
-        seen.append(json)
+        seen.append(deepcopy(json))
         return queue.pop(0)
 
     llm._client.stream = fake
@@ -339,10 +340,33 @@ def provider_pin_checks() -> None:
     print("ok  provider pin: single tag, ordered list, config default, and no pin")
 
 
+def _breakpoints(messages) -> list[int]:
+    return [i for i, message in enumerate(messages)
+            if any("cache_control" in part for part in (message.get("content") or [])
+                   if isinstance(part, dict))]
+
+
+def _plain_messages(messages):
+    """Undo wire-only cache annotations for transcript prefix comparisons."""
+    plain = deepcopy(messages)
+    for message in plain:
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                part.pop("cache_control", None)
+            if len(content) == 1 and content[0].get("type") == "text":
+                message["content"] = content[0]["text"]
+    return plain
+
+
 def cache_control_checks() -> None:
-    """Only Anthropic requests get one top-level breakpoint on either path."""
+    """Claude caches the system and stable tail, without changing the caller."""
     messages = [{"role": "system", "content": "sys"},
-                {"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "result"},
+                {"role": "assistant", "tool_calls": [{"id": "c2"}]},
+                {"role": "user", "content": "volatile"}]
     tools = [{"type": "function", "function": {"name": "test", "parameters": {"type": "object"}}}]
     chunks = [{"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}]
 
@@ -353,44 +377,169 @@ def cache_control_checks() -> None:
         def json():
             return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
 
-    for model, expected in (("anthropic/claude-haiku-5.5", {"type": "ephemeral"}),
-                            ("~anthropic/claude-sonnet-latest", {"type": "ephemeral"}),
-                            ("openai/gpt-5.6-luna", None), ("google/gemini-3.7-flash", None),
-                            ("other/anthropic/claude", None), ("anthropic-not/claude", None),
-                            ("", None)):
-        assert llm.cache_control(model) == expected, model
+    def request(model, transcript, tail, stream):
+        before = deepcopy(transcript)
+        posts = []
+
+        def fake_post(url, json=None, **kwargs):
+            posts.append(deepcopy(json))
+            return Body()
+
+        with patch.object(llm._client, "post", fake_post), streaming(FakeStream(sse(chunks))) as sent:
+            reply = llm.chat(model, transcript, tools=tools, stream=stream, volatile_tail=tail)
+        assert reply.text == "ok"
+        assert len(sent) == int(stream) and len(posts) == int(not stream)
+        assert transcript == before, "wire annotations mutated the caller"
+        assert isinstance(transcript[0]["content"], str)
+        return (sent if stream else posts)[0]
+
+    baseline = None
+    for model in ("anthropic/claude-haiku-5.5", "~anthropic/claude-sonnet-latest",
+                  "openai/gpt-6-luna", "openrouter/free", "google/gemini-3.7-flash",
+                  "other/anthropic/claude", "anthropic-not/claude", ""):
+        claude = model.startswith(("anthropic/", "~anthropic/"))
         for stream in (True, False):
-            posts = []
-
-            def fake_post(url, json=None, **kwargs):
-                posts.append(json)
-                return Body()
-
-            with patch.object(llm._client, "post", fake_post), streaming(FakeStream(sse(chunks))) as sent:
-                reply = llm.chat(model, messages, tools=tools, stream=stream)
-            assert reply.text == "ok"
-            assert len(sent) == int(stream) and len(posts) == int(not stream)
-            payload = (sent if stream else posts)[0]
-            if expected is None:
-                assert "cache_control" not in payload, (model, stream, payload)
+            payload = request(model, messages, 1, stream)
+            assert "cache_control" not in payload
+            assert payload["tools"] == tools
+            if claude:
+                assert _breakpoints(payload["messages"]) == [0, 3]
+                assert json.dumps(payload).count('"cache_control"') == 2
+                for i in (0, 3):
+                    assert payload["messages"][i]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+                assert _plain_messages(payload["messages"]) == messages
+                if baseline is None:
+                    baseline = payload["messages"]
+                assert payload["messages"] == baseline
             else:
-                assert payload.get("cache_control") == {"type": "ephemeral"}, (model, stream, payload)
-                assert json.dumps(payload).count('"cache_control"') == 1, payload
-            assert payload["messages"] == messages and payload["tools"] == tools
+                assert '"cache_control"' not in json.dumps(payload)
+                assert payload["messages"] == messages
 
-    # A stream that never starts carries the same cache hint into its fallback.
+    model = "anthropic/claude-haiku-5.5"
+    # Default tail=0 caches the newest message; all rebuilt trailing messages
+    # are skipped when there is more than one.
+    assert _breakpoints(request(model, messages, 0, False)["messages"]) == [0, 5]
+    assert _breakpoints(request(model, messages, 3, False)["messages"]) == [0, 1]
+    assert _breakpoints(request(model, [messages[0], messages[-1]], 1, False)["messages"]) == [0]
+    assert _breakpoints(request(model, [messages[0]], 0, False)["messages"]) == [0]
+    assert _breakpoints(request(model, messages[:3], 0, False)["messages"]) == [0, 1]
+
+    parts = [{"role": "system", "content": "sys"},
+             {"role": "user", "content": [{"type": "text", "text": "first"},
+                                            {"type": "text", "text": "last"}]},
+             messages[-1]]
+    wire = request(model, parts, 1, False)["messages"]
+    assert "cache_control" not in wire[1]["content"][0]
+    assert wire[1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert _breakpoints(wire) == [0, 1]
+
+    # Only marked dicts/parts are copied; unmarked ones retain their identities.
+    wire = llm._cache_messages(model, parts, 1)
+    assert wire is not parts and wire[0] is not parts[0] and wire[1] is not parts[1]
+    assert wire[2] is parts[2]
+    assert wire[1]["content"] is not parts[1]["content"]
+    assert wire[1]["content"][0] is parts[1]["content"][0]
+    assert wire[1]["content"][-1] is not parts[1]["content"][-1]
+
     posts = []
+    before = deepcopy(messages)
+
+    def fake_post(url, json=None, **kwargs):
+        posts.append(deepcopy(json))
+        return Body()
+
     with patch.object(llm._client, "post", fake_post), patch.object(llm.time, "sleep"), \
             streaming(FakeStream([], status=500, body="unavailable")) as sent:
-        llm.chat("anthropic/claude-haiku-5.5", messages, stream=True, max_retries=1)
+        llm.chat(model, messages, stream=True, max_retries=1, volatile_tail=1)
     assert len(sent) == len(posts) == 1
-    assert sent[0]["cache_control"] == posts[0]["cache_control"] == {"type": "ephemeral"}
-    print("ok  caching: Anthropic only, one top-level field, streaming/plain/fallback")
+    assert sent[0]["messages"] == posts[0]["messages"] == baseline
+    assert "cache_control" not in sent[0] and "cache_control" not in posts[0]
+    assert messages == before
+    print("ok  caching: explicit stable breakpoints, Claude only, no mutation, all paths")
+
+
+def agent_cache_prefix_checks() -> None:
+    """Real tool dispatch changes the plan tail, but preserves cached prefixes."""
+    def tool_reply(cid, tool_name, **arguments):
+        call = {"index": 0, "id": cid, "type": "function",
+                "function": {"name": tool_name, "arguments": json.dumps(arguments)}}
+        return FakeStream(sse([{"choices": [{"delta": {"tool_calls": [call]},
+                                             "finish_reason": "tool_calls"}]}]))
+
+    def text_reply(text, reason="stop"):
+        return FakeStream(sse([{"choices": [{"delta": {"content": text},
+                                             "finish_reason": reason}]}]))
+
+    with tempfile.TemporaryDirectory() as raw, \
+            patch.object(llm.config, "SKILLS_DIR", Path(raw) / "skills"), \
+            patch.object(llm.config, "MODEL_CACHE_PATH", Path(raw) / "catalog.json"), \
+            patch.object(llm.config, "AVATAR_STATE_PATH", Path(raw) / "avatar.json"), \
+            patch.object(llm.config, "AVATAR_ENV", "jarvis"), \
+            patch.object(llm.config, "STREAM", True):
+        skill = llm.config.SKILLS_DIR / "test"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\ndescription: Test skill\n---\nFollow the plan.\n")
+        agent = agent_mod.Agent(model="anthropic/claude-haiku-5.5",
+                               tool_names=["skill_read", "plan_write"], max_steps=8)
+        responses = [tool_reply("c1", "plan_write", plan="- [ ] read skill"),
+                     tool_reply("c2", "skill_read", name="test"),
+                     tool_reply("c3", "plan_write", plan="- [x] read skill"),
+                     text_reply("done"), text_reply("second done")]
+        with no_post(), streaming(*responses) as sent:
+            assert agent.run_turn("follow the plan").text == "done"
+            assert agent.run_turn("what next?").text == "second done"
+        assert len(sent) == 5
+        plains = [_plain_messages(p["messages"]) for p in sent]
+        assert len({p[-1]["content"] for p in plains}) > 1, "context did not change"
+        assert "- [x] read skill" in plains[-1][-1]["content"]
+        for payload, plain in zip(sent, plains):
+            messages = payload["messages"]
+            points = _breakpoints(messages)
+            assert len(points) == 2 and points[0] == 0, "missing explicit stable breakpoints"
+            assert points[1] == len(messages) - 2
+            assert plain[-1]["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX)
+            assert messages[-1] == _plain_messages(messages)[-1], "context block marked"
+            assert "cache_control" not in payload
+        for current, following in zip(sent, sent[1:]):
+            end = _breakpoints(current["messages"])[1] + 1
+            assert _plain_messages(current["messages"][:end]) == _plain_messages(following["messages"][:end]), \
+                "cached prefix changed on the next request"
+        assert '"cache_control"' not in json.dumps(agent.messages)
+        assert all(isinstance(m.get("content"), str) or m.get("content") is None
+                   for m in agent.messages)
+
+        # A token-cap continuation uses the same transcript call and exclusion.
+        with no_post(), streaming(text_reply("cut", "length"), text_reply("finished")) as sent:
+            assert agent.run_turn("continue answer").text == "cutfinished"
+        assert len(sent) == 2
+        assert all(_breakpoints(p["messages"])[-1] == len(p["messages"]) - 2 for p in sent)
+
+        # At exhaustion the handoff prompt follows the context block, so the
+        # identity check returns zero rather than skipping that stable prompt.
+        agent.max_steps = 1
+        posts = []
+
+        def handoff_post(url, json=None, **kwargs):
+            posts.append(deepcopy(json))
+            assert agent._volatile_tail() == 0
+            return type("Body", (), {"status_code": 200, "json": staticmethod(
+                lambda: {"choices": [{"message": {"content": "handoff"}}]})})()
+
+        with patch.object(llm._client, "post", handoff_post), streaming(
+                tool_reply("c4", "plan_write", plan="- [ ] more work")):
+            assert "handoff" in agent.run_turn("more work").text
+        assert len(posts) == 1
+        assert _breakpoints(posts[0]["messages"])[-1] == len(posts[0]["messages"]) - 1
+        for message, plain in zip(posts[0]["messages"], _plain_messages(posts[0]["messages"])):
+            if isinstance(plain.get("content"), str) and plain["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX):
+                assert message == plain, "handoff context block marked"
+    print("ok  caching: real Agent prefixes across three tool steps and a second turn, continuation, handoff")
 
 
 def main() -> int:
     llm.config.MODELS_PATH = Path(tempfile.mkdtemp()) / "models.json"
     cache_control_checks()
+    agent_cache_prefix_checks()
     assembly_checks()
     tool_call_checks()
     cancel_checks()

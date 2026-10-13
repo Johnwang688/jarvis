@@ -434,6 +434,10 @@ class Agent:
                 del self.messages[index]
                 return
 
+    def _volatile_tail(self) -> int:
+        """The rebuilt context block is excluded from Claude cache breakpoints."""
+        return int(bool(self.messages) and self.messages[-1] is self._context_block)
+
     def _summarize(self, transcript: str) -> str:
         """Compress old history into fixed sections, on the orchestrator tier.
 
@@ -698,6 +702,7 @@ class Agent:
                 reply = llm.chat(
                     self.model,
                     self.messages,
+                    volatile_tail=self._volatile_tail(),
                     tools=self.tool_specs,
                     # Streaming makes cancellation answerable *during* the call.
                     # Safe precisely here: nothing has been dispatched yet, so
@@ -888,6 +893,7 @@ class Agent:
         try:
             reply = llm.chat(
                 self.model, self.messages, stream=False,
+                volatile_tail=self._volatile_tail(),
                 effort=self._effort(),
             )
         except Exception as exc:  # provider error, cancellation, anything

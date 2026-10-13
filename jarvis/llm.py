@@ -229,10 +229,37 @@ def provider_order(pin: str | None) -> list[str]:
 
 
 def cache_control(model: str) -> dict[str, str] | None:
-    """OpenRouter's moving cache breakpoint is opt-in for Claude models."""
+    """Explicit cache breakpoints are opt-in for Claude models."""
     if model.startswith(("anthropic/", "~anthropic/")):
         return {"type": "ephemeral"}
     return None
+
+
+def _cache_messages(
+    model: str, messages: list[dict[str, Any]], volatile_tail: int
+) -> list[dict[str, Any]]:
+    """Mark the stable prefix on a wire copy, leaving the transcript verbatim."""
+    wire = list(messages)
+    caching = cache_control(model)
+    if caching is None:
+        return wire
+
+    indices = [0] if messages else []
+    for index in range(len(messages) - max(0, volatile_tail) - 1, 0, -1):
+        if messages[index].get("content"):
+            indices.append(index)
+            break
+    for index in indices:
+        content = messages[index].get("content")
+        if isinstance(content, str) and content:
+            content = [{"type": "text", "text": content, "cache_control": dict(caching)}]
+        elif isinstance(content, list) and content:
+            content = list(content)
+            content[-1] = {**content[-1], "cache_control": dict(caching)}
+        else:
+            continue
+        wire[index] = {**messages[index], "content": content}
+    return wire
 
 
 def chat(
@@ -248,6 +275,8 @@ def chat(
     should_stop: Any = None,
     stream: bool | None = None,
     effort: str | None = None,
+    *,
+    volatile_tail: int = 0,
 ) -> Reply:
     """One chat completion.
 
@@ -256,18 +285,18 @@ def chat(
     `should_stop` being answerable *while the model is still generating*
     instead of only between steps, and `on_delta` for a surface that wants to
     render text as it arrives.
+
+    `volatile_tail` counts trailing messages rebuilt each step. Claude cache
+    breakpoints stop before them, and only the wire copy is marked.
     """
     payload: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": _cache_messages(model, messages, volatile_tail),
         "temperature": temperature,
         "max_tokens": config.MAX_TOKENS if max_tokens is None else max_tokens,
         # Ask OpenRouter to bill-report each call so the bench can compare cost.
         "usage": {"include": True},
     }
-    caching = cache_control(model)
-    if caching is not None:
-        payload["cache_control"] = caching
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"

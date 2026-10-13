@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -56,7 +56,7 @@ class ContextPolicy:
     image_token_cost: int = 1500
     """Rough per-image token cost, for budget estimation."""
 
-    compact_at_tokens: int = config.COMPACT_AT_TOKENS
+    compact_at_tokens: int = field(default_factory=lambda: config.COMPACT_AT_TOKENS)
     """Summarize the oldest history once the estimate crosses this."""
 
     keep_recent_messages: int = 14
