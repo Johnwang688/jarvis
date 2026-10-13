@@ -1325,3 +1325,9 @@ capture time. Therefore cards say **Preview unavailable** and no target outline
 is drawn. Amendment B.6/B.9 positive pixel identity remains capability-blocked,
 not verified by the synthetic stream tests. No screenshot or capture call is
 created to manufacture that proof.
+
+The named always-ask layer uses a distinct private delegation card with exactly
+`{kind: "delegation", tool: "hud_browser_act"}`, empty args and null command. It
+permits only reaching subsequent Browser checks, never authorizes a page action.
+It shares the same deadline, identity and one-shot no-Always consent lifecycle;
+no page identity, target, command or preview is invented for that card.

@@ -138,6 +138,23 @@ def drive_checks(browser,mock,base,check,until,guard,init_script):
         page.wait_for_timeout(100)
         check('BR9c late old detail cannot replace the current request','CURRENT_ONLY' in card.inner_text() and 'PRIVATE_CARD_TEXT' not in card.inner_text())
         page.keyboard.press('Escape');until(lambda:card.count()==0)
+        delegated,_=private_card('drive_card07',tid);delegated['layer']='always-ask'
+        details[delegated['req_id']]={**delegated,'allowlistable':False,'args':{},'command':None,
+            'browser':{'kind':'delegation','tool':'hud_browser_act'},'headline':'PRIVATE UNUSED','reason':'PRIVATE UNUSED'}
+        mock.world['approvals']=[delegated];mock.emit('approval_requested',delegated)
+        until(lambda:card.locator('[data-testid="browser-delegation-details"]').count()==1)
+        check('BR9c named-rule card grants no action or invented page facts','This grants no Browser action' in card.inner_text()
+            and not re.search('PRIVATE|Preview|Pane|example.test',card.inner_text()) and card.locator('[data-testid="approval-command"],canvas,img').count()==0)
+        card.locator('[data-testid="approval-allow"]').click();until(lambda:card.count()==0)
+        check('BR9c named-rule consent is one ordinary noAlways answer',mock.sent('POST','/approvals/drive_card07')==[{'decision':'allow','always':False}])
+        release,rd=private_card('drive_card08',tid)
+        download={'id':'abcde123','name':'sample.bin','size':1024};args={'action':'release_download','download_id':download['id'],'name':download['name'],'size':download['size']}
+        rd.update(args=args,command=json.dumps(args));rd['browser'].update(action='release_download',category='executable_download',text='',rect=None,download=download)
+        details[release['req_id']]=rd;mock.world['approvals']=[release];mock.emit('approval_requested',release)
+        until(lambda:'Release this executable download?' in card.inner_text())
+        check('BR9c release card shows exact file facts without an execute claim','sample.bin' in card.inner_text()
+            and '1,024 bytes' in card.inner_text() and 'It does not run it.' in card.inner_text() and card.locator('[data-testid="approval-command"]').inner_text()==rd['command'])
+        page.keyboard.press('Escape');until(lambda:card.count()==0)
         sock=remote.sockets[-1];remote.drive(sock,'t1')
         chat=page.locator(_pane(5,'[data-testid="input"]'));chat.click();chat.fill('keep this draft')
         until(lambda:page.evaluate('window.__hud.mic.state().open'))

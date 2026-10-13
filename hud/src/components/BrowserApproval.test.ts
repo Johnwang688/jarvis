@@ -70,3 +70,21 @@ it("private authorization cancels Enter and Space defaults even if a button is f
   expect(onDecide).not.toHaveBeenCalled();
   const down=new MouseEvent("mousedown",{bubbles:true,cancelable:true});await act(async()=>allow.dispatchEvent(down));expect(down.defaultPrevented).toBe(true);
 });
+
+it("named-rule delegation keeps fixed wording and the same one-shot consent lifecycle",async()=>{
+  const req={...request,layer:"always-ask"},onDecide=vi.fn();
+  mocks.get.mockResolvedValue({...req,allowlistable:false,args:{},command:null,browser:{kind:"delegation",tool:"hud_browser_act"},headline:"PRIVATE RAW HEADLINE",reason:"PRIVATE RAW REASON"});
+  await act(async()=>root.render(createElement(BrowserApprovalCard,{request:req,onDecide,onPresent:vi.fn()})));
+  expect(host.textContent).toContain("This grants no Browser action");expect(host.textContent).not.toMatch(/PRIVATE|Preview|Pane|The page calls/);
+  expect(host.querySelector('[data-testid="approval-command"], [data-testid="approval-always"], canvas, img')).toBeNull();
+  const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!;
+  expect(allow.disabled).toBe(false);await act(async()=>{allow.click();allow.click();});
+  expect(onDecide).toHaveBeenCalledExactlyOnceWith(req.req_id,true,false);
+});
+it("an action reply cannot authorize a replaced delegation request with the same id",async()=>{
+  const pending=deferred();mocks.get.mockReturnValueOnce(pending.promise);await render();const oldAllowed=current.canAuthorize;
+  const req={...request,layer:"always-ask"};mocks.get.mockResolvedValue({...req,allowlistable:false,args:{},command:null,browser:{kind:"delegation",tool:"hud_browser_act"}});
+  await render(req);await act(async()=>pending.resolve(details()));
+  expect(oldAllowed()).toBe(false);expect(current.detail?.kind).toBe("delegation");expect(host.textContent).not.toContain("Untrusted label");
+  await act(async()=>vi.advanceTimersByTime(119000));expect(current.canAuthorize()).toBe(false);
+});

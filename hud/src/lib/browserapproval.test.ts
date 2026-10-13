@@ -1,4 +1,4 @@
-import { browserApprovalDeadline, parseBrowserApproval, type BrowserApprovalPublic } from "./browserapproval";
+import { browserApprovalDeadline, parseBrowserApproval, parseBrowserPrivateApproval, type BrowserApprovalPublic } from "./browserapproval";
 const expected: BrowserApprovalPublic = {req_id:"request_1234",code:"ABCD",tool:"hud_browser_act",layer:"browser-gate",thread_id:"thread",hud_only:true,asked_at:"2026-10-13T00:00:00+00:00",timeout_s:120};
 function fixture() {
   const args={action:"type",pane:"2",target:"e1",text:"hello \nworld",file:""};
@@ -42,4 +42,17 @@ it("derives a finite maximum120-second deadline from issued time, never load tim
 
 it("keeps the conservative unjudged fallback usable as one exact owner card",()=>{
   const raw=fixture();expect(parseBrowserApproval({...raw,browser:{...raw.browser,category:"unjudged"}},expected)?.browser.category).toBe("unjudged");
+});
+
+it("accepts only the exact metadata-only named-rule delegation shape",()=>{
+  const req={...expected,layer:"always-ask"};
+  const raw={...req,allowlistable:false,args:{},command:null,browser:{kind:"delegation",tool:"hud_browser_act"},headline:"unused",reason:"unused"};
+  expect(parseBrowserPrivateApproval(raw,req)).toEqual({kind:"delegation",reqId:req.req_id});
+  expect(parseBrowserApproval(raw,req)).toBeNull();
+  for(const delta of [{command:"private"},{args:{target:"private"}},{browser:null},{browser:{...raw.browser,page_identity:1}},
+    {browser:{...raw.browser,tool:"run_command"}},{layer:"browser-gate"},{allowlistable:true},{req_id:"request_5678"},{timeout_s:121}]) {
+    expect(parseBrowserPrivateApproval({...raw,...delta},req)).toBeNull();
+  }
+  expect(parseBrowserPrivateApproval(fixture(),req)).toBeNull();
+  expect(parseBrowserPrivateApproval(raw,expected)).toBeNull();
 });

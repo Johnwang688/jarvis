@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { browserApi } from "../api";
 import { noPointerFocus } from "../lib/talkkey";
-import { browserApprovalDeadline, browserApprovalKey, parseBrowserApproval, type BrowserApprovalDetail, type BrowserApprovalPublic } from "../lib/browserapproval";
+import { browserApprovalDeadline, browserApprovalKey, parseBrowserPrivateApproval, isBrowserPrivateRequest, type BrowserPrivateDetail, type BrowserApprovalPublic } from "../lib/browserapproval";
 import "./BrowserApproval.css";
 
 export const PRIVATE_DETAIL_UNAVAILABLE = "The Browser action details are unavailable. Deny this request.";
@@ -11,10 +11,9 @@ export function useBrowserApproval(request: BrowserApprovalPublic) {
   const current = useRef(key); current.current = key;
   const alive = useRef(false);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; }; }, [key]);
-  const [result, setResult] = useState<{ key: string; detail: BrowserApprovalDetail | null; failed: boolean } | null>(null);
+  const [result, setResult] = useState<{ key: string; detail: BrowserPrivateDetail | null; failed: boolean } | null>(null);
   const [now, setNow] = useState(Date.now);
-  const eligible = request.hud_only === true && request.tool === "hud_browser_act" && request.layer === "browser-gate"
-    && /^[A-Za-z0-9_-]{12}$/.test(request.req_id);
+  const eligible = isBrowserPrivateRequest(request);
   const deadline = useMemo(() => {
     const at = Date.parse(request.asked_at), received = Date.now();
     return at > received + 5000 ? 0 : Math.min(browserApprovalDeadline(request), received + 120000);
@@ -25,7 +24,7 @@ export function useBrowserApproval(request: BrowserApprovalPublic) {
     if (deadline <= Date.now() || !eligible) return;
     void browserApi.get<unknown>("/approvals/" + encodeURIComponent(request.req_id), controller.signal).then(raw => {
       if (gone || current.current !== key) return;
-      const detail = parseBrowserApproval(raw, request);
+      const detail = parseBrowserPrivateApproval(raw, request);
       setResult({ key, detail, failed: !detail });
     }).catch(() => { if (!gone && current.current === key) setResult({ key, detail: null, failed: true }); });
     return () => { gone = true; controller.abort(); };
@@ -44,7 +43,12 @@ export function useBrowserApproval(request: BrowserApprovalPublic) {
     message: expired ? "This Browser request expired." : !eligible || selected?.failed ? PRIVATE_DETAIL_UNAVAILABLE : detail ? "" : "Loading private Browser action details…" };
 }
 
-export function BrowserApprovalBody({ detail }: { detail: BrowserApprovalDetail }) {
+export function BrowserApprovalBody({ detail }: { detail: BrowserPrivateDetail }) {
+  if (detail.kind === "delegation") return <div className="browserapproval" data-testid="browser-delegation-details">
+    <div className="headline">Allow this Browser tool to reach its safety checks?</div>
+    <p>Your named rule requires permission before the Browser tool can proceed.</p>
+    <p>This grants no Browser action. The requested action must still pass the Browser safety checks and may require a separate authorization.</p>
+  </div>;
   const b = detail.browser, release = b.action === "release_download";
   return <div className="browserapproval" data-testid="browser-approval-details">
     <div className="headline">{release ? "Release this executable download?" : "Authorize this one Browser action?"}</div>
@@ -83,7 +87,7 @@ export function BrowserApprovalCard({ request, onDecide, onPresent }: {
       if ((event.key === "Enter" || event.key === " ") && !(event.target instanceof Element && event.target.closest('[data-testid="approval-deny"]'))) event.preventDefault();
     }}>
     <h3>AUTHORIZATION REQUIRED</h3>
-    <div className="tool" data-testid="approval-tool">Browser action</div>
+    <div className="tool" data-testid="approval-tool">{request.layer === "always-ask" ? "Browser tool permission" : "Browser action"}</div>
     {details.detail ? <BrowserApprovalBody detail={details.detail} /> : null}
     {details.message ? <p role="status">{details.message}</p> : null}
     <div className="btns">

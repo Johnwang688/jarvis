@@ -6,7 +6,7 @@ export interface BrowserApprovalPublic {
   code: string; thread_id: string | null; asked_at: string; timeout_s?: number;
 }
 export interface BrowserApprovalDetail {
-  reqId: string; command: string;
+  kind: "action"; reqId: string; command: string;
   browser: {
     tab_id: string; action_id: string; pane: number; page_identity: number; document_generation: number;
     action: typeof BROWSER_ACTIONS[number]; category: typeof BROWSER_CATEGORIES[number];
@@ -14,6 +14,8 @@ export interface BrowserApprovalDetail {
     download?: { id: string; name: string; size: number };
   };
 }
+export interface BrowserDelegationDetail { kind: "delegation"; reqId: string }
+export type BrowserPrivateDetail = BrowserApprovalDetail | BrowserDelegationDetail;
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max * 2 && [...v].length <= max;
 const integer = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
@@ -26,12 +28,27 @@ export function browserApprovalDeadline(request: BrowserApprovalPublic): number 
 export function browserApprovalKey(request: BrowserApprovalPublic): string {
   return JSON.stringify([request.req_id, request.tool, request.layer, request.hud_only, request.code, request.thread_id, request.asked_at, request.timeout_s]);
 }
+export function isBrowserPrivateRequest(expected: BrowserApprovalPublic): boolean {
+  return expected.hud_only === true && expected.tool === "hud_browser_act"
+    && ["browser-gate", "always-ask"].includes(expected.layer) && /^[A-Za-z0-9_-]{12}$/.test(expected.req_id);
+}
+function matchingEnvelope(raw: unknown, expected: BrowserApprovalPublic): raw is Record<string, unknown> {
+  return isBrowserPrivateRequest(expected) && !!browserApprovalDeadline(expected) && record(raw)
+    && raw.hud_only === true && raw.allowlistable === false && raw.req_id === expected.req_id && raw.tool === expected.tool
+    && raw.layer === expected.layer && raw.code === expected.code && raw.thread_id === expected.thread_id
+    && raw.asked_at === expected.asked_at && raw.timeout_s === expected.timeout_s;
+}
+export function parseBrowserPrivateApproval(raw: unknown, expected: BrowserApprovalPublic): BrowserPrivateDetail | null {
+  if (expected.layer === "browser-gate") return parseBrowserApproval(raw, expected);
+  if (expected.layer !== "always-ask" || !matchingEnvelope(raw, expected)) return null;
+  const b = raw.browser;
+  if (raw.command !== null || !record(raw.args) || Object.keys(raw.args).length !== 0
+    || !record(b) || Object.keys(b).length !== 2 || b.kind !== "delegation" || b.tool !== "hud_browser_act") return null;
+  // This passes only a named tool rule. No action or page facts were judged here.
+  return { kind: "delegation", reqId: expected.req_id };
+}
 export function parseBrowserApproval(raw: unknown, expected: BrowserApprovalPublic): BrowserApprovalDetail | null {
-  if (expected.hud_only !== true || expected.tool !== "hud_browser_act" || expected.layer !== "browser-gate"
-    || !/^[A-Za-z0-9_-]{12}$/.test(expected.req_id) || !browserApprovalDeadline(expected) || !record(raw)) return null;
-  if (raw.hud_only !== true || raw.allowlistable !== false || raw.req_id !== expected.req_id || raw.tool !== expected.tool
-    || raw.layer !== expected.layer || raw.code !== expected.code || raw.thread_id !== expected.thread_id
-    || raw.asked_at !== expected.asked_at || raw.timeout_s !== expected.timeout_s) return null;
+  if (expected.layer !== "browser-gate" || !matchingEnvelope(raw, expected)) return null;
   const b = raw.browser;
   if (!record(b) || !id(b.tab_id, 8) || !id(b.action_id, 32) || !integer(b.pane) || b.pane < 1 || b.pane > 8
     || !integer(b.page_identity) || !integer(b.document_generation)
@@ -61,7 +78,7 @@ export function parseBrowserApproval(raw: unknown, expected: BrowserApprovalPubl
   }
   // Deliberately omit raw args/reason/headline/rect. Consent shows the exact full command;
   // fixed application wording describes it, and this browser has no proven preview pixels.
-  return { reqId: expected.req_id, command: raw.command, browser: {
+  return { kind: "action", reqId: expected.req_id, command: raw.command, browser: {
     tab_id: b.tab_id, action_id: b.action_id, pane: b.pane, page_identity: b.page_identity, document_generation: b.document_generation,
     action: b.action as BrowserApprovalDetail["browser"]["action"], category: b.category as BrowserApprovalDetail["browser"]["category"],
     host: b.host, path: b.path, target: b.target, text: b.text, ...(download ? { download } : {}),
