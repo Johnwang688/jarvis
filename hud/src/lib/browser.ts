@@ -1,3 +1,5 @@
+import { cleanTitle } from "./remote";
+
 // What the Browser pane is allowed to iframe, and how (WP-E; renamed from
 // the Preview pane, lib/preview.ts, in BR-3a).
 //
@@ -255,4 +257,19 @@ export function daemonPortsFrom(status: unknown, self: number | null = null): Da
 export function workshopUrl(projectId: string, rel: string, port = WORKSHOP_PORT): string {
   const clean = rel.replace(/^\/+/, "");
   return `http://127.0.0.1:${port}/p/${encodeURIComponent(projectId)}/${clean}`;
+}
+
+/** Direct labels are the URL, never a page-controlled document title. */
+export function browserLabel(raw: string): string {
+  if (!raw) return "New tab";
+  try {
+    const u = new URL(raw);
+    let path = u.pathname;
+    try { path = decodeURIComponent(path); } catch { /* keep malformed escapes as text */ }
+    return cleanTitle(u.host + (path === "/" ? "" : path), 40);
+  } catch { return cleanTitle(raw, 40) || "New tab"; }
+}
+
+export function browserHost(raw: string): string {
+  try { return cleanTitle(new URL(raw).host, 80); } catch { return ""; }
 }

@@ -1558,3 +1558,15 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
   .settings-content { padding: 12px; }
   .settings-heading { padding: 10px 12px; }
 }
+
+/* Browser pages share the Editor's compact, quiet strip (AO-2, Graphite). */
+.browsertabs { display: flex; flex: 0 0 auto; overflow-x: auto; min-width: 0; border-bottom: 1px solid var(--border); background: var(--bg-2); }
+.browsertab { display: flex; flex: 0 0 auto; align-items: stretch; border-right: 1px solid var(--border); }
+.browsertab [role=tab] { display: flex; align-items: center; gap: 5px; max-width: 235px; border: 0; border-radius: 0; padding: 7px 8px; font: 11px var(--mono); color: var(--text-muted); background: transparent; }
+.browsertab [role=tab] > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browsertab [role=tab][aria-selected=true] { color: var(--text); background: var(--bg-3); box-shadow: inset 0 -2px var(--accent); }
+.browsertabclose, .browsernew { border: 0; border-radius: 0; background: transparent; color: var(--text-muted); padding: 3px 7px; }
+.browsertabclose:hover, .browsernew:hover { color: var(--text); background: var(--hover); }
+.browserautomark { color: var(--accent); }
+.browserauto { flex: 0 0 auto; padding: 4px 10px; color: var(--text-2); font-size: 11px; overflow-wrap: anywhere; border-bottom: 1px solid var(--border); }
+.browserpage { min-width: 0; }
