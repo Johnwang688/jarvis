@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import collections
 import hashlib
+import io
+import math
+import wave
 import json
 import threading
 import time
@@ -624,6 +627,17 @@ if (mode === "focus-reload") {
 """
 
 
+def wav_tone(ms: int, hz: int = 440) -> bytes:
+    """A quiet sine of `ms` milliseconds: what the mock's `/say` "speaks"."""
+    rate = 8000
+    frames = b"".join(int(6000 * math.sin(2 * math.pi * hz * i / rate)).to_bytes(2, "little", signed=True)
+                      for i in range(rate * ms // 1000))
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(frames)
+    return out.getvalue()
+
+
 class MockDaemon:
     """The mock server plus the calls it recorded, for the test to assert on."""
 
@@ -643,6 +657,8 @@ class MockDaemon:
         self._sse_gen = 0
         self._sse_closed = False
         self.calls: list[tuple[str, str, dict]] = []
+        self.say_fail = False        # /say answers 503 (the local voice is down)
+        self.ms_per_char = 12        # /say's tone length per character of text
         self.httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         # The sidebar dots' races (2026-10-09): while `activity_gate` is an
@@ -1097,6 +1113,30 @@ class MockDaemon:
                                         "default_effort": info["default_effort"],
                                         "default_source": info["default_source"]})
                     return self._json(payload)
+                if path == "/say":
+                    # V6: the real route's contract -- known keys only, a voice
+                    # from the catalog, `local_only` a boolean -- answering a
+                    # tone as long as the text (`ms_per_char`), so a test can
+                    # count what was spoken without a speaker.
+                    unknown = sorted(set(body) - {"text", "voice", "instructions", "local_only"})
+                    if unknown:
+                        return self._err(400, f"unknown fields ({len(unknown)})")
+                    if not str(body.get("text", "")).strip():
+                        return self._err(400, "no text to say")
+                    names = {v["name"] for v in w["voices"]["voices"]}
+                    if body.get("voice") is not None and body["voice"] not in names:
+                        return self._err(400, "unknown voice")
+                    if not isinstance(body.get("local_only", False), bool):
+                        return self._err(400, "local_only must be a boolean")
+                    if mock.say_fail:
+                        return self._err(503, "local speech unavailable")
+                    audio = wav_tone(max(80, len(body["text"]) * mock.ms_per_char))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(len(audio)))
+                    self.end_headers()
+                    self.wfile.write(audio)
+                    return
                 if path in PICKER_KEYS:
                     # The real daemon's keys, enforced the way it enforces
                     # them: an unknown key is a 400 naming it. The mock used
