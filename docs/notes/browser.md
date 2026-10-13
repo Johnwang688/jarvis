@@ -1307,3 +1307,9 @@ Transport now passes constant functions with bounded data arguments, decodes raw
 192KiB chunks natively, transfers temporary ArrayBuffers to zero after immutable
 Blob ownership, and composes a byte-backed File. Neither production nor the
 accepted fixture forces page-global collection to conceal a previous peak.
+
+### BR10 exact-instance activity wiring
+
+The host now admits owner page operations and Remote capture/prepare/execute on their actual event-loop coroutine. A driver parent token spans preparation, review/cards, execution, download review and final notice. An unanswered owner CDP send keeps a separate child token after the short delivery waiter returns. Shutdown does not cancel already-running cleanup a second time. Owner-attention tokens bind the current tab object and instance generation; pending dialogs/choosers, popup adoption and download cleanup cannot be mistaken for idle work. The narrow `page_hold`/`release_page_hold` seam is available for later authentication challenges; no authentication feature is implemented here. Late old-tab callbacks cannot mutate a same-ID replacement's port lease, metadata, stream or download attribution. Only in-process pane metadata includes the instance generation.
+
+`PendingApprovals.run_if_idle` provides the approved broker-lock → activity-lock commitment ordering. The callback may only validate/mark an in-memory token, never perform IO or service callbacks. Four real-broker ordering tests include a card already inserted while its announcement is held. The sound coordinator/replacement is still pending, so this seam does not yet trigger automatic restarts. Pure integrated checks and six isolated actual-Chrome lifecycle probes passed; no audio was played or routed by those probes.
