@@ -7,7 +7,7 @@
 // the backend meaningful.
 
 import type {
-  ApprovalRequest, AvatarDesc, ChatMessage, Diff, FileRead, ModelRow, Platform,
+  ApprovalRequest, AvatarDesc, ChatMessage, ToolEntry, Diff, FileRead, ModelRow, Platform,
   Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
   VoiceEntry, Attachment, DirListing, DiscordStatus, ProjectChannel, BackfillResult, SendResult } from "./types";
 import type { ThreadModels } from "./lib/threadmodel";
@@ -91,7 +91,14 @@ export const api = {
    * new `GET /thread-models`. */
   setProviderDefault: (body: { provider: string; model: string; effort?: string }) =>
     req<ThreadModels>("/thread-models", json(body)),
-  transcript: (id: string) => req<{ messages: ChatMessage[] }>(`/threads/${id}/transcript`),
+  transcript: async (id: string, tools = true): Promise<{ messages: (ChatMessage | ToolEntry)[] }> => {
+    if (!tools) return req(`/threads/${id}/transcript`);
+    try { return await req(`/threads/${id}/transcript?tools=1`); }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 400) throw error;
+      return req(`/threads/${id}/transcript`);
+    }
+  },
   /** `spoken` (PR C): dictated, so the Discord mirror says "You (HUD, voice)".
    * While a turn runs the message is steered into it or queued behind it
    * (2026-10-08) — never refused; `status` says which. */

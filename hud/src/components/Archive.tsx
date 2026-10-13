@@ -205,7 +205,7 @@ export function ArchiveView(props: {
   };
 
   const read = (t: Thread) =>
-    api.transcript(t.id).then((r) => setReading({ thread: t, messages: r.messages || [] }))
+    api.transcript(t.id, false).then((r) => setReading({ thread: t, messages: (r.messages || []).filter((m): m is ChatMessage => m.role !== "tool") }))
       .catch((e) => setError(e.message));
 
   const days = view?.trash.retention_days ?? null;

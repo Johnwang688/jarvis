@@ -189,6 +189,32 @@ class History(unittest.TestCase):
     def history(self, thread):
         return self.request("GET", f"/threads/{thread.id}/transcript?tools=1")["messages"]
 
+    def test_opt_in_text_turn_identity_preserves_legacy_bytes(self):
+        import http.client
+        import json
+        thread = self.thread()
+        self.append(thread, "user", {"text": "again"}, "first")
+        self.append(thread, "user", {"text": "again", "message_id": "steer", "steer": True}, "first")
+        self.append(thread, "text", {"text": "answer"}, "first")
+        self.append(thread, "user", {"text": "again"}, "second")
+        expected = {"messages": [
+            {"role": "user", "text": "again", "at": "2026-10-12T12:00:00Z"},
+            {"role": "user", "text": "again", "at": "2026-10-12T12:00:00Z", "message_id": "steer", "mark": "steering"},
+            {"role": "assistant", "text": "answer", "at": "2026-10-12T12:00:00Z"},
+            {"role": "user", "text": "again", "at": "2026-10-12T12:00:00Z"},
+        ]}
+        conn = http.client.HTTPConnection("127.0.0.1", self.daemon.port, timeout=5)
+        try:
+            conn.request("GET", f"/threads/{thread.id}/transcript")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), json.dumps(expected, ensure_ascii=False).encode())
+        finally:
+            conn.close()
+        rows = self.history(thread)
+        self.assertEqual([r["turn_id"] for r in rows], ["first", "first", "first", "second"])
+        self.assertEqual([{k: v for k, v in row.items() if k != "turn_id"} for row in rows], expected["messages"])
+
     def test_order_outcomes_and_restart(self):
         thread = self.thread()
         self.append(thread, "user", {"text": "go"})
