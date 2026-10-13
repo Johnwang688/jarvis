@@ -388,8 +388,29 @@ def scrub_rule_checks(root: Path) -> None:
                 assert value not in scrub(f"value {value} here"), (name, value)
         finally:
             os.chdir(previous)
+    # PR #80's review: joined *PASSWORD/*PASSWD/*CREDS names, CRED/CREDS and
+    # MNEMONIC keys, with values too short or too plain for the value rule.
+    joined = root / "joined"
+    joined.mkdir()
+    secrets_here = {"PGPASSWORD": "pgpw1234", "MYSQLPASSWORD": "mysql-pw-7",
+                    "ADMINPASSWD": "adm1nzz", "DB_CREDS": "user:pw99",
+                    "USERCREDS": "hunter2x", "CRED": "abcdefghijklmnopqr",
+                    "MNEMONIC": "apple river stone cloud mango tiger lemon eagle piano sugar ocean candle"}
+    (joined / ".env").write_text(
+        "".join(f"{k}={v}\n" for k, v in secrets_here.items())
+        + "KEYBOARD_LAYOUT=us-intl\nPASSWORD_MIN_LENGTH=12\nSACRED_GROVE=elm-valley\n",
+        encoding="utf-8")
+    previous = Path.cwd()
+    os.chdir(joined)
+    try:
+        for key, value in secrets_here.items():
+            assert value not in scrub(f"got {value} back"), (key, "withheld by the key rule")
+        for setting in ("us-intl", "elm-valley"):
+            assert setting in scrub(f"layout {setting}"), (setting, "a setting was withheld")
+    finally:
+        os.chdir(previous)
     print("ok  scrub: a .env.preview's settings left alone (README intact); its secret key, "
-          "DSN password and 40-char token withheld; .env and .env.local by the same rule")
+          "DSN password and 40-char token withheld; .env and .env.local by the same rule; joined PASSWORD/CREDS names and MNEMONIC withheld")
     delta_review_checks(root)
 
 

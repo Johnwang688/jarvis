@@ -3184,7 +3184,10 @@ depth, any case, a Windows-trimmed name both ways — not a name ending
   line attributed to one is dropped (`is_protected`). **What is taken from a
   file is the lead's decision (PR #60 review, MED-2)**, and since the
   owner's answer (2026-10-12) it holds for `.env` and `.env.local` too, which
-  used to give every value of 8+ characters: every credential env file gives
+  used to give every value of 8+ characters (`terminal_read`'s guard still
+  takes every value from the folder chain's env files, `terminals._env_values`;
+  PR #80's review added joined `*PASSWORD`/`*PASSWD`/`*CREDS` names and the
+  CRED, CREDS and MNEMONIC key parts): every credential env file gives
   only (a) the value of a **secret-named
   key** — a whole word or an `_`/camelCase part of KEY, TOKEN, SECRET,
   PASS/PASSWD/PASSWORD/PWD, CREDENTIAL, PRIVATE, SALT or DSN (plurals too,
