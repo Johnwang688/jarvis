@@ -945,3 +945,17 @@ frame. A stopped tab stays stopped until Reload. Background content is
 hidden/inert, and every strip/control is disabled under a card. Labels are
 cleaned host/path text, capped at 40; auto-source names cap at 60 and appear in
 visible chrome. Remote mode and autonomous placement remain later packages.
+
+## Current automatic-opening identity and OFF contract (AO-3, 2026-10-13)
+
+The HUD's shared `lib/windowId.ts` provides one fresh memory-only 32-lowercase-hex
+identity per live page. Terminal holder records, dev-server ownership and future
+Remote front-window reporting use that same identity; copied storage is never
+its source. Missing secure random bytes yields no valid auto-open identity.
+
+An owner settings change publishes a fixed `dev_server_settings` boolean-only
+record before invalidating pending claims on OFF. Existing arbitration and claims
+are revoked, and claim/renew/placed refuse while disabled; a later ON does not
+revive old ownership. Owner-only listing includes effective `auto_open`.
+No URL, port or source text is added to that settings event. UI placement wiring
+belongs to the remaining AO-3 work, not to this backend contract alone.

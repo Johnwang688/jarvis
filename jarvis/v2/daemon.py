@@ -451,6 +451,10 @@ class Daemon:
                     "refused_ports": refused_ports, "dev_watch": dev_watch}
 
     def _dev_settings_changed(self):
+        # A fixed preference fact, never a server URL or a Remote navigation.
+        # Publish before lapsing claims so windows invalidate queued work first.
+        self.bus.publish({"kind": "dev_server_settings",
+                          "data": {"auto_open": self.browser_settings.auto_open()}})
         self.devservers.settings_changed()
 
     def _dev_known(self):

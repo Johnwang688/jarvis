@@ -20,11 +20,19 @@ headers. No route starts, probes, opens or navigates a server or the Browser.
 
 | Route | Exact body | Answer |
 |---|---|---|
-| `GET /dev-servers?window=<nonce>` | none; window optional | `{servers: [{id, url, state, source, claimed, mine}]}`; only listening, non-dismissed entries |
+| `GET /dev-servers?window=<nonce>` | none; window optional | `{auto_open: bool, servers: [{id, url, state, source, claimed, mine}]}`; effective preference plus listening, non-dismissed entries |
 | `POST /dev-servers/<id>/claim` | `{window, shows: bool, focused_at: int}` | `{won: true, url}` or `{won: false}` |
 | `POST /dev-servers/<id>/renew` | `{window}` | 200 `{}`; extends winner's lease |
 | `POST /dev-servers/<id>/placed` | `{window}` | 200 `{}`; publishes placed and ends lease |
 | `POST /dev-servers/<id>/dismiss` | `{window}` | 200 `{}`; any owner window may dismiss |
+
+Turning automatic opening off publishes exactly
+`{kind: "dev_server_settings", data: {auto_open: false}}` before revoking
+outstanding claims/arbitrations. Turning it on publishes the corresponding
+true boolean; old callbacks do not regain a claim. While disabled,
+claim/renew/placed return **409** `{error, code: "off"}`; owner dismissal
+remains available. The listing reports the effective `auto_open` value for
+bootstrap/reconnect without navigating or touching the Remote browser.
 
 The window nonce is exactly 32 lowercase hex characters. `focused_at` is
 epoch milliseconds in `[0, 2**53 - 1]` (0 means never). Unknown/missing keys
