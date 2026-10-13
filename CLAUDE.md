@@ -16,6 +16,11 @@ current code. Historical “live” claims are not new deployment receipts.
 Invariants and decisions are retained byte for byte; their named paragraph
 references are in the notes. Preserved paths are repository-relative.
 
+Tool-call labels: A value split by shell quoting can still appear in a label;
+labels do not parse or evaluate shell commands. Treat labels as untrusted
+text, not proof that every secret was removed. See the full limits in
+[HUD workspace notes](docs/notes/hud-workspace.md).
+
 <!-- retained:chat-git-and-v2:begin -->
 ## Chat git worktrees (2026-10-13)
 
@@ -144,8 +149,9 @@ summaries do not replace detailed matchers, exceptions or owner choices.
   checks, fresh contexts and action budgets. v1 never takes the owner's real
   browser profile. The v2 URL judge, SOCKS gate and action reviewer do different
   jobs: read [Browser notes](docs/notes/browser.md) before changing any. Only
-  owner navigation admits a loopback port; agent-triggered auto-open is Direct
-  only and never admits one. No frame takes focus without the owner's gesture,
+  owner navigation admits a port while its tab remains; last departure revokes
+  local tunnels too (BR-1c replaces the archived lifetime rule). The gate is
+  shared. Auto-open is Direct only and never admits a port. No frame takes focus without the owner's gesture,
   including behind cards or in hidden panes.
 - **Untrusted input stays data.** Strip hidden/invisible web text while keeping
   visible content, fence fetched text and retain provenance. Script review is

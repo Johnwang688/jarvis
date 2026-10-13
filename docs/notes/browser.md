@@ -959,3 +959,52 @@ restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
 The later daemon pane binding resolves the entry to immutable source identity;
 labels and client-supplied terminal IDs never authorize BR5. Unknown stays
 fail-closed. This shared model change alone does not enable Remote or a tool.
+
+## Current BR-1c implementation (2026-10-13)
+
+This current note supersedes the archived BR-1a host-lifetime loopback rule and
+pre-BD-5 sync-off wording above. Profile metadata is strict atomic 0600 JSON,
+with random path IDs, up to eight labels (1–32 visible NFC characters, unique
+case-insensitively; Private reserved). GET/POST/PATCH/DELETE owner profile routes
+never start Chrome by themselves. Deleting the final profile leaves no profiles.
+See [HUD API](../hud-api.md#additions-2026-10-12-the-browsers-engine--br-1a) for
+route shapes, refusal codes and the dedicated sign-in entry.
+
+A maximum of three persistent Chrome instances includes launches and closes in
+flight, plus one shared Private engine. Persistent instances stop 300 seconds
+after their last tab; reuse cancels the idle task. Private panes use independent
+off-record contexts; explicitly sharing a ctx shares its login state. Context
+close removes its tabs/downloads; the last context stops Private and removes
+its temporary profile, HOME and artifacts. Forget stops one profile, waits for
+download workers, wipes its profile/downloads, and leaves its label and an empty
+0700 folder. Delete also removes metadata after the wipe. Per-profile locks
+cover queued opens, downloads and even a cancelled filesystem wipe; a failure
+cannot be reported as a successful deletion. Failed or cancelled context
+retirement retains its identity and closing state until strict data cleanup
+finishes, so DELETE can retry it. Healthy existing Private contexts stay usable;
+new-context admission waits for unresolved cleanup. Repeated cancellations of
+a profile wipe still cannot release its lock while the worker is running.
+
+Only an admitted owner navigation temporarily grants a local port, retained
+while its authorizing tab remains there. Failure/cancellation rolls it back;
+last-tab leave/close/forget/delete revokes both new and established local SOCKS
+tunnels. The connector rechecks permission after its await. Pages, popups,
+history and agents do not create grants. `local_servers` stays a global owner
+override. The gate is shared across profiles/Private: cookie separation does
+not imply per-profile network permission.
+
+BD-5 keeps persistent sign-in, sync and autofill enabled. The dedicated,
+hold-respecting owner sign-in route admits only exact `chrome://settings/syncSetup`
+and its locally measured `chrome://settings/people` redirect in that tab; leaving
+ends the capability. Generic navigation still refuses internal URLs. A temporary
+profile with blocked external network rendered and captured the settings page.
+Actual Google login, sync, saved credentials and keyring behavior are **not
+verified** (manual M4/M4b/M12). `browser.sync` says `password_store: basic` with
+`source: launch_argument`; it reports the explicit flag, not inspected secrets.
+`navigator.webdriver` remained true in the real local fixture.
+
+The profile regression suite uses one real Chrome at a time and checks summed
+RSS below 1.5 GiB; concurrent three-plus-Private admission uses barrier-controlled
+doubles. This does not establish simultaneous production memory demand or a
+production memory ceiling (BD-10). No HUD profile chip is included here; BR-3b
+consumes these backend routes.

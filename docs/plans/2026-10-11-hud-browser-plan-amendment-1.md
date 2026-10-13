@@ -30,7 +30,7 @@
   - A "driven by…" banner and a list of actions show in the pane.
   - Any click, key or scroll of yours pauses the agent until you press **Resume Jarvis**.
 - **A browser approval card shows only in the HUD window.** It names the action, the site and the target, and it never offers ALWAYS. A yes covers that one action only.
-- **Named profiles** (Main, Work, …) can each be signed in to different accounts at once, plus **Private** panes that forget everything when closed. Chrome's own sign-in and sync stay off. Website logins work normally, though Google may refuse an automated Chrome (measurement M4).
+- **Named profiles** (Main, Work, …) can each be signed in to different accounts at once, plus **Private** panes that forget everything when closed. Chrome's own sign-in and sync stay on (BD-5; §C supersedes the earlier off recommendation). Website logins work normally, though Google may refuse an automated Chrome (measurement M4).
 - **Dev servers open by themselves.** When a server in a HUD terminal prints its local address, a Browser pane opens beside it. It never takes your keyboard focus and never opens under a card. You can switch this off.
 - **"Jarvis can see" is on for every pane**, and you can point him at one: "look at pane 3".
 - **Sound has a switch, off by default.** Measurement M3 decides how "on" works.
@@ -584,7 +584,7 @@ Sound and video still have no sync, as §9 says.
 | **BR-8a** | `devurl.py`, pure | S, low | **now** (new file) | no |
 | BR-8a wiring | feed from `Terminal._output`, the `dev_url` frame, the `auto_open` setting | S, medium | after #33 merges (it rewrites `terminals.py`) | no |
 | BR-1b | stream, input, hold, dialogs, tabs, files; plus owner-input stamps, pause and resume, and the `{t:"agent"}` channel | L, high | after BR-1a | no |
-| BR-1c | profiles, Private, sign-in and sync off, per-profile forget | M, medium-high | after BR-1a, parallel with BR-1b | no |
+| BR-1c | profiles, Private, owner sign-in entry and sync on (BD-5), per-profile forget | M, medium-high | after BR-1a, parallel with BR-1b | no |
 | BR-3a | rename and migration | S–M | **right after G1 merges** | yes |
 | BR-3b | Remote mode, profile chip, Private, see and drive switches | L, high | after BR-1b, BR-1c, BR-2, BR-3a | yes |
 | BR-8b | auto-open in the HUD (Direct mode only, so BR-3b is not needed). **Replaced by amendment 2's AO-1a, AO-1b-i, AO-1b-ii, AO-2 and AO-3** | M, medium | after G2 and BR-8a; G2 or BR-8b adds `splitPane(..., {focus:false})` | yes (`App.tsx`, `workspace.ts`) |
@@ -699,7 +699,7 @@ None of these touches `workspace.ts`, `Workspace.tsx`, `Layout.tsx`, `ChatTab`, 
 | each folder is 0700; a symlinked or other-readable folder is refused; folders are on the credential list | created 0755 |
 | a cookie set in profile A is absent in B; a Private cookie is gone after close; no Private file remains in `BROWSER_DIR` | Private made persistent |
 | forget wipes only that profile and its downloads | forget wipes everything |
-| `--disable-sync` is in the launch args; prefs are written before launch; the policy is detected through a temp-path seam, never `/etc` | prefs written after launch |
+| Persistent launch omits `--disable-sync`; Private keeps it; exact owner sign-in entry is bounded separately from generic URL routes; the password-store launch choice is reported without claiming a real login | sync disabled for persistent profiles, or arbitrary internal URL admitted |
 | a fourth profile instance is refused; an idle instance stops after a shortened idle time; `navigator.webdriver` is recorded on the fixture | — |
 
 ### BR-8a: `tests/v2/devurl_check.py` (pure), plus additions to `tests/v2/terminal_check.py`
