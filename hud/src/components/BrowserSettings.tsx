@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from "react";
 import { api } from "../api";
+import { BrowserSoundSetting } from "./BrowserSound";
 import { devservers } from "../state/devserverClient";
 import { noPointerFocus } from "../lib/talkkey";
 
@@ -8,7 +9,7 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
   useSyncExternalStore(devservers.subscribe, devservers.version);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const enabled = devservers.enabled;
-  return <div className="block">
+  return <><div className="block">
     <label className="browser-auto-setting">
       <input type="checkbox" data-testid="browser-auto-open" checked={enabled === true}
         disabled={blocked || busy || enabled === null}
@@ -29,5 +30,5 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
     <p className="muted">Local servers can open in a Browser pane while your work stays in place.</p>
     {enabled === null ? <p className="muted">Waiting for the daemon's setting.</p> : null}
     {error ? <p className="err" role="status">{error}</p> : null}
-  </div>;
+  </div><BrowserSoundSetting blocked={blocked} /></>;
 }
