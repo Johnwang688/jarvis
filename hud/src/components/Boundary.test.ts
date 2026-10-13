@@ -233,6 +233,28 @@ describe("crash copy recovery", () => {
   function draw(blocked = false) {
     act(() => root.render(createElement(WorkspaceBoundary, { blocked }, createElement(CrashProbe, { where: "workspace" }))));
   }
+  it("distinguishes same-relative-path edits and names the copied file", async () => {
+    buffers.reset();
+    buffers.configure({
+      read: async (projectId, path) => ({ path, abs: `/${projectId}/${path}`, content: projectId,
+        kind: "text", protected: false, editable: true, etag: "a".repeat(32) }),
+      write: async () => ({etag:"b".repeat(32)}), stat: async () => ({ files: {} }),
+      makeModel: async text => new PlainModel(text), now: () => 0,
+    });
+    for (const project of ["alpha", "beta"]) {
+      await buffers.open(project, "src/index.ts", `${project}|src/index.ts`);
+      (buffers.model(`/${project}/src/index.ts`) as PlainModel).setValue(`${project} unsaved`);
+    }
+    draw();
+    const buttons = [...host.querySelectorAll('[data-testid="hud-crashed-copy"]')] as HTMLButtonElement[];
+    expect(buttons.map(b => b.parentElement?.textContent)).toEqual([
+      "/alpha/src/index.ts Copy unsaved text", "/beta/src/index.ts Copy unsaved text",
+    ]);
+    await act(async () => buttons[1].click());
+    expect(copy).toHaveBeenCalledWith("beta unsaved");
+    expect(host.textContent).toContain("Copied /beta/src/index.ts. The edit is still unsaved.");
+    expect(buffers.dirtyCount()).toBe(2);
+  });
   it("copies exact retained text after save409 without clearing dirty state", async () => {
     const getText = vi.spyOn(buffers, "text"); draw();
     expect(getText).not.toHaveBeenCalled(); expect(copy).not.toHaveBeenCalled();

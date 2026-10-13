@@ -965,10 +965,6 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 def _checkpoint_crash_copy_checks(page, mock, check, until):
     """The owner can recover exact text after a crash and a refused etag save."""
     check("recovery: file opens", _open(page, until, 2, "calc.py"))
@@ -1011,3 +1007,7 @@ def _checkpoint_crash_copy_checks(page, mock, check, until):
     actual = page.evaluate("__copyCalls")
     check("recovery: clipboard gets exact retained text", actual == [expected] and original.strip() in expected and "#exact_copy_after_409" in expected, repr({"actual": actual, "expected": expected}))
     check("recovery: copy neither overwrites disk nor clears dirty state", mock.world["files"]["calc.py"]["content"] == "#changed_on_disk\n" and any(b["dirty"] for b in _buffers(page)))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

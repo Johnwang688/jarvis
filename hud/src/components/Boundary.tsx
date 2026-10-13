@@ -37,6 +37,8 @@ function SaveUnsaved(props: { blocked?: boolean }) {
   const [copying, setCopying] = useState<string | null>(null);
   const dirty = buffers.snapshot().filter(b => b.dirty);
   const n = dirty.length;
+  const labels = new Map(dirty.map(file => [file.abs,
+    dirty.some(other => other.abs !== file.abs && other.path === file.path) ? file.abs : file.path]));
   if (!n && !said) return null;
   return (
     <div>
@@ -66,7 +68,7 @@ function SaveUnsaved(props: { blocked?: boolean }) {
       {said ? <span data-testid="hud-crashed-saved">{said}</span> : null}
       </p>
       {dirty.map(file => <p key={file.abs}>
-        <span>{file.path}</span>{" "}
+        <span>{labels.get(file.abs)}</span>{" "}
         <button type="button" data-testid="hud-crashed-copy" data-path={file.path}
           disabled={busy || copying !== null || props.blocked} onKeyDown={ownKey} onKeyUp={ownKey}
           onClick={async () => {
@@ -78,7 +80,7 @@ function SaveUnsaved(props: { blocked?: boolean }) {
             setCopying(file.abs); setSaid("");
             try {
               await navigator.clipboard.writeText(text);
-              setSaid(`Copied ${file.path}. The edit is still unsaved.`);
+              setSaid(`Copied ${labels.get(file.abs)}. The edit is still unsaved.`);
             } catch {
               setSaid("Copy failed. Your edit is still here; allow clipboard access and try again.");
             } finally { setCopying(null); }
