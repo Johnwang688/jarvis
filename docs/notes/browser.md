@@ -1022,8 +1022,9 @@ submission is the separate explicit disclosure boundary. Browser input and
 arbitrary navigation remain unavailable to this tool.
 
 The host scans in a CDP isolated world using the same visibility judgement as
-v1. No DOM attribute stamps, edits, scroll, focus or input are issued. Default
-text is viewport text; whole-page text includes rendered reachable DOM without
+v1. Every open-shadow descent checks its host's visibility, including nested
+hosts; direct ShadowRoot text uses the host for style ancestry. No DOM attribute
+stamps, edits, scroll, focus or input are issued. Default text is viewport text; whole-page text includes rendered reachable DOM without
 scrolling. Refs and the image stay viewport-only. Refs additionally require
 centre hit-testing, at least 8×8 pixels and opacity above 0.05; ordinary text
 visibility does not promise occlusion filtering. Limits are 20,000 visited

@@ -431,6 +431,28 @@ class Real(O.OwnerBrowser):
         with patch.object(C,"_scan",new=close):
             result=self.read();self.assertTrue(result.refused);self.assertEqual(result.text,"");self.assertIsNone(result.image)
 
+    def test_14_open_shadow_host_visibility_and_direct_text(self):
+        self.desk["images"]=False
+        for style in ("opacity:0", "filter:opacity(0)", "clip-path:inset(50%)",
+                      "position:absolute;clip:rect(0,0,0,0)", "display:none"):
+            with self.subTest(style=style):
+                self.html("""<p>Public paragraph</p><div id='hidden'></div><div id='nested'></div><div id='visible'></div>
+                <script>(()=>{
+                hidden.style.cssText=STYLE;
+                hidden.attachShadow({mode:'open'}).innerHTML='HIDDEN-DIRECT<p>HIDDEN-CHILD</p>';
+                const outer=nested.attachShadow({mode:'open'});
+                outer.innerHTML='<div id="wrapper"><div id="inner"></div></div>';
+                outer.querySelector('#wrapper').style.cssText=STYLE;
+                outer.querySelector('#inner').attachShadow({mode:'open'}).innerHTML='HIDDEN-NESTED-DIRECT<p>HIDDEN-NESTED-CHILD</p>';
+                visible.attachShadow({mode:'open'}).innerHTML='VISIBLE-DIRECT<p>VISIBLE-CHILD</p><div id="inner"></div>';
+                visible.shadowRoot.querySelector('#inner').attachShadow({mode:'open'}).innerHTML='VISIBLE-NESTED-DIRECT<p>VISIBLE-NESTED-CHILD</p>';
+                })();</script>""".replace("STYLE",json.dumps(style)))
+                result=self.read();self.assertFalse(result.refused,result.refused)
+                for text in ("VISIBLE-DIRECT", "VISIBLE-CHILD", "VISIBLE-NESTED-DIRECT", "VISIBLE-NESTED-CHILD"):
+                    self.assertIn(text,result.text)
+                for text in ("HIDDEN-DIRECT", "HIDDEN-CHILD", "HIDDEN-NESTED-DIRECT", "HIDDEN-NESTED-CHILD"):
+                    self.assertNotIn(text,result.text)
+
 
 class RegistryReal(Real):
     """The actual registry and actual Chrome, without a front-report double."""

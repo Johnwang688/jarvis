@@ -42,11 +42,14 @@ SCAN_JS = r"""(args) => {
     const candidate = e => /^(A|BUTTON|INPUT|TEXTAREA|SELECT|SUMMARY)$/.test(e.tagName)
         || /^(button|link|checkbox|radio|tab|menuitem|switch|combobox|textbox)$/.test(e.getAttribute('role') || '');
     const candidates = [], names = new Map(), textParts = [];
+    // A text node directly in an open ShadowRoot has no parentElement.
+    // Use its host for style/label ancestry without reading any form value.
+    const parentOf = n => n.parentElement || (n.parentNode instanceof ShadowRoot ? n.parentNode.host : null);
     const stack = [document.documentElement];
     while (stack.length && !out.incomplete) {
         const n = stack.pop(); if (++visits > args.nodeCap) { out.incomplete=true; break; }
         if (n.nodeType === Node.TEXT_NODE) {
-            const p=n.parentElement;
+            const p=parentOf(n);
             if (!p || p.isContentEditable) continue;
             const cs=css(p);
             if (cs.display==='none' || cs.visibility!=='visible' || textHidden(n,p,cs)) continue;
@@ -54,7 +57,7 @@ SCAN_JS = r"""(args) => {
             if (!args.whole && !viewport(r)) continue;
             const value=charge(n.nodeValue); textParts.push(value);
             if (value.trim()) out.lines.push(value);
-            for(let a=p;a;a=a.parentElement) {
+            for(let a=p;a;a=parentOf(a)) {
                 if(names.has(a)) { names.get(a).push(value); break; }
             }
             continue;
@@ -77,7 +80,11 @@ SCAN_JS = r"""(args) => {
         }
         // Editable and form-control children may be their current/default value.
         if (isMask || omitted.has(e.tagName)) continue;
-        const shadow=e.shadowRoot;
+        // The shared judge follows light-DOM parents. Gate every shadow
+        // descent at its host so hidden composed ancestors remain a barrier
+        // even across nested roots; keep v1's exact shared judge unchanged.
+        const shadow=e.shadowRoot && cs.display!=='none' && cs.visibility==='visible'
+            && !hides(e) ? e.shadowRoot : null;
         if(e.childNodes.length+(shadow?shadow.childNodes.length:0)>args.nodeCap-visits) {out.incomplete=true;break;}
         const children=Array.from(e.childNodes);
         if(shadow) children.push(...shadow.childNodes);
