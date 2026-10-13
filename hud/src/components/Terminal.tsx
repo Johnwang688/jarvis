@@ -1161,6 +1161,7 @@ export class TermManager {
   blocked = false;
   zoom = 100;
   panelOpen = false;
+  covered = false;
   ledger = new AttachLedger();
   prefs = loadPrefs();
   /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals): pane ids. */
@@ -1267,7 +1268,7 @@ export class TermManager {
 
   /** Whether a terminal is in view: a drawn pane holds it, or it is the open panel's tab. */
   visible(id: string): boolean {
-    return this.place.has(id) || (this.panelOpen && this.panelActive() === id);
+    return !this.covered && (this.place.has(id) || (this.panelOpen && this.panelActive() === id));
   }
 
   /**
@@ -1425,6 +1426,13 @@ export class TermManager {
     if (this.zoom === zoom) return;
     this.zoom = zoom;
     for (const s of this.sessions.values()) s.applyZoom();
+  }
+
+  setCovered(covered: boolean) {
+    if (this.covered === covered) return;
+    this.covered = covered;
+    this.dropHiddenHolds();
+    this.changed();
   }
 
   setPanelOpen(open: boolean) {

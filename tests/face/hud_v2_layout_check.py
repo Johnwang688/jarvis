@@ -87,6 +87,8 @@ LONG_COMMAND = "rm -rf /home/johnw/projects/scratch && " + " && ".join(
     f"echo step-{i} >> /tmp/zoom-check.log" for i in range(60))
 
 
+from tests.face.hud_v2_check import open_settings
+
 def layout_checks(browser, mock, base, check, until, guard, init_script):
     print("\nzoom, folding and resizing")
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
@@ -729,8 +731,7 @@ def _reachable(page, sel: str) -> tuple[bool, str]:
 
 TOOLS = ['[data-testid="tab-chat"]', '[data-testid="tab-task"]', '[data-testid="tab-file"]',
          '[data-testid="tab-diff"]', '[data-testid="tab-browser"]', '[data-testid="profile"]',
-         '[data-testid="open-model"]', '[data-testid="open-voice"]', '[data-testid="open-avatar"]',
-         '[data-testid="open-settings"]', '[data-testid="input"]', '[data-testid="model-chip"]',
+         '[data-testid="titlebar-settings"]', '[data-testid="input"]', '[data-testid="model-chip"]',
          '[data-testid="project-chip"]', '[data-testid="dictation"]']
 
 
@@ -816,16 +817,16 @@ def _model_chip_checks(page, mock, check, until):
 
 def _picker_zoom_checks(page, mock, check, until):
     """The pickers' 78vh cap divides by the zoom as the card's does."""
-    # Settings is ~197px tall; at 160% on a 300px window an undivided 78vh
+    # A schedule dialog at 160% on a 300px window: an undivided 78vh
     # cap (374 zoomed px) would let it run off both edges.
     page.set_viewport_size({"width": 1280, "height": 300})
     _set_storage(page, zoom="160")
     _boot(page, mock, None, until, reload=True)
-    page.locator('[data-testid="open-settings"]').click()
-    until(lambda: page.locator('[data-testid="picker"] .picker').count() > 0, timeout=3)
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {picker: 'schedule'}})")
+    until(lambda: page.locator('[data-testid="schedule-dialog"]').count() > 0, timeout=3)
     time.sleep(0.2)
     r = page.evaluate("""() => {
-      const p = document.querySelector('[data-testid="picker"] .picker');
+      const p = document.querySelector('[data-testid="schedule-dialog"]');
       const b = p.getBoundingClientRect();
       return {top: b.top, bottom: b.bottom, h: b.height, vh: innerHeight};
     }""")
@@ -1125,17 +1126,17 @@ def _titlebar_checks(page, mock, check, until):
           geo[0] == 28 and geo[1] == 0 and abs(geo[2] - 28) < 1, str(geo))
     check("and the window's <title> is still J.A.R.V.I.S. (the desktop bridge's backstop)",
           geo[3] == "J.A.R.V.I.S.", geo[3])
-    missing = [sid for sid in ("open-model", "open-voice", "open-avatar", "open-settings", "zoom-control",
+    missing = [sid for sid in ("titlebar-settings", "zoom-control",
                                "layout-customize", "toggle-left", "toggle-panel", "toggle-right")
                if page.locator(f'[data-testid="titlebar"] [data-testid="{sid}"]').count() != 1]
-    check("Model, Voice, Avatar, Settings, zoom and the four toggles live in the title bar", not missing,
+    check("Settings, zoom and the four toggles live in the title bar", not missing,
           str(missing))
     check("the zoom control left the status pane's header",
           page.locator('#right [data-testid="zoom-control"]').count() == 0)
     check("and the global buttons left the centre's header",
           page.locator('#main [data-testid="open-model"]').count() == 0)
     xs = [page.locator(f'[data-testid="{sid}"]').bounding_box()["x"]
-          for sid in ("open-settings", "zoom-control", "layout-customize", "toggle-left", "toggle-panel",
+          for sid in ("titlebar-settings", "zoom-control", "layout-customize", "toggle-left", "toggle-panel",
                       "toggle-right")]
     check("in VS Code's order: tools │ zoom │ ⊞ ◧ ⬓ ◨", xs == sorted(xs), str(xs))
     end = page.locator('[data-testid="toggle-right"]').bounding_box()
@@ -1325,25 +1326,23 @@ def _titlebar_checks(page, mock, check, until):
     page.locator('[data-testid="expand-left"]').click()
     until(lambda: _visible(page, "#sidebar"), timeout=2)
 
-    # The narrowest windows: the text buttons fold into ⋯, nothing else hides.
+    # One Settings gear stays reachable even at narrow zoomed width.
     page.set_viewport_size({"width": 700, "height": 700})
     _set_storage(page, zoom="160", layout="{}")
     _boot(page, mock, None, until, reload=True)
-    check("under 560 zoomed px the four text buttons fold into ⋯",
-          _visible(page, '[data-testid="titlebar-more"]') and page.locator('[data-testid="open-model"]').count() == 0)
-    bad = [f"{sid}: {why}" for sid in ("titlebar-more", "zoom-out", "zoom-in", "layout-customize", "toggle-left",
-                                        "toggle-panel", "toggle-right")
+    check("the Settings gear replaces all four text tools and their overflow",
+          _visible(page, '[data-testid="titlebar-settings"]')
+          and page.locator('[data-testid="titlebar-more"], [data-testid="open-model"]').count() == 0)
+    bad = [f"{sid}: {why}" for sid in ("titlebar-settings", "zoom-out", "zoom-in", "layout-customize",
+                                      "toggle-left", "toggle-panel", "toggle-right")
            for ok, why in [_reachable(page, f'[data-testid="{sid}"]')] if not ok]
-    check("while ⋯, zoom and the four toggles stay on screen and clickable", not bad, "; ".join(bad))
-    over = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
-    check("and nothing overflows sideways", over <= 0, f"{over}px")
-    page.locator('[data-testid="titlebar-more"]').click()
-    until(lambda: page.locator('[data-testid="titlebar-more-menu"]').count() > 0, timeout=2)
-    page.locator('[data-testid="titlebar-more-menu"] [data-testid="open-settings"]').click()
-    until(lambda: page.locator('[data-testid="picker"]').count() > 0, timeout=3)
-    check("⋯ reaches Settings", page.locator('[data-testid="picker"]').count() > 0)
+    check("Settings, zoom and layout stay on screen and clickable", not bad, "; ".join(bad))
+    check("nothing overflows sideways",
+          page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
+    open_settings(page)
+    check("the gear reaches Settings", page.locator('[data-testid="settings-page"]').count() == 1)
     page.keyboard.press("Escape")
-    until(lambda: page.locator('[data-testid="picker"]').count() == 0, timeout=2)
+    until(lambda: page.locator('[data-testid="settings-page"]').count() == 0, timeout=2)
     _reset_all(page, mock, until)
 
 
@@ -2685,8 +2684,7 @@ def _crash_checks(page, mock, check, until):
     try:
         for size, opener, menu, what in (
             ((1280, 800), "layout-customize", "layout-menu", "⊞ (the layout menu)"),
-            # Under 560 HUD pixels the four text buttons fold into ⋯.
-            ((500, 700), "titlebar-more", "titlebar-more-menu", "⋯ (the folded tools menu)"),
+            ((500, 700), "layout-customize", "layout-menu", "⊞ at narrow width"),
         ):
             _reset_all(page, mock, until, size=size)
             errors.clear()
@@ -2806,19 +2804,21 @@ def _crash_checks(page, mock, check, until):
         # A picker or dialog that throws is closed; the window carries on.
         _reset_all(page, mock, until)
         errors.clear()
-        page.locator('[data-testid="open-settings"]').click()
-        until(lambda: page.locator('[data-testid="picker"]').count() > 0, timeout=3)
+        open_settings(page, "Model")
+        page.locator('[data-testid="model-pin-more"]').click()
+        until(lambda: page.locator('[data-testid="catalog"]').count() > 0, timeout=3)
         # The probe and the render that trips it in one evaluate: set apart, a
         # render of the window's own on a slow machine tripped it first, its
         # "dialog hit an error" was then overwritten by this patch's text, and
         # "and says so" below failed (20x CPU throttling: 3 of 3).
         page.evaluate("window.__hudCrashProbe = 'dialog';"
                       " window.__hud.dispatch({type: 'patch', patch: {error: 'dialog probe render'}})")
-        until(lambda: page.locator('[data-testid="picker"]').count() == 0, timeout=3)
+        until(lambda: page.locator('[data-testid="catalog"]').count() == 0, timeout=3)
         time.sleep(0.2)
+        page.locator('[data-testid="settings-close"]').click()
         ok, why = _window_whole(page)
         check("a dialog that throws is closed and the window stays drawn",
-              page.locator('[data-testid="picker"]').count() == 0 and ok, why)
+              page.locator('[data-testid="catalog"]').count() == 0 and ok, why)
         # The sentence is drawn a render after the dialog goes (the boundary's
         # onCrash patches it in): under load one read 0.2 s later missed it.
         line = lambda: page.evaluate(  # noqa: E731
@@ -2827,11 +2827,14 @@ def _crash_checks(page, mock, check, until):
         check("and says so", "dialog hit an error" in line(), repr(line()))
         check("and is caught: no page error", not errors, "; ".join(errors[:2]))
         page.evaluate("delete window.__hudCrashProbe")
-        page.locator('[data-testid="open-settings"]').click()
-        until(lambda: page.locator('[data-testid="picker"]').count() > 0, timeout=3)
-        check("and the next picker opened is drawn", page.locator('[data-testid="picker"]').count() > 0)
+        open_settings(page, "Model")
+        page.locator('[data-testid="model-pin-more"]').click()
+        until(lambda: page.locator('[data-testid="catalog"]').count() > 0, timeout=3)
+        check("and the next picker opened is drawn", page.locator('[data-testid="catalog"]').count() > 0)
         page.keyboard.press("Escape")
-        until(lambda: page.locator('[data-testid="picker"]').count() == 0, timeout=2)
+        until(lambda: page.locator('[data-testid="catalog"]').count() == 0, timeout=2)
+
+        page.locator('[data-testid="settings-close"]').click()
     finally:
         page.remove_listener("pageerror", listen)
         mock.stt_gate = None

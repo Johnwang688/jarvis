@@ -163,7 +163,7 @@ export class DialogBoundary extends Component<
  * the HUD or the daemon sets it; a script that could set it could already do
  * anything to the page, so it gives nothing away. Renders nothing otherwise.
  */
-export function CrashProbe(props: { where: "workspace" | "dialog" }): null {
+export function CrashProbe(props: { where: "workspace" | "dialog" | "settings" }): null {
   if ((window as any).__hudCrashProbe === props.where) {
     throw new Error(`crash probe: ${props.where}`);
   }

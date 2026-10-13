@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
-import { SettingsDialog } from "../components/Pickers";
+import { GeneralSettings } from "../components/Pickers";
 import { InstallApp, INSTALL_MENU } from "./installApp";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -71,8 +71,8 @@ describe("HUD app installation", () => {
     const container = document.createElement("div");
     const root = createRoot(container); const onInstall = vi.fn();
     const render = (installStatus: "available" | "installed" | "unavailable", blocked: boolean) => {
-      act(() => root.render(createElement(SettingsDialog, {
-        route: null, onClose: vi.fn(), onInstall, installStatus, blocked,
+      act(() => root.render(createElement(GeneralSettings, {
+         onInstall, installStatus, blocked,
       })));
     };
     try {
