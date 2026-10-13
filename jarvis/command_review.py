@@ -182,6 +182,7 @@ def _ask_model(url: str, body: str) -> Review:
             [{"role": "user", "content": PROMPT % (url, body)}],
             temperature=0.0,
             max_tokens=600,
+            cache=False,
         ).text
     except Exception as exc:
         return Review("unclear", summary=f"the reviewer could not be reached ({exc})", url=url)

@@ -7212,23 +7212,35 @@ Two findings worth keeping:
   `openai/gpt-6-luna`'s price: $0.10 in and $0.50 out per M, cache reads $0.01.
   From 100k, the whole request costs 5x: $0.50 in and $2.50 out per M.
   Compaction therefore defaults to 90k (`JARVIS_COMPACT_AT_TOKENS` overrides;
-  it must be an integer of at least 1000). A turn can grow past the threshold
-  before a safe cut point exists (invariant 1).
+  a non-empty value must be an integer of at least 1000; empty means unset).
+  A turn can grow past the threshold before a safe cut point exists (invariant 1).
   Default threads, sub-agents, compaction summaries and the review tier now
   run on Haiku 5.5. Saved HUD selections still take precedence. A bench given
   `-m` still runs its children and summaries through `models.tier()`; pin
   `JARVIS_ORCHESTRATOR` for comparable runs. Numbers taken before this PR
   are not comparable with numbers after it.
-- **Claude prompt caching (2026-10-12).** Two explicit ephemeral breakpoints
-  go on the wire: the system message and the newest stable message with
-  content before the volatile tail. Content-less assistant turns are skipped.
-  The caller's transcript stays verbatim. The old top-level breakpoint landed
-  on the working-context tail, rebuilt every step (invariant 7), so it never
-  hit for real agents with that block. A live Haiku 5.5 probe with the default
-  toolset, about 20k prompt tokens and six steps read zero cached tokens each
-  step and paid a 1.25x cache write, $0.0026 per step. Explicit breakpoints
-  read 19.2k of 20k tokens from step 2 on, $0.00035 per step. A breakpoint on
-  a tool message worked.
+- **Claude prompt caching (2026-10-12).** Three explicit ephemeral breakpoint
+  positions: the system message, an optional middle boundary already finalised by
+  `context.manage()`, and the newest markable message before the volatile tail.
+  The middle boundary precedes both the newest full tool results and the newest
+  live images, using the agent's context policy. Once truncated or evicted,
+  that prefix stays unchanged on subsequent steps; compaction can invalidate it.
+  With fewer results/images than both keep counts, no middle point is needed.
+  Breakpoints walk back to nonblank text only, never image parts or assistant
+  messages with tool calls. Caller boundaries are deduped and capped at four,
+  dropping oldest middle points while preserving the system and tail.
+  The caller's transcript stays verbatim. One-shot summaries, delegation and
+  reviews opt out with `cache=False`. The handoff prompt follows the context
+  block, so its `volatile_tail` is 0.
+  The old top-level breakpoint landed on the working-context tail, rebuilt
+  every step (invariant 7), so it never hit for real agents with that block.
+  A live Haiku 5.5 probe with the default toolset, about 20k prompt tokens and
+  six steps read zero cached tokens each step and paid a 1.25x cache write,
+  $0.0026 per step. Explicit breakpoints read about 19.2k of 20k tokens from
+  step 2 on, $0.00035 per step. That was a short turn with small results;
+  in long turns with big results, the middle breakpoint is what keeps reads
+  as context management rewrites older messages. A breakpoint on a tool
+  message worked.
   A live three-step tool turn on Haiku 5.5 at a reasoning effort ran without
   error although `_stream_once` does not pass `reasoning_details` back.
   Nothing changed for reasoning.
@@ -9555,7 +9567,7 @@ CLAUDE.md once it has been, with the results folded into the notes above:**
 4. **A real run past the compaction threshold.** Nothing has yet exercised
    compaction against a live model — the orphan fix is proven synthetically
    only. A long browser or CAD session (parallel `cad_render` calls are the
-   exact shape that triggered the bug) crossing 100k tokens would confirm no
+   exact shape that triggered the bug) crossing 90k tokens would confirm no
    400s and that the pinned goal reads sensibly after a summary lands.
 4b. **Does the model actually use `edit_file` and `grep_files`?** (Added
    2026-08-09.) Both are mechanically tested; the *prompting* is not. Watch a

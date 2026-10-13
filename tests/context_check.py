@@ -85,7 +85,7 @@ def config_env_validation_checks() -> None:
                    "from jarvis import config; print(config.COMPACT_AT_TOKENS)"]
         for value, expected in ((None, 90_000), ("1000", 1000), ("42000", 42_000),
                                 ("0", None), ("999", None), ("-1000", None),
-                                ("abc", None), ("1.5", None), ("", None)):
+                                ("abc", None), ("1.5", None), ("", 90_000)):
             case_env = dict(env)
             if value is not None:
                 case_env["JARVIS_COMPACT_AT_TOKENS"] = value

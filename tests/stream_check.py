@@ -360,7 +360,7 @@ def _plain_messages(messages):
 
 
 def cache_control_checks() -> None:
-    """Claude caches the system and stable tail, without changing the caller."""
+    """Claude caches nonblank text at stable boundaries on a wire copy."""
     messages = [{"role": "system", "content": "sys"},
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
@@ -377,7 +377,7 @@ def cache_control_checks() -> None:
         def json():
             return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
 
-    def request(model, transcript, tail, stream):
+    def request(model, transcript, tail, stream, **kwargs):
         before = deepcopy(transcript)
         posts = []
 
@@ -386,7 +386,7 @@ def cache_control_checks() -> None:
             return Body()
 
         with patch.object(llm._client, "post", fake_post), streaming(FakeStream(sse(chunks))) as sent:
-            reply = llm.chat(model, transcript, tools=tools, stream=stream, volatile_tail=tail)
+            reply = llm.chat(model, transcript, tools=tools, stream=stream, volatile_tail=tail, **kwargs)
         assert reply.text == "ok"
         assert len(sent) == int(stream) and len(posts) == int(not stream)
         assert transcript == before, "wire annotations mutated the caller"
@@ -440,6 +440,55 @@ def cache_control_checks() -> None:
     assert wire[1]["content"] is not parts[1]["content"]
     assert wire[1]["content"][0] is parts[1]["content"][0]
     assert wire[1]["content"][-1] is not parts[1]["content"][-1]
+
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZmFrZQ=="}}
+    carrier = {"role": "user", "content": [image]}
+    cases = [
+        # An image carrier at the tail walks back to the preceding tool result.
+        ([messages[0], messages[3], carrier, messages[-1]], (), [0, 1]),
+        # An attachment keeps its text markable, even before an image.
+        ([messages[0], {"role": "user", "content": [
+            {"type": "text", "text": "look at this"}, image]}, messages[-1]], (), [0, 1]),
+        # Steering also skips any blank text after the image.
+        ([messages[0], {"role": "user", "content": [
+            {"type": "text", "text": "[owner steering] look"}, image,
+            {"type": "text", "text": "  \n"}]}, messages[-1]], (), [0, 1]),
+        # An image-only middle point walks back, independently of the tail.
+        ([messages[0], messages[3], carrier, messages[1], messages[-1]], (2,), [0, 1, 3]),
+        ([messages[0], messages[3], {"role": "tool", "content": " \n\t"},
+          {"role": "assistant", "content": "tool preamble", "tool_calls": [{"id": "c2"}]},
+          messages[-1]], (), [0, 1]),
+        ([messages[0], messages[3],
+          {"role": "assistant", "content": "empty calls", "tool_calls": []},
+          messages[-1]], (), [0, 1]),
+    ]
+    for transcript, points, expected in cases:
+        for stream in (True, False):
+            wire = request(model, transcript, 1, stream, cache_points=points)["messages"]
+            assert _breakpoints(wire) == expected
+            for message in wire:
+                content = message.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if "cache_control" in part:
+                            assert part["type"] == "text" and part["text"].strip()
+            assert _plain_messages(wire) == _plain_messages(transcript)
+    mixed = cases[2][0]
+    wire = llm._cache_messages(model, mixed, 1)
+    assert wire[1]["content"][0] is not mixed[1]["content"][0]
+    assert wire[1]["content"][1] is image
+    assert "cache_control" not in image
+
+    many = [{"role": "user", "content": str(i)} for i in range(10)]
+    many[0]["role"] = "system"
+    # Drop oldest middle boundaries after walking/deduping, regardless of order.
+    wire = request(model, many, 1, False, cache_points=(7, 1, 6, 2, 6, 0, 8))["messages"]
+    assert _breakpoints(wire) == [0, 6, 7, 8]
+    for stream in (True, False):
+        wire = request(model, many, 1, stream, cache_points=(1, 2, 3), cache=False)["messages"]
+        assert wire == many and not _breakpoints(wire)
+    assert not _breakpoints(llm._cache_messages(model, [
+        {"role": "system", "content": " "}, carrier], 0))
 
     posts = []
     before = deepcopy(messages)
@@ -536,10 +585,96 @@ def agent_cache_prefix_checks() -> None:
     print("ok  caching: real Agent prefixes across three tool steps and a second turn, continuation, handoff")
 
 
+def agent_long_cache_prefix_checks() -> None:
+    """Large results and image eviction leave each middle prefix unchanged."""
+    with tempfile.TemporaryDirectory() as raw, \
+            patch.object(llm.config, "SKILLS_DIR", Path(raw) / "skills"), \
+            patch.object(llm.config, "SPILL_DIR", Path(raw) / "spill"), \
+            patch.object(llm.config, "AVATAR_STATE_PATH", Path(raw) / "avatar.json"), \
+            patch.object(llm.config, "AVATAR_ENV", "jarvis"), \
+            patch.object(llm.config, "STREAM", True):
+        skill = llm.config.SKILLS_DIR / "test"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\ndescription: Large-result test\n---\nFollow the plan.\n")
+        agent = agent_mod.Agent(model="anthropic/claude-haiku-5.5",
+                               tool_names=["skill_read", "plan_write"], max_steps=12)
+        assert agent.policy == agent_mod.context.ContextPolicy()
+        responses = []
+        for step in range(1, 11):
+            call = {"index": 0, "id": f"long{step}", "type": "function",
+                    "function": {"name": "skill_read", "arguments": '{"name":"test"}'}}
+            responses.append(FakeStream(sse([{"choices": [{"delta": {"tool_calls": [call]},
+                                                            "finish_reason": "tool_calls"}]}])))
+        responses.append(FakeStream(sse([{"choices": [{"delta": {"content": "done"},
+                                                        "finish_reason": "stop"}]}])))
+
+        def dispatch(call):
+            step = int(call["id"][4:])
+            return agent_mod.tools.ToolResult(text=f"result {step}: " + "R" * 4000,
+                                             image_b64="ZmFrZQ==" if step in (2, 5, 8) else None)
+
+        with patch.object(agent, "_dispatch_one", dispatch), no_post(), streaming(*responses) as sent:
+            assert agent.run_turn("ten large tool results, with images").text == "done"
+        assert len(sent) == 11
+        plains = [_plain_messages(payload["messages"]) for payload in sent]
+        assert all(plain[-1]["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX) for plain in plains), \
+            [(i, plain[-1]["content"][:100]) for i, plain in enumerate(plains)]
+        assert any(agent_mod.context.TRUNCATED in m.get("content", "")
+                   for m in plains[-1] if m["role"] == "tool")
+        assert any(p.get("text") == agent_mod.context.EVICTED_IMAGE
+                   for m in sent[-1]["messages"] for p in agent_mod.context._parts(m))
+        middle_count = 0
+        for current, following in zip(sent, sent[1:]):
+            points = _breakpoints(current["messages"])
+            assert 0 in points and len(points) <= 4
+            if len(points) == 3:
+                middle_count += 1
+                end = points[1] + 1
+                assert _plain_messages(current["messages"][:end]) == \
+                    _plain_messages(following["messages"][:end]), "middle cached prefix changed"
+        assert middle_count >= 5, "long turn never acquired a useful middle breakpoint"
+        assert '"cache_control"' not in json.dumps(agent.messages)
+
+        # The boundary follows the actual policy, counting images, not carriers.
+        agent.messages = [{"role": "system", "content": "sys"},
+                          {"role": "tool", "content": "old"},
+                          {"role": "user", "content": [
+                              {"type": "input_image"}, {"type": "image"}]},
+                          {"role": "tool", "content": "new"}]
+        assert agent._cache_points() == (1,)
+        agent.policy.keep_full_results = 1
+        assert agent._cache_points() == (1,)
+        agent.policy.keep_images = 3
+        assert agent._cache_points() == (2,)
+        agent.policy.keep_full_results = 3
+        assert agent._cache_points() == ()
+        agent.policy.keep_full_results = agent.policy.keep_images = 0
+        assert agent._cache_points() == ()
+    print("ok  caching: real Agent, ten 4k tool results, three images, finalised middle prefixes")
+
+
+def summarize_cache_checks() -> None:
+    agent = agent_mod.Agent(tool_names=[])
+    calls = []
+
+    def fake(model, messages, **kwargs):
+        calls.append(kwargs)
+        return llm.Reply(message={"content": "summary"},
+                         model=model, latency_s=0.0,
+                         finish_reason="length" if len(calls) == 1 else "stop")
+
+    with patch.object(llm, "chat", fake):
+        assert agent._summarize("large transcript") == "summary"
+    assert len(calls) == 2 and all(call.get("cache") is False for call in calls)
+    print("ok  caching: compaction and its retry opt out")
+
+
 def main() -> int:
     llm.config.MODELS_PATH = Path(tempfile.mkdtemp()) / "models.json"
     cache_control_checks()
     agent_cache_prefix_checks()
+    agent_long_cache_prefix_checks()
+    summarize_cache_checks()
     assembly_checks()
     tool_call_checks()
     cancel_checks()

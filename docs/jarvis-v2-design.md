@@ -1577,19 +1577,31 @@ for OpenRouter's orchestrator and following tiers. Below 100k prompt tokens it
 lists at `openai/gpt-6-luna`'s price: $0.10 in and $0.50 out per M, cache reads
 $0.01. From 100k the whole request costs 5x: $0.50 in and $2.50 out per M.
 Compaction therefore defaults to 90k tokens. A turn can grow before a safe cut
-point exists. `JARVIS_COMPACT_AT_TOKENS` overrides and must be an integer of at
-least 1000. Saved HUD selections still take precedence. The rule against
-Chinese-hosted vendors stands.
+point exists. `JARVIS_COMPACT_AT_TOKENS` overrides; empty means unset, and a
+non-empty value must be an integer of at least 1000. Saved HUD selections still
+take precedence. The rule against Chinese-hosted vendors stands.
 
-Claude requests use two explicit ephemeral cache breakpoints: the system
-message and the newest stable message with content before the volatile tail.
-Content-less assistant turns are skipped. Only the wire copy is marked.
+Claude requests use three explicit ephemeral cache breakpoint positions: the
+system message, an optional middle boundary already finalised by
+`context.manage()`, and the newest markable message before the volatile tail.
+The middle boundary precedes
+both the newest full tool results and the newest live images according to the
+agent's policy. Truncation and eviction are idempotent before it; compaction
+can still invalidate the prefix. With fewer results/images than both keep
+counts, no middle point is needed. Each boundary walks back to nonblank text,
+never an image part or an assistant message with tool calls. Only the wire
+copy is marked. Points are deduped and capped at four, dropping oldest middle
+points while keeping the system and tail. One-shot summaries, delegation and
+reviews use `cache=False`. At handoff, the prompt follows the context block,
+so `volatile_tail` is 0.
 The old top-level breakpoint landed on the working-context block, rebuilt at
 the tail every step, so it never hit for agents with that block. A live Haiku
 5.5 probe with the default toolset, about 20k prompt tokens and six steps read
 zero cached tokens each step. It paid a 1.25x cache write, $0.0026 per step.
-The explicit breakpoints read 19.2k of 20k tokens from step 2 on, $0.00035 per
-step. A breakpoint on a tool message worked.
+The explicit breakpoints read about 19.2k of 20k tokens from step 2 on,
+$0.00035 per step. This was a short turn with small results. In long turns with
+big results, the middle breakpoint is what keeps reads as context management
+rewrites older messages. A breakpoint on a tool message worked.
 
 A live three-step tool turn on Haiku 5.5 at a reasoning effort ran without
 error although `_stream_once` does not pass `reasoning_details` back.

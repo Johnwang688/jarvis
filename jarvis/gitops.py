@@ -1729,7 +1729,7 @@ def review(args: list[str], ctx: RepoContext, why: str) -> Review:
 
         raw = llm.chat(models.tier("review"),
                        [{"role": "user", "content": REVIEW_PROMPT % payload}],
-                       temperature=0.0, max_tokens=300).text or ""
+                       temperature=0.0, max_tokens=300, cache=False).text or ""
     except Exception as exc:
         return Review("unclear", f"the reviewer could not be reached ({type(exc).__name__})")
     match = re.search(r"\{.*\}", raw, re.DOTALL)

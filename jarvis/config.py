@@ -866,7 +866,7 @@ COMPACTION_MAX_TOKENS = int(os.environ.get("JARVIS_COMPACTION_MAX_TOKENS", "2400
 # from 100,000 the whole request costs $0.50 in / $2.50 out (5x). Use 90,000
 # for headroom: a turn can grow before a safe compaction cut point exists.
 try:
-    COMPACT_AT_TOKENS = int(os.environ.get("JARVIS_COMPACT_AT_TOKENS", "90000"))
+    COMPACT_AT_TOKENS = int(os.environ.get("JARVIS_COMPACT_AT_TOKENS") or "90000")
 except ValueError:
     raise ValueError("JARVIS_COMPACT_AT_TOKENS must be an integer of at least 1000.") from None
 if COMPACT_AT_TOKENS < 1000:

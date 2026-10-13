@@ -438,6 +438,25 @@ class Agent:
         """The rebuilt context block is excluded from Claude cache breakpoints."""
         return int(bool(self.messages) and self.messages[-1] is self._context_block)
 
+    def _cache_points(self) -> tuple[int, ...]:
+        """End of the prefix already finalised by context management.
+
+        Recent full results and live images may be rewritten next step. The
+        prefix before both windows has already been truncated/evicted, whose
+        rewrites are idempotent. Compaction can still invalidate it.
+        """
+        if not self.policy.enabled:
+            return ()
+        limits = []
+        tools_at = [i for i, m in enumerate(self.messages) if m.get("role") == "tool"]
+        images_at = [i for i, m in enumerate(self.messages)
+                     for part in context._parts(m) if context.is_live_image(part)]
+        for indices, keep in ((tools_at, self.policy.keep_full_results),
+                              (images_at, self.policy.keep_images)):
+            if keep > 0 and len(indices) >= keep:
+                limits.append(indices[-keep] - 1)
+        return (min(limits),) if limits and min(limits) >= 0 else ()
+
     def _summarize(self, transcript: str) -> str:
         """Compress old history into fixed sections, on the orchestrator tier.
 
@@ -472,6 +491,7 @@ class Agent:
                 ],
                 max_tokens=config.COMPACTION_MAX_TOKENS,
                 stream=False,
+                cache=False,
             )
 
         # A summary cut off at the token ceiling is worse than any other
@@ -703,6 +723,7 @@ class Agent:
                     self.model,
                     self.messages,
                     volatile_tail=self._volatile_tail(),
+                    cache_points=self._cache_points(),
                     tools=self.tool_specs,
                     # Streaming makes cancellation answerable *during* the call.
                     # Safe precisely here: nothing has been dispatched yet, so
@@ -894,6 +915,7 @@ class Agent:
             reply = llm.chat(
                 self.model, self.messages, stream=False,
                 volatile_tail=self._volatile_tail(),
+                cache_points=self._cache_points(),
                 effort=self._effort(),
             )
         except Exception as exc:  # provider error, cancellation, anything
@@ -913,4 +935,4 @@ def delegate(prompt: str, tier: str = "worker", system: str | None = None) -> st
     """
     messages = [{"role": "system", "content": system}] if system else []
     messages.append({"role": "user", "content": prompt})
-    return llm.chat(models.tier(tier), messages, temperature=0.4).text
+    return llm.chat(models.tier(tier), messages, temperature=0.4, cache=False).text

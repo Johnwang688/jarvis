@@ -236,7 +236,10 @@ def cache_control(model: str) -> dict[str, str] | None:
 
 
 def _cache_messages(
-    model: str, messages: list[dict[str, Any]], volatile_tail: int
+    model: str,
+    messages: list[dict[str, Any]],
+    volatile_tail: int,
+    cache_points: tuple[int, ...] = (),
 ) -> list[dict[str, Any]]:
     """Mark the stable prefix on a wire copy, leaving the transcript verbatim."""
     wire = list(messages)
@@ -244,20 +247,44 @@ def _cache_messages(
     if caching is None:
         return wire
 
-    indices = [0] if messages else []
-    for index in range(len(messages) - max(0, volatile_tail) - 1, 0, -1):
-        if messages[index].get("content"):
-            indices.append(index)
-            break
-    for index in indices:
+    def text_part(index: int) -> int | None:
+        message = messages[index]
+        if message.get("role") == "assistant" and "tool_calls" in message:
+            return None
+        content = message.get("content")
+        if isinstance(content, str):
+            return -1 if content.strip() else None
+        if isinstance(content, list):
+            for part_index in range(len(content) - 1, -1, -1):
+                part = content[part_index]
+                text = part.get("text")
+                if part.get("type") == "text" and isinstance(text, str) and text.strip():
+                    return part_index
+        return None
+
+    def walk_back(index: int) -> int | None:
+        for candidate in range(index, -1, -1):
+            if text_part(candidate) is not None:
+                return candidate
+        return None
+
+    indices = {0} if messages and text_part(0) is not None else set()
+    tail = walk_back(len(messages) - max(0, volatile_tail) - 1)
+    if tail is not None:
+        indices.add(tail)
+    middle = {walk_back(point) for point in cache_points if 0 <= point < len(messages)}
+    middle.discard(None)
+    # Keep the system and tail, then the newest distinct caller boundaries.
+    middle.difference_update(indices)
+    indices.update(sorted(middle)[-(4 - len(indices)):])
+    for index in sorted(indices):
         content = messages[index].get("content")
-        if isinstance(content, str) and content:
+        if isinstance(content, str):
             content = [{"type": "text", "text": content, "cache_control": dict(caching)}]
-        elif isinstance(content, list) and content:
-            content = list(content)
-            content[-1] = {**content[-1], "cache_control": dict(caching)}
         else:
-            continue
+            part_index = text_part(index)
+            content = list(content)
+            content[part_index] = {**content[part_index], "cache_control": dict(caching)}
         wire[index] = {**messages[index], "content": content}
     return wire
 
@@ -277,6 +304,8 @@ def chat(
     effort: str | None = None,
     *,
     volatile_tail: int = 0,
+    cache_points: tuple[int, ...] = (),
+    cache: bool = True,
 ) -> Reply:
     """One chat completion.
 
@@ -287,11 +316,16 @@ def chat(
     render text as it arrives.
 
     `volatile_tail` counts trailing messages rebuilt each step. Claude cache
-    breakpoints stop before them, and only the wire copy is marked.
+    breakpoints stop before them. `cache_points` are message indices the caller
+    vouches will not be rewritten; each walks back to nonblank text. Only the
+    wire copy is marked. One-off prompts can opt out with `cache=False`.
     """
     payload: dict[str, Any] = {
         "model": model,
-        "messages": _cache_messages(model, messages, volatile_tail),
+        "messages": (
+            _cache_messages(model, messages, volatile_tail, cache_points)
+            if cache else list(messages)
+        ),
         "temperature": temperature,
         "max_tokens": config.MAX_TOKENS if max_tokens is None else max_tokens,
         # Ask OpenRouter to bill-report each call so the bench can compare cost.
