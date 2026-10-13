@@ -1177,7 +1177,7 @@ def _rv_stt_lands_selected_checks(page, mock, check, until):
     _focus(page, until, 1)
     _dictation(page, "auto")
     held = []
-    page.route("**/stt", lambda r: held.append(r))
+    page.route("**/stt*", lambda r: held.append(r))
     try:
         page.evaluate(UTTERANCE)
         until(lambda: _pumped(page) and len(held) > 0, timeout=6)
@@ -1187,7 +1187,7 @@ def _rv_stt_lands_selected_checks(page, mock, check, until):
         s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
         held[0].continue_()
     finally:
-        page.unroute("**/stt")
+        page.unroute("**/stt*")
     sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
     check("W-6: clicking pane 2 during STT sends the words to pane 2's chat",
           bool(sent) and sent[-1].get("text") == "what is the weather", str(sent))

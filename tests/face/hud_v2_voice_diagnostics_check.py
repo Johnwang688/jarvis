@@ -71,11 +71,11 @@ def main():
             check("settings speech never uploaded", len(mock.sent('POST', '/stt')) == before)
             page.screenshot(path=os.environ.get('VOICE_DIAGNOSTICS_SCREENSHOT', '/tmp/voice-v1-diagnostics.png'))
             page.locator('[data-testid="settings-close"]').click()
-            page.route('**/stt', lambda r: r.fulfill(status=502, content_type='application/json', body='{"error":"private server error"}'))
+            page.route('**/stt*', lambda r: r.fulfill(status=502, content_type='application/json', body='{"error":"private server error"}'))
             page.evaluate("window.__hud.capture.press(); window.__hud.mic.feedMs(1200, .06); window.__hud.capture.release()")
             page.wait_for_function("() => window.__hud.voiceDiagnostics().rows.at(-1).outcome === 'stt_failed'")
             check("failure recorded without exception text", "private" not in page.evaluate("JSON.stringify(window.__hud.voiceDiagnostics())"))
-            page.unroute('**/stt')
+            page.unroute('**/stt*')
             # A failed chat send stays a handoff outcome, never falsely "sent".
             page.route('**/threads/*/send', lambda r: r.fulfill(status=503, content_type='application/json', body='{"error":"fake send unavailable"}'))
             page.locator('[data-testid="dictation-auto"]').click()
