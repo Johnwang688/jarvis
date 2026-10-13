@@ -230,7 +230,8 @@ def _action_checks(page, view, mock, k1, check, until):
 
 def _shared_action_checks(page, view, mock, k1, check, until):
     from tests.face.hud_v2_layout_check import _choose, _show
-    _choose(page, until, "cols2")
+    page.set_viewport_size({"width": 1900, "height": 900})
+    _choose(page, until, "cols3")
     _show(page, until, 1, "task")
     _show(page, until, 2, "task")
     first = page.locator('[data-testid="pane-1"] [data-testid="task-view"]')
@@ -247,18 +248,19 @@ def _shared_action_checks(page, view, mock, k1, check, until):
         err = second.locator('[data-testid="task-action-error"]')
         check("another task pane cannot issue a concurrent action",
               bool(until(lambda: err.count() and "still pending" in err.inner_text())) and len(held) == 1)
-        _show(page, until, 1, "chat")
-        page.evaluate("""() => window.__hud.dispatch({type:'message', pane:1,
+        _show(page, until, 3, "chat")
+        page.evaluate("""() => window.__hud.dispatch({type:'message', pane:3,
           message:{role:'system',text:'Synthetic proposal',proposal:{task_id:'k1',until:Date.now()+60000}}})""")
-        proposal = page.locator('[data-testid="pane-1"] [data-testid="proposal-cancel"]')
+        proposal = page.locator('[data-testid="pane-3"] [data-testid="proposal-cancel"]')
         proposal.click()
         notice = page.locator('[data-testid="error"]')
         check("transcript Cancel shares the guard and shows its refusal",
               bool(until(lambda: notice.count() and "task k1" in notice.inner_text()
                          and "still pending" in notice.inner_text())) and len(held) == 1)
         held[0].fulfill(status=200, content_type="application/json", body='{"ok":true}')
-        # Wait for the accepted action's task refresh to release the guard.
-        page.wait_for_timeout(250)
+        # The original view stays mounted. Its pending control becomes
+        # enabled only after the shared App guard's refresh has completed.
+        until(lambda: first.locator('[data-testid="steer-send"]').is_enabled())
         proposal.click()
         until(lambda: page.evaluate("true") and len(held) == 2)
         held[-1].fulfill(status=409, content_type="application/json", body='{"error":"synthetic transcript refusal"}')
