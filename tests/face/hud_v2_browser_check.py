@@ -1276,6 +1276,21 @@ def _tabs_frames_checks(page, mock, check, until):
     check("AO2: active pages win the window budget", all(f"{n}:tab002" in keys for n in range(1, 5)), str(keys))
     check("AO2: each pane keeps at most three live frames", all(sum(k.startswith(f"{n}:") for k in keys) <= 3 for n in range(1, 5)))
     check("AO2: the oldest background frame was evicted", "1:tab000" not in keys, str(keys))
+    page.evaluate("""() => { window.__ao2CoveredFrames = Array.from(document.querySelectorAll('[data-testid="browser-frame"]')); }""")
+    page.keyboard.press("Control+,")
+    until(lambda: page.locator('[data-testid="settings-page"]').count() == 1, timeout=3)
+    check("AO2: Settings retains all eight live frame identities within the window cap",
+          page.locator(allframes).count() == 8 and page.evaluate("""() =>
+            window.__ao2CoveredFrames.every(e => e.isConnected)"""))
+    check("AO2: every covered frame is hidden while its workspace is inert",
+          page.locator(".workspace-surface").evaluate("e => e.inert")
+          and page.locator(allframes).evaluate_all("els => els.every(e => getComputedStyle(e).visibility === 'hidden')"))
+    page.locator('[data-testid="settings-close"]').click()
+    until(lambda: page.locator('[data-testid="settings-page"]').count() == 0, timeout=3)
+    check("AO2: closing Settings restores the same eight frames without allocating more",
+          page.locator(allframes).count() == 8 and page.evaluate("""() =>
+            window.__ao2CoveredFrames.every(e => e.isConnected)"""))
+    page.evaluate("delete window.__ao2CoveredFrames")
     path = "/focus-none?budget=1-0"
     before = mock.dev_hits.count(path)
     _tab(page, 1, "tab000").click()
