@@ -10,9 +10,6 @@ import type { Thread } from "../types";
 
 export const UNTITLED_NEW = "New thread";
 export const UNTITLED_OLD = "Untitled";
-/** The sidebar wraps a title and clamps it at this many lines (theme.css). */
-export const TITLE_LINES = 3;
-
 export interface ThreadLabel {
   text: string;
   untitled: boolean;

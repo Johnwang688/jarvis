@@ -1049,15 +1049,16 @@ it. Logs name the thread and the route, never the title or the words.
 **No tool can set or regenerate a title** (`titles_check` `NoTool`, by name
 and by what tool modules call); `PATCH /threads/{id}` is not `owner_only`, as
 before — an API client's rename counts as the owner's. HUD: the row's name
-is `threadLabel` (`lib/threadTitle.ts`) — the title, wrapping and clamped at
-three lines (`.nm.ttl`, the whole title its tooltip; a pinned model's badge
-gives way), or "New thread" (no turns) / "Untitled", muted italic, **never
-the id**, which is the ⋯ menu's **Copy id** (`tmenu-copyid`); a split's chat
+is `threadLabel` (`lib/threadTitle.ts`) — the title, truncated to one line
+with an ellipsis (`.nm.ttl`; `HoverTitle` slowly scrolls overflowing titles
+on hover and resets on leave, respects reduced motion, and keeps the whole
+title in the tooltip; a pinned model's badge gives way), or "New thread"
+(no turns) / "Untitled", muted italic, **never the id**, which is the ⋯ menu's **Copy id** (`tmenu-copyid`); a split's chat
 header and the Archive view (its id the tooltip; `quotedName` in sentences)
 name a chat the same way. Free checks: `tests/v2/titles_check.py` (35, with
 a stand-in app-server over real pipes for `one_shot`), the mirror's
 `…waits_for_its_restore` pair in `discord_mirror_check`,
-`threadTitle.test.ts`, `tests/face/hud_v2_titles_check.py` (19, its own
+`threadTitle.test.ts`, `tests/face/hud_v2_titles_check.py` (its own
 `MockDaemon(0)`, run by `hud_v2_check` after the editor-marks section).
 Guard removals that bite: the owner guard in `auto_title`, the session-copy
 update, `save` keeping the stored title, the mirror's archived skip.

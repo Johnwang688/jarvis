@@ -2978,8 +2978,12 @@ start-up. A title is written only onto an empty one, so **a rename always
 wins**, before or during generation, and it follows to the chat's Discord
 thread like a rename — except for a chat archived in the HUD, whose Discord
 thread keeps its name (and stays archived) until the chat or its project is
-restored. The Archive view names archived chats by title as well. In the sidebar the title **wraps**, clamped at three
-lines with the whole title as its tooltip; an untitled chat reads "New
+restored. The Archive view names archived chats by title as well. In the
+sidebar the title **truncates to one line with an ellipsis** (owner update,
+2026-10-12). Hovering an overflowing title slowly scrolls through its
+full text, pausing at the ends; leaving resets it. Resizing or a live title
+update recalculates the scroll, and reduced motion keeps it still. The
+whole title remains its tooltip; an untitled chat reads "New
 thread" (or "Untitled" for an older one the backfill has not reached), muted
 and italic, never its id — the id is "Copy id" in the row's ⋯ menu. A split's
 chat header names it the same way. No agent can set or regenerate a title.

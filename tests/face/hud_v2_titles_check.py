@@ -2,7 +2,8 @@
 
 The owner: "right now each chat just displays its id. we should keep the id
 in the three dots but have the main display be the title and have the title
-wrap after a certain length."
+wrap after a certain length." The follow-up requests one-line ellipsis and
+slow scrolling on hover.
 
 Free and hermetic: a `MockDaemon(0)` of its own and a browser context of its
 own, under `hud_v2_check.guard` (no request to 8402/8403/8405, no CSP
@@ -12,8 +13,8 @@ new, one untitled with turns behind it, one with a long title.
 What it pins:
   - **never the id**: an untitled row reads "New thread" (no turns yet) or
     "Untitled", muted and italic, and its text holds no id;
-  - **wraps, clamped**: a long title wraps (no ellipsis), is clamped at three
-    lines, and the whole title is the name's tooltip;
+  - **truncates, scrolls**: one line with an ellipsis, slow hover scrolling
+    through the whole title, reset on leave, and a full-title tooltip;
   - **live**: a `thread_updated` carrying a title relabels the row and the
     chat pane's header in a split (which read "New thread" before);
   - **Copy id**: the row's ⋯ menu has "Copy id" showing the id, and it puts
@@ -80,23 +81,124 @@ def _untitled_checks(page, mock, check, until):
           str(rows))
 
 
-def _wrap_checks(page, mock, check, until):
+def _width_checks(page, mock, check, until):
+    title = next(t for t in mock.world["threads"] if t["id"] == "t22")
+    old_model, old_provider = title["model"], title["provider"]
+    title["model"], title["provider"] = "anthropic/claude-sonnet-4-6", "claude"
+    base = page.url.rstrip("/")
+    try:
+        for width, min_em in ((180, 2.5), (236, 5), (480, 6)):
+            _set_storage(page, zoom="100", layout=json.dumps({"left": width}))
+            _boot(page, mock, base, until, reload=True)
+            _show(page, until, "t22")
+            got = page.evaluate("""() => {
+              const row = document.querySelector('[data-testid="thread-t22"]');
+              const title = row.querySelector('.ttl'), pin = row.querySelector('.pin');
+              const provider = row.querySelector('.badge.claude'), menu = row.querySelector('.menu');
+              return { width: title.clientWidth, em: parseFloat(getComputedStyle(title).fontSize),
+                provider: provider.textContent, providerWidth: provider.clientWidth,
+                pin: pin.textContent, tooltip: pin.title, row: row.getBoundingClientRect().right,
+                menu: menu.getBoundingClientRect().right }; }""")
+            check(f"at {width}px the title keeps room and the provider/menu remain visible",
+                  got["width"] >= min_em * got["em"] and got["provider"] == "claude"
+                  and got["providerWidth"] >= 40 and got["menu"] <= got["row"], str(got))
+            check(f"at {width}px a truncated model badge retains its text and full tooltip",
+                  got["pin"] == "claude-sonnet-4-6" and got["tooltip"] == title["model"], str(got))
+    finally:
+        title["model"], title["provider"] = old_model, old_provider
+        _set_storage(page, zoom="100", layout="{}")
+        _boot(page, mock, base, until, reload=True)
+
+
+def _scroll_checks(page, mock, check, until):
     check("setup: the long title is listed", _show(page, until, "t22"))
     name = _name("t22")
+    page.mouse.move(1500, 900)
     got = page.evaluate("""sel => { const el = document.querySelector(sel); const s = getComputedStyle(el);
-      const line = parseFloat(s.lineHeight);
-      return { clamp: s.webkitLineClamp, ws: s.whiteSpace, overflow: s.textOverflow,
-               height: el.clientHeight, scroll: el.scrollHeight, line, title: el.title,
-               text: el.textContent }; }""", name)
-    # Wrapped, not cut to one line: the ellipsis Chromium draws is at the end
-    # of the third line, where the clamp falls.
-    check("a long title wraps (white-space normal, more than one line)",
-          got["ws"] == "normal" and got["height"] > 1.5 * got["line"], str(got))
-    check("…clamped at three lines", got["clamp"] == "3" and got["height"] <= 3 * got["line"] + 2
-          and got["height"] >= 2 * got["line"] and got["scroll"] > got["height"], str(got))
-    check("…its whole title is the tooltip and the text", got["title"] == LONG and got["text"] == LONG)
-    short = page.evaluate("sel => document.querySelector(sel).clientHeight", _name("t1"))
-    check("a short title stays one line", short <= got["line"] + 2, f"{short} vs line {got['line']}")
+      return { ws: s.whiteSpace, overflow: s.textOverflow, height: el.clientHeight,
+               line: parseFloat(s.lineHeight), width: el.clientWidth,
+               textWidth: el.firstElementChild.offsetWidth, title: el.title, text: el.textContent }; }""", name)
+    check("a long title truncates with an ellipsis on one line",
+          got["ws"] == "nowrap" and got["overflow"] == "ellipsis"
+          and got["height"] <= got["line"] + 2 and got["textWidth"] > got["width"], str(got))
+    check("its whole title remains the tooltip and text", got["title"] == LONG and got["text"] == LONG)
+    page.evaluate("window.__titleFocusBefore = document.activeElement")
+    page.locator(name).hover(position={"x": 2, "y": 2})
+    until(lambda: page.locator(name).get_attribute("data-scrolling") == "true")
+    check("hovering does not move keyboard focus",
+          page.evaluate("document.activeElement === window.__titleFocusBefore"))
+    # Drive the real browser animation's clock: check geometry at the start,
+    # middle and end without making the suite wait through a long title.
+    moved = page.evaluate("""sel => { const el = document.querySelector(sel), text = el.firstElementChild;
+      const a = text.getAnimations()[0]; if (!a) return null;
+      a.pause(); const duration = a.effect.getTiming().duration;
+      a.currentTime = 0; const start = text.getBoundingClientRect().left;
+      a.currentTime = duration / 2; const middle = text.getBoundingClientRect().left;
+      a.currentTime = duration - 1;
+      return { start, middle, end: text.getBoundingClientRect().left,
+               tail: text.getBoundingClientRect().right, edge: el.getBoundingClientRect().right }; }""", name)
+    check("hover scrolls through the title and reveals its end",
+          bool(moved) and moved["end"] < moved["middle"] < moved["start"]
+          and abs(moved["tail"] - moved["edge"]) < 2, str(moved))
+    # A resized sidebar must recalculate the distance while the mouse stays put.
+    page.evaluate("sel => document.querySelector(sel).style.maxWidth = '60px'", name)
+    until(lambda: page.evaluate("""sel => { const a = document.querySelector(sel).firstElementChild.getAnimations()[0];
+      return a && a.playState === 'running'; }""", name))
+    resized = page.evaluate("""sel => { const el = document.querySelector(sel), text = el.firstElementChild;
+      const a = text.getAnimations()[0]; if (!a) return null;
+      a.pause(); a.currentTime = a.effect.getTiming().duration - 1;
+      return { tail: text.getBoundingClientRect().right, edge: el.getBoundingClientRect().right }; }""", name)
+    check("hover scrolling adapts when the available width changes",
+          bool(resized) and abs(resized["tail"] - resized["edge"]) < 2, str(resized))
+    page.mouse.move(1500, 900)
+    until(lambda: page.locator(name).get_attribute("data-scrolling") is None)
+    reset = page.evaluate("""sel => { const el = document.querySelector(sel), text = el.firstElementChild;
+      return { animations: text.getAnimations().length, transform: getComputedStyle(text).transform,
+               overflow: getComputedStyle(el).textOverflow }; }""", name)
+    check("leaving resets the title and restores the ellipsis",
+          reset == {"animations": 0, "transform": "none", "overflow": "ellipsis"}, str(reset))
+    page.evaluate("sel => document.querySelector(sel).style.maxWidth = ''", name)
+    page.locator(_name("t20")).hover()
+    short = page.evaluate("""sel => { const el = document.querySelector(sel);
+      return { animations: el.firstElementChild.getAnimations().length, scrolling: el.dataset.scrolling }; }""",
+                          _name("t20"))
+    check("a title that fits never scrolls", short["animations"] == 0 and not short.get("scrolling"), str(short))
+    page.emulate_media(reduced_motion="reduce")
+    page.locator(name).hover()
+    check("reduced motion keeps the title still and the full tooltip available",
+          page.evaluate("""sel => { const el = document.querySelector(sel);
+            return el.firstElementChild.getAnimations().length === 0 && !el.dataset.scrolling; }""", name)
+          and page.locator(name).get_attribute("title") == LONG)
+    page.emulate_media(reduced_motion="no-preference")
+    page.mouse.move(1500, 900)
+
+
+def _click_checks(page, mock, check, until):
+    name = _name("t22")
+    page.locator(name).click()
+    until(lambda: page.locator('[data-testid="thread-t22"]').get_attribute("class").find(" sel") >= 0)
+    check("single-click on the title selects the chat",
+          " sel" in page.locator('[data-testid="thread-t22"]').get_attribute("class")
+          and page.locator('[data-testid="rename-thread-t22"]').count() == 0)
+    page.locator(name).dblclick()
+    box = page.locator('[data-testid="rename-thread-t22"]')
+    until(lambda: box.count() > 0)
+    check("double-click still opens inline rename with the full title",
+          box.count() == 1 and box.input_value() == LONG)
+    box.press("Escape")
+    until(lambda: box.count() == 0)
+    check("Escape still cancels rename without saving", not mock.sent("PATCH", "/threads/t22"))
+    # Native buttons offer the same complete text without needing hover.
+    page.locator('[data-testid="thread-menu-t22"]').press("Enter")
+    page.locator('[data-testid="tmenu-rename"]').press("Enter")
+    until(lambda: box.count() > 0)
+    check("the full title can be reached through keyboard menu actions", box.input_value() == LONG)
+    box.press("Escape")
+    page.locator('[data-testid="thread-menu-t22"]').tap()
+    page.locator('[data-testid="tmenu-rename"]').tap()
+    until(lambda: box.count() > 0)
+    check("the full title can be reached through touch menu actions", box.input_value() == LONG)
+    box.press("Escape")
 
 
 def _live_checks(page, mock, check, until):
@@ -142,7 +244,7 @@ def _markup_checks(page, mock, check, until):
     until(lambda: page.locator(_name("t21")).inner_text() == MARKUP, timeout=4)
     time.sleep(0.2)
     got = page.evaluate("""sel => ({ text: document.querySelector(sel).textContent,
-      kids: document.querySelector(sel).children.length, pwned: !!window.__pwned })""", _name("t21"))
+      kids: document.querySelector(sel).firstElementChild.children.length, pwned: !!window.__pwned })""", _name("t21"))
     check("a title holding markup is drawn as characters", got == {"text": MARKUP, "kids": 0, "pwned": False},
           str(got))
 
@@ -172,7 +274,7 @@ def _archive_checks(page, mock, check, until):
 
 def titles_checks(browser, mock, base, check, until, guard, init_script):
     print("\nchat titles: the sidebar row, its ⋯ menu and the pane header")
-    ctx = browser.new_context(viewport={"width": WIDE[0], "height": WIDE[1]},
+    ctx = browser.new_context(viewport={"width": WIDE[0], "height": WIDE[1]}, has_touch=True,
                               permissions=["microphone", "clipboard-read", "clipboard-write"])
     guard(ctx)
     ctx.add_init_script(init_script)
@@ -189,7 +291,7 @@ def titles_checks(browser, mock, base, check, until, guard, init_script):
         _set_storage(page, zoom="100", layout="{}")
         _set_ws(page, SPLIT)
         _boot(page, mock, base, until, reload=True)
-        for section in (_untitled_checks, _wrap_checks, _live_checks, _copy_id_checks, _markup_checks,
+        for section in (_untitled_checks, _width_checks, _scroll_checks, _click_checks, _live_checks, _copy_id_checks, _markup_checks,
                         _archive_checks):
             try:
                 section(page, mock, check, until)
