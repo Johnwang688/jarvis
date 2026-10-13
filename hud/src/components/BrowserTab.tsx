@@ -45,6 +45,7 @@ import { useDaemonPorts } from "../state/daemonPorts";
 import { cancelLoad, ownLoad, selectFrame } from "../state/frameguard";
 import { FrameHost } from "./FrameHost";
 import { BrowserTabStrip } from "./BrowserTabStrip";
+import { BrowserCapture, type CaptureDestination } from "./BrowserCapture";
 import { BrowserProfile } from "./BrowserProfile";
 import { RemoteView } from "./RemoteView";
 import type { BrowserControl } from "../state/browser";
@@ -54,7 +55,7 @@ export const BROWSER_FULL = "This pane has 12 tabs. Close one to open another.";
 
 export function BrowserTab(props: {
   pane: number; slot: number; drawn: boolean; projectId: string | null;
-  control?: BrowserControl; spec?: PaneSpec; zoom?: number;
+  control?: BrowserControl; spec?: PaneSpec; zoom?: number; captureDestination?: CaptureDestination;
   unseen?: readonly string[]; newTabNote?: string;
   browser?: BrowserTabs; liveFrames: readonly string[]; blocked?: boolean; limitMessage?: boolean;
   onLoaded: (id: string, url: string) => void;
@@ -75,8 +76,8 @@ export function BrowserTab(props: {
   };
   const shown = tabs.length ? tabs : [{ id: emptyId, url: "" }];
   const profile=props.control?.selectedProfile(props.pane as PaneNo)??null;
-  return <div className="tabbody browserbody" onPointerDownCapture={()=>{if(!props.blocked)props.control?.focus(props.pane as PaneNo);}}
-    onKeyDownCapture={e=>{if(!props.blocked&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&e.key!=="Tab")props.control?.focus(props.pane as PaneNo);}}>
+  return <div className="tabbody browserbody" onPointerDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture]")&&!props.blocked)props.control?.focus(props.pane as PaneNo);}}
+    onKeyDownCapture={e=>{if(!(e.target as Element).closest("[data-browser-capture]")&&!props.blocked&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&e.key!=="Tab")props.control?.focus(props.pane as PaneNo);}}>
     {props.control?<BrowserProfile pane={props.pane as PaneNo} control={props.control} selected={profile}
       see={props.spec?.see!==false} blocked={!!props.blocked} privateEnded={props.spec?.browserPrivateEnded} />:null}
     {props.control?.error?<div className="pad err" data-testid="browser-owner-error">{props.control.error}</div>:null}
@@ -106,6 +107,7 @@ export function BrowserTab(props: {
 function DirectTab(props: {
   pane: number; slot: number; drawn: boolean; projectId: string | null;
   tab: BrowserTabSpec; active: boolean; live: boolean; blocked?: boolean; control?: BrowserControl;
+  captureDestination?: CaptureDestination; zoom?: number;
   focusUrl: boolean; onFocused: () => void;
   onLoaded: (id: string, url: string) => void;
   onSubmitted: (id: string, url: string) => void;
@@ -216,6 +218,12 @@ function DirectTab(props: {
       {reason && !ownerError ? <div className="pad err" data-testid="browser-refused">{reason}</div> : null}
       {ownerError?<div className="pad err" role="status" data-testid="browser-refused">{ownerError}</div>:null}
     </> : null}
+    {props.captureDestination && props.control ? <BrowserCapture remoteTabId={null}
+      active={props.active} drawn={props.drawn} blocked={!!props.blocked} zoom={props.zoom ?? 100}
+      identity={() => props.control!.captureIdentity(props.pane as PaneNo, props.tab.id)}
+      destination={props.captureDestination}
+      onRemote={() => void props.control!.convert(props.pane as PaneNo, props.tab.id, "remote")
+        .catch(e => setOwnerError(cleanTitle(e.message, 300)))} /> : null}
     {src && stolen ? <div className="pad stolen" data-testid="browser-stolen" role="status" tabIndex={-1} ref={notice}>
       <span>This page took the keyboard</span><span aria-hidden="true">·</span>
       <button type="button" className="quiet" data-testid="browser-stolen-reload" disabled={props.blocked || !known}
@@ -228,8 +236,10 @@ function DirectTab(props: {
 }
 
 function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string|null;tab:BrowserTabSpec;
-  active:boolean;blocked?:boolean;control?:BrowserControl;spec?:PaneSpec;zoom?:number;focusUrl:boolean;onFocused:()=>void}) {
+  active:boolean;blocked?:boolean;control?:BrowserControl;spec?:PaneSpec;zoom?:number;captureDestination?:CaptureDestination;focusUrl:boolean;onFocused:()=>void}) {
   const input=useRef<HTMLInputElement>(null);
+  const [annotating, setAnnotating] = useState(false);
+  const pageBlocked = !!props.blocked || annotating;
   const [typed,setTyped]=useState(props.tab.url);const [error,setError]=useState("");
   const control=props.control;const pane=props.pane as PaneNo;
   const live=props.active&&props.drawn&&!!control?.online&&!control.covered;
@@ -240,23 +250,28 @@ function RemoteTab(props:{pane:number;slot:number;drawn:boolean;projectId:string
     if(live&&!props.blocked&&control)void control.ensure(pane,props.tab.id);
   },[live,props.blocked,props.tab.id,props.tab.remoteTabId,profile,props.spec?.browserCtx,control?.ensure,pane]);
   useLayoutEffect(()=>{if(props.active&&props.focusUrl&&!props.blocked){input.current?.focus();props.onFocused();}},[props.active,props.focusUrl,props.blocked,props.onFocused]);
-  const action=async(job:()=>Promise<unknown>)=>{if(props.blocked)return;setError("");try{await job();}catch(e){setError(cleanTitle(e instanceof Error?e.message:"The Browser action failed.",300));}};
+  const action=async(job:()=>Promise<unknown>)=>{if(pageBlocked)return;setError("");try{await job();}catch(e){setError(cleanTitle(e instanceof Error?e.message:"The Browser action failed.",300));}};
   return <div className="tabbody browserpage remotepage" data-browser-page={props.tab.id}
     style={props.active?undefined:{display:"none"}} aria-hidden={!props.active} {...(!props.active?{inert:""} as Record<string,string>:{})}>
     <div className="toolbar">
-      <button aria-label="Back" disabled={props.blocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"back"))}>←</button>
-      <button aria-label="Forward" disabled={props.blocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"forward"))}>→</button>
-      <button aria-label="Reload" title="Reload page (ordinary reload)" disabled={props.blocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"reload"))}>↻</button>
-      <input ref={input} data-testid="browser-url" aria-label="Browser address" value={typed} disabled={props.blocked} placeholder="https://example.com/"
+      <button aria-label="Back" disabled={pageBlocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"back"))}>←</button>
+      <button aria-label="Forward" disabled={pageBlocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"forward"))}>→</button>
+      <button aria-label="Reload" title="Reload page (ordinary reload)" disabled={pageBlocked||!props.tab.remoteTabId} onClick={()=>void action(()=>control!.history(pane,props.tab.id,"reload"))}>↻</button>
+      <input ref={input} data-testid="browser-url" aria-label="Browser address" value={typed} disabled={pageBlocked} placeholder="https://example.com/"
         onChange={e=>setTyped(e.target.value)} onKeyDown={e=>{e.stopPropagation();if(e.key==="Enter")void action(()=>control!.submit(pane,props.tab.id,typed,"remote"));}} />
-      <button data-testid="browser-go" disabled={props.blocked||runtime?.busy} onClick={()=>void action(()=>control!.submit(pane,props.tab.id,typed,"remote"))}>Load</button>
-      <select aria-label="Browser mode" value="remote" disabled={props.blocked||profile==="private"} onChange={()=>void action(()=>control!.convert(pane,props.tab.id,"direct"))}><option value="direct">Direct</option><option value="remote">Remote</option></select>
+      <button data-testid="browser-go" disabled={pageBlocked||runtime?.busy} onClick={()=>void action(()=>control!.submit(pane,props.tab.id,typed,"remote"))}>Load</button>
+      <select aria-label="Browser mode" value="remote" disabled={pageBlocked||profile==="private"} onChange={()=>void action(()=>control!.convert(pane,props.tab.id,"direct"))}><option value="direct">Direct</option><option value="remote">Remote</option></select>
     </div>
     {props.tab.auto?<div className="browserauto">Opened for {props.tab.auto.label}</div>:null}
     {runtime?.viewed?<div className="small muted" data-testid="browser-viewed">{runtime.viewed.refused?"Jarvis look refused":"Jarvis looked"} · {new Date(runtime.viewed.at).toLocaleTimeString()}</div>:null}
     {error||runtime?.error?<div className="pad err" role="status">{error||runtime?.error}</div>:null}
     {runtime?.busy?<div className="pad muted" role="status">Opening Remote page…</div>:null}
-    {props.tab.remoteTabId&&control?<RemoteView key={props.tab.remoteTabId} tabId={props.tab.remoteTabId} live={live} blocked={!!props.blocked} zoom={props.zoom??100} projectId={props.projectId}
+    {props.captureDestination && control ? <BrowserCapture remoteTabId={props.tab.remoteTabId ?? null}
+      active={props.active} drawn={props.drawn} blocked={!!props.blocked || !control.online || control.covered || !props.tab.remoteTabId}
+      zoom={props.zoom ?? 100} identity={() => control.captureIdentity(pane, props.tab.id)}
+      destination={props.captureDestination} onAnnotating={setAnnotating}
+      onRemote={() => void action(() => control.ensure(pane, props.tab.id))} /> : null}
+    {props.tab.remoteTabId&&control?<RemoteView key={props.tab.remoteTabId} tabId={props.tab.remoteTabId} live={live} blocked={pageBlocked} zoom={props.zoom??100} projectId={props.projectId}
       onRetry={()=>control.ensure(pane,props.tab.id)} onOwnerFocus={()=>control.focus(pane)} onLocation={(url,title)=>control.location(pane,props.tab.id,props.tab.remoteTabId!,url,title)}
       onPopup={id=>void control.adopt(pane,props.tab.remoteTabId!,id)}
       onAction={what=>{if(what==="address")input.current?.focus();else void action(()=>control.history(pane,props.tab.id,what==="hardReload"?"reload":what));}} />:

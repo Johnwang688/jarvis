@@ -2778,3 +2778,28 @@ pending claims/arbitrations and queued window placements. claim, renew and
 placed refuse with 409 {error, code: "off"} while disabled; dismiss remains
 an explicit owner action. ON does not revive an old placement response.
 No automatic opening calls browser manager or navigation routes.
+
+## Owner immutable Browser captures (BR4)
+
+GET /browser/tabs/<id>/capture accepts exactly window, pane (stable pane ID1–8),
+local_tab, view, and optional whole=0|1 (default0). Existing owner HUD listener,
+Origin/same-origin and strict Host checks run first. The exact live drawn active
+Remote binding must match its host-issued view ID; stale, covered, held, Direct
+or mismatched tabs refuse. The owner may choose a capture with see off or unknown
+source; this changes neither permission nor provenance. A card appearing at any
+time during capture invalidates it, even after that card is answered.
+
+The reply is {capture_id,image:{mime,data_b64,width,height},url,title,text_chars,
+whole,notes}. Screenshot and text share the same checked document. Forms and
+embedded frames are masked; known credentials or heuristic withheld text refuse
+both parts. The still is at most1920px, PNG or JPEG0.9, at most4MiB. It never
+opens a network lease. This is not OCR or proof about arbitrary page pixels.
+
+The HUD stages a canonical image plus application/x-jarvis-page-capture named
+page text. Its data_b64 is an opaque32-hex reference, not encoded text or a path.
+Only authenticated owner HUD send assembly resolves it, rechecks current known
+credentials against retained text and creates a new untrusted fence around URL,
+title and page text. Other callers, missing/expired references and daemon
+restart receive fixed notes. The memory-only store keeps at most16 entries and
+8MiB for24h; it stores no screenshots. Later credential checks cover retained
+text, not already-staged image pixels. Nothing here sends a chat automatically.
