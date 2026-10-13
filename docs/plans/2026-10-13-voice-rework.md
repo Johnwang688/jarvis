@@ -16,7 +16,8 @@ before relying on them._
 - **Talking into a busy chat steers it**, as typing does.
 - **TV, other people and noise are filtered** by a speech model and noise
   suppression. Once you record a voice sample in Settings → Voice, Jarvis
-  acts only on your voice. The sample never leaves the PC.
+  acts only on your voice. The sample never leaves the PC. A **Guest voice**
+  switch turns that check off so a friend can use Jarvis by voice.
 - **Replies are read aloud again.** This covers every open chat pane, hidden
   ones included, for Claude, Codex and fast-path chats, including mid-task
   updates.
@@ -129,6 +130,9 @@ markdown.
 | V-9 | **Distinct voice per chat**, auto-assigned from local Kokoro and Pocket voices, sticky per thread, changeable from the chat header. |
 | V-10 | **Dictating into a busy chat steers** the running turn. |
 | V-11 | **STT robustness:** timeouts, retries, errors surfaced, audio kept for retry. Local STT and local keyword spotting are evaluated with a recommendation. |
+| V-12 | **The speaker store is not added to the protected-path detector** (owner, 2026-10-13, answering this plan's sign-off request). It is non-destructive configuration the owner can easily put back, so it does not need another agent-blocked path. It stays local, mode 0700, and is never uploaded. |
+| V-13 | **Spoken summaries default to Haiku 5.5** (`anthropic/claude-haiku-5.5`) and stay under the 90k-token threshold, as compaction does now (`JARVIS_COMPACT_AT_TOKENS`). The owner reports Haiku at about 100–200 tokens/s, fast enough for speech. |
+| V-14 | **A switch turns speaker verification off ("Guest voice")** so a friend can demo or use Jarvis by voice. It does not change ML VAD, noise suppression or any approval rule (§3.4.1). |
 
 ## 3. Design
 
@@ -240,12 +244,14 @@ Capture (main): claim (PTT | wake | follow-up | continuation) → UtteranceRecor
 - **The store** is `~/.local/share/jarvis/speaker/`, mode 0700 like the
   Pocket voice store.
   - It holds the centroid, threshold, model id and reference clips (open
-    question 12). It is biometric and credential-adjacent.
-  - The package **adds it to the shared protected/credential path detector**:
-    agent read, search, diff, attachment, preview and write are refused, with
-    v1/v2 parity and symlink and ancestor checks. That is a boundary change,
-    so read `docs/notes/safety-permissions.md` first and get the owner's
-    sign-off.
+    question 12).
+  - **It is not added to the protected/credential path detector (V-12).**
+    The owner judged it non-destructive configuration that is easy to put
+    back. The worst an agent edit can do is make verification reject the
+    owner or accept another voice. Either is visible in diagnostics and
+    fixed by re-enrolling or switching Guest voice on. Neither can authorize
+    anything, because speech never answers an approval card (V-6). No route
+    returns its audio or embeddings, and nothing uploads it.
   - Weights are prefetched. `HF_HUB_OFFLINE=1` stays the default, and no
     path uploads the store.
 - **Self-voice gating** applies during playback and 300 ms after it:
@@ -257,6 +263,27 @@ Capture (main): claim (PTT | wake | follow-up | continuation) → UtteranceRecor
   3. **Verification**, once enrolled, rejects Jarvis's voices.
   4. **Wake and command hits** during playback must pass (2), and (3) when
      enrolled. A reply that says "Jarvis stop" never stops itself.
+
+### 3.4.1 Guest voice: the verification off switch (V-14)
+
+- **What it means.** "ML voice recognition" here is speaker verification,
+  the part that accepts only the owner's voice. Guest voice skips it, so
+  anyone in the room can dictate and give "Jarvis …" commands.
+- **What stays on.** ML VAD, noise suppression and self-voice gating keep
+  running, because they help every speaker. Steps (1) and (2) of
+  self-voice gating still apply; step (3) is skipped.
+- **Approvals.** Speech never answers an approval card (V-6), so Guest
+  voice gives a friend no new authority, only the microphone.
+- **Where it lives.** It is a switch in Settings → Voice → Your voice, plus
+  a one-click toggle on the speech strip. It is held on the daemon, beside
+  the store, so `/stt?verify=1` reads one source of truth, and it is
+  published on the bus so every HUD window agrees.
+- **What it shows.** While it is on, the orb line and the speech strip say
+  **GUEST VOICE**, so the owner never forgets it is on. Diagnostics records
+  `verify_skipped_guest` instead of a score.
+- **Before enrollment.** It reads "Guest voice (no voice enrolled)" and is
+  effectively always on, since there is nothing to verify against.
+- **How long it lasts.** See open question 17.
 
 ### 3.5 STT reliability (V-11)
 
@@ -351,10 +378,16 @@ This is new HUD code (`lib/speech/*.ts`); synthesis stays `/say`.
     When the message closes, `/speech/summary` returns 1–3 sentences
     (≤ 300 characters) covering **the rest**, without repeating the opening
     or reading code.
-- **Model.**
+- **Model (V-13).**
   - A new tier, `speech_summary` (`JARVIS_SPEECH_SUMMARY_MODEL`), defaulting
-    to `anthropic/claude-haiku-5.5`. The existing `cheap` tier is
-    `gpt-oss-20b` (`config.py:937`), so it is not used.
+    to `anthropic/claude-haiku-5.5`, the owner's choice. The existing `cheap`
+    tier is `gpt-oss-20b` (`config.py:937`), so it is not used.
+  - **Its input stays under the compaction threshold**
+    (`JARVIS_COMPACT_AT_TOKENS`, default 90k), as conversations do now. That
+    keeps every summary request below Haiku 5.5's 100k price step (CLAUDE.md,
+    "Model default update"). A reply too long to fit is condensed in
+    sections first, and the sections' summaries are then summarized. One
+    request is the normal case; a 90k-token spoken reply is unusual.
   - Screened with `models.cn_hosted` (`jarvis/models.py:641`), as
     `titles.openrouter_model()` does (`v2/titles.py:184–191`).
   - Input passes `scrub()` and `strip_invisible`. One-shot, `cache=False`,
@@ -363,7 +396,8 @@ This is new HUD code (`lib/speech/*.ts`); synthesis stays `/say`.
     screen."
 - **Estimate (unverified, measured in V8).** At $0.10/M in and $0.50/M out
   (CLAUDE.md), about 2.5k tokens in and 120 out ≈ $0.0003 per summary, so
-  100 a day ≈ $0.03. Expected latency is about 1–2 s, hidden behind the
+  100 a day ≈ $0.03. At the owner-reported 100–200 tokens/s, 120 output
+  tokens take about 0.6–1.2 s plus time to first token, hidden behind the
   verbatim opening.
 
 ### 3.9 Per-chat voices and the shared queue (V-8, V-9)
@@ -484,7 +518,7 @@ This is new HUD code (`lib/speech/*.ts`); synthesis stays `/say`.
 - **Output:** read aloud on/off, separate from mic OFF (open question 11);
   summary threshold; speed; voice pool and per-chat overrides; announce chat
   on switch (off by default); Browser ducking (§3.14).
-- **Your voice:** enrollment, threshold, on/off, delete.
+- **Your voice:** enrollment, threshold, Guest voice (§3.4.1), delete.
 - **Diagnostics.**
 
 These settings are window-local, kept in localStorage behind try/catch.
@@ -500,7 +534,7 @@ Per-thread voices, enrollment and the STT engine live on the daemon.
 | `POST /say` | Gains `local_only`; validates `voice` against `catalog()`; returns `X-Speech-Ms`. |
 | `POST /speech/summary` | New. `{thread_id, text, spoken_prefix}` → `{summary}`, per §3.8. |
 | `GET`/`POST /speech/voices` | New. The per-thread map; publishes `thread_voice` on the bus. |
-| `GET`/`POST`/`DELETE /speaker` | New. Status, add a reading, accept a threshold, delete. Never returns audio or embeddings. |
+| `GET`/`POST`/`DELETE /speaker` | New. Status, add a reading, accept a threshold, set Guest voice, delete. Publishes `speaker_guest` on the bus. Never returns audio or embeddings. |
 | `GET /voices` | Gains `voice_out`. Mic OFF stops posting `/mute`. |
 
 ### 3.14 Browser sound (`docs/plans/2026-10-13-browser-sound.md`)
@@ -535,7 +569,7 @@ package as committed, merged, built, browser-tested or live-checked.
 | V9 | Barge-in, self-voice reference gating, transcript commands, approval-isolation tests | V5, V6 | M | high |
 | V10 | Send and cancel words (transcript phase), Undo | V5, V2 | S | low–med |
 | V11 | Local KWS for wake, commands and send words; Chrome recognizer retired for phrase avatars | V0, V9 | M–L | med–high |
-| V12 | Enrollment, verification, store, protected-path addition, `/stt?verify` | V0, V4 | L | high |
+| V12 | Enrollment, verification, store, Guest voice switch, `/stt?verify` | V0, V4 | L | high |
 | V13 | Local STT with a cloud-fallback switch | V0, V2 | M | medium |
 | V14 | RNNoise in the worker, if V0 shows a gain | V0, V5 | S–M | low |
 | V15 | Browser ducking and hold | V7, Browser sound plan | S | low |
@@ -588,8 +622,11 @@ ephemeral ports; run under `systemd-run --user --scope -q -p MemoryMax=3G
   - `/stt?verify=1` with a fake embedder never calls `transcribe` on a
     rejection;
   - the speaker store is 0700;
-  - **the shared detector refuses agent read/write of the speaker store, v1
-    and v2** (mutation required);
+  - **Guest voice on skips verification; off with an enrolled store rejects
+    an impostor before any cloud call** (mutation: a guest flag that is
+    ignored, or one that also skips self-voice gating, must fail);
+  - Guest voice never changes approval handling ("Jarvis approve" with a
+    card up and Guest on: zero approval requests);
   - other routes still refuse non-JSON bodies.
 
 **Playwright against the mock daemon** (`tests/face/hud_v2_mock.py`). Chromium
@@ -616,7 +653,8 @@ Chrome-for-Testing fallback or Playwright in WSL.
 3. TV or YouTube running: false holds and dictation accuracy.
 4. Three minutes of dictation with pauses, then "over".
 5. "Cancel" and Undo.
-6. Enrollment, then the TV or another person saying "Jarvis".
+6. Enrollment, then the TV or another person saying "Jarvis"; then Guest
+   voice on, and the other person dictates successfully.
 7. A long Claude reply → summary.
 8. STT down → Retry.
 9. A card up while speaking.
@@ -674,7 +712,7 @@ Chrome-for-Testing fallback or Playwright in WSL.
     chunk with a mark.
 12. **Keep enrollment clips?** *Recommend:* yes, in the 0700 store, so a
     model upgrade can re-derive the voiceprint without re-recording. Delete
-    removes all of it.
+    removes all of it. (The store is not agent-protected; V-12.)
 13. **Resume point.** *Recommend:* restart the interrupted sentence.
 14. **Browser sound.** *Recommend:* duck HUD-played Browser audio by about
     −15 dB, and offer "hold speech while a tab plays sound" (off) for Direct
@@ -684,6 +722,10 @@ Chrome-for-Testing fallback or Playwright in WSL.
 16. **KWS engine and placement.** *Recommend:* sherpa-onnx open-vocabulary
     KWS in the window if V0 shows ≤ 15% of a core and acceptable misses;
     otherwise on the daemon. Retire Chrome's cloud recognizer either way.
+17. **How long Guest voice stays on.** *Recommend:* until you switch it
+    off, with **GUEST VOICE** always shown while it is on, and it survives a
+    HUD reload. The alternatives are turning off on daemon restart, or after
+    a timer you pick when switching it on (for example 2 hours).
 
 ## 8. Out of scope
 
