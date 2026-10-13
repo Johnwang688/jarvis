@@ -1171,6 +1171,11 @@ Each visible active Remote stream consumes a fresh ticket and owns its decode/in
 
 Profile controls expose creation, rename, Chrome sign-in, confirmed clearing and deletion through the owner routes. The HUD states Chrome's basic password store and possible sync limitations. This package does not enable agent driving or prove a real account sign-in. BR4 adds capture/annotation controls separately; its identity getter uses the exact current host receipt, not stream pixels.
 
+## BR7 Windows fonts (2026-10-13)
+
+When `/mnt/c/Windows/Fonts` exists, Chrome uses a private `home/fontconfig/fonts.conf` and first-choice cache under the Browser credential folder. The distro Fontconfig include retains Linux aliases and fallback; no system config or font files change. Private uses its disposable run/home. Unreachable Windows fonts keep the original curated environment. Config files are atomic 0600, directories 0700; invalid existing config types, ownership or modes refuse startup. No inherited Fontconfig/XDG/Pulse settings are accepted.
+
+A local one-series probe with the exact include-based config rendered 36 Segoe UI glyphs (CDP verified). Baseline ready 0.238 s / RSS 918.1 MiB; new-cache ready 2.594 s / 926.5 MiB; warmed font cache with fresh profile 0.187 s / 917.1 MiB. All remain below the 30 s launch deadline. These are synthetic observations, not a general performance claim. Linux sans-serif/monospace matching and distro rules stayed unchanged; created font caches were private and external cache metadata stayed unchanged.
 
 ## Current owner capture HUD (BR4, 2026-10-13)
 

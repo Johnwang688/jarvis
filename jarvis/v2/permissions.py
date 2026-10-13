@@ -36,6 +36,10 @@ Between layers 2 and 4 sits **`jarvis-tool`** (2026-10-10, plan §4.1): a
 read-only Jarvis session tool (`session_tools`, `mcp__jarvis__<tool>`) in an
 owner's chat is ALLOWed, never asked of anyone — the daemon's bridge judges
 each call. It comes after layer 2, so an always-ask rule naming it still asks.
+Exact offered tools on a Claude owner's own session server also use the
+`jarvis-session-delegate` layer. Nondangerous writes remain behind always-ask;
+dangerous calls delegate here and ask the owner once at bridge execution,
+never as an automatic execution approval. Strict refuses both paths.
 
 **`Decision.ALLOW` out of this callback means "not refused by Jarvis", not
 "approved by the owner"** — except when layer 2 or layer 5 produced it, which
@@ -88,6 +92,7 @@ L_WIDENING = "sandbox-widening"
 # because the daemon judges each call itself (the turn, the guard). Not a
 # human decision, and never logged as one.
 L_JARVIS_TOOL = "jarvis-tool"
+L_JARVIS_DELEGATE = "jarvis-session-delegate"
 
 # Tools that carry a shell command line, per provider.
 COMMAND_TOOLS = frozenset({
@@ -893,14 +898,33 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 return finish(Decision.DENY, L_HUMAN,
                               "strict profile refuses a dangerous Jarvis tool")
             match = always_ask_match(tool, args, brief, ctx.project)
+            if match is None and ctx.provider == "claude":
+                match = always_ask_match(session_tools.CLAUDE_PREFIX + tool, args, brief, ctx.project)
             reason = ("a dangerous Jarvis tool: the owner decides every call"
                       + (f" (also always-ask rule {match[0]})" if match else ""))
             decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN,
                             allowlistable=False)
             return finish(decision, L_HUMAN, reason)
 
+        # A native hook's exact offered Jarvis call delegates to this
+        # session's daemon bridge. Delegation is not execution approval:
+        # dangerous entries are asked once by the bridge's branch above,
+        # including named always-ask rules, and can never mint Always.
+        delegated = (session_tools.claude_session_tool(brief, tool)
+                     if ctx.provider == "claude" else None)
+        if delegated is not None:
+            if profile == PermissionProfile.STRICT:
+                return finish(Decision.DENY, L_JARVIS_DELEGATE,
+                              "strict profile refuses session tool delegation")
+            from jarvis import tools as registry
+            if registry.REGISTRY[delegated.name].dangerous:
+                return finish(Decision.ALLOW, L_JARVIS_DELEGATE,
+                              "delegate to the daemon; the owner still decides execution")
+
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         match = always_ask_match(tool, args, brief, ctx.project)
+        if match is None and delegated is not None:
+            match = always_ask_match(delegated.name, args, brief, ctx.project)
         if match is None and command.strip():
             # A line that might write the gate's own state but is not provably
             # a write (layer 1 took those): a copy into the gate's folder, a
@@ -948,10 +972,12 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # Only an owner's chat brief is offered session tools (a task's
         # threads never get a jarvis server), so only a chat brief is ALLOWed
         # here; the daemon's bridge judges the call itself.
-        if (brief is not None and brief.role == Role.CHAT and brief.task_id is None
-                and tool in session_tools.read_only_claude_names()):
-            return finish(Decision.ALLOW, L_JARVIS_TOOL,
-                          "read-only Jarvis tool; the daemon checks the turn")
+        if delegated is not None:
+            if delegated.read_only:
+                return finish(Decision.ALLOW, L_JARVIS_TOOL,
+                              "read-only Jarvis tool; the daemon checks the turn")
+            return finish(Decision.ALLOW, L_JARVIS_DELEGATE,
+                          "delegate to the daemon's registered session tool")
 
         # --- layer 4: the owner's standing yes, human-backed only ----------
         # Layer 3 (the CLI reviewer) is not evaluated here; see the module

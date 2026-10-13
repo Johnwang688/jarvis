@@ -506,3 +506,19 @@ These points are for the WP-2/WP-3 builders. None of them is a WP-1 defect:
    - Consider `approve` for **every** offered tool. The bridge already gates the dangerous ones (`dangerous_tool=True`, the owner every time), so Codex's own prompt adds nothing but a decline.
 3. **The Codex carrier is findable.** `CODEX_HOME` is in the model's shell environment, so a shell command can find `config.toml` and the token in it. This is within §1.8's accepted same-user limit. Note it in the WP-3 docs; it is not a regression.
 4. **Query strings on `/mcp/*`.** `_log_path` used to keep the query on `/mcp/*` paths. Nothing leaked, because the relay sends its token in a header and never a query. WP-1's review round strips the query anyway, as it is for `/terminals`.
+
+
+## WP-2 implementation status (2026-10-13)
+
+Claude-only implementation now uses the shared D-3 catalog plus terminal_read,
+exact session-server hook delegation, daemon-bound desk state and private
+Claude terminal summaries. Codex WP-3 and browser BR6 are not part of this
+package. The next-turn carry rule has an additional conservative pending
+reservation: if delivery spans several successor turns, all stay off-desk
+until it settles. Settlement never re-enables an already admitted turn.
+Only proven pre-write refusal can restore the original still-active slot.
+
+Free/fake checks and mutation evidence are required before independent source
+review. Native synthetic Claude L1/L2/L5 probes remain a separate release gate;
+no live-provider pass is claimed by this implementation note. Current details
+are in [the control-plane notes](../notes/control-plane.md#current-implementation-claude-session-mcp-wp-2).

@@ -39,9 +39,12 @@ class SteerRefused(Exception):
       message next, saying the previous turn was interrupted by the owner.
     """
 
-    def __init__(self, reason: str, fallback: str = "queue"):
+    def __init__(self, reason: str, fallback: str = "queue", *, before_write: bool = False):
         super().__init__(reason)
         self.fallback = fallback if fallback in ("queue", "interrupt") else "queue"
+        # Only the provider can prove no delivery was attempted. A generic
+        # refusal/timeout after a write is ambiguous and must not restore desk.
+        self.before_write = before_write is True
 
 
 @dataclass
@@ -152,7 +155,8 @@ class UserMessage:
     # and only when the request came through the HUD's listener with the
     # HUD's Origin (`projects.is_owner`) — never by Discord, the API
     # listener every tool's HTTP client uses, the escape hatch or a schedule.
-    # The fast path holds `terminal_read` only for such a turn.
+    # The fast path and Claude session bridge bind terminal-reading authority
+    # only for such a turn; the relay itself cannot grant it.
     desk: bool = False
 
 
