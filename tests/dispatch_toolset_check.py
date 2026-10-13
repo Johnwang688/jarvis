@@ -877,6 +877,71 @@ def loaded_group_later_turn_checks() -> None:
     print("ok  deferred: a group loaded in one turn is still usable in the next")
 
 
+
+def turn_context_checks() -> None:
+    """Finished/failed/nested turns restore every turn-owned context binding."""
+    variables = (runtime._PLAN, runtime._APPROVE, runtime._SHOULD_STOP,
+                 runtime._DEPTH, runtime._TOOLS, runtime._LOADED)
+
+    def values():
+        return tuple(variable.get() for variable in variables)
+
+    def same(before):
+        assert all(a is b for a, b in zip(values(), before)), "a turn leaked a context binding"
+
+    for prebound in (False, True):
+        for raises in (False, True):
+            def scenario():
+                if prebound:
+                    runtime.bind(plan={"text": "parent"}, approve=deny, should_stop=lambda: False,
+                                 depth=1, tool_names={"read_file"}, loaded_groups=set())
+                before = values()
+                bound_before = contextvars.copy_context()
+                # These slots belong to the provider, never to Agent.run_turn.
+                proposal, desk = {}, {"present": True}
+                runtime.bind(origin="owner", proposal=proposal, desk=desk,
+                             caller={"thread_id": "context-parent"})
+                agent = agent_mod.Agent(tool_names=["get_datetime"], approve=lambda *a, **k: True,
+                                        depth=2, on_event=lambda *_: None)
+                marker = f"[scope-{prebound}-{raises}]"
+                SCRIPT.add(marker, RuntimeError("scripted provider failure") if raises else reply("done"))
+                try:
+                    agent.run_turn(marker)
+                except RuntimeError:
+                    assert raises
+                else:
+                    assert not raises
+                same(before)
+                current = contextvars.copy_context()
+                assert all((v in current) == (v in bound_before) for v in variables), "unset binding became set"
+                assert not runtime.approver()("anything", {}), "completed turn retained its approving gate"
+                assert runtime.origin() == "owner" and runtime.proposal_slot() is proposal
+                assert runtime._DESK.get() is desk and runtime.caller()["thread_id"] == "context-parent"
+            contextvars.Context().run(scenario)
+
+    def nested():
+        before = values()
+        calls = []
+        def outer_event(kind, _data):
+            if kind != "text":
+                return
+            parent = values()
+            assert runtime.plan_slot() is outer.plan
+            assert runtime.loaded_groups() is outer.loaded_groups
+            child = agent_mod.Agent(tool_names=["get_datetime"], approve=deny, depth=1)
+            SCRIPT.add("[scope-child]", reply("child done"))
+            child.run_turn("[scope-child]")
+            same(parent)
+            calls.append(True)
+        outer = agent_mod.Agent(tool_names=["get_datetime"], approve=deny, on_event=outer_event)
+        SCRIPT.add("[scope-outer]", reply("parent done"))
+        outer.run_turn("[scope-outer]")
+        same(before)
+        assert calls == [True]
+    contextvars.Context().run(nested)
+    print("ok  turn scope: success, error, nested and unset bindings restore; provider slots survive")
+
+
 def restore_checks() -> None:
     """"Bound" means inside an agent's turn: a turn puts the toolset back as
     it found it, so a thread that ran one does not go on holding that agent's
@@ -1209,6 +1274,7 @@ def main() -> int:
     empty_core_checks()
     restore_checks()
     raising_turn_checks()
+    turn_context_checks()
     loaded_group_later_turn_checks()
     dynamic_walk_checks()
     print("\nall dispatch toolset checks passed")
