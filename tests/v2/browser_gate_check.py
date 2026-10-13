@@ -673,6 +673,74 @@ class Protocol(Base):
                 self.assertEqual(bytes(got), payload)
         self.assertEqual(self.gate.stats()["allowed"], 3)
 
+    def test_last_lease_revokes_existing_tunnels_for_every_local_spelling(self):
+        for name in ("localhost", "127.0.0.1", "0.0.0.0", "::ffff:127.0.0.1"):
+            with self.subTest(name=name):
+                self.opened.add(self.dev.port)
+                reply, sock = socks(self.gate.port, name, self.dev.port)
+                self.addCleanup(sock.close)
+                self.assertEqual(reply, G.REP_OK)
+                sock.sendall(b"before")
+                self.assertEqual(recv_exact(sock, 6), b"before")
+                self.opened.remove(self.dev.port)
+                self.gate.revoke_closed_loopback()
+                sock.settimeout(2)
+                self.assertEqual(sock.recv(1), b"", "a revoked local tunnel stayed open")
+                self.assertEqual(code(self.gate.port, name, self.dev.port), G.REP_NOT_ALLOWED)
+                sock.close()
+
+    def test_revocation_preserves_another_authorized_port(self):
+        keep = Listener(echo=True)
+        self.addCleanup(keep.close)
+        self.opened.add(keep.port)
+        reply, sock = socks(self.gate.port, "localhost", keep.port)
+        self.addCleanup(sock.close)
+        self.assertEqual(reply, G.REP_OK)
+        self.opened.discard(self.dev.port)
+        self.gate.revoke_closed_loopback()
+        sock.sendall(b"keep")
+        self.assertEqual(recv_exact(sock, 4), b"keep")
+
+    def test_local_servers_override_revokes_when_turned_off(self):
+        enabled=[True]
+        self.opened.remove(self.dev.port)
+        self.gate._loopback=lambda port: enabled[0] or port in self.opened
+        reply,sock=socks(self.gate.port,"localhost",self.dev.port)
+        self.addCleanup(sock.close)
+        self.assertEqual(reply,G.REP_OK)
+        self.gate.revoke_closed_loopback()
+        sock.sendall(b"still allowed")
+        self.assertEqual(recv_exact(sock,13),b"still allowed")
+        enabled[0]=False
+        self.gate.revoke_closed_loopback()
+        sock.settimeout(2)
+        self.assertEqual(sock.recv(1),b"")
+        self.assertEqual(code(self.gate.port,"localhost",self.dev.port),G.REP_NOT_ALLOWED)
+
+    def test_permission_is_rechecked_after_connect_await(self):
+        entered = threading.Event()
+        release = threading.Event()
+        real = self.gate._connector
+        async def paused(address, port):
+            connected = await real(address, port)
+            entered.set()
+            await asyncio.to_thread(release.wait, 3)
+            return connected
+        self.gate._connector = paused
+        result = []
+        caller = threading.Thread(target=lambda: result.append(code(self.gate.port, "127.0.0.1", self.dev.port)))
+        caller.start()
+        try:
+            self.assertTrue(entered.wait(3))
+            self.opened.remove(self.dev.port)
+            # No revoke callback here: catch the dispatch-time race independently.
+            release.set()
+            caller.join(3)
+            self.assertEqual(result, [G.REP_NOT_ALLOWED])
+        finally:
+            release.set()
+            caller.join(3)
+
     def test_the_connection_cap(self):
         gate = self.make_gate(max_connections=1)
         held = socket.create_connection(("127.0.0.1", gate.port), timeout=5)

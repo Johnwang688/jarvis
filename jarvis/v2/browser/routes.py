@@ -18,6 +18,12 @@ refusal ever contains one.
     POST   /browser/tabs/<id>/navigate       {url}  (the URL judge first)
     POST   /browser/tabs/<id>/history        {action: back | forward | reload}
     POST   /browser/profiles/<id>/forget     {}  ("Sign out of everything")
+    GET    /browser/profiles                 [{id, label, created}]
+    POST   /browser/profiles                 {label} -> 201 profile row
+    PATCH  /browser/profiles/<id>            {label} -> profile row
+    DELETE /browser/profiles/<id>            closes and deletes only this profile
+    POST   /browser/profiles/<id>/signin     {} -> 201 exact owner settings entry
+    DELETE /browser/contexts/<ctx>           closes a Private context and its data
 
 BR-1b's (stream.py, files.py):
 
@@ -35,8 +41,8 @@ every input (stream.py).
 
 A URL the owner opens on this machine (`localhost`, `127.0.0.1` …) with
 `POST /browser/tabs` or `…/navigate` opens that loopback port in the gate for
-this host's lifetime: loopback is closed like the LAN until then (review of
-PR #69). History, a page's own moves and any agent never open one, and
+as long as an authorizing tab remains on the port; its last departure also
+revokes established local tunnels (BR-1c; review of PR #69). History, a page's own moves and any agent never open one, and
 neither does auto-open (amendment 2, L2): it loads only in a Direct frame, and
 a loopback port opens to the Remote browser only through the owner's own
 navigation.
@@ -181,7 +187,26 @@ def route(handler, daemon, parts, query):
                 LOG.info("browser settings changed by the owner: %s",
                          ", ".join(f"{k} {'on' if v else 'off'}" for k, v in sorted(body.items())))
                 daemon._dev_settings_changed()
+                host.settings_changed()
                 return 200, values
+        if parts == ["browser", "profiles"]:
+            if method == "GET":
+                return 200, host.list_profiles()
+            if method == "POST":
+                body = _object(handler._body(), ("label",), ("label",))
+                return 201, host.create_profile(body["label"])
+        if len(parts) == 3 and parts[1] == "profiles":
+            if method == "PATCH":
+                body = _object(handler._body(), ("label",), ("label",))
+                return 200, host.rename_profile(parts[2], body["label"])
+            if method == "DELETE":
+                return 200, host.delete_profile(parts[2])
+        if len(parts) == 3 and parts[1] == "contexts" and method == "DELETE":
+            return 200, host.close_context(parts[2])
+        if (len(parts) == 4 and parts[1] == "profiles" and parts[3] == "signin"
+                and method == "POST"):
+            _object(handler._body(), ())
+            return 201, host.signin(parts[2])
         # `owner=True` below is the owner's own navigation (this route is the
         # owner's only): it opens the URL's loopback port in the gate, as
         # nothing a page or an agent does ever can (MED 2 of PR #69's review).
