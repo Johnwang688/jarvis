@@ -242,6 +242,8 @@ class Daemon:
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
+        self._dev_hook_errors = set()
+        self._dev_streams = {}
         # thread id -> owner messages waiting on its running turn (QUEUE_MAX).
         # Per thread rather than per session: a turn that ends by dropping its
         # session (a fatal error) must not take what waits behind it along.
@@ -474,11 +476,37 @@ class Daemon:
         gate = getattr(self.browser, "_gate", None)
         return pids, leaders, getattr(gate, "port", None)
 
+    def _dev_hook(self, name, *args):
+        """Watcher faults must not interrupt a turn or provider cleanup."""
+        try:
+            getattr(self.devservers, name)(*args)
+        except Exception as exc:
+            kind = type(exc).__name__
+            with self._lock:
+                if type(exc) not in self._dev_hook_errors:
+                    self._dev_hook_errors.add(type(exc))
+                    LOG.warning("Dev watcher hook failed (%s)", kind)
+
+    def _dev_stream_started(self, window):
+        with self._lock:
+            self._dev_streams[window] = self._dev_streams.get(window, 0) + 1
+
+    def _dev_stream_ended(self, window):
+        with self._lock:
+            remaining = self._dev_streams[window] - 1
+            if remaining:
+                self._dev_streams[window] = remaining
+            else:
+                del self._dev_streams[window]
+                self._dev_hook("window_ended", window)
+
     def _dev_browser_roots(self):
         # Playwright's driver owns its Chrome tree. The watcher recognizes
         # descendants from stat facts, without Chrome's cmdline-based helper.
         pw = getattr(self.browser, "_pw", None)
-        transport = getattr(getattr(pw, "_connection", None), "_transport", None)
+        impl = getattr(pw, "_impl_obj", None)
+        connection = getattr(impl, "_connection", None) or getattr(pw, "_connection", None)
+        transport = getattr(connection, "_transport", None)
         pid = getattr(getattr(transport, "_proc", None), "pid", None)
         return {pid} if isinstance(pid, int) else set()
 
@@ -615,7 +643,7 @@ class Daemon:
         except BaseException:
             # A session that never opened keeps no token (plan §1.4).
             self.callers.revoke(session)
-            self.devservers.session_closed(session.origin_tag)
+            self._dev_hook("session_closed", session.origin_tag)
             if session.handle is not None:
                 self._cleanup(session)
             with self._lock:
@@ -1129,8 +1157,8 @@ class Daemon:
             self.stores.threads._append(thread_id, "log.jsonl", record)
             self.bus.publish(dict(record))
         session.worker = worker
-        self.devservers.turn_started(thread_id, session.thread.provider)
         worker.start()
+        self._dev_hook("turn_started", thread_id, session.thread.provider)
         return turn_id
 
     def _waiting_on_owner(self, session) -> bool:
@@ -1367,7 +1395,9 @@ class Daemon:
             return False
 
     def _turn(self, session, message):
-        terminal = None
+        # Wait for _begin to finish the start hook before this turn can end.
+        with self._lock:
+            terminal = None
         failed = False
         fatal = False
         # Who is calling, on this turn's own thread (a fresh context): an
@@ -1406,7 +1436,7 @@ class Daemon:
             # Steered messages the provider took but never delivered (the fast
             # path's final answer came first): they run next, as turns of their
             # own — unless the owner stopped this one.
-            self.devservers.turn_ended(session.thread.id)
+            self._dev_hook("turn_ended", session.thread.id)
             returned = []
             undelivered = getattr(session.provider, "undelivered", None)
             if callable(undelivered) and session.handle is not None:
@@ -1523,7 +1553,7 @@ class Daemon:
         # token dies with it (close, archive, delete, a lost session — plan
         # §1.4). The provider's close then removes its carrier.
         self.callers.revoke(session)
-        self.devservers.session_closed(session.origin_tag)
+        self._dev_hook("session_closed", session.origin_tag)
         for operation in (session.provider.interrupt, session.provider.close):
             try:
                 operation(session.handle)
@@ -2116,6 +2146,8 @@ def _handler(daemon):
 
         def _events(self, filters, window=None):
             q = daemon.bus.subscribe(filters)
+            if window is not None:
+                daemon._dev_stream_started(window)
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -2140,7 +2172,7 @@ def _handler(daemon):
             finally:
                 daemon.bus.unsubscribe(q)
                 if window is not None:
-                    daemon.devservers.window_ended(window)
+                    daemon._dev_stream_ended(window)
     return Handler
 
 

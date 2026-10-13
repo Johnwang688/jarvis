@@ -1990,7 +1990,9 @@ and every guard of the fixes above. A grep pin allows only `daemon`,
 the fd scan's `complete` answer. A lazy `jarvis-devwatch` polls only during
 Claude/Codex turns and their 600-second grace, or for live registry entries;
 `auto_open` comes only through `devservers.enabled()` → `BrowserSettings`.
-Off means no watcher work. `main()` supplies the real proc/cgroup roots;
+A poll exception logs its type once and stops the watcher; only a new turn
+start or settings change can re-arm it. Off means no watcher work. `main()`
+supplies the real proc/cgroup roots;
 embedded/test daemons must explicitly supply fixture roots to watch.
 An initial baseline is old. Transient missing facts retry three polls;
 before publication the same `(pid, start)` must still hold the inode.
@@ -2000,11 +2002,13 @@ The memory registry de-dups ports for 60 seconds after down and publishes
 only `{kind: dev_server, data: {id, state, source, at}}`; no port or URL,
 no thread-log record, and no Discord delivery. Owner-only `/dev-servers`
 routes return URLs, arbitrate claims for 600 ms, and renew/complete/dismiss
-90-second leases. An owner HUD `/events?window=` disconnect lapses leases;
-the API listener's parameter has no effect. `/status.dev_watch` is counts.
+90-second leases. Only the last owner HUD stream for a window ending lapses
+its claims; the API listener's parameter has no effect. `/status.dev_watch` is counts.
 `Brief.origin_tag` is hidden from repr, exists only in the session run copy,
 and reaches Claude's SDK env and Codex's app-server env, never argv or
-brief.json. Close retains attribution for the grace. Stop ends terminals,
+`brief.json`. `_open` writes it only when absent; it previously only
+round-tripped the stored brief, and the tag is never in it.
+Close retains attribution for the grace. Stop ends terminals,
 then the watcher and probes, then the bus. Terminal announcement support is
 in the registry; AO-1b-ii wires its sniffer. `devservers_check` uses fixture
 proc trees, fake CLIs and fixed free loopback ports; `frame_check` walks the

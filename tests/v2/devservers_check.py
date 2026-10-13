@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+import asyncio
 import http.client
 import json
 import logging
@@ -450,6 +451,83 @@ class Watch(Base):
                 self.assertEqual(self.watch.listing()["servers"], [])
                 self.assertEqual(self.records, [])
 
+    def test_port_class_rechecked_between_cheap_refusal_and_connect(self):
+        server = self.server()
+        self.add_listener(server)
+        self.watch.poll()  # passes the cheap refusal while this is a dev port
+        candidate = self.watch._candidates[(10, server.port)]
+        self.assertFalse(candidate.done)
+        self.clock.now += 2
+        exchange = self.watch._exchange
+        def become_gate(c, tls=False):
+            with patch.object(self.daemon.browser, "_gate", SimpleNamespace(port=server.port)):
+                return exchange(c, tls=tls)
+        with patch.object(self.watch, "_exchange", side_effect=become_gate):
+            self.watch.poll()
+            self.finish_probe()
+        self.assertEqual(server.accepts, 0)
+        self.assertEqual(self.watch.status()["work"]["probes"], 0)
+        self.assertEqual(self.watch.status()["refused"].get(dl.JARVIS_PORT), 1)
+        self.assertEqual(self.watch.listing()["servers"], [])
+
+    def test_slow_proc_scan_does_not_block_hooks_status_or_claim_routes(self):
+        server = self.server()
+        self.add_listener(server)
+        entered = threading.Event()
+        scan = self.watch.reader.socket_owners
+        def slow_scan(*args, **kwargs):
+            entered.set()
+            time.sleep(1)
+            return scan(*args, **kwargs)
+        ident = self.entry(window=W1)
+        worker = threading.Thread(target=self.watch.poll)
+        with patch.object(self.watch.reader, "socket_owners", side_effect=slow_scan):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                actions = [lambda: self.watch.turn_started(self.thread.id, PN.CLAUDE),
+                           lambda: self.watch.turn_ended(self.thread.id), self.watch.status,
+                           lambda: self.watch.session_opened("another"),
+                           lambda: self.watch.session_closed(self.tag),
+                           lambda: self.watch.act(ident, "renew", W1),
+                           lambda: self.watch.claim(ident, W2, False, 0), self.watch.listing]
+                for action in actions:
+                    began = time.monotonic()
+                    action()
+                    self.assertLess(time.monotonic() - began, .05)
+            finally:
+                worker.join(4)
+            self.assertFalse(worker.is_alive())
+
+    def test_apply_rechecks_candidate_and_sessions_after_proc_scan(self):
+        server = self.server()
+        self.add_listener(server)
+        self.watch.poll()
+        self.clock.now += 2
+        scan = self.watch._still_holds
+        def replace_candidate(*args):
+            result = scan(*args)
+            with self.watch._lock:
+                self.watch._candidates.clear()
+            return result
+        with patch.object(self.watch, "_still_holds", side_effect=replace_candidate):
+            self.watch.poll()
+        eventually(lambda: not self.watch._probes)
+        self.assertEqual(server.accepts, 0)
+        self.assertEqual(self.watch.listing()["servers"], [])
+        self.watch.poll()
+        self.clock.now += 2
+        def remove_session(*args):
+            result = scan(*args)
+            with self.watch._lock:
+                self.watch.sessions = dl.Sessions()
+            return result
+        with patch.object(self.watch, "_still_holds", side_effect=remove_session):
+            self.watch.poll()
+        eventually(lambda: not self.watch._probes)
+        self.assertEqual(server.accepts, 0)
+        self.assertEqual(self.watch.listing()["servers"], [])
+
     def test_page_and_framing_refusals_redirect_and_read_cap(self):
         target = self.server()
         replies = [b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
@@ -642,7 +720,8 @@ class Watch(Base):
         self.discover(s)
         status, data = self.req("GET", "/status", port=self.daemon.port)
         view = data["dev_watch"]
-        self.assertEqual(set(view), {"active", "entries", "polls", "refused", "work"})
+        self.assertEqual(set(view), {"active", "entries", "polls", "errors", "refused", "work"})
+        self.assertEqual(view["errors"], {})
         self.assertEqual(set(view["work"]), {"rows", "fd_readlinks", "environ_reads", "probes"})
         self.assertEqual(view["entries"], 1)
         self.assertEqual(view["work"]["probes"], 1)
@@ -758,6 +837,27 @@ class Routes(Base):
         eventually(lambda: self.watch._entry(ident).state == "up", timeout=3)
         self.assertEqual(self.records[-1]["data"]["state"], "up")
 
+    def test_last_stream_only_lapses_its_window_claims(self):
+        first = self.entry(window=W1)
+        second = self.entry(window=W2, terminal="other-terminal", port=23457)
+        streams = [self.stream(W1), self.stream(W1), self.stream(W2)]
+        for stream in streams:
+            self.addCleanup(stream.close)
+        eventually(lambda: self.daemon._dev_streams == {W1: 2, W2: 1})
+        streams[0].shutdown(socket.SHUT_RDWR)
+        streams[0].close()
+        eventually(lambda: self.daemon._dev_streams == {W1: 1, W2: 1})
+        self.assertEqual(self.watch._entry(first).state, "claimed")
+        self.assertEqual(self.watch._entry(second).state, "claimed")
+        streams[1].shutdown(socket.SHUT_RDWR)
+        streams[1].close()
+        eventually(lambda: self.watch._entry(first).state == "up")
+        self.assertEqual(self.watch._entry(second).state, "claimed")
+        self.assertEqual(self.watch._entry(second).window, W2)
+        streams[2].shutdown(socket.SHUT_RDWR)
+        streams[2].close()
+        eventually(lambda: self.watch._entry(second).state == "up")
+
     def test_terminal_registry_preclaim_path_rate_limit_capacity_and_liveness(self):
         for port in config.control_ports() | {self.daemon.workshop_port}:
             self.assertIsNone(self.watch.announce_terminal("refused", f"http://localhost:{port}/"))
@@ -794,6 +894,107 @@ class Lifecycle(Base):
             _transport=SimpleNamespace(_proc=SimpleNamespace(pid=752))))
         self.assertIn(752, self.daemon._dev_known()[0])
         self.daemon.browser._pw = None
+
+    def test_real_playwright_driver_root(self):
+        from playwright.async_api import async_playwright
+        async def check_driver():
+            pw = await async_playwright().start()
+            try:
+                self.daemon.browser._pw = pw
+                driver_pid = pw._impl_obj._connection._transport._proc.pid
+                self.assertEqual(self.daemon._dev_browser_roots(), {driver_pid})
+                self.assertIn(driver_pid, self.daemon._dev_known()[0])
+            finally:
+                self.daemon.browser._pw = None
+                await pw.stop()
+        asyncio.run(check_driver())
+
+    def test_baseline_proc_read_does_not_block_turn_start(self):
+        watch = ds.DevServers(self.daemon, proc_root=self.tree.proc,
+                              cgroup_root=self.tree.cg, clock=self.clock)
+        self.addCleanup(watch.stop)
+        watch.session_opened("baseline")
+        entered, release = threading.Event(), threading.Event()
+        rows = watch.reader.net_rows
+        def slow_rows():
+            entered.set()
+            release.wait(2)
+            return rows()
+        with patch.object(watch.reader, "net_rows", side_effect=slow_rows):
+            try:
+                began = time.monotonic()
+                watch.turn_started("baseline", PN.CLAUDE)
+                self.assertLess(time.monotonic() - began, .05)
+                self.assertTrue(entered.wait(1))
+                began = time.monotonic()
+                watch.status()
+                self.assertLess(time.monotonic() - began, .05)
+            finally:
+                release.set()
+            eventually(lambda: watch.status()["polls"] > 0)
+
+    def test_poll_exception_stops_without_respawn_and_turn_rearms(self):
+        watch = ds.DevServers(self.daemon, proc_root=self.tree.proc,
+                              cgroup_root=self.tree.cg, clock=self.clock)
+        self.addCleanup(watch.stop)
+        watch.session_opened("fault")
+        starts, uncaught = [], []
+        thread_factory = threading.Thread
+        def counted(*args, **kwargs):
+            if kwargs.get("name") == "jarvis-devwatch":
+                starts.append(time.monotonic())
+            return thread_factory(*args, **kwargs)
+        with patch.object(watch.reader, "net_rows", side_effect=RuntimeError(SECRET)), \
+             patch.object(ds.threading, "Thread", side_effect=counted), \
+             patch.object(threading, "excepthook", side_effect=uncaught.append):
+            watch.turn_started("fault", PN.CLAUDE)
+            time.sleep(3)
+            self.assertLessEqual(len(starts), 2)
+            self.assertIsNone(watch._thread)
+            self.assertEqual(watch.status()["errors"], {"RuntimeError": 1})
+            watch.announce_terminal("fault-terminal", "http://localhost:23458/")
+            self.assertIsNone(watch._thread)  # registry work cannot re-arm a fault
+            watch.turn_started("fault", PN.CLAUDE)
+            eventually(lambda: watch.status()["errors"].get("RuntimeError") == 2)
+            eventually(lambda: watch._thread is None)
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(uncaught, [])
+        self.assertEqual(self.logs, ["Dev watcher failed (RuntimeError)"])
+        watch.settings_changed()
+        eventually(lambda: watch.status()["polls"] > 0)
+        self.assertTrue(watch._thread.is_alive())
+
+    def check_faulting_hook(self, hook):
+        session = self.daemon._sessions[self.thread.id]
+        called = threading.Event()
+        def fault(*args):
+            if hook == "turn_started":
+                self.assertIsNotNone(session.worker.ident)
+            called.set()
+            raise RuntimeError(SECRET)
+        with patch.object(self.watch, hook, side_effect=fault), \
+             patch.object(session.provider, "send", wraps=session.provider.send) as send, \
+             patch.object(session.provider, "close", wraps=session.provider.close) as close:
+            for _ in range(2):
+                self.daemon.send(self.thread.id, UserMessage("fixture"))
+                eventually(lambda: session.worker is None)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual([r["data"]["stop"] for r in self.records
+                              if r["kind"] == "turn_finished"], ["end", "end"])
+            self.daemon.close_thread(self.thread.id)
+            close.assert_called_once()
+            self.assertNotIn(self.thread.id, self.daemon._sessions)
+            self.assertTrue(called.is_set())
+        self.assertEqual(self.logs, ["Dev watcher hook failed (RuntimeError)"])
+
+    def test_faulting_turn_started_cannot_wedge_worker(self):
+        self.check_faulting_hook("turn_started")
+
+    def test_faulting_turn_ended_cannot_skip_finally(self):
+        self.check_faulting_hook("turn_ended")
+
+    def test_faulting_session_closed_cannot_skip_provider_close(self):
+        self.check_faulting_hook("session_closed")
 
     def test_settings_toggle_wakes_active_turn_and_no_work_when_off(self):
         # A constructed daemon opts in to fixture roots; the owner setting

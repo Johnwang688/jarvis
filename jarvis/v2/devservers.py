@@ -8,7 +8,9 @@ daemon2's main explicitly opts into the machine's proc and cgroup roots.
 from __future__ import annotations
 
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
+import logging
 import os
 import re
 import secrets
@@ -20,6 +22,8 @@ from urllib.parse import urlsplit
 
 from . import devlisten as dl
 from .model import utcnow
+
+LOG = logging.getLogger(__name__)
 
 ENTRIES_MAX = 32
 DOWN_KEEP_S = 60.0
@@ -89,6 +93,10 @@ class DevServers:
                        if proc_root is not None else None)
         self.sessions = dl.Sessions()
         self._lock = threading.RLock()
+        self._poll_lock = threading.Lock()
+        self._faulted = False
+        self._errors = Counter()
+        self._logged_errors = set()
         self._changed = threading.Condition(self._lock)
         self._wake = threading.Event()
         self._stopped = False
@@ -129,6 +137,7 @@ class DevServers:
         with self._lock:
             if not self.sessions.turn_started(thread_id, provider, at=self.clock()):
                 return
+            self._faulted = False
             self._running.add(thread_id)
             self._ended.pop(thread_id, None)
             self._ensure_thread()
@@ -143,6 +152,7 @@ class DevServers:
 
     def settings_changed(self):
         with self._lock:
+            self._faulted = False
             self._ensure_thread()
             self._wake.set()
             if not self.enabled():
@@ -150,7 +160,7 @@ class DevServers:
                     self._close_socket(sock)
 
     def _ensure_thread(self):
-        if self._stopped or self.reader is None:
+        if self._stopped or self._faulted or self.reader is None:
             return
         if not self.enabled():
             self._wake.set()
@@ -160,10 +170,6 @@ class DevServers:
         if self._thread is not None and self._thread.is_alive():
             self._wake.set()
             return
-        if self._baseline is None:
-            self._cgroup = self.reader.own_cgroup()
-            self._ephemeral = self.reader.ephemeral()
-            self._baseline = {(r.inode, r.port) for r in self.reader.net_rows()}
         self._thread = threading.Thread(target=self._run, name="jarvis-devwatch", daemon=True)
         self._thread.start()
 
@@ -178,6 +184,7 @@ class DevServers:
         return None
 
     def _run(self):
+        failed = False
         try:
             while True:
                 with self._lock:
@@ -190,13 +197,22 @@ class DevServers:
                 else:
                     self.poll()
                     self._wake.wait(delay)
+        except Exception as exc:
+            failed = True
+            kind = type(exc).__name__
+            with self._lock:
+                self._faulted = True
+                self._errors[kind] += 1
+                if type(exc) not in self._logged_errors:
+                    self._logged_errors.add(type(exc))
+                    LOG.warning("Dev watcher failed (%s)", kind)
         finally:
             with self._lock:
                 self._thread = None
                 if not self.enabled():
                     for sock in list(self._sockets):
                         self._close_socket(sock)
-                elif not self._stopped:
+                elif not self._stopped and not failed:
                     self._ensure_thread()           # a rapid off/on while this thread ended
 
     def _known(self):
@@ -208,7 +224,12 @@ class DevServers:
                         os.getuid(), frozenset(pids), frozenset(leaders))
 
     def poll(self):
-        """One bounded poll. Public for deterministic fixture-clock tests."""
+        """Snapshot, read proc without the registry lock, then re-check and apply."""
+        # Only polls serialize here; lifecycle hooks and routes use _lock alone.
+        with self._poll_lock:
+            self._poll()
+
+    def _poll(self):
         with self._lock:
             if self._stopped or self.reader is None or not self.enabled():
                 return
@@ -216,13 +237,20 @@ class DevServers:
             self._expire(now)
             if self.cadence(now) is None:
                 return
-            rows = self.reader.net_rows()
+            baseline_needed = self._baseline is None
+        rows = self.reader.net_rows()
+        keys = {(r.inode, r.port) for r in rows}
+        if baseline_needed:
+            cgroup = self.reader.own_cgroup()
+            ephemeral = self.reader.ephemeral()
+        known = self._known()
+        browser_roots = self.daemon._dev_browser_roots()
+        with self._lock:
+            if self._stopped or not self.enabled():
+                return
             self._polls += 1
-            keys = {(r.inode, r.port) for r in rows}
-            if self._baseline is None:
-                self._cgroup = self.reader.own_cgroup()
-                self._ephemeral = self.reader.ephemeral()
-                self._baseline = keys
+            if baseline_needed:
+                self._cgroup, self._ephemeral, self._baseline = cgroup, ephemeral, keys
                 return
             self._baseline.intersection_update(keys)
             self._liveness({r.port for r in rows}, now)
@@ -230,8 +258,6 @@ class DevServers:
                 c = self._candidates.pop(key)
                 if not c.done and c.listener.last_seen - c.listener.first_seen < dl.MIN_LIFE_S:
                     self._refused[dl.BRIEF] += 1
-            known = self._known()
-            browser_roots = self.daemon._dev_browser_roots()
             detect = self.sessions.live(now)
             for row in rows:
                 key = (row.inode, row.port)
@@ -248,44 +274,76 @@ class DevServers:
                 else:
                     c = self._candidates[key]
                     c.listener = dl.Listener(row, c.listener.first_seen, now)
-            pending = [c for c in self._candidates.values() if not c.done]
-            need = [c for c in pending if c.facts is None]
-            if need:
-                pids = self.reader.cgroup_pids(self._cgroup) if self._cgroup else []
-                owners = self.reader.socket_owners(pids, [c.listener.row.inode for c in need])
-                facts = {}
-                for c in need:
-                    c.complete = owners.complete
-                    if not owners.complete:
-                        continue
-                    holders = owners.get(c.listener.row.inode, [])
-                    for pid in holders:
-                        if pid not in facts:
-                            facts[pid] = self.reader.facts(pid, stop=known.jarvis_pids - browser_roots)
-                    c.facts = [facts[p] for p in holders]
-            chrome = {f.pid for c in pending for f in (c.facts or []) if f is not None
-                      and (f.ppid in browser_roots or any(p in browser_roots for p, _ in f.ancestors))}
-            if chrome:
-                known = dl.Known(known.ports, known.uid, known.jarvis_pids | chrome, known.terminal_leaders)
-            for c in pending:
+            snapshots = [(c, replace(c)) for c in self._candidates.values() if not c.done]
+            sessions = deepcopy(self.sessions)
+            cgroup = self._cgroup
+        pending = [c for _, c in snapshots]
+        need = [c for c in pending if c.facts is None]
+        if need:
+            pids = self.reader.cgroup_pids(cgroup) if cgroup else []
+            owners = self.reader.socket_owners(pids, [c.listener.row.inode for c in need])
+            facts = {}
+            for c in need:
+                c.complete = owners.complete
+                if not owners.complete:
+                    continue
+                holders = owners.get(c.listener.row.inode, [])
+                for pid in holders:
+                    if pid not in facts:
+                        facts[pid] = self.reader.facts(pid, stop=known.jarvis_pids - browser_roots)
+                c.facts = [facts[p] for p in holders]
+        chrome = {f.pid for c in pending for f in (c.facts or []) if f is not None
+                  and (f.ppid in browser_roots or any(p in browser_roots for p, _ in f.ancestors))}
+        if chrome:
+            known = dl.Known(known.ports, known.uid, known.jarvis_pids | chrome, known.terminal_leaders)
+        for original, c in snapshots:
+            tags = {}
+            def tag_of(f):
+                key = (f.pid, f.start)
+                if key not in tags:
+                    tags[key] = self.reader.tag(f)
+                return tags[key]
+            verdict, holds = None, False
+            if not c.probing and c.facts is not None:
+                verdict = dl.attribute(c.listener, c.facts, sessions, now, known,
+                                       tag_of=tag_of, probe=c.probe, scan_complete=c.complete)
+                if verdict.attributed or verdict.pending == "probe":
+                    holds = self._still_holds(verdict.pid, verdict.start, c.listener.row.inode)
+            # Re-read identity/fds immediately before applying this candidate;
+            # no other candidate's proc work intervenes before publication.
+            current_known = self._known()
+            current_known = dl.Known(current_known.ports, current_known.uid,
+                                    current_known.jarvis_pids | chrome, current_known.terminal_leaders)
+            with self._lock:
+                if self._stopped or not self.enabled():
+                    return
+                snapshot = c
+                key = (snapshot.listener.row.inode, snapshot.listener.row.port)
+                c = self._candidates.get(key)
+                if (c is not original or c.done or c.listener != snapshot.listener
+                        or c.probing != snapshot.probing or c.probe is not snapshot.probe):
+                    continue
+                c.facts, c.complete = snapshot.facts, snapshot.complete
                 if c.probe is None and now - c.listener.first_seen >= dl.PROBE_BUDGET_S:
                     self._drop(c, dl.NOT_HTTP)
                     continue
-                if c.probing or c.facts is None:
+                if verdict is None:
                     continue
-                verdict = dl.attribute(c.listener, c.facts, self.sessions, now, known,
-                                       tag_of=self.reader.tag, probe=c.probe,
-                                       scan_complete=c.complete)
+                fresh = dl.attribute(c.listener, c.facts, self.sessions, now, current_known,
+                                     tag_of=lambda f: tags.get((f.pid, f.start), dl.UNREADABLE),
+                                     probe=c.probe, scan_complete=c.complete)
+                # A changed owner cannot reuse another identity's fd re-check.
+                holds = holds and (fresh.pid, fresh.start) == (verdict.pid, verdict.start)
+                verdict = fresh
                 if verdict.refusal in (dl.OUTSIDE, dl.UNREADABLE):
                     c.retries += 1
-                    c.facts = None                 # transient parent/fd/environ failures get another scan
+                    c.facts = None
                     if c.retries >= FACT_RETRIES:
                         self._drop(c, verdict.refusal)
                 elif verdict.outcome == "refused":
                     self._drop(c, verdict.refusal)
                 elif verdict.attributed:
-                    # Last check before publishing: both identity and fd ownership.
-                    if not self._still_holds(verdict.pid, verdict.start, c.listener.row.inode):
+                    if not holds:
                         self._drop(c, dl.UNREADABLE)
                         continue
                     self._register(c.listener.row.port, c.scheme, "/", {
@@ -294,7 +352,7 @@ class DevServers:
                     c.done = True
                 elif verdict.pending == "probe":
                     if now >= c.next_probe and len(self._probes) < dl.PROBES_IN_FLIGHT:
-                        if not self._still_holds(verdict.pid, verdict.start, c.listener.row.inode):
+                        if not holds:
                             self._drop(c, dl.UNREADABLE)
                             continue
                         c.probing = True
@@ -302,9 +360,7 @@ class DevServers:
                                                   name="jarvis-devprobe", daemon=True)
                         self._probes.add(worker)
                         worker.start()
-            # A candidate first seen near a closed session's grace boundary
-            # can still be compiling its first page. Keep the tag until the
-            # probe budget has elapsed; owner() still judges at first_seen.
+        with self._lock:
             self.sessions.prune(now - dl.PROBE_BUDGET_S)
 
     def _still_holds(self, pid, start, inode):
@@ -566,6 +622,7 @@ class DevServers:
             work = self.reader.work if self.reader else dl.Work()
             return {"active": bool(self.enabled() and not self._stopped and self.cadence() is not None
                                    and self.reader is not None),
+                    "errors": dict(self._errors),
                     "entries": sum(e.listening for e in self._entries.values()), "polls": self._polls,
                     "refused": dict(self._refused), "work": {"rows": work.rows,
                     "fd_readlinks": work.fd_readlinks, "environ_reads": work.environ_reads,
