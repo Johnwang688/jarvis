@@ -180,3 +180,10 @@ describe("unsolicited allocation cannot discard work", () => {
     expect(autoSplitVerdict(DEFAULT_LAYOUT, setPreset(ws, "grid8"), 4000, 1800).ok).toBe(false);
   });
 });
+
+it("a driven Browser receives an inactive Direct tab even when otherwise unused",()=>{
+  const target=pane(2,{view:"browser",tabCount:1,driving:true});const w=win({panes:[pane(1),target],drawn:[1,2],focused:1,canSplit:false});
+  expect(plan(entry(),w).plan).toEqual({kind:"tab",pane:2,url:"http://localhost:5173/",activate:false});
+  target.driving=false;expect(plan(entry(),w).plan).toMatchObject({activate:true});
+  target.driving=true;target.browserProfile="private";expect(plan(entry(),w).plan.kind).toBe("prompt");
+});

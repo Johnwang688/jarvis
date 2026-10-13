@@ -1,0 +1,8 @@
+.browserapproval { min-width: 0; overflow-wrap: anywhere; }
+.browserapproval p { margin: 6px 0; }
+.browserapproval pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); }
+
+.auth.browserauth { display: flex; flex-direction: column; overflow: hidden; }
+.auth.browserauth > :not(.browserapproval) { flex: 0 0 auto; }
+.auth.browserauth .browserapproval { min-height: 0; overflow: auto; }
+.auth .browserapproval .headline { color: var(--text); border: 0; padding: 0; }

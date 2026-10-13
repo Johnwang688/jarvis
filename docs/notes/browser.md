@@ -1087,7 +1087,8 @@ The landing guard captures the offending document generation when scheduling its
 ## Current read-only Browser look (2026-10-13, BR5)
 
 `hud_browser_view(pane="", whole_page=False)` is an explicit HUD owner-chat
-fast-path tool. The pane number is its displayed slot (1–8), not a tab ID;
+tool in the fast path and the foreground Claude/Codex session MCP catalog.
+The pane number is its displayed slot (1–8), not a tab ID;
 empty selects the last owner-focused eligible Browser pane. It uses BR3b's live
 owner-window registry and never discovers background tabs or hidden windows.
 The registry, see switch, source, terminal readability, hold/approval state,
@@ -1132,10 +1133,35 @@ Page data is fenced as untrusted and enters only the owner's tool conversation.
 `PRIVATE_RESULT` summaries say only `looked at a page` or `refused`; the
 `browser_viewed` bus record contains exactly the bound opaque `tab_id`, timestamp
 and refusal flag. Direct uses the registry's host-minted view ID, never a hidden
-page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
-background tasks, workflows, subagents or default session tools. This backend
-package does not establish the pending BR3b UI or BR6 session/MCP interface,
-real account authentication, a live-provider call or deployment verification.
+page ID or a pane-local ID. The tool is not parallel-safe and is not available to
+background tasks, workflows, subagents or default session tools. The foreground
+MCP catalog uses the existing WP2/WP3 host provenance and desk ticket: child,
+missing, stale and replayed calls refuse before capture. Revocation during a
+capture withholds text and pixels together. Normal assistant prose can describe
+the result; private normalization protects tool/event summaries, not that prose.
+
+## Current foreground Browser MCP (2026-10-13, BR6)
+
+Claude and Codex receive the same parent-only `hud_browser_view` catalog entry.
+The exact applied provider/model is pinned after the provider's apply-choice
+callback, only for the current session, worker, turn and desk slot. A requested
+model switch that fails retains the surviving model's capability. Only a model
+entry with the boolean `vision: true` enables images; unknown models receive
+text. Updating that capability cannot restore a lost desk presence.
+
+The existing relay carries PNG image blocks without a new capture path. Shared
+Browser presentation limits the image to 6 MiB of base64 so the bounded text and
+JSON envelope fit the relay's unchanged 8 MiB response limit. Oversized images
+are omitted with an explicit size note and the guarded text remains available;
+there is no second capture or image degradation. Foreground, see/source,
+credential, document and post-capture checks are otherwise unchanged. Provider
+events use fixed looked/refused summaries, including interrupted calls and
+unmatched Codex MCP approval-review completions.
+
+Synthetic acceptance checks cover actual Chrome pixels, masks, no page mutation,
+the real relay, current-model pinning, child refusal and revocation. Native CLI
+image acceptance and deployment are separate release gates; this implementation
+does not establish real account authentication or browser driving.
 
 ## Current Remote restore and landing replacement (BR3b, 2026-10-13)
 
@@ -1334,3 +1360,35 @@ The existing isolated M3 probe observed headless Chrome routing without Xvfb: it
 Voice-queue ducking remains pending its consuming voice package. There is no new HTTP/App speaking hook or claimed ducking behavior in this release.
 
 Verification before independent release review: 63 focused Python checks, a separate 49-check owner-route/dev-server pass, 54 focused HUD unit checks, 19 actual Chromium checks against an isolated mock HUD, and a HUD production build passed. Nine isolated owner-grant/admission guard mutations each produced a failed assertion. The review follow-ups cover bounded allocation floods, partial-restoration admission, owner close, OFF during an awaited allocation, and exact-handle profile fallback. These receipts verify control behavior and guarded replacement, not installation or physical playback.
+
+
+## BR9c owner driving presentation (current)
+
+Production agent driving remains OFF, with both Settings and pane switches disabled.
+The ticketed Remote socket alone supplies the memory-only driver banner and last
+20 actions. Displayed chat slots are resolved from the current workspace; hidden
+chats use fixed wording. Reattachment needs a fresh paused/list replay. Successful
+owner input mirrors takeover, Stop uses the current socket, and Resume stays
+paused until daemon confirmation. Cards, annotations, hidden panes and disconnects
+block these controls. AO3 adds an inactive Direct tab to a driven destination.
+
+Only the current top HUD-only Browser card fetches its private owner detail. Exact
+request metadata, bounded action fields and complete command/argument equality
+are checked; details never enter the public approval store or browser storage.
+Replacement, unmount and expiry invalidate old replies and consent callbacks.
+Deny remains available, Authorize requires deliberate pointer activation, and
+Always is absent. Long exact commands scroll without hiding consent controls.
+Held downloads expose deletion and explain closing/reopening a fresh owner tab;
+there is no manual executable release route.
+
+The installed Chrome155 screencast timestamp is processing time, not proven
+capture time. Therefore cards say **Preview unavailable** and no target outline
+is drawn. Amendment B.6/B.9 positive pixel identity remains capability-blocked,
+not verified by the synthetic stream tests. No screenshot or capture call is
+created to manufacture that proof.
+
+The named always-ask layer uses a distinct private delegation card with exactly
+`{kind: "delegation", tool: "hud_browser_act"}`, empty args and null command. It
+permits only reaching subsequent Browser checks, never authorizes a page action.
+It shares the same deadline, identity and one-shot no-Always consent lifecycle;
+no page identity, target, command or preview is invented for that card.

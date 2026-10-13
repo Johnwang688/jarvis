@@ -30,5 +30,7 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
     <p className="muted">Local servers can open in a Browser pane while your work stays in place.</p>
     {enabled === null ? <p className="muted">Waiting for the daemon's setting.</p> : null}
     {error ? <p className="err" role="status">{error}</p> : null}
+    <label className="browser-auto-setting"><input type="checkbox" data-testid="browser-agents-drive" checked={false} disabled />Agents may drive</label>
+    <p className="muted">Agent driving is not enabled.</p>
   </div><BrowserSoundSetting blocked={blocked} /></>;
 }

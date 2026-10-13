@@ -1,0 +1,6 @@
+.drivestatus { flex: 0 0 auto; min-width: 0; padding: 5px 8px; border-bottom: 1px solid var(--border); background: var(--bg-1); color: var(--text-2); font-size: 11px; }
+.drivestatus > .row { display: flex; flex-wrap: wrap; gap: 5px 8px; align-items: center; }
+.drivestatus [role=status] { flex: 1 1 150px; overflow-wrap: anywhere; }
+.drivestatus button { padding: 2px 7px; }
+.driveactions { list-style: none; max-height: 140px; overflow: auto; margin-top: 5px; }
+.driveactions li { padding: 3px 0; overflow-wrap: anywhere; font-family: var(--mono); }

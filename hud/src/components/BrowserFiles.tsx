@@ -3,7 +3,7 @@ import { api, browserApi } from "../api";
 import { cleanTitle } from "../lib/remote";
 import type { Tree } from "../types";
 interface Download {id:string;profile:string;name:string;size:number;held:boolean}
-export function BrowserFiles(props:{tabId:string;projectId:string|null;chooser:{id:string;multiple:boolean}|null;downloads:boolean;blocked:boolean;generation:number;onCloseDownloads:()=>void}) {
+export function BrowserFiles(props:{tabId:string;projectId:string|null;chooser:{id:string;multiple:boolean}|null;downloads:boolean;blocked:boolean;generation:number;onOwnerInput?:()=>void;onCloseDownloads:()=>void}) {
   const latest=useRef(props);latest.current=props;
   // A listing and its selections belong to one chooser/project binding. Do not
   // reinterpret retained names under a new folder or a replacement chooser.
@@ -36,7 +36,7 @@ export function BrowserFiles(props:{tabId:string;projectId:string|null;chooser:{
   const upload=async()=>{
     const initial=latest.current;const started=revision.current;if(initial.blocked||!initial.chooser||!initial.projectId)return;
     setBusy(true);setError("");
-    try {await browserApi.write(`/tabs/${initial.tabId}/files`,{chooser:initial.chooser.id,files:selected.map(path=>({project:initial.projectId,path}))});}
+    try {await browserApi.write(`/tabs/${initial.tabId}/files`,{chooser:initial.chooser.id,files:selected.map(path=>({project:initial.projectId,path}))});if(current(initial,started))latest.current.onOwnerInput?.();}
     catch(e){if(current(initial,started))setError(cleanTitle(e instanceof Error?e.message:"The files could not be sent.",300));}
     finally{if(current(initial,started))setBusy(false);}
   };
@@ -46,6 +46,13 @@ export function BrowserFiles(props:{tabId:string;projectId:string|null;chooser:{
       const blob=await browserApi.download(row.id);if(!current(initial,started))return;
       const url=URL.createObjectURL(blob);const anchor=document.createElement("a");anchor.href=url;anchor.download=cleanTitle(row.name,200)||"download";anchor.click();setTimeout(()=>URL.revokeObjectURL(url),0);
     }catch(e){if(current(initial,started))setError(cleanTitle(e instanceof Error?e.message:"The download could not be saved.",300));}
+    finally{if(current(initial,started))setBusy(false);}
+  };
+  const remove=async(row:Download)=>{
+    const initial=latest.current,started=revision.current;if(initial.blocked||busy)return;
+    setBusy(true);setError("");
+    try{await browserApi.remove(`/downloads/${encodeURIComponent(row.id)}`);if(current(initial,started))setRows(old=>old.filter(item=>item.id!==row.id));}
+    catch{if(current(initial,started))setError("The download could not be deleted.");}
     finally{if(current(initial,started))setBusy(false);}
   };
   return <div className="browserfiles pad" data-testid="browser-files">
@@ -58,7 +65,8 @@ export function BrowserFiles(props:{tabId:string;projectId:string|null;chooser:{
         <button disabled={props.blocked||busy||!selected.length} onClick={()=>void upload()}>Use selected {selected.length===1?"file":"files"}</button>
       </>}</>:null}
     {props.downloads?<><div className="row"><strong>Browser downloads</strong><button disabled={props.blocked} onClick={props.onCloseDownloads}>Close</button></div>
-      {rows.map(row=><div className="row" key={row.id}><bdi>{cleanTitle(row.name,200)}</bdi><span>{row.held?"Held: executable":"Ready"}</span>{!row.held?<button disabled={props.blocked||busy} onClick={()=>void save(row)}>Save a copy</button>:null}</div>)}
+      {rows.map(row=><div className="row" key={row.id}><bdi>{cleanTitle(row.name,200)}</bdi><span>{row.held?"Held for safety":"Ready"}</span>{!row.held?<button disabled={props.blocked||busy} onClick={()=>void save(row)}>Save a copy</button>:null}<button disabled={props.blocked||busy} onClick={()=>void remove(row)}>Delete</button></div>)}
+      {rows.some(row=>row.held)?<p className="muted">A held download cannot be saved here. Delete it and reopen the page in a fresh tab before trying again.</p>:null}
       {!rows.length?<p className="muted">No saved Browser downloads.</p>:null}</>:null}
     {error?<p className="err" role="status">{error}</p>:null}
   </div>;

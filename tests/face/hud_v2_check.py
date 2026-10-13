@@ -3092,6 +3092,14 @@ def main():
             finally:
                 toolcalls_mock.stop()
 
+            from tests.face.hud_v2_math_check import math_checks
+            math_mock = MockDaemon(0).start()
+            try:
+                math_checks(browser, math_mock, f"http://127.0.0.1:{math_mock.port}", check, until,
+                            guard, FAKE_RECOGNIZER)
+            finally:
+                math_mock.stop()
+
             # The input bar declutter (PR #29) and its review: a context and a
             # mock of their own, for the same reasons.
             from tests.face.hud_v2_declutter_check import declutter_checks
@@ -3143,6 +3151,13 @@ def main():
                 remote_checks(browser, remote_mock, f"http://127.0.0.1:{remote_mock.port}", check, until, guard, FAKE_RECOGNIZER)
             finally:
                 remote_mock.stop()
+
+            from tests.face.hud_v2_drive_check import drive_checks
+            drive_mock = MockDaemon(0).start()
+            try:
+                drive_checks(browser, drive_mock, f"http://127.0.0.1:{drive_mock.port}", check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                drive_mock.stop()
 
             from tests.face.hud_v2_browser_check import browser_checks as browser_origin_checks
             browser_mock = MockDaemon(0).start()

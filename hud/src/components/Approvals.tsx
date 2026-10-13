@@ -19,6 +19,7 @@ import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
+import { BrowserApprovalCard } from "./BrowserApproval";
 
 export function approvalChime(ctx?: AudioContext | null) {
   try {
@@ -42,6 +43,13 @@ export function approvalChime(ctx?: AudioContext | null) {
 }
 
 export function ApprovalCard(props: {
+  request: ApprovalRequest;
+  onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
+}) {
+  return props.request.hud_only ? <BrowserApprovalCard {...props} onPresent={approvalChime} /> : <OrdinaryApprovalCard {...props} />;
+}
+
+function OrdinaryApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
 }) {
@@ -270,9 +278,7 @@ export function ApprovalQueue(props: {
       <h3>Approvals queue ({props.requests.length})</h3>
       {props.requests.map((r) => (
         <div className="queue-row" key={r.req_id}>
-          {r.origin ? `${r.origin} · ` : ""}
-          {r.tool}
-          {r.command ? ` · ${r.command}` : ""}
+          {r.hud_only ? `Browser action · ${r.code}` : <>{r.origin ? `${r.origin} · ` : ""}{r.tool}{r.command ? ` · ${r.command}` : ""}</>}
         </div>
       ))}
     </div>
