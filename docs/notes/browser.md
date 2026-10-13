@@ -994,3 +994,31 @@ RSS below 1.5 GiB; concurrent three-plus-Private admission uses barrier-controll
 doubles. This does not establish simultaneous production memory demand or a
 production memory ceiling (BD-10). No HUD profile chip is included here; BR-3b
 consumes these backend routes.
+
+## Browser source provenance (2026-10-13, BR3b/AO3 shared seam)
+
+Auto-open display labels do not authorize reading. Each tab independently keeps
+`source: {kind:"dev_server", entryId}` or `{kind:"unknown"}`. Legacy auto tabs
+and invalid source records become unknown; copies retain source even when they
+drop the display mark and origin grant. Passive URL changes, tab selection,
+reload and project-root actions preserve source. Only a successfully judged
+owner address-field Enter/Load submission clears it, including the same URL;
+that also drops the obsolete auto label so storage cannot recreate a legacy
+restriction. `submitBrowserUrl` is separate from ordinary `setBrowserUrl`.
+The later daemon pane binding resolves the entry to immutable source identity;
+labels and client-supplied terminal IDs never authorize BR5. Unknown stays
+fail-closed. This shared model change alone does not enable Remote or a tool.
+
+
+
+## Current owner pane registry (2026-10-13, BR3b incremental interface)
+
+`browser/panes.py` now owns live window/pane/tab mappings for the pending Remote
+UI and BR5. Exact owner-only front, permission and address routes are documented
+in `docs/hud-api.md`. All reports carry initial see state; drive is always false.
+Resolved dev-server identities survive entry expiry and cannot be erased by a
+passive report. Only successful owner address submission clears source; failure
+and stale navigation preserve it. Cached host document identities invalidate
+same-URL reloads before the next report. Snapshot URL/source stay memory-only;
+`browser_viewed` carries only a host-issued view ID, timestamp and refusal flag.
+This registry commit does not yet supply Remote UI or a browser-reading tool.

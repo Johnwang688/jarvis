@@ -3071,6 +3071,7 @@ export default function App() {
             blocked={blocked}
             limitMessage={browserFull === n}
             onLoaded={(id, url) => view.setBrowserUrl(n, url, id)}
+            onSubmitted={(id, url) => view.submitBrowserUrl(n, url, id)}
             onKeepOrigin={(id, origin) => view.setTabKeepOrigin(n, id, origin)}
             onAdd={(id) => view.addBrowserTab(n, "", { id })}
             onClose={(id) => view.closeBrowserTab(n, id)}

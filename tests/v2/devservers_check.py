@@ -831,6 +831,7 @@ class Routes(Base):
             stream.close()
             time.sleep(.7)
             self.assertEqual(self.watch._entry(ident).state, "claimed")
+            self.assertEqual(self.daemon.browser_panes._live, {})
         stream = self.stream(W1)
         stream.shutdown(socket.SHUT_RDWR)
         stream.close()
@@ -844,14 +845,21 @@ class Routes(Base):
         for stream in streams:
             self.addCleanup(stream.close)
         eventually(lambda: self.daemon._dev_streams == {W1: 2, W2: 1})
+        self.assertEqual(self.daemon.browser_panes._live, {W1: 2, W2: 1})
+        body = {"window": W1, "seq": 1, "focus_seq": 0, "focused_slot": None, "covered": False, "panes": []}
+        self.assertEqual(self.req("POST", "/browser/front", body)[0], 200)
+        self.assertIn(W1, self.daemon.browser_panes._windows)
         streams[0].shutdown(socket.SHUT_RDWR)
         streams[0].close()
         eventually(lambda: self.daemon._dev_streams == {W1: 1, W2: 1})
+        self.assertIn(W1, self.daemon.browser_panes._windows)
         self.assertEqual(self.watch._entry(first).state, "claimed")
         self.assertEqual(self.watch._entry(second).state, "claimed")
         streams[1].shutdown(socket.SHUT_RDWR)
         streams[1].close()
         eventually(lambda: self.watch._entry(first).state == "up")
+        self.assertNotIn(W1, self.daemon.browser_panes._windows)
+        self.assertEqual(self.daemon.browser_panes._live, {W2: 1})
         self.assertEqual(self.watch._entry(second).state, "claimed")
         self.assertEqual(self.watch._entry(second).window, W2)
         streams[2].shutdown(socket.SHUT_RDWR)
@@ -1241,14 +1249,28 @@ class Lifecycle(Base):
 
 
 class NoTool(unittest.TestCase):
-    def test_only_daemon_hud_api_terminals_and_implementation_reach_modules(self):
+    def test_only_owner_registry_daemon_hud_api_terminals_and_implementation_reach_modules(self):
         allowed = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py",
-                   "jarvis/v2/devservers.py", "jarvis/v2/devlisten.py"}
+                   "jarvis/v2/devservers.py", "jarvis/v2/devlisten.py", "jarvis/v2/browser/panes.py"}
         needle = re.compile(r"(?:\bimport\s+[^\n]*\b(?:devservers|devlisten)\b|"
                             r"\b(?:devservers|devlisten)\s+import\b|\.devservers\b|['\"]/dev-servers)")
         offenders = [p.relative_to(REPO).as_posix() for p in (REPO / "jarvis").rglob("*.py")
                      if p.relative_to(REPO).as_posix() not in allowed and needle.search(p.read_text())]
         self.assertEqual(offenders, [])
+        # BR3b's owner registry may copy immutable source identity, but does
+        # not receive mutable Entry state, claim or placement authority.
+        import ast
+        tree = ast.parse((REPO / "jarvis/v2/browser/panes.py").read_text())
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        accesses = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr == "devservers"]
+        self.assertEqual(len(accesses), 1)
+        for access in accesses:
+            method = parents.get(access)
+            self.assertIsInstance(method, ast.Attribute)
+            self.assertEqual(method.attr, "source_snapshot")
+            call = parents.get(method)
+            self.assertIsInstance(call, ast.Call)
+            self.assertIs(call.func, method)
 
 
 def env_parent(target):

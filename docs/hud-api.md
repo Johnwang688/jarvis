@@ -2630,3 +2630,77 @@ Open state is window-local, bounded to 500 `thread|turn|firstCall` keys, and
 never appears in this API or localStorage. Every group starts collapsed.
 Expanded rows show name, label, outcome word and duration only. The read-only
 `__hud.toolGroups()` test hook returns disclosure keys, never tool contents.
+
+
+## Owner Browser pane bindings (BR3b)
+
+These routes use the same owner HUD listener, Origin and strict loopback Host
+checks as every `/browser` route, before reading JSON or accessing Chrome. They
+accept no query. They publish no URL, title or source identity on the event bus.
+Agents may drive remains OFF; `drive:true` is refused with 409.
+
+- `POST /browser/front`: exact `{window,seq,focus_seq,focused_slot,covered,panes}`.
+  `window` is the page's shared memory-only 32-lowercase-hex identity and must
+  have a live owner SSE connection. `seq` is a positive JavaScript safe integer;
+  `focus_seq` is a nonnegative safe integer advanced only on owner Browser focus.
+  `focused_slot` is 1–8 or null; `covered` is boolean. At most eight pane rows:
+  `{pane_id,slot,drawn,profile,ctx,see,drive,active,tabs}`. Stable `pane_id` is 1–8;
+  displayed `slot` is separately 1–8 or null. A drawn pane needs a slot. Profile
+  is `p-<8hex>` or `private`, ctx is null or the Private context's eight-hex ID,
+  see/drawn are booleans, drive is false, active is a local tab ID or null.
+  Each pane has at most twelve tabs with unique six-lowercase-alphanumeric IDs:
+  Direct `{id,mode:"direct",url,source}` or Remote
+  `{id,mode:"remote",tab_id,source}`. An unallocated Remote tab has `tab_id:null`
+  and is ineligible for a look; reporting it does not start Chrome. An allocated
+  Remote ID must match the host's current profile/context; URL and document
+  identity come from the host cache, never the report. No duplicate Remote
+  handle in a report. Private accepts Remote only. Direct uses the shared URL
+  safety judge plus the HUD's frameable loopback-host restriction; it opens no
+  gate permission. Blank Direct tabs are allowed but ineligible for a look.
+- Source is null (owner), `{kind:"unknown"}`, or
+  `{kind:"dev_server",entryId:"ds_<8hex>"}`. Entry identity is copied under the
+  dev-server lock at binding and retained after entry expiry/reuse. Missing
+  entries become unknown. A normal report cannot remove a previously resolved
+  restriction; source labels and client-supplied terminal IDs are never trusted.
+- `PATCH /browser/panes/<pane_id>`: exact `{window,seq,see?,drive?}`, with at
+  least one boolean change. Same ordering as reports; see off keeps drive off.
+- `POST /browser/panes/<pane_id>/tabs/<local_id>/address`: exact
+  `{window,seq,url,mode}`. Only the actual owner address-field submission uses
+  this route. It invalidates the binding while Direct judging or Remote owner
+  navigation runs, then commits owner source only after success and generation
+  revalidation. Failed/stale operations preserve restriction; newly created
+  orphan tabs are cleaned up without closing a tab another report adopted.
+  An approval card refuses navigation. A Remote owner navigation may open its
+  normal loopback gate lease; a Direct submission does not. It never enables
+  see or drive. Observed navigation/history/full reports do not clear source.
+
+Successful report/PATCH receipts are `{window,seq,panes:[{pane_id,see,drive:false,
+ tabs:[{id,view_id,generation}]}]}`. Address adds `tab_id`, `ctx` and the host's
+current `url`. Direct `view_id` is a host-minted opaque binding ID; Remote uses
+its daemon tab ID. Heartbeats preserve unchanged IDs/generations. The UI must
+serialize these mutations through one publisher and apply only current receipts.
+
+The registry admits at most sixteen live owner windows. Last SSE disconnect and
+daemon stop revoke bindings. A sixty-second report lease revokes visibility;
+bounded dormant bindings retain frozen source identity and the last focus counter
+until the live window ends or its report removes/replaces the binding. Sequence
+high-water marks also survive lease expiry until the connection ends, so a
+late older report cannot restore permissions. Resuming a report advances binding
+generations without manufacturing a focus gesture. Address completion rechecks
+the lease before committing and cannot revive an expired binding. The HUD
+heartbeat is twenty seconds.
+Focus priority across windows is accepted arrival order, never a comparison of
+per-window counters; heartbeats do not steal focus. Hidden/Settings-covered panes
+are retained but cannot be resolved. Explicit pane numbers are displayed slots,
+never stable IDs or raw daemon tab IDs; ambiguous/missing targets return fixed
+safe text without host labels, paths or titles.
+
+In-process BR5 uses `daemon.browser_panes.resolve(pane="")` and
+`still_current(snapshot)`. Resolution may return see-off/unknown snapshots solely
+so BR5 can issue its fixed refusal and opaque `browser_viewed` event. BR5 must
+check see and source/current terminal readability before any capture, then
+revalidate after capture. `still_current` additionally compares live window,
+lease, binding, visibility, permissions and cached host page/document generation;
+it rejects see-off. Same-URL reload and same-document navigation invalidate a
+Remote snapshot without waiting for a HUD heartbeat. Host cache reads are safe
+on the browser event-loop thread; no registry lock is held across CDP/network.

@@ -1021,6 +1021,31 @@ class OwnerBrowser(unittest.TestCase):
         self.assertEqual(self.ask("POST", "/browser/tabs/deadbeef/navigate", {"url": "about:blank"})[0], 404)
         self.assertEqual(self.ask("POST", "/browser/tabs/NOTANID/navigate", {"url": "about:blank"})[0], 400)
 
+    def test_11b_navigation_identity_is_current_without_a_hud_report(self):
+        url = f"http://127.0.0.1:{self.fx}/echo"
+        tab = self.owner("POST", "/browser/tabs", {"url": url})["tab_id"]
+        try:
+            first = self.host.pane_tab(tab)
+            self.assertIsNotNone(first)
+            self.assertEqual(first["url"], url)
+            self.owner("POST", f"/browser/tabs/{tab}/history", {"action": "reload"})
+            self.assertTrue(self.wait(lambda: (self.host.pane_tab(tab) or {}).get(
+                "document_generation", 0) > first["document_generation"]))
+            reloaded = self.host.pane_tab(tab)
+            self.assertEqual(reloaded["url"], url)
+            self.assertEqual(reloaded["page_identity"], first["page_identity"])
+            self.run_on(self.page(tab).evaluate("history.pushState({}, '', '#same-document')"))
+            self.assertTrue(self.wait(lambda: (self.host.pane_tab(tab) or {}).get(
+                "document_generation", 0) > reloaded["document_generation"]))
+            self.assertEqual(self.host.pane_tab(tab)["url"], url + "#same-document")
+
+            async def from_capture_loop():
+                return self.host.pane_tab(tab)
+            self.assertEqual(self.run_on(from_capture_loop(), 2), self.host.pane_tab(tab))
+        finally:
+            self.owner("DELETE", f"/browser/tabs/{tab}")
+        self.assertIsNone(self.host.pane_tab(tab))
+
     def test_12_the_tab_cap(self):
         self.close_others(self.main_tab)
         rows = [self.owner("POST", "/browser/tabs", {}) for _ in range(2)]
