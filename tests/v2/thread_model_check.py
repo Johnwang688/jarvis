@@ -27,6 +27,7 @@ def info(model_id, efforts=(), vision=True):
 
 CATALOG = {m.id: m for m in (
     info("openai/gpt-5.6-luna", ("max", "high", "medium", "low")),
+    info("anthropic/claude-haiku-5.5", ("max", "high", "medium", "low")),
     info("deepseek/deepseek-v4-flash-0731", ("high", "medium", "low"), vision=False),
     info("moonshotai/kimi-k3", ("medium", "low")),
     info("plain/no-reasoning", ()),
@@ -195,10 +196,10 @@ class ThreadModel(unittest.TestCase):
         default, and the effort is clamped to whatever the default is now —
         nothing at all for a default with no reasoning control."""
         self.roster("moonshotai/kimi-k3", "plain/no-reasoning", "cat/only-max",
-                    selected="openai/gpt-5.6-luna")
+                    selected=self.default)
         self.assertEqual(tm.check(P.FAST, None, "max"), (None, "max"), "an effort alone pins nothing")
         thread = Thread("abcdef01", "p", Role.CHAT, P.FAST, effort="max")
-        self.assertEqual(tm.effective(thread), ("openai/gpt-5.6-luna", "max"))
+        self.assertEqual(tm.effective(thread), (self.default, "max"))
         self.roster("moonshotai/kimi-k3", "plain/no-reasoning", "cat/only-max",
                     selected="moonshotai/kimi-k3")
         self.assertEqual(tm.effective(thread), ("moonshotai/kimi-k3", "medium"), "clamped down to the ladder")

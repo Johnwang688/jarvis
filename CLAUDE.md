@@ -7221,12 +7221,53 @@ Two findings worth keeping:
   difficulty profile. That is also the better benchmark: repeatable, shareable,
   CI-able, no bans.
 - **Model routing policy (2026-07-30).** Default all real work to
-  `openai/gpt-5.6-luna`. Do not route personal data (chat, transcripts,
+  `openai/gpt-5.6-luna`. That Luna default is superseded by the owner's
+  choice of Haiku 5.5 on 2026-10-12. Do not route personal data (chat, transcripts,
   compaction summaries) to Chinese-hosted models — the cheap tier moved
   qwen3.7-flash → gpt-oss-20b for exactly this reason. Multi-model
   comparisons remain opt-in by naming models explicitly on `jarvis bench`.
   If Luna hits a capability wall, escalate the orchestrator to GPT-5.6 Terra
   or Claude Sonnet 5.
+- **Model default update (2026-10-12).** The owner chose
+  `anthropic/claude-haiku-5.5`. Below 100k prompt tokens it lists at
+  `openai/gpt-6-luna`'s price: $0.10 in and $0.50 out per M, cache reads $0.01.
+  From 100k, the whole request costs 5x: $0.50 in and $2.50 out per M.
+  Compaction therefore defaults to 90k (`JARVIS_COMPACT_AT_TOKENS` overrides;
+  a non-empty value must be an integer of at least 1000; empty means unset).
+  A turn can grow past the threshold before a safe cut point exists (invariant 1).
+  Default threads, sub-agents, compaction summaries and the review tier now
+  run on Haiku 5.5. Saved HUD selections still take precedence. A bench given
+  `-m` still runs its children and summaries through `models.tier()`; pin
+  `JARVIS_ORCHESTRATOR` for comparable runs. Numbers taken before this PR
+  are not comparable with numbers after it.
+- **Claude prompt caching (2026-10-12).** Up to four explicit ephemeral breakpoint
+  positions: the system message, separate image and full-tool-result window
+  boundaries from `context.manage()`, and the newest markable message before
+  the volatile tail. The earlier middle prefix is already truncated/evicted
+  and stays unchanged on subsequent steps. The later middle prefix can be
+  invalidated by the other window, but reuses more result text between sparse
+  image evictions; a single minimum boundary let old live images hold it back.
+  Compaction can invalidate either prefix. Each window contributes only once
+  its keep count is reached; coincident boundaries use one point.
+  Breakpoints walk back to nonblank text only, never image parts or assistant
+  messages with tool calls. Caller boundaries are deduped and capped at four,
+  dropping oldest middle points while preserving the system and tail.
+  The caller's transcript stays verbatim. One-shot summaries, delegation and
+  reviews opt out with `cache=False`. The handoff prompt follows the context
+  block, so its `volatile_tail` is 0.
+  The old top-level breakpoint landed on the working-context tail, rebuilt
+  every step (invariant 7), so it never hit for real agents with that block.
+  A live Haiku 5.5 probe with the default toolset, about 20k prompt tokens and
+  six steps read zero cached tokens each step and paid a 1.25x cache write,
+  $0.0026 per step. Explicit breakpoints read about 19.2k of 20k tokens from
+  step 2 on, $0.00035 per step. That was a short turn with small results;
+  in long turns with big results, middle breakpoints preserve reusable prefixes
+  as context management rewrites older messages. A breakpoint on a tool
+  message worked. The separate-window fix has synthetic regression coverage;
+  its provider cache-read improvement still needs a live long-turn probe.
+  A live three-step tool turn on Haiku 5.5 at a reasoning effort ran without
+  error although `_stream_once` does not pass `reasoning_details` back.
+  Nothing changed for reasoning.
 - **Semantic/RAG memory deferred.** Memory is one markdown file per fact, pulled
   on demand via tools, so nothing is auto-injected. The upgrade ladder is
   substring → SQLite FTS5/BM25 → embeddings, and the tool interface
@@ -8697,7 +8738,7 @@ failure — a run that goes long enough to forget what it was doing.
 - **The cut-point orphan bug** (invariant 1) — found by inspection, reproduced,
   fixed, and now covered by the `context.py` test suite that this file had been
   claiming existed. Worth internalizing: it lived in a code path that *only*
-  executes past 60k tokens, so every short test in the repo ran straight past
+  executes past 90k tokens by default, so every short test in the repo ran straight past
   it. Long-horizon code needs long-horizon tests.
 - **The working plan** (`tools/plan.py`). One tool, `plan_write`, holding a
   markdown checklist rewritten whole each time. It renders into `messages[0]`,
@@ -9550,7 +9591,7 @@ CLAUDE.md once it has been, with the results folded into the notes above:**
 4. **A real run past the compaction threshold.** Nothing has yet exercised
    compaction against a live model — the orphan fix is proven synthetically
    only. A long browser or CAD session (parallel `cad_render` calls are the
-   exact shape that triggered the bug) crossing 60k tokens would confirm no
+   exact shape that triggered the bug) crossing 90k tokens would confirm no
    400s and that the pinned goal reads sensibly after a summary lands.
 4b. **Does the model actually use `edit_file` and `grep_files`?** (Added
    2026-08-09.) Both are mechanically tested; the *prompting* is not. Watch a
