@@ -18,6 +18,7 @@ import { parseRow, parseRows, type InSpec } from "./lib/terminal";
 import { parseBuild, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
 import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./lib/vexNew";
 
+import type { CaptureIdentity } from "./lib/pageCapture";
 import { WINDOW_ID, isWindowId } from "./lib/windowId";
 
 export class ApiError extends Error {
@@ -50,6 +51,19 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** Owner Browser routes. Page data is JSON/text only; attach tickets stay in memory. */
+export const browserApi = {
+  get: <T>(path: string, signal?: AbortSignal) => req<T>("/browser" + path, { signal }),
+  write: <T>(path: string, body: unknown = {}, method = "POST", signal?: AbortSignal) =>
+    req<T>("/browser" + path, { method, headers: {"Content-Type":"application/json"}, body:JSON.stringify(body), signal }),
+  remove: <T>(path: string) => req<T>("/browser" + path, {method:"DELETE"}),
+  async download(id:string):Promise<Blob> {
+    const response = await fetch("/browser/downloads/" + encodeURIComponent(id));
+    if (!response.ok) throw new ApiError(response.status, "The download could not be saved.");
+    return response.blob();
+  },
+};
+
 const json = (body: unknown): RequestInit => ({
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -71,6 +85,12 @@ export const api = {
   actDevServer: (id: string, action: "renew" | "placed" | "dismiss", window: string) =>
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/" + action, json({ window })),
   setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
+
+  captureBrowser: (tab: string, identity: CaptureIdentity, whole: boolean) => req<unknown>(
+    "/browser/tabs/" + encodeURIComponent(tab) + "/capture?" + new URLSearchParams({
+      window: identity.window, pane: String(identity.pane_id), local_tab: identity.local_tab_id,
+      view: identity.view_id, whole: whole ? "1" : "0",
+    })),
 
   // --- projects -----------------------------------------------------------
   projects: () => req<Project[]>("/projects"),

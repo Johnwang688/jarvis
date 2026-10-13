@@ -38,7 +38,7 @@ describe("Direct tab storage and grants", () => {
     expect(parsed.tabs).toHaveLength(12);
     expect(parsed.active).toBe("abcdef");
     expect(parsed.tabs[0].keepOrigin).toBeUndefined();
-    expect(parsed.tabs[0]).not.toHaveProperty("mode");
+    expect(parsed.tabs[0].mode).toBe("remote");
     expect(parsed.tabs[0].auto!.label).toHaveLength(60);
     expect(parsed.tabs[0].auto!.label).not.toContain("\u202e");
     expect(parsed.tabs[0].auto).not.toHaveProperty("secret");

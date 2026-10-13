@@ -29,8 +29,24 @@ def configure(page, mock, until, preset="single", views=("chat",), width=1600):
     page.wait_for_timeout(150)
 
 
+def _discovery_only(call):
+    method, path, body = call
+    if method == "GET" and path == "/browser/profiles" and body == {}:
+        return True
+    # BR3b publishes Direct panes too. This must not hide Remote allocation,
+    # navigation, tickets or a front report containing any Remote handle.
+    if method != "POST" or path != "/browser/front" or not isinstance(body, dict):
+        return False
+    return (isinstance(body.get("panes"), list) and all(
+        isinstance(pane, dict) and pane.get("ctx") is None
+        and isinstance(pane.get("profile"), str) and pane["profile"].startswith("p-")
+        and pane.get("drive") is False and isinstance(pane.get("tabs"), list)
+        and all(isinstance(tab, dict) and tab.get("mode") == "direct" and "tab_id" not in tab
+                for tab in pane["tabs"]) for pane in body["panes"]))
+
+
 def browser_calls(mock):
-    return [call for call in mock.calls if call[1].startswith("/browser/")]
+    return [call for call in mock.calls if call[1].startswith("/browser/") and not _discovery_only(call)]
 
 
 def window_id(mock):
@@ -45,6 +61,24 @@ def wait_placed(page, entry):
 
 def autoopen_checks(browser, check, until, guard, init_script):
     print("\nautomatic Direct tabs: real claim registry, focus, cards and windows")
+    direct = {"panes": [{"profile": "p-11111111", "ctx": None, "drive": False,
+                         "tabs": [{"id": "abcdef", "mode": "direct", "url": "http://localhost:12345/"}]}]}
+    check("AO3 call audit admits read-only profiles and Direct-only front discovery",
+          _discovery_only(("GET", "/browser/profiles", {}))
+          and _discovery_only(("POST", "/browser/front", direct)))
+    unsafe_fronts = []
+    for field, value in (("mode", "remote"), ("tab_id", "1234abcd")):
+        changed = json.loads(json.dumps(direct)); changed["panes"][0]["tabs"][0][field] = value
+        unsafe_fronts.append(("POST", "/browser/front", changed))
+    for field, value in (("ctx", "1234abcd"), ("drive", True), ("profile", "private")):
+        changed = json.loads(json.dumps(direct)); changed["panes"][0][field] = value
+        unsafe_fronts.append(("POST", "/browser/front", changed))
+    check("AO3 call audit never hides Remote front, navigation, tickets, allocation or profile writes",
+          not any(_discovery_only(call) for call in unsafe_fronts + [
+              ("POST", "/browser/tabs", {}),
+              ("POST", "/browser/contexts", {}), ("POST", "/browser/tabs/1234abcd/ticket", {}),
+              ("POST", "/browser/panes/1/tabs/abcdef/address", {"mode": "remote"}),
+              ("POST", "/browser/profiles", {}), ("GET", "/browser/profiles", {"extra": True})]))
     sections = (_split, _behind, _quiet, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
     for section in sections:
         if os.environ.get("AUTO_ONLY") and os.environ["AUTO_ONLY"] not in section.__name__: continue
@@ -101,7 +135,7 @@ def _split(browser, context, page, mock, f, check, until, guard, init):
     check("claim and placement use one 32-hex page identity",
           re.fullmatch("[0-9a-f]{32}", window_id(mock)) is not None and entry.window == window_id(mock)
           and bool(mock.posted("/dev-servers/" + entry.id + "/placed")))
-    check("automatic split makes exactly zero additional browser-manager requests", browser_calls(mock) == before)
+    check("automatic split makes zero Remote browser-manager requests beyond Direct discovery", browser_calls(mock) == before)
     f.publish({"kind": "dev_server", "data": {"id": entry.id, "state": "up", "source": entry.source}})
     page.wait_for_timeout(250)
     check("duplicate SSE cannot create another tab", len(tabs(page)) == 1)

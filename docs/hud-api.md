@@ -2722,6 +2722,13 @@ Remote snapshot without waiting for a HUD heartbeat. Host cache reads are safe
 on the browser event-loop thread; no registry lock is held across CDP/network.
 
 
+`POST /browser/tabs/<id>/restore` is an owner-only lazy restore with exact
+`{url}`. It uses the ordinary URL/card checks with `owner=False`, so it never
+creates a loopback gate lease. The HUD creates a blank tab only when a stored
+persistent Remote tab is first drawn, then calls restore; an existing live
+handle reattaches without navigation. A refused local restore stays visibly
+failed until an actual owner address submission. Ended Private sessions never
+replay stored URLs (Private storage contains none).
 ## Additions 2026-10-13: read-only HUD Browser look (BR5)
 
 The explicit owner-HUD-chat tool `hud_browser_view(pane: str = "",
@@ -2778,3 +2785,28 @@ pending claims/arbitrations and queued window placements. claim, renew and
 placed refuse with 409 {error, code: "off"} while disabled; dismiss remains
 an explicit owner action. ON does not revive an old placement response.
 No automatic opening calls browser manager or navigation routes.
+
+## Owner immutable Browser captures (BR4)
+
+GET /browser/tabs/<id>/capture accepts exactly window, pane (stable pane ID1–8),
+local_tab, view, and optional whole=0|1 (default0). Existing owner HUD listener,
+Origin/same-origin and strict Host checks run first. The exact live drawn active
+Remote binding must match its host-issued view ID; stale, covered, held, Direct
+or mismatched tabs refuse. The owner may choose a capture with see off or unknown
+source; this changes neither permission nor provenance. A card appearing at any
+time during capture invalidates it, even after that card is answered.
+
+The reply is {capture_id,image:{mime,data_b64,width,height},url,title,text_chars,
+whole,notes}. Screenshot and text share the same checked document. Forms and
+embedded frames are masked; known credentials or heuristic withheld text refuse
+both parts. The still is at most1920px, PNG or JPEG0.9, at most4MiB. It never
+opens a network lease. This is not OCR or proof about arbitrary page pixels.
+
+The HUD stages a canonical image plus application/x-jarvis-page-capture named
+page text. Its data_b64 is an opaque32-hex reference, not encoded text or a path.
+Only authenticated owner HUD send assembly resolves it, rechecks current known
+credentials against retained text and creates a new untrusted fence around URL,
+title and page text. Other callers, missing/expired references and daemon
+restart receive fixed notes. The memory-only store keeps at most16 entries and
+8MiB for24h; it stores no screenshots. Later credential checks cover retained
+text, not already-staged image pixels. Nothing here sends a chat automatically.

@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit
 
 from . import policy
-from .look import LookRefused, CHANGED, guarded, masked_image
+from .look import LookRefused, CHANGED, IMAGE_EDGE, guarded, masked_image
 from .look_scan import SCAN_JS, CLEAR_JS, NODE_CAP, RAW_CAP, REF_CAP, SCAN_TIMEOUT_S
 
 LOOK_TIMEOUT_S=30.0
@@ -106,7 +106,7 @@ async def _frame(cdp):
     return row["id"],row.get("loaderId"),row["url"]
 
 
-async def capture(host,snapshot,whole,images,forms,current,deadline):
+async def capture(host,snapshot,whole,images,forms,current,deadline,*,image_edge=IMAGE_EDGE):
     from .host import PRIVATE
     if host._look_lock is None:host._look_lock=asyncio.Lock()
     task=asyncio.current_task();host._look_tasks.add(task)
@@ -147,7 +147,7 @@ async def capture(host,snapshot,whole,images,forms,current,deadline):
                             "format":"png","fromSurface":True,"captureBeyondViewport":False})
                         after_scan=await _scan(cdp,context_id,url,serial,whole,False)
                         withheld=guarded(after_scan,forms) or withheld
-                        if scan==after_scan and not withheld:image=masked_image(captured["data"],scan)
+                        if scan==after_scan and not withheld:image=masked_image(captured["data"],scan,edge=image_edge)
                     after=await _frame(cdp)
                     if before!=after:raise LookRefused(CHANGED)
                     current()

@@ -501,6 +501,7 @@ class BrowserHost:
         # Private alive through capture/retirement, without entering owner tabs.
         self._look_reserved: set[str] = set()
         self._look_tasks: set[asyncio.Task] = set()
+        self._capture_hold_epoch = 0
         self._look_lock = None
         self._launched: set[Path] = set()
         self._snapshot: dict = {"instances": [], "tabs": 0}
@@ -717,7 +718,7 @@ class BrowserHost:
     def _tab_cap() -> int:
         return max(1, config.BROWSER_TAB_CAP)
 
-    def capture_look(self, snapshot, whole, images, forms, current):
+    def capture_look(self, snapshot, whole, images, forms, current, *, image_edge=1568):
         """The BR5 service's read adapter. Never admits an owner port lease."""
         from .look_capture import LOOK_TIMEOUT_S, capture, direct_url
         from .look import LookRefused
@@ -728,7 +729,7 @@ class BrowserHost:
             self._ensure_started()
         elif not self._running():
             raise LookRefused("no live HUD Browser pane is available")
-        return self._call(capture(self, snapshot, whole, images, forms, current, deadline),
+        return self._call(capture(self, snapshot, whole, images, forms, current, deadline, image_edge=image_edge),
                           max(0.1, deadline-time.monotonic()) + CLOSE_TIMEOUT_S*3)
 
     # -- profiles (BR-1c) ---------------------------------------------------
@@ -1067,7 +1068,7 @@ class BrowserHost:
             with self._lock:
                 self._guarded += 1
             LOG.info("Browser landing guard replaced a page (%s)", refusal.reason)
-            asyncio.ensure_future(self._replace(tab))
+            asyncio.ensure_future(self._replace(tab, tab.document_generation))
             return
         # A new page has no chooser open any more.
         if tab.chooser is not None:
@@ -1102,12 +1103,23 @@ class BrowserHost:
             return
         self._located(tab, url=tab.page.url, title=title)
 
-    async def _replace(self, tab: _Tab) -> None:
-        try:
-            await tab.page.goto("about:blank", timeout=NAV_TIMEOUT_S * 1000)
-            await tab.page.set_content(EXPLANATION, timeout=NAV_TIMEOUT_S * 1000)
-        except Exception:  # noqa: BLE001 - a closed page has nothing to replace
-            pass
+    async def _replace(self, tab: _Tab, generation: int) -> None:
+        # Scheduled, never awaited by a navigation holding this lock. A failed
+        # landing may queue its guard just before the owner's next navigation;
+        # it must not blank the newer document when it finally gets CPU.
+        async with self._launching.setdefault(tab.profile, asyncio.Lock()):
+            if self._tabs.get(tab.id) is not tab or tab.document_generation != generation:
+                return
+            try:
+                await tab.page.goto("about:blank", wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
+                # Main-frame commit increments the generation once. A close or
+                # another landing while goto waited invalidates the explanation.
+                if (self._tabs.get(tab.id) is not tab or tab.document_generation != generation + 1
+                        or tab.page.url != "about:blank"):
+                    return
+                await tab.page.set_content(EXPLANATION, timeout=NAV_TIMEOUT_S * 1000)
+            except Exception:  # noqa: BLE001 - a closed page has nothing to replace
+                pass
 
     # -- tabs (thread-safe entry points) ------------------------------------------------
 
@@ -1383,6 +1395,11 @@ class BrowserHost:
 
     # -- the hold (plan §8.3, amendment H3) -----------------------------------------------
 
+    def capture_hold_epoch(self) -> int:
+        """A capture spanning any approval card must be started again."""
+        with self._lock:
+            return self._capture_hold_epoch
+
     def input_held(self) -> bool:
         """Whether **any** approval is waiting on the owner: then nothing
         reaches a page. Fails closed — a broker that cannot be asked holds."""
@@ -1401,6 +1418,8 @@ class BrowserHost:
     def _observe(self, record) -> None:
         """A bus observer: a card raised holds every tab at once."""
         if isinstance(record, dict) and record.get("kind") == "approval_requested":
+            with self._lock:
+                self._capture_hold_epoch += 1
             for tab in list(self._tabs.values()):
                 if tab.stream is not None:
                     tab.stream.hold_through()

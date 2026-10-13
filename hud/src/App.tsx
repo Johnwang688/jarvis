@@ -20,6 +20,9 @@ import { SendStops } from "./lib/sendStops";
 // send, a transcript — stays with that thread.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
+import { CaptureDrafts } from "./lib/captureDraft";
+import type { CaptureDestination } from "./components/BrowserCapture";
 import { api, subscribe } from "./api";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
@@ -36,7 +39,7 @@ import { DETECT_STALE_MS, vex } from "./state/vex";
 import { offersVex } from "./lib/vex";
 import { ENV_LANGUAGE, makeModel, monacoEditors, monacoLanguage, monacoModels, relanguage, setEditorsBlocked } from "./lib/monaco";
 import { buffers, PlainModel } from "./state/buffers";
-import { NO_TABS, openTab, renameTabs, sameTabs, writtenPaths } from "./lib/buffers";
+import { renameTabs, sameTabs, writtenPaths } from "./lib/buffers";
 import { Palette, QuickOpen } from "./components/QuickOpen";
 import { focusedEditor } from "./components/Editor";
 import { EditorSettingsDialog } from "./components/EditorSettings";
@@ -49,6 +52,7 @@ import { DiffTab } from "./components/DiffTab";
 import { ProjectDiff } from "./components/ProjectDiff";
 import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
 import { BrowserTab } from "./components/BrowserTab";
+import { useBrowser } from "./state/browser";
 import { useBrowserFrames } from "./state/browserframes";
 import { BROWSER_TABS_MAX, browserTabId, VIEW_LABEL } from "./lib/workspace";
 import { autoOpenPlan, devUrl, sourceKey, DEV_OPEN_IDLE, type DevSource, type DevWindow } from "./lib/devopen";
@@ -196,14 +200,6 @@ function stripProject(at: State, spec: PaneSpec, pane: PaneNo): string | null {
   return currentProjectId(at);
 }
 
-/** A line to go to in a File pane (VX-2: a build error clicked in the VEX view). */
-interface FileGoto {
-  path: string;
-  line: number;
-  col: number;
-  n: number;
-}
-
 export default function App() {
   const { state, dispatch } = useStore();
   // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts; the
@@ -311,6 +307,7 @@ export default function App() {
   // PR #32). The ref is what the capture hooks read; the state re-runs the
   // wake recognizer's effect, which stops it.
   const [crashed, setCrashed] = useState(false);
+  const browser = useBrowser(view, settingsOpen || crashed, blocked);
   const crashedRef = useRef(false);
   // File panes holding an unsaved edit: such a buffer is never closed behind
   // the owner's back — "follow chat" waits, a project that goes away keeps
@@ -522,6 +519,23 @@ export default function App() {
     if (selected !== at.selectedChat || front) dispatch({ type: "select", pane: selected, front });
   }, [selected, focusedChat, state.selectedChat, state.selectedOrder, dispatch]);
 
+  const pageDrafts = useRef(new CaptureDrafts());
+  const pageDestination = useMemo<CaptureDestination>(() => ({
+    target: () => {
+      const pane = live.current.selectedChat;
+      return pageDrafts.current.pin(live.current, pane !== null && chatsOnScreen().includes(pane) ? pane : null);
+    },
+    stage: (target, files) => {
+      // Judge capacity against the actual commit state; acknowledge only the
+      // intact pair so a refused or interrupted action cannot discard ink.
+      flushSync(() => dispatch({ type: "stage", key: target.key, capture: target.compose, files, atomic: true }));
+      const at = live.current;
+      return [...PANE_NOS.map(n => at.chats[n].files), ...Object.values(at.drafts).map(d => d.files)]
+        .some(staged => files.every(file => staged.includes(file)));
+    },
+    release: target => pageDrafts.current.release(target),
+  }), [dispatch]);
+
   // ---- capture ------------------------------------------------------------
 
   const capture = useMemo(
@@ -711,6 +725,7 @@ export default function App() {
             const t = await api.openThread({
               project_id: projectId, role: "chat", ...threadBody(composeChoice(compose)),
             });
+            pageDrafts.current.opened(compose?.id, t.id);
             const n = conversation();
             threadId = t.id;
             opened = t;
@@ -990,6 +1005,7 @@ export default function App() {
 
   useEffect(() => {
     const stop = subscribe((e: any) => {
+      browser.onEvent(e);
       const kind = e.kind;
       const data = e.data || e;
       if (devservers.event(e)) return;
@@ -1902,16 +1918,6 @@ export default function App() {
   };
 
   /**
-   * A build error clicked in the VEX view (VX-2): its file, at its line, in
-   * the editor — ED-2's buffers, so an edit already open there is the one
-   * shown. Where: a drawn File pane on that project; else a new pane beside
-   * the VEX view (a split, so the errors list stays in sight); else the VEX
-   * pane itself becomes the File pane. Never under a card.
-   */
-  const [fileGoto, setFileGoto] = useState<Partial<Record<PaneNo, FileGoto>>>({});
-  const gotoSeq = useRef(0);
-
-  /**
    * **Where a file opens**, the one rule for every way one is opened — ED-7's
    * quick open, find in files and palette, VX-2's build-error click: a drawn
    * File pane on that project (`from` itself first, when it is one); else a
@@ -1948,35 +1954,16 @@ export default function App() {
 
   const openAt = useCallback((from: PaneNo, projectId: string, path: string, line: number, col: number) => {
     if (blockedNow.current || crashedRef.current) return;
-    const lay = layoutNow.current;
     const target = placeFile(from, projectId);
     if (target === null) {
       dispatch({ type: "patch", patch: { error: `No room to open ${path} beside this view: close a pane, or switch one to the editor.` } });
       return;
     }
-    const spec = lay.ws.panes[target - 1];
-    // A pane just made by the split has no tabs yet; one already showing the
-    // project keeps its own.
-    const tabs = spec.view === "file" && spec.projectId === projectId ? spec.editors ?? NO_TABS : NO_TABS;
-    // Pinned, never the preview: the owner asked for this file. Past the tab
-    // cap only a clean tab closes — and every tab counts as holding an edit
-    // here, so a full pane says so in FileTab rather than losing one.
-    const next = openTab(tabs, path, { pin: true, dirty: () => true }) ?? tabs;
-    view.setEditors(target, projectId, next.paths.includes(path) ? next : tabs);
-    const n = ++gotoSeq.current;
-    const pane = target;
-    setFileGoto((g) => ({ ...g, [pane]: { path, line, col, n } }));
-    focusPaneElement(pane);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [placeFile]);
-  const gotoDone = useCallback((pane: PaneNo, n: number) => {
-    setFileGoto((g) => {
-      if (g[pane]?.n !== n) return g;
-      const next = { ...g };
-      delete next[pane];
-      return next;
-    });
-  }, []);
+    // The shared FileAsk path pins, admits the tab and reveals only once its
+    // actual model is ready. It owns capacity refusal and stale cancellation.
+    askFile(target, { kind: "open", path, line, col });
+    focusPaneElement(target);
+  }, [placeFile, askFile]);
 
   /**
    * A project went away — archived or deleted, here or in another window. Its
@@ -3169,8 +3156,6 @@ export default function App() {
             onAddToChat={addToChat}
             ask={fileAsk[n] ?? null}
             onRenamed={onRenamed}
-            goto={fileGoto[n] ?? null}
-            onGotoDone={(k) => gotoDone(n, k)}
             onEditorSettings={openEditorSettings}
             root={pid ? treeRoot(state.projects.find((p) => p.id === pid)) : null}
           />
@@ -3228,14 +3213,18 @@ export default function App() {
         return (
           <BrowserTab
             pane={n}
+            captureDestination={pageDestination}
             slot={info.slot}
             drawn={info.drawn}
             projectId={paneProject(spec, n)}
             browser={spec.browser}
+            control={browser}
+            spec={spec}
+            zoom={view.zoom}
             liveFrames={browserFrames}
             unseen={Object.keys(devUnseen).filter(key => key.startsWith(n + ":")).map(key => key.slice(key.indexOf(":") + 1))}
             newTabNote={Object.entries(devUnseen).filter(([key]) => key.startsWith(n + ":")).map(([, host]) => host).at(-1)}
-            blocked={blocked}
+            blocked={workBlocked}
             limitMessage={browserFull === n}
             onLoaded={(id, url) => view.setBrowserUrl(n, url, id)}
             onSubmitted={(id, url) => view.submitBrowserUrl(n, url, id)}
