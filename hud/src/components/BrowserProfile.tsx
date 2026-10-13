@@ -1,10 +1,11 @@
 import { noPointerFocus } from "../lib/talkkey";
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { browserApi } from "../api";
 import { cleanTitle } from "../lib/remote";
 import type { PaneNo } from "../lib/workspace";
 import type { BrowserControl, BrowserProfile as Profile } from "../state/browser";
-export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selected:string|null;see:boolean;blocked:boolean;privateEnded?:boolean}) {
+export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selected:string|null;see:boolean;blocked:boolean;privateEnded?:boolean;statusTarget?:HTMLElement|null}) {
   const [manage,setManage]=useState(false);const [label,setLabel]=useState("");
   const [pending,setPending]=useState(false);const [error,setError]=useState("");
   const [confirm,setConfirm]=useState<"delete"|"forget"|null>(null);
@@ -17,6 +18,11 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
   };
   const disabled=props.blocked||pending||!props.control.online;
   const driveReason = props.blocked ? "Finish the approval or annotation first" : !props.see ? "Allow Jarvis to see this pane first" : props.control.globalDrive!==true ? "Agents may drive is off or unavailable" : !props.control.driveReady(props.pane) ? "Open this Private session first" : "Allow Jarvis to drive this pane when asked";
+
+  const status=<>
+    {pending?<p className="small muted" role="status">Applying Browser change…</p>:null}
+    {error?<p className="err" role="status">{error}</p>:null}
+  </>;
   return <div className="browserprofile" data-testid="browser-profile">
     <div className="toolbar browserpermissions">
       <label>Profile <select aria-label="Browser profile" value={props.selected??""} disabled={disabled}
@@ -46,7 +52,6 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
         <button disabled={disabled} onClick={()=>void run(async()=>{if(confirm==="delete")await browserApi.remove(`/profiles/${row.id}`);else await browserApi.write(`/profiles/${row.id}/forget`);setConfirm(null);await props.control.refresh();})}>Confirm</button>
         <button disabled={disabled} onClick={()=>setConfirm(null)}>Cancel</button></div>:null}
     </div>:null}
-    {pending?<p className="small muted" role="status">Applying Browser change…</p>:null}
-    {error?<p className="err" role="status">{error}</p>:null}
+    {props.statusTarget ? createPortal(status, props.statusTarget) : status}
   </div>;
 }
