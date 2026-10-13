@@ -119,6 +119,14 @@ def boot(page, mock: MockDaemon, path: str = "/"):
     return page
 
 
+def open_settings(page, section="General"):
+    """Use the one public Settings entry point, selecting a real section."""
+    if not page.locator('[data-testid="settings-page"]').count():
+        page.locator('[data-testid="titlebar-settings"]').click()
+        page.wait_for_selector('[data-testid="settings-page"]')
+    page.locator(f'[data-testid="settings-{section.lower()}"]').click()
+
+
 # ---------------------------------------------------------------------------
 # sections
 # ---------------------------------------------------------------------------
@@ -168,10 +176,11 @@ def sidebar_checks(page, mock):
     check("New thread is a button pinned above the projects",
           page.locator('[data-testid="new-thread"]').evaluate("el => el.tagName") == "BUTTON"
           and bool(new) and bool(tree) and new["y"] < tree["y"])
-    check("schedules, usage and route are reachable",
+    check("Schedules remains in the footer; the other controls moved to Settings",
           page.locator('[data-testid="open-schedules"]').count() == 1
-          and page.locator('[data-testid="open-usage"]').count() == 1
-          and page.locator('[data-testid="open-route"]').count() == 1)
+          and page.locator('[data-testid="open-usage"]').count() == 0
+          and page.locator('[data-testid="open-route"]').count() == 0
+          and page.locator('[data-testid="titlebar-settings"]').count() == 1)
     _ = mock
 
 
@@ -1284,6 +1293,7 @@ def browser_checks(page, mock):
 
 def panels_checks(page, mock):
     print("\nusage, schedules, route")
+    open_settings(page, "Usage")
     usage = page.locator('[data-testid="usage"]')
     until(lambda: usage.count() > 0 and usage.inner_text() != "")
     check("claude is the mark and two windows",
@@ -1307,6 +1317,7 @@ def panels_checks(page, mock):
           "412" not in usage.inner_text() and "local allowance" not in usage.inner_text().lower(),
           usage.inner_text()[:200])
 
+    page.locator('[data-testid="settings-close"]').click()
     check("schedules are one button",
           page.locator('[data-testid="schedule-open"]').count() == 1
           and page.locator('[data-testid="schedule-cron"]').count() == 0)
@@ -1328,6 +1339,7 @@ def panels_checks(page, mock):
     page.locator('[data-testid="schedule-dialog"] [data-testid="picker-close"]').click()
     until(lambda: page.locator('[data-testid="schedule-dialog"]').count() == 0)
 
+    open_settings(page, "Routing")
     decisions = page.locator('[data-testid="decisions"]')
     check("decisions start collapsed", decisions.evaluate("el => el.open") is False)
     check("and the log is not on the idle rail",
@@ -1339,7 +1351,7 @@ def panels_checks(page, mock):
     check("ledger states are in the opened log",
           "over_threshold" in page.locator('[data-testid="route-states"]').inner_text())
 
-    page.locator('[data-testid="open-settings"]').click()
+    open_settings(page, "Routing")
     page.wait_for_selector('[data-testid="routing-readonly"]')
     check("the routing table is in settings",
           "orchestrator" in page.locator('[data-testid="routing-readonly"]').inner_text())
@@ -1348,8 +1360,8 @@ def panels_checks(page, mock):
           warned.count() == 1 and "gpt-5.5 is not a codex model" in warned.inner_text()
           and "<b>until</b>" in warned.inner_text() and warned.locator("b").count() == 0,
           warned.inner_text()[:300] if warned.count() else "missing")
-    page.locator('[data-testid="picker-close"]').click()
-    until(lambda: page.locator('[data-testid="picker"]').count() == 0)
+    page.locator('[data-testid="settings-close"]').click()
+    until(lambda: page.locator('[data-testid="settings-page"]').count() == 0)
 
 
 def _badge_on(page, model_id):
@@ -1472,7 +1484,7 @@ def roster_edit_checks(page, mock):
 
 def picker_checks(page, mock):
     print("\npickers")
-    page.locator('[data-testid="open-model"]').click()
+    open_settings(page, "Model")
     page.wait_for_selector('[data-testid="picker"]')
     # The picker chooses the fast path's model only, and says so.
     note = page.locator('[data-testid="model-scope-note"]').inner_text()
@@ -1509,14 +1521,14 @@ def picker_checks(page, mock):
     check("and neither effort change selected the model",
           len(mock.sent("POST", "/model")) == selects, str(mock.sent("POST", "/model")[selects:]))
     roster_edit_checks(page, mock)
-    page.locator('[data-testid="picker-close"]').click()
+    page.locator('[data-testid="settings-close"]').click()
     mutes = mock.sent("POST", "/mute")
     check("every /mute the window sent carried {muted: bool}",
           bool(mutes) and all(set(b) == {"muted"} and isinstance(b["muted"], bool) for b in mutes),
           str(mutes))
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
-    page.locator('[data-testid="open-voice"]').click()
+    open_settings(page, "Voice")
     page.wait_for_selector('[data-testid="picker"]')
     check("the voice picker groups backends",
           "POCKET" in page.locator('[data-testid="voice-pocket:alba"]').inner_text().upper(),
@@ -1526,10 +1538,10 @@ def picker_checks(page, mock):
     body = until(lambda: mock.sent("POST", "/voice") or None)
     check("AVATAR DEFAULT clears the override with {voice: \"\"}",
           bool(body) and body[-1] == {"voice": ""}, str(body))
-    page.locator('[data-testid="picker-close"]').click()
+    page.locator('[data-testid="settings-close"]').click()
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
-    page.locator('[data-testid="open-avatar"]').click()
+    open_settings(page, "Avatar")
     page.wait_for_selector('[data-testid="picker"]')
     check("the avatar picker lists them with their wake phrases",
           "hoot" in page.locator('[data-testid="avatar-hoot"]').inner_text())
@@ -1545,7 +1557,7 @@ def picker_checks(page, mock):
     face = page.locator("img#avatar")
     check("the face cannot eat a click meant for the card",
           face.evaluate("el => getComputedStyle(el).pointerEvents") == "none")
-    page.locator('[data-testid="picker-close"]').click()
+    page.locator('[data-testid="settings-close"]').click()
 
     # An SSE avatar broadcast relabels live.
     mock.world["avatars"]["active"] = "jarvis"
@@ -1906,6 +1918,7 @@ def move_checks(page, mock):
 
 
 def quota_checks(page, mock):
+    open_settings(page, "Usage")
     print("\nquota bars")
     until(lambda: page.locator('[data-testid="quota-bar-codex-weekly"]').count() > 0)
     bar = page.locator('[data-testid="quota-bar-codex-weekly"]')
@@ -1963,6 +1976,8 @@ def quota_checks(page, mock):
           "high" in (page.locator('[data-testid="quota-bar-codex-weekly"] .qfill')
                      .get_attribute("class") or ""))
 
+
+    page.locator('[data-testid="settings-close"]').click()
 
 def discord_checks(page, mock):
     """PR A: the Discord light — green ok, amber with the reason, red down —
@@ -3233,6 +3248,14 @@ def main():
                             guard, FAKE_RECOGNIZER)
             finally:
                 boot_mock.stop()
+
+            from tests.face.hud_v2_settings_check import settings_page_checks
+            settings_page_mock = MockDaemon(0).start()
+            try:
+                settings_page_checks(browser, settings_page_mock, f"http://127.0.0.1:{settings_page_mock.port}",
+                                     check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                settings_page_mock.stop()
 
             # Chat titles (2026-10-12): the row's title, wrapped and clamped,
             # Copy id in ⋯, and a title arriving live — a mock of their own.
