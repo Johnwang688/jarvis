@@ -1057,7 +1057,7 @@ env files) and every format in `credential_patterns.PATTERNS`. URLs in any
 label lose userinfo, query and fragment, keeping scheme, host, port and path.
 Grep shows its pattern with ` in <path>` when scoped.
 A value split by shell quoting can still appear in a label;
-labels do not parse or evaluate shell commands. Labels end as one cleaned
+labels do not parse or evaluate shell commands. Also still visible: a password with a bare `/` in a URL, and scheme-less `user:pass@host` or `curl -u user:pass`. Only the first 4,096 characters are judged, so every pass stays linear (a 1 MB argument takes a millisecond). The env values come from the thread's folder and its parents up to home. Labels end as one cleaned
 120-character line; tool names are cleaned to 40 characters. `_record` computes it once
 **before `_lock`** (scrub reads files), onto the existing start's log and bus
 data; a label exception silently falls back to the cleaned tool name. History

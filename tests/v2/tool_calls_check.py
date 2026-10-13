@@ -23,6 +23,26 @@ from jarvis.v2.provider import Event, EventKind as K
 import hud_backend_check as backend
 
 
+_CWD = tempfile.TemporaryDirectory(prefix="tc1-cwd-")
+atexit.register(_CWD.cleanup)
+
+
+def setUpModule():
+    # Every class, History's real backend included, runs with the process in a
+    # temp folder and the scrub's checkout root there too, so no search ever
+    # reaches the owner's checkout or home (delta review of PR #84).
+    global _PREVIOUS, _ROOT
+    _PREVIOUS = Path.cwd()
+    os.chdir(_CWD.name)
+    _ROOT = patch.object(secrets, "_JARVIS_ROOT", Path(_CWD.name))
+    _ROOT.start()
+
+
+def tearDownModule():
+    _ROOT.stop()
+    os.chdir(_PREVIOUS)
+
+
 class Labels(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="tc1-labels-")
@@ -107,6 +127,23 @@ class Labels(unittest.TestCase):
         value = tool_calls.label("Bash", {"command": "echo " + token}, str(self.project))
         self.assertEqual(value, "echo " + secrets.REDACTED)
         self.assertNotIn("fake-secret", value)
+
+    def test_long_tokens_stay_linear(self):
+        # Delta review of PR #84: the unbounded scheme regex took 1 s on a 64K
+        # token (and held the GIL); a label judges only its head now.
+        import time
+        for size in (100_000, 1_000_000):
+            command = "ab12" * (size // 4)
+            start = time.perf_counter()
+            tool_calls.label("Bash", {"command": command}, "")
+            self.assertLess(time.perf_counter() - start, 0.5, size)
+
+    def test_a_parent_folders_env_value_is_withheld(self):
+        (self.project / ".env.local").write_text("API_KEY=fakeparentvalue123\n")
+        sub = self.project / "sub"
+        sub.mkdir()
+        got = tool_calls.label("Bash", {"command": "echo fakeparentvalue123"}, str(sub))
+        self.assertNotIn("fakeparentvalue123", got)
 
     def test_credential_shapes(self):
         token = "sk-" + "or-v1-" + "a1" * 25

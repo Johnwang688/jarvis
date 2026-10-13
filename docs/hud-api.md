@@ -2495,7 +2495,7 @@ their positions and fields. Tool entries sit at their start's position:
   `credential_patterns.PATTERNS`. URLs in any field lose userinfo, query and
   fragment, keeping scheme, host, port and path, before cleaning to 120
   characters. A value split by shell quoting can still appear in a label;
-  labels do not parse or evaluate shell commands. A label exception silently
+  labels do not parse or evaluate shell commands. Also still visible: a password with a bare `/` in a URL, and scheme-less `user:pass@host` or `curl -u user:pass`. Only the first 4,096 characters are judged, so every pass stays linear (a 1 MB argument takes a millisecond). The env values come from the thread's folder and its parents up to home. A label exception silently
   falls back to `clean_line(name, 40)`. The entry's `name` is also cleaned to 40
   characters.
 - Missing labels on pre-feature starts are computed outside the lock only

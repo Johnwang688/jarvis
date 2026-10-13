@@ -27,6 +27,24 @@ def _path(value: str, cwd: str) -> str:
         return value
 
 
+LABEL_SCAN = 4096
+# The scheme is bounded and must start a word: `[A-Za-z][…]*://` tried at
+# every letter of a long token is quadratic.
+_URL = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s'\"<>`]+")
+
+
+def _folder_chain(folder: Path) -> list[Path]:
+    """The thread's folder and its parents up to home (or the root), as the
+    scrub's own search walks the process's: a parent's `.env` counts too."""
+    home = Path.home()
+    chain = []
+    for current in (folder, *folder.parents):
+        chain.append(current)
+        if current == home or len(chain) >= 16:
+            break
+    return chain
+
+
 def label(name, args, cwd) -> str:
     """First present display argument, scrubbed before one-line cleaning.
 
@@ -59,14 +77,18 @@ def label(name, args, cwd) -> str:
         except ValueError:
             return "[redacted]"
 
+    # A label shows 120 characters, so only the head of a long argument is
+    # judged; every pass below is then bounded (delta review of PR #84: an
+    # unbounded scheme match went quadratic on a 64K token and held the GIL).
+    text = text[:LABEL_SCAN]
     if selected_key == "url":
         text = safe_url(text)
     # Also remove credentials from URLs embedded in commands or other fields.
-    text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+",
-                  lambda match: safe_url(match.group()), text)
+    text = _URL.sub(lambda match: safe_url(match.group()), text)
     text = secrets.scrub(text)
     if cwd:
-        values = {value for path in secrets.env_files_in(Path(cwd))
+        values = {value for folder in _folder_chain(Path(cwd))
+                  for path in secrets.env_files_in(folder)
                   for value in secrets._values_in(path)}
         for value in sorted(values, key=len, reverse=True):
             text = text.replace(value, secrets.REDACTED)
