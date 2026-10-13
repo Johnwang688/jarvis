@@ -1071,7 +1071,8 @@ fail-closed. This shared model change alone does not enable Remote or a tool.
 
 `browser/panes.py` now owns live window/pane/tab mappings for the pending Remote
 UI and BR5. Exact owner-only front, permission and address routes are documented
-in `docs/hud-api.md`. All reports carry initial see state; drive is always false.
+in `docs/hud-api.md`. All reports carry explicit see and drive preferences. Effective Remote drive requires
+the global switch and see; Private additionally requires this pane/context owner opt-in.
 Resolved dev-server identities survive entry expiry and cannot be erased by a
 passive report. Only successful owner address submission clears source; failure
 and stale navigation preserve it. Cached host document identities invalidate
@@ -1189,7 +1190,7 @@ never substitute a fresh hidden Remote load for the owner's Direct pixels.
 
 ## Current owner Remote Browser UI (BR3b, 2026-10-13)
 
-The Browser strip retains Direct tabs and adds Remote tabs backed by the owner host. Public HTTP(S) address entry chooses Remote; loopback defaults to Direct, with explicit mode conversion. Profile is per pane; mode is per tab. Jarvis can see defaults on and persists an explicit off across navigation, profile changes and copies. Agents may drive stays disabled. Private is always Remote, with one new off-record context for each copied pane; Private URLs, titles and origin grants are omitted from stored workspace state. An ended Private context never replays a stored page.
+The Browser strip retains Direct tabs and adds Remote tabs backed by the owner host. Public HTTP(S) address entry chooses Remote; loopback defaults to Direct, with explicit mode conversion. Profile is per pane; mode is per tab. Jarvis can see defaults on and persists an explicit off across navigation, profile changes and copies. Agents may drive is an owner setting, default on; named panes retain an explicit driving opt-out. Private opt-in is runtime-only and bound to the exact pane/context. Private is always Remote, with one new off-record context for each copied pane; Private URLs, titles and origin grants are omitted from stored workspace state. An ended Private context never replays a stored page.
 
 One ordered publisher uses the shared live SSE window identity for front reports, permission changes and owner address transactions. Layout/Settings/visibility changes revoke a slow address immediately with a newer sequence; confirmed mutation receipts remain current when React catches up. Only successful explicit address entry clears source restrictions. Default profile discovery preserves existing handles, while explicit profile conversion reserves allocation ahead of lazy restore. Restored persistent pages use the non-owner restore route; existing handles reattach without navigation. Failed host cleanup remains visible with an owner retry action.
 
@@ -1224,14 +1225,15 @@ synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
 “Open this in Remote to annotate” and converts only on that second owner gesture.
 
 
-## BR9b dormant Browser action backend (2026-10-13)
+## BR9b Browser action backend (2026-10-13)
 
 `hud_browser_act` is explicit-only and serial in the fast path, with typed click,
 type, press, scroll, select, upload, navigate/back/forward operations. Production
-`_shipping_enabled()` unconditionally returns false; no environment flag, owner
-route or profile setting enables it. The checkpoint's global OFF decision wins.
-This is implemented infrastructure exercised with a fixture-only policy injection,
-not evidence that production driving, BR9c UI or BR9d live model drills work.
+`_shipping_enabled(daemon)` reads only BrowserSettings.agents_may_drive, per the
+owner's 2026-10-13 DR-0 decision. Missing file/key defaults on; existing bad or
+unreadable state fails closed. An unrelated repair never silently enables it.
+The owner-only settings PATCH changes it; no alternate environment/CLI gate exists.
+Free fixture coverage is separate from real owner interaction and paid model drills.
 
 A private turn scope binds the actual fast caller, original owner words, thread,
 turn, project and strict flag. Only a successful presented Remote look publishes
@@ -1329,7 +1331,9 @@ accepted fixture forces page-global collection to conceal a previous peak.
 
 ## BR9c owner driving presentation (current)
 
-Production agent driving remains OFF, with both Settings and pane switches disabled.
+Production driving uses live Settings and pane switches. Global off preserves
+named pane preference; see-off clears it. Private permission requires an explicit
+owner mutation and expires with the pane/context or owner-window lifetime.
 The ticketed Remote socket alone supplies the memory-only driver banner and last
 20 actions. Displayed chat slots are resolved from the current workspace; hidden
 chats use fixed wording. Reattachment needs a fresh paused/list replay. Successful
@@ -1357,3 +1361,17 @@ The named always-ask layer uses a distinct private delegation card with exactly
 permits only reaching subsequent Browser checks, never authorizes a page action.
 It shares the same deadline, identity and one-shot no-Always consent lifecycle;
 no page identity, target, command or preview is invented for that card.
+
+## Driving release switch semantics (2026-10-13)
+
+DR-0 authorizes the production enable seam and two switches only. All classifier
+floors, private cards, five-second quiet rule, refs, desk/depth checks, action and
+hour budgets, ownership and between-event guards retain their previous behavior.
+Named HUD panes explicitly report their default-on preference and persist only
+an opt-out. Private consent is never serialized: only the owner permission PATCH
+grants it, bound to window, pane and live context; copied/forged front reports
+cannot grant it. See-off clears preference; navigation does not enable it.
+The fast prompt is re-narrowed from its pristine composition whenever the desk
+toolset changes, preserving the caller suffix while off-desk turns omit action
+guidance. Chrome preview capability remains unavailable. Paid classifier accuracy,
+real owner switch interaction and installation are separate acceptance evidence.

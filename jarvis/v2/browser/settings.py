@@ -8,6 +8,8 @@ One small JSON object at `config.BROWSER_SETTINGS_PATH`
 (`~/.config/jarvis/browser.json`, env `JARVIS_BROWSER_SETTINGS`). It holds the
 owner's switches for the HUD's Browser, each a boolean:
 
+- **`agents_may_drive`** (DR-0): on by owner decision. Existing invalid or
+  unreadable settings fail closed; only the owner settings route changes it.
 - **`lan`** (B-5, BR-1a): the Browser's gate admits private-network addresses.
   **Off** by default.
 - **`local_servers`** (BR-1a): the gate admits every loopback port that is not
@@ -19,8 +21,13 @@ owner's switches for the HUD's Browser, each a boolean:
   by default. Auto-open loads only in a Direct frame and never opens a port in
   the Remote gate: only the owner's own navigation does (amendment 2).
 
-A missing, unreadable or malformed file, or a value that is not a boolean,
-reads as the default. Later packages add their switches here (sound), and a
+- **`sound`** (BR-10): master permission for owner speaker buttons, **allowed** by default.
+  Each instance still starts muted; explicit memory-only owner gestures enable it.
+
+A missing file or omitted key reads as the default. Sound master permission
+fails closed for unreadable/malformed files and non-boolean values; repairing
+such a file through another setting keeps sound off. Other switches retain
+their existing defaults. Later packages add their switches here, and a
 write keeps every key it does not change — one a later package added
 included.
 
@@ -59,7 +66,10 @@ import time
 
 LOG = logging.getLogger(__name__)
 
-DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True}
+DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": True, "agents_may_drive": True}
+FAIL_CLOSED_KEYS = frozenset({"sound", "agents_may_drive"})
+_UNKNOWN = object()
+_UNREADABLE = object()
 FILE_CAP = 64 * 1024
 RECHECK_S = 1.0
 
@@ -69,8 +79,10 @@ def _stamp(path: Path):
     when it is not there (or cannot be looked at)."""
     try:
         st = os.stat(path, follow_symlinks=False)
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _UNREADABLE
     return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode
 
 
@@ -82,12 +94,12 @@ def _read(path: Path) -> dict | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        LOG.warning("browser settings not read (%s); using the defaults", type(exc).__name__)
+        LOG.warning("browser settings not read (%s); using safe settings values", type(exc).__name__)
         return None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > FILE_CAP:
-            LOG.warning("browser settings not read (not a small regular file); using the defaults")
+            LOG.warning("browser settings not read (not a small regular file); using safe settings values")
             return None
         chunks, size = [], 0
         while size <= FILE_CAP:
@@ -97,7 +109,7 @@ def _read(path: Path) -> dict | None:
             chunks.append(chunk)
             size += len(chunk)
     except OSError as exc:
-        LOG.warning("browser settings not read (%s); using the defaults", type(exc).__name__)
+        LOG.warning("browser settings not read (%s); using safe settings values", type(exc).__name__)
         return None
     finally:
         os.close(fd)
@@ -106,13 +118,13 @@ def _read(path: Path) -> dict | None:
     try:
         value = json.loads(b"".join(chunks))
     except ValueError:
-        LOG.warning("browser settings not read (not JSON); using the defaults")
+        LOG.warning("browser settings not read (not JSON); using safe settings values")
         return None
     return value if isinstance(value, dict) else None
 
 
 def _values(raw: dict) -> dict[str, bool]:
-    return {key: raw[key] if isinstance(raw.get(key), bool) else default
+    return {key: raw[key] if isinstance(raw.get(key), bool) else (False if key in FAIL_CLOSED_KEYS and key in raw else default)
             for key, default in DEFAULTS.items()}
 
 
@@ -144,7 +156,7 @@ class BrowserSettings:
         self._clock = clock
         self._path: Path | None = None
         self._values = dict(DEFAULTS)
-        self._stamp = None
+        self._stamp = _UNKNOWN
         self._checked = float("-inf")
         if path is not None:
             self.attach(path)
@@ -158,18 +170,20 @@ class BrowserSettings:
         with self._lock:
             self._path = Path(path).expanduser()
             self._values = dict(DEFAULTS)
-            self._stamp = None
+            self._stamp = _UNKNOWN
             self._refresh()
 
     def _refresh(self) -> None:
         """The caller holds `_lock`."""
         self._checked = self._clock()
         stamp = _stamp(self._path)
-        if stamp == self._stamp:
+        if stamp is not _UNREADABLE and stamp == self._stamp:
             return
         self._stamp = stamp
-        raw = _read(self._path) if stamp is not None else None
+        raw = _read(self._path) if stamp is not None and stamp is not _UNREADABLE else None
         self._values = _values(raw or {})
+        if stamp is not None and raw is None:
+            self._values.update({key: False for key in FAIL_CLOSED_KEYS})
 
     def value(self, key: str) -> bool:
         """One switch, as the file says it now. Cheap — memory, and a `stat`
@@ -205,7 +219,11 @@ class BrowserSettings:
             if self._path is None:
                 self._values.update(changes)
                 return dict(self._values)
-            payload = dict(_read(self._path) or {})
+            raw = _read(self._path)
+            payload = dict(raw or {})
+            if raw is None and _stamp(self._path) is not None:
+                # Repairing malformed state must not enable an omitted safety switch.
+                payload.update({key: False for key in FAIL_CLOSED_KEYS})
             payload.update(changes)
             _write(self._path, payload)
             self._values = _values(payload)

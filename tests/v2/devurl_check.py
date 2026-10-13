@@ -568,13 +568,13 @@ class Settings(unittest.TestCase):
     def test_on_by_default_and_memory_only_without_a_file(self):
         memory = S.BrowserSettings()
         self.assertIs(memory.auto_open(), True)
-        self.assertEqual(memory.snapshot(), {"lan": False, "local_servers": False, "auto_open": True})
+        self.assertEqual(memory.snapshot(), dict(S.DEFAULTS))
         self.assertEqual(memory.update(auto_open=False),
-                         {"lan": False, "local_servers": False, "auto_open": False})
+                         {**S.DEFAULTS, "auto_open": False})
         self.assertIs(memory.auto_open(), False)
         self.assertIs(memory.value("auto_open"), False)
         with self.assertRaises(KeyError):
-            memory.value("sound")
+            memory.value("unknown_setting")
         self.assertIsNone(memory.path)
         self.assertIs(self.settings().auto_open(), True)              # no file yet
         self.assertFalse(self.path.exists())
@@ -584,7 +584,7 @@ class Settings(unittest.TestCase):
         self.path.write_text(json.dumps({"auto_open": True, "lan": True, "sound": False}))
         settings = self.settings()
         self.assertEqual(settings.update(auto_open=False),
-                         {"lan": True, "local_servers": False, "auto_open": False})
+                         {**S.DEFAULTS, "lan": True, "auto_open": False, "sound": False})
         self.assertEqual(json.loads(self.path.read_text()), {"auto_open": False, "lan": True, "sound": False})
         self.assertEqual(settings.update(local_servers=True)["local_servers"], True)
         self.assertEqual(json.loads(self.path.read_text()),

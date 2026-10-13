@@ -10,6 +10,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jarvis.v2.browser.panes import BrowserPanes, PaneRefused, LEASE_S
 from jarvis.v2.browser.policy import URLRefused
+from jarvis.v2.browser.settings import BrowserSettings
 
 W = "a" * 32
 P = "p-0123abcd"
@@ -36,7 +37,7 @@ class Panes(unittest.TestCase):
             refused_ports=lambda: frozenset((18738, 18739)), input_held=lambda: False,
             close_tab=Mock(), open_tab=Mock(), navigate=Mock())
         self.dev = SimpleNamespace(source_snapshot=lambda entry: deepcopy(self.source))
-        self.registry = BrowserPanes(SimpleNamespace(browser=self.host, devservers=self.dev), clock=lambda: self.now)
+        self.registry = BrowserPanes(SimpleNamespace(browser=self.host, devservers=self.dev, browser_settings=BrowserSettings()), clock=lambda: self.now)
         self.registry.window_started(W)
 
     def remote(self, seq=1):
@@ -254,11 +255,42 @@ class Panes(unittest.TestCase):
         with self.assertRaisesRegex(PaneRefused, "newer"): self.registry.report(report(2))
         self.assertFalse(self.registry.resolve().see)
         self.assertFalse(self.registry.still_current(snap))
-        with self.assertRaisesRegex(PaneRefused, "drive is off"):
-            self.registry.permissions(4, {"window": W, "seq": 4, "drive": True})
-        body = report(4); body["panes"][0]["drive"] = True
-        with self.assertRaisesRegex(PaneRefused, "drive is off"): self.registry.report(body)
+        self.registry.permissions(4, {"window": W, "seq": 4, "drive": True})
+        body = report(5); body["panes"][0]["drive"] = True
+        self.registry.report(body)
+        self.assertFalse(self.registry.resolve().drive)  # Direct is never drivable
+
+    def test_drive_preference_global_off_and_see_off_are_separate(self):
+        body = self.remote(); body["panes"][0]["drive"] = True
+        self.registry.report(body)
+        snap = self.registry.resolve(); self.assertTrue(snap.drive)
+        self.registry.daemon.browser_settings.update(agents_may_drive=False)
         self.assertFalse(self.registry.resolve().drive)
+        self.assertFalse(self.registry.still_current(snap))
+        body["seq"] = 2; self.assertFalse(self.registry.report(body)["panes"][0]["drive"])
+        self.registry.daemon.browser_settings.update(agents_may_drive=True)
+        self.assertTrue(self.registry.resolve().drive)
+        self.registry.permissions(4, {"window":W,"seq":3,"see":False})
+        self.registry.permissions(4, {"window":W,"seq":4,"see":True})
+        self.assertFalse(self.registry.resolve().drive)
+
+    def test_private_reports_cannot_grant_and_ctx_copy_reload_revoke_optin(self):
+        self.rows[T].update(profile="private", ctx=T)
+        body = self.remote(); body["panes"][0].update(profile="private", ctx=T, drive=True)
+        self.registry.report(body); self.assertFalse(self.registry.resolve("1").drive)
+        self.registry.permissions(4,{"window":W,"seq":2,"drive":True})
+        self.assertTrue(self.registry.resolve("1").drive)
+        body["seq"]=3;self.registry.report(body);self.assertTrue(self.registry.resolve("1").drive)
+        # New pane with identical copied context still has no owner opt-in.
+        body["seq"]=4;body["panes"][0]["pane_id"]=5
+        self.registry.report(body);self.assertFalse(self.registry.resolve("1").drive)
+        self.registry.permissions(5,{"window":W,"seq":5,"drive":True})
+        self.assertTrue(self.registry.resolve("1").drive)
+        self.rows[T]["ctx"]="11111111";body["seq"]=6;body["panes"][0]["ctx"]="11111111"
+        self.registry.report(body);self.assertFalse(self.registry.resolve("1").drive)
+        self.registry.permissions(5,{"window":W,"seq":7,"drive":True})
+        self.registry.window_ended(W);self.registry.window_started(W)
+        body["seq"]=1;self.registry.report(body);self.assertFalse(self.registry.resolve("1").drive)
 
     def test_malformed_report_rejects_atomically(self):
         self.registry.report(report())
@@ -266,7 +298,7 @@ class Panes(unittest.TestCase):
         cases = []
         for key, value in (("seq", True), ("focus_seq", -1), ("covered", 1), ("focused_slot", 9)):
             cases.append(report(2, **{key: value}) if key != "seq" else report(value))
-        for key, value in (("pane_id", True), ("drawn", 1), ("active", "missing"), ("see", "false"), ("ctx", T)):
+        for key, value in (("pane_id", True), ("drawn", 1), ("active", "missing"), ("see", "false"), ("drive", "true"), ("ctx", T)):
             body = report(2); body["panes"][0][key] = value; cases.append(body)
         body = report(2); body["panes"].append(deepcopy(body["panes"][0])); cases.append(body)
         body = report(2); body["panes"][0]["tabs"] *= 2; cases.append(body)
