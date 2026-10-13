@@ -705,11 +705,17 @@ class CodexProvider:
                             "approvals_reviewer": "auto_review"}
                 if any(effective.get(k) != v for k, v in required.items()):
                     raise BriefRefused("Codex effective config changed authentication or permissions")
+                workspace = effective.get("sandbox_workspace_write") or {}
+                if workspace.get("network_access", False) is not False:
+                    raise BriefRefused("Codex effective config enabled sandbox networking")
+                expected_roots = codex_config.git_roots(brief)
+                if workspace.get("writable_roots", []) != expected_roots:
+                    raise BriefRefused("Codex effective config changed writable roots")
                 params = {"cwd": brief.cwd, "modelProvider": "openai", "sandbox": "workspace-write",
                           "approvalPolicy": "on-request", "approvalsReviewer": "auto_review",
                           # baseInstructions replaces the native prompt. The additive
                           # developer field preserves it, AGENTS.md and skill loading.
-                          "developerInstructions": brief.system_append}
+                          "developerInstructions": "\n\n".join(filter(None, (brief.system_append, codex_config.git_note(brief))))}
                 if brief.model:
                     params["model"] = brief.model
                 if brief.effort:
@@ -728,7 +734,9 @@ class CodexProvider:
                         or result.get("modelProvider", "openai") != "openai"
                         or result.get("approvalPolicy") != "on-request"
                         or result.get("approvalsReviewer") != "auto_review"
-                        or result.get("sandbox", {}).get("type") != "workspaceWrite"):
+                        or result.get("sandbox", {}).get("type") != "workspaceWrite"
+                        or result.get("sandbox", {}).get("writableRoots", []) != expected_roots
+                        or result.get("sandbox", {}).get("networkAccess", False) is not False):
                     raise BriefRefused("Codex did not honor the requested model, effort or sandbox")
                 if not resume:
                     accounting = Accounting(home / "usage.json", returned_id, False)
