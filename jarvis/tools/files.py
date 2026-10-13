@@ -90,6 +90,11 @@ SELF_PROTECTED = frozenset(
         # 2026-10-11). Editing it is editing which credentials the window
         # serves.
         "jarvis/v2/editor_policy.py",
+        # The editor's git routes and its navigation/explorer routes (ED-9,
+        # ED-7): what HEAD's text, a status, a listing, a search or an fs op
+        # may reveal or touch. The owner's answer, 2026-10-12.
+        "jarvis/v2/editor_git.py",
+        "jarvis/v2/editor_nav.py",
     }
 )
 

@@ -2912,7 +2912,8 @@ The rules the two reviews left, in one place:
 - The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
   file by name, LOW4); a save's unexpected `OSError` is 500 and a
   `PermissionError` 403, never the dispatcher's 409 (the conflict bar); a tree
-  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED.
+  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED, and so, since
+  the owner's answer (2026-10-12), are `editor_git.py` and `editor_nav.py`.
 - **`Buffers.releasePane` touches only buffers this pane held** (H1): × on any
   pane used to discard every edit no tab held. **A project going away asks
   the panes on it together** (H2, `panesLose`/`panesHolding`): two panes
@@ -3181,9 +3182,10 @@ depth, any case, a Windows-trimmed name both ways — not a name ending
   and each file is read non-blocking, regular files only, capped
   (`_read_regular`; a FIFO named `.env.x` hung the old blocking read). A grep
   line attributed to one is dropped (`is_protected`). **What is taken from a
-  file is the lead's decision (PR #60 review, MED-2)**: `.env` and
-  `.env.local` give every value of 8+ characters, exactly as before; every
-  other credential env file gives only (a) the value of a **secret-named
+  file is the lead's decision (PR #60 review, MED-2)**, and since the
+  owner's answer (2026-10-12) it holds for `.env` and `.env.local` too, which
+  used to give every value of 8+ characters: every credential env file gives
+  only (a) the value of a **secret-named
   key** — a whole word or an `_`/camelCase part of KEY, TOKEN, SECRET,
   PASS/PASSWD/PASSWORD/PWD, CREDENTIAL, PRIVATE, SALT or DSN (plurals too,
   any case) — at 4+ characters and not a boolean; AUTH, SESSION and COOKIE
