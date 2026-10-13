@@ -146,7 +146,7 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _rv47b_close_other_view_checks, _rv47b_park_said_checks, _rv47b_thread_park_said_checks,
                         _rv47b_send_held_named_checks,
                         # review 3 of PR #47 (9a093f9): words parked for the next new thread
-                        _rv47c_close_orphan_checks, _rv47c_archive_orphan_checks):
+                        _rv47c_close_orphan_checks, _rv47c_archive_orphan_checks, _checkpoint_compose_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -1482,7 +1482,7 @@ def _rr_compose_fail_moved_checks(page, mock, check, until):
     check("review 2: a failed new-thread send's words never land in a box showing another thread",
           "brand new" not in b1 and "brand new" not in b2, f"pane 1 (t2) {b1!r}, pane 2 (t3) {b2!r}")
     err = page.evaluate("window.__hud.state().error") or ""
-    check("review 2: and the window says where they are kept", "kept for the next new thread" in err, err)
+    check("review 2: and the window says where they are kept", "kept until this pane shows a new thread" in err, err)
     _focus(page, until, 1)
     page.locator('[data-testid="new-thread"]').click()
     until(lambda: _chat(page, 1)["threadId"] is None and _chat(page, 1)["compose"] is not None, timeout=3)
@@ -2837,6 +2837,43 @@ def _rv47c_archive_orphan_checks(page, mock, check, until):
     finally:
         mock.emit("project_restored", {"project_id": "p1"}, project_id="p1")
         page.evaluate("localStorage.setItem('jarvis.hud.lastProject', 'p1')")
+
+
+def _checkpoint_compose_checks(page, mock, check, until):
+    """A failed first send keeps its hidden compose row recoverable."""
+    _fresh(page, mock, until, TWO)
+    held = []
+    page.route(OPEN_URL, lambda r: held.append(r) if r.request.method == "POST" else r.continue_())
+    try:
+        _box(page, 2).fill("hidden first-send words")
+        _box(page, 2).press("Enter")
+        assert until(lambda: _pumped(page) and held, timeout=3)
+        _focus(page, until, 1)
+        _choose(page, until, "single")
+        assert until(lambda: not _visible(page, _pane(2)), timeout=2)
+        held[0].fulfill(status=500, content_type="application/json", body=json.dumps({"error": "fixture refusal"}))
+        held.clear()
+        parked = until(lambda: _state(page, "drafts").get("compose:2"), timeout=3)
+        check("checkpoint: a hidden compose failure parks its words", parked and parked.get("text") == "hidden first-send words", str(parked))
+        check("checkpoint: hidden words never go to the selected chat", not _box(page, 1).input_value())
+        check("checkpoint: the hidden row does not silently take up its words", _chat(page, 2)["input"] == "")
+        _choose(page, until, "cols2")
+        check("checkpoint: showing that compose row restores its words once", bool(until(lambda: _box(page, 2).input_value() == "hidden first-send words", timeout=3)))
+        check("checkpoint: successful takeup clears only its parked draft", "compose:2" not in _state(page, "drafts"))
+        _box(page, 2).fill("")
+    finally:
+        for route in held: route.abort()
+        page.unroute(OPEN_URL)
+
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 2, "t2")
+    page.evaluate("""() => window.__hud.dispatch({type:'park',key:'compose:2',text:'closed-slot words',projectId:'p1'})""")
+    page.locator('[data-testid="pane-2-close"]').click()
+    check("checkpoint: closing a different thread preserves that slot's parked compose words",
+          bool(until(lambda: _state(page,"drafts").get("compose:*",{}).get("text") == "closed-slot words", timeout=3)))
+    page.locator('[data-testid="new-thread"]').click()
+    check("checkpoint: the next owner-started thread retrieves closed-slot words", bool(until(lambda: _box(page,1).input_value() == "closed-slot words", timeout=3)))
+    _box(page,1).fill("")
 
 
 if __name__ == "__main__":

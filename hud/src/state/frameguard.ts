@@ -168,6 +168,12 @@ export function ownLoad(key: string) {
   loads.set(key, { at: now(), loadedAt: null, frame: null });
 }
 
+/** Picking one tab: only that exact registered frame, or its next fresh frame. */
+export function selectFrame(key: string) {
+  const entry = [...entries.values()].find((e) => e.key === key);
+  loads.set(key, { at: now(), loadedAt: entry ? now() : null, frame: entry?.frame ?? null });
+}
+
 /** A load that is not the owner's (a stored URL restored, a terminal's "Open in Browser"): no gesture carries over. */
 export function cancelLoad(key: string) {
   loads.delete(key);

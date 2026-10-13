@@ -511,6 +511,36 @@ def _monaco_checks(page, mock, check, until):
     check("once the chord is done, Ctrl+D in Monaco talks again", held is not None and after is None
           and key.get("prevented") is True, f"{held} {after} {key}")
 
+    # A Monaco chord never starts voice, but its held second key must not
+    # become terminal EOF when focus crosses into xterm before keyup.
+    from tests.face.hud_v2_terminal_check import FakePty, _new_terminal, _focus_term
+    fake = FakePty(page.context, mock)
+    tid = _new_terminal(page, mock, until, fake)
+    for blur in (False, True):
+        lines.click()
+        page.keyboard.press("Escape")
+        page.keyboard.press("Control+k")
+        page.keyboard.down("Control")
+        page.keyboard.down("d")
+        before = len(fake.sent(tid))
+        no_voice = page.evaluate("window.__hud.capture.ptt") is None
+        if blur:
+            page.evaluate("window.dispatchEvent(new Event('blur'))")
+        _focus_term(page, tid)
+        for _ in range(3):
+            page.keyboard.down("d")
+        page.keyboard.up("d")
+        page.keyboard.up("Control")
+        page.wait_for_timeout(100)
+        check(f"Monaco chord repeats never become terminal EOF (blur={blur})",
+              no_voice and page.evaluate("window.__hud.capture.ptt") is None
+              and fake.sent(tid)[before:] == b"", repr(fake.sent(tid)[before:]))
+        before = len(fake.sent(tid))
+        page.keyboard.press("Control+d")
+        check(f"a fresh terminal Ctrl+D after that chord still works (blur={blur})",
+              bool(until(lambda: fake.sent(tid)[before:] == b"\x04", timeout=2)),
+              repr(fake.sent(tid)[before:]))
+
 
 # ---- after a crash -----------------------------------------------------------------
 

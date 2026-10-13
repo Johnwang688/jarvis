@@ -1797,7 +1797,7 @@ def _browser_link_checks(page, mock, base, check, until, fake):
         page.wait_for_timeout(150)
 
     def frame(n):
-        return page.locator(f'[data-testid="pane-{n}"] [data-testid="browser-frame"]')
+        return page.locator(f'[data-testid="pane-{n}"] [data-browser-page][aria-hidden="false"] [data-testid="browser-frame"]')
 
     ctrl_click(0)
     until(lambda: _visible(page, menu), timeout=3)
@@ -1834,6 +1834,27 @@ def _browser_link_checks(page, mock, base, check, until, fake):
           frame(2).get_attribute("src") == dev
           and page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "chat"
           and page.locator('[data-testid="pane-2"]').get_attribute("data-focused") == "true")
+
+    # AO-2: a later terminal link adds a tab, leaving the old page in place.
+    old = dev + "old-page"
+    page.locator('[data-testid="pane-2"] [data-testid="browser-url"]').fill(old)
+    page.locator('[data-testid="pane-2"] [data-testid="browser-go"]').click()
+    until(lambda: frame(2).get_attribute("src") == old, timeout=3)
+    ctrl_click(0)
+    until(lambda: _visible(page, menu), timeout=3)
+    page.locator('[data-testid="term-link-pane"]').click()
+    until(lambda: frame(2).get_attribute("src") == dev, timeout=3)
+    spec = page.evaluate("window.__hud.workspace()")["ws"]["panes"][1]
+    check("AO2: terminal Open in Browser adds a foreground tab and preserves the old page",
+          len(spec["browser"]["tabs"]) == 2 and [t["url"] for t in spec["browser"]["tabs"]] == [old, dev])
+    first = spec["browser"]["tabs"][0]["id"]
+    page.locator(f'[data-testid="pane-2"] [data-browser-tab="{first}"]').click()
+    ctrl_click(0)
+    until(lambda: _visible(page, menu), timeout=3)
+    page.locator('[data-testid="term-link-pane"]').click()
+    until(lambda: frame(2).get_attribute("src") == dev, timeout=3)
+    check("AO2: reopening that URL selects its existing tab",
+          len(page.evaluate("window.__hud.workspace()")["ws"]["panes"][1]["browser"]["tabs"]) == 2)
 
     for row, url, word in ((1, hud, "HUD"), (2, api, "API")):
         ctrl_click(row)

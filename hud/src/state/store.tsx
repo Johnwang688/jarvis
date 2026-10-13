@@ -80,6 +80,8 @@ export interface State {
   /** The last compose row id minted (`Compose.id`, `c<n>`): kept here so the
    * reducer stays pure. */
   composeSeq: number;
+  /** Exact draft-location notice owned by the reducer, replaceable after takeup. */
+  orphanNotice?: string;
   taskId: string | null;
   /** A task was picked more recently than a thread: the File tab follows it. */
   taskFocus: boolean;
@@ -174,6 +176,8 @@ export type Action =
    * else to its parked draft — never to whatever the pane they were dropped
    * on shows by then (re-review of PR #27). */
   | { type: "stage"; key: string; files: Attachment[] }
+  | { type: "restore_compose"; pane: PaneNo; composeId: string }
+  | { type: "notice"; text: string }
   /** Words for a conversation no pane shows: kept with its parked draft
    * (`projectId`: the compose row's, for words parked under `ORPHAN_DRAFT`). */
   | { type: "park"; key: string; text: string; files?: Attachment[]; projectId?: string | null }
@@ -218,7 +222,7 @@ function withChat(s: State, pane: PaneNo, next: ChatState): State {
  */
 function reconverse(
   s: State, pane: PaneNo, was: ChatState, next: ChatState, takeOrphan = false,
-): { next: ChatState; drafts: State["drafts"]; notice?: string } {
+): { next: ChatState; drafts: State["drafts"]; notice?: string; orphan?: boolean } {
   // A new thread the owner is starting: a compose row that has opened nothing yet.
   const fresh = takeOrphan && !next.threadId && !!next.compose && !next.compose.openedId;
   if (sameConversation(was, next, pane)) {
@@ -241,7 +245,9 @@ function reconverse(
   }
   const parked = into ? drafts[into] : undefined;
   if (into && parked) delete drafts[into];
-  return { next: { ...next, input: parked?.text ?? "", files: parked?.files ?? [] }, drafts };
+  const notice = parked && fresh && drafts[ORPHAN_DRAFT]
+    ? "This pane's draft is back. Other unsent words are still kept for the next new thread you start." : undefined;
+  return { next: { ...next, input: parked?.text ?? "", files: parked?.files ?? [] }, drafts, notice };
 }
 
 /** A parked draft's projects with one more, once each (undefined: none). */
@@ -271,7 +277,7 @@ function filesLeftOut(n: number): string {
  */
 function orphanTaken(
   s: State, next: ChatState, drafts: State["drafts"],
-): { next: ChatState; drafts: State["drafts"]; notice: string } {
+): { next: ChatState; drafts: State["drafts"]; notice: string; orphan: boolean } {
   const o = drafts[ORPHAN_DRAFT];
   delete drafts[ORPHAN_DRAFT];
   const text = next.input && o.text ? `${next.input}\n${o.text}` : next.input || o.text;
@@ -284,7 +290,7 @@ function orphanTaken(
   const where = elsewhere ? ` This new thread is in ${projectName(s, now)}; its project chip can move it.` : "";
   const notice = `Words you had not sent${wrote} are back, in this new thread's box.${where}`
     + filesLeftOut(all.length - files.length);
-  return { next: { ...next, input: text, files }, drafts, notice };
+  return { next: { ...next, input: text, files }, drafts, notice, orphan: true };
 }
 
 /**
@@ -296,7 +302,7 @@ export const NOTICE_BREATH_MS = 1000;
 
 /** A plain write to the error line (a failure, or clearing it): it replaces what was there. */
 function wrote(s: State, error: string): State {
-  return { ...s, error, errorAt: error ? Date.now() : 0 };
+  return { ...s, error, errorAt: error ? Date.now() : 0, orphanNotice: undefined };
 }
 
 /**
@@ -305,11 +311,15 @@ function wrote(s: State, error: string): State {
  * written over it (review 3 of PR #47, LOW): a split that reuses a hidden pane
  * says both that its words were kept and that the new thread took them.
  */
-function noticed(s: State, notice: string): State {
+function noticed(s: State, notice: string, orphan = false, append = false): State {
   const now = Date.now();
-  const together = !!s.error && now - s.errorAt < NOTICE_BREATH_MS;
-  const error = !together ? notice : s.error.includes(notice) ? s.error : `${s.error} ${notice}`;
-  return { ...s, error, errorAt: now };
+  // Replace only our own exact location notice; an unrelated refusal is retained.
+  const previous = orphan && s.orphanNotice && s.error.includes(s.orphanNotice) ? s.orphanNotice : null;
+  const together = !!s.error && (append || now - s.errorAt < NOTICE_BREATH_MS);
+  const error = previous ? s.error.replace(previous, notice)
+    : !together ? notice : s.error.includes(notice) ? s.error : `${s.error} ${notice}`;
+  return { ...s, error, errorAt: now, orphanNotice: orphan ? notice
+    : s.orphanNotice && error.includes(s.orphanNotice) ? s.orphanNotice : undefined };
 }
 
 /** The orb for a pane's turn, as the reducers below leave it. */
@@ -359,7 +369,7 @@ export function reduce(s: State, a: Action): State {
       if (orb !== undefined && a.pane === s.selectedChat) next = { ...next, orb };
       if (error !== undefined) next = wrote(next, error);
       // Words taken up from a pane that let them go are never back unsaid.
-      if (moved.notice) next = noticed(next, moved.notice);
+      if (moved.notice) next = noticed(next, moved.notice, moved.orphan);
       return next;
     }
 
@@ -379,16 +389,32 @@ export function reduce(s: State, a: Action): State {
       return withChat(s, a.pane, { ...c, input: a.text ?? c.input, files: a.files ?? c.files });
     }
 
+    case "notice":
+      return a.text ? noticed(s, a.text, false, true) : s;
+
+    case "restore_compose": {
+      const c = s.chats[a.pane];
+      if (c.threadId || !c.compose || c.compose.openedId || c.compose.id !== a.composeId) return s;
+      const key = `compose:${a.pane}`;
+      const had = s.drafts[key];
+      if (!had) return s;
+      const drafts = { ...s.drafts };
+      delete drafts[key];
+      const all = [...c.files, ...had.files];
+      const text = c.input && had.text ? `${c.input}\n${had.text}` : c.input || had.text;
+      const next = { ...withChat(s, a.pane, { ...c, input: text, files: all.slice(0, MAX_FILES) }), drafts };
+      return noticed(next, "Words that were not sent are back in this box." + filesLeftOut(Math.max(0, all.length - MAX_FILES)));
+    }
+
     case "stage": {
       if (!a.files.length) return s;
       const n = PANE_NOS.find((p) => draftKey(s.chats[p], p) === a.key);
-      if (n !== undefined) {
-        const c = s.chats[n];
-        return withChat(s, n, { ...c, files: [...c.files, ...a.files].slice(0, MAX_FILES) });
-      }
       const had = s.drafts[a.key];
-      const files = [...(had?.files ?? []), ...a.files].slice(0, MAX_FILES);
-      return { ...s, drafts: { ...s.drafts, [a.key]: { text: had?.text ?? "", files } } };
+      const all = [...(n !== undefined ? s.chats[n].files : had?.files ?? []), ...a.files];
+      const files = all.slice(0, MAX_FILES);
+      const next = n !== undefined ? withChat(s, n, { ...s.chats[n], files })
+        : { ...s, drafts: { ...s.drafts, [a.key]: { ...had, text: had?.text ?? "", files } } };
+      return all.length > MAX_FILES ? noticed(next, filesLeftOut(all.length - MAX_FILES).trim()) : next;
     }
 
     case "message":
@@ -619,7 +645,20 @@ export function reduce(s: State, a: Action): State {
             + " is kept for the next new thread you start.";
         }
       }
-      if (notice) notice += filesLeftOut(dropped);
+      let orphanText = !thread && a.keep && c.compose ? notice : "";
+      if (orphanText) notice = "";
+      const oldCompose = drafts[`compose:${a.pane}`];
+      if (oldCompose) {
+        delete drafts[`compose:${a.pane}`];
+        park(ORPHAN_DRAFT, oldCompose.text, oldCompose.files);
+        const saved = drafts[ORPHAN_DRAFT];
+        for (const project of saved ? oldCompose.projects ?? [] : []) saved.projects = withProject(saved.projects, project);
+        orphanText += (orphanText ? " " : "") + "Previously unsent words are kept for the next new thread you start.";
+      }
+      if (dropped) {
+        if (orphanText) orphanText += filesLeftOut(dropped);
+        else if (notice) notice += filesLeftOut(dropped);
+      }
       const loose = { ...s.loose };
       // A placeholder (`local-N`, a first send whose thread does not exist
       // yet) is no thread: nothing can open it.
@@ -630,7 +669,8 @@ export function reduce(s: State, a: Action): State {
         chats: { ...s.chats, [a.pane]: { ...emptyChat(), status: keep } },
         selectedOrder: s.selectedOrder.filter((n) => n !== a.pane),
       };
-      return notice ? noticed(next, notice) : next;
+      const said = notice ? noticed(next, notice) : next;
+      return orphanText ? noticed(said, orphanText, true) : said;
     }
 
     case "loose":

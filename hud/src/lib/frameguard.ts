@@ -27,7 +27,7 @@ export const BELT_MS = 250;
 export const RESTORE_MS = 300;
 
 /** `data-browser-frame` on every Browser iframe: the pane id and the tab index. */
-export function frameKey(pane: number, tab: number): string {
+export function frameKey(pane: number, tab: number | string): string {
   return `${pane}:${tab}`;
 }
 
