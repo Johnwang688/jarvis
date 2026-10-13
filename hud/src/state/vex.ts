@@ -45,6 +45,8 @@ const BRAIN_CLOSED = "The brain terminal was closed for the download";
 export interface ProjectRun {
   /** This window's last build of the project (or one remembered across a reload). */
   build: BuildView | null;
+  startingBuild: { action: "build" | "rebuild" | "clean"; started: number } | null;
+  buildNote: string;
   /** What this project's chain is doing now. */
   busy: "build" | "download" | null;
   /** A sentence about the last action: a refusal in the daemon's words, or progress. */
@@ -73,7 +75,8 @@ type Detected =
   | { state: "loading" }
   | { state: "error"; message: string; at: number };
 
-const blankRun = (): ProjectRun => ({ build: null, busy: null, note: "", noteTone: "info", downloaded: null });
+const blankRun = (): ProjectRun => ({ build: null, startingBuild: null, buildNote: "",
+  busy: null, note: "", noteTone: "info", downloaded: null });
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -214,7 +217,10 @@ export class VexStore {
     );
     // A build this window ran before a reload: its record comes back.
     const id = this.last[projectId];
-    if (id && !this.run(projectId).build && !this.polling.has(id)) void this.follow(projectId, id, false);
+    const build = this.run(projectId).build;
+    if (id && (!build || (force && build.state === "running")) && !this.polling.has(id)) {
+      void this.follow(projectId, id, false);
+    }
   }
 
   /**
@@ -248,11 +254,23 @@ export class VexStore {
 
   // -- build ---------------------------------------------------------------
 
+  monitoringBuild(projectId: string): boolean {
+    const id = this.run(projectId).build?.id;
+    return !!id && this.polling.has(id);
+  }
+
+  /** Recheck an action whose monitoring ended without a final status. */
+  async refreshBuild(projectId: string): Promise<void> {
+    if (!this.mayAct()) return;
+    const build = this.run(projectId).build;
+    if (build?.state === "running") await this.follow(projectId, build.id, false);
+  }
+
   /** Build, Rebuild or Clean: the owner's click. */
   async build(projectId: string, action: "build" | "rebuild" | "clean"): Promise<void> {
     if (!this.mayAct()) return;
     const r = this.run(projectId);
-    if (r.busy) return;
+    if (r.busy || r.startingBuild || r.build?.state === "running") return;
     this.patchRun(projectId, { busy: "build", note: "", downloaded: null });
     try {
       await this.runBuild(projectId, action);
@@ -264,14 +282,20 @@ export class VexStore {
   /** Start a build and follow it to its end; the record, or null when refused (said). */
   private async runBuild(projectId: string, action: "build" | "rebuild" | "clean",
                          onStarted?: (terminalId: string | null) => void): Promise<BuildView | null> {
+    const requestedAt = Date.now();
+    this.patchRun(projectId, { startingBuild: { action, started: requestedAt }, buildNote: "" });
     let started: { build_id: string; terminal_id: string };
     try {
       started = await api.vexBuild(projectId, action);
     } catch (e: any) {
+      this.patchRun(projectId, { buildNote: e?.message || "the build could not start" });
       this.say(projectId, e?.message || "the build could not start");
       return null;
+    } finally {
+      this.patchRun(projectId, { startingBuild: null });
     }
     if (!isVexId(started?.build_id)) {
+      this.patchRun(projectId, { buildNote: "the daemon answered without a build" });
       this.say(projectId, "the daemon answered without a build");
       return null;
     }
@@ -281,7 +305,7 @@ export class VexStore {
       build: {
         id: started.build_id, project_id: projectId, action, state: "running",
         terminal_id: isVexId(started.terminal_id) ? started.terminal_id : null,
-        exit_code: null, errors: [], bin: null, started: "", ended: null,
+        exit_code: null, errors: [], output: "", bin: null, started: new Date(requestedAt).toISOString(), ended: null,
       },
     });
     if (isVexId(started.terminal_id)) void terminals.showProgram(started.terminal_id);
@@ -293,6 +317,7 @@ export class VexStore {
   private async follow(projectId: string, buildId: string, mine: boolean): Promise<BuildView | null> {
     if (this.polling.has(buildId)) return null;
     this.polling.add(buildId);
+    this.changed();
     const until = Date.now() + BUILD_POLL_MAX_MS;
     try {
       for (;;) {
@@ -301,17 +326,22 @@ export class VexStore {
           b = await api.vexBuildState(buildId);
         } catch (e: any) {
           if (e?.status === 404) {
-            // Forgotten (a daemon restart, or 32 newer builds): not this window's any more.
-            if (!mine) {
+            // Forgotten after a restart or 32 newer builds. Clear a restored
+            // running record too, so it cannot leave the controls locked.
+            if (this.last[projectId] === buildId) {
               const { [projectId]: _gone, ...rest } = this.last;
               this.last = rest;
               saveLast(this.last);
-              return null;
             }
-            this.say(projectId, "The daemon no longer knows this build (did Jarvis restart?)");
+            if (this.run(projectId).build?.id === buildId) {
+              this.patchRun(projectId, { build: null, buildNote: "The daemon no longer knows this build (did Jarvis restart?)" });
+            }
+            if (mine) this.say(projectId, "The daemon no longer knows this build (did Jarvis restart?)");
             return null;
           }
+          this.patchRun(projectId, { buildNote: `Build status unavailable: ${e?.message || "connection failed"}. Retrying…` });
           if (Date.now() > until) {
+            this.patchRun(projectId, { buildNote: `Build status unavailable: ${e?.message || "connection failed"}. Open the terminal to check the action.` });
             this.say(projectId, e?.message || "the build's state could not be read");
             return null;
           }
@@ -319,10 +349,11 @@ export class VexStore {
           continue;
         }
         if (this.run(projectId).build?.id === buildId || mine || !this.run(projectId).build) {
-          this.patchRun(projectId, { build: b });
+          this.patchRun(projectId, { build: b, buildNote: "" });
         }
         if (b.state !== "running") return b;
         if (Date.now() > until) {
+          this.patchRun(projectId, { buildNote: "Status monitoring stopped: the daemon still reports this action running. Open the terminal to check it." });
           this.say(projectId, "The build is still running; its terminal shows how far it got.", "info");
           return null;
         }
@@ -330,6 +361,7 @@ export class VexStore {
       }
     } finally {
       this.polling.delete(buildId);
+      this.changed();
     }
   }
 

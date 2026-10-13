@@ -81,6 +81,8 @@ export interface BuildView {
   terminal_id: string | null;
   exit_code: number | null;
   errors: BuildError[];
+  /** Latest plain-text output, bounded by the daemon; never persisted. */
+  output: string;
   bin: { path: string; size: number; mtime: string } | null;
   started: string;
   ended: string | null;
@@ -168,6 +170,7 @@ export function parseBuild(raw: unknown): BuildView | null {
     terminal_id: isVexId(raw.terminal_id) ? raw.terminal_id : null,
     exit_code: int(raw.exit_code),
     errors: errors.slice(0, 200),
+    output: typeof raw.output === "string" ? raw.output.slice(-16 * 1024) : "",
     bin,
     started: str(raw.started, 64),
     ended: strOrNull(raw.ended, 64),
@@ -317,7 +320,7 @@ export function buildLine(b: BuildView | null): BuildLine {
     .filter(Boolean).join(", ");
   switch (b.state) {
     case "running":
-      return { tone: "busy", text: b.action === "clean" ? "Cleaning…" : "Building…" };
+      return { tone: "busy", text: b.action === "clean" ? "Cleaning…" : b.action === "rebuild" ? "Rebuilding…" : "Building…" };
     case "succeeded":
       if (b.action === "clean") return { tone: "ok", text: "✓ Cleaned" };
       return {
@@ -325,9 +328,10 @@ export function buildLine(b: BuildView | null): BuildLine {
         text: `✓ Built${b.bin ? ` ${b.bin.path} (${size(b.bin.size)})` : ""}${warns ? ` · ${counts}` : ""}`,
       };
     case "timed_out":
-      return { tone: "bad", text: "✗ The build took over 5 minutes and was stopped" };
+      return { tone: "bad", text: `✗ The ${b.action} took over 5 minutes and was stopped` };
     default:
-      return { tone: "bad", text: `✗ Build failed${counts ? `: ${counts}` : ` (exit ${b.exit_code ?? "?"})`}` };
+      return { tone: "bad", text: `✗ ${b.action === "clean" ? "Clean" : b.action === "rebuild" ? "Rebuild" : "Build"} failed`
+        + ` (exit ${b.exit_code ?? "?"})${counts ? `: ${counts}` : ""}` };
   }
 }
 

@@ -1453,6 +1453,10 @@ button.termread { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; white-space
 .vexstate.ok { color: var(--green); }
 .vexstate.bad { color: var(--red); }
 .vexstate.busy { color: var(--accent); }
+.vexspinner { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: vexspin 1s linear infinite; vertical-align: -2px; }
+@keyframes vexspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .vexspinner { animation: none; } }
+.vexoutput { margin: 0; padding: 8px 10px; min-height: 60px; max-height: calc(220px / var(--ui-zoom, 1)); overflow: auto; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .vexerrors { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: calc(40vh / var(--ui-zoom, 1)); overflow-y: auto; }
 .vexerr {
   display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; padding: 3px 6px;

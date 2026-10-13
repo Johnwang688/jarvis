@@ -2270,7 +2270,12 @@ settings parse, or are malformed/PROS so the view can say why; App's
 `stripProject` names the project — a chat pane's conversation's, else the
 pin, else the active chat's), and switching a pane to it **pins** it, so a
 build or download never follows the chat to another robot. Build / Rebuild
-/ Clean show ✓ or the errors list; **an error click opens the file at its
+/ Clean immediately show the action, a spinner and elapsed time. The view
+previews the latest output and diagnostics while running, reports status-read
+errors while retrying, and offers Show terminal for full output. Build records
+keep a bounded output tail in memory after exit; no output is persisted.
+`showProgram` requests a fresh listing so an in-flight list cannot hide a
+new terminal. Actions show ✓ or the errors list; **an error click opens the file at its
 line** (`openAt`, through ED-7's `placeFile`: a drawn File pane on that
 project, else a split beside the view, else a sentence — since the ED-7
 merge never the VEX pane itself; FileTab's `goto` sets the cursor after

@@ -1358,7 +1358,8 @@ export class TermManager {
    */
   async showProgram(id: string): Promise<void> {
     if (!isTerminalId(id)) return;
-    await this.refresh();
+    // A listing already in flight may predate this program's creation.
+    await this.freshList();
     if (this.blocked || !this.rows.some((r) => r.id === id)) return;
     this.claim(id);
     if (this.place.has(id)) {

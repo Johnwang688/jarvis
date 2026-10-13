@@ -1,6 +1,6 @@
 // The VEX store's download chain, on its own (VX-2 delta review): the view's
 // disabled buttons hide these rules, so they are held here without them.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const buildFirst = (sentence = "build/override.bin is older than the sources; Build first, then download") =>
   Object.assign(new Error(sentence), { status: 409, body: { error: sentence, code: "build_first" } });
@@ -52,6 +52,13 @@ vi.mock("../components/Terminal", () => ({
 }));
 
 import { VexStore } from "./vex";
+import { api } from "../api";
+import { terminals } from "../components/Terminal";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   h.downloads.length = 0;
@@ -59,6 +66,99 @@ beforeEach(() => {
   h.download = null;
   h.brain = null;
   h.brainOpened = 0;
+});
+
+describe("build feedback", () => {
+  it("reports clean immediately while its start request waits and ignores repeat clicks", async () => {
+    const store = new VexStore();
+    let release!: (v: { build_id: string; terminal_id: string }) => void;
+    const start = vi.spyOn(api, "vexBuild").mockImplementationOnce(() => new Promise((res) => { release = res; }));
+    const show = vi.spyOn(terminals, "showProgram");
+    const work = store.build("p3", "clean");
+    expect(store.run("p3").startingBuild?.action).toBe("clean");
+    expect(store.run("p3").startingBuild?.started).toBeGreaterThan(0);
+    await store.build("p3", "rebuild");
+    expect(start).toHaveBeenCalledTimes(1);
+    release({ build_id: "00000009", terminal_id: "a0000009" });
+    await work;
+    expect(show).toHaveBeenCalledWith("a0000009");
+    expect(store.run("p3").startingBuild).toBeNull();
+    expect(store.run("p3").busy).toBeNull();
+  });
+
+  it("puts startup failures beside the build controls and allows another try", async () => {
+    const store = new VexStore();
+    vi.spyOn(api, "vexBuild").mockRejectedValueOnce(new Error("make.exe could not start"));
+    await store.build("p3", "rebuild");
+    expect(store.run("p3").buildNote).toBe("make.exe could not start");
+    expect(store.run("p3").startingBuild).toBeNull();
+    expect(store.run("p3").busy).toBeNull();
+    await store.build("p3", "build");
+    expect(store.run("p3").buildNote).toBe("");
+  });
+
+  it("shows failed status reads while retrying, then clears the warning on recovery", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    const state = vi.spyOn(api, "vexBuildState").mockRejectedValueOnce(new Error("Network offline"));
+    const work = store.build("p3", "build");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.run("p3").buildNote).toContain("Network offline");
+    expect(store.run("p3").buildNote).toContain("Retrying");
+    expect(store.run("p3").busy).toBe("build");
+    await vi.advanceTimersByTimeAsync(1200);
+    await work;
+    expect(state).toHaveBeenCalledTimes(2);
+    expect(store.run("p3").buildNote).toBe("");
+    expect(store.run("p3").busy).toBeNull();
+  });
+
+  it("can recheck after monitoring expires and clears forgotten restored builds", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    const running = { id: "00000001", project_id: "p3", action: "build", state: "running" as const,
+      terminal_id: "a0000001", exit_code: null, errors: [], output: "compiling", bin: null, started: "", ended: null };
+    const state = vi.spyOn(api, "vexBuildState").mockResolvedValue(running);
+    const work = store.build("p3", "build");
+    await vi.advanceTimersByTimeAsync(6 * 60_000 + 600);
+    await work;
+    expect(store.run("p3").build?.state).toBe("running");
+    expect(store.monitoringBuild("p3")).toBe(false);
+    state.mockResolvedValueOnce({ ...running, state: "succeeded", exit_code: 0 });
+    await store.refreshBuild("p3");
+    expect(store.run("p3").build?.state).toBe("succeeded");
+
+    // A later build expires too, then is forgotten by a daemon restart.
+    state.mockResolvedValue({ ...running, id: "00000002", action: "clean" });
+    const second = store.build("p3", "clean");
+    await vi.advanceTimersByTimeAsync(6 * 60_000 + 600);
+    await second;
+    state.mockRejectedValueOnce(Object.assign(new Error("build not found"), { status: 404 }));
+    await store.refreshBuild("p3");
+    expect(store.run("p3").build).toBeNull();
+    expect(store.run("p3").buildNote).toMatch(/no longer knows/);
+    expect(store.monitoringBuild("p3")).toBe(false);
+    state.mockResolvedValueOnce({ ...running, id: "00000003", state: "succeeded", exit_code: 0 });
+    await store.build("p3", "rebuild");
+    expect(store.run("p3").build?.state).toBe("succeeded");
+  });
+
+  it("resumes expired monitoring on focus refresh", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    const running = { id: "00000001", project_id: "p3", action: "build", state: "running" as const,
+      terminal_id: "a0000001", exit_code: null, errors: [], output: "", bin: null, started: "", ended: null };
+    const state = vi.spyOn(api, "vexBuildState").mockResolvedValue(running);
+    await store.refreshStatus();
+    const work = store.build("p3", "build");
+    await vi.advanceTimersByTimeAsync(6 * 60_000 + 600);
+    await work;
+    state.mockResolvedValueOnce({ ...running, state: "succeeded", exit_code: 0 });
+    store.want("p3", true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.run("p3").build?.state).toBe("succeeded");
+    expect(store.monitoringBuild("p3")).toBe(false);
+  });
 });
 
 describe("one download chain per window (review M1), held by the store itself", () => {

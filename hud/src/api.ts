@@ -280,7 +280,7 @@ export const api = {
     req<{ build_id: string; terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/build`,
       json({ action })),
   vexBuildState: (buildId: string) =>
-    req<unknown>(`/vex/builds/${encodeURIComponent(buildId)}`).then((r) => {
+    req<unknown>(`/vex/builds/${encodeURIComponent(buildId)}`, { signal: AbortSignal.timeout(10_000) }).then((r) => {
       const b = parseBuild(r);
       if (!b) throw new ApiError(500, "the daemon answered without a build");
       return b;

@@ -23,8 +23,9 @@
 //     text: markup in them is characters.
 //   - With no `vex.json`, the view says the one command to run.
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { vex } from "../state/vex";
+import { terminals } from "./Terminal";
 import {
   SETUP_COMMAND, SLOTS, buildLine, chainCancellable, chainLine, defaultName, downloadLabel, errorTarget, errorWhere,
   isExplicitClick, nameRefusal, setupNote, type BuildError, type Detection,
@@ -200,34 +201,88 @@ function BuildSection(props: {
 }) {
   const { d, pid, blocked } = props;
   const run = vex.run(pid);
+  const active = !!run.startingBuild || run.build?.state === "running";
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
   if (d.language !== "cpp") {
     return <section className="vexsec"><h4>Build</h4><div className="muted small">A Python project has nothing to build.</div></section>;
   }
-  const off = blocked || !props.configured || !d.builds || !!run.busy;
-  const line = buildLine(run.build);
-  const errors = run.build && run.build.state !== "running" ? run.build.errors : [];
+  const off = blocked || !props.configured || !d.builds || !!run.busy || active;
+  const action = run.startingBuild?.action ?? (active ? run.build?.action : null);
+  const line = run.startingBuild
+    ? { tone: "busy", text: `Starting ${run.startingBuild.action}…` } : buildLine(run.build);
+  const errors = run.startingBuild ? [] : run.build?.errors ?? [];
+  const started = run.startingBuild?.started ?? Date.parse(run.build?.started ?? "");
+  const ended = active ? now : Date.parse(run.build?.ended ?? "");
+  const seconds = Number.isFinite(started) && Number.isFinite(ended)
+    ? Math.max(0, Math.floor((ended - started) / 1000)) : null;
+  const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const build = run.startingBuild ? null : run.build;
   return (
-    <section className="vexsec" data-testid="vex-build">
+    <section className="vexsec" data-testid="vex-build" aria-busy={active}>
       <h4>Build</h4>
       <div className="vexrow">
         <button type="button" data-testid="vex-build-btn" disabled={off} onClick={() => void vex.build(pid, "build")}>
-          {run.busy === "build" ? "Building…" : "Build"}
+          {action === "build" ? "Building…" : "Build"}
         </button>
         <button type="button" data-testid="vex-rebuild-btn" disabled={off} onClick={() => void vex.build(pid, "rebuild")}>
-          Rebuild
+          {action === "rebuild" ? "Rebuilding…" : "Rebuild"}
         </button>
         <button type="button" data-testid="vex-clean-btn" disabled={off} onClick={() => void vex.build(pid, "clean")}>
-          Clean
+          {action === "clean" ? "Cleaning…" : "Clean"}
         </button>
         <span className={"vexstate " + line.tone} data-testid="vex-build-state"
-              data-state={run.build?.state ?? "none"}>{line.text}</span>
+              role="status" data-state={run.startingBuild ? "starting" : run.build?.state ?? "none"}>
+          {active ? <span className="vexspinner" aria-hidden="true" /> : null}{line.text}
+        </span>
+        {elapsed ? <span className="muted small" data-testid="vex-build-elapsed">{elapsed}</span> : null}
+        {build?.terminal_id ? (
+          <button type="button" className="quiet" data-testid="vex-build-output-btn" disabled={blocked}
+                  onClick={() => void terminals.showProgram(build.terminal_id!)}>Show terminal</button>
+        ) : null}
+        {build?.state === "running" && !vex.monitoringBuild(pid) ? (
+          <button type="button" className="quiet" data-testid="vex-build-recheck" disabled={blocked}
+                  onClick={() => void vex.refreshBuild(pid)}>Check status</button>
+        ) : null}
       </div>
+      {run.buildNote ? <div className="err small" role="alert" data-testid="vex-build-note">{run.buildNote}</div> : null}
+      {active && !build?.output ? (
+        <div className="muted small" data-testid="vex-build-waiting">
+          {run.startingBuild ? "Waiting for the build tools to start…"
+            : "Waiting for tool output. This action is stopped automatically after 5 minutes."}
+        </div>
+      ) : null}
+      {build?.output ? <BuildOutput output={build.output} /> : null}
+      {build && !active && !build.output && build.state !== "succeeded" ? (
+        <div className="muted small">No output preview is available. Open the terminal for full output.</div>
+      ) : null}
       {errors.length ? (
         <ul className="vexerrors" data-testid="vex-errors">
           {errors.map((e, i) => <ErrorRow key={i} e={e} i={i} blocked={blocked} onOpen={props.onOpenError} />)}
         </ul>
       ) : null}
     </section>
+  );
+}
+
+function BuildOutput(props: { output: string }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const following = useRef(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (el && following.current) el.scrollTop = el.scrollHeight;
+  }, [props.output]);
+  return (
+    <pre ref={ref} className="vexoutput" data-testid="vex-build-output" aria-label="Build output" tabIndex={0}
+         onScroll={() => {
+           const el = ref.current;
+           if (el) following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+         }}>{props.output}</pre>
   );
 }
 
