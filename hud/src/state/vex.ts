@@ -217,7 +217,10 @@ export class VexStore {
     );
     // A build this window ran before a reload: its record comes back.
     const id = this.last[projectId];
-    if (id && !this.run(projectId).build && !this.polling.has(id)) void this.follow(projectId, id, false);
+    const build = this.run(projectId).build;
+    if (id && (!build || (force && build.state === "running")) && !this.polling.has(id)) {
+      void this.follow(projectId, id, false);
+    }
   }
 
   /**
@@ -250,6 +253,18 @@ export class VexStore {
   }
 
   // -- build ---------------------------------------------------------------
+
+  monitoringBuild(projectId: string): boolean {
+    const id = this.run(projectId).build?.id;
+    return !!id && this.polling.has(id);
+  }
+
+  /** Recheck an action whose monitoring ended without a final status. */
+  async refreshBuild(projectId: string): Promise<void> {
+    if (!this.mayAct()) return;
+    const build = this.run(projectId).build;
+    if (build?.state === "running") await this.follow(projectId, build.id, false);
+  }
 
   /** Build, Rebuild or Clean: the owner's click. */
   async build(projectId: string, action: "build" | "rebuild" | "clean"): Promise<void> {
@@ -302,6 +317,7 @@ export class VexStore {
   private async follow(projectId: string, buildId: string, mine: boolean): Promise<BuildView | null> {
     if (this.polling.has(buildId)) return null;
     this.polling.add(buildId);
+    this.changed();
     const until = Date.now() + BUILD_POLL_MAX_MS;
     try {
       for (;;) {
@@ -310,15 +326,17 @@ export class VexStore {
           b = await api.vexBuildState(buildId);
         } catch (e: any) {
           if (e?.status === 404) {
-            // Forgotten (a daemon restart, or 32 newer builds): not this window's any more.
-            if (!mine) {
+            // Forgotten after a restart or 32 newer builds. Clear a restored
+            // running record too, so it cannot leave the controls locked.
+            if (this.last[projectId] === buildId) {
               const { [projectId]: _gone, ...rest } = this.last;
               this.last = rest;
               saveLast(this.last);
-              return null;
             }
-            this.say(projectId, "The daemon no longer knows this build (did Jarvis restart?)");
-            this.patchRun(projectId, { build: null, buildNote: "The daemon no longer knows this build (did Jarvis restart?)" });
+            if (this.run(projectId).build?.id === buildId) {
+              this.patchRun(projectId, { build: null, buildNote: "The daemon no longer knows this build (did Jarvis restart?)" });
+            }
+            if (mine) this.say(projectId, "The daemon no longer knows this build (did Jarvis restart?)");
             return null;
           }
           this.patchRun(projectId, { buildNote: `Build status unavailable: ${e?.message || "connection failed"}. Retrying…` });
@@ -343,6 +361,7 @@ export class VexStore {
       }
     } finally {
       this.polling.delete(buildId);
+      this.changed();
     }
   }
 

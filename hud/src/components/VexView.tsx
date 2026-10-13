@@ -245,6 +245,10 @@ function BuildSection(props: {
           <button type="button" className="quiet" data-testid="vex-build-output-btn" disabled={blocked}
                   onClick={() => void terminals.showProgram(build.terminal_id!)}>Show terminal</button>
         ) : null}
+        {build?.state === "running" && !vex.monitoringBuild(pid) ? (
+          <button type="button" className="quiet" data-testid="vex-build-recheck" disabled={blocked}
+                  onClick={() => void vex.refreshBuild(pid)}>Check status</button>
+        ) : null}
       </div>
       {run.buildNote ? <div className="err small" role="alert" data-testid="vex-build-note">{run.buildNote}</div> : null}
       {active && !build?.output ? (
@@ -255,7 +259,7 @@ function BuildSection(props: {
       ) : null}
       {build?.output ? <BuildOutput output={build.output} /> : null}
       {build && !active && !build.output && build.state !== "succeeded" ? (
-        <div className="err small">The tool exited without printing any output. Check its exit code above.</div>
+        <div className="muted small">No output preview is available. Open the terminal for full output.</div>
       ) : null}
       {errors.length ? (
         <ul className="vexerrors" data-testid="vex-errors">

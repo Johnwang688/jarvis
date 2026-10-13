@@ -1623,6 +1623,9 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   the latest output and diagnostics, and status-read errors while retrying.
   Show terminal reopens the full output. A fresh terminal listing after
   creation prevents a listing already in flight from hiding the new terminal.
+  If monitoring stops without a final status, Check status or a focus refresh
+  resumes it. A forgotten build record clears the stale running state so the
+  controls become available again.
 - Download: `POST …/vex/download {slot, name}` **only from the Download
   button, on a trusted pointer click whose `detail` is exactly 1** (a double
   click is one download). **One chain per window**: no second download, for
