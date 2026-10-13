@@ -3375,6 +3375,13 @@ def third_delta_review_75_checks() -> None:
         assert started.hidden == ("/bin/x y",) and "/bin/x y" in started.strings
         assert rules.starts(["systemd-run", "-p", "ExecStart=", "true"]).hidden == ()
         assert rules.starts(["systemd-run", "-p", "Description=x", "true"]).hidden == ()
+        # A line held in a property asks for being hidden, even one that is
+        # ALLOW on its own (systemd-run asks anyway today; this is the reading
+        # of what it starts, which a runner's own verdict does not cover).
+        assert rules._judge_started(["systemd-run", "--user", "-p", "ExecStart=ls", "true"], [],
+                                    0).decision == rules.ASK
+        assert rules._judge_started(["systemd-run", "--user", "-p", "Description=x", "true"], [],
+                                    0).decision == rules.ALLOW
         # Anything else in one is asked, and no entry for what the unit
         # starts covers it.
         for prop in EXEC_PROPS + ("ExecSearchPath",):
