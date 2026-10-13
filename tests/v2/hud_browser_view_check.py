@@ -251,8 +251,10 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         host=H.BrowserHost();host._tabs={str(i):SimpleNamespace(page=object()) for i in range(3)}
         host._look_reserved={"look-fixture"}
         page=object()
+        instance=H._Instance(H.PRIVATE,Path('/synthetic/private'),Mock(),Mock(),generation=1)
+        host._instances[H.PRIVATE]=instance
         with patch.object(config,"BROWSER_TAB_CAP",4),patch.object(host,"_refuse_popup",new=AsyncMock()) as refuse,patch.object(H,"_Tab",side_effect=AssertionError("adoption attempted beyond reserved cap")):
-            self.assertIsNone(host._adopt(SimpleNamespace(profile=H.PRIVATE),page,None))
+            self.assertIsNone(host._adopt(instance,page,None))
             await asyncio.sleep(0);refuse.assert_awaited_once_with(page)
         host=SimpleNamespace(_launching={},_look_reserved=set(),_closing_contexts=set(),_tabs={"a":object()},
             _tab_cap=lambda:1,_instance=AsyncMock())

@@ -68,8 +68,8 @@ class BrowserSound:
         return audio.launch_audio(args, env, bool(authorized), available)
 
     def clear(self, profile):
-        self._recoveries.pop(profile, None)
         with self._lock:
+            self._recoveries.pop(profile, None)
             if profile not in self._requests:
                 return
             self._requests.discard(profile)
@@ -106,8 +106,8 @@ class BrowserSound:
             self._generation += 1
             generation = self._generation
             self._available = available
+            self._recoveries[profile] = (instance, instance.generation, generation)
         self.host.activity.desired(generation)
-        self._recoveries[profile] = (instance, instance.generation, generation)
         # Keep the failed identity visible until a real replacement commits.
         # The new desired generation admits one explicit recovery attempt.
         self.wake()
@@ -159,15 +159,22 @@ class BrowserSound:
             with self._lock:
                 self._queued = False
 
+    def recovery(self, instance):
+        with self._lock:
+            recovery = self._recoveries.get(instance.profile)
+            if (recovery is not None and recovery[0] is instance
+                    and recovery[1] == instance.generation):
+                return recovery
+        return None
+
     def recovery_current(self, instance):
-        recovery = self._recoveries.get(instance.profile)
-        return (recovery is not None and recovery[0] is instance
-                and recovery[1] == instance.generation)
+        return self.recovery(instance) is not None
 
     def recovery_committed(self, instance, generation):
-        if self.recovery_current(instance):
-            recovery = self._recoveries[instance.profile]
-            if recovery[2] <= generation:
+        with self._lock:
+            recovery = self._recoveries.get(instance.profile)
+            if (recovery is not None and recovery[0] is instance
+                    and recovery[1] == instance.generation and recovery[2] <= generation):
                 self._recoveries.pop(instance.profile, None)
 
     def _reconcile(self):
@@ -274,7 +281,8 @@ class BrowserSound:
         instance = self.host._instances.get(profile)
         if instance is not None:
             generation = self.preference()[1]
-            self._recoveries[profile] = (instance, instance.generation, generation)
+            with self._lock:
+                self._recoveries[profile] = (instance, instance.generation, generation)
             self.restarts.consider(instance, generation)
         return {"tab_id": tab_id, "retrying": True}
 

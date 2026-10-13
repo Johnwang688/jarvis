@@ -34,7 +34,8 @@ class SoundRestarts:
             if descriptor.profile == profile:
                 self.cancel_tab(descriptor.tab_id)
         self.failed.pop(profile, None)
-        self.sound._recoveries.pop(profile, None)
+        with self.sound._lock:
+            self.sound._recoveries.pop(profile, None)
 
     def consider(self, instance, generation):
         profile = instance.profile
@@ -52,8 +53,8 @@ class SoundRestarts:
             if not done.cancelled():
                 done.exception()
             current = self.host._instances.get(profile)
-            if current is not None and self.sound.recovery_current(current):
-                recovery = self.sound._recoveries[profile]
+            recovery = self.sound.recovery(current) if current is not None else None
+            if recovery is not None:
                 if recovery[2] != generation:
                     self.sound.wake()
             self.sound.publish()
@@ -234,7 +235,8 @@ class SoundRestarts:
             else:
                 await host._quietly(replacement.context.close())
         # Preserve a bounded failed status/Retry identity without a live page.
-        recovery = self.sound._recoveries.get(old.profile)
+        with self.sound._lock:
+            recovery = self.sound._recoveries.get(old.profile)
         pending = (recovery is not None and recovery[2] > generation
                    and (recovery[0] is old or recovery[0] is replacement)
                    and recovery[1] == recovery[0].generation)
@@ -247,13 +249,15 @@ class SoundRestarts:
             host._instances[old.profile] = old
             host.activity.opened(old.profile, old.generation)
             self.failed[old.profile] = (old, generation)
-            if pending:
-                self.sound._recoveries[old.profile] = (old, old.generation, recovery[2])
+            with self.sound._lock:
+                if pending and self.sound._recoveries.get(old.profile) is recovery:
+                    self.sound._recoveries[old.profile] = (old, old.generation, recovery[2])
 
     async def settle(self):
         self.descriptors.clear()
         self.failed.clear()
-        self.sound._recoveries.clear()
+        with self.sound._lock:
+            self.sound._recoveries.clear()
         tasks = list(self.tasks.values())
         for task in tasks:
             if not task.cancelling():

@@ -199,6 +199,31 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sound._recoveries,{})
         self.assertNotIn(self.profile,self.sound.restarts.failed)
 
+    async def test_master_off_during_failed_transfer_cannot_revive_recovery_marker(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.host._loop=asyncio.get_running_loop()
+        entered=asyncio.Event();release=asyncio.Event()
+        async def goto(*args,**kwargs):
+            entered.set();await release.wait();return {'loaded':False}
+        self.host._goto=goto
+        self.sound.restarts.consider(self.old,self.generation)
+        await entered.wait();await self.sound.change(old.id,True)
+        opened=self.host.activity.opened
+        def master_off(profile,generation,*args):
+            result=opened(profile,generation,*args)
+            if self.host._instances.get(profile) is self.old:
+                self.host._settings.update(sound=False);self.sound.sync()
+            return result
+        self.host.activity.opened=master_off
+        first=self.sound.restarts.tasks[self.profile]
+        release.set();await first
+        self.assertEqual(self.sound._recoveries,{})
+        for _ in range(8):await asyncio.sleep(0)
+        self.assertEqual(self.sound._recoveries,{})
+        self.assertFalse(self.sound.preference(self.profile)[0])
+        self.assertEqual(self.host._launch.await_count,1)
+        self.assertEqual(self.sound.instance_status(self.host._instances[self.profile])['phase'],'failed')
+
     async def test_other_profile_owner_gesture_cannot_retry_failed_profile(self):
         old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
         self.host._goto=AsyncMock(return_value={'loaded':False})
