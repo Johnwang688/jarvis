@@ -347,3 +347,16 @@ These come before the Browser work, in this order. Each starts as soon as an age
   - **Decision for you: compaction defaults to 90k, not 100k.** Inside one long turn the context can grow past the threshold before it can be compacted, and 100k sits right on the price step. Say if you want exactly 100k; `JARVIS_COMPACT_AT_TOKENS` sets it either way.
   - **Reasoning:** a live 3-step tool turn on Haiku at your `xhigh` setting ran cleanly.
   - **Next:** Codex is building the fix round. It goes through a quick review and a sweep, then merges. Deploys still wait for the clean checkout.
+- **~22:35: saved for Wednesday** (`docs/plans/2026-10-12-checkpoint.md`; also on GitHub branch `checkpoint/2026-10-12`).
+  - **Git for Claude and Codex chats** is the first Wednesday item.
+    - Claude chats can already do it.
+    - Codex is blocked by its sandbox's read-only `.git`. The fix is measured and half-built on `feat/codex-git-write`.
+    - The wiring edit was refused by Claude Code's safety check, so it waits on your OK.
+  - **#86** has had two fix rounds and is pushed (759b8d4).
+    - Images are safe.
+    - Long image-heavy turns still need a fourth cache breakpoint. Not merged yet.
+  - **The Codex chat's title patch** (one line, scrolling on hover) is saved out of `/tmp`.
+  - **Deploying main a2e1103** (#75, #84, #85) once your running Codex task turn ends.
+- **~22:30: deployed now, at your request.** Main a2e1103 (#75, #84, #85) is live, and all three providers are ok.
+  - **Press Ctrl+R.**
+  - The forced restart cut off your Codex schoolwork task's running turn (thread 2531b2e0). It may need resuming.

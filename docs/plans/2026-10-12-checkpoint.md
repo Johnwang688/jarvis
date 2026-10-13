@@ -30,12 +30,19 @@ points here.
 - #84, TC-1, the daemon half of tool calls in the transcript;
 - #85, VEX build progress, from the owner's other session.
 
-A background job waits for the running chat turn to end, then runs `jarvis hud rebuild --pull --restart`. Its log is
-`~/.cache/jarvis-lead/deploy-2210.log`, and the result is in section 1a.
+Deployed; the log is `~/.cache/jarvis-lead/deploy-now.log` and the result is in section 1a.
 
 ### 1a. Deploy result
 
-_(filled in when the deploy finishes)_
+**Deployed at ~22:30 at the owner's request** ("can you deploy now?"), forced over one running turn.
+- **What was cut off:** a Codex task worker on the schoolwork report, thread 2531b2e0. Check that task on Wednesday;
+  it may need resuming.
+- **What is live:**
+  - HUD build `20261013T033040287457Z-d7f77ae7123e`, from **a2e1103**, `installed`;
+  - Claude, Codex and the fast path all ok (the fast path on `anthropic/claude-haiku-5.5`).
+- **For the owner:** press Ctrl+R.
+
+The section 5 step "check that tonight's deploy took" is done.
 
 ## 2. Saved half-built work (nothing is lost)
 
