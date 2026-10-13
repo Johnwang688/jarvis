@@ -70,7 +70,7 @@ ON = "allow-scripts allow-forms allow-same-origin"
 # Every console message the page writes, (type, text): the frame guard's
 # sections read it for React errors and for its own one line.
 CONSOLE: list[tuple[str, str]] = []
-FRAME = _pane(2, '[data-testid="browser-frame"]')
+FRAME = _pane(2, '[data-browser-page][aria-hidden="false"] [data-testid="browser-frame"]')
 KEEP = _pane(2, '[data-testid="browser-keep-origin"]')
 REFUSED = _pane(2, '[data-testid="browser-refused"]')
 
@@ -89,6 +89,7 @@ def browser_checks(browser, mock, base, check, until, guard, init_script):
         page.on("console", lambda m: CONSOLE.append((m.type, m.text)))
         for section in (_port_checks, _keep_checks, _stored_checks, _hardened_checks, _card_checks,
                         _workshop_hijack_checks, _served_under_checks, _split_checks, _rename_checks,
+                        _tabs_checks, _tabs_ports_checks, _tabs_frames_checks, _tabs_guard_checks,
                         _guard_mount_checks, _guard_timer_checks, _guard_hidden_checks, _guard_card_checks,
                         _guard_frame_to_frame_checks, _guard_parked_pointer_checks, _guard_gesture_checks,
                         _guard_reload_checks, _guard_refocus_checks, _guard_giveback_checks, _guard_tab_checks,
@@ -486,7 +487,7 @@ INPUT1 = _pane(1, '[data-testid="input"]')
 STOLEN = _pane(2, '[data-testid="browser-stolen"]')
 RELOAD = _pane(2, '[data-testid="browser-stolen-reload"]')
 SHIELD = _pane(2, '[data-testid="browser-shield"]')
-FRAME3 = _pane(3, '[data-testid="browser-frame"]')
+FRAME3 = _pane(3, '[data-browser-page][aria-hidden="false"] [data-testid="browser-frame"]')
 STOLEN3 = _pane(3, '[data-testid="browser-stolen"]')
 
 
@@ -497,6 +498,11 @@ def _focus_url(mock, mode: str, **q) -> str:
 
 def _letters(n: int, start: int = 0) -> str:
     return "".join(chr(97 + (start + i) % 26) for i in range(n))
+
+
+def _frame_key(page, sel):
+    loc = page.locator(sel)
+    return loc.first.get_attribute("data-browser-frame") if loc.count() else "missing-frame"
 
 
 def _active_frame(page) -> str | None:
@@ -704,8 +710,8 @@ def _guard_frame_to_frame_checks(page, mock, check, until):
     box.fill("")
     x, y = _centre(page, FRAME)
     page.mouse.click(x, y)
-    until(lambda: _active_frame(page) == "2:0", timeout=3)
-    check("setup: a click put the keyboard in the page in pane 2", _active_frame(page) == "2:0", str(_active_frame(page)))
+    until(lambda: _active_frame(page) == _frame_key(page, FRAME), timeout=3)
+    check("setup: a click put the keyboard in the page in pane 2", _active_frame(page) == _frame_key(page, FRAME), str(_active_frame(page)))
     page.keyboard.type("ab", delay=30)
     until(lambda: len(mock.dev_keys) - keys >= 2, timeout=3)
     check("setup: that page gets the owner's keys", len(mock.dev_keys) - keys == 2
@@ -776,7 +782,7 @@ def _click_into(page, until, sel: str = None) -> bool:
     x, y = _centre(page, sel or FRAME)
     page.mouse.move(x - 10, y)
     page.mouse.click(x, y)
-    return bool(until(lambda: _active_frame(page) == ("2:0" if sel in (None, FRAME) else "3:0"), timeout=3))
+    return bool(until(lambda: _active_frame(page) == (_frame_key(page, FRAME) if sel in (None, FRAME) else _frame_key(page, FRAME3)), timeout=3))
 
 
 def _guard_refocus_checks(page, mock, check, until):
@@ -821,7 +827,7 @@ def _guard_giveback_checks(page, mock, check, until):
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     page.wait_for_timeout(200)
-    check("setup: the card gave page A the keyboard back", _active_frame(page) == "2:0", str(_active_frame(page)))
+    check("setup: the card gave page A the keyboard back", _active_frame(page) == _frame_key(page, FRAME), str(_active_frame(page)))
     keys = len(mock.dev_keys)
     _grab(page, FRAME3, 600)
     page.wait_for_timeout(900)
@@ -894,7 +900,7 @@ def _guard_tab_checks(page, mock, check, until):
         page.wait_for_timeout(40)
         if _active_frame(page):
             break
-    check("setup: a Tab put the keyboard in page A", _active_frame(page) == "2:0", str(_active_frame(page)))
+    check("setup: a Tab put the keyboard in page A", _active_frame(page) == _frame_key(page, FRAME), str(_active_frame(page)))
     keys = len(mock.dev_keys)
     _grab(page, FRAME3, 30)
     page.wait_for_timeout(250)
@@ -940,11 +946,11 @@ def _guard_typing_pointer_checks(page, mock, check, until):
     x, y = _centre(page, FRAME)
     page.mouse.move(x - 10, y)
     page.mouse.click(x, y)
-    until(lambda: _active_frame(page) == "2:0", timeout=3)
+    until(lambda: _active_frame(page) == _frame_key(page, FRAME), timeout=3)
     page.keyboard.type("xyz", delay=40)
     until(lambda: len(mock.dev_keys) - keys >= 3, timeout=3)
     check("M2: from the chat box, a click puts the keyboard in the page and the keys typed after reach it",
-          _active_frame(page) == "2:0" and len(mock.dev_keys) - keys == 3 and box.input_value() == "ab"
+          _active_frame(page) == _frame_key(page, FRAME) and len(mock.dev_keys) - keys == 3 and box.input_value() == "ab"
           and _count(page, STOLEN) == 0, f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
 
 
@@ -1030,12 +1036,12 @@ def _guard_gesture_checks(page, mock, check, until):
     keys = len(mock.dev_keys)
     x, y = _centre(page, FRAME)
     page.mouse.click(x, y)
-    until(lambda: _active_frame(page) == "2:0", timeout=3)
+    until(lambda: _active_frame(page) == _frame_key(page, FRAME), timeout=3)
     page.keyboard.type("xyz", delay=30)
     until(lambda: len(mock.dev_keys) - keys >= 3, timeout=3)
     page.wait_for_timeout(300)
     check("gesture: clicking into a page gives it the keyboard, and keys reach it",
-          _active_frame(page) == "2:0" and _count(page, FRAME) == 1 and _count(page, STOLEN) == 0
+          _active_frame(page) == _frame_key(page, FRAME) and _count(page, FRAME) == 1 and _count(page, STOLEN) == 0
           and len(mock.dev_keys) - keys == 3, f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
 
     # A card comes up while the keyboard is in the page: the card takes it;
@@ -1048,7 +1054,7 @@ def _guard_gesture_checks(page, mock, check, until):
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     page.wait_for_timeout(300)
     check("gesture: a card takes the keyboard from a page the owner clicked into, and gives it back after",
-          took == "approval-card" and _active_frame(page) == "2:0" and _count(page, FRAME) == 1
+          took == "approval-card" and _active_frame(page) == _frame_key(page, FRAME) and _count(page, FRAME) == 1
           and _count(page, STOLEN) == 0, f"card={took} after={_active_frame(page)} stolen={_count(page, STOLEN)}")
 
     # (Playwright's own `locator(frame).click()` checks the hit target before
@@ -1067,7 +1073,7 @@ def _guard_gesture_checks(page, mock, check, until):
     page.keyboard.type("tt", delay=30)
     until(lambda: len(mock.dev_keys) - keys >= 2, timeout=3)
     check("gesture: Tab from the URL box into the page keeps it, and keys reach it",
-          _active_frame(page) == "2:0" and _count(page, STOLEN) == 0 and len(mock.dev_keys) - keys == 2,
+          _active_frame(page) == _frame_key(page, FRAME) and _count(page, STOLEN) == 0 and len(mock.dev_keys) - keys == 2,
           f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
 
     # The pointer over a page that grabs focus on a timer (no text control
@@ -1078,13 +1084,13 @@ def _guard_gesture_checks(page, mock, check, until):
     x, y = _centre(page, FRAME)
     page.mouse.move(x - 20, y - 20)
     page.mouse.move(x, y)
-    until(lambda: _active_frame(page) == "2:0", timeout=4)
+    until(lambda: _active_frame(page) == _frame_key(page, FRAME), timeout=4)
     page.wait_for_timeout(600)
     keys = len(mock.dev_keys)
     page.keyboard.type("pq", delay=30)
     until(lambda: len(mock.dev_keys) - keys >= 2, timeout=3)
     check("gesture: with the pointer over it, a page that focuses itself keeps the keyboard",
-          _active_frame(page) == "2:0" and _count(page, FRAME) == 1 and _count(page, STOLEN) == 0
+          _active_frame(page) == _frame_key(page, FRAME) and _count(page, FRAME) == 1 and _count(page, STOLEN) == 0
           and len(mock.dev_keys) - keys == 2, f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
 
     # The owner's own load: Enter in the URL box on a page that focuses on mount.
@@ -1093,10 +1099,10 @@ def _guard_gesture_checks(page, mock, check, until):
     url_box.click()
     url_box.fill(_focus_url(mock, "focus-mount"))
     url_box.press("Enter")
-    until(lambda: _active_frame(page) == "2:0", timeout=4)
+    until(lambda: _active_frame(page) == _frame_key(page, FRAME), timeout=4)
     page.wait_for_timeout(300)
     check("gesture: a page the owner loaded with Enter may focus itself as it loads",
-          _active_frame(page) == "2:0" and _count(page, FRAME) == 1 and _count(page, STOLEN) == 0)
+          _active_frame(page) == _frame_key(page, FRAME) and _count(page, FRAME) == 1 and _count(page, STOLEN) == 0)
 
 
 def _guard_reload_checks(page, mock, check, until):
@@ -1111,10 +1117,10 @@ def _guard_reload_checks(page, mock, check, until):
     check("R-1: no React error from the removal", _react_errors(con) == [], str(_react_errors(con)[:2]))
     keys = len(mock.dev_keys)
     page.locator(RELOAD).click()
-    until(lambda: _active_frame(page) == "2:0", timeout=4)
+    until(lambda: _active_frame(page) == _frame_key(page, FRAME), timeout=4)
     page.wait_for_timeout(300)
     check("R-1: Reload makes a fresh frame, and the page that focuses on load keeps it this time",
-          _count(page, FRAME) == 1 and _count(page, STOLEN) == 0 and _active_frame(page) == "2:0")
+          _count(page, FRAME) == 1 and _count(page, STOLEN) == 0 and _active_frame(page) == _frame_key(page, FRAME))
     page.keyboard.type("rr", delay=30)
     until(lambda: len(mock.dev_keys) - keys >= 2, timeout=3)
     check("R-1: and the owner's keys reach it", len(mock.dev_keys) - keys == 2, str(mock.dev_keys[keys:]))
@@ -1138,6 +1144,158 @@ def _guard_reload_checks(page, mock, check, until):
     check("R-1: the chat box holds every key", box.input_value() == text, repr(box.input_value()))
     check("R-1: the page's server received none", mock.dev_keys[keys:] == [], str(mock.dev_keys[keys:][:5]))
 
+
+
+# Direct tabs (AO-2): actual iframe retention and the visible controls, not only storage.
+def _tab(page, pane, ident):
+    return page.locator(_pane(pane, f'[data-browser-tab="{ident}"]'))
+
+
+def _tabframe(pane, ident):
+    return _pane(pane, f'[data-browser-page="{ident}"] [data-testid="browser-frame"]')
+
+
+def _tabs_checks(page, mock, check, until):
+    url = _focus_url(mock, "focus-none")
+    tabs = [{"id": "first1", "url": url, "keepOrigin": f"http://127.0.0.1:{mock.dev_port}",
+             "auto": {"kind": "thread", "label": "Project chat"}},
+            {"id": "second", "url": url + "?second=1"}]
+    _setup(page, mock, until, {"browser": {"tabs": tabs, "active": "first1"}})
+    until(lambda: _sandbox(page) == ON, timeout=4)
+    check("AO2: auto-open source is visible chrome", page.locator(_pane(2, '[data-testid="browser-auto"]')).is_visible()
+          and page.locator(_pane(2, '[data-testid="browser-auto"]')).inner_text() == f"Opened for Project chat · 127.0.0.1:{mock.dev_port}")
+    check("AO2: auto-open has a mark", _tab(page, 2, "first1").locator(".browserautomark").count() == 1)
+    _tab(page, 2, "second").click()
+    until(lambda: _src(page) == url + "?second=1", timeout=3)
+    check("AO2: switching tabs carries no origin grant", _sandbox(page) == OFF and not _keep_checked(page))
+    check("AO2: the previous page stays mounted, hidden and inert",
+          page.locator(_tabframe(2, "first1")).count() == 1
+          and page.locator(_pane(2, '[data-browser-page="first1"]')).get_attribute("inert") is not None
+          and not page.locator(_tabframe(2, "first1")).is_visible())
+    _tab(page, 2, "second").press("ArrowLeft")
+    check("AO2: arrows activate the adjacent tab", _tab(page, 2, "first1").get_attribute("aria-selected") == "true")
+    check("AO2: returning to the first tab restores only its own grant", _sandbox(page) == ON)
+    _tab(page, 2, "second").click(button="middle")
+    check("AO2: middle click closes only that tab", page.locator(_pane(2, '[data-testid="browser-tab"]')).count() == 1)
+    _approval(mock, "tabs-card")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    buttons = page.locator(_pane(2, '[data-testid="browser-tabs"] button'))
+    check("AO2: every strip button is disabled under a card", all(buttons.nth(i).is_disabled() for i in range(buttons.count())))
+    check("AO2: the strip is inert under a card", page.locator(_pane(2, '[data-testid="browser-tabs"]')).evaluate("e => !!e.closest('[inert]')"))
+    page.keyboard.press("Escape")
+    body = until(lambda: mock.sent("POST", "/approvals/tabs-card") or None, timeout=4)
+    check("AO2: Escape denies while the strip is inert", bool(body) and body[-1].get("decision") == "deny")
+
+    # A markup/bidi URL is still only text; Direct never borrows document.title.
+    hostile = f"http://localhost:{mock.dev_port}/%E2%80%AE%3Cimg%3E" + "x" * 1700
+    tabs = [{"id": f"tab{i:03}", "url": hostile if i == 0 else ""} for i in range(12)]
+    _setup(page, mock, until, {"browser": {"tabs": tabs, "active": "tab001"}})
+    title = page.title()
+    label = _tab(page, 2, "tab000").inner_text()
+    check("AO2: hostile labels are clean capped React text", len(label) == 40 and "\u202e" not in label
+          and "<img>" in label and _tab(page, 2, "tab000").locator("img").count() == 0 and page.title() == title, repr(label))
+    page.locator(_pane(2, '[data-testid="browser-tab-new"]')).click()
+    check("AO2: plus refuses a thirteenth tab with a sentence",
+          page.locator(_pane(2, '[data-testid="browser-tab"]')).count() == 12
+          and "12 tabs" in page.locator(_pane(2, '[data-testid="browser-full"]')).inner_text())
+    for _ in range(12):
+        page.locator(_pane(2, '[data-testid="browser-tab-close"]')).last.click()
+    check("AO2: closing the last tab leaves Nothing loaded", page.locator(_pane(2, '[data-testid="browser-tab"]')).count() == 0
+          and "Nothing loaded" in page.locator(_pane(2)).inner_text())
+    _boot(page, mock, None, until, reload=True)
+    check("AO2: empty tabs survive reload without mirror resurrection", page.locator(_pane(2, '[data-testid="browser-tab"]')).count() == 0
+          and _ws(page)["ws"]["panes"][1]["browser"] == {"tabs": [], "active": ""})
+    page.locator(_pane(2, '[data-testid="browser-tab-new"]')).click()
+    until(lambda: _active_testid(page) == "browser-url", timeout=2)
+    check("AO2: plus creates a blank tab and focuses its URL box",
+          _active_testid(page) == "browser-url" and page.locator(_pane(2, '[data-testid="browser-tab"]')).count() == 1)
+
+
+def _tabs_ports_checks(page, mock, check, until):
+    good = _focus_url(mock, "focus-none")
+    bad = f"http://localhost:{mock.api_port}/"
+    _setup(page, mock, until, {"browser": {"tabs": [
+        {"id": "good01", "url": good}, {"id": "api001", "url": bad, "keepOrigin": bad.rstrip("/")},
+        {"id": "api002", "url": "http://localhost:8405/"}], "active": "good01"}})
+    until(lambda: _src(page) == good, timeout=3)
+    until(lambda: "keepOrigin" not in _ws(page)["ws"]["panes"][1]["browser"]["tabs"][1], timeout=3)
+    check("AO2: even dormant tabs drop grants for reported control ports",
+          "keepOrigin" not in _ws(page)["ws"]["panes"][1]["browser"]["tabs"][1])
+    for ident in ("api001", "api002"):
+        _tab(page, 2, ident).click()
+        until(lambda: _count(page, REFUSED) == 1, timeout=2)
+        check("AO2: stored " + ident + " is refused on load", _count(page, FRAME) == 0
+              and "API" in page.locator(REFUSED).inner_text() and not mock.api_hits)
+    _tab(page, 2, "good01").click()
+    check("AO2: a refused sibling never stops the other tab", _src(page) == good)
+    # Every save mirrors exactly the active tab for a one-release rollback.
+    spec = _ws(page)["ws"]["panes"][1]
+    check("AO2: canonical tabs retain an active rollback URL", spec["browserUrl"] == good
+          and spec["browser"]["active"] == "good01" and not spec.get("keepOrigin"))
+
+
+def _tabs_frames_checks(page, mock, check, until):
+    panes = [{"view": "browser", "browser": {"tabs": [
+        {"id": f"tab{i:03}", "url": _focus_url(mock, "focus-none", budget=f"{n}-{i}")} for i in range(3)
+    ], "active": "tab000"}} for n in range(1, 5)]
+    page.set_viewport_size({"width": 2400, "height": 1200})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, json.dumps({"preset": "grid4", "focused": 1, "panes": panes}))
+    _boot(page, mock, None, until, reload=True)
+    # Startup creates a chat when every stored pane is non-chat. The owner
+    # explicitly switches that first pane back; its retained Browser tabs stay.
+    if _ws(page)["ws"]["panes"][0]["view"] != "browser":
+        page.locator(_pane(1, '[data-testid="tab-browser"]')).click()
+    for pane in range(1, 5):
+        for i in (1, 2):
+            _tab(page, pane, f"tab{i:03}").click()
+    allframes = '[data-testid="browser-frame"]'
+    until(lambda: page.locator(allframes).count() == 8, timeout=4)
+    keys = page.locator(allframes).evaluate_all("els => els.map(e => e.dataset.browserFrame)")
+    check("AO2: four panes with three visited tabs mount exactly eight frames", len(keys) == 8, str(keys))
+    check("AO2: active pages win the window budget", all(f"{n}:tab002" in keys for n in range(1, 5)), str(keys))
+    check("AO2: each pane keeps at most three live frames", all(sum(k.startswith(f"{n}:") for k in keys) <= 3 for n in range(1, 5)))
+    check("AO2: the oldest background frame was evicted", "1:tab000" not in keys, str(keys))
+    path = "/focus-none?budget=1-0"
+    before = mock.dev_hits.count(path)
+    _tab(page, 1, "tab000").click()
+    until(lambda: mock.dev_hits.count(path) > before, timeout=4)
+    check("AO2: picking an evicted tab loads its URL again", mock.dev_hits.count(path) == before + 1
+          and page.locator(_tabframe(1, "tab000")).count() == 1 and page.locator(allframes).count() == 8)
+    _choose(page, until, "single")
+    check("AO2: hidden panes still count toward the window budget", page.locator(allframes).count() <= 8)
+    _choose(page, until, "grid4")
+
+
+def _tabs_guard_checks(page, mock, check, until):
+    tabs = [{"id": "pageaa", "url": _focus_url(mock, "focus-none", who="TAB-A")},
+            {"id": "pagebb", "url": _focus_url(mock, "focus-none", who="TAB-B")}]
+    _setup(page, mock, until, {"browser": {"tabs": tabs, "active": "pageaa"}})
+    until(lambda: _count(page, _tabframe(2, "pageaa")) == 1, timeout=3)
+    _tab(page, 2, "pagebb").click()
+    until(lambda: _count(page, _tabframe(2, "pagebb")) == 1, timeout=3)
+    _tab(page, 2, "pageaa").click()
+    _grab(page, _tabframe(2, "pageaa"))
+    until(lambda: _active_frame(page) == "2:pageaa", timeout=3)
+    check("AO2: picking an existing tab grants only its exact frame", _active_frame(page) == "2:pageaa"
+          and _count(page, _tabframe(2, "pageaa")) == 1)
+    box = page.locator(INPUT1)
+    box.click()
+    box.fill("kept")
+    keys = len(mock.dev_keys)
+    _grab(page, _tabframe(2, "pagebb"))
+    until(lambda: _count(page, _tabframe(2, "pagebb")) == 0, timeout=3)
+    page.keyboard.type("-typing", delay=30)
+    check("AO2: a background tab taking focus is removed and the chat keeps its keys",
+          _count(page, _tabframe(2, "pagebb")) == 0 and box.input_value() == "kept-typing"
+          and not mock.dev_keys[keys:])
+    _tab(page, 2, "pagebb").click()
+    check("AO2: a stolen tab stays stopped after selecting it", _count(page, FRAME) == 0
+          and page.locator(STOLEN).is_visible())
+    page.locator(RELOAD).click()
+    until(lambda: _count(page, FRAME) == 1, timeout=3)
+    check("AO2: only explicit Reload restores that stolen tab", _count(page, FRAME) == 1
+          and _frame_key(page, FRAME) == "2:pagebb")
 
 def main():
     from playwright.sync_api import sync_playwright

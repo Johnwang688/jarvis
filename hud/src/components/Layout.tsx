@@ -30,7 +30,9 @@ import {
   setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
   unpinProject as unpinProjectOf, setEditors as setEditorsOf,
   type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
-  type WorkspaceFit,
+  type WorkspaceFit, type BrowserTabOptions,
+  addBrowserTab as addBrowserTabOf, closeBrowserTab as closeBrowserTabOf,
+  activateBrowserTab as activateBrowserTabOf, setTabKeepOrigin as setTabKeepOriginOf,
 } from "../lib/workspace";
 import { inTerminal, terminalTakesKey } from "../lib/terminal";
 import { chordSecond, isSaveKey, resetChord } from "../lib/editorkeys";
@@ -66,7 +68,11 @@ export interface LayoutControl {
   setEditors: (pane: PaneNo, projectId: string, tabs: Tabs | null) => void;
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
-  setBrowserUrl: (pane: PaneNo, url: string) => void;
+  setBrowserUrl: (pane: PaneNo, url: string, id?: string) => void;
+  addBrowserTab: (pane: PaneNo, url: string, opts?: BrowserTabOptions) => void;
+  closeBrowserTab: (pane: PaneNo, id: string) => void;
+  activateBrowserTab: (pane: PaneNo, id: string) => void;
+  setTabKeepOrigin: (pane: PaneNo, id: string, origin: string | null) => void;
   /** The file a File or Diff pane has open (null: none), read again when it mounts (WP-G2). */
   setFilePath: (pane: PaneNo, path: string | null) => void;
   /** A Browser pane's "keep its own origin" grant (an origin), or none (WP-E, W-4). */
@@ -223,7 +229,11 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   const unpinProject = useCallback(
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
-  const setBrowserUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setBrowserUrlOf(w, pane, url)), []);
+  const setBrowserUrl = useCallback((pane: PaneNo, url: string, id?: string) => setWs((w) => setBrowserUrlOf(w, pane, url, id)), []);
+  const addBrowserTab = useCallback((pane: PaneNo, url: string, opts?: BrowserTabOptions) => setWs((w) => addBrowserTabOf(w, pane, url, opts)), []);
+  const closeBrowserTab = useCallback((pane: PaneNo, id: string) => setWs((w) => closeBrowserTabOf(w, pane, id)), []);
+  const activateBrowserTab = useCallback((pane: PaneNo, id: string) => setWs((w) => activateBrowserTabOf(w, pane, id)), []);
+  const setTabKeepOrigin = useCallback((pane: PaneNo, id: string, origin: string | null) => setWs((w) => setTabKeepOriginOf(w, pane, id, origin)), []);
   const setFilePath = useCallback(
     (pane: PaneNo, path: string | null) => setWs((w) => setFilePathOf(w, pane, path)), [],
   );
@@ -390,6 +400,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
     setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, setFilePath, setKeepOrigin,
+    addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin,
     setTerminal, forgetTerminal, renameTerminal, setSplit,
     equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
   };

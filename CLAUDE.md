@@ -1758,6 +1758,25 @@ on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
 
+**Direct Browser tabs (AO-2, amendment 2 §E.3).** Browser panes store
+`browser: {tabs, active}`: up to 12 URLs with stable ids and per-tab origin
+grants. Old `browserUrl`/`previewUrl` migrate; saves mirror only the active
+`browserUrl`/`keepOrigin` for one release. Explicit empty tabs stay empty.
+Every tab's grant is rejudged with the serving daemon's ports, dormant tabs
+included; splits copy URLs with fresh ids, never grants or auto-source marks.
+The strip supports arrows, ×, middle-click and a blank + (URL box focused).
+At 12 a sentence refuses another. Terminal **Open in Browser opens a new tab**
+or selects an exact URL already present, keeping the previous page.
+`lib/browserframes.ts` and one App hook retain up to 3 visited frames per pane
+and 8 per window, drawn active tabs first, oldest backgrounds evicted. Hidden
+frames count; never-drawn stored panes do not. An evicted page reloads when
+picked. Each foreground/background iframe still belongs to `FrameHost`,
+guarded by stable `<pane>:<tab-id>`; tab selection grants only that exact
+frame. A stopped tab stays stopped until Reload. Background content is
+hidden/inert, and every strip/control is disabled under a card. Labels are
+cleaned host/path text, capped at 40; auto-source names cap at 60 and appear in
+visible chrome. Remote mode and autonomous placement remain later packages.
+
 **A framed page never takes the keyboard on its own (2026-10-12, R-1, AO-2's
 first half, shipped alone; `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`
 §E.8, §H AO-2; contract in `docs/hud-api.md`).** The gap PR #74's review
@@ -1769,7 +1788,7 @@ hidden`, re-focusing the box and `contentWindow.blur()` do not stop it, a
 `display: none` frame included; **removing the iframe does.** So each
 Browser iframe is made by script in **`FrameHost`** (`useLayoutEffect`,
 never JSX, so a removal never trips React; `data-browser-frame="<pane>:<tab>"`,
-tab 0 until Direct tabs; a fresh frame per load), the decision is pure in
+stable tab id; a fresh frame per load), the decision is pure in
 **`lib/frameguard.ts`**, and **`state/frameguard.ts`** (installed once by
 App, a layout effect) removes a frame that gains focus without the owner's
 gesture, puts focus back **only on the HUD element that lost it to this

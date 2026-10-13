@@ -251,7 +251,7 @@ describe("what each pane shows", () => {
     w = { ...w, panes: w.panes.map((p, i) => (i === 1 ? { ...p, terminalId: "term-b" } : p)) as Workspace["panes"] };
     const after = setView(w, 2, "chat");
     expect(after.panes[1]).toEqual(
-      { view: "chat", projectId: "p2", terminalId: "term-b", browserUrl: "http://localhost:5173/" });
+      { ...w.panes[1], view: "chat", projectId: "p2", terminalId: "term-b", browserUrl: "http://localhost:5173/" });
     expect(after.panes[0]).toBe(w.panes[0]);
     expect(after.focused).toBe(2);
     expect(setView(after, 2, "browser").panes[1].browserUrl).toBe("http://localhost:5173/");
@@ -327,7 +327,8 @@ describe("the rename: Preview is the Browser, File reads as the editor (BR-3a)",
       panes: [{ view: "chat" }, { view: "preview", previewUrl: "http://localhost:5173/app", projectId: "p2" }],
     }));
     expect(w.panes[1]).toEqual({
-      view: "browser", projectId: "p2", terminalId: null, browserUrl: "http://localhost:5173/app" });
+      view: "browser", projectId: "p2", terminalId: null, browserUrl: "http://localhost:5173/app",
+      browser: { tabs: [{ id: "legacy", url: "http://localhost:5173/app" }], active: "legacy" } });
     expect(PANE_VIEWS as readonly string[]).not.toContain("preview");
   });
 
@@ -1306,8 +1307,10 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     expect(copySpec({ ...base, view: "file" })).toEqual({ view: "file", projectId: "p1", terminalId: null });
     expect(copySpec({ ...base, view: "diff" })).toEqual({ view: "diff", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
     // The keep-origin grant is the owner's choice for one pane: never copied (WP-E).
-    expect(copySpec({ ...base, view: "browser" })).toEqual({
-      view: "browser", projectId: "p1", terminalId: null, browserUrl: "http://localhost:5173/x" });
+    const browserCopy = copySpec({ ...base, view: "browser" });
+    expect(browserCopy).toEqual({
+      view: "browser", projectId: "p1", terminalId: null, browserUrl: "http://localhost:5173/x",
+      browser: { tabs: [{ id: browserCopy.browser!.active, url: "http://localhost:5173/x" }], active: browserCopy.browser!.active } });
     // A task view's copy is that task's diff (S-7).
     expect(copySpec({ ...base, view: "task" })).toEqual({ view: "diff", projectId: null, terminalId: null });
     // A chat and a terminal start empty: the window fills them (a compose row, a new terminal).

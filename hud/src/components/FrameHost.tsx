@@ -11,8 +11,8 @@
 // changes: the sandbox's flags apply when a frame navigates, so a change of
 // them reloads the page under the new ones (as the old `key` did), and a load
 // the owner asks for is always a fresh frame the guard can tie their gesture
-// to. Every frame carries `data-browser-frame="<pane>:<tab>"`; until Direct
-// tabs land (AO-2's second half) the tab is 0.
+// to. Every frame carries `data-browser-frame="<pane>:<tab-id>"`, including
+// retained background tabs; closing another tab never changes this identity.
 //
 // Over the frame lies a transparent shield: how the guard learns the owner's
 // pointer is over a page whose events the HUD never sees (state/frameguard.ts).
@@ -23,13 +23,13 @@ import { registerFrame } from "../state/frameguard";
 
 export function FrameHost(props: {
   pane: number;
-  /** The tab index in the pane (0 until Direct tabs). */
-  tab?: number;
+  /** The stable tab id in the pane. */
+  tab?: number | string;
   /** The pane's slot, for the console line a theft writes. */
   slot: number;
   /** The pane is drawn by this render. */
   drawn: boolean;
-  /** This is the pane's active tab (always, until Direct tabs). */
+  /** This is the pane's active tab. */
   active?: boolean;
   src: string;
   sandbox: string;
