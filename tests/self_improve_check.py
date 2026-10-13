@@ -29,6 +29,9 @@ def guard_checks() -> None:
     # The editor's one classifier (ED-2) decides which credentials the HUD
     # serves: frozen like the terminal read guard (review of PR #49).
     assert "jarvis/v2/editor_policy.py" in SELF_PROTECTED
+    # The editor's git and navigation routes too (the owner's answer, 2026-10-12).
+    assert "jarvis/v2/editor_git.py" in SELF_PROTECTED
+    assert "jarvis/v2/editor_nav.py" in SELF_PROTECTED
     for rel in sorted(SELF_PROTECTED):
         out = tools.dispatch(
             "write_file",

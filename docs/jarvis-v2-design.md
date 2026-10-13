@@ -1572,6 +1572,8 @@ personal chat off; the owner should reset that selection.
 
 ## 18. HUD v2 landed (2026-09-16)
 
+AO-1b-i (2026-10-12): `devservers.py` watches tagged Claude/Codex listeners, holds the memory-only registry and owner-only claims/leases; id-only `dev_server` events and `/status.dev_watch` follow amendment 2 §B–§D.
+
 WP12a (Codex) and WP12b (Opus) merged the same day, built against
 `docs/hud-api.md` in parallel and joined at the end: the built HUD served
 by `jarvis daemon2` on 8402 passed all 14 live checks against the real

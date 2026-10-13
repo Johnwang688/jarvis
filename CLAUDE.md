@@ -2058,6 +2058,35 @@ comma-joined CSPs, X-Frame-Options lists and the last `Content-Type`),
 and every guard of the fixes above. A grep pin allows only `daemon`,
 `hud_api`, `terminals` and `devservers` to name the module.
 
+**Dev-server daemon wiring, AO-1b-i (2026-10-12; amendment 2 §B–§D).**
+`devservers.DevServers`, attached to the daemon, calls AO-1a's rules with
+the fd scan's `complete` answer. A lazy `jarvis-devwatch` polls only during
+Claude/Codex turns and their 600-second grace, or for live registry entries;
+`auto_open` comes only through `devservers.enabled()` → `BrowserSettings`.
+A poll exception logs its type once and stops the watcher; only a new turn
+start or settings change can re-arm it. Off means no watcher work. `main()`
+supplies the real proc/cgroup roots;
+embedded/test daemons must explicitly supply fixture roots to watch.
+An initial baseline is old. Transient missing facts retry three polls;
+before publication the same `(pid, start)` must still hold the inode.
+Two bounded loopback probes send only GET /, never follow redirects, and
+retry TLS once after a silent close or alert. Responses are never retained.
+The memory registry de-dups ports for 60 seconds after down and publishes
+only `{kind: dev_server, data: {id, state, source, at}}`; no port or URL,
+no thread-log record, and no Discord delivery. Owner-only `/dev-servers`
+routes return URLs, arbitrate claims for 600 ms, and renew/complete/dismiss
+90-second leases. Only the last owner HUD stream for a window ending lapses
+its claims; the API listener's parameter has no effect. `/status.dev_watch` is counts.
+`Brief.origin_tag` is hidden from repr, exists only in the session run copy,
+and reaches Claude's SDK env and Codex's app-server env, never argv or
+`brief.json`. `_open` writes it only when absent; it previously only
+round-tripped the stored brief, and the tag is never in it.
+Close retains attribution for the grace. Stop ends terminals,
+then the watcher and probes, then the bus. Terminal announcement support is
+in the registry; AO-1b-ii wires its sniffer. `devservers_check` uses fixture
+proc trees, fake CLIs and fixed free loopback ports; `frame_check` walks the
+new family. No tool or Discord verb reaches either dev module.
+
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
 wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
@@ -2965,7 +2994,8 @@ The rules the two reviews left, in one place:
 - The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
   file by name, LOW4); a save's unexpected `OSError` is 500 and a
   `PermissionError` 403, never the dispatcher's 409 (the conflict bar); a tree
-  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED.
+  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED, and so, since
+  the owner's answer (2026-10-12), are `editor_git.py` and `editor_nav.py`.
 - **`Buffers.releasePane` touches only buffers this pane held** (H1): × on any
   pane used to discard every edit no tab held. **A project going away asks
   the panes on it together** (H2, `panesLose`/`panesHolding`): two panes
@@ -3234,9 +3264,13 @@ depth, any case, a Windows-trimmed name both ways — not a name ending
   and each file is read non-blocking, regular files only, capped
   (`_read_regular`; a FIFO named `.env.x` hung the old blocking read). A grep
   line attributed to one is dropped (`is_protected`). **What is taken from a
-  file is the lead's decision (PR #60 review, MED-2)**: `.env` and
-  `.env.local` give every value of 8+ characters, exactly as before; every
-  other credential env file gives only (a) the value of a **secret-named
+  file is the lead's decision (PR #60 review, MED-2)**, and since the
+  owner's answer (2026-10-12) it holds for `.env` and `.env.local` too, which
+  used to give every value of 8+ characters (`terminal_read`'s guard still
+  takes every value from the folder chain's env files, `terminals._env_values`;
+  PR #80's review added joined `*PASSWORD`/`*PASSWD`/`*CREDS` names and the
+  CRED, CREDS and MNEMONIC key parts): every credential env file gives
+  only (a) the value of a **secret-named
   key** — a whole word or an `_`/camelCase part of KEY, TOKEN, SECRET,
   PASS/PASSWD/PASSWORD/PWD, CREDENTIAL, PRIVATE, SALT or DSN (plurals too,
   any case) — at 4+ characters and not a boolean; AUTH, SESSION and COOKIE
