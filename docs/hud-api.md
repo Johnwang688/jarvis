@@ -1494,7 +1494,9 @@ HUD can flag one it cannot match to its own click.
   the project's previous ended build terminal. 5-minute timeout.
 - `GET /vex/builds/{id}` → `{id, project_id, action, state:
   "running"|"succeeded"|"failed"|"timed_out", terminal_id, exit_code, errors,
-  bin, started, ended}`. `errors` are `{file, line, col, severity:
+  bin, started, ended, output}`. `output` is the latest 16 KiB of plain-text
+  terminal output, in memory only, returned while running and after exit.
+  `errors` are updated while running and are `{file, line, col, severity:
   "error"|"warning", message, in_project}` parsed from the build's own
   `file:line:col: error|warning:` lines (notes skipped; a file under the
   project comes back relative, with `/`); `bin` is `{path: "build/<name>.bin",
@@ -1617,7 +1619,10 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
 - Build: `POST …/vex/build {action}`, then `GET /vex/builds/{id}` every 0.6 s
   to its end. The last build id per project is kept in `localStorage`
   (`jarvis.hud.vex.builds`, ids only) so the errors list comes back after a
-  reload.
+  reload. The view immediately shows which action is starting, elapsed time,
+  the latest output and diagnostics, and status-read errors while retrying.
+  Show terminal reopens the full output. A fresh terminal listing after
+  creation prevents a listing already in flight from hiding the new terminal.
 - Download: `POST …/vex/download {slot, name}` **only from the Download
   button, on a trusted pointer click whose `detail` is exactly 1** (a double
   click is one download). **One chain per window**: no second download, for

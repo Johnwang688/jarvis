@@ -109,6 +109,7 @@ INFO_TIMEOUT_S = 10.0
 KILL_GRACE_S = 2.0
 RECORDS_KEPT = 32
 ERRORS_KEPT = 200
+BUILD_OUTPUT_CAP = 16 * 1024
 INFO_TEXT_CAP = 16 * 1024
 INFO_PARSE_CAP = 256 * 1024
 ACTIONS = ("build", "rebuild", "clean")
@@ -1343,6 +1344,7 @@ class Build:
     terminal_id: str | None = None
     exit_code: int | None = None
     errors: list = field(default_factory=list)
+    output: str = ""
     bin: dict | None = None
     ended: str | None = None
     timed_out: bool = False
@@ -1361,7 +1363,7 @@ class Build:
     def view(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "action": self.action,
                 "state": self.state, "terminal_id": self.terminal_id,
-                "exit_code": self.exit_code, "errors": list(self.errors),
+                "exit_code": self.exit_code, "errors": list(self.errors), "output": self.output,
                 "bin": _public(self.bin), "started": self.started, "ended": self.ended}
 
 
@@ -1644,7 +1646,8 @@ class Vex:
         self._stop_program(terminal)
 
     def _build_ended(self, record: Build, terminal) -> None:
-        errors = parse_errors(plain(terminal.history().data), record.root_windows)
+        text = _visible(plain(terminal.history().data))
+        errors = parse_errors(text, record.root_windows)
         found = current = None
         renamed = True
         if record.action != "clean":
@@ -1664,6 +1667,7 @@ class Vex:
             record.terminal_id = terminal.id
             record.exit_code = terminal.exit_code
             record.errors = errors
+            record.output = text[-BUILD_OUTPUT_CAP:]
             record.bin = found
             record.ended = _utcnow()
             record.state = ("timed_out" if record.timed_out
@@ -1703,13 +1707,28 @@ class Vex:
                  record.state, record.exit_code)
 
     def build(self, build_id) -> dict:
+        from .daemon import APIError
+
         if not isinstance(build_id, str) or not _ID.fullmatch(build_id):
             raise _api(400, "build id must be eight lowercase hex characters")
         with self._lock:
             record = self._builds.get(build_id)
             if record is None:
                 raise _api(404, f"build {build_id} not found")
-            return record.view()
+            view = record.view()
+        # Output stays in memory and goes only to the owner's HUD, like the
+        # terminal replay. Don't hold the VEX lock while looking up a terminal:
+        # a fast program can call its exit hook while create_program holds its lock.
+        if view["state"] == "running" and view["terminal_id"]:
+            try:
+                terminal = self.daemon.terminals.get(view["terminal_id"])
+            except APIError:
+                pass  # closed meanwhile; the exit hook keeps the final output
+            else:
+                text = _visible(plain(terminal.history().data))
+                view["output"] = text[-BUILD_OUTPUT_CAP:]
+                view["errors"] = parse_errors(text, record.root_windows)
+        return view
 
     # -- download -----------------------------------------------------------------------
 

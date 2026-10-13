@@ -882,6 +882,29 @@ class Routes(DaemonBase):
 # -- build -----------------------------------------------------------------------------------------------
 
 class Build(DaemonBase):
+    def test_live_output_and_diagnostics_survive_the_terminal_being_replaced(self):
+        (self.folder / "src" / "MARKER").write_text("live-build")
+        (self.folder / "HOLD").write_text("")
+        first = self.build(wait=False)
+        view = eventually(lambda: (r if "OUTPUT-LIVE-BUILD" in r["output"] else None)
+                          if (r := self.owner("GET", f"/vex/builds/{first['build_id']}")) else None,
+                          what="live build output")
+        self.assertEqual(view["state"], "running")
+        self.assertEqual(view["errors"], [])
+        terminal = self.daemon.terminals.get(first["terminal_id"])
+        terminal._output(b"\x1b[31msrc/main.cpp:12:5: error: expected ';'\x1b[0m\r\n")
+        live = self.owner("GET", f"/vex/builds/{first['build_id']}")
+        self.assertIn("expected ';'", live["output"])
+        self.assertNotIn("\x1b", live["output"])
+        self.assertEqual(live["errors"][0]["line"], 12)
+        (self.folder / "HOLD").unlink()
+        eventually(lambda: self.owner("GET", f"/vex/builds/{first['build_id']}")["state"] == "succeeded")
+        self.build("clean")
+        kept = self.owner("GET", f"/vex/builds/{first['build_id']}")
+        self.assertIn("OUTPUT-LIVE-BUILD", kept["output"])
+        self.assertIn("expected ';'", kept["output"])
+        self.assertLessEqual(len(kept["output"]), vex.BUILD_OUTPUT_CAP)
+
     def test_build_runs_the_exact_argv_in_the_project_and_reports(self):
         result = self.build()
         self.assertEqual(result["state"], "succeeded", result)

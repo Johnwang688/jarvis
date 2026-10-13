@@ -1,6 +1,6 @@
 // The VEX store's download chain, on its own (VX-2 delta review): the view's
 // disabled buttons hide these rules, so they are held here without them.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const buildFirst = (sentence = "build/override.bin is older than the sources; Build first, then download") =>
   Object.assign(new Error(sentence), { status: 409, body: { error: sentence, code: "build_first" } });
@@ -52,6 +52,13 @@ vi.mock("../components/Terminal", () => ({
 }));
 
 import { VexStore } from "./vex";
+import { api } from "../api";
+import { terminals } from "../components/Terminal";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   h.downloads.length = 0;
@@ -59,6 +66,52 @@ beforeEach(() => {
   h.download = null;
   h.brain = null;
   h.brainOpened = 0;
+});
+
+describe("build feedback", () => {
+  it("reports clean immediately while its start request waits and ignores repeat clicks", async () => {
+    const store = new VexStore();
+    let release!: (v: { build_id: string; terminal_id: string }) => void;
+    const start = vi.spyOn(api, "vexBuild").mockImplementationOnce(() => new Promise((res) => { release = res; }));
+    const show = vi.spyOn(terminals, "showProgram");
+    const work = store.build("p3", "clean");
+    expect(store.run("p3").startingBuild?.action).toBe("clean");
+    expect(store.run("p3").startingBuild?.started).toBeGreaterThan(0);
+    await store.build("p3", "rebuild");
+    expect(start).toHaveBeenCalledTimes(1);
+    release({ build_id: "00000009", terminal_id: "a0000009" });
+    await work;
+    expect(show).toHaveBeenCalledWith("a0000009");
+    expect(store.run("p3").startingBuild).toBeNull();
+    expect(store.run("p3").busy).toBeNull();
+  });
+
+  it("puts startup failures beside the build controls and allows another try", async () => {
+    const store = new VexStore();
+    vi.spyOn(api, "vexBuild").mockRejectedValueOnce(new Error("make.exe could not start"));
+    await store.build("p3", "rebuild");
+    expect(store.run("p3").buildNote).toBe("make.exe could not start");
+    expect(store.run("p3").startingBuild).toBeNull();
+    expect(store.run("p3").busy).toBeNull();
+    await store.build("p3", "build");
+    expect(store.run("p3").buildNote).toBe("");
+  });
+
+  it("shows failed status reads while retrying, then clears the warning on recovery", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    const state = vi.spyOn(api, "vexBuildState").mockRejectedValueOnce(new Error("Network offline"));
+    const work = store.build("p3", "build");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.run("p3").buildNote).toContain("Network offline");
+    expect(store.run("p3").buildNote).toContain("Retrying");
+    expect(store.run("p3").busy).toBe("build");
+    await vi.advanceTimersByTimeAsync(1200);
+    await work;
+    expect(state).toHaveBeenCalledTimes(2);
+    expect(store.run("p3").buildNote).toBe("");
+    expect(store.run("p3").busy).toBeNull();
+  });
 });
 
 describe("one download chain per window (review M1), held by the store itself", () => {

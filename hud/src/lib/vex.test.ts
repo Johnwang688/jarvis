@@ -12,7 +12,7 @@ const err = (over: Partial<BuildError> = {}): BuildError => ({
 
 const build = (over: Partial<BuildView> = {}): BuildView => ({
   id: "0a1b2c3d", project_id: "p3", action: "build", state: "succeeded", terminal_id: "a0000001", exit_code: 0,
-  errors: [], bin: { path: "build/override.bin", size: 56288, mtime: "2026-10-11T12:00:00+00:00" },
+  errors: [], output: "", bin: { path: "build/override.bin", size: 56288, mtime: "2026-10-11T12:00:00+00:00" },
   started: "2026-10-11T12:00:00+00:00", ended: "2026-10-11T12:00:09+00:00", ...over,
 });
 
@@ -152,6 +152,19 @@ describe("builds", () => {
     expect(parseBuild({ ...build(), state: "exploded" })).toBeNull();
   });
 
+  it("keeps the latest output and accepts older daemons without a preview", () => {
+    expect(parseBuild({ ...build(), output: "a".repeat(20_000) + "error: link failed" })!.output)
+      .toBe(("a".repeat(20_000) + "error: link failed").slice(-16 * 1024));
+    expect(parseBuild({ ...build(), output: undefined })!.output).toBe("");
+  });
+
+  it("names clean and rebuild in running and failed states", () => {
+    expect(buildLine(build({ action: "clean", state: "running" })).text).toBe("Cleaning…");
+    expect(buildLine(build({ action: "rebuild", state: "running" })).text).toBe("Rebuilding…");
+    expect(buildLine(build({ action: "clean", state: "failed", exit_code: 2 })).text).toBe("✗ Clean failed (exit 2)");
+    expect(buildLine(build({ action: "rebuild", state: "failed", exit_code: 1 })).text).toBe("✗ Rebuild failed (exit 1)");
+  });
+
   it("says ✓, the errors, running or the timeout", () => {
     expect(buildLine(build()).text).toMatch(/^✓ Built build\/override\.bin/);
     expect(buildLine(build()).tone).toBe("ok");
@@ -159,7 +172,7 @@ describe("builds", () => {
     const failed = buildLine(build({ state: "failed", exit_code: 2, bin: null,
       errors: [err(), err({ severity: "warning" }), err()] }));
     expect(failed.tone).toBe("bad");
-    expect(failed.text).toBe("✗ Build failed: 2 errors, 1 warning");
+    expect(failed.text).toBe("✗ Build failed (exit 2): 2 errors, 1 warning");
     expect(buildLine(build({ state: "failed", exit_code: 2, errors: [] })).text).toBe("✗ Build failed (exit 2)");
     expect(buildLine(build({ state: "timed_out" })).text).toMatch(/5 minutes/);
     expect(buildLine(build({ action: "clean" })).text).toBe("✓ Cleaned");

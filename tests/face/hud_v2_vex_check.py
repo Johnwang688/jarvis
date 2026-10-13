@@ -224,6 +224,20 @@ def _build_checks(page, mock, check, until, fake):
                                         timeout=4)))
     state = page.locator(_view(V, _tid("vex-build-state")))
     check("the view says it is building", "Building" in state.inner_text())
+    check("a silent build shows elapsed time and explains that it is waiting for output",
+          page.locator(_view(V, _tid("vex-build-elapsed"))).count() == 1
+          and "Waiting for tool output" in page.locator(_view(V, _tid("vex-build-waiting"))).inner_text())
+    rec = mock_vex.state(mock)["builds"][bid]
+    rec["output"] = "Compiling src/main.cpp\nerror: <b>link failed</b>\n"
+    rec["errors"] = ERRORS
+    preview = page.locator(_view(V, _tid("vex-build-output")))
+    check("output and errors are visible while the build is still running, rendered as text",
+          bool(until(lambda: preview.count() and "link failed" in preview.inner_text(), timeout=4))
+          and preview.locator("b").count() == 0
+          and page.locator(_view(V, _tid("vex-errors")) + " li").count() == 2)
+    page.locator(_tid("panel-hide")).click()
+    page.locator(_view(V, _tid("vex-build-output-btn"))).click()
+    check("Show terminal reopens the full build output", bool(until(lambda: tab.count() > 0, timeout=4)))
     _finish(mock, fake, bid, "succeeded")
     check("a build that succeeds shows ✓",
           bool(until(lambda: state.inner_text().startswith("✓ Built"), timeout=4)), state.inner_text())
@@ -239,7 +253,7 @@ def _build_checks(page, mock, check, until, fake):
     _finish(mock, fake, bid2, "failed", ERRORS)
     errs = page.locator(_view(V, _tid("vex-errors")) + " li")
     until(lambda: errs.count() == 2, timeout=4)
-    check("a failed build shows the errors list", errs.count() == 2 and "✗ Build failed: 1 error, 1 warning"
+    check("a failed build shows the errors list", errs.count() == 2 and "✗ Build failed (exit 2): 1 error, 1 warning"
           in state.inner_text(), state.inner_text())
     outside = page.locator(_view(V, _tid("vex-error-1")))
     check("an error outside the project is text, never a button to open",
