@@ -699,23 +699,23 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
       const threads = [{ id: "t2", title: "second chat", project_id: "p1" }] as any;
       let s = withChats({ 2: { threadId: "t2", input: "for t2" }, 7: { compose: { projectId: "p1", id: "c7" }, input: "kept" } },
                         { threads, projects: [{ id: "p1", name: "jarvis" }] as any });
-      s = reduce(s, { type: "release_chat", pane: 2 });
-      s = reduce(s, { type: "release_chat", pane: 7, keep: true });
+      s = reduce(s, { type: "release_chat", pane: 2, issuedAt: 1_000_000 });
+      s = reduce(s, { type: "release_chat", pane: 7, keep: true, issuedAt: 1_000_000 });
       expect(s.error).toContain("waits with “second chat”");
       expect(s.error).toContain("kept for the next new thread you start");
       // The new thread that takes them, in the same breath: said too, and nothing said twice.
-      s = reduce(s, { type: "chat", pane: 7, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+      s = reduce(s, { type: "chat", pane: 7, issuedAt: 1_000_000, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
       expect(s.error).toContain("waits with “second chat”");
       expect(s.error).toContain("are back, in this new thread's box");
       expect(s.error.split("second chat").length).toBe(2);
       // Later, a notice replaces what is there; a plain write always does.
       vi.setSystemTime(1_000_000 + 5_000);
       s = reduce(withChats({ 3: { threadId: "t2", input: "again" } }, { threads, error: s.error, errorAt: s.errorAt }),
-                 { type: "release_chat", pane: 3 });
+                 { type: "release_chat", pane: 3, issuedAt: 1_005_000 });
       expect(s.error.startsWith("What you had not sent waits with")).toBe(true);
-      s = reduce(s, { type: "patch", patch: { error: "Could not send: x" } });
+      s = reduce(s, { type: "patch", issuedAt: 1_005_000, patch: { error: "Could not send: x" } });
       expect([s.error, s.errorAt]).toEqual(["Could not send: x", 1_005_000]);
-      s = reduce(s, { type: "patch", patch: { error: "" } });
+      s = reduce(s, { type: "patch", issuedAt: 1_005_000, patch: { error: "" } });
       expect([s.error, s.errorAt]).toEqual(["", 0]);
     } finally {
       vi.useRealTimers();
