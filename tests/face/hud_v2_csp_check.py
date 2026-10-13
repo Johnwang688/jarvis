@@ -34,6 +34,7 @@ It also runs inside `hud_v2_check.py`, after the browser section.
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from pathlib import Path
 import sys
 import threading
@@ -110,6 +111,30 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
     mock.world["avatars"]["active"] = "hoot"
     try:
         _boot(page, mock, base, until)
+
+        # CDP asks Chrome to load the actual <link rel=manifest>, exercising
+        # manifest-src (a fetch() would exercise connect-src instead).
+        manifest = ctx.new_cdp_session(page).send("Page.getAppManifest")
+        check("Chrome loads the linked manifest with no manifest CSP violation",
+              manifest.get("url") == base + "/manifest.webmanifest"
+              and bool(manifest.get("data")) and not manifest.get("errors") and not violations,
+              f"{manifest.get('errors')}; {violations[:2]}")
+        listed = json.loads(manifest.get("data") or "{}").get("icons", [])
+        icons = page.evaluate("""async icons => Promise.all(icons.map(icon => new Promise(done => {
+          const image = new Image();
+          image.onload = () => done({src: icon.src, width: image.naturalWidth, height: image.naturalHeight});
+          image.onerror = () => done({src: icon.src, width: 0, height: 0});
+          image.src = icon.src;
+        })))""", listed)
+        check("all six manifest icons load as images under img-src without a violation",
+              len(icons) == 6 and all(f"{i['width']}x{i['height']}" == spec["sizes"]
+                                         for i, spec in zip(icons, listed)) and not violations,
+              f"{icons}; {violations[:2]}")
+        manifest_responses = [r for r in responses if r.url == base + "/manifest.webmanifest"]
+        check("the installer receives application/manifest+json explicitly",
+              bool(manifest_responses) and all(r.status == 200 and
+                  r.headers.get("content-type", "").split(";")[0] == "application/manifest+json"
+                  for r in manifest_responses))
 
         # -- 1. the policy is on everything the window loaded --------------------
         own = [r for r in responses if not r.url.split("?")[0].endswith("/avatar.svg")]

@@ -1081,6 +1081,20 @@ and layout persist in localStorage behind try/catch. The free checks are
 `tests/face/hud_v2_layout_check.py`, run first by `hud_v2_check.py` in a
 context of its own, plus `hud/src/lib/layout.test.ts`.
 
+**HUD installed app and orb icon (2026-10-12, design §18).** Settings offers
+**Install as app** when Chrome supplies `beforeinstallprompt`; otherwise it
+shows Chrome’s menu route. Standalone windows and `appinstalled` say Installed.
+The install action is disabled and inert under an approval card. The manifest
+is `/manifest.webmanifest`, served as `application/manifest+json` under the
+one CSP’s `manifest-src 'self'`; Vite copies public icons into the installed
+build’s integrity manifest. `hud/scripts/render_icons.py` copies the idle orb
+without refactoring `Orb.tsx`, with simpler 16/32px rings and a safe-zone mask.
+`jarvis hud` pins Windows Chrome to `JARVIS_HUD_CHROME_PROFILE` (Default),
+refusing slash, backslash or `..`; the id uses Chromium’s verified double SHA-256.
+Only the HUD root uses `--app-id` when its
+Manifest Resources folder exists under `JARVIS_WINDOWS_LOCALAPPDATA` (else
+converted LOCALAPPDATA, else johnw’s Windows Local AppData). No profile is read.
+
 **HUD boot animation (2026-10-12, design §18; the owner: "this is literally
 perfection … make sure that its disabled when automation is on").** The owner's
 prototype (`prototypes/boot/index.html`) at its default settings, v2 only, no

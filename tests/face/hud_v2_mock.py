@@ -712,6 +712,9 @@ class MockDaemon:
                 url = urlparse(self.path)
                 path, q = url.path, parse_qs(url.query)
                 self._record("GET", path, {k: v[0] for k, v in q.items()})
+                if path == "/manifest.webmanifest" or path.startswith("/icons/"):
+                    from jarvis.v2 import hud_api
+                    return hud_api.hud_files(self, path.strip("/").split("/"))
                 w = mock.world
                 if mock_vex.handle(self, mock, "GET", path, {}):
                     return

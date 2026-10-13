@@ -63,7 +63,8 @@ automatic opening never grants access through the Remote gate.
 
 ## Static
 
-`GET /` → the HUD's page; `GET /assets/*` → its assets — from the newest
+`GET /` → the HUD's page; `GET /assets/*`, `GET /icons/*` → its assets;
+`GET /manifest.webmanifest` → `application/manifest+json` — from the newest
 **installed build** (`config.HUD_DIR/<build-id>/`, decision C-1; see "the
 HUD's CSP and installed build" below), or from `hud/dist` itself only under
 `JARVIS_HUD_DEV=1`. With nothing installed, `GET /` is a 503 page naming
@@ -1692,7 +1693,7 @@ decision C-1 (the decisions file wins).
 
     default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';
     connect-src 'self'; style-src 'self' 'unsafe-inline';
-    img-src 'self' data:; font-src 'self' data:; media-src 'self';
+    img-src 'self' data:; font-src 'self' data:; media-src 'self'; manifest-src 'self';
     frame-src http://localhost:* http://*.localhost:* http://127.0.0.1:* http://0.0.0.0:*;
     base-uri 'none'; form-action 'none'; object-src 'none';
     frame-ancestors 'none'
