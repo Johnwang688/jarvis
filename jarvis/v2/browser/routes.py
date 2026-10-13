@@ -238,6 +238,11 @@ def route(handler, daemon, parts, query):
             if parts[3] == "navigate":
                 body = _object(handler._body(), ("url",), ("url",))
                 return 200, host.navigate(parts[2], body["url"], owner=True)
+            if parts[3] == "restore":
+                # A stored Remote page is restored lazily, without manufacturing
+                # a new owner navigation gesture or opening a loopback lease.
+                body = _object(handler._body(), ("url",), ("url",))
+                return 200, host.navigate(parts[2], body["url"], owner=False)
             if parts[3] == "history":
                 body = _object(handler._body(), ("action",), ("action",))
                 return 200, host.history(parts[2], body["action"])

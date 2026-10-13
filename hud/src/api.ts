@@ -51,6 +51,19 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** Owner Browser routes. Page data is JSON/text only; attach tickets stay in memory. */
+export const browserApi = {
+  get: <T>(path: string, signal?: AbortSignal) => req<T>("/browser" + path, { signal }),
+  write: <T>(path: string, body: unknown = {}, method = "POST", signal?: AbortSignal) =>
+    req<T>("/browser" + path, { method, headers: {"Content-Type":"application/json"}, body:JSON.stringify(body), signal }),
+  remove: <T>(path: string) => req<T>("/browser" + path, {method:"DELETE"}),
+  async download(id:string):Promise<Blob> {
+    const response = await fetch("/browser/downloads/" + encodeURIComponent(id));
+    if (!response.ok) throw new ApiError(response.status, "The download could not be saved.");
+    return response.blob();
+  },
+};
+
 const json = (body: unknown): RequestInit => ({
   method: "POST",
   headers: { "Content-Type": "application/json" },

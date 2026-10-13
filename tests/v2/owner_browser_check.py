@@ -1046,6 +1046,30 @@ class OwnerBrowser(unittest.TestCase):
             self.owner("DELETE", f"/browser/tabs/{tab}")
         self.assertIsNone(self.host.pane_tab(tab))
 
+    def test_11c_stored_restore_never_opens_gate_or_hits_control_ports(self):
+        local = Sanity()
+        self.addCleanup(local.close)
+        tab = self.owner("POST", "/browser/tabs", {})["tab_id"]
+        try:
+            url = f"http://localhost:{local.port}/hit?w=restore"
+            restored = self.owner("POST", f"/browser/tabs/{tab}/restore", {"url": url})
+            self.assertFalse(restored["loaded"])
+            self.assertEqual(local.accepts, 0)
+            self.assertFalse(self.host.loopback_open(local.port))
+            before = self.stand_in_accepts()
+            for listener in self.stand_ins.values():
+                status, _ = self.ask("POST", f"/browser/tabs/{tab}/restore",
+                                     {"url": f"http://localhost:{listener.port}/"})
+                self.assertEqual(status, 400)
+            self.assertEqual(self.stand_in_accepts(), before)
+            opened = self.owner("POST", f"/browser/tabs/{tab}/navigate", {"url": url})
+            self.assertTrue(opened["loaded"], opened)
+            self.assertGreater(local.accepts, 0)
+            self.assertTrue(self.host.loopback_open(local.port))
+        finally:
+            self.owner("DELETE", f"/browser/tabs/{tab}")
+        self.assertFalse(self.host.loopback_open(local.port))
+
     def test_12_the_tab_cap(self):
         self.close_others(self.main_tab)
         rows = [self.owner("POST", "/browser/tabs", {}) for _ in range(2)]

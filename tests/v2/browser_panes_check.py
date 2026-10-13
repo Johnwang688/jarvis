@@ -486,6 +486,18 @@ class Ingress(unittest.TestCase):
         with self.assertRaises(APIError): route(self.handler,self.daemon,["browser","front"],{"url":"secret"})
         with self.assertRaises(APIError): route(self.handler,self.daemon,["browser","panes","04"],{})
 
+    def test_restore_is_owner_only_and_never_claims_owner_navigation(self):
+        from jarvis.v2.browser.routes import route
+        from jarvis.v2.daemon import APIError
+        self.handler._body.return_value = {"url": "http://localhost:23456/"}
+        self.daemon.browser.navigate.return_value = {"loaded": False}
+        path = ["browser", "tabs", T, "restore"]
+        self.assertEqual(route(self.handler, self.daemon, path, {}), (200, {"loaded": False}))
+        self.daemon.browser.navigate.assert_called_once_with(T, "http://localhost:23456/", owner=False)
+        self.handler.headers.pop("Origin")
+        with self.assertRaises(APIError): route(self.handler, self.daemon, path, {})
+        self.assertEqual(self.daemon.browser.navigate.call_count, 1)
+
     def test_real_source_accessor_copies_under_lock_without_mutating_entry(self):
         from jarvis.v2.devservers import DevServers, Entry
         dev=DevServers(SimpleNamespace(), clock=lambda:1)
