@@ -1233,13 +1233,5 @@ export function saveMine(mine: Set<string>, holder: string | null, storage?: Pic
   }
 }
 
-/** A per-page-load nonce, in memory only. */
-export function pageNonce(): string {
-  try {
-    const b = new Uint8Array(8);
-    crypto.getRandomValues(b);
-    return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-  } catch {
-    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
-  }
-}
+// Compatibility export; the shared live-page value is WINDOW_ID in windowId.ts.
+export { pageNonce } from "./windowId";
