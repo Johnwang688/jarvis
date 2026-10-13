@@ -624,15 +624,16 @@ def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None, lis
     bash's way of running a builtin by name (`builtin eval …`) and is peeled
     the same way.
     """
-    tokens = list(tokens)
-    while tokens and tokens[0] in ("(", "{", "!"):
-        tokens = tokens[1:]
-    if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
-        tokens[0] = tokens[0][1:]
+    # The words before the program — reserved words, a `case` pattern, a
+    # function's header and the `NAME=VALUE` assignments — are not it, and
+    # `lead` must start at it (third delta review of PR #75, HIGH: `X=1 time
+    # -o <allowlist> … ls` kept `X=1` in `lead`, so `_started_touches` never
+    # read `time`'s output file, and it ran unasked behind an `ls` entry).
+    tokens = rules.command_start(tokens)
     chdir = None
     for _ in range(8):
         if tokens and tokens[0] == "builtin":
-            tokens = tokens[1:]
+            tokens = rules.strip_assignments(tokens[1:])
             continue
         if not tokens or rules._basename(tokens[0]) != "env":
             break
@@ -777,8 +778,7 @@ def _writes_what_it_is_given(words: list[str], hops: int) -> bool:
 def _given_effects(words: list[str], hops: int) -> tuple[bool, list[str]]:
     """(`_writes_what_it_is_given`, the files the command writes by name:
     a reader's named outputs, a wrapper's own output file)."""
-    while words and re.fullmatch(r"[A-Za-z_]\w*=.*", words[0]):
-        words = words[1:]
+    words = rules.strip_assignments(words)
     if not words:
         return False, []
     stem = rules._basename(words[0])
@@ -947,16 +947,12 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
 
     # `D=~/.config/jarvis` on its own, or `export D=…`: remembered for the
     # segments after it, which is when the shell would expand it.
-    words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
-    if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+    head = rules.command_start(raw, assignments=False)
+    words = head[1:] if head and head[0] in ("export", "declare", "local", "readonly") else head
+    if words and all(rules.ASSIGNMENT.fullmatch(w) for w in words):
         _redirect_touches(segment, state, protected, ids, seen)
         for word in words:
-            name, value = word.split("=", 1)
-            expanded = _expand(value, state) if value else ""
-            if expanded is not None:
-                state.variables[name] = expanded
-            else:
-                state.variables.pop(name, None)
+            _assign(word, state)
         return seen
 
     tokens, chdir, lead = _peel(raw, state)
@@ -981,12 +977,37 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
     _redirect_touches(segment, local, protected, ids, seen)
     # `env` (and `builtin`) are peeled here rather than walked through the
     # table: what they start is still behind a wrapper (M-B).
-    bare = list(words)
-    while bare and re.fullmatch(r"[A-Za-z_]\w*=.*", bare[0]):
-        bare.pop(0)
+    bare = rules.command_start(words)
     _command(tokens, lead, parsed, segment, local, state, protected, ids, depth, seen, 0,
              wrapped=len(lead) < len(bare))
     return seen
+
+
+def _assign(word: str, state: _State) -> None:
+    """Remember what an assignment word sets, for the segments after it. `D+=
+    /x` appends (a `D=$HOME; D+=/.config/jarvis` path is the gate's folder);
+    `D[0]=V` is `$D`'s value too, and any other element leaves `$D` alone
+    unless its index cannot be told — then `$D` is unknown (third delta
+    review of PR #75: both were read as commands, and `$D` kept its old
+    value)."""
+    parts = rules.assignment(word)
+    if parts is None:
+        return
+    name, subscript, append, value = parts
+    if subscript is not None:
+        index = subscript.strip()
+        if index.isdigit() and int(index) != 0:
+            return
+        if not index.isdigit():
+            state.variables.pop(name, None)
+            return
+    if append:
+        value = state.variables.get(name, os.environ.get(name, "")) + value
+    expanded = _expand(value, state) if value else ""
+    if expanded is not None:
+        state.variables[name] = expanded
+    else:
+        state.variables.pop(name, None)
 
 
 def _started_touches(lead: list[str], parsed: bool, segment: str, local: _State, state: _State,
@@ -3222,11 +3243,7 @@ def _peel_runner(tokens: list[str], state: _Owner, appends: bool = False
     (`rules.charge`); past the budget, `_PEEL_READINGS` or `_PEEL_HOPS` it
     raises `rules.TooComplex` rather than stopping quietly (review of PR #75,
     L2): the caller marks the line too complex to judge, which is asked."""
-    tokens = [t for t in tokens]
-    while tokens and tokens[0] in ("(", "{", "!"):
-        tokens = tokens[1:]
-    if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
-        tokens[0] = tokens[0][1:]
+    tokens = rules.command_start(tokens)
     readings: list[tuple[list[str], bool, bool, bool]] = []
     todo: list[tuple[list[str], bool, int]] = [(tokens, appends, 0)]
     seen: set = set()
@@ -3239,8 +3256,7 @@ def _peel_runner(tokens: list[str], state: _Owner, appends: bool = False
         seen.add((tuple(tokens), appends))
         done = False
         while True:
-            while tokens and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0]):
-                tokens = tokens[1:]
+            tokens = rules.strip_assignments(tokens)
             if tokens and tokens[0] == "builtin":
                 tokens = tokens[1:]
                 continue
@@ -3552,10 +3568,9 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
         if not raw:
             continue
         words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
-        if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+        if words and all(rules.ASSIGNMENT.fullmatch(w) for w in words):
             for word in words:
-                name, value = word.split("=", 1)
-                state.variables[name] = _unmark(_owner_word(value, state))
+                _owner_assign(word, state)
             continue
         why = _owner_command(raw, segment, state, depth)
         if why:
@@ -3575,31 +3590,36 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
     return None
 
 
-# Shell reserved words a command may follow (review 2 of PR #48: `if true;
-# then systemctl --user restart jarvis-daemon2; fi` split into a segment
-# whose first word was `then`, and was not judged).
-_RESERVED = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "{", "coproc"})
-
-
 def _strip_reserved(tokens: list[str]) -> list[str]:
     """The command a segment runs, past the shell's reserved words (`then
-    jarvis restart`, `do pkill -f daemon2`, `! cmd`, `{ cmd`, `coproc cmd`)
-    and a `case` pattern (`case x in a) cmd`, `b) cmd`)."""
-    for _ in range(32):
-        if not tokens:
-            break
-        head = tokens[0]
-        if head in _RESERVED:
-            tokens = tokens[1:]
-        elif head == "case":
-            tokens = tokens[tokens.index("in") + 1:] if "in" in tokens else []
-        elif head.endswith(")") and head.count(")") > head.count("("):
-            tokens = tokens[1:]                      # a case pattern: `a)`, `*)`, `(a|b)`
-        elif head.startswith("(") and head.endswith(")") and len(tokens) > 1 and head.count("(") == 1:
-            tokens = tokens[1:]                      # `(a)` — a case pattern with its paren
-        else:
-            break
-    return tokens
+    jarvis restart`, `do pkill -f daemon2`, `! cmd`, `{ cmd`, `coproc cmd`;
+    review 2 of PR #48: `if true; then systemctl --user restart
+    jarvis-daemon2; fi` split into a segment whose first word was `then`),
+    a `case` pattern (`case x in a) cmd`, `b) cmd`) and a function's header
+    — rules' one reading (`rules.command_start`), the gate-state detector's
+    and the vex reading's too. Assignments are left: the caller records them."""
+    return rules.command_start(tokens, assignments=False)
+
+
+def _owner_assign(word: str, state: "_Owner") -> None:
+    """Remember an assignment word's value for the segments after it, as the
+    gate-state detector does (`_assign`): `x+=V` appends; `x[0]=V` sets
+    `$x`, another element leaves it, an index not told makes it unknown."""
+    parts = rules.assignment(word)
+    if parts is None:
+        return
+    name, subscript, append, value = parts
+    if subscript is not None:
+        index = subscript.strip()
+        if index.isdigit() and int(index) != 0:
+            return
+        if not index.isdigit():
+            state.variables.pop(name, None)
+            return
+    value = _unmark(_owner_word(value, state))
+    if append:
+        value = state.variables.get(name, os.environ.get(name, "")) + value
+    state.variables[name] = value
 
 
 def runs_jarvis(tokens: list[str]) -> str | None:
@@ -3673,7 +3693,8 @@ def _could_be_owner_op(command: str) -> bool:
         return True
     # A word the line assembles from its own variables (`x=h; jarvis ${x}ud
     # install`) need not spell the op's word anywhere: such a line is parsed.
-    return "$" in flat and re.search(r"(?:^|[\s;&|(])[A-Za-z_]\w*=", flat) is not None
+    return "$" in flat and re.search(r"(?:^|[\s;&|(])[A-Za-z_]\w*(?:\[[^\]]*\])?\+?=",
+                                     flat) is not None
 
 
 def owner_reading(command: str, *, prefilter: bool = True) -> tuple[str | None, str | None]:

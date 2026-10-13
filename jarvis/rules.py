@@ -986,7 +986,70 @@ def unwrap_sure(tokens: list[str], peeled: list | None = None,
     return tokens if sure else None
 
 
-_SIMPLE_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
+# A shell assignment word: `NAME=VALUE`, `NAME+=VALUE` or `NAME[i]=VALUE`,
+# ASCII names only (bash runs `Xé=1` as a command). **The one pattern every
+# reader of a segment's first word strips** (third delta review of PR #75,
+# HIGH: the gate-state detector kept `X=1` in front of `time -o FILE`, read
+# `X=1` as the program, and so never saw the wrapper's own output file — a
+# write onto the allowlist ran unasked behind an `ls` entry). `unwrap` had
+# its own narrower copy, which missed `+=` and `[i]=`.
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=.*", re.S)
+_ASSIGNMENT = ASSIGNMENT
+_ASSIGNMENT_PARTS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[([^\]]*)\])?(\+?)=(.*)", re.S)
+
+
+def assignment(word: str) -> tuple[str, str | None, bool, str] | None:
+    """(name, subscript or None, whether it appends, value) of an assignment
+    word (`ASSIGNMENT`), or None for any other word."""
+    match = _ASSIGNMENT_PARTS.fullmatch(word)
+    if match is None:
+        return None
+    name, subscript, plus, value = match.groups()
+    return name, subscript, bool(plus), value
+
+
+def strip_assignments(words: list[str]) -> list[str]:
+    """The words from the first that is not a leading assignment: `X=1 A="x
+    y" time -o F ls` runs `time`. Every place that reads a command's first
+    word strips them with this, and only this (`command_start` too)."""
+    words = list(words)
+    k = 0
+    while k < len(words) and ASSIGNMENT.fullmatch(words[k]):
+        k += 1
+    return words[k:]
+
+
+def command_start(words: list[str], *, assignments: bool = True) -> list[str]:
+    """A segment's words from its program on: the shell's words that may
+    stand before a command and are not it — the reserved words that open a
+    compound command or a pipeline (`then`, `do`, `else`, `!`, `{`, `(`,
+    `coproc`: `_LEAD_WORDS`), a `case … in` and its pattern (`a)`, `(a|b)`),
+    a function's header (`f()`, `function f`), parens glued to the program —
+    and, with `assignments`, the `NAME=VALUE` words (`strip_assignments`).
+    `for`/`select` are left in front: their words are a list, not a program,
+    and each caller judges that. One function for the gate-state detector,
+    the owner-op detector and the vex reading (third delta review of PR #75:
+    `if true; then time -o <allowlist> ls; fi` hid the wrapper behind
+    `then` from the gate-state detector)."""
+    words = list(words)
+    while words:
+        word = words[0]
+        if word in _LEAD_WORDS or word.endswith("()") or (
+                assignments and ASSIGNMENT.fullmatch(word)):
+            words.pop(0)
+        elif word == "case":
+            words = words[words.index("in") + 1:] if "in" in words else []
+        elif word == "function":
+            words = words[2:]
+        elif word.startswith("(") and len(word) > 1:
+            words[0] = _cut(word, len(word) - len(word.lstrip("(")))
+            if not words[0]:
+                words.pop(0)
+        elif len(words) > 1 and word.endswith(")") and word.count(")") > word.count("("):
+            words.pop(0)                    # a `case` pattern
+        else:
+            break
+    return words
 
 
 def _unwrap_reading(tokens: list[str], peeled: list | None = None,
@@ -1004,8 +1067,7 @@ def _unwrap_reading(tokens: list[str], peeled: list | None = None,
     tokens = list(tokens)
     sure = True
     for _ in range(PROGRAM_DEPTH + 2):
-        while tokens and _SIMPLE_ASSIGNMENT.fullmatch(tokens[0]):
-            tokens = tokens[1:]
+        tokens = strip_assignments(tokens)
         if not tokens or _basename(tokens[0]) not in _WRAPPERS:
             return tokens, sure
         stem = _basename(tokens[0])
@@ -1022,7 +1084,10 @@ def _unwrap_reading(tokens: list[str], peeled: list | None = None,
             writes.extend(started.writes)
         if started is None or not started.programs:
             return tokens, sure and not (started and started.strings)
-        if not started.sure:
+        if not started.sure or started.strings:
+            # A command line it runs beside its program (`systemd-run -p
+            # ExecStartPost=CMD true`; third delta review of PR #75, LOW 2)
+            # is not the program's: which commands run cannot be told from it.
             sure = False
         if peeled is not None:
             peeled.append(stem)
@@ -2217,7 +2282,8 @@ _WRAPPER_OPTS = {
                          "working-directory setenv host machine on-active on-boot on-startup "
                          "on-unit-active on-unit-inactive on-calendar timer-property "
                          "path-property socket-property json expand-environment",
-                         property_writes="p property"),
+                         property_writes="p property socket-property timer-property "
+                         "path-property"),
     "flock": _opts("sxeunoFhV", "wEc", lflags="shared exclusive unlock nonblock nb close no-fork "
                    "verbose help version", lvalues="timeout wait conflict-exit-code command",
                    strings="c command", positionals=1),
@@ -2241,6 +2307,15 @@ _WRAPPER_OPTS = {
 # `--userconfig`); none writes a file it names.
 
 _STD_FILE = re.compile(r"Standard(?:Output|Error)=(?:file|append|truncate):(.+)", re.S)
+# A unit property that holds a command line: `ExecStart=`, `ExecStartPre=`,
+# `ExecStartPost=`, `ExecCondition=`, `ExecReload=`, `ExecStop=`,
+# `ExecStopPost=` and their `…Ex=` forms (third delta review of PR #75, LOW
+# 2: `systemd-run -p ExecStartPost=<a command> true` ran a command line no
+# reader looked at). Every `Exec…=` property is read so — `ExecSearchPath=`
+# and `ExecPaths=` change which program runs or what it may reach — which
+# can only ask or refuse. systemd's own prefixes (`@`, `-`, `:`, `+`, `!`,
+# `|`) are taken off the command.
+_EXEC_PROPERTY = re.compile(r"\s*Exec[A-Za-z]*=(.*)", re.S)
 
 _UV_FLAGS = ("quiet verbose native-tls offline no-cache no-progress no-config preview no-preview "
              "managed-python no-managed-python no-python-downloads show-settings help version")
@@ -2344,13 +2419,15 @@ _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 # Words that open or close a compound command rather than name a program.
 _LEAD_WORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "(",
                          "((", "coproc", "fi", "done", "esac", "}", ")", "))", ";;"})
-_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=.*", re.S)
 
 
-def _wrote(opts: _Opts, name: str, value: str, writes: list | None, long: bool) -> None:
+def _wrote(opts: _Opts, name: str, value: str, writes: list | None, long: bool,
+           hidden: list | None = None) -> None:
     """Record the file an option's value names, when that option writes one:
     by name, or — for a long option this table does not know — as a unique
-    prefix of one that does (getopt_long reads `--out=F` as `--output=F`)."""
+    prefix of one that does (getopt_long reads `--out=F` as `--output=F`).
+    A property option's `Exec…=` value is a command line the unit runs:
+    into `hidden`."""
     if writes is None or not name:
         return
 
@@ -2362,17 +2439,24 @@ def _wrote(opts: _Opts, name: str, value: str, writes: list | None, long: bool) 
         match = _STD_FILE.fullmatch(value.strip())
         if match:
             writes.append(match.group(1))
+        match = _EXEC_PROPERTY.fullmatch(value)
+        if match and hidden is not None:
+            line = match.group(1).lstrip().lstrip("@-:+!|")
+            if line.strip():
+                hidden.append(line)
     if named(opts.writes):
         writes.append(value)
 
 
-def _option_walk(tokens: list[str], start: int, opts: _Opts, writes: list | None = None):
+def _option_walk(tokens: list[str], start: int, opts: _Opts, writes: list | None = None,
+                 hidden: list | None = None):
     """(indices where the program may stand, command-line strings, whether
     the program is a module, whether the rest is one command line). An
     index of `len(tokens)` means no program. An unknown option is followed
     both ways — taking the next word, and not — so the set is every place
     the program could be. `writes`, when given, receives every value of an
-    option that writes a file (`_Opts.writes`), in any reading."""
+    option that writes a file (`_Opts.writes`), in any reading; `hidden`,
+    every command line a property option names (`Exec…=`)."""
     n = len(tokens)
     found: set[int] = set()
     strings: list[str] = []
@@ -2409,16 +2493,16 @@ def _option_walk(tokens: list[str], start: int, opts: _Opts, writes: list | None
             if name in opts.long_values:
                 if name in opts.strings:
                     strings.append(value if eq else following)
-                _wrote(opts, name, value if eq else following, writes, True)
+                _wrote(opts, name, value if eq else following, writes, True, hidden)
                 todo.append((i + (1 if eq else 2), left))
             elif name in opts.long_flags or eq:
                 if name in opts.strings and eq:
                     strings.append(value)
                 if eq:
-                    _wrote(opts, name, value, writes, True)
+                    _wrote(opts, name, value, writes, True, hidden)
                 todo.append((i + 1, left))
             else:
-                _wrote(opts, name, following, writes, True)
+                _wrote(opts, name, following, writes, True, hidden)
                 todo += [(i + 1, left), (i + 2, left)]
             continue
         if token.startswith("-") and len(token) > 1:
@@ -2431,12 +2515,12 @@ def _option_walk(tokens: list[str], start: int, opts: _Opts, writes: list | None
                     if letter in opts.strings:
                         strings.append(glued or (tokens[i + 1] if i + 1 < n else ""))
                     _wrote(opts, letter, glued or (tokens[i + 1] if i + 1 < n else ""), writes,
-                           False)
+                           False, hidden)
                     todo.append((i + (1 if glued else 2), left))
                     break
                 if letter in opts.optional:
                     if letters[k + 1:]:
-                        _wrote(opts, letter, letters[k + 1:], writes, False)
+                        _wrote(opts, letter, letters[k + 1:], writes, False, hidden)
                     todo.append((i + 1, left))
                     break
                 if letter in opts.flags:
@@ -2542,7 +2626,9 @@ class Started:
     it no program at all (an unknown option took the last word). `writes`:
     files the wrapper itself writes (`time -o FILE`, `script FILE`,
     `systemd-run -p StandardOutput=file:FILE`) — `writes_certain` is False
-    when an option this table does not know leaves the parse in doubt."""
+    when an option this table does not know leaves the parse in doubt.
+    `hidden`: those of `strings` a unit property holds (`systemd-run -p
+    ExecStartPost=CMD`), judged as lines and never auto-approved."""
     programs: tuple = ()
     strings: tuple = ()
     joined: bool = False
@@ -2551,6 +2637,7 @@ class Started:
     open_end: bool = False
     writes: tuple = ()
     writes_certain: bool = True
+    hidden: tuple = ()
 
     @property
     def sure(self) -> bool:
@@ -2563,7 +2650,9 @@ def starts(tokens: list[str], *, remote: bool = False) -> Started | None:
     starts nothing: `uv pip install`, `npm run build` (a package.json script,
     not a program), `command -v x` (a lookup). Raises `_TooComplex` past
     `env -S`'s bound (`_env_splice`), or when an option the table does not
-    know leaves more than `STARTS_READINGS` places the program may stand."""
+    know leaves more than `STARTS_READINGS` places the program may stand.
+    Leading assignments are not the program (`strip_assignments`)."""
+    tokens = strip_assignments(tokens)
     if not tokens:
         return None
     stem = _basename(tokens[0])
@@ -2576,21 +2665,24 @@ def starts(tokens: list[str], *, remote: bool = False) -> Started | None:
         if stem == "env":
             tokens = _env_splice(tokens)
         writes: list[str] = []
-        places, strings, _module, _shell = _option_walk(tokens, 1, opts, writes)
+        hidden: list[str] = []
+        places, strings, _module, _shell = _option_walk(tokens, 1, opts, writes, hidden)
+        strings += hidden
         if len(places) > STARTS_READINGS or len(strings) > STARTS_READINGS:
             raise _TooComplex
+        hidden_lines = tuple(dict.fromkeys(hidden))
         if opts.operand_writes:
             writes += [tokens[p] for p in sorted(places) if p < len(tokens)]
         writes_certain = len(places) <= 1
         if not opts.program:
             return Started(strings=tuple(strings), writes=tuple(dict.fromkeys(writes)),
-                           writes_certain=writes_certain)
+                           writes_certain=writes_certain, hidden=hidden_lines)
         joined = stem in _REMOTE_OPTS or (
             stem == "watch" and not any(t in ("-x", "--exec") for t in tokens[1:]))
         return Started(tuple(tuple(tokens[p:]) for p in sorted(places) if p < len(tokens)),
                        tuple(strings), joined=joined, appends=stem == "xargs",
                        open_end=len(tokens) in places, writes=tuple(dict.fromkeys(writes)),
-                       writes_certain=writes_certain)
+                       writes_certain=writes_certain, hidden=hidden_lines)
     spec = _RUNNER_SPECS.get(stem)
     if spec is None:
         return None
@@ -2634,8 +2726,7 @@ def started_commands(segment: str) -> list[list[str]]:
     seen: set = set()
 
     def walk(words: list[str], depth: int) -> None:
-        while words and _ASSIGNMENT.fullmatch(words[0]):
-            words = words[1:]
+        words = strip_assignments(words)
         if not words or tuple(words) in seen:
             return
         seen.add(tuple(words))
@@ -3266,23 +3357,9 @@ def _command_words(tokens: list[str]) -> list[str]:
     """A segment's words from the program on: compound-command keywords,
     `(`, a function's name, a `case` pattern and assignments cut off the
     front, and the `)`/`}` that close a group cut off the end."""
-    tokens = list(tokens)
-    while tokens:
-        word = tokens[0]
-        if word in _LEAD_WORDS or word.endswith("()") or _ASSIGNMENT.fullmatch(word):
-            tokens.pop(0)
-        elif word in ("for", "select"):
-            return []                       # the words of `for x in …` are not run
-        elif word == "case":
-            tokens = tokens[tokens.index("in") + 1:] if "in" in tokens else []
-        elif word == "function":
-            tokens = tokens[2:]
-        elif word.startswith("(") and len(word) > 1:
-            tokens[0] = _cut(word, len(word) - len(word.lstrip("(")))
-        elif len(tokens) > 1 and word.endswith(")") and word.count(")") > word.count("("):
-            tokens.pop(0)                   # a `case` pattern
-        else:
-            break
+    tokens = command_start(tokens)
+    if tokens and tokens[0] in ("for", "select"):
+        return []                           # the words of `for x in …` are not run
     tokens = [t for t in tokens if t not in (")", "}", "))", ";;")]
     if tokens:
         last = tokens[-1]
@@ -3826,9 +3903,7 @@ def _judge_started(words: list[str], redirects: list, depth: int) -> Verdict | N
     Bounded by the line's work budget (`charge`), with every reading judged
     once (`_Work.memo`); past it, or past `PROGRAM_DEPTH`, the line is too
     complex to judge (`RUNNERS_TOO_COMPLEX`)."""
-    lead = list(words)
-    while lead and _ASSIGNMENT.fullmatch(lead[0]):
-        lead.pop(0)
+    lead = strip_assignments(words)
     if not lead:
         return None
     stem = _basename(lead[0])
@@ -3866,6 +3941,11 @@ def _judge_started(words: list[str], redirects: list, depth: int) -> Verdict | N
         verdict = _line_verdict(text, depth + 1)
         if verdict.decision == DENY:
             return verdict
+        if text in started.hidden:
+            # A command line a unit property holds (`-p ExecStartPost=CMD`)
+            # is asked whatever it is (third delta review of PR #75, LOW 2).
+            worse(Verdict(ASK, f"{stem} runs a command line held in a unit property: "
+                          f"{text[:60]}"))
         if verdict.decision == ALLOW or (verdict is _UNLISTED and not transparent):
             continue
         worse(Verdict(ASK, f"{stem} runs a command line that asks: {verdict.reason or text[:60]}"))
@@ -3890,9 +3970,7 @@ def _judge_started(words: list[str], redirects: list, depth: int) -> Verdict | N
         if not started.joined and _UNTOLD.search(program[0]):
             worse(Verdict(ASK, f"the program {stem} starts ({program[0][:60]}) is only known "
                           "when it runs"))
-        own = list(program)
-        while own and _ASSIGNMENT.fullmatch(own[0]):
-            own.pop(0)
+        own = strip_assignments(program)
         if not started.joined and own and not known_program(_basename(own[0])):
             # A program no table knows, handed `-c`/`-e`/`--command STRING`,
             # may be a shell: its string is judged as a command line (M-B).
@@ -3973,7 +4051,8 @@ def known_program(stem: str) -> bool:
 def command_strings(tokens: list[str]) -> list[str]:
     """The strings a program is handed with `-c`, `-e` or `--command` (or
     `--command=…`, or glued to `-c`/`-e` when they hold a space, which no
-    cluster of flags does) — what a shell this check does not know by name
+    cluster of flags does), `c` or `e` in a cluster of flags included (`-lc`,
+    `-ic`, `-ec`, `-xc`, `-cl`) — what a shell this check does not know by name
     would run as a command line (delta review of PR #75, M-B: behind a
     runner, an unknown program is judged only as unknown, so `uv run myshell
     -c '<an owner op>'` was the ALLOW of `uv`). Read only for a program no
@@ -3984,12 +4063,27 @@ def command_strings(tokens: list[str]) -> list[str]:
     for i, token in enumerate(tokens[1:], 1):
         if token == "--":
             break
-        if token in ("-c", "-e", "--command") and i + 1 < len(tokens):
-            out.append(tokens[i + 1])
+        following = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if token == "--command":
+            out.append(following)
         elif token.startswith("--command="):
             out.append(token.split("=", 1)[1])
-        elif token[:2] in ("-c", "-e") and len(token) > 2 and any(c.isspace() for c in token):
-            out.append(token[2:])
+        elif token.startswith("-") and not token.startswith("--") and len(token) > 1:
+            # A short-option cluster holding `c` or `e` (third delta review of
+            # PR #75, LOW 1: `uv run mysh -lc '<an owner op>'` was the ALLOW
+            # of `uv`; a shell reads `-lc`, `-ic`, `-ec`, `-xc`, `-cl` as `-c`
+            # with flags). Read both ways a getopt program may: the rest of
+            # the cluster as its glued value, and the next word as the value
+            # (the cluster all flags).
+            letters = token[1:]
+            k = next((j for j, ch in enumerate(letters) if ch in "ce"), None)
+            if k is None or not all(ch.isascii() and ch.isalpha() for ch in letters[:k]):
+                continue
+            glued = letters[k + 1:]
+            if glued and any(ch.isspace() for ch in glued):
+                out.append(glued)
+            if all(ch.isascii() and ch.isalpha() for ch in letters) and following:
+                out.append(following)
     return [text for text in out
             if _COMMAND_CHARS.search(text) or known_program(_basename(text.strip()))]
 
