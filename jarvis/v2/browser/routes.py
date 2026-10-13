@@ -207,7 +207,7 @@ def route(handler, daemon, parts, query):
                 LOG.info("browser settings changed by the owner: %s",
                          ", ".join(f"{k} {'on' if v else 'off'}" for k, v in sorted(body.items())))
                 daemon._dev_settings_changed()
-                host.settings_changed()
+                host.settings_changed(sound_requested="sound" in body)
                 return 200, values
         if parts == ["browser", "profiles"]:
             if method == "GET":

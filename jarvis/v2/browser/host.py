@@ -84,6 +84,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from functools import wraps
+from .audio import InstanceAudio
 import json
 import logging
 import os
@@ -572,6 +573,8 @@ class _Instance:
     idle: object = None
     closing: bool = False
     generation: int = 0
+    audio: InstanceAudio = field(default_factory=lambda: InstanceAudio(False))
+    audio_owner: object = None
 
 
 @dataclass
@@ -657,6 +660,8 @@ class BrowserHost:
         self._look_lock = None
         self._launched: set[Path] = set()
         self._snapshot: dict = {"instances": [], "tabs": 0}
+        from .sound import BrowserSound
+        self._sound = BrowserSound(self)
         self._next_page_identity = 0
         self._pane_tabs: dict[str, dict] = {}  # private in-process identity cache; never status/bus
         self._guarded = 0
@@ -777,9 +782,10 @@ class BrowserHost:
         if revoked and self._gate is not None:
             self._gate.revoke_closed_loopback()
 
-    def settings_changed(self) -> None:
+    def settings_changed(self, *, sound_requested: bool = False) -> None:
         if self._gate is not None:
             self._gate.revoke_closed_loopback()
+        self._sound.sync(explicit=sound_requested)
 
     # -- lifecycle ------------------------------------------------------------------
 
@@ -1080,6 +1086,7 @@ class BrowserHost:
                 raise BrowserRefused(409, "old Browser work is still settling")
             self._instances[profile] = instance
             self._publish_snapshot()
+            self._sound.wake()
             return instance
         finally:
             self._launch_reserved.discard(profile)
@@ -1123,11 +1130,13 @@ class BrowserHost:
             LOG.warning("Stopped a leftover Chrome on a Browser profile")
         self._launched.add(folder)
         started = time.monotonic()
+        launch_audio = self._sound.launch(launch_args(folder, self._gate.port, private=private),
+                                          font_environment(home))
         try:
             context = await self._pw.chromium.launch_persistent_context(
                 str(folder), channel="chrome", headless=True, ignore_default_args=True,
-                args=launch_args(folder, self._gate.port, private=private),
-                env=font_environment(home), chromium_sandbox=True,
+                args=launch_audio.args,
+                env=launch_audio.env, chromium_sandbox=True,
                 artifacts_dir=str(artifacts), downloads_path=str(incoming),
                 accept_downloads=True, handle_sigint=False, handle_sigterm=False,
                 handle_sighup=False, timeout=LAUNCH_TIMEOUT_S * 1000,
@@ -1141,7 +1150,8 @@ class BrowserHost:
         self.timings["launch_s"] = round(time.monotonic() - started, 3)
         browser = context.browser
         instance = _Instance(profile=profile, folder=folder, context=context, browser=browser,
-                             version=getattr(browser, "version", "") or "")
+                             version=getattr(browser, "version", "") or "",
+                             audio=InstanceAudio(launch_audio.applied))
         context.on("page", lambda page: self._adopt(instance, page, None))
         LOG.info("Browser started a Chrome (%s)", "private" if private else "profile")
         return instance
@@ -2362,7 +2372,8 @@ class BrowserHost:
     def _publish_snapshot(self) -> None:
         self._publish_pane_tabs()
         instances = [{"profile": p, "tabs": sum(t.profile == p for t in self._tabs.values()),
-                      "contexts": len(i.private_contexts) if p == PRIVATE else None}
+                      "contexts": len(i.private_contexts) if p == PRIVATE else None,
+                      "sound": self._sound.instance_status(i)}
                      for p, i in self._instances.items()]
         versions = sorted({i.version for i in self._instances.values() if i.version})
         with self._lock:
@@ -2384,6 +2395,7 @@ class BrowserHost:
                       if t.stream is not None and t.stream.attached() is not None)
         return {"available": CHROME_PATH.exists(), "running": running,
                 "version": snapshot.get("version"), "instances": snapshot["instances"],
+                "sound": self._sound.status(),
                 "tabs": snapshot["tabs"], "tab_cap": max(1, config.BROWSER_TAB_CAP),
                 "lan": settings["lan"], "local_servers": settings["local_servers"],
                 "profile_cap": 8, "instance_cap": PROFILE_INSTANCES_MAX,
