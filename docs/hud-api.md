@@ -2779,3 +2779,29 @@ persistent Remote tab is first drawn, then calls restore; an existing live
 handle reattaches without navigation. A refused local restore stays visibly
 failed until an actual owner address submission. Ended Private sessions never
 replay stored URLs (Private storage contains none).
+
+## Private Browser approval infrastructure (BR9b)
+
+A Browser action card has hud_only: true. Its public broker projection contains
+only req_id, code, tool, layer, thread_id, asked_at, allowlistable: false,
+timeout_s and hud_only. General approval listings and request/resolution events
+contain no page URL, typed text, file path, command, headline or classifier
+reason. Ordinary approval JSON stays unchanged.
+
+GET /browser/approvals/<req_id> serves a still-pending private card through the
+existing owner-only HUD listener, Origin/fetch metadata and strict loopback Host
+checks. It adds args, command, reason, headline and browser details.
+Missing, resolved and ordinary requests return a fixed 404. Owner answers use
+the existing POST /approvals/<req_id> path. A private ALLOW requires that exact
+HUD answering path; code and non-HUD callers can deny but cannot consent. Always
+never writes a rule. Private requests wait at most 120 seconds even with a remote
+broker, and cancellation denies and withdraws the pending card. Discord neither
+delivers nor selects these cards.
+
+The registry's internal after_navigation(snapshot) is only for reconciliation
+after completed judged input. It accepts URL/document generation advancement
+while requiring the exact same page identity, window, pane, selected tab, source,
+profile/context, generation and permissions. Ordinary still_current is
+unchanged. Current production snapshots keep drive:false, so this helper
+cannot enable driving. This infrastructure does not expose a driving tool by
+itself.

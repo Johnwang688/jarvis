@@ -1326,6 +1326,13 @@ class Daemon:
                           "data": request.to_json()})
 
     def _approval_resolved(self, request: ApprovalRequest, decision, resolution: str) -> None:
+        if request.private:
+            self.bus.publish({"kind": "approval_resolved", "thread_id": request.thread_id,
+                              "data": {"req_id": request.req_id, "code": request.code,
+                                       "tool": request.tool, "hud_only": True,
+                                       "decision": getattr(decision, "value", str(decision)),
+                                       "resolution": resolution}})
+            return
         self.bus.publish({"kind": "approval_resolved",
                           "thread_id": request.thread_id,
                           "data": {"req_id": request.req_id, "code": request.code,
@@ -1334,9 +1341,9 @@ class Daemon:
                                    "decision": getattr(decision, "value", str(decision)),
                                    "resolution": resolution}})
 
-    def resolve_approval(self, req_id: str, decision, always: bool = False) -> dict:
+    def resolve_approval(self, req_id: str, decision, always: bool = False, *, hud: bool = False) -> dict:
         try:
-            entry = self.approvals.resolve(req_id, decision, always=always)
+            entry = self.approvals.resolve(req_id, decision, always=always, hud=hud)
         except ValueError as exc:
             raise APIError(404, str(exc)) from exc
         return {"ok": True, "req_id": req_id,
@@ -2158,7 +2165,9 @@ def _handler(daemon):
                 if not isinstance(always, bool):
                     raise APIError(400, "always must be a boolean")
                 return 200, daemon.resolve_approval(
-                    parts[1], Decision(_text(body["decision"], "decision")), always)
+                    parts[1], Decision(_text(body["decision"], "decision")), always,
+                    hud=self.headers.get("Host", "") in (
+                        f"127.0.0.1:{daemon.face_port}", f"localhost:{daemon.face_port}"))
             if len(parts) in (2, 3) and parts[0] == "tasks":
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":

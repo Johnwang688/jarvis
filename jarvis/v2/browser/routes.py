@@ -144,6 +144,11 @@ def route(handler, daemon, parts, query):
     # The socket's ticket is the one query any route takes (it is never logged:
     # `/browser` paths are logged without their query).
     _object(query, ("ticket",) if attach else ())
+    if len(parts) == 3 and parts[1] == "approvals" and method == "GET":
+        try:
+            return 200, daemon.approvals.owner_details(parts[2])
+        except ValueError:
+            _fail(404, "no pending Browser approval")
     host = daemon.browser
     settings = daemon.browser_settings
     try:

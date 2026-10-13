@@ -594,7 +594,8 @@ class DiscordRouter:
         """The open requests that were asked in this channel, and only those."""
         with self._lock:
             channels = dict(self._approval_channels)
-        return [r for r in self.approvals.pending() if channels.get(r.req_id) == str(channel_id)]
+        return [r for r in self.approvals.pending()
+                if not getattr(r, "private", getattr(r, "hud_only", False)) and channels.get(r.req_id) == str(channel_id)]
 
     @staticmethod
     def allowlistable(request) -> tuple[bool, str]:
@@ -617,7 +618,7 @@ class DiscordRouter:
         code = clean_code(code)
         with self._lock:
             channels = dict(self._approval_channels)
-        open_requests = list(self.approvals.pending())
+        open_requests = [r for r in self.approvals.pending() if not getattr(r, "private", getattr(r, "hud_only", False))]
         if code:
             match = next((r for r in open_requests if r.code == code), None)
             if match is None:
@@ -677,7 +678,8 @@ class DiscordRouter:
         req_id, (asked_in, _message, posted_code) = found[0]
         if asked_in != str(channel_id) or posted_code != clean_code(code):
             return None, "That button does not match its approval. Nothing ran."
-        request = next((r for r in self.approvals.pending() if r.req_id == req_id), None)
+        request = next((r for r in self.approvals.pending()
+                        if r.req_id == req_id and not getattr(r, "private", getattr(r, "hud_only", False))), None)
         if request is None:
             return None, "That approval was already answered — nothing ran."
         return request, None
@@ -691,7 +693,7 @@ class DiscordRouter:
             try:
                 if record.get("kind") == "shutdown":
                     break
-                if not (record.get("data") or {}).get("code"):
+                if (record.get("data") or {}).get("hud_only") or not (record.get("data") or {}).get("code"):
                     # Only the broker asks the owner, and every broker question
                     # carries a code. Anything else (a provider's "the gate was
                     # consulted") is never a DM, nor a resolution post.
@@ -713,6 +715,8 @@ class DiscordRouter:
         recorded as where it was asked — so the answer counts there and only
         there, exactly as if it had been asked there first. In a guild the post
         is silent and followed by the D1 ping line; a DM notifies by itself."""
+        if data.get("hud_only"):
+            return
         req_id = str(data.get("req_id") or "")
         code = str(data.get("code") or "")
         channel = None
@@ -815,6 +819,8 @@ class DiscordRouter:
             LOG.warning("Discord approval buttons not removed (%s)", type(exc).__name__)
 
     def _post_resolution(self, data: dict) -> None:
+        if data.get("hud_only"):
+            return
         req_id = str(data.get("req_id") or "")
         with self._lock:
             channel = self._approval_channels.pop(req_id, None)
