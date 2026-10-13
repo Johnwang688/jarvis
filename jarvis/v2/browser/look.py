@@ -7,7 +7,7 @@ here; capture runs on BrowserHost's existing Playwright thread.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from io import BytesIO
 import json
@@ -43,6 +43,8 @@ class LookResult:
     notes: tuple[str, ...] = ()
     image: str | None = None
     refused: str = ""
+    # Tool-local receipt; owner capture adapters never receive a ref grant.
+    delivered: object = field(default=None,repr=False,compare=False)
 
 
 def guarded(raw: dict, forms) -> bool:
@@ -172,8 +174,12 @@ class BrowserLook:
             withheld=guarded(scan,forms) or withheld
             result=presented(scan,image,fresh=snapshot.mode=="direct",vision=runtime.desk_images(),withheld=withheld)
             self._current(snapshot)
+            def delivered():
+                self._current(snapshot)
+                drive=getattr(self.daemon,"browser_drive",None)
+                if drive is not None:drive.publish_look(snapshot,scan)
             refused=False
-            return result
+            return replace(result,delivered=delivered)
         except LookRefused as exc:
             return LookResult(refused=str(exc))
         except Exception:

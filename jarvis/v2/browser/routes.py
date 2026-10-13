@@ -100,13 +100,13 @@ def _disposition(name: str) -> str:
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name, safe='')}"
 
 
-def _serve_download(handler, download_id):
+def _serve_download(handler, download_id, authorize=None):
     """A saved download, to the owner's window only, as an attachment that
     runs nothing (files.py)."""
     dest = handler.headers.get("Sec-Fetch-Dest", "")
     if dest not in DOWNLOAD_DESTS:
         _fail(403, "a download is opened or fetched, never embedded")
-    fd, name, size = _files.open_download(download_id)
+    fd, name, size = _files.open_download(download_id, authorize=authorize)
     try:
         from ..hud_api import frame_headers
         frame_headers(handler, DOWNLOAD_CSP)        # checked before a byte is written
@@ -146,6 +146,11 @@ def route(handler, daemon, parts, query):
     # `/browser` paths are logged without their query.
     capture = len(parts) == 4 and parts[1] == "tabs" and parts[3] == "capture" and method == "GET"
     _object(query, ("ticket",) if attach else ("window", "pane", "local_tab", "view", "whole") if capture else ())
+    if len(parts) == 3 and parts[1] == "approvals" and method == "GET":
+        try:
+            return 200, daemon.approvals.owner_details(parts[2])
+        except ValueError:
+            _fail(404, "no pending Browser approval")
     host = daemon.browser
     settings = daemon.browser_settings
     try:
@@ -180,7 +185,7 @@ def route(handler, daemon, parts, query):
             return 200, host.downloads()
         if len(parts) == 3 and parts[1] == "downloads":
             if method == "GET":
-                return _serve_download(handler, parts[2])
+                return _serve_download(handler, parts[2], daemon.browser_drive.downloads.authorized)
             if method == "DELETE":
                 return 200, _files.delete(parts[2])
         if parts == ["browser"] and method == "GET":

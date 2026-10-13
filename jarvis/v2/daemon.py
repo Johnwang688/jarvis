@@ -306,6 +306,8 @@ class Daemon:
         self.browser = BrowserHost(self)
         from .browser.look import BrowserLook
         self.browser_look = BrowserLook(self)
+        from .browser.drive import BrowserDrive
+        self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
         self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
         from .browser.panes import BrowserPanes
@@ -367,6 +369,7 @@ class Daemon:
             # `terminal_read` (WP-F) reads these terminals and no others.
             self.terminals.install()
             self.browser_look.install()
+            self.browser_drive.install()
             self.devservers.start()
             self.schedules.start()
 
@@ -1342,6 +1345,13 @@ class Daemon:
                           "data": request.to_json()})
 
     def _approval_resolved(self, request: ApprovalRequest, decision, resolution: str) -> None:
+        if request.private:
+            self.bus.publish({"kind": "approval_resolved", "thread_id": request.thread_id,
+                              "data": {"req_id": request.req_id, "code": request.code,
+                                       "tool": request.tool, "hud_only": True,
+                                       "decision": getattr(decision, "value", str(decision)),
+                                       "resolution": resolution}})
+            return
         self.bus.publish({"kind": "approval_resolved",
                           "thread_id": request.thread_id,
                           "data": {"req_id": request.req_id, "code": request.code,
@@ -1350,9 +1360,9 @@ class Daemon:
                                    "decision": getattr(decision, "value", str(decision)),
                                    "resolution": resolution}})
 
-    def resolve_approval(self, req_id: str, decision, always: bool = False) -> dict:
+    def resolve_approval(self, req_id: str, decision, always: bool = False, *, hud: bool = False) -> dict:
         try:
-            entry = self.approvals.resolve(req_id, decision, always=always)
+            entry = self.approvals.resolve(req_id, decision, always=always, hud=hud)
         except ValueError as exc:
             raise APIError(404, str(exc)) from exc
         return {"ok": True, "req_id": req_id,
@@ -1365,7 +1375,8 @@ class Daemon:
             from .tool_calls import label
             data = event.data or {}
             try:
-                tool_label = label(data.get("name"), data.get("args"), session.brief.cwd)
+                tool_label = ("Browser action" if data.get("name")=="hud_browser_act" else
+                              label(data.get("name"), data.get("args"), session.brief.cwd))
             except Exception:
                 from .approvals import clean_line
                 tool_label = clean_line(data.get("name"), 40)
@@ -1401,6 +1412,17 @@ class Daemon:
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
+            data=record.get("data") or {}
+            if data.get("name")=="hud_browser_act":
+                if event.kind==EventKind.TOOL_STARTED:
+                    record["data"]={"call_id":data.get("call_id"),"name":"hud_browser_act","args":{}}
+                elif event.kind==EventKind.TOOL_FINISHED:
+                    from jarvis.tools import private_summary
+                    summary=data.get("summary")
+                    safe=summary if summary in ("acted","refused","asked","stopped") else private_summary("hud_browser_act",str(summary or ""))
+                    record["data"]={"call_id":data.get("call_id"),"name":"hud_browser_act",
+                        "ok":data.get("ok") is True,"outcome":data.get("outcome") if data.get("outcome") in ("ok","denied","failed") else "failed",
+                        "summary":safe}
             if tool_label is not None:
                 record["data"] = {**record.get("data", {}), "label": tool_label}
             if event.kind == EventKind.QUESTION and (event.data or {}).get("req_id"):
@@ -1753,6 +1775,7 @@ class Daemon:
         # The Browser's Chrome, its driver and its gate (BR-1a): after the
         # terminals, before the listeners close. Its own bound, past the
         # daemon's: a Chrome that will not close is killed by exact PID.
+        self.browser_drive.stop()
         self.browser_look.stop()
         self.browser_panes.stop()
         self.browser.stop()
@@ -2203,7 +2226,9 @@ def _handler(daemon):
                 if not isinstance(always, bool):
                     raise APIError(400, "always must be a boolean")
                 return 200, daemon.resolve_approval(
-                    parts[1], Decision(_text(body["decision"], "decision")), always)
+                    parts[1], Decision(_text(body["decision"], "decision")), always,
+                    hud=self.headers.get("Host", "") in (
+                        f"127.0.0.1:{daemon.face_port}", f"localhost:{daemon.face_port}"))
             if len(parts) in (2, 3) and parts[0] == "tasks":
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":
