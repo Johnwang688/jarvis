@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from ... import runtime, untrusted
-from ...tools import EXPLICIT_ONLY, tool
+from ...tools import EXPLICIT_ONLY, PRIVATE_RESULT, tool
 from ..terminal_guard import DEFAULT_LINES, LINE_CAP, MAX_LINES
 from ..terminals import read_for_tool
 
@@ -85,3 +85,4 @@ def terminal_read(
 
 
 EXPLICIT_ONLY.add("terminal_read")
+PRIVATE_RESULT.add("terminal_read")

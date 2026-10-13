@@ -29,6 +29,27 @@ describe("the socket's URL", () => {
   });
 });
 
+it("attaches the shared 32-hex page identity and omits invalid legacy identities", () => {
+  const loc = { protocol: "http:", host: "localhost:9999" }, nonce = "a1".repeat(16);
+  expect(new URL(attachUrl(loc, "0a1b2c3d", "tk", nonce)).searchParams.get("window")).toBe(nonce);
+  for (const bad of ["a1".repeat(8), nonce.toUpperCase(), "", "../window"]) {
+    expect(new URL(attachUrl(loc, "0a1b2c3d", "tk", bad)).searchParams.has("window")).toBe(false);
+  }
+});
+
+it("accepts bounded dev-server controls and preserves legacy id-less announcements", () => {
+  const url = "http://localhost:5173/";
+  expect(parseControl(JSON.stringify({ type: "dev_url", url, id: "ds_1234abcd" })))
+    .toEqual({ type: "dev_url", url, id: "ds_1234abcd" });
+  expect(parseControl(JSON.stringify({ type: "dev_url", url }))).toEqual({ type: "dev_url", url });
+  for (const id of ["bad", "ds_1234ABCD", "ds_123456789", null, 1]) {
+    expect(parseControl(JSON.stringify({ type: "dev_url", url, id }))).toBeNull();
+  }
+  for (const url of ["", "x".repeat(2049), null]) {
+    expect(parseControl(JSON.stringify({ type: "dev_url", url }))).toBeNull();
+  }
+});
+
 describe("pastes", () => {
   it("are chunked at 16 KiB, in order, losslessly", () => {
     const data = new Uint8Array(CHUNK * 3 + 5).map((_, i) => i % 251);

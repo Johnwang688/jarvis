@@ -221,7 +221,7 @@ live in the design/plans. Markers refer to the original file's lines.
 | Discord commands/channels/reports | [Discord](docs/notes/discord.md), [plan](docs/plans/2026-10-07-discord-plan.md) |
 | HUD chats/layout/installed app | [Workspace](docs/notes/hud-workspace.md), [decisions](docs/plans/2026-10-09-hud-workspace-decisions.md) |
 | Files, editor, diffs and settings | [Editor](docs/notes/editor.md), [decisions](docs/plans/2026-10-09-hud-editor-decisions.md) |
-| Browser, preview and auto-open | [Browser](docs/notes/browser.md), [decisions](docs/plans/2026-10-10-hud-browser-decisions.md), [amendment 2](docs/plans/2026-10-12-hud-browser-plan-amendment-2.md) |
+| Browser, preview, auto-open and looks | [Browser](docs/notes/browser.md), [decisions](docs/plans/2026-10-10-hud-browser-decisions.md), [amendment 2](docs/plans/2026-10-12-hud-browser-plan-amendment-2.md) |
 | PTYs and terminal reads | [Terminals](docs/notes/terminals.md) |
 | VEX build/device/project work | [VEX](docs/notes/vex.md) |
 | Loop/transcript contracts | [Invariant snapshot](docs/notes/invariants.md); active copy below |

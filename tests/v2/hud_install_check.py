@@ -717,9 +717,25 @@ class NoLever(unittest.TestCase):
         from jarvis import tools
         from jarvis.v2.providers import fastpath
         names = set(tools.REGISTRY)
-        self.assertFalse([n for n in names if "hud" in n.lower() or "install" in n.lower()],
-                         sorted(n for n in names if "hud" in n.lower() or "install" in n.lower()))
-        self.assertFalse(any("hud" in n.lower() or "install" in n.lower() for n in fastpath.FAST_TOOLS))
+        # BR5 is the one deliberately named read-only HUD tool. Keep the
+        # exact exception and its narrow service import, not a broad HUD-name
+        # waiver that could admit an installer or another owner capability.
+        allowed = {"hud_browser_view"}
+        for offered in (names, set(fastpath.FAST_TOOLS)):
+            self.assertEqual({n for n in offered if "hud" in n.lower() or "install" in n.lower()}, allowed)
+        import ast
+        tree = ast.parse((REPO / "jarvis/v2/tools/hud_browser_view.py").read_text())
+        imports = []
+        for node in ast.walk(tree):
+            self.assertNotIsInstance(node, ast.Import, "the tool uses only its explicit from-import boundary")
+            if isinstance(node, ast.ImportFrom):
+                imports.append((node.level, node.module, tuple(alias.name for alias in node.names)))
+        self.assertEqual(imports, [
+            (0, "typing", ("Annotated",)),
+            (0, "jarvis", ("runtime", "untrusted")),
+            (0, "jarvis.tools", ("EXPLICIT_ONLY", "PRIVATE_RESULT", "ToolResult", "tool")),
+            (2, "browser.look", ("look_for_tool",)),
+        ])
 
 
 if __name__ == "__main__":

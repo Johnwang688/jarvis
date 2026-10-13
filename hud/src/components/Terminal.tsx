@@ -1,3 +1,4 @@
+import { devservers } from "../state/devserverClient";
 // The owner's terminals in the window (WP-D; plan docs/plans/2026-10-09-hud-
 // workspace-plan.md §2.3–§2.4, decisions W-1, W-2, W-5; contract in
 // docs/hud-api.md). lib/terminal.ts decides every rule; this file holds the
@@ -522,7 +523,7 @@ export class TermSession {
     if (this.disposed || !this.wanted || this.ws) return;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(attachUrl(window.location, this.id, ticket));
+      ws = new WebSocket(attachUrl(window.location, this.id, ticket, PAGE));
     } catch {
       this.scheduleReconnect();
       return;
@@ -632,7 +633,7 @@ export class TermSession {
   endedWhy: "gone" | "ended" = "ended";
 
   private onMessage(ws: WebSocket, gen: number, ev: MessageEvent) {
-    if (ws !== this.ws) return;
+    if (ws !== this.ws || gen !== this.gen) return;
     if (typeof ev.data !== "string") {
       this.out.data(gen, new Uint8Array(ev.data as ArrayBuffer));
       return;
@@ -640,6 +641,9 @@ export class TermSession {
     const msg = parseControl(ev.data);
     if (!msg) return;
     switch (msg.type) {
+      case "dev_url":
+        if (this.sawAttached && this.state === "attached") devservers.terminal(this.id, msg.url, msg.id);
+        return;
       case "attached":
         this.sawAttached = true;
         this.attempts = 0;

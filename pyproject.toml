@@ -9,6 +9,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "prompt-toolkit>=3.0",
     "websocket-client>=1.8",
+    "pillow>=12.3",
 ]
 
 [project.optional-dependencies]

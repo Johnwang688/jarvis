@@ -497,6 +497,11 @@ class BrowserHost:
         self._closing_contexts: set[str] = set()
         self._retiring_contexts: dict[str, asyncio.Task] = {}
         self._download_tasks: dict[asyncio.Task, _Tab] = {}
+        # BR5: separate hidden-context identities count against tabs and keep
+        # Private alive through capture/retirement, without entering owner tabs.
+        self._look_reserved: set[str] = set()
+        self._look_tasks: set[asyncio.Task] = set()
+        self._look_lock = None
         self._launched: set[Path] = set()
         self._snapshot: dict = {"instances": [], "tabs": 0}
         self._next_page_identity = 0
@@ -676,6 +681,9 @@ class BrowserHost:
         self._publish_snapshot()
 
     async def _shutdown(self) -> None:
+        looks=list(self._look_tasks)
+        for task in looks:task.cancel()
+        if looks:await asyncio.gather(*looks,return_exceptions=True)
         for profile in list(self._instances.keys() | self._closing_instances.keys()):
             await self._close_instance(profile)
         if self._pw is not None:
@@ -704,6 +712,24 @@ class BrowserHost:
                 LOG.warning("Browser call failed: %s", type(exc).__name__)
                 raise BrowserRefused(409, "the Browser could not do that") from None
             raise
+
+    @staticmethod
+    def _tab_cap() -> int:
+        return max(1, config.BROWSER_TAB_CAP)
+
+    def capture_look(self, snapshot, whole, images, forms, current):
+        """The BR5 service's read adapter. Never admits an owner port lease."""
+        from .look_capture import LOOK_TIMEOUT_S, capture, direct_url
+        from .look import LookRefused
+        deadline = time.monotonic() + LOOK_TIMEOUT_S
+        current()
+        if snapshot.mode == "direct":
+            direct_url(self, snapshot.url)
+            self._ensure_started()
+        elif not self._running():
+            raise LookRefused("no live HUD Browser pane is available")
+        return self._call(capture(self, snapshot, whole, images, forms, current, deadline),
+                          max(0.1, deadline-time.monotonic()) + CLOSE_TIMEOUT_S*3)
 
     # -- profiles (BR-1c) ---------------------------------------------------
 
@@ -858,6 +884,7 @@ class BrowserHost:
             _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE, strict=True)
             self._closing_contexts.difference_update(instance.private_contexts)
             instance.private_contexts.clear()
+            self._look_reserved.clear()
         self._closing_instances.pop(profile, None)
         self._publish_snapshot()
 
@@ -874,7 +901,7 @@ class BrowserHost:
         for tab in self._tabs.values():
             if tab.page is page:
                 return tab
-        if len(self._tabs) >= max(1, config.BROWSER_TAB_CAP):
+        if len(self._tabs) + len(self._look_reserved) >= max(1, config.BROWSER_TAB_CAP):
             asyncio.ensure_future(self._refuse_popup(page))
             return None
         tab_id = self._new_id(self._tabs)
@@ -1114,7 +1141,7 @@ class BrowserHost:
         cap = max(1, config.BROWSER_TAB_CAP)
         if url is not None:
             self._refuse_if_held()
-        if len(self._tabs) >= cap:
+        if len(self._tabs) + len(self._look_reserved) >= cap:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         if profile == PRIVATE and self._closing_contexts:
             if ctx is None or ctx in self._closing_contexts or PRIVATE in self._closing_instances:

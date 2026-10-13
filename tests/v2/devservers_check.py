@@ -801,9 +801,46 @@ class Routes(Base):
         self.assertEqual(self.claim(ident, W2)[1], {"won": False})
         self.assertEqual(self.req("POST", f"/dev-servers/{ident}/dismiss", {"window": W2})[0], 200)
         self.assertEqual(self.claim(ident)[0], 409)
-        self.assertEqual(self.watch.listing(), {"servers": []})
+        self.assertEqual(self.watch.listing(), {"auto_open": True, "servers": []})
         self.assertEqual([r["data"]["state"] for r in self.records], ["up", "claimed", "placed", "dismissed"])
         self.assertEqual(self.claim("ds_deadbeef")[0], 404)
+
+    def test_off_broadcast_revokes_pending_windows_and_refuses_actions(self):
+        one = self.entry(window=W1)
+        two = self.entry(window=W2, terminal="other-terminal", port=23457)
+        self.records.clear()
+        self.assertEqual(self.req("PATCH", "/browser/settings", {"auto_open": False})[0], 200)
+        self.assertEqual(self.records[0], {"kind": "dev_server_settings", "data": {"auto_open": False}})
+        listing = self.req("GET", f"/dev-servers?window={W1}")[1]
+        self.assertFalse(listing["auto_open"])
+        self.assertTrue(all(not row["mine"] and not row["claimed"] for row in listing["servers"]))
+        for ident, window in ((one, W1), (two, W2)):
+            self.assertEqual(self.claim(ident, window), (409, {"error": "automatic opening is off", "code": "off"}))
+            for action in ("renew", "placed"):
+                status, body = self.req("POST", f"/dev-servers/{ident}/{action}", {"window": window})
+                self.assertEqual((status, body["code"]), (409, "off"))
+        # ON is a new epoch, not permission for an old card's callback to act.
+        self.assertEqual(self.req("PATCH", "/browser/settings", {"auto_open": True})[0], 200)
+        self.assertEqual(self.records[-1], {"kind": "dev_server_settings", "data": {"auto_open": True}})
+        for ident, window in ((one, W1), (two, W2)):
+            self.assertEqual(self.req("POST", f"/dev-servers/{ident}/placed", {"window": window})[0], 409)
+        self.assertTrue(self.req("GET")[1]["auto_open"])
+        self.assertTrue(self.claim(one, W2)[1]["won"])
+        self.req("PATCH", "/browser/settings", {"auto_open": False})
+        self.assertEqual(self.req("POST", f"/dev-servers/{one}/dismiss", {"window": W2})[0], 200)
+
+    def test_off_during_arbitration_never_awards_the_stale_claim(self):
+        ident = self.entry()
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(self.claim, ident)
+            eventually(lambda: bool(self.watch._entry(ident).claims))
+            self.req("PATCH", "/browser/settings", {"auto_open": False})
+            status, body = pending.result(timeout=2)
+            self.assertEqual((status, body["code"]), (409, "off"))
+        self.req("PATCH", "/browser/settings", {"auto_open": True})
+        entry = self.watch._entry(ident)
+        self.assertEqual((entry.state, entry.window, entry.claims), ("up", None, []))
+        self.assertTrue(self.claim(ident, W2)[1]["won"])
 
     def test_unrenewed_lease_lapses_and_publishes_up(self):
         ident = self.entry()

@@ -50,6 +50,7 @@ export const BROWSER_FULL = "This pane has 12 tabs. Close one to open another.";
 
 export function BrowserTab(props: {
   pane: number; slot: number; drawn: boolean; projectId: string | null;
+  unseen?: readonly string[]; newTabNote?: string;
   browser?: BrowserTabs; liveFrames: readonly string[]; blocked?: boolean; limitMessage?: boolean;
   onLoaded: (id: string, url: string) => void;
   onSubmitted: (id: string, url: string) => void;
@@ -69,7 +70,7 @@ export function BrowserTab(props: {
   };
   const shown = tabs.length ? tabs : [{ id: emptyId, url: "" }];
   return <div className="tabbody browserbody">
-    <BrowserTabStrip tabs={tabs} active={active} blocked={props.blocked}
+    <BrowserTabStrip tabs={tabs} active={active} blocked={props.blocked} unseen={props.unseen}
       onActivate={activate} onClose={(id) => { if (!props.blocked) { setFull(false); props.onClose(id); } }}
       onNew={() => {
         if (props.blocked) return;
@@ -79,6 +80,7 @@ export function BrowserTab(props: {
         setFocusUrl(id);
         props.onAdd(id);
       }} />
+    {props.newTabNote ? <div className="browser-newtab-note" data-testid="browser-new-tab-note">New tab · {props.newTabNote}</div> : null}
     {(full || props.limitMessage) && tabs.length >= BROWSER_TABS_MAX
       ? <div className="pad muted" role="status" data-testid="browser-full">{BROWSER_FULL}</div> : null}
     {shown.map((tab) => <DirectTab key={tab.id} {...props} tab={tab}
