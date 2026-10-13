@@ -34,19 +34,24 @@ function SaveUnsaved(props: { blocked?: boolean }) {
   useSyncExternalStore(buffers.subscribe, buffers.version);
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState("");
-  const n = buffers.dirtyCount();
+  const [copying, setCopying] = useState<string | null>(null);
+  const dirty = buffers.snapshot().filter(b => b.dirty);
+  const n = dirty.length;
+  const labels = new Map(dirty.map(file => [file.abs,
+    dirty.some(other => other.abs !== file.abs && other.path === file.path) ? file.abs : file.path]));
   if (!n && !said) return null;
   return (
-    <p>
+    <div>
+      <p>
       {n ? (
         <button
           type="button"
           data-testid="hud-crashed-save"
-          disabled={busy || props.blocked}
+          disabled={busy || copying !== null || props.blocked}
           onKeyDown={ownKey}
           onKeyUp={ownKey}
           onClick={async () => {
-            if (busy || props.blocked) return;
+            if (busy || copying !== null || props.blocked) return;
             setBusy(true);
             try {
               const ok = await buffers.saveAll();
@@ -61,7 +66,29 @@ function SaveUnsaved(props: { blocked?: boolean }) {
         </button>
       ) : null}{" "}
       {said ? <span data-testid="hud-crashed-saved">{said}</span> : null}
-    </p>
+      </p>
+      {dirty.map(file => <p key={file.abs}>
+        <span>{labels.get(file.abs)}</span>{" "}
+        <button type="button" data-testid="hud-crashed-copy" data-path={file.path}
+          disabled={busy || copying !== null || props.blocked} onKeyDown={ownKey} onKeyUp={ownKey}
+          onClick={async () => {
+            if (busy || copying !== null || props.blocked) return;
+            // Exact text is taken only for this owner gesture, never a render,
+            // log, request or persistent recovery store.
+            const text = buffers.text(file.abs);
+            if (text === null) { setSaid("That edit is no longer available to copy."); return; }
+            setCopying(file.abs); setSaid("");
+            try {
+              await navigator.clipboard.writeText(text);
+              setSaid(`Copied ${labels.get(file.abs)}. The edit is still unsaved.`);
+            } catch {
+              setSaid("Copy failed. Your edit is still here; allow clipboard access and try again.");
+            } finally { setCopying(null); }
+          }}>
+          {copying === file.abs ? "Copying…" : "Copy unsaved text"}
+        </button>
+      </p>)}
+    </div>
   );
 }
 

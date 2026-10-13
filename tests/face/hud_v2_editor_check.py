@@ -172,7 +172,7 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
                         _unmount_checks, _card_checks,
                         # The review of PR #49, each failing on f869543.
                         _rv49_env_not_utf8_checks, _rv49_project_gone_checks, _rv49_compare_loop_checks,
-                        _rv49_two_projects_checks, _rv49_crash_save_checks, _rv49_double_save_checks,
+                        _rv49_two_projects_checks, _rv49_crash_save_checks, _checkpoint_crash_copy_checks, _rv49_double_save_checks,
                         _rv49_save_again_checks, _rv49_close_both_checks):
             _fresh(page, mock, until, keep_files=keep)
             try:
@@ -963,6 +963,50 @@ def main():
         return 1
     print(f"all {v2.CHECKS} editor checks passed")
     return 0
+
+
+def _checkpoint_crash_copy_checks(page, mock, check, until):
+    """The owner can recover exact text after a crash and a refused etag save."""
+    check("recovery: file opens", _open(page, until, 2, "calc.py"))
+    check("recovery: retained edit", _type(page, until, 2, "\n#exact_copy_after_409"))
+    original = mock.world["files"]["calc.py"]["content"]
+    mock.world["files"]["calc.py"]["content"] = "#changed_on_disk\n"
+    page.evaluate("""() => {
+      window.__copyCalls=[]; window.__copyFail=false;
+      Object.defineProperty(navigator,'clipboard',{configurable:true,value:{
+        writeText: async text => { if(window.__copyFail) throw new Error('fixture denied'); window.__copyCalls.push(text); }
+      }});
+      window.__hudCrashProbe='workspace';
+      window.__hud.dispatch({type:'patch',patch:{error:'crash copy probe'}});
+    }""")
+    until(lambda: page.locator('[data-testid="hud-crashed"]').count() == 1, timeout=4)
+    page.evaluate("delete window.__hudCrashProbe")
+    save = page.locator('[data-testid="hud-crashed-save"]')
+    copy = page.locator('[data-testid="hud-crashed-copy"][data-path="calc.py"]')
+    save.click()
+    until(lambda: "could not be saved" in page.locator('[data-testid="hud-crashed-saved"]').inner_text(), timeout=4)
+    check("recovery: 409 preserves the unsaved file and offers its named copy", copy.count() == 1 and "calc.py" in page.locator('[data-testid="hud-crashed"]').inner_text())
+    _approval(mock, "crashcopy1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    until(lambda: copy.is_disabled(), timeout=3)
+    check("recovery: approval makes copy disabled and inert", copy.is_disabled() and copy.evaluate("e=>!!e.closest('[inert]')"))
+    copy.evaluate("e=>e.click()")
+    check("recovery: blocked click writes no clipboard", page.evaluate("__copyCalls.length") == 0)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0 and not copy.is_disabled(), timeout=4)
+    page.evaluate("window.__copyFail=true")
+    copy.click()
+    until(lambda: "Copy failed" in page.locator('[data-testid="hud-crashed-saved"]').inner_text(), timeout=4)
+    check("recovery: denied clipboard does not claim success", page.evaluate("__copyCalls.length") == 0 and "Copied calc.py" not in page.locator('[data-testid="hud-crashed-saved"]').inner_text())
+    page.evaluate("window.__copyFail=false")
+    copy.click()
+    until(lambda: "Copied calc.py" in page.locator('[data-testid="hud-crashed-saved"]').inner_text(), timeout=4)
+    # Monaco inner_text is a visual line layout, not the model's exact bytes.
+    # The refused PUT carried the same retained edit through a separate save path.
+    expected = mock.sent("PUT", "/projects/p1/file")[-1]["content"]
+    actual = page.evaluate("__copyCalls")
+    check("recovery: clipboard gets exact retained text", actual == [expected] and original.strip() in expected and "#exact_copy_after_409" in expected, repr({"actual": actual, "expected": expected}))
+    check("recovery: copy neither overwrites disk nor clears dirty state", mock.world["files"]["calc.py"]["content"] == "#changed_on_disk\n" and any(b["dirty"] for b in _buffers(page)))
 
 
 if __name__ == "__main__":
