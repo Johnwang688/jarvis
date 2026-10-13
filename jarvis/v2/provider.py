@@ -57,6 +57,7 @@ class Brief:
     always_ask: list[str] = field(default_factory=list)          # §6 layer 2, project + global
     max_turns: int | None = None
     task_id: str | None = None                  # attribution on approvals
+    origin_tag: str | None = field(default=None, repr=False)  # AO-1b-i: run copy only, never saved
 
 
 class EventKind(str, Enum):
