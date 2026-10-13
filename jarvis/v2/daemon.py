@@ -299,6 +299,8 @@ class Daemon:
         self.browser_look = BrowserLook(self)
         from .devservers import DevServers
         self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
+        from .browser.panes import BrowserPanes
+        self.browser_panes = BrowserPanes(self)
         # Per-session jarvis-mcp caller tokens (callers.py, plan 2026-10-10
         # §1): minted in `_run_brief` for an owner's Claude or Codex chat that
         # is offered session tools, held only as digests, revoked whenever
@@ -503,9 +505,11 @@ class Daemon:
     def _dev_stream_started(self, window):
         with self._lock:
             self._dev_streams[window] = self._dev_streams.get(window, 0) + 1
+            self.browser_panes.window_started(window)
 
     def _dev_stream_ended(self, window):
         with self._lock:
+            self.browser_panes.window_ended(window)
             remaining = self._dev_streams[window] - 1
             if remaining:
                 self._dev_streams[window] = remaining
@@ -1670,6 +1674,7 @@ class Daemon:
         # terminals, before the listeners close. Its own bound, past the
         # daemon's: a Chrome that will not close is killed by exact PID.
         self.browser_look.stop()
+        self.browser_panes.stop()
         self.browser.stop()
         self.bus.close()
         for server, worker in self._listeners:

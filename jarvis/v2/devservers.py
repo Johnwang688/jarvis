@@ -619,6 +619,19 @@ class DevServers:
                 e.claims = [c for c in e.claims if c.window != window]
             self._changed.notify_all()
 
+    def source_snapshot(self, entry_id):
+        """Copy source identity under the registry lock; never return an Entry.
+
+        Consumers retain this immutable-at-binding copy after entry expiry. An
+        unknown ID is not an owner URL, and labels never authorize a read.
+        """
+        if not isinstance(entry_id, str) or not re.fullmatch(r"ds_[0-9a-f]{8}", entry_id):
+            return None
+        with self._lock:
+            self._expire(self.clock())
+            entry = next((e for e in self._entries.values() if e.id == entry_id), None)
+            return deepcopy(entry.source) if entry is not None else None
+
     def listing(self, window=None):
         with self._lock:
             self._expire(self.clock())
