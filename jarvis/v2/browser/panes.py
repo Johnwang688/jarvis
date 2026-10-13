@@ -455,6 +455,39 @@ class BrowserPanes:
                 raise PaneRefused(409, "choose one visible Browser pane in the owner window")
             return self._snapshot(*matches[0])
 
+    def resolve_owner(self, window, pane_id, local_tab_id, expected_view_id):
+        """Pin one owner-selected visible binding; never grant see or drive."""
+        _id(window, _WINDOW)
+        _number(pane_id, 1, 8)
+        _id(local_tab_id, _LOCAL)
+        if not isinstance(expected_view_id, str) or not re.fullmatch(r"(?:v_[0-9a-f]{24}|[0-9a-f]{8})", expected_view_id):
+            _bad()
+        with self._lock:
+            self._expire()
+            state = self._windows.get(window) if window in self._live else None
+            pane = state.panes.get(pane_id) if state else None
+            if pane is None:
+                raise PaneRefused(409, "that Browser view is no longer visible")
+            snapshot = self._snapshot(window, state, pane)
+            if snapshot.local_tab_id != local_tab_id or snapshot.view_id != expected_view_id:
+                raise PaneRefused(409, "that Browser view has changed")
+            return snapshot
+
+    def owner_current(self, snapshot):
+        """Recheck the entire immutable binding, including its permission state."""
+        if not isinstance(snapshot, PaneSnapshot):
+            return False
+        with self._lock:
+            self._expire()
+            state = self._windows.get(snapshot.window) if snapshot.window in self._live else None
+            pane = state.panes.get(snapshot.pane_id) if state else None
+            if pane is None:
+                return False
+            try:
+                return self._snapshot(snapshot.window, state, pane) == snapshot
+            except PaneRefused:
+                return False
+
     def still_current(self, snapshot):
         if not isinstance(snapshot, PaneSnapshot) or not snapshot.see:
             return False
