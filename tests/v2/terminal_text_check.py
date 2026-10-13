@@ -1101,6 +1101,8 @@ class ReplFollowups(unittest.TestCase):
             "In [1]: %env", "   ...: %env", "In [1]: %env API_KEY",
             "In [2]: %env API_KEY=placeholder", "In [3]: %env API_KEY placeholder",
             "In [4]: %set_env API_KEY=placeholder", "In [5]: %set_env API_KEY placeholder",
+            "In [1]: %env API-KEY", "In [1]: %env API.KEY=placeholder",
+            "In [1]: %set_env 1API_KEY=placeholder", "In [1]: %env 1API_KEY placeholder",
             "In [2]: !env", "In [2]: !!env", "In [2]: !cat .env",
             "   ...: !printenv API_KEY", "In [1]: print(os.environ)",
             "irb(main):001> ENV.to_h", "irb(main):001:0> puts ENV['API_KEY']",
@@ -1114,6 +1116,8 @@ class ReplFollowups(unittest.TestCase):
     def test_benign_repl_input_and_prose_keep_reading(self):
         for source in [
             "In [1]: %env MODE", "In [1]: %env MODE=prod", "In [1]: %env MODE prod",
+            "In [1]: %env BUILD-MODE", "In [1]: %env BUILD.MODE=prod",
+            "In [1]: %set_env 1MODE=prod", "In [1]: %env 1MODE prod",
             "In [1]: %env MODE='test run'", 'In [1]: %env MODE "test run"',
             "In [1]: %set_env MODE=prod", "In [1]: %set_env", "In [1]: %env?",
             "In [1]: %environment", "In [1]: !ls -la", "In [1]: !!echo ready",

@@ -1314,7 +1314,6 @@ _REPL_INPUT = re.compile(
     r"|irb\([^\r\n)]{1,120}\):[0-9]{1,10}(?::[0-9]{1,10})?>"
     r"|\[[0-9]{1,10}\] pry\([^\r\n)]{1,120}\)>|php\s*>|>>>|\.\.\.|>)\s+")
 _IPYTHON_MAGIC = re.compile(r"%(?P<set>set_)?env(?:\s+(?P<args>.*)|$)")
-_IPYTHON_NAME = re.compile(r"[A-Za-z_]\w*(?=\s|=|$)")
 
 
 def _repl_prints(match: re.Match, scan: str, budget: Budget | None) -> bool:
@@ -1328,10 +1327,10 @@ def _repl_prints(match: re.Match, scan: str, budget: Budget | None) -> bool:
         args = (magic.group("args") or "").strip()
         if not args:
             return magic.group("set") is None              # %env dumps; %set_env errors
-        name = _IPYTHON_NAME.match(args)
+        name = args.split("=" if "=" in args else " ", 1)[0].strip()
         # IPython assignments echo their value too. Both the lookup and
         # assignment of a secret-named variable therefore refuse the read.
-        return name is not None and _SECRET_NAME.search(name.group()) is not None
+        return bool(name) and _SECRET_NAME.search(name) is not None
     if source.startswith("!"):
         command = source[2:] if source.startswith("!!") else source[1:]
         return prints_secrets(command, budget=budget)       # same bounded parse budget
