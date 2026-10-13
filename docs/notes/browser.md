@@ -1131,3 +1131,21 @@ page ID or a pane-local ID. The tool is not parallel-safe, offered by MCP,
 background tasks, workflows, subagents or default session tools. This backend
 package does not establish the pending BR3b UI or BR6 session/MCP interface,
 real account authentication, a live-provider call or deployment verification.
+
+## Current owner capture boundary (2026-10-13, BR4)
+
+Owner captures use resolve_owner/owner_current on one exact current binding.
+They bypass only initial see/source disclosure policy for that explicit capture;
+full snapshot equality, page/document generations, held state and a monotonic
+approval epoch remain checked. Agent still_current and BrowserLook.read retain
+their existing gates. The lower CDP capture adapter has an optional1920px owner
+image edge; its BR5 default remains1568px. Known credential/heuristic hits omit
+image and text together. Capture-time masks do not prove arbitrary pixels free
+of secrets; send-time credential revalidation promises retained text only.
+
+Capture references are bounded, memory-only and owner-send-only, with fresh
+untrusted fences and canonical mirror names. Capture metadata is not logged or
+published on SSE. The HUD drawing layer uses the existing pixel-coordinate ink
+model and stages an atomic image/reference pair into a pinned draft. Direct
+app-mode Region Capture remains unverified until a real M6 receipt exists;
+never substitute a fresh hidden Remote load for the owner's Direct pixels.

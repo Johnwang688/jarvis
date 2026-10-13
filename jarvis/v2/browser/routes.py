@@ -61,6 +61,7 @@ import os
 from urllib.parse import quote
 
 from . import files as _files
+from .captures import CaptureRefused, capture_page
 from .files import FileRefused
 from .host import BrowserRefused
 from .panes import PaneRefused
@@ -141,12 +142,15 @@ def route(handler, daemon, parts, query):
     _strict_host(handler, daemon)
     method = handler.command
     attach = len(parts) == 4 and parts[1] == "tabs" and parts[3] == "attach" and method == "GET"
-    # The socket's ticket is the one query any route takes (it is never logged:
-    # `/browser` paths are logged without their query).
-    _object(query, ("ticket",) if attach else ())
+    # Socket tickets and capture identity queries are never logged:
+    # `/browser` paths are logged without their query.
+    capture = len(parts) == 4 and parts[1] == "tabs" and parts[3] == "capture" and method == "GET"
+    _object(query, ("ticket",) if attach else ("window", "pane", "local_tab", "view", "whole") if capture else ())
     host = daemon.browser
     settings = daemon.browser_settings
     try:
+        if capture:
+            return 200, capture_page(daemon, parts[2], query)
         if parts == ["browser", "front"] and method == "POST":
             return 200, daemon.browser_panes.report(handler._body())
         if len(parts) >= 3 and parts[1] == "panes":
@@ -257,6 +261,8 @@ def route(handler, daemon, parts, query):
                 and method == "POST"):
             _object(handler._body(), ())
             return 200, host.forget(parts[2])
+    except CaptureRefused as refusal:
+        _fail(409, str(refusal))
     except URLRefused as refusal:
         _fail(400, str(refusal))
     except (BrowserRefused, FileRefused, PaneRefused) as refusal:
