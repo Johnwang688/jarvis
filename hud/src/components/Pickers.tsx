@@ -1,4 +1,4 @@
-// The pickers, all modal, all built from text.
+// Picker bodies, embedded in Settings or shown as dialogs, all built from text.
 //
 // The model picker **chooses the fast path's model only** (§12.1). Provider
 // and model per role live in Settings, read-only: the picker can never touch
@@ -20,7 +20,13 @@ import {
   chosenHere, configDefaultLine, effectiveDefault, refusal, removeNotice, rowBadges, type RosterView,
 } from "../lib/roster";
 
-function Shell(props: { title: string; onClose: () => void; children: React.ReactNode; foot?: React.ReactNode }) {
+function Shell(props: { title: string; onClose: () => void; children: React.ReactNode; foot?: React.ReactNode; embedded?: boolean }) {
+  if (props.embedded) return (
+    <div className="settings-picker" data-testid="picker">
+      <div className="rows">{props.children}</div>
+      {props.foot ? <div className="foot">{props.foot}</div> : null}
+    </div>
+  );
   return (
     <div className="pickerveil" data-testid="picker" onClick={(e) => {
       if (e.target === e.currentTarget) props.onClose();
@@ -37,45 +43,46 @@ function Shell(props: { title: string; onClose: () => void; children: React.Reac
   );
 }
 
-export function SettingsDialog(props: {
-  route: RouteView | null; onClose: () => void;
+export function GeneralSettings(props: {
   blocked: boolean; installStatus: InstallStatus; onInstall: () => Promise<void>;
 }) {
+  return (
+    <div className="pad" data-testid="install-app">
+      {props.installStatus === "installed" ? <span>Installed</span>
+        : props.installStatus === "available" ? (
+          <button type="button" disabled={props.blocked} onClick={() => {
+            if (!props.blocked) void props.onInstall();
+          }}>Install as app</button>
+        ) : <span className="muted small">{INSTALL_MENU}</span>}
+    </div>
+  );
+}
+
+export function RoutingSettings(props: { route: RouteView | null }) {
   const chains = props.route?.table?.chains || {};
   const notes = (props.route?.notes || []).filter((w) => typeof w === "string");
   return (
-    <Shell title="Settings" onClose={props.onClose}>
-      <div className="pad" data-testid="install-app">
-        {props.installStatus === "installed" ? <span>Installed</span>
-          : props.installStatus === "available" ? (
-            <button type="button" disabled={props.blocked} onClick={() => {
-              if (!props.blocked) void props.onInstall();
-            }}>Install as app</button>
-          ) : <span className="muted small">{INSTALL_MENU}</span>}
-      </div>
-      <div className="pad" data-testid="routing-readonly">
-        <div className="muted small" style={{ marginBottom: 6 }}>Routing</div>
-        {notes.length ? (
-          // Saved routing that runs differently right now; text only.
-          <div className="small" data-testid="route-notes" style={{ marginBottom: 6 }}>
-            {notes.map((w, i) => (
-              <div key={i} className="muted" style={{ overflowWrap: "anywhere" }}>{w}</div>
-            ))}
-          </div>
-        ) : null}
-        <table className="plain" data-testid="route-table">
-          <tbody>
-            {Object.entries(chains).map(([role, chain]) => (
-              <tr key={role}>
-                <th>{role}</th>
-                <td>{Array.isArray(chain) ? chain.join(" → ") : String(chain)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {Object.keys(chains).length === 0 ? <div className="muted small">no routing table</div> : null}
-      </div>
-    </Shell>
+    <div className="pad" data-testid="routing-readonly">
+      {notes.length ? (
+        // Saved routing that runs differently right now; text only.
+        <div className="small" data-testid="route-notes" style={{ marginBottom: 6 }}>
+          {notes.map((w, i) => (
+            <div key={i} className="muted" style={{ overflowWrap: "anywhere" }}>{w}</div>
+          ))}
+        </div>
+      ) : null}
+      <table className="plain" data-testid="route-table">
+        <tbody>
+          {Object.entries(chains).map(([role, chain]) => (
+            <tr key={role}>
+              <th>{role}</th>
+              <td>{Array.isArray(chain) ? chain.join(" → ") : String(chain)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {Object.keys(chains).length === 0 ? <div className="muted small">no routing table</div> : null}
+    </div>
   );
 }
 
@@ -102,6 +109,7 @@ export function ModelPicker(props: {
   /** Open the catalogue to pin a model, on top of this picker. */
   onPinMore?: () => void;
   onClose: () => void;
+  embedded?: boolean;
 }) {
   const [error, setError] = useState("");
   // A successful action that changed more than it says: unpinning the
@@ -116,7 +124,7 @@ export function ModelPicker(props: {
     go().then((result) => then?.(result)).catch((e) => setError(refusal(what, e)));
   };
   return (
-    <Shell
+    <Shell embedded={props.embedded}
       title="Fast-path model"
       onClose={props.onClose}
       foot={props.onPinMore ? (
@@ -127,7 +135,7 @@ export function ModelPicker(props: {
       ) : null}
     >
       <div className="pad small muted" data-testid="model-scope-note">
-        This picks the <b>fast path's</b> model only. Who runs each role is in Settings and is
+        This picks the <b>fast path's</b> model only. Who runs each role is in Routing and is
         never changed here — the picker cannot touch Claude or Codex.
       </div>
       <div className="pad small muted row" data-testid="model-config-default">
@@ -218,15 +226,20 @@ export function VoicePicker(props: {
   override: string;
   onPick: (name: string) => void;
   onClose: () => void;
+  embedded?: boolean;
 }) {
   return (
-    <Shell title="Voice" onClose={props.onClose}>
+    <Shell embedded={props.embedded} title="Voice" onClose={props.onClose}>
       {/* "" clears the override, which is the way back to the avatar's own
           voice — a picker that outranks every avatar forever with no way out
           was the v1 bug this row fixes. */}
       <div
         className={"prow" + (props.override ? "" : " sel")}
         data-testid="voice-default"
+        role="button" tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onPick(""); }
+        }}
         onClick={() => props.onPick("")}
       >
         <span>AVATAR DEFAULT</span>
@@ -236,6 +249,10 @@ export function VoicePicker(props: {
           key={v.name}
           className={"prow" + (v.name === props.override ? " sel" : "")}
           data-testid={`voice-${v.name}`}
+          role="button" tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onPick(v.name); }
+          }}
           onClick={() => props.onPick(v.name)}
         >
           <span>{v.name}</span>
@@ -251,14 +268,19 @@ export function AvatarPicker(props: {
   active: string;
   onPick: (slug: string) => void;
   onClose: () => void;
+  embedded?: boolean;
 }) {
   return (
-    <Shell title="Avatar" onClose={props.onClose}>
+    <Shell embedded={props.embedded} title="Avatar" onClose={props.onClose}>
       {props.avatars.map((a) => (
         <div
           key={a.slug}
           className={"prow" + (a.slug === props.active ? " sel" : "")}
           data-testid={`avatar-${a.slug}`}
+          role="button" tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onPick(a.slug); }
+          }}
           onClick={() => props.onPick(a.slug)}
         >
           <span>{a.name}</span>

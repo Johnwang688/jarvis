@@ -16,6 +16,7 @@ import { TerminalPanel } from "./Terminal";
 
 export function Panel(props: {
   open: boolean;
+  covered?: boolean;
   height: number;
   blocked: boolean;
   zoom: number;
@@ -29,7 +30,7 @@ export function Panel(props: {
       data-open={props.open ? "true" : "false"}
       style={props.open ? { flexBasis: props.height, height: props.height } : { display: "none" }}
     >
-      <TerminalPanel open={props.open} blocked={props.blocked} projects={props.projects} zoom={props.zoom}
+      <TerminalPanel open={props.open && !props.covered} blocked={props.blocked} projects={props.projects} zoom={props.zoom}
                      onHide={props.onHide} />
     </div>
   );

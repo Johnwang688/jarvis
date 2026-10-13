@@ -418,7 +418,9 @@ export function CatalogPicker(props: {
   const total = (props.catalog || []).length;
 
   return (
-    <div className="pickerveil" data-testid="catalog" onClick={(e) => {
+    <div className="pickerveil" data-testid="catalog" onKeyDown={(e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); props.onClose(); }
+    }} onClick={(e) => {
       if (e.target === e.currentTarget) props.onClose();
     }}>
       <div className="picker">
