@@ -42,12 +42,19 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
     active=_pane(2,'[data-browser-page][aria-hidden="false"]')
     annotation=page.locator(active+' [data-testid="browser-annotate"]')
     canvas=page.locator(active+' [data-testid="annotation-canvas"]')
-    actions=page.locator(active+' [data-testid="browser-capture-actions"]')
+    actions=page.locator(_pane(2,'[data-testid="browser-capture-actions"]'))
+    def options():
+        button=page.locator(_pane(2,'[data-testid="browser-options-toggle"]'))
+        if button.get_attribute("aria-expanded")!="true":button.click()
+    def capture(label):
+        options()
+        actions.get_by_role("button",name=label,exact=True).click()
     def boot(zoom="100", chat=True):
         _set_storage(page,zoom=zoom,layout="{}");_set_ws(page,json.dumps(raw));_boot(page,mock,None,until,reload=True)
         until(lambda:page.locator(active+' .remotesurface canvas').get_attribute("data-frame")=="ready",timeout=5)
         until(lambda:any(p=="/browser/front" for _,p,_ in mock.calls),timeout=3)
         if chat:page.locator(_pane(1,'[data-testid="input"]')).click()
+        options()
     def draw(tool,index):
         annotation.get_by_role("button",name=tool,exact=True).click()
         b=canvas.bounding_box();x=b["x"]+b["width"]*.3;y=b["y"]+b["height"]*.4
@@ -60,7 +67,7 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
     try:
         _boot(page,mock,base,until)
         for zoom in ("70","160"):
-            boot(zoom);actions.get_by_role("button",name="Annotate",exact=True).click()
+            boot(zoom);capture("Annotate")
             until(lambda:annotation.count()==1 and not annotation.get_by_role("button",name="Pen",exact=True).is_disabled(),timeout=4)
             check(f"BR4 {zoom}% captures the registered see-off source without changing permission",annotation.count()==1 and _ws(page)["ws"]["panes"][1]["see"] is False
                   and _ws(page)["ws"]["panes"][1]["browser"]["tabs"][0]["source"]=={"kind":"unknown"})
@@ -90,11 +97,11 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
             check("BR4 Send to chat stages exactly the canonical pair",len(files)==2 and [f["name"] for f in files]==["page.png","page text"])
             check("BR4 staging never sends a chat turn",not any(p.endswith("/send") for _,p,_ in mock.calls))
             check("BR4 still and ink export as an actual PNG",base64.b64decode(files[0]["data_b64"]).startswith(b"\x89PNG"))
-        boot();actions.get_by_label("Whole-page text").check();actions.get_by_role("button",name="Annotate",exact=True).click()
+        boot();actions.get_by_label("Whole-page text").check();capture("Annotate")
         until(lambda:annotation.count()==1,timeout=3)
         check("BR4 whole text is fixed before capture",requests[-1]["whole"]=="1" and "Whole-page text" in annotation.inner_text())
         annotation.get_by_role("button",name="Done",exact=True).click()
-        mode["hold"]=True;actions.get_by_role("button",name="Annotate",exact=True).click();until(lambda:bool(pending),timeout=3)
+        mode["hold"]=True;capture("Annotate");until(lambda:bool(pending),timeout=3)
         page.locator(_pane(2,'[data-browser-tab="pagebb"]')).click()
         r,data=pending.pop();r.fulfill(json=data);mode["hold"]=False
         check("BR4 a late capture never appears on a different selected tab",page.locator('[data-testid="browser-annotate"]:visible').count()==0)
@@ -102,14 +109,14 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
         # Use the real explicit conversion path; fallback must never silently capture Direct.
         box=page.locator(active+' [data-testid="browser-url"]');box.fill(f"http://127.0.0.1:{mock.dev_port}/");box.press("Enter")
         until(lambda:_ws(page)["ws"]["panes"][1]["browser"]["tabs"][1]["url"]==f"http://127.0.0.1:{mock.dev_port}/",timeout=4)
-        page.locator(active+' select[aria-label="Browser mode"]').select_option("direct")
         check("BR4 fallback fixture is a real Direct frame",bool(until(lambda:page.locator(active+' [data-testid="browser-frame"]').count()==1,timeout=4)))
-        n=len(requests);actions.get_by_role("button",name="Annotate",exact=True).click()
+        n=len(requests);capture("Annotate")
+        until(lambda:"Open this in Remote to annotate." in page.locator(active).inner_text(),timeout=4)
         check("BR4 Direct offers only the explicit documented fallback",len(requests)==n and "Open this in Remote to annotate." in page.locator(active).inner_text())
         page.locator(active).get_by_role("button",name="Open in Remote",exact=True).click()
         until(lambda:page.locator(active+' .remotesurface canvas').get_attribute("data-frame")=="ready",timeout=4)
         check("BR4 explicit fallback conversion opens Remote, without an implicit capture",len(requests)==n and page.locator(active+' .remotesurface canvas').count()==1)
-        actions.get_by_role("button",name="Annotate",exact=True).click();until(lambda:annotation.count()==1,timeout=3);draw("Box",1)
+        capture("Annotate");until(lambda:annotation.count()==1,timeout=3);draw("Box",1)
         if os.environ.get("BR4_SCREENSHOT"):page.screenshot(path=os.environ["BR4_SCREENSHOT"])
         annotation.get_by_role("button",name="Done",exact=True).click()
         # Two drawn chats; select the second before Send, then choose the first
@@ -117,7 +124,7 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
         raw["preset"]="cols3";raw["panes"][2]={"view":"chat"}
         boot();page.locator(_pane(3,'[data-testid="input"]')).click()
         check("BR4 split fixture selects chat three",page.evaluate("window.__hud.state().selectedChat")==3)
-        mode["hold"]=True;actions.get_by_role("button",name="Send to chat",exact=True).click()
+        mode["hold"]=True;capture("Send to chat")
         until(lambda:bool(pending),timeout=3)
         page.locator(_pane(1,'[data-testid="input"]')).click()
         r,data=pending.pop();r.fulfill(json=data);mode["hold"]=False
@@ -127,7 +134,7 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
         # A selected compose closes during the capture; another visible chat
         # receives nothing, and the whole pair is recoverable with its project.
         boot();page.locator(_pane(3,'[data-testid="input"]')).click()
-        mode["hold"]=True;actions.get_by_role("button",name="Send to chat",exact=True).click()
+        mode["hold"]=True;capture("Send to chat")
         until(lambda:bool(pending),timeout=3)
         page.locator('[data-testid="pane-3-close"]').click()
         until(lambda:page.locator(_pane(3)).count()==0,timeout=3)
@@ -139,7 +146,7 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
               and "next new thread" in page.evaluate("window.__hud.state().error??''")
               and page.evaluate("window.__hud.state().chats[1].files")==[])
         # Capture export failure leaves the immutable still and its ink.
-        boot();actions.get_by_role("button",name="Annotate",exact=True).click()
+        boot();capture("Annotate")
         until(lambda:annotation.count()==1,timeout=3);draw("Arrow",1)
         page.evaluate("() => {window.__realBlob=HTMLCanvasElement.prototype.toBlob;HTMLCanvasElement.prototype.toBlob=function(cb){cb(null)};}")
         annotation.locator('[data-testid="capture-send"]').click()
@@ -151,7 +158,7 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
         raw["preset"]="cols2";raw["panes"][0]={"view":"chat"};raw["panes"][2]={"view":"file"}
         boot();page.locator(_pane(1,'[data-testid="tab-file"]')).click()
         until(lambda:page.evaluate("window.__hud.state().selectedChat") is None,timeout=3)
-        n=len(requests);actions.get_by_role("button",name="Send to chat",exact=True).click()
+        n=len(requests);capture("Send to chat")
         check("BR4 no drawn chat refuses before capture",len(requests)==n and
               "No chat is open to attach files to" in page.locator(active).inner_text())
         check("BR4 all capture paths still send zero turns",not any(p.endswith("/send") for _,p,_ in mock.calls))

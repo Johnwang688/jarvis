@@ -1,6 +1,7 @@
 // Explicit owner gestures only. A capture never turns see on or changes source.
 import { useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { createPortal } from "react-dom";
 import type { CaptureTarget } from "../lib/captureDraft";
 import type { Attachment } from "../types";
 import { type Op } from "../lib/annotate";
@@ -21,6 +22,7 @@ export function BrowserCapture(props: {
   remoteTabId: string | null; active: boolean; drawn: boolean; blocked: boolean; zoom: number;
   identity: () => CaptureIdentity | null; destination: CaptureDestination;
   onRemote: () => void; onAnnotating?: (active: boolean) => void;
+  controlsTarget?: HTMLElement | null; beforeCapture?: () => Promise<void>;
 }) {
   const [whole, setWhole] = useState(false);
   const [still, setStill] = useState<CaptureStill | null>(null);
@@ -55,13 +57,18 @@ export function BrowserCapture(props: {
     setMessage("");
     const key = send ? target() : null;
     if (send && !key) return;
-    if (!props.remoteTabId) { if (key) props.destination.release?.(key); setFallback(true); setMessage(DIRECT_CAPTURE); return; }
-    const identity = props.identity();
-    if (!identity) { if (key) props.destination.release?.(key); setMessage(CAPTURE_CHANGED); return; }
-    const stamp = JSON.stringify(identity), token = ++epoch.current;
+    const token = ++epoch.current;
     working.current = true; setBusy(true); setFallback(false);
     try {
-      const capture = captureReply(await api.captureBrowser(props.remoteTabId, identity, whole));
+      // Pin the destination/token before waiting for an options panel's fresh
+      // uncovered receipt. A card/tab/profile change cannot revive this gesture.
+      await now.current.beforeCapture?.();
+      if (!valid(token)) return;
+      if (!now.current.remoteTabId) { setFallback(true); setMessage(DIRECT_CAPTURE); return; }
+      const identity = now.current.identity();
+      if (!identity) { setMessage(CAPTURE_CHANGED); return; }
+      const stamp = JSON.stringify(identity);
+      const capture = captureReply(await api.captureBrowser(now.current.remoteTabId!, identity, whole));
       if (!valid(token) || JSON.stringify(now.current.identity()) !== stamp) {
         if (valid(token)) setMessage(CAPTURE_CHANGED);
         return;
@@ -84,15 +91,16 @@ export function BrowserCapture(props: {
     finally { now.current.destination.release?.(key); if (token === epoch.current) working.current = false; }
   };
   const disabled = !props.active || !props.drawn || props.blocked || busy;
-  return <>
-    <div className="browser-capture-actions" data-browser-capture="" data-testid="browser-capture-actions">
+  const actions = <div className="browser-capture-actions" data-browser-capture="" data-testid="browser-capture-actions">
       <button type="button" disabled={disabled} onClick={() => void begin(false)}>Annotate</button>
       <button type="button" disabled={disabled} onClick={() => void begin(true)}>Send to chat</button>
       <label><input type="checkbox" checked={whole} disabled={disabled || !!still}
         onChange={e => { if (eligible()) setWhole(e.target.checked); }}
         onKeyDown={e => e.stopPropagation()} onKeyUp={e => e.stopPropagation()} /> Whole-page text</label>
       {busy && <span role="status">Capturing…</span>}
-    </div>
+    </div>;
+  return <>
+    {props.active && props.drawn ? "controlsTarget" in props ? props.controlsTarget ? createPortal(actions, props.controlsTarget) : null : actions : null}
     {message && <div className="annotation-note" data-browser-capture="" role="status" data-testid="capture-notice">{message}</div>}
     {fallback && <button type="button" className="capture-remote" data-browser-capture="" disabled={disabled}
       onClick={() => { if (eligible()) { setFallback(false); props.onRemote(); } }}>Open in Remote</button>}

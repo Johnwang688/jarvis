@@ -1357,3 +1357,33 @@ The named always-ask layer uses a distinct private delegation card with exactly
 permits only reaching subsequent Browser checks, never authorizes a page action.
 It shares the same deadline, identity and one-shot no-Always consent lifecycle;
 no page identity, target, command or preview is invented for that card.
+
+
+## Compact owner controls and automatic addresses (2026-10-13)
+
+Browser keeps tabs, history/reload, address, Load and a three-dot **Browser options**
+button visible. Profile management, see/drive preferences, Project root, Keep its
+origin and capture actions live in the pane-local options panel. Pending/errors,
+page status, held downloads and driver/takeover controls remain outside the panel.
+Local Direct previews retain disabled history buttons with an explanation; reload
+uses the existing guarded owner load.
+
+Owner address submission uses the existing automatic target rule: localhost and
+project previews use Direct, external pages use Remote, and Private stays Remote.
+Manual mode selection is removed. Direct capture still offers its explicit
+Open in Remote fallback without silently capturing or granting a port.
+
+Opening options immediately holds local Remote input and reports this pane as
+not drawn to the host. This invalidates old action refs without changing saved
+see/drive preferences or transient Private consent. Exact component ownership
+prevents a stale unmount from uncovering a replacement pane. Escape restores the
+options button; outside clicks close it without forwarding the first Remote page
+gesture. Dismissal cancels pointerdown, consuming its compatibility mouse events;
+a transparent shield catches Direct iframe presses on the stable HUD frame host.
+Cards, hidden panes, Settings and annotations disable options.
+
+Capture pins its destination and cancellation token before closing options,
+then waits for the new front receipt. Card, visibility, profile/context, active
+tab or pane replacement during that wait cancels the original capture. Capture
+controllers stay mounted while only their action controls are portaled; existing
+stills and ink survive menu changes. Ending annotation releases the local hold.

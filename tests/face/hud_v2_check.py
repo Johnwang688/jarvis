@@ -1261,7 +1261,9 @@ def browser_checks(page, mock):
     check("and a non-http scheme never starts a renderer",
           page.locator('[data-testid="browser-frame"]').count() == 0)
 
+    page.locator('[data-testid="browser-options-toggle"]').click()
     page.locator('[data-testid="browser-project"]').click()
+    page.locator('[data-testid="browser-options-toggle"]').click()
     until(lambda: page.locator('[data-testid="browser-frame"]').count() > 0)
     frame = page.locator('[data-testid="browser-frame"]')
     src = frame.get_attribute("src") or ""
@@ -3153,6 +3155,13 @@ def main():
                 remote_checks(browser, remote_mock, f"http://127.0.0.1:{remote_mock.port}", check, until, guard, FAKE_RECOGNIZER)
             finally:
                 remote_mock.stop()
+
+            from tests.face.hud_v2_browser_controls_check import controls_checks
+            controls_mock = MockDaemon(0).start()
+            try:
+                controls_checks(browser, controls_mock, f"http://127.0.0.1:{controls_mock.port}", check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                controls_mock.stop()
 
             from tests.face.hud_v2_drive_check import drive_checks
             drive_mock = MockDaemon(0).start()
