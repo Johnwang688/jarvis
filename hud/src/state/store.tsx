@@ -175,7 +175,7 @@ export type Action =
    * to the box of the pane holding that conversation when they are ready,
    * else to its parked draft — never to whatever the pane they were dropped
    * on shows by then (re-review of PR #27). */
-  | { type: "stage"; key: string; files: Attachment[] }
+  | { type: "stage"; key: string; files: Attachment[]; atomic?: boolean }
   | { type: "restore_compose"; pane: PaneNo; composeId: string }
   | { type: "notice"; text: string }
   /** Words for a conversation no pane shows: kept with its parked draft
@@ -411,6 +411,10 @@ export function reduce(s: State, a: Action): State {
       const n = PANE_NOS.find((p) => draftKey(s.chats[p], p) === a.key);
       const had = s.drafts[a.key];
       const all = [...(n !== undefined ? s.chats[n].files : had?.files ?? []), ...a.files];
+      // A page picture and its opaque text reference are one owner-selected
+      // capture. Capacity changes while export runs must never split the pair.
+      if (a.atomic && all.length > MAX_FILES)
+        return noticed(s, "This capture needs two attachment slots: remove a file and try again.");
       const files = all.slice(0, MAX_FILES);
       const next = n !== undefined ? withChat(s, n, { ...s.chats[n], files })
         : { ...s, drafts: { ...s.drafts, [a.key]: { ...had, text: had?.text ?? "", files } } };
