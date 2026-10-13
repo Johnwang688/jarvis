@@ -503,7 +503,7 @@ describe("this tab's terminals", () => {
       setItem: (k: string, v: string) => void kept.set(k, v),
     };
     const me = pageNonce();
-    expect(me).toMatch(/^[0-9a-f]{16}$/);
+    expect(me).toMatch(/^[0-9a-f]{32}$/);
     expect(pageNonce()).not.toBe(me);
     saveMine(new Set(["0a1b2c3d"]), me, storage);
     expect(parseMine(kept.get(MINE_KEY))).toEqual({ ids: ["0a1b2c3d"], holder: me });

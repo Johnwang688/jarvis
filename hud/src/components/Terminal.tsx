@@ -57,11 +57,12 @@ import { api } from "../api";
 import {
   AttachLedger, HeldInput, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, continuationPrefix,
   continuesOn, counterZoom, encodeInput, fontSizeFor, hhmm, integrationNote, isTerminalId, judgeLink, loadMine,
-  loadPrefs, mayContinue, menuWidth, pageNonce, parseControl, parseRead, placeMenu, readableCarry, readNoteText,
+  loadPrefs, mayContinue, menuWidth, parseControl, parseRead, placeMenu, readableCarry, readNoteText,
   saveMine, savePrefs,
   SPECS_KEPT, type InSpec, type ReadNote, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
+import { WINDOW_ID } from "../lib/windowId";
 import { judgeBrowserUrl } from "../lib/browser";
 import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
@@ -120,7 +121,7 @@ let unloading = false;
  * terminals as held by a live page (lib/terminal.ts, MINE_KEY), so a copy of
  * the list in a duplicated or reopened tab is never taken for its own.
  */
-const PAGE = pageNonce();
+const PAGE = WINDOW_ID;
 if (typeof window !== "undefined") {
   // Leaving (a reload, the window closing): say goodbye with a normal close,
   // so the daemon detaches at once rather than when TCP notices — and never
