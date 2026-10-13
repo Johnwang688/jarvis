@@ -1254,10 +1254,29 @@ export default function App() {
       api.answerTask(taskId, index, text).then(() => { void refreshTasks(); }),
     [refreshTasks],
   );
+  // Every TaskView and transcript Cancel share this guard. A task can be
+  // drawn twice; a second surface cannot race a pending action on the first.
+  const taskActions = useRef(new Set<string>());
+  const taskAction = useCallback(async (id: string, action: "steer" | "cancel" | "resume" | "start", text?: string) => {
+    if (taskActions.current.has(id)) throw new Error("another action on this task is still pending");
+    taskActions.current.add(id);
+    try {
+      if (action === "steer") await api.steerTask(id, text!);
+      else if (action === "cancel") await api.cancelTask(id);
+      else if (action === "resume") await api.resumeTask(id);
+      else await api.startTask(id);
+      // refreshTasks keeps the last snapshot if its read fails. An accepted
+      // mutation is never described as refused because a later read failed.
+      await refreshTasks();
+    } finally { taskActions.current.delete(id); }
+  }, [refreshTasks]);
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
-    (id: string) => void api.cancelTask(id).then(refreshTasks).catch(() => {}),
-    [refreshTasks],
+    (id: string) => void taskAction(id, "cancel").catch((error: unknown) => {
+      const why = error instanceof Error ? error.message : "the daemon could not be reached";
+      dispatch({ type: "patch", patch: { error: `Could not cancel task ${id}: ${why}` } });
+    }),
+    [taskAction, dispatch],
   );
 
   const refreshActivity = useCallback(async () => {
@@ -2951,10 +2970,10 @@ export default function App() {
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
               onAnswer={answerQuestion}
-              onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
-              onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
-              onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
-              onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
+              onSteer={(id, text) => taskAction(id, "steer", text)}
+              onCancel={(id) => taskAction(id, "cancel")}
+              onResume={(id) => taskAction(id, "resume")}
+              onStart={(id) => taskAction(id, "start")}
             />
           </div>
         );
@@ -3442,10 +3461,10 @@ export default function App() {
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
               onAnswer={answerQuestion}
-              onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
-              onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
-              onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
-              onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
+              onSteer={(id, text) => taskAction(id, "steer", text)}
+              onCancel={(id) => taskAction(id, "cancel")}
+              onResume={(id) => taskAction(id, "resume")}
+              onStart={(id) => taskAction(id, "start")}
             />
             <DiscordPanel
               discord={state.discord}
