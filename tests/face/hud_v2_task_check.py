@@ -26,6 +26,7 @@ The checks worth keeping, each shown to fail on origin/main (9c94aaf):
 from __future__ import annotations
 
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -51,6 +52,7 @@ def _clarifying(mock) -> dict:
         {"text": ASSUMABLE, "blocking": False, "options": [], "answer": None, "assumed": "3.14"},
         {"text": BRANCH, "blocking": True, "options": ["main", "branch"], "answer": None, "assumed": None},
         {"text": RUNNER, "blocking": True, "options": [], "answer": None, "assumed": None},
+        {"text": "already answered with empty text", "blocking": True, "options": [], "answer": "", "assumed": None},
     ]
     return k1
 
@@ -84,7 +86,7 @@ def task_answer_checks(browser, mock, base, check, until, guard, init_script):
         page.locator('[data-testid="tab-task"]').click()
         until(lambda: page.locator('[data-testid="task-view"]').count() > 0)
         view = page.locator('[data-testid="task-view"]').first
-        for section in (_answer_checks, _refusal_checks, _not_clarifying_checks):
+        for section in (_answer_checks, _refusal_checks, _not_clarifying_checks, _action_checks, _shared_action_checks):
             try:
                 section(page, view, mock, k1, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -104,10 +106,13 @@ def _answer_checks(page, view, mock, k1, check, until):
     until(lambda: _row(view, RUNNER).count() > 0)
     check("both blocking questions are asked", _row(view, BRANCH).count() == 1 and _row(view, RUNNER).count() == 1)
     check("the assumable one is not", _row(view, ASSUMABLE).count() == 0)
-    check("each box is named by its question's index in spec.questions",
-          view.locator('[data-testid="answer-0"]').count() == 0
-          and view.locator('[data-testid="answer-1"]').count() == 1
-          and view.locator('[data-testid="answer-2"]').count() == 1)
+    from jarvis.v2.commands import open_questions
+    from jarvis.v2.model import Task, from_json
+    expected = [f"answer-{i}" for i, _ in open_questions(from_json(Task, k1))]
+    actual = view.locator('[data-testid^="answer-"] input, input[data-testid^="answer-"]').evaluate_all(
+        "els => els.map(el => el.dataset.testid)")
+    check("question box IDs follow Python commands.open_questions exactly", actual == expected,
+          f"expected {expected}, got {actual}")
 
     # The second open question first: its index is 2, its place among the
     # open ones 1 — a HUD that counts the wrong list answers the wrong one.
@@ -169,6 +174,101 @@ def _not_clarifying_checks(page, view, mock, k1, check, until):
     until(lambda: view.locator('[data-testid="task-phase"]').inner_text().strip().lower() == "running")
     check("a task that is not clarifying offers no answer box",
           view.locator('[data-testid="blocking-questions"]').count() == 0)
+
+
+def _action_checks(page, view, mock, k1, check, until):
+    """Real request failures must remain visible, with steering words intact."""
+    action_url = re.compile(r".*/tasks/k1/(start|cancel|resume|steer)$")
+    held = []
+    page.route(action_url, lambda route: held.append(route))
+    try:
+        for verb, state in (("steer", "running"), ("cancel", "running"),
+                            ("resume", "blocked"), ("start", "intake")):
+            k1["state"] = state
+            k1["status"]["phase"] = state
+            mock.emit("task_status_changed", {"task_id": "k1", "state": state}, task_id="k1")
+            until(lambda: view.locator('[data-testid="task-phase"]').inner_text() == state)
+            box = view.locator('[data-testid="steer-box"]')
+            if verb == "steer":
+                box.fill("keep my steering words")
+            button = view.locator('[data-testid="steer-send"' + ']' if verb == "steer"
+                                  else f'[data-testid="task-{verb}"]')
+            before = len(held)
+            button.click()
+            until(lambda: page.evaluate("true") and len(held) > before)
+            check(f"{verb}: duplicate request is disabled while pending", button.is_disabled())
+            held[-1].fulfill(status=409, content_type="application/json",
+                             body=json.dumps({"error": f"synthetic {verb} refusal"}))
+            error = view.locator('[data-testid="task-action-error"]')
+            check(f"{verb}: daemon refusal is visible beside task controls",
+                  bool(until(lambda: error.count() and f"synthetic {verb} refusal" in error.inner_text())))
+            check(f"{verb}: refusal leaves the control ready to retry", button.is_enabled())
+            if verb == "steer":
+                check("steer: refusal preserves unsent words", box.input_value() == "keep my steering words")
+            before = len(held)
+            button.click()
+            until(lambda: page.evaluate("true") and len(held) > before)
+            if verb == "steer":
+                box.fill("new words typed during delivery")
+            held[-1].fulfill(status=200, content_type="application/json", body='{"ok":true}')
+            until(lambda: button.is_enabled())
+            check(f"{verb}: successful retry clears its refusal", error.count() == 0)
+            if verb == "steer":
+                check("steer: success preserves words edited during the request",
+                      box.input_value() == "new words typed during delivery")
+        # Network failure is also visible and does not consume the draft.
+        box.fill("offline steering words")
+        before = len(held)
+        view.locator('[data-testid="steer-send"]').click()
+        until(lambda: page.evaluate("true") and len(held) > before)
+        held[-1].abort("failed")
+        check("steer: network failure is visible and retains words",
+              bool(until(lambda: error.count() > 0)) and box.input_value() == "offline steering words")
+    finally:
+        page.unroute(action_url)
+
+
+def _shared_action_checks(page, view, mock, k1, check, until):
+    from tests.face.hud_v2_layout_check import _choose, _show
+    page.set_viewport_size({"width": 1900, "height": 900})
+    _choose(page, until, "cols3")
+    _show(page, until, 1, "task")
+    _show(page, until, 2, "task")
+    first = page.locator('[data-testid="pane-1"] [data-testid="task-view"]')
+    second = page.locator('[data-testid="pane-2"] [data-testid="task-view"]')
+    check("same task is drawn in two panes", first.count() == 1 and second.count() == 1)
+    url = re.compile(r".*/tasks/k1/(steer|cancel)$")
+    held = []
+    page.route(url, lambda route: held.append(route))
+    try:
+        first.locator('[data-testid="steer-box"]').fill("one shared request")
+        first.locator('[data-testid="steer-send"]').click()
+        until(lambda: page.evaluate("true") and len(held) == 1)
+        second.locator('[data-testid="task-cancel"]').click()
+        err = second.locator('[data-testid="task-action-error"]')
+        check("another task pane cannot issue a concurrent action",
+              bool(until(lambda: err.count() and "still pending" in err.inner_text())) and len(held) == 1)
+        _show(page, until, 3, "chat")
+        page.evaluate("""() => window.__hud.dispatch({type:'message', pane:3,
+          message:{role:'system',text:'Synthetic proposal',proposal:{task_id:'k1',until:Date.now()+60000}}})""")
+        proposal = page.locator('[data-testid="pane-3"] [data-testid="proposal-cancel"]')
+        proposal.click()
+        notice = page.locator('[data-testid="error"]')
+        check("transcript Cancel shares the guard and shows its refusal",
+              bool(until(lambda: notice.count() and "task k1" in notice.inner_text()
+                         and "still pending" in notice.inner_text())) and len(held) == 1)
+        held[0].fulfill(status=200, content_type="application/json", body='{"ok":true}')
+        # The original view stays mounted. Its pending control becomes
+        # enabled only after the shared App guard's refresh has completed.
+        until(lambda: first.locator('[data-testid="steer-send"]').is_enabled())
+        proposal.click()
+        until(lambda: page.evaluate("true") and len(held) == 2)
+        held[-1].fulfill(status=409, content_type="application/json", body='{"error":"synthetic transcript refusal"}')
+        check("transcript Cancel shows the daemon refusal with its task identity",
+              bool(until(lambda: "task k1" in notice.inner_text()
+                         and "synthetic transcript refusal" in notice.inner_text())))
+    finally:
+        page.unroute(url)
 
 
 def _mock_contract_checks(mock, check):
