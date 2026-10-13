@@ -801,3 +801,58 @@ false holds, WASM Silero/RNNoise/KWS CPU, local Parakeet RTF/WER and speaker
 EER. Synthetic diagnostics checks establish none of those measurements.
 This package does not change wake recognition, add speech playback, alter
 approvals, retain retry clips, add continuation, or claim a live deployment.
+
+## 2026-10-13: V2 STT reliability
+
+Plan §3.5 / decision V-11. A claimed utterance now goes through
+`hud/src/lib/stt.ts` (`SttAssembler`) instead of one bare `fetch`.
+
+- **Deadlines.** The client aborts each attempt at `max(15 s, 2 x clip)`, and
+  the deadline fires even when the transport ignores its abort signal. On the
+  daemon, `POST /stt` passes `config.STT_DICTATION_TIMEOUT_S` (20 s) and
+  `STT_DICTATION_ATTEMPTS` (2) to `voice.stt` -> `llm.transcribe`, instead of
+  60 s x 3 per model. Discord voice notes keep the old defaults.
+  `llm.transcribe` no longer sleeps after its last attempt. Known limit: a
+  client abort does not cancel the daemon's request, so an automatic retry can
+  overlap the first one on a slow provider.
+- **Retries.** One automatic retry after 2 s, only for failures a repeat could
+  fix (timeout, network, 408/429, 5xx). Any other 4xx is not repeated. The
+  Retry button is explicit and is one attempt per press. A retry (automatic
+  or explicit) is refused while the mic is OFF, the window has crashed, or an
+  authorization card is up: the same fail-closed rule as the first upload.
+- **Kept clips.** The WAV of a clip is held, in memory only, until its text is
+  placed or the owner presses Discard: at most 20 clips, 10 minutes of audio
+  and 32 MiB. The oldest failed clip is evicted first (the diagnostics row then
+  reads "audio not kept"); a new clip that cannot fit because 20 are still in
+  flight is refused with a visible `STT BACKLOG` error, never by evicting audio
+  in flight. Reload clears everything. Nothing is persisted or uploaded except
+  the `/stt` request itself. The V1 ring still holds no audio; the clips live
+  in the assembler, and Play decodes them through Web Audio (the CSP's
+  `media-src 'self'` excludes `blob:` for `<audio>`).
+- **Visible failure.** `STT FAILED · RETRY` under the orb, the window error
+  line, and a Retry/Discard block in the Status pane. Settings -> Voice rows
+  with a kept clip offer Play and Retry. If the right pane is folded, the
+  Settings row is the way back to Retry.
+- **Order.** Each clip gets a `seq` at capture and is sent as
+  `/stt?utterance_id=<id>&seq=<seq>`; the daemon echoes both (non-negative
+  integers, anything else is a 400 before any provider call). Text is placed
+  in `seq` order: a reply that lands early waits for earlier clips still in
+  flight. A clip that has *failed* does not hold the line; later text is
+  placed and the failed clip's text goes in when its retry lands (marked
+  `late`). Texts that become ready together are one batch: REVIEW joins them
+  with a space in one box update; AUTO sends them one by one.
+- **Mode at landing.** AUTO sends a transcript only if the mode was AUTO when
+  it was said and still is when it lands (`placementFor`); otherwise it goes
+  into the box unsent. A late Retry therefore never becomes a message the
+  owner no longer expects.
+
+Free checks: `hud/src/lib/stt.test.ts` (fake clock: deadline expiry keeps the
+clip and shows the failure, bounded retry, Retry re-sends the same Blob,
+out-of-order replies, retention bounds), `tests/voice_stt_check.py`,
+`tests/v2/hud_backend_check.py` (`/stt` ids and limits),
+`tests/face/hud_v2_stt_check.py` (real HUD, scripted mock `/stt`). Mutations
+(ordering that does not wait for an in-flight clip, a no-op Retry, an
+unbounded automatic retry) each fail the vitest suite.
+
+Not done and not claimed: physical-microphone acceptance, a live provider
+outage test, chunked/overlapping STT (V4), continuation and steering (V3).
