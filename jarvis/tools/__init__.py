@@ -87,6 +87,10 @@ _READ_LINES = re.compile(r"its last (\d+) line")
 
 def private_summary(name: str, text: str) -> str:
     """Only fixed words/counts; no page/terminal text, including refusal details."""
+    if name == "hud_browser_act":
+        for prefix, outcome in (("Acted:", "acted"), ("Asked:", "asked"), ("Stopped:", "stopped")):
+            if text.startswith(prefix):return outcome
+        return "refused"
     if name == "hud_browser_view":
         return "refused" if text.startswith(("Refused", "Error", "Stopped")) or " is not available to this agent" in text[:200] else "looked at a page"
     if text.startswith("Refused") or " is not available to this agent" in text[:200]:

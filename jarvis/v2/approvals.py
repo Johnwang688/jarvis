@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+import math
 import re
 import secrets as _secrets
 import threading
@@ -139,8 +140,26 @@ class ApprovalRequest:
     req_id: str = ""
     code: str = ""
     asked_at: str = ""
+    # Browser cards contain owner page/action details. Their public projection
+    # is deliberately small; only the owner browser route serves details.
+    hud_only: bool = False
+    browser: dict[str, Any] | None = field(default=None, repr=False)
+    max_wait_s: float | None = None
+    _hud_private: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def private(self) -> bool:
+        # Publication and answer constraints cannot weaken while an ask waits.
+        return bool(self.hud_only or self._hud_private)
 
     def to_json(self) -> dict:
+        if self.private:
+            return {
+                "req_id": self.req_id, "code": self.code, "tool": self.tool,
+                "layer": self.layer, "thread_id": self.thread_id,
+                "asked_at": self.asked_at, "allowlistable": False,
+                "timeout_s": self.timeout_s, "hud_only": True,
+            }
         return {
             "req_id": self.req_id, "code": self.code, "tool": self.tool,
             "args": self.args, "command": self.command, "reason": self.reason,
@@ -152,6 +171,14 @@ class ApprovalRequest:
             "discord_channel_id": self.discord_channel_id,
         }
 
+    def owner_json(self) -> dict:
+        """Private detail projection; call only behind the owner HUD boundary."""
+        if not self.private:
+            return self.to_json()
+        return {**self.to_json(), "args": self.args, "command": self.command,
+                "reason": self.reason, "headline": self.headline,
+                "browser": self.browser}
+
 
 @dataclass
 class _Pending:
@@ -160,6 +187,7 @@ class _Pending:
     decision: Decision | None = None
     resolution: str = ""
     announced: bool = False             # resolve() already told on_resolve
+    hud_only: bool = False              # pinned when asked; never weakened later
 
 
 class DenyAll:
@@ -211,28 +239,63 @@ class PendingApprovals:
 
     # -- the asking side ---------------------------------------------------
 
-    def ask(self, request: ApprovalRequest) -> Decision:
-        """Block up to `timeout_s`. DENY on timeout, shutdown or any error."""
+    def ask(self, request: ApprovalRequest, *,
+            cancelled: Callable[[], bool] | None = None) -> Decision:
+        """Block for a bounded owner answer; cancellation callbacks run unlocked."""
+        request._hud_private = request.private
+        wait_s = self.timeout_s
+        if request.private:
+            wait_s = min(wait_s, LOCAL_TIMEOUT_S)
+        if request.max_wait_s is not None:
+            value = request.max_wait_s
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0):
+                return self._record(request, Decision.DENY, "invalid-timeout")
+            wait_s = min(wait_s, value)
+        def stopped():
+            if cancelled is None:
+                return False
+            try:
+                return bool(cancelled())
+            except Exception:
+                return True
+        if stopped():
+            return self._record(request, Decision.DENY, "cancelled")
         with self._lock:
             if self._closed:
                 return self._record(request, Decision.DENY, "shutdown")
             request.req_id = self._new_id()
             request.code = self._new_code()
             request.asked_at = utcnow()
-            item = _Pending(request)
+            item = _Pending(request, hud_only=request.private)
             self._pending[request.req_id] = item
 
         if self._on_request is not None:
             try:
-                request.timeout_s = self.timeout_s
+                request.timeout_s = wait_s
                 self._on_request(request)
             except Exception:       # a surface that cannot be told must not grant
-                LOG.exception("Cannot announce approval %s", request.req_id)
+                if request.private:
+                    LOG.warning("Cannot announce private approval %s", request.req_id)
+                else:
+                    LOG.exception("Cannot announce approval %s", request.req_id)
                 with self._lock:
                     self._pending.pop(request.req_id, None)
                 return self._record(request, Decision.DENY, "nowhere-to-ask")
 
-        item.event.wait(self.timeout_s)
+        cancelled_wait = False
+        if cancelled is None:
+            item.event.wait(wait_s)
+        else:
+            deadline = time.monotonic() + wait_s
+            while not item.event.is_set():
+                if stopped():
+                    cancelled_wait = True
+                    break
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                item.event.wait(min(0.1, left))
         with self._lock:
             self._pending.pop(request.req_id, None)
             if item.event.is_set():
@@ -244,7 +307,7 @@ class PendingApprovals:
                 # Timed out. Setting the event means a resolve() racing this
                 # finds the request gone and refuses, rather than answering it.
                 item.event.set()
-                decision, resolution, announced = None, "timeout", False
+                decision, resolution, announced = None, "cancelled" if cancelled_wait else "timeout", False
         if decision is None:
             decision, resolution = Decision.DENY, resolution or "timeout"
         if not announced:
@@ -256,7 +319,8 @@ class PendingApprovals:
 
     # -- the answering side ------------------------------------------------
 
-    def resolve(self, req_id: str, decision: Decision | str, *, always: bool = False):
+    def resolve(self, req_id: str, decision: Decision | str, *, always: bool = False,
+                hud: bool = False):
         """Resolve exactly once. A second resolve is refused.
 
         `always=True` also writes the persistent allowlist through v1
@@ -268,11 +332,13 @@ class PendingApprovals:
             item = self._pending.get(req_id)
             if item is None or item.event.is_set():
                 raise ValueError(f"unknown or already-resolved approval {req_id!r}")
+            if item.hud_only and decision is Decision.ALLOW and hud is not True:
+                raise ValueError("this approval requires an answer in the owner HUD")
             item.decision = decision
             item.resolution = decision.value
             entry = None
             if always and decision is Decision.ALLOW:
-                if not item.request.allowlistable:
+                if item.hud_only or not item.request.allowlistable:
                     item.resolution = "allow (no standing rule from this path)"
                 else:
                     try:
@@ -319,6 +385,14 @@ class PendingApprovals:
                 return False
             return bool(commit())
 
+    def owner_details(self, req_id: str) -> dict:
+        """One still-pending private card. The HTTP caller enforces owner access."""
+        with self._lock:
+            item = self._pending.get(req_id)
+            if item is None or item.event.is_set() or not item.hud_only:
+                raise ValueError("no pending Browser approval")
+            return item.request.owner_json()
+
     def shutdown(self) -> None:
         """Release every waiter with a denial. Idempotent."""
         with self._lock:
@@ -352,11 +426,14 @@ class PendingApprovals:
         try:
             self._on_resolve(request, decision, resolution)
         except Exception:
-            LOG.exception("Cannot announce resolution of %s", request.req_id)
+            if request.private:
+                LOG.warning("Cannot announce private resolution %s", request.req_id)
+            else:
+                LOG.exception("Cannot announce resolution of %s", request.req_id)
 
     def _record(self, request: ApprovalRequest, decision: Decision, resolution: str) -> Decision:
         self.decisions.append({
-            "req_id": request.req_id, "tool": request.tool, "origin": request.origin,
+            "req_id": request.req_id, "tool": request.tool, "origin": "" if request.private else request.origin,
             "decision": decision.value, "resolution": resolution, "at": utcnow(),
         })
         return decision

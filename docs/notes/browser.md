@@ -1137,6 +1137,12 @@ background tasks, workflows, subagents or default session tools. This backend
 package does not establish the pending BR3b UI or BR6 session/MCP interface,
 real account authentication, a live-provider call or deployment verification.
 
+## Current Remote restore and landing replacement (BR3b, 2026-10-13)
+
+Stored persistent Remote tabs allocate a blank tab and use the owner-only `POST /browser/tabs/<id>/restore {url}` route. It calls `navigate(owner=False)`: restoring state cannot open the shared local-server gate. A live stored handle reattaches without navigation; expired Private state never replays a saved URL. Actual address entry continues through the pane registry transaction and may open the ordinary owner navigation lease.
+
+The landing guard captures the offending document generation when scheduling its explanation. The queued replacement takes the same per-profile lifecycle lock as owner navigation, checks the original tab/generation before navigating, then checks tab/generation/about:blank again before setting explanation content. It cannot blank a newer owner document or write into a page closed during replacement. This is scheduled work; callers never await it while holding the same lock.
+
 ## Current owner capture boundary (2026-10-13, BR4)
 
 Owner captures use resolve_owner/owner_current on one exact current binding.
@@ -1198,3 +1204,106 @@ The protected BrowserSettings schema now recognizes `sound`, a strict owner bool
 A mute attempt taints that instance before command dispatch, including timeout or a late completion after ON. Only a fresh ON instance clears the taint. A killed utility whose exit has not settled keeps the instance pending until actual cleanup; the bounded caller returning does not release that reservation. Pure helper tests exercise these races with synthetic processes/Pulse replies and disposable utility children. This is implementation groundwork: Chrome launch/restart and HUD wiring are separate pending changes, and this paragraph is not a production sound or physical audibility receipt.
 The pure `activity.py` helper adds exact-instance activity and restart capabilities. Parent and child cleanup holds are independent; canceled waiters cannot erase actual coroutine work. Settings changes supersede only uncommitted replacements, current page holds invalidate a pending restart, and stale/forged cleanup cannot free another token. Its methods do no IO or permission work; broker-to-activity is the planned commit lock order. Twelve pure tests plus eight in-memory mutants verify admission/cleanup races. Host, broker and BR9b wiring still require the integrated implementation and independent review; helper tests do not establish that every production operation is covered.
 The independent HUD portion adds one window sound-status store, shared by the Browser Settings switch and Direct/Remote speaker buttons. The speaker opens Browser settings without sending page input or changing the preference; its Direct label explicitly leaves Direct audio unchanged. Desired and per-instance applied modes remain distinct, with fixed pending, Private, unavailable and retry wording. Approval/annotation blocking, Settings focus restoration, mounted workspace lifetime and source/see retention use the existing seams. Status is read from `/status.browser`; only an explicit enabled switch writes `sound`. Ambiguous read/save results disable new mutations until an authoritative retry/reconnect read. This UI contract still requires the pending host sound status/restart integration; it is not a claim of physical audio support.
+
+
+## BR9b dormant Browser action backend (2026-10-13)
+
+`hud_browser_act` is explicit-only and serial in the fast path, with typed click,
+type, press, scroll, select, upload, navigate/back/forward operations. Production
+`_shipping_enabled()` unconditionally returns false; no environment flag, owner
+route or profile setting enables it. The checkpoint's global OFF decision wins.
+This is implemented infrastructure exercised with a fixture-only policy injection,
+not evidence that production driving, BR9c UI or BR9d live model drills work.
+
+A private turn scope binds the actual fast caller, original owner words, thread,
+turn, project and strict flag. Only a successful presented Remote look publishes
+refs, scoped to that exact page/document and caller. Direct/owner captures do not.
+Every action needs live desk/depth zero, non-strict uncancelled session, see+drive,
+drawn uncovered Remote binding, readable terminal provenance, current refs where
+required, attached visible owner socket, no held/paused/depressed input, and five
+seconds without owner input. Budgets are 40 judged actions/turn and 200 actions/tab
+per rolling hour. The same tab cannot be driven concurrently; cancellation retires
+its reservation but holds it through actual in-flight CDP settlement and cleanup.
+No navigation creates a local-port lease. Post-input reconciliation pins physical
+page, pane/window/source/profile/permission identity; only URL/document generation
+may advance. The eight-step fast-path ending reports the pane and asks the owner
+to say "go on"; it does not automatically create a task or reset caller scope.
+
+BR9a H1 refusals run before the model. Its stricter static rules/floors remain;
+uncertain/sensitive actions ask the owner even if the configured browser review
+model says safe. Private cards expire after 120 seconds, cannot create an Always
+rule, and accept ALLOW only from the authenticated owner HUD route. Public bus,
+transcript and audit retain fixed summaries and digests, never command/typed text,
+URL, file path, page labels or model reasons. The owner detail includes the exact
+command and selected text plus fixed action/category, bounded host/path/target,
+and page/document identity. Current Chrome lacks proven stream capture identity,
+so BR9c's separately accepted fallback is Preview unavailable/no target outline.
+
+Full raw bounded facts and credential checks precede truncation. Isolated-world
+pins retain the exact DOM node, never field values. Pointer press AND release
+hit-test the original dispatch coordinates; an inserted overlay stops the release.
+Text chunks recheck focus/type and every event rechecks the gate/fingerprint.
+Select assignment, input and change are separate awaited guarded operations.
+A handler replacing or sensitizing the control stops later events. Cancellation
+waits for each already dispatched event to settle, sends no subsequent event, and
+reports truthful partial input; neutral mouse cleanup never manufactures a click.
+
+Uploads supersede the old proposed filesystem private-copy mechanism above.
+H8 judges one permitted project file; before review, a bounded stable no-follow
+read records identity and a content digest. After yes, path, metadata and digest
+must match the exact stable immutable buffer sent to Chrome. There are no new
+staging-tree writes or lazy path references. A fixed isolated-world helper receives
+at most 1 MiB of base64 per CDP message, uses bounded Uint8Array storage, then
+creates a byte-backed File (50 MiB cap). Assignment/input/change are separately
+awaited with exact-node, type, enabled, directory and gate checks. A later source
+edit/deletion cannot change submission bytes. Old staging-remnant recovery walks
+and pins every ancestor with directory descriptors, never follows symlinks, and
+only deletes bounded private one-file remnants; unknown/replaced entries remain
+and close the service. No content or digest goes to the bus/log. Owner chooser
+uploads retain their existing route and behavior.
+
+Agent-caused downloads retain at most eight URL-digest/MIME response entries and
+four downloads per action, with no headers or navigation history. Unknown/overflow
+or late attribution fails closed. Every such save writes a fixed private hold marker
+before file bytes, so an owner GET cannot race classification. A confidently
+attributed executable name/magic/MIME gets one private release card (not an agent
+`release_download` operation). Approval rechecks exact identity+digest of the
+buffer served from a sealed anonymous descriptor; mutable disk cannot change the
+response. Release never executes a file. Denial/stop deletes only the exact file;
+replacement or cleanup failure stays held. Content and hashes are not persisted.
+
+A conservatively tainted tab stays tainted until closure, even after later owner
+input. Thus a later owner download in that tab can remain held. There is no manual
+release endpoint for ambiguous/late files: the current limit is owner deletion and
+reopening a fresh owner tab for a new download. Untouched owner tabs retain ordinary
+behavior. Restart forgets all memory-only release grants, including ordinary agent
+files; their persistent marker keeps them held. Files over the 50 MiB release cap
+stay held. Owner download/delete UI remains the only applicable existing control.
+
+New SELF_PROTECTED modules: browser/drive.py, drive_state.py, drive_scan.py,
+drive_execute.py, drive_files.py, drive_downloads.py (under jarvis/v2/) and
+jarvis/v2/tools/hud_browser_act.py, in addition to act_rules.py and act_review.py.
+They enforce OFF, caller/turn ownership, credentials, private approval, actual input
+and exact-file release. Only the owner may change these gate files; runtime.py and
+toolgroups.py retain the owner's existing non-protected decision.
+
+
+### BR9b full-size upload test resource accommodation
+
+Lead review approved an explicit exception to amendment1 section H for the one
+full50MiB upload fixture: summed Chrome sampled-peak and endpoint RSS below1.75GiB,
+plus actual entire cgroup memory.peak below1.5GiB. Ordinary Browser fixtures retain
+1.5GiB summed RSS; all test trees retain MemoryMax3GiB/MemorySwapMax0. The fixture
+refreshes owned Chrome PIDs every20ms and at transfer phases, records baseline,
+phase maxima, sampled peak, endpoint and actual cgroup peak, and uses no forced GC.
+A sampled peak is not a mathematically exact continuous maximum. The exception
+changes neither production driving OFF nor the50MiB file cap.
+
+Unmodified standalone full-cap tests exceeded the original summed-RSS target:
+about1559–1581MiB, versus actual complete cgroup peaks below827MiB. Shared pages
+are multiply counted by summed RSS. Baseline-only GC and temporary buffer
+retirement did not reliably reach the original target; their failures were kept.
+Transport now passes constant functions with bounded data arguments, decodes raw
+192KiB chunks natively, transfers temporary ArrayBuffers to zero after immutable
+Blob ownership, and composes a byte-backed File. Neither production nor the
+accepted fixture forces page-global collection to conceal a previous peak.

@@ -212,6 +212,28 @@ def approvals_reviewer(brief: Brief) -> str:
     return "user" if brief.role == Role.CHAT and brief.task_id is None else "auto_review"
 
 
+def session_mcp(brief: Brief) -> dict | None:
+    """Only the daemon's owner-chat run copy carries this server."""
+    if brief.role == Role.CHAT and brief.task_id is None:
+        return brief.mcp_servers.get("jarvis")
+    return None
+
+
+def validate_mcp(brief: Brief, effective: dict) -> None:
+    """Compare measured 0.161 readback without putting token values in errors."""
+    expected = session_mcp(brief)
+    if expected is None:
+        return
+    servers = effective.get("mcp_servers")
+    actual = servers.get("jarvis") if isinstance(servers, dict) else None
+    if (not isinstance(actual, dict)
+            or any(actual.get(key) != value for key, value in expected.items())
+            or actual.get("enabled", True) is not True
+            or actual.get("environment_id", "local") != "local"
+            or actual.get("disabled_tools") not in (None, [])):
+        raise BriefRefused("Codex effective config changed the Jarvis MCP delegation")
+
+
 def config_text(brief: Brief) -> str:
     values = dict(model_provider="openai", forced_login_method="chatgpt",
                   cli_auth_credentials_store="file", sandbox_mode="workspace-write",

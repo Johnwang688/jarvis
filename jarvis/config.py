@@ -923,6 +923,10 @@ TIERS: dict[str, str] = {
     "review": os.environ.get(
         "JARVIS_REVIEW_MODEL", os.environ.get("JARVIS_ORCHESTRATOR", "anthropic/claude-haiku-5.5")
     ),
+    # Browser action classifier follows the same review default; its own
+    # explicit override is still screened by the non-CN reviewer gate.
+    "browser_review": os.environ.get("JARVIS_BROWSER_REVIEW_MODEL", os.environ.get(
+        "JARVIS_REVIEW_MODEL", os.environ.get("JARVIS_ORCHESTRATOR", "anthropic/claude-haiku-5.5"))),
     # Handles delegated single-shot work (drafting, summarizing, extracting).
     # Bench 2026-07-30: 8/8 on tool tasks at half Luna's cost.
     "worker": os.environ.get("JARVIS_WORKER", "openai/gpt-oss-20b"),

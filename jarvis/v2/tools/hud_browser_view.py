@@ -26,8 +26,12 @@ def hud_browser_view(
     if result.refused:return ToolResult("Refused: "+result.refused)
     if not runtime.at_desk() or runtime.depth()!=0 or runtime.should_stop()():
         return ToolResult("Refused: the owner is no longer at the HUD; look again from the HUD")
-    return ToolResult(untrusted.fence(result.text,result.source,notes=list(result.notes)),
-                      result.image if runtime.desk_images() else None)
+    response=ToolResult(untrusted.fence(result.text,result.source,notes=list(result.notes)),
+                        result.image if runtime.desk_images() else None)
+    if result.delivered is not None:
+        try:result.delivered()
+        except Exception:return ToolResult("Refused: the Browser pane changed before the look was delivered; look again")
+    return response
 
 
 EXPLICIT_ONLY.add("hud_browser_view")
