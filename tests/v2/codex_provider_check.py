@@ -131,7 +131,8 @@ def peer(script_path, log_path, thread_name):
             result = {"thread": {"id": native}, "model": settings.get("model", "fake-model"),
                       "reasoningEffort": settings.get("model_reasoning_effort"),
                       "approvalPolicy": "on-request", "approvalsReviewer": "auto_review",
-                      "sandbox": script.get("sandbox", {"type": "workspaceWrite", "networkAccess": False})}
+                      "sandbox": script.get("sandbox", {"type": "workspaceWrite", "networkAccess": False,
+                                                       "writableRoots": settings.get("sandbox_workspace_write", {}).get("writable_roots", [])})}
         elif method == "turn/start":
             if mode == "start_stall":
                 continue
@@ -621,6 +622,46 @@ class Checks(unittest.TestCase):
                 finally:
                     for key in script:
                         self.brain.script.pop(key)
+
+    def test_returned_roots_must_match_for_chats_tasks_start_and_resume(self):
+        # Native 0.161 returns only configured extra roots here; cwd and the
+        # default temporary roots are implicit, not entries in writableRoots.
+        for role in (Role.CHAT, Role.IMPLEMENTER):
+            brief = replace(self.brief, role=role)
+            for resume in (False, True):
+                with self.subTest(role=role, resume=resume):
+                    if resume:
+                        initial = self.start(brief=brief)
+                        self.provider.close(initial)
+                        thread = replace(self.thread, role=role, provider_session_id=initial.provider_session_id)
+                    self.brain.script["sandbox"] = {
+                        "type": "workspaceWrite", "networkAccess": False, "writableRoots": ["/"]}
+                    try:
+                        with self.assertRaises(BriefRefused):
+                            if resume:
+                                self.provider.resume(thread, brief, lambda *_: Decision.ALLOW)
+                            else:
+                                self.start(brief=brief)
+                    finally:
+                        self.brain.script.pop("sandbox")
+        # Dropping the promised grants is also a refused chat receipt.
+        self.brain.script["sandbox"] = {"type": "workspaceWrite", "networkAccess": False}
+        with self.assertRaises(BriefRefused):
+            self.start(brief=self.chat())
+
+    def test_example_env_names_do_not_block_a_later_chat(self):
+        root = config.CHAT_WORKTREES_DIR
+        root.mkdir()
+        tree = root / "existing-worktree"
+        tree.mkdir()
+        (tree / ".env.example").write_text("EXAMPLE=value")
+        h = self.start(brief=self.chat())
+        self.provider.close(h)
+        resumed = self.provider.resume(
+            replace(self.thread, role=Role.CHAT, provider_session_id=h.provider_session_id),
+            self.chat(), lambda *_: Decision.ALLOW)
+        self.handles.append(resumed)
+        self.assertEqual(codex_config.git_roots(self.chat()), [str(root)])
 
     def test_a_named_skill_is_a_directive_on_turn_start(self):
         """S1: Codex has the skill installed, so it is told to use it. (A native
