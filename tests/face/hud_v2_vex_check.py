@@ -286,6 +286,29 @@ def _build_checks(page, mock, check, until, fake):
           and page.evaluate("window.__hud.workspace().ws.order.length") == 3, str(cursor()))
 
 
+def _clean_output_checks(page, mock, check, until, fake):
+    _reset(page, mock, until)
+    page.locator(_view(V, _tid("vex-clean-btn"))).click()
+    until(lambda: _latest_build(mock), timeout=4)
+    bid = _latest_build(mock)
+    rec = mock_vex.state(mock)["builds"][bid]
+    tid = rec["terminal_id"]
+    check("Clean sends exactly its action and opens its program output",
+          _posted(mock, "/projects/p3/vex/build")[-1] == {"action": "clean"}
+          and bool(until(lambda: page.locator(_tid(f"panel-tab-{tid}")).count() > 0, timeout=4)))
+    rec["output"] = "clean project\n"
+    fake.output(tid, b"clean project\r\n")
+    preview = page.locator(_view(V, _tid("vex-build-output")))
+    check("Clean output is visible before completion",
+          bool(until(lambda: preview.count() and "clean project" in preview.inner_text(), timeout=4)))
+    _finish(mock, fake, bid)
+    state = page.locator(_view(V, _tid("vex-build-state")))
+    check("Clean exits successfully and Build becomes usable again",
+          bool(until(lambda: state.inner_text().startswith("✓ Cleaned")
+                     and page.locator(_view(V, _tid("vex-build-btn"))).is_enabled(), timeout=4)),
+          state.inner_text())
+
+
 def _explicit_click_checks(page, mock, check, until, fake):
     _reset(page, mock, until)
     check("setup: the view draws", _ready(page, until))
@@ -802,7 +825,7 @@ def _ed7_beside_checks(page, mock, check, until, fake):
     check("ED-7: and the download button is reachable", page.locator(_view(V, _tid("vex-download-btn"))).is_visible())
 
 
-SECTIONS = (_offer_checks, _setup_checks, _build_checks, _explicit_click_checks, _chain_checks, _card_checks,
+SECTIONS = (_offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks, _chain_checks, _card_checks,
             _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _header_rebuild_checks,
             _still_stale_checks,
             _answer_card_checks, _passing_card_checks, _first_click_checks, _detect_again_checks,
