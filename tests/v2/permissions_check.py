@@ -1588,6 +1588,46 @@ def review_48_delta_checks():
             ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
 
 
+# The third delta review of PR #75 at layer 1: an assignment or a reserved
+# word in front of a wrapper's output file or a runner's here-string shell, a
+# `c`/`e` cluster handed to an unknown program, and a systemd `Exec…=`
+# property. Each was allowed under AUTO at 89074f1 (or asked, by layer 2).
+_A = "~/.config/jarvis/allowlist.json"
+THIRD_DELTA_75_V2_DENY = (
+    f"X=1 time -o {_A} -f x ls", f"FOO= time -o {_A} ls", f"X=$(true) time -o {_A} ls",
+    f"X=1 env time -o {_A} ls", f"X=1 /usr/bin/time -o {_A} ls", f"X=1 nohup time -o {_A} ls",
+    f"X=1 script -c true {_A}", f"X=1 systemd-run --user -p StandardOutput=file:{_A} true",
+    f"X=1 uv run sh <<< 'cp /tmp/x {_A}'", f"X=1 npm exec -- sh <<< 'cp /tmp/x {_A}'",
+    f"A=1 B=2 time -o {_A} ls", f"A=\"x y\" time -o {_A} ls", f"b+=y time -o {_A} ls",
+    f"if true; then time -o {_A} ls; fi", f"case x in x) uv run sh <<< 'cp /tmp/x {_A}';; esac",
+    "X=1 uv run sh <<< 'jarvis restart'",
+    "D=$HOME; D+=/.config/jarvis; cp /tmp/x $D/allowlist.json",
+    "npx mysh -lc 'jarvis restart'", f"uv run mysh -ec 'cp /tmp/x {_A}'",
+    "pnpm exec zx -xc 'jarvis hud install'",
+    "systemd-run --user -p ExecStartPost='jarvis restart' true",
+    f"systemd-run --user --property=ExecStart='/bin/sh -c \"cp /tmp/x {_A}\"' true",
+)
+
+
+def third_delta_75_checks():
+    """The third delta review of PR #75 at layer 1: refused under AUTO and
+    STRICT, never put to the owner."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_command
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in THIRD_DELTA_75_V2_DENY:
+                ok(denied_command(line, "/tmp"), f"layer 1 refuses {line[:60]!r}")
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line[:60]!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line[:60]!r} is never put to the owner")
+
+
 def daemon_checks():
     from jarvis.v2 import daemon as daemon_mod
     from jarvis.v2.model import PermissionProfile as P, ProviderName, Role
@@ -1957,7 +1997,8 @@ def main():
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     env_file_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
-                    review_48_round2_checks, review_48_delta_checks, runner_checks, daemon_checks,
+                    review_48_round2_checks, review_48_delta_checks, runner_checks,
+                    third_delta_75_checks, daemon_checks,
                     auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
