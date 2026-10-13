@@ -104,8 +104,7 @@ a model. Quota, title, cost and cache claims need evidence.
 
 The HUD uses **Graphite**: warm off-black/glacier-cyan, amber pending/red error,
 overriding the global palette. Preserve dimensions, input behavior and owner
-workspace/editor/Browser decisions. Driving uses the owner switch (2026-10-13):
-fast path on desk turns, with per-pane and Private rules in the Browser notes.
+workspace/editor/Browser decisions. Driving uses owner switches.
 
 ## Safety design (deliberate, do not loosen without asking)
 
