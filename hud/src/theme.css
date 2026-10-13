@@ -1635,3 +1635,10 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .math-display .katex-display { margin: 0.6em 0; }
 .math-inline .katex { font-size: 1.1em; }
 .math-display .katex { font-size: 1.15em; }
+
+/* V1 metadata uses existing Graphite settings tokens. */
+.voice-diagnostics { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
+.voice-diagnostics h3 { font-size: 12px; }
+.voice-diagnostics p { color: var(--text-muted); font-size: 11px; }
+.voice-diagnostic-rows { padding: 0; list-style: none; max-height: 250px; overflow: auto; font: 11px var(--mono); }
+.voice-diagnostic-rows li { border-top: 1px solid var(--border); padding: 6px 0; overflow-wrap: anywhere; }
