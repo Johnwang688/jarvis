@@ -431,8 +431,28 @@ def judge(facts: Facts, owner_words: str = "", *, chat=None, extra_values=()) ->
         # would send nothing at all), and not streaming means no second,
         # non-streaming attempt after a failed stream. An answer that arrives
         # after the deadline is an ask all the same.
-        reply = chat(model, request, temperature=0.0, max_tokens=MAX_TOKENS,
-                     timeout=TIMEOUT_S, max_retries=1, stream=False)
+        # Haiku 5.5 thinks by default, spending this small response envelope
+        # before the JSON is finished. Its documented no-thinking mode keeps
+        # the existing 150-token bound; it also requires sampling omission.
+        # Other configured models keep their existing request contract.
+        haiku = model == "anthropic/claude-haiku-5.5"
+        options = {"effort": "none"} if haiku else {}
+        reply = chat(model, request, temperature=None if haiku else 0.0,
+                     max_tokens=MAX_TOKENS, timeout=TIMEOUT_S,
+                     max_retries=1, stream=False, **options)
+        if getattr(reply, "finish_reason", "stop") != "stop":
+            return _ask(R_FORM)
+        missing_wire = object()
+        wire = getattr(reply, "raw", missing_wire)
+        if wire is not missing_wire:
+            # llm.Reply normalizes falsey finish reasons to stop for legacy
+            # callers. The Browser gate requires an actual completed wire
+            # response; null/empty/missing metadata cannot become consent.
+            choices = wire.get("choices") if isinstance(wire, dict) else None
+            if (not isinstance(choices, list) or not choices
+                    or not isinstance(choices[0], dict)
+                    or choices[0].get("finish_reason") != "stop"):
+                return _ask(R_FORM)
         raw = reply.text
     except Exception:
         return _ask(R_TIMEOUT if _now() > deadline else R_UNREACHABLE)
