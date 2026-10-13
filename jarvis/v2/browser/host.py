@@ -20,8 +20,10 @@ its own Chrome on `BROWSER_DIR/profiles/<id>/`. **Private** is one more
 Chrome on a throwaway `BROWSER_DIR/private/run-<hex>/` (removed at stop,
 swept at the next start), whose panes are each an off-the-record context
 created with `browser.new_context()` — nothing a Private pane does is written
-to disk, and a context closes with its last tab. Profile management itself
-(create, rename, delete) is BR-1c's.
+to its persistent profile, and a context closes with its last tab. BR-1c
+adds private metadata CRUD, at most eight profiles, three persistent Chrome
+instances plus Private, and a five-minute idle stop for persistent Chrome.
+Private's final context closes its Chrome and removes its temporary data.
 
 **The folder** (`config.BROWSER_DIR`) is a credential folder: made 0700
 (every folder in it too), and the engine refuses to start when it, or one of
@@ -49,11 +51,12 @@ DevTools only over Playwright's private pipe: never `--remote-debugging-port`.
 **This machine is closed like the LAN** (the lead's decision on PR #69):
 a loopback port is reachable through the gate only after the owner opened a
 pane on it — `open_tab`/`navigate` with `owner=True`, which only the
-owner-only routes pass — and only for this host's lifetime
-(`loopback_open`). A page's or an agent's navigation never opens one.
+owner-only routes pass — while at least one authorizing tab remains on that
+port (`loopback_open`). The shared gate revokes existing tunnels when the
+last tab leaves. A page's or an agent's navigation never opens one.
 
 **A clean environment** (`chrome_environment`): built from nothing, not
-filtered from the daemon's — `HOME` is `BROWSER_DIR/home`, so everything
+filtered from the daemon's — `HOME` is `BROWSER_DIR/home` (inside the throwaway run folder for Private), so everything
 Chrome writes outside its profile (its NSS store, the font cache) stays in
 the credential folder; no `JARVIS_*`, no API key, no display, no
 `PULSE_SERVER`, no D-Bus. (The Playwright driver, a separate node process,
@@ -99,6 +102,7 @@ from jarvis import config
 
 from . import files as _files
 from . import policy
+from .profiles import ProfileStore
 from .gate import Gate
 from .settings import BrowserSettings
 from .stream import TICKET_TTL_S, TabStream, Tickets, serve as _serve_stream
@@ -116,6 +120,10 @@ LAUNCH_TIMEOUT_S = 30.0
 NAV_TIMEOUT_S = 20.0
 CLOSE_TIMEOUT_S = 5.0
 STOP_TIMEOUT_S = 10.0
+PROFILE_INSTANCES_MAX = 3
+PROFILE_IDLE_S = 300.0
+SIGNIN_URL = "chrome://settings/syncSetup"
+SIGNIN_PAGES = frozenset((SIGNIN_URL, "chrome://settings/people"))
 PROFILES_CAP = 64 * 1024
 TITLE_CAP = 120
 URL_CAP = 2048
@@ -263,7 +271,7 @@ def secure_dir(path: Path, *, create: bool = True) -> Path:
     return path
 
 
-def _remove_tree(path: Path) -> None:
+def _remove_tree(path: Path, *, strict: bool = False) -> None:
     """Remove a folder we made, never through a symlink (`rmtree` refuses a
     symlinked root and does not follow links inside)."""
     try:
@@ -271,6 +279,8 @@ def _remove_tree(path: Path) -> None:
             shutil.rmtree(path)
     except OSError as exc:
         LOG.warning("Cannot remove a browser folder: %s", type(exc).__name__)
+        if strict:
+            raise BrowserRefused(409, "the Private browser data could not be removed") from None
 
 
 def _write_private(path: Path, data: bytes) -> None:
@@ -414,6 +424,8 @@ class _Instance:
     browser: object
     version: str = ""
     private_contexts: dict = field(default_factory=dict)
+    idle: object = None
+    closing: bool = False
 
 
 @dataclass
@@ -439,6 +451,9 @@ class _Tab:
     pressed: dict = field(default_factory=dict)     # button -> hold count before dispatch
     keys_pressed: dict = field(default_factory=dict)  # code -> hold count before dispatch
     input_task: object = None           # unanswered CDP input, never bank more behind it
+    loopback_port: int | None = None
+    pending_port: int | None = None
+    signin: bool = False
 
 
 class BrowserHost:
@@ -462,8 +477,9 @@ class BrowserHost:
         # (review of PR #69). Re-entrant: a failed start stops under it.
         self._start_lock = threading.RLock()
         # Loopback ports the owner opened in a pane (MED 2 of the review):
-        # the only loopback ports the gate admits, for this host's lifetime.
-        self._opened_ports: set[int] = set()
+        # the only loopback ports the gate admits while their owner tabs remain.
+        self._port_owners: dict[int, set[str]] = {}
+        self._profiles = ProfileStore()
         self._started = False
         self._stopped = False
         self._thread: threading.Thread | None = None
@@ -471,8 +487,13 @@ class BrowserHost:
         self._gate: Gate | None = None
         self._pw = None
         self._instances: dict[str, _Instance] = {}
+        self._closing_instances: dict[str, _Instance] = {}
         self._tabs: dict[str, _Tab] = {}
         self._launching: dict[str, asyncio.Lock] = {}
+        self._launch_reserved: set[str] = set()
+        self._closing_contexts: set[str] = set()
+        self._retiring_contexts: dict[str, asyncio.Task] = {}
+        self._download_tasks: dict[asyncio.Task, _Tab] = {}
         self._launched: set[Path] = set()
         self._snapshot: dict = {"instances": [], "tabs": 0}
         self._guarded = 0
@@ -505,23 +526,32 @@ class BrowserHost:
 
     def loopback_open(self, port: int) -> bool:
         """Whether the gate admits a loopback connection to `port`: the owner
-        opened a pane on it in this host's lifetime, or turned on
+        still has an authorizing pane on it, or turned on
         `local_servers` in `browser.json`. Jarvis's ports are refused before
         this is asked, and a name that resolves to loopback never gets here."""
         with self._lock:
-            if port in self._opened_ports:
+            if self._port_owners.get(port):
                 return True
         return self._settings.value("local_servers")
 
-    def _open_loopback(self, url: str | None) -> None:
-        """The owner asked for `url` in a pane: if it is on this machine, its
-        port is open from now on (never one of Jarvis's ports). Only an owner
-        route reaches this; a page's or an agent's navigation never does."""
-        port = policy.loopback_port(url) if url else None
-        if port is None or port in self.refused_ports():
-            return
+    def _sync_ports(self, tab: _Tab) -> None:
+        """Only an admitted owner navigation grants; every last lease revokes."""
+        ports = {p for p in (tab.loopback_port, tab.pending_port) if p is not None}
         with self._lock:
-            self._opened_ports.add(port)
+            before = set(self._port_owners)
+            for port, owners in list(self._port_owners.items()):
+                owners.discard(tab.id)
+                if not owners:
+                    del self._port_owners[port]
+            for port in ports - self.refused_ports():
+                self._port_owners.setdefault(port, set()).add(tab.id)
+            revoked = before - set(self._port_owners)
+        if revoked and self._gate is not None:
+            self._gate.revoke_closed_loopback()
+
+    def settings_changed(self) -> None:
+        if self._gate is not None:
+            self._gate.revoke_closed_loopback()
 
     # -- lifecycle ------------------------------------------------------------------
 
@@ -608,7 +638,7 @@ class BrowserHost:
             if self._stopped:
                 return
             self._stopped = True
-            self._opened_ports.clear()
+            self._port_owners.clear()
             loop, thread = self._loop, self._thread
         # Every window first: told the Browser ended, its socket closed.
         self.tickets.clear()
@@ -641,7 +671,7 @@ class BrowserHost:
         self._publish_snapshot()
 
     async def _shutdown(self) -> None:
-        for profile in list(self._instances):
+        for profile in list(self._instances.keys() | self._closing_instances.keys()):
             await self._close_instance(profile)
         if self._pw is not None:
             try:
@@ -670,38 +700,27 @@ class BrowserHost:
                 raise BrowserRefused(409, "the Browser could not do that") from None
             raise
 
-    # -- profiles (BR-1c grows this) ---------------------------------------------------
-
-    def _profiles_path(self) -> Path:
-        return config.BROWSER_DIR / "profiles.json"
+    # -- profiles (BR-1c) ---------------------------------------------------
 
     def profiles(self) -> list[dict]:
-        """`[{id, label, created}]` from `profiles.json`; [] before the first
-        start. A file that is not a list of well-formed rows is refused:
-        guessing could cost the owner a profile's logins."""
-        try:
-            raw = _read_capped(self._profiles_path(), PROFILES_CAP)
-        except (OSError, ValueError):
-            raise BrowserRefused(409, "profiles.json is unreadable") from None
-        if raw is None:
-            return []
-        try:
-            rows = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            raise BrowserRefused(409, "profiles.json is unreadable") from None
-        if not isinstance(rows, list) or not all(
-                isinstance(r, dict) and isinstance(r.get("id"), str) and PROFILE_ID.fullmatch(r["id"])
-                and isinstance(r.get("label"), str) for r in rows):
-            raise BrowserRefused(409, "profiles.json is unreadable")
-        return [{"id": r["id"], "label": _clean(r["label"], 32), "created": r.get("created")}
-                for r in rows]
+        return self._profiles.list()
+
+    def list_profiles(self) -> list[dict]:
+        with self._start_lock:
+            return self._profiles.list(create=True)
+
+    def create_profile(self, label) -> dict:
+        self._refuse_if_held()
+        with self._start_lock:
+            return self._profiles.create(label)
+
+    def rename_profile(self, profile, label) -> dict:
+        self._refuse_if_held()
+        with self._start_lock:
+            return self._profiles.rename(profile, label)
 
     def _ensure_main(self) -> None:
-        if self.profiles():
-            return
-        row = {"id": f"p-{secrets.token_hex(4)}", "label": MAIN_LABEL,
-               "created": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        _write_private(self._profiles_path(), (json.dumps([row], indent=2) + "\n").encode())
+        self._profiles.list(create=True)
 
     def _profile_id(self, profile) -> str:
         """A request's profile: omitted means the first (Main), `private`, or
@@ -709,7 +728,7 @@ class BrowserHost:
         if profile is None:
             rows = self.profiles()
             if not rows:
-                raise BrowserRefused(409, "the Browser has no profile yet")
+                raise BrowserRefused(409, "create a Browser profile first")
             return rows[0]["id"]
         if profile == PRIVATE:
             return PRIVATE
@@ -722,18 +741,46 @@ class BrowserHost:
     # -- instances ------------------------------------------------------------------
 
     async def _instance(self, profile: str) -> _Instance:
+        # Caller holds the profile lifecycle lock through adoption/navigation.
+        if profile != PRIVATE:
+            self._profiles.require(profile)
         found = self._instances.get(profile)
         if found is not None:
+            if found.idle is not None:
+                found.idle.cancel()
+                found.idle = None
             return found
-        lock = self._launching.setdefault(profile, asyncio.Lock())
-        async with lock:
-            found = self._instances.get(profile)
-            if found is not None:
-                return found
+        if profile in self._closing_instances:
+            await self._close_instance(profile)
+        count = len((set(self._instances) | set(self._closing_instances) | self._launch_reserved) - {PRIVATE})
+        if profile != PRIVATE and count >= PROFILE_INSTANCES_MAX:
+            raise BrowserRefused(409, "three profiles are already open; close one first")
+        self._launch_reserved.add(profile)
+        try:
             instance = await self._launch(profile)
             self._instances[profile] = instance
             self._publish_snapshot()
             return instance
+        finally:
+            self._launch_reserved.discard(profile)
+
+    def _idle_if_empty(self, instance: _Instance) -> None:
+        if instance.closing or any(t.profile == instance.profile for t in self._tabs.values()):
+            return
+        if instance.idle is not None:
+            instance.idle.cancel()
+        async def expire():
+            try:
+                await asyncio.sleep(0 if instance.profile == PRIVATE else PROFILE_IDLE_S)
+                lock = self._launching.setdefault(instance.profile, asyncio.Lock())
+                async with lock:
+                    if (self._instances.get(instance.profile) is instance
+                            and not any(t.profile == instance.profile for t in self._tabs.values())):
+                        instance.idle = None
+                        await self._close_instance(instance.profile)
+            except asyncio.CancelledError:
+                pass
+        instance.idle = asyncio.create_task(expire())
 
     async def _launch(self, profile: str) -> _Instance:
         root = secure_dir(config.BROWSER_DIR)
@@ -747,8 +794,8 @@ class BrowserHost:
         # Chrome writes a download under Playwright's own name here; a
         # finished one is copied out, 0600, under its cleaned name (files.py).
         incoming = secure_dir(downloads / _files.INCOMING)
-        home = secure_dir(root / "home")
-        artifacts = secure_dir(root / "artifacts")
+        home = secure_dir((folder if private else root) / "home")
+        artifacts = secure_dir((folder if private else root) / "artifacts")
         loop = asyncio.get_running_loop()
         # A Chrome a crashed daemon left on this profile would hold its lock.
         if await loop.run_in_executor(None, stop_pids, folder):
@@ -779,9 +826,14 @@ class BrowserHost:
         return instance
 
     async def _close_instance(self, profile: str) -> None:
-        instance = self._instances.pop(profile, None)
+        instance = self._instances.pop(profile, None) or self._closing_instances.get(profile)
         if instance is None:
             return
+        self._closing_instances[profile] = instance
+        instance.closing = True
+        if instance.idle is not None:
+            instance.idle.cancel()
+            instance.idle = None
         for tab_id in [t.id for t in self._tabs.values() if t.profile == profile]:
             tab = self._tabs.pop(tab_id, None)
             if tab is not None:
@@ -791,10 +843,12 @@ class BrowserHost:
         except Exception:  # noqa: BLE001 - the PID backstop follows
             LOG.warning("A Browser Chrome did not close cleanly")
         await asyncio.get_running_loop().run_in_executor(None, stop_pids, instance.folder)
+        await self._settle_downloads(profile)
         if profile == PRIVATE:
-            _remove_tree(instance.folder)
+            _remove_tree(instance.folder, strict=True)
             # A Private download goes with the Private Chrome (BR-1b).
-            _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE)
+            _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE, strict=True)
+        self._closing_instances.pop(profile, None)
         self._publish_snapshot()
 
     def _adopt(self, instance: _Instance, page, ctx: str | None):
@@ -824,7 +878,7 @@ class BrowserHost:
         page.on("load", lambda _page: asyncio.ensure_future(self._titled(tab)))
         page.on("dialog", lambda dialog: self._dialog(tab, dialog))
         page.on("filechooser", lambda chooser: self._chooser(tab, chooser))
-        page.on("download", lambda download: asyncio.ensure_future(self._download(tab, download)))
+        page.on("download", lambda download: self._start_download(tab, download))
         # A pop-up may have navigated before it was handed to us.
         self._landed(tab, page.main_frame)
         asyncio.ensure_future(self._link_opener(tab))
@@ -864,6 +918,8 @@ class BrowserHost:
     def _release(self, tab: _Tab, reason: str) -> None:
         """A tab is gone: its window is told and let go, its timers and its
         input task stop. On the Browser's thread."""
+        tab.loopback_port = tab.pending_port = None
+        self._sync_ports(tab)
         if tab.stream is not None:
             tab.stream.close(reason)
         for timer in tab.timers.values():
@@ -879,13 +935,35 @@ class BrowserHost:
         if self._tabs.get(tab.id) is tab:
             del self._tabs[tab.id]
         self._release(tab, "closed")
-        if tab.ctx is not None and not any(t.ctx == tab.ctx for t in self._tabs.values()):
-            instance = self._instances.get(PRIVATE)
-            context = instance.private_contexts.pop(tab.ctx, None) if instance else None
-            if context is not None:
-                asyncio.ensure_future(self._quietly(context.close()))
-            _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / tab.ctx)
+        instance = self._instances.get(tab.profile)
+        if (tab.ctx is not None and not any(t.ctx == tab.ctx for t in self._tabs.values())
+                and tab.ctx not in self._closing_contexts):
+            self._closing_contexts.add(tab.ctx)
+            task = asyncio.create_task(self._retire_context(tab.ctx))
+            self._retiring_contexts[tab.ctx] = task
+            def finished(done):
+                self._retiring_contexts.pop(tab.ctx, None)
+                if not done.cancelled() and done.exception() is not None:
+                    LOG.warning("A Private context did not finish closing")
+            task.add_done_callback(finished)
+        elif instance is not None:
+            self._idle_if_empty(instance)
         self._publish_snapshot()
+
+    async def _retire_context(self, ctx: str) -> None:
+        try:
+            async with self._launching.setdefault(PRIVATE, asyncio.Lock()):
+                instance = self._instances.get(PRIVATE)
+                context = instance.private_contexts.pop(ctx, None) if instance else None
+                if context is not None:
+                    await self._quietly(context.close())
+                await self._settle_downloads(PRIVATE, ctx)
+                _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / ctx, strict=True)
+                if (instance is not None and not instance.private_contexts
+                        and not any(t.profile == PRIVATE for t in self._tabs.values())):
+                    await self._close_instance(PRIVATE)
+        finally:
+            self._closing_contexts.discard(ctx)
 
     @staticmethod
     async def _quietly(awaitable) -> None:
@@ -916,8 +994,19 @@ class BrowserHost:
             # Its first real landing comes through `framenavigated` and is
             # judged then (review of PR #69: judging "" blanked every pop-up).
             return
+        port = policy.loopback_port(url)
+        if port == tab.pending_port and port is not None:
+            tab.loopback_port = port
+        elif port != tab.loopback_port:
+            tab.loopback_port = None
+        tab.pending_port = None
+        self._sync_ports(tab)
+        internal = tab.signin and url in SIGNIN_PAGES
+        if not internal:
+            tab.signin = False
         try:
-            policy.judge_url(url, refused=self.refused_ports(), landed=True)
+            if not internal:
+                policy.judge_url(url, refused=self.refused_ports(), landed=True)
         except policy.URLRefused as refusal:
             with self._lock:
                 self._guarded += 1
@@ -977,11 +1066,20 @@ class BrowserHost:
         profile_id = self._profile_id(profile)
         if ctx is not None and profile_id != PRIVATE:
             raise BrowserRefused(400, "only a Private tab has a ctx")
-        if owner:
-            self._open_loopback(target)
-        return self._call(self._open_tab(profile_id, ctx, target), LAUNCH_TIMEOUT_S + NAV_TIMEOUT_S)
+        return self._call(self._open_tab(profile_id, ctx, target, owner=owner), LAUNCH_TIMEOUT_S + NAV_TIMEOUT_S)
 
-    async def _open_tab(self, profile: str, ctx: str | None, url: str | None) -> dict:
+    async def _open_tab(self, profile: str, ctx: str | None, url: str | None,
+                        *, owner: bool = False, signin: bool = False) -> dict:
+        async with self._launching.setdefault(profile, asyncio.Lock()):
+            try:
+                return await self._open_tab_locked(profile, ctx, url, owner=owner, signin=signin)
+            finally:
+                instance = self._instances.get(profile)
+                if instance is not None:
+                    self._idle_if_empty(instance)
+
+    async def _open_tab_locked(self, profile: str, ctx: str | None, url: str | None,
+                               *, owner: bool, signin: bool) -> dict:
         cap = max(1, config.BROWSER_TAB_CAP)
         if url is not None:
             self._refuse_if_held()
@@ -989,6 +1087,8 @@ class BrowserHost:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         instance = await self._instance(profile)
         if profile == PRIVATE:
+            if ctx in self._closing_contexts:
+                raise BrowserRefused(404, "no such Private context")
             if ctx is None:
                 ctx = self._new_id(instance.private_contexts)
                 context = await instance.browser.new_context(
@@ -1010,15 +1110,23 @@ class BrowserHost:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         row = {"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx, "loaded": True}
         if url is not None:
-            row.update(await self._goto(tab, url))
+            tab.signin = signin
+            row.update(await self._goto(tab, url, owner=owner))
         return row
 
-    async def _goto(self, tab: _Tab, url: str) -> dict:
+    async def _goto(self, tab: _Tab, url: str, *, owner: bool = False) -> dict:
+        self._refuse_if_held()
+        if owner:
+            tab.pending_port = policy.loopback_port(url)
+            self._sync_ports(tab)
         try:
             await tab.page.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
             return {"loaded": True}
         except Exception as exc:  # noqa: BLE001
             return {"loaded": False, "error": _net_error(exc)}
+        finally:
+            tab.pending_port = None
+            self._sync_ports(tab)
 
     def _tab(self, tab_id) -> _Tab:
         if not isinstance(tab_id, str) or not TAB_ID.fullmatch(tab_id):
@@ -1043,10 +1151,11 @@ class BrowserHost:
 
     async def _navigate(self, tab_id, url, owner: bool = False) -> dict:
         tab = self._tab(tab_id)
-        self._refuse_if_held()
-        if owner:
-            self._open_loopback(url)
-        return {"tab_id": tab.id, **(await self._goto(tab, url))}
+        async with self._launching.setdefault(tab.profile, asyncio.Lock()):
+            tab = self._tab(tab_id)
+            self._refuse_if_held()
+            tab.signin = False
+            return {"tab_id": tab.id, **(await self._goto(tab, url, owner=owner))}
 
     def history(self, tab_id, action) -> dict:
         if action not in ("back", "forward", "reload"):
@@ -1058,26 +1167,36 @@ class BrowserHost:
 
     async def _history(self, tab_id, action) -> dict:
         tab = self._tab(tab_id)
-        self._refuse_if_held()
-        step = {"back": tab.page.go_back, "forward": tab.page.go_forward,
-                "reload": tab.page.reload}[action]
-        try:
-            await step(wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
-            return {"tab_id": tab.id, "loaded": True}
-        except Exception as exc:  # noqa: BLE001
-            return {"tab_id": tab.id, "loaded": False, "error": _net_error(exc)}
+        async with self._launching.setdefault(tab.profile, asyncio.Lock()):
+            tab = self._tab(tab_id)
+            self._refuse_if_held()
+            tab.signin = False
+            step = {"back": tab.page.go_back, "forward": tab.page.go_forward,
+                    "reload": tab.page.reload}[action]
+            try:
+                await step(wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
+                return {"tab_id": tab.id, "loaded": True}
+            except Exception as exc:  # noqa: BLE001
+                return {"tab_id": tab.id, "loaded": False, "error": _net_error(exc)}
 
     def close_tab(self, tab_id) -> dict:
         if not self._running():
             raise BrowserRefused(404, "no such tab")
-        return self._call(self._close_tab(tab_id), CLOSE_TIMEOUT_S + 5)
+        return self._call(self._close_tab(tab_id), CLOSE_TIMEOUT_S + 25)
 
     async def _close_tab(self, tab_id) -> dict:
         tab = self._tab(tab_id)
-        try:
-            await asyncio.wait_for(tab.page.close(), CLOSE_TIMEOUT_S)
-        finally:
-            self._dropped(tab)
+        async with self._launching.setdefault(tab.profile, asyncio.Lock()):
+            tab = self._tab(tab_id)
+            try:
+                await asyncio.wait_for(tab.page.close(), CLOSE_TIMEOUT_S)
+            finally:
+                self._dropped(tab)
+            retirement = self._retiring_contexts.get(tab.ctx)
+        # Last-tab closure is a completed data-removal operation for Private.
+        # Its task takes the same lifecycle lock, so await it after releasing.
+        if retirement is not None:
+            await asyncio.shield(retirement)
         return {"tab_id": tab.id, "closed": True}
 
     def tabs(self) -> list[dict]:
@@ -1103,48 +1222,118 @@ class BrowserHost:
         return rows
 
     def close_profile(self, profile) -> None:
-        """Stop one profile's Chrome (its tabs close with it). BR-1c's idle
-        stop will call this; the suites use it to keep one Chrome at a time."""
         profile_id = self._profile_id(profile)
         if self._running():
-            self._call(self._close_instance(profile_id), CLOSE_TIMEOUT_S + 10)
+            self._call(self._close_profile(profile_id), CLOSE_TIMEOUT_S + 20)
+
+    async def _close_profile(self, profile: str) -> None:
+        async with self._launching.setdefault(profile, asyncio.Lock()):
+            await self._close_instance(profile)
+
+    def signin(self, profile) -> dict:
+        self._refuse_if_held()
+        self._profiles.require(profile)  # Private is never signed in to Chrome.
+        self._ensure_started()
+        return self._call(self._open_tab(profile, None, SIGNIN_URL, signin=True),
+                          LAUNCH_TIMEOUT_S + NAV_TIMEOUT_S)
+
+    def close_context(self, ctx) -> dict:
+        if not isinstance(ctx, str) or not CTX_ID.fullmatch(ctx):
+            raise BrowserRefused(400, "ctx must be eight lowercase hex characters")
+        self._refuse_if_held()
+        if not self._running():
+            raise BrowserRefused(404, "no such Private context")
+        return self._call(self._close_context(ctx), CLOSE_TIMEOUT_S + 20)
+
+    async def _close_context(self, ctx: str) -> dict:
+        async with self._launching.setdefault(PRIVATE, asyncio.Lock()):
+            self._refuse_if_held()
+            instance = self._instances.get(PRIVATE)
+            if instance is None or ctx not in instance.private_contexts:
+                raise BrowserRefused(404, "no such Private context")
+            self._closing_contexts.add(ctx)
+            try:
+                context = instance.private_contexts.pop(ctx)
+                for tab in [t for t in self._tabs.values() if t.ctx == ctx]:
+                    self._tabs.pop(tab.id, None)
+                    self._release(tab, "context closed")
+                await context.close()
+                await self._settle_downloads(PRIVATE, ctx)
+                _remove_tree(config.BROWSER_DIR / "downloads" / PRIVATE / ctx, strict=True)
+                if not instance.private_contexts and not any(t.profile == PRIVATE for t in self._tabs.values()):
+                    await self._close_instance(PRIVATE)
+                self._publish_snapshot()
+            finally:
+                self._closing_contexts.discard(ctx)
+        return {"ctx": ctx, "closed": True}
 
     def forget(self, profile) -> dict:
-        """"Sign out of everything" for one profile (plan §3): its Chrome is
-        stopped, its folder and downloads are removed and a fresh, empty
-        folder made; the label stays. For `private`, every Private context
-        closes."""
+        self._refuse_if_held()
         if profile == PRIVATE:
-            if self._running():
-                self._call(self._close_instance(PRIVATE), CLOSE_TIMEOUT_S + 10)
+            self.close_profile(PRIVATE)
             return {"profile": PRIVATE, "forgotten": True}
-        if not isinstance(profile, str) or not PROFILE_ID.fullmatch(profile):
-            raise BrowserRefused(400, 'profile must be "private" or a profile id')
-        if profile not in {r["id"] for r in self.profiles()}:
-            raise BrowserRefused(404, "no such profile")
-        root = secure_dir(config.BROWSER_DIR, create=False)
-        folder, downloads = root / "profiles" / profile, root / "downloads" / profile
+        return self._manage_profile(profile, delete=False)
 
-        def wipe():
-            stop_pids(folder)
-            _remove_tree(folder)
-            _remove_tree(downloads)
-            secure_dir(folder)
+    def delete_profile(self, profile) -> dict:
+        self._refuse_if_held()
+        return self._manage_profile(profile, delete=True)
 
-        if self._running():
-            # Under the profile's launch lock, so no tab can start its Chrome
-            # on the folder while it is being removed.
-            self._call(self._forget(profile, wipe), CLOSE_TIMEOUT_S + 20)
-        else:
-            wipe()
-        LOG.info("Browser forgot a profile")
-        return {"profile": profile, "forgotten": True}
+    def _manage_profile(self, profile, *, delete: bool) -> dict:
+        # Exclude a cold Chrome start while metadata/data are being removed.
+        with self._start_lock:
+            self._profiles.require(profile)
+            if self._running():
+                self._call(self._manage_profile_async(profile, delete), CLOSE_TIMEOUT_S + 30)
+            else:
+                self._wipe_profile(profile)
+                if delete:
+                    self._profiles.delete(profile)
+                else:
+                    secure_dir(config.BROWSER_DIR / "profiles" / profile)
+        return {"profile": profile, "deleted" if delete else "forgotten": True}
 
-    async def _forget(self, profile: str, wipe) -> None:
-        lock = self._launching.setdefault(profile, asyncio.Lock())
-        async with lock:
+    async def _manage_profile_async(self, profile: str, delete: bool) -> None:
+        async with self._launching.setdefault(profile, asyncio.Lock()):
+            self._refuse_if_held()
+            self._profiles.require(profile)
             await self._close_instance(profile)
-            await asyncio.get_running_loop().run_in_executor(None, wipe)
+            # A prior close may have timed out waiting for an executor copy.
+            # Its task remains tracked: never wipe until the writer stopped.
+            await self._settle_downloads(profile)
+            # Cancellation cannot stop a filesystem worker. Keep the lifecycle
+            # lock until its wipe and metadata commit finish, including when a
+            # caller timed out, so a queued open cannot race the old worker.
+            wiping = asyncio.get_running_loop().run_in_executor(None, self._wipe_profile, profile)
+            cancelled = False
+            try:
+                await asyncio.shield(wiping)
+            except asyncio.CancelledError:
+                cancelled = True
+                await wiping
+            if delete:
+                self._profiles.delete(profile)
+            else:
+                secure_dir(config.BROWSER_DIR / "profiles" / profile)
+            if cancelled:
+                raise asyncio.CancelledError()
+
+    def _wipe_profile(self, profile: str) -> None:
+        self._profiles.require(profile)
+        root = secure_dir(config.BROWSER_DIR, create=False)
+        targets = []
+        for name in ("profiles", "downloads"):
+            parent = secure_dir(root / name, create=False)
+            path = parent / profile
+            if os.path.lexists(path):
+                secure_dir(path, create=False)
+            targets.append(path)
+        stop_pids(targets[0])
+        try:
+            for path in targets:
+                if os.path.lexists(path):
+                    shutil.rmtree(path)  # symlink roots refused above and by rmtree
+        except OSError:
+            raise BrowserRefused(409, "the profile data could not be removed") from None
 
     # -- the hold (plan §8.3, amendment H3) -----------------------------------------------
 
@@ -1586,6 +1775,21 @@ class BrowserHost:
 
     # -- downloads -------------------------------------------------------------------------------
 
+    def _start_download(self, tab: _Tab, download) -> None:
+        task = asyncio.create_task(self._download(tab, download))
+        self._download_tasks[task] = tab
+        task.add_done_callback(lambda done: self._download_tasks.pop(done, None))
+
+    async def _settle_downloads(self, profile: str, ctx: str | None = None) -> None:
+        tasks = [task for task, tab in self._download_tasks.items()
+                 if tab.profile == profile and (ctx is None or tab.ctx == ctx)]
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=CLOSE_TIMEOUT_S + 10)
+            if pending:
+                raise BrowserRefused(409, "downloads are still closing; try again shortly")
+            # Consume outcomes without cancelling an executor-backed writer.
+            await asyncio.gather(*done, return_exceptions=True)
+
     async def _download(self, tab: _Tab, download) -> None:
         """A download is saved where only the owner reaches it (files.py) and
         its tab's window told; an executable one is held."""
@@ -1598,6 +1802,8 @@ class BrowserHost:
         tab.stream.send({**notice, "state": "started"})
         try:
             source = await download.path()
+            if self._tabs.get(tab.id) is not tab or tab.profile not in self._instances:
+                return
             row = await asyncio.get_running_loop().run_in_executor(
                 None, _files.save, str(source), profile, name, download_id, tab.ctx)
         except Exception as exc:  # noqa: BLE001 - a failed or cancelled download
@@ -1658,7 +1864,7 @@ class BrowserHost:
             snapshot = dict(self._snapshot)
             running = self._started and not self._stopped
             guarded = self._guarded
-            opened = len(self._opened_ports)
+            opened = len(self._port_owners)
             downloading = self._downloading
             popups_refused = self._popups_refused
         gate = self._gate.stats() if self._gate is not None and running else None
@@ -1669,6 +1875,8 @@ class BrowserHost:
                 "version": snapshot.get("version"), "instances": snapshot["instances"],
                 "tabs": snapshot["tabs"], "tab_cap": max(1, config.BROWSER_TAB_CAP),
                 "lan": settings["lan"], "local_servers": settings["local_servers"],
+                "profile_cap": 8, "instance_cap": PROFILE_INSTANCES_MAX,
+                "sync": {"password_store": "basic", "source": "launch_argument"},
                 # How many loopback ports the owner opened — never which.
                 "loopback_opened": opened, "landing_guard": guarded, "gate": gate,
                 # BR-1b: counts only — windows streaming a tab, downloads under

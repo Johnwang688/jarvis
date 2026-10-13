@@ -3077,6 +3077,22 @@ the log. `/status` gains `browser` and `refused_ports`. The same review
 closed v1's file tools (`read_file`, `grep_files` and the write tools) to
 every credential folder, the Browser's profile included.
 
+**Profiles and Private lifecycle (2026-10-13, BR-1c).** Owner-only CRUD for
+up to eight named profiles, strict 0600 metadata with random path IDs, three
+persistent Chrome instances plus Private including launches/closes in flight,
+and a five-minute persistent idle stop. Private contexts isolate cookies and
+remove their temporary data on last-tab/context close. Forget/delete serialize
+against opens, downloads and filesystem workers; only the target is wiped.
+Deleting the final profile leaves an empty list. Loopback permission now lasts
+only while an authorizing owner tab remains on the port, superseding BR-1a's
+host-lifetime grant above; last departure revokes established local tunnels.
+The gate remains shared across profiles and Private. Persistent sync stays on
+(BD-5). The dedicated owner sign-in route opens only the locally measured exact
+syncSetup/people settings entry, with no generic internal URL permission.
+Real Google login/sync/keyring remain manual and unverified. `browser.sync`
+reports the explicit basic-store launch flag. Current details and validation
+scope: [Browser notes](notes/browser.md#current-br-1c-implementation-2026-10-13).
+
 **The Browser's stream and the owner's input (2026-10-12, BR-1b of the
 browser plan, §2 "The stream", §3, §8; amendment 1 §B.8–§B.9).** Backend
 only; BR-3b draws it. A HUD window sees one tab over a socket of its own —

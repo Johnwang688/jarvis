@@ -2189,7 +2189,8 @@ BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
 The owner's built-in Browser, backend only (plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C): a
 daemon-owned Google Chrome behind a SOCKS gate. The stream, input, dialogs,
-downloads and the tab strip are BR-1b's; profile management is BR-1c's.
+downloads and the tab strip are BR-1b's; profile management is BR-1c's
+(owner routes below; the profile chip is still BR-3b).
 
 **Every `/browser` route is the owner's**: `projects.owner_only` (the HUD
 listener, and the HUD's own page — its Origin, or a same-origin GET with no
@@ -2197,7 +2198,7 @@ Origin) plus a strict loopback `Host`, checked before a body is read, a tab
 is looked up or Chrome is started; anything else is **403**. No route takes
 a query string (**400**; BR-1b's socket attach takes its `ticket`, below); a
 URL travels only in a JSON body, and no refusal ever contains one. Nothing
-starts Chrome but `POST /browser/tabs`.
+starts Chrome but `POST /browser/tabs` or the dedicated profile sign-in route.
 
 | Route | Body | Answer |
 |---|---|---|
@@ -2210,13 +2211,41 @@ starts Chrome but `POST /browser/tabs`.
 | `POST /browser/tabs/<id>/navigate` | exactly `{url}` | `{tab_id, loaded, error?}` |
 | `POST /browser/tabs/<id>/history` | exactly `{action: "back" \| "forward" \| "reload"}` | `{tab_id, loaded, error?}` |
 | `POST /browser/profiles/<id>/forget` | `{}` | `{profile, forgotten: true}` |
+| `GET /browser/profiles` | — | `[{id, label, created}]`; creates initial Main metadata only when absent; never starts Chrome |
+| `POST /browser/profiles` | exactly `{label}` | **201** `{id, label, created}` |
+| `PATCH /browser/profiles/<id>` | exactly `{label}` | `{id, label, created}` |
+| `DELETE /browser/profiles/<id>` | — | `{profile, deleted: true}`; closes Chrome, wipes its data, then removes metadata |
+| `DELETE /browser/contexts/<ctx>` | — | `{ctx, closed: true}`; every tab and download in that Private context goes |
+| `POST /browser/profiles/<id>/signin` | `{}` | **201** `{tab_id, profile, ctx, loaded, error?}`; exact owner sign-in settings entry only |
 
 - **`profile`**: omitted means the first profile (**Main**, which the first
-  start creates), `"private"`, or a `p-<8 hex>` id from `GET /browser`
+  profile-list request or start creates only if metadata is absent), `"private"`, or a `p-<8 hex>` id from `GET /browser`
   (404 if unknown, 400 if not that shape). **`ctx`** (8 hex) names a Private
   context: `profile: "private"` with no `ctx` makes a new off-the-record
   context and answers its id; with one, the tab opens in it (404 if gone).
-  A context closes with its last tab.
+  A context closes with its last tab. The final Private context stops its
+  Chrome and removes its throwaway profile, HOME, artifacts and downloads.
+  At most eight persistent profiles and three running persistent instances
+  (including launching/closing instances), plus Private. An empty persistent
+  instance stops after 300 seconds; reuse cancels that timer. Deleting the last
+  profile leaves an empty list: create one before opening with no profile.
+- **Labels** are 1–32 visible NFC characters on one line, with no leading or
+  trailing whitespace; `Private` is reserved, and duplicate labels are refused
+  case-insensitively. Paths always use random IDs, never labels. Metadata is
+  atomic 0600 JSON in the 0700 credential folder; malformed, non-private or
+  symlinked metadata is refused. Capacity and duplicate-label refusals are 409;
+  invalid labels/IDs are 400 and unknown IDs are 404. Destructive operations
+  wait for downloads and filesystem workers before wiping only their target;
+  failure is reported and metadata remains until a successful delete.
+- **Sign-in entry** is owner-only, refused under an approval card, and accepts
+  no URL. It opens exactly `chrome://settings/syncSetup`; the measured local
+  Chrome redirects to exactly `chrome://settings/people`, also permitted for
+  this tab only. Other internal pages, subroutes, queries and fragments remain
+  refused; leaving these two pages ends the capability. Generic URL routes
+  still refuse every `chrome://` address. Persistent sign-in/sync flags remain
+  enabled (BD-5); Private disables sync. The temporary, network-blocked probe
+  rendered and captured this settings surface; actual Google authentication,
+  sync, autofill and keyring behavior remain unverified manual M4/M4b/M12 work.
 - **The URL judge** runs first on every `url` (typed, stored, "Open in
   Browser"): exactly `about:blank`, or an absolute `http`/`https` URL with a
   host. Refused (**400**, one of fixed sentences): any other scheme (`file:`,
@@ -2230,10 +2259,15 @@ starts Chrome but `POST /browser/tabs`.
 - **A URL on this machine opens its port** (review of PR #69, the lead's
   decision): a `url` naming this machine in any loopback spelling, sent to
   `POST /browser/tabs` or `…/navigate`, opens that port in the gate from
-  then until the Browser stops (never one of `refused_ports`). Loopback is
-  otherwise closed like the LAN: a page's own move, `…/history`, and anything
-  that is not these two owner routes never open a port. `local_servers: true`
-  in the settings opens every loopback port that is not Jarvis's.
+  its admitted navigation until the authorizing tab leaves that port or closes
+  (never one of `refused_ports`). Failed/cancelled admission rolls back its
+  pending permission. The last owner leaving revokes existing local SOCKS
+  tunnels as well as future connections, including a connect still awaiting
+  completion. This is a **shared gate across profiles and Private**: cookie
+  isolation is not network isolation while a port is authorized. A page's own
+  move, `…/history`, popup and agent never create permission. `local_servers:
+  true` remains the explicit global override; turning it off through the owner
+  route revokes tunnels without a surviving owner tab. Jarvis ports stay denied.
 - **An unknown field** in any body (here and on every other route) is
   **400** `unknown fields (N)`: the count, never the names.
 - **The settings** (`browser.json`, `config.BROWSER_SETTINGS_PATH`, env
@@ -2262,9 +2296,11 @@ starts Chrome but `POST /browser/tabs`.
 **`GET /status`** gains:
 
 - **`browser`**: `{available, running, version, instances: [{profile, tabs,
-  contexts}], tabs, tab_cap, lan, local_servers, loopback_opened,
-  landing_guard, gate}` — `loopback_opened` is how many loopback ports the
-  owner opened (never which); `gate` is `{port, connections, allowed,
+  contexts}], tabs, tab_cap, profile_cap, instance_cap, lan, local_servers,
+  sync: {password_store: "basic", source: "launch_argument"}, loopback_opened,
+  landing_guard, gate}` — sync reports the explicitly selected launch flag,
+  not an authenticated account or verified credential database. `loopback_opened`
+  counts currently authorized owner-tab ports (never which); `gate` is `{port, connections, allowed,
   failed, open, refused: {class: count}}` while running, else null. Profile
   ids only: **no URL, title or label**.
 - **`refused_ports`**: every port the Browser's gate refuses on this machine
