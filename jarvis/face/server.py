@@ -1416,6 +1416,9 @@ def find_browser() -> tuple[str, bool]:
     return find_chromium(), False
 
 
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9 _-]{0,63}")
+
+
 def chrome_app_id(manifest_id_url: str) -> str:
     """Chromium GenerateAppIdFromManifestId → crx_file::id_util::GenerateId.
 
@@ -1434,8 +1437,12 @@ def launch_window(url: str, size: tuple[int, int] = (1280, 860)) -> subprocess.P
     profile_args = []
     if is_windows and Path(browser.replace("\\", "/")).name.lower() == "chrome.exe":
         profile = config.HUD_CHROME_PROFILE
-        if not profile or any(part in profile for part in ("/", "\\", "..")):
-            raise ValueError("HUD Chrome profile must be a single profile directory name")
+        # An allowlist (review of PR #83): a profile folder name such as
+        # "Default" or "Profile 2" — never an option, a path, a quote or a
+        # control character, whatever reached the environment.
+        if not _PROFILE_NAME.fullmatch(profile or ""):
+            raise ValueError("JARVIS_HUD_CHROME_PROFILE must be a Chrome profile folder name "
+                             "such as Default or Profile 2")
         profile_args = [f"--profile-directory={profile}"]
         root_url = f"http://localhost:{config.FACE_PORT}/"
         if url == root_url:

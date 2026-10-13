@@ -496,6 +496,12 @@ class FrameHeaders(Base):
                     self.assertEqual(status, 200, content)
                     self.assertIn(mime, dict(got)["Content-Type"])
                     self.assert_hardened(got, f"{listener} installed {path}")
+            # The manifest's type is set explicitly, not left to the platform's
+            # mimetypes table (review of PR #83: Python 3.14 knows .webmanifest).
+            with patch("jarvis.v2.hud_api.mimetypes.guess_type", return_value=(None, None)):
+                status, got, _ = self.ask(listener, "GET", "/manifest.webmanifest")
+            self.assertEqual(status, 200)
+            self.assertIn("application/manifest+json", dict(got)["Content-Type"])
             status, got, _ = self.ask(listener, "GET", "/assets/absent.js")
             self.assertEqual(status, 404)
             self.assert_hardened(got, f"{listener} absent asset")

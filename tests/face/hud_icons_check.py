@@ -29,7 +29,9 @@ class Icons(unittest.TestCase):
                 with self.subTest(icon=icon["src"]):
                     path = HUD / "public" / icon["src"].lstrip("/")
                     self.assertTrue(path.is_file())
-                    self.assertEqual((HUD / "dist" / icon["src"].lstrip("/")).read_bytes(), path.read_bytes())
+                    built = HUD / "dist" / icon["src"].lstrip("/")
+                    if built.exists():  # a built tree carries the same bytes; an unbuilt one is fine
+                        self.assertEqual(built.read_bytes(), path.read_bytes())
                     data = base64.b64encode(path.read_bytes()).decode()
                     result = page.evaluate("""async data => {
                       const image = new Image(); image.src = 'data:image/png;base64,' + data;

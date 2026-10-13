@@ -17,7 +17,12 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 # that the browser and web tools can refuse to touch it without importing the
 # face (which would drag Playwright and the agent into every import).
 FACE_PORT = int(os.environ.get("JARVIS_FACE_PORT", "8402"))
-HUD_CHROME_PROFILE = os.environ.get("JARVIS_HUD_CHROME_PROFILE", "Default")
+# The owner's Chrome profile for the HUD window (`jarvis hud`); empty means the default.
+def hud_chrome_profile(environ=os.environ) -> str:
+    return environ.get("JARVIS_HUD_CHROME_PROFILE") or "Default"
+
+
+HUD_CHROME_PROFILE = hud_chrome_profile()
 # The headless daemon's port. v1's `jarvis daemon` serves a read-only
 # health/status endpoint here (the single-instance lock, and how the face can
 # tell that another process already owns the Discord gateway). v2's daemon

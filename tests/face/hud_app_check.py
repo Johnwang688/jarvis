@@ -79,11 +79,22 @@ class HudApp(unittest.TestCase):
             self.assertIn(f"--app-id={app_id}", args)
 
     def test_unsafe_profiles_refused_before_popen(self):
-        for profile in ("../Default", "x/y", "x\\y", "foo..bar", ""):
+        for profile in ("../Default", "x/y", "x\\y", "foo..bar", "", ".", "-x", "Default --user-data-dir=X",
+                        "a\nb", "a\x00b", "'q'", 'a"b', "x" * 65):
             with self.subTest(profile=profile), patch.object(config, "HUD_CHROME_PROFILE", profile):
                 with self.assertRaises(ValueError):
                     self.launch()
         self.popen.assert_not_called()
+
+    def test_ordinary_profile_names_pass(self):
+        for profile in ("Default", "Profile 2", "Guest_Profile", "work-2"):
+            with self.subTest(profile=profile), patch.object(config, "HUD_CHROME_PROFILE", profile):
+                self.assertIn(f"--profile-directory={profile}", self.launch())
+
+    def test_an_empty_setting_is_the_default_profile(self):
+        self.assertEqual(config.hud_chrome_profile({"JARVIS_HUD_CHROME_PROFILE": ""}), "Default")
+        self.assertEqual(config.hud_chrome_profile({}), "Default")
+        self.assertEqual(config.hud_chrome_profile({"JARVIS_HUD_CHROME_PROFILE": "Profile 2"}), "Profile 2")
 
     def test_edge_and_playwright_receive_no_chrome_profile_or_app_id(self):
         self.resources.mkdir(parents=True)
