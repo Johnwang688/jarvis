@@ -33,10 +33,19 @@ class Labels(unittest.TestCase):
         env = patch.dict(os.environ, {"HOME": str(home)})
         env.start()
         self.addCleanup(env.stop)
-        # Never let the scrub scan any owner checkout or credential bundle.
-        dirs = patch.object(secrets, "_search_dirs", return_value=[self.root, home])
-        dirs.start()
-        self.addCleanup(dirs.stop)
+        # The process is elsewhere: the project cannot be found by the old
+        # scrub's cwd search. Exercise the real search rather than patch it.
+        process = self.root / "daemon"
+        process.mkdir()
+        project = self.root / "project"
+        project.mkdir()
+        previous = Path.cwd()
+        os.chdir(process)
+        self.addCleanup(os.chdir, previous)
+        checkout = patch.object(secrets, "_JARVIS_ROOT", process)
+        checkout.start()
+        self.addCleanup(checkout.stop)
+        self.project = project
         from jarvis import config
         for name in ("GOOGLE_TOKEN_PATH", "ONSHAPE_TOKEN_PATH", "DISCORD_TOKEN_PATH", "SPOTIFY_TOKEN_PATH"):
             guard = patch.object(config, name, self.root / (name + ".json"))
@@ -55,7 +64,8 @@ class Labels(unittest.TestCase):
             ("Read", {"path": cwd + "-outside/a"}, cwd + "-outside/a"),
             ("apply_patch", {"paths": [cwd + "/a", "b"], "changes": [{"diff": "PRIVATE DIFF"}]}, "a, b"),
             ("Grep", {"pattern": "TODO"}, "TODO"),
-            ("Grep", {"path": "src", "pattern": "TODO"}, "src"),
+            ("Grep", {"path": "src", "pattern": "TODO"}, "TODO in src"),
+            ("Grep", {"path": cwd + "/src", "pattern": "TODO"}, "TODO in src"),
             ("fetch_page", {"url": "https://example.invalid"}, "https://example.invalid"),
             ("search", {"query": "a query"}, "a query"),
             ("Task", {"description": "check tests"}, "check tests"),
@@ -91,10 +101,40 @@ class Labels(unittest.TestCase):
 
     def test_secret_scrub_precedes_clean_and_cap(self):
         token = "fake-secret-token-" + "z" * 160
-        (self.root / ".env.production").write_text("API_KEY=" + token + "\n")
-        value = tool_calls.label("Bash", {"command": "echo " + token}, str(self.root))
+        (self.project / ".env.production").write_text("API_KEY=" + token + "\n")
+        self.assertNotIn(self.project, secrets._search_dirs())
+        self.assertEqual(secrets.scrub("echo " + token), "echo " + token)
+        value = tool_calls.label("Bash", {"command": "echo " + token}, str(self.project))
         self.assertEqual(value, "echo " + secrets.REDACTED)
         self.assertNotIn("fake-secret", value)
+
+    def test_credential_shapes(self):
+        token = "sk-" + "or-v1-" + "a1" * 25
+        other = "gh" + "p_" + "z" * 36
+        value = tool_calls.label("Bash", {"command": "curl -H 'Authorization: Bearer " + token + "' " + other}, str(self.project))
+        self.assertEqual(value, "curl -H 'Authorization: Bearer [redacted]' [redacted]")
+
+    def test_urls_drop_userinfo_query_and_fragment(self):
+        urls = ("https://user:pass@host:8443/x?access_token=fake-query#fake-fragment",
+                "https://host/x?access_token=fake-query", "https://user:pass@host/x",
+                "https://host/x#fake-fragment", "https://user:pass@[::1]:8443/x?q=fake#frag")
+        expected = ("https://host:8443/x", "https://host/x", "https://host/x",
+                    "https://host/x", "https://[::1]:8443/x")
+        for url, safe in zip(urls, expected):
+            with self.subTest(url=url):
+                self.assertEqual(tool_calls.label("fetch", {"url": url}, str(self.project)), safe)
+                self.assertEqual(tool_calls.label("Bash", {"command": "curl '" + url + "'"}, str(self.project)), "curl '" + safe + "'")
+        self.assertEqual(tool_calls.label("fetch", {"url": "/x?access_token=fake#frag"}, str(self.project)), "/x")
+
+    def test_quoted_split_limit_is_documented(self):
+        token = "fake-secret-token-value"
+        (self.project / ".env.production").write_text("API_KEY=" + token + "\n")
+        command = "echo fake-secret-'token-value'"
+        self.assertEqual(tool_calls.label("Bash", {"command": command}, str(self.project)), command)
+        checkout = Path(__file__).resolve().parents[2]
+        for path in (checkout / "CLAUDE.md", checkout / "docs/hud-api.md"):
+            self.assertTrue("A value split by shell quoting can still appear in a label" in path.read_text(),
+                            str(path) + " must state the quoted-value limit")
 
 
 class History(unittest.TestCase):
@@ -166,6 +206,22 @@ class History(unittest.TestCase):
         self.assertEqual([r["label"] for r in rows[:4]], ["Read", "Read", "Read", "3"])
         self.assertEqual(rows[-1]["label"], "persisted")
         self.assertEqual(len(rows), 503)
+
+    def test_names_are_cleaned(self):
+        thread = self.thread()
+        self.append(thread, "tool_started", {"call_id": "c", "name": "`Bash`\n\u202e" + "x" * 60, "label": "saved"})
+        self.assertEqual(self.history(thread)[0]["name"], "Bash " + "x" * 34 + "…")
+
+    def test_label_exception_falls_back_without_logging(self):
+        thread = self.thread()
+        session = self.daemon._sessions[thread.id]
+        event = Event(K.TOOL_STARTED, thread.id, {"call_id": "c", "name": "`Bash`\n\u202e", "args": {}})
+        with patch.object(tool_calls, "label", side_effect=RuntimeError("PRIVATE exception")), patch("logging.Logger._log") as log:
+            self.daemon._record(session, event)
+        log.assert_not_called()
+        logged = self.stores.threads.read_log(thread.id)[-1]
+        self.assertEqual(logged["data"]["label"], "Bash")
+        self.assertEqual([r for r in self.events_all() if r["kind"] == "tool_started"], [logged])
 
     def test_record_labels_log_and_bus_once_outside_lock(self):
         thread = self.thread()

@@ -941,15 +941,22 @@ def no_self_switch_checks() -> None:
 
 def outcome_checks() -> None:
     import queue
-    for text, expected in (("The user declined this call", "denied"), ("Refused by policy", "denied"),
-                           ("Error: broke", "failed"), ("a result mentioning Error or declined", "ok")):
-        events = queue.Queue()
-        state = fastpath._TurnState("t", events)
-        state._on_tool_start(("get_datetime", {}))
-        state._on_tool_end(("get_datetime", text))
-        events.get_nowait()
-        assert events.get_nowait().data["outcome"] == expected, (text, expected)
-    print("ok  outcomes: declined/refused denied, Error failed, success ok")
+    cases = (("The user declined to run this. Ask what they would like instead.", "denied"),
+             ("Refused: blocked by policy. This is blocked outright", "denied"),
+             ("Error: broke", "failed"), ("a result mentioning Error or declined", "ok"),
+             ("Refused by a character in the story", "ok"), ("The user declined dinner", "ok"),
+             ("Error in a story", "ok"))
+    for name in ("get_datetime", "memory_read", "session_summary", "session_read", "read_file", "fetch_page", "skill_read"):
+        for text, expected in cases:
+            events = queue.Queue()
+            state = fastpath._TurnState("t", events)
+            state._on_tool_start((name, {}))
+            state._on_tool_end((name, text))
+            events.get_nowait()
+            data = events.get_nowait().data
+            assert data["outcome"] == (expected if name == "get_datetime" else "ok"), (name, text, data)
+            assert data["ok"] == (not text.startswith(("Error", "Refused", "The user declined"))), data
+    print("ok  outcomes: owned refusal prefixes, raw content stays ok, legacy ok unchanged")
 
 
 def main() -> int:

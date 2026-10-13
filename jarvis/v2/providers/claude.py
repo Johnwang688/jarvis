@@ -622,6 +622,8 @@ class _Session:
     interrupted: bool = False
     closed: bool = False
     tools_seen: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    denied_tools: set[str] = field(default_factory=set)
+    denial_without_id: bool = False
     # What this handle's results added (the per-result deltas, summed).
     usage: Usage = field(default_factory=Usage)
     # The CLI's running cost total as the last result on this conversation
@@ -885,6 +887,10 @@ class ClaudeProvider:
             from .. import session_tools
             jarvis = session_tools.claude_tool(name)
             if jarvis is not None and jarvis.foreground_only and data.get("agent_id"):
+                if tool_use_id:
+                    session.denied_tools.add(tool_use_id)
+                else:
+                    session.denial_without_id = True
                 # A sub-agent's call (the hook input names its agent): refused
                 # without asking `permit`, so no one is ever asked about it.
                 return {
@@ -921,6 +927,10 @@ class ClaudeProvider:
                         "permissionDecisionReason": "approved by Jarvis",
                     }
                 }
+            if tool_use_id:
+                session.denied_tools.add(tool_use_id)
+            else:
+                session.denial_without_id = True
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -942,6 +952,11 @@ class ClaudeProvider:
             decision = await self._decide(session, str(tool_name or ""), args)
             if decision is Decision.ALLOW:
                 return PermissionResultAllow()
+            tool_use_id = getattr(context, "tool_use_id", None)
+            if tool_use_id:
+                session.denied_tools.add(tool_use_id)
+            else:
+                session.denial_without_id = True
             return PermissionResultDeny(message=_safe(HOOK_DENIAL_MESSAGE))
 
         return can_use_tool
@@ -1070,6 +1085,8 @@ class ClaudeProvider:
         session.events = events
         session.interrupted = False
         session.tools_seen.clear()
+        session.denied_tools.clear()
+        session.denial_without_id = False
         with session.mutex:
             session.accepting = False
             session.generation += 1
@@ -1609,7 +1626,14 @@ class ClaudeProvider:
         name, args = session.tools_seen.get(block.tool_use_id, ("", {}))
         text = _safe(_result_text(block.content))
         declined = text.startswith(CLASSIFIER_DENIAL_PREFIX)
-        denied = declined or text.startswith((HOOK_DENIAL_PREFIX, HOOK_REFUSAL_PREFIX))
+        denied = declined or block.tool_use_id in session.denied_tools
+        # Older SDK contexts may omit the id. Only an error can then be a
+        # hook refusal; successful output bearing those words stays success.
+        if (session.denial_without_id and block.is_error
+                and text.startswith((HOOK_DENIAL_PREFIX, HOOK_REFUSAL_PREFIX))):
+            denied = True
+            session.denial_without_id = False
+        session.denied_tools.discard(block.tool_use_id)
         out: list[Event] = []
         if declined:
             # §6.1: the owner's judgement outranks a classifier, but only
@@ -1637,7 +1661,7 @@ class ClaudeProvider:
                 {
                     "call_id": block.tool_use_id,
                     "name": name,
-                    "ok": not bool(block.is_error) and not denied,
+                    "ok": not bool(block.is_error) and not declined,
                     "outcome": "denied" if denied else "failed" if block.is_error else "ok",
                     "summary": text[:SUMMARY_CHARS],
                 },

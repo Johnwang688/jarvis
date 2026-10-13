@@ -1321,7 +1321,11 @@ class Daemon:
         if event.kind == EventKind.TOOL_STARTED:
             from .tool_calls import label
             data = event.data or {}
-            tool_label = label(data.get("name"), data.get("args"), session.brief.cwd)
+            try:
+                tool_label = label(data.get("name"), data.get("args"), session.brief.cwd)
+            except Exception:
+                from .approvals import clean_line
+                tool_label = clean_line(data.get("name"), 40)
         with self._lock:
             if session.retired:
                 return

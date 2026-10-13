@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from jarvis.credential_patterns import PATTERNS
 
 from jarvis.tools import secrets
 from .approvals import clean_line
 
-_KEYS = ("command", "cmd", "file_path", "notebook_path", "path", "paths",
-         "pattern", "url", "query", "description", "terminal", "name")
+_KEYS = ("command", "cmd", "pattern", "file_path", "notebook_path", "path", "paths",
+         "url", "query", "description", "terminal", "name")
 _PATH_KEYS = frozenset(("file_path", "notebook_path", "path", "paths"))
 
 
@@ -31,6 +35,7 @@ def label(name, args, cwd) -> str:
     """
     args = args if isinstance(args, dict) else {}
     text = str(name or "")
+    selected_key = None
     for key in _KEYS:
         if key not in args:
             continue
@@ -43,8 +48,31 @@ def label(name, args, cwd) -> str:
             continue
         if key == "pattern" and isinstance(args.get("path"), str) and args["path"]:
             text += " in " + _path(args["path"], cwd)
+        selected_key = key
         break
-    return clean_line(secrets.scrub(text), 120)
+
+    def safe_url(value: str) -> str:
+        try:
+            parts = urlsplit(value)
+            return parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1],
+                                  query="", fragment="").geturl()
+        except ValueError:
+            return "[redacted]"
+
+    if selected_key == "url":
+        text = safe_url(text)
+    # Also remove credentials from URLs embedded in commands or other fields.
+    text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+",
+                  lambda match: safe_url(match.group()), text)
+    text = secrets.scrub(text)
+    if cwd:
+        values = {value for path in secrets.env_files_in(Path(cwd))
+                  for value in secrets._values_in(path)}
+        for value in sorted(values, key=len, reverse=True):
+            text = text.replace(value, secrets.REDACTED)
+    for _, pattern in PATTERNS:
+        text = pattern.sub("[redacted]", text)
+    return clean_line(text, 120)
 
 
 def transcript_tools(rows, cwd, running_turn):
@@ -67,7 +95,7 @@ def transcript_tools(rows, cwd, running_turn):
         display = data.get("label")
         if not isinstance(display, str):
             display = label(name, data.get("args"), cwd) if i in recent else clean_line(name, 40)
-        entry = dict(role="tool", call_id=data.get("call_id"), name=name, label=display,
+        entry = dict(role="tool", call_id=data.get("call_id"), name=clean_line(name, 40), label=display,
                      outcome="running" if running_turn is not None and turn == running_turn else "stopped",
                      turn_id=turn, at=row.get("at", row.get("t")))
         if finish is not None:

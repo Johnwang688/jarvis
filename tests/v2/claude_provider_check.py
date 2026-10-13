@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -1445,7 +1446,7 @@ def reviewer_declined_checks() -> None:
 
     # The CLI's actual PreToolUse deny reason and permission-callback message,
     # as built by this provider (not a synthetic generic denial string).
-    for source in ("hook", "callback", "foreground"):
+    for source in ("hook", "callback", "foreground", "callback_no_id"):
         with fake([result_message()]):
             handle = provider.start(thread(), brief(), lambda *_: Decision.DENY)
             session = handle.native
@@ -1462,13 +1463,38 @@ def reviewer_declined_checks() -> None:
                 finally:
                     session_tools.unregister(name)
             else:
-                text = claude._await(session.loop, provider._can_use_tool(session)("Bash", {"command": "rm a"}, None), 3).message
+                text = claude._await(session.loop, provider._can_use_tool(session)("Bash", {"command": "rm a"}, None if source == "callback_no_id" else SimpleNamespace(tool_use_id="c")), 3).message
+            if source == "callback_no_id":
+                successful = provider._tool_result(session, ToolResultBlock(tool_use_id="own", content=text, is_error=False))
+                finish = next(e for e in successful if e.kind is EventKind.TOOL_FINISHED)
+                eq(finish.data["outcome"], "ok", "unknown-id fallback requires an SDK error")
+                eq(finish.data["ok"], True, "unknown-id fallback preserves success")
+            if source != "callback_no_id":
+                check("c" in session.denied_tools, source + " records the denied id")
+                text = "Permission blocked without any prefix"
             translated = provider._tool_result(session, ToolResultBlock(tool_use_id="c", content=text, is_error=True))
             finish = next(e for e in translated if e.kind is EventKind.TOOL_FINISHED)
             eq(finish.data["outcome"], "denied", source + " denial outcome")
             check(finish.data["ok"] is False, source + " denial is not ok")
             check(not any(e.kind is EventKind.REVIEWER_DECLINED for e in translated), source + " denial is not the classifier")
             provider.close(handle)
+
+    # A tool is free to print the hook's words, even as its own error.
+    with fake([result_message()]):
+        handle = provider.start(thread(), brief(), lambda *_: Decision.DENY)
+        for prefix in (claude.HOOK_DENIAL_PREFIX, claude.HOOK_REFUSAL_PREFIX):
+            for is_error in (False, True):
+                translated = provider._tool_result(handle.native, ToolResultBlock(tool_use_id="own", content=prefix + "everything\n", is_error=is_error))
+                finish = next(e for e in translated if e.kind is EventKind.TOOL_FINISHED)
+                eq(finish.data["ok"], not is_error, "own output preserves ok")
+                eq(finish.data["outcome"], "failed" if is_error else "ok", "own output is not a denial")
+        # Even an inconsistent SDK success for a tracked denial keeps old ok.
+        claude._await(handle.native.loop, provider._pre_tool_hook(handle.native)({"tool_name": "Bash", "tool_input": {}}, "tracked", None), 3)
+        translated = provider._tool_result(handle.native, ToolResultBlock(tool_use_id="tracked", content="done", is_error=False))
+        finish = next(e for e in translated if e.kind is EventKind.TOOL_FINISHED)
+        eq(finish.data["ok"], True, "tracked denial preserves pre-TC-1 ok")
+        eq(finish.data["outcome"], "denied", "tracked denial is independent of text")
+        provider.close(handle)
 
     print("\n-- an ordinary error is not a reviewer decline")
     with fake(
