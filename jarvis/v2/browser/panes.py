@@ -164,6 +164,7 @@ class BrowserPanes:
         self._live = {}
         self._sequences = {}
         self._windows = {}
+        self._dormant = {}  # bounded by live windows; frozen source/focus survives lease expiry
         self._front = None
         self._generation = 0
         self._retiring = set()
@@ -181,6 +182,7 @@ class BrowserPanes:
             self._live.clear()
             self._sequences.clear()
             self._windows.clear()
+            self._dormant.clear()
             self._front = None
 
     def window_ended(self, window):
@@ -195,14 +197,21 @@ class BrowserPanes:
 
     def _drop(self, window):
         self._windows.pop(window, None)
+        self._dormant.pop(window, None)
         if self._front and self._front[0] == window:
             self._front = None
 
     def _expire(self):
         now = self.clock()
         for window, state in list(self._windows.items()):
-            if window not in self._live or state.expires <= now:
+            if window not in self._live:
                 self._drop(window)
+            elif state.expires <= now:
+                # Expiry revokes discoverability, not provenance. The live
+                # window's next report must not erase source or invent focus.
+                self._dormant[window] = self._windows.pop(window)
+                if self._front and self._front[0] == window:
+                    self._front = None
 
     def _next(self):
         self._generation += 1
@@ -220,7 +229,8 @@ class BrowserPanes:
         if state is None:
             if existing:
                 raise PaneRefused(409, "report this Browser pane first")
-            if len(self._windows) >= MAX_WINDOWS:
+            state = self._dormant.get(window)
+            if state is None and len(self._windows) + len(self._dormant) >= MAX_WINDOWS:
                 raise PaneRefused(409, "too many Browser windows are active")
         elif seq <= state.seq:
             raise PaneRefused(409, "a newer Browser report is already applied")
@@ -355,7 +365,7 @@ class BrowserPanes:
                         tab = replace(tab, source=previous.source)
                     context_same = prior and self._context(prior, old.covered) == self._context(pane, body["covered"])
                     binding_same = previous and (previous.mode, previous.tab_id, previous.url, previous.source) == (tab.mode, tab.tab_id, tab.url, tab.source)
-                    same = context_same and binding_same and not previous.pending
+                    same = context_same and binding_same and not previous.pending and old.expires > self.clock()
                     identity_same = binding_same and prior.profile == pane.profile and prior.ctx == pane.ctx
                     view = previous.view_id if identity_same else (tab.tab_id if tab.mode == "remote" else "v_" + secrets.token_hex(12))
                     tabs[lid] = replace(tab, view_id=view or "", generation=previous.generation if same else self._next())
@@ -366,6 +376,7 @@ class BrowserPanes:
                 _bad()
             state = _Window(body["seq"], body["focus_seq"], focused, body["covered"], self.clock() + LEASE_S, updated)
             self._windows[body["window"]] = state
+            self._dormant.pop(body["window"], None)
             self._sequences[body["window"]] = body["seq"]
             if fresh_focus and focused is not None:
                 # Arrival order is authoritative across windows. Local counters
@@ -498,6 +509,7 @@ class BrowserPanes:
             else:
                 tid, identity = None, None
             with self._lock:
+                self._expire()
                 current = self._windows.get(body["window"])
                 now_pane = current.panes.get(pane_id) if current else None
                 now_tab = now_pane.tabs.get(local_id) if now_pane else None
@@ -523,7 +535,7 @@ class BrowserPanes:
                 # exclude new bindings during cleanup without holding our lock
                 # across Chrome. Existing bound tabs are never cleaned up here.
                 with self._lock:
-                    orphan = not any(tab.tab_id == created for state in self._windows.values()
+                    orphan = not any(tab.tab_id == created for state in (*self._windows.values(), *self._dormant.values())
                                      for pane in state.panes.values() for tab in pane.tabs.values())
                     if orphan:
                         self._retiring.add(created)

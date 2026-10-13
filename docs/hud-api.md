@@ -2672,9 +2672,14 @@ its daemon tab ID. Heartbeats preserve unchanged IDs/generations. The UI must
 serialize these mutations through one publisher and apply only current receipts.
 
 The registry admits at most sixteen live owner windows. Last SSE disconnect and
-daemon stop revoke bindings. A sixty-second report lease also expires them;
-sequence high-water marks survive lease expiry until the connection ends, so a
-late older report cannot restore permissions. The HUD heartbeat is twenty seconds.
+daemon stop revoke bindings. A sixty-second report lease revokes visibility;
+bounded dormant bindings retain frozen source identity and the last focus counter
+until the live window ends or its report removes/replaces the binding. Sequence
+high-water marks also survive lease expiry until the connection ends, so a
+late older report cannot restore permissions. Resuming a report advances binding
+generations without manufacturing a focus gesture. Address completion rechecks
+the lease before committing and cannot revive an expired binding. The HUD
+heartbeat is twenty seconds.
 Focus priority across windows is accepted arrival order, never a comparison of
 per-window counters; heartbeats do not steal focus. Hidden/Settings-covered panes
 are retained but cannot be resolved. Explicit pane numbers are displayed slots,
