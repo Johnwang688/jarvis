@@ -114,6 +114,118 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         task=self.sound.restarts.tasks.get(self.profile)
         if task:await task
         self.assertEqual(set(self.host._tabs),{first.id,second.id});self.assertEqual(self.host._launch.await_count,2)
+    async def failed_toggle(self, initially_on, *, fail_again=False):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.old.audio=A.InstanceAudio(not initially_on)
+        if not initially_on:self.sound._requests.discard(self.profile)
+        real=self.host._goto
+        self.host._goto=AsyncMock(return_value={'loaded':False})
+        await self.run_restart()
+        self.assertEqual(self.host._launch.await_count,1)
+        placeholder=self.host._instances[self.profile]
+        self.assertTrue(placeholder.closing)
+        self.assertEqual(set(self.sound.restarts.descriptors),{old.id})
+        self.host._loop=asyncio.get_running_loop()
+        self.host._daemon.approvals.run_if_idle=lambda f:False
+        await self.sound.change(old.id,not initially_on)
+        self.assertEqual(self.sound.instance_status(placeholder)['phase'],'failed')
+        await asyncio.sleep(0);await asyncio.sleep(0);await asyncio.sleep(0)
+        task=self.sound.restarts.tasks.get(self.profile)
+        if task:await task
+        await asyncio.sleep(0)
+        self.assertEqual(self.host._launch.await_count,1)
+        self.assertEqual(self.sound.instance_status(placeholder)['phase'],'failed')
+        self.assertEqual(self.host._tabs,{})
+        self.host._daemon.approvals.run_if_idle=lambda f:f()
+        if not fail_again:self.host._goto=real
+        self.sound._reconcile()
+        task=self.sound.restarts.tasks.get(self.profile)
+        if task:await task
+        await asyncio.sleep(0)
+        self.assertEqual(self.host._launch.await_count,2)
+        if fail_again:
+            self.assertEqual(self.sound.instance_status(self.host._instances[self.profile])['phase'],'failed')
+            self.assertEqual(set(self.sound.restarts.descriptors),{old.id})
+        else:
+            current=self.host._instances[self.profile]
+            self.assertFalse(current.closing)
+            self.assertTrue(current.audio.synchronized(not initially_on))
+            self.assertEqual(self.sound.instance_status(current)['phase'],'ready')
+            self.assertEqual(set(self.host._tabs),{old.id})
+            self.assertEqual(self.sound.restarts.descriptors,{})
+        self.sound._reconcile();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.assertEqual(self.host._launch.await_count,2)
+
+    async def test_failed_on_owner_off_restores_quiet_after_busy_barrier(self):
+        await self.failed_toggle(True)
+
+    async def test_failed_off_owner_on_restores_audible_after_busy_barrier(self):
+        await self.failed_toggle(False)
+
+    async def test_failed_toggle_attempt_stays_failed_without_automatic_retry(self):
+        await self.failed_toggle(True,fail_again=True)
+
+    async def test_new_owner_generation_during_failed_restore_survives_exact_replacement(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.host._loop=asyncio.get_running_loop()
+        entered=asyncio.Event();release=asyncio.Event();real=self.host._goto
+        calls=0
+        async def goto(tab,*args,**kwargs):
+            nonlocal calls
+            calls+=1
+            if calls==1:
+                entered.set();await release.wait();return {'loaded':False}
+            return await real(tab,*args,**kwargs)
+        self.host._goto=goto
+        self.sound.restarts.consider(self.old,self.generation)
+        await entered.wait()
+        replacement=self.host._instances[self.profile]
+        await self.sound.change(old.id,False)
+        marker=self.sound._recoveries[self.profile]
+        self.assertIs(marker[0],replacement)
+        self.assertEqual(marker[1],replacement.generation)
+        first=self.sound.restarts.tasks[self.profile]
+        release.set();await first
+        for _ in range(20):
+            await asyncio.sleep(0)
+            task=self.sound.restarts.tasks.get(self.profile)
+            if task is not None:await task
+            if old.id in self.host._tabs:break
+        current=self.host._instances[self.profile]
+        self.assertEqual(self.host._launch.await_count,2)
+        self.assertFalse(current.closing)
+        self.assertTrue(current.audio.synchronized(False))
+        self.assertEqual(set(self.host._tabs),{old.id})
+        self.assertEqual(self.sound._recoveries,{})
+        self.assertNotIn(self.profile,self.sound.restarts.failed)
+
+    async def test_other_profile_owner_gesture_cannot_retry_failed_profile(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.host._goto=AsyncMock(return_value={'loaded':False})
+        await self.run_restart()
+        placeholder=self.host._instances[self.profile]
+        other='p-87654321'
+        self.host._instances[other]=H._Instance(other,self.old.folder,Context(),Mock(),generation=100)
+        other_tab=SimpleNamespace(id='other-id',profile=other)
+        self.host._tabs[other_tab.id]=other_tab
+        self.sound.publish=Mock()
+        await self.sound.change(other_tab.id,False)
+        self.sound._reconcile();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.assertEqual(self.host._launch.await_count,1)
+        self.assertEqual(self.sound.instance_status(placeholder)['phase'],'failed')
+        self.assertEqual(set(self.sound.restarts.descriptors),{old.id})
+
+    async def test_stale_instance_recovery_marker_cannot_retry_failed_profile(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.host._goto=AsyncMock(return_value={'loaded':False})
+        await self.run_restart()
+        placeholder=self.host._instances[self.profile]
+        self.sound._recoveries[self.profile]=(placeholder,placeholder.generation-1,self.generation+1)
+        self.sound.sync(explicit=True)
+        self.sound._reconcile();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.assertEqual(self.host._launch.await_count,1)
+        self.assertEqual(self.sound.instance_status(placeholder)['phase'],'failed')
+
     async def test_new_card_after_commit_holds_input_but_structural_restore_completes(self):
         old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
         def commit(f):
