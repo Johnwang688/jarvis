@@ -256,7 +256,6 @@ def _at_desk(brief: Brief, message: UserMessage) -> bool:
             and (message.via or "hud") == "hud")
 
 
-_READ_COUNT = re.compile(r"its last (\d+) line")
 
 
 def _summary(name: str, text: str) -> str:

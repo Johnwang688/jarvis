@@ -11,9 +11,11 @@ from io import BytesIO
 import json
 from pathlib import Path
 import sys
+import time
+import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from jarvis import config,llm,runtime,tools
@@ -75,6 +77,46 @@ class Pure(unittest.TestCase):
                 self.assertTrue(hud_browser_view("",1).text.startswith("Refused:"))
             look.assert_not_called()
 
+    def test_provider_pins_vision_and_offdesk_surfaces_cannot_dispatch(self):
+        from jarvis.v2.model import Role
+        from jarvis.v2.provider import Brief, BriefRefused, UserMessage
+        from jarvis import agents, goalrunner, tasks, workflows
+        from jarvis.tools import subagent
+        from jarvis.v2 import mcp
+        provider=F.FastPathProvider()
+        for names in (tools.default_names(),workflows.SAFE_TOOLS,subagent.SUBAGENT_TOOLS,
+                      goalrunner.goal_tool_names(),tasks.task_tool_names(),mcp.MCP_TOOLS,mcp.available_tools(),
+                      *(kind.tools for kind in agents.TYPES.values())):
+            self.assertNotIn("hud_browser_view",names)
+        for role,task in ((Role.CHAT,"task"),(Role.IMPLEMENTER,None),(Role.ORCHESTRATOR,None)):
+            brief=Brief(role=role,cwd="/tmp",task_id=task)
+            self.assertNotIn("hud_browser_view",provider._toolset(brief))
+            with self.assertRaises(BriefRefused):provider._toolset(replace(brief,allowed_tools=["hud_browser_view"]))
+        cases=[(UserMessage("look",via="hud",desk=True),True,True),
+               (UserMessage("look",via="hud",desk=True),False,True),
+               (UserMessage("look",via="hud",desk=True),None,True),
+               (UserMessage("look",via="discord",desk=True),True,False),
+               (UserMessage("look",via="dm",desk=True),True,False),
+               (UserMessage("look",origin="owner-ran",desk=True),True,False),
+               (UserMessage("look",origin="system",via="system",desk=True),True,False)]
+        for message,vision,allowed in cases:
+            captured=[]
+            agent=SimpleNamespace(model="old",_base_tool_names=[],tool_specs=[])
+            def run_turn(*args,**kwargs):
+                runtime.bind(tool_names=agent._base_tool_names)
+                captured.append((runtime.at_desk(),runtime.desk_images(),tools.dispatch("hud_browser_view","{}").text))
+                return SimpleNamespace(cost_usd=0,cancelled=False,stopped_early=False,text="done")
+            agent.run_turn=run_turn
+            native=SimpleNamespace(agent=agent,model="fixture-pinned",effort=None,stop=threading.Event(),
+                brief=Brief(role=Role.CHAT,cwd="/tmp"),tool_names=["hud_browser_view"],project_id="p",
+                inbox_lock=threading.Lock(),inbox=[],leftover=[],accepting=False,cost_usd=0,turns=0)
+            with patch.object(F.models,"tier",return_value="different-global"),patch.object(F.models,"cached_info",return_value=None if vision is None else SimpleNamespace(vision=vision)) as info,patch("jarvis.v2.tools.hud_browser_view.look_for_tool",return_value=L.LookResult(text="Dispatch marker",source="Fixture")) as look:
+                list(provider._run(SimpleNamespace(thread_id="thread"),native,message))
+                info.assert_called_once_with("fixture-pinned")
+                self.assertEqual(look.call_count,int(allowed))
+                self.assertEqual(captured[0][:2],(allowed,bool(vision) and allowed))
+                self.assertEqual("Dispatch marker" in captured[0][2],allowed)
+
     def test_raw_guard_before_truncation_and_heuristic(self):
         forms=L.terminal_guard.value_forms([MARKER])
         for text in (MARKER,"x"*5000+MARKER,base64.b64encode(MARKER.encode()).decode()):
@@ -125,6 +167,108 @@ class Pure(unittest.TestCase):
             self.assertNotIn(forbidden,source)
 
 
+class Lifecycle(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_cancel_during_cdp_cleanup_waits_for_private_retirement(self):
+        entered=asyncio.Event();cleanup_entered=asyncio.Event();cleanup_release=asyncio.Event()
+        retire_entered=asyncio.Event();retire_release=asyncio.Event()
+        contexts={"owner-ctx":object(),"look-fixture":object()}
+        instance=SimpleNamespace(private_contexts=contexts)
+        host=SimpleNamespace(_look_lock=None,_look_tasks=set(),_look_reserved={"look-fixture"},
+            _launching={},_instances={H.PRIVATE:instance},_closing_instances={},
+            refused_ports=lambda:frozenset(),loopback_open=lambda _:True)
+        async def retire(ctx):
+            retire_entered.set();await retire_release.wait();contexts.pop(ctx)
+        host._retire_context_locked=retire
+        async def send(method,params=None):
+            if method=="Page.getFrameTree":return {"frameTree":{"frame":{"id":"frame","loaderId":"loader","url":"http://localhost:4567/"}}}
+            if method=="Page.createIsolatedWorld":return {"executionContextId":7}
+            if method=="Runtime.evaluate":
+                self.assertIn("delete globalThis.__jarvisLook",params["expression"])
+                cleanup_entered.set();await cleanup_release.wait()
+            return {}
+        cdp=SimpleNamespace(send=send)
+        page=SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=cdp)))
+        async def scan(*args):entered.set();await asyncio.Event().wait()
+        with patch.object(C,"_hidden",new=AsyncMock(return_value=("look-fixture",page))),patch.object(C,"_scan",new=scan):
+            task=asyncio.create_task(C.capture(host,snapshot(mode="direct"),False,False,[],lambda:None,time.monotonic()+5))
+            await entered.wait();task.cancel();await cleanup_entered.wait();task.cancel()
+            await asyncio.sleep(0);self.assertFalse(task.done());self.assertIn("look-fixture",contexts)
+            cleanup_release.set();await retire_entered.wait();task.cancel()
+            await asyncio.sleep(0);self.assertFalse(task.done());retire_release.set()
+            with self.assertRaises(asyncio.CancelledError):await task
+        self.assertEqual(set(contexts),{"owner-ctx"});self.assertEqual(host._look_reserved,set())
+        self.assertEqual(host._look_tasks,set())
+
+    async def test_failed_retirement_is_retryable_and_blocks_new_hidden_admission(self):
+        contexts={"owner-ctx":object(),"look-fixture":object()}
+        instance=SimpleNamespace(private_contexts=contexts)
+        host=SimpleNamespace(_launching={},_instances={H.PRIVATE:instance},_closing_instances={},
+            _look_reserved={"look-fixture"},_retire_context_locked=AsyncMock(side_effect=RuntimeError("fixture")),
+            _instance=AsyncMock())
+        for action in (C._retire_hidden(host,"look-fixture"),C._hidden(host,"http://localhost:4567/")):
+            with self.assertRaises(RuntimeError):await action
+            self.assertEqual(set(contexts),{"owner-ctx","look-fixture"})
+            self.assertEqual(host._look_reserved,{"look-fixture"})
+        host._instance.assert_not_called()
+        async def retire(ctx):contexts.pop(ctx)
+        host._retire_context_locked=retire
+        await C._retire_hidden(host,"look-fixture")
+        self.assertEqual(set(contexts),{"owner-ctx"});self.assertEqual(host._look_reserved,set())
+
+    async def test_empty_engine_failure_retains_reservation_until_close_succeeds(self):
+        instance=SimpleNamespace(private_contexts={})
+        host=SimpleNamespace(_launching={},_instances={H.PRIVATE:instance},_closing_instances={},
+            _look_reserved={"look-fixture"},_tabs={},_close_instance=AsyncMock(side_effect=RuntimeError("fixture")))
+        with self.assertRaises(RuntimeError):await C._retire_hidden(host,"look-fixture")
+        self.assertEqual(host._look_reserved,{"look-fixture"})
+        host._close_instance=AsyncMock()
+        await C._retire_hidden(host,"look-fixture")
+        host._close_instance.assert_awaited_once_with(H.PRIVATE)
+        self.assertEqual(host._look_reserved,set())
+
+    async def test_cancel_during_hidden_allocation_keeps_reservation_until_registered_cleanup(self):
+        entered=asyncio.Event();release=asyncio.Event();abandoned=[]
+        host=SimpleNamespace(_look_lock=None,_look_tasks=set(),_look_reserved=set())
+        async def hidden(*args):
+            host._look_reserved.add("look-fixture");entered.set()
+            try:
+                await release.wait()
+            finally:
+                if not release.is_set():abandoned.append(True)
+            return "look-fixture",object()
+        async def retire(*args):host._look_reserved.remove("look-fixture")
+        with patch.object(C,"_hidden",new=hidden),patch.object(C,"_retire_hidden",new=retire):
+            task=asyncio.create_task(C.capture(host,snapshot(mode="direct"),False,False,[],lambda:None,time.monotonic()+5))
+            await entered.wait();task.cancel();task.cancel()
+            for _ in range(5):await asyncio.sleep(0)
+            self.assertEqual(abandoned,[],"allocation must finish registering before cleanup")
+            self.assertFalse(task.done());self.assertEqual(host._look_reserved,{"look-fixture"})
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):await task
+        self.assertEqual(host._look_reserved,set());self.assertEqual(host._look_tasks,set())
+
+    async def test_hidden_reservation_counts_against_owner_adoption_and_new_looks(self):
+        host=H.BrowserHost();host._tabs={str(i):SimpleNamespace(page=object()) for i in range(3)}
+        host._look_reserved={"look-fixture"}
+        page=object()
+        with patch.object(config,"BROWSER_TAB_CAP",4),patch.object(host,"_refuse_popup",new=AsyncMock()) as refuse,patch.object(H,"_Tab",side_effect=AssertionError("adoption attempted beyond reserved cap")):
+            self.assertIsNone(host._adopt(SimpleNamespace(profile=H.PRIVATE),page,None))
+            await asyncio.sleep(0);refuse.assert_awaited_once_with(page)
+        host=SimpleNamespace(_launching={},_look_reserved=set(),_closing_contexts=set(),_tabs={"a":object()},
+            _tab_cap=lambda:1,_instance=AsyncMock())
+        with self.assertRaisesRegex(L.LookRefused,"limit"):
+            await C._hidden(host,"http://localhost:4567/")
+        host._instance.assert_not_called()
+
+    async def test_remote_stale_host_identity_refuses_before_cdp(self):
+        tab=SimpleNamespace(page_identity=42,document_generation=7,page=object())
+        host=SimpleNamespace(_look_lock=None,_look_tasks=set(),_tabs={"abcdef01":tab},_ensure_cdp=AsyncMock())
+        for snap in (snapshot(page_identity=41,document_generation=7),snapshot(page_identity=42,document_generation=6)):
+            with self.assertRaisesRegex(L.LookRefused,"changed"):
+                await C.capture(host,snap,False,False,[],lambda:None,time.monotonic()+5)
+        host._ensure_cdp.assert_not_called();self.assertEqual(host._look_tasks,set())
+
+
 class Real(O.OwnerBrowser):
     @classmethod
     def setUpClass(cls):
@@ -142,10 +286,13 @@ class Real(O.OwnerBrowser):
         row=self.host.open_tab(profile="private",url=self.url,owner=True)
         self.tab=self.host._tabs[row["tab_id"]];self.pg=self.tab.page
         self.run_on(self.pg.wait_for_load_state("load"))
-        self.snap=snapshot(tab_id=self.tab.id,view_id=self.tab.id,ctx=self.tab.ctx,url=self.url,page_identity=id(self.pg))
+        self.snap=snapshot(tab_id=self.tab.id,view_id=self.tab.id,ctx=self.tab.ctx,url=self.url,page_identity=self.tab.page_identity,document_generation=self.tab.document_generation)
         self.valid=True
         self.daemon.browser_panes=SimpleNamespace(resolve=lambda pane:self.snap,
-            still_current=lambda snap:self.valid and snap==self.snap and self.pg.url==self.url)
+            still_current=lambda snap:self.valid and snap==self.snap and self.pg.url==self.url
+                and (snap.mode=="direct" or self.host.pane_tab(snap.tab_id)==dict(
+                    tab_id=snap.tab_id,profile=snap.profile,ctx=snap.ctx,url=snap.url,
+                    page_identity=snap.page_identity,document_generation=snap.document_generation)))
         self.service=self.daemon.browser_look
         self.desk={"present":True,"images":True}
         self.scope=runtime.turn_scope(desk=self.desk);self.scope.__enter__();self.addCleanup(self.scope.__exit__,None,None,None)
@@ -227,8 +374,63 @@ class Real(O.OwnerBrowser):
         self.assertTrue(events);self.assertTrue(all(set(row["data"])=={"tab_id","at","refused"} for row in events))
         self.assertNotIn(marker,json.dumps(self.records)+"\n".join(self.logs))
 
+    def test_09_same_url_reload_during_capture_discards_without_front_report(self):
+        self.html("<p>Before reload</p>")
+        original=C._scan;previous=self.snap.document_generation
+        async def reload(*args,**kwargs):
+            result=await original(*args,**kwargs)
+            await self.pg.reload(wait_until="load")
+            return result
+        with patch.object(C,"_scan",new=reload):result=self.read()
+        self.assertIn("changed",result.refused);self.assertEqual(result.text,"");self.assertIsNone(result.image)
+        self.assertGreater(self.host.pane_tab(self.tab.id)["document_generation"],previous)
+        self.assertEqual(self.pg.url,self.snap.url)
+
+    def test_10_terminal_readability_revoked_during_scan_discards(self):
+        self.snap=replace(self.snap,source=ResolvedSource("terminal",terminal_id="fixture-terminal"))
+        readable=[True];original=C._scan
+        async def revoke(*args,**kwargs):
+            result=await original(*args,**kwargs);readable[0]=False;return result
+        with patch.object(self.daemon.terminals,"readable_source",side_effect=lambda _:readable[0]),patch.object(C,"_scan",new=revoke):
+            result=self.read()
+        self.assertIn("terminal",result.refused);self.assertEqual(result.text,"");self.assertIsNone(result.image)
+
+    def test_11_direct_lease_revocation_discards_and_retires_hidden_context(self):
+        self.snap=replace(self.snap,mode="direct",tab_id=None,view_id="view-direct-fixture",page_identity=None,document_generation=None)
+        original=C._scan
+        async def revoke(*args,**kwargs):
+            result=await original(*args,**kwargs)
+            self.tab.loopback_port=None;self.tab.pending_port=None;self.host._sync_ports(self.tab)
+            return result
+        with patch.object(C,"_scan",new=revoke):result=self.read()
+        self.assertTrue(result.refused);self.assertEqual(result.text,"");self.assertIsNone(result.image)
+        self.assertFalse(self.host.loopback_open(self.fx));self.assertEqual(self.host._look_reserved,set())
+        self.assertEqual(set(self.host._instances[H.PRIVATE].private_contexts),{self.tab.ctx})
+
+    def test_12_ref_node_budgets_and_inaccessible_frame_masks(self):
+        self.html("<div style='display:flex;flex-wrap:wrap'>"+"<button style='width:20px;height:20px'>x</button>"*(S.REF_CAP+1)+"</div>")
+        self.assertIn("too large",self.read().refused)
+        self.html("<div>"+"<span></span>"*(S.NODE_CAP+1)+"</div>")
+        self.assertIn("too large",self.read().refused)
+        self.html(f"<iframe style='position:absolute;left:20px;top:50px;width:250px;height:100px' srcdoc='<p>{MARKER}</p>'></iframe><p>Outside frame</p>")
+        result=self.read();self.assertFalse(result.refused,result.refused);self.assertNotIn(MARKER,result.text)
+        from PIL import Image
+        with Image.open(BytesIO(base64.b64decode(result.image))) as image:self.assertEqual(image.getpixel((80,70)),(24,26,29))
+
+    def test_13_input_hold_and_close_during_capture_discard(self):
+        original=C._scan
+        async def hold(*args,**kwargs):
+            result=await original(*args,**kwargs);self.valid=False;return result
+        with patch.object(self.host,"input_held",side_effect=lambda:not self.valid),patch.object(C,"_scan",new=hold):
+            self.assertTrue(self.read().refused)
+        self.valid=True
+        async def close(*args,**kwargs):
+            result=await original(*args,**kwargs);await self.pg.close();return result
+        with patch.object(C,"_scan",new=close):
+            result=self.read();self.assertTrue(result.refused);self.assertEqual(result.text,"");self.assertIsNone(result.image)
+
 
 def load_tests(loader,tests,pattern):
-    return unittest.TestSuite(cls(name) for cls in (Pure,Real) for name in sorted(cls.__dict__) if name.startswith("test_"))
+    return unittest.TestSuite(cls(name) for cls in (Pure,Lifecycle,Real) for name in sorted(cls.__dict__) if name.startswith("test_"))
 
 if __name__=="__main__":unittest.main(verbosity=2)

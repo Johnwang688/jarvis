@@ -104,7 +104,7 @@ def presented(scan: dict, image: str | None, *, fresh: bool, vision: bool, withh
                 if clean:lines.append(clean)
     text="\n".join(lines)
     notes=[]
-    if len(text)>TEXT_CAP:notes.append("page text shortened to4000 characters")
+    if len(text)>TEXT_CAP:notes.append("page text shortened to 4000 characters")
     text=text[:TEXT_CAP]
     refs=[]
     for row in scan["refs"]:

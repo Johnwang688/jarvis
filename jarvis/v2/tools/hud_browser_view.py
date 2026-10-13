@@ -21,7 +21,7 @@ def hud_browser_view(
     if not runtime.at_desk() or runtime.depth()!=0:
         return ToolResult("Refused: hud_browser_view works only in a chat the owner is typing in at the HUD (not from Discord, a task, a schedule or a sub-agent)")
     if not isinstance(pane,str) or (pane and pane not in tuple(str(i) for i in range(1,9))) or not isinstance(whole_page,bool):
-        return ToolResult("Refused: pane must be a visible slot from1 to8 or empty, and whole_page must be true or false")
+        return ToolResult("Refused: pane must be a visible slot from 1 to 8 or empty, and whole_page must be true or false")
     result=look_for_tool(pane,whole_page)
     if result.refused:return ToolResult("Refused: "+result.refused)
     if not runtime.at_desk() or runtime.depth()!=0 or runtime.should_stop()():

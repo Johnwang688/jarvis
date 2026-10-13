@@ -42,13 +42,19 @@ async def _retire_hidden(host,ctx):
     from .host import PRIVATE
     async with host._launching.setdefault(PRIVATE,asyncio.Lock()):
         instance=host._instances.get(PRIVATE) or host._closing_instances.get(PRIVATE)
-        if instance is not None and ctx in instance.private_contexts:
-            await host._retire_context_locked(ctx)
+        if instance is not None:
+            if ctx in instance.private_contexts:
+                await host._retire_context_locked(ctx)
+            elif (not instance.private_contexts
+                  and not any(tab.profile == PRIVATE for tab in host._tabs.values())):
+                # Launch can succeed before new_context fails. Keep that empty
+                # engine retryable too; there is no owner context to preserve.
+                await host._close_instance(PRIVATE)
         host._look_reserved.discard(ctx)
 
 
 async def _hidden(host,url):
-    from .host import PRIVATE, BrowserRefused
+    from .host import PRIVATE
     # Retry retained failed cleanups before another hidden context can exist.
     for old in tuple(host._look_reserved):await _retire_hidden(host,old)
     async with host._launching.setdefault(PRIVATE,asyncio.Lock()):
@@ -73,9 +79,9 @@ async def _hidden(host,url):
             return ctx,page
         except BaseException:
             instance=host._instances.get(PRIVATE) or host._closing_instances.get(PRIVATE)
-            if instance is None or ctx not in instance.private_contexts:
+            if instance is None:
                 host._look_reserved.discard(ctx)
-            else:
+            elif ctx in instance.private_contexts:
                 host._closing_contexts.add(ctx)
             raise
 
@@ -113,11 +119,13 @@ async def capture(host,snapshot,whole,images,forms,current,deadline):
                     if snapshot.mode=="direct":
                         # _hidden may fail after reserving; the finally retires all
                         # retained hidden identities, never a user's Private ctx.
-                        ctx,page=await _hidden(host,snapshot.url)
+                        ctx,page=await _settle(_hidden(host,snapshot.url))
                         cdp=await page.context.new_cdp_session(page)
                     else:
                         tab=host._tabs.get(snapshot.tab_id)
-                        if tab is None or id(tab.page)!=snapshot.page_identity:raise LookRefused(CHANGED)
+                        if (tab is None or tab.page_identity != snapshot.page_identity
+                                or tab.document_generation != snapshot.document_generation):
+                            raise LookRefused(CHANGED)
                         page=tab.page;cdp=await host._ensure_cdp(tab)
                     await cdp.send("Page.enable")
                     before=await _frame(cdp)
@@ -147,13 +155,21 @@ async def capture(host,snapshot,whole,images,forms,current,deadline):
                     success=True
                     return scan,image,withheld
             finally:
-                if cdp is not None and context_id is not None:
-                    expression=("globalThis.__jarvisLook?.observer?.disconnect();" if success else CLEAR_JS)
-                    try:await asyncio.wait_for(cdp.send("Runtime.evaluate",{
-                        "expression":expression,"contextId":context_id,"silent":True}),1)
-                    except Exception:pass
-                if snapshot.mode=="direct":
-                    for reserved in tuple(host._look_reserved):
-                        await _settle(_retire_hidden(host,reserved))
+                async def cleanup():
+                    # Shield the complete cleanup, including CDP disposal. A
+                    # second cancellation must not skip Private retirement.
+                    try:
+                        if cdp is not None and context_id is not None:
+                            expression=("globalThis.__jarvisLook?.observer?.disconnect();" if success else CLEAR_JS)
+                            try:
+                                await asyncio.wait_for(cdp.send("Runtime.evaluate",{
+                                    "expression":expression,"contextId":context_id,"silent":True}),1)
+                            except Exception:
+                                pass
+                    finally:
+                        if snapshot.mode=="direct":
+                            for reserved in tuple(host._look_reserved):
+                                await _retire_hidden(host,reserved)
+                await _settle(cleanup())
     finally:
         host._look_tasks.discard(task)
