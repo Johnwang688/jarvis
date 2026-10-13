@@ -37,6 +37,7 @@ from typing import Any, Iterator
 
 from ... import config, models, permissions, sessions, tools
 from ...agent import Agent
+from ..desk import desk_message as _at_desk
 from ..model import PermissionProfile, ProviderName, Role, Thread
 from ..provider import (
     Brief,
@@ -249,11 +250,7 @@ def _owners_chat(brief: Brief) -> bool:
     return brief.role == Role.CHAT and brief.task_id is None
 
 
-def _at_desk(brief: Brief, message: UserMessage) -> bool:
-    """The owner is present for this message (WP-F): their chat thread, and
-    a message the HUD's own window sent (`UserMessage.desk`), as the owner."""
-    return (_owners_chat(brief) and message.desk is True and message.origin == "owner"
-            and (message.via or "hud") == "hud")
+# Compatibility alias: one predicate for the fast path and session bridge.
 
 
 

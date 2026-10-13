@@ -874,8 +874,9 @@ class ClaudeProvider:
         jarvis server (`session_tools`, plan 2026-10-10 §3.4/§4.1): one marked
         `foreground_only` is denied outright when a sub-agent calls it (the
         hook input carries `agent_id`), without asking `permit`; and one
-        marked `read_only` that `permit` ALLOWs (its `jarvis-tool` layer) gets
-        an explicit allow under both profiles.
+        that `permit` delegates gets an explicit allow under both profiles.
+        This does not approve execution: the daemon bridge asks once for each
+        dangerous call. Nondangerous tools retain named always-ask checks.
         """
 
         async def pre_tool(input_data, tool_use_id, context):  # noqa: ANN001
@@ -885,7 +886,7 @@ class ClaudeProvider:
             args = dict(args) if isinstance(args, dict) else {}
             # A Jarvis session tool (`mcp__jarvis__<tool>`, plan 2026-10-10).
             from .. import session_tools
-            jarvis = session_tools.claude_tool(name)
+            jarvis = session_tools.claude_session_tool(session.brief, name)
             if jarvis is not None and jarvis.foreground_only and data.get("agent_id"):
                 if tool_use_id:
                     session.denied_tools.add(tool_use_id)
@@ -904,8 +905,7 @@ class ClaudeProvider:
                     }
                 }
             decision = await self._decide(session, name, args)
-            if (decision is Decision.ALLOW and jarvis is not None and jarvis.read_only
-                    and "jarvis" in session.brief.mcp_servers):
+            if decision is Decision.ALLOW and jarvis is not None:
                 # Explicit under both profiles (D-5): under ASK it pre-empts the
                 # CLI's own prompt, under AUTO it skips the classifier, whose
                 # job here the daemon does on every call. Never "approved":
@@ -914,7 +914,8 @@ class ClaudeProvider:
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "allow",
-                        "permissionDecisionReason": "a read-only Jarvis tool",
+                        "permissionDecisionReason": ("a read-only Jarvis tool" if jarvis.read_only
+                                                     else "the daemon checks this Jarvis tool"),
                     }
                 }
             if decision is Decision.ALLOW and session.brief.profile is PermissionProfile.AUTO:
@@ -1159,7 +1160,7 @@ class ClaudeProvider:
         """
         session = h.native
         if session is None or session.closed:
-            raise SteerRefused("session closed")
+            raise SteerRefused("session closed", before_write=True)
         uid = str(uuid.uuid4())
         payload = {
             "type": "user",
@@ -1174,7 +1175,7 @@ class ClaudeProvider:
 
         with session.mutex:
             if not session.accepting:
-                raise SteerRefused("no turn of this message's is under way")
+                raise SteerRefused("no turn of this message's is under way", before_write=True)
             # Registered before the write, so a result frame read while the
             # write is in flight already knows a steer is on its way.
             session.steering[uid] = session.generation
@@ -1620,6 +1621,13 @@ class ClaudeProvider:
             return out
         return out
 
+    @staticmethod
+    def _tool_summary(name: str, text: str) -> str:
+        if name in ("terminal_read", "mcp__jarvis__terminal_read"):
+            from jarvis import tools
+            return tools.private_summary("terminal_read", text)
+        return text[:SUMMARY_CHARS]
+
     def _tool_result(self, session: _Session, block: Any) -> list[Event]:
         if not isinstance(block, ToolResultBlock):
             return []
@@ -1634,6 +1642,13 @@ class ClaudeProvider:
             denied = True
             session.denial_without_id = False
         session.denied_tools.discard(block.tool_use_id)
+        private_terminal = name in ("terminal_read", "mcp__jarvis__terminal_read")
+        summary = self._tool_summary(name, text)
+        if private_terminal:
+            if denied:
+                summary = self._tool_summary(name, "Refused")
+            elif block.is_error and summary not in ("refused", "error"):
+                summary = self._tool_summary(name, "Error")
         out: list[Event] = []
         if declined:
             # §6.1: the owner's judgement outranks a classifier, but only
@@ -1648,9 +1663,9 @@ class ClaudeProvider:
                         "tool": name,
                         "args": args,
                         "command": _command(args),
-                        "reason": match.group("reason").strip()
-                        if match
-                        else text[:SUMMARY_CHARS],
+                        "reason": (summary if private_terminal
+                                   else match.group("reason").strip() if match
+                                   else text[:SUMMARY_CHARS]),
                     },
                 )
             )
@@ -1663,7 +1678,7 @@ class ClaudeProvider:
                     "name": name,
                     "ok": not bool(block.is_error) and not declined,
                     "outcome": "denied" if denied else "failed" if block.is_error else "ok",
-                    "summary": text[:SUMMARY_CHARS],
+                    "summary": summary,
                 },
             )
         )

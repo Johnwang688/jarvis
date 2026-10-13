@@ -194,3 +194,53 @@ runs a real port-0 daemon and real headless Chromium and reads the headers
 where the daemon receives them; its same-origin read fails on main.
 
 <!-- claude-source:000866-000938:end -->
+
+
+## Current implementation: Claude session MCP (WP-2)
+
+Claude owner chats offer `terminal_read` plus the exact shared D-3 catalog
+(`jarvis/v2/mcp_catalog.py`), filtered by registered tool availability. The
+external MCP server still excludes terminal reads and retains its deny-all
+dangerous-tool approver. Codex's production session catalog remains empty
+until WP-3. Task workers receive neither a token nor a Jarvis server.
+
+`desk.py` owns memory-only per-session authority. Every daemon turn gets a
+fresh mutable slot using the original fast-path predicate. A non-HUD native
+steer revokes that slot and reserves carry before provider handoff. Carry
+costs the next turn; a separate pending set keeps every successor off-desk
+while delivery remains unsettled. Completion removes only its pending token,
+never grants authority to an existing successor. Only proven pre-write
+refusal releases its own carry and may restore its own original active slot;
+query errors/timeouts are ambiguous. Concurrent reservations are independent.
+Queued messages do not revoke the current slot. End, Stop and close revoke
+old slots, including those captured by in-flight calls. Fast-path capability
+selection otherwise retains its existing behavior.
+
+The authenticated bridge rechecks exact session/worker/turn under the daemon
+lock, binds caller/depth/toolset/desk/stop in a fresh Context, and calls the
+registry dispatch once. Dangerous approval waits recheck identity and Stop
+after the human answer, before execution. Terminal results recheck desk/Stop
+after the existing guarded read, so a concurrent steer cannot disclose its
+text. The unchanged terminal note records the guarded read itself; a later
+revoked result is refused without publishing raw text or a second note.
+
+Claude's exact offered session-tool hook delegates to this bridge. Read-only
+and nondangerous calls retain named always-ask rules (canonical or exact
+server-prefixed spelling). Dangerous calls get exactly one owner decision at
+the bridge, never Always; strict and layer-1 refusals still win. Foreground
+terminal calls from Claude subagents are refused before permit. Other D-3
+tools retain the owner's approved off-desk/subagent availability.
+
+Claude terminal result summaries and denial reasons use fixed private words
+or line counts, covering canonical and exact `mcp__jarvis__terminal_read`
+names. Ordinary tool summaries retain 200 characters. Returned terminal text
+still reaches the Claude/model transcript and anything the model repeats;
+this is not a promise to filter model replies. Caller carriers remain subject
+to the documented same-user process/file access limit. No desk state or token
+is saved in the canonical brief or public event stream.
+
+Free validation: `tests/v2/terminal_read_mcp_check.py` covers real ephemeral
+listeners/relay/fake-shell PTY, native hooks over a fake SDK, lifecycle and
+approval barriers, guard/read-switch behavior, summaries and catalog bounds.
+Native authenticated Claude L1/L2/L5 validation is a separate release gate;
+these fake/free checks do not claim that gate passed.

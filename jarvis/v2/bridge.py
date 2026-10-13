@@ -160,7 +160,7 @@ def route(handler, daemon, parts, query):
     return 200, call(daemon, session, caller, body["name"], body["arguments"])
 
 
-def _approver(session):
+def _approver(session, current):
     """The session's own gate for a dangerous tool: its permit, asked with
     `dangerous_tool=True` — the owner decides every call. A permit that cannot
     take the keyword, that raises, or that answers anything but ALLOW, denies.
@@ -169,13 +169,15 @@ def _approver(session):
     permit = getattr(session, "permit", None)
 
     def approve(entry, arguments) -> bool:
-        if permit is None:
+        if permit is None or not current():
             return False
         try:
             decision = Decision(permit(entry.name, dict(arguments), None, dangerous_tool=True))
         except Exception:  # noqa: BLE001 — an unreadable answer is a denial
             return False
-        return decision is Decision.ALLOW
+        # The broker wait may outlive this turn or this exact session. Check
+        # under the daemon lock again before dispatch can enter the tool.
+        return decision is Decision.ALLOW and current()
 
     return approve
 
@@ -188,20 +190,45 @@ def call(daemon, session, caller, name: str, arguments: dict) -> dict:
     from . import session_tools
     thread = session.thread
     offered = session_tools.for_provider(thread.provider)
-    if name not in {entry.name for entry in offered}:
+    entry = next((entry for entry in offered if entry.name == name), None)
+    if entry is None:
         raise APIError(404, "this chat is not offered that tool")
+    from .callers import FORBIDDEN
+    from .model import Role
+
+    def live_session():
+        return (not daemon._stopping and daemon._sessions.get(thread.id) is session
+                and caller.session is session and caller.thread_id == thread.id
+                and caller.provider == thread.provider.value and session.caller_key is not None
+                and not session.closing and not session.retired and not session.lost
+                and thread.role == Role.CHAT and thread.task_id is None
+                and session.brief.role == Role.CHAT and session.brief.task_id is None)
+
     with daemon._lock:
-        # The turn this call belongs to: the running one, or none between
-        # turns (a CLI turn nobody sent, a call while the session opens).
-        turn_id = session.turn_id if session.worker is not None else None
+        if not live_session():
+            raise APIError(403, FORBIDDEN)
+        # A CLI may call between turns; it gets an off-desk slot. Capture
+        # worker identity as well as turn id so a successor cannot inherit it.
+        worker = session.worker
+        turn_id = session.turn_id if worker is not None else None
+        desk = session.desk.slot if worker is not None else {"present": False}
+
+    def current():
+        with daemon._lock:
+            return (live_session() and session.worker is worker
+                    and (session.turn_id if session.worker is not None else None) == turn_id
+                    and not session.cancelled.is_set())
     who = {"thread_id": thread.id, "project_id": thread.project_id,
            "provider": caller.provider, "turn_id": turn_id}
     names = frozenset(entry.name for entry in offered)
-    approve = _approver(session)
+    approve = _approver(session, current)
     LOG.debug("jarvis-mcp call %s for thread %s", name, thread.id)
 
     def run():
-        runtime.bind(caller=who, depth=0, tool_names=names, approve=approve)
+        runtime.bind(caller=who, depth=0, tool_names=names, approve=approve,
+                     desk=desk, should_stop=lambda: not current())
+        if not current() and not entry.desk_only:
+            return tools.ToolResult("Refused: this chat turn is no longer current.")
         return tools.dispatch(name, json.dumps(arguments), approve=approve)
 
     result = contextvars.Context().run(run)

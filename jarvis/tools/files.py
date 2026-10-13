@@ -84,6 +84,8 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/callers.py",
         "jarvis/v2/bridge.py",
         "jarvis/v2/session_tools.py",
+        "jarvis/v2/mcp_catalog.py",
+        "jarvis/v2/desk.py",
         "jarvis/v2/mcp_session.py",
         # Decides what the HUD's editor may show and write, and what an
         # `@path`, the preview origin and a task diff withhold (ED-2,
