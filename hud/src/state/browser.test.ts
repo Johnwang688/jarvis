@@ -156,3 +156,46 @@ it("profile change retries another exact old-pane handle after an absent handle"
   expect(mocks.write).toHaveBeenCalledWith("/tabs/abcd0123/sound",{on:false});
   expect(workspace.panes[0].browserProfile).toBe("private");
 });
+
+it("pane options revoke drawn eligibility while preserving preferences and exact instance ownership", async () => {
+  source=setBrowserSee(source,1,false); await connected();
+  const oldOwner={}, newOwner={};
+  await act(async()=>browser.cover(1,oldOwner,true));
+  expect(front.panes[0]).toMatchObject({drawn:false,slot:1,see:false,drive:false});
+  expect(workspace.panes[0].see).toBe(false);
+  expect(browser.captureIdentity(1,"page01")).toBeNull();
+  await act(async()=>browser.cover(1,newOwner,true));
+  await act(async()=>browser.cover(1,oldOwner,false));
+  expect(front.panes[0].drawn).toBe(false);
+  await act(async()=>browser.uncover(1,"page01",newOwner));
+  expect(front.panes[0].drawn).toBe(true);
+  expect(browser.captureIdentity(1,"page01")).not.toBeNull();
+});
+it("uncover waits for a fresh receipt and rejects a card arriving during that wait", async () => {
+  await connected(); const owner={}; await act(async()=>browser.cover(1,owner,true));
+  const ready=deferred<any>(), saved=mocks.write.getMockImplementation()!;
+  mocks.write.mockImplementation((p,body,...args)=>p==="/front"&&body.panes[0].drawn?ready.promise:saved(p,body,...args));
+  let job!:Promise<void>, result!:Promise<unknown>;
+  await act(async()=>{job=browser.uncover(1,"page01",owner);result=job.catch(e=>e);});
+  expect(browser.captureIdentity(1,"page01")).toBeNull();
+  await render({blocked:true});
+  let answer:any; await act(async()=>{answer=await result;});
+  expect(answer).toBeInstanceOf(Error);
+  expect(answer.message).toContain("cancelled");
+});
+it("profile, context or active-tab replacement invalidates a waiting uncover gesture", async () => {
+  for(const change of [
+    (w:Workspace)=>setBrowserProfile(w,1,"private"),
+    (w:Workspace)=>setBrowserRemote(w,1,"page01",{mode:"remote",remoteTabId:"0123abcd",ctx:"1234abcd"}),
+    (w:Workspace)=>addBrowserTab(w,1,"http://localhost:5173/",{id:"other1"}),
+  ]){
+    await connected(); const owner={}; await act(async()=>browser.cover(1,owner,true));
+    const saved=mocks.write.getMockImplementation()!, ready=deferred<any>();
+    mocks.write.mockImplementation((p,body,...args)=>p==="/front"&&body.panes[0].drawn?ready.promise:saved(p,body,...args));
+    let result!:Promise<unknown>; await act(async()=>{result=browser.uncover(1,"page01",owner).catch(e=>e);});
+    await act(async()=>set(change));
+    let answer:any; await act(async()=>{answer=await result;});
+    expect(answer).toBeInstanceOf(Error);
+    mocks.write.mockImplementation(saved);
+  }
+});

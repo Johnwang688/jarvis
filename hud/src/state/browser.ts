@@ -51,6 +51,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   const receipts=useRef<BrowserReceipt|null>(null);
   const previous=useRef(view.ws);
   const frontCode=useRef("");
+  const coveredPanes=useRef(new Map<PaneNo, object>());
   const refreshNumber=useRef(0);
   const patch=useCallback((key:string,value:BrowserRuntime) => {
     if (mounted.current) setRuntime((old)=>({...old,[key]:{...old[key],...value}}));
@@ -70,11 +71,31 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   const publish=useCallback(()=>{
     const c=now.current;
     if (!WINDOW_ID || c.status==="pending") return;
-    const front=browserFront(c.view.ws,c.view.fit.panes,c.covered,WINDOW_ID,c.profiles[0]?.id??null,c.focus.pane,c.focus.seq,c.ports);
+    const front=browserFront(c.view.ws,c.view.fit.panes.filter(p=>!coveredPanes.current.has(p)),c.covered,WINDOW_ID,c.profiles[0]?.id??null,c.focus.pane,c.focus.seq,c.ports);
     const encoded=JSON.stringify(front);
     if(encoded!==frontCode.current){receipts.current=null;frontCode.current=encoded;}
     publisher.update(front);
   },[publisher]);
+  // A pane-local overlay changes visibility, never the owner's preferences.
+  // Exact instance ownership keeps an old unmount from uncovering a reused pane.
+  const cover=useCallback((pane:PaneNo,owner:object,value:boolean)=>{
+    if(value)coveredPanes.current.set(pane,owner);
+    else if(coveredPanes.current.get(pane)===owner)coveredPanes.current.delete(pane);
+    else return;
+    publish();
+  },[publish]);
+  const uncover=useCallback(async(pane:PaneNo,id:string,owner:object)=>{
+    const initial=now.current.view.ws.panes[pane-1];
+    const unchanged=()=>allowed(pane)&&now.current.view.ws.panes[pane-1]===initial
+      && initial.browser?.active===id&&!coveredPanes.current.has(pane);
+    cover(pane,owner,false);
+    const deadline=Date.now()+3000;
+    while(unchanged()&&Date.now()<deadline){
+      if(receipts.current?.panes.find(p=>p.pane_id===pane)?.tabs.some(t=>t.id===id))return;
+      await frame();
+    }
+    throw new Error("That Browser capture was cancelled because the pane changed.");
+  },[allowed,cover]);
   const refresh=useCallback(async()=>{
     const seq=++refreshNumber.current;
     try {
@@ -258,10 +279,10 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     const next={pane,seq:now.current.focus.seq+1};now.current.focus=next;setFocus(next);publish();
   },[allowed,publish]);
   const captureIdentity=useCallback((pane:PaneNo,id:string)=>{
-    if(!allowed(pane)||now.current.view.ws.panes[pane-1].browser?.active!==id)return null;
+    if(!allowed(pane)||coveredPanes.current.has(pane)||now.current.view.ws.panes[pane-1].browser?.active!==id)return null;
     const binding=receipts.current?.panes.find(p=>p.pane_id===pane)?.tabs.find(t=>t.id===id);
     return binding?{window:WINDOW_ID,pane_id:pane,local_tab_id:id,view_id:binding.view_id}:null;
   },[allowed]);
-  return {profiles,runtime,error,cleanupError,retryCleanup,online,covered,captureIdentity,refresh,onEvent,ensure,submit,see,profile,convert,signin,location,history,adopt,focus:focusPane,selectedProfile};
+  return {profiles,runtime,error,cleanupError,retryCleanup,online,covered,cover,uncover,captureIdentity,refresh,onEvent,ensure,submit,see,profile,convert,signin,location,history,adopt,focus:focusPane,selectedProfile};
 }
 export type BrowserControl=ReturnType<typeof useBrowser>;

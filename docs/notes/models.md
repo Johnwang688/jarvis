@@ -239,3 +239,37 @@ The no-tool guards (`fastpath_check`, `models_check`) cover every roster
 write.
 
 <!-- claude-source:009492-009596:end -->
+
+## Browser classifier response envelope (2026-10-13)
+
+The synthetic M11 probe on Haiku 5.5 returned 42 truncated responses out of
+50 at the existing 150-token limit. All failed toward ASK. Measured p50 was
+1.5043 s, p95 2.131825 s, and billed cost $0.005680050; these are classifier
+request measurements, not Browser action success or a safety benchmark.
+
+[OpenRouter's Haiku 5.5 migration guide](https://openrouter.ai/docs/cookbook/evaluate-and-optimize/model-migrations/claude-5-5)
+documents adaptive thinking on by default, shared thinking/output budgets,
+optional disabled thinking, and removal of non-default sampling parameters.
+The Browser review call now uses `effort="none"` and `temperature=None` only
+for the exact `anthropic/claude-haiku-5.5` slug. `llm.chat` omits temperature
+only when explicitly passed None; every other caller retains its prior
+default. This does not change the owner's selected model or other reasoning
+settings. Unknown models and aliases keep their existing request shape.
+The 150-token, 8-second, single non-streaming attempt limits remain. An
+explicit non-stop finish reason always asks and never populates the allow
+cache, even when its visible text happens to be complete JSON.
+
+Free request-wire and classifier tests cover this contract, including the
+original wire finish reason before normalization: null, empty, false, zero,
+missing or malformed reasons cannot produce a cached allow.
+
+A separately approved 50-call synthetic confirmation probe on reviewed source
+`81f1fd0` produced 49 valid model replies and one provider timeout, which stayed
+ASK. No replies were truncated. Classifier wall-time p50 was 1.364650 s and p95
+1.734687 s (including that timeout); the 49 known costs total $0.004222625.
+The timeout retains a $0.000988900 reservation. Including the original probe
+and earlier conservative reservation, total charged-or-reserved spending is
+$0.01187951250, below the approved $0.10 cumulative cap. The interrupted probe
+resumed only its remaining 35 calls, preserving all 15 prior attempts. This
+measures response format, latency and cost on inert synthetic facts; it does
+not establish Browser action reliability or classifier safety accuracy.

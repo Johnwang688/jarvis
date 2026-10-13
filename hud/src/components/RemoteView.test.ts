@@ -143,3 +143,20 @@ it("annotation/card blocking leaves frames flowing without target pixels or acti
   await render({blocked:true});await frame(binary(1));expect(mocks.draw).toHaveBeenCalledOnce();expect(driveButton("stop")?.disabled).toBe(true);
   expect(host.querySelector('[data-testid="drive-outline"]')).toBeNull();expect(host.querySelectorAll("canvas")).toHaveLength(1);
 });
+
+it("an options hold blocks input synchronously before its blocked render while frames keep flowing",async()=>{
+  let held=false;await render({inputHeld:()=>held});await act(async()=>socket().open());socket().sent=[];
+  await key("a");expect(socket().sent.some(x=>x.t==="key")).toBe(true);socket().sent=[];
+  held=true;
+  await key("b");
+  await act(async()=>{
+    input().dispatchEvent(new CompositionEvent("compositionend",{bubbles:true,data:"menu text"}));
+    const paste=new Event("paste",{bubbles:true,cancelable:true});
+    Object.defineProperty(paste,"clipboardData",{value:{getData:()=>"menu paste"}});
+    input().dispatchEvent(paste);
+    host.querySelector('[data-testid="remote-surface"]')!.dispatchEvent(new MouseEvent("mousedown",{bubbles:true,button:0,clientX:1,clientY:1}));
+  });
+  expect(socket().sent).toEqual([]);
+  await frame(binary(1));expect(mocks.draw).toHaveBeenCalledOnce();
+  expect(socket().sent).toContainEqual({t:"ack",id:1});
+});

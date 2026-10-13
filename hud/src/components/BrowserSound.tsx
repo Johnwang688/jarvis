@@ -30,8 +30,8 @@ export function speakerGesture(trusted: boolean, blocked: boolean): boolean {
   return trusted && !blocked;
 }
 
-export function BrowserSpeaker({ direct, blocked, tabId, profile, profileLabel }: {
-  direct: boolean; blocked: boolean; tabId?: string; profile?: string; profileLabel?: string;
+export function BrowserSpeaker({ direct, blocked, tabId, profile, profileLabel, inputHeld }: {
+  direct: boolean; blocked: boolean; tabId?: string; profile?: string; profileLabel?: string; inputHeld?: () => boolean;
 }) {
   const state = useSound();
   if (direct) return <span className="small muted" title="Direct audio follows this window's browser policy">Sound after a page click</span>;
@@ -48,7 +48,7 @@ export function BrowserSpeaker({ direct, blocked, tabId, profile, profileLabel }
   return <button type="button" data-testid="browser-sound-toggle" data-browser-sound
     className={instance?.phase !== "ready" ? "browser-speaker warn" : "browser-speaker"} disabled={disabled}
     aria-label={label} aria-pressed={enabled} title={label + ". " + scope} onMouseDown={noPointerFocus}
-    onClick={e => { if (speakerGesture(e.isTrusted, !!disabled) && tabId) void browserSound.toggle(tabId, !enabled); }}>
+    onClick={e => { if (speakerGesture(e.isTrusted, !!disabled || !!inputHeld?.()) && tabId) void browserSound.toggle(tabId, !enabled); }}>
     <svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
       <path d="M3 7h3l4-4v14l-4-4H3z" />
       {enabled && known ? <path d="M13 6c2 2 2 6 0 8m3-11c4 4 4 10 0 14" /> : <path d="m13 7 5 6m0-6-5 6" />}
