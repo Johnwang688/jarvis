@@ -502,6 +502,38 @@ class BrowserPanes:
             except PaneRefused:
                 return False
 
+    def after_navigation(self, snapshot):
+        """Rebind only a completed drive's document, never the visible binding.
+
+        The caller must have finished all judged input and recheck its driver,
+        owner-input and stop state separately. Ordinary looks keep using strict
+        still_current. Production snapshots keep drive=False until a separately
+        approved driving rollout; this helper cannot enable them.
+        """
+        if (not isinstance(snapshot, PaneSnapshot) or snapshot.mode != "remote"
+                or not snapshot.see or not snapshot.drive
+                or type(snapshot.page_identity) is not int
+                or type(snapshot.document_generation) is not int):
+            return None
+        with self._lock:
+            self._expire()
+            state = self._windows.get(snapshot.window) if snapshot.window in self._live else None
+            pane = state.panes.get(snapshot.pane_id) if state else None
+            if pane is None:
+                return None
+            try:
+                fresh = self._snapshot(snapshot.window, state, pane)
+            except PaneRefused:
+                return None
+            if (type(fresh.document_generation) is not int
+                    or fresh.document_generation < snapshot.document_generation
+                    or (fresh.url != snapshot.url
+                        and fresh.document_generation == snapshot.document_generation)):
+                return None
+            pinned = replace(fresh, url=snapshot.url,
+                             document_generation=snapshot.document_generation)
+            return fresh if pinned == snapshot else None
+
     def address(self, pane_id, local_id, body):
         _number(pane_id, 1, 8)
         _id(local_id, _LOCAL)

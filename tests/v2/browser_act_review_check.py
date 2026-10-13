@@ -256,7 +256,7 @@ class Failures(World):
         with patch.object(models, "tier", lambda name: f"tier:{name}"):
             _, script = self.run_one(page(), answer())
         call = script.calls[0]
-        self.assertEqual(call["model"], "tier:review")
+        self.assertEqual(call["model"], "tier:browser_review")
         # One request: `max_retries` is llm.chat's attempt count, and no stream
         # means no second, non-streaming attempt.
         for key, value in (("temperature", 0.0), ("max_tokens", 150), ("timeout", 8.0),
