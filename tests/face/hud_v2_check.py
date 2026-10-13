@@ -1255,10 +1255,10 @@ def browser_checks(page, mock):
               page.locator('[data-testid="browser-refused"]').count() == 1
               and page.locator('[data-testid="browser-frame"]').count() == 0)
 
-    page.locator('[data-testid="browser-url"]').fill("https://example.com/")
+    page.locator('[data-testid="browser-url"]').fill("file:///tmp/refused")
     page.locator('[data-testid="browser-go"]').click()
     until(lambda: page.locator('[data-testid="browser-refused"]').count() > 0)
-    check("and anything that is not a local server",
+    check("and a non-http scheme never starts a renderer",
           page.locator('[data-testid="browser-frame"]').count() == 0)
 
     page.locator('[data-testid="browser-project"]').click()

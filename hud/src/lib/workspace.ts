@@ -791,13 +791,22 @@ export function setBrowserRemote(ws: Workspace, pane: PaneNo, id: string,
   }
   if (value.url !== undefined) next.url = value.url;
   let updated = changeBrowser(ws, pane, { ...browser, tabs: browser.tabs.map((t) => t.id === id ? next : t) });
-  if (value.ctx) updated = { ...updated, panes: updated.panes.map((p, i) => i === pane - 1 ? { ...p, browserCtx: value.ctx } : p) as Panes };
+  if (value.ctx) updated = { ...updated, panes: updated.panes.map((p, i) => {
+    if (i !== pane - 1) return p;
+    const live = { ...p, browserCtx: value.ctx }; delete live.browserPrivateEnded; return live;
+  }) as Panes };
   return updated;
 }
 
-export function setBrowserProfile(ws: Workspace, pane: PaneNo, profile: string): Workspace {
+export function setBrowserProfile(ws: Workspace, pane: PaneNo, profile: string, initialOnly = false): Workspace {
   if (profile !== "private" && !/^p-[0-9a-f]{8}$/.test(profile)) return ws;
   const spec = ws.panes[pane - 1];
+  // Discovering the default is metadata, not an owner profile conversion.
+  // Keep existing handles until ensure() validates them against host metadata.
+  if (initialOnly) {
+    if (spec.browserProfile || profile === "private") return ws;
+    return { ...ws, panes: ws.panes.map((p, i) => i === pane - 1 ? { ...p, browserProfile: profile } : p) as Panes };
+  }
   if (spec.browserProfile === profile && !spec.browserPrivateEnded) return ws;
   const next = { ...spec, browserProfile: profile };
   delete next.browserCtx;

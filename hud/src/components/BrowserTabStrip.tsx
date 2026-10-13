@@ -25,7 +25,7 @@ export function BrowserTabStrip(props: {
           row.current?.querySelector<HTMLButtonElement>('[data-browser-tab="' + next.id + '"]')?.focus();
         }}>
         {tab.auto ? <span className="browserautomark" aria-label="Opened automatically">·</span> : null}
-        <span>{browserLabel(tab.url)}</span>
+        <span>{tab.title || browserLabel(tab.url)}</span>
       </button>
       <button type="button" className="browsertabclose" data-testid="browser-tab-close" tabIndex={-1}
         aria-label={"Close " + browserLabel(tab.url)} disabled={props.blocked} onClick={() => props.onClose(tab.id)}>×</button>

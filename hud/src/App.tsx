@@ -48,6 +48,7 @@ import { DiffTab } from "./components/DiffTab";
 import { ProjectDiff } from "./components/ProjectDiff";
 import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
 import { BrowserTab } from "./components/BrowserTab";
+import { useBrowser } from "./state/browser";
 import { useBrowserFrames } from "./state/browserframes";
 import { BROWSER_TABS_MAX } from "./lib/workspace";
 import { judgeBrowserUrl } from "./lib/browser";
@@ -266,6 +267,7 @@ export default function App() {
   // PR #32). The ref is what the capture hooks read; the state re-runs the
   // wake recognizer's effect, which stops it.
   const [crashed, setCrashed] = useState(false);
+  const browser = useBrowser(view, settingsOpen || crashed, blocked);
   const crashedRef = useRef(false);
   // File panes holding an unsaved edit: such a buffer is never closed behind
   // the owner's back — "follow chat" waits, a project that goes away keeps
@@ -934,6 +936,7 @@ export default function App() {
 
   useEffect(() => {
     const stop = subscribe((e: any) => {
+      browser.onEvent(e);
       const kind = e.kind;
       const data = e.data || e;
       const at = live.current;
@@ -3016,8 +3019,11 @@ export default function App() {
             drawn={info.drawn}
             projectId={paneProject(spec, n)}
             browser={spec.browser}
+            control={browser}
+            spec={spec}
+            zoom={view.zoom}
             liveFrames={browserFrames}
-            blocked={blocked}
+            blocked={workBlocked}
             limitMessage={browserFull === n}
             onLoaded={(id, url) => view.setBrowserUrl(n, url, id)}
             onSubmitted={(id, url) => view.submitBrowserUrl(n, url, id)}

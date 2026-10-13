@@ -195,9 +195,9 @@ def _port_checks(page, mock, check, until):
     until(lambda: _count(page, FRAME) > 0, timeout=4)
     page.wait_for_timeout(200)
     check("not as localhost either", _count(page, KEEP) == 0 and _sandbox(page) == OFF)
-    _load(page, "https://example.com/")
+    _load(page, "file:///tmp/refused")
     until(lambda: _count(page, REFUSED) > 0, timeout=3)
-    check("a URL that is not local is refused, with no switch", _count(page, FRAME) == 0 and _count(page, KEEP) == 0)
+    check("a non-http URL is refused, with no origin switch", _count(page, FRAME) == 0 and _count(page, KEEP) == 0)
 
 
 def _keep_checks(page, mock, check, until):
