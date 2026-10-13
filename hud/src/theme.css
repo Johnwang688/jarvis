@@ -234,17 +234,16 @@ h2.bar {
   .act.working, .tree-row.act-working { animation: none; }
 }
 .tree-row .nm { overflow: hidden; text-overflow: ellipsis; }
-/* Chat titles (2026-10-12): a chat row's title wraps, never an ellipsis,
-   clamped at three lines (lib/threadTitle.ts TITLE_LINES); the whole title is
-   its tooltip. An untitled chat reads "New thread" or "Untitled", muted. */
-.tree-row.titled { align-items: flex-start; white-space: normal; }
+/* Chat titles: one line with an ellipsis. HoverTitle scrolls overflowing
+   titles on hover; the whole title remains available in the tooltip. */
 /* The title keeps room for a few words; a pinned model's badge gives way. */
-.tree-row.titled > .badge.pin { flex: 0 1 auto; min-width: 3em; }
+.tree-row.titled > .badge.pin { flex: 0 4 auto; min-width: 0; }
 .tree-row .nm.ttl {
-  flex: 1 1 8em; min-width: 6em; white-space: normal; overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
-  overflow: hidden; line-height: 1.35;
+  flex: 1 1 8em; min-width: 0; white-space: nowrap;
+  display: block; overflow: hidden; text-overflow: ellipsis; line-height: 1.35;
 }
+.tree-row .nm.ttl[data-scrolling="true"] { text-overflow: clip; }
+.tree-row .nm.ttl[data-scrolling="true"] .title-text { display: inline-block; }
 .tree-row .nm.ttl.untitled { font-style: italic; color: var(--text-muted); padding-right: 3px; }
 .indent-1 { padding-left: 26px; }
 .indent-2 { padding-left: 40px; }
