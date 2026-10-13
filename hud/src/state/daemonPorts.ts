@@ -16,6 +16,7 @@ import { DEFAULT_PORTS, daemonPortsFrom, type DaemonPorts } from "../lib/browser
 export interface PortsState {
   status: "pending" | "ok" | "failed";
   ports: DaemonPorts;
+  controlPorts?: readonly number[];
 }
 
 /** The port this window was served from. */
@@ -41,7 +42,9 @@ export function loadDaemonPorts() {
   const ask = (attempt: number) => {
     api
       .status()
-      .then((status) => set({ status: "ok", ports: daemonPortsFrom(status, selfPort()) }))
+      .then((status) => set({ status: "ok", ports: daemonPortsFrom(status, selfPort()),
+        controlPorts: Array.isArray(status?.refused_ports) ? status.refused_ports.filter((p: unknown) =>
+          typeof p === "number" && Number.isInteger(p) && p > 0 && p < 65536) : [] }))
       .catch(() => {
         if (attempt < 5) setTimeout(() => ask(attempt + 1), 1000 * (attempt + 1));
         else set({ status: "failed", ports: { ...DEFAULT_PORTS, self: selfPort() } });

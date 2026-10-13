@@ -1558,6 +1558,12 @@ class Terminals:
         except Exception as exc:  # noqa: BLE001 — a bus problem never fails a read
             LOG.warning("terminal %s: read not published (%s)", terminal.id, type(exc).__name__)
 
+    def readable_source(self, terminal_id: str) -> bool:
+        """BR5 provenance check only: no text, title, folder or mutable handle."""
+        with self._lock:
+            terminal = self._terminals.get(terminal_id)
+            return bool(terminal is not None and terminal.readable)
+
     def read(self, spec, lines: int = terminal_guard.DEFAULT_LINES) -> "ToolRead":
         terminal = self._resolve(spec)
         if not terminal.readable:

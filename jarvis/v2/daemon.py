@@ -300,8 +300,12 @@ class Daemon:
         # On the bus and in the log it is nothing but classes and counts.
         from .browser.host import BrowserHost
         self.browser = BrowserHost(self)
+        from .browser.look import BrowserLook
+        self.browser_look = BrowserLook(self)
         from .devservers import DevServers
         self.devservers = DevServers(self, proc_root=dev_proc_root, cgroup_root=dev_cgroup_root)
+        from .browser.panes import BrowserPanes
+        self.browser_panes = BrowserPanes(self)
         # Per-session jarvis-mcp caller tokens (callers.py, plan 2026-10-10
         # §1): minted in `_run_brief` for an owner's Claude or Codex chat that
         # is offered session tools, held only as digests, revoked whenever
@@ -358,6 +362,7 @@ class Daemon:
             connect_controls(self)
             # `terminal_read` (WP-F) reads these terminals and no others.
             self.terminals.install()
+            self.browser_look.install()
             self.devservers.start()
             self.schedules.start()
 
@@ -456,6 +461,10 @@ class Daemon:
                     "refused_ports": refused_ports, "dev_watch": dev_watch}
 
     def _dev_settings_changed(self):
+        # A fixed preference fact, never a server URL or a Remote navigation.
+        # Publish before lapsing claims so windows invalidate queued work first.
+        self.bus.publish({"kind": "dev_server_settings",
+                          "data": {"auto_open": self.browser_settings.auto_open()}})
         self.devservers.settings_changed()
 
     def _dev_known(self):
@@ -505,9 +514,11 @@ class Daemon:
     def _dev_stream_started(self, window):
         with self._lock:
             self._dev_streams[window] = self._dev_streams.get(window, 0) + 1
+            self.browser_panes.window_started(window)
 
     def _dev_stream_ended(self, window):
         with self._lock:
+            self.browser_panes.window_ended(window)
             remaining = self._dev_streams[window] - 1
             if remaining:
                 self._dev_streams[window] = remaining
@@ -1697,6 +1708,8 @@ class Daemon:
         # The Browser's Chrome, its driver and its gate (BR-1a): after the
         # terminals, before the listeners close. Its own bound, past the
         # daemon's: a Chrome that will not close is killed by exact PID.
+        self.browser_look.stop()
+        self.browser_panes.stop()
         self.browser.stop()
         self.bus.close()
         for server, worker in self._listeners:

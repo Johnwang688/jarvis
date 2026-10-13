@@ -4,7 +4,7 @@ import type { BrowserTabSpec } from "../lib/workspace";
 
 /** Direct and future Remote tabs share this strip; page content lives elsewhere. */
 export function BrowserTabStrip(props: {
-  tabs: readonly BrowserTabSpec[]; active: string; blocked?: boolean;
+  tabs: readonly BrowserTabSpec[]; active: string; blocked?: boolean; unseen?: readonly string[];
   onActivate: (id: string) => void; onClose: (id: string) => void; onNew: () => void;
 }) {
   const row = useRef<HTMLDivElement>(null);
@@ -25,6 +25,7 @@ export function BrowserTabStrip(props: {
           row.current?.querySelector<HTMLButtonElement>('[data-browser-tab="' + next.id + '"]')?.focus();
         }}>
         {tab.auto ? <span className="browserautomark" aria-label="Opened automatically">·</span> : null}
+        {props.unseen?.includes(tab.id) ? <span className="browser-unseen" aria-label="New tab" /> : null}
         <span>{browserLabel(tab.url)}</span>
       </button>
       <button type="button" className="browsertabclose" data-testid="browser-tab-close" tabIndex={-1}

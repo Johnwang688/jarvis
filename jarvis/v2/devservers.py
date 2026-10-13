@@ -159,6 +159,15 @@ class DevServers:
             if not self.enabled():
                 for sock in list(self._sockets):
                     self._close_socket(sock)
+                # OFF revokes a placement still waiting on a window/card,
+                # including an arbitration in progress. ON cannot revive it.
+                for entry in self._entries.values():
+                    if entry.listening and entry.state == "claimed":
+                        self._lapse(entry)
+                    else:
+                        entry.claims.clear()
+                        entry.claim_until = None
+                self._changed.notify_all()
 
     def _ensure_thread(self):
         if self._stopped or self._faulted or self.reader is None:
@@ -619,10 +628,23 @@ class DevServers:
                 e.claims = [c for c in e.claims if c.window != window]
             self._changed.notify_all()
 
+    def source_snapshot(self, entry_id):
+        """Copy source identity under the registry lock; never return an Entry.
+
+        Consumers retain this immutable-at-binding copy after entry expiry. An
+        unknown ID is not an owner URL, and labels never authorize a read.
+        """
+        if not isinstance(entry_id, str) or not re.fullmatch(r"ds_[0-9a-f]{8}", entry_id):
+            return None
+        with self._lock:
+            self._expire(self.clock())
+            entry = next((e for e in self._entries.values() if e.id == entry_id), None)
+            return deepcopy(entry.source) if entry is not None else None
+
     def listing(self, window=None):
         with self._lock:
             self._expire(self.clock())
-            return {"servers": [{"id": e.id, "url": e.url, "state": e.state,
+            return {"auto_open": self.enabled(), "servers": [{"id": e.id, "url": e.url, "state": e.state,
                 "source": dict(e.source), "claimed": e.window is not None, "mine": e.window == window
                 if window is not None else False} for e in self._entries.values()
                 if e.listening and e.state != "dismissed"]}
@@ -638,6 +660,8 @@ class DevServers:
     def claim(self, entry_id, window, shows, focused_at):
         # The route validates every field before making this Claim.
         with self._changed:
+            if not self.enabled():
+                return 409, {"error": "automatic opening is off", "code": "off"}
             e = self._entry(entry_id)
             if not e.listening or e.state in ("down", "dismissed"):
                 return 409, {"error": "dev server is gone", "code": "gone"}
@@ -660,6 +684,8 @@ class DevServers:
                         e.claim_until = None
                     break
                 self._changed.wait(left)
+            if not self.enabled():
+                return 409, {"error": "automatic opening is off", "code": "off"}
             if not e.listening or e.state in ("down", "dismissed"):
                 return 409, {"error": "dev server is gone", "code": "gone"}
             won = e.state == "claimed" and e.window == window and not self._stopped
@@ -668,6 +694,8 @@ class DevServers:
     def act(self, entry_id, action, window):
         from .daemon import APIError
         with self._lock:
+            if action != "dismiss" and not self.enabled():
+                return 409, {"error": "automatic opening is off", "code": "off"}
             e = self._entry(entry_id)
             if not e.listening or e.state in ("down", "dismissed"):
                 return 409, {"error": "dev server is gone", "code": "gone"}

@@ -14,6 +14,7 @@ import type { Attachment, Project } from "../types";
 import { folderName } from "../lib/compose";
 import { joined, pendingAfter, type GiveBack } from "../lib/giveback";
 import { MAX_FILES } from "../lib/chats";
+import { requestInputFit, cancelInputFit } from "../lib/inputFit";
 
 export { MAX_FILES };
 
@@ -33,21 +34,7 @@ export interface ProjectChip {
   onNewProject: () => void;
 }
 
-/** The box grows with what is typed, up to this many lines, then scrolls. */
-export const MAX_LINES = 15;
-/** …and never past this share of its pane's height: in a short pane (a split
- * of rows, a small window at a high zoom) fifteen lines pushed Send and the
- * chips out of the pane and squeezed the conversation to nothing (review of
- * PR #29). */
-export const MAX_PANE_SHARE = 0.35;
-/** …and never so tall that the conversation above it gets less than this
- * (zoomed px) or this share of the pane, whichever is more: at the pane's
- * minimum, with the bottom panel open, 35% still left the log 36px. */
-export const MIN_LOG_PX = 96;
-export const MIN_LOG_SHARE = 0.3;
-/** But the box itself never stops short of this many lines: a pane that
- * cannot fit the conversation's minimum gets a two-line box that scrolls. */
-export const MIN_LINES = 2;
+export { MAX_LINES, MAX_PANE_SHARE, MIN_LOG_PX, MIN_LOG_SHARE, MIN_LINES } from "../lib/inputFit";
 
 const MAX_BYTES = 4 * 1024 * 1024;
 
@@ -185,52 +172,36 @@ export function InputBar(props: {
     const el = box.current;
     if (!el) return;
     const pane = el.closest<HTMLElement>(".wpane");
-    fit.current = () => {
-      const cs = getComputedStyle(el);
-      const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.45;
-      const edge = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
-      const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-      const lines = (n: number) => line * n + pad + edge;
-      let cap = lines(MAX_LINES);
-      // A hidden pane measures 0: its box is refitted when the pane is drawn.
-      const paneH = pane?.clientHeight ?? 0;
-      if (pane && paneH > 0) {
-        cap = Math.min(cap, paneH * MAX_PANE_SHARE);
-        const log = pane.querySelector<HTMLElement>('[data-testid="log"]');
-        if (log) {
-          // The pane's fixed parts, measured with the box at one line, when
-          // nothing overflows: everything but the conversation and the box.
-          el.style.height = `${lines(1)}px`;
-          const fixed = paneH - log.offsetHeight - el.offsetHeight;
-          const minLog = Math.max(MIN_LOG_PX, paneH * MIN_LOG_SHARE);
-          cap = Math.min(cap, paneH - fixed - minLog);
-        }
-      }
-      cap = Math.max(lines(MIN_LINES), cap);
-      el.style.height = "auto";
-      const want = el.scrollHeight + edge;
-      el.style.height = `${Math.min(want, cap)}px`;
-      el.style.overflowY = want > cap ? "auto" : "hidden";
-    };
+    const log = pane?.querySelector<HTMLElement>('[data-testid="log"]');
+    const measure = () => ({
+      width: el.clientWidth, height: pane?.clientHeight ?? 0,
+      fixed: pane && log ? pane.clientHeight - log.offsetHeight - el.offsetHeight : 0,
+    });
+    let previous = measure();
+    // Store the observer baseline after all writes. The textarea and log
+    // resize inversely; rounding their heights must not schedule a loop.
+    fit.current = () => requestInputFit(el, () => { previous = measure(); });
     fit.current();
-    if (typeof ResizeObserver === "undefined") return;
-    let width = el.clientWidth;
-    let height = pane?.clientHeight ?? 0;
+    if (typeof ResizeObserver === "undefined") return () => {
+      fit.current = () => {}; cancelInputFit(el);
+    };
     const ro = new ResizeObserver(() => {
-      const w = el.clientWidth;
-      const h = pane?.clientHeight ?? 0;
-      if (w === width && h === height) return;
-      width = w;
-      height = h;
+      const next = measure();
+      if (next.width === previous.width && next.height === previous.height
+          && Math.abs(next.fixed - previous.fixed) <= 1) return;
+      previous = next;
       fit.current();
     });
     ro.observe(el);
     if (pane) ro.observe(pane);
-    return () => ro.disconnect();
+    // Fixed rows can grow while the pane itself keeps exactly its size:
+    // model errors, header notices, status text, or the thinking line.
+    if (log) ro.observe(log);
+    return () => { ro.disconnect(); fit.current = () => {}; cancelInputFit(el); };
   }, []);
   useLayoutEffect(
     () => fit.current(),
-    [text, files.length, notes.length, props.imageNote, props.status != null, !!props.footLine],
+    [text, files.length, notes.length, props.imageNote, props.status, !!props.footLine],
   );
 
   // REVIEW dictation puts the transcript in the box and focuses it. Nothing is

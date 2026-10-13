@@ -473,8 +473,10 @@ path has no tool that can change anything.** Its toolset is read-only files,
 `grep_files`, a single-page `fetch_page`, memory, threads/sessions read,
 `task_status`, and one new tool, `task_propose` — plus, since WP-F and only
 for the owner's own chat turn typed in the HUD, the read-only
-`terminal_read` (§18). It cannot edit, run a
-command, browse interactively, or spawn anything. So a fast-path turn that
+`terminal_read` (§18) and `hud_browser_view` (BR5; current Browser notes).
+The latter reads a live, owner-visible HUD Browser pane with its see permission;
+it cannot input, navigate the owner page or grant a local port. It cannot edit,
+run a command, browse interactively, or spawn a task. So a fast-path turn that
 misjudges a request as chat can only *answer badly*; it cannot half-do work.
 
 The fast path's prompt carries the escalation test, and the loop enforces the

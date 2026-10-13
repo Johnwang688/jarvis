@@ -63,6 +63,7 @@ from urllib.parse import quote
 from . import files as _files
 from .files import FileRefused
 from .host import BrowserRefused
+from .panes import PaneRefused
 from .policy import URLRefused
 from .settings import DEFAULTS as SETTINGS
 from .stream import SOCKET_PENDING
@@ -146,6 +147,16 @@ def route(handler, daemon, parts, query):
     host = daemon.browser
     settings = daemon.browser_settings
     try:
+        if parts == ["browser", "front"] and method == "POST":
+            return 200, daemon.browser_panes.report(handler._body())
+        if len(parts) >= 3 and parts[1] == "panes":
+            if parts[2] not in tuple(str(n) for n in range(1, 9)):
+                _fail(400, "choose a Browser pane number")
+            pane_id = int(parts[2])
+            if len(parts) == 3 and method == "PATCH":
+                return 200, daemon.browser_panes.permissions(pane_id, handler._body())
+            if len(parts) == 6 and parts[3] == "tabs" and parts[5] == "address" and method == "POST":
+                return 200, daemon.browser_panes.address(pane_id, parts[4], handler._body())
         if attach:
             from .. import ws
             from ..hud_api import frame_headers
@@ -248,6 +259,6 @@ def route(handler, daemon, parts, query):
             return 200, host.forget(parts[2])
     except URLRefused as refusal:
         _fail(400, str(refusal))
-    except (BrowserRefused, FileRefused) as refusal:
+    except (BrowserRefused, FileRefused, PaneRefused) as refusal:
         _fail(refusal.status, str(refusal))
     _fail(404, "route not found")
