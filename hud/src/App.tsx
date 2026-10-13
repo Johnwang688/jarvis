@@ -48,10 +48,13 @@ import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
 import { ProjectDiff } from "./components/ProjectDiff";
 import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
-import { BrowserTab, type BrowserRequest } from "./components/BrowserTab";
+import { BrowserTab } from "./components/BrowserTab";
+import { useBrowserFrames } from "./state/browserframes";
+import { BROWSER_TABS_MAX } from "./lib/workspace";
 import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
-import { allowRestore, installFrameGuard } from "./state/frameguard";
+import { allowRestore, cancelLoad, installFrameGuard } from "./state/frameguard";
+import { frameKey } from "./lib/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
@@ -216,6 +219,7 @@ export default function App() {
   const editorKeyRef = useRef<(what: EditorShortcut) => void>(() => {});
   const view = useLayout(blocked, (what) => editorKeyRef.current(what),
     { open: settingsOpen, toggle: () => settingsKeyRef.current() });
+  const browserFrames = useBrowserFrames(view.ws, view.fit.panes, settingsOpen);
   // Under a card nothing reaches a shell (WP-D). Said from here, above the
   // workspace's error boundary: a render error unmounts the workspace, but
   // the terminals' sockets and paste pumps live on, and a hold driven from in
@@ -793,8 +797,9 @@ export default function App() {
         // one anywhere (review of PR #47).
         const back = conversation();
         const { ws } = layoutNow.current;
-        const closed = !ws.order.includes(pane) && !ws.kept.includes(pane);
-        const parkKey = !threadId && back === null ? (closed ? ORPHAN_DRAFT : `compose:${pane}`) : null;
+        const draftPane = back ?? pane;
+        const closed = !inWorkspace(ws, draftPane);
+        const parkKey = !threadId ? (closed ? ORPHAN_DRAFT : `compose:${draftPane}`) : null;
         const went = giveBack(threadId, text, attachments, back, parkKey, compose?.projectId ?? null);
         // Held for a thread no drawn pane shows (a first send that failed at
         // `/send` after its pane closed): said, naming the thread, so the
@@ -809,7 +814,7 @@ export default function App() {
         const error = `Could not send: ${e.message}`
           + (went === "parked"
             ? (closed ? " — what you wrote is kept for the next new thread you start."
-              : " — what you wrote is kept for the next new thread in this pane.")
+              : " — what you wrote is kept until this pane shows a new thread again.")
             : went === "held" && threadId
               ? ` — what you wrote waits with ${named(threadId)}: it is back in the box when you open that thread.`
               : "");
@@ -1394,10 +1399,10 @@ export default function App() {
    * daemon's ports, goes to a drawn Browser pane — the focused one if it is
    * one — else the focused pane switches to Browser (the sidebar's click
    * rule, lib/workspace `show`), unless that pane holds an unsaved edit. The
-   * pane loads it as a request, judged again there, and stores it.
+   * pane adds and selects a tab (or selects its exact URL), judged again
+   * there. Its previous page stays; this creates no frame-focus gesture.
    */
-  const [browserAsk, setBrowserAsk] = useState<Partial<Record<PaneNo, BrowserRequest>>>({});
-  const browserSeq = useRef(0);
+  const [browserFull, setBrowserFull] = useState<PaneNo | null>(null);
 
   // ---- the editor's navigation (ED-7) ------------------------------------------
 
@@ -1456,18 +1461,19 @@ export default function App() {
     const lay = layoutNow.current;
     const pane = showOf(lay.ws, "browser", lay.fit.panes).focused;
     if (!showView("browser")) return false;
-    const n = ++browserSeq.current;
-    setBrowserAsk((asks) => ({ ...asks, [pane]: { url: v.url, n } }));
+    const tabs = lay.ws.panes[pane - 1].browser?.tabs ?? [];
+    const same = tabs.find((t) => t.url === v.url);
+    if (same) {
+      cancelLoad(frameKey(pane, same.id));
+      view.activateBrowserTab(pane, same.id);
+    }
+    else {
+      if (tabs.length >= BROWSER_TABS_MAX) { setBrowserFull(pane); return false; }
+      view.addBrowserTab(pane, v.url);
+    }
+    setBrowserFull(null);
     return true;
-  }, [showView]);
-  const browserHandled = useCallback((pane: PaneNo, n: number) => {
-    setBrowserAsk((asks) => {
-      if (asks[pane]?.n !== n) return asks;
-      const next = { ...asks };
-      delete next[pane];
-      return next;
-    });
-  }, []);
+  }, [showView, view.activateBrowserTab, view.addBrowserTab]);
 
   /** Put a chat on screen in `pane`: focus it, switching its view to chat when it shows something else. */
   const placeChat = useCallback((pane: PaneNo): boolean => {
@@ -1610,12 +1616,7 @@ export default function App() {
       for (const k of PANE_NOS) if (next[k]?.pane === n) delete next[k];
       return next;
     });
-    setBrowserAsk((asks) => {
-      if (!asks[n]) return asks;
-      const next = { ...asks };
-      delete next[n];
-      return next;
-    });
+    setBrowserFull((full) => full === n ? null : full);
   }, [dispatch]);
 
   /**
@@ -2080,6 +2081,26 @@ export default function App() {
       }
     }
   }, [booted, emptyChatPanes, chatPatch]);
+
+  // Failed first sends can return while their compose row is hidden. Take
+  // them up only when that same row is actually drawn; its identity is checked
+  // again by the reducer, and duplicate effects cannot consume it twice.
+  const parkedCompose = (settingsOpen ? [] : view.fit.panes).filter(n => {
+    const c = state.chats[n];
+    return view.ws.panes[n - 1].view === "chat" && !c.threadId && c.compose?.id
+      && !c.compose.openedId && state.drafts[`compose:${n}`];
+  }).map(n => `${n}:${state.chats[n].compose!.id}`).join("|");
+  useEffect(() => {
+    if (!parkedCompose) return;
+    for (const n of chatsOnScreen()) {
+      const c = live.current.chats[n];
+      if (c.compose?.id && !c.threadId && !c.compose.openedId && live.current.drafts[`compose:${n}`]) {
+        dispatch({ type: "restore_compose", pane: n, composeId: c.compose.id });
+      }
+    }
+    // The primitive key changes only for a drawn row with parked words.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parkedCompose, dispatch]);
 
   // A thread's transcript is loaded when a pane opens it, so switching redraws
   // from the saved conversation rather than from whatever is on screen. A
@@ -3026,13 +3047,15 @@ export default function App() {
             slot={info.slot}
             drawn={info.drawn}
             projectId={paneProject(spec, n)}
-            url={spec.browserUrl}
-            keepOrigin={spec.keepOrigin}
-            request={browserAsk[n] ?? null}
+            browser={spec.browser}
+            liveFrames={browserFrames}
             blocked={blocked}
-            onLoaded={(url) => view.setBrowserUrl(n, url)}
-            onKeepOrigin={(origin) => view.setKeepOrigin(n, origin)}
-            onRequestHandled={(k) => browserHandled(n, k)}
+            limitMessage={browserFull === n}
+            onLoaded={(id, url) => view.setBrowserUrl(n, url, id)}
+            onKeepOrigin={(id, origin) => view.setTabKeepOrigin(n, id, origin)}
+            onAdd={(id) => view.addBrowserTab(n, "", { id })}
+            onClose={(id) => view.closeBrowserTab(n, id)}
+            onActivate={(id) => view.activateBrowserTab(n, id)}
             onProjectRoot={(id) => view.pin(n, id)}
           />
         );
@@ -3619,7 +3642,7 @@ export default function App() {
                 });
                 // A new project starts as a new thread in it.
                 newThread(created.id);
-                if (channelNote) patch({ error: channelNote });
+                if (channelNote) dispatch({ type: "notice", text: channelNote });
               })
           }
           taken={projectNamesTaken(state.projects, null, state.archivedNames)}

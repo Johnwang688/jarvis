@@ -790,3 +790,81 @@ describe("tool transcript state (TC-2)", () => {
     expect(reduce(s, { type: "transcript", threadId: "gone", rows: [] })).toBe(s);
   });
 });
+
+
+describe("checkpoint compose draft regressions", () => {
+  const files = (count: number) => Array.from({ length: count }, (_, i) => ({ name: `f${i}.txt`, mime: "text/plain", data_b64: "" }));
+  it("reports concurrent attachment overflow against the reducer's actual current state", () => {
+    for (const shown of [false, true]) {
+      let s = withChats(shown ? { 2: { threadId: "t1" } } : {});
+      s = reduce(s, { type: "stage", key: "t1", files: files(5) });
+      s = reduce(s, { type: "stage", key: "t1", files: files(5) });
+      expect(shown ? s.chats[2].files.length : s.drafts.t1.files.length).toBe(8);
+      expect(s.error).toContain("2 files were left out");
+    }
+  });
+  it("keeps already parked compose words when their pane closes, even if it shows another thread", () => {
+    for (const threadId of [null, "t2"]) {
+      let s = withChats({ 2: { threadId, compose: threadId ? null : { projectId: "p1" } } });
+      s = reduce(s, { type: "park", key: "compose:2", text: "failed send", files: files(1), projectId: "p1" });
+      s = reduce(s, { type: "release_chat", pane: 2 });
+      expect(s.drafts["compose:2"]).toBeUndefined();
+      expect(s.drafts["compose:*"].text).toBe("failed send");
+      expect(s.drafts["compose:*"].files).toHaveLength(1);
+      expect(s.drafts["compose:*"].projects).toEqual(["p1"]);
+      expect(s.error).toContain("next new thread");
+    }
+  });
+});
+
+
+describe("drawn compose restoration", () => {
+  it("merges the current parked draft once, and refuses stale compose identities", () => {
+    let s = withChats({ 2: { compose: { id: "c2", projectId: "p1" }, input: "new words" } });
+    s = reduce(s, { type: "park", key: "compose:2", text: "failed words" });
+    const action = { type: "restore_compose" as const, pane: 2 as const, composeId: "old" };
+    expect(reduce(s, action)).toBe(s);
+    const current = { ...action, composeId: "c2" };
+    s = reduce(s, current);
+    expect(s.chats[2].input).toBe("new words\nfailed words");
+    expect(s.drafts["compose:2"]).toBeUndefined();
+    expect(reduce(s, current)).toBe(s);
+    expect(reduce(s, { ...current, pane: 3 })).toBe(s);
+  });
+  it("does not restore compose words into an existing or opened thread", () => {
+    for (const fields of [{ threadId: "t1" }, { compose: { id: "c2", projectId: "p1", openedId: "t1" } }]) {
+      const s = withChats({ 2: { compose: { id: "c2", projectId: "p1" }, ...fields } },
+        { drafts: { "compose:2": { text: "private draft", files: [] } } });
+      expect(reduce(s, { type: "restore_compose", pane: 2, composeId: "c2" })).toBe(s);
+    }
+  });
+  it("replaces its own obsolete location notice and keeps a later channel failure", () => {
+    let s = withChats({ 8: { compose: { id: "c8", projectId: "p1" }, input: "saved" } });
+    s = reduce(s, { type: "release_chat", pane: 8, keep: true });
+    expect(s.error).toContain("kept for the next new thread");
+    s = reduce(s, { type: "chat", pane: 8, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+    expect(s.error).toContain("are back");
+    expect(s.error).not.toContain("kept for the next new thread");
+    s = reduce(s, { type: "notice", text: "The project's channel could not be created." });
+    expect(s.error).toContain("are back");
+    expect(s.error).toContain("channel could not");
+  });
+  it("says when a pane's own pending draft leaves the orphan waiting", () => {
+    let s = withChats({}, { drafts: { "compose:2": { text: "mine", files: [] }, "compose:*": { text: "other", files: [] } } });
+    s = reduce(s, { type: "chat", pane: 2, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+    expect(s.chats[2].input).toBe("mine");
+    expect(s.drafts["compose:*"].text).toBe("other");
+    expect(s.error).toContain("Other unsent words are still kept");
+  });
+});
+
+
+it("an orphan takeup retains an unrelated thread-draft location notice", () => {
+  let s = withChats({ 2: { threadId: "t2", input: "thread words" } },
+    { drafts: { "compose:2": { text: "compose words", files: [] } } });
+  s = reduce(s, { type: "release_chat", pane: 2 });
+  s = reduce(s, { type: "chat", pane: 3, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+  expect(s.error).toContain("waits with its thread");
+  expect(s.error).toContain("are back");
+  expect(s.error).not.toContain("kept for the next new thread");
+});

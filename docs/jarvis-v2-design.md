@@ -1598,6 +1598,26 @@ personal chat off; the owner should reset that selection.
 
 ## 18. HUD v2 landed (2026-09-16)
 
+**Direct Browser tabs (AO-2, amendment 2 §E.3).** Browser panes store
+`browser: {tabs, active}`: up to 12 URLs with stable ids and per-tab origin
+grants. Old `browserUrl`/`previewUrl` migrate; saves mirror only the active
+`browserUrl`/`keepOrigin` for one release. Explicit empty tabs stay empty.
+Every tab's grant is rejudged with the serving daemon's ports, dormant tabs
+included; splits copy URLs with fresh ids, never grants or auto-source marks.
+The strip supports arrows, ×, middle-click and a blank + (URL box focused).
+At 12 a sentence refuses another. Terminal **Open in Browser opens a new tab**
+or selects an exact URL already present, keeping the previous page.
+`lib/browserframes.ts` and one App hook retain up to 3 visited frames per pane
+and 8 per window, drawn active tabs first, oldest backgrounds evicted. Hidden
+frames count; never-drawn stored panes do not. An evicted page reloads when
+picked. Each foreground/background iframe still belongs to `FrameHost`,
+guarded by stable `<pane>:<tab-id>`; tab selection grants only that exact
+frame. A stopped tab stays stopped until Reload. Background content is
+hidden/inert, and every strip/control is disabled under a card. Labels are
+cleaned host/path text, capped at 40; auto-source names cap at 60 and appear in
+visible chrome. Remote mode and autonomous placement remain later packages.
+
+
 Model defaults (2026-10-12): the owner chose `anthropic/claude-haiku-5.5`
 for OpenRouter's orchestrator and following tiers. Below 100k prompt tokens it
 lists at `openai/gpt-6-luna`'s price: $0.10 in and $0.50 out per M, cache reads

@@ -1303,6 +1303,25 @@ own server and is unaffected.
   (`false` before the daemon has started). A HUD whose `/status` lacks it
   (an older daemon) never offers "keep its own origin".
 
+**Direct Browser tabs (AO-2, amendment 2 §E.3).** Browser panes store
+`browser: {tabs, active}`: up to 12 URLs with stable ids and per-tab origin
+grants. Old `browserUrl`/`previewUrl` migrate; saves mirror only the active
+`browserUrl`/`keepOrigin` for one release. Explicit empty tabs stay empty.
+Every tab's grant is rejudged with the serving daemon's ports, dormant tabs
+included; splits copy URLs with fresh ids, never grants or auto-source marks.
+The strip supports arrows, ×, middle-click and a blank + (URL box focused).
+At 12 a sentence refuses another. Terminal **Open in Browser opens a new tab**
+or selects an exact URL already present, keeping the previous page.
+`lib/browserframes.ts` and one App hook retain up to 3 visited frames per pane
+and 8 per window, drawn active tabs first, oldest backgrounds evicted. Hidden
+frames count; never-drawn stored panes do not. An evicted page reloads when
+picked. Each foreground/background iframe still belongs to `FrameHost`,
+guarded by stable `<pane>:<tab-id>`; tab selection grants only that exact
+frame. A stopped tab stays stopped until Reload. Background content is
+hidden/inert, and every strip/control is disabled under a card. Labels are
+cleaned host/path text, capped at 40; auto-source names cap at 60 and appear in
+visible chrome. Remote mode and autonomous placement remain later packages.
+
 **The Browser pane (`lib/browser.ts`, `BrowserTab.tsx`; the Preview pane,
 `lib/preview.ts` and `PreviewTab.tsx`, until BR-3a):**
 - **Refused ports**: the HUD's (`hud_port`, 8402), the API's (`api_port`,
@@ -1320,7 +1339,7 @@ own server and is unaffected.
   flags reloads the page under them.
 - **No frame takes the keyboard on its own** (R-1, amendment 2 §E.8,
   2026-10-12). The iframe (`browser-frame`, with `data-browser-frame=
-  "<pane>:<tab>"`, tab 0 until Direct tabs) is made by script and has a
+  "<pane>:<tab-id>"`, a stable tab identity) is made by script and has a
   transparent shield over it (`browser-shield`, `data-up` "true" while it
   catches the pointer). A frame that gains focus without the owner's gesture
   — the pointer over it, Tab or Shift+Tab within 300 ms, their own load
@@ -1342,15 +1361,17 @@ own server and is unaffected.
   loaded URL is loopback `http(s)` on a port that is none of `hud_port`,
   `workshop_port`, `api_port`, 8402, 8403, 8405 nor the window's own, and
   only while `/status` says `frame_hardened: true`. Stored with the pane
-  spec (`jarvis.hud.workspace`) as `keepOrigin: "<scheme://host:port>"` —
+  spec's individual tab (`jarvis.hud.workspace`) as
+  `browser.tabs[i].keepOrigin: "<scheme://host:port>"` —
   the origin it was given for — so loading a URL on another port, host or
   scheme turns it off (`setBrowserUrl` drops it, and the frame applies it
   only while the origins match). Judged again on every load
   (`keptOrigin`) and **dropped from storage** when it no longer passes; the
   parser keeps only a grant that is exactly the stored URL's origin on a
   non-default loopback port. Disabled under an approval card (and inert
-  behind its veil). A split copies a Browser pane's URL, judged again
-  on load, and **never** its keep-origin grant (WP-G2).
+  behind its veil). A split copies every Browser tab URL with fresh ids,
+  judged again on load, and **never** its keep-origin grant or auto-source
+  mark (AO-2).
 - **Why it is safe**: scripts plus same-origin amount to no sandbox only
   when the framed page is the parent's origin. The port check refuses the
   HUD's origin up front, and `frame-ancestors 'none'` on every HUD and API
