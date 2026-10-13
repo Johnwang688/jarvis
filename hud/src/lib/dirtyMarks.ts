@@ -19,6 +19,7 @@ export interface DirtyBuffer {
   projectId: string;
   path: string;
   dirty: boolean;
+  aliases?: readonly { projectId: string; path: string }[];
 }
 
 const trimSlashes = (p: string) => p.replace(/^\/+|\/+$/g, "");
@@ -46,6 +47,11 @@ export function dirtyPathsIn(bufs: readonly DirtyBuffer[], projectId: string, ro
   const out = new Set<string>();
   for (const b of bufs) {
     if (!b.dirty) continue;
+    const aliases = b.aliases?.filter(a => a.projectId === projectId);
+    if (aliases?.length) {
+      for (const alias of aliases) { const p = trimSlashes(alias.path); if (p) out.add(p); }
+      continue;
+    }
     if (b.projectId === projectId) {
       const p = trimSlashes(b.path);
       if (p) out.add(p);
