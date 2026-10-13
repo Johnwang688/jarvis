@@ -128,7 +128,13 @@ def _setup(page, mock, until, pane2: dict | None = None):
     until(lambda: _visible(page, _pane(2, '[data-testid="browser-url"]')), timeout=3)
 
 
+def _options(page, opened=True, pane=2):
+    button=page.locator(_pane(pane,'[data-testid="browser-options-toggle"]'))
+    if (button.get_attribute("aria-expanded")=="true") != opened:button.click()
+
+
 def _load(page, url: str):
+    _options(page, False)
     page.locator(_pane(2, '[data-testid="browser-url"]')).fill(url)
     page.locator(_pane(2, '[data-testid="browser-go"]')).click()
     page.wait_for_timeout(150)
@@ -185,6 +191,7 @@ def _port_checks(page, mock, check, until):
               word in text and _count(page, FRAME) == 0 and _count(page, KEEP) == 0, text)
     check("and nothing reached the API listener", mock.api_hits == [], str(mock.api_hits))
 
+    _options(page)
     page.locator(_pane(2, '[data-testid="browser-project"]')).click()
     until(lambda: _count(page, FRAME) > 0, timeout=4)
     check("the workshop loads, its sandbox exactly allow-scripts allow-forms", _sandbox(page) == OFF,
@@ -209,6 +216,7 @@ def _keep_checks(page, mock, check, until):
     until(lambda: _count(page, FRAME) > 0 and _count(page, KEEP) > 0, timeout=4)
     check("a local dev server loads, its sandbox exactly allow-scripts allow-forms", _sandbox(page) == OFF,
           str(_sandbox(page)))
+    _options(page)
     check("and the pane offers 'Keep its origin', off by default",
           _visible(page, KEEP) and not _keep_checked(page) and page.locator(KEEP).get_attribute("data-origin") == origin)
     until(lambda: _inside(page, "#storage") not in ("", "?"), timeout=4)
@@ -217,6 +225,7 @@ def _keep_checks(page, mock, check, until):
           f"{_inside(page, '#storage')} {_inside(page, '#origin')}")
     check("and the page came from the dev server", len(mock.dev_hits) > hits)
 
+    _options(page)
     page.locator(KEEP).check()
     until(lambda: _sandbox(page) == ON, timeout=3)
     check("on, the sandbox is exactly allow-scripts allow-forms allow-same-origin", _sandbox(page) == ON,
@@ -242,6 +251,7 @@ def _keep_checks(page, mock, check, until):
         if not _keep_checked(page):
             _load(page, dev)
             until(lambda: _count(page, KEEP) > 0, timeout=3)
+            _options(page)
             page.locator(KEEP).check()
             until(lambda: _sandbox(page) == ON and _stored(page) == origin, timeout=3)
         _load(page, url)
@@ -253,8 +263,10 @@ def _keep_checks(page, mock, check, until):
 
     _load(page, dev)
     until(lambda: _count(page, KEEP) > 0, timeout=3)
+    _options(page)
     page.locator(KEEP).check()
     until(lambda: _sandbox(page) == ON, timeout=3)
+    _options(page)
     page.locator(KEEP).uncheck()
     until(lambda: _sandbox(page) == OFF, timeout=3)
     check("unchecked, it is off and forgotten", _sandbox(page) == OFF and _stored(page) is None)
@@ -263,6 +275,7 @@ def _keep_checks(page, mock, check, until):
     # grant the owner just clicked must not sit under a habitual one (Space on
     # a focused checkbox flips it). Focus starts nowhere.
     page.evaluate("document.activeElement && document.activeElement.blur()")
+    _options(page)
     page.locator(KEEP).check()
     until(lambda: _sandbox(page) == ON, timeout=3)
     focused = _active_testid(page)
@@ -273,6 +286,7 @@ def _keep_checks(page, mock, check, until):
     check("review #40: a click leaves no focus on 'Keep its origin', so a Space after it flips nothing",
           focused != "browser-keep-origin" and _keep_checked(page) and _sandbox(page) == ON,
           f"focus={focused} checked={_keep_checked(page)} sandbox={_sandbox(page)}")
+    _options(page)
     page.locator(KEEP).uncheck()
     until(lambda: _sandbox(page) == OFF, timeout=3)
 
@@ -309,6 +323,7 @@ def _hardened_checks(page, mock, check, until):
         mock.frame_hardened = True
     _setup(page, mock, until, {"browserUrl": dev})
     until(lambda: _count(page, KEEP) > 0, timeout=4)
+    _options(page)
     check("the same daemon saying it again offers the switch again", _visible(page, KEEP) and not _keep_checked(page))
 
 
@@ -372,6 +387,7 @@ def _split_checks(page, mock, check, until):
     origin = f"http://127.0.0.1:{mock.dev_port}"
     _load(page, dev)
     until(lambda: _count(page, KEEP) > 0, timeout=4)
+    _options(page)
     page.locator(KEEP).check()
     until(lambda: _sandbox(page) == ON and _stored(page) == origin, timeout=3)
     page.locator('[data-testid="pane-2-split"]').click()

@@ -1642,3 +1642,16 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .voice-diagnostics p { color: var(--text-muted); font-size: 11px; }
 .voice-diagnostic-rows { padding: 0; list-style: none; max-height: 250px; overflow: auto; font: 11px var(--mono); }
 .voice-diagnostic-rows li { border-top: 1px solid var(--border); padding: 6px 0; overflow-wrap: anywhere; }
+
+/* Owner options are a pane-local overlay; active page status stays visible. */
+.browserbody { position: relative; }
+.browser-navigation { flex-wrap: nowrap !important; gap: 4px; }
+.browser-navigation > input { min-width: 40px !important; flex: 1 1 0 !important; }
+.browser-navigation > button { flex: 0 0 auto; padding: 3px 6px; }
+.browser-options { position: absolute; top: 62px; right: 8px; z-index: 8; width: min(440px, calc(100% - 16px)); max-height: calc(100% - 78px); overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-2); box-shadow: 0 8px 24px #0006; }
+.browser-options[hidden] { display: none; }
+.browser-options-heading { padding: 8px; font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.browser-options .browserprofilemanage { max-height: none; }
+.browser-project-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.browser-option-status:empty { display: none; }
+.browser-option-status p { margin: 4px 8px; }
