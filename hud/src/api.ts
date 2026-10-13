@@ -18,6 +18,7 @@ import { parseRow, parseRows, type InSpec } from "./lib/terminal";
 import { parseBuild, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
 import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./lib/vexNew";
 
+import type { CaptureIdentity } from "./lib/pageCapture";
 import { WINDOW_ID, isWindowId } from "./lib/windowId";
 
 export class ApiError extends Error {
@@ -84,6 +85,12 @@ export const api = {
   actDevServer: (id: string, action: "renew" | "placed" | "dismiss", window: string) =>
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/" + action, json({ window })),
   setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
+
+  captureBrowser: (tab: string, identity: CaptureIdentity, whole: boolean) => req<unknown>(
+    "/browser/tabs/" + encodeURIComponent(tab) + "/capture?" + new URLSearchParams({
+      window: identity.window, pane: String(identity.pane_id), local_tab: identity.local_tab_id,
+      view: identity.view_id, whole: whole ? "1" : "0",
+    })),
 
   // --- projects -----------------------------------------------------------
   projects: () => req<Project[]>("/projects"),

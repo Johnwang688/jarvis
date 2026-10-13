@@ -224,6 +224,39 @@ describe("a draft belongs to its conversation (review of PR #27)", () => {
     expect(s.chats[2].files.length).toBe(8);
   });
 
+  it("stages a capture pair atomically into its pinned conversation or parked draft", () => {
+    const image = { name: "page.png", mime: "image/png", data_b64: "image" };
+    const reference = { name: "page text", mime: "application/x-jarvis-page-capture", data_b64: "a".repeat(32) };
+    const pair = [image, reference];
+    let s = withChats({ 1: { threadId: "new", input: "new words" }, 2: { threadId: "original", input: "kept" } });
+    s = reduce(s, { type: "stage", key: "original", files: pair, atomic: true });
+    expect(s.chats[1].files).toEqual([]);
+    expect(s.chats[2].files).toEqual(pair);
+    expect(s.chats[2].input).toBe("kept");
+    s = reduce(s, { type: "stage", key: "closed-thread", files: pair, atomic: true });
+    expect(s.drafts["closed-thread"].files).toEqual(pair);
+  });
+
+  it("refuses the whole capture pair if capacity changed while export was pending", () => {
+    const f = (name: string) => ({ name, mime: "text/plain", data_b64: "" });
+    for (const count of [7, 8]) {
+      const had = Array.from({ length: count }, (_, i) => f(String(i)));
+      let s = withChats({ 1: { threadId: "t1", input: "words", files: had } });
+      s = reduce(s, { type: "stage", key: "t1", files: [f("page.png"), f("page text")], atomic: true });
+      expect(s.chats[1].files).toEqual(had);
+      expect(s.chats[1].input).toBe("words");
+      expect(s.error).toContain("two attachment slots");
+      const parked = reduce({ ...withChats({}), drafts: { t1: { text: "parked", files: had } } },
+        { type: "stage", key: "t1", files: [f("page.png"), f("page text")], atomic: true });
+      expect(parked.drafts.t1.files).toEqual(had);
+      expect(parked.drafts.t1.text).toBe("parked");
+    }
+    const had = Array.from({ length: 6 }, (_, i) => f(String(i)));
+    const s = reduce(withChats({ 1: { threadId: "t1", files: had } }),
+      { type: "stage", key: "t1", files: [f("page.png"), f("page text")], atomic: true });
+    expect(s.chats[1].files.length).toBe(8);
+  });
+
   it("parks a failed new-thread send's files with its words, and the next compose row there gets both (re-review of PR #27)", () => {
     const f = { name: "f.txt", mime: "text/plain", data_b64: "" };
     let s = reduce(withChats({ 1: { threadId: "t2" } }), { type: "park", key: "compose:1", text: "lost words", files: [f] });
