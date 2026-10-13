@@ -149,7 +149,10 @@ export class TalkHold {
       if (this.holding) return "swallow";
     } else {
       this.holding = false;
-      if (where.chordSecond) return "monaco";
+      if (where.chordSecond) {
+        this.holding = true; // its repeats remain the editor's hold across a focus change
+        return "monaco";
+      }
     }
     if (talkKeyAction(e, where) !== "talk") return "pass";
     if (e.repeat) return "swallow";
