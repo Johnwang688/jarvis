@@ -348,7 +348,8 @@ def scrub_rule_checks(root: Path) -> None:
     """ENV-1 review, MED-2: from a newly covered env file only secrets are
     withheld — a secret-named key's value, or a secret-looking value — so
     settings (`NODE_ENV=production`, `API_URL=https://…`) no longer mangle
-    ordinary output. `.env` and `.env.local` are scrubbed whole, as before."""
+    ordinary output. Since the owner's answer (2026-10-12) `.env` and
+    `.env.local` follow the same rule."""
     (root / ".env.preview").write_text(
         "NODE_ENV=production\nAPI_URL=https://api.example.com\nCOOKIE_SECURE=true\n"
         "SESSION_DRIVER=redis\nAPP_NAME=My Great Application\n"
@@ -371,18 +372,45 @@ def scrub_rule_checks(root: Path) -> None:
     for value in (STRIPE, DB_PASS, TOKEN40, "correcthorse", "sunshine99"):
         assert value not in cleaned, (value, cleaned)
     assert "lifetime 120" in cleaned, cleaned
-    # `.env` and `.env.local` keep today's rule: every value of 8+ characters.
-    whole = root / "whole"
-    whole.mkdir()
-    (whole / ".env").write_text("MODE=production-ish\n", encoding="utf-8")
+    # `.env` and `.env.local` follow the same rule now (the owner's answer,
+    # 2026-10-12): a setting is left alone, a secret-named key's value and a
+    # secret-looking value are still withheld.
+    for name in (".env", ".env.local"):
+        folder = root / ("narrow" + name)
+        folder.mkdir()
+        (folder / name).write_text(f"MODE=production-ish\nOPENROUTER_API_KEY={STRIPE}\n"
+                                   f"BUILD_ID={TOKEN40}\nDB_PASS=correcthorse\n", encoding="utf-8")
+        previous = Path.cwd()
+        os.chdir(folder)
+        try:
+            assert "production-ish" in scrub("mode is production-ish"), (name, "a setting was withheld")
+            for value in (STRIPE, TOKEN40, "correcthorse"):
+                assert value not in scrub(f"value {value} here"), (name, value)
+        finally:
+            os.chdir(previous)
+    # PR #80's review: joined *PASSWORD/*PASSWD/*CREDS names, CRED/CREDS and
+    # MNEMONIC keys, with values too short or too plain for the value rule.
+    joined = root / "joined"
+    joined.mkdir()
+    secrets_here = {"PGPASSWORD": "pgpw1234", "MYSQLPASSWORD": "mysql-pw-7",
+                    "ADMINPASSWD": "adm1nzz", "DB_CREDS": "user:pw99",
+                    "USERCREDS": "hunter2x", "CRED": "abcdefghijklmnopqr",
+                    "MNEMONIC": "apple river stone cloud mango tiger lemon eagle piano sugar ocean candle"}
+    (joined / ".env").write_text(
+        "".join(f"{k}={v}\n" for k, v in secrets_here.items())
+        + "KEYBOARD_LAYOUT=us-intl\nPASSWORD_MIN_LENGTH=12\nSACRED_GROVE=elm-valley\n",
+        encoding="utf-8")
     previous = Path.cwd()
-    os.chdir(whole)
+    os.chdir(joined)
     try:
-        assert "production-ish" not in scrub("mode is production-ish"), "the .env rule moved"
+        for key, value in secrets_here.items():
+            assert value not in scrub(f"got {value} back"), (key, "withheld by the key rule")
+        for setting in ("us-intl", "elm-valley"):
+            assert setting in scrub(f"layout {setting}"), (setting, "a setting was withheld")
     finally:
         os.chdir(previous)
     print("ok  scrub: a .env.preview's settings left alone (README intact); its secret key, "
-          "DSN password and 40-char token withheld; .env still scrubbed whole")
+          "DSN password and 40-char token withheld; .env and .env.local by the same rule; joined PASSWORD/CREDS names and MNEMONIC withheld")
     delta_review_checks(root)
 
 
