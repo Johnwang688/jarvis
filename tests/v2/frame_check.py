@@ -350,6 +350,8 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("POST", "/browser/profiles/p-00000000/forget", {}),
         # BR-1b: the socket's ticket and attach, a switch, a file chooser's
         # answer and the downloads — none of which starts Chrome either.
+        ("POST", "/browser/tabs/deadbeef/sound", {"on": True}),
+        ("POST", "/browser/tabs/deadbeef/sound-retry", {}),
         ("POST", "/browser/tabs/deadbeef/ticket", {}), ("GET", "/browser/tabs/deadbeef/attach", None),
         ("POST", "/browser/tabs/deadbeef/activate", {}),
         ("POST", "/browser/tabs/deadbeef/files", {"chooser": "x", "files": []}),

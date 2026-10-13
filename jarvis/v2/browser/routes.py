@@ -240,6 +240,9 @@ def route(handler, daemon, parts, query):
         if len(parts) == 3 and parts[1] == "tabs" and method == "DELETE":
             return 200, host.close_tab(parts[2])
         if len(parts) == 4 and parts[1] == "tabs" and method == "POST":
+            if parts[3] == "sound":
+                body = _object(handler._body(), ("on",), ("on",))
+                return 200, host.set_sound(parts[2], body["on"])
             if parts[3] == "sound-retry":
                 _object(handler._body(), ())
                 return 200, host.retry_sound(parts[2])

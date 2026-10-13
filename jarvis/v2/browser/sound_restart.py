@@ -62,7 +62,7 @@ class SoundRestarts:
         async with host._launching.setdefault(profile, asyncio.Lock()):
             if host._instances.get(profile) is not instance or host._stopped:
                 return
-            desired, latest, available = self.sound.preference()
+            desired, latest, available = self.sound.preference(profile)
             if latest != generation or (desired and not available.routing):
                 return
             if instance.audio.synchronized(desired) and not any(
@@ -107,7 +107,7 @@ class SoundRestarts:
                 from .host import chrome_pids
                 if await asyncio.to_thread(chrome_pids, instance.folder):
                     raise RuntimeError('old browser cleanup is unfinished')
-                replacement = await host._launch(profile)
+                replacement = await host._launch(profile, restart_token=token)
                 host._next_instance_generation += 1
                 replacement.generation = host._next_instance_generation
                 replacement.restoring = True

@@ -47,10 +47,10 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         self.context=Context();self.old=H._Instance(self.profile,Path(self.tmp.name)/self.profile,self.context,Mock(),generation=1)
         self.host._instances[self.profile]=self.old;self.host._next_instance_generation=1
         self.host.activity.opened(self.profile,1)
-        self.host._settings.update(sound=True);self.sound.sync();self.generation=self.sound.preference()[1]
+        self.sound._requests.add(self.profile);self.sound.sync(explicit=True);self.generation=self.sound.preference()[1]
         self.launches=[]
-        async def launch(profile):
-            context=Context();instance=H._Instance(profile,self.old.folder,context,Mock(),audio=A.InstanceAudio(self.sound.preference()[0]))
+        async def launch(profile, *, restart_token=None):
+            context=Context();instance=H._Instance(profile,self.old.folder,context,Mock(),audio=A.InstanceAudio(self.sound.preference(profile)[0]))
             context.callback=lambda page:self.host._adopt(instance,page,None)
             self.launches.append(instance);return instance
         self.host._launch=AsyncMock(side_effect=launch)
@@ -173,7 +173,7 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         with patch.object(A.OwnedChrome,'pin',return_value=object()),patch.object(H,'chrome_pids',side_effect=lambda _:[] if self.context.closed else [12345]):
             self.sound._mute(self.old,off,A.Availability(True,True))
             while not entered.is_set():await asyncio.sleep(0)
-            self.host._settings.update(sound=True);self.sound.sync();on=self.sound.preference()[1]
+            self.host._settings.update(sound=True);self.sound.sync();await self.sound.change(old.id,True);on=self.sound.preference()[1]
             await self.sound.restarts._run(self.old,on);self.host._launch.assert_not_awaited()
             release.set();task=self.sound._mute_tasks[self.profile];await task;await asyncio.sleep(0)
             restart=self.sound.restarts.tasks.get(self.profile)

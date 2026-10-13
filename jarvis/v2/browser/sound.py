@@ -16,6 +16,7 @@ class BrowserSound:
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
         self._desired = host._settings.value("sound")
+        self._requests = set()  # owner gestures only; never persisted
         self._generation = 0
         self._available = probe()
         self._queued = False
@@ -38,24 +39,75 @@ class BrowserSound:
             available = self.probe()
             with self._lock:
                 self._desired = desired
+                if not desired:
+                    self._requests.clear()
                 self._generation += 1
                 generation = self._generation
                 self._available = available
             self.host.activity.desired(generation)
         self.wake()
 
-    def preference(self):
+    def preference(self, profile=None):
         self.sync()
         with self._lock:
-            return self._desired, self._generation, self._available
+            return (self._desired if profile is None else self._desired and profile in self._requests), self._generation, self._available
 
-    def launch(self, args, env):
+    def launch(self, args, env, *, profile=None, restart_token=None):
+        """Only an exact committed sound replacement may launch audible."""
         self.sync()
         available = self.probe()
         with self._lock:
             self._available = available
-            desired = self._desired
-        return audio.launch_audio(args, env, desired, available)
+            desired = bool(self._desired and profile in self._requests
+                and restart_token is not None
+                and getattr(restart_token, "desired", None) == self._generation)
+        authorized = (desired and self.host.activity.restart_current(
+            restart_token, profile, restart_token.instance))
+        return audio.launch_audio(args, env, bool(authorized), available)
+
+    def clear(self, profile):
+        with self._lock:
+            if profile not in self._requests:
+                return
+            self._requests.discard(profile)
+            self._generation += 1
+            generation = self._generation
+        self.host.activity.desired(generation)
+        self.wake()
+
+    async def change(self, tab_id, on):
+        from .host import BrowserRefused
+        if type(on) is not bool:
+            raise BrowserRefused(400, "on must be a boolean")
+        self.host._refuse_if_held()
+        tab = self.host._tabs.get(tab_id)
+        descriptor = self.restarts.descriptors.get(tab_id)
+        profile = tab.profile if tab is not None else descriptor.profile if descriptor else None
+        instance = self.host._instances.get(profile)
+        if profile is None or instance is None:
+            raise BrowserRefused(404, "no such Browser tab")
+        self.sync()
+        if on and profile == "private":
+            raise BrowserRefused(409, "Close Private panes to allow sound")
+        if on and not self.preference()[0]:
+            raise BrowserRefused(409, "Browser sound is disabled in Settings")
+        available = self.probe()
+        self.sync()
+        with self._lock:
+            if on and not self._desired:
+                raise BrowserRefused(409, "Browser sound is disabled in Settings")
+            if on:
+                self._requests.add(profile)
+            else:
+                self._requests.discard(profile)
+            self._generation += 1
+            generation = self._generation
+            self._available = available
+        self.host.activity.desired(generation)
+        self.restarts.failed.pop(profile, None)
+        self.wake()
+        self.publish()
+        return {"on": on, "profile": profile, "generation": generation}
 
     def status(self):
         desired, generation, available = self.preference()
@@ -64,7 +116,7 @@ class BrowserSound:
                 "reason": "unavailable" if desired and not available.routing else None}
 
     def instance_status(self, instance):
-        desired, _, available = self.preference()
+        desired, _, available = self.preference(instance.profile)
         state = instance.audio
         if instance.profile in self.restarts.failed:
             phase, reason = "failed", "restart_failed"
@@ -84,7 +136,7 @@ class BrowserSound:
                 elif self._mute_reason.get(instance.profile) == audio.MUTE_UNCERTAIN:
                     reason = "mute_uncertain"
             phase = "pending"
-        return {"applied": state.applied, "generation": instance.generation,
+        return {"requested": desired, "applied": state.applied, "generation": instance.generation,
                 "phase": phase, "reason": reason}
 
     def wake(self):
@@ -109,6 +161,7 @@ class BrowserSound:
             return
         desired, generation, available = self.preference()
         for instance in list(self.host._instances.values()):
+            desired, generation, available = self.preference(instance.profile)
             if ((instance.audio.synchronized(desired) and instance.profile not in self.restarts.failed)
                     or (instance.closing and instance.profile not in self.restarts.failed)):
                 # Failed placeholders are retried only by an explicit gesture.
@@ -139,7 +192,7 @@ class BrowserSound:
             return
         def current():
             with self._lock:
-                requested = not self._desired and self._generation == generation
+                requested = (not self._desired or profile not in self._requests) and self._generation == generation
             return (requested and not self.host._stopped and not instance.closing
                     and self.host._instances.get(profile) is instance)
         async def run():
@@ -181,7 +234,7 @@ class BrowserSound:
                 done.exception()
             if self.host._stopped:
                 return
-            desired_now, generation_now, route_now = self.preference()
+            desired_now, generation_now, route_now = self.preference(profile)
             if self.host._instances.get(profile) is instance and not instance.closing:
                 if instance.profile != "private" and (not desired_now or route_now.routing):
                     self.restarts.consider(instance, generation_now)

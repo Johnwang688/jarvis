@@ -1038,7 +1038,14 @@ class BrowserHost:
                 "<body><p>This page was left blank after the sound setting changed. "
                 "Enter an address or use Sign in to open it again.</p>")
 
+    def set_sound(self, tab_id, on):
+        self._refuse_if_held()
+        if not self._running():
+            raise BrowserRefused(404, "no such tab")
+        return self._call(self._sound.change(tab_id, on))
+
     def retry_sound(self, tab_id):
+        self._refuse_if_held()
         if not self._running():
             raise BrowserRefused(404, "no such tab")
         return self._call(self._sound.retry(tab_id))
@@ -1134,7 +1141,7 @@ class BrowserHost:
                 pass
         instance.idle = asyncio.create_task(expire())
 
-    async def _launch(self, profile: str) -> _Instance:
+    async def _launch(self, profile: str, *, restart_token=None) -> _Instance:
         root = secure_dir(config.BROWSER_DIR)
         private = profile == PRIVATE
         if private:
@@ -1155,7 +1162,7 @@ class BrowserHost:
         self._launched.add(folder)
         started = time.monotonic()
         launch_audio = self._sound.launch(launch_args(folder, self._gate.port, private=private),
-                                          font_environment(home))
+                                          font_environment(home), profile=profile, restart_token=restart_token)
         try:
             context = await self._pw.chromium.launch_persistent_context(
                 str(folder), channel="chrome", headless=True, ignore_default_args=True,
@@ -1188,6 +1195,7 @@ class BrowserHost:
         self._closing_instances[profile] = instance
         instance.closing = True
         if not preserve_activity:
+            self._sound.clear(profile)
             self.activity.closed(profile, instance.generation)
         if profile == PRIVATE:
             self._closing_contexts.update(instance.private_contexts)
@@ -1346,6 +1354,8 @@ class BrowserHost:
         if drive is not None:drive.downloads.closed_tab(tab.id)
         self._release(tab, "closed")
         del self._tabs[tab.id]
+        if not any(t.profile == tab.profile for t in self._tabs.values()):
+            self._sound.clear(tab.profile)
         instance = self._instances.get(tab.profile)
         if (tab.ctx is not None and not any(t.ctx == tab.ctx for t in self._tabs.values())
                 and tab.ctx not in self._closing_contexts):
@@ -1680,6 +1690,9 @@ class BrowserHost:
         if tab is None and profile is None:
             raise BrowserRefused(404, "no such tab")
         profile = profile or tab.profile
+        if (not any(t.profile == profile and t.id != tab_id for t in self._tabs.values())
+                and not any(d.profile == profile for d in self._sound.restarts.descriptors.values())):
+            self._sound.clear(profile)
         async with self._launching.setdefault(profile, asyncio.Lock()):
             tab = self._tabs.get(tab_id)
             if tab is None:
@@ -1723,6 +1736,7 @@ class BrowserHost:
             self._call(self._close_profile(profile_id), CLOSE_TIMEOUT_S + 20)
 
     async def _close_profile(self, profile: str) -> None:
+        self._sound.clear(profile)
         self._sound.restarts.cancel_profile(profile)
         async with self._launching.setdefault(profile, asyncio.Lock()):
             await self._close_instance(profile)
