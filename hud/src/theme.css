@@ -13,7 +13,7 @@
 
    Class names the free suites assert on — droptarget, cur, done, ok, warn,
    high — and the avatar's pointer-events:none must survive any restyle. Do
-   not add text-transform to .op, .phase or .chatops: the checks read their text. */
+   not add text-transform to .phase or .tool-group: the checks read their text. */
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -408,12 +408,22 @@ h2.bar {
   .miniorb .mo-outer, .miniorb .mo-inner, .miniorb .mo-core { animation: none; }
 }
 
-/* ---- operations ticker ---- */
-:is(#ops, .chatops) { flex: 0 0 auto; max-height: 132px; overflow-y: auto; border-top: 1px solid var(--border); padding: 6px 20px; }
-.op { font: 10px var(--mono); color: var(--text-muted); display: flex; gap: 8px; }
-.op .nm { color: var(--amber); }
-.op.done .nm { color: var(--text-muted); }
-.op .ms { margin-left: auto; }
+/* ---- transcript tool groups ---- */
+/* Tool calls are transcript rows, with native disclosures and a bounded long list. */
+.chatlog { overflow-anchor: none; }
+.tool-group { margin: 8px 20px; min-width: 0; color: var(--text-muted); font: 11px var(--mono); }
+.tool-group > button { border: 0; background: transparent; padding: 4px 0; text-align: left; color: inherit; }
+.tool-group > button:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.tool-group .tc-failed, .tc-status.failed { color: var(--red); }
+.tool-calls { list-style: none; margin: 4px 0 0; padding: 0; }
+.tool-calls.windowed { height: 352px; overflow: auto; }
+.tool-calls[hidden] { display: none; }
+.tool-call { height: 22px; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.tc-name { flex: 0 1 140px; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.tc-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tc-status, .tc-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.tc-status.running { color: var(--amber); }
+
 
 /* ---- input bar ---- */
 :is(#inputbar, .inputbar) {

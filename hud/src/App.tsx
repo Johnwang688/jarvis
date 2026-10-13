@@ -25,6 +25,7 @@ import {
   type ChatPatch, type State,
 } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
+import { toolGroups } from "./state/toolGroups";
 import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
@@ -63,7 +64,7 @@ import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
-import type { Attachment, AvatarDesc, ChatMessage, Schedule, Thread, VoiceEntry } from "./types";
+import type { Attachment, AvatarDesc, Schedule, Thread, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
@@ -682,6 +683,9 @@ export default function App() {
           ...(spoken ? { spoken: true } : {}),
         });
         const status = result?.status ?? "started";
+        if (status === "started" && result.turn_id) {
+          dispatch({ type: "mark", local, patch: { turn_id: result.turn_id, mark: undefined } });
+        }
         // A Stop pressed while the thread was opening: the turn exists now,
         // so the stop it asked for goes to it.
         if (stopWhenOpen.current.delete(local) && status === "started") api.interrupt(threadId).catch(() => {});
@@ -877,6 +881,7 @@ export default function App() {
       const record = threads.find((t) => t.id === turn);
       const chat = live.current.chats[n];
       if (record && record.running === false && chat.busy && chat.turnThreadId === turn) {
+        dispatch({ type: "tool_stop", pane: n, at: new Date().toISOString() });
         chatPatch(n, { busy: false, turnThreadId: null, orb: "idle", status: "" });
       }
     }
@@ -942,7 +947,7 @@ export default function App() {
               dispatch({
                 type: "message", pane: n,
                 message: {
-                  role: "user", text: ownerLine(data), via: data.via,
+                  role: "user", text: ownerLine(data), via: data.via, at: e.at, turn_id: e.turn_id,
                   ...(data.message_id ? { message_id: data.message_id } : {}),
                   ...(mark ? { mark } : {}),
                 },
@@ -987,7 +992,8 @@ export default function App() {
           if (tid) dispatch({ type: "turn", event: "started", threadId: tid, at: Date.now() });
           for (const n of mine) {
             chatPatch(n, {
-              busy: true, orb: "thinking", draft: "", turnThreadId: at.chats[n].turnThreadId ?? tid ?? null,
+              busy: true, orb: "thinking", draft: "", toolTurnId: e.turn_id ?? "",
+              turnThreadId: at.chats[n].turnThreadId ?? tid ?? null,
             });
           }
           break;
@@ -998,7 +1004,7 @@ export default function App() {
           }
           break;
         case "text":
-          for (const n of mine) dispatch({ type: "settle", pane: n, text: data.text || "" });
+          for (const n of mine) dispatch({ type: "settle", pane: n, text: data.text || "", at: e.at, turn_id: e.turn_id });
           break;
         case "tool_started": {
           // A running turn's write tool named a file (any thread, a task's
@@ -1011,7 +1017,8 @@ export default function App() {
             chatPatch(n, { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" });
             dispatch({
               type: "op_start", pane: n,
-              op: { call_id: data.call_id || String(Date.now()), name: data.name || "tool", started: Date.now() },
+              op: { call_id: data.call_id || String(Date.now()), name: data.name || "tool", started: Date.now(),
+                turn_id: e.turn_id ?? at.chats[n].toolTurnId ?? "", label: data.label ?? "", at: e.at },
             });
           }
           break;
@@ -1023,11 +1030,13 @@ export default function App() {
               type: "op_done", pane: n,
               call_id: data.call_id || "",
               ok: data.ok !== false,
-              summary: data.summary || "",
+              summary: data.summary || "", turn_id: e.turn_id, outcome: data.outcome, at: e.at,
             });
           }
           break;
         case "turn_finished": {
+          for (const n of mine) dispatch({ type: "tool_stop", pane: n,
+            turn_id: e.turn_id ?? at.chats[n].toolTurnId ?? undefined, at: e.at ?? new Date().toISOString() });
           if (tid) {
             dispatch({
               type: "turn", event: "finished", threadId: tid, at: Date.now(),
@@ -1119,7 +1128,7 @@ export default function App() {
         }
         case "model_set":
           // Every model and effort change is a line in the chat (A7).
-          if (tid) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text || "" } });
+          if (tid) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text || "", at: e.at, turn_id: e.turn_id } });
           break;
         case "discord_status":
           // The event says something changed; the route says what, filtered.
@@ -2062,15 +2071,8 @@ export default function App() {
   // way is still loaded.
   const toLoad = PANE_NOS.map((n) => `${state.chats[n].threadId ?? ""}:${state.chats[n].loadedThread ?? ""}`).join("|");
   useEffect(() => {
-    const land = (id: string, messages: ChatMessage[]) => {
-      const at = live.current;
-      const n = PANE_NOS.find((p) => at.chats[p].threadId === id);
-      if (n === undefined) return;
-      // A turn running in another thread keeps the pane busy, but its status
-      // line is about that thread, not this one.
-      const chat = at.chats[n];
-      const status = chat.turnThreadId === id ? chat.status : "";
-      chatPatch(n, { messages, draft: "", ops: [], status, loadedThread: id });
+    const land = (id: string, rows: Awaited<ReturnType<typeof api.transcript>>["messages"]) => {
+      dispatch({ type: "transcript", threadId: id, rows });
     };
     for (const n of PANE_NOS) {
       const chat = live.current.chats[n];
@@ -2488,6 +2490,7 @@ export default function App() {
       workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
       // The thinking lines' one clock (WP-H): how many drawn lines tick, and
       // whether its interval runs at all. Read-only.
+      toolGroups: () => toolGroups.keys(),
       thinkingClock: () => ({ subscribers: thinkingClock.subscribers(), running: thinkingClock.running() }),
       // A split the owner did not click (WP-G2's `{focus: false}`, for the
       // browser's dev-server pane): the id it took, or null when refused.
@@ -2825,7 +2828,8 @@ export default function App() {
           thread={thread}
           messages={chat.messages}
           draft={chat.draft}
-          ops={chat.ops}
+          toolTurnId={chat.toolTurnId}
+          busy={chat.busy}
           onCancelTask={cancelTask}
           thinking={thinking}
           accent={state.avatar?.accent ?? null}
