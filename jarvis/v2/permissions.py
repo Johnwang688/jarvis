@@ -25,8 +25,9 @@ handed. The layers are evaluated in order and the first to answer wins:
 One exception sits between layers 1 and 2: a call the provider marks as a
 **sandbox widening** (`permit(..., widening="network on · …")`, Codex only)
 is always asked of a human, with no Always, whatever the profile — strict
-denies it — because the provider's reviewer has already passed it by the time
-it reaches us, so an AUTO "the reviewer decides" would mean no one decided.
+denies it. Owner Codex chats use native `user` review and classify every
+command/file approval this way. Task approvals retain `auto_review`. Neither
+may let the AUTO "provider reviewer decides" fallback silently grant a widening.
 A **dangerous Jarvis tool** the jarvis-mcp bridge runs for a chat
 (`permit(..., dangerous_tool=True)`) is handled the same way, for the same
 reason: the owner, every time, no Always.
@@ -48,8 +49,9 @@ same distinction seen from the provider side.
 
 **R8 is not solved here and this file does not pretend otherwise.** Codex has
 no universal pre-tool callback under `auto_review`, so layer 2 cannot be
-enforced from the approval requests its reviewer chooses to escalate;
-`CodexProvider` refuses a brief with a non-empty `always_ask` rather than
+enforced from the approval requests its reviewer chooses to escalate.
+Owner chats use `user` review for escalations, but ordinary sandboxed tools
+still have no universal pre-tool hook. `CodexProvider` refuses a brief with a non-empty `always_ask` rather than
 claim an enforcement it lacks. The seam is `always_ask_for()` below: whatever
 mechanism answers R8 (a Codex pre-execution hook, or a `jarvis-mcp` tool with
 the native equivalent removed from the toolset) consumes the same list.
@@ -864,10 +866,11 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             widening = widening + " · " + "; ".join(unchecked)
 
         # --- sandbox widening: a human, every time ------------------------
-        # A Codex approval reaches us only after its own reviewer passed it,
-        # so the AUTO answer below ("the reviewer decides") would mean nobody
-        # decided. Accepting one also accepts the grant riding on it, and the
-        # reply cannot strip that. So this asks whatever the profile, and an
+        # Owner Codex chats use the native user reviewer and mark every
+        # command/file approval as widening, including bare callbacks. Tasks
+        # retain auto_review. Neither case may reach AUTO's reviewer fallback:
+        # accepting also accepts the grant riding on it, and the reply cannot
+        # strip that. So this asks whatever the profile, and an
         # ALWAYS is never offered: a standing yes to a widening is a wider box.
         if widening:
             if profile == PermissionProfile.STRICT:
