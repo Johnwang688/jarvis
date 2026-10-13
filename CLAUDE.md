@@ -1069,8 +1069,32 @@ recognizes dispatch/approval refusal wording, and never assigns an outcome
 from raw-content tools' text. An older finish maps from `ok`.
 An unfinished call runs only for the thread's current running turn, otherwise
 it is stopped, including after restart. No new log lines or bus kinds.
-Free suites: `tool_calls_check`, the backend golden and all three providers;
-TC-2 supplies the HUD's collapsed groups.
+Free suites: `tool_calls_check`, the backend golden and all three providers.
+
+**Tool-call transcript, HUD half (TC-2, 2026-10-13).** Consecutive calls of
+one turn appear as a collapsed transcript row, replacing the separate ticker.
+Settled text, any owner message, system lines and new turns split groups;
+finishes find their call across a steer split by both turn and call id.
+`lib/toolCalls.ts` is the shared live/history rule. The HUD requests
+`?tools=1`, falling back to the old route only on 400. Events heard while
+history loads are replayed by stable ids/server timestamps; stops, optimistic
+message ids and failed sends survive the load. The opt-in route also includes
+text-row turn ids, so the acknowledged initial owner message reconciles by
+turn without merging repeated text or same-turn steers. The running final group says
+`Using tools… N`; all others say `Used N tools`, with failed/denied/stopped
+counts. Every group starts closed. Expanded rows contain only the cleaned
+name, daemon label, outcome word and duration, never args or result summaries.
+`ChatState.ops` remains the thinking/orb/status source and is updated with the
+transcript. Stops happen before queued-next handling and on idle reconcile.
+Disclosure state is window-local, capped at 500, keyed by thread, turn and
+first call (turn prevents reused provider ids from sharing a disclosure).
+Per-key subscriptions and memoized rows keep typing from redrawing history;
+more than 40 calls use the unchanged SCM window helper, 22px rows and a 16-row
+viewport. New entries follow only within 24px of the bottom; toggling a group
+preserves the log offset. Native buttons support Enter/Space, pointer clicks
+preserve input focus, Ctrl+D remains talk, and approval cards keep the log
+inert. `hud_v2_toolcalls_check.py` covers live/reload/races, fallback, keyboard,
+scroll, card layering, hostile labels and 2,000-call histories in two panes.
 
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the

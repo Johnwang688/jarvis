@@ -10,6 +10,8 @@
 // The orb follows **the selected chat's** turn: a turn event in another pane
 // never repaints it.
 
+import { applyEvent, fold, historyOps, outcome, type TranscriptEvent } from "../lib/toolCalls";
+import type { ToolEntry, ToolOutcome } from "../types";
 import React, { createContext, useContext, useReducer } from "react";
 import type {
   ApprovalRequest, Attachment, AvatarDesc, ChatMessage, Project, Schedule, Task, TaskThread,
@@ -144,9 +146,11 @@ export type Action =
   /** Take back a message this window drew optimistically (its send failed). */
   | { type: "unmessage"; local: string }
   | { type: "delta"; pane: PaneNo; text: string }
-  | { type: "settle"; pane: PaneNo; text: string }
+  | { type: "settle"; pane: PaneNo; text: string; at?: string; turn_id?: string }
   | { type: "op_start"; pane: PaneNo; op: ToolOp }
-  | { type: "op_done"; pane: PaneNo; call_id: string; ok: boolean; summary: string }
+  | { type: "op_done"; pane: PaneNo; call_id: string; ok: boolean; summary: string; turn_id?: string; outcome?: ToolOutcome; at?: string }
+  | { type: "tool_stop"; pane: PaneNo; turn_id?: string; at: string }
+  | { type: "transcript"; threadId: string; rows: (ChatMessage | ToolEntry)[] }
   | { type: "approval_add"; request: ApprovalRequest }
   | { type: "approval_drop"; req_id: string }
   | { type: "task_upsert"; task: Task }
@@ -315,6 +319,12 @@ function turnOrb(s: State, c: ChatState): OrbState {
   return c.busy ? "thinking" : "idle";
 }
 
+/** Record pending events only while this conversation's history is loading. */
+function transcriptEvent(c: ChatState, event: TranscriptEvent): ChatState {
+  return { ...c, messages: applyEvent(c.messages, event),
+    toolReplay: c.threadId && c.loadedThread !== c.threadId ? [...c.toolReplay, event] : c.toolReplay };
+}
+
 export function reduce(s: State, a: Action): State {
   switch (a.type) {
     case "patch": {
@@ -384,18 +394,18 @@ export function reduce(s: State, a: Action): State {
     case "message":
       // The owner's own line goes up verbatim; his is rendered. That decision
       // lives in the view, not here — the store keeps the role.
-      return withChat(s, a.pane, { ...s.chats[a.pane], messages: [...s.chats[a.pane].messages, a.message] });
+      return withChat(s, a.pane, transcriptEvent(s.chats[a.pane], { kind: "message", message: a.message }));
 
     case "mark": {
-      const hit = (m: ChatMessage) =>
-        (!!a.local && m.local === a.local) || (!!a.message_id && m.message_id === a.message_id);
-      if (!PANE_NOS.some((n) => s.chats[n].messages.some(hit))) return s;
+      const event: TranscriptEvent = { kind: "mark", local: a.local, message_id: a.message_id, patch: a.patch };
       const chats = { ...s.chats };
+      let changed = false;
       for (const n of PANE_NOS) {
-        if (!chats[n].messages.some(hit)) continue;
-        chats[n] = { ...chats[n], messages: chats[n].messages.map((m) => (hit(m) ? { ...m, ...a.patch } : m)) };
+        const c = chats[n];
+        if (c.messages.some(m => (!!a.local && m.local === a.local) || (!!a.message_id && m.message_id === a.message_id))
+          || (c.threadId && c.loadedThread !== c.threadId)) { chats[n] = transcriptEvent(c, event); changed = true; }
       }
-      return { ...s, chats };
+      return changed ? { ...s, chats } : s;
     }
 
     case "unmessage": {
@@ -404,7 +414,7 @@ export function reduce(s: State, a: Action): State {
       const chats = { ...s.chats };
       for (const n of PANE_NOS) {
         if (!chats[n].messages.some((m) => m.local === a.local)) continue;
-        chats[n] = { ...chats[n], messages: chats[n].messages.filter((m) => m.local !== a.local) };
+        chats[n] = transcriptEvent(chats[n], { kind: "remove", local: a.local });
       }
       return { ...s, chats };
     }
@@ -421,24 +431,32 @@ export function reduce(s: State, a: Action): State {
       const c = s.chats[a.pane];
       const text = a.text || c.draft;
       if (!text) return withChat(s, a.pane, { ...c, draft: "" });
-      return withChat(s, a.pane, { ...c, draft: "", messages: [...c.messages, { role: "assistant", text }] });
+      return withChat(s, a.pane, transcriptEvent({ ...c, draft: "" },
+        { kind: "message", message: { role: "assistant", text, at: a.at, turn_id: a.turn_id } }));
     }
 
     case "op_start": {
       const c = s.chats[a.pane];
-      const next = withChat(s, a.pane, { ...c, ops: [...c.ops.slice(-60), a.op] });
+      const turn = a.op.turn_id ?? c.toolTurnId ?? "";
+      const op = { ...a.op, turn_id: turn };
+      const ops = c.ops.some(o => o.call_id === op.call_id && o.turn_id === turn) ? c.ops : [...c.ops.slice(-60), op];
+      const next = withChat(s, a.pane, transcriptEvent({ ...c, ops, draft: "", toolTurnId: turn },
+        { kind: "start", call: { call_id: op.call_id, turn_id: turn, name: op.name, label: op.label ?? "",
+          at: op.at ?? new Date(op.started).toISOString(), outcome: "running" } }));
       if (a.pane !== s.selectedChat) return next;
       return { ...next, orb: s.orb === "approval" ? s.orb : "tool" };
     }
 
     case "op_done": {
       const c = s.chats[a.pane];
+      const turn = a.turn_id ?? c.toolTurnId ?? "";
       const ops = c.ops.map((o) =>
-        o.call_id === a.call_id && !o.finished
+        o.call_id === a.call_id && (o.turn_id ?? "") === turn && !o.finished
           ? { ...o, finished: Date.now(), ok: a.ok, summary: a.summary }
           : o,
       );
-      const next = withChat(s, a.pane, { ...c, ops });
+      const next = withChat(s, a.pane, transcriptEvent({ ...c, ops }, { kind: "finish",
+        turn_id: turn, call_id: a.call_id, outcome: outcome(a.outcome, a.ok), at: a.at ?? new Date().toISOString() }));
       if (a.pane !== s.selectedChat) return next;
       const running = ops.some((o) => !o.finished);
       // The window falls back to THINKING when the running count hits zero —
@@ -446,6 +464,27 @@ export function reduce(s: State, a: Action): State {
       // turn reading as "still running gmail_search".
       const orb = s.orb === "approval" ? s.orb : running ? "tool" : c.busy ? "thinking" : "idle";
       return { ...next, orb };
+    }
+
+    case "tool_stop": {
+      const c = s.chats[a.pane];
+      const ops = c.ops.map(o => !o.finished && (a.turn_id === undefined || o.turn_id === a.turn_id)
+        ? { ...o, finished: Date.parse(a.at) || Date.now(), ok: false } : o);
+      const next = transcriptEvent({ ...c, ops, toolTurnId: a.turn_id === undefined || c.toolTurnId === a.turn_id ? null : c.toolTurnId },
+        { kind: "stop", turn_id: a.turn_id, at: a.at });
+      return withChat(s, a.pane, next);
+    }
+    case "transcript": {
+      const n = PANE_NOS.find(p => s.chats[p].threadId === a.threadId);
+      if (n === undefined) return s;
+      const c = s.chats[n];
+      const messages = fold(a.rows, c.toolReplay);
+      const ops = historyOps(messages, Date.now());
+      // A finish heard during the request wins over a stale running snapshot.
+      const active = [...ops].reverse().find(o => !o.finished)?.turn_id ?? null;
+      return withChat(s, n, { ...c, messages, ops, loadedThread: a.threadId, toolReplay: [],
+        toolTurnId: c.toolTurnId ?? active,
+        status: c.turnThreadId === a.threadId ? c.status : "" });
     }
 
     case "approval_add": {
@@ -501,6 +540,7 @@ export function reduce(s: State, a: Action): State {
       const same = was.compose?.openedId === a.threadId;
       const moved = reconverse(s, a.pane, was, {
         ...was, threadId: a.threadId, compose: null, loadedThread: same ? a.threadId : was.loadedThread,
+        ...(same || was.threadId === a.threadId ? {} : { messages: [], ops: [], draft: "", toolReplay: [], toolTurnId: null }),
       });
       const here = { ...moved.next };
       for (const n of PANE_NOS) {

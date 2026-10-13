@@ -1864,6 +1864,10 @@ def route(handler, daemon, parts, query):
                     role = ("assistant" if kind == "text" else "user" if kind == "user"
                             else "system" if kind == "model_set" else row.get("role", "assistant"))
                     message = dict(role=role, text=text, at=row.get("at", row.get("t")))
+                    # Opt-in clients reconcile an optimistic initial send by
+                    # its acknowledged turn. Legacy response bytes stay fixed.
+                    if query.get("tools") == "1" and isinstance(row.get("turn_id"), str):
+                        message["turn_id"] = row["turn_id"]
                     if kind == "user" and data.get("via") in ("discord", "dm"):
                         # Typed in Discord (PR C): the HUD labels it "via Discord".
                         message["via"] = data["via"]
