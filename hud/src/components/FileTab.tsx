@@ -214,13 +214,6 @@ export function FileTab(props: {
    */
   onRenamed?: (projectId: string, from: string, to: string, moves: { pane: string; from: string; to: string }[],
                kept: { pane: string; path: string }[]) => void;
-  /**
-   * Put the cursor at a line of a tab (VX-2: a build error clicked in the
-   * VEX view). Applied once that tab is active and its buffer is in the
-   * editor, then handed back by `n`; dropped if the tab closes first.
-   */
-  goto?: { path: string; line: number; col: number; n: number } | null;
-  onGotoDone?: (n: number) => void;
   /** The project's folder: a file read through another project is marked dirty here too. */
   root?: string | null;
   /** The editor settings dialog (ED-8): the toolbar's ⚙. */
@@ -283,6 +276,11 @@ export function FileTab(props: {
 
   // Hold what the tabs name; let go of what they no longer do.
   const pathsKey = tabs.paths.join("\u0000");
+  useLayoutEffect(() => {
+    const r = reveal.current;
+    if (props.blocked || (r && (!tabsNow.current.paths.includes(r.path)
+      || tabsNow.current.active !== r.path))) reveal.current = null;
+  }, [props.blocked, pathsKey, tabs.active]);
   useEffect(() => {
     if (!pid) return;
     const want = new Set(tabsNow.current.paths);
@@ -313,6 +311,7 @@ export function FileTab(props: {
         (e: any) => {
           loading.current.delete(path);
           if (!alive.current) return;
+          if (reveal.current?.path === path) reveal.current = null;
           // A tab whose file cannot be read (gone, out of scope) closes, and says why.
           setNote(`${path}: ${e?.status === 404 ? "not found" : e?.message || "could not be read"}`);
           setTabs(closeTab(tabsNow.current, path));
@@ -381,7 +380,10 @@ export function FileTab(props: {
 
   // ---- gestures ---------------------------------------------------------------
 
-  const open = (path: string, pin: boolean) => {
+  const open = (path: string, pin: boolean): boolean => {
+    // A newer gesture supersedes a pending reveal even if admission refuses.
+    reveal.current = null;
+    if (props.blocked) return false;
     setAsk(null);
     setTreeOpen(false);
     // A narrow pane folds its tree behind "Files" the moment a file opens, so
@@ -392,9 +394,10 @@ export function FileTab(props: {
     if (!next) {
       // Past the cap only a clean tab is ever closed to make room (M1).
       setNote(`${TABS_MAX} tabs are open and every other one holds an unsaved edit: save or close one first`);
-      return;
+      return false;
     }
     setTabs(next);
+    return true;
   };
 
   // The tree's handle on `open`: one function for the pane's life, so the
@@ -404,6 +407,7 @@ export function FileTab(props: {
   const onTreeOpen = useCallback((path: string, pin: boolean) => openLatest.current(path, pin), []);
 
   const close = (path: string, discard = false) => {
+    if (reveal.current?.path === path) reveal.current = null;
     setAsk(null);
     if (discard) discarding.current.add(path);
     setTabs(closeTab(tabsNow.current, path));
@@ -488,24 +492,28 @@ export function FileTab(props: {
 
   /** Open `path` pinned, and put the cursor at `line` (and `col`) once it shows. */
   const openAt = (path: string, line?: number | null, col?: number | null) => {
+    if (!open(path, true)) return;
     if (line) {
       reveal.current = { path, line, col: col ?? 1 };
       // A markdown file opens rendered; a place in it is a place in its text.
       if (isMarkdown(path)) setMdRead((m) => ({ ...m, [path]: false }));
+      // Opening an already selected tab changes no state. Schedule the same
+      // model-ready effect for a new nonce targeting that existing tab too.
+      setEdTick(t => t + 1);
     }
-    open(path, true);
   };
 
   // The cursor goes where it was asked once the editor shows that buffer
   // (Monaco loads late the first time; a tab's buffer is read first).
   useEffect(() => {
     const r = reveal.current;
+    if (props.blocked) { reveal.current = null; return; }
     if (!r || !ed || active !== r.path || !view || view.kind === "withheld") return;
     const m = buffers.model(view.abs) as any;
     if (!m || ed.getModel?.() !== m) return;
     reveal.current = null;
     const line = Math.max(1, Math.min(r.line, m.getLineCount?.() ?? r.line));
-    ed.setPosition?.({ lineNumber: line, column: Math.max(1, r.col) });
+    ed.setPosition?.({ lineNumber: line, column: Math.max(1, Math.min(r.col, m.getLineMaxColumn?.(line) ?? r.col)) });
     ed.revealLineInCenter?.(line);
     if (!props.blocked) ed.focus?.();
   });
@@ -636,6 +644,7 @@ export function FileTab(props: {
     const ask = appAsk;
     if (!ask || ask.nonce === doneAsk.current || !pid) return;
     doneAsk.current = ask.nonce;
+    if (props.blocked) { reveal.current = null; return; }
     switch (ask.kind) {
       case "open":
         openAt(ask.path, ask.line, ask.col);
@@ -707,32 +716,6 @@ export function FileTab(props: {
     if (model && !everEditor) setEverEditor(true);
   }, [model, everEditor]);
   const mdText = useMdText(md ? view?.abs ?? null : null);
-
-  // A line to go to (VX-2's error click): once its tab is the active one and
-  // the editor holds its buffer — after PaneEditor's own layout effect has
-  // swapped the model in and restored the tab's view state, so the position
-  // set here is the one that stays.
-  const goto = props.goto ?? null;
-  const onGotoDone = useRef(props.onGotoDone);
-  onGotoDone.current = props.onGotoDone;
-  useEffect(() => {
-    if (!goto) return;
-    if (!tabsNow.current.paths.includes(goto.path) && !loading.current.has(goto.path)) {
-      onGotoDone.current?.(goto.n);          // the tab closed (not found, out of scope)
-      return;
-    }
-    if (tabsNow.current.active !== goto.path) return;
-    const abs = opened[goto.path];
-    const ed = editorRef.current;
-    const m = abs ? buffers.model(abs) : null;
-    if (!abs || !ed || !m || ed.getModel?.() !== m) return;
-    const lines = typeof (m as any).getLineCount === "function" ? (m as any).getLineCount() : goto.line;
-    const line = Math.min(Math.max(1, goto.line), Math.max(1, lines));
-    ed.setPosition({ lineNumber: line, column: Math.max(1, goto.col) });
-    ed.revealLineInCenter?.(line);
-    if (!props.blocked) ed.focus?.();
-    onGotoDone.current?.(goto.n);
-  });
 
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 
@@ -973,7 +956,7 @@ export function FileTab(props: {
               editorRef={(editor) => {
                 editorRef.current = editor;
                 setEd(editor);
-                // A pending line to go to (VX-2) waits for the editor.
+                // Every navigation request waits for the actual editor model.
                 setEdTick((t) => t + 1);
               }}
               mayAddToChat={!!view && jarvisMayRead(view.kind) && !!props.onAddToChat}
