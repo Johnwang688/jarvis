@@ -224,6 +224,181 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host._launch.await_count,1)
         self.assertEqual(self.sound.instance_status(self.host._instances[self.profile])['phase'],'failed')
 
+    async def test_retry_later_master_off_wins_actual_admission_lock(self):
+        import threading
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.host._goto=AsyncMock(return_value={'loaded':False})
+        await self.run_restart()
+        native=self.sound._lock
+        class Gate:
+            armed=False
+            fired=False
+            entered=threading.Event()
+            settled=threading.Event()
+            def __enter__(gate):
+                if gate.armed:
+                    gate.armed=False;gate.fired=True;gate.entered.set()
+                    if not gate.settled.wait(3):raise AssertionError('master OFF worker did not settle')
+                native.acquire()
+                return gate
+            def __exit__(gate,*args):native.release()
+        gate=Gate();self.sound._lock=gate
+        errors=[]
+        def master_off():
+            if not gate.entered.wait(3):
+                errors.append('admission gate never fired');gate.settled.set();return
+            try:
+                self.host._settings.update(sound=False);self.sound.sync()
+            except BaseException as exc:errors.append(type(exc).__name__)
+            finally:gate.settled.set()
+        worker=threading.Thread(target=master_off)
+        before=self.sound.preference
+        def capture(profile=None):
+            value=before(profile)
+            if not gate.fired:gate.armed=True
+            return value
+        self.sound.preference=capture
+        self.sound.restarts.consider=Mock()
+        worker.start()
+        try:receipt=await self.sound.retry(old.id)
+        finally:
+            self.sound.preference=before
+            worker.join(4)
+        self.assertFalse(worker.is_alive());self.assertTrue(gate.fired);self.assertEqual(errors,[])
+        self.assertEqual(self.sound._recoveries,{})
+        self.assertFalse(receipt['retrying'])
+        self.sound.restarts.consider.assert_not_called()
+        other='p-87654321'
+        self.host._instances[other]=H._Instance(other,self.old.folder,Context(),Mock(),generation=100)
+        other_tab=SimpleNamespace(id='other-id',profile=other)
+        self.host._tabs[other_tab.id]=other_tab
+        self.sound.publish=Mock()
+        await self.sound.change(other_tab.id,False)
+        self.sound._reconcile()
+        self.sound.restarts.consider.assert_not_called()
+        self.assertEqual(self.sound.instance_status(self.host._instances[self.profile])['phase'],'failed')
+
+    async def test_owner_retry_when_master_already_off_restores_quiet(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        real=self.host._goto;self.host._goto=AsyncMock(return_value={'loaded':False})
+        await self.run_restart()
+        self.host._settings.update(sound=False);self.sound.sync()
+        self.host._goto=real
+        receipt=await self.sound.retry(old.id)
+        self.assertTrue(receipt['retrying'])
+        task=self.sound.restarts.tasks.get(self.profile)
+        if task:await task
+        await asyncio.sleep(0)
+        current=self.host._instances[self.profile]
+        self.assertFalse(current.closing);self.assertTrue(current.audio.synchronized(False))
+        self.assertEqual(set(self.host._tabs),{old.id})
+        self.assertEqual(self.sound._recoveries,{})
+
+    async def popup_retirement(self, *, master=False, owner_on=False, master_after_on=False):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.old.audio=A.InstanceAudio(True)
+        if master:
+            self.host._settings.update(sound=False);self.sound.sync()
+        else:await self.sound.change(old.id,False)
+        popups=[]
+        for _ in range(self.host._tab_cap()+3):
+            page=Page('https://popup.test/');self.context.pages.append(page);popups.append(page)
+            self.assertIsNone(self.host._adopt(self.old,page,None))
+        self.assertTrue(self.old.closing)
+        self.assertLessEqual(len(self.old.refused_pages)+len(self.old.unadopted),self.host._tab_cap())
+        self.assertLessEqual(len(self.old.popup_cleanup),self.host._tab_cap())
+        self.host._daemon.approvals.run_if_idle=lambda f:False
+        self.sound._reconcile()
+        task=self.sound.restarts.tasks.get(self.profile)
+        if task:await task
+        await asyncio.sleep(0)
+        self.assertFalse(self.context.closed);self.host._launch.assert_not_awaited()
+        self.assertTrue(self.sound.retirement_current(self.old))
+        if owner_on:
+            await self.sound.change(old.id,True)
+            self.assertNotEqual(self.sound.instance_status(self.old)['phase'],'ready')
+        if master_after_on:
+            self.host._settings.update(sound=False);self.sound.sync()
+        self.host._daemon.approvals.run_if_idle=lambda f:f()
+        self.sound._reconcile()
+        task=self.sound.restarts.tasks.get(self.profile)
+        if task:await task
+        await asyncio.sleep(0)
+        self.assertEqual(self.host._launch.await_count,1)
+        current=self.host._instances[self.profile]
+        self.assertIsNot(current,self.old);self.assertFalse(current.closing)
+        self.assertTrue(current.audio.synchronized(owner_on and not master_after_on))
+        self.assertTrue(self.context.closed);self.assertTrue(all(page.closed for page in popups))
+        self.assertEqual(set(self.host._tabs),{old.id})
+        self.assertEqual(self.sound._retirements,{})
+
+    async def test_profile_off_popup_overflow_replaces_exact_retired_instance(self):
+        await self.popup_retirement()
+
+    async def test_master_off_popup_overflow_retires_without_owner_marker(self):
+        await self.popup_retirement(master=True)
+
+    async def test_retired_owner_on_still_requires_fresh_instance(self):
+        await self.popup_retirement(owner_on=True)
+
+    async def test_retired_owner_on_then_master_off_restores_quiet(self):
+        await self.popup_retirement(owner_on=True,master_after_on=True)
+
+    async def test_retirement_is_consumed_at_commit_before_context_wait(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.old.audio=A.InstanceAudio(True);await self.sound.change(old.id,False)
+        self.old.closing=True;self.sound.retire(self.old)
+        self.context.entered=asyncio.Event();self.context.gate=asyncio.Event()
+        job=asyncio.create_task(self.sound.restarts._run(self.old,self.sound.preference()[1]))
+        await self.context.entered.wait()
+        try:self.assertEqual(self.sound._retirements,{})
+        finally:
+            self.context.gate.set();await job
+        self.assertTrue(self.host._instances[self.profile].audio.synchronized(False))
+
+    async def test_retirement_binding_and_stale_cleanup_cannot_migrate(self):
+        self.sound.retire(self.old)
+        self.old.generation+=1
+        self.assertFalse(self.sound.retirement_current(self.old))
+        self.old.generation-=1
+        other=H._Instance(self.profile,self.old.folder,Context(),Mock(),generation=self.old.generation)
+        self.assertFalse(self.sound.retirement_current(other))
+        self.sound.retire(other)
+        self.sound.retirement_finished(self.old)
+        self.assertTrue(self.sound.retirement_current(other))
+        self.assertEqual(len(self.sound._retirements),1)
+
+    async def test_retired_undesired_instance_keeps_exact_native_mute_guard(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.old.audio=A.InstanceAudio(True);await self.sound.change(old.id,False)
+        self.old.closing=True;self.sound.retire(self.old);guards=[]
+        self.host._daemon.approvals.run_if_idle=lambda f:False
+        def mute(owned,state,current):
+            guards.append(current())
+            return A.MuteResult(1,guards[-1],A.MUTE_UNCERTAIN)
+        self.sound.pulse.mute_owned=Mock(side_effect=mute)
+        with patch.object(H,'chrome_pids',return_value=[12345]),patch.object(A.OwnedChrome,'pin',return_value=object()):
+            self.sound._mute(self.old,self.sound.preference()[1],A.Availability(True,True))
+            await self.sound._mute_tasks[self.profile]
+        await asyncio.sleep(0)
+        self.assertEqual(guards,[True])
+        self.sound.pulse.mute_owned.assert_called_once()
+        await self.sound.change(old.id,True)
+        with patch.object(H,'chrome_pids',return_value=[12345]),patch.object(A.OwnedChrome,'pin',return_value=object()):
+            self.sound._mute(self.old,self.sound.preference()[1],A.Availability(True,True))
+            task=self.sound._mute_tasks.get(self.profile)
+            if task:await task
+        self.assertEqual(guards,[True,False])
+
+    async def test_unrelated_closing_instance_is_never_a_retirement(self):
+        old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.old.audio=A.InstanceAudio(True);await self.sound.change(old.id,False)
+        self.old.closing=True
+        self.sound._reconcile();await asyncio.sleep(0);await asyncio.sleep(0)
+        self.host._launch.assert_not_awaited()
+        self.assertEqual(self.sound.restarts.tasks,{})
+        self.assertFalse(self.context.closed)
+
     async def test_other_profile_owner_gesture_cannot_retry_failed_profile(self):
         old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
         self.host._goto=AsyncMock(return_value={'loaded':False})

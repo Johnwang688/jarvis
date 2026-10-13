@@ -1222,6 +1222,7 @@ class BrowserHost:
             self._closing_contexts.difference_update(instance.private_contexts)
             instance.private_contexts.clear()
             self._look_reserved.clear()
+        self._sound.retirement_finished(instance)
         self._closing_instances.pop(profile, None)
         self._publish_snapshot()
 
@@ -1263,7 +1264,7 @@ class BrowserHost:
                     task.add_done_callback(settled)
                 else:
                     instance.closing = True
-                    self._sound.wake()
+                    self._sound.retire(instance)
             return None
         if instance.restoring:
             if logical_id is None:

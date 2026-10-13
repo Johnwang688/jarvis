@@ -18,6 +18,7 @@ class BrowserSound:
         self._desired = host._settings.value("sound")
         self._requests = set()  # owner gestures only; never persisted
         self._recoveries = {}  # profile -> exact instance, binding, owner generation
+        self._retirements = {}  # revoked audible overflow -> exact instance/binding
         self._generation = 0
         self._available = probe()
         self._queued = False
@@ -127,7 +128,7 @@ class BrowserSound:
             phase, reason = "failed", "restart_failed"
         elif instance.profile in self.restarts.restarting:
             phase, reason = "restarting", None
-        elif state.synchronized(desired):
+        elif state.synchronized(desired) and not self.retirement_current(instance):
             phase, reason = "ready", None
         elif instance.profile == "private":
             phase, reason = "pending", "private"
@@ -159,6 +160,25 @@ class BrowserSound:
             with self._lock:
                 self._queued = False
 
+    def retire(self, instance):
+        # Only the host's revoked-audible overflow path admits this reason.
+        with self._lock:
+            self._retirements[instance.profile] = (instance, instance.generation)
+        self.wake()
+
+    def retirement_current(self, instance):
+        with self._lock:
+            value = self._retirements.get(instance.profile)
+            return (value is not None and value[0] is instance
+                    and value[1] == instance.generation)
+
+    def retirement_finished(self, instance):
+        with self._lock:
+            value = self._retirements.get(instance.profile)
+            if (value is not None and value[0] is instance
+                    and value[1] == instance.generation):
+                self._retirements.pop(instance.profile, None)
+
     def recovery(self, instance):
         with self._lock:
             recovery = self._recoveries.get(instance.profile)
@@ -187,8 +207,9 @@ class BrowserSound:
             desired, generation, available = self.preference(instance.profile)
             if instance.profile in self.restarts.failed and not self.recovery_current(instance):
                 continue
-            if ((instance.audio.synchronized(desired) and instance.profile not in self.restarts.failed)
-                    or (instance.closing and instance.profile not in self.restarts.failed)):
+            retired = self.retirement_current(instance)
+            if ((instance.audio.synchronized(desired) and instance.profile not in self.restarts.failed and not retired)
+                    or (instance.closing and instance.profile not in self.restarts.failed and not retired)):
                 # Failed placeholders are retried only by an explicit gesture.
                 continue
             if not desired and instance.audio.applied:
@@ -218,7 +239,8 @@ class BrowserSound:
         def current():
             with self._lock:
                 requested = (not self._desired or profile not in self._requests) and self._generation == generation
-            return (requested and not self.host._stopped and not instance.closing
+            return (requested and not self.host._stopped
+                    and (not instance.closing or self.retirement_current(instance))
                     and self.host._instances.get(profile) is instance)
         async def run():
             # The actual executor future settles before structural replacement.
@@ -279,12 +301,17 @@ class BrowserSound:
             raise BrowserRefused(404, "no such persistent Browser tab")
         self.sync(explicit=True)
         instance = self.host._instances.get(profile)
+        admitted = False
         if instance is not None:
             generation = self.preference()[1]
             with self._lock:
-                self._recoveries[profile] = (instance, instance.generation, generation)
-            self.restarts.consider(instance, generation)
-        return {"tab_id": tab_id, "retrying": True}
+                # A later master change already withdrew this captured intent.
+                if generation == self._generation:
+                    self._recoveries[profile] = (instance, instance.generation, generation)
+                    admitted = True
+            if admitted:
+                self.restarts.consider(instance, generation)
+        return {"tab_id": tab_id, "retrying": admitted}
 
     async def settle(self):
         tasks = list(self._mute_tasks.values())

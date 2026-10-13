@@ -36,6 +36,7 @@ class SoundRestarts:
         self.failed.pop(profile, None)
         with self.sound._lock:
             self.sound._recoveries.pop(profile, None)
+            self.sound._retirements.pop(profile, None)
 
     def consider(self, instance, generation):
         profile = instance.profile
@@ -72,7 +73,7 @@ class SoundRestarts:
             desired, latest, available = self.sound.preference(profile)
             if latest != generation or (desired and not available.routing):
                 return
-            if instance.audio.synchronized(desired) and not any(
+            if (instance.audio.synchronized(desired) and not self.sound.retirement_current(instance)) and not any(
                     d.profile == profile for d in self.descriptors.values()):
                 return
             # Sign-in is privileged owner attention, even when no modal exists.
@@ -98,6 +99,7 @@ class SoundRestarts:
                 committed = True
                 self.restarting.add(profile)
                 self.sound.recovery_committed(instance, generation)
+                self.sound.retirement_finished(instance)
                 self.failed.pop(profile, None)
                 # No await between commitment and detaching old page identity.
                 instance.closing = True
@@ -258,6 +260,7 @@ class SoundRestarts:
         self.failed.clear()
         with self.sound._lock:
             self.sound._recoveries.clear()
+            self.sound._retirements.clear()
         tasks = list(self.tasks.values())
         for task in tasks:
             if not task.cancelling():
