@@ -617,11 +617,17 @@ class DevServers:
                 self._publish(e)
             return 200, {}
 
+    def note_hook_error(self, kind):
+        """A daemon hook into the watcher raised: counted for `/status`, as a
+        poll's own fault is (delta review of PR #79, NIT)."""
+        with self._lock:
+            self._errors["hook:" + kind] += 1
+
     def status(self):
         with self._lock:
             work = self.reader.work if self.reader else dl.Work()
-            return {"active": bool(self.enabled() and not self._stopped and self.cadence() is not None
-                                   and self.reader is not None),
+            return {"active": bool(self.enabled() and not self._stopped and not self._faulted
+                                   and self.cadence() is not None and self.reader is not None),
                     "errors": dict(self._errors),
                     "entries": sum(e.listening for e in self._entries.values()), "polls": self._polls,
                     "refused": dict(self._refused), "work": {"rows": work.rows,

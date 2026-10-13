@@ -486,6 +486,10 @@ class Daemon:
                 if type(exc) not in self._dev_hook_errors:
                     self._dev_hook_errors.add(type(exc))
                     LOG.warning("Dev watcher hook failed (%s)", kind)
+            try:
+                self.devservers.note_hook_error(kind)
+            except Exception:
+                pass
 
     def _dev_stream_started(self, window):
         with self._lock:

@@ -952,6 +952,7 @@ class Lifecycle(Base):
             self.assertLessEqual(len(starts), 2)
             self.assertIsNone(watch._thread)
             self.assertEqual(watch.status()["errors"], {"RuntimeError": 1})
+            self.assertFalse(watch.status()["active"])  # a faulted watcher is not active
             watch.announce_terminal("fault-terminal", "http://localhost:23458/")
             self.assertIsNone(watch._thread)  # registry work cannot re-arm a fault
             watch.turn_started("fault", PN.CLAUDE)
@@ -986,6 +987,9 @@ class Lifecycle(Base):
             self.assertNotIn(self.thread.id, self.daemon._sessions)
             self.assertTrue(called.is_set())
         self.assertEqual(self.logs, ["Dev watcher hook failed (RuntimeError)"])
+        # Every fault is counted in /status, not only the first one logged.
+        self.assertGreaterEqual(self.watch.status()["errors"].get("hook:RuntimeError", 0),
+                                2 if hook != "session_closed" else 1)
 
     def test_faulting_turn_started_cannot_wedge_worker(self):
         self.check_faulting_hook("turn_started")
