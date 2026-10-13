@@ -120,13 +120,13 @@ class CatalogChecks(unittest.TestCase):
             'memory_write', 'memory_delete', 'gmail_send', 'discord_dm_owner',
             'spotify_play', 'spotify_pause', 'schedule_create', 'schedule_delete'})
         for name, entry in CATALOG.items():
-            self.assertEqual(entry.providers, frozenset({'claude'}))
+            self.assertEqual(entry.providers, frozenset({'claude', 'codex'}))
             self.assertEqual(entry.read_only, name in MCP_READ_ONLY or name == 'terminal_read')
             self.assertEqual(entry.foreground_only, name == 'terminal_read')
             self.assertEqual(entry.desk_only, name == 'terminal_read')
-        # Probe entries explicitly enable Codex for WP-1 tests, production doesn't.
+        # Both chat providers share availability; terminal stays out of external MCP.
         with patch.dict(session_tools.SESSION_TOOLS, CATALOG, clear=True):
-            self.assertEqual(session_tools.for_provider('codex'), [])
+            self.assertEqual(session_tools.for_provider('codex'), session_tools.for_provider('claude'))
             self.assertNotIn('terminal_read', MCP_TOOLS)
             offered = session_tools.for_provider('claude')
             for entry in offered:

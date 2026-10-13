@@ -96,7 +96,7 @@ def setUpModule():
     session_tools.SESSION_TOOLS.clear()
     tools.tool(mcp_probe_read)
     tools.tool(dangerous=True)(mcp_probe_send)
-    session_tools.register(session_tools.SessionTool(READ, read_only=True, foreground_only=True))
+    session_tools.register(session_tools.SessionTool(READ, read_only=True))
     session_tools.register(session_tools.SessionTool(SEND))
 
 
@@ -217,7 +217,7 @@ def token_of(brief: Brief) -> str:
     return entry_of(brief)["env"][bridge.TOKEN_VARIABLE]
 
 
-def run_relay(entry: dict, calls=(), *, cwd: Path, timeout: float = 30.0):
+def run_relay(entry: dict, calls=(), *, cwd: Path, timeout: float = 30.0, call_meta=None):
     """Start the real relay as a CLI would — `command` + `args`, the entry's
     `env` over a bare PATH — and speak MCP to it. ({id: response}, stderr)."""
     env = {"PATH": "/usr/bin:/bin", "HOME": str(cwd), **entry["env"]}
@@ -233,7 +233,8 @@ def run_relay(entry: dict, calls=(), *, cwd: Path, timeout: float = 30.0):
     ]
     for index, (name, arguments) in enumerate(calls):
         requests.append({"jsonrpc": "2.0", "id": 10 + index, "method": "tools/call",
-                         "params": {"name": name, "arguments": arguments}})
+                         "params": {"name": name, "arguments": arguments,
+                                    **({"_meta": call_meta} if call_meta is not None else {})}})
     want = {r["id"] for r in requests if "id" in r}
     timer = threading.Timer(timeout, proc.kill)
     timer.start()
@@ -505,14 +506,14 @@ class BridgeChecks(DaemonHarness):
         self.assertEqual(call["tools"], frozenset({READ, SEND}))
         self.assertEqual(self.stderr, [""], "the relay writes nothing to stderr")
 
-    def test_codex_run_brief_marks_read_only_tools_approve(self):
+    def test_codex_run_brief_delegates_every_offered_tool(self):
         thread = self.chat(CODEX)
         entry = entry_of(self.run_brief(thread))
-        self.assertEqual(entry["tools"], {READ: {"approval_mode": "approve"}})
+        self.assertEqual(entry["tools"], {READ: {"approval_mode": "approve"}, SEND: {"approval_mode": "approve"}})
         text = codex_config.config_text(self.run_brief(thread))
         server = tomllib.loads(text)["mcp_servers"]["jarvis"]
         self.assertEqual(server["tools"][READ]["approval_mode"], "approve")
-        self.assertNotIn(SEND, server["tools"])
+        self.assertEqual(server["tools"][SEND]["approval_mode"], "approve")
         got, _ = self.relay_in_turn(thread, [(READ, {"note": "cx"})])
         self.assertEqual(got[10]["result"]["content"][0]["text"], "PROBE-MARKER cx")
         self.assertEqual(CALLS[0]["caller"]["provider"], "codex")
@@ -829,14 +830,14 @@ class BridgeChecks(DaemonHarness):
         finally:
             session_tools.SESSION_TOOLS.update(saved)
 
-    def test_production_catalog_is_claude_only(self):
+    def test_production_catalog_has_both_owner_chat_providers(self):
         out = subprocess.run(
             [sys.executable, "-c", "from jarvis.v2 import session_tools as s; "
                                    "from jarvis.v2.mcp_catalog import MCP_TOOLS; "
                                    "assert set(s.SESSION_TOOLS) == MCP_TOOLS | {'terminal_read'}; "
-                                   "assert all(t.providers == frozenset({'claude'}) for t in s.SESSION_TOOLS.values()); "
+                                   "assert all(t.providers == frozenset({'claude', 'codex'}) for t in s.SESSION_TOOLS.values()); "
                                    "assert any(t.name == 'terminal_read' for t in s.for_provider('claude')); "
-                                   "assert not s.for_provider('codex'); print('ok')"],
+                                   "assert any(t.name == 'terminal_read' for t in s.for_provider('codex')); print('ok')"],
             cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)},
             capture_output=True, text=True, timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -1183,6 +1184,8 @@ class ClaudeProviderChecks(unittest.TestCase):
                         self.assertEqual(reason, "the daemon checks this Jarvis tool")
 
     def test_the_hook_refuses_a_foreground_tool_for_a_sub_agent_without_permit(self):
+        self.stack.enter_context(patch.dict(session_tools.SESSION_TOOLS, {
+            READ: replace(session_tools.SESSION_TOOLS[READ], foreground_only=True)}))
         asker = Asker(Decision.ALLOW)
         brief = Brief(Role.CHAT, str(self.cwd),
                       mcp_servers={"jarvis": {"command": "/bin/true"}})
@@ -1255,7 +1258,7 @@ class CodexProviderChecks(unittest.TestCase):
         path = home / "config.toml"
         server = tomllib.loads(path.read_text())["mcp_servers"]["jarvis"]
         self.assertEqual(server["env"][bridge.TOKEN_VARIABLE], PLACEHOLDER)
-        self.assertEqual(server["tools"], {READ: {"approval_mode": "approve"}})
+        self.assertEqual(server["tools"], {READ: {"approval_mode": "approve"}, SEND: {"approval_mode": "approve"}})
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(home.stat().st_mode & 0o777, 0o700)
         rpc = h.native.rpc
