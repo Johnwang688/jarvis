@@ -643,6 +643,8 @@ class BrowserHost:
         from .activity_work import ActivityWork
         self.activity = BrowserActivity()
         self._activity_work = ActivityWork(self.activity)
+        from .attention_cleanup import AttentionCleanup
+        self._attention_cleanup = AttentionCleanup(self)
         self._next_instance_generation = 0
         self._instances: dict[str, _Instance] = {}
         self._closing_instances: dict[str, _Instance] = {}
@@ -912,6 +914,7 @@ class BrowserHost:
         if looks:await asyncio.gather(*looks,return_exceptions=True)
         for profile in list(self._instances.keys() | self._closing_instances.keys()):
             await self._close_instance(profile)
+        await self._attention_cleanup.settle()
         if self._pw is not None:
             try:
                 await asyncio.wait_for(self._pw.stop(), CLOSE_TIMEOUT_S)
@@ -2115,6 +2118,7 @@ class BrowserHost:
         dialog_id = self._new_id(tab.dialogs)
         token = self.page_hold(tab, "dialog:" + dialog_id)
         if token is None:
+            self._attention_cleanup.refuse(tab, "dialog", dialog)
             return
         tab.dialogs[dialog_id] = dialog
         kind = dialog.type if dialog.type in DIALOG_KINDS else "alert"
@@ -2229,6 +2233,7 @@ class BrowserHost:
         key = "download:" + secrets.token_hex(4)
         token = self.page_hold(tab, key)
         if token is None:
+            self._attention_cleanup.refuse(tab, "download", download)
             return
         drive=getattr(self._daemon,"browser_drive",None)
         item=drive.downloads.started(tab.id,getattr(download,"url",None)) if drive is not None else None
@@ -2349,7 +2354,7 @@ class BrowserHost:
                      "instance_generation": self._instances[tab.profile].generation,
                      "document_generation": tab.document_generation}
             for tab in self._tabs.values() if tab.pane_ready and tab.page_identity > 0
-            and tab.profile in self._instances
+            and tab.profile in self._instances and not self._instances[tab.profile].closing
         }
         with self._lock:
             self._pane_tabs = rows

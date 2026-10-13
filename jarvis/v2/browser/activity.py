@@ -53,6 +53,7 @@ class BrowserActivity:
         self._instances: dict[str, int] = {}
         self._active: dict[ActivityToken, tuple[str, int]] = {}
         self._restarts: dict[str, _Restart] = {}
+        self._cleanup: dict[str, ActivityToken] = {}
 
     def desired(self, generation: int) -> None:
         if type(generation) is not int or generation < 0:
@@ -110,6 +111,30 @@ class BrowserActivity:
                 self._restarts.pop(profile, None)
             return self._enter(profile, instance)
 
+    def cleanup_hold(self, profile: str, instance: int) -> ActivityToken | None:
+        """One reserved overflow-cleanup token per live instance (at most nine).
+
+        Only refused dialog/download cleanup uses this escape from the ordinary
+        activity cap. A committed replacement already owns old-context teardown.
+        """
+        with self._lock:
+            try:
+                self._current(profile, instance)
+            except ActivityRefused:
+                return None
+            pending = self._restarts.get(profile)
+            if pending is not None:
+                if pending.committed:
+                    return None
+                self._restarts.pop(profile, None)
+            prior = self._cleanup.get(profile)
+            if prior is not None:
+                return prior if prior.instance == instance else None
+            token = ActivityToken(profile, instance)
+            self._cleanup[profile] = token
+            self._active[token] = (profile, instance)
+            return token
+
     def _enter(self, profile: str, instance: int) -> ActivityToken:
         if len(self._active) >= MAX_ACTIVITIES:
             raise ActivityRefused("too much Browser work is still settling")
@@ -120,6 +145,8 @@ class BrowserActivity:
     def leave(self, token: ActivityToken) -> None:
         with self._lock:
             self._active.pop(token, None)
+            if self._cleanup.get(token.profile) is token:
+                self._cleanup.pop(token.profile, None)
 
     def try_restart(self, profile: str, instance: int, desired: int) -> RestartToken | None:
         with self._lock:
