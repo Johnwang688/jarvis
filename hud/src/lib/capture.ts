@@ -260,8 +260,13 @@ export class Capture {
     return summary;
   }
 
-  /** The message is over: flush its last chunk, arm the continuation window, say so. */
-  private finishRecording(trim: number) {
+  /**
+   * The message is over: flush its last chunk, arm the continuation window, say so.
+   * `cutShort`: it did not end because the owner finished (the 60 s stopgap cap): it
+   * is announced `truncated`, so it is placed late and boxed, and arms no
+   * continuation, which would only split what was one long message.
+   */
+  private finishRecording(trim: number, cutShort = false) {
     const rec = this.rec;
     if (!rec) return;
     this.rec = null;
@@ -274,13 +279,13 @@ export class Capture {
     // can take its window back.
     const source = this.claimSource;
     if (source === "wake" || source === "follow_up") { this.chainFrom = this.ring.written; this.chainClaims = 0; }
-    const arm = (source === "wake" || source === "follow_up" || source === "continuation")
+    const arm = !cutShort && (source === "wake" || source === "follow_up" || source === "continuation")
       && this.chainClaims < CONTINUE_MAX_CLAIMS;
     this.continueToken = arm ? ++this.tokenSeq : 0;
     this.continueUntil = arm ? this.ring.written + msToSamples(CONTINUE_MS) : -1;
     const summary = rec.end(trim);
     if (summary.chunks === 0) { this.closeContinuation(); this.announceEnd(rec, summary, null, false); return; }
-    this.announceEnd(rec, summary, arm ? this.continueToken : null, false);
+    this.announceEnd(rec, summary, arm ? this.continueToken : null, cutShort);
   }
 
   /** The ceiling: the message goes as it stands, and the window says so. */
@@ -289,7 +294,7 @@ export class Capture {
     if (!rec) return;
     const ms = rec.ms;
     const claimCap = rec.limitMs < UTTERANCE_LIMIT_MS;
-    this.finishRecording(0);
+    this.finishRecording(0, claimCap);
     this.vad.open = false;
     this.segClaimed = false;
     this.ptt = null;
@@ -421,6 +426,14 @@ export class Capture {
   onWake(): "claimed" | "armed" {
     if (this.hooks.muted()) return "armed"; // a result already in flight can land late
     if (this.ptt) return "armed"; // the talk key already owns this recording
+    // Saying his name over a message the 60 s stopgap would cut makes it a wake claim:
+    // the same lift the talk key gives.
+    if (this.rec && this.rec.limitMs < UTTERANCE_LIMIT_MS) {
+      this.rec.limitMs = UTTERANCE_LIMIT_MS;
+      this.claimSource = "wake";
+      this.wakeHitAt = -1e9;
+      return "claimed";
+    }
     this.wakeHitAt = this.now();
     if (this.vad.open && !this.segClaimed) {
       this.segClaimed = true;

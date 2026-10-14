@@ -518,9 +518,41 @@ describe("a claim without the wake word or the talk key ends at 60 s (M3, until 
     expect(r.limits[0]).toMatchObject({ claimCap: true });
     expect(r.limits[0].ms).toBeGreaterThanOrEqual(CLAIM_CAP_MS);
     expect(r.limits[0].ms).toBeLessThan(CLAIM_CAP_MS + 100);
-    expect(r.ends[0]).toMatchObject({ source: "follow_up", truncated: false });
+    expect(r.ends[0]).toMatchObject({ source: "follow_up", truncated: true, continuation: null });   // cut short: boxed, no continuation
+    expect(r.placed[0].late).toBe(true);
     expect(r.ends[0].ms).toBeLessThan(CLAIM_CAP_MS + 100);
     expect(r.placed[0].text.split(" ").length).toBeLessThanOrEqual(62);
+  });
+
+  it("a follow-up of 91 s is one boxed message: the piece after the cap is not sent on its own", async () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.openFollowUp();
+    r.say(0, 90);
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    await r.settle();
+    expect(r.ends).toHaveLength(1);                           // no 33 s continuation claim after the cap
+    expect(r.ends[0]).toMatchObject({ truncated: true, continuation: null });
+    expect(r.placed).toHaveLength(1);
+    expect(placementFor({ mode: "auto", chat: "t1" }, { mode: "auto", chat: "t1", busy: false, steers: false, card: false }, r.placed[0])).toBe("review");
+    expect(r.drops.map(d => d.reason)).toContain("unclaimed"); // the rest is speech nobody claimed
+    expect(r.limits).toHaveLength(1);
+  });
+
+  it("saying the wake word over a message the cap would cut lifts it, as the talk key does", async () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.openFollowUp();
+    r.say(0, 29);
+    expect(r.cap.onWake()).toBe("claimed");
+    r.say(30, 90);
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    await r.settle();
+    expect(r.limits).toEqual([]);
+    expect(r.ends).toHaveLength(1);
+    expect(r.ends[0]).toMatchObject({ source: "wake", truncated: false });
+    expect(r.ends[0].ms).toBeGreaterThan(90_000);
+    expect(r.placed[0].late).toBe(false);
   });
 
   it("a continuation claim is capped the same way", () => {
@@ -530,6 +562,7 @@ describe("a claim without the wake word or the talk key ends at 60 s (M3, until 
     r.cap.feedMs(HANGOVER_MS + 400, QUIET);                 // the wake-claimed message ends and arms the window
     r.say(10, 80);                                          // speech soon after continues it
     expect(r.ends.map(e => e.source)).toEqual(["wake", "continuation"]);   // the second was cut at 60 s
+    expect(r.ends[1]).toMatchObject({ truncated: true, continuation: null });
     expect(r.limits).toHaveLength(1);
     expect(r.limits[0].claimCap).toBe(true);
   });

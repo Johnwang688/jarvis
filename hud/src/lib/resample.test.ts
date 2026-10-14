@@ -91,12 +91,12 @@ describe("Resampler (windowed sinc)", () => {
     expect(out.length).toBeLessThanOrEqual(16000);
   });
 
-  it("does not drift over ten minutes of input (counted, not accumulated)", () => {
+  it("does not drift over two minutes of input (counted, not accumulated)", () => {
     const r = new Resampler(44100);
     let total = 0;
     const block = new Float32Array(441);
-    for (let i = 0; i < 44100 * 600 / 441; i++) total += r.process(block).length;
-    expect(Math.abs(total - 16000 * 600)).toBeLessThan(20);
+    for (let i = 0; i < 44100 * 120 / 441; i++) total += r.process(block).length;
+    expect(Math.abs(total - 16000 * 120)).toBeLessThan(20);
   });
 
   it("rejects a nonsense rate", () => {

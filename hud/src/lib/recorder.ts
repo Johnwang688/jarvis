@@ -13,7 +13,7 @@
 //   - at a pause where there is one: once the chunk is CHUNK_SOFT_MS long, the
 //     first quiet run of CHUNK_GAP_MS ends it; past CHUNK_LATE_MS a shorter
 //     pause (CHUNK_LATE_GAP_MS) will do. Nothing is lost at such a cut; the
-//     next chunk repeats only CHUNK_SOFT_OVERLAP_MS of the quiet before it;
+//     next chunk starts with CHUNK_SOFT_OVERLAP_MS of digital silence;
 //   - failing that, hard at CHUNK_HARD_MS, in the middle of speech. The next
 //     chunk then starts CHUNK_OVERLAP_MS earlier, so a word the cut fell in is
 //     whole in one of them, and the transcripts are joined by the words the
@@ -31,7 +31,7 @@ export const CHUNK_LATE_MS = 18_000;
 export const CHUNK_LATE_GAP_MS = 300;
 export const CHUNK_HARD_MS = 25_000;
 export const CHUNK_OVERLAP_MS = 500;
-/** A cut at a pause also repeats this much of the quiet before it, so the first phoneme after the pause is never at a chunk's edge. */
+/** A cut at a pause starts the next chunk with this much digital silence, so the first phoneme after the pause is never at a chunk's edge. */
 export const CHUNK_SOFT_OVERLAP_MS = 200;
 export const UTTERANCE_LIMIT_MS = 15 * 60_000;
 /**
@@ -57,7 +57,7 @@ export interface RecordedChunk {
   wav: Blob;
   /** The chunk's length, overlap included. */
   ms: number;
-  /** How much of its start repeats the end of the previous chunk (200 ms of quiet after a cut at a pause, 500 ms of speech after a hard cut). */
+  /** How much of its start is not new audio: 200 ms of digital silence after a cut at a pause, 500 ms repeating the previous chunk's speech after a hard cut. */
   overlapMs: number;
   /**
    * That overlap may hold words the previous chunk's transcript also ends with
@@ -180,8 +180,12 @@ export class UtteranceRecorder {
     const samples = this.flush();
     this.voiced = 0;
     this.quiet = 0;
+    // A hard cut repeats real speech (the join looks for the echoed words). A cut at a
+    // pause pads the next chunk with digital silence instead of repeating the quiet
+    // before it: "quiet" is only below the detector's threshold, and a faint trailing
+    // word in the last 200 ms would otherwise be heard twice.
     const keep = Math.min(samples.length, msToSamples(hard ? CHUNK_OVERLAP_MS : CHUNK_SOFT_OVERLAP_MS));
-    this.frames = [samples.slice(samples.length - keep)];
+    this.frames = [hard ? samples.slice(samples.length - keep) : new Float32Array(keep)];
     this.len = keep;
     this.overlap = keep;
     this.overlapRepeats = hard;

@@ -480,7 +480,9 @@ export class SttAssembler<M = undefined> {
       const id = g.members[at];
       const e = this.entries.get(id);
       if (!e) continue;
-      if (e.state === "failed") { if (acc[acc.length - 1] !== GAP_MARK) acc.push(GAP_MARK); continue; }
+      // Marks only on a message's first placement: a later one is a retried chunk, alone,
+      // and the others' gaps were already marked where they belong.
+      if (e.state === "failed") { if (g.placed.size === 0 && acc[acc.length - 1] !== GAP_MARK) acc.push(GAP_MARK); continue; }
       if (e.state !== "ready" || !inBatch.has(id)) continue;
       const t = e.text.trim();
       if (!t) continue;

@@ -62,6 +62,18 @@ describe("UtteranceRecorder", () => {
     expect(chunks[0].ms + chunks[1].ms - chunks[1].overlapMs).toBeCloseTo(rec.ms, -1);
   });
 
+  it("pads a cut at a pause with digital silence, never a repeat of the faint audio before it", () => {
+    const { rec, chunks, feed } = mk();
+    feed(CHUNK_SOFT_MS);
+    feed(800, 0.004, false);             // quiet to the detector, but not silent: a trailing word's tail
+    expect(chunks).toHaveLength(1);
+    feed(1000);
+    rec.end(0);
+    const pad = chunks[1].samples.subarray(0, msToSamples(CHUNK_SOFT_OVERLAP_MS));
+    expect(Array.from(pad).every(v => v === 0)).toBe(true);
+    expect(chunks[1].repeats).toBe(false);
+  });
+
   it("takes a shorter pause after 18 s", () => {
     const { chunks, feed } = mk();
     feed(19000);

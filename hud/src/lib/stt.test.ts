@@ -670,6 +670,22 @@ describe("chunked messages (V4)", () => {
     expect(await run([true, true])).toBeUndefined();            // nothing was heard: no message of marks
   });
 
+  it("marks the gaps once: a retried chunk placed alone adds none (chunks 2 and 4 failed, retry 2)", async () => {
+    const h = harness();
+    const g = open(h);
+    const ids = [sub(h, g), sub(h, g), sub(h, g), sub(h, g)];
+    h.calls[0].resolve("t1"); h.calls[2].resolve("t3");
+    h.calls[1].reject(Object.assign(new Error("x"), { status: 400 }));
+    h.calls[3].reject(Object.assign(new Error("x"), { status: 400 }));
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["t1 […] t3 […]"]);
+    h.stt.retry(ids[1]);
+    h.calls[4].resolve("t2");
+    await flush();
+    expect(h.texts()).toEqual(["t1 […] t3 […]", "t2"]);          // not "t2 […]": chunk 4's gap was marked already
+  });
+
   it("a cut at a pause is not de-duplicated even when the chunks share an edge word (repeats: false)", async () => {
     const h = harness();
     const g = open(h);
