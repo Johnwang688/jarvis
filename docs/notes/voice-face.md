@@ -1775,7 +1775,11 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
 - **Counts.** vitest 2438 tests / 154 files (2385 / 151 on V5: +53, three new files; one unrelated
   `markdownMath` timing test failed once in a full run under a load average of 24 and passed alone), `tsc` and
   `vite build` clean. Browser checks on the built `hud/dist`: `hud_v2_words_check` 68, `chunks` 58, `stt` 28,
-  `steer` 46, `ptt` 70, `speech` 56 all pass; `vad` and `multichat`: see the PR. The full `hud_v2_check` was not run.
+  `steer` 46, `ptt` 70, `speech` 56, `multichat` 343 all pass; `vad` 67 passes at a load average of about 4. At a load of
+  10-25 its three "2.4 s pause continues" checks failed in three full runs (the message ended at the pause, 5.3 s + 4.2 s
+  instead of one 11 s upload) while V5's own build passed once at load 15; run alone (`pauses`) it passes on this branch.
+  Nothing on this branch touches the pause path (`Capture`'s additions only read the quiet run), but a margin of 100 ms of
+  real-time fake-microphone audio is load-sensitive, so treat that check as flaky under load. The full `hud_v2_check` was not run.
 - **Mutations that fail on purpose** (source restored afterwards): dropping the quiet test (6 vitest tests);
   ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks).
 - **Not done / not claimed.** A real person's voice, a physical microphone, and how Parakeet transcribes a spoken "over"
