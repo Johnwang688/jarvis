@@ -20,12 +20,24 @@
 //     not hold the line: later text is placed, and the failed clip's text goes
 //     in when its retry lands, marked `late`.
 //
+// V4 (chunked STT, plan §3.5): a long message leaves the recorder as ordered
+// chunks. They are one *group* here -- one diagnostics row, one meta, one
+// placement -- whose chunks are clips like any other: each has its own `seq`,
+// deadline, retry, kept audio and Retry button; at most STT_MAX_IN_FLIGHT are
+// uploading at a time; and the group's text is placed once, when the message
+// has ended and none of its chunks is still in flight: the chunk texts joined
+// in order, the words an overlap repeats said once (joinChunks.ts). A chunk
+// that failed does not hold the line, as before: the others are placed (marked
+// `late`, so AUTO boxes them rather than sending half a message) and the
+// failed one's words follow when its Retry lands.
+//
 // Nothing here persists or uploads anything beyond the one `transcribe` call
 // the caller supplies, and a retry is refused while `canUpload()` is false (the
 // mic is OFF, the window crashed, a card is up) -- the same fail-closed rule as
 // the first attempt.
 
 import type { ClaimSource, VoiceDiagnostics } from "./voiceDiagnostics";
+import { dropLeadingOverlap, dropTrailingOverlap } from "./joinChunks";
 
 export const STT_MAX_CLIPS = 20;
 export const STT_MAX_CLIP_MS = 10 * 60_000;
@@ -34,6 +46,8 @@ export const STT_RETRY_DELAY_MS = 2000;
 export const STT_MIN_DEADLINE_MS = 15_000;
 /** Automatic retries per clip. The owner's Retry button is separate and explicit. */
 export const STT_AUTO_RETRIES = 1;
+/** Chunks uploading at once (plan §3.5). The class itself is unbounded unless told; the HUD passes this. */
+export const STT_MAX_IN_FLIGHT = 2;
 
 export const sttDeadlineMs = (clipMs: number) =>
   Math.max(STT_MIN_DEADLINE_MS, 2 * (Number.isFinite(clipMs) ? Math.max(0, clipMs) : 0));
@@ -42,6 +56,10 @@ export type SttState = "transcribing" | "waiting" | "ready" | "failed";
 
 export interface SttClipView {
   id: number;
+  /** The message this clip belongs to (its own id when it is a whole message). */
+  group: number;
+  /** Position among the message's chunks that are still held, from 1. */
+  part: number;
   diag: number;
   seq: number;
   ms: number;
@@ -66,6 +84,8 @@ export interface SttPlaced<M> {
   late: boolean;
   /** True when the owner's Retry button produced this text. */
   retried: boolean;
+  /** Chunks whose text was joined into this one (1 for a clip that was never chunked). */
+  parts: number;
 }
 
 export type SttEvent =
@@ -81,18 +101,36 @@ export interface SttOptions<M> {
   /** Called in `seq` order with every text that is ready to be placed. */
   place: (batch: SttPlaced<M>[]) => void | Promise<void>;
   diagnostics: VoiceDiagnostics;
-  /** Consulted before every retry (automatic or explicit), never the first attempt. */
+  /** Consulted before every upload that did not start the moment its clip was submitted, and every retry. */
   canUpload?: () => boolean;
+  /** Uploads at once; later chunks wait their turn, in `seq` order. Default: no limit. */
+  maxInFlight?: number;
   onEvent?: (e: SttEvent) => void;
   now?: () => number;
 }
 
 interface Entry<M> {
-  id: number; seq: number; diag: number; ms: number; source: ClaimSource; meta: M;
+  id: number; gid: number; seq: number; diag: number; ms: number; overlapMs: number; source: ClaimSource; meta: M;
   blob: Blob | null; bytes: number;
   state: SttState; attempts: number; autoRetries: number; error: string; text: string;
   startedAt: number; hadFailure: boolean; retried: boolean; cancelled: boolean;
-  ac: AbortController | null; retryTimer: ReturnType<typeof setTimeout> | null;
+  ac: AbortController | null; retryTimer: ReturnType<typeof setTimeout> | null; cancel: (() => void) | null;
+}
+
+/** One message: a clip, or the chunks a long dictation was cut into. */
+interface Group<M> {
+  id: number; source: ClaimSource; meta: M;
+  diag: number;
+  /** More chunks may still be submitted. The group's text is not placed until it is closed. */
+  open: boolean;
+  members: number[];
+  /** What each member said (and its overlap), kept while the group lives so a late retry can be joined to its neighbours. */
+  parts: Map<number, { text: string; overlap: boolean }>;
+  placed: Set<number>;
+  lastAt: number;
+  hadFailure: boolean;
+  /** Handed to `place`, which has not returned yet. */
+  placing: number;
 }
 
 class Deadline extends Error {}
@@ -111,16 +149,26 @@ function describe(error: unknown, deadlineMs: number): string {
   return typeof m === "string" && m ? m.slice(0, 200) : "transcription failed";
 }
 
+class Cancelled extends Error {}
+
 export class SttAssembler<M = undefined> {
   private entries = new Map<number, Entry<M>>();
+  private groups = new Map<number, Group<M>>();
   private nextId = 0;
   private listeners = new Set<() => void>();
   private chain: Promise<void> = Promise.resolve();
   private waiters = new Map<number, (() => void)[]>();
+  private groupWaiters = new Map<number, (() => void)[]>();
+  private queue: { e: Entry<M>; explicit: boolean }[] = [];
+  private running = 0;
   private value: SttSnapshot = { clips: [], pending: 0 };
   private now: () => number;
+  private max: number;
 
-  constructor(private o: SttOptions<M>) { this.now = o.now ?? (() => performance.now()); }
+  constructor(private o: SttOptions<M>) {
+    this.now = o.now ?? (() => performance.now());
+    this.max = o.maxInFlight && o.maxInFlight > 0 ? o.maxInFlight : Infinity;
+  }
 
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   snapshot = () => this.value;
@@ -142,19 +190,48 @@ export class SttAssembler<M = undefined> {
     for (const fn of w ?? []) fn();
   }
 
+  /** The same for a whole message (V4): closed, nothing in flight, its text placed or its chunks failed for good. */
+  whenGroupSettled(gid: number): Promise<void> {
+    const g = this.groups.get(gid);
+    if (!g || this.groupDone(g)) return Promise.resolve();
+    return new Promise<void>(done => { this.groupWaiters.set(gid, [...(this.groupWaiters.get(gid) ?? []), done]); });
+  }
+  private groupDone(g: Group<M>): boolean {
+    if (g.open || g.placing > 0) return false;
+    return !g.members.some(id => { const e = this.entries.get(id); return e && e.state !== "failed"; });
+  }
+  private settleGroup(g: Group<M>) {
+    if (!this.groupDone(g)) return;
+    const w = this.groupWaiters.get(g.id);
+    this.groupWaiters.delete(g.id);
+    for (const fn of w ?? []) fn();
+    // Nothing of it is held any more (failed chunks included): forget its texts.
+    if (!g.members.some(id => this.entries.has(id))) this.groups.delete(g.id);
+  }
+
   /** The kept audio for a clip, for Play. Null once it is placed, discarded or evicted. */
   clip(id: number): Blob | null { return this.entries.get(id)?.blob ?? null; }
 
   private emit() {
     const all = [...this.entries.values()].filter(e => e.blob).sort((a, b) => a.seq - b.seq);
+    const parts = new Map<number, number>();
     this.value = {
       pending: all.filter(e => e.state === "transcribing" || e.state === "waiting").length,
-      clips: all.map(e => ({ id: e.id, diag: e.diag, seq: e.seq, ms: e.ms, bytes: e.bytes, state: e.state, attempts: e.attempts, error: e.error })),
+      clips: all.map(e => {
+        const part = (parts.get(e.gid) ?? 0) + 1;
+        parts.set(e.gid, part);
+        return { id: e.id, group: e.gid, part, diag: e.diag, seq: e.seq, ms: e.ms, bytes: e.bytes, state: e.state, attempts: e.attempts, error: e.error };
+      }),
     };
     for (const fn of this.listeners) { try { fn(); } catch { /* observers cannot affect transcription */ } }
   }
 
   private event(e: SttEvent) { try { this.o.onEvent?.(e); } catch { /* ditto */ } }
+
+  /** The diagnostics row says "audio kept" while any chunk of its message still holds audio. */
+  private syncKept(g: Group<M> | undefined) {
+    if (g && g.diag) this.o.diagnostics.keep(g.diag, g.members.some(id => !!this.entries.get(id)?.blob));
+  }
 
   /**
    * Make room for `extra`, evicting the oldest failed clips -- but only if that
@@ -180,33 +257,101 @@ export class SttAssembler<M = undefined> {
   private drop(e: Entry<M>) {
     this.entries.delete(e.id);
     e.blob = null;
-    this.o.diagnostics.keep(e.diag, false);
+    this.syncKept(this.groups.get(e.gid));
   }
 
-  /** Queue a finished clip. Returns its id, or null when the backlog is full (visible, never silent). */
-  submit(blob: Blob, ms: number, source: ClaimSource, meta: M): number | null {
+  /**
+   * A message that will arrive as several chunks (V4). Submit them with
+   * `{ group }`, then `closeGroup` when the message has ended: nothing of it is
+   * placed before, and everything is placed together after.
+   */
+  beginGroup(source: ClaimSource, meta: M): number {
+    const id = ++this.nextId;
+    this.groups.set(id, {
+      id, source, meta, diag: 0, open: true, members: [], parts: new Map(), placed: new Set(),
+      lastAt: this.now(), hadFailure: false, placing: 0,
+    });
+    return id;
+  }
+
+  /** The message has ended; no chunk will follow. */
+  closeGroup(gid: number) {
+    const g = this.groups.get(gid);
+    if (!g) return;
+    g.open = false;
+    if (!g.members.length) { this.settleGroup(g); this.groups.delete(gid); return; }
+    this.release();
+    this.settleGroup(g);
+  }
+
+  /**
+   * Queue a finished clip -- or, with `opts.group`, one chunk of a message.
+   * `overlapMs` is how much of its start repeats the previous chunk's end.
+   * Returns its id, or null when the backlog is full (visible, never silent).
+   */
+  submit(blob: Blob, ms: number, source: ClaimSource, meta: M, opts: { group?: number; overlapMs?: number } = {}): number | null {
+    let g = opts.group === undefined ? undefined : this.groups.get(opts.group);
+    if (opts.group !== undefined && (!g || !g.open)) return null; // a closed message takes no more
+    const overlapMs = Math.max(0, Math.min(ms, opts.overlapMs ?? 0));
     // The incoming clip counts against every cap. Only a clip that cannot fit
     // while other audio is held is refused; a lone oversize clip is still sent
     // once, and is dropped (and said to be) the moment it fails.
     if (!this.makeRoom(blob.size, ms, 1) && [...this.entries.values()].some(e => e.blob)) {
-      this.o.diagnostics.add(ms, source, "stt_failed");
+      if (g) {
+        // A chunk lost from the middle of a message: the rest must not go out as if it were all of it.
+        g.hadFailure = true;
+        if (g.diag) this.o.diagnostics.finish(g.diag, "stt_failed", this.now() - g.lastAt);
+        else g.diag = this.o.diagnostics.add(ms - overlapMs, source, "stt_failed");
+      } else this.o.diagnostics.add(ms, source, "stt_failed");
       return null;
     }
     const id = ++this.nextId;
+    if (!g) {
+      g = {
+        id, source, meta, diag: 0, open: false, members: [], parts: new Map(), placed: new Set(),
+        lastAt: this.now(), hadFailure: false, placing: 0,
+      };
+      this.groups.set(id, g);
+    }
+    if (!g.diag) g.diag = this.o.diagnostics.add(ms - overlapMs, source, "transcribing");
+    else this.o.diagnostics.extend(g.diag, ms - overlapMs);
+    g.members.push(id);
+    g.parts.set(id, { text: "", overlap: overlapMs > 0 });
+    g.lastAt = this.now();
     const e: Entry<M> = {
-      id, seq: id, diag: this.o.diagnostics.add(ms, source, "transcribing"), ms, source, meta,
-      blob, bytes: blob.size, state: "transcribing", attempts: 0, autoRetries: 0, error: "", text: "",
-      startedAt: this.now(), hadFailure: false, retried: false, cancelled: false, ac: null, retryTimer: null,
+      id, gid: g.id, seq: id, diag: g.diag, ms, overlapMs, source, meta: g.meta,
+      blob, bytes: blob.size, state: "waiting", attempts: 0, autoRetries: 0, error: "", text: "",
+      startedAt: this.now(), hadFailure: false, retried: false, cancelled: false, ac: null, retryTimer: null, cancel: null,
     };
     this.entries.set(id, e);
-    this.o.diagnostics.keep(e.diag, true);
-    void this.attempt(e, false);
+    this.syncKept(g);
+    this.schedule(e, false);
+    if (e.state === "waiting") this.emit(); // queued behind the uploads already running
     return id;
+  }
+
+  /** Start `e` when a slot is free, earliest `seq` first. */
+  private schedule(e: Entry<M>, explicit: boolean) {
+    this.queue.push({ e, explicit });
+    this.pump();
+  }
+
+  private pump() {
+    while (this.running < this.max && this.queue.length) {
+      this.queue.sort((a, b) => a.e.seq - b.e.seq);
+      const { e, explicit } = this.queue.shift()!;
+      if (e.cancelled || !e.blob) continue;
+      // A chunk that waited its turn is judged again: the mic may be OFF now, a card up.
+      if (this.o.canUpload && !this.o.canUpload()) { this.fail(e, "not sent: dictation is paused"); continue; }
+      this.running++;
+      void this.attempt(e, explicit).finally(() => { this.running--; this.pump(); });
+    }
   }
 
   private async attempt(e: Entry<M>, explicit: boolean) {
     const blob = e.blob;
     if (!blob || e.cancelled) return;
+    const g = this.groups.get(e.gid);
     e.state = "transcribing"; e.attempts++; e.error = "";
     const ac = new AbortController(); e.ac = ac;
     const deadline = sttDeadlineMs(e.ms);
@@ -214,15 +359,18 @@ export class SttAssembler<M = undefined> {
     const expired = new Promise<never>((_, reject) => {
       timer = setTimeout(() => { reject(new Deadline()); ac.abort(); }, deadline);
     });
+    const cancelled = new Promise<never>((_, reject) => { e.cancel = () => reject(new Cancelled()); });
+    expired.catch(() => {}); cancelled.catch(() => {});
     this.emit();
     this.event({ kind: "busy", pending: this.value.pending });
     let text = "";
     let failure: unknown = null;
     try {
-      text = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: e.id, seq: e.seq, budgetMs: deadline }), expired]);
+      text = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: e.gid, seq: e.seq, budgetMs: deadline }), expired, cancelled]);
     } catch (error) { failure = error ?? new Error("transcription failed"); }
     clearTimeout(timer);
-    if (e.cancelled) return;
+    e.cancel = null;
+    if (e.cancelled || failure instanceof Cancelled) return;
     if (failure) {
       if (!explicit && e.autoRetries < STT_AUTO_RETRIES && retryable(failure)) {
         e.autoRetries++; e.state = "waiting"; e.error = describe(failure, deadline);
@@ -230,7 +378,7 @@ export class SttAssembler<M = undefined> {
           e.retryTimer = null;
           if (e.cancelled) return;
           if (this.o.canUpload && !this.o.canUpload()) { this.fail(e, "not retried: dictation is paused"); return; }
-          void this.attempt(e, false);
+          this.schedule(e, false);
         }, STT_RETRY_DELAY_MS);
         this.emit();
         this.event({ kind: "retrying" });
@@ -239,26 +387,29 @@ export class SttAssembler<M = undefined> {
       this.fail(e, describe(failure, deadline));
       return;
     }
-    if (typeof text !== "string" || !text.trim()) {
-      this.entries.delete(e.id); e.blob = null;
-      this.o.diagnostics.keep(e.diag, false);
-      this.o.diagnostics.finish(e.diag, "empty_transcript", this.now() - e.startedAt);
-      this.emit(); this.event({ kind: "empty" }); this.settle(e.id); this.release();
-      return;
-    }
-    e.text = text; e.state = "ready"; e.error = "";
+    // A blank text is a normal answer for a chunk of mostly silence: it is
+    // settled with the rest of its message (release).
+    e.text = typeof text === "string" ? text : "";
+    g?.parts.set(e.id, { text: e.text.trim(), overlap: e.overlapMs > 0 });
+    e.state = "ready"; e.error = "";
     this.emit(); this.release();
   }
 
   private fail(e: Entry<M>, message: string) {
+    const g = this.groups.get(e.gid);
     e.state = "failed"; e.error = message; e.hadFailure = true;
-    this.o.diagnostics.finish(e.diag, "stt_failed", this.now() - e.startedAt);
+    if (g) {
+      g.hadFailure = true;
+      this.o.diagnostics.finish(g.diag, "stt_failed", this.now() - g.lastAt);
+    }
     this.makeRoom(0, 0, 0); // may evict this very clip when it alone is over the caps
     const kept = this.entries.has(e.id);
+    this.syncKept(g);
     this.emit();
     this.event({ kind: "failed", id: e.id, message, kept });
     this.settle(e.id);
     this.release();
+    if (g) this.settleGroup(g);
   }
 
   /** The owner pressed Retry: exactly one more attempt for a kept, failed clip. */
@@ -266,10 +417,13 @@ export class SttAssembler<M = undefined> {
     const e = this.entries.get(id);
     if (!e || e.state !== "failed" || !e.blob) return false;
     if (this.o.canUpload && !this.o.canUpload()) { this.event({ kind: "blocked", message: "NOT RETRIED · MIC OFF OR PAUSED" }); return false; }
-    this.o.diagnostics.reopen(e.diag);
+    const g = this.groups.get(e.gid);
+    if (g) { this.o.diagnostics.reopen(g.diag); g.lastAt = this.now(); }
     e.startedAt = this.now();
     e.retried = true;
-    void this.attempt(e, true);
+    e.state = "waiting";
+    this.schedule(e, true);
+    if (e.state === "waiting") this.emit();
     return true;
   }
 
@@ -277,29 +431,80 @@ export class SttAssembler<M = undefined> {
   discard(id: number) {
     const e = this.entries.get(id);
     if (!e) return;
-    e.cancelled = true; e.ac?.abort(); clearTimeout(e.retryTimer ?? undefined);
-    if (e.state !== "failed") this.o.diagnostics.finish(e.diag, "cancelled", this.now() - e.startedAt);
+    const g = this.groups.get(e.gid);
+    e.cancelled = true; e.ac?.abort(); e.cancel?.(); clearTimeout(e.retryTimer ?? undefined);
+    this.queue = this.queue.filter(q => q.e !== e);
+    // A message with other chunks still going is not cancelled by dropping one.
+    const alone = !g || g.members.every(m => m === id || !this.entries.has(m));
+    if (e.state !== "failed" && g && alone) this.o.diagnostics.finish(g.diag, "cancelled", this.now() - e.startedAt);
     this.drop(e);
-    this.emit(); this.settle(id); this.release();
+    this.emit(); this.settle(id);
+    this.release();
+    if (g) this.settleGroup(g);
   }
 
-  /** Place, in capture order, every ready text no earlier clip is still waiting on. */
-  private release() {
-    const batch: Entry<M>[] = [];
-    for (const e of [...this.entries.values()].sort((a, b) => a.seq - b.seq)) {
-      if (e.state === "transcribing" || e.state === "waiting") break;
-      if (e.state === "ready") batch.push(e);
+  /** The message's words: each ready chunk's text in order, with what an overlap repeats said once. */
+  private joined(g: Group<M>, ready: Entry<M>[]): string {
+    const pieces: string[] = [];
+    for (const e of ready) {
+      let t = e.text.trim();
+      if (!t) continue;
+      const at = g.members.indexOf(e.id);
+      const prev = g.parts.get(g.members[at - 1]);
+      const nextId = g.members[at + 1];
+      const next = nextId === undefined ? undefined : g.parts.get(nextId);
+      if (e.overlapMs > 0 && prev?.text) t = dropLeadingOverlap(prev.text, t);
+      // A retried chunk whose successor was placed without it: its tail repeats the successor's head.
+      if (next?.overlap && next.text && g.placed.has(nextId)) t = dropTrailingOverlap(t, next.text);
+      if (t) pieces.push(t);
     }
-    if (!batch.length) return;
-    const items: SttPlaced<M>[] = batch.map(e => ({
-      id: e.id, seq: e.seq, text: e.text.trim(), ms: e.ms, source: e.source, meta: e.meta, diag: e.diag,
-      latencyMs: this.now() - e.startedAt, late: e.hadFailure, retried: e.retried,
-    }));
-    for (const e of batch) { this.entries.delete(e.id); e.blob = null; this.o.diagnostics.keep(e.diag, false); }
+    return pieces.join(" ");
+  }
+
+  /** Place, in capture order, every message no earlier chunk is still waiting on. */
+  private release() {
+    const out: { g: Group<M>; ents: Entry<M>[]; item: SttPlaced<M> }[] = [];
+    for (const g of [...this.groups.values()].sort((a, b) => a.id - b.id)) {
+      if (g.open) break; // still being spoken: it holds the line for what follows
+      const live = g.members.map(id => this.entries.get(id)).filter((e): e is Entry<M> => !!e);
+      if (live.some(e => e.state === "transcribing" || e.state === "waiting")) break;
+      const ready = live.filter(e => e.state === "ready");
+      if (!ready.length) continue; // failed for good, or nothing left
+      const text = this.joined(g, ready);
+      if (!text) {
+        // Every chunk that answered was blank.
+        const failed = live.some(e => e.state === "failed") || g.hadFailure;
+        for (const e of ready) { this.entries.delete(e.id); e.blob = null; g.placed.add(e.id); this.settle(e.id); }
+        this.syncKept(g);
+        if (!failed) this.o.diagnostics.finish(g.diag, "empty_transcript", this.now() - g.lastAt);
+        this.emit();
+        if (!failed) this.event({ kind: "empty" });
+        this.settleGroup(g);
+        continue;
+      }
+      const item: SttPlaced<M> = {
+        id: ready[0].id, seq: ready[0].seq, text,
+        ms: ready.reduce((n, e) => n + e.ms - e.overlapMs, 0),
+        source: g.source, meta: g.meta, diag: g.diag,
+        latencyMs: this.now() - g.lastAt, late: g.hadFailure, retried: ready.some(e => e.retried), parts: ready.length,
+      };
+      for (const e of ready) { this.entries.delete(e.id); e.blob = null; g.placed.add(e.id); }
+      this.syncKept(g);
+      g.placing++;
+      out.push({ g, ents: ready, item });
+    }
+    if (!out.length) return;
     this.emit();
-    this.chain = this.chain.then(() => this.o.place(items)).catch(() => {
-      for (const i of items) this.o.diagnostics.finish(i.diag, "unplaced", i.latencyMs);
-    }).then(() => { for (const i of items) this.settle(i.id); });
+    const batch = out.map(o => o.item);
+    this.chain = this.chain.then(() => this.o.place(batch)).catch(() => {
+      for (const i of batch) this.o.diagnostics.finish(i.diag, "unplaced", i.latencyMs);
+    }).then(() => {
+      for (const o of out) {
+        for (const e of o.ents) this.settle(e.id);
+        o.g.placing--;
+        this.settleGroup(o.g);
+      }
+    });
   }
 
   /** Resolves when every placement handed over so far has run (tests, teardown). */

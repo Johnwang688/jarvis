@@ -38,7 +38,8 @@ beforeEach(() => {
     onListening: () => {},
     onIdle: () => {},
     onDrop: (reason) => { drops.push(reason); },
-    onUtterance: () => { sent++; },
+    onChunk: () => {},
+    onUtteranceEnd: (e) => { if (e.chunks && !e.truncated) sent++; },
   }, () => 10_000);
 });
 
@@ -123,7 +124,10 @@ describe("the wiring is pinned", () => {
     expect(appSource).toMatch(/if \(capture\.press\(\)\) speech\.controller\.bargeIn\(\)/);
     // He resumes when the talk-key utterance is over: on a drop, and however it ends.
     expect(appSource).toMatch(/source === "ptt"\) speech\.controller\.endBargeIn\(\)/);
-    expect(appSource).toMatch(/\.finally\(\(\) => \{ if \(source === "ptt"\) speech\.controller\.endBargeIn\(\)/);
+    // V4: the end of the whole (possibly chunked) message, once its fate is known, and also when nothing was uploaded.
+    expect(appSource).toMatch(/const finish = \(\) => \{ if \(end\.source === "ptt"\) speech\.controller\.endBargeIn\(\); \}/);
+    expect(appSource).toMatch(/whenGroupSettled\(u\.gid\)\.then\([\s\S]{0,200}finish\(\)/);
+    expect(appSource).toMatch(/u\.gid === null\) \{ refuse\(\); finish\(\); return; \}/);
     expect(appSource).toContain("speech.controller.messageSent(threadId)");
     expect(appSource).toContain("followUpAfterSpeech.current = true");
     expect(appSource).toContain("speech.controller.onIdle(");

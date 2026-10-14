@@ -20,6 +20,7 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt }: { di
     <h3>Microphone diagnostics</h3>
     <p>Kept in this window only. Reload clears the last 50 utterances and any audio held for Retry.</p>
     <p data-testid="voice-mic-capability">Microphone: {value.mic === "unavailable" ? "unavailable — check the browser microphone permission" : value.mic === "unknown" ? "not checked" : "available"} · {muted ? "MIC MUTED · " : ""}Detector: energy</p>
+    <p data-testid="voice-capture-path">Capture: {value.path === "worklet" ? "AudioWorklet · 16 kHz mono, 512-sample frames" : value.path === "script_processor" ? `older ScriptProcessor path — ${value.pathNote || "AudioWorklet unavailable"}` : "not started"}</p>
     <p data-testid="voice-live-level">Level {muted ? "0.0000" : Number.isFinite(meter.rms) ? meter.rms.toFixed(4) : "—"} · Noise floor {Number.isFinite(meter.floor) ? meter.floor.toFixed(4) : "—"}</p>
     <p data-testid="voice-mic-settings">Echo cancellation: {setting(value.settings.echoCancellation)} · Noise suppression: {setting(value.settings.noiseSuppression)} · Automatic gain: {setting(value.settings.autoGainControl)}</p>
     <p>Requested: echo cancellation, noise suppression and automatic gain. Values above are the browser's readback.</p>

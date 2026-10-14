@@ -10,14 +10,14 @@ function harness() {
   const cap = new Capture({ suppressed: () => suppressed, suppressionReason: () => "card", muted: () => muted,
     onLevel: () => {}, onListening: () => {}, onIdle: () => {},
     onDrop: (reason, ms, source) => drops.push({ reason, ms, source }),
-    onUtterance: (_, ms, source) => sends.push({ ms, source }) }, () => 10000);
+    onChunk: () => {}, onUtteranceEnd: (e) => { if (e.chunks && !e.truncated) sends.push({ ms: e.ms, source: e.source }); } }, () => 10000);
   cap.feedMs(2000, quiet);
   return { cap, drops, sends, mute: () => { muted = true; }, block: () => { suppressed = true; } };
 }
 describe("capture observations do not own claim or upload decisions", () => {
   it("never includes the muted pre-roll in a PTT upload immediately after unmute", () => {
     let muted = true; const durations: number[] = [];
-    const cap = new Capture({ suppressed: () => false, muted: () => muted, onLevel: () => {}, onListening: () => {}, onIdle: () => {}, onUtterance: (_, ms) => durations.push(ms) });
+    const cap = new Capture({ suppressed: () => false, muted: () => muted, onLevel: () => {}, onListening: () => {}, onIdle: () => {}, onChunk: () => {}, onUtteranceEnd: (e) => { if (e.chunks) durations.push(e.ms); } });
     cap.feedMs(3000, speech); muted = false; cap.markUnmute(); cap.press(); cap.feedMs(1200, speech); cap.release();
     expect(durations).toEqual([1200]);
   });
@@ -50,7 +50,7 @@ describe("capture observations do not own claim or upload decisions", () => {
   });
   it("a throwing observation cannot prevent a later real claimed upload", () => {
     const sends: Blob[] = [];
-    const cap = new Capture({ suppressed: () => false, muted: () => false, onLevel: () => {}, onListening: () => {}, onIdle: () => {}, onDrop: () => { throw Error("observer"); }, onUtterance: wav => sends.push(wav) }, () => 10000);
+    const cap = new Capture({ suppressed: () => false, muted: () => false, onLevel: () => {}, onListening: () => {}, onIdle: () => {}, onDrop: () => { throw Error("observer"); }, onChunk: () => {}, onUtteranceEnd: (e) => { if (e.chunks) sends.push(new Blob()); } }, () => 10000);
     cap.feedMs(2000, quiet); cap.feedMs(1000, speech); cap.feedMs(HANGOVER_MS + 300, quiet);
     cap.openFollowUp(); cap.feedMs(1000, speech); cap.feedMs(HANGOVER_MS + 300, quiet);
     expect(sends).toHaveLength(1);

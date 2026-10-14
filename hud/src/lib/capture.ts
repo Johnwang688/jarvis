@@ -2,9 +2,12 @@
 // (tests/face/hud_capture_check.py is the spec).
 //
 // The mic is open from boot and never closes. Audio flows continuously into a
-// 40-second ring; utterances are carved out of it *afterwards* by the
-// detector, and the payload is a WAV this module builds rather than a webm a
-// MediaRecorder owns.
+// 40-second ring that supplies only the *pre-roll*: a claim starts an
+// UtteranceRecorder (recorder.ts) with the ring's audio from before the speech
+// was detected, then every frame until the message ends. There is no length
+// cap (V4, decision V-1); a long message leaves as ordered chunks (`onChunk`),
+// each a WAV this module builds rather than a webm a MediaRecorder owns, and
+// the message's end is announced once (`onUtteranceEnd`).
 //
 // Four rules the design turns on, each of which was a bug first:
 //   - an utterance is only sent if it was addressed to him (the orb was held,
@@ -24,11 +27,31 @@
 // pre-roll or as a wake hit's back-dating.
 
 import {
-  CAP_RATE, CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
-  closeBounds, frameRms, longEnough, msToSamples, samplesToMs, wavBlob,
+  CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
+  closeBounds, frameRms, longEnough, msToSamples, samplesToMs,
 } from "./vad";
+import { UtteranceRecorder, type RecordedChunk } from "./recorder";
 
 import type { ClaimSource, DropReason, SuppressionReason } from "./voiceDiagnostics";
+
+/** One chunk of a claimed message, as it leaves for transcription. */
+export interface UtteranceChunk extends RecordedChunk {
+  source: ClaimSource;
+}
+
+/** A claimed message is over: sent whole, truncated, or never uploaded at all. */
+export interface UtteranceEnd {
+  utterance: number;
+  source: ClaimSource;
+  /** Audio recorded, overlap counted once. */
+  ms: number;
+  /** Chunks that left (0: nothing was uploaded). */
+  chunks: number;
+  /** The continuation window this message armed (taken back with `cancelContinuation`), if it went out. */
+  continuation: number | null;
+  /** It ended before the owner finished: the mic went OFF, a card or picker appeared, the window crashed. */
+  truncated: boolean;
+}
 
 export interface CaptureHooks {
   /** Suppressed whenever the detector would be listening to him, not the owner. */
@@ -41,12 +64,27 @@ export interface CaptureHooks {
   /**
    * A claimed utterance began. `tag` is what the follow-up window was opened
    * for (V3: the pane whose reply opened it), when `source` is "follow_up".
+   * `utterance` names it for `onChunk` and `onUtteranceEnd`.
    */
-  onListening: (source?: ClaimSource, tag?: number | null) => void;
+  onListening: (source?: ClaimSource, tag?: number | null, utterance?: number) => void;
   onIdle: (note?: string) => void;
-  /** A finished, claimed utterance. The dictation mode decides what happens next. */
-  onUtterance: (wav: Blob, ms: number, source?: ClaimSource, continuation?: number | null) => void;
+  /**
+   * A chunk of a claimed message left the recorder (V4): the first when the
+   * message is 8-25 s long, or at its end. The dictation mode decides what
+   * happens to the words once all of them are in. This is also the seam for
+   * per-utterance audio (`chunk.samples`, speaker verification in V12).
+   */
+  onChunk: (chunk: UtteranceChunk) => void;
+  /** Called exactly once for every `onListening`, after its last chunk. */
+  onUtteranceEnd: (end: UtteranceEnd) => void;
+  /** The message reached the 15-minute ceiling and was sent as it stood. */
+  onLimit?: (ms: number) => void;
 }
+
+/** Reasons that stop a recording even when the owner is holding the talk key. */
+const HARD_STOPS: ReadonlySet<DropReason> = new Set<DropReason>([
+  "muted", "suppressed:card", "suppressed:picker", "suppressed:settings", "suppressed:crash",
+]);
 
 export class Capture {
   ring = new Ring();
@@ -73,7 +111,10 @@ export class Capture {
   private tokenSeq = 0;
   wakeHitAt = -1e9;
   segClaimed = false;
-  ptt: { from: number } | null = null;
+  ptt: { from: number; at: number } | null = null;
+  /** The recording of the claimed message in progress, if any. */
+  private rec: UtteranceRecorder | null = null;
+  private utterances = 0;
   micFloorSample = 0;
   private followUpTimer: any = null;
   private claimSource: ClaimSource = "unclaimed";
@@ -152,11 +193,88 @@ export class Capture {
     if (this.ptt) this.drop("suppressed:crash", samplesToMs(this.ring.written - this.ptt.from), "ptt");
     else if (this.vad.open) this.drop("suppressed:crash", samplesToMs(this.vad.voiced));
     this.blockedAlreadyReported = this.vad.open;
+    this.stopRecording(true);
     this.ptt = null;
     this.segClaimed = false;
     this.wakeHitAt = -1e9;
     this.closeFollowUp();
     this.closeContinuation();
+  }
+
+  /** A claimed message is being recorded (chunks may already have left). */
+  recording() {
+    return this.rec !== null;
+  }
+
+  // ---- recording ----------------------------------------------------------
+
+  private beginRecording(from: number): number {
+    const id = ++this.utterances;
+    const source = () => this.claimSource;
+    const rec = new UtteranceRecorder(id, (chunk) => {
+      try { this.hooks.onChunk({ ...chunk, source: source() }); } catch { /* a consumer cannot break the audio path */ }
+    });
+    this.rec = rec;
+    // Nothing from before the last unmute ever leaves, however far back the pre-roll reaches.
+    rec.start(this.ring.slice(Math.max(from, this.micFloorSample), this.ring.written));
+    return id;
+  }
+
+  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean) {
+    try {
+      this.hooks.onUtteranceEnd({
+        utterance: rec.id, source: this.claimSource, ms: summary.ms, chunks: summary.chunks, continuation, truncated,
+      });
+    } catch { /* ditto */ }
+  }
+
+  /**
+   * End the recording without sending what is still held: the mic went OFF, a
+   * card appeared, the window crashed, or the speech was too short to be a
+   * turn. Chunks that already left stay out (they were captured while allowed).
+   */
+  private stopRecording(truncated: boolean): { chunks: number; droppedMs: number } | null {
+    const rec = this.rec;
+    if (!rec) return null;
+    this.rec = null;
+    const summary = rec.abort();
+    this.announceEnd(rec, summary, null, truncated);
+    return summary;
+  }
+
+  /** The message is over: flush its last chunk, arm the continuation window, say so. */
+  private finishRecording(trim: number) {
+    const rec = this.rec;
+    if (!rec) return;
+    this.rec = null;
+    this.vad.voiced = 0;
+    // The message ended here. Whatever follows soon enough continues it --
+    // except after push-to-talk, whose release is the owner's own full stop:
+    // the next words need the key (or his name) again. Only a wake or
+    // follow-up claim starts a chain; a continuation extends it while claims
+    // remain. Armed before the hook runs, so a caller that refuses the message
+    // can take its window back.
+    const source = this.claimSource;
+    if (source === "wake" || source === "follow_up") { this.chainFrom = this.ring.written; this.chainClaims = 0; }
+    const arm = (source === "wake" || source === "follow_up" || source === "continuation")
+      && this.chainClaims < CONTINUE_MAX_CLAIMS;
+    this.continueToken = arm ? ++this.tokenSeq : 0;
+    this.continueUntil = arm ? this.ring.written + msToSamples(CONTINUE_MS) : -1;
+    const summary = rec.end(trim);
+    if (summary.chunks === 0) { this.closeContinuation(); this.announceEnd(rec, summary, null, false); return; }
+    this.announceEnd(rec, summary, arm ? this.continueToken : null, false);
+  }
+
+  /** The ceiling: the message goes as it stands, and the window says so. */
+  private hitLimit() {
+    const rec = this.rec;
+    if (!rec) return;
+    const ms = rec.ms;
+    this.finishRecording(0);
+    this.vad.open = false;
+    this.segClaimed = false;
+    this.ptt = null;
+    try { this.hooks.onLimit?.(ms); } catch { /* ditto */ }
   }
 
   /** Called when the mic unmutes: everything before this point stays local. */
@@ -186,6 +304,14 @@ export class Capture {
     this.wasBlocked = reason !== null;
     if (this.ptt) this.blockedAlreadyReported = true;
     this.observeBlocked(rms, frame.length, reason);
+    // A recording in progress stops uploading the moment the detector may not
+    // listen: nothing under a card, a picker or Settings, nothing while OFF,
+    // nothing from a crashed window. The talk key is the owner's own word, so
+    // it carries on through his own voice (barge-in) and a chat closing, which
+    // the old pipeline also let a held key do.
+    if (this.rec && reason && (!this.ptt || HARD_STOPS.has(reason))) this.truncate(reason);
+    // The ceiling and the pause-tracking read what the detector saw in this frame.
+    this.vad.uncapped = this.segClaimed || this.rec !== null;
     if (muted || suppressed) {
       // Still track the room, so the threshold is current the moment the
       // follow-up window opens; just never open an utterance.
@@ -193,17 +319,37 @@ export class Capture {
         this.vad.open = false;
         this.segClaimed = false;
       }
+      const had = this.rec;
       this.vad.feed(rms, frame.length, this.ring.written);
+      if (had && this.rec === had && had.push(frame, this.vad.loud)) this.hitLimit();
       return;
     }
+    const had = this.rec;
     const event = this.vad.feed(rms, frame.length, this.ring.written);
+    // A recording that began before this frame takes it; one that begins on
+    // this frame (the "open" event below) already has it, from the ring.
+    if (had && this.rec === had && had.push(frame, this.vad.loud)) { this.hitLimit(); return; }
     if (event) this.onVadEvent(event);
   }
 
+  private truncate(reason: DropReason) {
+    const ptt = this.ptt;
+    const stopped = this.stopRecording(true);
+    if (ptt) {
+      this.drop(reason, stopped?.droppedMs ?? 0, "ptt");
+      this.ptt = null;
+    }
+    this.segClaimed = false;
+    if (stopped && stopped.chunks === 0) this.hooks.onIdle();
+  }
+
   private onVadEvent(event: "open" | "close" | "cap") {
+    // The talk key owns the recording while it is held: the detector neither
+    // claims a second utterance beside it nor ends it at a pause.
+    if (this.ptt) { this.segClaimed = false; return; }
     if (event === "open") {
       const continuing = this.continuing();
-      this.claimSource = this.ptt ? "ptt" : this.conversing() ? "follow_up" : this.now() - this.wakeHitAt < WAKE_GRACE_MS ? "wake"
+      this.claimSource = this.conversing() ? "follow_up" : this.now() - this.wakeHitAt < WAKE_GRACE_MS ? "wake"
         : continuing ? "continuation" : "unclaimed";
       this.segClaimed = this.conversing() || this.now() - this.wakeHitAt < WAKE_GRACE_MS || continuing;
       if (this.claimSource === "continuation") this.chainClaims++;
@@ -212,17 +358,19 @@ export class Capture {
         this.wakeHitAt = -1e9;
         const tag = this.claimSource === "follow_up" ? this.followUpTag : null;
         this.closeFollowUp();
-        this.hooks.onListening(this.claimSource, tag);
+        const id = this.beginRecording(this.vad.openedAt);
+        this.hooks.onListening(this.claimSource, tag, id);
       }
       return;
     }
-    const { from, to } = closeBounds(this.vad, this.ring.written, event);
+    const { to } = closeBounds(this.vad, this.ring.written, event);
     const claimed = this.segClaimed;
     this.segClaimed = false;
-    if (!claimed) { if (!this.ptt) this.drop("unclaimed", samplesToMs(this.vad.voiced)); return; }
+    if (!claimed) { this.drop("unclaimed", samplesToMs(this.vad.voiced)); return; }
     if (!longEnough(this.vad)) {
       this.drop("too_short", samplesToMs(this.vad.voiced));
       this.vad.voiced = 0;
+      this.stopRecording(false);
       // He was addressed; give the owner the window back -- but only if a wake
       // word or the follow-up window did the addressing. A too-short
       // continuation (a cough, a TV's click) just drops: reopening follow-up
@@ -231,27 +379,8 @@ export class Capture {
       this.hooks.onIdle("DIDN'T CATCH THAT");
       return;
     }
-    this.send(from, to);
-  }
-
-  private send(from: number, to: number) {
-    from = Math.max(from, this.micFloorSample);
-    const samples = this.ring.slice(from, to);
-    this.vad.voiced = 0;
-    if (!samples.length) { this.drop("too_short", 0); return; }
-    // The message ended here. Whatever follows soon enough continues it --
-    // except after push-to-talk, whose release is the owner's own full stop:
-    // the next words need the key (or his name) again. Only a wake or
-    // follow-up claim starts a chain; a continuation extends it while claims
-    // remain. Armed before the hook runs, so a caller that refuses the clip
-    // can take its window back.
-    const source = this.claimSource;
-    if (source === "wake" || source === "follow_up") { this.chainFrom = this.ring.written; this.chainClaims = 0; }
-    const arm = (source === "wake" || source === "follow_up" || source === "continuation")
-      && this.chainClaims < CONTINUE_MAX_CLAIMS;
-    this.continueToken = arm ? ++this.tokenSeq : 0;
-    this.continueUntil = arm ? this.ring.written + msToSamples(CONTINUE_MS) : -1;
-    this.hooks.onUtterance(wavBlob(samples, CAP_RATE), samplesToMs(samples.length), source, arm ? this.continueToken : null);
+    // The utterance ended a hangover ago: drop the silence that proved it.
+    this.finishRecording(Math.max(0, this.ring.written - to));
   }
 
   // ---- wake ---------------------------------------------------------------
@@ -264,6 +393,7 @@ export class Capture {
    */
   onWake(): "claimed" | "armed" {
     if (this.hooks.muted()) return "armed"; // a result already in flight can land late
+    if (this.ptt) return "armed"; // the talk key already owns this recording
     this.wakeHitAt = this.now();
     if (this.vad.open && !this.segClaimed) {
       this.segClaimed = true;
@@ -274,7 +404,8 @@ export class Capture {
         this.ring.written - msToSamples(WAKE_GRACE_MS + PREROLL_MS),
       );
       this.closeFollowUp();
-      this.hooks.onListening("wake", null);
+      const id = this.beginRecording(this.vad.openedAt);
+      this.hooks.onListening("wake", null, id);
       return "claimed";
     }
     return "armed";
@@ -286,20 +417,26 @@ export class Capture {
     if (this.hooks.muted()) return false; // muting takes away recording
     if (this.ptt) return false;
     this.claimSource = "ptt";
-    this.ptt = { from: Math.max(0, this.ring.written - msToSamples(PREROLL_MS)) };
+    const at = this.ring.written;
+    this.ptt = { from: Math.max(0, at - msToSamples(PREROLL_MS)), at };
+    this.segClaimed = false;
     this.closeFollowUp();
     this.closeContinuation();
-    this.hooks.onListening("ptt", null);
+    // A hands-free message already being recorded is simply carried on by the key.
+    const id = this.rec ? this.rec.id : this.beginRecording(this.ptt.from);
+    this.hooks.onListening("ptt", null, id);
     return true;
   }
 
   release() {
     if (!this.ptt) return;
-    const { from } = this.ptt;
+    const { at } = this.ptt;
     this.ptt = null;
-    const to = this.ring.written;
-    if (samplesToMs(to - from) < MIN_UTTER_MS + PREROLL_MS) {
-      this.drop("too_short", samplesToMs(to - from), "ptt");
+    const rec = this.rec;
+    if (!rec) return;
+    if (samplesToMs(this.ring.written - at) < MIN_UTTER_MS && rec.chunks === 0) {
+      this.drop("too_short", samplesToMs(this.ring.written - at), "ptt");
+      this.stopRecording(false);
       this.hooks.onIdle("TOO SHORT");
       return;
     }
@@ -309,7 +446,7 @@ export class Capture {
     this.vad.run = 0;
     this.vad.open = false;
     this.segClaimed = false;
-    this.send(from, to);
+    this.finishRecording(0);
   }
 
   /** Test hook: script a room through the real detector, no microphone. */
