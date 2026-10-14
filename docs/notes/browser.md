@@ -1501,3 +1501,33 @@ changing the product. These are synthetic local credentials and ephemeral daemon
 not real accounts, installation or physical-device evidence; final review and the
 combined release sweep remain separate.
 See [the focused interface plan](../plans/2026-10-13-browser-http-auth.md).
+
+
+## Native parent Browser driving (BR9d)
+
+Foreground Claude ASK/AUTO and Codex AUTO owner HUD chats now offer explicit
+`hud_browser_act` through the same `BrowserDrive.act` gate as the fast path.
+Tasks, Discord/scheduled turns, children and strict contexts cannot acquire it.
+Native calls retain the live global/pane/Private switches, visible attachment,
+owner quiet/input/auth holds, exact guarded look refs, 40 judged actions/turn,
+200 actions/tab/hour, private cards and in-flight cleanup ownership. Provider
+attribution uses the actual caller; no independent native gate exists.
+
+Only confirmed desk steering changes bounded in-memory owner words. Unknown
+Codex steer delivery keeps the existing no-requeue policy but grants no Browser
+authority. Off-desk text never becomes owner context. Native completion/Stop and
+carrier/session replacement retire the exact DriveTurn and its refs; relay
+abandonment cancels only its captured call/socket, preserving parallel calls.
+
+**For the owner:** pane Stop and Resume Jarvis work for both native providers.
+After Codex Chat Stop, start a fresh chat: its existing incomplete-accounting
+rule refuses continuation in that interrupted native thread. Normal resume of a
+completed session and pane Stop/Resume are separate supported operations.
+
+[Native acceptance](../plans/2026-10-13-browser-native-offline-cli.md) distinguishes
+actual local CLI/HUD/CDP tests, Claude child catalog omission plus hook tests,
+Codex actual child host denial, the raw-wire Codex socket limitation and the
+production Chat Stop entry point. Scripted local providers prove transport and
+guard composition; subscription authentication, paid-model quality and physical
+owner/device behavior remain unmeasured. No installation is claimed by these
+fixture receipts.

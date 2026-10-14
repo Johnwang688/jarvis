@@ -28,6 +28,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import socket
 import sys
 import threading
 
@@ -40,6 +41,7 @@ LIST_TIMEOUT_S = 10.0
 # tool waits on the owner, and the relay must not give up first.
 CALL_TIMEOUT_S = 900.0
 MAX_RESPONSE = 8 * 1024 * 1024
+MAX_ACTIVE_CALLS = 32
 
 NOT_CONNECTED = ("Error: this jarvis-mcp is not connected to a Jarvis chat "
                  "(the session ended or Jarvis restarted).")
@@ -50,17 +52,64 @@ _REFUSALS = {
 }
 
 
+class CallLifetime:
+    """One request's owned connection, never a turn or a successor request."""
+    def __init__(self):
+        self.cancelled = threading.Event()
+        self.lock = threading.Lock()
+        self.sock = None
+        self.worker = None
+
+    def bind(self, sock) -> bool:
+        with self.lock:
+            self.sock = sock
+            if self.cancelled.is_set():
+                self._shutdown(sock)
+                return False
+            return True
+
+    @staticmethod
+    def _shutdown(sock):
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def cancel(self):
+        with self.lock:
+            self.cancelled.set()
+            self._shutdown(self.sock)
+
+    def unbind(self, sock):
+        with self.lock:
+            if self.sock is sock:
+                self.sock = None
+
+
 class Relay:
     def __init__(self, token: str, port: int | None):
         self._token = token
         self._port = port
 
-    def _request(self, method: str, path: str, body: dict | None, timeout: float):
+    def _request(self, method: str, path: str, body: dict | None, timeout: float, *, lifetime=None):
         """`(status, payload)` from the daemon, or None on any failure."""
         if not self._token or self._port is None:
             return None
-        conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=timeout)
+        conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=min(timeout, LIST_TIMEOUT_S) if lifetime is not None else timeout)
+        bound_socket = None
         try:
+            if lifetime is not None:
+                # Explicit single connect: shutdown/close must never trigger
+                # HTTPConnection.send's implicit reconnect after cancellation.
+                conn.auto_open = False
+                if lifetime.cancelled.is_set():
+                    return None
+                conn.connect()
+                bound_socket = conn.sock
+                if not lifetime.bind(bound_socket) or lifetime.cancelled.is_set():
+                    return None
+                bound_socket.settimeout(timeout)
             headers = {"Authorization": "Bearer " + self._token,
                        "Accept": "application/json"}
             data = None
@@ -76,6 +125,8 @@ class Relay:
         except Exception:  # noqa: BLE001 — every failure is "not connected"
             return None
         finally:
+            if lifetime is not None:
+                lifetime.unbind(bound_socket)
             conn.close()
 
     def list_tools(self) -> dict:
@@ -95,11 +146,11 @@ class Relay:
                 tools.append(tool)
         return {"tools": tools}
 
-    def call_tool(self, name: str, arguments: dict, *, codex_context=None) -> dict:
+    def call_tool(self, name: str, arguments: dict, *, codex_context=None, lifetime=None) -> dict:
         body = {"name": name, "arguments": arguments}
         if codex_context is not None:
             body["codex_context"] = codex_context
-        got = self._request("POST", "/mcp/call", body, CALL_TIMEOUT_S)
+        got = self._request("POST", "/mcp/call", body, CALL_TIMEOUT_S, lifetime=lifetime)
         if got is None:
             return _result(NOT_CONNECTED, error=True)
         status, payload = got
@@ -141,7 +192,7 @@ class RPCError(Exception):
         self.code, self.message = code, message
 
 
-def _route(relay: Relay, method: str, params: dict):
+def _route(relay: Relay, method: str, params: dict, *, lifetime=None):
     if method == "initialize":
         version = params.get("protocolVersion")
         if not isinstance(version, str):
@@ -160,7 +211,8 @@ def _route(relay: Relay, method: str, params: dict):
             arguments = {}
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise RPCError(-32602, "tools/call requires a name and an arguments object")
-        return relay.call_tool(name, arguments, codex_context=_codex_context(params))
+        return relay.call_tool(name, arguments, codex_context=_codex_context(params),
+                               **({"lifetime": lifetime} if lifetime is not None else {}))
     raise RPCError(-32601, "Method not found")
 
 
@@ -168,7 +220,7 @@ def _error(request_id, code, message):
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def handle(relay: Relay, message):
+def handle(relay: Relay, message, *, lifetime=None):
     """One JSON-RPC message → its response, or None for a notification."""
     if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
             or not isinstance(message.get("method"), str)
@@ -185,7 +237,7 @@ def handle(relay: Relay, message):
         if not isinstance(params, dict):
             raise RPCError(-32602, "params must be an object")
         return {"jsonrpc": "2.0", "id": request_id,
-                "result": _route(relay, message["method"], params)}
+                "result": _route(relay, message["method"], params, lifetime=lifetime)}
     except RPCError as exc:
         return _error(request_id, exc.code, exc.message)
     except Exception:  # noqa: BLE001
@@ -196,41 +248,97 @@ def _reject_constant(value):
     raise ValueError(f"Not a JSON constant: {value}")
 
 
+def _request_id(value):
+    return ((isinstance(value, str) and 0 < len(value) <= 128)
+            or (type(value) is int and -(2**63) <= value < 2**63))
+
+
 def serve(relay: Relay, source, sink) -> None:
-    """Read requests until EOF. A tool call runs on its own thread, so a call
-    that waits on the owner's approval does not hold up `ping` or a listing;
-    responses are written whole, one at a time."""
-    lock = threading.Lock()
-    workers = []
+    """Bounded concurrent calls; EOF and native cancellation stop exact sockets."""
+    write_lock = threading.Lock()
+    active_lock = threading.Lock()
+    active = {}
 
     def write(response) -> None:
         if response is None:
             return
         line = json.dumps(response, ensure_ascii=True, allow_nan=False) + "\n"
-        with lock:
+        with write_lock:
             try:
                 sink.write(line)
                 sink.flush()
             except (OSError, ValueError):
                 pass
 
-    for line in source:
+    def execute(message, record):
+        request_id = message["id"]
         try:
-            message = json.loads(line, parse_constant=_reject_constant)
-        except (ValueError, UnicodeError):
-            write(_error(None, -32700, "Parse error"))
-            continue
-        if isinstance(message, dict) and message.get("method") == "tools/call" and "id" in message:
-            worker = threading.Thread(target=lambda m=message: write(handle(relay, m)),
-                                      name="jarvis-mcp-call", daemon=True)
-            workers.append(worker)
-            worker.start()
-            continue
-        write(handle(relay, message))
-    # EOF: the CLI is gone and nobody reads an answer. A call still waiting
-    # (on the owner, say) is not waited for; the daemon finishes it alone.
-    for worker in workers:
-        worker.join(0.5)
+            response = handle(relay, message, lifetime=record)
+            if not record.cancelled.is_set():
+                write(response)
+        finally:
+            with active_lock:
+                if active.get(request_id) is record:
+                    active.pop(request_id)
+
+    try:
+        for line in source:
+            try:
+                message = json.loads(line, parse_constant=_reject_constant)
+            except (ValueError, UnicodeError):
+                write(_error(None, -32700, "Parse error"))
+                continue
+            if (isinstance(message, dict) and message.get("jsonrpc") == "2.0"
+                    and message.get("method") == "notifications/cancelled" and "id" not in message):
+                params = message.get("params")
+                request_id = params.get("requestId") if isinstance(params, dict) else None
+                with active_lock:
+                    valid = (isinstance(params, dict) and set(params) <= {"requestId", "reason"}
+                             and _request_id(request_id)
+                             and ("reason" not in params or isinstance(params["reason"], str)))
+                    record = active.get(request_id) if valid else None
+                if record is not None:
+                    record.cancel()
+                continue
+            if isinstance(message, dict) and message.get("method") == "tools/call" and "id" in message:
+                request_id = message["id"]
+                if not _request_id(request_id):
+                    write(_error(None, -32600, "Invalid request ID"))
+                    continue
+                with active_lock:
+                    if request_id in active:
+                        failure = _error(request_id, -32600, "Duplicate active request ID")
+                    elif len(active) >= MAX_ACTIVE_CALLS:
+                        failure = _error(request_id, -32000, "Too many active tool calls")
+                    else:
+                        failure = None
+                        record = CallLifetime()
+                        worker = threading.Thread(target=execute, args=(message, record),
+                                                  name="jarvis-mcp-call", daemon=True)
+                        record.worker = worker
+                        active[request_id] = record
+                if failure is not None:
+                    write(failure)
+                else:
+                    try:
+                        worker.start()
+                    except BaseException:
+                        record.cancel()
+                        with active_lock:
+                            if active.get(request_id) is record:
+                                active.pop(request_id)
+                        raise
+                continue
+            write(handle(relay, message))
+    finally:
+        # Mark first, then shut down every exact connection; no new worker
+        # may reconnect after EOF, including one still inside connect().
+        with active_lock:
+            remaining = tuple(active.values())
+        for record in remaining:
+            record.cancel()
+        for record in remaining:
+            record.worker.join(0.5)
 
 
 def _port(value) -> int | None:

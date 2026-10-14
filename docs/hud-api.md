@@ -2891,7 +2891,10 @@ restart receive fixed notes. The memory-only store keeps at most16 entries and
 text, not already-staged image pixels. Nothing here sends a chat automatically.
 
 
-## Dormant Browser action tool (BR9b)
+## Dormant Browser action tool (BR9b snapshot)
+
+This records the original dormant state. For the implemented shared native
+contract, see [Native owner Browser driving](#native-owner-browser-driving-br9d).
 
 Production `hud_browser_act` always refuses because Agents may drive is OFF.
 There is no enable or execute HTTP endpoint. The typed tool accepts action, pane
@@ -2975,3 +2978,23 @@ observation. Explicit owner Reload recovered the popup through `auth_pending` an
 its owner form. Use explicit top-level owner navigation for protected embedded
 pages; no universal popup/OOPIF delivery is promised. No credentials were sent in
 these capability probes.
+
+
+## Native owner Browser driving (BR9d)
+
+Foreground Claude ASK/AUTO and Codex AUTO HUD chats use `hud_browser_view` and
+owner-gated `hud_browser_act` through their session relay. The existing Browser
+settings, pane controls, private action cards and ticketed socket are the same
+owner surfaces. Driver frames identify the actual `fast`, `claude` or `codex`
+provider. Tasks, off-desk sources, children and strict contexts are refused.
+
+Actions bind the exact native parent/daemon turn and fresh Remote look refs;
+completion, Chat Stop, session replacement and old-carrier revocation cannot
+transfer those refs to another turn. Accepted desk steering alone updates owner
+words. Private action authorization remains deliberate, single-action and HUD
+only; its public event/decision labels exclude private arguments.
+
+Pane Stop/Resume and native Chat Stop are distinct: Codex's pre-existing
+incomplete-accounting guard requires a fresh chat after Chat Stop. See
+[Browser owner guidance and evidence](notes/browser.md#native-parent-browser-driving-br9d)
+for supported profiles and the offline acceptance limits.

@@ -111,7 +111,10 @@ class BrowserDrive:
             with self.daemon._lock:
                 session=sessions.get(turn.thread_id)
                 if (session is None or session.retired or session.turn_id!=turn.turn_id
-                        or session.cancelled.is_set()):raise LookRefused(STOPPED)
+                        or session.cancelled.is_set()
+                        or (turn.provider in ("claude", "codex")
+                            and getattr(session,"drive_turn",None) is not turn)):
+                    raise LookRefused(STOPPED)
 
     def _url(self,url):
         parsed=policy.judge_url(url,refused=self.daemon.browser.refused_ports())
@@ -199,7 +202,7 @@ class BrowserDrive:
         blob=json.dumps([action.action,action.target,action.text,action.file,prepared.fingerprint],ensure_ascii=False)
         digest=hashlib.sha256(blob.encode("utf-8","surrogatepass")).hexdigest()
         log_decision(ApprovalRecord("hud_browser_act",digest,"browser-gate",decision,
-            reason=category+":"+source,thread_id=turn.thread_id,provider="fast"))
+            reason=category+":"+source,thread_id=turn.thread_id,provider=turn.provider))
 
     def _card(self,action,prepared,guard,action_id,category):
         hidden=prepared.context_flagged
@@ -217,7 +220,7 @@ class BrowserDrive:
         args={"action":action.action,"pane":str(guard.snapshot.slot),"target":action.target,"text":action.text,"file":action.file}
         return ApprovalRequest("hud_browser_act",args=args,command=json.dumps(args,ensure_ascii=False),
             reason="Approve this one Browser action? Page labels are untrusted page text.",
-            layer="browser-gate",thread_id=guard.turn.thread_id,provider="fast",allowlistable=False,
+            layer="browser-gate",thread_id=guard.turn.thread_id,provider=guard.turn.provider,allowlistable=False,
             headline="Browser action: "+action.action,hud_only=True,browser=browser,max_wait_s=120)
 
     def _cancelled(self,guard,request):
@@ -265,7 +268,7 @@ class BrowserDrive:
                 if getattr(self.daemon.approvals,"human_backed",False) is not True:
                     raise LookRefused("this Browser action needs the owner at the HUD")
                 request=self._card(action,prepared,guard,action_id,category)
-                self.daemon.browser.drive_notice(snapshot.tab_id,turn.thread_id,action_id,action.action,"asking",prepared,action.text)
+                self.daemon.browser.drive_notice(snapshot.tab_id,turn.thread_id,action_id,action.action,"asking",prepared,action.text,provider=turn.provider)
                 answer=self.daemon.approvals.ask(request,cancelled=lambda:self._cancelled(guard,request))
                 self._audit(action,prepared,turn,"allow" if answer is Decision.ALLOW else "deny",category,"owner")
                 # A resolved card no longer appears in pending(), but its one
@@ -282,7 +285,7 @@ class BrowserDrive:
             def execute(upload_bytes=None):
                 guard()
                 self.state.charge_action(lease)
-                self.daemon.browser.drive_notice(snapshot.tab_id,turn.thread_id,action_id,action.action,"running",refreshed,action.text)
+                self.daemon.browser.drive_notice(snapshot.tab_id,turn.thread_id,action_id,action.action,"running",refreshed,action.text,provider=turn.provider)
                 token=self.downloads.begin(snapshot.tab_id,action_id,guard,refreshed)
                 guard.download=token
                 try:
@@ -334,6 +337,16 @@ class BrowserDrive:
 
 _installed_lock=threading.Lock()
 _installed=None
+
+
+def admission_for_tool() -> bool:
+    """No browser IO or prompt; consult only the installed owner's drive switch."""
+    with _installed_lock:
+        service = _installed
+    try:
+        return service is not None and not service.closed and service.enabled() is True
+    except Exception:
+        return False
 
 
 def act_for_tool(action,pane="",target="",text="",file=""):
