@@ -16,8 +16,8 @@ current code. Historical “live” claims are not new deployment receipts.
 Invariants and decisions are retained byte for byte; their named paragraph
 references are in the notes. Preserved paths are repository-relative.
 
-Tool-call labels are untrusted text: they don't parse shell, so a quote-split
-value can still appear in one. See [HUD workspace notes](docs/notes/hud-workspace.md).
+Tool-call labels: A value split by shell quoting can still appear in a label;
+labels are untrusted text. See [HUD workspace notes](docs/notes/hud-workspace.md).
 
 <!-- retained:chat-git-and-v2:begin -->
 ## Chat git worktrees (2026-10-13)
