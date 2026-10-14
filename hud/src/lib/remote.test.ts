@@ -509,6 +509,26 @@ describe("the wheel", () => {
     expect(normalizeWheel({ deltaX: 0, deltaY: 1e9, deltaMode: 0 }, 100, 600)).toEqual({ deltaX: 0, deltaY: WHEEL_MAX });
   });
 
+  // A fitted page (host.py `_fit`) is drawn at its placement scale: pixels
+  // and lines are divided by it, so a notch moves the picture as far on
+  // screen as on a page drawn 1:1; a page is the fitted view's own height.
+  it("a frame drawn smaller scrolls by its placement scale", () => {
+    expect(normalizeWheel({ deltaX: 0, deltaY: 100, deltaMode: 0 }, 100, 960, 0.625)).toEqual({ deltaX: 0, deltaY: 160 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: 160, deltaMode: 0 }, 160, 960, 0.625)).toEqual({ deltaX: 0, deltaY: 160 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: 100, deltaMode: 0, shiftKey: true }, 100, 960, 0.625)).toEqual({ deltaX: 160, deltaY: 0 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: 3, deltaMode: 1 }, 100, 960, 0.625)).toEqual({ deltaX: 0, deltaY: 3 * LINE_PX * 1.6 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: -1, deltaMode: 2 }, 100, 960, 0.625)).toEqual({ deltaX: 0, deltaY: -960 });
+    // 1 changes nothing; zero, negative or nonfinite reads as 1.
+    for (const scale of [1, 0, -2, NaN, Infinity]) {
+      expect(normalizeWheel({ deltaX: 0, deltaY: 100, deltaMode: 0 }, 100, 600, scale)).toEqual({ deltaX: 0, deltaY: 100 });
+      expect(normalizeWheel({ deltaX: 0, deltaY: 3, deltaMode: 1 }, 100, 600, scale)).toEqual({ deltaX: 0, deltaY: 3 * LINE_PX });
+    }
+    // Still clamped.
+    expect(normalizeWheel({ deltaX: 0, deltaY: 4000, deltaMode: 0 }, 100, 960, 0.5)).toEqual({ deltaX: 0, deltaY: WHEEL_MAX });
+    expect(cdpWheel({ deltaX: 0, deltaY: 100, deltaMode: 0, button: 0, buttons: 0 }, { x: 780, y: 20 }, 100, 960, 0.625)!.deltaY)
+      .toBe(160);
+  });
+
   it("goes as a mouseWheel event at the pointer", () => {
     expect(cdpWheel({ deltaX: 0, deltaY: 160, deltaMode: 0, button: 0, buttons: 0, ctrlKey: true }, { x: 3, y: 4 }, 160, 600))
       .toEqual({

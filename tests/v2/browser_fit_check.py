@@ -183,25 +183,36 @@ class Fit(B.BrowserStream):
         self.measured_more(tab, window, 3)
         self.assertEqual(self.js(tid, PAGE_VIEW)[:2], [800, 960])
 
-    def test_05_navigation_resets(self):
+    def test_05_new_documents_reset_route_changes_do_not(self):
         tid, window, tab = self.open("/fit800")
         self.laid_out(tid, window, 800, 960, 0.625, "min-width page fitted")
-        # Same-document navigation is a reset: a page that now fits narrows
-        # (a repaint alone never narrows it).
+        # The page now fits the pane; a repaint never narrows it.
         self.js(tid, "document.body.style.minWidth = '0px'; document.getElementById('edge').remove()")
         self.measured_more(tab, window, 2)
         self.assertEqual(self.js(tid, PAGE_VIEW)[0], 800, "a repaint never narrows")
-        self.js(tid, "history.pushState(null, '', '/fit800?next')")
-        self.laid_out(tid, window, 500, 600, 1, "same-document navigation resets")
+        # An SPA's route changes (same-document) are not resets: no override,
+        # no relayout at the pane's width, the layout kept.
+        overrides = tab.calls["Emulation.setDeviceMetricsOverride"]
+        generation = tab.document_generation
+        self.js(tid, "history.pushState(null, '', '/fit800?next'); location.hash = 'a';"
+                     " history.replaceState(null, '', '/fit800?again')")
+        self.wait(lambda: tab.document_generation >= generation + 3, what="three same-document navigations")
+        self.measured_more(tab, window, 3)
+        self.assertEqual(tab.calls["Emulation.setDeviceMetricsOverride"], overrides,
+                         "a same-document navigation sets no viewport")
+        self.assertEqual(self.js(tid, PAGE_VIEW), [800, 960, 0.625])
+        self.assertEqual(tab.stream.page_viewport(), (800, 960, 0.625))
+        self.assertTrue(all(f[1:3] == (800, 960) for f in window.frames[-5:]))
+        # A new document is: page-initiated, then the owner's.
+        self.js(tid, "location.assign('/plain')")
+        self.laid_out(tid, window, 500, 600, 1, "a page-initiated navigation resets")
         self.assertIsNone(tab.stream.fitted)
-        # Back to a wide page and away to one that fits: reset to the pane.
         self.owner("POST", f"/browser/tabs/{tid}/navigate", {"url": self.url("/fit800")})
         self.laid_out(tid, window, 800, 960, 0.625, "fitted after navigating")
         self.owner("POST", f"/browser/tabs/{tid}/navigate", {"url": self.url("/plain")})
         self.laid_out(tid, window, 500, 600, 1, "navigation to a fitting page resets")
         self.assertIsNone(tab.stream.fitted)
         self.assertEqual(tab.casting, NARROW)
-
 
 def suite():
     # Fit's own cases only, never the inherited BrowserStream sections.

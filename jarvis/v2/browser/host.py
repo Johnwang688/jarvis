@@ -1538,9 +1538,6 @@ class BrowserHost:
             # Its first real landing comes through `framenavigated` and is
             # judged then (review of PR #69: judging "" blanked every pop-up).
             return
-        if tab.stream is not None and tab.stream.viewport is not None:
-            # A new document starts at the window's viewport (`_fit`).
-            asyncio.ensure_future(self._quietly(self._refit(tab, reset=True)))
         port = policy.loopback_port(url)
         auth_session = self._auth.sessions.get(tab.id)
         auth_refused = bool(auth_session and auth_session.navigation and auth_session.navigation.refused)
@@ -2149,12 +2146,32 @@ class BrowserHost:
                 cdp = await tab.page.context.new_cdp_session(tab.page)
                 cdp.on("Page.screencastFrame", lambda params: self._frame(tab, cdp, params))
                 cdp.on("Security.visibleSecurityStateChanged", lambda params: self._secured(tab, params))
+                cdp.on("Page.frameNavigated", lambda params: self._new_document(tab, params))
                 try:
                     await cdp.send("Security.enable")
                 except Exception:  # noqa: BLE001 - the security state is a courtesy
                     pass
+                try:
+                    await cdp.send("Page.enable")
+                except Exception:  # noqa: BLE001 - unfitted on navigation, never a lost tab
+                    pass
                 tab.cdp = cdp
         return tab.cdp
+
+    def _new_document(self, tab: _Tab, params) -> None:
+        """CDP `Page.frameNavigated`: a new document (never a same-document
+        change, which is `navigatedWithinDocument`). In the main frame it
+        starts at the window's viewport (`_fit`). An SPA's in-app route
+        changes are not resets: each would relayout the page three or four
+        times; repaints still widen, and narrowing waits for a resize or a
+        real navigation."""
+        if self._tabs.get(tab.id) is not tab or self._stopped:
+            return
+        frame = (params or {}).get("frame") or {}
+        if frame.get("parentId") is not None:
+            return
+        if tab.stream is not None and tab.stream.viewport is not None:
+            asyncio.ensure_future(self._quietly(self._refit(tab, reset=True)))
 
     def _secured(self, tab: _Tab, params) -> None:
         if self._tabs.get(tab.id) is not tab or self._stopped:
@@ -2206,7 +2223,7 @@ class BrowserHost:
 
     @_tab_activity
     async def _refit(self, tab: _Tab, *, reset: bool) -> None:
-        """`_fit` for a navigation (a reset) or a repaint (widening only),
+        """`_fit` for a new document (a reset) or a repaint (widening only),
         on the CDP session a window already made; none without a window's
         viewport."""
         cdp = tab.cdp
@@ -2240,7 +2257,8 @@ class BrowserHost:
 
         C is CDP's `Page.getLayoutMetrics`, which runs no page code: a page
         that lies can only make its own picture smaller. A reset (a resize,
-        a main-frame navigation) lays the page out at the window's viewport
+        a new main-frame document: `_new_document`, never a same-document
+        route change) lays the page out at the window's viewport
         and measures from there; a repaint (`_fit_soon`) only widens, so the
         layout never oscillates; narrowing waits for the next reset.
         Overflow within FIT_SLACK is left; widening stops at FIT_MAX × W,

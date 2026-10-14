@@ -37,13 +37,19 @@ through that scale. So the fix lives in the daemon (`jarvis/v2/browser/host.py`)
    page that lies about its size can only make its own picture smaller.
 3. **Bounds.** Never wider than 3×W (scale ≥ 1/3) or `VIEW_MAX` (4096), and
    within the device-pixel cap. Ignore overflow of 1% or less (Spotify
-   overflows by 12 px even at 1400). Widen only toward the measured width: a
-   `width: 100vw + margin` page that keeps growing stops at the cap instead
-   of looping.
+   overflows by 12 px even at 1400). Widen only toward the measured width.
+   As built: a widening the page answers by growing as much (a
+   `width: 100vw + margin` page, or Spotify's 12 px past any width) is
+   undone and widening stops until the next reset, instead of creeping to
+   the cap (Spotify would otherwise creep 12 px per repaint check).
 4. **When to measure.**
    - On every resize from the window: reset to W, then measure and fit.
-   - On main-frame navigation, including same-document navigation: reset,
-     then fit.
+   - On a new main-frame document (cross-document navigation): reset, then
+     fit. **Not** on same-document navigation (amended in lead review,
+     2026-10-14): on an SPA every in-app click is a `pushState`, and a reset
+     would relayout the page three or four times and likely flash a narrow
+     frame per click. Repaints still widen after a route change; narrowing
+     waits for the next resize or real navigation.
    - On screencast frames, throttled to at most 2 per second. Frames arrive
      only on repaint, so an idle page costs nothing. This catches SPAs that
      set their min-width after hydration (Spotify does). Between resets a
@@ -57,6 +63,10 @@ through that scale. So the fix lives in the daemon (`jarvis/v2/browser/host.py`)
    frame's viewport, which is what `clientToPage` already produces.
 6. **No new settings, no new wire messages.** Frame metadata already carries
    the effective size. The stream's `resize` validation is unchanged.
+7. **Wheel speed (amended in lead review).** The HUD divides pixel- and
+   line-mode wheel deltas by the frame's placement scale (`placeFrame`), so
+   a notch moves a fitted page as far on screen as an unfitted one. Page
+   mode already uses the fitted view's height.
 
 Not done (considered):
 
@@ -74,10 +84,12 @@ Not done (considered):
     800×960, page `innerWidth` 800, DPR scaled by 500/800.
   - A page with no min-width is not widened.
   - Resizing back to a wide pane resets to the pane size.
-  - A `100vw + 50px` page stops at the 3× cap.
+  - A `100vw + 50px` page is left at the pane's size (widening undone);
+    Spotify's shape settles at 812; a min-width of 2000 stops at the 3× cap.
   - A min-width added after load (simulated hydration) is fitted on the next
     frames.
-  - Navigating to a page that fits resets the viewport.
+  - Navigating to a page that fits resets the viewport; a same-document
+    navigation (pushState, hash, replaceState) sets no viewport.
   - Mutation evidence: with the fit disabled, the check fails.
 - The existing suites still pass: `browser_routes_check`,
   `browser_owner_tools_chrome_check`, and the HUD's `hud_v2_remote_check` and

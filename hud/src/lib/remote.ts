@@ -719,24 +719,31 @@ export const WHEEL_MAX = 5000;
  * lines are 40 page px, pages the viewport's height. Shift turns a vertical
  * wheel sideways (Chrome does this before an event reaches the page; the
  * remote Chrome never sees the owner's device). Null when it moves nothing.
+ * `placeScale` is the frame's placement (`placeFrame`): a page the daemon
+ * laid out wider than the pane (host.py `_fit`) is drawn at W/C, so pixels
+ * and lines are divided by it and a notch moves the picture as far on
+ * screen as before; a page is already the fitted view's height.
  */
-export function normalizeWheel(e: WheelLike, zoomPct: number, viewHeight: number): { deltaX: number; deltaY: number } | null {
+export function normalizeWheel(
+  e: WheelLike, zoomPct: number, viewHeight: number, placeScale = 1,
+): { deltaX: number; deltaY: number } | null {
   let dx = Number.isFinite(e.deltaX) ? e.deltaX : 0;
   let dy = Number.isFinite(e.deltaY) ? e.deltaY : 0;
   if (e.shiftKey && dx === 0) {
     dx = dy;
     dy = 0;
   }
+  const s = finitePos(placeScale, 1);
   if (e.deltaMode === 1) {
-    dx *= LINE_PX;
-    dy *= LINE_PX;
+    dx *= LINE_PX / s;
+    dy *= LINE_PX / s;
   } else if (e.deltaMode === 2) {
     const page = finitePos(viewHeight, 800);
     dx *= page;
     dy *= page;
   } else {
-    dx = toCss(dx, zoomPct);
-    dy = toCss(dy, zoomPct);
+    dx = toCss(dx, zoomPct) / s;
+    dy = toCss(dy, zoomPct) / s;
   }
   const clamp = (n: number) => Math.round(Math.min(WHEEL_MAX, Math.max(-WHEEL_MAX, n)) * 100) / 100;
   dx = clamp(dx);
@@ -746,8 +753,10 @@ export function normalizeWheel(e: WheelLike, zoomPct: number, viewHeight: number
 }
 
 /** A wheel event at a page point, as `Input.dispatchMouseEvent` takes it. */
-export function cdpWheel(e: WheelLike & MouseLike, at: { x: number; y: number }, zoomPct: number, viewHeight: number): CdpMouseEvent | null {
-  const d = normalizeWheel(e, zoomPct, viewHeight);
+export function cdpWheel(
+  e: WheelLike & MouseLike, at: { x: number; y: number }, zoomPct: number, viewHeight: number, placeScale = 1,
+): CdpMouseEvent | null {
+  const d = normalizeWheel(e, zoomPct, viewHeight, placeScale);
   if (!d) return null;
   return {
     type: "mouseWheel", x: at.x, y: at.y, modifiers: modifiersOf(e), button: "none",
