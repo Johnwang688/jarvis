@@ -12,7 +12,8 @@ environment *names* to `calls.jsonl` beside itself, then:
 * `--programs` (exactly; "shows programs"): a text list with markup and a raw
   escape in it.
 
-Both reads hang while `HOLD_INFO` exists beside it. The output shapes are
+Both reads hang while `HOLD_INFO` exists beside it. With `STARTUP_DSR`
+beside it, every mode but `--user` first waits for interop's cursor reply. The output shapes are
 plausible guesses, not vexcom's: the real ones are only seen on a real brain.
 """
 import json
@@ -26,6 +27,25 @@ args = sys.argv[1:]
 with open(HERE / "calls.jsonl", "a", encoding="utf-8") as log:
     log.write(json.dumps({"tool": "vexcom", "argv": args, "cwd": os.getcwd(),
                           "env": sorted(os.environ), "wslenv": os.environ.get("WSLENV")}) + "\n")
+# Model Windows interop's startup handshake (as vex_fake/make.py): with
+# `STARTUP_DSR` beside it, nothing is printed until the cursor reply arrives.
+if (HERE / "STARTUP_DSR").is_file() and "--user" not in args:
+    import select
+    import termios
+    import tty
+    attrs = termios.tcgetattr(0)
+    tty.setraw(0)
+    for part in (b"\x1b", b"[", b"6", b"n"):
+        os.write(1, part)
+        time.sleep(0.01)
+    reply = b""
+    until = time.monotonic() + 2
+    while len(reply) < 6 and time.monotonic() < until:
+        if select.select([0], [], [], 0.1)[0]:
+            reply += os.read(0, 6 - len(reply))
+    if reply != b"\x1b[1;1R":
+        sys.exit(91)
+    termios.tcsetattr(0, termios.TCSANOW, attrs)
 if "--user" in args:
     print("brain user port open", flush=True)
     for line in sys.stdin:

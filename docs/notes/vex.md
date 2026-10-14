@@ -36,6 +36,25 @@ fake programs/devices and temporary configuration. No robot download or installe
 HUD/daemon restart is part of these receipts. The preserved flag inventory below
 is historical; the current fixed `--usb` exception above supersedes it.
 
+## Device programs and interop's cursor query (2026-10-14)
+
+On the owner's machine every `vexcom` started by the daemon (download, USB
+check, device reads) hung with no output until its timeout, while builds ran.
+Cause, reproduced with a replica of `create_program`'s spawn: under a PTY that
+has a size, WSL interop's Windows console first writes `ESC[6n` and waits for
+a cursor report; an unsized PTY never asks, so `vexcom --usb` run by hand
+answered in under a second. `ab84d58` answered the query for `vex-build`
+only. `terminals.STARTUP_REPLY_PROGRAMS` now lists every input-disabled VEX
+program (`vex-build`, `vex-download`, `vex-connection`, `vex-info`); the same
+one fixed `ESC[1;1R`, for the first exact query only, hidden from the ring.
+The brain terminal takes input and is not listed. The fake `vexcom` models
+the handshake with `STARTUP_DSR` beside it and exits 91 without the reply;
+`tests/v2/vex_output_check.py` (`DeviceStartup`, and the pinned set in
+`StartupProtocol`) fails against the build-only rule. The live `--usb` output
+for a plugged-in controller was one `usb.vex` record
+`{"vid":"0x2888","pid":"0x0503","family":"v5","device":"ctrl"}`, which the
+strict parser accepts. A real robot download is still unverified.
+
 ## Original CLAUDE.md lines 2231–2491
 
 <!-- claude-source:002231-002491:begin -->
