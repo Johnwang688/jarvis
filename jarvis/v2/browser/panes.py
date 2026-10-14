@@ -586,7 +586,9 @@ class BrowserPanes:
                 else:
                     row = self.host.open_tab(pane.profile, target, pane.ctx, owner=True)
                     created = row["tab_id"]
-                if not row.get("loaded", False):
+                pending = (row.get("auth_pending") is True and row.get("loaded") is False
+                           and self.host.auth_pending_current(row.get("tab_id"), row.get("nav_id")))
+                if not row.get("loaded", False) and not pending:
                     raise PaneRefused(409, "that address could not be loaded")
                 tid = row["tab_id"]
                 identity = self.host.pane_tab(tid)
@@ -605,7 +607,10 @@ class BrowserPanes:
                 current.panes[pane_id] = replace(now_pane, ctx=identity["ctx"] if identity else now_pane.ctx, tabs={**now_pane.tabs, local_id: new})
                 current.expires = self.clock() + LEASE_S
                 created = None
-                return {"tab_id": tid, "ctx": current.panes[pane_id].ctx, "url": identity["url"] if identity else target, **self._receipt(body["window"], current)}
+                return {"tab_id": tid, "ctx": current.panes[pane_id].ctx,
+                        "url": identity["url"] if identity else target,
+                        **({"loaded": False, "auth_pending": True} if tid and pending else {}),
+                        **self._receipt(body["window"], current)}
         finally:
             with self._lock:
                 current = self._windows.get(body["window"])

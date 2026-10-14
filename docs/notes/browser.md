@@ -1444,3 +1444,60 @@ then waits for the new front receipt. Card, visibility, profile/context, active
 tab or pane replacement during that wait cancels the original capture. Capture
 controllers stay mounted while only their action controls are portaled; existing
 stills and ink survive menu changes. Ending annotation releases the local hold.
+
+
+## Owner HTTP authentication (B-AUTH, October 13)
+
+Owner-adopted Remote tabs intercept Server Basic/Digest through their exact page
+CDP session. The existing SOCKS/URL/control-port gates retain authority. A first
+protected address returns `loaded:false, auth_pending:true` and an exact live
+allocation receipt, then the real ticketed socket presents a plain owner form.
+The actual blank/prior URL remains document identity until commit. Only the
+existing explicit address transaction discloses source/adopts a fresh lease;
+stored Remote restore creates neither permission. No agent/MCP auth tool exists.
+
+One supervised navigation child keeps actual activity ownership through cleanup.
+Normal work retains an accumulated 20-second budget; authentication shares one
+original 60-second expiry and at most 3 submissions per explicit operation. One
+prompt per tab/eight per host, 128 paused-request records/callbacks, exact origin,
+Page/document/instance/socket/hold/visibility identity and bounded reply admission
+prevent stale or unbounded work. Authentication admission drops prior page input
+and old presses through the existing hold count. Owner answer/cancel stamps takeover.
+
+Credentials stay in transient owner socket fields and one guarded CDP response;
+replies clear fields on every controller exit, and no credentials enter replay,
+registry, bus, status, logs, config or browser storage. Chrome may retain its
+ordinary in-memory HTTP-auth cache. The form never autofocuses and higher cards
+invalidate old consent. Reconnect rotates only the nonce, preserving the original
+clock/attempts. Auth blocks preparation and between-event driving as owner attention.
+
+Protected navigation during a committed Sound replacement cancels/settles without
+a prompt or a usable replacement ticket, retaining existing explicit Retry. This
+batch does not hand pending auth through the exclusive Sound restart barrier.
+Hidden Direct capture does not adopt owner tabs or install the prompting controller.
+Separate installed-Chrome probes delivered same-origin iframe auth. A popup's
+first protected request had no OwnerAuth session/prompt within two seconds;
+explicit owner Reload returned `auth_pending` and delivered a prompt. A previously
+established separate OOPIF target reached the protected fixture without delivering
+an owner prompt during the bounded two-second observation. These measured gaps
+sent no credentials. Use explicit top-level owner navigation for protected embedded
+pages; the popup Reload recovery was measured. Do not infer universal popup/OOPIF
+support from top-level Basic/Digest.
+
+Focused backend 46 checks passed. Actual production-host/SOCKS/ticket/socket Basic
+proved first pending address, a 22.153-second owner wait followed by one successful
+reply, and original 60.002-second expiry; Chrome tree RSS 1054.7 MiB and cleanup passed.
+A later 62-check auth/Sound run and nine-case native matrix passed, including
+Digest, first allocation cancel, reconnect/old nonce, superseding navigation,
+profile close, three wrong attempts, stored restore without a new lease, Private
+cleanup and hidden capture exclusion. Six guard baseline assertions passed and
+five scratch mutants failed their intended assertions. The WT production HUD
+build passed, with 2,092 HUD units plus the remaining 15 syntax asset checks under
+a finite fixture allowlist. Focused actual auth HUD passed 14 checks, including
+keyboard buttons, approval/Escape priority, strict Settings detach/reattach with a
+fresh ticket, cleared typed fields and narrow layout. A Python-only poll had
+starved routed socket callbacks; the fixture now pumps sync Playwright without
+changing the product. These are synthetic local credentials and ephemeral daemons,
+not real accounts, installation or physical-device evidence; final review and the
+combined release sweep remain separate.
+See [the focused interface plan](../plans/2026-10-13-browser-http-auth.md).

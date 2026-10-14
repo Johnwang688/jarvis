@@ -141,7 +141,8 @@ class BrowserDrive:
     def _owner(self,snapshot, *, own_card=None):
         row=self.daemon.browser.owner_state(snapshot.tab_id)
         if (row.get("paused") is not False or row.get("shown") is not True or row.get("visible") is not True
-                or row.get("depressed") is not False or row.get("input_busy") is not False):
+                or row.get("depressed") is not False or row.get("input_busy") is not False
+                or row.get("auth", False) is not False):
             raise LookRefused("the owner has paused or is no longer showing this Browser pane")
         quiet=row.get("owner_quiet_s")
         if quiet is not None and (type(quiet) not in (int,float) or not math.isfinite(quiet) or quiet<rules.OWNER_QUIET_S):

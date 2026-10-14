@@ -280,6 +280,21 @@ def parse(raw: bytes) -> Msg:
         if "text" in m:
             text = _clean_text(m["text"], cap_bytes=DIALOG_TEXT_MAX, allowed="\t", what="a dialog's answer")
         return Msg(t, id=m["id"], accept=m["accept"], text=text)
+    if t == "auth":
+        _fields(m, ("id", "cancel", "username", "password"), ("id", "cancel"))
+        if (not isinstance(m["id"], str) or not __import__("re").fullmatch(r"[0-9a-f]{32}", m["id"])
+                or type(m["cancel"]) is not bool):
+            raise Bad("an authentication answer has the wrong shape")
+        if m["cancel"]:
+            if "username" in m or "password" in m:
+                raise Bad("an authentication answer has the wrong shape")
+            return Msg(t, id=m["id"], cancel=True)
+        from .auth_state import credential_fields, AuthRefused
+        try:
+            username, password = credential_fields(m.get("username"), m.get("password"))
+        except AuthRefused:
+            raise Bad("authentication fields are invalid") from None
+        return Msg(t, id=m["id"], cancel=False, username=username, password=password)
     if t == "ack":
         _fields(m, ("id",), ("id",))
         if not _is_int(m["id"], 0, 0xFFFFFFFF):
