@@ -170,6 +170,8 @@ class Backend(unittest.TestCase):
                                 AVATAR_ENV="",
                                 # Never the owner's per-chat read-aloud voices (V7).
                                 SPEECH_VOICES_PATH=self.root / "speech.json",
+                                # Never the owner's Browser-duck journal (V15).
+                                SPEECH_DUCK_PATH=self.root / "speech_duck.json",
                                 # Never the owner's real Discord files: the guild
                                 # file decides `GET /discord`'s answer (B1).
                                 DISCORD_GUILD_PATH=self.root / "discord_guild.json",
@@ -1864,6 +1866,46 @@ class Backend(unittest.TestCase):
                 "deadbeef": {"voice": "af_a", "muted": False}, first.id: {"voice": "bm_d", "muted": False}}}))
             self.owner("POST", "/speech/voices", {"thread_id": second.id, "muted": False})
             self.assertNotIn("deadbeef", json.loads(Path(config.SPEECH_VOICES_PATH).read_text())["threads"])
+
+    def test_speech_duck_is_an_owner_only_lease_and_never_starts_the_browser(self):
+        """V15: the HUD holds a short lease while Jarvis speaks; only the owner's window can."""
+        from jarvis.v2.speech_duck import Ducker
+        ducker = Ducker(lambda: [], run=lambda *_: self.fail("pactl ran"), threaded=False,
+                        journal=Path(config.SPEECH_DUCK_PATH))
+        self.daemon.speech_ducker = ducker
+        # Owner-only, the HUD listener: the API listener, a missing Origin and a foreign Origin are refused.
+        self.request("GET", "/speech/duck", status=403)
+        self.request("POST", "/speech/duck", {"on": True}, status=403)
+        self.request("POST", "/speech/duck", {"on": True}, status=403,
+                     port=self.daemon.face_port, headers={"Origin": "http://evil.example"})
+        self.request("POST", "/speech/duck", {"on": True}, status=403, port=self.daemon.face_port)
+        self.assertFalse(ducker.status()["on"], "a refused request granted nothing")
+        # The owner's: grant, renew, release.
+        self.assertEqual(self.owner("GET", "/speech/duck"), {"on": False, "ducked": 0, "lease_s": 3.0})
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": True})["on"])
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": True})["on"])
+        self.assertTrue(self.owner("GET", "/speech/duck")["on"])
+        self.assertFalse(self.owner("POST", "/speech/duck", {"on": False})["on"])
+        # Strict bodies: unknown keys, a missing key, a non-boolean, a query.
+        # A window's lease token is optional, 32 lowercase hex, and ends only its own lease.
+        a, b = "a" * 32, "b" * 32
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": True, "window": a})["on"])
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": True, "window": b})["on"])
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": False, "window": a})["on"], "b still holds its lease")
+        self.assertFalse(self.owner("POST", "/speech/duck", {"on": False, "window": b})["on"])
+        for body in ({"on": True, "window": "A" * 32}, {"on": True, "window": "a" * 31}, {"on": True, "window": 7},
+                     {"on": True, "window": None}, {"on": True, "window": "../" + "a" * 29}, {"window": a}):
+            self.owner("POST", "/speech/duck", body, status=400)
+        for body in ({"on": True, "bogus": 1}, {"bogus": 1}, {}, {"on": "yes"}, {"on": 1}, {"on": None}, [], "on"):
+            self.owner("POST", "/speech/duck", body, status=400)
+        self.owner("GET", "/speech/duck?x=1", status=400)
+        self.assertFalse(ducker.status()["on"])
+        # The Browser was never started by any of it, and nothing was written.
+        self.assertFalse(self.daemon.browser.status()["running"])
+        self.assertFalse(Path(config.SPEECH_DUCK_PATH).exists())
+        # A daemon that is stopping grants nothing.
+        ducker.stop()
+        self.owner("POST", "/speech/duck", {"on": True}, status=409)
 
     def test_speech_voices_survive_a_corrupt_store_and_reuse_when_the_pool_runs_out(self):
         kokoro = {"af_a", "bm_d"}
