@@ -787,6 +787,21 @@ describe("V13: which backend served the clip", () => {
     expect(h.diagnostics.snapshot().rows[1].backend).toBeUndefined();
     expect(JSON.stringify(h.diagnostics.snapshot())).not.toContain("script");
   });
+  it("a two-chunk message answered by the cloud (fallback) and then locally still shows the cloud was used", async () => {
+    const h = withReplies();
+    const g = h.stt.beginGroup("ptt", "auto");
+    const replies = [reply("cloud", true), reply("local", false)];
+    let n = 0;
+    (h.stt as any).o.transcribe = async () => replies[n++];
+    h.stt.submit(new Blob([new Uint8Array(10)]), 8000, "ptt", "auto", { group: g });
+    h.stt.submit(new Blob([new Uint8Array(10)]), 8000, "ptt", "auto", { group: g });
+    await vi.advanceTimersByTimeAsync(0);
+    h.stt.closeGroup(g);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows).toHaveLength(1);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+  });
+
   it("an empty transcript still says who heard it", async () => {
     const h = withReplies();
     h.set({ text: "  ", backend: "local", fellBack: false });

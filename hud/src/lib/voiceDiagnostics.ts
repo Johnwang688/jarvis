@@ -67,12 +67,19 @@ export class VoiceDiagnostics {
     this.rows = this.rows.map(x => x.id === id ? { ...x, ms: bounded(x.ms + ms, 900_000) } : x);
     this.publish();
   }
-  /** V13: which backend served the clip. Anything but "local"/"cloud" is ignored. */
+  /**
+   * V13: which backend served the clip. Anything but "local"/"cloud" is ignored.
+   * A long message is one row served by several chunks (V4), so this accumulates
+   * and never hides that audio left the PC: once any chunk was answered by the
+   * cloud the row says `cloud`, and once one fell back it stays `fellBack`, however
+   * the later chunks were served. A Retry (`reopen`) starts the row afresh.
+   */
   served(id: number, backend: unknown, fellBack = false) {
     if (backend !== "local" && backend !== "cloud") return;
     const row = this.rows.find(x => x.id === id);
     if (!row) return;
-    this.rows = this.rows.map(x => x.id === id ? { ...x, backend, fellBack: fellBack === true } : x);
+    const next: SttBackend = row.backend === "cloud" ? "cloud" : backend;
+    this.rows = this.rows.map(x => x.id === id ? { ...x, backend: next, fellBack: x.fellBack === true || fellBack === true } : x);
     this.publish();
   }
   /** An explicit Retry: the row is in flight again, so it can settle again. */

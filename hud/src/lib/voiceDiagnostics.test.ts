@@ -78,4 +78,18 @@ describe("V13 served-by metadata", () => {
     d.reopen(id);
     expect(d.snapshot().rows[0].backend).toBeUndefined();
   });
+
+  it("a message served by several chunks never hides the cloud: it sticks, and so does a fallback", () => {
+    const d = new VoiceDiagnostics(() => 1);
+    const id = d.add(1000, "ptt", "transcribing");
+    d.served(id, "cloud", true);
+    d.served(id, "local", false);                       // a later chunk was local
+    expect(d.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+    const other = d.add(1000, "ptt", "transcribing");
+    d.served(other, "local"); d.served(other, "cloud", false); d.served(other, "local");
+    expect(d.snapshot().rows[1]).toMatchObject({ backend: "cloud", fellBack: false });
+    const plain = d.add(1000, "ptt", "transcribing");
+    d.served(plain, "local"); d.served(plain, "local");
+    expect(d.snapshot().rows[2]).toMatchObject({ backend: "local", fellBack: false });
+  });
 });
