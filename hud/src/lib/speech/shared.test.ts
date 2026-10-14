@@ -175,6 +175,14 @@ describe("backlog", () => {
     expect(live.find((i) => i.kind === "note")?.text).toBe("Skipping 1 update.");
   });
 
+  it("never collapses a thread's newest message, which may still be arriving", async () => {
+    synth.hang = () => true;
+    q.enqueue(entry("a", 0, long("old", 30)));
+    q.endMessage("a:0");
+    q.enqueue(entry("a", 1, long("newest", 70)));          // not finished, not yet known to be the reply
+    expect(q.items().filter((i) => i.kind !== "note").map((i) => i.text.slice(0, 6))).toEqual(["newest"]);
+  });
+
   it("later collapses are counted by markers too, and every collapsed message is accounted for", async () => {
     synth.hang = () => true;
     q.enqueue(entry("a", 0, long("a0", 30)));

@@ -832,6 +832,48 @@ The v1 mute flag (`voicectl`, `POST /mute`) and the `set_voice_mute` tool no lon
 affect read-aloud: the HUD's read-aloud switch (Settings → Voice) and the speech
 strip are its only controls, and the mic's OFF touches neither.
 
+## V7: one queue over every open chat pane (2026-10-13)
+
+Decisions V-8 and V-9 (plan sections 3.9, 3.10): every thread shown in any chat pane
+is read aloud, each in its own voice, through the V6 queue.
+
+- **Who is read** (`policy.speakingThreads(ws, chats, pending)`): a thread shown by a pane
+  that is in the workspace (`order` or `kept`, so a pane the layout folded away still reads)
+  and whose view is `chat`. A task view, a pane showing a file, a thread in no pane, and a
+  chat the owner muted are silent; a thread leaving the set drops its items and stops its
+  sound at once. A thread shown in two panes is one entry.
+- **Floor rules** (`floor.ts`, the `PlayOrder` V6 left): a message that has started holds
+  the floor and its later chunks go before other messages; messages go in the order of their
+  first chunk; a holder with nothing ready for 4 s yields (`FLOOR_TIMEOUT_MS`) and the rest
+  of its message re-queues behind what is queued by then; an ended message with nothing left
+  releases the floor at once (the controller calls `queue.endMessage` when a message closes,
+  is skipped, dropped or its thread leaves). While a holder keeps the floor the queue plays
+  nothing else, even a chunk already made.
+- **Stale drop** is V6's (a `user_message` drops that thread's items and stops its sound).
+- **Backlog** (rule 6): over 60 s of estimated speech (16 characters a second) unplayed in
+  one thread, its oldest *interim* messages are dropped (mark `collapsed`) and one spoken
+  "Skipping N updates." (`kind: "note"`) takes their place in line. Never collapsed: the
+  last message of a finished turn (`queue.turnEnded` marks it final at `turn_finished`), the
+  message being played or holding the floor, a thread's newest message (it may still be
+  arriving), and markers. A marker already being made is not edited, so a later collapse
+  gets a marker of its own.
+- **Voices**: `jarvis/v2/speech_voices.py` and `GET`/`POST /speech/voices` (owner-only, HUD
+  listener), stored in `~/.config/jarvis/speech.json` (`config.SPEECH_VOICES_PATH`), pruned
+  with deleted threads, published as `thread_voice`. The first thread takes the voice the
+  owner hears now (`voice.selected_voice()`, so the HUD picker's choice, else the avatar's);
+  later ones the next unused of English Kokoro `a*` then `b*`, then English Pocket builtins;
+  all taken reuses the least used. Sticky; a stored voice no longer installed is reassigned.
+  The window asks for a voice when a thread joins the readers and again at synthesis time, so
+  a voice chosen from the chip applies to chunks not yet made, and a chunk waits for a voice
+  still being assigned. Mute is stored beside the voice so every window agrees.
+- **Voice chip** (`components/VoiceChip.tsx`, in the pane's header strip): the voice name,
+  a pulse while that chat is read, and opened inline: voice select, Skip (this chat's
+  current message), Mute. Disabled under an authorization card. The speech strip now names
+  the chat being read, not the selected one.
+
+Not done here: summaries (V8), barge-in and spoken commands (V9), Browser sound ducking
+(V15), any physical speaker or Windows-audio acceptance.
+
 ## 2026-10-13: V0 measurements (synthetic and offline, no product change)
 
 Package V0 of `docs/plans/2026-10-13-voice-rework.md` section 6. Probes live in
