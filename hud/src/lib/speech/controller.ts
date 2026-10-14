@@ -517,17 +517,20 @@ export class SpeechController {
   /**
    * The owner starts talking over him (decision V-7: barge-in pauses, then
    * resumes). Pauses speech that is in progress and remembers that *it* did; a
-   * pause the owner made from the strip is theirs, and is left alone.
+   * pause the owner made from the strip is theirs, and is left alone. Returns
+   * whether there was speech to hold (playing, buffering, or a summary on its
+   * way), so a caller knows whether anything waits to be resumed.
    */
-  bargeIn(): void {
+  bargeIn(): boolean {
     const state = this.queue.view().state;
     if (state !== "playing" && state !== "buffering") {
       // Nothing sounds, but a summary is on its way: it waits for the owner to finish.
-      if (this.lanes.size > 0 && state === "idle") { this.holdDelivery = true; this.bargePaused = true; this.notify(); }
-      return;
+      if (this.lanes.size > 0 && state === "idle") { this.holdDelivery = true; this.bargePaused = true; this.notify(); return true; }
+      return false;
     }
     this.queue.pause();
     this.bargePaused = true;
+    return true;
   }
 
   /**
@@ -535,12 +538,20 @@ export class SpeechController {
    * dropped, failed, placed for review, or sent). Resumes what this barge-in
    * paused, restarting the sentence (Q13); a thread a message went to has
    * already lost its items (`messageSent`), so what resumes is what remains.
+   * `skip`: a message went out (V-7), so the message he was in the middle of is
+   * not resumed either, whichever chat it was for -- the rest of the queue is.
    */
-  endBargeIn(): void {
+  endBargeIn(opts: { skip?: boolean } = {}): void {
     if (!this.bargePaused) return;
     this.bargePaused = false;
+    if (opts.skip) this.skip();
     this.release();
     this.queue.resume();
+  }
+
+  /** A barge-in's pause is in force (the owner has not paused, resumed or stopped since). */
+  bargeHeld(): boolean {
+    return this.bargePaused;
   }
 
   /** The rest of the current message is not spoken. */

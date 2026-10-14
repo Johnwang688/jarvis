@@ -533,6 +533,8 @@ export interface SttCapture {
   boxOnly?: boolean;
   /** The continuation window this message armed (`Capture`'s token), settled when it is placed. */
   continuation?: number | null;
+  /** The capture's utterance id: what a barge-in that this message began is called (V9). */
+  utterance?: number;
 }
 
 /** What is true when a transcript lands. */

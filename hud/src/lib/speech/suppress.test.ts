@@ -115,17 +115,17 @@ describe("the mic and his voice", () => {
 });
 
 describe("the wiring is pinned", () => {
-  it("App holds the detector off with micSuppressedBySpeech, in both places", () => {
-    expect(appSource.match(/micSuppressedBySpeech\(speech\.controller\.view\(\)\)/g)?.length).toBe(1);
+  it("App holds the detector off with micSuppressedBySpeech only when the self-voice gate cannot run (V9), in both places", () => {
+    expect(appSource.match(/micSuppressedBySpeech\(speech\.controller\.view\(\)\) && !speech\.selfVoice\.runnable\(\)/g)?.length).toBe(1);
     expect(appSource.match(/speechPlaying\(\)/g)?.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("a talk-key press pauses speech, and a turn's follow-up waits for the speech to end", () => {
-    expect(appSource).toMatch(/if \(capture\.press\(\)\) speech\.controller\.bargeIn\(\)/);
-    // He resumes when the talk-key utterance is over: on a drop, and however it ends.
-    expect(appSource).toMatch(/source === "ptt"\) speech\.controller\.endBargeIn\(\)/);
+  it("the talk key and the wake word begin a barge-in, and its utterance's end resumes him; a turn's follow-up waits for the speech to end", () => {
+    // V9: one place begins it (the claim), one ends it (the utterance's end), whoever claimed.
+    expect(appSource).toMatch(/\(source === "wake" \|\| source === "ptt"\)\) barge\.begin\(source === "ptt" \? "key" : "wake", utterance\)/);
+    expect(appSource).not.toMatch(/speech\.controller\.bargeIn\(\)/);
     // V4: the end of the whole (possibly chunked) message, once its fate is known, and also when nothing was uploaded.
-    expect(appSource).toMatch(/const finish = \(\) => \{ if \(end\.source === "ptt"\) speech\.controller\.endBargeIn\(\); \}/);
+    expect(appSource).toMatch(/const finish = \(\) => barge\.end\("dropped", end\.utterance\)/);
     expect(appSource).toMatch(/whenGroupSettled\(u\.gid\)\.then\([\s\S]{0,200}finish\(\)/);
     expect(appSource).toMatch(/u\.gid === null\) \{ refuse\(\); finish\(\); return; \}/);
     expect(appSource).toContain("speech.controller.messageSent(threadId)");

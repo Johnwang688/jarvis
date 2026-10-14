@@ -4,6 +4,7 @@
 // parts meet.
 
 import { api } from "../../api";
+import { SelfVoiceGate } from "../selfvoice";
 import { SpeechController } from "./controller";
 import { WebAudioPlayer } from "./player";
 import type { Clock } from "./queue";
@@ -30,7 +31,26 @@ export function saveReadAloud(on: boolean, storage?: Pick<Storage, "setItem">): 
   }
 }
 
-const realClock: Clock = {
+const GATE_KEY = "jarvis.selfVoiceGate";
+
+/** Self-voice gating on/off, a per-window convenience (default on). Off is V6's blanket hold: the mic is held for the whole of a reply. */
+export function loadSelfVoiceGate(storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    return (storage ?? window.localStorage).getItem(GATE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function saveSelfVoiceGate(on: boolean, storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? window.localStorage).setItem(GATE_KEY, on ? "on" : "off");
+  } catch {
+    /* a window with storage blocked still works, it just forgets */
+  }
+}
+
+export const realClock: Clock = {
   now: () => Date.now(),
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
   clearTimeout: (h) => window.clearTimeout(h as number),
@@ -40,6 +60,8 @@ export interface Speech {
   controller: SpeechController;
   gate: SpeakerGate;
   player: WebAudioPlayer;
+  /** What the window is playing, as the reference for telling his voice from the owner's (V9). */
+  selfVoice: SelfVoiceGate;
   /** Each chat's voice and mute (V7), kept by the daemon. */
   voices: ThreadVoices;
   dispose(): void;
@@ -48,6 +70,10 @@ export interface Speech {
 export function createSpeech(): Speech {
   const gate = new SpeakerGate(browserLocks());
   const player = new WebAudioPlayer();
+  // The player is the reference: the gate hears exactly what Web Audio puts out (V9).
+  const selfVoice = new SelfVoiceGate();
+  selfVoice.setEnabled(loadSelfVoiceGate());
+  player.setReference(selfVoice.reference);
   const voices = new ThreadVoices({
     list: () => api.speechVoices(),
     change: (thread, change) => api.speechVoice(thread, change),
@@ -64,7 +90,7 @@ export function createSpeech(): Speech {
   controller.setEnabled(loadReadAloud());
   const unbind = bindFocus(gate, window, () => document.hasFocus());
   return {
-    controller, gate, player, voices,
+    controller, gate, player, selfVoice, voices,
     dispose: () => { unbind(); controller.dispose(); gate.dispose(); player.dispose(); },
   };
 }

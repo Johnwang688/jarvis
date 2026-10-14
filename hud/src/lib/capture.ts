@@ -15,9 +15,14 @@
 //     it resumed within the continuation window of a message just sent);
 //     continuous capture without that gate is a hot mic;
 //   - a wake phrase claims exactly one utterance;
-//   - he does not answer himself — the detector is suppressed while he speaks
-//     or holds an authorization card (a running turn no longer silences it: V3),
-//     but it still *tracks the room*
+//   - he does not answer himself. V9: frames the self-voice gate (selfvoice.ts)
+//     says are his own voice coming back never open or hold an utterance, and
+//     while he is audible nothing is claimed except by the owner's own act (the
+//     talk key, or a wake word heard with an utterance the gate did not veto);
+//     the follow-up and continuation windows close. When the gate cannot run, V6's
+//     blanket hold applies instead (`suppressed` below). An authorization card
+//     suppresses the detector outright (a running turn no longer silences it: V3),
+//     and a suppressed detector still *tracks the room*
 //     so the threshold is current the moment the follow-up window opens;
 //   - the minimum length is measured on the speech, not on the padded segment.
 //
@@ -33,6 +38,7 @@ import {
 } from "./vad";
 import { UtteranceRecorder, type RecordedChunk } from "./recorder";
 
+import { CLEAR, type SelfFrame } from "./selfvoice";
 import type { ClaimSource, DropReason, SuppressionReason } from "./voiceDiagnostics";
 
 /** One chunk of a claimed message, as it leaves for transcription. */
@@ -124,6 +130,10 @@ export class Capture {
   private blockedReason: DropReason | null = null;
   private blockedAlreadyReported = false;
   private wasBlocked = false;
+  /** V9: his voice is audible within the echo delay (the self-voice gate's last word on a frame). */
+  selfActive = false;
+  private wasSelfObserved = false;
+  private wasPlaying = false;
 
   private drop(reason: DropReason, ms: number, source = this.claimSource) {
     try { this.hooks.onDrop?.(reason, ms, source); } catch { /* diagnostics cannot change capture */ }
@@ -299,10 +309,13 @@ export class Capture {
   /**
    * One 16 kHz frame. `prob` is the ML VAD's speech probability for it when the
    * detector stage has one (V5); without it the frame is judged by energy, as
-   * before. Either way the frame is ring-pushed, level-metered and recorded the
-   * same, and every rule below (OFF, suppression, claims, drops) is unchanged.
+   * before. `self` is the self-voice gate's verdict on it (V9): a frame that is
+   * his own voice is not speech to the detector, and while his voice is audible
+   * the windows that let speech be claimed without a wake word are closed. Either
+   * way the frame is ring-pushed, level-metered and recorded the same, and every
+   * rule below (OFF, suppression, claims, drops) is unchanged.
    */
-  onFrame(frame: Float32Array, prob?: number | null) {
+  onFrame(frame: Float32Array, prob?: number | null, self: SelfFrame | null = null) {
     this.ring.push(frame);
     const rms = frameRms(frame);
     const muted = this.hooks.muted();
@@ -310,11 +323,18 @@ export class Capture {
     // is listening", which is exactly the wrong promise.
     this.hooks.onLevel(muted ? 0 : Math.min(1, rms * 4));
     const suppressed = this.hooks.suppressed();
+    const verdict = self ?? CLEAR;
+    this.selfActive = verdict.active;
     // Anything that stops the detector listening ends the message it would
     // have continued: words after a card, a picker or his own voice are a new
     // thought, and need the wake word again.
-    if (muted || suppressed) this.closeContinuation();
+    if (muted || suppressed || verdict.active) this.closeContinuation();
+    // ...and the follow-up window is for the reply that opened it: when a new reply begins to
+    // sound, it belongs to nobody, and speech is claimed only by name or key.
+    if (verdict.playing && !this.wasPlaying) this.closeFollowUp();
+    this.wasPlaying = verdict.playing;
     const reason: DropReason | null = muted ? "muted" : suppressed ? `suppressed:${this.hooks.suppressionReason?.() ?? "speaking"}` : null;
+    const vetoed = verdict.self && !muted && !suppressed;
     if (reason && !this.wasBlocked && this.vad.open && !this.ptt && !this.blockedAlreadyReported) {
       this.drop(reason, samplesToMs(this.vad.voiced));
       this.blockedAlreadyReported = true;
@@ -322,7 +342,13 @@ export class Capture {
     if (reason && !this.wasBlocked) this.blockedVad.floor = this.vad.floor;
     this.wasBlocked = reason !== null;
     if (this.ptt) this.blockedAlreadyReported = true;
-    this.observeBlocked(rms, frame.length, reason, prob);
+    // A vetoed frame in the middle of nothing is observed like a suppressed one, so the
+    // diagnostics can say "self voice" for speech-shaped sound that was held back. A
+    // message being recorded is not "observed": its own pauses are its own business.
+    const observed = reason ?? (vetoed && !this.vad.open && this.rec === null && !this.ptt ? "self_voice" : null);
+    if (observed === "self_voice" && !this.wasSelfObserved) this.blockedVad.floor = this.vad.floor;
+    this.wasSelfObserved = observed === "self_voice";
+    this.observeBlocked(rms, frame.length, observed, prob);
     // A recording in progress stops uploading the moment the detector may not
     // listen: nothing under a card, a picker or Settings, nothing while OFF,
     // nothing from a crashed window. The talk key is the owner's own word, so
@@ -339,12 +365,12 @@ export class Capture {
         this.segClaimed = false;
       }
       const had = this.rec;
-      this.vad.feed(rms, frame.length, this.ring.written, prob);
+      this.vad.feed(rms, frame.length, this.ring.written, prob, vetoed);
       if (had && this.rec === had && had.push(frame, this.vad.loud)) this.hitLimit();
       return;
     }
     const had = this.rec;
-    const event = this.vad.feed(rms, frame.length, this.ring.written, prob);
+    const event = this.vad.feed(rms, frame.length, this.ring.written, prob, vetoed);
     // A recording that began before this frame takes it; one that begins on
     // this frame (the "open" event below) already has it, from the ring.
     if (had && this.rec === had && had.push(frame, this.vad.loud)) { this.hitLimit(); return; }
@@ -410,9 +436,19 @@ export class Capture {
    * after it was said, so the detector usually already has an utterance open:
    * claim that one, and back-date its start far enough to cover the lag.
    */
-  onWake(): "claimed" | "armed" {
+  onWake(): "claimed" | "armed" | "ignored" {
     if (this.hooks.muted()) return "armed"; // a result already in flight can land late
     if (this.ptt) return "armed"; // the talk key already owns this recording
+    // V9: while his voice is audible, his own word "Jarvis" -- a reply that says it, a
+    // recognizer that hears the speakers -- must not claim anything. A hit counts only
+    // against an utterance the self-voice gate did not veto (frames it vetoes never open
+    // one), so it is honoured when the owner is speaking over him and ignored otherwise;
+    // and it is never held in reserve for the next utterance, which is how a reply
+    // saying "Jarvis" would claim the owner's next word.
+    if (this.selfActive && !(this.vad.open && !this.segClaimed)) {
+      this.drop("self_voice", 0, "wake");
+      return "ignored";
+    }
     this.wakeHitAt = this.now();
     if (this.vad.open && !this.segClaimed) {
       this.segClaimed = true;
@@ -469,7 +505,7 @@ export class Capture {
   }
 
   /** Test hook: script a room through the real detector, no microphone. */
-  feedMs(ms: number, amplitude: number, frameSamples = 1024, prob?: number | null) {
+  feedMs(ms: number, amplitude: number, frameSamples = 1024, prob?: number | null, self: SelfFrame | null = null) {
     const total = msToSamples(ms);
     let done = 0;
     while (done < total) {
@@ -477,7 +513,7 @@ export class Capture {
       const frame = new Float32Array(n);
       // A frame of N samples at a constant amplitude has exactly that RMS.
       frame.fill(amplitude);
-      this.onFrame(frame, prob);
+      this.onFrame(frame, prob, self);
       done += n;
     }
   }
