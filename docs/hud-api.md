@@ -321,7 +321,27 @@ every one of these routes asks (`kind`):
 - `POST /stt` body `audio/*` (WAV or webm) → `{"text"}` via `voice.stt`,
   which tries `STT_MODEL` then `STT_FALLBACK_MODELS`. When every model fails
   it is a **502** whose `error` names each model and its HTTP status (never a
-  response body), and the HUD shows that sentence.
+  response body), and the HUD shows that sentence. V12: `POST /stt?verify=1`
+  first asks whose voice the clip is (`jarvis/speaker.py`, local only), **before
+  any transcription or upload**, and adds `"verify": "matched" | "skipped_guest" |
+  "skipped_unenrolled"` to the reply. Nobody enrolled, or Guest voice on, skips it.
+  A voice that is not the enrolled one is a **422** `not the enrolled speaker` (no
+  score, nothing transcribed); enrolled but unable to judge the clip (damaged or
+  other-model voiceprint, no engine, audio that is not 16-bit PCM WAV, a busy
+  engine) fails closed, a **503** or **415** with a sentence. Anything but `1` for
+  `verify` is a 400. Without `verify` the route is what it was.
+- `GET /speaker` · `POST /speaker/reading` (body `audio/wav`, at most 4 MiB, one
+  prompted reading; `{accepted, problems, metrics, readings}`) · `POST /speaker`
+  with exactly one of `{propose: true}` (score the readings against each other
+  and every built-in voice; stores nothing), `{accept: true, threshold?}` (build
+  the voiceprint, verification on), `{threshold}` (tune), `{guest: bool}` (Guest
+  voice) · `DELETE /speaker` (the readings, the voiceprint, the Guest switch).
+  **Owner-only**, the HUD listener: another listener, a foreign or missing Origin
+  is a 403 before anything is read. The status carries counts, the threshold and
+  the last score, never audio or an embedding. Every state change publishes
+  `{kind: "speaker_guest", data: {guest, enrolled, mode}}` on `/events`, so every
+  window shows GUEST VOICE at once. Audio bodies are allowed on an explicit set of
+  routes (`hud_api.AUDIO_ROUTES`: `/stt`, `/speaker/reading`), never a prefix.
 - `POST /say` `{text, voice?, instructions?, local_only?}` → audio bytes
   (`RIFF` or MP3; the client sniffs), `X-Speech-Ms` = synthesis time. Unknown
   keys are a 400. A `voice` must be one `GET /voices` lists, else **400**.

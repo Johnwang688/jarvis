@@ -1691,3 +1691,134 @@ V6 stopgap is gone.)
 Pending: `tests/speech_summary_probe.py --yes-spend` (24 synthetic replies, 800
 to 8000 characters, aborts before $0.09). Fill in date, model id, call count,
 total spend, tokens, p50/p95 here after the lead runs it.
+
+## V12: speaker enrollment, verification and Guest voice (2026-10-14)
+
+Plan §3.4, §3.4.1, §3.13; decisions V-2, V-5, V-12, V-14; answered Q7 and Q12. Stacked on V4
+(`Capture.hooks.onChunk` is the seam), merged with nothing else. Status: committed on
+`claude/voice-v12` and pushed; not merged, not installed, **not live-validated, and never run with
+a real person's voice**.
+
+**What it is.** `jarvis/speaker.py` (engine, store, enrollment, verification) and
+`jarvis/v2/speaker_routes.py` (owner-only routes). NeMo TitaNet-small through `sherpa-onnx`, the V0
+winner, lazily loaded, unloaded after `JARVIS_SPEAKER_IDLE_MIN` (5) idle minutes, one thread
+(`JARVIS_SPEAKER_THREADS`, 1..4). `sherpa_onnx` is imported only at first load (checked in a
+subprocess); the daemon runs without it and `status()` says what is missing. The engine, the idle
+reaper and `fetch` copy V13's `stt_local.py` pattern. Deploy: install `sherpa-onnx` in the daemon
+venv, then `python -m jarvis.speaker fetch` (40 MB, SHA256 pinned and asserted equal to V0's
+`models.json`). **Licence not settled**: NGC's card says the model's licence is "covered by the
+NeMo Toolkit" (Apache-2.0); the sherpa-onnx ONNX repack carries no licence text. The lead should
+confirm before shipping the download.
+
+**Verification (`/stt?verify=1`).** Before any transcription or upload. The order is pinned by tests:
+(1) Guest voice on: skipped, nothing embedded; (2) nothing enrolled (no `voiceprint.json`): skipped;
+(3) everything else fails closed: damaged, unsafe or other-model voiceprint (503), no engine (503),
+audio that is not 16-bit PCM WAV (415, no media decoder runs on uploaded bytes), a busy engine
+(503), no speech in the clip (422); (4) the first 3 s of speech (leading silence skipped by a
+-55 dBFS / -14 dB-below-loud gate) are embedded and compared by cosine with the enrolled centroid;
+below the threshold is **422 `not the enrolled speaker`**, no score, no `transcribe`. A clip under
+1.2 s (a command) uses a threshold 0.08 lower (`JARVIS_SPEAKER_SHORT_RELAX`). The reply to a match
+carries `verify`. Verification is requested by the client: the HUD asks for every chunk; a client that
+omits `verify` gets the old route (agents' tools are not owner voices).
+
+**Guest voice.** One file, `guest.json`, in the store, so it survives HUD reloads and daemon
+restarts and has no timer. It skips step (4) and nothing else: `speaker.py` knows nothing about the
+microphone, VAD, noise suppression, self-voice gating or approvals (a test greps for that), and the
+HUD's capture and approval modules cannot read the switch (`guestGate.test.ts` greps those too and
+whitelists every line of `App.tsx` that mentions it). An unreadable `guest.json` is "Guest off".
+Published as `speaker_guest {guest, enrolled, mode}` so every window shows **GUEST VOICE** on the orb
+line (every branch of `orbLine`) and on the speech strip, which now also shows for a guest with
+nothing playing (and in the folded rail as one button). The strip's button turns it off always
+(even under a card) and on only when a voice is enrolled and speech is playing; the switch in
+Settings turns it on anywhere. Delete resets it to off.
+
+**The store.** `config.SPEAKER_DIR` = `~/.local/share/jarvis/speaker/` (plan §3.4), mode 0700, owned
+by the owner, created 0700 and tightened if found wider; files 0600. Every file is opened relative to
+the folder's descriptor with `O_NOFOLLOW`, read only if a regular file (a FIFO holding good JSON is
+refused), at most 256 KB (readings 4 MB), and replaced atomically. Corrupt, FIFO, symlink, directory,
+oversize, 200 000-deep JSON, `1e999`, `NaN`, 5000-digit ints, wrong dimension, zero centroid,
+out-of-range threshold: all "damaged", all fail closed, none hangs (`voice_speaker_check.py`).
+Contents: `voiceprint.json` (centroid, threshold, model name, counts), `guest.json`, `readings/r-NNN.wav`
+(our own 16-bit mono re-encoding, never the uploaded bytes; Q12: kept so a model upgrade can
+re-derive the voiceprint; at most 6, each at most 30 s), `impostors.json` (cached embeddings of the
+built-in voices, per model). Delete removes the folder (symlinks inside are removed, never followed;
+a symlinked folder is unlinked, its target untouched). **Not added to the protected-path detector
+(V-12).** No route returns audio or an embedding; the status carries counts, the threshold and the
+last score only.
+
+**Enrollment (Settings → Voice → Your voice).** Three prompted readings (`POST /speaker/reading`,
+owner-only, audio allowed on the explicit set `hud_api.AUDIO_ROUTES`, size judged from the header
+before the read). The HUD records the mic's 16 kHz frames (`MicInput.addFrameListener`) with a live
+meter and the daemon's own quality limits (6 to 30 s, -40 to -6 dB, clipping, speech share); a bad
+take is not uploaded, and the daemon re-checks what it is sent. "Check my readings" runs `propose`:
+leave-one-reading-out genuine scores against the voiceprint of the others, and each built-in voice
+(Kokoro `a*`/`b*` and Pocket builtins, spoken locally by `voice._local_tts` / `pocket.synthesize`, never
+the cloud) against the voiceprint of all of them, shown as two histograms with the proposed threshold
+and the rates at it. Verification switches on only on Accept. A model change makes the voiceprint
+"stale" (verification blocked, Guest or Rebuild); Rebuild re-derives it from the kept readings.
+
+**Threshold: how it is chosen.** V0's equal-error threshold for TitaNet ranged 0.51 to 0.71 across
+conditions, so it is derived from the owner's enrollment, never hard-coded. Proposed = halfway
+between the closest built-in voice and the owner's weakest 10 % of windows, but never nearer the owner
+than 0.10 below that (a TV, a cold or another room scores the owner lower than a quiet enrollment),
+never inside the impostors (then closest + 0.02 and a warning), clamped to 0.30..0.90; with no
+built-in voice scored it is `min(0.60, p10 - 0.05)`. Tunable: Accept takes a number, `{threshold}`
+retunes, `JARVIS_SPEAKER_THRESHOLD` (default 0.60) only seeds the no-impostor case.
+
+**Measured through the real model** (`tests/voice_speaker_real.py`, V0 venv, V0's synthetic fixtures;
+`JARVIS_VOICE_V12_REAL=1`; **not** owner-vs-TV and easier than a person, see V0): owner = Kokoro
+`af_bella`, three readings of three joined clips, 15 held-out clips; the others are 38 more Kokoro
+and Pocket voices, one clip each standing in for the built-ins. Proposed threshold **0.794**
+(genuine min 0.874, p10 0.894, median 0.918; closest built-in `kokoro_af_heart` 0.72, next 0.44).
+Held-out owner 15/15 accepted (min 0.885); other voices 156/156 refused (highest 0.722);
+Jarvis's default voice `bm_george` 0/8 accepted; 1 s commands 7/8 accepted with the relaxed
+threshold; verification 32 to 40 ms p50 per clip, peak RSS 165 to 176 MB, model loaded once.
+Proposing against 39 voices took 1.7 to 2.2 s here because the fixtures stood in for TTS; with real
+Kokoro/Pocket synthesis the first proposal costs one sentence per voice (cached after), budgeted at
+150 s and 64 voices.
+
+**HUD.** Every chunk is sent with `verify=1` (`api.stt`). A 422 `not the enrolled speaker` is not a
+failure: no automatic retry, **the chunk's audio is dropped at once** (it may be someone else's: no
+Retry, no Play), the diagnostics row ends `not_owner` (or, for a message that went on, records
+"n parts not your voice"), and the orb says NOT YOUR VOICE. Like a failed chunk it leaves a hole, so
+the rest of that message is placed `late`: boxed for review, never auto-sent as if whole. The row also
+records what verification did (`voice matched`, `verification skipped (guest voice)`, `(no voice
+enrolled)`), never a score.
+
+**Tests (this PR).**
+- `tests/voice_speaker_check.py`: 52 (store 0700/0600, hostile files, a pipe holding good JSON,
+  delete, quality, hostile audio, propose/accept/rebuild, verification order, Guest, fail-closed
+  engine, lazy load and idle unload, pins, no network or approval import).
+- `tests/v2/speaker_check.py`: 16 over real loopback listeners (owner-only 403 from the API port,
+  a foreign Origin, no Origin, `null`; content types; `/stt?verify=1` with a recorder in place of the
+  cloud: a rejection never calls `transcribe`, Jarvis's own voices are rejected, Guest skips only the
+  check, survives a daemon restart, never touches a pending approval).
+- `frame_check` walks the new routes; `hud_backend_check` 85/85, `voice_stt_check` 36 unchanged.
+- vitest 2372 tests / 149 files (was 2315 / 145): `speaker`, `enroll`, `SpeakerSettings`, `guestGate`,
+  and additions to `stt`, `dictation`, `SpeechStrip`; `tsc` and `vite build` clean.
+- Playwright `tests/face/hud_v2_speaker_check.py` 43 (real worklet, mock daemon): enrollment, a
+  refused voice uploads nothing (the mock counts only clips that passed), Guest through reload and a
+  bus event from another window, Jarvis speaking and a card still stop dictation with Guest on, no
+  approval request from speech. Also re-run: `hud_v2_stt_check` 28 (its query expectation gained
+  `verify=1`), `speech` 56, `chunks` 58, `ptt` 70, `steer` 46 (a teardown `BrokenPipeError` in the
+  mock after its last check), `voice_diagnostics` 17.
+- Mutations that fail on purpose (source restored byte for byte): guest flag ignored (unit and routes);
+  a not-clean store treated as unenrolled (fail open); a rejection that still transcribes; store
+  created 0755 or never tightened; reader following symlinks; no regular-file check; damaged voiceprint
+  accepted; Delete leaving the readings; Guest not persisted; whole clip embedded, not 3 s; readings
+  alone switching verification on; HUD: not-owner as an ordinary failure, refused audio kept, the
+  rest of a message not made late, `verify=1` not sent, orb line ignoring Guest, strip hidden for a
+  guest, any truthy `guest` turning the label on, and **Guest also skipping the capture's suppression**
+  (fails `guestGate.test.ts` and the Playwright "his own voice still never opens an utterance" check).
+
+**Not done and not claimed.** Barge-in and reference-correlation self-voice gating (V9: before
+enrollment only "Jarvis"/Ctrl+D pause playback, Q7, is V9's); KWS (V11); any run with a real voice,
+a TV, a physical microphone, Windows Chrome or the live daemon; the manual gate "enroll, then the TV or
+another person says Jarvis, then Guest on" (plan §5 live check 6). `status()["last"]` shows the last
+score for tuning; there is no "test my voice" button. Embedding all chunks (not only chunk 0) means a
+noisy chunk of a long dictation can be refused and the message arrives boxed, not sent.
+
+**Merging with V13.** Both touch `/stt` in `hud_api.py`, `hud/src/api.ts` (`stt` options), `stt.ts` and
+`docs/hud-api.md`. Verification must stay first, before `voice.stt` chooses local or cloud, so a
+refusal is local and calls neither; V13's `STTBlocked` (409) and fallback fields can sit beside
+`verify` in the reply. `frame_check.py` and `hud_backend_check.py` are also touched by V13.

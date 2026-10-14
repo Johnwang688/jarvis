@@ -74,6 +74,19 @@ class Store(Base):
         for f in (self.dir / "guest.json", *(self.dir / "readings").iterdir()):
             self.assertEqual(self.mode(f), 0o600, f)
 
+    def test_the_folder_is_created_private_not_tightened_afterwards(self):
+        modes = []
+        real = os.mkdir
+
+        def spy(path, mode=0o777, **kw):
+            if "speaker" in str(path) or kw.get("dir_fd") is not None:     # the store and its readings, not a parent
+                modes.append(mode)
+            return real(path, mode, **kw)
+
+        with patch.object(os, "mkdir", spy):
+            speaker.add_reading(clip(OWNER, 10.5))
+        self.assertTrue(modes and all(m == 0o700 for m in modes), modes)
+
     def test_a_loose_folder_is_tightened_when_used(self):
         self.dir.mkdir()
         os.chmod(self.dir, 0o755)
@@ -178,6 +191,35 @@ class Store(Base):
                 self.assertEqual(speaker.status()["mode"], "off")
                 self.enroll()                                  # fresh good store for the next case
                 self.assertEqual(speaker.status()["mode"], "on")
+
+    def test_a_pipe_holding_good_json_is_not_a_file(self):
+        """A FIFO holding perfectly good JSON is still refused: only regular files are read."""
+        self.enroll()
+        good = (self.dir / "voiceprint.json").read_bytes()
+        held = []
+
+        def feed(path, data):
+            if os.path.lexists(path):
+                os.unlink(path)
+            os.mkfifo(path)
+            reader = os.open(path, os.O_RDONLY | os.O_NONBLOCK)         # so the writer can open at once
+            writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(writer, data)
+            os.close(writer)                      # the bytes wait in the pipe, and a reader reaches EOF after them
+            held.append(reader)
+
+        self.addCleanup(lambda: [os.close(fd) for fd in held])
+        feed(self.dir / "voiceprint.json", good)
+        self.assertEqual(speaker.status()["state"], "damaged")
+        with self.assertRaises(speaker.VerifyUnavailable):
+            speaker.verify(clip(OWNER, 3, seed=9))
+        # The same for the Guest switch: a pipe saying {"guest": true} does not turn it on.
+        speaker.delete()
+        self.enroll()
+        feed(self.dir / "guest.json", b'{"guest": true}')
+        self.assertFalse(speaker.status()["guest"])
+        with self.assertRaises(speaker.NotOwner):
+            speaker.verify(clip(FRIEND, 3))
 
     def test_hostile_guest_file_means_guest_off(self):
         self.enroll()
