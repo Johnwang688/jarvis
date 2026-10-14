@@ -1521,18 +1521,19 @@ hashes it** (and, for a build, the five tools `make.exe` runs) against the
 SHA-256 `jarvis vex setup` recorded, and is 409 "the VEX tools changed since
 `jarvis vex setup` (<tool>); run it again" on a mismatch.
 
-**SSE `vex_device`** `{action: "download"|"brain"|"info", at}` — one per
+**SSE `vex_device`** `{action: "download"|"brain"|"info"|"connection", at}` — one per
 device action, when it starts; nothing else (no slot, name, path or output),
 as `terminal_attached`. A device action the window did not cause (a
 program running as the owner POSTing with a forged Origin) shows up here; the
-HUD can flag one it cannot match to its own click.
+HUD can flag one it cannot match to its own click. `connection` identifies a
+visible-window USB probe and is not an unclicked manual action notice.
 
 - `GET /vex/status` → `{configured, hint, vexcom_version, toolchain,
   sdks: {cpp, python}, extension_version, templates, project_folder, device,
   brain}`. `configured` false with `hint` (a sentence ending "run `jarvis
   vex setup` again") when `vex.json` is missing, malformed, or names a path
   that fails the use-time check. `device` is the device action running
-  (`"download"`, `"info"`, `"brain"` or null); `brain` the brain terminal's
+  (`"download"`, `"info"`, `"brain"`, `"connection"` or null); `brain` the brain terminal's
   id.
 - `GET /projects/{id}/vex` → detection: `{project_id, vex: true, name,
   language: "cpp"|"python", slot, sdk_version, printf_float, python_main,
@@ -1560,7 +1561,7 @@ HUD can flag one it cannot match to its own click.
   `file:line:col: error|warning:` lines (notes skipped; a file under the
   project comes back relative, with `/`); `bin` is `{path: "build/<name>.bin",
   size, mtime}` when this build wrote one. The last 32 are kept.
-- `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id}`.
+- `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id, download_id}`.
   `slot` an integer 1–8 (not a string, not a bool); `name`
   `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 `{error,
   code: "build_first"}` (`Vex._fresh`, judged under the project's build lock)
@@ -1583,6 +1584,31 @@ HUD can flag one it cannot match to its own click.
   --progress` (DishPy's flags) in the project folder (`program:
   "vex-download"`); 3-minute timeout. **No "run after download"** (V-3), and
   no other route, CLI or tool downloads.
+- `GET /vex/downloads/{id}` → `{id, project_id, slot, state:
+  "running"|"succeeded"|"failed"|"timed_out", terminal_id, exit_code, output,
+  started, ended}`. Actual PTY EOF settles the immutable final record, including
+  when the terminal was closed. Output is the latest 16 KiB of plain text,
+  memory-only; the last 32 records are retained. A missing terminal listing
+  cannot establish completion. Unknown/forgotten status never implies that
+  nothing was downloaded and never retries Download.
+- `POST /vex/device/connection` `{}` → `{brain, controller, checked_at, state:
+  "unknown"|"checking"|"ready"|"busy"|"error", message, events}`. Expresses
+  visible-window demand and immediately returns shared cached USB presence.
+  `brain`/`controller` are boolean or null (unknown); `checked_at` is the last
+  fully validated snapshot time. Up to 32 `{device: "brain"|"controller",
+  connected, at}` confirmed changes/baselines are retained in memory. No serial
+  numbers, port names or raw probe output are returned by this route.
+  One fingerprint-checked `vexcom --usb` runs at most every 5 seconds across
+  windows, with exponential error backoff up to 80 seconds and a 2-second probe
+  budget. Timeout never frees the device before actual PTY settlement. A busy
+  brain/download/manual read is never interrupted or closed for a probe.
+  Waiting owner actions have priority over new probes and may wait up to 4
+  seconds for an existing probe to settle, then receive an explicit busy refusal.
+  The complete bounded JSON must contain recognized `usb.vex`/`usb.dfu` arrays
+  with VEX VID 2888 and V5 Brain/Controller PID 0501/0503; truncated output,
+  unknown identities, errors and busy checks preserve prior confirmed values.
+  Empty fully validated lists confirm absence. This measures USB presence only,
+  not radio link, extension-host health, program execution or download readiness.
 - `POST /vex/brain` `{}` → `{terminal_id, started}`: the brain's user port,
   `vexcom.exe --user`, both ways (`program: "vex-brain"`, the only program
   terminal that takes typed input). One at a time: the open one comes back
@@ -1699,8 +1725,18 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   owner's Cancel dropped, nor after a card that came and went while the
   download ran. **Cancel** (until the download is sent) closes the
   build's program terminal (`DELETE /terminals/{id}`, which ends the build)
-  and sends nothing. The download's end is read from the terminal listing
-  (`exited`, `exit_code`).
+  and sends nothing. The returned `download_id` is polled every 0.6 seconds;
+  Download immediately shows elapsed progress, its program terminal and a
+  bounded inline output tail, then retains the actual final outcome/output.
+  Failed reads retry visibly for at most four minutes. Check status can recover
+  a late final receipt without sending Download; unknown status is labeled as
+  unknown. Exact operation identity and immutable final receipts reject stale
+  replies from overlapping status reads.
+- USB status: visible VEX panes demand the shared cached check; cards, crashes,
+  hidden windows and a Download chain pause demand. The view separates Tooling
+  configured state from USB Brain/Controller presence, labels paused/error or
+  older-than-12-second readings as last confirmed/stale, and shows last-check
+  time plus a timestamped connection log.
 - SSE `vex_device`: matched against the device actions this window started
   (recorded before each request; 30 s); one it did not start is said in the
   VEX view.

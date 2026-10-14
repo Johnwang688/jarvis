@@ -40,10 +40,10 @@ Its fixed listUSB operation uses `--usb` (character offset 69284). Its parser
 reads `usb.vex`/`usb.dfu` arrays and vid/pid strings (offset 166710). Its device
 mapping uses VEX VID 2888, PID 0501 V5 Brain / 0503 V5 Controller (offsets 154957,
 155217 and 178133). No vendor executable was decompiled or copied. The old fake
-`devices[]` system-info shape is explicitly not evidence. The new fixed read-only
-flag needs root/independent review before implementation.
+`devices[]` system-info shape is explicitly not evidence. The fixed read-only
+flag and schema were independently source-reviewed and accepted before implementation.
 
-## Proposed shared connection contract
+## Shared connection contract
 
 Owner-only `POST /vex/device/connection {}` expresses visible-window demand and
 returns cached typed state immediately. A shared daemon worker coalesces windows,
@@ -81,3 +81,34 @@ backoff, owner action priority and exact cleanup. Actual mock-HUD Download outpu
 completion, keyboard refusal, plain text and narrow layout; TypeScript/build and
 appropriate existing VEX/terminal regressions. No heavy jobs until root grants a
 slot. Real-device verification remains a separately identified owner step.
+
+## Verification and release state
+
+Runtime frozen at `70dfd6c`; test-only narrow followup `22e8484`. Includes current
+main `2c02713`. Independent source review passed, including exact device-holder
+cleanup after timeout/late EOF, whole-snapshot/truncated-tail refusal, atomic owner
+priority and monotonic exact-ID Download status responses.
+
+Verified with temporary HOME/XDG/config, dummy keys, fake VEX programs and
+synthetic HUD state only, under 3 GiB / zero-swap scopes with a 4 GiB free-memory
+preflight, explicit deadlines, source manifests/drift checks and inactive empty
+scopes after every run:
+
+- 38 focused Python checks: new actual fake-PTY Download/USB lifecycle tests,
+  existing VEX Device/Routes and selected terminal lifecycle regressions.
+- 50 targeted VEX HUD units and TypeScript/production HUD build passed.
+- 49 selected actual Chromium HUD checks passed: live/final output, strict
+  pointer-only Download, chain/card guards, brain resume and device info.
+- 9 focused feedback/narrow Chromium checks passed, including fitted pane 2 at
+  375 px and no connection/output horizontal overflow.
+- 7 existing Build/Clean output regressions passed after shared timer cleanup.
+
+The original selected HUD run was 48/49: the keyboard refusal fixture counted an
+earlier scenario's authorized Download in retained mock history. The test-only
+repair preserves that history and asserts zero new Download POSTs from before
+its reset, plus an empty current Download list. Its corrected 49/49 receipt is
+retained alongside the original failure; production did not change for this fix.
+
+Code is ready for the coordinator's merge/deployment gates. It is not installed
+by these receipts. Real VEX executable/device validation and robot Download are
+**UNRUN**. USB indicators intentionally make no radio-link/extension-host claim.
