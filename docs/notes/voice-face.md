@@ -1754,9 +1754,9 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   and V10 has no route to `decide` or `/approve` (V9 owns the "Jarvis ..." commands, with their own mutation test).
   Under a card the mic claims and uploads nothing anyway (V3); the in-flight case is the one this covers. A card that comes
   up between plan and execution (an earlier step awaited a send) turns the remaining word steps into plain runs of the
-  words as said.
-- **Text rules.** The transcript is NFKC-normalised before the last word is read (decomposed accents and full-width
-  letters match; a word that counts comes back normalised, any other text untouched); a list entry may contain combining
+  words as said (`inertUnderCard`, unit-tested; its one-line call in `placeTranscripts` is not).
+- **Text rules.** The last word is found in the transcript as said and NFKC-normalised for the comparison only (decomposed
+  accents and full-width letters match; the text before it is returned exactly as said, ½ and … included); a list entry may contain combining
   marks but must start with a letter or digit. Scripts written without word separators (Chinese, Japanese) are not
   supported: their last "word" is the whole sentence, so an entry matches only when it is the whole message.
 - **Settings -> Voice -> "Send and cancel words"** (`components/VoiceWords.tsx`, `lib/voiceWords.ts`): an on/off toggle, the
@@ -1778,7 +1778,7 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   in `__hud`), `capture.ts` (`UtteranceEnd.tailMs`, `finishRecording`'s quiet argument, `endNow`), `stt.ts`
   (`SttCapture.tailMs`), `voiceDiagnostics.ts` (two outcomes), `chats.ts` (two capture statuses),
   `InputBar.tsx` (`undo`), `theme.css`.
-- **Free checks.** `lib/voiceWords.test.ts` (51: reading, the list, planning, ledger, hold), `captureWords.test.ts` (10:
+- **Free checks.** `lib/voiceWords.test.ts` (56: reading, the list, planning, ledger, hold), `captureWords.test.ts` (10:
   the tail of quiet for pause, talk key, short key, truncation; `endNow`), `voiceWordsFlow.test.ts` (5: the real
   Capture, assembler and plan; a cancel whose last chunk is still in flight; the same words without quiet; a failed chunk).
   `tests/face/hud_v2_words_check.py` (68, real HUD, mock daemon, synthetic fake microphone): REVIEW + over sends the box;
@@ -1786,7 +1786,7 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   expiry; AUTO cancel with a chunk held in flight and Undo; cancel does not recall a send and `NOTHING TO CANCEL`; a card
   in flight (verbatim, zero approval requests) and a card up (nothing uploaded); busy chat steers; the lists in
   Settings (refusals, bound, persistence); edited lists, the toggle, an empty list, hostile storage.
-- **Counts.** vitest 2451 tests / 154 files (2385 / 151 on V5), `tsc` and `vite build` clean. Browser checks on the
+- **Counts.** vitest 2456 tests / 154 files (2385 / 151 on V5), `tsc` and `vite build` clean. Browser checks on the
   built `hud/dist`: `hud_v2_words_check` 84, `chunks` 58, `stt` 28, `steer` 46, `speech` 56, `multichat` 343 all pass;
   `vad` 67 passed at a load average of about 4 before the review fixes and was not rerun (its three "2.4 s pause
   continues" checks failed in three full runs at load 10-25 and pass alone: a 100 ms margin of real-time fake-microphone

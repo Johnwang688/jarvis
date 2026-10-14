@@ -403,7 +403,7 @@ def main(argv=None):
                 check("a dictated word that is no longer in the box deletes nothing: 'gone ahead' is intact",
                       waits(lambda: "NOTHING TO CANCEL" in page.locator('[data-testid="orb-status"]').inner_text() or undo_bar().count() == 1)
                       and box() == "gone ahead", repr(box()))
-                check("... and the window says part of it stayed", "edited in the box" in page.evaluate("window.__hud.state().error"),
+                check("... and the window says part of it stayed", "matches words you typed" in page.evaluate("window.__hud.state().error"),
                       page.evaluate("window.__hud.state().error"))
                 check("nothing was sent", len(_sent(mock, "t1")) == s0)
 

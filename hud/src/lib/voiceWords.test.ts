@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CANCELLED_STATUS, DEFAULT_WORDS, DictationLedger, MAX_WORDS, MAX_WORD_LENGTH, SEND_WORD_SILENCE_MS, UNDO_MS, UndoHold,
-  TYPING_GUARD_MS, loadWords, normalizeList, normalizeWords, parseWord, planWords, readWord, refusal, saveWords, typedRecently, wordMaySend, type Words,
+  TYPING_GUARD_MS, inertUnderCard, loadWords, normalizeList, normalizeWords, parseWord, planWords, readWord, refusal, saveWords, typedRecently, wordMaySend, type Words,
 } from "./voiceWords";
 import type { SttCapture, SttLanding } from "./stt";
 
@@ -100,6 +100,18 @@ describe("unicode: the same word however it is written", () => {
     const w: Words = { enabled: true, send: ["终了"], cancel: [] };
     expect(readWord("请发送它终了", w, QUIET)).toEqual({ text: "请发送它终了", word: null });
     expect(readWord("终了", w, QUIET).word).toBe("send");     // only when it is alone
+  });
+
+  it("the remainder is returned as it was said: only the matched word is normalised", () => {
+    expect(readWord("Spend ½ ™ … over", W, QUIET)).toEqual({ text: "Spend ½ ™ …", word: "send" });
+    expect(readWord("ﬁnd the ﬂow over", W, QUIET).text).toBe("ﬁnd the ﬂow");        // ligatures are not rewritten
+    expect(readWord("2² ≠ 5 cancel", W, QUIET)).toEqual({ text: "2² ≠ 5", word: "cancel" });
+    expect(readWord(NFD("ça va, résumé over"), W, QUIET).text).toBe(NFD("ça va, résumé"));
+  });
+
+  it("full-width punctuation after the word does not hide it", () => {
+    expect(readWord("send it ｏｖｅｒ！？", W, QUIET).word).toBe("send");
+    expect(readWord("send it over。", W, QUIET).word).toBe("send");
   });
 
   it("an unchanged transcript comes back byte for byte when no word counts", () => {
@@ -225,6 +237,36 @@ describe("planWords", () => {
     const batch = [item("send it over")];
     planWords(batch, ctx);
     expect(batch[0].text).toBe("send it over");
+  });
+});
+
+describe("inertUnderCard: a card that rose between the steps", () => {
+  const ctx = { words: W, card: false };
+  const a = { id: 1, ...item("send it over") };
+  const b = { id: 2, ...item("never mind cancel") };
+  const originals = new Map([a, b].map((i) => [i.id, i]));
+
+  it("the second step of [send, cancel] becomes a plain run of the words as said; nothing is discarded", () => {
+    const [first, second] = planWords([a, b], ctx);
+    expect([first.kind, second.kind]).toEqual(["send", "cancel"]);
+    expect(second.items[0].text).toBe("never mind");                 // stripped by the plan
+    const guarded = inertUnderCard(second, originals, true);
+    expect(guarded.kind).toBe("run");
+    expect(guarded.items.map((i) => i.text)).toEqual(["never mind cancel"]);   // verbatim, the word included
+    expect(guarded.items[0]).toBe(b);
+  });
+
+  it("a send step is made inert the same way", () => {
+    const [first] = planWords([a, b], ctx);
+    expect(inertUnderCard(first, originals, true)).toEqual({ kind: "run", items: [a] });
+  });
+
+  it("with no card, steps and runs pass through untouched", () => {
+    const [first, second] = planWords([a, b], ctx);
+    expect(inertUnderCard(first, originals, false)).toBe(first);
+    expect(inertUnderCard(second, originals, false)).toBe(second);
+    const run = planWords([item("plain words")], ctx)[0];
+    expect(inertUnderCard(run, new Map(), true)).toBe(run);
   });
 });
 

@@ -109,17 +109,18 @@ export function saveWords(words: Words, storage?: Pick<Storage, "setItem">): voi
 export type SpokenWord = "send" | "cancel";
 
 /**
- * The last word of `text` (punctuation aside) and where it starts, or null. `text`
- * is already NFKC-normalised (readWord does it), so a decomposed accent or a
- * full-width letter is the letter the list holds. Words are found by their
+ * The last word of `text` (punctuation aside) and where it starts in `text`, or
+ * null. The word is NFKC-normalised for the comparison, so a decomposed accent or
+ * a full-width letter is the letter the list holds. Words are found by their
  * separators: a script written without them (Chinese, Japanese) has no last word
  * short of the whole sentence, so a list entry never matches there -- unsupported.
  */
 function lastWord(text: string): { word: string; at: number } | null {
-  const body = text.replace(/[\s.,;:!?…。、"“”‘’')\]*_–—-]+$/u, "");
+  const body = text.replace(/[\s\p{P}]+$/u, "");
   const m = /(?:^|[^\p{L}\p{N}\p{M}'’-])([\p{L}\p{N}][\p{L}\p{N}\p{M}'’-]*)$/u.exec(body);
   if (!m) return null;
-  return { word: m[1].toLowerCase().replace(/’/g, "'"), at: body.length - m[1].length };
+  // Only the token is normalised, for the comparison: the text around it is returned as it was said.
+  return { word: m[1].normalize("NFKC").toLowerCase().replace(/’/g, "'"), at: body.length - m[1].length };
 }
 
 /**
@@ -130,12 +131,11 @@ function lastWord(text: string): { word: string; at: number } | null {
 export function readWord(text: string, words: Words, tailMs: number): { text: string; word: SpokenWord | null } {
   const none = { text, word: null as SpokenWord | null };
   if (!words.enabled || !(tailMs >= SEND_WORD_SILENCE_MS)) return none;
-  const norm = text.normalize("NFKC");
-  const last = lastWord(norm);
+  const last = lastWord(text);
   if (!last) return none;
   const word: SpokenWord | null = words.send.includes(last.word) ? "send" : words.cancel.includes(last.word) ? "cancel" : null;
   if (!word) return none;
-  return { text: norm.slice(0, last.at).replace(/[\s,;:"“‘–—-]+$/u, ""), word };
+  return { text: text.slice(0, last.at).replace(/[\s,;:"“‘\p{Pd}、，；：]+$/u, ""), word };
 }
 
 // ---- planning a batch -------------------------------------------------------
@@ -174,6 +174,19 @@ export function planWords<T extends WordItem>(batch: readonly T[], ctx: { words:
   }
   if (run.length) steps.push({ kind: "run", items: run });
   return steps;
+}
+
+/**
+ * A card that rose after the plan was made (an earlier step awaited a send) makes
+ * the step inert: send and cancel steps become plain runs of the words as they
+ * were said (`originals`, by id), so nothing is stripped, sent as a command or
+ * discarded under a card.
+ */
+export function inertUnderCard<T extends WordItem & { id: number }>(
+  step: WordStep<T>, originals: ReadonlyMap<number, T>, cardUp: boolean,
+): WordStep<T> {
+  if (!cardUp || step.kind === "run") return step;
+  return { kind: "run", items: step.items.map((i) => originals.get(i.id) ?? i) };
 }
 
 /**

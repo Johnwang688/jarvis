@@ -91,7 +91,7 @@ import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReas
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
 import { VoiceWordsSetting } from "./components/VoiceWords";
-import { CANCELLED_STATUS, DictationLedger, UndoHold, loadWords, normalizeWords, planWords, saveWords, typedRecently, wordMaySend, type Words } from "./lib/voiceWords";
+import { CANCELLED_STATUS, DictationLedger, UndoHold, inertUnderCard, loadWords, normalizeWords, planWords, saveWords, typedRecently, wordMaySend, type Words } from "./lib/voiceWords";
 import { VadStage } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
@@ -982,14 +982,12 @@ export default function App() {
         const shows = pane ?? n;
         if (text) undoHold.hold(home ?? draftKey(now.chats[n], n) ?? "", text);
         if (!now.chats[shows].busy) chatPatch(shows, { orb: "idle", status: text ? CANCELLED_STATUS : "NOTHING TO CANCEL" });
-        if (kept) dispatch({ type: "patch", patch: { error: "Part of what you dictated was edited in the box, so it stayed there." } });
+        if (kept) dispatch({ type: "patch", patch: { error: "Part of what you dictated was edited, or matches words you typed, so it stayed in the box." } });
       };
       const spoken = new Map(batch.map((i) => [i.id, i]));
       for (let step of planWords(batch, { words: wordsNow.current, card: at.approvals.length > 0 })) {
         // A card that came up since the plan was made (an earlier step awaited a send): the words are inert, placed as said.
-        if (step.kind !== "run" && live.current.approvals.length > 0) {
-          step = { kind: "run", items: step.items.map((i) => spoken.get(i.id) ?? i) };
-        }
+        step = inertUnderCard(step, spoken, live.current.approvals.length > 0);
         if (step.kind === "cancel") { cancelByWord(step); continue; }
         // The message goes out (to a box or a chat): its continuation window stays.
         for (const i of step.items) if (i.meta.continuation) placedWindows.current.add(i.meta.continuation);
@@ -1000,7 +998,10 @@ export default function App() {
         if (items.length) await placeRun(items, afterSend);
         if (stillTyping) {
           stillTyping = false;
-          if (live.current.chats[n].busy) dispatch({ type: "patch", patch: { error: "You are still typing in the box, so it was not sent. What you said is in the box." } });
+          if (live.current.chats[n].busy) {
+            const said = step.items.some((i) => i.text);
+            dispatch({ type: "patch", patch: { error: said ? "You are still typing in the box, so it was not sent. What you said is in the box." : "Not sent: you were still typing." } });
+          }
           else chatPatch(n, { orb: "idle", status: "STILL TYPING · NOT SENT" });
         }
       }
