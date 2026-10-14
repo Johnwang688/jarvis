@@ -1685,6 +1685,12 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   changed, truncated, wasm 500, Worker construction refused, a worker answering 1.5 s late); Try again
   restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its "speech" is two
   oscillators, which Silero rightly does not call speech) by failing the model fetch for its contexts.
+- **Counts.** vitest 2385 tests / 151 files (2315 / 145 on V4 after V8: +70, six new files), `tsc` and
+  `vite build` clean. Browser checks on the built `hud/dist`: `hud_v2_vad_check` 67, `chunks` 58,
+  `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17, `speech` 56, `multichat` 343, all pass;
+  `csp` 41 of 44, the three failures being the manifest/icon checks, which fail identically on V4's
+  own build in this headless-shell environment (`Page.getAppManifest` returns nothing). The full
+  `hud_v2_check` was not run.
 - **Mutations that fail on purpose** (source restored afterwards): no backlog bound (1 test); the
   checksum not compared (3); the message pause back to 1.5 s (3); the probability ignored (8+).
 - **Not done / not claimed.** Windows Chrome and a physical microphone: unmeasured (CPU of the
