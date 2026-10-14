@@ -727,6 +727,11 @@ follow-up moves them again.
   6 lookalikes (`snake_case`, `2 * 3 * 4`, prose) come back byte-identical,
   fences are dropped rather than read aloud, and `tts()` applies the strip
   itself so no speech path can forget. Run after touching `voice.py`.
+- `tests/voice_v0_helpers_check.py` — free, offline check of the V0 voice
+  measurement helpers (word error rate, equal error rate, SNR mixing). The
+  probes it supports (`tests/voice_v0/`: WASM CPU, local STT, speaker EER, KWS,
+  Smart Turn, plus owner-run mic scripts) download models and run only with
+  `JARVIS_VOICE_V0=1`; results and method are in `docs/notes/voice-face.md`.
 - `tests/voice_pocket_check.py` — free checks for the Pocket TTS backend, a
   fake `pocket_tts` injected into `sys.modules` (its sample rate deliberately
   16000, not Kokoro's 24000, so a hardcoded rate fails). The cases that
