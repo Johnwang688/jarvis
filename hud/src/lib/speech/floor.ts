@@ -36,6 +36,8 @@ interface Msg {
   thread: string;
   /** Where the message stands in line: the id of its first chunk, or a later number after a yield. null: the next chunk to arrive sets it. */
   rank: number | null;
+  /** The id of the message's first chunk: when it arrived. Unlike `rank`, a yield never moves it. */
+  born: number;
   /** No more chunks are coming (the message closed, was skipped or dropped). */
   ended: boolean;
   /** The last message of a finished turn: a reply, never an update. */
@@ -65,7 +67,7 @@ export class Floor {
     this.latest = Math.max(this.latest, item.id);
     let m = this.msgs.get(item.messageKey);
     if (!m) {
-      m = { key: item.messageKey, thread: item.thread, rank: item.id, ended: false, final: false, note: item.kind === "note" };
+      m = { key: item.messageKey, thread: item.thread, rank: item.id, born: item.id, ended: false, final: false, note: item.kind === "note" };
       this.msgs.set(item.messageKey, m);
     } else {
       if (m.rank === null) m.rank = item.id;
@@ -90,7 +92,7 @@ export class Floor {
   turnEnded(thread: string): void {
     let newest: Msg | null = null;
     for (const m of this.msgs.values()) {
-      if (m.thread === thread && !m.note && (newest === null || (m.rank ?? 0) > (newest.rank ?? 0))) newest = m;
+      if (m.thread === thread && !m.note && (newest === null || m.born > newest.born)) newest = m;
     }
     if (newest) newest.final = true;
   }
@@ -204,8 +206,9 @@ export class Floor {
       let total = mine.reduce((sum, i) => sum + estimateMs(i.text), 0);
       if (total <= maxMs) continue;
       const keys = [...new Set(this.order(live).filter((i) => i.thread === thread).map((i) => i.messageKey))];
-      const newest = keys.reduce<string | null>((best, k) =>
-        best === null || this.rankOf(k) > this.rankOf(best) ? k : best, null);
+      // The newest by arrival, not by place in line: a yielded older message is behind it.
+      const bornOf = (k: string) => (this.msgs.get(k)?.note ? -1 : this.msgs.get(k)?.born ?? -1);
+      const newest = keys.reduce<string | null>((best, k) => (best === null || bornOf(k) > bornOf(best) ? k : best), null);
       for (const key of keys) {
         if (total <= maxMs) break;
         const m = this.msgs.get(key);

@@ -22,6 +22,8 @@ export class ThreadVoices {
   private map = new Map<string, ThreadVoice>();
   private asking = new Map<string, Promise<string | null>>();
   private failedAt = new Map<string, number>();
+  /** Mutes this window has set that the daemon has not answered yet: a reload of the map must not undo them. */
+  private muting = new Map<string, boolean>();
   private listeners = new Set<() => void>();
   private _pool: readonly string[] = [];
   private _version = 0;
@@ -35,7 +37,10 @@ export class ThreadVoices {
     try {
       const got = await this.api.list();
       this._pool = got.pool;
-      for (const [id, v] of Object.entries(got.threads)) this.map.set(id, { voice: v.voice, muted: v.muted });
+      for (const [id, v] of Object.entries(got.threads)) {
+        const mine = this.muting.get(id);
+        this.map.set(id, { voice: v.voice, muted: mine ?? v.muted });
+      }
       this.changed();
     } catch { /* the chat is read in the daemon's own voice until it answers */ }
   }
@@ -76,8 +81,11 @@ export class ThreadVoices {
     const failed = this.failedAt.get(thread);
     if (failed !== undefined && this.now() - failed < RETRY_MS) return Promise.resolve(null);
     const p = this.api.change(thread, {}).then((r) => {
-      this.failedAt.delete(thread);
       this.apply(r);
+      // The daemon answered with no voice (none installed): back off like a failure,
+      // or every chunk would ask again.
+      if (r.voice) this.failedAt.delete(thread);
+      else this.failedAt.set(thread, this.now());
       return r.voice;
     }, () => {
       this.failedAt.set(thread, this.now());
@@ -96,9 +104,16 @@ export class ThreadVoices {
     // The window acts at once; the daemon's answer (or another window's change) settles it.
     const before = this.info(thread);
     this.map.set(thread, { ...before, muted });
+    this.muting.set(thread, muted);
     this.changed();
-    try { this.apply(await this.api.change(thread, { muted })); }
-    catch { this.map.set(thread, before); this.changed(); }
+    try {
+      this.apply(await this.api.change(thread, { muted }));
+    } catch {
+      this.map.set(thread, before);
+      this.changed();
+    } finally {
+      this.muting.delete(thread);
+    }
   }
 
   /** A record from the daemon: our own call's answer, or another window's `thread_voice`. */

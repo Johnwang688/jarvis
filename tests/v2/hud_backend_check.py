@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 import http.client
+import inspect
 import json
 import os
 from pathlib import Path
@@ -1805,6 +1806,64 @@ class Backend(unittest.TestCase):
         self.assertEqual(names[:2], ["af_a", "bm_d"])
         self.assertIn("pocket:alba", names)
         self.assertNotIn("pocket:lola", names)
+
+    def test_speech_voices_with_no_voice_to_give_store_and_publish_nothing(self):
+        """Review MED-2: no installed voice means no write and no event, however often it is asked."""
+        thread = self.thread()
+        with patch.object(voice, "available_voices", return_value=set()), \
+                patch.object(voice, "catalog", return_value=[]), \
+                patch.object(voice, "selected_voice", return_value="gone"):
+            self.events_all()
+            for _ in range(3):
+                got = self.owner("POST", "/speech/voices", {"thread_id": thread.id})
+                self.assertIsNone(got["voice"])
+            self.assertFalse(Path(config.SPEECH_VOICES_PATH).exists())
+            self.assertEqual([e for e in self.events_all() if e["kind"] == "thread_voice"], [])
+
+    def test_speech_voices_event_is_published_while_the_lock_is_held(self):
+        """Review LOW-2: two changes cannot reach the bus in another order than they were stored."""
+        from jarvis.v2 import speech_voices
+        thread = self.thread()
+        held = []
+        real = self.daemon.bus.publish
+        self.daemon.bus.publish = lambda event: (held.append(speech_voices._lock.locked()), real(event))[1]
+        self.addCleanup(lambda: setattr(self.daemon.bus, "publish", real))
+        with patch.object(voice, "available_voices", return_value={"af_a"}), \
+                patch.object(voice, "catalog", return_value=[{"name": "af_a", "backend": "kokoro", "kind": "builtin"}]), \
+                patch.object(voice, "selected_voice", return_value="af_a"):
+            self.owner("POST", "/speech/voices", {"thread_id": thread.id})
+            self.owner("POST", "/speech/voices", {"thread_id": thread.id, "muted": True})
+        self.assertEqual(held, [True, True])
+
+    def test_speech_voices_store_is_read_defensively(self):
+        """Review LOW-1: a FIFO, a device, an oversize or a deeply nested file is an empty store."""
+        from jarvis.v2 import speech_voices
+        path = Path(config.SPEECH_VOICES_PATH)
+        good = '{"threads": {"deadbeef": {"voice": "af_a", "muted": true}}}'
+        path.write_text(good)
+        self.assertEqual(speech_voices._read(), {"deadbeef": {"voice": "af_a", "muted": True}})
+        path.write_text("[" * 200_000)                       # json.loads: RecursionError
+        self.assertEqual(speech_voices._read(), {})
+        path.write_text('{"threads": {}, "pad": "' + "x" * (speech_voices._MAX_BYTES + 10) + '"}')
+        self.assertEqual(speech_voices._read(), {})
+        path.unlink()
+        os.mkfifo(path)                                       # must not block waiting for a writer
+        self.assertEqual(speech_voices._read(), {})
+        path.unlink()
+        path.symlink_to("/dev/zero")                          # endless: not a regular file
+        self.assertEqual(speech_voices._read(), {})
+
+    def test_deleting_a_thread_forgets_its_read_aloud_voice(self):
+        from jarvis.v2 import speech_voices
+        thread = self.thread()
+        Path(config.SPEECH_VOICES_PATH).write_text(json.dumps({"threads": {
+            thread.id: {"voice": "af_a", "muted": False}, "deadbeef": {"voice": "bm_d", "muted": False}}}))
+        speech_voices.forget(thread.id)
+        self.assertEqual(set(json.loads(Path(config.SPEECH_VOICES_PATH).read_text())["threads"]), {"deadbeef"})
+        speech_voices.forget("0badc0de")                      # unknown: nothing happens
+        # The delete path calls it.
+        from jarvis.v2 import projects
+        self.assertIn("speech_voices.forget(thread.id)", inspect.getsource(projects.delete_thread))
 
     def test_picker_body_keys_are_the_contract(self):
         """A6: the HUD sent {id}, {name} and {mute}; the daemon read model,

@@ -104,6 +104,34 @@ describe("the floor", () => {
 /** The fake player lasts 50 ms a character; the first chunk of the timeout tests ends well within this. */
 function A_ENDS() { return "A starts talking.".length * MS_PER_CHAR; }
 
+describe("one at a time, whatever the order says", () => {
+  it("never starts a second sound while one plays, even if the order puts a ready item ahead of it", async () => {
+    // A PlayOrder that puts the newest first: without the guard in the queue's step the
+    // new, ready item would start over the one playing.
+    const lifo = new SpeechQueue({ synth: synth.fn, player, clock, order: (live) => [...live].reverse() });
+    lifo.enqueue(entry("a", 0, "First one is long enough to overlap."));
+    await clock.advance(200);
+    expect(player.active).toBe(1);
+    lifo.enqueue(entry("b", 0, "Second."));
+    await clock.advance(200);
+    expect(player.active).toBe(1);
+    expect(player.maxActive).toBe(1);
+    await clock.advance(30_000);
+    expect(player.maxActive).toBe(1);
+  });
+});
+
+describe("a chunk that could not be made", () => {
+  it("keeps naming its chat while idle, until the marks are cleared", async () => {
+    synth.failing = () => true;
+    q.enqueue(entry("a", 0, "This will not be made."));
+    await clock.advance(1000);
+    expect(q.view()).toMatchObject({ state: "idle", failed: 1, thread: "a" });
+    q.clearMarks();
+    expect(q.view()).toMatchObject({ failed: 0, thread: null });
+  });
+});
+
 describe("stale, drop and skip", () => {
   it("a send to a thread drops its unplayed items and stops its playing one, others go on", async () => {
     q.enqueue(entry("a", 0, "A is being read right now."));
@@ -181,6 +209,31 @@ describe("backlog", () => {
     q.endMessage("a:0");
     q.enqueue(entry("a", 1, long("newest", 70)));          // not finished, not yet known to be the reply
     expect(q.items().filter((i) => i.kind !== "note").map((i) => i.text.slice(0, 6))).toEqual(["newest"]);
+  });
+
+  it("a message that yielded does not make the arriving one collapsible (newest by arrival, not by place in line)", async () => {
+    synth.hang = (item) => item.text === "A stalled chunk.";
+    q.enqueue(entry("a", 0, "A plays first, then stalls."));
+    await clock.advance(300);                                  // a:0 plays and holds the floor
+    q.enqueue(entry("a", 0, "A stalled chunk.", 1));            // its next chunk never gets made
+    q.enqueue(entry("a", 1, long("arriving", 70)));             // the next message is still arriving
+    q.enqueue(entry("b", 0, "B waits for the floor."));
+    await clock.advance(FLOOR_TIMEOUT_MS + 3000);               // a:0 yields to b; its rank now sits behind a:1
+    // a:1 (70 s unplayed, but a's newest message) goes next: it was never collapsed.
+    expect(player.started.some((t) => t.startsWith("arriving"))).toBe(true);
+    expect(q.past().some((i) => i.mark === "collapsed" && i.text.startsWith("arriving"))).toBe(false);
+  });
+
+  it("a final reply from an earlier turn is not collapsed when a later turn's interim messages back up", async () => {
+    synth.hang = () => true;
+    q.enqueue(entry("a", 0, long("reply1", 50)));
+    q.endMessage("a:0");
+    q.turnEnded("a");                                          // turn 1 is over: a:0 is its reply
+    for (let i = 1; i <= 3; i++) { q.enqueue(entry("a", i, long(`u${i}`, i === 3 ? 10 : 40))); q.endMessage(`a:${i}`); }
+    const left = q.items().filter((i) => i.kind !== "note").map((i) => i.text.slice(0, 2));
+    expect(left).toContain("re");                               // the turn-1 reply stays
+    expect(left).toContain("u3");                               // the newest
+    expect(left).not.toContain("u1");
   });
 
   it("later collapses are counted by markers too, and every collapsed message is accounted for", async () => {
@@ -471,6 +524,40 @@ describe("ThreadVoices", () => {
     expect(v.info("t1").muted).toBe(true);
     await p;
     expect(v.info("t1").muted).toBe(false);
+  });
+
+  it("an assignment the daemon answers with no voice backs off like a failure, not one request per chunk", async () => {
+    const calls: unknown[] = [];
+    let t = 0;
+    const api: VoicesApi = {
+      list: async () => ({ threads: {}, pool: [] }),
+      change: async (thread) => { calls.push(thread); return { thread_id: thread, voice: null, muted: false }; },
+    };
+    const v = new ThreadVoices(api, () => t);
+    for (let i = 0; i < 5; i++) expect(await v.voiceFor("t1")).toBeNull();
+    expect(calls).toHaveLength(1);
+    t = 6_000;
+    await v.voiceFor("t1");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a reload of the map does not undo a mute still waiting for the daemon", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const api: VoicesApi = {
+      list: async () => ({ threads: { t1: { voice: "bm_a", muted: false } }, pool: [] }),
+      change: async (thread, change) => { await held; return { thread_id: thread, voice: "bm_a", muted: change.muted ?? false }; },
+    };
+    const v = new ThreadVoices(api);
+    await v.load();
+    const p = v.mute("t1", true);
+    await v.load();                                   // the daemon still says unmuted
+    expect(v.info("t1").muted).toBe(true);
+    release();
+    await p;
+    expect(v.info("t1").muted).toBe(true);
+    await v.load();
+    expect(v.info("t1").muted).toBe(false);           // settled: the daemon's word stands
   });
 
   it("names voices for the chip", () => {

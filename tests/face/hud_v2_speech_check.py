@@ -249,11 +249,8 @@ def main() -> int:
             _choose(page, until, "cols2")              # ⊞ folds pane 3 away: its chat is open, not drawn
             until(lambda: not page.locator('[data-testid="pane-3"]').is_visible(), timeout=3)
             until(lambda: all(page.locator(f'[data-testid="pane-{n}-voice"]').count() == 1 for n in (1, 2)), timeout=5)
-            voices = {tid: mock.speech_threads.get(tid, {}).get("voice") for tid in ("t1", "t2", "t3")}
-            check("each open chat, the hidden one included, was given a voice by the daemon",
-                  all(voices.values()) and len(set(voices.values())) == 3, str(voices))
-            check("the voice chips name them", page.locator('[data-testid="pane-1-voice"]').get_attribute("data-voice") == voices["t1"]
-                  and page.locator('[data-testid="pane-2-voice"]').get_attribute("data-voice") == voices["t2"])
+            check("chats that are merely open have used up no voice",
+                  "t2" not in mock.speech_threads and "t3" not in mock.speech_threads, str(mock.speech_threads))
             mock.ms_per_char = 14
             mark = len(mock.sent("POST", "/say"))
             texts = {tid: f"{tag} reply from chat {tid}. {tag} has a second sentence to say here. {tag} has a third one too."
@@ -269,6 +266,13 @@ def main() -> int:
                 mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
             until(lambda: speech(page)["view"]["state"] == "idle" and len(said(mock)) > mark + 6, timeout=30)
             until(lambda: speech(page)["view"]["state"] == "idle", timeout=30)
+            voices = {tid: mock.speech_threads.get(tid, {}).get("voice") for tid in ("t1", "t2", "t3")}
+            check("each chat that was read, the hidden one included, was given its own voice by the daemon",
+                  all(voices.values()) and len(set(voices.values())) == 3, str(voices))
+            check("the chat in no pane was given none", "t9" not in mock.speech_threads)
+            check("the voice chips name them", all(
+                bool(until(lambda n=n, tid=tid: page.locator(f'[data-testid="pane-{n}-voice"]').get_attribute("data-voice") == voices[tid], timeout=3))
+                for n, tid in ((1, "t1"), (2, "t2"))))
             spoken = [b for b in mock.sent("POST", "/say")[mark:]]
             played = [i["text"] for i in speech(page)["past"] if i["state"] == "done"][-len(spoken):]
             order = runs(played)      # the order they SOUNDED in (the /say requests run ahead of it)

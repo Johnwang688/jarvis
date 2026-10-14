@@ -563,12 +563,12 @@ export default function App() {
   // The threads read now (lib/speech/policy `speakingThreads`): every thread
   // shown in any chat pane, hidden panes included, through the one queue. A
   // thread that leaves the set (its pane closed or changed) stops speaking at
-  // once, and each one is given its own voice by the daemon as it joins.
+  // once. A voice is given by the daemon only when a chat is first read
+  // (`voiceFor`), so chats that are merely open use none up.
   const speakerKey = [...speakingThreads(view.ws, state.chats, pendingThread.current)].sort().join(",");
   useEffect(() => {
     const threads = speakerKey ? speakerKey.split(",") : [];
     speech.controller.setSpeakers(new Set(threads));
-    for (const id of threads) void speech.voices.assign(id);
   }, [speech, speakerKey]);
   const voicesVersion = useSyncExternalStore(
     useCallback((cb: () => void) => speech.voices.subscribe(cb), [speech]), () => speech.voices.version());

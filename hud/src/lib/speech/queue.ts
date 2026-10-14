@@ -118,6 +118,8 @@ export class SpeechQueue {
   private current: { slot: Slot; handle: PlayHandle } | null = null;
   private paused = false;
   private failed = 0;
+  /** The thread of the latest chunk that could not be made or played: the strip names it while idle. */
+  private lastFailed: string | null = null;
   private ids = 0;
   private cached: QueueView | null = null;
   private pumping = false;
@@ -143,7 +145,7 @@ export class SpeechQueue {
     const head = this.current?.slot.item ?? this.order(live)[0];
     const view: QueueView = {
       state,
-      thread: head ? head.thread : null,
+      thread: head ? head.thread : this.failed > 0 ? this.lastFailed : null,
       queued: live.length - (this.current ? 1 : 0),
       failed: this.failed,
       blocked: this.deps.player.blocked(),
@@ -239,6 +241,7 @@ export class SpeechQueue {
     this.markers.clear();
     this.paused = false;
     this.failed = 0;
+    this.lastFailed = null;
     this.pump();
   }
 
@@ -250,6 +253,7 @@ export class SpeechQueue {
 
   clearMarks(): void {
     this.failed = 0;
+    this.lastFailed = null;
     this.notify();
   }
 
@@ -266,6 +270,7 @@ export class SpeechQueue {
   private retire(slot: Slot, state: "done" | "skipped" | "dropped", mark?: ItemMark): void {
     slot.item.state = state;
     if (mark) slot.item.mark = mark;
+    if (mark === "tts_failed" || mark === "tts_timeout" || mark === "play_failed") this.lastFailed = slot.item.thread;
     slot.abort?.abort();
     if (slot.timer !== undefined) this.deps.clock.clearTimeout(slot.timer);
     this.unwatch(slot);

@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import threading
 from pathlib import Path
 
@@ -52,23 +53,34 @@ def _path() -> Path:
 
 
 def _read() -> dict[str, dict]:
-    """The stored map, tolerating anything: a missing, corrupt or odd file is empty."""
+    """The stored map, tolerating anything: a missing, odd, oversized or corrupt
+    file is empty. Only a regular file is read (never a FIFO or a device a
+    symlink points at), at most `_MAX_BYTES` of it, and nested-to-death JSON
+    (a RecursionError) is just another corrupt file."""
     try:
-        path = _path()
-        if path.stat().st_size > _MAX_BYTES:
+        # O_NONBLOCK: opening a FIFO must not wait for a writer.
+        fd = os.open(_path(), os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return {}
+            with os.fdopen(fd, "rb", closefd=False) as f:
+                data = f.read(_MAX_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(data) > _MAX_BYTES:
             return {}
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError):
+        raw = json.loads(data.decode("utf-8"))
+        threads = raw.get("threads") if isinstance(raw, dict) else None
+        out: dict[str, dict] = {}
+        if isinstance(threads, dict):
+            for tid, entry in threads.items():
+                if isinstance(tid, str) and _THREAD_ID.fullmatch(tid) and isinstance(entry, dict):
+                    voice = entry.get("voice")
+                    out[tid] = {"voice": voice if isinstance(voice, str) and voice else None,
+                                "muted": entry.get("muted") is True}
+        return out
+    except Exception:       # OSError, ValueError, UnicodeError, RecursionError ...
         return {}
-    threads = raw.get("threads") if isinstance(raw, dict) else None
-    out: dict[str, dict] = {}
-    if isinstance(threads, dict):
-        for tid, entry in threads.items():
-            if isinstance(tid, str) and _THREAD_ID.fullmatch(tid) and isinstance(entry, dict):
-                voice = entry.get("voice")
-                out[tid] = {"voice": voice if isinstance(voice, str) and voice else None,
-                            "muted": entry.get("muted") is True}
-    return out
 
 
 def _write(threads: dict[str, dict]) -> None:
@@ -152,19 +164,22 @@ def view(daemon) -> dict:
 
 def assign(daemon, thread_id: str) -> tuple[dict, bool]:
     """Give `thread_id` a voice if it has none that is installed. Idempotent: a
-    sticky voice never moves. Returns the record and whether anything was written."""
+    sticky voice never moves. Returns the record and whether the stored entry
+    changed (when no voice can be found nothing is stored, and nothing changes)."""
     installed = _installed()
     with _lock:
         threads = _read()
-        entry = dict(threads.get(thread_id) or {"voice": None, "muted": False})
-        changed = thread_id not in threads
+        before = threads.get(thread_id)
+        entry = dict(before) if before else {"voice": None, "muted": False}
         if entry["voice"] not in installed:
             entry["voice"] = _pick({k: v for k, v in threads.items() if k != thread_id}, installed)
-            changed = True
-        threads[thread_id] = entry
+        # An entry that would be {voice: None, muted: False} is the same as none at all.
+        changed = entry != (before or {"voice": None, "muted": False})
         if changed:
+            threads[thread_id] = entry
             _prune(daemon, threads, keep=thread_id)
             _write(threads)
+            _publish(daemon, thread_id, entry)
     return {"thread_id": thread_id, **entry}, changed
 
 
@@ -184,6 +199,7 @@ def set_voice(daemon, thread_id: str, name: str) -> tuple[dict, bool]:
         if changed:
             _prune(daemon, threads, keep=thread_id)
             _write(threads)
+            _publish(daemon, thread_id, entry)
     return {"thread_id": thread_id, **entry}, changed
 
 
@@ -198,7 +214,25 @@ def set_muted(daemon, thread_id: str, muted: bool) -> tuple[dict, bool]:
         if changed:
             _prune(daemon, threads, keep=thread_id)
             _write(threads)
+            _publish(daemon, thread_id, entry)
     return {"thread_id": thread_id, **entry}, changed
+
+
+def _publish(daemon, thread_id: str, entry: dict) -> None:
+    """Tell every window, still holding the lock: two changes cannot reach the bus
+    in a different order from the one they were stored in."""
+    daemon.bus.publish({"kind": "thread_voice", "data": {"thread_id": thread_id, **entry}})
+
+
+def forget(thread_id: str) -> None:
+    """A deleted thread's entry goes (best effort: pruning on the next write catches a miss)."""
+    try:
+        with _lock:
+            threads = _read()
+            if threads.pop(thread_id, None) is not None:
+                _write(threads)
+    except Exception:
+        pass
 
 
 def _prune(daemon, threads: dict[str, dict], keep: str) -> None:
@@ -233,15 +267,13 @@ def route(handler, daemon, parts, query):
         if "voice" in body:
             if not isinstance(body["voice"], str):
                 fail(400, "voice must be a string")
-            record, changed = set_voice(daemon, thread_id, body["voice"])
+            record, _ = set_voice(daemon, thread_id, body["voice"])
         elif "muted" in body:
             if not isinstance(body["muted"], bool):
                 fail(400, "muted must be a boolean")
-            record, changed = set_muted(daemon, thread_id, body["muted"])
+            record, _ = set_muted(daemon, thread_id, body["muted"])
         else:
-            record, changed = assign(daemon, thread_id)
+            record, _ = assign(daemon, thread_id)
     except LookupError as exc:
         raise APIError(400, str(exc)) from exc
-    if changed:
-        daemon.bus.publish({"kind": "thread_voice", "data": record})
     return 200, record

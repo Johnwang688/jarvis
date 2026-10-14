@@ -854,8 +854,8 @@ is read aloud, each in its own voice, through the V6 queue.
   one thread, its oldest *interim* messages are dropped (mark `collapsed`) and one spoken
   "Skipping N updates." (`kind: "note"`) takes their place in line. Never collapsed: the
   last message of a finished turn (`queue.turnEnded` marks it final at `turn_finished`), the
-  message being played or holding the floor, a thread's newest message (it may still be
-  arriving), and markers. A marker already being made is not edited, so a later collapse
+  message being played or holding the floor, a thread's newest message *by arrival* (it may
+  still be arriving; a message that yielded is behind it in line but older), and markers. A marker already being made is not edited, so a later collapse
   gets a marker of its own.
 - **Voices**: `jarvis/v2/speech_voices.py` and `GET`/`POST /speech/voices` (owner-only, HUD
   listener), stored in `~/.config/jarvis/speech.json` (`config.SPEECH_VOICES_PATH`), pruned
@@ -863,9 +863,13 @@ is read aloud, each in its own voice, through the V6 queue.
   owner hears now (`voice.selected_voice()`, so the HUD picker's choice, else the avatar's);
   later ones the next unused of English Kokoro `a*` then `b*`, then English Pocket builtins;
   all taken reuses the least used. Sticky; a stored voice no longer installed is reassigned.
-  The window asks for a voice when a thread joins the readers and again at synthesis time, so
-  a voice chosen from the chip applies to chunks not yet made, and a chunk waits for a voice
-  still being assigned. Mute is stored beside the voice so every window agrees.
+  Nothing is stored (or published) when no voice can be found, and the window backs off for
+  5 s after such an answer. A voice is assigned only when a chat is first *read*, never
+  because it is merely open, and again asked for at synthesis time, so a voice chosen from
+  the chip applies to chunks not yet made, and a chunk waits for a voice still being assigned.
+  The store is read defensively (regular file only, size-bounded, any parse error is empty),
+  `thread_voice` is published while the store lock is held, and deleting a thread removes
+  its entry (`projects.delete_thread`; every write also prunes). Mute is stored beside the voice so every window agrees.
 - **Voice chip** (`components/VoiceChip.tsx`, in the pane's header strip): the voice name,
   a pulse while that chat is read, and opened inline: voice select, Skip (this chat's
   current message), Mute. Disabled under an authorization card. The speech strip now names
