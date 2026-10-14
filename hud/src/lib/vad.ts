@@ -11,7 +11,24 @@ export const CAP_RATE = 16000; // parakeet's own rate — resampling here costs 
 export const RING_SEC = 40;
 export const PREROLL_MS = 800; // rewound from before speech was detected
 export const ONSET_MS = 60; // sustained speech this long opens an utterance
-export const HANGOVER_MS = 1500; // silence this long closes one
+// V5, the three timers of plan §3.2 (all tunable here, all counted in samples):
+//   - the SEGMENT gap: a quiet run this long is a place where a long message may be
+//     cut into chunks and the earlier part sent for transcription (recorder.ts reads
+//     it as its pause cut); the message itself stays open;
+//   - the END pause: a quiet run this long ends the message (owner decision V-1:
+//     about 2.5 s; `Capture.setEndPause` changes it per window);
+//   - the CONTINUATION window (CONTINUE_MS below): speech resuming within it after
+//     a message ended continues that message, no wake word.
+export const SEGMENT_GAP_MS = 700;
+export const END_PAUSE_MS = 2500;
+/** Bounds the end pause may be tuned to: never under the segment gap, never so long a turn feels dead. */
+export const END_PAUSE_MIN_MS = 1000;
+export const END_PAUSE_MAX_MS = 6000;
+export const HANGOVER_MS = END_PAUSE_MS; // the energy VAD's name for the end pause (kept for older callers)
+// V5: speech probability from the ML VAD (Silero) -> the per-frame `loud` flag, with
+// hysteresis so one low frame inside a word does not end it (plan §3.2).
+export const SPEECH_ON_P = 0.5;
+export const SPEECH_OFF_P = 0.35;
 export const MIN_UTTER_MS = 350; // shorter is a cough, not a turn
 // V4: a hard stop for an utterance nobody claimed (room speech that never pauses).
 // A claimed one is uncapped: the recorder cuts it into chunks (recorder.ts).
@@ -81,6 +98,14 @@ export class Vad {
   loud = false;
   /** Set by the caller while the utterance is claimed: it is then never closed by MAX_UTTER_MS. */
   uncapped = false;
+  /** How long a quiet run ends an open utterance (the message pause, V5). */
+  endPauseMs = END_PAUSE_MS;
+  /** The last frame was judged by the ML VAD (a probability was given), not by energy. */
+  ml = false;
+  /** The ML VAD's last probability (0 until it has spoken). */
+  prob = 0;
+  /** Hysteresis state for the ML path: inside speech until the probability falls below SPEECH_OFF_P. */
+  private speech = false;
 
   reset() {
     this.floor = 0.02;
@@ -94,14 +119,21 @@ export class Vad {
     this.peak = 0;
     this.loud = false;
     this.uncapped = false;
+    this.ml = false;
+    this.prob = 0;
+    this.speech = false;
   }
 
   /**
    * @param rms      this frame's level
    * @param n        the frame length in samples — what turns the ratios into times
    * @param written  the ring's sample clock
+   * @param prob     the ML VAD's speech probability for this frame, when there is one.
+   *                 Without it (the worker not ready, or fallen back) the frame is judged
+   *                 by energy, as before V5. The noise floor is tracked either way, so a
+   *                 fallback finds a current threshold.
    */
-  feed(rms: number, n: number, written: number): VadEvent {
+  feed(rms: number, n: number, written: number, prob?: number | null): VadEvent {
     this.rms = rms;
     // The floor falls fast and rises slowly, so a room that goes quiet is
     // tracked within a breath while a passing conversation has to be sustained
@@ -113,7 +145,18 @@ export class Vad {
     this.floor = Math.max(this.floor, 0.0008);
     this.thresh = Math.max(this.floor * 3.0, 0.006);
 
-    const loud = rms > this.thresh;
+    let loud: boolean;
+    if (typeof prob === "number" && Number.isFinite(prob)) {
+      this.ml = true;
+      this.prob = prob;
+      if (prob >= SPEECH_ON_P) this.speech = true;
+      else if (prob < SPEECH_OFF_P) this.speech = false;
+      loud = this.speech;
+    } else {
+      this.ml = false;
+      this.speech = false;
+      loud = rms > this.thresh;
+    }
     this.loud = loud;
     if (loud) {
       this.run += n;
@@ -147,7 +190,7 @@ export class Vad {
       this.open = false;
       return "cap";
     }
-    if (this.quiet >= msToSamples(HANGOVER_MS)) {
+    if (this.quiet >= msToSamples(this.endPauseMs)) {
       this.open = false;
       return "close";
     }
@@ -172,7 +215,9 @@ export function closeBounds(vad: Vad, written: number, event: "close" | "cap") {
  * said to him.
  */
 export function longEnough(vad: Vad): boolean {
-  return samplesToMs(vad.voiced) >= MIN_UTTER_MS && vad.peak >= vad.thresh * 1.6;
+  // The ML VAD has already said these frames were speech; the energy test for
+  // "rose clear of the room" would only second-guess it (a quiet talker in a quiet room).
+  return samplesToMs(vad.voiced) >= MIN_UTTER_MS && (vad.ml || vad.peak >= vad.thresh * 1.6);
 }
 
 /** RMS of one frame — the same number the orb's level meter reads. */

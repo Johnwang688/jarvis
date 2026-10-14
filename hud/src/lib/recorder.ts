@@ -23,10 +23,10 @@
 // never silently. Silence trimming at the end of a message is the caller's: it
 // passes the number of trailing samples to drop.
 
-import { CAP_RATE, msToSamples, samplesToMs, wavBlob } from "./vad";
+import { CAP_RATE, SEGMENT_GAP_MS, msToSamples, samplesToMs, wavBlob } from "./vad";
 
 export const CHUNK_SOFT_MS = 8_000;
-export const CHUNK_GAP_MS = 700;
+export const CHUNK_GAP_MS = SEGMENT_GAP_MS; // the plan's segment gap (V5, vad.ts)
 export const CHUNK_LATE_MS = 18_000;
 export const CHUNK_LATE_GAP_MS = 300;
 export const CHUNK_HARD_MS = 25_000;

@@ -27,7 +27,8 @@
 // pre-roll or as a wake hit's back-dating.
 
 import {
-  CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
+  CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, END_PAUSE_MAX_MS, END_PAUSE_MIN_MS, END_PAUSE_MS, FOLLOWUP_MS,
+  MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs,
 } from "./vad";
 import { UtteranceRecorder, type RecordedChunk } from "./recorder";
@@ -128,14 +129,14 @@ export class Capture {
     try { this.hooks.onDrop?.(reason, ms, source); } catch { /* diagnostics cannot change capture */ }
   }
 
-  private observeBlocked(rms: number, n: number, reason: DropReason | null) {
+  private observeBlocked(rms: number, n: number, reason: DropReason | null, prob?: number | null) {
     if (!reason) {
       if (this.blockedVad.open && !this.blockedAlreadyReported && this.blockedReason)
         this.drop(this.blockedReason, samplesToMs(this.blockedVad.voiced), "unclaimed");
       this.blockedVad.reset(); this.blockedReason = null; this.blockedAlreadyReported = false;
       return;
     }
-    const event = this.blockedVad.feed(rms, n, this.ring.written);
+    const event = this.blockedVad.feed(rms, n, this.ring.written, prob);
     if (event === "open") this.blockedReason = reason;
     if (event === "close" || event === "cap") {
       if (!this.blockedAlreadyReported) this.drop(this.blockedReason ?? reason, samplesToMs(this.blockedVad.voiced), "unclaimed");
@@ -144,6 +145,18 @@ export class Capture {
   }
 
   constructor(private hooks: CaptureHooks, private now: () => number = () => performance.now()) {}
+
+  /** The quiet run that ends a message (V5, plan §3.2: about 2.5 s, tunable). */
+  get endPauseMs() {
+    return this.vad.endPauseMs;
+  }
+
+  /** Tune the message pause; held to END_PAUSE_MIN_MS..END_PAUSE_MAX_MS, anything else keeps the default. */
+  setEndPause(ms: number) {
+    const v = Number.isFinite(ms) ? Math.round(Math.max(END_PAUSE_MIN_MS, Math.min(END_PAUSE_MAX_MS, ms))) : END_PAUSE_MS;
+    this.vad.endPauseMs = v;
+    this.blockedVad.endPauseMs = v;
+  }
 
   conversing() {
     return this.now() < this.followUpUntil;
@@ -283,7 +296,13 @@ export class Capture {
     this.closeContinuation();
   }
 
-  onFrame(frame: Float32Array) {
+  /**
+   * One 16 kHz frame. `prob` is the ML VAD's speech probability for it when the
+   * detector stage has one (V5); without it the frame is judged by energy, as
+   * before. Either way the frame is ring-pushed, level-metered and recorded the
+   * same, and every rule below (OFF, suppression, claims, drops) is unchanged.
+   */
+  onFrame(frame: Float32Array, prob?: number | null) {
     this.ring.push(frame);
     const rms = frameRms(frame);
     const muted = this.hooks.muted();
@@ -303,7 +322,7 @@ export class Capture {
     if (reason && !this.wasBlocked) this.blockedVad.floor = this.vad.floor;
     this.wasBlocked = reason !== null;
     if (this.ptt) this.blockedAlreadyReported = true;
-    this.observeBlocked(rms, frame.length, reason);
+    this.observeBlocked(rms, frame.length, reason, prob);
     // A recording in progress stops uploading the moment the detector may not
     // listen: nothing under a card, a picker or Settings, nothing while OFF,
     // nothing from a crashed window. The talk key is the owner's own word, so
@@ -320,12 +339,12 @@ export class Capture {
         this.segClaimed = false;
       }
       const had = this.rec;
-      this.vad.feed(rms, frame.length, this.ring.written);
+      this.vad.feed(rms, frame.length, this.ring.written, prob);
       if (had && this.rec === had && had.push(frame, this.vad.loud)) this.hitLimit();
       return;
     }
     const had = this.rec;
-    const event = this.vad.feed(rms, frame.length, this.ring.written);
+    const event = this.vad.feed(rms, frame.length, this.ring.written, prob);
     // A recording that began before this frame takes it; one that begins on
     // this frame (the "open" event below) already has it, from the ring.
     if (had && this.rec === had && had.push(frame, this.vad.loud)) { this.hitLimit(); return; }
@@ -450,7 +469,7 @@ export class Capture {
   }
 
   /** Test hook: script a room through the real detector, no microphone. */
-  feedMs(ms: number, amplitude: number, frameSamples = 1024) {
+  feedMs(ms: number, amplitude: number, frameSamples = 1024, prob?: number | null) {
     const total = msToSamples(ms);
     let done = 0;
     while (done < total) {
@@ -458,7 +477,7 @@ export class Capture {
       const frame = new Float32Array(n);
       // A frame of N samples at a constant amplitude has exactly that RMS.
       frame.fill(amplitude);
-      this.onFrame(frame);
+      this.onFrame(frame, prob);
       done += n;
     }
   }

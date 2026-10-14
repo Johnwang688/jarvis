@@ -89,6 +89,9 @@ import micWorkletUrl from "./lib/micWorklet.ts?worker&url";
 import { SttRetry } from "./components/SttRetry";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReason } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
+import { EndPauseSetting } from "./components/EndPause";
+import { VadStage } from "./lib/listen/stage";
+import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, Schedule, Thread, VoiceEntry } from "./types";
@@ -2841,6 +2844,17 @@ export default function App() {
 
   // ---- microphone ---------------------------------------------------------
 
+  // V5: the ML speech detector. Between the microphone and the capture; the OFF
+  // mode scores nothing (it has no frames posted while muted).
+  const vadStage = useMemo(() => new VadStage({
+    deliver: (frame, p) => capture.onFrame(frame, p),
+    active: () => !isMuted(live.current.dictation),
+    onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [capture, voiceDiagnostics]);
+  const [endPause, setEndPause] = useState(() => loadEndPause());
+  useEffect(() => { capture.setEndPause(endPause); }, [capture, endPause]);
+
   // The live microphone input (V4): its frames are the seam V5's VAD worker and
   // V12's recorder read (`micInput.addFrameListener`).
   const micInput = useRef<MicInput | null>(null);
@@ -2857,8 +2871,12 @@ export default function App() {
         // An AudioWorklet resamples to 16 kHz mono in 512-sample frames (V4).
         // Without one the same resampler runs behind the old ScriptProcessor,
         // and the window says so rather than quietly capturing worse.
-        input = await startMicInput({ stream, onFrame: (frame) => capture.onFrame(frame), workletUrl: micWorkletUrl });
-        if (gone) { input.stop(); return; }
+        // The frames go through the VAD stage (V5): Silero scores each in a worker and
+        // the stage hands it on, in order, to the capture; until the worker is ready,
+        // or if it cannot run, the capture judges by energy and the diagnostics say so.
+        vadStage.start();
+        input = await startMicInput({ stream, onFrame: (frame) => vadStage.push(frame), workletUrl: micWorkletUrl });
+        if (gone) { input.stop(); vadStage.stop(); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
         if (input.path !== "worklet") {
@@ -2875,8 +2893,9 @@ export default function App() {
       micInput.current = null;
       stream?.getTracks().forEach((t) => t.stop());
       input?.stop();
+      vadStage.stop();
     };
-  }, [capture]);
+  }, [capture, vadStage]);
 
   // ---- files dropped on the window -----------------------------------------
 
@@ -2951,11 +2970,15 @@ export default function App() {
           .filter((id): id is string => !!id).map((id) => [id, speech.voices.info(id)])),
       }),
       mic: {
-        feedMs: (ms: number, amp: number, frame?: number) => capture.feedMs(ms, amp, frame),
+        feedMs: (ms: number, amp: number, frame?: number, prob?: number | null) => capture.feedMs(ms, amp, frame, prob),
         path: () => voiceDiagnostics.snapshot().path,
         // Frame listeners, as V5/V12 will register them: read-only audio, 512 samples at 16 kHz.
         listen: (fn: (frame: Float32Array) => void) => micInput.current?.addFrameListener(fn) ?? (() => {}),
         wake: () => onWakeHit(),
+        // The ML VAD stage (V5): what it is, and (for tests) a way to start it again.
+        detector: () => vadStage.status(),
+        retryDetector: () => vadStage.retry(),
+        endPause: () => capture.endPauseMs,
         state: () => ({
           open: capture.vad.open,
           thresh: capture.vad.thresh,
@@ -4062,7 +4085,7 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

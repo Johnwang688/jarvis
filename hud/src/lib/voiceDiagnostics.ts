@@ -6,7 +6,10 @@ export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_c
 export type MicCapability = "unknown" | "available" | "unavailable";
 /** How the microphone reaches the capture (V4): the AudioWorklet, or the older ScriptProcessor fallback. */
 export type CapturePathName = "unknown" | "worklet" | "script_processor";
-export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; }
+/** V5: which detector judged the frames: Silero (ML, in a worker) or the energy fallback. */
+export type DetectorKind = "energy" | "silero";
+export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
+export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
 const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
@@ -33,7 +36,8 @@ export class VoiceDiagnostics {
   private next = 0;
   private listeners = new Set<() => void>();
   private rows: readonly VoiceDiagnostic[] = [];
-  private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "" };
+  private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "",
+    detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0 };
   constructor(private now: () => number = () => performance.now()) {}
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   snapshot = () => this.value;
@@ -47,9 +51,20 @@ export class VoiceDiagnostics {
     this.value = { ...this.value, path: ["unknown", "worklet", "script_processor"].includes(path) ? path : "unknown", pathNote: String(note).slice(0, 200) };
     this.publish();
   }
+  /** Which detector is live and why it is the fallback when it is (V5). A sentence from a closed set, never engine text. */
+  detector(kind: DetectorKind, phase: DetectorPhase, note = "", frameMs = 0) {
+    this.value = {
+      ...this.value,
+      detector: kind === "silero" ? "silero" : "energy",
+      detectorPhase: ["idle", "loading", "ready", "failed"].includes(phase) ? phase : "idle",
+      detectorNote: String(note).slice(0, 200),
+      detectorMs: bounded(frameMs * 100, 1_000_000) / 100,
+    };
+    this.publish();
+  }
   add(ms: number, source: ClaimSource, outcome: VoiceOutcome): number {
     const id = ++this.next;
-    this.rows = [...this.rows, { id, at: bounded(this.now(), Number.MAX_SAFE_INTEGER), ms: bounded(ms, 900_000), source: sources.includes(source) ? source : "unclaimed", detector: "energy" as const, outcome: outcomes.includes(outcome) ? outcome : "unclaimed" }].slice(-50);
+    this.rows = [...this.rows, { id, at: bounded(this.now(), Number.MAX_SAFE_INTEGER), ms: bounded(ms, 900_000), source: sources.includes(source) ? source : "unclaimed", detector: this.value.detector, outcome: outcomes.includes(outcome) ? outcome : "unclaimed" }].slice(-50);
     this.publish(); return id;
   }
   finish(id: number, outcome: VoiceOutcome, latencyMs: number) {
