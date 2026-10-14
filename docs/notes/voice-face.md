@@ -1576,7 +1576,7 @@ Cost and latency are well inside the plan's estimate ($0.0003 a summary, a
 second or so). The failure rate is not acceptable: the owner would hear the
 truncated fallback about three times in ten.
 
-**Cause.** Not proven. The probe kept only "502" for the failed calls, and the
+**Cause.** Not proven by the first run (the second run below confirmed it). The probe kept only "502" for the failed calls, and the
 route answers a fixed sentence, so the internal reason was lost. What the code
 shows: the inputs are not the cause (the seven are scattered across all four
 sizes and the first call of the run was one of them; `prepare()` leaves every
@@ -1604,8 +1604,33 @@ Tests in `tests/v2/speech_summary_check.py` (`FailedSummaries`) reproduce each
 path with a fake reply, and two mutations (the old 160-token budget, a single
 attempt) fail them.
 
-**Still to do.** A second probe (owner's OK; same cap) to confirm the failure
-rate and to read the reason codes from a real run. If `empty_content` shows
-`finish=length` with `reasoning_tokens` close to the budget, the cause was the
-budget; if `http_*`, the retry; if neither, the next step is turning reasoning
-off for this call.
+**Still to do (done 2026-10-14, see the second run below).** A second probe
+(owner's OK; same cap) to confirm the failure rate and to read the reason codes
+from a real run. If `empty_content` shows `finish=length` with
+`reasoning_tokens` close to the budget, the cause was the budget; if `http_*`,
+the retry; if neither, the next step is turning reasoning off for this call.
+
+### Second probe receipt (owner-approved, same $0.10 cap)
+
+Run on **2026-10-14**, from main `3165b31`, after PR #164 was installed.
+
+| | |
+|---|---|
+| Model | `anthropic/claude-haiku-5.5` |
+| Calls | 24, **0 failed**, **0 retried** |
+| Total spend | $0.004219 (cap $0.10) |
+| Mean cost per call | $0.000176 |
+| Prompt tokens, mean | 956 |
+| Completion tokens, mean | 160 (one reply used 392) |
+| Latency | p50 1.57 s, p95 2.73 s, max 3.55 s |
+| Estimated costs | none |
+
+**Conclusion.** The old `max_tokens=160` budget was the cause. Replies needed up
+to 392 output tokens, and with 0 failures and 0 retries under the 1024 ceiling,
+the retry path was not what fixed it. The second run confirmed it. No failure
+reason code was produced, because nothing failed, so none is recorded here.
+
+**Cost note.** The mean cost per summary rose from $0.000136 to $0.000176
+because the replies are now complete. Both means cover successful calls only:
+the first run's $0.000136 is its $0.002314 total over the 17 calls that returned
+a summary, and this run's $0.000176 is over all 24.
