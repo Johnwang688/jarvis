@@ -233,7 +233,7 @@ describe("capture order (seq)", () => {
 
 describe("where AUTO may send (placementFor)", () => {
   const cap = { mode: "auto" as const, chat: "t1" };
-  const now = { mode: "auto" as const, chat: "t1", busy: false, card: false };
+  const now = { mode: "auto" as const, chat: "t1", busy: false, steers: false, card: false };
   const fresh = { late: false, retried: false };
   it("sends only when nothing has moved", () => {
     expect(placementFor(cap, now, fresh)).toBe("send");
@@ -244,12 +244,28 @@ describe("where AUTO may send (placementFor)", () => {
     ["OFF now", cap, { ...now, mode: "off" as const }, fresh],
     ["another chat is selected", cap, { ...now, chat: "t2" }, fresh],
     ["no chat was selected at capture", { ...cap, chat: null }, { ...now, chat: null }, fresh],
-    ["the chat is running a turn", cap, { ...now, busy: true }, fresh],
+    // V3: a busy chat is no longer a reason, but a turn that is not the
+    // chat's own thread's would start a new turn rather than steer.
+    ["the chat's running turn is not its own thread's", cap, { ...now, busy: true, steers: false }, fresh],
     ["a card is waiting", cap, { ...now, card: true }, fresh],
     ["the text is late", cap, now, { late: true, retried: false }],
     ["the owner pressed Retry", cap, now, { late: false, retried: true }],
   ])("goes to the box when %s", (_name, c, l, i) => {
     expect(placementFor(c as any, l as any, i)).toBe("review");
+  });
+  it("V3: steers the chat's own running turn instead of boxing the words", () => {
+    expect(placementFor(cap, { ...now, busy: true, steers: true }, fresh)).toBe("send");
+  });
+  it.each([
+    ["captured in REVIEW", { ...cap, mode: "review" as const }, now, fresh],
+    ["another chat is selected", cap, { ...now, chat: "t2" }, fresh],
+    ["the follow-up's pane was gone when claimed", { ...cap, boxOnly: true }, now, fresh],
+    ["a card is waiting", cap, now, fresh],
+    ["the text is late", cap, now, { late: true, retried: false }],
+    ["the owner pressed Retry", cap, now, { late: false, retried: true }],
+  ])("V3: a busy chat still boxes the words when %s", (name, c, l, i) => {
+    const landing = { ...l, busy: true, steers: true, card: name === "a card is waiting" };
+    expect(placementFor(c as any, landing as any, i)).toBe("review");
   });
   it("marks text produced by Retry or after a failure", async () => {
     const h = harness();

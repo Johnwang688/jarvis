@@ -25,7 +25,7 @@
 // ambiguous input has nowhere to go and is never sent. Ambiguous input is
 // input with no thread of its own — voice (AUTO and REVIEW, delivered to the
 // selected chat as it is when the transcript lands), push-to-talk and the
-// orb's interrupt, the follow-up listening window, files dropped outside a
+// orb (push-to-talk steers a busy chat; Stop interrupts), the follow-up listening window, files dropped outside a
 // chat pane, an SSE event with no `thread_id`. Input that belongs to a thread
 // — words typed in a pane's box, a steer or queued message, words handed back
 // or held for a thread, a first send's result, a transcript — stays with that
@@ -157,9 +157,12 @@ export function sameConversation(a: ChatState, b: ChatState, pane: PaneNo): bool
 /** Files a box stages for one message, at most (the backend's per-turn cap). */
 export const MAX_FILES = 8;
 
+/** The status a claimed utterance puts under the orb while it is being said. */
+export const LISTENING_STATUS = "LISTENING · SPEAK NOW";
+
 /** Capture statuses: what the microphone is doing, said in the selected chat's input bar. */
 export const CAPTURE_STATUSES: ReadonlySet<string> = new Set([
-  "LISTENING · SPEAK NOW", "TRANSCRIBING", "STT FAILED", "DIDN'T CATCH THAT", "TOO SHORT", "MIC MUTED",
+  LISTENING_STATUS, "TRANSCRIBING", "STT FAILED", "DIDN'T CATCH THAT", "TOO SHORT", "MIC MUTED",
 ]);
 
 /** The project a pane's conversation is in: its compose row's, else its thread's. */

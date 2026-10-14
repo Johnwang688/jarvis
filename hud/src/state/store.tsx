@@ -324,7 +324,7 @@ function noticed(s: State, notice: string, now: number, orphan = false, append =
 }
 
 /** The orb for a pane's turn, as the reducers below leave it. */
-function turnOrb(s: State, c: ChatState): OrbState {
+export function turnOrb(s: State, c: ChatState): OrbState {
   if (s.approvals.length) return "approval";
   if (c.ops.some((o) => !o.finished)) return "tool";
   return c.busy ? "thinking" : "idle";
