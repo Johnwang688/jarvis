@@ -1177,7 +1177,7 @@ def _rv_stt_lands_selected_checks(page, mock, check, until):
     _focus(page, until, 1)
     _dictation(page, "auto")
     held = []
-    page.route("**/stt", lambda r: held.append(r))
+    page.route("**/stt*", lambda r: held.append(r))
     try:
         page.evaluate(UTTERANCE)
         until(lambda: _pumped(page) and len(held) > 0, timeout=6)
@@ -1187,11 +1187,16 @@ def _rv_stt_lands_selected_checks(page, mock, check, until):
         s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
         held[0].continue_()
     finally:
-        page.unroute("**/stt")
-    sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
-    check("W-6: clicking pane 2 during STT sends the words to pane 2's chat",
-          bool(sent) and sent[-1].get("text") == "what is the weather", str(sent))
-    check("W-6: and none to the pane they were spoken in", len(_sent(mock, "t1")) == s1)
+        page.unroute("**/stt*")
+    # V2 changed this (a different chat than at capture is never sent to
+    # unseen): the words land in the chat now selected, in its box, unsent.
+    until(lambda: "what is the weather" in _box(page, 2).input_value(), timeout=5)
+    check("W-6 (V2): clicking pane 2 during STT puts the words in pane 2's box, unsent",
+          "what is the weather" in _box(page, 2).input_value(), repr(_box(page, 2).input_value()))
+    time.sleep(0.3)
+    check("W-6 (V2): and nothing is sent to either chat",
+          len(_sent(mock, "t1")) == s1 and len(_sent(mock, "t2")) == s2)
+    _box(page, 2).fill("")
     _dictation(page, "review")
     mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
 

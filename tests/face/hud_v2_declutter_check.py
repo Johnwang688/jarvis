@@ -476,8 +476,8 @@ def _folded_status_checks(page, mock, check, until):
     check("unfolded, the selected chat's bar draws no status line (the orb carries it)", line.count() == 0)
     _fold_left(page, until)
 
-    def shown(text: str) -> tuple[bool, str]:
-        ok = until(lambda: line.count() == 1 and line.inner_text().strip() == text and line.is_visible(), timeout=4)
+    def shown(text: str, timeout: float = 4) -> tuple[bool, str]:
+        ok = until(lambda: line.count() == 1 and line.inner_text().strip() == text and line.is_visible(), timeout=timeout)
         if not ok:
             return False, line.inner_text() if line.count() else "no status line"
         whole = page.evaluate("(el) => el.scrollWidth <= el.clientWidth + 1",
@@ -490,14 +490,15 @@ def _folded_status_checks(page, mock, check, until):
     ok, why = shown("LISTENING · SPEAK NOW")
     check("review #29 F3: folded, the bar says LISTENING · SPEAK NOW", ok, why)
     # STT FAILED: the utterance ends and transcription fails.
-    page.route("**/stt", lambda r: r.fulfill(status=500, body='{"error": "stt is down"}',
+    page.route("**/stt*", lambda r: r.fulfill(status=500, body='{"error": "stt is down"}',
                                                content_type="application/json"))
     try:
         page.evaluate("() => { window.__hud.mic.feedMs(2200, 0.0005); return true; }")
-        ok, why = shown("STT FAILED")
-        check("review #29 F3: folded, the bar says STT FAILED", ok, why)
+        # V2: a 5xx is retried once after 2 s before the failure is shown.
+        ok, why = shown("STT FAILED · RETRY", timeout=10)
+        check("review #29 F3: folded, the bar says STT FAILED · RETRY", ok, why)
     finally:
-        page.unroute("**/stt")
+        page.unroute("**/stt*")
     page.evaluate("window.__hud.capture.closeFollowUp()")
     page.evaluate("window.__hud.dispatch({type: 'patch', patch: {status: '', error: ''}})")
     # MIC MUTED: the cycle to OFF (REVIEW → AUTO → OFF).

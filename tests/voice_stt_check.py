@@ -138,6 +138,93 @@ def main():
     except ValueError:
         ok(True, "empty audio is refused")
 
+    # V2: dictation passes tighter limits through to every model it tries; the
+    # default callers (Discord voice notes) pass none and keep llm's defaults.
+    seen: list[dict] = []
+    saved_t = llm.transcribe
+
+    def limited(audio, model, filename="audio.webm", mime="audio/webm", **kw):
+        seen.append(kw)
+        return "ok"
+
+    llm.transcribe = limited
+    try:
+        voice.stt(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2)
+        voice.stt(b"RIFFaudio", mime="audio/wav")
+    finally:
+        llm.transcribe = saved_t
+    ok(seen == [{"timeout": 20.0, "max_retries": 2}, {}],
+       f"timeout and attempts reach llm.transcribe only when given: {seen!r}")
+    ok(config.STT_DICTATION_TIMEOUT_S <= 20 and config.STT_DICTATION_ATTEMPTS == 2,
+       "the shipped dictation bounds are 20 s and two attempts")
+
+    # llm.transcribe itself: bounded attempts, and no sleep after the last one
+    # (it used to wait 2**n s before raising, so a failure came late).
+    import httpx
+    sleeps: list[float] = []
+    posts: list[float] = []
+
+    class DeadClient:
+        def post(self, *a, timeout=None, **kw):
+            posts.append(timeout)
+            raise httpx.ConnectTimeout("simulated")
+
+    real = (llm._client, llm.time.sleep, config.api_key)
+    llm._client, llm.time.sleep, config.api_key = DeadClient(), sleeps.append, lambda: "sk-dummy-not-a-key"
+    try:
+        try:
+            llm.transcribe(b"x", "m/x", timeout=20.0, max_retries=2)
+            ok(False, "a dead provider raises")
+        except llm.LLMError as exc:
+            ok("after 2 attempts" in str(exc), f"two attempts, named: {exc}")
+    finally:
+        llm._client, llm.time.sleep, config.api_key = real
+    ok(posts == [20.0, 20.0], f"each attempt used the 20 s timeout: {posts!r}")
+    ok(sleeps == [1], f"one backoff between two attempts and none after the last: {sleeps!r}")
+
+    # MED-2: a caller that states its deadline (the HUD: budget_ms) gets the
+    # model chain fitted inside it. A virtual clock models llm.transcribe: a
+    # hung model consumes `timeout` per attempt plus the 1 s, 2 s... backoff
+    # between attempts; a healthy one answers at once.
+    class Clock:
+        now = 0.0
+
+    def hung_primary(audio, model, filename="audio.webm", mime="audio/webm", timeout=60.0, max_retries=3, **_kw):
+        if model == "a/primary":
+            for attempt in range(max_retries):
+                Clock.now += timeout
+                if attempt + 1 < max_retries:
+                    Clock.now += 2 ** attempt
+            raise llm.LLMError(f"{model} transcription failed after {max_retries} attempts: timeout")
+        return "fallback heard"
+
+    for client_ms in (15_000, 20_000, 40_000, 120_000):
+        saved_b = (llm.transcribe, config.STT_MODEL, config.STT_FALLBACK_MODELS, voice._clock)
+        llm.transcribe, config.STT_MODEL, config.STT_FALLBACK_MODELS = hung_primary, "a/primary", ["b/fallback"]
+        voice._clock = lambda: Clock.now
+        Clock.now = 0.0
+        voice._warned.clear()
+        try:
+            text = voice.stt(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2, budget=client_ms / 1000)
+        except Exception as exc:  # noqa: BLE001
+            text = f"raised {exc!r}"
+        finally:
+            llm.transcribe, config.STT_MODEL, config.STT_FALLBACK_MODELS, voice._clock = saved_b
+        ok(text == "fallback heard", f"a hung primary still fails over inside a {client_ms} ms deadline: {text!r}")
+        ok(Clock.now <= client_ms / 1000 - 0.9, f"and the whole chain ({Clock.now:.1f} s) ends inside the client's {client_ms / 1000:.0f} s")
+    ok(voice._fit_budget(7.0, 1, 2, 20.0) == (7.0, 1), "a short slot is one attempt")
+    ok(voice._fit_budget(40.0, 1, 2, 20.0) == (19.5, 2), "a long slot is two attempts, capped at the 20 s ceiling")
+    ok(voice._fit_budget(0.5, 2, 2, 20.0) is None, "no time left is reported, not guessed")
+
+    # Without a budget (Discord, the face) the fixed limits pass through untouched.
+    seen2: list[dict] = []
+    llm.transcribe = lambda audio, model, **kw: seen2.append(kw) or "ok"
+    try:
+        voice.stt(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2)
+    finally:
+        llm.transcribe = saved_t
+    ok([{k: v for k, v in kw.items() if k in ("timeout", "max_retries")} for kw in seen2] == [{"timeout": 20.0, "max_retries": 2}], f"no budget_ms keeps the fixed dictation bounds: {seen2!r}")
+
     print()
     if FAILURES:
         print(f"{len(FAILURES)} of {CHECKS} voice stt checks FAILED")

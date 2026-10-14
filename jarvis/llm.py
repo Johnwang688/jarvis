@@ -521,12 +521,14 @@ def transcribe(
             )
         except httpx.HTTPError as exc:
             last_error = exc
-            time.sleep(2**attempt)
+            if attempt + 1 < max_retries:
+                time.sleep(2**attempt)
             continue
 
         if response.status_code in (408, 429) or response.status_code >= 500:
             last_error = LLMError(f"HTTP {response.status_code}: {response.text[:300]}")
-            time.sleep(2**attempt)
+            if attempt + 1 < max_retries:
+                time.sleep(2**attempt)
             continue
         if response.status_code >= 400:
             raise LLMError(f"HTTP {response.status_code}: {response.text[:500]}")

@@ -81,6 +81,9 @@ import { ReadAloudSetting } from "./components/ReadAloud";
 import { createSpeech, saveReadAloud } from "./lib/speech";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture } from "./lib/capture";
+import { SttAssembler, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
+import { CAP_RATE } from "./lib/vad";
+import { SttRetry } from "./components/SttRetry";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type ClaimSource } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
@@ -638,67 +641,122 @@ export default function App() {
   // chat as it is when it is delivered, and there was none).
   const unplaced = useRef<string[]>([]);
 
+  // V2: STT with deadlines, one automatic retry, kept clips for an explicit
+  // Retry, and text placed in capture order (lib/stt.ts). The words go to the
+  // selected chat as it is when each transcript lands (W-6).
+  const sttSay = (p: ChatPatch) => {
+    const n = live.current.selectedChat;
+    if (n !== null) {
+      // A chat running a turn keeps its own orb and status line: dictation
+      // progress must not overwrite "working" (errors still show).
+      if (live.current.chats[n].busy && p.orb !== "error") { const { orb: _o, status: _s, ...rest } = p; p = rest; }
+      if (Object.keys(p).length) chatPatch(n, p);
+    } else if (p.error !== undefined) dispatch({ type: "patch", patch: { error: p.error } });
+  };
+  const sttError = useRef("");
+  const stt = useMemo(
+    () =>
+      new SttAssembler<SttCapture>({
+        diagnostics: voiceDiagnostics,
+        transcribe: (blob, o) => api.stt(blob, o),
+        // The first attempt was judged by onUtterance; a retry, automatic or
+        // explicit, must not upload while the mic is OFF, the window has
+        // crashed, or a card waits for an answer.
+        canUpload: () => !crashedRef.current && !isMuted(live.current.dictation) && !live.current.approvals.length,
+        place: (batch) => placeTranscripts(batch),
+        onEvent: (e) => {
+          if (e.kind === "busy") sttSay({ orb: "transcribing", status: e.pending > 1 ? `TRANSCRIBING ${e.pending}` : "TRANSCRIBING" });
+          else if (e.kind === "retrying") sttSay({ orb: "transcribing", status: "RETRYING" });
+          else if (e.kind === "failed") {
+            sttError.current = e.kept
+              ? `Speech-to-text failed: ${e.message}. Your audio is kept: press Retry.`
+              : `Speech-to-text failed: ${e.message}. The audio was too large to keep, so it cannot be retried.`;
+            sttSay({ orb: "error", status: e.kept ? "STT FAILED · RETRY" : "STT FAILED", error: sttError.current });
+          } else if (e.kind === "empty") sttSay({ orb: "idle", status: "DIDN'T CATCH THAT" });
+          else if (e.kind === "blocked") {
+            // On the window's error line as well: a busy chat's status line is
+            // not ours to write, and a Retry that seems to do nothing is worse.
+            sttSay({ status: e.message });
+            dispatch({ type: "patch", patch: { error: "Not retried: the mic is OFF, the window is paused, or an authorization card is waiting. Fix that, then press Retry." } });
+          }
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [voiceDiagnostics],
+  );
+
   const onUtterance = useCallback(
-    async (wav: Blob, ms = 0, source: ClaimSource = "unclaimed") => {
-      // Ambiguous input (decisions W-6): what was said goes to **the selected
-      // chat as it is when the transcript lands** — the chat pane most
-      // recently clicked, whatever thread it shows by then. Clicking another
-      // chat during STT sends the words there: the owner's call. What the
-      // microphone is doing is said in the selected chat's input bar.
-      const say = (p: ChatPatch) => {
-        const n = live.current.selectedChat;
-        if (n !== null) chatPatch(n, p);
-        else if (p.error !== undefined) dispatch({ type: "patch", patch: { error: p.error } });
-      };
+    async (wav: Blob, ms: number, source: ClaimSource = "unclaimed") => {
+      // The length bounds the deadline and the retention caps, so it is never
+      // guessed: take it from the WAV itself if the caller did not say.
+      if (!Number.isFinite(ms) || ms <= 0) ms = Math.max(0, ((wav.size - 44) / 2 / CAP_RATE) * 1000);
       // A crashed window uploads nothing, and sends nothing, for anyone.
       if (crashedRef.current) { voiceDiagnostics.add(ms, source, "suppressed:crash"); return; }
       const mode = live.current.dictation;
-      const what = outcomeFor(mode);
       // OFF never reaches here (Capture refuses to claim while muted), but the
       // mode is checked again rather than assumed: the fail-closed direction
       // costs a discarded utterance and the other costs an upload.
-      if (what === "discard") { voiceDiagnostics.add(ms, source, "muted"); return; }
-      const diagnostic = voiceDiagnostics.add(ms, source, "transcribing");
-      const sttStarted = performance.now();
-      const finish = (outcome: "stt_failed" | "suppressed:crash" | "empty_transcript" | "unplaced" | "review" | "handed_to_chat") => voiceDiagnostics.finish(diagnostic, outcome, performance.now() - sttStarted);
-      say({ orb: "transcribing", status: "TRANSCRIBING" });
-      let text = "";
-      try {
-        text = await api.stt(wav);
-      } catch (e: any) {
-        finish("stt_failed");
-        say({ orb: "error", status: "STT FAILED", error: e.message });
+      if (outcomeFor(mode) === "discard") { voiceDiagnostics.add(ms, source, "muted"); return; }
+      if (ms <= 0) { voiceDiagnostics.add(0, source, "too_short"); return; }
+      const at = live.current;
+      // Where the words are for: the selected chat as it is when they were said.
+      const chat = at.selectedChat !== null ? draftKey(at.chats[at.selectedChat], at.selectedChat) : null;
+      const id = stt.submit(wav, ms, source, { mode, chat });
+      if (id === null) {
+        sttSay({ orb: "error", status: "STT BACKLOG", error: "Too many clips are waiting to be transcribed, so this one was not kept. Wait for them to finish." });
         return;
       }
+      // Resolve only when the clip's fate is known (placed or sent, empty, failed
+      // for good): the caller's `.finally` ends a talk-key barge-in then (V-7),
+      // not when the upload merely starts.
+      await stt.whenSettled(id);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dispatch, stt],
+  );
+
+  // A batch of transcripts, in the order they were spoken. REVIEW never sends
+  // on its own; AUTO sends only when nothing moved since the words were said
+  // (see `placementFor`): a late or retried transcript, a different or busy
+  // chat, or a waiting card all put the words in the box instead.
+  const placeTranscripts = useCallback(
+    async (batch: SttPlaced<SttCapture>[]) => {
+      const done = (outcome: "suppressed:crash" | "unplaced" | "review" | "handed_to_chat", items = batch) =>
+        items.forEach((i) => voiceDiagnostics.finish(i.diag, outcome, i.latencyMs));
+      if (sttError.current && live.current.error === sttError.current) dispatch({ type: "patch", patch: { error: "" } });
+      sttError.current = "";
       // The window crashed while this was being transcribed: the words go
-      // nowhere — not to a chat the owner cannot see, not into a box.
-      if (crashedRef.current) { finish("suppressed:crash"); return; }
-      if (!text.trim()) {
-        finish("empty_transcript");
-        say({ orb: "idle", status: "DIDN'T CATCH THAT" });
-        return;
-      }
-      const n = live.current.selectedChat;
+      // nowhere -- not to a chat the owner cannot see, not into a box.
+      if (crashedRef.current) { done("suppressed:crash"); return; }
+      const at = live.current;
+      const n = at.selectedChat;
       if (n === null) {
         // No chat on screen: never sent anywhere. It waits for the next chat
-        // selected, in its box, unsent — and the window says so.
-        finish("unplaced");
-        unplaced.current.push(text);
+        // selected, in its box, unsent -- and the window says so.
+        done("unplaced");
+        unplaced.current.push(...batch.map((i) => i.text));
         dispatch({
           type: "patch",
           patch: { orb: "idle", error: "No chat is open, so what you said was not sent. It will be in the box of the next chat you select." },
         });
         return;
       }
-      // REVIEW never sends on its own: the transcript lands in the box.
-      if (what === "review") {
-        finish("review");
-        chatPatch(n, { orb: "idle", status: "", pendingTranscript: text });
+      const chat = at.chats[n];
+      const landing = { mode: at.dictation, chat: draftKey(chat, n), busy: chat.busy, card: at.approvals.length > 0 };
+      // One spoken order: if any item must wait in the box, they all do.
+      const sends = batch.every((i) => placementFor(i.meta, landing, i) === "send");
+      if (!sends) {
+        done("review");
+        // Words spoken in one chat that landed in another say so.
+        const moved = batch.some((i) => i.meta.chat !== landing.chat);
+        // A chat running a turn keeps its own orb and status line.
+        chatPatch(n, { ...(chat.busy ? {} : { orb: "idle" as const, status: moved ? "SPOKEN IN ANOTHER CHAT · IN THE BOX" : "" }), pendingTranscript: batch.map((i) => i.text).join(" ") });
+        if (moved && chat.busy) dispatch({ type: "patch", patch: { error: "What you said was spoken in another chat. It is in this chat's box, unsent." } });
         return;
       }
       // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
-      finish("handed_to_chat");
-      await send(n, text, [], true);
+      done("handed_to_chat");
+      await send(n, batch.map((i) => i.text).join(" "), [], true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -3768,6 +3826,7 @@ export default function App() {
                 patch({ picker: "schedule" });
               }}
             />
+            <SttRetry stt={stt} disabled={state.approvals.length > 0} />
             {state.error ? <div className="block err" data-testid="error">{state.error}</div> : null}
           </div>
         </div>
@@ -3858,7 +3917,7 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded
