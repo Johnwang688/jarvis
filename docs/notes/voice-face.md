@@ -1590,7 +1590,7 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   gone) is fixed when it is claimed, not when it ends: a chat switch halfway
   through a long dictation boxes it with "SPOKEN IN ANOTHER CHAT".
 
-Free checks: vitest 2216 tests / 138 files (new: `resample.test.ts` 9,
+Free checks: vitest 2315 tests / 145 files after merging V8 (2216 / 138 before; new: `resample.test.ts` 9,
 `joinChunks.test.ts` 11, `recorder.test.ts` 9, `captureChunks.test.ts` 30,
 `micInput.test.ts` 5, `stt.test.ts` +17 for groups; `capture.test.ts`,
 `captureDiagnostics.test.ts` and `speech/suppress.test.ts` adapted to the new
