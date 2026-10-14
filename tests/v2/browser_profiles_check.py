@@ -277,15 +277,40 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         self.host._gate.revoke_closed_loopback.assert_called_once()
 
     async def test_cancelled_navigation_revokes_pending_port(self):
-        entered=asyncio.Event()
-        async def goto(*args,**kw):entered.set();await asyncio.Event().wait()
-        tab=SimpleNamespace(id="a",loopback_port=None,pending_port=None,page=SimpleNamespace(goto=goto))
-        self.host._tabs[tab.id]=tab
+        entered=asyncio.Event();stopped=asyncio.Event()
+        async def goto(*args,**kw):
+            entered.set()
+            try:await asyncio.Event().wait()
+            finally:stopped.set()
+        profile=self.ids[0]
+        cdp=SimpleNamespace(on=Mock(),send=AsyncMock(return_value={}))
+        context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=cdp))
+        page=SimpleNamespace(goto=goto,url="about:blank",context=context)
+        instance=H._Instance(profile,config.BROWSER_DIR/profile,context,None,generation=1)
+        tab=H._Tab("1234abcd",profile,None,page,cdp_lock=asyncio.Lock(),page_identity=1)
+        self.host._instances[profile]=instance;self.host._tabs[tab.id]=tab
+        self.host.activity.opened(profile,instance.generation)
         going=asyncio.create_task(self.host._goto(tab,"http://127.0.0.1:33333",owner=True))
-        await entered.wait();self.assertTrue(self.host.loopback_open(33333))
-        going.cancel()
-        with self.assertRaises(asyncio.CancelledError):await going
-        self.assertFalse(self.host.loopback_open(33333))
+        starting=asyncio.create_task(entered.wait())
+        try:
+            done,_=await asyncio.wait({going,starting},timeout=2,return_when=asyncio.FIRST_COMPLETED)
+            self.assertTrue(done,"navigation neither entered goto nor settled within the fixture deadline")
+            if going in done:
+                self.fail("navigation settled before goto: "+repr(going.result()))
+            self.assertTrue(starting.done());self.assertTrue(self.host.loopback_open(33333))
+            context.new_cdp_session.assert_awaited_once_with(page)
+            cdp.send.assert_any_await("Fetch.enable",{"handleAuthRequests":True})
+            going.cancel()
+            with self.assertRaises(asyncio.CancelledError):await asyncio.wait_for(going,2)
+            self.assertTrue(stopped.is_set(),"actual navigation child did not settle")
+            self.assertIsNone(tab.pending_port);self.assertFalse(self.host.loopback_open(33333))
+            self.assertEqual(self.host.activity.counts(profile)[0],0)
+            self.assertFalse(self.host._auth._pending)
+        finally:
+            for task in (going,starting):
+                if not task.done():task.cancel()
+            await asyncio.wait_for(asyncio.gather(going,starting,return_exceptions=True),2)
+            await asyncio.wait_for(self.host._auth.settle(),2)
 
     async def test_admission_failure_does_not_open_a_port(self):
         self.host._tabs={str(n):SimpleNamespace(profile=self.ids[0]) for n in range(4)}

@@ -226,6 +226,24 @@ class Gate(unittest.TestCase):
         self.approvals.ask.side_effect=ask
         self.assertEqual(self.action("click").outcome,"refused");self.host.execute_action.assert_not_called()
 
+    def test_document_input_discard_preserves_navigation_but_real_approval_hold_stops_it(self):
+        from jarvis.v2.browser.stream import TabStream
+        stream=TabStream("1234abcd",held=lambda:False,wake=lambda:None)
+        self.host.owner_state.side_effect=lambda _:{**self.state,"hold_count":stream.hold_count}
+        stages=[]
+        def execute(snapshot,action,prepared,identity,forms,guard,**kwargs):
+            stream.discard_document_input()
+            guard(navigation=True);stages.append("document accepted")
+            stream.hold_through(notify=False)
+            with self.assertRaisesRegex(D.LookRefused,"another approval interrupted"):
+                guard(navigation=True)
+            stages.append("approval refused")
+            return D.ActResult("stopped","Stopped after approval.")
+        self.host.execute_action.side_effect=execute
+        self.assertEqual(self.action("navigate",text="https://fixture.test/next").outcome,"stopped")
+        self.assertEqual(stages,["document accepted","approval refused"])
+        self.assertEqual(stream.hold_count,1)
+
     def test_budget_and_audit_remain_bounded_and_content_free(self):
         self.judge.return_value=A.ActVerdict("deny",R.INJECTION,"PRIVATE-MODEL-REASON","model")
         for _ in range(40):self.assertEqual(self.action("click").outcome,"refused")

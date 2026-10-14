@@ -8,11 +8,12 @@ merging or deploying. It is not a new authorization to expand product scope.
 
 At the initial checkpoint the current Codex team reserved four packages:
 `B-UI`, `B-DR`, `B-SOUND` and `B-CLASSIFIER`. **All four are now INSTALLED.**
-The next Browser batch is **TAKEN by the Codex lead**: `B-NATIVE`, `B-AUTH` and
-`B-FIND`. Other unclaimed packages remain available. A saved draft alone is not
-an active claim.
+In the next Browser batch, `B-AUTH` and `B-FIND` are **MERGED, not yet installed**;
+`B-NATIVE` remains **TAKEN by the Codex lead**. The urgent `VEX-DOWNLOAD` fix is
+also TAKEN. Other unclaimed packages remain available. A saved draft alone is
+not an active claim.
 
-**Voice packages owned by the Claude team (2026-10-13):** `V0` merged; `V2`, `V6` installed; `V3`, `V7`, `V8` TAKEN.
+**Voice packages owned by the Claude team (2026-10-13):** all of V0–V15. `V0`, `V3`, `V7` merged; `V2`, `V6` installed; the rest TAKEN.
 Slot1 is reserved for that team under the shared limit below.
 
 ## How teams coordinate
@@ -122,11 +123,21 @@ current main and deliberately ports reviewed draft work.
   `browser-find-v2`: top-document find, owner context menu and finite cursors.
   Native picker fallbacks and real Windows IME acceptance are not included.
 
-Current validation snapshot: the isolated combined worktree includes main `5fb1f7e`
-and all three Browser implementations. Its build and **2,179 HUD unit tests in
-139 files passed**. The full HUD and backend release sweeps are still pending;
-these PRs are drafts and none of this batch is installed. Original failed fixture
-receipts are preserved alongside reviewed corrections.
+Current validation snapshot: the isolated combined worktree passed its build,
+**2,179 HUD unit tests in 139 files** and **3,222 full HUD checks**. The initial
+137-suite backend sweep passed 134; two fixture failures and one Find navigation
+interaction were corrected. All 14 affected suites then passed on combined head
+`ac8bdedec0c824971d763f26a2f879f2055cbbfb`, with unchanged source manifests and an
+inactive, empty memory-limited test scope. Original failures remain preserved.
+Independent source reviews passed. Auth #150 merged at `3b1205ae`; Find #151
+merged at `dd210803`. Neither is installed yet; Native #149 remains a draft with
+actual native lifecycle/child and real-HUD capability gates outstanding.
+
+GitGuardian's advisory failures on Auth/Find were independently adjudicated as
+three historical synthetic authentication fixtures. Dummy values were clarified
+without changing test inputs. The check remains recorded as failed; no scanner
+suppression, history rewrite or admin bypass was used. See #150 for exact paths
+and introducing commits.
 
 B-NATIVE can progress alongside B-AUTH. B-FIND develops isolated helpers/UI in
 parallel, then integrates B-AUTH's accepted navigation/attention/socket changes
@@ -139,7 +150,8 @@ Voice V3/V7/V8 and their App/capture/speech work remain with the Claude team;
 this batch does not claim voice work or native subagent visibility.
 
 **Test slots:** slot 1 remains reserved for the Claude voice team. Codex reserves
-slot 2 for B-NATIVE and slot 3 shared sequentially by B-AUTH/B-FIND. A reservation
+slot 2 for B-NATIVE and slot 3 for the urgent VEX-DOWNLOAD fix (the Auth/Find
+correction run is complete). A reservation
 is not a running job: the lead grants each heavy run after a memory check.
 At most three heavy test/build jobs globally, each capped at 3 GiB and no swap;
 start only with at least 4 GiB available. Native/provider probes need a concrete
@@ -151,8 +163,8 @@ acceptance remains separately identified, never inferred from synthetic tests.
 | ID | Feature | Status / owner | Dependencies / definition of done |
 |---|---|---|---|
 | B-NATIVE (BR-9d, BD-a/b/c) | Claude and Codex parent chats drive through the same Browser gate | **TAKEN — Codex lead / `browser_native`; draft [#149](https://github.com/Johnwang688/jarvis/pull/149)** | `codex/browser-native-v2` / `browser-native-v2`. Source review and 248 focused backend checks passed; exact installed Codex parent identity/admission and real MCP call passed against an isolated scripted provider. Both installed CLIs survived a 115.000-second private-card wait and returned the exact result in the next scripted provider request. Actual native lifecycle/child checks and combined release gates remain pending. No paid model, real-account or installed-release claim. [Native plan](2026-10-13-browser-driving-claude-codex.md). |
-| B-AUTH (BR-7) | HTTP Basic/Digest owner challenge form over the existing authenticated tab socket | **TAKEN — Codex lead / `browser_auth`; draft [#150](https://github.com/Johnwang688/jarvis/pull/150)** | `codex/browser-auth-v2` / `browser-auth-v2`, reviewed head `3b1f76d`. First protected navigation, delayed reply/original expiry, Digest, stale socket/nonce, restore, privacy and cleanup passed focused tests; 62 auth/Sound checks, nine native cases and 14 actual HUD assertions passed; five guard mutants were killed. Same-origin iframe prompts measured; in the installed-Chrome probe the first protected popup prompted only after explicit Reload, and separate OOPIF prompt delivery was absent in the bounded probe. Protected Sound restoration remains fail-closed with Retry. Combined sweep, security-check resolution, guarded merge and deployment pending. |
-| B-FIND (BR-7) | Find-in-page, bounded owner context menu, finite cursor shapes | **TAKEN — Codex lead / `browser_find`; draft [#151](https://github.com/Johnwang688/jarvis/pull/151)** | `codex/browser-find-v2` / `browser-find-v2`, stacked on #150. Fixed top-document search, five owner menu actions, finite cursor feedback and exact document/socket/hold guards implemented and independently reviewed. Focused backend/HUD, real Chrome, five guard mutants and 22 actual owner HUD assertions passed; fixture reliability follow-up, security-check resolution and combined release sweep pending. Native layout preemption remains unproven. No native picker/IME expansion. |
+| B-AUTH (BR-7) | HTTP Basic/Digest owner challenge form over the existing authenticated tab socket | **MERGED — [#150](https://github.com/Johnwang688/jarvis/pull/150); Codex lead / `browser_auth`; deployment pending** | Exact reviewed head `70460c2` merged at `3b1205ae`. First protected navigation, delayed reply/original expiry, Digest, stale identity, restore, privacy and cleanup passed focused checks; 62 auth/Sound checks, nine native cases, 14 actual HUD assertions and five guard mutants passed. Combined release correction gates passed as described above. Same-origin iframe prompts measured; first protected popup required explicit Reload, and separate OOPIF prompt delivery was absent in the bounded probe. Protected Sound restoration remains fail-closed with Retry. No real-account acceptance claim. |
+| B-FIND (BR-7) | Find-in-page, bounded owner context menu, finite cursor shapes | **MERGED — [#151](https://github.com/Johnwang688/jarvis/pull/151); Codex lead / `browser_find`; deployment pending** | Exact reviewed head `5e638ea` merged at `dd210803` after #150. Fixed top-document search, five owner menu actions, finite cursors and exact document/socket/hold guards passed independent review. Final focused evidence: 70 backend checks, 19 real driving cases, real Chrome owner tools, 22 actual owner HUD assertions and seven intended guard mutants; all 14 combined correction suites passed. Navigation discards stale document input without adding an approval hold. Native layout preemption remains unproven; native picker/IME expansion excluded. |
 | B-PICKERS (BR-7/M9) | Owner select/date/color fallback; assess datalist separately | **VERIFY — unclaimed** | Chrome 155 select/date/color popups were absent from screencast; datalist opening was not proven. Refine and review exact-element fallback design before implementation. Preserve input/change revalidation, bounds, focus, native-control privacy and stale-element refusal. Shared host/RemoteView integration waits for active Browser packages. |
 | B-IME (BR-7) | Finish real owner IME/composition acceptance | **VERIFY — unclaimed** | Composition transport exists in Remote UI; do not rebuild it blindly. Audit existing coverage, then validate real Windows composition and cancellation across holds/reconnects. Implement only demonstrated gaps. |
 | B-DIRECT-CAPTURE (BR-4/M6) | Direct iframe capture in installed app mode | **VERIFY — unclaimed** | Remote capture/annotation is installed. Direct currently offers explicit “Open in Remote” fallback. Requires actual Windows app-mode getDisplayMedia/CropTarget prompt and pixel evidence before enabling a Direct capture path. |
@@ -179,18 +191,18 @@ V-1…V-14. [Full voice plan](2026-10-13-voice-rework.md).
 | V1 | Mic constraints/readback, bounded drop/transcription diagnostics | **INSTALLED — #128** | Existing capture behavior retained. This is observability, not ML VAD, speaker verification or a proven acoustic fix. |
 | V2 | STT deadlines/retries, retained clips, visible errors and sequence ordering | **INSTALLED — [#136](https://github.com/Johnwang688/jarvis/pull/136), Claude team** | Installed build `20261014T021138099135Z-87990c016981` from main 6bbef98, daemon restarted, providers healthy. No physical-mic acceptance. Follow-ups: stale "Not retried" error line; oversize-clip message wording; no test for `place()` throwing. `/stt` and `/say` have no `owner_only` check (pre-existing). |
 | V3 | Dictation steers busy chats; push-to-talk no longer interrupts; continuation window | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v3`, stacked on V2 until it merges. Owner answered plan Q3–Q5 (send at the pause, then steer; PTT steers; reply goes to the pane that spoke). Verify busy/idle transitions, owner destination identity and unchanged Ctrl+D gesture. |
-| V4 | AudioWorklet/resampler, uncapped utterance recorder and chunked STT | **WAIT — unclaimed** | V2. Bounded buffering, ordered chunks and long dictation without silent truncation. |
-| V5 | Silero VAD worker, energy fallback and end-of-utterance timers | **WAIT — unclaimed** | V4 + V0 evidence. Test pause/continuation boundaries and degraded-worker fallback. |
+| V4 | AudioWorklet/resampler, uncapped utterance recorder and chunked STT | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v4`. stacked from main. V2. Bounded buffering, ordered chunks and long dictation without silent truncation. |
+| V5 | Silero VAD worker, energy fallback and end-of-utterance timers | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v5`. after V4. V4 + V0 evidence. Test pause/continuation boundaries and degraded-worker fallback. |
 | V6 | Streaming speech core: prose filter, sentence splitting, /say, one-thread player/queue, controls and output separate from mic | **INSTALLED — [#134](https://github.com/Johnwang688/jarvis/pull/134), Claude team** | Same install as V2. No physical speaker/AEC acceptance. 1200-character spoken cap is a stopgap replaced by V8. Follow-ups from review: headerless diffs still read; barge-in with nothing playing pauses nothing; buffering counts as active during a synthesis hang. |
 | V7 | One shared queue across every open chat pane, per-thread voices, floor/stale/backlog rules | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v7`, stacked on V6 until it merges. Hidden open panes speak; threads in no pane are silent; playback never overlaps. Includes the per-pane voice chip (Q9). |
 | V8 | Bounded spoken summaries using Haiku tier, fallback, cost/latency measurement | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v8`, stacked on V6 until it merges. Owner answered Q2: replies over 600 characters become a summary only. One paid cost/latency probe approved, capped at $0.10; no other paid calls. |
-| V9 | Barge-in, self-voice reference gating and transcript commands | **WAIT — unclaimed** | V5 + V6. Voice must never authorize an approval card; real speaker/headphone checks remain separate from fake audio tests. |
-| V10 | Trailing send/cancel words and Undo | **WAIT — unclaimed** | V5 + V2. Whole-utterance/trailing-silence semantics; ordinary prose containing “over” must not send early. |
-| V11 | Local wake/command/send keyword spotting; retire phrase-avatar Chrome recognition | **WAIT — unclaimed** | V0 + V9. Choose only after measured resource/accuracy evidence. |
-| V12 | Local speaker enrollment/verification/store and persistent Guest voice switch | **WAIT — unclaimed** | V0 + V4. Store stays local, mode0700, never uploaded; owner decided no additional protected-path rule. Guest survives restart until explicitly off and changes no approval or self-voice rule. |
-| V13 | Local STT with explicit cloud-fallback switch | **WAIT — unclaimed** | V0 + V2. Offline rejection/selection and cloud fallback must be visible and tested. |
-| V14 | RNNoise worker stage | **WAIT / conditional — unclaimed** | V0 + V5; implement only if V0 demonstrates a gain. |
-| V15 | Coordinate speech with Browser audio | **WAIT — unclaimed** | V7 + B-SOUND. Resolve the plans' audio-transport mismatch: Remote audio leaves through WSLg, not the frame stream; Direct cross-origin audio is not observable/controllable by default. No speculative ducking hook or unmute. |
+| V9 | Barge-in, self-voice reference gating and transcript commands | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v9`. after V5; Q7 stricter (only "Jarvis"/Ctrl+D pause before enrollment), Q8, Q10 answered. V5 + V6. Voice must never authorize an approval card; real speaker/headphone checks remain separate from fake audio tests. |
+| V10 | Trailing send/cancel words and Undo | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v10`. after V5; Q1 answered. V5 + V2. Whole-utterance/trailing-silence semantics; ordinary prose containing “over” must not send early. |
+| V11 | Local wake/command/send keyword spotting; retire phrase-avatar Chrome recognition | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v11`. after V9; Q16 answered (local wake only, commands via STT). V0 + V9. Choose only after measured resource/accuracy evidence. |
+| V12 | Local speaker enrollment/verification/store and persistent Guest voice switch | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v12`. after V4; Q12 answered (keep clips). V0 + V4. Store stays local, mode0700, never uploaded; owner decided no additional protected-path rule. Guest survives restart until explicitly off and changes no approval or self-voice rule. |
+| V13 | Local STT with explicit cloud-fallback switch | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v13`. Q6 answered; one paid cloud-vs-local WER check <= $0.25. V0 + V2. Offline rejection/selection and cloud fallback must be visible and tested. |
+| V14 | RNNoise worker stage | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v14`. after V5; owner: build it, default off. V0 + V5; implement only if V0 demonstrates a gain. |
+| V15 | Coordinate speech with Browser audio | **TAKEN — Claude lead; implementers Sonnet 5.5 (Haiku 5.5 only for non-critical chores)** | Branch `claude/voice-v15`. owner: duck Remote tabs via WSLg PulseAudio sink-inputs under a renewable lease; never unmute. V7 + B-SOUND. Resolve the plans' audio-transport mismatch: Remote audio leaves through WSLg, not the frame stream; Direct cross-origin audio is not observable/controllable by default. No speculative ducking hook or unmute. |
 
 ## Native subagent view
 
@@ -239,6 +251,7 @@ PR #125 itself adds plans, not the features those plans describe.
 | QA-LOAD | Remaining load-sensitive tests and reliable sweep reporting | **READY — unclaimed.** Reproduce unchanged VEX/terminal throughput bounds; retain performance assertions and distinguish regression from scheduler noise. Preserve per-suite output and real exit codes: an old lead wrapper could exit0 with failed suites. Audit old quota flake against current waits before editing. |
 | GIT-LIVE | Positive end-to-end native Git flow under the final approval policy | **VERIFY — unclaimed.** Local worktree/edit/commit and denied/resumed pushes were checked. Use a disposable authorized repo/branch and actual owner approval for the final positive flow; do not reuse old fixture-helper evidence as native proof. |
 | HUD-FOLLOWUPS | Reconcile the checkpoint's old `hud-open-followups` list | **VERIFY — unclaimed.** Most named input/draft/editor issues already merged above; recover the original list and close by evidence before making new edits. |
+| VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **TAKEN — Codex lead / `browser_auth`; urgent owner request.** Branch `codex/vex-download-device-status`, worktree `vex-download-device-status`. Reuse the guarded owner-click download and one-device reservation; distinguish disconnected from failed/unknown device reads. Read-only diagnosis precedes changes; independent review and fake-tool/device tests precede merge. No real robot operation is part of validation. |
 | VEX-UI | Broad VEX view redesign | **DEFERRED.** The urgent Clean/Build fix is installed. The narrow bug request does not itself expand into a full redesign or authorize real robot operations. |
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 

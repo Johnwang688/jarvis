@@ -12,7 +12,7 @@ import { WINDOW_ID } from "../lib/windowId";
 import { useDaemonPorts } from "./daemonPorts";
 
 export interface BrowserProfile { id:string; label:string; created:string }
-export interface RemoteRow { tab_id:string; profile:string; ctx:string|null; url?:string; title?:string; opener?:string|null; loaded?:boolean; error?:string }
+export interface RemoteRow { tab_id:string; profile:string; ctx:string|null; url?:string; title?:string; opener?:string|null; loaded?:boolean; auth_pending?:boolean; error?:string }
 export interface BrowserRuntime { busy?:boolean; error?:string; viewed?:{at:string;refused:boolean} }
 const tabKey = (pane:PaneNo,id:string) => `${pane}:${id}`;
 const message = (e:unknown) => cleanTitle(e instanceof Error ? e.message : "The Browser could not apply that change.", 300);
@@ -188,7 +188,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
       if(initial.url) {
         const reply=await browserApi.write<RemoteRow>(`/tabs/${created.tab_id}/${ownerConversion?"navigate":"restore"}`,{url:initial.url});
         if(!current())return;
-        if(reply.loaded===false)patch(key,{error:"This page was not restored. Enter its address and choose Load to try again."});
+        if(reply.loaded===false&&!reply.auth_pending)patch(key,{error:"This page was not restored. Enter its address and choose Load to try again."});
       }
       c.view.setBrowserRemote(pane,id,{mode:"remote",remoteTabId:created.tab_id,ctx:created.ctx??undefined});
       created=null; // the state update adopts only this generation's new handle
@@ -294,7 +294,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     if(!allowed(pane))return;
     const t=tab(pane,id);if(!t?.remoteTabId)return;
     const reply=await browserApi.write<RemoteRow>(`/tabs/${t.remoteTabId}/history`,{action});
-    if(reply.loaded===false)throw new Error("The page could not complete that navigation.");
+    if(reply.loaded===false&&!reply.auth_pending)throw new Error("The page could not complete that navigation.");
   },[allowed,tab]);
   const adopt=useCallback(async(pane:PaneNo,opener:string,remoteId:string)=>{
     if(!allowed(pane)||!/^([0-9a-f]{8})$/.test(remoteId))return;
