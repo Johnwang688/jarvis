@@ -952,6 +952,15 @@ is read aloud, each in its own voice, through the V6 queue.
   current message), Mute. Disabled under an authorization card. The speech strip now names
   the chat being read, not the selected one.
 
+**Known limit until V9:** the detector is held off while anything is read
+(`micSuppressedBySpeech`, V6), and now that includes any open pane, not only the selected
+chat. A hands-free utterance during, or within the 300 ms hangover of, another pane's speech is
+dropped as "speaking"; the talk key still works (it pauses the speech). A multichat section
+that streamed pane 7's words while speaking into pane 6 started failing for exactly this
+(the suites ran with the page holding the speech lock); it now mutes pane 7's chat, and
+`hud_v2_speech_check.py` pins the suppression and the working talk key. Self-voice gating
+(V9) replaces the blanket hold.
+
 Not done here: summaries (V8), barge-in and spoken commands (V9), Browser sound ducking
 (V15), any physical speaker or Windows-audio acceptance.
 

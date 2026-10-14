@@ -50,6 +50,14 @@ SOURCES = """
   };
 })();
 """
+# A hands-free utterance, fed to the fake mic: the follow-up window opens, speech, then quiet.
+UTTERANCE = """() => {
+  const m = window.__hud.mic;
+  m.feedMs(2000, 0.001);
+  window.__hud.capture.openFollowUp();
+  m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+  return true;
+}"""
 TAGS = {"t1": "Alpha", "t2": "Bravo", "t3": "Charlie", "t9": "Zulu"}
 
 
@@ -317,6 +325,26 @@ def main() -> int:
             mock.emit("text", {"text": "Bravo is back after the unmute."}, thread_id="t2")
             check("unmuted, it is read again", bool(until(lambda: any("back after the unmute" in t for t in said(mock)), timeout=5)))
             until(lambda: speech(page)["view"]["state"] == "idle", timeout=8)
+            print("\nwhile another pane is read: hands-free is held off, the talk key is not (until V9)")
+            sel = page.evaluate("window.__hud.state().selectedChat")
+            sel_tid = page.evaluate(f"window.__hud.state().chats[{sel}].threadId")
+            reading = "t2" if sel_tid == "t1" else "t1"
+            mock.ms_per_char = 60
+            mock.emit("text", {"text": "Words from the other pane are being read out to nobody in particular."}, thread_id=reading)
+            until(lambda: speech(page)["view"]["state"] == "playing" and speech(page)["view"]["thread"] == reading, timeout=5)
+            stt = len(mock.sent("POST", "/stt"))
+            page.evaluate(UTTERANCE)
+            page.wait_for_timeout(500)
+            check("a hands-free utterance in the selected pane is dropped while another pane is read",
+                  len(mock.sent("POST", "/stt")) == stt and speech(page)["view"]["state"] == "playing")
+            page.locator("#orb").dispatch_event("pointerdown")
+            check("the talk key still pauses it", speech(page)["view"]["state"] == "paused")
+            page.locator("#orb").dispatch_event("pointerup")
+            check("and it carries on when nothing was said",
+                  bool(until(lambda: speech(page)["view"]["state"] == "playing", timeout=3)))
+            page.locator('[data-testid="speech-stop"]').click()
+            page.evaluate("window.__hud.capture.closeFollowUp()")
+            mock.ms_per_char = 12
             pool = [v["name"] for v in mock.world["voices"]["voices"]]
             other = next(v for v in pool if v != voices["t1"])
             if page.locator('[data-testid="pane-1-voice-select"]').count() == 0:    # the chip is still open from skip
