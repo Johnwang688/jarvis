@@ -1047,6 +1047,11 @@ class BrowserHost:
                 "<body><p>This page was left blank after the sound setting changed. "
                 "Enter an address or use Sign in to open it again.</p>")
 
+    def duck_owners(self):
+        """Pinned Chrome roots that Jarvis's speech may lower (V15); `[]` when
+        nothing is audible. Never starts Chrome."""
+        return self._sound.duck_owners()
+
     def set_sound(self, tab_id, on):
         self._refuse_if_held()
         if not self._running():

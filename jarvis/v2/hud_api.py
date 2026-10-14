@@ -1708,6 +1708,11 @@ def route(handler, daemon, parts, query):
         mounted = _speech_voices.route(handler, daemon, parts, query)
         if mounted is not None:
             return mounted
+        # Lowering the Remote Browser's sound while Jarvis speaks (V15): owner-only.
+        from . import speech_duck as _speech_duck
+        mounted = _speech_duck.route(handler, daemon, parts, query)
+        if mounted is not None:
+            return mounted
     if parts[0] == "terminals":
         # The owner's terminals (WP-C): owner-only, the HUD listener only,
         # and the attach socket also needs a single-use ticket.

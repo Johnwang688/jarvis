@@ -305,6 +305,11 @@ class Daemon:
         # On the bus and in the log it is nothing but classes and counts.
         from .browser.host import BrowserHost
         self.browser = BrowserHost(self)
+        # Jarvis's speech lowers the Remote Browser's sound under a short HUD
+        # lease (V15, speech_duck.py). Nothing starts until the first lease;
+        # `recover()` at start only reads the journal of a crashed run.
+        from .speech_duck import Ducker
+        self.speech_ducker = Ducker(self.browser.duck_owners, journal=self._duck_journal)
         from .browser.look import BrowserLook
         self.browser_look = BrowserLook(self)
         from .browser.drive import BrowserDrive
@@ -373,6 +378,21 @@ class Daemon:
             self.browser_drive.install()
             self.devservers.start()
             self.schedules.start()
+            # A previous run's unrestored duck (V15) is repaired from its
+            # journal, under the same "this is the owner's daemon" rule.
+            if self._owns_data():
+                self.speech_ducker.recover()
+
+    def _duck_journal(self):
+        """The duck's journal is the owner's daemon's alone: a test or embedded daemon
+        on a folder of its own never reads or writes the owner's file."""
+        return config.SPEECH_DUCK_PATH if self._owns_data() else None
+
+    def _owns_data(self) -> bool:
+        try:
+            return Path(self.stores.root).resolve() == Path(config.V2_DATA_DIR).resolve()
+        except OSError:
+            return False
 
     def _sweep_carriers(self) -> None:
         """Before anything is served: remove jarvis-mcp token carriers a crash
@@ -1845,6 +1865,9 @@ class Daemon:
         # The Browser's Chrome, its driver and its gate (BR-1a): after the
         # terminals, before the listeners close. Its own bound, past the
         # daemon's: a Chrome that will not close is killed by exact PID.
+        # Before Chrome goes: its streams are put back to their volume while
+        # they still exist (a lost one is repaired from the journal later).
+        self.speech_ducker.stop()
         self.browser_drive.stop()
         self.browser_look.stop()
         self.browser_panes.stop()
