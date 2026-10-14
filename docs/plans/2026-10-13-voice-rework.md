@@ -374,6 +374,13 @@ This is new HUD code (`lib/speech/*.ts`); synthesis stays `/say`.
 
 ### 3.8 Spoken summaries (V-4)
 
+> **Amended (2026-10-13, owner's answer to Q2):** summary only, with each
+> message held until it closes. The "verbatim stops after the sentence
+> crossing 400 characters ... covering the rest" rule below is superseded:
+> up to 600 characters a message is read as written once it closes; longer,
+> only the summary is said (the 400-character opening is the *failure*
+> fallback). See §7 Q2 and `docs/notes/voice-face.md` ("V8").
+
 - **Rule (open question 2).**
   - Prose ≤ **600 characters** (about 35–40 s at the 1.2× default,
     `config.py:224`) is read verbatim as it streams.
@@ -688,10 +695,15 @@ Chrome-for-Testing fallback or Playwright in WSL.
    trailing "over" sends only when followed by >= 500 ms of silence (and a
    short pause before it once KWS exists); "cancel" likewise discards. The
    word list is editable, and it also sends in REVIEW.
-2. ~~Summary threshold.~~ **Answered (2026-10-13): summary only.** A
-   reply up to 600 characters is read verbatim. A longer one is replaced by
-   a short spoken summary (V8, Haiku 5.5 tier), with no verbatim lead-in. The
-   owner approved one paid V8 cost/latency probe, capped at $0.10.
+2. ~~Summary threshold.~~ **Answered (2026-10-13): summary only, and
+   hold-until-close ("wait, then speak").** A message is held until it
+   closes (a `text`, a tool call or the turn's end); then, if it is up to 600
+   characters, it is read verbatim, and if it is longer it is replaced by a
+   short spoken summary (V8, Haiku 5.5 tier), with no verbatim lead-in. This
+   supersedes §3.8's "read the opening to about 400 characters, then
+   summarise the rest" and V-3's speak-while-streaming for the per-message
+   decision. The owner approved one paid V8 cost/latency probe, capped at
+   $0.10.
 3. ~~Continuation in AUTO.~~ **Answered (2026-10-13):** as recommended. Send
    at the 2.5 s pause; continuations steer the running turn. "Over" still
    sends at once.

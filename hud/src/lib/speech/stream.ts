@@ -8,22 +8,13 @@
 import { ProseFilter } from "./prose";
 import { sentences, stableChunks } from "./split";
 
-/**
- * A safety stop, not the design: until `/speech/summary` exists (V8) a very
- * long reply would be read to the end. Past this many spoken characters a
- * message says `MORE_ON_SCREEN` and stops. V8 replaces it with the plan's
- * 600-character rule and a summary.
- */
-export const SPOKEN_CAP_CHARS = 1200;
-export const MORE_ON_SCREEN = "…and more on screen.";
-
 /** The fast path appends this to a reply that ran into its token limit. */
 const CUT_OFF_TAIL = /\s*\[cut off at the token limit\]\s*$/;
 
 export interface SpokenChunk {
   text: string;
   /** `fallback`: words of Jarvis's own, not the agent's. */
-  kind: "verbatim" | "fallback";
+  kind: "verbatim" | "summary" | "fallback";
 }
 
 export class ProseStream {
@@ -31,12 +22,8 @@ export class ProseStream {
   private raw = "";
   private speech = "";
   private emitted = 0;
-  private spoken = 0;
-  private capped = false;
   private quiet = false;
   private gapped = false;
-
-  constructor(private readonly cap = SPOKEN_CAP_CHARS) {}
 
   /** Anything fed since the message opened. */
   get open(): boolean {
@@ -108,27 +95,14 @@ export class ProseStream {
     this.raw = "";
     this.speech = "";
     this.emitted = 0;
-    this.spoken = 0;
-    this.capped = false;
     this.quiet = false;
     return out;
   }
 
   private take(final: boolean): SpokenChunk[] {
-    if (this.capped) return [];
     const all = (final ? sentences(this.speech) : stableChunks(this.speech)).filter((c) => c.trim());
     const fresh = all.slice(this.emitted);
-    const out: SpokenChunk[] = [];
-    for (const text of fresh) {
-      if (this.spoken + text.length > this.cap && this.spoken > 0) {
-        this.capped = true;
-        out.push({ text: MORE_ON_SCREEN, kind: "fallback" });
-        break;
-      }
-      this.spoken += text.length;
-      out.push({ text, kind: "verbatim" });
-    }
     this.emitted = all.length;
-    return out;
+    return fresh.map((text) => ({ text, kind: "verbatim" as const }));
   }
 }
