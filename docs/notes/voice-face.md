@@ -1515,7 +1515,7 @@ V6 stopgap is gone.)
   one deadline. `JARVIS_CHAT_PROVIDER` is not applied to this call (`provider=""`).
 - **Request.** `scrub` + `strip_invisible` on the text, then `untrusted.fence`
   (fresh nonce per call, marker phrases neutralized) so a reply cannot close its
-  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=160`.
+  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=1024` (a ceiling; was 160, see the receipt), two tries per model.
   Output is cleaned with `voice.speakable`, bounded to 300 characters at a
   sentence. A request never exceeds `min(JARVIS_COMPACT_AT_TOKENS, 90k)`
   (estimated at 3 characters a token, less 1000): longer text is summarised in
@@ -1556,6 +1556,56 @@ V6 stopgap is gone.)
 
 ### Paid probe receipt (owner-approved, cap $0.10)
 
-Pending: `tests/speech_summary_probe.py --yes-spend` (24 synthetic replies, 800
-to 8000 characters, aborts before $0.09). Fill in date, model id, call count,
-total spend, tokens, p50/p95 here after the lead runs it.
+Run by the lead on **2026-10-14** from the main checkout
+(`tests/speech_summary_probe.py --yes-spend`), model
+`anthropic/claude-haiku-5.5`, 24 calls on synthetic replies of 723 to 8053
+characters, no real chat content. Numbers as relayed by the lead (the console
+output itself was not kept):
+
+| | |
+|---|---|
+| Calls | 24, of which **7 failed with 502** (29%) |
+| Total spend | $0.002314 (cap $0.10) |
+| Mean cost per call | $0.000136 |
+| Prompt tokens, mean | 902 |
+| Completion tokens, mean | 92 |
+| Latency | p50 1.46 s, p95 2.1 s |
+| Failed inputs (characters) | 786, 832, 1742, 1778, 3635, 3644, 8053 |
+
+Cost and latency are well inside the plan's estimate ($0.0003 a summary, a
+second or so). The failure rate is not acceptable: the owner would hear the
+truncated fallback about three times in ten.
+
+**Cause.** Not proven. The probe kept only "502" for the failed calls, and the
+route answers a fixed sentence, so the internal reason was lost. What the code
+shows: the inputs are not the cause (the seven are scattered across all four
+sizes and the first call of the run was one of them; `prepare()` leaves every
+probe text unchanged, so `scrub` and the fence are not involved), and there are
+only three ways `summarize` returns a 502: the call raises (a provider or
+network error, one attempt, no retry), the reply comes back with no text, or the
+text is empty after `clean()`. The bounds in `clean()` cannot empty a reply that
+has words, whatever its sentence ends (tested). The likeliest cause is the first
+two together: `max_tokens=160` was the *whole* budget, so a model that reasons
+before it answers could spend it on reasoning and return nothing (finish reason
+`length`), and a transient 429/5xx/529 was never tried again. A mean of 92
+completion tokens for replies of at most 300 characters (about 70 tokens) is
+consistent with some thinking being counted.
+
+**Fix (V8 fix, `claude/voice-v8-fix`).** `OUT_MAX_TOKENS` 160 -> 1024 (a ceiling;
+length is still the prompt's and `clean()`'s job); each model gets two tries
+inside the one 6 s deadline, the second for a transient HTTP error (anything but
+400/401/402/403/404/413/422) or an empty reply, with a retry that must leave
+0.3 s; content parts are read as text. Every failure now carries a **reason
+code and numbers only** (`SummaryError.reason`/`.detail`: `http_<status>`,
+`llm_error`, `empty_content`, `empty_after_clean`, `exception:<Class>`, `deadline`;
+finish reason, completion and reasoning tokens, whether a reasoning field was
+present, raw length), logged and printed by the probe, never sent to the HUD.
+Tests in `tests/v2/speech_summary_check.py` (`FailedSummaries`) reproduce each
+path with a fake reply, and two mutations (the old 160-token budget, a single
+attempt) fail them.
+
+**Still to do.** A second probe (owner's OK; same cap) to confirm the failure
+rate and to read the reason codes from a real run. If `empty_content` shows
+`finish=length` with `reasoning_tokens` close to the budget, the cause was the
+budget; if `http_*`, the retry; if neither, the next step is turning reasoning
+off for this call.
