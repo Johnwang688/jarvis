@@ -11,7 +11,7 @@ def sound_checks(browser, mock, base, check, until, guard, init_script):
     print("\nBrowser sound: explicit owner speaker gestures and session-only profile state")
     from tests.face.hud_v2_remote_check import Remote
     from tests.face.hud_v2_mock_browser import state as host_state
-    ctx=browser.new_context(viewport={"width":1600,"height":1000},permissions=["microphone"])
+    ctx=browser.new_context(viewport={"width":1600,"height":1000},permissions=["microphone"],has_touch=True)
     guard(ctx);ctx.add_init_script(init_script);remote=Remote(ctx,mock)
     master={"desired":True,"generation":1,"available":True,"reason":None}
     rows=[{"profile":"p-11111111","sound":{"requested":False,"applied":False,"generation":1,"phase":"ready","reason":None}}]
@@ -63,6 +63,77 @@ def sound_checks(browser, mock, base, check, until, guard, init_script):
         check("BR10: approval does not mute already granted playback",rows[0]["sound"]["requested"])
         speaker.click();until(lambda:speaker.get_attribute("aria-pressed")=="false",timeout=4)
         check("BR10: one pointer mute sends explicit false",len(toggles)==2 and toggles[-1][1]=={"on":False})
+        options=page.locator(_pane(2,'[data-testid="browser-options-toggle"]'))
+        panel=page.locator(_pane(2,'[data-testid="browser-options"]'))
+        for kind in ('mouse','touch'):
+            options.click();assert until(lambda:panel.is_visible() and speaker.is_disabled(),timeout=4)
+            box=speaker.bounding_box();popup=panel.bounding_box()
+            assert box is not None and popup is not None
+            x=box['x']+box['width']/2;y=box['y']+box['height']/2
+            check('BR10: '+kind+' dismissal targets the speaker outside the wide options panel',
+                  not (popup['x']<=x<=popup['x']+popup['width'] and popup['y']<=y<=popup['y']+popup['height']))
+            count=len(toggles);inputs=len(remote.inputs())
+            if kind=='mouse':page.mouse.click(x,y)
+            else:page.touchscreen.tap(x,y)
+            assert until(lambda:not panel.is_visible(),timeout=4);page.wait_for_timeout(150)
+            check('BR10: '+kind+' dismissal gesture cannot toggle sound or reach the page',
+                  len(toggles)==count and len(remote.inputs())==inputs,str(toggles[count:]))
+            if speaker.get_attribute('aria-pressed')=='true':
+                speaker.click();assert until(lambda:speaker.get_attribute('aria-pressed')=='false',timeout=4)
+            count=len(toggles)
+            box=speaker.bounding_box();x=box['x']+box['width']/2;y=box['y']+box['height']/2
+            if kind=='mouse':page.mouse.click(x,y)
+            else:page.touchscreen.tap(x,y)
+            assert until(lambda:speaker.get_attribute('aria-pressed')=='true',timeout=4)
+            check('BR10: next deliberate '+kind+' gesture grants sound once',
+                  len(toggles)==count+1 and toggles[-1][1]=={'on':True})
+            speaker.click();assert until(lambda:speaker.get_attribute('aria-pressed')=='false',timeout=4)
+        page.evaluate('''() => {window.__soundClicks=[]; document.addEventListener('click',e=>{if(e.target.closest('[data-browser-sound]'))window.__soundClicks.push({detail:e.detail,pointerType:e.pointerType,trusted:e.isTrusted,disabled:e.target.closest('[data-browser-sound]').disabled});},true);}''')
+        for change in ('card','options','generation','disconnect'):
+            box=speaker.bounding_box();x=box['x']+box['width']/2;y=box['y']+box['height']/2
+            count=len(toggles);page.mouse.move(x,y);page.mouse.down()
+            if change=='card':
+                _approval(mock,'sound-pointer-card')
+                assert until(lambda:page.locator('[data-testid="approval-card"]').count()==1,timeout=4)
+                page.keyboard.press('Escape')
+                assert until(lambda:page.locator('[data-testid="approval-card"]').count()==0 and speaker.is_enabled(),timeout=4)
+            elif change=='options':
+                options.focus();options.press('Enter');assert until(lambda:panel.is_visible(),timeout=4)
+                page.keyboard.press('Escape');assert until(lambda:not panel.is_visible() and speaker.is_enabled(),timeout=4)
+            elif change=='generation':
+                sockets=len(remote.sockets);rows[0]['sound']['generation']+=1;master['generation']+=1
+                mock.emit('browser_sound_changed',{'generation':master['generation']})
+                assert until(lambda:speaker.is_enabled() and len(remote.sockets)>sockets,timeout=5), "new generation must reattach before release"
+            else:
+                connections=mock.sse_connections()
+                page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+                assert until(lambda:speaker.is_disabled(),timeout=4), "pagehide must actually revoke the speaker"
+                page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
+                assert mock.await_reconnect(connections), "SSE must actually reconnect"
+                assert until(lambda:speaker.is_enabled(),timeout=5), "pageshow must reconnect before release"
+            page.mouse.up();page.wait_for_timeout(150)
+            check('BR10: allowed pointerdown cannot survive '+change+' before click',len(toggles)==count,str({'routes':toggles[count:],'click':page.evaluate('window.__soundClicks.slice(-1)')}))
+            if speaker.get_attribute('aria-pressed')=='true':
+                speaker.click();assert until(lambda:speaker.get_attribute('aria-pressed')=='false',timeout=4)
+        count=len(toggles);speaker.focus();speaker.press('Enter')
+        assert until(lambda:speaker.get_attribute('aria-pressed')=='true',timeout=4)
+        check('BR10: trusted keyboard activation remains direct after menu dismissal',len(toggles)==count+1 and toggles[-1][1]=={'on':True})
+        speaker.press('Space');assert until(lambda:speaker.get_attribute('aria-pressed')=='false',timeout=4)
+        check('BR10: trusted Space consumes one explicit mute gesture',len(toggles)==count+2 and toggles[-1][1]=={'on':False})
+        page.locator(active+' [data-testid="browser-url"]').click()
+        page.set_viewport_size({"width":375,"height":800})
+        assert until(lambda:speaker.is_visible() and speaker.is_enabled(),timeout=4)
+        geometry=page.locator(_pane(2)).evaluate("""e=>({
+            pane:e.getBoundingClientRect().toJSON(),
+            speaker:e.querySelector('[data-browser-page][aria-hidden="false"] [data-browser-sound]').getBoundingClientRect().toJSON(),
+            rows:[...e.querySelectorAll('[data-browser-page][aria-hidden="false"] .browser-navigation,[data-browser-page][aria-hidden="false"] .browser-sound-controls')].map(r=>({width:r.clientWidth,scroll:r.scrollWidth}))
+        })""")
+        check("BR10: primary speaker and navigation fit the 375px pane",
+              all(r["scroll"]<=r["width"]+1 for r in geometry["rows"])
+              and geometry["speaker"]["x"]>=geometry["pane"]["x"]
+              and geometry["speaker"]["right"]<=geometry["pane"]["right"]+1,str(geometry))
+        page.set_viewport_size({"width":1600,"height":1000})
+        settled_toggles=len(toggles)
         page.keyboard.press("Control+,");until(lambda:page.locator('[data-testid="settings-page"]').count()==1,timeout=4)
         page.locator('[data-testid="settings-browser"]').click()
         switch=page.locator('[data-testid="browser-sound-setting"]')
@@ -75,7 +146,7 @@ def sound_checks(browser, mock, base, check, until, guard, init_script):
         page.keyboard.press("Control+,");until(lambda:page.locator('[data-testid="settings-page"]').count()==1,timeout=4)
         switch.click();until(lambda:switch.is_checked(),timeout=4)
         page.locator('[data-testid="settings-close"]').click();until(lambda:speaker.is_enabled(),timeout=4)
-        check("BR10: master ON does not restore previous sound",speaker.get_attribute("aria-pressed")=="false" and len(toggles)==2)
+        check("BR10: master ON does not restore previous sound",speaker.get_attribute("aria-pressed")=="false" and len(toggles)==settled_toggles)
         malformed[0]=True;mock.emit("browser_sound_changed",{"generation":master["generation"]})
         until(lambda:speaker.is_disabled(),timeout=4)
         check("BR10: unknown status cannot grant sound",speaker.is_disabled())
@@ -84,6 +155,7 @@ def sound_checks(browser, mock, base, check, until, guard, init_script):
         check("BR10: source and see survive sound gestures",_ws(page)["ws"]["panes"][1]["browser"]["tabs"][0]["source"]=={"kind":"unknown"} and not _ws(page)["ws"]["panes"][1]["see"] and chat.input_value()=="sound fixture draft")
         profile=page.locator(_pane(2,'select[aria-label="Browser profile"]'))
         rows.append({"profile":"private","sound":{"requested":False,"applied":False,"generation":2,"phase":"ready","reason":None}})
+        options.click();until(lambda:panel.is_visible(),timeout=4)
         profile.select_option("private")
         until(lambda:speaker.count()==1 and "Close Private panes" in speaker.inner_text(),timeout=4)
         check("BR10: Private cannot lose its session through relaunch",speaker.is_disabled())
