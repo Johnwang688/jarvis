@@ -36,7 +36,7 @@
 // mic is OFF, the window crashed, a card is up) -- the same fail-closed rule as
 // the first attempt.
 
-import type { ClaimSource, DetectorKind, VoiceDiagnostics } from "./voiceDiagnostics";
+import type { ClaimSource, DetectorKind, DropReason, VoiceDiagnostics } from "./voiceDiagnostics";
 import { dropLeadingOverlap, dropTrailingOverlap } from "./joinChunks";
 
 export const STT_MAX_CLIPS = 20;
@@ -450,6 +450,30 @@ export class SttAssembler<M = undefined> {
     this.emit(); this.settle(id);
     this.release();
     if (g) this.settleGroup(g);
+  }
+
+  /**
+   * The message turned out not to be one (V5: too short after a chunk had already left). Everything
+   * of it is dropped -- in-flight uploads aborted, kept audio released -- and nothing is placed.
+   * Its one diagnostics row is settled as `outcome`.
+   */
+  cancelGroup(gid: number, outcome: DropReason) {
+    const g = this.groups.get(gid);
+    if (!g) return;
+    g.open = false;
+    if (g.diag) this.o.diagnostics.finish(g.diag, outcome, this.now() - g.lastAt);
+    for (const id of [...g.members]) {
+      const e = this.entries.get(id);
+      if (!e) continue;
+      e.cancelled = true; e.ac?.abort(); e.cancel?.(); clearTimeout(e.retryTimer ?? undefined);
+      this.queue = this.queue.filter(q => q.e !== e);
+      this.drop(e);
+      this.settle(id);
+    }
+    this.emit();
+    this.release();
+    this.settleGroup(g);
+    if (!g.members.some(id => this.entries.has(id))) this.groups.delete(gid);
   }
 
   /** The message's words: each ready chunk's text in order, with what an overlap repeats said once. */

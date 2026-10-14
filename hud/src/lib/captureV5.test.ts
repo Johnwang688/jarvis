@@ -14,7 +14,7 @@ import {
 import type { ClaimSource, DropReason } from "./voiceDiagnostics";
 
 function mk(state: { suppressed?: boolean; muted?: boolean } = {}) {
-  const ends: { ms: number; chunks: number; source: ClaimSource; truncated: boolean }[] = [];
+  const ends: { ms: number; chunks: number; source: ClaimSource; truncated: boolean; discard?: boolean }[] = [];
   const listens: (ClaimSource | undefined)[] = [];
   const chunks: number[] = [];
   const drops: DropReason[] = [];
@@ -24,7 +24,7 @@ function mk(state: { suppressed?: boolean; muted?: boolean } = {}) {
     onListening: (s) => listens.push(s), onIdle: () => {},
     onChunk: (c) => chunks.push(c.index),
     onDrop: (r) => drops.push(r),
-    onUtteranceEnd: (e) => ends.push({ ms: e.ms, chunks: e.chunks, source: e.source, truncated: e.truncated }),
+    onUtteranceEnd: (e) => ends.push({ ms: e.ms, chunks: e.chunks, source: e.source, truncated: e.truncated, discard: e.discard }),
   }, () => clock);
   const F = 512;
   // The stage hands the capture real 512-sample frames.
@@ -156,7 +156,8 @@ describe("the probability, not the loudness, decides", () => {
     expect(f(0.35)).toBe(true);  // at the floor, still in
     expect(f(0.34)).toBe(false);
     expect(f(0.45)).toBe(false); // and back above the off level is not enough to restart
-    expect(f(0.6)).toBe(true);
+    expect(f(0.6)).toBe(false);  // a single speech frame inside an open utterance waits for a second...
+    expect(f(0.6)).toBe(true);   // ...and then counts
   });
 
   it("a non-finite probability is judged by energy for that frame", () => {
@@ -198,6 +199,99 @@ describe("the recorder's pause cut reads the ML flag", () => {
     m.quiet(END_PAUSE_MS + 300);          // and the message ends on silence alone
     expect(m.ends).toHaveLength(1);
     expect(m.ends[0].chunks).toBe(2);     // no third chunk of nothing
+  });
+});
+
+describe("a first-gap cut never sends audio that is not a message (review MED)", () => {
+  it("energy mode: a follow-up of 600 ms at 0.008 (threshold 0.006) leaves nothing for STT and places nothing", () => {
+    const m = mk();
+    m.quiet(2000, undefined, 0.0009);
+    m.cap.openFollowUp();
+    m.cap.feedMs(600, 0.008, 512);                // opens, but never clears the 1.6x-threshold minimum
+    m.cap.feedMs(1000, 0.0009, 512);              // a long gap: the first-gap cut would have fired
+    expect(m.chunks).toEqual([]);                  // nothing left
+    m.cap.feedMs(END_PAUSE_MS, 0.0009, 512);
+    expect(m.drops).toContain("too_short");
+    expect(m.ends).toEqual([{ ms: expect.any(Number), chunks: 0, source: "follow_up", truncated: false }]);
+  });
+
+  it("if a chunk did leave and the close then says too short, the consumer is told to cancel the group, and the drop is not reported twice", () => {
+    const m = mk();
+    m.quiet(2000, undefined, 0.0009);
+    m.cap.openFollowUp();
+    m.cap.feedMs(500, 0.0098, 512);               // clears the minimum: 500 ms, 1.6 x 0.006
+    m.cap.feedMs(800, 0.0009, 512);               // first gap: chunk 0 leaves
+    expect(m.chunks).toEqual([0]);
+    m.cap.vad.peak = 0;                            // the threshold rose meanwhile: by the close it no longer clears
+    m.cap.feedMs(END_PAUSE_MS, 0.0009, 512);
+    expect(m.ends).toHaveLength(1);
+    expect(m.ends[0]).toMatchObject({ chunks: 1, truncated: false, discard: true });
+    expect(m.drops).not.toContain("too_short");   // the consumer settles the row it already opened
+    expect(m.cap.continueUntil).toBe(-1);          // and nothing continues it
+  });
+});
+
+describe("a soft onset can still be claimed within 400 ms (review LOW)", () => {
+  it("96 ms soft, then loud: claimed as a follow-up, from the utterance's own start", () => {
+    const m = mk();
+    m.quiet(2000); m.cap.openFollowUp();
+    m.talk(96, 0.95, 0.007);                      // under the 0.0084 gate
+    expect(m.listens).toEqual([]);
+    m.talk(1500, 0.95, 0.03);
+    expect(m.listens).toEqual(["follow_up"]);
+    m.quiet(END_PAUSE_MS + 300);
+    expect(m.ends).toHaveLength(1);
+    expect(m.ends[0].ms).toBeGreaterThan(1500 + 96);  // nothing of the soft start or the pre-roll lost
+  });
+
+  it("but not once the window is over: rising after 600 ms is a different thing", () => {
+    const m = mk();
+    m.quiet(2000); m.cap.openFollowUp();
+    m.talk(600, 0.95, 0.007);
+    m.talk(1500, 0.95, 0.03);
+    expect(m.listens).toEqual([]);
+    expect(m.cap.conversing()).toBe(true);        // and the follow-up window is still the owner's
+  });
+
+  it("a continuation likewise", () => {
+    const m = mk();
+    m.claimed(1500); m.quiet(END_PAUSE_MS + 300); m.quiet(1000);
+    m.talk(96, 0.95, 0.007); m.talk(1500, 0.95, 0.03);
+    expect(m.listens).toEqual(["follow_up", "continuation"]);
+  });
+});
+
+describe("a single loud frame does not extend the pause (ML mode)", () => {
+  it("one spike frame in the gap does not reset the quiet run; two do", () => {
+    const v = new Vad();
+    const n = 512;
+    for (let i = 0; i < 20; i++) v.feed(0.03, n, i * n, 0.95);       // speech: opens
+    expect(v.open).toBe(true);
+    for (let i = 0; i < 10; i++) v.feed(0.0009, n, 0, 0.02);
+    const before = v.quiet;
+    v.feed(0.2, n, 0, 0.95);                                          // a click the model liked
+    expect(v.quiet).toBe(before + n);                                 // counted as quiet
+    expect(v.loud).toBe(false);
+    for (let i = 0; i < 5; i++) v.feed(0.0009, n, 0, 0.02);
+    expect(v.quiet).toBe(before + 6 * n);
+    v.feed(0.03, n, 0, 0.95); v.feed(0.03, n, 0, 0.95);               // real speech resuming: second frame resets
+    expect(v.quiet).toBe(0);
+  });
+
+  it("through the capture: the message ends 2.5 s after the last real word, a spike at 2 s notwithstanding", () => {
+    const m = mk();
+    m.claimed(1500);
+    m.quiet(2000);
+    m.talk(32, 0.95, 0.2);                         // one frame
+    m.quiet(600);                                  // 2.6 s after the speech
+    expect(m.ends).toHaveLength(1);
+  });
+
+  it("the open-utterance rule leaves onset detection alone: two frames still open one", () => {
+    const m = mk();
+    m.quiet(1500); m.cap.openFollowUp();
+    m.talk(64, 0.95, 0.03);
+    expect(m.listens).toEqual(["follow_up"]);
   });
 });
 

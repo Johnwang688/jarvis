@@ -824,6 +824,8 @@ export default function App() {
       // The message only keeps its continuation window if it goes out.
       const refuse = () => capture.cancelContinuation(end.continuation);
       if (!u || u.gid === null) { refuse(); finish(); return; }
+      // Not a message after all (V5): a chunk left, then it proved too short. Nothing is placed.
+      if (end.discard) { stt.cancelGroup(u.gid, "too_short"); refuse(); finish(); return; }
       u.meta.continuation = end.continuation;
       stt.closeGroup(u.gid);
       // Resolve only when the message's fate is known (placed or sent, empty,
@@ -2885,6 +2887,7 @@ export default function App() {
         // The frames go through the VAD stage (V5): Silero scores each in a worker and
         // the stage hands it on, in order, to the capture; until the worker is ready,
         // or if it cannot run, the capture judges by energy and the diagnostics say so.
+        if (gone) { stream.getTracks().forEach((t) => t.stop()); return; }
         vadRun = vadStage.start();
         input = await startMicInput({ stream, onFrame: (frame) => vadStage.push(frame), workletUrl: micWorkletUrl });
         if (gone) { input.stop(); vadStage.stop(vadRun); return; }

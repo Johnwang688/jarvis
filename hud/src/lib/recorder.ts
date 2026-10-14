@@ -74,6 +74,12 @@ export class UtteranceRecorder {
   private total = 0;           // unique samples recorded (overlap counted once)
   private startedAt = 0;       // unique samples before the current chunk's first new sample
   private done = false;
+  /**
+   * Set by the caller before each frame: the audio so far is a message, not a click (the detector's
+   * `longEnough`). The first chunk is cut at a pause only while it is true; an energy-mode onset that
+   * has not cleared the minimum must not reach transcription.
+   */
+  cutOk = true;
 
   constructor(readonly id: number, private onChunk: (chunk: RecordedChunk) => void) {}
 
@@ -105,7 +111,7 @@ export class UtteranceRecorder {
     const ms = samplesToMs(this.len);
     if (ms >= CHUNK_HARD_MS) this.cut(true);
     else if (ms >= CHUNK_SOFT_MS && this.quiet >= msToSamples(ms >= CHUNK_LATE_MS ? CHUNK_LATE_GAP_MS : CHUNK_GAP_MS)) this.cut(false);
-    else if (this.index === 0 && this.heard >= msToSamples(FIRST_CUT_SPEECH_MS) && this.quiet >= msToSamples(CHUNK_GAP_MS)) this.cut(false);
+    else if (this.index === 0 && this.cutOk && this.heard >= msToSamples(FIRST_CUT_SPEECH_MS) && this.quiet >= msToSamples(CHUNK_GAP_MS)) this.cut(false);
     return this.total >= msToSamples(UTTERANCE_LIMIT_MS);
   }
 

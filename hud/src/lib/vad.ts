@@ -35,6 +35,8 @@ export const SPEECH_OFF_P = 0.35;
 // gate: the utterance's onset must have peaked this many times above the energy threshold.
 // Wake and push-to-talk are not gated (the owner said his name or held the key).
 export const WEAK_CLAIM_GATE = 1.4;
+/** ...within this long after the utterance opened: a soft start that then rises is still claimed. */
+export const WEAK_CLAIM_WINDOW_MS = 400;
 export const MIN_UTTER_MS = 350; // shorter is a cough, not a turn
 // V4: a hard stop for an utterance nobody claimed (room speech that never pauses).
 // A claimed one is uncapped: the recorder cuts it into chunks (recorder.ts).
@@ -110,6 +112,8 @@ export class Vad {
   ml = false;
   /** The ML VAD's last probability (0 until it has spoken). */
   prob = 0;
+  /** The last frame was speech by the model, before the isolated-spike rule below. */
+  private prevRaw = false;
   /** The loudest frame of the current loud run (what an opening utterance starts its peak from). */
   private runPeak = 0;
   /** Hysteresis state for the ML path: inside speech until the probability falls below SPEECH_OFF_P. */
@@ -131,6 +135,7 @@ export class Vad {
     this.prob = 0;
     this.speech = false;
     this.runPeak = 0;
+    this.prevRaw = false;
   }
 
   /**
@@ -166,6 +171,12 @@ export class Vad {
       this.speech = false;
       loud = rms > this.thresh;
     }
+    // In an open utterance, one speech frame on its own (a click, a cough, a TV's burst) does
+    // not reset the pause: the model's ML path needs a second frame in a row before quiet
+    // starts counting from zero again. (Energy frames keep their old behaviour.)
+    const raw = loud;
+    if (this.ml && this.open && raw && !this.prevRaw) loud = false;
+    this.prevRaw = raw;
     this.loud = loud;
     if (loud) {
       this.run += n;

@@ -1701,6 +1701,9 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   run that opened the utterance). Wake and push-to-talk are not gated; the energy detector's claims
   are untouched. A refused onset is an `unclaimed` drop and the follow-up window stays open. It is a
   narrow gate: a TV above that level still claims; speaker verification (V12) is the real answer.
+  The gate is looked at again on every frame for `WEAK_CLAIM_WINDOW_MS` = 400 ms after the utterance
+  opened: a soft start that then rises is claimed, from the utterance's own start (the ring still holds
+  it), so nothing is lost; a rise after the window is not.
 - **First chunk at the first gap (plan §3.2's segment gap, the lead's decision).** The recorder
   cuts the first chunk at the first quiet run of `CHUNK_GAP_MS` (700 ms) once `FIRST_CUT_SPEECH_MS` =
   350 ms of speech has been heard (the pre-roll does not count), whatever its length, so the opening of
@@ -1708,6 +1711,17 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   rule (open segment at least 8 s, then a 700 ms gap; 300 ms past 18 s; hard at 25 s). A final chunk
   with no speech in it is never uploaded. Consequence: a message with a pause after its first
   sentence is now two uploads (one message, one row, placed together).
+  The first cut is allowed only while `longEnough` holds (`recorder.cutOk`, set by the capture before
+  each frame): in energy mode an onset that has not cleared the minimum (350 ms of speech, peak 1.6 x
+  the threshold) never reaches transcription. Should a chunk ever have left and the close still say
+  `too_short`, the end carries `discard: true`; App calls `stt.cancelGroup(gid, "too_short")` (in-flight
+  uploads aborted, audio released, nothing placed, the group's one row settled as `too_short`) and
+  the capture does not report the drop a second time.
+- **One speech frame does not extend the pause.** In ML mode, inside an open utterance a speech
+  frame that is not preceded by another (a click, a cough, a TV burst) counts as quiet: the quiet run
+  resets only when a second frame in a row is speech. Onset detection (60 ms) is unchanged. (Found in
+  review as the likely cause of an intermittent "speech 7 s after the message ended is not claimed"
+  browser failure, which has not recurred.)
 - **Free checks.** `lib/listen/{sha256,pins,runner,stage}.test.ts` (checksum vectors against node's
   on every length around the block boundaries; the vendored file, manifest, licences, `models.json`
   and `pins.ts` agree; the Silero loop with a fake runtime; the stage with a fake worker: ordering,
@@ -1733,7 +1747,7 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   late one; Try again restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its
   "speech" is two oscillators, which Silero rightly does not call speech) by failing the model fetch
   for its contexts.
-- **Counts.** vitest 2410 tests / 151 files (2315 / 145 on V4 after V8), `tsc` and `vite build`
+- **Counts.** vitest 2420 tests / 151 files (2315 / 145 on V4 after V8), `tsc` and `vite build`
   clean. (`markdownMath.test.ts` has a 5 s wall budget that trips on a loaded machine and passes
   alone.) Browser checks on the built `hud/dist` with `JARVIS_HUD_DEV=1` and the full Chromium:
   `hud_v2_vad_check` 96, `chunks` 58, `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17,
@@ -1742,7 +1756,7 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   `hud_v2_check` was not run here.
 - **Mutations that fail on purpose** (source restored afterwards): no queue bound; the checksum not
   compared (also the browser fallback check); the message pause back to 1.5 s; the probability
-  ignored; stalls counted as worker time; no weak gate; no first-gap cut; no automatic retry.
+  ignored; stalls counted as worker time; no weak gate; no first-gap cut; no automatic retry; the first cut ignoring `cutOk`; no late claim; the spike rule off; the discard flag dropped.
 - **Not done / not claimed.** Windows Chrome and a physical microphone: unmeasured (CPU of the
   worker there is V0's headless-Linux 3.4% of a core, not re-measured; V0's 28-39 ms slow first frame is
   expected to fall in the worker's warm-up before `ready`, not measured separately). A real person's voice, a room, a TV, real

@@ -28,7 +28,7 @@
 
 import {
   CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, END_PAUSE_MAX_MS, END_PAUSE_MIN_MS, END_PAUSE_MS, FOLLOWUP_MS,
-  MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS, WEAK_CLAIM_GATE,
+  MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS, WEAK_CLAIM_GATE, WEAK_CLAIM_WINDOW_MS,
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs,
 } from "./vad";
 import { UtteranceRecorder, type RecordedChunk } from "./recorder";
@@ -54,6 +54,11 @@ export interface UtteranceEnd {
   continuation: number | null;
   /** It ended before the owner finished: the mic went OFF, a card or picker appeared, the window crashed. */
   truncated: boolean;
+  /**
+   * It turned out not to be a message (too short, a cough) after a chunk had already left: the
+   * consumer must cancel that chunk's group and place nothing. The drop is the consumer's to report.
+   */
+  discard?: boolean;
 }
 
 export interface CaptureHooks {
@@ -238,10 +243,11 @@ export class Capture {
     return id;
   }
 
-  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean) {
+  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean, discard = false) {
     try {
       this.hooks.onUtteranceEnd({
         utterance: rec.id, source: this.claimSource, ms: summary.ms, chunks: summary.chunks, continuation, truncated,
+        ...(discard ? { discard: true } : {}),
       });
     } catch { /* ditto */ }
   }
@@ -251,12 +257,12 @@ export class Capture {
    * card appeared, the window crashed, or the speech was too short to be a
    * turn. Chunks that already left stay out (they were captured while allowed).
    */
-  private stopRecording(truncated: boolean): { chunks: number; droppedMs: number } | null {
+  private stopRecording(truncated: boolean, discard = false): { chunks: number; droppedMs: number } | null {
     const rec = this.rec;
     if (!rec) return null;
     this.rec = null;
     const summary = rec.abort();
-    this.announceEnd(rec, summary, null, truncated);
+    this.announceEnd(rec, summary, null, truncated, discard);
     return summary;
   }
 
@@ -345,15 +351,22 @@ export class Capture {
       }
       const had = this.rec;
       this.vad.feed(rms, frame.length, this.ring.written, prob);
-      if (had && this.rec === had && had.push(frame, this.vad.loud)) this.hitLimit();
+      if (had && this.rec === had && this.pushFrame(had, frame)) this.hitLimit();
       return;
     }
     const had = this.rec;
     const event = this.vad.feed(rms, frame.length, this.ring.written, prob);
     // A recording that began before this frame takes it; one that begins on
     // this frame (the "open" event below) already has it, from the ring.
-    if (had && this.rec === had && had.push(frame, this.vad.loud)) { this.hitLimit(); return; }
+    if (had && this.rec === had && this.pushFrame(had, frame)) { this.hitLimit(); return; }
     if (event) this.onVadEvent(event);
+    else this.lateClaim();
+  }
+
+  /** One frame into the recording, telling it whether what it holds is a message yet (its first-gap cut asks). */
+  private pushFrame(rec: UtteranceRecorder, frame: Float32Array): boolean {
+    rec.cutOk = longEnough(this.vad);
+    return rec.push(frame, this.vad.loud);
   }
 
   private truncate(reason: DropReason) {
@@ -374,24 +387,8 @@ export class Capture {
     if (event === "open") {
       // The detector that opened it is the one that judged it.
       this.judgedBy = this.vad.ml ? "silero" : "energy";
-      // V5 stopgap (until V12): with the ML VAD, a follow-up or continuation claim needs the
-      // onset to have risen WEAK_CLAIM_GATE x above the energy threshold, so steady room
-      // speech (a TV) that the model calls speech does not claim without the wake word.
-      const weak = this.vad.ml && this.vad.peak < this.vad.thresh * WEAK_CLAIM_GATE;
-      const continuing = this.continuing() && !weak;
-      const following = this.conversing() && !weak;
-      const woken = this.now() - this.wakeHitAt < WAKE_GRACE_MS;
-      this.claimSource = following ? "follow_up" : woken ? "wake" : continuing ? "continuation" : "unclaimed";
-      this.segClaimed = following || woken || continuing;
-      if (this.claimSource === "continuation") this.chainClaims++;
-      if (this.segClaimed) {
-        // Saying his name claims exactly one utterance.
-        this.wakeHitAt = -1e9;
-        const tag = this.claimSource === "follow_up" ? this.followUpTag : null;
-        this.closeFollowUp();
-        const id = this.beginRecording(this.vad.openedAt);
-        this.hooks.onListening(this.claimSource, tag, id);
-      }
+      this.gateUntil = this.ring.written + msToSamples(WEAK_CLAIM_WINDOW_MS);
+      this.tryClaim();
       return;
     }
     const { to } = closeBounds(this.vad, this.ring.written, event);
@@ -399,9 +396,12 @@ export class Capture {
     this.segClaimed = false;
     if (!claimed) { this.drop("unclaimed", samplesToMs(this.vad.voiced)); return; }
     if (!longEnough(this.vad)) {
-      this.drop("too_short", samplesToMs(this.vad.voiced));
+      // (The first chunk is only cut early once the audio is long enough, so a chunk having left
+      // already is rare; if it did, the consumer cancels its group and reports the drop itself.)
+      const left = this.rec?.chunks ?? 0;
+      if (left === 0) this.drop("too_short", samplesToMs(this.vad.voiced));
       this.vad.voiced = 0;
-      this.stopRecording(false);
+      this.stopRecording(false, left > 0);
       // He was addressed; give the owner the window back -- but only if a wake
       // word or the follow-up window did the addressing. A too-short
       // continuation (a cough, a TV's click) just drops: reopening follow-up
@@ -412,6 +412,42 @@ export class Capture {
     }
     // The utterance ended a hangover ago: drop the silence that proved it.
     this.finishRecording(Math.max(0, this.ring.written - to));
+  }
+
+  /** Until when (ring clock) an unclaimed open utterance may still pass the weak gate. */
+  private gateUntil = -1;
+
+  /**
+   * Decide whether the utterance that just opened is claimed. V5 stopgap (until V12): with the ML
+   * VAD a follow-up or continuation claim needs the onset to have risen WEAK_CLAIM_GATE x above the
+   * energy threshold, so steady room speech the model calls speech does not claim without the wake
+   * word. A soft onset is not condemned for good: the gate is looked at again on each frame for the
+   * first WEAK_CLAIM_WINDOW_MS (`lateClaim`), and the recording starts at the utterance's own start,
+   * which the ring still holds.
+   */
+  private tryClaim() {
+    const weak = this.vad.ml && this.vad.peak < this.vad.thresh * WEAK_CLAIM_GATE;
+    const continuing = this.continuing() && !weak;
+    const following = this.conversing() && !weak;
+    const woken = this.now() - this.wakeHitAt < WAKE_GRACE_MS;
+    this.claimSource = following ? "follow_up" : woken ? "wake" : continuing ? "continuation" : "unclaimed";
+    this.segClaimed = following || woken || continuing;
+    if (this.claimSource === "continuation") this.chainClaims++;
+    if (this.segClaimed) {
+      // Saying his name claims exactly one utterance.
+      this.wakeHitAt = -1e9;
+      const tag = this.claimSource === "follow_up" ? this.followUpTag : null;
+      this.closeFollowUp();
+      const id = this.beginRecording(this.vad.openedAt);
+      this.hooks.onListening(this.claimSource, tag, id);
+    }
+  }
+
+  /** An open, unclaimed ML utterance whose onset was too soft: claim it if it has risen since, within the window. */
+  private lateClaim() {
+    if (!this.vad.open || this.segClaimed || this.ptt || !this.vad.ml || this.ring.written > this.gateUntil) return;
+    if (this.vad.peak < this.vad.thresh * WEAK_CLAIM_GATE) return;
+    this.tryClaim();
   }
 
   // ---- wake ---------------------------------------------------------------
