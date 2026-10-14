@@ -15,6 +15,9 @@ export const HANGOVER_MS = 1500; // silence this long closes one
 export const MIN_UTTER_MS = 350; // shorter is a cough, not a turn
 export const MAX_UTTER_MS = 30000; // a hard stop, never a normal ending
 export const FOLLOWUP_MS = 9000; // speak again after he answers, no wake word
+// V3: speech resuming this soon after a message ended continues it, no wake
+// word (plan §3.2). Counted in samples, like everything the detector decides.
+export const CONTINUE_MS = 6000;
 export const WAKE_GRACE_MS = 1200; // recognizer lag: a wake hit claims a slightly older utterance
 
 // How fast the floor chases the room, in seconds rather than in frames. Frames

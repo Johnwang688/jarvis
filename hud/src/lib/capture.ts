@@ -8,11 +8,13 @@
 //
 // Four rules the design turns on, each of which was a bug first:
 //   - an utterance is only sent if it was addressed to him (the orb was held,
-//     a wake phrase was heard around it, or it landed in the follow-up window);
+//     a wake phrase was heard around it, it landed in the follow-up window, or
+//     it resumed within the continuation window of a message just sent);
 //     continuous capture without that gate is a hot mic;
 //   - a wake phrase claims exactly one utterance;
-//   - he does not answer himself — the detector is suppressed while he speaks,
-//     thinks, or holds an authorization card, but it still *tracks the room*
+//   - he does not answer himself — the detector is suppressed while he speaks
+//     or holds an authorization card (a running turn no longer silences it: V3),
+//     but it still *tracks the room*
 //     so the threshold is current the moment the follow-up window opens;
 //   - the minimum length is measured on the speech, not on the padded segment.
 //
@@ -22,7 +24,7 @@
 // pre-roll or as a wake hit's back-dating.
 
 import {
-  CAP_RATE, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
+  CAP_RATE, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs, wavBlob,
 } from "./vad";
 
@@ -36,7 +38,11 @@ export interface CaptureHooks {
   /** OFF: nothing is claimed and nothing is uploaded. */
   muted: () => boolean;
   onLevel: (level: number) => void;
-  onListening: () => void;
+  /**
+   * A claimed utterance began. `tag` is what the follow-up window was opened
+   * for (V3: the pane whose reply opened it), when `source` is "follow_up".
+   */
+  onListening: (source?: ClaimSource, tag?: number | null) => void;
   onIdle: (note?: string) => void;
   /** A finished, claimed utterance. The dictation mode decides what happens next. */
   onUtterance: (wav: Blob, ms: number, source?: ClaimSource) => void;
@@ -46,6 +52,14 @@ export class Capture {
   ring = new Ring();
   vad = new Vad();
   followUpUntil = 0;
+  /** Opaque: what the follow-up window was opened for (a pane), handed back on a claim. */
+  followUpTag: number | null = null;
+  /**
+   * The continuation window, on the ring's sample clock (-1: closed). Opened
+   * when a claimed message goes out; speech whose onset falls before it is
+   * claimed as that message's continuation (V3, plan §3.2).
+   */
+  continueUntil = -1;
   wakeHitAt = -1e9;
   segClaimed = false;
   ptt: { from: number } | null = null;
@@ -84,8 +98,9 @@ export class Capture {
   }
 
   /** Opened when he stops speaking: the next utterance is simply the next turn. */
-  openFollowUp() {
+  openFollowUp(tag: number | null = null) {
     if (this.hooks.muted()) return; // a muted mic must not promise "just speak"
+    this.followUpTag = tag;
     this.followUpUntil = this.now() + FOLLOWUP_MS;
     clearTimeout(this.followUpTimer);
     this.followUpTimer = setTimeout(() => {
@@ -95,7 +110,17 @@ export class Capture {
 
   closeFollowUp() {
     this.followUpUntil = 0;
+    this.followUpTag = null;
     clearTimeout(this.followUpTimer);
+  }
+
+  /** Speech beginning now would continue the message just sent. */
+  continuing() {
+    return this.continueUntil >= 0 && this.ring.written - this.vad.run <= this.continueUntil;
+  }
+
+  closeContinuation() {
+    this.continueUntil = -1;
   }
 
   /**
@@ -112,11 +137,13 @@ export class Capture {
     this.segClaimed = false;
     this.wakeHitAt = -1e9;
     this.closeFollowUp();
+    this.closeContinuation();
   }
 
   /** Called when the mic unmutes: everything before this point stays local. */
   markUnmute() {
     this.micFloorSample = this.ring.written;
+    this.closeContinuation();
   }
 
   onFrame(frame: Float32Array) {
@@ -127,6 +154,10 @@ export class Capture {
     // is listening", which is exactly the wrong promise.
     this.hooks.onLevel(muted ? 0 : Math.min(1, rms * 4));
     const suppressed = this.hooks.suppressed();
+    // Anything that stops the detector listening ends the message it would
+    // have continued: words after a card, a picker or his own voice are a new
+    // thought, and need the wake word again.
+    if (muted || suppressed) this.closeContinuation();
     const reason: DropReason | null = muted ? "muted" : suppressed ? `suppressed:${this.hooks.suppressionReason?.() ?? "speaking"}` : null;
     if (reason && !this.wasBlocked && this.vad.open && !this.ptt && !this.blockedAlreadyReported) {
       this.drop(reason, samplesToMs(this.vad.voiced));
@@ -152,13 +183,16 @@ export class Capture {
 
   private onVadEvent(event: "open" | "close" | "cap") {
     if (event === "open") {
-      this.claimSource = this.ptt ? "ptt" : this.conversing() ? "follow_up" : this.now() - this.wakeHitAt < WAKE_GRACE_MS ? "wake" : "unclaimed";
-      this.segClaimed = this.conversing() || this.now() - this.wakeHitAt < WAKE_GRACE_MS;
+      const continuing = this.continuing();
+      this.claimSource = this.ptt ? "ptt" : this.conversing() ? "follow_up" : this.now() - this.wakeHitAt < WAKE_GRACE_MS ? "wake"
+        : continuing ? "continuation" : "unclaimed";
+      this.segClaimed = this.conversing() || this.now() - this.wakeHitAt < WAKE_GRACE_MS || continuing;
       if (this.segClaimed) {
         // Saying his name claims exactly one utterance.
         this.wakeHitAt = -1e9;
+        const tag = this.claimSource === "follow_up" ? this.followUpTag : null;
         this.closeFollowUp();
-        this.hooks.onListening();
+        this.hooks.onListening(this.claimSource, tag);
       }
       return;
     }
@@ -182,6 +216,10 @@ export class Capture {
     this.vad.voiced = 0;
     if (!samples.length) { this.drop("too_short", 0); return; }
     this.hooks.onUtterance(wavBlob(samples, CAP_RATE), samplesToMs(samples.length), this.claimSource);
+    // The message ended here. Whatever follows soon enough continues it --
+    // except after push-to-talk, whose release is the owner's own full stop:
+    // the next words need the key (or his name) again.
+    if (this.claimSource !== "ptt") this.continueUntil = this.ring.written + msToSamples(CONTINUE_MS);
   }
 
   // ---- wake ---------------------------------------------------------------
@@ -204,7 +242,7 @@ export class Capture {
         this.ring.written - msToSamples(WAKE_GRACE_MS + PREROLL_MS),
       );
       this.closeFollowUp();
-      this.hooks.onListening();
+      this.hooks.onListening("wake", null);
       return "claimed";
     }
     return "armed";
@@ -213,12 +251,13 @@ export class Capture {
   // ---- push to talk -------------------------------------------------------
 
   press() {
-    if (this.hooks.muted()) return false; // muting takes away recording, not the interrupt
+    if (this.hooks.muted()) return false; // muting takes away recording
     if (this.ptt) return false;
     this.claimSource = "ptt";
     this.ptt = { from: Math.max(0, this.ring.written - msToSamples(PREROLL_MS)) };
     this.closeFollowUp();
-    this.hooks.onListening();
+    this.closeContinuation();
+    this.hooks.onListening("ptt", null);
     return true;
   }
 

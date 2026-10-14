@@ -25,7 +25,7 @@ import { CaptureDrafts } from "./lib/captureDraft";
 import type { CaptureDestination } from "./components/BrowserCapture";
 import { api, subscribe } from "./api";
 import {
-  useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
+  useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState, turnOrb,
   type ChatPatch, type State,
 } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
@@ -109,7 +109,7 @@ import {
 } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
-  ORPHAN_DRAFT, besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane,
+  LISTENING_STATUS, ORPHAN_DRAFT, besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane,
   heldElsewhere,
   isEmptyChat, nonePerPane, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
@@ -549,24 +549,37 @@ export default function App() {
     const at = live.current;
     if (at.orb === "speaking") return "speaking";
     if (at.selectedChat === null) return "no_chat";
-    if (at.chats[at.selectedChat].busy) return "busy";
     if (at.approvals.length) return "card";
     if (at.picker !== null || chipOverlay.current) return "picker";
     if (settingsNow.current) return "settings";
     if (crashedRef.current) return "crash";
     return null;
   };
+  // V3: listening on a chat that is running a turn borrows its orb and status
+  // line; they come back when the capture ends (`endListening`).
+  const listenWas = useRef<{ pane: PaneNo; status: string } | null>(null);
+  // The selected chat when a follow-up window opened (Q5): a different one now
+  // means the owner has chosen since, and the window no longer picks the pane.
+  const followBase = useRef<PaneNo | null>(null);
+  const endListening = () => {
+    const was = listenWas.current;
+    listenWas.current = null;
+    if (!was) return;
+    const at = live.current;
+    const c = at.chats[was.pane];
+    if (!c.busy) return; // the turn finished meanwhile and set the pane itself
+    chatPatch(was.pane, { orb: turnOrb(at, c), status: c.status === LISTENING_STATUS ? was.status : c.status });
+  };
   const capture = useMemo(
     () =>
       new Capture({
         // He does not answer himself, and never talks over a pending
-        // authorization or an open picker. Only the selected chat's turn
-        // suppresses the mic — a long turn in another pane must not silence
-        // it — and with no chat on screen there is nobody to talk to.
+        // authorization or an open picker; with no chat on screen there is
+        // nobody to talk to. A running turn no longer silences the mic (V3,
+        // decision V-10): what is said to a busy chat steers it.
         suppressed: () =>
           live.current.orb === "speaking" ||
           live.current.selectedChat === null ||
-          live.current.chats[live.current.selectedChat].busy ||
           live.current.approvals.length > 0 ||
           live.current.picker !== null ||
           chipOverlay.current || settingsNow.current ||
@@ -575,12 +588,26 @@ export default function App() {
         onDrop: (reason, ms, source) => { voiceDiagnostics.add(ms, source, reason); },
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
-        onListening: () => {
-          const n = live.current.selectedChat;
-          if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "listening", status: "LISTENING · SPEAK NOW" } });
+        onListening: (source, tag) => {
+          const at = live.current;
+          let n = at.selectedChat;
+          // Q5: a follow-up opened by a drawn pane's reply belongs to that
+          // pane, unless the owner chose another chat since (their click is
+          // newer than the reply).
+          if (source === "follow_up" && typeof tag === "number" && tag !== n && n === followBase.current
+              && chatsOnScreen().includes(tag as PaneNo)) {
+            layoutNow.current.focus(tag as PaneNo);
+            dispatch({ type: "select", pane: tag as PaneNo, front: true });
+            n = tag as PaneNo;
+          }
+          if (n === null) return;
+          // A turn's own orb and status come back when the listening is over.
+          if (at.chats[n].busy && !listenWas.current) listenWas.current = { pane: n, status: at.chats[n].status };
+          dispatch({ type: "chat", pane: n, patch: { orb: "listening", status: LISTENING_STATUS } });
         },
         onIdle: (note) => {
           const n = live.current.selectedChat;
+          if (n !== null && live.current.chats[n].busy) { endListening(); return; }
           if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "idle", status: note || "" } });
           else dispatch({ type: "patch", patch: { orb: "idle" } });
         },
@@ -589,6 +616,24 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
+
+  /**
+   * The follow-up window belongs to the pane whose reply opened it (Q5): a
+   * pane the owner can see, the selected chat or another drawn one. A pane
+   * that is not drawn opens none (hidden panes are silent and do not listen).
+   * Today only the selected chat's turn ending calls this; a drawn pane's
+   * *spoken* reply will (V7), when panes are read aloud.
+   */
+  const openFollowUpFor = useCallback((pane: PaneNo) => {
+    if (pane !== live.current.selectedChat && !chatsOnScreen().includes(pane)) return;
+    followBase.current = live.current.selectedChat;
+    capture.openFollowUp(pane);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capture]);
+
+  // A message continues only in the chat it went to: choosing another chat
+  // ends the continuation window (the click is the owner's newer intent).
+  useEffect(() => { capture.closeContinuation(); }, [state.selectedChat, capture]);
 
   // Words spoken while no chat pane was on screen: they wait, unsent, for the
   // next chat selected (decisions W-6: ambiguous input goes to the selected
@@ -645,6 +690,7 @@ export default function App() {
       // guessed: take it from the WAV itself if the caller did not say.
       if (!Number.isFinite(ms) || ms <= 0) ms = Math.max(0, ((wav.size - 44) / 2 / CAP_RATE) * 1000);
       // A crashed window uploads nothing, and sends nothing, for anyone.
+      endListening();
       if (crashedRef.current) { voiceDiagnostics.add(ms, source, "suppressed:crash"); return; }
       const mode = live.current.dictation;
       // OFF never reaches here (Capture refuses to claim while muted), but the
@@ -664,8 +710,9 @@ export default function App() {
 
   // A batch of transcripts, in the order they were spoken. REVIEW never sends
   // on its own; AUTO sends only when nothing moved since the words were said
-  // (see `placementFor`): a late or retried transcript, a different or busy
-  // chat, or a waiting card all put the words in the box instead.
+  // (see `placementFor`): a late or retried transcript, a different chat, a
+  // busy chat whose turn is not its own thread's, or a waiting card all put
+  // the words in the box instead. A busy chat's own turn is steered (V3).
   const placeTranscripts = useCallback(
     async (batch: SttPlaced<SttCapture>[]) => {
       const done = (outcome: "suppressed:crash" | "unplaced" | "review" | "handed_to_chat", items = batch) =>
@@ -689,7 +736,11 @@ export default function App() {
         return;
       }
       const chat = at.chats[n];
-      const landing = { mode: at.dictation, chat: draftKey(chat, n), busy: chat.busy, card: at.approvals.length > 0 };
+      const landing = {
+        mode: at.dictation, chat: draftKey(chat, n), busy: chat.busy, card: at.approvals.length > 0,
+        // `send` steers exactly when the running turn is this thread's own.
+        steers: chat.busy && !!chat.threadId && chat.turnThreadId === chat.threadId,
+      };
       // One spoken order: if any item must wait in the box, they all do.
       const sends = batch.every((i) => placementFor(i.meta, landing, i) === "send");
       if (!sends) {
@@ -1220,7 +1271,7 @@ export default function App() {
           // Only the selected chat's own turn opens the follow-up window. A
           // Discord turn, or a turn in another pane, finishing must not start
           // the HUD listening.
-          if (followUp) capture.openFollowUp();
+          if (followUp) openFollowUpFor(at.selectedChat!);
           break;
         }
         case "error":
@@ -2539,17 +2590,14 @@ export default function App() {
       dispatch({ type: "patch", patch: { error: "No chat is open to talk to: open a chat first." } });
       return;
     }
-    // The interrupt half comes first: muting yourself must not take away the
-    // orb as the way to shut him up. It interrupts the selected chat's turn —
-    // a turn running in another pane keeps running, and keeps its Stop.
-    const chat = live.current.chats[pane];
-    if (chat.busy && chat.turnThreadId) interruptTurn(chat.turnThreadId);
+    // Push-to-talk no longer interrupts (V3, decision V-10): what is said to a
+    // chat running a turn steers it, as typing does, and Stop is the interrupt.
     if (isMuted(live.current.dictation)) {
       chatPatch(pane, { status: "MIC MUTED" });
       return;
     }
     capture.press();
-  }, [capture, chatPatch, dispatch, interruptTurn]);
+  }, [capture, chatPatch, dispatch]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -2762,6 +2810,7 @@ export default function App() {
   useEffect(() => {
     (window as any).__hud = {
       capture,
+      followUpFor: (pane: PaneNo) => openFollowUpFor(pane),
       voiceDiagnostics: () => voiceDiagnostics.snapshot(),
       mic: {
         feedMs: (ms: number, amp: number, frame?: number) => capture.feedMs(ms, amp, frame),

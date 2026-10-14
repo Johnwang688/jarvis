@@ -300,21 +300,31 @@ export interface SttLanding {
   chat: string | null;
   /** The selected chat is running a turn. */
   busy: boolean;
+  /**
+   * The running turn is this chat's own thread's, so a send is taken by it as
+   * a steer (V3). A busy chat whose turn is something else -- a first send
+   * still opening its thread, a turn tracked from another thread -- would
+   * start a new turn instead, and that is not something to do unseen.
+   */
+  steers: boolean;
   /** An authorization card is waiting. */
   card: boolean;
 }
 
 /**
  * AUTO sends a transcript on its own only when nothing has moved since the
- * words were said: it was AUTO then and still is, the same chat is selected
- * and idle, no card is up, and it is neither a late text nor the product of
- * the owner's Retry. Anything else puts the words in the box, unsent: a late
- * or retried transcript must never become a message, to a chat or into a
- * running turn, that the owner no longer expects.
+ * words were said: it was AUTO then and still is, the same chat is still
+ * selected, no card is up, and it is neither a late text nor the product of
+ * the owner's Retry. A chat running a turn is no obstacle (V3, decision V-10):
+ * the words steer that turn, as typed words do, provided the turn really is
+ * that chat's own (`steers`). Anything else puts the words in the box, unsent:
+ * a late or retried transcript must never become a message, to a chat or into
+ * a running turn, that the owner no longer expects, and a card is answered by
+ * hand, never by what the microphone heard.
  */
 export function placementFor(captured: SttCapture, landing: SttLanding, item: { late: boolean; retried: boolean }): "send" | "review" {
   const same = captured.chat !== null && captured.chat === landing.chat;
-  return captured.mode === "auto" && landing.mode === "auto" && same && !landing.busy && !landing.card
+  return captured.mode === "auto" && landing.mode === "auto" && same && (!landing.busy || landing.steers) && !landing.card
     && !item.late && !item.retried ? "send" : "review";
 }
 

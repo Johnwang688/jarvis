@@ -2,24 +2,26 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { Capture } from "./capture";
-import { HANGOVER_MS, PREROLL_MS, WAKE_GRACE_MS, samplesToMs } from "./vad";
+import { CONTINUE_MS, HANGOVER_MS, PREROLL_MS, WAKE_GRACE_MS, samplesToMs } from "./vad";
+import type { ClaimSource } from "./voiceDiagnostics";
 
 function mk(opts: { muted?: () => boolean; suppressed?: () => boolean } = {}) {
-  const sent: { ms: number }[] = [];
+  const sent: { ms: number; source?: ClaimSource }[] = [];
   const notes: string[] = [];
+  const listens: { source?: ClaimSource; tag?: number | null }[] = [];
   let clock = 10_000;
   const cap = new Capture(
     {
       suppressed: opts.suppressed || (() => false),
       muted: opts.muted || (() => false),
       onLevel: () => {},
-      onListening: () => notes.push("listening"),
+      onListening: (source, tag) => { notes.push("listening"); listens.push({ source, tag }); },
       onIdle: (n) => notes.push(n || "idle"),
-      onUtterance: (_wav, ms) => sent.push({ ms }),
+      onUtterance: (_wav, ms, source) => sent.push({ ms, source }),
     },
     () => clock,
   );
-  return { cap, sent, notes, tick: (ms: number) => (clock += ms) };
+  return { cap, sent, notes, listens, tick: (ms: number) => (clock += ms) };
 }
 
 const QUIET = 0.0009;
@@ -83,7 +85,11 @@ describe("a wake phrase claims exactly one utterance", () => {
     cap.feedMs(900, SPEECH);
     cap.feedMs(HANGOVER_MS + 300, QUIET);
     expect(sent).toHaveLength(1);
-    // An aside to someone else, straight afterwards, is not a second turn.
+    // V3 changed this deliberately: speech straight afterwards is now the
+    // message's continuation (CONTINUE_MS, plan §3.2) -- that is the feature.
+    // The hit itself still claims one utterance: once the window has lapsed,
+    // an aside to someone else is not a second turn.
+    cap.feedMs(CONTINUE_MS + 1000, QUIET);
     cap.feedMs(1200, SPEECH);
     cap.feedMs(HANGOVER_MS + 300, QUIET);
     expect(sent).toHaveLength(1);
@@ -231,5 +237,157 @@ describe("a window that stopped drawing sends nothing in hand (review of PR #32)
     cap.feedMs(1200, SPEECH); // the window is closed too: not claimed
     cap.feedMs(HANGOVER_MS + 300, QUIET);
     expect(sent).toHaveLength(0);
+  });
+});
+
+// V3 (plan §3.2, answered Q3): speech resuming soon after a message ended is
+// claimed as its continuation, with no wake word. The window is counted on the
+// ring's sample clock, so these tests need no timers at all.
+describe("the continuation window (V3)", () => {
+  /** A wake-claimed message, fed until it has gone out. The window opens there. */
+  function firstMessage(m: ReturnType<typeof mk>, via: "wake" | "follow_up" = "wake") {
+    m.cap.feedMs(2000, QUIET);
+    if (via === "follow_up") m.cap.openFollowUp();
+    m.cap.feedMs(400, SPEECH);
+    if (via === "wake") m.cap.onWake();
+    m.cap.feedMs(1000, SPEECH);
+    while (m.sent.length === 0) m.cap.feedMs(64, QUIET, 1024);
+  }
+  /** `gap` ms of quiet after the message went out, then a second thing said. */
+  function resume(m: ReturnType<typeof mk>, gap: number) {
+    const before = m.sent.length;
+    m.cap.feedMs(gap, QUIET);
+    m.cap.feedMs(1200, SPEECH);
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    return m.sent.length - before;
+  }
+
+  it("claims speech resuming at 5 s but not at 7 s", () => {
+    const near = mk();
+    firstMessage(near);
+    expect(resume(near, 5000)).toBe(1);
+    expect(near.sent[1].source).toBe("continuation");
+    const far = mk();
+    firstMessage(far);
+    expect(resume(far, 7000)).toBe(0);
+  });
+
+  it("closes where the plan says: claimed just inside CONTINUE_MS, not just outside", () => {
+    expect(CONTINUE_MS).toBe(6000);
+    const inside = mk();
+    firstMessage(inside);
+    expect(resume(inside, CONTINUE_MS - 400)).toBe(1);
+    const outside = mk();
+    firstMessage(outside);
+    expect(resume(outside, CONTINUE_MS + 400)).toBe(0);
+  });
+
+  it("is also opened by a message the follow-up window claimed", () => {
+    const m = mk();
+    firstMessage(m, "follow_up");
+    expect(m.sent[0].source).toBe("follow_up");
+    expect(resume(m, 4000)).toBe(1);
+    expect(m.sent[1].source).toBe("continuation");
+  });
+
+  it("chains: a continuation is a message too, and opens the next window", () => {
+    const m = mk();
+    firstMessage(m);
+    expect(resume(m, 5000)).toBe(1);
+    expect(resume(m, 5000)).toBe(1);
+    expect(m.sent.map((x) => x.source)).toEqual(["wake", "continuation", "continuation"]);
+  });
+
+  it("is not opened by speech nobody claimed", () => {
+    const m = mk();
+    m.cap.feedMs(2000, QUIET);
+    m.cap.feedMs(1200, SPEECH);
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(resume(m, 1000)).toBe(0);
+    expect(m.sent).toHaveLength(0);
+  });
+
+  it("is not opened by push-to-talk: letting go of the key is the full stop", () => {
+    const m = mk();
+    m.cap.feedMs(2000, QUIET);
+    m.cap.press();
+    m.cap.feedMs(1200, SPEECH);
+    m.cap.release();
+    expect(m.sent).toHaveLength(1);
+    expect(resume(m, 1000)).toBe(0);
+  });
+
+  it("does not outlive the mic going OFF", () => {
+    let muted = false;
+    const m = mk({ muted: () => muted });
+    firstMessage(m);
+    muted = true;
+    m.cap.feedMs(500, QUIET);
+    muted = false;
+    m.cap.markUnmute();
+    expect(resume(m, 500)).toBe(0);
+  });
+
+  it("does not outlive a card, a picker or his own voice (anything that suppresses the detector)", () => {
+    let blocked = false;
+    const m = mk({ suppressed: () => blocked });
+    firstMessage(m);
+    blocked = true;
+    m.cap.feedMs(200, QUIET);
+    blocked = false;
+    expect(resume(m, 500)).toBe(0);
+  });
+
+  it("ends when the owner chooses another chat (closeContinuation)", () => {
+    const m = mk();
+    firstMessage(m);
+    m.cap.closeContinuation();
+    expect(resume(m, 500)).toBe(0);
+  });
+
+  it("ends when the window stopped drawing", () => {
+    const m = mk();
+    firstMessage(m);
+    m.cap.abandon();
+    expect(resume(m, 500)).toBe(0);
+  });
+
+  it("a wake phrase or the key still outranks it, and push-to-talk closes it", () => {
+    const m = mk();
+    firstMessage(m);
+    m.cap.feedMs(1000, QUIET);
+    m.cap.press();
+    expect(m.cap.continuing()).toBe(false);
+    m.cap.release();
+  });
+});
+
+describe("what a claim hands back to the window (V3, Q5)", () => {
+  it("reports the source, and the tag a follow-up window was opened for", () => {
+    const m = mk();
+    m.cap.feedMs(2000, QUIET);
+    m.cap.openFollowUp(3);
+    m.cap.feedMs(1200, SPEECH);
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(m.listens).toEqual([{ source: "follow_up", tag: 3 }]);
+  });
+
+  it("does not leak a stale tag into a later claim", () => {
+    const m = mk();
+    m.cap.feedMs(2000, QUIET);
+    m.cap.openFollowUp(3);
+    m.cap.feedMs(1200, SPEECH);
+    m.cap.feedMs(HANGOVER_MS + 300 + CONTINUE_MS + 1000, QUIET);
+    m.cap.feedMs(400, SPEECH);
+    m.cap.onWake();
+    expect(m.listens.at(-1)).toEqual({ source: "wake", tag: null });
+  });
+
+  it("a plain follow-up has no tag: the selected chat", () => {
+    const m = mk();
+    m.cap.feedMs(2000, QUIET);
+    m.cap.openFollowUp();
+    m.cap.feedMs(1200, SPEECH);
+    expect(m.listens).toEqual([{ source: "follow_up", tag: null }]);
   });
 });
