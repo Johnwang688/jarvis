@@ -1703,6 +1703,81 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   between words is the gap; in a real room the pause the model sees starts a little after the last
   word. The hash proves the file is the pinned one, not that the pinned file is good for this room.
 
+## V10: send and cancel words, Undo (2026-10-14)
+
+Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`claude/voice-v5`).
+
+- **What is read.** At the message's end, the placed transcript's *last word* (`lib/voiceWords.ts`
+  `readWord`; case and trailing punctuation ignored, hyphenated compounds are one word) is compared with two
+  editable lists, default `over` (send) and `cancel`. A word counts only when **all** of:
+  it is the last word; the recording ended with **>= 500 ms of quiet after it**
+  (`SEND_WORD_SILENCE_MS`; `UtteranceEnd.tailMs`, measured by `Capture` on the ring clock as the VAD's quiet run when
+  the message ended, and 0 for a message cut short by OFF, a card, a picker, Settings or a crash); the message is
+  whole (`late` false: no chunk failed) and not the product of Retry; and no authorization card is waiting.
+  Anything else leaves the text exactly as dictated. "come over to my place" and "over there is a box" are prose;
+  so is "the game is over" when the talk key came up in the same breath (REVIEW: it waits in the box, over kept).
+  A hands-free message that ended on the pause always has >= the pause behind it (1 s at the tightest tuning), so the
+  quiet test bites for the talk key, truncated messages and anything that ends before the pause. Known collision, as
+  decided in Q1: "the game is over" said and then left alone for the pause is a send word too (REVIEW sends the
+  box). The plan's extra mitigation, a >= 200 ms pause *before* the word, needs KWS timestamps and waits for V11.
+- **Over.** The word is stripped (and the comma/dash it leaves) and the message sends at once. **In REVIEW it sends the
+  box**: what is in it (typed or dictated), a transcript not yet taken into it, then these words, joined by spaces,
+  with the staged files; the box is emptied first, so a failed send gives the words back as any send does. AUTO sends
+  only what was said, as before, leaving typed text alone. It steers a running turn that is the chat's own, exactly
+  as `placementFor` allows (`wordMaySend` is `placementFor` minus the mode test); if anything moved (another chat
+  than at capture, a pane that is gone, a turn that is not this thread's, OFF) the stripped words wait in the box,
+  unsent. "over" alone with an empty box sends nothing and says `NOTHING TO SEND`. After a word has sent, anything
+  later in the same batch waits in the box (the chat's state has moved on).
+- **Cancel.** The word is stripped and everything dictated *since the last send* is discarded: this message (all its
+  chunks; the group is placed once, when every chunk has answered, so one still in flight is part of it), earlier
+  messages in the same batch, and the **dictated pieces in the REVIEW box** where it was said. What the owner typed
+  stays: `DictationLedger` records each piece a REVIEW placement put in a box and a send (any send, typed too)
+  forgets them; a cancel removes exactly those strings (latest occurrence, one space), and a piece edited past
+  recognition stays and is reported on the error line. A cancelled message does not keep its continuation window.
+  A message already sent is not recalled (plan §3.3). Cancel works in AUTO too: that message was not yet sent.
+- **Undo.** `UndoHold` keeps the discarded text in memory for **10 s** (one at a time: a later cancel that discards
+  something replaces it, one that discards nothing, `NOTHING TO CANCEL`, leaves it). While held, the chat's box shows
+  `Cancelled what you dictated. [Undo]` (`voice-undo`) and an idle chat's line under the orb reads
+  `CANCELLED · UNDO` (plan §3.12). Undo puts the text back into the box of that chat, **unsent, even from AUTO**
+  (it appends like a REVIEW transcript and is registered with the ledger so it can be cancelled again); it expires on
+  the timer, is used once, and is per chat. Nothing is persisted or uploaded.
+- **Cards.** With a card waiting, `planWords` reads nothing: the text is placed verbatim by the existing rules (box,
+  never sent), nothing is discarded and **no approval request exists on any path**: these words are not commands
+  and V10 has no route to `decide` or `/approve` (V9 owns the "Jarvis ..." commands, with their own mutation test).
+  Under a card the mic claims and uploads nothing anyway (V3); the in-flight case is the one this covers.
+- **Settings -> Voice -> "Send and cancel words"** (`components/VoiceWords.tsx`, `lib/voiceWords.ts`): an on/off toggle, the
+  two lists as removable chips, an Add box, Reset. An entry is one word of 2-20 letters/digits (an inner `'` or `-`
+  allowed), lower-cased; five per list at most (the box switches off at the bound); a word cannot be in both lists;
+  an empty list is that function off. Stored as JSON in `localStorage` `jarvis.hud.voice.words` behind try/catch,
+  re-validated on load (hostile or stale storage cannot add an invalid entry). Window-local like the end pause.
+- **Diagnostics.** New outcomes `send_word` and `cancel_word` on the utterance's row (the row says the word counted,
+  never which word or what was said). `window.__hud.voiceWords()` (read-only: the lists and the held Undo's chat key,
+  never its text) is the test hook.
+- **Early end, not done, with its seam.** "Over followed by 500 ms of quiet ends the message at once instead of
+  waiting out 2.5 s" cannot be known from audio alone: the word is only known after transcription, and an upload per
+  500 ms pause would cost more than it saves. The plan puts it in phase 2 (local KWS, V11). `Capture.endNow(minQuietMs
+  = 500)` is the seam: it ends a claimed hands-free message now if it has been quiet that long (never the talk key's),
+  with the same end handling as the pause. **It has no caller yet.**
+- **Shared-file hunks** (V9 builds beside this): `App.tsx` (imports; the `words`/`ledger`/`undoHold` block after
+  `unplaced`; `u.meta.tailMs` in `onUtteranceEnd`; `placeTranscripts` after the card/no-chat preamble, whose
+  box/send tail became `placeRun`; `ledger.forget` at the top of `send`; the `undo` prop and Settings row; `voiceWords`
+  in `__hud`), `capture.ts` (`UtteranceEnd.tailMs`, `finishRecording`'s quiet argument, `endNow`), `stt.ts`
+  (`SttCapture.tailMs`), `voiceDiagnostics.ts` (two outcomes), `chats.ts` (two capture statuses),
+  `InputBar.tsx` (`undo`), `theme.css`.
+- **Free checks.** `lib/voiceWords.test.ts` (38: reading, the list, planning, ledger, hold), `captureWords.test.ts` (10:
+  the tail of quiet for pause, talk key, short key, truncation; `endNow`), `voiceWordsFlow.test.ts` (5: the real
+  Capture, assembler and plan; a cancel whose last chunk is still in flight; the same words without quiet; a failed chunk).
+  `tests/face/hud_v2_words_check.py` (68, real HUD, mock daemon, synthetic fake microphone): REVIEW + over sends the box;
+  AUTO; no quiet / mid-sentence / 300 ms are prose; cancel in REVIEW leaves the typed note, Undo, a second cancel, 10 s
+  expiry; AUTO cancel with a chunk held in flight and Undo; cancel does not recall a send and `NOTHING TO CANCEL`; a card
+  in flight (verbatim, zero approval requests) and a card up (nothing uploaded); busy chat steers; the lists in
+  Settings (refusals, bound, persistence); edited lists, the toggle, an empty list, hostile storage.
+- **Mutations that fail on purpose** (source restored afterwards): dropping the quiet test (6 vitest tests);
+  ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks).
+- **Not done / not claimed.** A real person's voice, a physical microphone, and how Parakeet transcribes a spoken "over"
+  or "cancel" (it may write "Over." or "Ova"; the lists are the remedy). The ledger cannot see text the owner edited
+  into a different shape. A send word does not recall a message already sent, by design.
+
 ## V8: spoken summaries (2026-10-13)
 
 Owner's answers to open question 2: **summary only**, and (confirmed) **hold

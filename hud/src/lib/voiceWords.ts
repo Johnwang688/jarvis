@@ -212,7 +212,7 @@ export class DictationLedger {
    * Remove the dictated pieces from `input` (the box) and the not-yet-taken
    * `pending` text. Returns what is left in the box, what was removed in the
    * order it was spoken, and how many pieces were edited past recognition and
-   * so stay.
+   * so stay (none counted when the box is empty: nothing was edited, it was cleared).
    */
   take(key: string, input: string, pending = ""): { input: string; removed: string[]; kept: number } {
     const list = [...(this.pieces.get(key) ?? [])];
@@ -233,7 +233,8 @@ export class DictationLedger {
     }
     if (pend) removed.push(pend);
     this.pieces.delete(key);
-    return { input: rest, removed, kept };
+    // A piece that is simply not there (the owner emptied the box) was not edited; only a box with words still in it can hold an edited one.
+    return { input: rest, removed, kept: input.trim() ? kept : 0 };
   }
 }
 
