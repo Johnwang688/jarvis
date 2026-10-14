@@ -142,6 +142,7 @@ def main(argv=None):
                 reset("review")
                 s0 = len(_sent(mock, "t1"))
                 _box(page, 1).fill("typed note")
+                time.sleep(3.3)             # past the typing guard: the owner is not writing any more
                 w["send_status"] = "started"
                 say("send it over")
                 got = until(lambda: _sent(mock, "t1")[s0:] or None, timeout=6)
@@ -354,6 +355,69 @@ def main(argv=None):
                 mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
                 until(lambda: not _chat(page, 1)["busy"], timeout=3)
 
+            # ---- 8b. a box still being typed in is not sent ------------------
+            def typing_guard():
+                reset("review")
+                s0 = len(_sent(mock, "t1"))
+                w["send_status"] = "started"
+                _box(page, 1).fill("half written")
+                say("send it over")
+                check("REVIEW + over while the owner typed a moment ago: the words go into the box beside theirs",
+                      waits(lambda: box().strip() == "half written send it"), repr(box()))
+                time.sleep(0.4)
+                check("... and nothing was sent", len(_sent(mock, "t1")) == s0)
+                check("the line says why", waits(lambda: "STILL TYPING" in page.locator('[data-testid="orb-status"]').inner_text()),
+                      page.locator('[data-testid="orb-status"]').inner_text())
+                check("the row is an ordinary review, not a send word", rows()[-1]["outcome"] == "review", str(rows()[-1]))
+                time.sleep(3.2)
+                say("and now over")
+                got = until(lambda: _sent(mock, "t1")[s0:] or None, timeout=6)
+                check("three seconds after the last keystroke the same word sends the box",
+                      bool(got) and got[-1].get("text") == "half written send it and now", str(got))
+                # AUTO never looked at the box: no guard there.
+                reset("auto")
+                s1 = len(_sent(mock, "t1"))
+                _box(page, 1).fill("typed just now")
+                say("send it over")
+                got = until(lambda: _sent(mock, "t1")[s1:] or None, timeout=6)
+                check("AUTO sends what was said at once, typing or not (it never sends the box)",
+                      bool(got) and got[-1].get("text") == "send it" and box() == "typed just now", str(got))
+
+            # ---- 8c. a cancel never deletes what was typed -------------------
+            def cancel_keeps_typing():
+                reset("review")
+                s0 = len(_sent(mock, "t1"))
+                say("ok", how=TIGHT)
+                check("setup: 'ok' dictated", waits(lambda: box().strip() == "ok"))
+                _box(page, 1).fill(box() + " book")
+                say("cancel")
+                check("'cancel' removes the dictated 'ok' and leaves the typed 'book' whole",
+                      waits(lambda: box() == "book"), repr(box()))
+                page.locator('[data-testid="voice-undo"]').click()
+                check("Undo puts 'ok' back without touching 'book'", waits(lambda: box().strip() == "book ok"), repr(box()))
+                _box(page, 1).fill("")
+                say("go", how=TIGHT)
+                waits(lambda: box().strip() == "go")
+                _box(page, 1).fill("gone ahead")                  # the owner replaced it with their own words
+                say("cancel")
+                check("a dictated word that is no longer in the box deletes nothing: 'gone ahead' is intact",
+                      waits(lambda: "NOTHING TO CANCEL" in page.locator('[data-testid="orb-status"]').inner_text() or undo_bar().count() == 1)
+                      and box() == "gone ahead", repr(box()))
+                check("... and the window says part of it stayed", "edited in the box" in page.evaluate("window.__hud.state().error"),
+                      page.evaluate("window.__hud.state().error"))
+                check("nothing was sent", len(_sent(mock, "t1")) == s0)
+
+            # ---- 8d. a stale Undo line does not sit on another pane ---------
+            def undo_line_follows_the_hold():
+                reset("review")
+                say("first chat words cancel")
+                check("setup: pane 1 offers Undo", waits(lambda: "CANCELLED" in (_chat(page, 1).get("status") or "")))
+                _focus(page, until, 2)
+                say("second chat words cancel")
+                check("a cancel in pane 2 takes the Undo hold: pane 1's line is gone",
+                      waits(lambda: "CANCELLED" not in (_chat(page, 1).get("status") or "")), str(_chat(page, 1).get("status")))
+                check("... and pane 2 has it", "CANCELLED" in (_chat(page, 2).get("status") or ""), str(_chat(page, 2).get("status")))
+
             # ---- 9. the lists in Settings -> Voice --------------------------
             def settings_lists():
                 reset("review")
@@ -381,6 +445,14 @@ def main(argv=None):
                       and page.locator('[data-testid="voice-words-send-add"]').is_disabled())
                 page.locator('[data-testid="voice-words-send"] [data-testid="voice-words-remove"]').nth(2).click()
                 check("a word can be removed", len(chips("send")) == 4)
+                # Storage that refuses writes must not undo the edit on screen.
+                page.evaluate("() => { Storage.prototype.setItem = function () { throw new Error('blocked'); }; }")
+                add("send", "zeta")
+                check("with localStorage blocked the edit still shows (and is simply forgotten at reload)",
+                      "zeta" in [c.strip("× \n") for c in chips("send")], str(chips("send")))
+                page.reload()                                  # the patch goes with the page
+                page.wait_for_selector('[data-testid="sidebar"]', state="attached")
+                page.wait_for_function("() => window.__hud && window.__hud.voiceDiagnostics().mic === 'available'")
                 stored = page.evaluate("localStorage.getItem('jarvis.hud.voice.words')")
                 check("the lists are stored (window-local)", stored is not None and '"done"' in stored, str(stored))
                 page.reload()
@@ -427,7 +499,8 @@ def main(argv=None):
                       and page.evaluate("window.__hud.voiceWords().cancel") == ["cancel"])
 
             for section in (review_over_sends_box, auto_over, not_a_word, review_cancel_undo, auto_cancel_inflight,
-                            cancel_not_a_recall, card_inert, busy_over, settings_lists, edited_lists_are_used):
+                            cancel_not_a_recall, card_inert, busy_over, typing_guard, cancel_keeps_typing,
+                            undo_line_follows_the_hold, settings_lists, edited_lists_are_used):
                 run(section)
             context.close()
             browser.close()

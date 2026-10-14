@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CANCELLED_STATUS, DEFAULT_WORDS, DictationLedger, MAX_WORDS, MAX_WORD_LENGTH, SEND_WORD_SILENCE_MS, UNDO_MS, UndoHold,
-  loadWords, normalizeList, normalizeWords, parseWord, planWords, readWord, refusal, saveWords, wordMaySend, type Words,
+  TYPING_GUARD_MS, loadWords, normalizeList, normalizeWords, parseWord, planWords, readWord, refusal, saveWords, typedRecently, wordMaySend, type Words,
 } from "./voiceWords";
 import type { SttCapture, SttLanding } from "./stt";
 
@@ -71,6 +71,50 @@ describe("readWord: only a last word, after enough quiet", () => {
     expect(readWord("send it over", W, undefined as unknown as number).word).toBeNull();
     expect(readWord("", W, QUIET)).toEqual({ text: "", word: null });
     expect(readWord("   ", W, QUIET).word).toBeNull();
+  });
+});
+
+describe("unicode: the same word however it is written", () => {
+  const NFD = (t: string) => t.normalize("NFD");
+
+  it("a decomposed accent in the transcript is the letter the list holds", () => {
+    const w: Words = { enabled: true, send: ["résumé"], cancel: ["cancel"] };
+    expect(NFD("résumé")).not.toBe("résumé");
+    expect(readWord(NFD("send the résumé"), w, QUIET)).toEqual({ text: "send the", word: "send" });
+    expect(readWord("send the résumé", w, QUIET).word).toBe("send");
+  });
+
+  it("an entry typed decomposed is stored composed, and marks are allowed in a word", () => {
+    expect(parseWord(NFD("résumé"))).toBe("résumé");
+    expect(parseWord("ça")).toBe("ça");
+    expect(parseWord("\u0301\u0301")).toBeNull();            // marks alone are no word
+  });
+
+  it("full-width letters read as the ASCII word", () => {
+    expect(readWord("send it ＯＶＥＲ", W, QUIET)).toEqual({ text: "send it", word: "send" });
+    expect(readWord("ｓｅｎｄ ｉｔ ｏｖｅｒ。", W, QUIET).word).toBe("send");
+    expect(parseWord("ｏｖｅｒ")).toBe("over");
+  });
+
+  it("scripts written without spaces are not supported: the last 'word' is the whole sentence", () => {
+    const w: Words = { enabled: true, send: ["终了"], cancel: [] };
+    expect(readWord("请发送它终了", w, QUIET)).toEqual({ text: "请发送它终了", word: null });
+    expect(readWord("终了", w, QUIET).word).toBe("send");     // only when it is alone
+  });
+
+  it("an unchanged transcript comes back byte for byte when no word counts", () => {
+    const t = "ＯＶＥＲ the game";
+    expect(readWord(t, W, QUIET).text).toBe(t);
+  });
+});
+
+describe("typedRecently: a box still being written", () => {
+  it("is true for 3 s after the last keystroke, never for no keystroke", () => {
+    expect(TYPING_GUARD_MS).toBe(3000);
+    expect(typedRecently(0, 10_000)).toBe(false);
+    expect(typedRecently(10_000, 10_000)).toBe(true);
+    expect(typedRecently(10_000, 12_999)).toBe(true);
+    expect(typedRecently(10_000, 13_000)).toBe(false);
   });
 });
 
@@ -246,6 +290,61 @@ describe("DictationLedger: a cancel removes what was dictated, not what was type
     expect(l.take("t1", "something typed instead").kept).toBe(1);
   });
 
+  it("never deletes typed text that merely contains the dictated letters: 'ok' dictated, 'book' typed", () => {
+    const l = new DictationLedger();
+    l.add("t1", "ok");
+    const r = l.take("t1", "ok book");
+    expect(r).toEqual({ input: "book", removed: ["ok"], kept: 0 });
+    const l2 = new DictationLedger();
+    l2.add("t1", "ok");
+    expect(l2.take("t1", "book")).toEqual({ input: "book", removed: [], kept: 1 });   // 'ok' is gone from the box: 'book' is not touched
+    const l3 = new DictationLedger();
+    l3.add("t1", "ok");
+    expect(l3.take("t1", "book ok")).toEqual({ input: "book", removed: ["ok"], kept: 0 });
+  });
+
+  it("'go' dictated, 'gone ahead' typed: only the whole word goes", () => {
+    const l = new DictationLedger();
+    l.add("t1", "go");
+    expect(l.take("t1", "gone ahead go")).toEqual({ input: "gone ahead", removed: ["go"], kept: 0 });
+    const l2 = new DictationLedger();
+    l2.add("t1", "go");
+    expect(l2.take("t1", "gone ahead")).toEqual({ input: "gone ahead", removed: [], kept: 1 });
+    const l3 = new DictationLedger();
+    l3.add("t1", "go");
+    expect(l3.take("t1", "go gone ahead")).toEqual({ input: "gone ahead", removed: ["go"], kept: 0 });
+  });
+
+  it("punctuation attached to a typed word is not a boundary: 'ok,' is the owner's", () => {
+    const l = new DictationLedger();
+    l.add("t1", "ok");
+    expect(l.take("t1", "ok, then")).toMatchObject({ input: "ok, then", removed: [] });
+  });
+
+  it("words the owner typed that equal the dictated ones are ambiguous: all stay", () => {
+    const l = new DictationLedger();
+    l.add("t1", "thanks");
+    const r = l.take("t1", "thanks a lot thanks");
+    expect(r).toEqual({ input: "thanks a lot thanks", removed: [], kept: 1 });
+  });
+
+  it("a multi-word piece is found as a whole, with its own spacing", () => {
+    const l = new DictationLedger();
+    l.add("t1", "call mum");
+    expect(l.take("t1", "please call mum")).toMatchObject({ input: "please", removed: ["call mum"] });
+    const l2 = new DictationLedger();
+    l2.add("t1", "call mum");
+    expect(l2.take("t1", "recall mum")).toMatchObject({ input: "recall mum", removed: [], kept: 1 });
+  });
+
+  it("removed pieces come back in the order they were spoken, repeats included", () => {
+    const l = new DictationLedger();
+    l.add("t1", "yes");
+    l.add("t1", "no");
+    l.add("t1", "yes");
+    expect(l.take("t1", "yes no yes").removed).toEqual(["yes", "no", "yes"]);
+  });
+
   it("the same words dictated twice are taken twice, one occurrence each", () => {
     const l = new DictationLedger();
     l.add("t1", "yes");
@@ -296,6 +395,19 @@ describe("UndoHold: ten seconds, one cancel, memory only", () => {
     expect(h.take("t1")).toBe("lost words");
     expect(h.take("t1")).toBeNull();
     expect(h.snapshot()).toBeNull();
+  });
+
+  it("a late read refuses expired text even if the timer never fired", () => {
+    const h = new UndoHold();
+    h.hold("t1", "words");
+    vi.setSystemTime(UNDO_MS - 1);                 // the clock moves; no timer runs
+    expect(h.take("t1")).toBe("words");
+    h.hold("t1", "words again");
+    vi.setSystemTime(UNDO_MS - 1 + UNDO_MS);       // exactly the hold's deadline, still no timer
+    expect(h.take("t1")).toBeNull();
+    h.hold("t1", "third");
+    vi.setSystemTime(10 * UNDO_MS);
+    expect(h.take("t1")).toBeNull();
   });
 
   it("expires after 10 s, on the timer and on a late read", () => {

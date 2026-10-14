@@ -91,7 +91,7 @@ import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReas
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
 import { VoiceWordsSetting } from "./components/VoiceWords";
-import { CANCELLED_STATUS, DictationLedger, UndoHold, loadWords, planWords, saveWords, wordMaySend, type Words } from "./lib/voiceWords";
+import { CANCELLED_STATUS, DictationLedger, UndoHold, loadWords, normalizeWords, planWords, saveWords, typedRecently, wordMaySend, type Words } from "./lib/voiceWords";
 import { VadStage } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
@@ -749,6 +749,8 @@ export default function App() {
   const [words, setWords] = useState<Words>(() => loadWords());
   const wordsNow = useRef(words);
   wordsNow.current = words;
+  // When the owner last typed in each pane's box (Date.now(); 0 never): a send word does not send a box still being written.
+  const typedAt = useRef<Record<number, number>>({});
   const ledger = useMemo(() => new DictationLedger(), []);
   const undoHold = useMemo(() => new UndoHold(), []);
   const heldCancel = useSyncExternalStore(undoHold.subscribe, undoHold.snapshot);
@@ -764,8 +766,10 @@ export default function App() {
   };
   // The line goes when the hold does (used, replaced by nothing, or ten seconds).
   useEffect(() => {
-    if (heldCancel) return;
-    for (const p of PANE_NOS) if (live.current.chats[p].status === CANCELLED_STATUS) chatPatch(p, { status: "" });
+    for (const p of PANE_NOS) {
+      const c = live.current.chats[p];
+      if (c.status === CANCELLED_STATUS && (!heldCancel || heldCancel.key !== draftKey(c, p))) chatPatch(p, { status: "" });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [heldCancel]);
 
@@ -933,10 +937,14 @@ export default function App() {
       // False when something moved since they were said -- another chat, a
       // card, a late text -- and they wait in the box instead.
       let afterSend = false;
+      let stillTyping = false;
       const sendByWord = async (step: { items: SttPlaced<SttCapture>[]; word: SttPlaced<SttCapture> }): Promise<boolean> => {
         const c = live.current.chats[n];
         const landing = landingNow();
         if (!step.items.every((i) => wordMaySend(i.meta, landing, i))) return false;
+        // REVIEW sends the box, so a box the owner is still typing in is not sent: the words go in beside it.
+        const reviewBox = landing.mode === "review" || step.items.some((i) => i.meta.mode === "review");
+        if (reviewBox && typedRecently(typedAt.current[n] ?? 0, Date.now())) { stillTyping = true; return false; }
         done("send_word", [step.word]);
         done("handed_to_chat", step.items);
         const spoken = step.items.map((i) => i.text).filter(Boolean);
@@ -976,7 +984,12 @@ export default function App() {
         if (!now.chats[shows].busy) chatPatch(shows, { orb: "idle", status: text ? CANCELLED_STATUS : "NOTHING TO CANCEL" });
         if (kept) dispatch({ type: "patch", patch: { error: "Part of what you dictated was edited in the box, so it stayed there." } });
       };
-      for (const step of planWords(batch, { words: wordsNow.current, card: at.approvals.length > 0 })) {
+      const spoken = new Map(batch.map((i) => [i.id, i]));
+      for (let step of planWords(batch, { words: wordsNow.current, card: at.approvals.length > 0 })) {
+        // A card that came up since the plan was made (an earlier step awaited a send): the words are inert, placed as said.
+        if (step.kind !== "run" && live.current.approvals.length > 0) {
+          step = { kind: "run", items: step.items.map((i) => spoken.get(i.id) ?? i) };
+        }
         if (step.kind === "cancel") { cancelByWord(step); continue; }
         // The message goes out (to a box or a chat): its continuation window stays.
         for (const i of step.items) if (i.meta.continuation) placedWindows.current.add(i.meta.continuation);
@@ -985,6 +998,11 @@ export default function App() {
         const items = step.kind === "run" ? step.items : step.items.filter((i) => i.text);
         if (step.kind === "send") done("review", step.items.filter((i) => !i.text));
         if (items.length) await placeRun(items, afterSend);
+        if (stillTyping) {
+          stillTyping = false;
+          if (live.current.chats[n].busy) dispatch({ type: "patch", patch: { error: "You are still typing in the box, so it was not sent. What you said is in the box." } });
+          else chatPatch(n, { orb: "idle", status: "STILL TYPING · NOT SENT" });
+        }
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3520,6 +3538,7 @@ export default function App() {
           onSend={(text, files) => void send(n, text, files)}
           onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}
           undo={heldCancel && heldCancel.key === draftKey(chat, n) ? () => undoCancel(n) : null}
+          onTyped={() => { typedAt.current[n] = Date.now(); }}
           running={runningHere(chat)}
           // A compose row's first send in flight has no thread to steer yet,
           // but it can be stopped: the stop waits for the acknowledgement
@@ -4189,7 +4208,7 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceWordsSetting words={words} onChange={(next) => { saveWords(next); setWords(loadWords()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceWordsSetting words={words} onChange={(next) => { saveWords(next); setWords(normalizeWords(next)); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

@@ -31,6 +31,8 @@ export const SEND_WORD_SILENCE_MS = 500;
 export const MAX_WORDS = 5;
 export const MAX_WORD_LENGTH = 20;
 export const UNDO_MS = 10_000;
+/** A send word does not send a REVIEW box the owner typed in this recently: they are still writing it. */
+export const TYPING_GUARD_MS = 3000;
 /** The line under the orb while Undo is offered (plan §3.12). */
 export const CANCELLED_STATUS = "CANCELLED · UNDO";
 
@@ -49,7 +51,7 @@ export function parseWord(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const w = raw.normalize("NFKC").trim().toLowerCase().replace(/[’]/g, "'");
   if (w.length < 2 || w.length > MAX_WORD_LENGTH) return null;
-  return /^[\p{L}\p{N}]+(?:['-][\p{L}\p{N}]+)*$/u.test(w) ? w : null;
+  return /^[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:['-][\p{L}\p{N}][\p{L}\p{N}\p{M}]*)*$/u.test(w) ? w : null;
 }
 
 /** Why an entry was refused, in words the settings box can show; null when it is fine. */
@@ -106,10 +108,16 @@ export function saveWords(words: Words, storage?: Pick<Storage, "setItem">): voi
 
 export type SpokenWord = "send" | "cancel";
 
-/** The last word of `text` (punctuation aside) and where it starts, or null. */
+/**
+ * The last word of `text` (punctuation aside) and where it starts, or null. `text`
+ * is already NFKC-normalised (readWord does it), so a decomposed accent or a
+ * full-width letter is the letter the list holds. Words are found by their
+ * separators: a script written without them (Chinese, Japanese) has no last word
+ * short of the whole sentence, so a list entry never matches there -- unsupported.
+ */
 function lastWord(text: string): { word: string; at: number } | null {
-  const body = text.replace(/[\s.,;:!?…"“”‘’')\]*_–—-]+$/u, "");
-  const m = /(?:^|[^\p{L}\p{N}'’-])([\p{L}\p{N}][\p{L}\p{N}'’-]*)$/u.exec(body);
+  const body = text.replace(/[\s.,;:!?…。、"“”‘’')\]*_–—-]+$/u, "");
+  const m = /(?:^|[^\p{L}\p{N}\p{M}'’-])([\p{L}\p{N}][\p{L}\p{N}\p{M}'’-]*)$/u.exec(body);
   if (!m) return null;
   return { word: m[1].toLowerCase().replace(/’/g, "'"), at: body.length - m[1].length };
 }
@@ -122,11 +130,12 @@ function lastWord(text: string): { word: string; at: number } | null {
 export function readWord(text: string, words: Words, tailMs: number): { text: string; word: SpokenWord | null } {
   const none = { text, word: null as SpokenWord | null };
   if (!words.enabled || !(tailMs >= SEND_WORD_SILENCE_MS)) return none;
-  const last = lastWord(text);
+  const norm = text.normalize("NFKC");
+  const last = lastWord(norm);
   if (!last) return none;
   const word: SpokenWord | null = words.send.includes(last.word) ? "send" : words.cancel.includes(last.word) ? "cancel" : null;
   if (!word) return none;
-  return { text: text.slice(0, last.at).replace(/[\s,;:"“‘–—-]+$/u, ""), word };
+  return { text: norm.slice(0, last.at).replace(/[\s,;:"“‘–—-]+$/u, ""), word };
 }
 
 // ---- planning a batch -------------------------------------------------------
@@ -211,31 +220,65 @@ export class DictationLedger {
   /**
    * Remove the dictated pieces from `input` (the box) and the not-yet-taken
    * `pending` text. Returns what is left in the box, what was removed in the
-   * order it was spoken, and how many pieces were edited past recognition and
-   * so stay (none counted when the box is empty: nothing was edited, it was cleared).
+   * order it was spoken, and how many pieces stay because they could not be
+   * told apart from the owner's own words.
+   *
+   * A piece is found only as whole words: preceded by the start or whitespace and
+   * followed by the end or whitespace ("ok" is not inside "book", "go" not inside
+   * "gone"). If it turns up more often than it was dictated (the owner typed the
+   * same words), which one is whose is unknowable and every one of them stays; a
+   * piece edited past recognition stays too. Leaving words is the safe side: a
+   * cancel never deletes what the owner wrote. (Nothing is counted as kept when
+   * the box is empty: it was cleared, not edited.)
    */
   take(key: string, input: string, pending = ""): { input: string; removed: string[]; kept: number } {
     const list = [...(this.pieces.get(key) ?? [])];
     const pend = pending.trim();
     if (pend) { const i = list.lastIndexOf(pend); if (i >= 0) list.splice(i, 1); }
     let rest = input;
-    const removed: string[] = [];
+    const gone = new Map<string, number>();
     let kept = 0;
+    const counts = new Map<string, number>();
+    for (const piece of list) counts.set(piece, (counts.get(piece) ?? 0) + 1);
+    for (const [piece, n] of counts) {
+      const at = wholeWordHits(rest, piece);
+      if (at.length === 0 || at.length > n) { kept += n; continue; }
+      kept += n - at.length;
+      gone.set(piece, at.length);
+      // Latest first, so earlier offsets stay true.
+      for (const i of [...at].reverse()) {
+        let before = rest.slice(0, i);
+        let after = rest.slice(i + piece.length);
+        if (/\s$/.test(before)) before = before.slice(0, -1);
+        else if (/^\s/.test(after)) after = after.slice(1);
+        rest = before + after;
+      }
+    }
+    const removed: string[] = [];
     for (const piece of list) {
-      const at = rest.lastIndexOf(piece);
-      if (at < 0) { kept++; continue; }
-      let before = rest.slice(0, at);
-      let after = rest.slice(at + piece.length);
-      if (before.endsWith(" ")) before = before.slice(0, -1);
-      else if (after.startsWith(" ")) after = after.slice(1);
-      rest = before + after;
-      removed.push(piece);
+      const left = gone.get(piece) ?? 0;
+      if (left > 0) { removed.push(piece); gone.set(piece, left - 1); }
     }
     if (pend) removed.push(pend);
     this.pieces.delete(key);
-    // A piece that is simply not there (the owner emptied the box) was not edited; only a box with words still in it can hold an edited one.
     return { input: rest, removed, kept: input.trim() ? kept : 0 };
   }
+}
+
+/** Offsets where `piece` stands as whole words in `text` (whitespace or an edge on both sides), without overlap. */
+function wholeWordHits(text: string, piece: string): number[] {
+  const out: number[] = [];
+  if (!piece) return out;
+  for (let i = text.indexOf(piece); i >= 0; i = text.indexOf(piece, i + piece.length)) {
+    const end = i + piece.length;
+    if ((i === 0 || /\s/.test(text[i - 1])) && (end === text.length || /\s/.test(text[end]))) out.push(i);
+  }
+  return out;
+}
+
+/** Was the box typed in within the guard? (`at`: Date.now() of the last keystroke, 0 for never.) */
+export function typedRecently(at: number, now: number, guardMs = TYPING_GUARD_MS): boolean {
+  return at > 0 && now - at < guardMs;
 }
 
 // ---- Undo ---------------------------------------------------------------------

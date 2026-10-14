@@ -1731,9 +1731,13 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
 - **Cancel.** The word is stripped and everything dictated *since the last send* is discarded: this message (all its
   chunks; the group is placed once, when every chunk has answered, so one still in flight is part of it), earlier
   messages in the same batch, and the **dictated pieces in the REVIEW box** where it was said. What the owner typed
-  stays: `DictationLedger` records each piece a REVIEW placement put in a box and a send (any send, typed too)
-  forgets them; a cancel removes exactly those strings (latest occurrence, one space), and a piece edited past
-  recognition stays and is reported on the error line. A cancelled message does not keep its continuation window.
+  stays: `DictationLedger` records each piece a REVIEW placement put in a box. A cancel finds a piece **only as whole words**
+  (start or whitespace before, end or whitespace after: "ok" is not inside a typed "book", "go" not inside "gone ahead"),
+  and **only if it appears no more often than it was dictated**; a piece the owner edited, or one whose words the owner
+  also typed, is ambiguous and stays, reported on the error line. A cancel never deletes what the owner wrote; leaving
+  dictated words is the safe side. The ledger forgets a chat's pieces on **every** `send()` for it (a typed send, an
+  AUTO send, a send word, and a send that then fails: the words come back through give-back, no longer "dictated"), and
+  words that had no chat to go to (`unplaced`) never enter it. A cancelled message does not keep its continuation window.
   A message already sent is not recalled (plan §3.3). Cancel works in AUTO too: that message was not yet sent.
 - **Undo.** `UndoHold` keeps the discarded text in memory for **10 s** (one at a time: a later cancel that discards
   something replaces it, one that discards nothing, `NOTHING TO CANCEL`, leaves it). While held, the chat's box shows
@@ -1741,10 +1745,20 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   `CANCELLED · UNDO` (plan §3.12). Undo puts the text back into the box of that chat, **unsent, even from AUTO**
   (it appends like a REVIEW transcript and is registered with the ledger so it can be cancelled again); it expires on
   the timer, is used once, and is per chat. Nothing is persisted or uploaded.
+- **A box still being typed in.** A send word in REVIEW sends the box, so it does not if the owner typed in that
+  box in the last 3 s (`TYPING_GUARD_MS`; `InputBar.onTyped`, keystrokes and pastes only, not dictation or hand-backs).
+  The spoken words go into the box beside theirs and the line says `STILL TYPING · NOT SENT` (the window error line on a
+  busy chat). AUTO never sends the box, so it has no such guard.
 - **Cards.** With a card waiting, `planWords` reads nothing: the text is placed verbatim by the existing rules (box,
   never sent), nothing is discarded and **no approval request exists on any path**: these words are not commands
   and V10 has no route to `decide` or `/approve` (V9 owns the "Jarvis ..." commands, with their own mutation test).
-  Under a card the mic claims and uploads nothing anyway (V3); the in-flight case is the one this covers.
+  Under a card the mic claims and uploads nothing anyway (V3); the in-flight case is the one this covers. A card that comes
+  up between plan and execution (an earlier step awaited a send) turns the remaining word steps into plain runs of the
+  words as said.
+- **Text rules.** The transcript is NFKC-normalised before the last word is read (decomposed accents and full-width
+  letters match; a word that counts comes back normalised, any other text untouched); a list entry may contain combining
+  marks but must start with a letter or digit. Scripts written without word separators (Chinese, Japanese) are not
+  supported: their last "word" is the whole sentence, so an entry matches only when it is the whole message.
 - **Settings -> Voice -> "Send and cancel words"** (`components/VoiceWords.tsx`, `lib/voiceWords.ts`): an on/off toggle, the
   two lists as removable chips, an Add box, Reset. An entry is one word of 2-20 letters/digits (an inner `'` or `-`
   allowed), lower-cased; five per list at most (the box switches off at the bound); a word cannot be in both lists;

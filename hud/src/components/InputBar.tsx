@@ -99,6 +99,8 @@ export function InputBar(props: {
   onTranscriptTaken: () => void;
   /** V10: a cancel word just discarded dictated words; Undo puts them back in this box (for ten seconds). Null: nothing to undo. */
   undo?: (() => void) | null;
+  /** The owner typed or pasted in the box (not a dictated or handed-back change): V10's send words wait while they are still writing. */
+  onTyped?: () => void;
   /** A turn is running in the open thread (2026-10-08): Enter steers it, and
    * a Stop button ends it. */
   running?: boolean;
@@ -335,7 +337,7 @@ export function InputBar(props: {
             (props.running ? "Steer him while he works · Enter sends, Stop ends the turn" : "Message, or @path to attach")
           }
           disabled={props.disabled}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => { props.onTyped?.(); setText(e.target.value); }}
           onPaste={(e) => {
             const fl = Array.from(e.clipboardData?.files || []);
             if (fl.length) {
