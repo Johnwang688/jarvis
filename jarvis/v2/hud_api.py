@@ -1406,6 +1406,31 @@ def say(handler, body):
                   headers={"X-Speech-Ms": elapsed})
 
 
+def speech_summary(body):
+    """`POST /speech/summary`: the line spoken in place of a long reply (V8).
+
+    `{thread_id, text, spoken_prefix?}` -> `{summary}`. `text` is the reply's
+    prose after the HUD's speech filter (never code); `spoken_prefix` is what
+    was already read aloud, empty under the owner's "summary only" answer. The
+    model, scrubbing, deadline and bounds are `speech_summary.py`'s. A failure
+    is a sentence with no provider text in it; the HUD reads truncated prose.
+    """
+    from . import speech_summary as S
+    for key in ("thread_id", "text"):
+        if not isinstance(body.get(key), str):
+            fail(400, f"{key} must be a string")
+    prefix = body.get("spoken_prefix", "")
+    if not isinstance(prefix, str):
+        fail(400, "spoken_prefix must be a string")
+    if not body["thread_id"].strip() or len(body["thread_id"]) > 200:
+        fail(400, "invalid thread_id")
+    try:
+        result = S.summarize(body["text"], spoken_prefix=prefix)
+    except S.SummaryError as exc:
+        fail(exc.status, exc.message)
+    return 200, {"summary": result.text}
+
+
 def pickers(handler, daemon, parts, query):
     from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
@@ -1458,11 +1483,15 @@ def pickers(handler, daemon, parts, query):
     # undid itself (decisions A6). An unknown key is now a 400 that names it.
     keys = {"mute": ("muted",), "avatar": ("slug",), "voice": ("voice",), "model": ("model",),
             "models": ("add", "remove", "model", "effort"),
-            "say": ("text", "voice", "instructions", "local_only")}.get(name)
+            "say": ("text", "voice", "instructions", "local_only"),
+            "speech/summary": ("thread_id", "text", "spoken_prefix")}.get(name)
     if keys is not None:
-        _object(body, keys, () if name in ("models", "say") else keys)
+        _object(body, keys, ("thread_id", "text") if name == "speech/summary" else
+                () if name in ("models", "say") else keys)
     if name == "say":
         return say(handler, body)
+    if name == "speech/summary":
+        return speech_summary(body)
     if name == "mute":
         if not isinstance(body["muted"], bool):
             fail(400, "muted must be a boolean")
@@ -1647,7 +1676,7 @@ def route(handler, daemon, parts, query):
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts in ([""], ["manifest.webmanifest"]) or parts[0] in ("assets", "icons")):
         return hud_files(handler, parts)
-    if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
+    if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt", "speech/summary"):
         return pickers(handler, daemon, parts, query)
     if parts[0] == "terminals":
         # The owner's terminals (WP-C): owner-only, the HUD listener only,

@@ -1705,6 +1705,46 @@ class Backend(unittest.TestCase):
             self.assertEqual(self.request("POST", "/say", {"text": "hi", "voice": "bm_test"}), b"MP3cloud")
             speech.assert_called_once()
 
+    def test_speech_summary_route(self):
+        """V8: `/speech/summary` answers a spoken summary, validates its body and never leaks a provider's text."""
+        from jarvis import llm
+        from jarvis.v2 import speech_summary
+        text = "A long reply about the change. " * 40
+        calls = []
+
+        def chat(model, messages, **kw):
+            calls.append((model, messages, kw))
+            return SimpleNamespace(text="The change is done.", prompt_tokens=10, completion_tokens=5, cost_usd=0.0)
+
+        with patch.object(llm, "chat", chat):
+            # A body with an unknown key, a missing field or the wrong type never reaches the model.
+            for bad in ({"thread_id": "t", "text": text, "bogus": 1}, {"thread_id": "t"}, {"text": text},
+                        {"thread_id": 7, "text": text}, {"thread_id": "t", "text": 7},
+                        {"thread_id": "t", "text": text, "spoken_prefix": 3}, {"thread_id": " ", "text": text}):
+                self.request("POST", "/speech/summary", bad, status=400)
+            self.request("POST", "/speech/summary", {"thread_id": "t", "text": "   "}, status=400)
+            self.assertEqual(calls, [])
+            self.request("POST", "/speech/summary", {"thread_id": "t", "text": text},
+                         status=403, headers={"Origin": "http://evil.example"})
+            self.assertEqual(calls, [])
+            self.assertEqual(self.request("POST", "/speech/summary", {"thread_id": "t", "text": text}),
+                             {"summary": "The change is done."})
+            self.assertEqual(self.request("POST", "/speech/summary",
+                                          {"thread_id": "t", "text": text, "spoken_prefix": ""}),
+                             {"summary": "The change is done."})
+        model, _, kw = calls[0]
+        self.assertEqual(model, config.TIERS["speech_summary"])
+        self.assertIs(kw["cache"], False)
+        # A provider failure is a sentence, with none of the provider's text in it.
+        def down(*a, **kw):
+            raise llm.LLMError("HTTP 500: never-expose-this")
+        with patch.object(llm, "chat", down):
+            body = self.request("POST", "/speech/summary", {"thread_id": "t", "text": text}, status=502)
+            self.assertNotIn("never-expose-this", body["error"])
+        with patch.object(speech_summary, "DEADLINE_S", 0.2), \
+                patch.object(llm, "chat", lambda *a, **kw: time.sleep(1) or chat(*a, **kw)):
+            self.request("POST", "/speech/summary", {"thread_id": "t", "text": text}, status=504)
+
     def test_mic_off_no_longer_mutes_voice_out(self):
         """V6: the HUD stops posting `/mute` for the mic's OFF; `voice_out` reports the flag."""
         voicectl.set_muted(False)
