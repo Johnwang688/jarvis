@@ -4,6 +4,8 @@ import { FramePipe, FRAME_MAX_BYTES, HeldKeys, HeldButtons, routeKeyDown, routeM
   pasteMessages, clientToPage, cdpWheel, viewportFor, backingSize, placeFrame, frameDest,
   cleanTitle, type FrameMeta, type CdpKeyEvent, type PaneAction } from "../lib/remote";
 import { BrowserFiles } from "./BrowserFiles";
+import { BrowserAuth } from "./BrowserAuth";
+import { parseBrowserAuth, type BrowserAuth as AuthChallenge } from "../lib/browserauth";
 import { DriveStatus } from "./DriveStatus";
 import { driving, useDriving } from "../state/driving";
 import type { DriveLease } from "../lib/drivestate";
@@ -39,7 +41,9 @@ export function RemoteView(props:RemoteViewProps) {
   const [dialogs,setDialogs]=useState<PageDialog[]>([]);
   const [chooser,setChooser]=useState<{id:string;multiple:boolean}|null>(null);
   const [downloads,setDownloads]=useState(false);
-  const canInput=()=>latest.current.live&&!latest.current.blocked&&!latest.current.inputHeld?.()&&connectedInstance.current===latest.current.instanceGeneration&&socket.current?.readyState===WebSocket.OPEN;
+  const [auth,setAuth]=useState<AuthChallenge|null>(null);
+  const authCurrent=useRef<AuthChallenge|null>(null);authCurrent.current=auth;
+  const canInput=()=>!authCurrent.current&&latest.current.live&&!latest.current.blocked&&!latest.current.inputHeld?.()&&connectedInstance.current===latest.current.instanceGeneration&&socket.current?.readyState===WebSocket.OPEN;
   const send=(body:object,inputMessage=false)=>{
     const ws=socket.current;
     if(!ws||ws.readyState!==WebSocket.OPEN||(inputMessage&&!canInput()))return false;
@@ -49,6 +53,14 @@ export function RemoteView(props:RemoteViewProps) {
       if(inputMessage&&lease?.tabId===latest.current.tabId)driving.owner(lease,body as {t:string},Date.now());
       return true;
     }catch{return false;}
+  };
+  const answerAuth=(id:string,body:object)=>{
+    if(!latest.current.live||latest.current.blocked||latest.current.inputHeld?.()
+      ||connectedInstance.current!==latest.current.instanceGeneration||authCurrent.current?.id!==id)return false;
+    if(!send(body))return false;
+    const lease=driveLease.current;
+    if(lease?.tabId===latest.current.tabId)driving.owner(lease,{t:"auth"},Date.now());
+    return true;
   };
   const release=()=>{
     const held=!canInput();
@@ -76,7 +88,7 @@ export function RemoteView(props:RemoteViewProps) {
     const gen=++generation.current;let gone=false;let ws:WebSocket|null=null;
     const lease=driving.attach(props.tabId);driveLease.current=lease;
     const controller=new AbortController();
-    setConnected(false);setError("");setDialogs([]);setChooser(null);setSecurity("unknown");
+    setConnected(false);setError("");setDialogs([]);setAuth(null);authCurrent.current=null;setChooser(null);setSecurity("unknown");
     keys.current=new HeldKeys();buttons.current=new HeldButtons();clipboard.current=null;composing.current=false;inputEpoch.current++;
     const current=()=>!gone&&generation.current===gen&&latest.current.tabId===props.tabId&&latest.current.instanceGeneration===props.instanceGeneration;
     const pipe=new FramePipe<ImageBitmap>(
@@ -114,6 +126,19 @@ export function RemoteView(props:RemoteViewProps) {
           let msg:any;try{msg=JSON.parse(event.data);}catch{return;}
           if(!msg||typeof msg.t!=="string")return;
           if(msg.t==="agent"){if(lease)driving.receive(lease,msg,Date.now());}
+          else if(msg.t==="auth"||msg.t==="auth_closed"){
+            const frame=parseBrowserAuth(msg);if(!frame)return;
+            if(frame.kind==="prompt"){
+              authCurrent.current=frame.auth;setAuth(frame.auth);inputEpoch.current++;
+              if(clipboard.current)clipboard.current.cancelled=true;
+              composing.current=false;keys.current=new HeldKeys();buttons.current=new HeldButtons();
+              if(input.current)input.current.value="";
+            }else{
+              setAuth(old=>old?.id===frame.id?null:old);
+              if(authCurrent.current?.id===frame.id)authCurrent.current=null;
+              if(frame.reason!=="answered")setError(frame.reason==="expired"?"Authentication expired. Reload to retry.":"Authentication ended. Reload to retry.");
+            }
+          }
           else if(msg.t==="location"&&typeof msg.url==="string"&&msg.url.length<=2048){
             latest.current.onLocation(msg.url,cleanTitle(msg.title));setSecurity(["secure","insecure","broken"].includes(msg.security)?msg.security:"unknown");
           } else if(msg.t==="dialog"&&/^[0-9a-f]{8}$/.test(msg.id)) {
@@ -139,7 +164,7 @@ export function RemoteView(props:RemoteViewProps) {
           } else if(msg.t==="ping")send({t:"pong"});
           else if(["error","input_dropped","popup_refused","closed","held","taken"].includes(msg.t))setError(cleanTitle(msg.reason??msg.error??"The Browser is unavailable.",300));
         };
-        ws.onclose=()=>{if(current()){if(lease)driving.detach(lease);socket.current=null;setConnected(false);setError("The Browser disconnected. Choose Retry to reconnect.");if(clipboard.current)clipboard.current.cancelled=true;}};
+        ws.onclose=()=>{if(current()){if(lease)driving.detach(lease);socket.current=null;setConnected(false);setAuth(null);authCurrent.current=null;setError("The Browser disconnected. Choose Retry to reconnect.");if(clipboard.current)clipboard.current.cancelled=true;}};
         ws.onerror=()=>{if(current())setError("The Browser connection failed. Choose Retry.");};
       }catch(e){if(current())setError(cleanTitle(e instanceof Error?e.message:"The Browser could not connect.",300));}
     };
@@ -148,7 +173,7 @@ export function RemoteView(props:RemoteViewProps) {
     const blur=()=>{if(clipboard.current)clipboard.current.cancelled=true;release();};
     window.addEventListener("blur",blur);
     return()=>{
-      gone=true;generation.current++;if(lease)driving.detach(lease);if(driveLease.current===lease)driveLease.current=null;controller.abort();pipe.clear();observer.disconnect();window.removeEventListener("blur",blur);
+      gone=true;generation.current++;authCurrent.current=null;if(lease)driving.detach(lease);if(driveLease.current===lease)driveLease.current=null;controller.abort();pipe.clear();observer.disconnect();window.removeEventListener("blur",blur);
       if(clipboard.current)clipboard.current.cancelled=true;
       if(socket.current===ws)socket.current=null;
       if(ws){ws.onmessage=null;ws.onopen=null;ws.onclose=null;ws.onerror=null;ws.close();}
@@ -177,16 +202,20 @@ export function RemoteView(props:RemoteViewProps) {
     if(lease?.tabId===latest.current.tabId)driving.control(lease,action,!canInput(),Date.now(),message=>send(message,true));
   };
   return <div className="remoteview" data-testid="remote-view">
-    <DriveStatus snapshot={drive} blocked={props.blocked||!props.live} slotOf={props.slotOf??(()=>null)} onControl={driveControl} />
+    <DriveStatus snapshot={drive} blocked={props.blocked||!props.live||!!auth} slotOf={props.slotOf??(()=>null)} onControl={driveControl} />
     <div className="remotestatus small muted" role="status">
       <span>{connected?`Remote · ${security==="secure"?"Encrypted connection":security==="unknown"?"Connection security unknown":"Connection not secure"}`:"Remote · Connecting"}</span>
       <button type="button" disabled={!connected||props.blocked} onClick={()=>setDownloads(v=>!v)}>Downloads</button>
     </div>
     {error?<div className="pad err" data-testid="remote-error">{error} {!connected?<button disabled={props.blocked} onClick={()=>{const gen=generation.current;void Promise.resolve(latest.current.onRetry?.()).then(()=>{if(generation.current===gen&&latest.current.live&&!latest.current.blocked)setRetry(v=>v+1);});}}>Retry</button>:null}</div>:null}
+    {auth?<BrowserAuth key={auth.id} challenge={auth}
+      blocked={props.blocked||!connected||!props.live||!!props.inputHeld?.()}
+      onAnswer={(id,username,password)=>answerAuth(id,{t:"auth",id,cancel:false,username,password})}
+      onCancel={id=>answerAuth(id,{t:"auth",id,cancel:true})} />:null}
     {dialogs.map(dialog=><PageQuestion key={dialog.id} dialog={dialog} blocked={props.blocked||!connected}
       answer={(accept,text)=>{if(canInput())send({t:"dialog",id:dialog.id,accept,...(dialog.kind==="prompt"?{text}: {})},true);}} />)}
     {chooser||downloads?<BrowserFiles tabId={props.tabId} projectId={props.projectId} chooser={chooser} downloads={downloads}
-      blocked={props.blocked||!connected} generation={generation.current} onOwnerInput={()=>{const lease=driveLease.current;if(lease?.tabId===latest.current.tabId&&canInput())driving.owner(lease,{t:"files"},Date.now());}} onCloseDownloads={()=>setDownloads(false)} />:null}
+      blocked={props.blocked||!connected||!!auth} generation={generation.current} onOwnerInput={()=>{const lease=driveLease.current;if(lease?.tabId===latest.current.tabId&&canInput())driving.owner(lease,{t:"files"},Date.now());}} onCloseDownloads={()=>setDownloads(false)} />:null}
     <div className="remotesurface" ref={surface} data-testid="remote-surface"
       onMouseDown={e=>mouse("down",e)} onMouseMove={e=>mouse("move",e)} onMouseUp={e=>mouse("up",e)}
       onPointerDown={e=>{if(canInput())e.currentTarget.setPointerCapture(e.pointerId);}}
@@ -195,7 +224,7 @@ export function RemoteView(props:RemoteViewProps) {
       onWheel={e=>{if(!canInput())return;const at=point(e);if(!at.inside)return;const event=cdpWheel(e,at,props.zoom,geometry.current.view.height);if(event){e.preventDefault();send({t:"mouse",e:event},true);}}}>
       <canvas ref={canvas} role="img" aria-label="Remote page image" />
       <textarea ref={input} className="remoteinput" data-remote-input data-testid="remote-input" aria-label="Type into the Remote page" spellCheck={false} autoComplete="off"
-        disabled={!connected||props.blocked} onBlur={()=>{release();send({t:"blur"},true);}}
+        disabled={!connected||props.blocked||!!auth} onBlur={()=>{release();send({t:"blur"},true);}}
         onFocus={()=>{if(canInput())send({t:"focus"},true);}}
         onKeyDown={e=>{
           const route=routeKeyDown(e.nativeEvent,!canInput());
