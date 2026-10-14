@@ -187,6 +187,14 @@ def _protected_state_paths() -> set[Path]:
              config.CODEX_CATALOG_PATH.expanduser(), config.VEX_PATH.expanduser(),
              config.BROWSER_SETTINGS_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
+    # The speaker store's two files that switch the voice check off (V12, V-12b,
+    # owner 2026-10-14): `voiceprint.json` (whose voice is the owner's) and
+    # `guest.json` (Guest voice). An agent that could rewrite or delete them could turn
+    # the check that keeps other people's voices from the cloud off without anyone
+    # being asked. Their folder is an ancestor, so deleting it is covered too. The
+    # readings and the built-in-voice cache beside them are not protected.
+    speaker = config.SPEAKER_DIR.expanduser()
+    paths |= {speaker / "voiceprint.json", speaker / "guest.json"}
     return paths
 
 

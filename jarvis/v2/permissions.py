@@ -289,6 +289,11 @@ def denied_file(target: str, cwd: str | None = None, *, folder: bool = False) ->
                 "Ask the owner to change it by hand.")
     resolved = _resolve(path)
     if resolved in protected_paths():
+        if path.name in ("voiceprint.json", "guest.json") and resolved.parent == _resolve(config.SPEAKER_DIR):
+            return (f"{path.name} holds the owner's speaker verification: whose voice is the "
+                    "owner's, and whether Guest voice is on. Changing it could switch the check "
+                    "that keeps other voices from the cloud off, so it is the owner's to change "
+                    "in Settings > Voice.")
         return (f"{path.name} is Jarvis's own permission state. Changing it "
                 "would widen what runs without anyone being asked, so it is "
                 "the owner's to edit by hand.")

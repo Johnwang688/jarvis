@@ -306,6 +306,51 @@ class Store(Base):
         self.assertNotIn("RIFF", text)
 
 
+class Protected(Base):
+    """V-12b (owner, 2026-10-14): `voiceprint.json` and `guest.json` switch the voice check off, so no
+    agent write, shell command or grant may change them. The readings and the cache beside them stay ordinary."""
+
+    def test_the_two_files_are_protected_state_and_the_rest_is_not(self):
+        from jarvis.tools import files
+        protected = files._protected_state()
+        for name in ("voiceprint.json", "guest.json"):
+            self.assertIn((self.dir / name).resolve(), protected, name)
+        for other in ("impostors.json", "readings/r-000.wav", "notes.txt"):
+            self.assertNotIn((self.dir / other).resolve(), protected, other)
+
+    def test_shell_detector_does_not_allow_writes_to_them(self):
+        from jarvis import permissions, rules
+        for target in (self.dir / "guest.json", self.dir / "voiceprint.json"):
+            for command in (f"cp /tmp/x {target}", f"echo '{{}}' > {target}", f"sh -c 'cp /tmp/x {target}'",
+                            f"cd {self.dir} && cp /tmp/x {target.name}", f"rm {target}", f"mv /tmp/x {target}"):
+                verdict = permissions.static_verdict(command)
+                self.assertNotEqual(verdict.decision, rules.ALLOW, f"{command}: {verdict}")
+        # Deleting the folder holds both files, so it is not a free pass either.
+        for command in (f"rm -rf {self.dir}", f"cd {self.dir.parent} && rm -rf {self.dir.name}"):
+            self.assertNotEqual(permissions.static_verdict(command).decision, rules.ALLOW, command)
+
+    def test_v2_layer_one_refuses_them_and_says_whose_they_are(self):
+        from jarvis.v2 import permissions as v2
+        for name in ("voiceprint.json", "guest.json"):
+            target = self.dir / name
+            self.assertIn(target.resolve(), v2.protected_paths())
+            reason = v2.denied_file(str(target))
+            self.assertTrue(reason, name)
+            self.assertIn("speaker verification", reason)
+            self.assertIn("Settings > Voice", reason)
+            self.assertNotIn("permission state", reason)
+            self.assertTrue(v2.denied_command(f"cp /tmp/x {target}"))
+            self.assertTrue(v2._command_writes_protected_state(f"cp /tmp/x {target}"))
+            self.assertIsNone(v2._command_writes_protected_state(f"cp {target} /tmp/backup"), "a read is not a write")
+        for name in ("impostors.json", "readings/r-000.wav"):
+            self.assertIsNone(v2.denied_file(str(self.dir / name)), name)
+        # The folder is the ancestor of both files: a write grant on it (or on a parent that holds it) is refused,
+        # so deleting the folder is covered too. A read grant is not a write.
+        for ancestor in (self.dir, self.dir.parent):
+            self.assertIn("permission state", v2.denied_grant(str(ancestor), "write") or "", ancestor)
+        self.assertIsNone(v2.denied_grant(str(self.dir / "readings"), "write"))
+
+
 class Enrollment(Base):
     def test_quality_checks(self):
         cases = {
