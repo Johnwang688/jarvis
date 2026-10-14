@@ -16,7 +16,12 @@ class OwnerRemote(Remote):
 
 def owner_tools_checks(browser,mock,base,check,until,guard,init_script):
     def required(predicate,timeout=5):
-        assert until(predicate,timeout=timeout), "required owner-tools prerequisite did not settle"
+        def poll():
+            # Routed WebSocket callbacks need a Playwright dispatch even when
+            # the required receipt lives only in a Python message list.
+            page.evaluate("0")
+            return predicate()
+        assert until(poll,timeout=timeout), "required owner-tools prerequisite did not settle"
         return True
     def right_edge(canvas):
         bounds=canvas.bounding_box()
@@ -91,8 +96,9 @@ def owner_tools_checks(browser,mock,base,check,until,guard,init_script):
         page.keyboard.press("Control+f");required(lambda:query.count()==1);query.fill("retained query")
         remote.send(sock,{"t":"owner_reset","query":"forged"})
         check("malformed owner reset cannot close Find",query.count()==1)
+        chat.click();assert chat.evaluate("e=>e===document.activeElement")
         remote.send(sock,{"t":"owner_reset"});required(lambda:query.count()==0)
-        check("same-document lifecycle reset closes Find without focus theft",chat.input_value()=="retained draft")
+        check("same-document lifecycle reset closes Find without focus theft",chat.input_value()=="retained draft" and chat.evaluate("e=>e===document.activeElement"))
         canvas.click(position={"x":80,"y":80},button="right");required(lambda:menu.count()==1)
         _approval(mock,"owner-tools-card");required(lambda:page.locator('[data-testid="approval-card"]').count()==1)
         required(lambda:menu.count()==0)
