@@ -1529,6 +1529,11 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .vexusb.ok { color: var(--green); }
 .vexusb.bad { color: var(--red); }
 .vexusb.stale { opacity: 0.6; }
+.vexcardtop { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px; }
+.vexbadges { display: flex; gap: 10px; align-items: center; font-size: 12px; }
+.vexbadge { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.vexdot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.vexbadge.muted .vexdot { background: transparent; border: 1px solid currentColor; box-sizing: border-box; }
 .vexprogress { display: flex; align-items: center; gap: 8px; max-width: 360px; }
 .vexprogress-track { flex: 1 1 auto; height: 7px; overflow: hidden; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 3px; }
 .vexprogress-fill { display: block; height: 100%; background: var(--accent); transition: width 0.3s linear; }
