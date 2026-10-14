@@ -78,8 +78,11 @@ import { useInstallApp } from "./state/installApp";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
-import { ReadAloudSetting } from "./components/ReadAloud";
-import { createSpeech, saveReadAloud } from "./lib/speech";
+import { DuckBrowserSetting, ReadAloudSetting } from "./components/ReadAloud";
+import { SttSettingsPanel } from "./components/SttSettings";
+import { sttSettingsStore, wakeRecognizerAllowed, STT_BACKSTOP_MS, STT_UNKNOWN_RETRY_MS } from "./state/sttSettings";
+import { parseSttSettings } from "./lib/sttSettings";
+import { createSpeech, saveDuckBrowser, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./lib/capture";
@@ -560,6 +563,8 @@ export default function App() {
   // the mic's.
   const speech = useMemo(() => createSpeech(), []);
   useEffect(() => () => speech.dispose(), [speech]);
+  const duckBrowser = useSyncExternalStore(
+    useCallback((cb: () => void) => speech.duck.subscribe(cb), [speech]), () => speech.duck.isEnabled());
   const speechSubscribe = useCallback((cb: () => void) => speech.controller.subscribe(cb), [speech]);
   const speechView = useSyncExternalStore(speechSubscribe, () => speech.controller.view());
   // The mic is held off for the whole of a reply, between chunks included.
@@ -586,14 +591,23 @@ export default function App() {
   // ---- capture ------------------------------------------------------------
 
   const voiceDiagnostics = useMemo(() => new VoiceDiagnostics(), []);
-  const captureSuppression = (): SuppressionReason | null => {
+  // What stops a recording whatever else is true (Capture `hardStop`): a card, a
+  // picker, Settings or a crashed window, in the order that names the strongest.
+  // Asked on its own, so his voice or a closed chat cannot mask one of them.
+  const captureHardStop = (): SuppressionReason | null => {
     const at = live.current;
-    if (at.orb === "speaking" || speechPlaying()) return "speaking";
-    if (at.selectedChat === null) return "no_chat";
+    if (crashedRef.current) return "crash";
     if (at.approvals.length) return "card";
     if (at.picker !== null || chipOverlay.current) return "picker";
     if (settingsNow.current) return "settings";
-    if (crashedRef.current) return "crash";
+    return null;
+  };
+  const captureSuppression = (): SuppressionReason | null => {
+    const at = live.current;
+    const hard = captureHardStop();
+    if (hard) return hard;
+    if (at.orb === "speaking" || speechPlaying()) return "speaking";
+    if (at.selectedChat === null) return "no_chat";
     return null;
   };
   // V3: listening on a chat that is running a turn borrows its orb and status
@@ -641,6 +655,7 @@ export default function App() {
           chipOverlay.current || settingsNow.current ||
           crashedRef.current,
         suppressionReason: () => captureSuppression() ?? "speaking",
+        hardStop: () => captureHardStop(),
         onDrop: (reason, ms, source, detector) => {
           voiceDiagnostics.add(ms, source, reason, detector);
           // A talk-key utterance that came to nothing: he carries on.
@@ -690,7 +705,9 @@ export default function App() {
         },
         onChunk: (chunk) => onChunk(chunk),
         onUtteranceEnd: (end) => onUtteranceEnd(end),
-        onLimit: () => dispatch({ type: "patch", patch: { error: "That message reached the 15-minute limit and was sent as it stood. Keep talking to start another." } }),
+        onLimit: (_ms, claimCap) => dispatch({ type: "patch", patch: { error: claimCap
+          ? "That message reached the 60-second limit for speech with no wake word or talk key, and was sent as it stood. Say Jarvis or hold the talk key to carry on."
+          : "That message reached the 15-minute limit and was sent as it stood. Say Jarvis or hold the talk key to start another." } }),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -761,7 +778,10 @@ export default function App() {
         // The first attempt was judged by onChunk; a retry, automatic or
         // explicit, and a chunk that had to wait its turn, must not upload while
         // the mic is OFF, the window has crashed, or a card waits for an answer.
-        canUpload: () => !crashedRef.current && !isMuted(live.current.dictation) && !live.current.approvals.length,
+        // The owner's own Retry may be pressed from Settings or with a picker open (the
+        // Settings row is the way back to it); nothing else uploads under either.
+        canUpload: (explicit) => !crashedRef.current && !isMuted(live.current.dictation) && !live.current.approvals.length
+          && (explicit || (live.current.picker === null && !chipOverlay.current && !settingsNow.current)),
         maxInFlight: STT_MAX_IN_FLIGHT,
         place: (batch) => placeTranscripts(batch),
         onEvent: (e) => {
@@ -801,6 +821,8 @@ export default function App() {
       // costs a discarded chunk and the other costs an upload.
       if (outcomeFor(at.dictation) === "discard") { refuse("muted"); return; }
       if (at.approvals.length) { refuse("suppressed:card"); return; }
+      if (at.picker !== null || chipOverlay.current) { refuse("suppressed:picker"); return; }
+      if (settingsNow.current) { refuse("suppressed:settings"); return; }
       if (!Number.isFinite(chunk.ms) || chunk.ms <= 0) { refuse("too_short"); return; }
       if (u.gid === null) u.gid = stt.beginGroup(chunk.source, u.meta);
       const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, { group: u.gid, overlapMs: chunk.overlapMs, detector: chunk.detector });
@@ -819,15 +841,28 @@ export default function App() {
     (end: UtteranceEnd) => {
       const u = utterances.current.get(end.utterance);
       utterances.current.delete(end.utterance);
-      endListening();
       const finish = () => { if (end.source === "ptt") speech.controller.endBargeIn(); };
       // The message only keeps its continuation window if it goes out.
       const refuse = () => capture.cancelContinuation(end.continuation);
+      // The group is closed whatever else fails here: an open one holds every later message.
+      try {
+        endListening();
+        // Whatever is left saying LISTENING (an idle chat's orb: `endListening` only
+        // restores a running turn's) says what is true now.
+        for (const n of PANE_NOS) {
+          const c = live.current.chats[n];
+          if (!c.busy && c.status === LISTENING_STATUS) {
+            chatPatch(n, stt.snapshot().pending > 0 ? { orb: "transcribing", status: "TRANSCRIBING" } : { orb: "idle", status: "" });
+          }
+        }
+      } catch { /* a status line cannot keep a message open */ }
       if (!u || u.gid === null) { refuse(); finish(); return; }
       // Not a message after all (V5): a chunk left, then it proved too short. Nothing is placed.
       if (end.discard) { stt.cancelGroup(u.gid, "too_short"); refuse(); finish(); return; }
       u.meta.continuation = end.continuation;
-      stt.closeGroup(u.gid);
+      // Cut short (OFF, a card, a crash) or partly refused: what is placed is not all
+      // of what was said, so it is marked late and AUTO boxes it instead of sending it.
+      stt.closeGroup(u.gid, { late: end.truncated || u.refused });
       // Resolve only when the message's fate is known (placed or sent, empty,
       // failed for good): a talk-key barge-in ends then (V-7), not when the
       // first upload merely starts.
@@ -1277,6 +1312,11 @@ export default function App() {
       if (devservers.event(e)) return;
       if (kind === "_connected") { devservers.connect(); void speech.voices.load(); }
       if (kind === "thread_voice") speech.voices.apply(data);
+      // V13: another window (or a hand edit the daemon noticed) changed the speech-to-text
+      // switches. Every window applies it at once: Chrome's wake recognizer must stop
+      // streaming to Google as soon as the cloud is switched off, in whichever window it runs.
+      if (kind === "stt_settings") sttSettingsStore.apply(parseSttSettings(data));
+      if (kind === "_connected") void sttSettingsStore.refresh();
       if (kind === "_disconnected") { devservers.disconnect(); return; }
       const at = live.current;
       // Per pane (lib/chats `routeEvent`). Mine: the panes showing the thread
@@ -2654,9 +2694,27 @@ export default function App() {
 
   // ---- wake word ----------------------------------------------------------
 
+  // V13: Chrome's recognizer streams the microphone to Google. With "Cloud
+  // fallback" off (or not yet known) it never starts, so wake-by-voice is off
+  // until local wake detection (V11); the talk key still works.
+  const sttConfig = useSyncExternalStore(sttSettingsStore.subscribe, sttSettingsStore.snapshot);
+  const wakeAllowed = wakeRecognizerAllowed(sttConfig);
+  useEffect(() => {
+    void sttSettingsStore.refresh();
+    // The daemon's `stt_settings` event is how a change reaches this window; these are the
+    // backstops: when the window becomes visible, every minute, and every 15 s while unknown
+    // (a daemon that was not up yet).
+    const again = () => { if (document.visibilityState !== "hidden") void sttSettingsStore.refresh(); };
+    document.addEventListener("visibilitychange", again);
+    const backstop = setInterval(() => void sttSettingsStore.refresh(), STT_BACKSTOP_MS);
+    const unknown = setInterval(() => { if (sttSettingsStore.snapshot() === null) void sttSettingsStore.refresh(); }, STT_UNKNOWN_RETRY_MS);
+    return () => { document.removeEventListener("visibilitychange", again); clearInterval(backstop); clearInterval(unknown); };
+  }, []);
+
   useEffect(() => {
     const SR: any = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) return;
+    if (!wakeAllowed) return; // no upload allowed: Chrome's cloud recognizer stays off
     if (isMuted(state.dictation)) return; // a muted mic stops the recognizer outright
     if (crashed) return; // so does a window that stopped drawing
     const gate = new WakeGate();
@@ -2709,7 +2767,7 @@ export default function App() {
       delete (window as any).__hudRecog;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dictation, crashed]);
+  }, [state.dictation, crashed, wakeAllowed]);
 
   const onWakeHit = useCallback(() => {
     if (crashedRef.current) return;
@@ -2887,15 +2945,20 @@ export default function App() {
         // The frames go through the VAD stage (V5): Silero scores each in a worker and
         // the stage hands it on, in order, to the capture; until the worker is ready,
         // or if it cannot run, the capture judges by energy and the diagnostics say so.
+        const fellBack = (path: string, why: string) => {
+          voiceDiagnostics.capturePath(path as "script_processor", why);
+          dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${why}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
+        };
         if (gone) { stream.getTracks().forEach((t) => t.stop()); return; }
         vadRun = vadStage.start();
-        input = await startMicInput({ stream, onFrame: (frame) => vadStage.push(frame), workletUrl: micWorkletUrl });
+        input = await startMicInput({
+          stream, onFrame: (frame) => vadStage.push(frame), workletUrl: micWorkletUrl,
+          onPathChange: (path, why) => { if (!gone) fellBack(path, why); },
+        });
         if (gone) { input.stop(); vadStage.stop(vadRun); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
-        if (input.path !== "worklet") {
-          dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${input.fallbackReason}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
-        }
+        if (input.path !== "worklet") fellBack(input.path, input.fallbackReason);
       } catch {
         if (vadRun !== null) vadStage.stop(vadRun);
         voiceDiagnostics.microphone("unavailable");
@@ -3042,7 +3105,7 @@ export default function App() {
     dispatch({ type: "patch", patch: { dictation: mode } });
     if (live.current.selectedChat !== null) chatPatch(live.current.selectedChat, { status: "" });
     if (wasMuted && !isMuted(mode)) capture.markUnmute();
-    if (isMuted(mode)) { capture.closeFollowUp(); followUpAfterSpeech.current = false; }
+    if (isMuted(mode)) { capture.muteNow(); capture.closeFollowUp(); followUpAfterSpeech.current = false; }
     // The mic's OFF no longer mutes Jarvis (lib/speech/policy, Q11).
     onMicModeChange(isMuted(mode), (m) => api.mute(m).catch(() => {}));
   };
@@ -4100,7 +4163,9 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />
+              <DuckBrowserSetting on={duckBrowser}
+                onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

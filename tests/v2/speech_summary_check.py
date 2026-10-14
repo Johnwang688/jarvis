@@ -100,7 +100,8 @@ class Tier(unittest.TestCase):
         chat = Chat(answer)
         with patch.dict(config.TIERS, {"speech_summary": "openai/gpt-5.6-luna"}):
             out = S.summarize(LONG, chat=chat)
-        self.assertEqual(chat.models, ["openai/gpt-5.6-luna", S.DEFAULT_MODEL])
+        # A 500 is transient: the tier's model gets its second try before the default is asked.
+        self.assertEqual(chat.models, ["openai/gpt-5.6-luna", "openai/gpt-5.6-luna", S.DEFAULT_MODEL])
         self.assertEqual((out.text, out.model), ("Done.", S.DEFAULT_MODEL))
 
 
@@ -110,7 +111,7 @@ class Request(unittest.TestCase):
         out = S.summarize(LONG, chat=chat)
         (call,) = chat.calls
         self.assertIs(call["cache"], False)
-        self.assertLessEqual(call["max_tokens"], 200)
+        self.assertEqual(call["max_tokens"], S.OUT_MAX_TOKENS)
         self.assertLessEqual(call["timeout"], S.DEADLINE_S)
         self.assertIs(call["stream"], False)
         self.assertEqual(call["max_retries"], 1)
@@ -259,6 +260,149 @@ class Request(unittest.TestCase):
             release.set()
             time.sleep(0.3)
             S.summarize(LONG, chat=Chat())
+
+
+def fake_reply(text="", *, finish="stop", completion=40, reasoning=None, message=None, cost=0.0001):
+    """A `Reply`-shaped fake with the fields the failure reasons read."""
+    msg = message if message is not None else {"content": text}
+    usage = {"completion_tokens": completion}
+    if reasoning is not None:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning}
+    return SimpleNamespace(text=msg.get("content") or "", message=msg, finish_reason=finish, prompt_tokens=900,
+                           completion_tokens=completion, cost_usd=cost, raw={"usage": usage})
+
+
+class Script:
+    """A chat that answers from a list, one entry per call (an exception is raised)."""
+
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), []
+
+    def __call__(self, model, messages, **kw):
+        self.calls.append({"model": model, "messages": messages, **kw})
+        a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(a, BaseException):
+            raise a
+        return a(kw) if callable(a) else a
+
+
+class FailedSummaries(unittest.TestCase):
+    """The probe of 2026-10-14 failed 7 of 24 calls with a 502. Each way the code could answer 502 is here."""
+
+    GOOD = "The change is done and the tests pass."
+
+    def test_a_reply_starved_by_the_token_budget_is_the_cause_the_budget_now_prevents(self):
+        """A model that thinks first spends max_tokens on it and answers with nothing (finish "length")."""
+        def thinking_model(kw):
+            if kw["max_tokens"] < 400:
+                return fake_reply("", finish="length", completion=kw["max_tokens"], reasoning=kw["max_tokens"],
+                                  message={"content": None, "reasoning": "Let me think about this..."})
+            return fake_reply(self.GOOD, completion=230, reasoning=140)
+        chat = Script(thinking_model)
+        out = S.summarize(LONG, chat=chat)
+        self.assertEqual((out.text, out.retries), (self.GOOD, 0))
+        self.assertGreaterEqual(chat.calls[0]["max_tokens"], 400)
+
+    def test_the_token_budget_mutation(self):
+        """With the old 160-token budget the same model fails both tries: the test above has teeth."""
+        def thinking_model(kw):
+            if kw["max_tokens"] < 400:
+                return fake_reply("", finish="length", completion=kw["max_tokens"], reasoning=kw["max_tokens"],
+                                  message={"content": None, "reasoning": "Let me think about this..."})
+            return fake_reply(self.GOOD)
+        with patch.object(S, "OUT_MAX_TOKENS", 160), self.assertLogs("jarvis.speech_summary", "WARNING"):
+            with self.assertRaises(S.SummaryError) as ctx:
+                S.summarize(LONG, chat=Script(thinking_model))
+        err = ctx.exception
+        self.assertEqual((err.status, err.reason), (502, "empty_content"))
+        self.assertEqual((err.detail["finish"], err.detail["reasoning_tokens"], err.detail["has_reasoning"]),
+                         ("length", 160, True))
+
+    def test_an_empty_reply_is_tried_once_more(self):
+        chat = Script(fake_reply("", finish="stop", completion=0), fake_reply(self.GOOD))
+        out = S.summarize(LONG, chat=chat)
+        self.assertEqual((out.text, out.calls, out.retries), (self.GOOD, 2, 1))
+        self.assertEqual(out.prompt_tokens, 1800)   # both calls are counted: they were both paid for
+
+    def test_a_transient_http_error_is_tried_once_more_and_a_permanent_one_is_not(self):
+        for status in (429, 500, 502, 529):
+            chat = Script(llm.LLMError(f"HTTP {status}: overloaded"), fake_reply(self.GOOD))
+            self.assertEqual(S.summarize(LONG, chat=chat).text, self.GOOD, status)
+            self.assertEqual(len(chat.calls), 2, status)
+        for status in (400, 401, 402, 404):
+            chat = Script(llm.LLMError(f"HTTP {status}: no"), fake_reply(self.GOOD))
+            with self.assertRaises(S.SummaryError) as ctx, self.assertLogs("jarvis.speech_summary", "WARNING"):
+                S.summarize(LONG, chat=chat)
+            self.assertEqual((ctx.exception.status, ctx.exception.reason), (502, f"http_{status}"))
+            self.assertEqual(len(chat.calls), 1, status)
+
+    def test_an_error_that_names_no_status_is_a_transient_network_failure(self):
+        chat = Script(llm.LLMError("model failed after 1 attempts: ConnectError"), fake_reply(self.GOOD))
+        self.assertEqual(S.summarize(LONG, chat=chat).text, self.GOOD)
+
+    def test_content_in_parts_is_read(self):
+        parts = [{"type": "text", "text": "The change "}, {"type": "text", "text": "is done."}]
+        out = S.summarize(LONG, chat=Script(SimpleNamespace(text=parts, message={"content": parts},
+                                                           finish_reason="stop", prompt_tokens=1,
+                                                           completion_tokens=1, cost_usd=0.0, raw={})))
+        self.assertEqual(out.text, "The change is done.")
+
+    def test_an_answer_that_never_reaches_a_sentence_end_is_spoken_not_dropped(self):
+        """max_tokens cutting a reply mid-sentence, and a reply with no full stop within 300 characters."""
+        cut = "The export timed out because the cache layer returned stale entries when two workers wrote " * 6
+        out = S.summarize(LONG, chat=Script(fake_reply(cut, finish="length"))).text
+        self.assertTrue(0 < len(out) <= S.OUT_MAX_CHARS)
+        self.assertEqual(S.clean("Part one is fine. Part two is cut off mid sent"), "Part one is fine. Part two is cut off mid sent")
+
+    def test_markdown_only_and_code_only_answers_are_empty_after_cleaning(self):
+        for raw in ("```py\nonly_code()\n```", "---", "> "):
+            chat = Script(fake_reply(raw))
+            with self.assertRaises(S.SummaryError) as ctx, self.assertLogs("jarvis.speech_summary", "WARNING"):
+                S.summarize(LONG, chat=chat)
+            self.assertEqual(ctx.exception.reason, "empty_after_clean", raw)
+            self.assertEqual(ctx.exception.detail["raw_chars"], len(raw))
+
+    def test_a_bullet_or_heading_answer_keeps_its_words(self):
+        for raw, spoken in (("- The change is done.", "The change is done."), ("# Result\nAll good.", "Result All good."),
+                            ("**Done.** Tests pass.", "Done. Tests pass.")):
+            self.assertEqual(S.clean(raw), spoken)
+
+    def test_a_crash_in_the_call_is_a_502_with_the_exception_class_as_its_reason(self):
+        chat = Script(TypeError("secret-looking text that must not be reported"))
+        with self.assertRaises(S.SummaryError) as ctx, self.assertLogs("jarvis.speech_summary", "WARNING"):
+            S.summarize(LONG, chat=chat)
+        err = ctx.exception
+        self.assertEqual((err.status, err.reason), (502, "exception:TypeError"))
+        self.assertEqual(len(chat.calls), 1, "a crash is not retried")
+        self.assertNotIn("secret-looking", f"{err.message} {err.reason} {err.detail}")
+
+    def test_reasons_carry_numbers_never_text(self):
+        chat = Script(fake_reply("", finish="length", completion=160, reasoning=160,
+                                 message={"content": "", "reasoning": "the reply says hunter2"}))
+        with self.assertRaises(S.SummaryError) as ctx, self.assertLogs("jarvis.speech_summary", "WARNING"):
+            S.summarize(LONG, chat=chat)
+        err = ctx.exception
+        self.assertNotIn("hunter2", f"{err.message} {err.reason} {err.detail}")
+        self.assertTrue(all(isinstance(v, (int, bool, str, type(None))) for v in err.detail.values()))
+        self.assertEqual(len(chat.calls), 2, "the empty reply was tried twice")
+
+    def test_a_retry_stays_inside_the_deadline(self):
+        def slow(model, messages, **kw):
+            time.sleep(0.4)
+            return fake_reply("")
+        started = time.monotonic()
+        with self.assertRaises(S.SummaryError) as ctx, self.assertLogs("jarvis.speech_summary", "WARNING"):
+            S.summarize(LONG, chat=slow, deadline_s=0.7)
+        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertIn(ctx.exception.status, (502, 504))
+
+    def test_the_retry_mutation(self):
+        """With one attempt the transient error and the empty reply above both fail."""
+        with patch.object(S, "ATTEMPTS", 1), self.assertLogs("jarvis.speech_summary", "WARNING"):
+            with self.assertRaises(S.SummaryError):
+                S.summarize(LONG, chat=Script(llm.LLMError("HTTP 529: overloaded"), fake_reply(self.GOOD)))
+            with self.assertRaises(S.SummaryError):
+                S.summarize(LONG, chat=Script(fake_reply(""), fake_reply(self.GOOD)))
 
 
 class Output(unittest.TestCase):

@@ -1905,8 +1905,10 @@ class NoTool(Base):
                          r"""jarvis\.v2\.terminals|\bTerminals\(|\bterminals\.(route|serve|create)""")
     # vex.py (VX-1) creates program terminals, from its own argv tables, behind
     # owner-only routes; tests/v2/vex_check.py holds it to that.
+    # vex_connection.py is the VEX USB-presence half split out of vex.py
+    # (5b0ac8c); only vex.py imports it, and no tool reaches either.
     ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py",
-               "jarvis/v2/vex.py"}
+               "jarvis/v2/vex.py", "jarvis/v2/vex_connection.py"}
     # The one reader, and the one line it may hold.
     READER = "jarvis/v2/tools/terminal_read.py"
     READER_IMPORT = "from ..terminals import read_for_tool\n"

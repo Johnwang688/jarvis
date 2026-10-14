@@ -22,3 +22,28 @@ export function ReadAloudSetting(props: { on: boolean; onChange: (on: boolean) =
     </section>
   );
 }
+
+// Settings -> Voice: lower the Remote Browser's sound while Jarvis speaks (V15).
+// A convenience kept in this window (localStorage), on by default. The daemon does
+// the lowering, under a short lease this window renews only while speech is active.
+export function DuckBrowserSetting(props: { on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <section className="read-aloud" data-testid="duck-browser" aria-label="Browser sound while speaking">
+      <h3>Browser sound</h3>
+      <label>
+        <input
+          type="checkbox"
+          data-testid="duck-browser-toggle"
+          checked={props.on}
+          onChange={(e) => props.onChange(e.target.checked)}
+        />{" "}
+        Lower Browser sound while Jarvis speaks
+      </label>
+      <p>
+        Remote Browser tabs only, by about 15 dB, and only while a reply is being read. It is put back
+        when he stops, or within seconds if this window closes. Nothing is unmuted, other apps are left
+        alone, and Direct pages are not affected. It needs the Browser&apos;s sound turned on in Browser settings.
+      </p>
+    </section>
+  );
+}

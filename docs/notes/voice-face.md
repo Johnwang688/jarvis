@@ -1490,13 +1490,16 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   bundled by Vite as its own same-origin module via `?worker&url`, so the CSP's
   `script-src 'self'` covers it; no CDN). All the logic is `MicFramer`
   (`lib/resample.ts`): render quanta at the device rate -> **windowed-sinc**
-  resample (Kaiser beta 8.6, 90 % of the output Nyquist, about 80 dB stop band,
-  zero group delay, position counted rather than accumulated) -> mono ->
+  resample (Kaiser beta 8.6, 85 % of the output Nyquist, 3 dB down at 6.5 kHz, 9 dB at 7 kHz,
+  80+ dB beyond 8.5 kHz,
+  zero group delay, position counted rather than accumulated; since the review: 85 % of the
+  output Nyquist, 14 lobes) -> mono ->
   **512-sample frames at 16 kHz** posted to the main thread as transferred
   `Float32Array`s. They queue there if the main thread stalls instead of being
   dropped, which `ScriptProcessorNode` could not promise. The old boxcar
-  average let a 12 kHz tone through 30 dB down; the new one is 60 dB+ down
-  (`resample.test.ts`).
+  average let a 12 kHz tone through 30 dB down; the new one is 80+ dB down at 8.5 kHz,
+  the tone that would alias to 7.5 kHz (the first cut, at 90 % and 10 lobes, measured only
+  -29 dB there, which the review caught; `resample.test.ts` pins 8.5 and 9 kHz at -60 dB).
 - **Fallback, visibly.** No `audioWorklet` (insecure origin, old browser), no
   `AudioWorkletNode`, a module that fails to load, or a node that cannot be built:
   the *same* resampler runs behind a `ScriptProcessorNode`. `VoiceDiagnostics.path`
@@ -1590,7 +1593,7 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   gone) is fixed when it is claimed, not when it ends: a chat switch halfway
   through a long dictation boxes it with "SPOKEN IN ANOTHER CHAT".
 
-Free checks: vitest 2315 tests / 145 files after merging V8 (2216 / 138 before; new: `resample.test.ts` 9,
+Free checks: vitest 2351 tests / 145 files after the delta-review fixes (2347 after the first review fixes, 2315 before them, 2216 / 138 before V8 was merged; first-cut new: `resample.test.ts` 9,
 `joinChunks.test.ts` 11, `recorder.test.ts` 9, `captureChunks.test.ts` 30,
 `micInput.test.ts` 5, `stt.test.ts` +17 for groups; `capture.test.ts`,
 `captureDiagnostics.test.ts` and `speech/suppress.test.ts` adapted to the new
@@ -1766,6 +1769,386 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   own: it passed with the clips trimmed to their first and last audible sample, so the silence
   between words is the gap; in a real room the pause the model sees starts a little after the last
   word. The hash proves the file is the pinned one, not that the pinned file is good for this room.
+**Review fixes (2026-10-14, the lead's Opus review of the first cut; the owner confirmed that
+a card or OFF cuts the recording):**
+- **H1, a cut-short message is late.** `closeGroup(gid, {late})`: App passes
+  `end.truncated || u.refused`, so a message cut by OFF, a card, a picker, Settings, a
+  crash or his own voice is placed `late` even though every chunk that left answered, and
+  AUTO boxes it (it used to be sent as if whole). `late` = a chunk failed **or** the message
+  was cut short.
+- **M1.** `onListening` is announced **before** the pre-roll is fed to the recorder: a long
+  pre-roll (27 s of room speech, then a wake word) cuts chunks while it is fed, and they
+  used to reach the consumer before it knew the message and were dropped silently.
+- **M2.** A tap on the talk key over a hands-free message is not "too short": the key
+  *adopts* the recording and release just finishes it. `claimSource` is reset after a key
+  ends, so the detector's later `unclaimed` row is no longer labelled `ptt`.
+- **M3, a stopgap until V12.** A message claimed by the follow-up window or as a
+  continuation (no wake word, no talk key) ends at **60 s** (`CLAIM_CAP_MS`), boxed (late), with the error line saying so (`onLimit(ms, claimCap)`). A wake claim and the
+  talk key keep the 15-minute ceiling; a key pressed over a hands-free message lifts the 60 s.
+- **M4.** `CaptureHooks.hardStop()` names a card, picker, Settings or crash on its own, so
+  `suppressed:speaking` / `no_chat` (reported first) cannot mask one: a held key over his voice
+  or a closed chat now stops when a card or Settings arrives, and the drop names the card.
+  App's `captureSuppression` lists the hard reasons first as well. `canUpload(explicit)` and
+  `onChunk` also refuse under a picker or Settings; the owner's own **Retry** (`explicit`) is
+  still allowed from Settings, which is where the Retry row lives.
+- **L1.** When the previous chunk heard only the start of a word ("transcrip") and the next
+  hears it whole, the fragment is dropped and the whole word kept (`overlapMerge`);
+  `MAX_OVERLAP_WORDS` is 4.
+- **L3.** A late message placed around a failed chunk carries `[…]` (`GAP_MARK`) where the
+  missing part belongs (first, middle or last); Retry's text still lands at the end.
+- **L4.** `onprocessorerror` hands the microphone to the ScriptProcessor and says so
+  (`onPathChange`); `addModule` times out after 8 s into the same fallback;
+  `Resampler.processShared` allocates nothing per call on the audio thread.
+- **L5.** `Capture.muteNow()` (App `setMode` OFF) ends a recording at once, not at the next
+  frame; `onUtteranceEnd` closes the group even if a status write throws; a pane left
+  saying LISTENING after a cut-short message now says TRANSCRIBING or nothing; the limit
+  messages say "Say Jarvis or hold the talk key" (speaking on would not be claimed).
+- **Soft cuts start the next chunk with 200 ms of digital silence** (`CHUNK_SOFT_OVERLAP_MS`),
+  so no first phoneme sits on a chunk edge; `chunk.repeats` is false for them, so the join does
+  not look for echoed words ("very | very" stays). (First tried as 200 ms of the quiet audio
+  before the cut; the delta review noted that "quiet" is only below the detector's threshold,
+  so a faint trailing word could be heard twice. Silence cannot echo, which is the safer pick.)
+- **The 60 s cap splits nothing (delta review).** A claim cut at the cap is announced
+  `truncated`, so it is placed late and boxed, and arms **no** continuation: a 91 s follow-up used
+  to be a 60 s piece sent and a 33 s continuation sent. A wake hit over a message the cap would
+  cut lifts the cap and makes it a wake claim, as the talk key does. The 15-minute ceiling still
+  sends as it stands.
+- **Gap marks once.** `[…]` is added only on a message's first placement; a retried chunk placed
+  alone adds none (chunks 2 and 4 failed, retry 2 gave "t2 […]" before).
+
+## 2026-10-13: V13 local speech-to-text with a cloud-fallback switch
+
+Plan §3.5 and §4 V13; Q6 answered (build local Parakeet with a switchable cloud
+fallback; one paid comparison on synthetic speech, at most $0.25; local becomes
+the default only if its WER is within 1 point of cloud). **Status: built and
+tested on fakes plus one real-model smoke run; the default stays `cloud`. The
+paid comparison ran on 2026-10-14 (receipt below) and the build is installed; no
+physical-microphone run yet.**
+
+- **Engine** (`jarvis/stt_local.py`). Parakeet-TDT-0.6B-v3 int8 through
+  `sherpa-onnx` (`OfflineRecognizer.from_transducer`, `nemo_transducer`, greedy),
+  inside the daemon. `sherpa_onnx` is imported only at first load, so the daemon
+  runs without it. Threads are pinned (`config.STT_LOCAL_THREADS`, default 2,
+  clamped 1..4; V0: more than 4 was 4-18x slower). Lazy load; a daemon
+  `threading.Timer` drops the model after `STT_LOCAL_IDLE_MIN` (default 10)
+  idle minutes (`Engine.reap`, never under a running decode). Decodes are
+  serialised on one lock; each request waits no longer than its own deadline,
+  and a caller that gave up marks its job cancelled so a job that never started
+  never runs (no stacking). The decode itself cannot be interrupted: an
+  abandoned one finishes in the background, a clip being capped at 90 s. A
+  failed load is not retried for 60 s. WAV (16-bit PCM, any rate/channels) only:
+  no media decoder runs on uploaded bytes, so Discord's Ogg would need a
+  decision before it opts in. Every `LocalSTTError` message is a fixed sentence
+  (no path, no library text).
+- **Policy** (`voice.stt_result`, `voice.stt` is its `.text`). Settings
+  (`jarvis/stt_settings.py`, `~/.config/jarvis/stt.json`, env
+  `JARVIS_STT_SETTINGS`): `backend` = `cloud`/`local`/`auto` and `cloud_fallback`
+  (bool, default on). Callers that do not pass `prefer_local` (Discord voice
+  notes, the face server) are unchanged: the cloud chain, whatever `backend`
+  says. The HUD's `/stt` opts in (`prefer_local=True`). With `local`/`auto`, local
+  decodes first; on failure or timeout the cloud answers with what is left of
+  the caller's budget, only if `cloud_fallback` is on. With a budget, local gets
+  at most `STT_LOCAL_BUDGET_SHARE` (0.45) of it while a fallback is allowed, and
+  all of it when not. `cloud_fallback` off forbids EVERY upload for every
+  caller: the cloud chain is never entered; a local failure is a visible 502
+  ("...cloud fallback is off, so nothing was uploaded"), and a path that would
+  need the cloud (backend `cloud`, or a caller that did not opt in) is
+  `STTBlocked`, a 409 the HUD does not retry. `auto` with no local engine goes
+  straight to the cloud without a complaint. The chosen backend and the reason
+  local did not serve are in the `/stt` reply (`backend`, `model`, `fallback`).
+- **Fail closed.** A missing `stt.json` is the defaults. One that exists but is
+  not JSON, not an object, a symlink, over 4 KB, or has a key of the wrong type
+  reads as `local` with no upload, and `/stt/settings` says so. A repair through
+  one switch keeps the other at its fail-closed value. `stt.json` is **protected
+  state** (`tools/files._protected_state_paths`): no agent write, grant or shell
+  command may change it, since flipping it could send the owner's voice to the
+  cloud and an upload cannot be undone. **Owner decision, 2026-10-14: keep it
+  protected** (plan §2, V-12a; the protected-state set, not the SELF_PROTECTED
+  source list). The shell detector and v2's layer 1 are pinned for it
+  (`tests/voice_stt_local_check.py`, `tests/v2/permissions_check.py`), and v2's
+  refusal says what the file is.
+- **Route.** `GET/POST /stt/settings`, owner-only on the HUD listener
+  (`{backend?, cloud_fallback?}`, validated before anything is written; a read
+  never loads the model). Settings -> Voice has a Speech-to-text section: the
+  three backends, the Cloud fallback switch, one sentence saying what happens to
+  the next clip, and the local engine's state (installed, loaded, threads, idle
+  unload, or how to install). The window keeps nothing: it shows the daemon's
+  answer after every change. Diagnostics rows say `· local`, `· cloud` or
+  `· cloud (local failed)` per clip (known values only, never daemon text).
+- **Real-model smoke** (`tests/voice_stt_local_real.py`, gated by
+  `JARVIS_STT_LOCAL_REAL=1`, V0 venv, 4G scope), one synthetic Kokoro clip:
+  WER 0, cold 2.7 s (load included), warm RTF 0.055, a 48 kHz stereo copy still
+  decodes, RSS 41 -> 1117 MB loaded -> **78 MB after unload** (`gc` plus
+  `malloc_trim`), reload on demand. Synthetic speech, one clip: it shows the
+  wiring works and that the 1.1 GB is returned, not accuracy.
+- **Deploy** (once, by the lead): install `sherpa-onnx` into the daemon venv
+  (the V0 probe venv has 1.13.8, which has a CPython 3.14 wheel), then
+  `python -m jarvis.stt_local fetch` (about 490 MB, SHA256-pinned, same digest as
+  `tests/voice_v0/models.json`, extracted with the `data` filter under member
+  and size caps into `~/.cache/jarvis-stt/parakeet-tdt-0.6b-v3-int8`; or point
+  `JARVIS_STT_LOCAL_MODEL` at an existing directory). Restart the daemon, then
+  Settings -> Voice shows "installed". Nothing changes until the owner picks
+  Local or Auto. The first load after each daemon start hashes about 640 MB of
+  model files (`verify_model`, once per file identity) on top of the 2-4 s load,
+  so the first clip after a start may miss its local share of the budget and
+  fall back to the cloud (or fail, with the fallback off).
+- **The default flip** is one line: `config.STT_BACKEND_DEFAULT = "cloud"`. Run
+  `tests/stt_compare_probe.py` first (header has the command; `--yes-spend`
+  required, `--dry-run` free, hard cap $0.24, estimate at 4x the listed price,
+  no key printed, no `.env` read); its output ends "local within 1 point of
+  cloud: YES/NO". Synthetic speech bounds the models from below and says nothing
+  about the owner's voice.
+
+Free checks: `tests/voice_stt_local_check.py` (settings, engine lazy load,
+threads, serialisation, deadline, abandoned jobs, idle unload, load-failure
+backoff, safe errors, audio handling, pin parity with V0's manifest, policy
+matrix incl. local-only never calling `llm.transcribe`, budget share, Discord/face
+unchanged), `tests/stt_compare_probe_check.py` (the probe's spend guards),
+`tests/v2/hud_backend_check.py` (`/stt` reply keys, 409, `/stt/settings`),
+`tests/v2/frame_check.py`, `hud/src/lib/sttSettings.test.ts`,
+`stt.test.ts`/`voiceDiagnostics.test.ts` (served-by), and
+`tests/face/hud_v2_stt_local_check.py` (real HUD, mock daemon, 17 checks).
+Mutations that each fail the Python suite: serialisation lock removed, idle
+reap that never unloads, a fallback-off path that still uploads, no budget share,
+a corrupt settings file that fails open, non-opt-in callers using local, the
+unpinned thread clamp, a cancelled job that still decodes after its load.
+Not done and not claimed: changing the default to local (the receipt does not
+support it), a run in the live daemon, a physical-microphone run, WAV-only means
+no Ogg/webm locally.
+
+### V13 review fixes (2026-10-14)
+
+- **The privacy promise is scoped to HUD dictation.** Chrome's wake recognizer
+  (`webkitSpeechRecognition`, App.tsx) streams the microphone to Google whatever
+  `stt.json` says, so with Cloud fallback OFF (or its state not yet known) it
+  never starts: wake-by-voice is off until V11's local wake detection, and the
+  talk key still works. Settings -> Voice says so ("Dictation audio never leaves
+  this computer. Wake word by voice is off until local wake detection lands; use
+  the talk key."), and with it ON it says the wake word uses Chrome's speech
+  recognition (Google). With local chosen and the fallback on, the summary says
+  Discord voice notes and the face server still use the cloud. The window's copy
+  of the settings (`hud/src/state/sttSettings.ts`) is shared by the panel and the
+  recognizer's gate. **Every window hears a change at once:** the daemon
+  publishes an `stt_settings` event on `/events` after each successful POST and
+  whenever a read finds the resolved value changed by itself (a hand edit, a
+  corrupt file; `stt_settings.watch`), and each window applies it, because a
+  recognizer in a second window would otherwise keep streaming to Google. The
+  backstops are a re-read when the window becomes visible (`visibilitychange`,
+  not focus), on every event-stream (re)connect, every 60 s, and every 15 s
+  while the value is unknown. `hud_v2_stt_local_check.py` asserts the recognizer
+  never starts after a reload with the fallback off, stops when it is switched
+  off, and starts when it is switched on again; `hud_v2_stt_wake_windows_check.py`
+  (two pages, one mock that fans events out) asserts the other window stops with
+  no focus change, and carries a control run with the event dropped in which the
+  other window keeps streaming.
+- `wav_samples` maps any exception from `wave`/numpy on hostile bytes to
+  `LocalSTTUnavailable` (a fuzzed header was a 500); a queued job now waits for
+  the engine in 50 ms slices and leaves the queue as soon as its caller has gone.
+- `fetch` caps the download (700 MB) while streaming, refuses to replace a
+  directory without the `.verified` marker, and records per-file hashes there;
+  `verify_model` re-checks them when the model loads (once per file identity:
+  path, inode, size, mtime, ctime). This guards against corruption, not
+  tampering: the marker lives in the same writable directory. A marker that is
+  there but unreadable, not JSON or without a `files` table refuses ("run the
+  fetch again") rather than being trusted. A model directory the owner supplies
+  has no marker and is trusted as it is: only the download is verified. The
+  check runs under the engine's lock and the directory is writable by anything
+  running as the owner, so it cannot be made to hang or exhaust memory: the
+  marker and every model file are opened `O_NOFOLLOW | O_NONBLOCK` and must be
+  regular files (a symlink, FIFO or device refuses at once), the marker is
+  read to at most 64 KB, and each model file to at most its size, which must
+  equal the size `fetch` recorded in `.verified` (`sizes`).
+- The compare probe charges its estimate for a failed request too. An invalid
+  `backend` reads "using local" (the fallback keeps its value); `auto` with
+  nothing installed and the fallback off says the engine is not installed, not
+  that cloud was switched off.
+
+### Paid comparison receipt (2026-10-14)
+
+The lead ran `tests/stt_compare_probe.py --yes-spend` from main f33c810 on 96
+synthetic Kokoro clips (1233 words). Local Parakeet-TDT-0.6B-v3 int8 WER was
+1.38%; cloud (`nvidia/parakeet-tdt-0.6b-v3` via OpenRouter) WER was 0.24%. The
+difference is +1.14 points, with a 95% bootstrap interval of +0.48 to +1.89. The
+Q6 condition ("local within 1 point of cloud") is NOT met, so
+`STT_BACKEND_DEFAULT` stays `"cloud"`; Local stays selectable in Settings -> Voice.
+Estimated spend was $0.0384 of the $0.24 cap. The estimate assumes 4x the listed
+price, so the real cost is lower. Typical local errors were word-ending slips
+such as "finis" for "finished" and "workets" for "worklets". The run used
+synthetic speech only, so it says nothing about the owner's voice. Deploy note:
+on 2026-10-14 the lead installed sherpa-onnx 1.13.8 into the daemon venv and
+fetched the pinned model to `~/.cache/jarvis-stt/parakeet-tdt-0.6b-v3-int8`
+(verified) with `python -m jarvis.stt_local fetch`.
+
+## V15: lowering the Remote Browser's sound while Jarvis speaks (2026-10-13)
+
+Q14 is answered (plan section 7): duck Remote tabs through WSLg. The daemon lowers the Remote
+Browser's own PulseAudio sink-inputs by about 15 dB while the HUD holds a short lease, and
+puts them back exactly. It never unmutes, never touches another app's stream, and does
+nothing for Direct frames (cross-origin iframes, not observable or controllable from here).
+Code: `jarvis/v2/speech_duck.py`, `BrowserSound.duck_owners()` (`browser/sound.py`),
+`hud/src/lib/speech/duck.ts`. Tests: `tests/v2/speech_duck_check.py` (58),
+`hud_backend_check` (route), `frame_check` (walk), `hud/src/lib/speech/duck.test.ts`,
+`tests/face/hud_v2_duck_check.py` (23). Committed and pushed on `claude/voice-v15`; not merged,
+built-and-installed or live-validated. **Physical audibility of the duck is UNMEASURED.**
+
+### Probe (2026-10-13, local only, no network)
+
+WSLg's server is PulseAudio 17 at `/mnt/wslg/PulseServer`, one sink `RDPSink`,
+`module-stream-restore` loaded. A throwaway `/opt/google/chrome/chrome --headless` with a
+temporary profile and `PULSE_SERVER` set (the way B-SOUND launches an audible instance)
+played a 1% sine from a `file://` page. Every process and stream I started was stopped; I
+changed the volume only of sink-inputs whose PID was in my own Chrome tree (and unmuted
+one of my own after muting it to test).
+
+- **Attribution works, by PID ancestry.** One sink-input appeared, `application.process.id`
+  = the Chrome *audio service* utility process (`--type=utility --utility-sub-type=
+  audio.mojom.AudioService`), a **direct child of the browser root** whose command line carries
+  `--user-data-dir`. `application.process.binary` was `chrome`, `application.name` "Google
+  Chrome". The existing `audio.OwnedChrome.chain(pid)` (executable, uid, start time, ancestry up
+  to the pinned root) therefore attributes it, and the root is found the way the mute finds
+  it (`chrome_pids(folder)`, exactly one pinned root).
+- **Name matching would be wrong, and the probe showed why.** During the probe a second,
+  unrelated sink-input from another agent's Playwright `chrome-headless-shell` (application
+  name "Chromium") was playing. It has its own PID and ancestry, so it is never ours; a
+  name-based rule would be one rename away from touching it. It was only read.
+- **Volume read and exact restore work.** `pactl --format=json list sink-inputs` gives
+  per-channel raw values (`volume.front-left.value`, 65536 = 100%). `pactl
+  set-sink-input-volume <id> <v1> <v2>` set an asymmetric (40000, 30000) pair, a duck pair and
+  the original pair again, each read back bit-exactly. Setting a volume on a muted stream left
+  `mute` untouched (the code never sends a mute command at all).
+- **Scale.** PulseAudio's raw volume is cubic in amplitude: pactl's `-15dB` is raw 36854
+  (56%), `18%` is -44.7 dB. The duck is `raw * 10**(-15/60)` per channel, which is a true
+  -15 dB and keeps the balance.
+- **`module-stream-restore` remembers pactl volumes (a finding that shaped the design).** After
+  I set a stream to 18% and killed its Chrome, the *next* Chrome stream (a new process, new
+  profile) was created at 18%. PulseAudio keys that memory by application name ("Google
+  Chrome"), and every `set-sink-input-volume` is saved. So a duck that is not restored, whether
+  the daemon is killed or the Chrome restarts mid-duck, would make the next Remote stream start
+  quiet with nobody having asked. Restoring writes the prior value, which is then what is
+  remembered (checked: a 100% restore made the next stream start at 100%).
+- **pactl latency is not constant.** Normally 0.00 s; for a few minutes, with several agents'
+  browsers running and load average 6, individual `list` and `set` calls took 6 to 15 s. Every
+  call is therefore bounded (2 s) and failure is non-fatal and retried; under such load the
+  duck is simply late, never stuck.
+
+**Live smoke of the finished code (same day, real pactl and real `/proc`, a throwaway
+headless Chrome with a temporary profile and a temporary journal):** the stream was attributed
+by `OwnedChrome.chain`, went 65536 -> 36854 per channel under a lease, the journal held
+prior/applied, `release()` restored 65536 exactly and deleted the journal, and a lease left to
+expire restored the same way. The one other app's stream present earlier was not touched.
+
+### What it does
+
+- **Route** `GET`/`POST /speech/duck` (owner-only, HUD listener, like `/speech/voices`);
+  body is exactly `{on: bool}` (unknown or missing key, or a non-boolean, is 400; a daemon that
+  is stopping answers 409). `on:true` grants or renews a **3 s lease**; `on:false` ends it.
+  The answer is `{on, ducked, lease_s}`: counts only, never PIDs or stream names.
+- **The HUD** (`DuckLease`, wired in `createSpeech`): the speech controller's `active` (playing,
+  buffering, or inside the 300 ms hangover) takes the lease at once and renews it every second;
+  pause, stop, end, the Settings switch going off, or `pagehide` end it. Requests never overlap and
+  an `off` cannot overtake an `on`; a failed request is dropped (the next renewal, or expiry,
+  covers it). Settings, Voice: **"Lower Browser sound while Jarvis speaks"**, in
+  `localStorage` (`jarvis.duckBrowser`), **on by default**; one choice for every window (a
+  `storage` listener applies another window's change). Only the window that holds the speech
+  lock ever has an active queue, so only it holds a lease. Each window sends its own random lease
+  token (`window`, 32 hex, optional in the route) and the daemon keeps one deadline per token
+  (at most 16), so one window's `off` or expiry cannot end another's lease; the duck lasts while
+  any lease lives.
+- **Whose streams.** A sink-input is lowered only if its PID descends from a Remote Chrome
+  named by `BrowserSound.duck_owners()`: an instance that launched audible
+  (`instance.audio.applied`), is not closing or Private, and for which the owner's request and
+  the master permission stand **now** (`preference(profile)`). Anything else (master OFF,
+  structurally muted launch, nothing requested, Browser not running) lists no owner and
+  causes **no pactl call at all**. It never starts the Browser. A stream with no process is
+  never ours; a stream whose chain does not reach the pinned root is never ours.
+- **Never the mute.** The runner (`speech_duck.pactl`) allows only the JSON listing and
+  `set-sink-input-volume <index> <1..8 raw values>`; mute, default devices and everything else
+  are refused before a process starts (tested). A muted stream is left entirely alone, and a
+  mute set during the duck survives the restore.
+- **Exact restore, owner wins.** Each held stream records its prior per-channel volume and the
+  value that was written. Restore (lease end, `off`, expiry, shutdown) writes the prior value back
+  **only if the stream still has the value we wrote**. If it does not (the owner moved the slider
+  in the Windows mixer, or anything else changed it) the stream is not touched again, now or at
+  restore, and is not re-ducked for the rest of that lease; the next lease ducks it afresh from
+  where the owner left it.
+- **A stream that appears mid-duck** is found on the next scan (every 0.5 s while a lease
+  lives) and ducked from its own volume, then restored to it. It can be audible at full volume
+  for up to one scan interval plus the pactl latency; that is the one unavoidable gap (no
+  subscription, to keep the B-SOUND "no leak-free claim" posture). A stream born carrying exactly
+  a duck level (the stream-restore case above) takes the prior of the duck that made that level,
+  not the level itself.
+- **Index reuse.** Before a write the listing is repeated and the stream must still have the same
+  PID and volume, and the chain is re-checked. The residual race (the server frees and reuses an
+  index between that check and the write) is the one B-SOUND documents for the mute; it cannot be
+  closed from pactl.
+
+### If the daemon dies mid-duck
+
+- **A closed or crashed HUD, a lost connection, or a daemon whose HUD stops renewing:** the lease
+  expires 3 s after the last renewal and the worker restores (nothing else is needed).
+- **Orderly daemon shutdown:** `Daemon.stop()` calls `speech_ducker.stop()` first (before Chrome
+  closes) and restores, bounded to about 6 s.
+- **`kill -9` of the daemon (or a pactl that never answers):** nothing can run. Each duck is
+  written to `~/.config/jarvis/speech_duck.json` (`config.SPEECH_DUCK_PATH`, 0600 via a random
+  `mkstemp` file and `os.replace`, at most 64 KB; active ducks are always kept and only the oldest
+  leftovers are cut at 16; deleted when everything is restored) *before* the volume is written. The next daemon start (`Ducker.recover()`, only for the owner's data folder) reads it;
+  while it holds an entry the idle worker polls every 3 s, and only when a Remote Chrome is
+  audible: a Remote stream that appears carrying exactly the recorded ducked value is set back to
+  the recorded prior value (also under a new lease). Whether a Chrome that outlives a
+  `kill -9`'d daemon keeps its stream ducked was not tested (its pipe to the daemon closes, so it
+  most likely exits); the journal covers both. **Remaining gap:** until a new Remote stream appears (the owner turns Browser
+  sound on again) the stored volume sits in PulseAudio's memory, and an entry older than 30 days is
+  forgotten; a corrupt or missing journal repairs nothing. The owner can always fix a stuck
+  volume in the Windows volume mixer, and nothing here changes the mute.
+- Chrome restarting mid-duck (B-SOUND's idle replacement, sound OFF then ON) is the same case: the
+  vanished stream becomes a journal entry and the new stream is repaired when it appears.
+
+### Review fixes (2026-10-14, PR #156 review at `7f908b11`)
+
+- **A forged journal can no longer raise a volume.** On load an entry must have `prior` at most
+  100% per channel, `applied` within 2 of the duck of `prior`, equal channel counts, and a finite
+  time that is not in the future (beyond 300 s of skew); otherwise it is dropped. Every volume
+  written is at most 100% per channel (the runner refuses more; a restore or repair writes
+  `min(prior, 100%)`), and a duck writes `min(duck of prior, the stream's current volume)`, so it
+  can only lower. The regression is the reviewer's repro (`prior` 262144), plus a mutant for each
+  guard. A stream the owner boosted past 100% is left alone (giving it back would need a write
+  above the norm).
+- **The journal is written through `tempfile.mkstemp`** (random name, `O_EXCL`, 0600) then
+  `os.replace`; a FIFO or hardlink at the old predictable name cannot block the worker (tested).
+- **Restore is bounded**: one overall deadline for `stop()` (6 s, worker join included) and each
+  call gets only the time left; the first pactl failure stops that round of writes, and the rest
+  stay held and journaled. A leftover in the journal covers what shutdown could not restore.
+- pactl runs through the same capped streaming runner as the mute (`audio.run_bounded`; the
+  mute's own allowlist and tests are unchanged).
+- Only the owner's daemon reads or writes the journal (`Daemon._duck_journal`, the same
+  `_owns_data` rule as the carrier sweep).
+- `duck_owners()` excludes any instance that is not `audio.synchronized(True)`: a mute attempt
+  pending or ever made on it (tainted) is not ours to lower.
+- **One continuous duck is capped at 10 minutes** (`MAX_LEASE_S`): the volumes are restored and
+  stay so for 5 s even while renewals continue, then a request starts a new period (a stuck
+  window renewing for ever is audible as a short gap every 10 minutes, not a permanent duck; a
+  genuine 10-minute read-aloud has the same gap). The idle leftover poll backs off 3 s -> 60 s
+  while Chrome plays with nothing to repair.
+
+- **One odd foreign stream cannot block a restore.** `parse()` fails the whole listing only on
+  structural problems (not a list, more than 256 rows, a row that is not an object, an index that
+  is not an integer or is repeated, a `mute` that is not a boolean). A row with a non-numeric
+  `application.process.id`, a volume above the read bound or a bad channel map is just dropped,
+  never written; a held stream that turns malformed is treated as gone and becomes a journal
+  leftover. **Residual:** a listing larger than `OUTPUT_CAP` (256 KB) or with more than 256
+  streams, or a repeated index, still fails the listing, so nothing is written and the duck
+  cannot be undone until pactl answers sanely again (the journal covers a restart).
+- `audio._run_bounded` is private and applies no allowlist; only `audio._pactl` and
+  `speech_duck.pactl` call it, each after its own allowlist. `stop()` is rechecked immediately
+  before a duck is written.
+
+### Not done, and not claimed
+
+No physical audibility, echo or latency measurement; the Windows-side mixer behaviour with the
+owner's volume sliders is inferred from the listing, not heard. The fallback ("hold speech while a
+tab plays") was **not** needed: attribution is possible. Direct frames are unchanged and there is
+no ducking hook for them. Browser audio as a mic echo source (voice plan 3.14) is still
+UNMEASURED and speaker verification covers it.
 
 ## V8: spoken summaries (2026-10-13)
 
@@ -1801,7 +2184,7 @@ V6 stopgap is gone.)
   one deadline. `JARVIS_CHAT_PROVIDER` is not applied to this call (`provider=""`).
 - **Request.** `scrub` + `strip_invisible` on the text, then `untrusted.fence`
   (fresh nonce per call, marker phrases neutralized) so a reply cannot close its
-  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=160`.
+  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=1024` (a ceiling; was 160, see the receipt), two tries per model.
   Output is cleaned with `voice.speakable`, bounded to 300 characters at a
   sentence. A request never exceeds `min(JARVIS_COMPACT_AT_TOKENS, 90k)`
   (estimated at 3 characters a token, less 1000): longer text is summarised in
@@ -1842,6 +2225,81 @@ V6 stopgap is gone.)
 
 ### Paid probe receipt (owner-approved, cap $0.10)
 
-Pending: `tests/speech_summary_probe.py --yes-spend` (24 synthetic replies, 800
-to 8000 characters, aborts before $0.09). Fill in date, model id, call count,
-total spend, tokens, p50/p95 here after the lead runs it.
+Run by the lead on **2026-10-14** from the main checkout
+(`tests/speech_summary_probe.py --yes-spend`), model
+`anthropic/claude-haiku-5.5`, 24 calls on synthetic replies of 723 to 8053
+characters, no real chat content. Numbers as relayed by the lead (the console
+output itself was not kept):
+
+| | |
+|---|---|
+| Calls | 24, of which **7 failed with 502** (29%) |
+| Total spend | $0.002314 (cap $0.10) |
+| Mean cost per call | $0.000136 |
+| Prompt tokens, mean | 902 |
+| Completion tokens, mean | 92 |
+| Latency | p50 1.46 s, p95 2.1 s |
+| Failed inputs (characters) | 786, 832, 1742, 1778, 3635, 3644, 8053 |
+
+Cost and latency are well inside the plan's estimate ($0.0003 a summary, a
+second or so). The failure rate is not acceptable: the owner would hear the
+truncated fallback about three times in ten.
+
+**Cause.** Not proven by the first run (the second run below confirmed it). The probe kept only "502" for the failed calls, and the
+route answers a fixed sentence, so the internal reason was lost. What the code
+shows: the inputs are not the cause (the seven are scattered across all four
+sizes and the first call of the run was one of them; `prepare()` leaves every
+probe text unchanged, so `scrub` and the fence are not involved), and there are
+only three ways `summarize` returns a 502: the call raises (a provider or
+network error, one attempt, no retry), the reply comes back with no text, or the
+text is empty after `clean()`. The bounds in `clean()` cannot empty a reply that
+has words, whatever its sentence ends (tested). The likeliest cause is the first
+two together: `max_tokens=160` was the *whole* budget, so a model that reasons
+before it answers could spend it on reasoning and return nothing (finish reason
+`length`), and a transient 429/5xx/529 was never tried again. A mean of 92
+completion tokens for replies of at most 300 characters (about 70 tokens) is
+consistent with some thinking being counted.
+
+**Fix (V8 fix, `claude/voice-v8-fix`).** `OUT_MAX_TOKENS` 160 -> 1024 (a ceiling;
+length is still the prompt's and `clean()`'s job); each model gets two tries
+inside the one 6 s deadline, the second for a transient HTTP error (anything but
+400/401/402/403/404/413/422) or an empty reply, with a retry that must leave
+0.3 s; content parts are read as text. Every failure now carries a **reason
+code and numbers only** (`SummaryError.reason`/`.detail`: `http_<status>`,
+`llm_error`, `empty_content`, `empty_after_clean`, `exception:<Class>`, `deadline`;
+finish reason, completion and reasoning tokens, whether a reasoning field was
+present, raw length), logged and printed by the probe, never sent to the HUD.
+Tests in `tests/v2/speech_summary_check.py` (`FailedSummaries`) reproduce each
+path with a fake reply, and two mutations (the old 160-token budget, a single
+attempt) fail them.
+
+**Still to do (done 2026-10-14, see the second run below).** A second probe
+(owner's OK; same cap) to confirm the failure rate and to read the reason codes
+from a real run. If `empty_content` shows `finish=length` with
+`reasoning_tokens` close to the budget, the cause was the budget; if `http_*`,
+the retry; if neither, the next step is turning reasoning off for this call.
+
+### Second probe receipt (owner-approved, same $0.10 cap)
+
+Run on **2026-10-14**, from main `3165b31`, after PR #164 was installed.
+
+| | |
+|---|---|
+| Model | `anthropic/claude-haiku-5.5` |
+| Calls | 24, **0 failed**, **0 retried** |
+| Total spend | $0.004219 (cap $0.10) |
+| Mean cost per call | $0.000176 |
+| Prompt tokens, mean | 956 |
+| Completion tokens, mean | 160 (one reply used 392) |
+| Latency | p50 1.57 s, p95 2.73 s, max 3.55 s |
+| Estimated costs | none |
+
+**Conclusion.** The old `max_tokens=160` budget was the cause. Replies needed up
+to 392 output tokens, and with 0 failures and 0 retries under the 1024 ceiling,
+the retry path was not what fixed it. The second run confirmed it. No failure
+reason code was produced, because nothing failed, so none is recorded here.
+
+**Cost note.** The mean cost per summary rose from $0.000136 to $0.000176
+because the replies are now complete. Both means cover successful calls only:
+the first run's $0.000136 is its $0.002314 total over the 17 calls that returned
+a summary, and this run's $0.000176 is over all 24.

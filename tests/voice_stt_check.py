@@ -15,10 +15,15 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import config, llm, voice  # noqa: E402
+
+# The owner's STT switches (V13) decide whether the cloud chain may run at all; this
+# suite is about the chain, so it reads no real settings file.
+config.STT_SETTINGS_PATH = Path(tempfile.mkdtemp()) / "no-such-stt.json"
 
 FAILURES: list[str] = []
 CHECKS = 0

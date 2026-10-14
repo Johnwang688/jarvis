@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CHUNK_HARD_MS, CHUNK_OVERLAP_MS, CHUNK_SOFT_MS, UTTERANCE_LIMIT_MS, UtteranceRecorder, type RecordedChunk,
+  CHUNK_HARD_MS, CHUNK_OVERLAP_MS, CHUNK_SOFT_MS, CHUNK_SOFT_OVERLAP_MS, UTTERANCE_LIMIT_MS, UtteranceRecorder, type RecordedChunk,
 } from "./recorder";
 import { msToSamples, samplesToMs } from "./vad";
 
@@ -41,7 +41,7 @@ describe("UtteranceRecorder", () => {
     expect(chunks[0].samples[0]).toBeCloseTo(0.2);
   });
 
-  it("cuts at the first 700 ms pause once the chunk is 8 s long, with no overlap", () => {
+  it("cuts at the first 700 ms pause once the chunk is 8 s long, repeating only 200 ms of quiet", () => {
     const { rec, chunks, feed } = mk();
     feed(CHUNK_SOFT_MS - 500);
     feed(600, 0, false);             // a pause, but the chunk is not 8 s yet
@@ -51,13 +51,27 @@ describe("UtteranceRecorder", () => {
     expect(chunks).toHaveLength(0);  // 500 ms is not a long enough pause
     feed(300, 0, false);             // now 800 ms of quiet
     expect(chunks).toHaveLength(1);
-    expect(chunks[0].overlapMs).toBe(0);
+    expect(chunks[0]).toMatchObject({ overlapMs: 0, repeats: false });
     feed(2000);
     rec.end(0);
     expect(chunks).toHaveLength(2);
-    expect(chunks[1]).toMatchObject({ index: 1, overlapMs: 0 });
+    expect(chunks[1]).toMatchObject({ index: 1, repeats: false });
+    expect(chunks[1].overlapMs).toBeCloseTo(CHUNK_SOFT_OVERLAP_MS, -2);   // a sliver of the quiet, so no first phoneme sits on an edge
+    expect(chunks[1].samples[0]).toBe(0);                                  // ... and it is quiet
     // together they are everything that was spoken, once
-    expect(chunks[0].ms + chunks[1].ms).toBeCloseTo(rec.ms, -1);
+    expect(chunks[0].ms + chunks[1].ms - chunks[1].overlapMs).toBeCloseTo(rec.ms, -1);
+  });
+
+  it("pads a cut at a pause with digital silence, never a repeat of the faint audio before it", () => {
+    const { rec, chunks, feed } = mk();
+    feed(CHUNK_SOFT_MS);
+    feed(800, 0.004, false);             // quiet to the detector, but not silent: a trailing word's tail
+    expect(chunks).toHaveLength(1);
+    feed(1000);
+    rec.end(0);
+    const pad = chunks[1].samples.subarray(0, msToSamples(CHUNK_SOFT_OVERLAP_MS));
+    expect(Array.from(pad).every(v => v === 0)).toBe(true);
+    expect(chunks[1].repeats).toBe(false);
   });
 
   it("takes a shorter pause after 18 s", () => {
@@ -84,6 +98,7 @@ describe("UtteranceRecorder", () => {
     expect(chunks).toHaveLength(2);
     expect(chunks[0].ms).toBeGreaterThanOrEqual(CHUNK_HARD_MS);
     expect(chunks[0].ms).toBeLessThan(CHUNK_HARD_MS + 40);   // the frame that crossed the line
+    expect(chunks[1]).toMatchObject({ repeats: true });
     expect(chunks[1].overlapMs).toBeCloseTo(CHUNK_OVERLAP_MS, -1);
     const a = chunks[0].samples, b = chunks[1].samples, ov = msToSamples(CHUNK_OVERLAP_MS);
     expect(Array.from(b.subarray(0, ov))).toEqual(Array.from(a.subarray(a.length - ov)));
@@ -159,7 +174,7 @@ describe("UtteranceRecorder", () => {
       expect(chunks).toHaveLength(1);
       feed(6000); feed(800, 0, false);
       expect(chunks).toHaveLength(2);
-      expect(chunks[1]).toMatchObject({ index: 1, overlapMs: 0 });
+      expect(chunks[1]).toMatchObject({ index: 1, repeats: false }); // a cut at a pause repeats no speech (main: 200 ms of digital silence leads the next chunk)
     });
 
     it("what follows an early cut is not sent when it is only silence", () => {

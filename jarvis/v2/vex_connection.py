@@ -25,7 +25,11 @@ def usb_presence(data: bytes) -> tuple[bool, bool]:
                 raise ValueError("duplicate USB field")
             obj[key] = value
         return obj
-    raw = json.loads(data.decode("utf-8"), object_pairs_hook=unique)
+    # Under a sized PTY, Windows' console wraps the JSON in its own control
+    # sequences (mode toggles, the window title, cursor show). Only those are
+    # removed; anything else that is not the JSON still refuses.
+    from .vex import _ANSI
+    raw = json.loads(_ANSI.sub("", data.decode("utf-8")), object_pairs_hook=unique)
     if not isinstance(raw, dict) or not isinstance(raw.get("usb"), dict):
         raise ValueError("USB response not recognized")
     usb = raw["usb"]

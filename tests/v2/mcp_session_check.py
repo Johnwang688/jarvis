@@ -834,9 +834,11 @@ class BridgeChecks(DaemonHarness):
         out = subprocess.run(
             [sys.executable, "-c", "from jarvis.v2 import session_tools as s; "
                                    "from jarvis.v2.mcp_catalog import MCP_TOOLS; "
-                                   "assert set(s.SESSION_TOOLS) == MCP_TOOLS | {'terminal_read', 'hud_browser_view'}; "
+                                   "assert set(s.SESSION_TOOLS) == MCP_TOOLS | {'terminal_read', 'hud_browser_view', 'hud_browser_act'}; "
                                    "assert all(t.providers == frozenset({'claude', 'codex'}) for t in s.SESSION_TOOLS.values()); "
                   "assert all(s.SESSION_TOOLS[n].read_only and s.SESSION_TOOLS[n].foreground_only and s.SESSION_TOOLS[n].desk_only for n in ('terminal_read', 'hud_browser_view')); "
+                                   "assert s.SESSION_TOOLS['hud_browser_act'].owner_gated and not s.SESSION_TOOLS['hud_browser_act'].read_only; "
+                                   "assert s.SESSION_TOOLS['hud_browser_act'].foreground_only and s.SESSION_TOOLS['hud_browser_act'].desk_only; "
                                    "assert any(t.name == 'terminal_read' for t in s.for_provider('claude')); "
                                    "assert any(t.name == 'terminal_read' for t in s.for_provider('codex')); print('ok')"],
             cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)},

@@ -8,7 +8,7 @@ import { VoiceDiagnostics } from "./voiceDiagnostics";
 type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number;
   resolve: (t: string) => void; reject: (e: unknown) => void };
 
-function harness(over: { canUpload?: () => boolean; maxInFlight?: number } = {}) {
+function harness(over: { canUpload?: (explicit: boolean) => boolean; maxInFlight?: number } = {}) {
   const calls: Call[] = [];
   const placed: SttPlaced<string>[][] = [];
   const events: SttEvent[] = [];
@@ -527,7 +527,7 @@ describe("chunked messages (V4)", () => {
 
     it("is kept and retryable while the others are placed in order, marked late so AUTO will not send half a message", async () => {
       const { h, ids } = await threeWithMiddleFailed();
-      expect(h.texts()).toEqual(["alpha beta gamma delta epsilon zeta"]);
+      expect(h.texts()).toEqual(["alpha beta gamma […] delta epsilon zeta"]);   // a mark where the missing part belongs
       expect(h.placed[0][0]).toMatchObject({ late: true, retried: false, parts: 2 });
       expect(h.stt.clip(ids[1])).not.toBeNull();
       expect(h.stt.snapshot().clips).toHaveLength(1);
@@ -541,7 +541,7 @@ describe("chunked messages (V4)", () => {
       expect(h.diagnostics.snapshot().rows[0].outcome).toBe("transcribing");
       h.calls[3].resolve("gamma and delta");              // overlaps both neighbours
       await flush();
-      expect(h.texts()).toEqual(["alpha beta gamma delta epsilon zeta", "and"]);
+      expect(h.texts()).toEqual(["alpha beta gamma […] delta epsilon zeta", "and"]);
       expect(h.placed[1][0]).toMatchObject({ late: true, retried: true, parts: 1 });
       expect(h.stt.snapshot().clips).toEqual([]);
     });
@@ -634,6 +634,96 @@ describe("chunked messages (V4)", () => {
     expect(h.texts()[0].split(" ")).toHaveLength(STT_MAX_CLIPS + 10);
   });
 
+  it("a message closed `late` is placed late even if every chunk answered (it was cut short)", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g);
+    h.calls[0].resolve("what was said");
+    h.stt.closeGroup(g, { late: true });
+    await flush();
+    expect(h.placed[0][0]).toMatchObject({ text: "what was said", late: true });
+    const k = harness();
+    const g2 = open(k);
+    sub(k, g2);
+    k.calls[0].resolve("whole");
+    k.stt.closeGroup(g2);
+    await flush();
+    expect(k.placed[0][0].late).toBe(false);
+  });
+
+  it("marks where a failed chunk belongs: first, middle and last, once each", async () => {
+    const run = async (fail: boolean[]) => {
+      const h = harness();
+      const g = open(h);
+      fail.forEach(() => sub(h, g));
+      for (let i = 0; i < fail.length; i++) {
+        if (fail[i]) h.calls[i].reject(Object.assign(new Error("x"), { status: 400 }));
+        else h.calls[i].resolve(`t${i}`);
+      }
+      h.stt.closeGroup(g);
+      await flush();
+      return h.texts()[0];
+    };
+    expect(await run([true, false, false])).toBe("[…] t1 t2");
+    expect(await run([false, true, true, false])).toBe("t0 […] t3");
+    expect(await run([false, false, true])).toBe("t0 t1 […]");
+    expect(await run([true, true])).toBeUndefined();            // nothing was heard: no message of marks
+  });
+
+  it("marks the gaps once: a retried chunk placed alone adds none (chunks 2 and 4 failed, retry 2)", async () => {
+    const h = harness();
+    const g = open(h);
+    const ids = [sub(h, g), sub(h, g), sub(h, g), sub(h, g)];
+    h.calls[0].resolve("t1"); h.calls[2].resolve("t3");
+    h.calls[1].reject(Object.assign(new Error("x"), { status: 400 }));
+    h.calls[3].reject(Object.assign(new Error("x"), { status: 400 }));
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["t1 […] t3 […]"]);
+    h.stt.retry(ids[1]);
+    h.calls[4].resolve("t2");
+    await flush();
+    expect(h.texts()).toEqual(["t1 […] t3 […]", "t2"]);          // not "t2 […]": chunk 4's gap was marked already
+  });
+
+  it("a cut at a pause is not de-duplicated even when the chunks share an edge word (repeats: false)", async () => {
+    const h = harness();
+    const g = open(h);
+    h.stt.submit(h.clip(), 8000, "ptt", "meta", { group: g });
+    h.stt.submit(h.clip(), 8200, "ptt", "meta", { group: g, overlapMs: 200, repeats: false });
+    h.calls[0].resolve("this is very");
+    h.calls[1].resolve("very good");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["this is very very good"]);
+    expect(h.stt.snapshot().clips).toEqual([]);
+  });
+
+  it("joins a fragment the cut left to the whole word the next chunk heard", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g, 0); sub(h, g, 500);
+    h.calls[0].resolve("sent to the transcrip");
+    h.calls[1].resolve("transcription service");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["sent to the transcription service"]);
+  });
+
+  it("asks whether an upload is allowed with `explicit` only for the owner's Retry", async () => {
+    const seen: boolean[] = [];
+    let allow = true;
+    const h = harness({ canUpload: (explicit: boolean) => { seen.push(explicit); return allow || explicit; } });
+    const id = h.stt.submit(h.clip(), 1000, "ptt", "x")!;
+    h.calls[0].reject(Object.assign(new Error("x"), { status: 400 }));
+    await flush();
+    allow = false;                                         // Settings is open: nothing uploads on its own ...
+    expect(h.stt.retry(id)).toBe(true);                    // ... but the owner's Retry from there is fine
+    expect(h.calls).toHaveLength(2);
+    expect(seen.at(-1)).toBe(true);
+    expect(seen[0]).toBe(false);                           // the first upload was not an explicit Retry
+  });
+
   it("cannot submit to a message that has ended", () => {
     const h = harness();
     const g = open(h);
@@ -679,5 +769,70 @@ describe("cancelGroup (V5: a message that proved too short after a chunk left)",
   it("an unknown group is nothing", () => {
     const h = harness();
     expect(() => h.stt.cancelGroup(99, "too_short")).not.toThrow();
+  });
+});
+
+describe("V13: which backend served the clip", () => {
+  const reply = (backend: unknown, fellBack?: boolean) => ({ text: "hello", backend, fellBack });
+  function withReplies() {
+    const diagnostics = new VoiceDiagnostics(() => 0);
+    const placed: string[] = [];
+    let next: ReturnType<typeof reply> | string = reply("local");
+    const stt = new SttAssembler<string>({
+      transcribe: async () => next,
+      place: b => { placed.push(...b.map(p => p.text)); },
+      diagnostics, now: () => Date.now(),
+    });
+    return { stt, diagnostics, placed, set: (r: typeof next) => { next = r; } };
+  }
+  it("records the backend on the diagnostics row, and the text still lands", async () => {
+    const h = withReplies();
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    await h.stt.settled();
+    expect(h.placed).toEqual(["hello"]);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "local", fellBack: false });
+  });
+  it("marks a clip the cloud answered because local failed", async () => {
+    const h = withReplies();
+    h.set(reply("cloud", true));
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+  });
+  it("a plain string reply still works, and an unknown backend is ignored", async () => {
+    const h = withReplies();
+    h.set("hi there");
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.placed).toEqual(["hi there"]);
+    expect(h.diagnostics.snapshot().rows[0].backend).toBeUndefined();
+    h.set(reply("<script>", true));
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[1].backend).toBeUndefined();
+    expect(JSON.stringify(h.diagnostics.snapshot())).not.toContain("script");
+  });
+  it("a two-chunk message answered by the cloud (fallback) and then locally still shows the cloud was used", async () => {
+    const h = withReplies();
+    const g = h.stt.beginGroup("ptt", "auto");
+    const replies = [reply("cloud", true), reply("local", false)];
+    let n = 0;
+    (h.stt as any).o.transcribe = async () => replies[n++];
+    h.stt.submit(new Blob([new Uint8Array(10)]), 8000, "ptt", "auto", { group: g });
+    h.stt.submit(new Blob([new Uint8Array(10)]), 8000, "ptt", "auto", { group: g });
+    await vi.advanceTimersByTimeAsync(0);
+    h.stt.closeGroup(g);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows).toHaveLength(1);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+  });
+
+  it("an empty transcript still says who heard it", async () => {
+    const h = withReplies();
+    h.set({ text: "  ", backend: "local", fellBack: false });
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ outcome: "empty_transcript", backend: "local" });
   });
 });

@@ -20,6 +20,8 @@ import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./
 
 import type { CaptureIdentity } from "./lib/pageCapture";
 import { WINDOW_ID, isWindowId } from "./lib/windowId";
+import { parseSttSettings, type SttChoice } from "./lib/sttSettings";
+import type { SttReply } from "./lib/stt";
 
 export class ApiError extends Error {
   status: number;
@@ -274,6 +276,13 @@ export const api = {
   /** Assign (no more keys), choose (`voice`; "" is automatic again) or mute one chat's voice. */
   speechVoice: (threadId: string, change: { voice?: string; muted?: boolean } = {}) =>
     req<{ thread_id: string; voice: string | null; muted: boolean }>("/speech/voices", json({ thread_id: threadId, ...change })),
+  /**
+   * Hold (`on`) or end the daemon's short lease that lowers the Remote Browser's sound while
+   * Jarvis speaks (V15). Renewed about once a second; the daemon restores by itself if it stops.
+   * `window` is this window's own lease token (32 hex): its `off` ends only its own lease.
+   */
+  speechDuck: (on: boolean, window: string, keepalive?: boolean) =>
+    req<{ on: boolean; ducked: number; lease_s: number }>("/speech/duck", { ...json({ on, window }), ...(keepalive ? { keepalive: true } : {}) }),
   /** The fast path's roster and its default (`models.describe()`). */
   models: () => req<RosterView>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),
@@ -368,7 +377,7 @@ export const api = {
 
   // --- speech -------------------------------------------------------------
   /** `utteranceId`/`seq` name the clip for the daemon, which echoes them; `budgetMs` is the deadline it must fit inside (V2). */
-  async stt(blob: Blob, opts: { signal?: AbortSignal; utteranceId?: number; seq?: number; budgetMs?: number } = {}): Promise<string> {
+  async stt(blob: Blob, opts: { signal?: AbortSignal; utteranceId?: number; seq?: number; budgetMs?: number } = {}): Promise<SttReply> {
     const ids = new URLSearchParams();
     if (Number.isSafeInteger(opts.utteranceId) && opts.utteranceId! >= 0) ids.set("utterance_id", String(opts.utteranceId));
     if (Number.isSafeInteger(opts.seq) && opts.seq! >= 0) ids.set("seq", String(opts.seq));
@@ -393,8 +402,14 @@ export const api = {
       throw new ApiError(res.status, message);
     }
     const body = await res.json();
-    return body.text || "";
+    // V13: which backend heard the clip, for the diagnostics. `fallback` is the daemon's reason
+    // local did not serve it; only whether it fell back is kept.
+    return { text: body.text || "", backend: body.backend, fellBack: typeof body.fallback === "string" && body.fallback !== "" };
   },
+  /** The owner's speech-to-text switches (V13): backend and the cloud-fallback switch, plus what the local engine has. */
+  sttSettings: () => req<unknown>("/stt/settings").then(parseSttSettings),
+  setSttSettings: (change: { backend?: SttChoice; cloud_fallback?: boolean }) =>
+    req<unknown>("/stt/settings", json(change)).then(parseSttSettings),
   /**
    * One chunk of speech as audio bytes (`POST /say`). Read-aloud asks
    * `localOnly`, so the daemon never sends the text to a cloud voice; a local

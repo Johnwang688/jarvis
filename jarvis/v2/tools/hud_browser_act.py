@@ -1,4 +1,4 @@
-"""Explicit-only dormant Browser input tool for an owner HUD fast-path turn."""
+"""Explicit-only Browser input tool for an owner HUD chat turn."""
 from typing import Annotated
 from jarvis import runtime
 from jarvis.tools import EXPLICIT_ONLY, PRIVATE_RESULT, tool
@@ -21,7 +21,7 @@ def hud_browser_act(
     Typing replaces the field; press accepts only the supported named navigation
     keys (not shortcuts), and scroll accepts up/down/top/bottom. A fresh look is
     required when target or document changes. This is available only to the
-    owner's HUD chat, never tasks, sessions, Discord or sub-agents.
+    owner's HUD chat, never tasks, Discord or sub-agents. Native calls share the gate.
     """
     if not runtime.at_desk() or runtime.depth()!=0:
         return "Refused: Browser driving requires the owner's HUD chat."
