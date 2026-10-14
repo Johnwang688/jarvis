@@ -28,6 +28,7 @@ class BrowserSound:
         self.pulse = audio.Pulse()
         self._mute_tasks = {}
         self._mute_reason = {}
+        self._duck_pins = {}  # profile -> (instance, pinned Chrome root); speech ducking only
 
     def sync(self, *, explicit=False):
         # Serialize preference reads and capability refreshes. A slower older
@@ -114,6 +115,47 @@ class BrowserSound:
         self.wake()
         self.publish()
         return {"on": on, "profile": profile, "generation": generation}
+
+    def duck_owners(self):
+        """The pinned Chrome roots whose sink-inputs Jarvis's speech may lower (V15).
+
+        Only an instance that launched audible, whose owner request and master
+        permission still stand *now*; a muted, closing, Private or unrequested
+        one has nothing to lower and is never listed. Read-only and never starts
+        the Browser. Callable from any thread (the duck's worker)."""
+        if self.host._stopped:
+            return []
+        found, live = [], set()
+        for instance in list(self.host._instances.values()):
+            profile = instance.profile
+            if (instance.closing or profile == "private" or not instance.audio.applied
+                    or not self.preference(profile)[0]):
+                continue
+            live.add(profile)
+            pin = self._duck_pins.get(profile)
+            if pin is None or pin[0] is not instance or not pin[1].current():
+                pin = (instance, self._pin_root(instance))
+                self._duck_pins[profile] = pin
+            if pin[1] is not None:
+                found.append(pin[1])
+        for profile in set(self._duck_pins) - live:
+            self._duck_pins.pop(profile, None)
+        return found
+
+    @staticmethod
+    def _pin_root(instance):
+        """The one Chrome process that names this profile's folder, or None (uncertain)."""
+        from .host import chrome_pids
+        try:
+            roots = []
+            for pid in chrome_pids(instance.folder):
+                try:
+                    roots.append(audio.OwnedChrome.pin(pid, instance.folder))
+                except audio.AudioRefused:
+                    pass
+            return roots[0] if len(roots) == 1 else None
+        except Exception:
+            return None
 
     def status(self):
         desired, generation, available = self.preference()
