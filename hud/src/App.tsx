@@ -561,6 +561,10 @@ export default function App() {
   // The selected chat when a follow-up window opened (Q5): a different one now
   // means the owner has chosen since, and the window no longer picks the pane.
   const followBase = useRef<PaneNo | null>(null);
+  // The pane a follow-up claim moved the selection to, until its clip is
+  // submitted: the selection itself only follows after the next render, and a
+  // clip must be filed under the chat it was said to, not the one before.
+  const voiceTarget = useRef<PaneNo | null>(null);
   const endListening = () => {
     const was = listenWas.current;
     listenWas.current = null;
@@ -591,6 +595,7 @@ export default function App() {
         onListening: (source, tag) => {
           const at = live.current;
           let n = at.selectedChat;
+          voiceTarget.current = null;
           // Q5: a follow-up opened by a drawn pane's reply belongs to that
           // pane, unless the owner chose another chat since (their click is
           // newer than the reply).
@@ -598,7 +603,7 @@ export default function App() {
               && chatsOnScreen().includes(tag as PaneNo)) {
             layoutNow.current.focus(tag as PaneNo);
             dispatch({ type: "select", pane: tag as PaneNo, front: true });
-            n = tag as PaneNo;
+            n = voiceTarget.current = tag as PaneNo;
           }
           if (n === null) return;
           // A turn's own orb and status come back when the listening is over.
@@ -691,6 +696,8 @@ export default function App() {
       if (!Number.isFinite(ms) || ms <= 0) ms = Math.max(0, ((wav.size - 44) / 2 / CAP_RATE) * 1000);
       // A crashed window uploads nothing, and sends nothing, for anyone.
       endListening();
+      const target = voiceTarget.current;
+      voiceTarget.current = null;
       if (crashedRef.current) { voiceDiagnostics.add(ms, source, "suppressed:crash"); return; }
       const mode = live.current.dictation;
       // OFF never reaches here (Capture refuses to claim while muted), but the
@@ -700,7 +707,8 @@ export default function App() {
       if (ms <= 0) { voiceDiagnostics.add(0, source, "too_short"); return; }
       const at = live.current;
       // Where the words are for: the selected chat as it is when they were said.
-      const chat = at.selectedChat !== null ? draftKey(at.chats[at.selectedChat], at.selectedChat) : null;
+      const said = target ?? at.selectedChat;
+      const chat = said !== null ? draftKey(at.chats[said], said) : null;
       if (stt.submit(wav, ms, source, { mode, chat }) === null)
         sttSay({ orb: "error", status: "STT BACKLOG", error: "Too many clips are waiting to be transcribed, so this one was not kept. Wait for them to finish." });
     },
