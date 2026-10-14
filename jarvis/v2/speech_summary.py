@@ -30,6 +30,11 @@ What this module guarantees, each pinned by `tests/v2/speech_summary_check.py`:
     sections' summaries are summarized.
   - **A deadline** (6 s) covers everything, fallback model and sections
     included. The caller falls back to truncated prose on any failure.
+  - **A failed attempt is retried once** (transient HTTP errors and replies that
+    come back empty), inside the same deadline, and every failure carries a
+    reason code and numbers only (`SummaryError.reason` / `.detail`: HTTP
+    status, finish reason, token counts; never a provider's or the reply's
+    text), so a probe can say *why* a summary failed (V8 fix, 2026-10-14).
   - **The output is bounded** (300 characters, cut at a sentence) and cleaned
     of markdown, so the daemon never hands the HUD something it would have
     to read as code.
@@ -52,7 +57,14 @@ LOG = logging.getLogger("jarvis.speech_summary")
 DEFAULT_MODEL = "anthropic/claude-haiku-5.5"
 DEADLINE_S = 6.0
 OUT_MAX_CHARS = 300
-OUT_MAX_TOKENS = 160
+# A ceiling, not the length control (the prompt and `clean()` bound the spoken
+# length). It was 160: a model that thinks before it answers spends the same
+# budget on reasoning, and a reply cut off there came back empty (finish
+# reason "length", no text). The probe of 2026-10-14 failed 7 of 24 calls.
+OUT_MAX_TOKENS = 1024
+# Tries per model: the second covers a transient error or an empty reply.
+ATTEMPTS = 2
+MIN_LEFT_S = 0.3
 # A reply this long is not a reply; refuse it rather than section it forever.
 # Two sections' worth at the default threshold, and under the route's 1 MiB body
 # even when every character is three bytes of UTF-8.
@@ -87,11 +99,17 @@ SYSTEM = (
 
 
 class SummaryError(Exception):
-    """No summary: `status` is what the route answers, `message` a sentence for the HUD."""
+    """No summary: `status` is what the route answers, `message` a sentence for the HUD.
 
-    def __init__(self, status: int, message: str):
+    `reason` is a short code for logs and probes (`empty_content`, `http_529`,
+    `exception:TypeError` ...) and `detail` numbers and flags only. Neither
+    ever holds text from the reply or from a provider, and neither reaches the
+    HUD: the route answers `message`.
+    """
+
+    def __init__(self, status: int, message: str, reason: str = "", **detail: Any):
         super().__init__(message)
-        self.status, self.message = status, message
+        self.status, self.message, self.reason, self.detail = status, message, reason, detail
 
 
 @dataclass(frozen=True)
@@ -103,6 +121,7 @@ class Summary:
     completion_tokens: int
     cost_usd: float
     seconds: float
+    retries: int = 0
 
 
 def candidates() -> list[str]:
@@ -160,12 +179,55 @@ def clean(raw: str) -> str:
     return text[:OUT_MAX_CHARS].rsplit(" ", 1)[0].strip()
 
 
+_HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
+_PERMANENT = {400, 401, 402, 403, 404, 413, 422}
+
+
+def classify(exc: BaseException) -> SummaryError:
+    """A failed call as a 502 with a reason code; `detail["transient"]` says whether a retry is worth it.
+
+    Reads only the status number out of an `LLMError`'s message, never its body.
+    """
+    if isinstance(exc, SummaryError):
+        return exc
+    if isinstance(exc, llm.LLMError):
+        found = _HTTP_STATUS.search(str(exc))
+        status = int(found.group(1)) if found else None
+        transient = status is None or status not in _PERMANENT
+        return SummaryError(502, "the summary could not be made",
+                            f"http_{status}" if status else "llm_error", http=status, transient=transient)
+    return SummaryError(502, "the summary could not be made", f"exception:{type(exc).__name__}", transient=False)
+
+
+def reply_text(reply: Any) -> str:
+    """The reply's text. A provider may answer with content parts instead of a string."""
+    content = getattr(reply, "text", "")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") if isinstance(part, dict) else str(part)
+                          for part in content if not isinstance(part, dict) or part.get("type", "text") == "text")
+    return content if isinstance(content, str) else ""
+
+
+def _usage_detail(reply: Any) -> dict[str, Any]:
+    """Numbers and flags about a reply that explain why it was empty."""
+    raw = getattr(reply, "raw", None)
+    usage = raw.get("usage") if isinstance(raw, dict) else None
+    details = (usage or {}).get("completion_tokens_details") if isinstance(usage, dict) else None
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    message = getattr(reply, "message", None)
+    thought = bool(isinstance(message, dict) and (message.get("reasoning") or message.get("reasoning_details")))
+    return {"finish": str(getattr(reply, "finish_reason", "") or ""),
+            "completion_tokens": int(getattr(reply, "completion_tokens", 0) or 0),
+            "reasoning_tokens": reasoning if isinstance(reasoning, int) else None,
+            "has_reasoning": thought}
+
+
 class _Run:
     """One summary's calls: models in order, usage added up, all under one deadline."""
 
     def __init__(self, chat: Callable[..., Any], models_: list[str], deadline_at: float):
         self.chat, self.models, self.deadline_at = chat, models_, deadline_at
-        self.calls = self.prompt = self.completion = 0
+        self.calls = self.prompt = self.completion = self.retries = 0
         self.cost = 0.0
         self.used = models_[0]
         self._lock = threading.Lock()
@@ -174,30 +236,45 @@ class _Run:
         note = "This is one part of a longer reply. Say what this part says.\n" if partial else ""
         user = note + untrusted.fence(text, SOURCE)
         messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-        error: Exception | None = None
+        failure: SummaryError | None = None
         for model in self.models:
-            left = self.deadline_at - time.monotonic()
-            if left <= 0.05:
-                break
-            try:
-                reply = self.chat(model, messages, temperature=0.2, max_tokens=OUT_MAX_TOKENS,
-                                  timeout=left, max_retries=1, stream=False, cache=False,
-                                  provider="")   # "" is no pin: JARVIS_CHAT_PROVIDER is for chat, not this
-            except Exception as exc:  # noqa: BLE001 - one model failing tries the next
-                error = exc
-                LOG.info("speech summary: %s failed (%s)", model, type(exc).__name__)
-                continue
-            with self._lock:
-                self.calls += 1
-                self.prompt += int(getattr(reply, "prompt_tokens", 0) or 0)
-                self.completion += int(getattr(reply, "completion_tokens", 0) or 0)
-                self.cost += float(getattr(reply, "cost_usd", 0.0) or 0.0)
-                self.used = model
-            out = clean(getattr(reply, "text", "") or "")
-            if out:
-                return out
-            error = SummaryError(502, "the summary came back empty")
-        raise error or SummaryError(504, "the summary took too long")
+            for attempt in range(ATTEMPTS):
+                left = self.deadline_at - time.monotonic()
+                if left <= (MIN_LEFT_S if attempt else 0.05):   # a retry needs room to finish
+                    break
+                try:
+                    reply = self.chat(model, messages, temperature=0.2, max_tokens=OUT_MAX_TOKENS,
+                                      timeout=left, max_retries=1, stream=False, cache=False,
+                                      provider="")   # "" is no pin: JARVIS_CHAT_PROVIDER is for chat, not this
+                except Exception as exc:  # noqa: BLE001 - one model failing tries the next
+                    failure = classify(exc)
+                    LOG.info("speech summary: %s attempt %d failed (%s)", model, attempt + 1, failure.reason)
+                    if failure.detail.get("transient") and attempt + 1 < ATTEMPTS:
+                        self._count_retry()
+                        continue
+                    break
+                with self._lock:
+                    self.calls += 1
+                    self.prompt += int(getattr(reply, "prompt_tokens", 0) or 0)
+                    self.completion += int(getattr(reply, "completion_tokens", 0) or 0)
+                    self.cost += float(getattr(reply, "cost_usd", 0.0) or 0.0)
+                    self.used = model
+                raw = reply_text(reply)
+                out = clean(raw)
+                if out:
+                    return out
+                failure = SummaryError(502, "the summary came back empty",
+                                       "empty_content" if not raw.strip() else "empty_after_clean",
+                                       raw_chars=len(raw), **_usage_detail(reply))
+                LOG.info("speech summary: %s attempt %d empty (%s, %s)", model, attempt + 1, failure.reason,
+                         {k: v for k, v in failure.detail.items()})
+                if attempt + 1 < ATTEMPTS:
+                    self._count_retry()
+        raise failure or SummaryError(504, "the summary took too long", "deadline")
+
+    def _count_retry(self) -> None:
+        with self._lock:
+            self.retries += 1
 
 
 _SLOTS = threading.BoundedSemaphore(MAX_IN_FLIGHT)
@@ -248,14 +325,15 @@ def summarize(text: str, *, chat: Callable[..., Any] | None = None,
                     "(a call was still in flight)", deadline_s, run.calls)
         raise SummaryError(504, "the summary took too long")
     error = box.get("error")
-    if isinstance(error, SummaryError):
-        raise error
     if error is not None or not box.get("text"):
-        raise SummaryError(502, "the summary could not be made")
+        failed = classify(error) if error is not None else SummaryError(502, "the summary could not be made", "no_text")
+        LOG.warning("speech summary failed: reason=%s detail=%s", failed.reason, failed.detail)
+        raise failed
     done = Summary(box["text"], run.used, run.calls, run.prompt, run.completion, run.cost,
-                   time.monotonic() - started)
-    LOG.info("speech summary: %s, %d call(s), %d in, %d out, $%.5f, %.2fs",
-             done.model, done.calls, done.prompt_tokens, done.completion_tokens, done.cost_usd, done.seconds)
+                   time.monotonic() - started, run.retries)
+    LOG.info("speech summary: %s, %d call(s) (%d retried), %d in, %d out, $%.5f, %.2fs",
+             done.model, done.calls, done.retries, done.prompt_tokens, done.completion_tokens, done.cost_usd,
+             done.seconds)
     return done
 
 
