@@ -78,11 +78,11 @@ import { useInstallApp } from "./state/installApp";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
-import { ReadAloudSetting } from "./components/ReadAloud";
+import { DuckBrowserSetting, ReadAloudSetting } from "./components/ReadAloud";
 import { SttSettingsPanel } from "./components/SttSettings";
 import { sttSettingsStore, wakeRecognizerAllowed, STT_BACKSTOP_MS, STT_UNKNOWN_RETRY_MS } from "./state/sttSettings";
 import { parseSttSettings } from "./lib/sttSettings";
-import { createSpeech, saveReadAloud } from "./lib/speech";
+import { createSpeech, saveDuckBrowser, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture } from "./lib/capture";
@@ -559,6 +559,8 @@ export default function App() {
   // the mic's.
   const speech = useMemo(() => createSpeech(), []);
   useEffect(() => () => speech.dispose(), [speech]);
+  const duckBrowser = useSyncExternalStore(
+    useCallback((cb: () => void) => speech.duck.subscribe(cb), [speech]), () => speech.duck.isEnabled());
   const speechSubscribe = useCallback((cb: () => void) => speech.controller.subscribe(cb), [speech]);
   const speechView = useSyncExternalStore(speechSubscribe, () => speech.controller.view());
   // The mic is held off for the whole of a reply, between chunks included.
@@ -4075,7 +4077,9 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />
+              <DuckBrowserSetting on={duckBrowser}
+                onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

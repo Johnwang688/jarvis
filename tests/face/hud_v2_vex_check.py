@@ -187,6 +187,9 @@ def _offer_checks(page, mock, check, until, fake):
 
 
 def _setup_checks(page, mock, check, until, fake):
+    # Earlier sections (feedback) legitimately POST /vex/brain on a resume, and
+    # mock.calls is the whole run's: judge only what this section asked for.
+    base = len(mock.calls)
     _reset(page, mock, until, configured=False)
     check("setup: the view draws", _ready(page, until))
     note = page.locator(_view(V, _tid("vex-setup")))
@@ -197,8 +200,10 @@ def _setup_checks(page, mock, check, until, fake):
     check("and every Build and Download button is off",
           all(page.locator(_view(V, _tid(t))).is_disabled()
               for t in ("vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn")))
-    check("and nothing was asked of the daemon but its status", not _posted(mock, "/projects/p3/vex/build")
-          and not _posted(mock, "/projects/p3/vex/download") and not _posted(mock, "/vex/brain"))
+    check("and nothing was asked of the daemon but its status",
+          not _posted_since(mock, base, "/projects/p3/vex/build")
+          and not _posted_since(mock, base, "/projects/p3/vex/download")
+          and not _posted_since(mock, base, "/vex/brain"))
     mock_vex.state(mock)["status"] = mock_vex.state(mock).get("status_ok") or {
         "configured": True, "hint": None, "sdks": {"cpp": "V5_20240802_15_00_00", "python": None}}
     page.evaluate("window.dispatchEvent(new Event('focus'))")

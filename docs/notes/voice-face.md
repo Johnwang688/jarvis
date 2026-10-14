@@ -1626,6 +1626,177 @@ live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
   nothing installed and the fallback off says the engine is not installed, not
   that cloud was switched off.
 
+## V15: lowering the Remote Browser's sound while Jarvis speaks (2026-10-13)
+
+Q14 is answered (plan section 7): duck Remote tabs through WSLg. The daemon lowers the Remote
+Browser's own PulseAudio sink-inputs by about 15 dB while the HUD holds a short lease, and
+puts them back exactly. It never unmutes, never touches another app's stream, and does
+nothing for Direct frames (cross-origin iframes, not observable or controllable from here).
+Code: `jarvis/v2/speech_duck.py`, `BrowserSound.duck_owners()` (`browser/sound.py`),
+`hud/src/lib/speech/duck.ts`. Tests: `tests/v2/speech_duck_check.py` (58),
+`hud_backend_check` (route), `frame_check` (walk), `hud/src/lib/speech/duck.test.ts`,
+`tests/face/hud_v2_duck_check.py` (23). Committed and pushed on `claude/voice-v15`; not merged,
+built-and-installed or live-validated. **Physical audibility of the duck is UNMEASURED.**
+
+### Probe (2026-10-13, local only, no network)
+
+WSLg's server is PulseAudio 17 at `/mnt/wslg/PulseServer`, one sink `RDPSink`,
+`module-stream-restore` loaded. A throwaway `/opt/google/chrome/chrome --headless` with a
+temporary profile and `PULSE_SERVER` set (the way B-SOUND launches an audible instance)
+played a 1% sine from a `file://` page. Every process and stream I started was stopped; I
+changed the volume only of sink-inputs whose PID was in my own Chrome tree (and unmuted
+one of my own after muting it to test).
+
+- **Attribution works, by PID ancestry.** One sink-input appeared, `application.process.id`
+  = the Chrome *audio service* utility process (`--type=utility --utility-sub-type=
+  audio.mojom.AudioService`), a **direct child of the browser root** whose command line carries
+  `--user-data-dir`. `application.process.binary` was `chrome`, `application.name` "Google
+  Chrome". The existing `audio.OwnedChrome.chain(pid)` (executable, uid, start time, ancestry up
+  to the pinned root) therefore attributes it, and the root is found the way the mute finds
+  it (`chrome_pids(folder)`, exactly one pinned root).
+- **Name matching would be wrong, and the probe showed why.** During the probe a second,
+  unrelated sink-input from another agent's Playwright `chrome-headless-shell` (application
+  name "Chromium") was playing. It has its own PID and ancestry, so it is never ours; a
+  name-based rule would be one rename away from touching it. It was only read.
+- **Volume read and exact restore work.** `pactl --format=json list sink-inputs` gives
+  per-channel raw values (`volume.front-left.value`, 65536 = 100%). `pactl
+  set-sink-input-volume <id> <v1> <v2>` set an asymmetric (40000, 30000) pair, a duck pair and
+  the original pair again, each read back bit-exactly. Setting a volume on a muted stream left
+  `mute` untouched (the code never sends a mute command at all).
+- **Scale.** PulseAudio's raw volume is cubic in amplitude: pactl's `-15dB` is raw 36854
+  (56%), `18%` is -44.7 dB. The duck is `raw * 10**(-15/60)` per channel, which is a true
+  -15 dB and keeps the balance.
+- **`module-stream-restore` remembers pactl volumes (a finding that shaped the design).** After
+  I set a stream to 18% and killed its Chrome, the *next* Chrome stream (a new process, new
+  profile) was created at 18%. PulseAudio keys that memory by application name ("Google
+  Chrome"), and every `set-sink-input-volume` is saved. So a duck that is not restored, whether
+  the daemon is killed or the Chrome restarts mid-duck, would make the next Remote stream start
+  quiet with nobody having asked. Restoring writes the prior value, which is then what is
+  remembered (checked: a 100% restore made the next stream start at 100%).
+- **pactl latency is not constant.** Normally 0.00 s; for a few minutes, with several agents'
+  browsers running and load average 6, individual `list` and `set` calls took 6 to 15 s. Every
+  call is therefore bounded (2 s) and failure is non-fatal and retried; under such load the
+  duck is simply late, never stuck.
+
+**Live smoke of the finished code (same day, real pactl and real `/proc`, a throwaway
+headless Chrome with a temporary profile and a temporary journal):** the stream was attributed
+by `OwnedChrome.chain`, went 65536 -> 36854 per channel under a lease, the journal held
+prior/applied, `release()` restored 65536 exactly and deleted the journal, and a lease left to
+expire restored the same way. The one other app's stream present earlier was not touched.
+
+### What it does
+
+- **Route** `GET`/`POST /speech/duck` (owner-only, HUD listener, like `/speech/voices`);
+  body is exactly `{on: bool}` (unknown or missing key, or a non-boolean, is 400; a daemon that
+  is stopping answers 409). `on:true` grants or renews a **3 s lease**; `on:false` ends it.
+  The answer is `{on, ducked, lease_s}`: counts only, never PIDs or stream names.
+- **The HUD** (`DuckLease`, wired in `createSpeech`): the speech controller's `active` (playing,
+  buffering, or inside the 300 ms hangover) takes the lease at once and renews it every second;
+  pause, stop, end, the Settings switch going off, or `pagehide` end it. Requests never overlap and
+  an `off` cannot overtake an `on`; a failed request is dropped (the next renewal, or expiry,
+  covers it). Settings, Voice: **"Lower Browser sound while Jarvis speaks"**, in
+  `localStorage` (`jarvis.duckBrowser`), **on by default**; one choice for every window (a
+  `storage` listener applies another window's change). Only the window that holds the speech
+  lock ever has an active queue, so only it holds a lease. Each window sends its own random lease
+  token (`window`, 32 hex, optional in the route) and the daemon keeps one deadline per token
+  (at most 16), so one window's `off` or expiry cannot end another's lease; the duck lasts while
+  any lease lives.
+- **Whose streams.** A sink-input is lowered only if its PID descends from a Remote Chrome
+  named by `BrowserSound.duck_owners()`: an instance that launched audible
+  (`instance.audio.applied`), is not closing or Private, and for which the owner's request and
+  the master permission stand **now** (`preference(profile)`). Anything else (master OFF,
+  structurally muted launch, nothing requested, Browser not running) lists no owner and
+  causes **no pactl call at all**. It never starts the Browser. A stream with no process is
+  never ours; a stream whose chain does not reach the pinned root is never ours.
+- **Never the mute.** The runner (`speech_duck.pactl`) allows only the JSON listing and
+  `set-sink-input-volume <index> <1..8 raw values>`; mute, default devices and everything else
+  are refused before a process starts (tested). A muted stream is left entirely alone, and a
+  mute set during the duck survives the restore.
+- **Exact restore, owner wins.** Each held stream records its prior per-channel volume and the
+  value that was written. Restore (lease end, `off`, expiry, shutdown) writes the prior value back
+  **only if the stream still has the value we wrote**. If it does not (the owner moved the slider
+  in the Windows mixer, or anything else changed it) the stream is not touched again, now or at
+  restore, and is not re-ducked for the rest of that lease; the next lease ducks it afresh from
+  where the owner left it.
+- **A stream that appears mid-duck** is found on the next scan (every 0.5 s while a lease
+  lives) and ducked from its own volume, then restored to it. It can be audible at full volume
+  for up to one scan interval plus the pactl latency; that is the one unavoidable gap (no
+  subscription, to keep the B-SOUND "no leak-free claim" posture). A stream born carrying exactly
+  a duck level (the stream-restore case above) takes the prior of the duck that made that level,
+  not the level itself.
+- **Index reuse.** Before a write the listing is repeated and the stream must still have the same
+  PID and volume, and the chain is re-checked. The residual race (the server frees and reuses an
+  index between that check and the write) is the one B-SOUND documents for the mute; it cannot be
+  closed from pactl.
+
+### If the daemon dies mid-duck
+
+- **A closed or crashed HUD, a lost connection, or a daemon whose HUD stops renewing:** the lease
+  expires 3 s after the last renewal and the worker restores (nothing else is needed).
+- **Orderly daemon shutdown:** `Daemon.stop()` calls `speech_ducker.stop()` first (before Chrome
+  closes) and restores, bounded to about 6 s.
+- **`kill -9` of the daemon (or a pactl that never answers):** nothing can run. Each duck is
+  written to `~/.config/jarvis/speech_duck.json` (`config.SPEECH_DUCK_PATH`, 0600 via a random
+  `mkstemp` file and `os.replace`, at most 64 KB; active ducks are always kept and only the oldest
+  leftovers are cut at 16; deleted when everything is restored) *before* the volume is written. The next daemon start (`Ducker.recover()`, only for the owner's data folder) reads it;
+  while it holds an entry the idle worker polls every 3 s, and only when a Remote Chrome is
+  audible: a Remote stream that appears carrying exactly the recorded ducked value is set back to
+  the recorded prior value (also under a new lease). Whether a Chrome that outlives a
+  `kill -9`'d daemon keeps its stream ducked was not tested (its pipe to the daemon closes, so it
+  most likely exits); the journal covers both. **Remaining gap:** until a new Remote stream appears (the owner turns Browser
+  sound on again) the stored volume sits in PulseAudio's memory, and an entry older than 30 days is
+  forgotten; a corrupt or missing journal repairs nothing. The owner can always fix a stuck
+  volume in the Windows volume mixer, and nothing here changes the mute.
+- Chrome restarting mid-duck (B-SOUND's idle replacement, sound OFF then ON) is the same case: the
+  vanished stream becomes a journal entry and the new stream is repaired when it appears.
+
+### Review fixes (2026-10-14, PR #156 review at `7f908b11`)
+
+- **A forged journal can no longer raise a volume.** On load an entry must have `prior` at most
+  100% per channel, `applied` within 2 of the duck of `prior`, equal channel counts, and a finite
+  time that is not in the future (beyond 300 s of skew); otherwise it is dropped. Every volume
+  written is at most 100% per channel (the runner refuses more; a restore or repair writes
+  `min(prior, 100%)`), and a duck writes `min(duck of prior, the stream's current volume)`, so it
+  can only lower. The regression is the reviewer's repro (`prior` 262144), plus a mutant for each
+  guard. A stream the owner boosted past 100% is left alone (giving it back would need a write
+  above the norm).
+- **The journal is written through `tempfile.mkstemp`** (random name, `O_EXCL`, 0600) then
+  `os.replace`; a FIFO or hardlink at the old predictable name cannot block the worker (tested).
+- **Restore is bounded**: one overall deadline for `stop()` (6 s, worker join included) and each
+  call gets only the time left; the first pactl failure stops that round of writes, and the rest
+  stay held and journaled. A leftover in the journal covers what shutdown could not restore.
+- pactl runs through the same capped streaming runner as the mute (`audio.run_bounded`; the
+  mute's own allowlist and tests are unchanged).
+- Only the owner's daemon reads or writes the journal (`Daemon._duck_journal`, the same
+  `_owns_data` rule as the carrier sweep).
+- `duck_owners()` excludes any instance that is not `audio.synchronized(True)`: a mute attempt
+  pending or ever made on it (tainted) is not ours to lower.
+- **One continuous duck is capped at 10 minutes** (`MAX_LEASE_S`): the volumes are restored and
+  stay so for 5 s even while renewals continue, then a request starts a new period (a stuck
+  window renewing for ever is audible as a short gap every 10 minutes, not a permanent duck; a
+  genuine 10-minute read-aloud has the same gap). The idle leftover poll backs off 3 s -> 60 s
+  while Chrome plays with nothing to repair.
+
+- **One odd foreign stream cannot block a restore.** `parse()` fails the whole listing only on
+  structural problems (not a list, more than 256 rows, a row that is not an object, an index that
+  is not an integer or is repeated, a `mute` that is not a boolean). A row with a non-numeric
+  `application.process.id`, a volume above the read bound or a bad channel map is just dropped,
+  never written; a held stream that turns malformed is treated as gone and becomes a journal
+  leftover. **Residual:** a listing larger than `OUTPUT_CAP` (256 KB) or with more than 256
+  streams, or a repeated index, still fails the listing, so nothing is written and the duck
+  cannot be undone until pactl answers sanely again (the journal covers a restart).
+- `audio._run_bounded` is private and applies no allowlist; only `audio._pactl` and
+  `speech_duck.pactl` call it, each after its own allowlist. `stop()` is rechecked immediately
+  before a duck is written.
+
+### Not done, and not claimed
+
+No physical audibility, echo or latency measurement; the Windows-side mixer behaviour with the
+owner's volume sliders is inferred from the listing, not heard. The fallback ("hold speech while a
+tab plays") was **not** needed: attribution is possible. Direct frames are unchanged and there is
+no ducking hook for them. Browser audio as a mic echo source (voice plan 3.14) is still
+UNMEASURED and speaker verification covers it.
+
 ## V8: spoken summaries (2026-10-13)
 
 Owner's answers to open question 2: **summary only**, and (confirmed) **hold

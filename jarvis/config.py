@@ -365,6 +365,16 @@ SPEECH_VOICES_PATH = Path(
     )
 )
 
+# Browser ducking (voice plan V15, jarvis/v2/speech_duck.py): the small journal
+# of volumes the daemon lowered while Jarvis spoke, kept only while a duck is
+# unrestored so a crash can be repaired at the next start. Machine-local, tiny,
+# and deleted as soon as every stream is back where it was.
+SPEECH_DUCK_PATH = Path(
+    os.environ.get(
+        "JARVIS_SPEECH_DUCK", Path.home() / ".config" / "jarvis" / "speech_duck.json"
+    )
+)
+
 # Custom Pocket TTS voices (clones and hybrids), one directory per voice —
 # see jarvis/pocket.py. Outside the repo like sessions: the store is the
 # owner's, bulk, and (for clones) audio of real people that does not belong
