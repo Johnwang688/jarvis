@@ -1265,44 +1265,60 @@ instead (that is how the scripts were smoke-tested with synthetic audio).
 
 ## V8: spoken summaries (2026-10-13)
 
-Owner's answer to open question 2: **summary only**. A message of up to 600
-spoken characters (what the speech filter lets through; code never counts) is
-read as written; a longer one is replaced by a short summary, with no verbatim
-lead-in. This **supersedes plan §3.8's** "read the opening to ~400 characters,
-then summarise the rest". Because the length decides how a message is said, the
-controller now **holds each message until it closes** (a `text`, a tool call, the
-turn's end) instead of speaking sentence by sentence while the model writes; this
-reverses V6's "speech starts while the model writes" for the per-message
-decision only. Mid-task messages are short and close at the next tool call, so the
-cost is the few seconds the message takes to finish. (`hud/src/lib/speech/controller.ts`,
-`summary.ts`; the 1200-character V6 stopgap is gone.)
+Owner's answers to open question 2: **summary only**, and (confirmed) **hold
+until close, then speak**. A message is held until it closes (a `text`, a tool
+call, the turn's end). Up to 600 spoken characters (what the speech filter lets
+through; code never counts) it is then read as written; a longer one is
+replaced by a short summary, with no verbatim lead-in. This **supersedes plan
+§3.8's** "read the opening to ~400 characters, then summarise the rest" (the
+plan now carries the amendment) and reverses V6's "speech starts while the
+model writes" for the per-message decision. Mid-task messages are short and
+close at the next tool call, so the cost is the few seconds the message takes
+to finish. (`hud/src/lib/speech/controller.ts`, `summary.ts`; the 1200-character
+V6 stopgap is gone.)
 
-- **Route.** `POST /speech/summary {thread_id, text, spoken_prefix?}` ->
-  `{summary}` (`jarvis/v2/speech_summary.py`, `hud_api.speech_summary`). Same
-  checks as `/say` (HUD listener, Host/Origin, JSON, unknown keys -> 400).
-  `spoken_prefix` is accepted for the plan's contract; the HUD sends none.
-  Failures are 502/503/504 sentences carrying no provider text.
+- **Route.** `POST /speech/summary {thread_id, text}` -> `{summary}`
+  (`jarvis/v2/speech_summary.py`, `hud_api.speech_summary`). Unlike `/say` and
+  `/stt` (which have no owner check; tracked as a follow-up, unchanged here),
+  it is **owner-only** (`projects.owner_only`, before the body is read): it is
+  a paid model call. Then: body capped at 1 MiB (413), `text` over 300,000
+  characters refused (400) before any cleaning, at most 4 in flight (429, a
+  timed-out call keeps its slot until it returns), unknown keys 400. Failures
+  are 400/429/502/503/504 sentences carrying no provider text. `spoken_prefix`
+  from the plan's contract is not accepted: under summary-only there is no
+  spoken opening.
 - **Model.** Tier `speech_summary` (`JARVIS_SPEECH_SUMMARY_MODEL`, default
   `anthropic/claude-haiku-5.5`), read straight from `config.TIERS`, **not**
   through `models.tier()`: the default equals the orchestrator default, so
-  `tier()` would follow the owner's chat-model selection and a summary would
-  become an Opus call. A Chinese-hosted override is skipped for the default
-  (`models.cn_hosted`); with nothing acceptable the route is 503. A failing
-  model tries the next within the one deadline.
-- **Request.** `scrub` + `strip_invisible` on the text; `cache=False`;
-  `stream=False`, `max_retries=1`, `max_tokens=160`; the reply is wrapped in
-  `<reply>` tags and the system prompt says it is data. Output is cleaned with
-  `voice.speakable`, bounded to 300 characters at a sentence. A request never
-  exceeds `JARVIS_COMPACT_AT_TOKENS` (estimated at 3 characters a token, less
-  1000): longer text is summarised in sections in parallel and the sections'
-  summaries are summarised. Deadline: 6 s total on the daemon; the HUD waits 8 s.
+  `tier()` would follow the owner's chat-model selection and an Opus pick would
+  make every summary an Opus call (owner confirmed this must not happen). A
+  Chinese-hosted override is skipped for the default (`models.cn_hosted`); with
+  nothing acceptable the route is 503. A failing model tries the next within the
+  one deadline. `JARVIS_CHAT_PROVIDER` is not applied to this call (`provider=""`).
+- **Request.** `scrub` + `strip_invisible` on the text, then `untrusted.fence`
+  (fresh nonce per call, marker phrases neutralized) so a reply cannot close its
+  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=160`.
+  Output is cleaned with `voice.speakable`, bounded to 300 characters at a
+  sentence. A request never exceeds `min(JARVIS_COMPACT_AT_TOKENS, 90k)`
+  (estimated at 3 characters a token, less 1000): longer text is summarised in
+  at most 4 parallel sections, then the sections' summaries are summarised.
+  Deadline: 6 s total on the daemon; the HUD waits 8 s. A timed-out call's cost
+  is logged as unknown.
 - **HUD failure path.** A failed, late (8 s) or unusable (empty, over 400
   characters) summary reads whole sentences up to 400 characters and then
-  "...and more on screen." (kind `fallback`). Summaries sit in the thread's
-  order: a later message of the same thread waits behind a pending summary; other
-  threads do not. A message to the thread, Stop, an interrupted turn, the pane
-  closing, read-aloud off, losing the speech lock, and Skip with nothing
-  sounding all cancel a pending summary (the request is aborted, nothing is said).
+  "...and more on screen." (kind `fallback`).
+- **Ordering and silencing.** Summaries sit in the thread's order: a later
+  message of the same thread waits behind a pending summary; other threads do
+  not. A per-thread **epoch** is captured when a message closes and checked at
+  `deliver()`: a send to the thread, Stop, an interrupted turn, Skip with nothing
+  sounding, the pane leaving, read-aloud off and the lock lost all bump it, so
+  the pending summary *and every message queued behind it* are dropped even if
+  the summariser answers despite its abort (review HIGH-1; vitest pins each path
+  and the mutations of the epoch check and its bumps fail them).
+- **While a summary is awaited** (`SpeechView.summarizing`) speech counts as
+  `active` (the detector stays held off), `onIdle` (the follow-up window) is
+  withheld and then paid once nothing is coming, and a barge-in holds the
+  delivery until `endBargeIn` (a send in between drops it).
 - **Not done / not claimed.** Live Haiku quality of the summaries and the
   numbers below are unmeasured until the probe runs. Nothing was run against a
   speaker.

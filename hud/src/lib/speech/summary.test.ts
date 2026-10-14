@@ -12,11 +12,13 @@ class FakeSummarize {
   private waiting: { resolve: (s: string) => void; reject: (e: Error) => void }[] = [];
   /** Answer at once with this (a string), or reject with an Error; unset: wait for `answer`. */
   auto: string | Error | null = null;
+  /** A summariser that does not stop when told: it answers anyway (a fetch that ignores its signal). */
+  ignoreAbort = false;
 
   fn = (text: string, opts: { thread: string; signal: AbortSignal }): Promise<string> => {
     this.calls.push({ text, thread: opts.thread, signal: opts.signal });
     return new Promise((resolve, reject) => {
-      opts.signal.addEventListener("abort", () => reject(new Error("aborted")));
+      opts.signal.addEventListener("abort", () => { if (!this.ignoreAbort) reject(new Error("aborted")); });
       if (this.auto instanceof Error) reject(this.auto);
       else if (this.auto !== null) resolve(this.auto);
       else this.waiting.push({ resolve, reject });
@@ -289,5 +291,175 @@ describe("order and cancellation", () => {
     sum.answer("Second summary.", 1);
     await clock.advance(60_000);
     expect(player.started).toEqual(["First summary.", "Second summary."]);
+  });
+});
+
+describe("silencing reaches what is queued behind a summary (review HIGH-1)", () => {
+  const LONG = prose(900);
+  const BEHIND = "Now checking the logs.";
+  const acts: [string, () => void][] = [
+    ["stop", () => c.stop()],
+    ["a message sent to the thread", () => c.event({ kind: "user_message", thread_id: T, data: { via: "hud" } })],
+    ["skip with nothing sounding", () => c.skip()],
+    ["an interrupted turn", () => c.event({ kind: "turn_finished", thread_id: T, data: { stop: "interrupted" } })],
+  ];
+
+  for (const [name, act] of acts) {
+    it(`${name}: the summary and the message behind it are both silent, and the next turn speaks`, async () => {
+      settle(LONG);
+      settle(BEHIND);
+      act();
+      sum.answer(SUMMARY);
+      await clock.advance(SUMMARY_DEADLINE_MS + 60_000);
+      expect(player.started, name).toEqual([]);
+      expect(say.calls, name).toEqual([]);
+      settle("The next turn is spoken.");
+      await clock.advance(30_000);
+      expect(player.started, name).toEqual(["The next turn is spoken."]);
+    });
+  }
+
+  it("a summariser that ignores its abort is still not heard", async () => {
+    sum.ignoreAbort = true;
+    settle(LONG);
+    settle(BEHIND);
+    c.stop();
+    expect(sum.calls[0].signal.aborted).toBe(true);
+    sum.answer(SUMMARY);
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
+
+  it("read-aloud turned off and on again while a summary is awaited: it is not heard", async () => {
+    sum.ignoreAbort = true;
+    settle(LONG);
+    settle(BEHIND);
+    c.setEnabled(false);
+    c.setEnabled(true);
+    sum.answer(SUMMARY);
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+    // And while it stays off, nothing queued behind it is said either.
+    settle(LONG);
+    settle(BEHIND);
+    c.setEnabled(false);
+    sum.answer(SUMMARY, 1);
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
+
+  it("a thread leaving its pane and coming back does not hear the old summary", async () => {
+    sum.ignoreAbort = true;
+    settle(LONG);
+    settle(BEHIND);
+    c.setSpeakers(new Set([U]));
+    c.setSpeakers(new Set([T, U]));
+    sum.answer(SUMMARY);
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
+
+  it("silencing one thread leaves another thread's summary alone", async () => {
+    settle(LONG);
+    settle(LONG, U);
+    c.event({ kind: "user_message", thread_id: T, data: {} });
+    sum.answer(SUMMARY, 1);
+    await clock.advance(60_000);
+    expect(player.started).toEqual([SUMMARY]);
+    expect(say.calls).toHaveLength(1);
+  });
+});
+
+describe("speech is active while a summary is awaited (review LOW-4)", () => {
+  const LONG = prose(900);
+
+  it("the view says so, so the detector stays held off", async () => {
+    expect(c.view()).toMatchObject({ active: false, summarizing: false });
+    settle(LONG);
+    expect(c.view()).toMatchObject({ active: true, summarizing: true, state: "idle" });
+    sum.answer(SUMMARY);
+    await clock.advance(1_000);
+    expect(c.view().summarizing).toBe(false);
+    await clock.advance(60_000);
+    expect(c.view().active).toBe(false);
+  });
+
+  it("a failed summary ends the wait too", async () => {
+    sum.auto = new Error("502");
+    settle(LONG);
+    await clock.advance(500);
+    expect(c.view().summarizing).toBe(false);
+  });
+
+  it("the follow-up window does not open while a summary is awaited, and opens once it is said", async () => {
+    let idle = 0;
+    c.onIdle(() => { idle += 1; });
+    settle("A short first message.");
+    await clock.advance(200);
+    settle(LONG);   // closes while the first is still playing
+    await clock.advance(6_000);   // the first ends, its hangover passes
+    expect(player.started).toEqual(["A short first message."]);
+    expect(idle).toBe(0);
+    sum.answer(SUMMARY);
+    await clock.advance(60_000);
+    expect(player.started).toEqual(["A short first message.", SUMMARY]);
+    expect(idle).toBe(1);
+  });
+
+  it("an idle that was owed is paid when the summary is cancelled and nothing comes", async () => {
+    let idle = 0;
+    c.onIdle(() => { idle += 1; });
+    settle("A short first message.");
+    await clock.advance(200);
+    settle(LONG);
+    await clock.advance(6_000);
+    expect(idle).toBe(0);
+    c.event({ kind: "user_message", thread_id: T, data: {} });
+    await clock.advance(1_000);
+    expect(idle).toBe(1);
+    expect(player.started).toEqual(["A short first message."]);
+  });
+
+  it("a barge-in while the summary is awaited holds it until the owner is done", async () => {
+    settle(LONG);
+    c.bargeIn();
+    expect(c.view().active).toBe(false);   // the owner is talking: the detector must listen
+    sum.answer(SUMMARY);
+    await clock.advance(30_000);
+    expect(player.started).toEqual([]);
+    c.endBargeIn();
+    await clock.advance(30_000);
+    expect(player.started).toEqual([SUMMARY]);
+  });
+
+  it("a barge-in that ends in a send: the held summary is stale and never said", async () => {
+    settle(LONG);
+    settle("Behind it.");
+    c.bargeIn();
+    sum.answer(SUMMARY);
+    await clock.advance(1_000);
+    c.event({ kind: "user_message", thread_id: T, data: { via: "hud" } });
+    c.endBargeIn();
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
+
+  it("the owner's own pause or stop during the hold takes over", async () => {
+    settle(LONG);
+    c.bargeIn();
+    sum.answer(SUMMARY);
+    await clock.advance(1_000);
+    c.stop();
+    c.endBargeIn();
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
+
+  it("a barge-in with nothing sounding and nothing awaited changes nothing", async () => {
+    c.bargeIn();
+    c.endBargeIn();
+    settle("Spoken as usual.");
+    await clock.advance(10_000);
+    expect(player.started).toEqual(["Spoken as usual."]);
   });
 });
