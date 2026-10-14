@@ -163,6 +163,7 @@ export const LISTENING_STATUS = "LISTENING · SPEAK NOW";
 /** Capture statuses: what the microphone is doing, said in the selected chat's input bar. */
 export const CAPTURE_STATUSES: ReadonlySet<string> = new Set([
   LISTENING_STATUS, "TRANSCRIBING", "STT FAILED", "DIDN'T CATCH THAT", "TOO SHORT", "MIC MUTED",
+  "NOTHING TO CANCEL", "NOTHING TO SEND",
 ]);
 
 /** The project a pane's conversation is in: its compose row's, else its thread's. */

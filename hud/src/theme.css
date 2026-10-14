@@ -1702,3 +1702,16 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 
 /* Catch Direct dismissal on a stable HUD host before any iframe event. */
 .browserbody[data-options-open=true] .framehost::after { content: ""; position: absolute; inset: 0; z-index: 2; background: transparent; }
+
+/* V10: Undo after a cancel word, and the send/cancel word lists in Settings -> Voice. */
+.voice-undo { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 6px; padding: 4px 8px; border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px; background: var(--bg-2); font-size: 11px; color: var(--text-muted); }
+.voice-undo button { font: inherit; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+.voice-words { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
+.voice-words h3 { font-size: 12px; }
+.voice-words p { color: var(--text-muted); font-size: 11px; }
+.voice-words-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.voice-words-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 8px; border: 1px solid var(--border); border-radius: 10px; font: 12px var(--mono); }
+.voice-words-chip button { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; padding: 0 4px; }
+.voice-words-add { display: flex; gap: 6px; align-items: center; }
+.voice-words-add input { width: 9em; }
+.voice-words-error { color: var(--red); font-size: 11px; min-height: 1em; }

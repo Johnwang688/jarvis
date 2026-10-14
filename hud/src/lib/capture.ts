@@ -32,6 +32,7 @@ import {
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs,
 } from "./vad";
 import { UtteranceRecorder, type RecordedChunk } from "./recorder";
+import { SEND_WORD_SILENCE_MS } from "./voiceWords";
 
 import type { ClaimSource, DropReason, SuppressionReason } from "./voiceDiagnostics";
 
@@ -52,6 +53,13 @@ export interface UtteranceEnd {
   continuation: number | null;
   /** It ended before the owner finished: the mic went OFF, a card or picker appeared, the window crashed. */
   truncated: boolean;
+  /**
+   * V10: the quiet that followed the last word when the message ended, in ms
+   * (the pause that proved it over, or how long the talk key waited before its
+   * release). 0 when it was cut short or hit the ceiling. A trailing send or
+   * cancel word counts only after `SEND_WORD_SILENCE_MS` of it.
+   */
+  tailMs: number;
 }
 
 export interface CaptureHooks {
@@ -233,10 +241,11 @@ export class Capture {
     return id;
   }
 
-  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean) {
+  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean, tailMs = 0) {
     try {
       this.hooks.onUtteranceEnd({
         utterance: rec.id, source: this.claimSource, ms: summary.ms, chunks: summary.chunks, continuation, truncated,
+        tailMs: truncated ? 0 : Math.max(0, Math.round(tailMs)),
       });
     } catch { /* ditto */ }
   }
@@ -255,11 +264,16 @@ export class Capture {
     return summary;
   }
 
-  /** The message is over: flush its last chunk, arm the continuation window, say so. */
-  private finishRecording(trim: number) {
+  /**
+   * The message is over: flush its last chunk, arm the continuation window, say
+   * so. `quietSamples` is the quiet run behind the last word (V10), read before
+   * anything resets it.
+   */
+  private finishRecording(trim: number, quietSamples = this.vad.quiet) {
     const rec = this.rec;
     if (!rec) return;
     this.rec = null;
+    const tailMs = samplesToMs(quietSamples);
     this.vad.voiced = 0;
     // The message ended here. Whatever follows soon enough continues it --
     // except after push-to-talk, whose release is the owner's own full stop:
@@ -275,7 +289,7 @@ export class Capture {
     this.continueUntil = arm ? this.ring.written + msToSamples(CONTINUE_MS) : -1;
     const summary = rec.end(trim);
     if (summary.chunks === 0) { this.closeContinuation(); this.announceEnd(rec, summary, null, false); return; }
-    this.announceEnd(rec, summary, arm ? this.continueToken : null, false);
+    this.announceEnd(rec, summary, arm ? this.continueToken : null, false, tailMs);
   }
 
   /** The ceiling: the message goes as it stands, and the window says so. */
@@ -283,7 +297,7 @@ export class Capture {
     const rec = this.rec;
     if (!rec) return;
     const ms = rec.ms;
-    this.finishRecording(0);
+    this.finishRecording(0, 0);
     this.vad.open = false;
     this.segClaimed = false;
     this.ptt = null;
@@ -460,12 +474,30 @@ export class Capture {
       return;
     }
     // The detector must not immediately re-open on the tail of what was just
-    // sent, and the room may have changed while the owner held the orb.
+    // sent, and the room may have changed while the owner held the orb. (How
+    // long it had been quiet is the message's tail, V10: read it first.)
+    const quiet = this.vad.quiet;
     this.vad.quiet = 0;
     this.vad.run = 0;
     this.vad.open = false;
     this.segClaimed = false;
-    this.finishRecording(0);
+    this.finishRecording(0, quiet);
+  }
+
+  /**
+   * End the claimed hands-free message now instead of waiting out the pause,
+   * if it has been quiet for at least `minQuietMs` (V10, plan §3.3 phase 2).
+   * The seam for local keyword spotting (V11): a send or cancel word heard and
+   * followed by 500 ms of quiet ends the message at once. Nothing in the
+   * transcript phase can call it -- the words are not known until the audio has
+   * been transcribed -- and the talk key owns its own recording. True when it ended.
+   */
+  endNow(minQuietMs = SEND_WORD_SILENCE_MS): boolean {
+    if (!this.rec || this.ptt || !this.segClaimed || !this.vad.open) return false;
+    if (samplesToMs(this.vad.quiet) < minQuietMs) return false;
+    this.vad.open = false;
+    this.onVadEvent("close");
+    return true;
   }
 
   /** Test hook: script a room through the real detector, no microphone. */

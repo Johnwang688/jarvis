@@ -97,6 +97,8 @@ export function InputBar(props: {
   imageNote?: string | null;
   onSend: (text: string, attachments: Attachment[]) => void;
   onTranscriptTaken: () => void;
+  /** V10: a cancel word just discarded dictated words; Undo puts them back in this box (for ten seconds). Null: nothing to undo. */
+  undo?: (() => void) | null;
   /** A turn is running in the open thread (2026-10-08): Enter steers it, and
    * a Stop button ends it. */
   running?: boolean;
@@ -303,6 +305,12 @@ export function InputBar(props: {
           {imageNote ? (
             <span className="chip warn" data-testid="image-note">{imageNote}</span>
           ) : null}
+        </div>
+      ) : null}
+      {props.undo ? (
+        <div className="voice-undo" data-testid="voice-undo-bar" role="status">
+          <span>Cancelled what you dictated.</span>
+          <button type="button" data-testid="voice-undo" onClick={props.undo}>Undo</button>
         </div>
       ) : null}
       <div className="inputrow">
