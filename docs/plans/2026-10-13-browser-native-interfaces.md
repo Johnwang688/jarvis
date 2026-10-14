@@ -79,9 +79,11 @@ Disconnect never retires the whole chat turn or cancels another relay request.
 4. Catalog, strict, alias named rule single private card, child/native metadata,
    privacy canaries, accepted/refused/queued desk steers and lifecycle regressions.
 5. A 115-second actual wall-clock free real-relay wait proves daemon/relay only;
-   fake clocks are broker unit timing evidence only. Native CLI
-   115-second acceptance for BOTH providers remains UNRUN pending a separate
-   concrete root-approved probe. No paid calls, owner credentials, live daemon,
+   fake clocks are broker unit timing evidence only. Actual native CLI
+   115-second waits passed for both installed providers with offline scripted
+   endpoints; see [measured evidence](2026-10-13-browser-native-offline-cli.md).
+   Those transport actions were substituted; real native CLI/HUD/CDP composition
+   is separately measured there. No paid calls, owner credentials, live daemon,
    real accounts/devices, installed HUD edits or service restart in free checks.
 
 Heavy checks require the lead slot grant, >=4 GiB available and systemd scope

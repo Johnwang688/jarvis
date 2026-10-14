@@ -108,10 +108,85 @@ The short actual MCP receipt precedes the long probe and confirms real admission
 and bridge dispatch. Earlier direct-function and readiness-field fixture failures
 remain preserved in separate receipts; they are not product refusal evidence.
 
-Actual CLI child denial, exact native interruption/abandoned-call cancellation,
-accepted desk steering, and native resume/token rotation (LB-2/3/5/6) remain
-UNRUN. The proposed lifecycle fixture must preserve actual host identity and keep
-the daemon turn live during cancellation so retirement cannot mask missing socket
-abandonment. Existing fake-host and real-socket regression tests are narrower
-coverage, and do not replace these actual CLI gates. Combined integration sweep
-and release acceptance remain pending root's reviewed run and merge sequence.
+At integrated runtime `4acf2ed082ad6fec8c87de8abdddfd6c06f96e31`, actual
+native steering passed for both CLIs. Codex's three exact successful, nonabandoned
+`turn/steer` replies preceded owner-word updates; Claude's actual SDK writes
+returned before those updates. Latest desk words stayed bounded, off-desk text
+revoked captured desk authority and carried uncertainty into one successor,
+and a pending owner card queued words without granting authority. Stop dropped
+that queue. See `batch2-native-steer-ready-{claude,codex}-result.json`.
+
+The steering acceptance review found and fixed an unconfirmed-receipt seam:
+Codex still counts an unanswered steer as delivered under its existing queue
+policy, but returns False so it cannot authorize Browser owner words. Confirmed
+True and Claude's legacy successful None retain authority. Late replies cannot
+retroactively update it. Commit `9a9f455` passed the three focused provider,
+Browser-MCP and steering suites before the clean current-main integration.
+
+Actual Codex child metadata (`subagent=true`, distinct child thread/turn) reached
+the production host and was refused before dispatch; the exact parent then
+acted once and completed cleanly. The child's model request used an opaque
+encrypted message carrier: nothing was decrypted. The derived
+`batch2-native-child-identity-codex-addendum.json` corrects only an overwritten
+mechanism label in the preserved original receipt; this proves host child
+denial, not catalog omission. Claude 2.1.295's actual child omitted Browser
+capability from its catalog, and its parent acted cleanly. A separate Driving-ON
+hook test and guard mutant verify denial before permission/dispatch; literal
+live child Act-hook invocation remains unobserved.
+
+The real isolated Face/HUD attachment and heartbeat component passed separately.
+Then actual native CLI + real HUD guarded look/ref/action/banner and native
+close/resume passed in every supported profile: Claude ASK and AUTO, Codex AUTO.
+Codex ASK is refused before startup by the production AUTO-only project policy;
+no fixture bypass was added. Each supported cell performed two judged real CDP
+input actions, required exact per-call native tool results and page values,
+retired its old DriveTurn, rotated its carrier, refused the old carrier with
+403, refused an old ref, and obtained a fresh guarded look before acting again.
+See `batch2-native-hud-classify-*-result.json`. Backend source is `4acf2ed`;
+read-only tested public HUD assets are from `f26848d`, with identical complete
+HUD source and a finite asset manifest. No installed file was changed.
+
+Both native AUTO providers also passed actual sensitive Browser action cards
+through the real HUD. The deterministic synthetic reviewer requested a sensitive
+category; the production Browser gate made each private card. Actual DENY
+produced no page input; a fresh turn's actual AUTHORIZE allowed one input.
+Exactly two distinct cards, two judgments and one real execution were observed,
+with private-detail/request identity, exact native results and clean completions.
+See `batch2-native-hud-card-ready-*-auto-result.json`.
+
+Claude's native interruption independently closed its exact relay socket while
+all other admission predicates stayed live. Raw-wire Codex interruption finished
+its native turn but did not close that socket within the bounded probe; this is
+a measured CLI limitation, not a socket PASS. The normal production Codex Stop
+path separately revoked admission and withdrew the real card before daemon
+cleanup; actual natural completion also retired admission without Stop. Preserve
+these distinct mechanisms in `batch2-native-interrupt-acceptance.json` and the
+composed Codex Stop/completion receipts.
+
+Actual HUD pane Stop/Resume passed for both CLIs while a real CDP type was in
+flight. The first 32-character insertion completed, its exact task and two
+activity holds stayed owned after Stop, and no following input attempt occurred.
+After settlement and the real Resume acknowledgement, a new native turn refused
+the old ref and used a fresh guarded look. Production Chat Stop also passed for
+both CLIs via `Daemon.interrupt` (not a clicked HUD Chat Stop button), with actual
+native interrupted completion and revoked admission while CDP work settled.
+
+Codex's existing incomplete-accounting policy intentionally rejects continuation
+in the same native thread after Chat Stop. The classification probe observed the
+exact fatal accounting category, false accounting-complete flag and zero new
+API/action/input; an actual fresh owner chat then refused the old ref, looked
+again and acted cleanly. This policy predates BR9d and was not weakened. Normal
+completed-session resume and pane Stop/Resume remain separately supported.
+See `batch2-native-hud-stop-*-result.json` and
+`batch2-native-hud-stop-accounting-observe-codex-chat-result.json`.
+
+The final evidence index is `batch2-native-acceptance-final.json`; original
+protocol, readiness, prerequisite and unsupported-profile failures remain
+preserved. The earlier 137-suite integration receipt and reviewed corrections
+remain separate from the final current-main regression: eleven affected suites
+passed on runtime `4acf2ed`, while a stale Auth callback-name audit expectation
+was corrected in test-only `944dace`. No later docs/test change alters `jarvis/`
+or `hud/`; the dispatch-only final check returned 0 with its existing guard
+mutants and exact scope cleanup. All receipts remain separately retained. Subscription/account
+authentication and Codex production subscription startup, paid-model judgment,
+physical owner/device behavior and installed deployment remain UNRUN.

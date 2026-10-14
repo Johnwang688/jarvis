@@ -296,3 +296,20 @@ off-desk/accepted steer/postread withholding/next-turn carry, and resume
 with a new token, old-token refusal and the same native thread. These probes
 used no real terminal contents or account side effects. Independent review
 and the full regression sweep remain separate release gates.
+
+
+## Native Browser action delegation (BR9d)
+
+`hud_browser_act` is an `owner_gated`, foreground-only, desk-only session tool.
+Its native annotations remain truthful: read-only false, destructive/open-world
+true. Claude explicitly delegates the exact owner tool under ASK/AUTO; Codex
+uses its validated per-tool approve policy under AUTO. Both reach the same
+bridge permit, Browser review/private card, budgets and exact foreground guards.
+A named always-ask permission is a separate private delegation card and never
+pre-approves an action. Strict refuses; native subscription validators are intact.
+
+Native request identity and the current desk/DriveTurn are checked again after
+waits. Relay notifications validate typed cancellation parameters, bind the exact
+socket before request bytes, and cannot let captured cleanup cancel a reused-ID
+successor. Private gate labels/records omit arguments; native tool results still
+enter that provider's conversation. See [contract and measured scope](browser.md#native-parent-browser-driving-br9d).
