@@ -1490,13 +1490,16 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   bundled by Vite as its own same-origin module via `?worker&url`, so the CSP's
   `script-src 'self'` covers it; no CDN). All the logic is `MicFramer`
   (`lib/resample.ts`): render quanta at the device rate -> **windowed-sinc**
-  resample (Kaiser beta 8.6, 90 % of the output Nyquist, about 80 dB stop band,
-  zero group delay, position counted rather than accumulated) -> mono ->
+  resample (Kaiser beta 8.6, 85 % of the output Nyquist, 3 dB down at 6.5 kHz, 9 dB at 7 kHz,
+  80+ dB beyond 8.5 kHz,
+  zero group delay, position counted rather than accumulated; since the review: 85 % of the
+  output Nyquist, 14 lobes) -> mono ->
   **512-sample frames at 16 kHz** posted to the main thread as transferred
   `Float32Array`s. They queue there if the main thread stalls instead of being
   dropped, which `ScriptProcessorNode` could not promise. The old boxcar
-  average let a 12 kHz tone through 30 dB down; the new one is 60 dB+ down
-  (`resample.test.ts`).
+  average let a 12 kHz tone through 30 dB down; the new one is 80+ dB down at 8.5 kHz,
+  the tone that would alias to 7.5 kHz (the first cut, at 90 % and 10 lobes, measured only
+  -29 dB there, which the review caught; `resample.test.ts` pins 8.5 and 9 kHz at -60 dB).
 - **Fallback, visibly.** No `audioWorklet` (insecure origin, old browser), no
   `AudioWorkletNode`, a module that fails to load, or a node that cannot be built:
   the *same* resampler runs behind a `ScriptProcessorNode`. `VoiceDiagnostics.path`
@@ -1590,7 +1593,7 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   gone) is fixed when it is claimed, not when it ends: a chat switch halfway
   through a long dictation boxes it with "SPOKEN IN ANOTHER CHAT".
 
-Free checks: vitest 2315 tests / 145 files after merging V8 (2216 / 138 before; new: `resample.test.ts` 9,
+Free checks: vitest 2347 tests / 145 files after the review fixes (2315 / 145 before them, 2216 / 138 before V8 was merged; first-cut new: `resample.test.ts` 9,
 `joinChunks.test.ts` 11, `recorder.test.ts` 9, `captureChunks.test.ts` 30,
 `micInput.test.ts` 5, `stt.test.ts` +17 for groups; `capture.test.ts`,
 `captureDiagnostics.test.ts` and `speech/suppress.test.ts` adapted to the new
@@ -1612,6 +1615,45 @@ transcript appears when the message ends, not chunk by chunk. Joining by words i
 a heuristic: a hard cut in the middle of a word the model hears differently in
 the two chunks can leave a fragment (shorter than four letters) or, rarely, drop a
 word repeated on purpose exactly at a cut.
+
+**Review fixes (2026-10-14, the lead's Opus review of the first cut; the owner confirmed that
+a card or OFF cuts the recording):**
+- **H1, a cut-short message is late.** `closeGroup(gid, {late})`: App passes
+  `end.truncated || u.refused`, so a message cut by OFF, a card, a picker, Settings, a
+  crash or his own voice is placed `late` even though every chunk that left answered, and
+  AUTO boxes it (it used to be sent as if whole). `late` = a chunk failed **or** the message
+  was cut short.
+- **M1.** `onListening` is announced **before** the pre-roll is fed to the recorder: a long
+  pre-roll (27 s of room speech, then a wake word) cuts chunks while it is fed, and they
+  used to reach the consumer before it knew the message and were dropped silently.
+- **M2.** A tap on the talk key over a hands-free message is not "too short": the key
+  *adopts* the recording and release just finishes it. `claimSource` is reset after a key
+  ends, so the detector's later `unclaimed` row is no longer labelled `ptt`.
+- **M3, a stopgap until V12.** A message claimed by the follow-up window or as a
+  continuation (no wake word, no talk key) ends at **60 s** (`CLAIM_CAP_MS`), sent as it
+  stands, with the error line saying so (`onLimit(ms, claimCap)`). A wake claim and the
+  talk key keep the 15-minute ceiling; a key pressed over a hands-free message lifts the 60 s.
+- **M4.** `CaptureHooks.hardStop()` names a card, picker, Settings or crash on its own, so
+  `suppressed:speaking` / `no_chat` (reported first) cannot mask one: a held key over his voice
+  or a closed chat now stops when a card or Settings arrives, and the drop names the card.
+  App's `captureSuppression` lists the hard reasons first as well. `canUpload(explicit)` and
+  `onChunk` also refuse under a picker or Settings; the owner's own **Retry** (`explicit`) is
+  still allowed from Settings, which is where the Retry row lives.
+- **L1.** When the previous chunk heard only the start of a word ("transcrip") and the next
+  hears it whole, the fragment is dropped and the whole word kept (`overlapMerge`);
+  `MAX_OVERLAP_WORDS` is 4.
+- **L3.** A late message placed around a failed chunk carries `[…]` (`GAP_MARK`) where the
+  missing part belongs (first, middle or last); Retry's text still lands at the end.
+- **L4.** `onprocessorerror` hands the microphone to the ScriptProcessor and says so
+  (`onPathChange`); `addModule` times out after 8 s into the same fallback;
+  `Resampler.processShared` allocates nothing per call on the audio thread.
+- **L5.** `Capture.muteNow()` (App `setMode` OFF) ends a recording at once, not at the next
+  frame; `onUtteranceEnd` closes the group even if a status write throws; a pane left
+  saying LISTENING after a cut-short message now says TRANSCRIBING or nothing; the limit
+  messages say "Say Jarvis or hold the talk key" (speaking on would not be claimed).
+- **Soft cuts repeat 200 ms of the quiet** before them (`CHUNK_SOFT_OVERLAP_MS`), so no first
+  phoneme sits on a chunk edge; `chunk.repeats` is false for them, so the join does not look
+  for echoed words ("very | very" stays).
 
 ## V8: spoken summaries (2026-10-13)
 

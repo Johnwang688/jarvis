@@ -326,7 +326,7 @@ def main(argv=None):
                 stt.reset("a1 a2 a3", ("err", 400), "c1 c2 c3")
                 ptt_long(70)
                 check("a chunk that fails is kept for Retry", waits(lambda: page.locator('[data-testid="stt-retry"]').count() == 1))
-                check("... and the others are placed in order in the box", waits(lambda: box() == "a1 a2 a3 c1 c2 c3"), box())
+                check("... and the others are placed in order in the box, with a mark where the missing part belongs", waits(lambda: box() == "a1 a2 a3 […] c1 c2 c3"), box())
                 check("... the failed chunk said which part it was",
                       "part 2 of 3" in page.locator('[data-testid="stt-retry"]').inner_text(), page.locator('[data-testid="stt-retry"]').inner_text())
                 check("one automatic retry was not made for a refusal", len(stt.reqs) == 3, str(len(stt.reqs)))
@@ -345,11 +345,51 @@ def main(argv=None):
                 stt.reset("half one", ("err", 400), "half three")
                 ptt_long(70)
                 check("AUTO: a message with a failed chunk goes to the box, never to the chat",
-                      waits(lambda: box() == "half one half three") and sends() == s0, f"{box()!r} sends+{sends() - s0}")
+                      waits(lambda: box() == "half one […] half three") and sends() == s0, f"{box()!r} sends+{sends() - s0}")
                 page.locator('[data-testid="stt-discard-button"]').click()
                 check("Discard releases the kept audio", waits(lambda: page.locator('[data-testid="stt-retry"]').count() == 0))
                 clear_box()
                 _dictation(page, "review")
+
+            def truncated_auto_never_sends():
+                """H1: a message cut short (card, mic OFF) is placed late, so AUTO boxes it."""
+                _dictation(page, "auto")
+                clear_box()
+                s0 = sends()
+                stt.reset("first half of it", "never said")
+                page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp()")
+                page.evaluate(f"({WORDS})(9, 9, 900)")
+                page.evaluate("window.__hud.mic.feedMs(900, .0009)")     # the breath: the first half leaves
+                check("setup: the first half has been uploaded", waits(lambda: len(stt.reqs) == 1))
+                _approval(mock, "v4cardC")
+                until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=4)
+                page.evaluate(f"({WORDS})(8)")
+                page.evaluate("window.__hud.mic.feedMs(2200, .0005)")
+                check("AUTO: a card cut the message, so what left waits in the box and is not sent",
+                      waits(lambda: "first half of it" in box()) and sends() == s0, f"{box()!r} sends+{sends() - s0}")
+                check("nothing more was uploaded under the card", len(stt.reqs) == 1)
+                page.keyboard.press("Escape")
+                until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+                check("the orb is not left on LISTENING", page.evaluate("window.__hud.state().orb") != "listening",
+                      page.evaluate("window.__hud.state().orb"))
+                clear_box()
+
+                # the mic switched OFF in the middle of a push-to-talk
+                stt.reset("spoken before off", "never said")
+                _dictation(page, "auto")
+                s0 = sends()
+                page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.press()")
+                page.evaluate(f"({WORDS})(30)")                    # one chunk left (hard cut at 25 s)
+                check("setup: a chunk is out", waits(lambda: len(stt.reqs) == 1))
+                _dictation(page, "off")
+                n = len(stt.reqs)
+                page.evaluate(f"({WORDS})(30)")
+                page.evaluate("window.__hud.capture.release()")
+                page.wait_for_timeout(500)
+                check("OFF ends the recording at once: no further chunk, nothing sent", len(stt.reqs) == n and sends() == s0)
+                _dictation(page, "review")
+                check("what was said before OFF is in the box, unsent", waits(lambda: "spoken before off" in box()) and sends() == s0, box())
+                clear_box()
 
             def two_in_flight():
                 page.unroute("**/stt*")
@@ -422,7 +462,7 @@ def main(argv=None):
                 clear_box()
 
             for section in (long_ptt_review, long_ptt_auto, hands_free_long, failed_chunk,
-                            failed_chunk_auto_never_sends_half, two_in_flight, off_uploads_nothing,
+                            failed_chunk_auto_never_sends_half, truncated_auto_never_sends, two_in_flight, off_uploads_nothing,
                             card_uploads_nothing, card_mid_message):
                 run(section)
             check("no page errors in the scripted sections", not [f for f in failures if f.startswith("page error")])
