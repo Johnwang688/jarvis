@@ -1,6 +1,14 @@
 # Browser driving release: the fast path (BR-9b/9c to production)
 
-**Status:** plan, 2026-10-13. Docs only. It builds on main at d4b65dd: PR #122 (BR-9b, the dormant backend) and PR #124 (BR-9c, the owner presentation). Claude and Codex driving is a separate plan, `2026-10-13-browser-driving-claude-codex.md`, which depends on this one.
+**Status (2026-10-13):** B-DR is implemented, independently reviewed and ready for coordinated merge/install in [PR #135](https://github.com/Johnwang688/jarvis/pull/135). Tested integration `22ab268` includes installed Browser controls/classifier and the Claude team's V0/V2/V6 claim; production content is identical to reviewed `76177f39`. This records candidate verification, not installation or owner-account validation. Native Claude/Codex driving remains the separate B-NATIVE handoff in `2026-10-13-browser-driving-claude-codex.md`.
+
+Named Remote panes default to driving on, subject to the global switch, see permission and existing action guards. Private requires a trusted owner grant bound to the exact pane/context and never persists it; Direct cannot drive. Existing malformed authority fails closed. Trusted activation and pending-operation identity checks are implemented.
+
+Verification: build, 1,870 HUD unit tests, 43 owner Browser checks, 19 real-Chrome execute tests, six scan tests, 33 full view tests, independent authority probes and five mutants passed. The immutable integrated HUD run had **8 failures of 3,134 checks**: moved-options fixture calls and one passive empty-front audit. Independently reviewed fixture corrections then passed **215/215 complete affected checks**, including all 49 capture assertions; unchanged unaffected sections come from the full run. These are two receipts, not one all-green full invocation. Earlier AO3 failures (19/3,195) and their 95/95 corrected rerun are retained.
+
+The backend sweep invoked all 115 suites with individual real exit codes: 108 initially passed and seven failed. Corrected full reruns passed Codex 88, installer 39, owner-browser **30 run / one private-netns skip**, terminal 90 and view 33. Fake Pocket checks and four non-synthesis local voice groups passed with synthetic metadata; real local synthesis is **UNRUN** because the isolated bundle/model is absent and voice prerequisites belong to the Claude team. The original view RSS failure at 1,558.4 MiB is retained; all six bounded baseline/candidate samples and the final full 33-test rerun passed the unchanged 1.5 GiB guard. The composing audit passed 29 negative controls, including actual permission/model/save routes. No paid model calls were made for B-DR; M11 was completed separately by B-CLASSIFIER (#130), as recorded in the [current feature map](2026-10-13-current-feature-map.md).
+
+**Historical planning material:** the observations and questions below record the original docs-only baseline at `d4b65dd` and the approved design. They are not current code or installation status.
 
 ## For the owner
 
@@ -33,7 +41,7 @@
   - BD-9: no driving under the strict profile.
   - BD-11: refs only, no coordinate clicks.
 
-## What the code does today (verified)
+## Historical code baseline (verified at d4b65dd)
 
 - **The backend.**
   - `BrowserDrive(daemon, enabled=_shipping_enabled)` (`drive.py:93`) calls `enabled()` in `_turn` (line 102), in `_current` before every guarded step and event (line 161), and in `publish_look` (line 178).
@@ -190,7 +198,7 @@ These are from the BR9b and BR9c notes; none of them is touched.
 
 The existing BR-9b and BR-9c suites run unchanged; they already inject `enabled=lambda: True`.
 
-## Live validation before calling it shipped
+## Original live-validation plan (historical; current evidence above)
 
 Use the owner's real HUD and real Chrome 155 on a fixture or harmless public page. No account side effects; the owner supplies the sites.
 
@@ -213,7 +221,7 @@ Use the owner's real HUD and real Chrome 155 on a fixture or harmless public pag
 2. **Code.** Restore `_shipping_enabled` to `return False`, a one-line owner-applied revert. Optionally restore the panes 409. All BR9b/9c guards remain, so the revert returns exactly to today's dormant state.
 3. **Ending a run.** Daemon restart forgets all drive state, grants and leases (memory only).
 
-## Open questions for the owner
+## Historical planning questions (implementation defaults recorded above)
 
 1. **A new pane on a named profile: "Jarvis can drive" on or off by default?** Recommend **on**. You decided driving should be on. Every action still needs a desk turn, a visible uncovered pane, 5 s hands-off and a card for sensitive categories, and Private stays off.
 2. **Private opt-in lifetime.** Recommend keeping BD-3: per pane, until that pane's Private session ends, never stored.
