@@ -359,6 +359,29 @@ describe("silencing reaches what is queued behind a summary (review HIGH-1)", ()
     expect(player.started).toEqual([]);
   });
 
+  it("skip with nothing sounding cancels the summary next in line and leaves another thread's alone", async () => {
+    settle(LONG);                 // T: out for its summary first
+    settle(BEHIND);               // queued behind it
+    settle(LONG, U);              // U: out for its own
+    c.skip();
+    expect(sum.calls[0].signal.aborted).toBe(true);
+    expect(sum.calls[1].signal.aborted).toBe(false);
+    sum.answer(SUMMARY, 0);
+    sum.answer("The other thread's summary.", 1);
+    await clock.advance(60_000);
+    expect(player.started).toEqual(["The other thread's summary."]);
+  });
+
+  it("skip with nothing sounding and nothing awaited drops the message being written", async () => {
+    delta("A message still being written, and then skipped. ");
+    c.skip();
+    delta("More that must not be said.");
+    tool();
+    await clock.advance(30_000);
+    expect(player.started).toEqual([]);
+    expect(sum.calls).toEqual([]);
+  });
+
   it("silencing one thread leaves another thread's summary alone", async () => {
     settle(LONG);
     settle(LONG, U);

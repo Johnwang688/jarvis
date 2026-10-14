@@ -223,9 +223,9 @@ def summarize(text: str, *, chat: Callable[..., Any] | None = None,
     body = prepare(text)
     if not body:
         raise SummaryError(400, "no text to summarize")
+    run = _Run(chat or llm.chat, pool, started + deadline_s)
     if not _SLOTS.acquire(blocking=False):
         raise SummaryError(429, "too many summaries at once")
-    run = _Run(chat or llm.chat, pool, started + deadline_s)
     box: dict[str, Any] = {}
 
     def work() -> None:

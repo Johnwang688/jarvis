@@ -1311,7 +1311,7 @@ V6 stopgap is gone.)
   message of the same thread waits behind a pending summary; other threads do
   not. A per-thread **epoch** is captured when a message closes and checked at
   `deliver()`: a send to the thread, Stop, an interrupted turn, Skip with nothing
-  sounding, the pane leaving, read-aloud off and the lock lost all bump it, so
+  sounding (it takes the oldest awaited summary and its thread only), the pane leaving, read-aloud off and the lock lost all bump it, so
   the pending summary *and every message queued behind it* are dropped even if
   the summariser answers despite its abort (review HIGH-1; vitest pins each path
   and the mutations of the epoch check and its bumps fail them).

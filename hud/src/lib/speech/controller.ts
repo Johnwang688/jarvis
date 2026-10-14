@@ -493,11 +493,12 @@ export class SpeechController {
   skip(): void {
     const skipped = this.queue.skip();
     if (!skipped) {
-      // Nothing sounded: the message being waited for -- still held, or out for its summary -- is the current
-      // one, in each thread that has such a message. Other threads are untouched.
-      const waiting = new Set<string>(this.lanes.keys());
-      for (const [thread, s] of this.open) if (s.stream.open) { this.hush(s); waiting.add(thread); }
-      for (const thread of waiting) this.cancel(thread);
+      // Nothing sounded, so the message next in line is the current one: the oldest summary being
+      // awaited (with whatever is queued behind it on its thread). Other threads' summaries are
+      // left alone. With none awaited, a message still being written is what is skipped.
+      const first = this.pending.values().next().value as Pending | undefined;
+      if (first) { this.cancel(first.thread); return; }
+      for (const [thread, s] of this.open) if (s.stream.open) { this.hush(s); this.cancel(thread); }
       return;
     }
     const s = this.open.get(skipped.thread);
