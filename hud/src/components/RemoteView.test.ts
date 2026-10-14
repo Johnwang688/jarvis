@@ -97,6 +97,23 @@ it("closes hidden streams and uses a fresh one-use ticket on return",async()=>{
   await ready();const first=socket();await render({live:false});expect(first.closed).toBe(true);await render({live:true});expect(mocks.write).toHaveBeenCalledTimes(2);expect(Socket.instances).toHaveLength(2);
 });
 
+it("sound instance replacement drops same-ID late frames, location and clipboard cut",async()=>{
+  await render({instanceGeneration:1});await act(async()=>socket().open());socket().sent=[];
+  const decode=deferred<any>(),saved=deferred<void>(),close=vi.fn();
+  mocks.decode.mockReturnValueOnce(decode.promise);mocks.clipboard.mockReturnValue(saved.promise);
+  await frame(binary(1));await key("x",{ctrlKey:true});await frame({t:"selection",text:"old"});
+  const old=socket(),late=old.onmessage!;await render({instanceGeneration:2});
+  expect(old.closed).toBe(true);expect(mocks.write).toHaveBeenCalledTimes(2);
+  await act(async()=>{socket().open();late({data:JSON.stringify({t:"location",url:"https://stale.test/",title:"stale"})});decode.resolve({close});saved.resolve();});
+  expect(mocks.draw).not.toHaveBeenCalled();expect(close).toHaveBeenCalledOnce();expect(props.onLocation).not.toHaveBeenCalled();
+  expect(old.sent.filter(x=>x.t==="key")).toHaveLength(0);expect(socket().sent.some(x=>x.t==="key")).toBe(false);
+});
+it("hidden sound generation changes request no ticket until drawn and never focus a page",async()=>{
+  await render({live:false,instanceGeneration:1});await render({instanceGeneration:3});expect(mocks.write).not.toHaveBeenCalled();
+  await render({live:true});await act(async()=>socket().open());expect(mocks.write).toHaveBeenCalledOnce();
+  expect(socket().sent.some(x=>x.t==="focus"||x.t==="key")).toBe(false);expect(props.onOwnerFocus).not.toHaveBeenCalled();
+});
+
 async function replay(paused=false){await frame({t:"agent",kind:"driver",thread_id:"driver-thread",provider:"fast"});await frame({t:"agent",kind:"paused",paused,by:paused?"owner":null});await frame({t:"agent",kind:"list",actions:[]});}
 const driveButton=(kind:string)=>host.querySelector<HTMLButtonElement>(`[data-testid="drive-${kind}"]`);
 it("agent replay uses displayed slots; only successful owner input mirrors takeover",async()=>{

@@ -108,6 +108,7 @@ class Pure(unittest.TestCase):
                 return SimpleNamespace(cost_usd=0,cancelled=False,stopped_early=False,text="done")
             agent.run_turn=run_turn
             native=SimpleNamespace(agent=agent,model="fixture-pinned",effort=None,stop=threading.Event(),
+                pristine_system=F.config.SYSTEM_PROMPT+F.FAST_PROMPT,
                 brief=Brief(role=Role.CHAT,cwd="/tmp"),tool_names=["hud_browser_view"],project_id="p",
                 inbox_lock=threading.Lock(),inbox=[],leftover=[],accepting=False,cost_usd=0,turns=0)
             with patch.object(F.models,"tier",return_value="different-global"),patch.object(F.models,"cached_info",return_value=None if vision is None else SimpleNamespace(vision=vision)) as info,patch("jarvis.v2.tools.hud_browser_view.look_for_tool",return_value=L.LookResult(text="Dispatch marker",source="Fixture")) as look:
@@ -251,8 +252,10 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         host=H.BrowserHost();host._tabs={str(i):SimpleNamespace(page=object()) for i in range(3)}
         host._look_reserved={"look-fixture"}
         page=object()
+        instance=H._Instance(H.PRIVATE,Path('/synthetic/private'),Mock(),Mock(),generation=1)
+        host._instances[H.PRIVATE]=instance
         with patch.object(config,"BROWSER_TAB_CAP",4),patch.object(host,"_refuse_popup",new=AsyncMock()) as refuse,patch.object(H,"_Tab",side_effect=AssertionError("adoption attempted beyond reserved cap")):
-            self.assertIsNone(host._adopt(SimpleNamespace(profile=H.PRIVATE),page,None))
+            self.assertIsNone(host._adopt(instance,page,None))
             await asyncio.sleep(0);refuse.assert_awaited_once_with(page)
         host=SimpleNamespace(_launching={},_look_reserved=set(),_closing_contexts=set(),_tabs={"a":object()},
             _tab_cap=lambda:1,_instance=AsyncMock())
@@ -287,6 +290,8 @@ class Real(O.OwnerBrowser):
         self.tab=self.host._tabs[row["tab_id"]];self.pg=self.tab.page
         self.run_on(self.pg.wait_for_load_state("load"))
         self.snap=snapshot(tab_id=self.tab.id,view_id=self.tab.id,ctx=self.tab.ctx,url=self.url,page_identity=self.tab.page_identity,document_generation=self.tab.document_generation)
+        self.instance_generation=self.host.pane_tab(self.tab.id)["instance_generation"]
+        self.assertIs(type(self.instance_generation),int)
         self.valid=True
         original_registry=self.daemon.browser_panes
         self.addCleanup(setattr,self.daemon,"browser_panes",original_registry)
@@ -294,7 +299,8 @@ class Real(O.OwnerBrowser):
             still_current=lambda snap:self.valid and snap==self.snap and self.pg.url==self.url
                 and (snap.mode=="direct" or self.host.pane_tab(snap.tab_id)==dict(
                     tab_id=snap.tab_id,profile=snap.profile,ctx=snap.ctx,url=snap.url,
-                    page_identity=snap.page_identity,document_generation=snap.document_generation)))
+                    page_identity=snap.page_identity,document_generation=snap.document_generation,
+                    instance_generation=self.instance_generation)))
         self.service=self.daemon.browser_look
         self.desk={"present":True,"images":True}
         self.scope=runtime.turn_scope(desk=self.desk);self.scope.__enter__();self.addCleanup(self.scope.__exit__,None,None,None)

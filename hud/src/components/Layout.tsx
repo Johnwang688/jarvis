@@ -32,7 +32,7 @@ import {
   unpinProject as unpinProjectOf, setEditors as setEditorsOf,
   type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
   type WorkspaceFit, type BrowserTabOptions,
-  setBrowserRemote as setBrowserRemoteOf, setBrowserProfile as setBrowserProfileOf, setBrowserSee as setBrowserSeeOf,
+  setBrowserRemote as setBrowserRemoteOf, setBrowserProfile as setBrowserProfileOf, setBrowserSee as setBrowserSeeOf, setBrowserDrive as setBrowserDriveOf,
   autoSplitVerdict as autoSplitVerdictOf,
   addBrowserTab as addBrowserTabOf, closeBrowserTab as closeBrowserTabOf,
   activateBrowserTab as activateBrowserTabOf, setTabKeepOrigin as setTabKeepOriginOf,
@@ -77,6 +77,7 @@ export interface LayoutControl {
   setBrowserRemote: (pane: PaneNo, id: string, value: Parameters<typeof setBrowserRemoteOf>[3]) => void;
   setBrowserProfile: (pane: PaneNo, profile: string, initialOnly?: boolean) => void;
   setBrowserSee: (pane: PaneNo, see: boolean) => void;
+  setBrowserDrive: (pane: PaneNo, drive: boolean) => void;
   addBrowserTab: (pane: PaneNo, url: string, opts?: BrowserTabOptions) => void;
   closeBrowserTab: (pane: PaneNo, id: string) => void;
   activateBrowserTab: (pane: PaneNo, id: string) => void;
@@ -245,6 +246,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   const submitBrowserUrl = useCallback((pane: PaneNo, url: string, id?: string) => setWs((w) => submitBrowserUrlOf(w, pane, url, id)), []);
   const setBrowserRemote = useCallback((pane: PaneNo, id: string, value: Parameters<typeof setBrowserRemoteOf>[3]) => setWs((w) => setBrowserRemoteOf(w, pane, id, value)), []);
   const setBrowserProfile = useCallback((pane: PaneNo, profile: string, initialOnly = false) => setWs((w) => setBrowserProfileOf(w, pane, profile, initialOnly)), []);
+  const setBrowserDrive = useCallback((pane: PaneNo, drive: boolean) => setWs((w) => setBrowserDriveOf(w, pane, drive)), []);
   const setBrowserSee = useCallback((pane: PaneNo, see: boolean) => setWs((w) => setBrowserSeeOf(w, pane, see)), []);
   const addBrowserTab = useCallback((pane: PaneNo, url: string, opts?: BrowserTabOptions) => setWs((w) => addBrowserTabOf(w, pane, url, opts)), []);
   const closeBrowserTab = useCallback((pane: PaneNo, id: string) => setWs((w) => closeBrowserTabOf(w, pane, id)), []);
@@ -433,7 +435,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
     setPreset, setView, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
-    addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin, setBrowserRemote, setBrowserProfile, setBrowserSee,
+    addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin, setBrowserRemote, setBrowserProfile, setBrowserSee, setBrowserDrive,
     setTerminal, forgetTerminal, renameTerminal, setSplit,
     equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplitVerdict, incarnation,
   };

@@ -6,6 +6,7 @@ from __future__ import annotations
 import secrets
 import threading
 from types import SimpleNamespace
+from jarvis.v2.browser.settings import BrowserSettings
 from jarvis.v2.browser.panes import BrowserPanes, PaneRefused
 from jarvis.v2.browser.policy import judge_url, URLRefused
 
@@ -48,7 +49,8 @@ class Host:
 def state(mock):
     if not hasattr(mock, "browser_host"):
         mock.browser_host = Host(mock)
-        mock.browser_panes = BrowserPanes(SimpleNamespace(browser=mock.browser_host, devservers=SimpleNamespace(source_snapshot=lambda _: None)))
+        mock.browser_settings = BrowserSettings()
+        mock.browser_panes = BrowserPanes(SimpleNamespace(browser=mock.browser_host, devservers=SimpleNamespace(source_snapshot=lambda _: None), browser_settings=mock.browser_settings))
         mock.browser_window = None
         mock.browser_lock = threading.RLock()
     return mock.browser_host
@@ -62,7 +64,17 @@ def connected(mock, window):
 
 def handle(h, mock, method, path, body):
     if not (path == "/browser" or path.startswith("/browser/")): return False
-    if path == "/browser/settings": return False  # AO3 owns this fixture.
+    if path == "/browser/settings":
+        state(mock)
+        if method == "GET":
+            out=mock.browser_settings.snapshot()
+            if mock.dev_fixture: out["auto_open"]=mock.dev_fixture.enabled
+            h._json(out);return True
+        if method == "PATCH" and set(body)=={"agents_may_drive"}:
+            try: h._json(mock.browser_settings.update(**body))
+            except ValueError: h._err(400,"invalid setting")
+            return True
+        return False  # AO3 owns auto_open mutations.
     host = state(mock)
     parts = path.strip("/").split("/")
     origin = h.headers.get("Origin")
@@ -99,6 +111,10 @@ def handle(h, mock, method, path, body):
                 if tid not in host.rows: raise PaneRefused(404,"no such tab")
                 if method=="DELETE":out=host.close_tab(tid)
                 elif parts[3] in ("navigate","restore"):out=host.navigate(tid,body["url"],owner=parts[3]=="navigate")
+                elif parts[3]=="sound":
+                    if type(body.get("on")) is not bool:raise PaneRefused(400,"on must be a boolean")
+                    if host.input_held():raise PaneRefused(409,"an approval card is waiting")
+                    out={"on":body["on"],"profile":host.rows[tid]["profile"]}
                 elif parts[3]=="history":out={"tab_id":tid,"loaded":True}
                 elif parts[3]=="ticket":
                     ticket=secrets.token_hex(16);host.tickets[ticket]=tid;out={"ticket":ticket,"expires_in":30}

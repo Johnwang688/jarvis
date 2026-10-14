@@ -1399,7 +1399,8 @@ class DevUrls(Base):
     def test_with_auto_open_off_the_sniffer_is_never_fed(self):
         self.assertTrue(self.owner("GET", "/browser/settings")["auto_open"])
         self.assertEqual(self.owner("PATCH", "/browser/settings", {"auto_open": False}),
-                         {"lan": False, "local_servers": False, "auto_open": False})
+                         {"lan": False, "local_servers": False, "auto_open": False,
+                           "sound": True, "agents_may_drive": True})
         fed = []
         real = devurl.DevUrlSniffer.feed
 
@@ -1439,7 +1440,8 @@ class DevUrls(Base):
 
     def test_the_switch_is_the_owners(self):
         path = "/browser/settings"
-        defaults = {"lan": False, "local_servers": False, "auto_open": True}
+        defaults = {"lan": False, "local_servers": False, "auto_open": True,
+                    "sound": True, "agents_may_drive": True}
         self.assertEqual(self.owner("GET", path), defaults)
         for kw in ({"port": self.daemon.port}, {"port": self.daemon.workshop_port},
                    {"origin": f"http://127.0.0.1:{self.daemon.workshop_port}"},
@@ -1471,7 +1473,8 @@ class DevUrls(Base):
         self.assertFalse(host.loopback_open(24699))
         changed = self.owner("PATCH", "/browser/settings",
                              {"lan": True, "local_servers": True, "auto_open": False})
-        self.assertEqual(changed, {"lan": True, "local_servers": True, "auto_open": False})
+        self.assertEqual(changed, {"lan": True, "local_servers": True, "auto_open": False,
+                                   "sound": True, "agents_may_drive": True})
         self.assertEqual((settings.value("lan"), settings.value("local_servers")), (True, True))
         self.assertTrue(host.loopback_open(24699), "the gate's per-connection read")
         self.assertFalse(term._dev_on(), "the terminals' read")

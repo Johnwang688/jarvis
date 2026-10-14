@@ -123,3 +123,17 @@ it("refuses a recovery mutation when its replacement report also fails and waits
   f.publisher.heartbeat();expect(f.calls[2].path).toBe("/browser/front");f.answer(2);await tick();
   expect(f.calls).toHaveLength(3);
 });
+
+it("named drive opt-out persists while Private opt-in needs an exact runtime context",()=>{
+  let ws=addBrowserTab(setView(defaultWorkspace(),1,"browser"),1,"https://example.test/",{id:"abcdef",mode:"remote"});
+  expect(browserFront(ws,[1],false,WINDOW,"p-0123abcd",1,1,DEFAULT_PORTS).panes[0].drive).toBe(true);
+  ws.panes[0].drive=false;
+  expect(browserFront(ws,[1],false,WINDOW,"p-0123abcd",1,1,DEFAULT_PORTS).panes[0].drive).toBe(false);
+  ws=setBrowserProfile(ws,1,"private");ws.panes[0].browserCtx="0123abcd";
+  const front=(grant:ReadonlyMap<number,string>)=>browserFront(ws,[1],false,WINDOW,"p-0123abcd",1,1,DEFAULT_PORTS,grant).panes[0];
+  expect(front(new Map()).drive).toBe(false);
+  expect(front(new Map([[1,"11111111"]])).drive).toBe(false);
+  expect(front(new Map([[2,"0123abcd"]])).drive).toBe(false);
+  expect(front(new Map([[1,"0123abcd"]])).drive).toBe(true);
+  ws=setBrowserSee(ws,1,false);expect(front(new Map([[1,"0123abcd"]])).drive).toBe(false);
+});

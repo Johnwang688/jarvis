@@ -1,8 +1,7 @@
-"""Dormant, caller-bound Browser action gate (BR9b).
+"""Caller-bound Browser action gate (BR9b).
 
-Production has no enable setting: every act refuses before Browser IO or review.
-Only in-process tests inject an enabled policy. Owner routes never expose this
-injection; the public pane registry continues refusing drive:true.
+Production reads only the owner's BrowserSettings switch. Desk, pane and
+Private consent plus all existing action guards remain mandatory.
 """
 from __future__ import annotations
 
@@ -30,10 +29,9 @@ STOPPED = "this Browser action was stopped; look again before trying another act
 CHANGED_ACTION = "the Browser target or page changed after review; look again"
 
 
-def _shipping_enabled() -> bool:
-    # Deliberately no config/env/settings route. Checkpoint overrides BR9c's
-    # older proposed default. Enabling production requires separately reviewed code.
-    return False
+def _shipping_enabled(daemon) -> bool:
+    """The owner's one production switch; no alternate env or CLI route."""
+    return daemon.browser_settings.value("agents_may_drive") is True
 
 
 @dataclass(frozen=True)
@@ -90,9 +88,9 @@ class Guard:
 
 
 class BrowserDrive:
-    def __init__(self, daemon, *, enabled=_shipping_enabled, state=None):
+    def __init__(self, daemon, *, enabled=None, state=None):
         self.daemon=daemon
-        self.enabled=enabled
+        self.enabled=enabled if enabled is not None else lambda: _shipping_enabled(daemon)
         self.state=state if state is not None else DriveState()
         self.closed=False
         from .drive_downloads import Downloads
@@ -226,7 +224,7 @@ class BrowserDrive:
         except Exception:return True
 
     def act(self,action:Action)->ActResult:
-        snapshot=None;lease=None;outcome="refused";action_id=random.token_hex(16)
+        snapshot=None;lease=None;activity=None;outcome="refused";action_id=random.token_hex(16)
         try:
             turn=self._turn();turn.attempted=True
             turn.pane=action.pane if action.pane in tuple(str(i) for i in range(1,9)) else ""
@@ -236,6 +234,8 @@ class BrowserDrive:
             turn.pane=str(snapshot.slot)
             row=self._owner(snapshot)
             capability=self.state.capability(turn,snapshot,action.target) if action.target else None
+            activity=self.daemon.browser.begin_activity(snapshot.tab_id,snapshot.page_identity)
+            self._binding(snapshot)
             lease=self.state.reserve(turn,snapshot.tab_id)
             stop=runtime.should_stop()
             guard=Guard(self,turn,snapshot,lease,capability,row["input_serial"],row["attachment_generation"],
@@ -314,6 +314,7 @@ class BrowserDrive:
                         "tab_id":snapshot.view_id,"action_id":action_id,"at":utcnow(),"outcome":outcome}})
                     self.daemon.browser.drive_finished(snapshot.tab_id,action_id,outcome)
                 except Exception:pass
+            if activity is not None:self.daemon.browser.end_activity(activity)
 
     def install(self):
         global _installed

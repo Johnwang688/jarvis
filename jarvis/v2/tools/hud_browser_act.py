@@ -15,7 +15,7 @@ def hud_browser_act(
     file: Annotated[str, "Upload only: permitted file inside this chat's project; approval binds its exact bytes."] = "",
 ) -> str:
     """Perform one reviewed action in the owner's visible Remote Browser pane.
-    Production Agents may drive is off, so calls currently refuse without input.
+    The owner's global and pane switches and all desk/action guards must permit it.
     No coordinate clicks or arbitrary JavaScript. Input yields to owner activity;
     private HUD approval may be required and never authorizes future actions.
     Typing replaces the field; press accepts only the supported named navigation

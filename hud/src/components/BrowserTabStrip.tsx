@@ -4,7 +4,7 @@ import type { BrowserTabSpec } from "../lib/workspace";
 
 /** Direct and future Remote tabs share this strip; page content lives elsewhere. */
 export function BrowserTabStrip(props: {
-  tabs: readonly BrowserTabSpec[]; active: string; blocked?: boolean; unseen?: readonly string[];
+  tabs: readonly BrowserTabSpec[]; active: string; blocked?: boolean; unseen?: readonly string[]; soundOn?: boolean;
   onActivate: (id: string) => void; onClose: (id: string) => void; onNew: () => void;
 }) {
   const row = useRef<HTMLDivElement>(null);
@@ -27,6 +27,7 @@ export function BrowserTabStrip(props: {
         {tab.auto ? <span className="browserautomark" aria-label="Opened automatically">·</span> : null}
         {props.unseen?.includes(tab.id) ? <span className="browser-unseen" aria-label="New tab" /> : null}
         <span>{tab.title || browserLabel(tab.url)}</span>
+        {props.soundOn && tab.mode==="remote" ? <span className="small muted"> · sound on</span> : null}
       </button>
       <button type="button" className="browsertabclose" data-testid="browser-tab-close" tabIndex={-1}
         aria-label={"Close " + browserLabel(tab.url)} disabled={props.blocked} onClick={() => props.onClose(tab.id)}>×</button>

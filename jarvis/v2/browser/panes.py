@@ -138,6 +138,8 @@ class _Pane:
     see: bool
     active: str | None
     tabs: dict
+    drive: bool = False
+    private_drive_ctx: str | None = None
 
 
 @dataclass
@@ -293,8 +295,7 @@ class BrowserPanes:
             if drawn and slot is None:
                 _bad()
             _boolean(raw["see"])
-            if _boolean(raw["drive"]):
-                raise PaneRefused(409, "Agents may drive is off")
+            drive = _boolean(raw["drive"]) and raw["see"]
             profile = raw["profile"]
             if profile != "private":
                 _id(profile, _PROFILE)
@@ -328,7 +329,7 @@ class BrowserPanes:
             active = raw["active"]
             if active is not None and (not isinstance(active, str) or active not in tabs):
                 _bad()
-            panes[pid] = _Pane(pid, slot, drawn, profile, raw["ctx"], raw["see"], active, tabs)
+            panes[pid] = _Pane(pid, slot, drawn, profile, raw["ctx"], raw["see"], active, tabs, drive)
         if body["focused_slot"] is not None and body["focused_slot"] not in slots:
             _bad()
         return panes
@@ -341,7 +342,7 @@ class BrowserPanes:
 
     @staticmethod
     def _context(pane, covered):
-        return (pane.slot, pane.drawn, pane.profile, pane.ctx, pane.see, pane.active, covered)
+        return (pane.slot, pane.drawn, pane.profile, pane.ctx, pane.see, pane.drive, pane.private_drive_ctx, pane.active, covered)
 
     def report(self, body):
         # Parsing copies source identities without this lock. Host reads below
@@ -358,6 +359,11 @@ class BrowserPanes:
             updated = {}
             for pid, pane in panes.items():
                 prior = old.panes.get(pid) if old else None
+                # A report cannot grant Private consent. Only the explicit
+                # permission mutation binds an opt-in to this pane/context.
+                if (prior and pane.profile == "private" and prior.profile == "private"
+                        and pane.ctx is not None and pane.ctx == prior.ctx and pane.see and pane.drive):
+                    pane = replace(pane, private_drive_ctx=prior.private_drive_ctx)
                 tabs = {}
                 for lid, tab in pane.tabs.items():
                     previous = prior.tabs.get(lid) if prior else None
@@ -388,10 +394,16 @@ class BrowserPanes:
                     self._front = None
             return self._receipt(body["window"], state)
 
-    @staticmethod
-    def _receipt(window, state):
+    def _effective_drive(self, pane):
+        active = pane.tabs.get(pane.active)
+        return (pane.drive and pane.see and active is not None and active.mode == "remote"
+                and self.daemon.browser_settings.value("agents_may_drive") is True
+                and (pane.profile != "private" or
+                     (pane.ctx is not None and pane.private_drive_ctx == pane.ctx)))
+
+    def _receipt(self, window, state):
         return {"window": window, "seq": state.seq, "panes": [
-            {"pane_id": pane.pane_id, "see": pane.see, "drive": False,
+            {"pane_id": pane.pane_id, "see": pane.see, "drive": self._effective_drive(pane),
              "tabs": [{"id": tab.local_id, "view_id": tab.view_id, "generation": tab.generation}
                       for tab in pane.tabs.values()]} for pane in state.panes.values()]}
 
@@ -402,16 +414,25 @@ class BrowserPanes:
         for key in ("see", "drive"):
             if key in body:
                 _boolean(body[key])
-        if body.get("drive"):
-            raise PaneRefused(409, "Agents may drive is off")
         with self._lock:
             state = self._admit(body["window"], body["seq"], existing=True)
             pane = state.panes.get(pane_id)
             if pane is None:
                 raise PaneRefused(404, "no such Browser pane")
             see = body.get("see", pane.see)
-            if see != pane.see:
-                pane = replace(pane, see=see, tabs={lid: replace(tab, generation=self._next()) for lid, tab in pane.tabs.items()})
+            drive = body.get("drive", pane.drive) if see else False
+            private_ctx = pane.private_drive_ctx if see and drive else None
+            if "drive" in body and drive and pane.profile == "private":
+                if pane.ctx is None:
+                    raise PaneRefused(409, "open this Private session before allowing driving")
+                active = pane.tabs.get(pane.active)
+                if active is None or active.mode != "remote" or active.tab_id is None:
+                    raise PaneRefused(409, "open this Private session before allowing driving")
+                self._remote(pane, active)
+                private_ctx = pane.ctx
+            if (see, drive, private_ctx) != (pane.see, pane.drive, pane.private_drive_ctx):
+                pane = replace(pane, see=see, drive=drive, private_drive_ctx=private_ctx,
+                               tabs={lid: replace(tab, generation=self._next()) for lid, tab in pane.tabs.items()})
                 state.panes[pane_id] = pane
             state.seq = body["seq"]
             self._sequences[body["window"]] = body["seq"]
@@ -432,7 +453,7 @@ class BrowserPanes:
             raise PaneRefused(409, "that Browser pane has no page open")
         return PaneSnapshot(window, pane.pane_id, pane.slot, tab.local_id, tab.mode,
                             tab.tab_id, tab.view_id, pane.profile, pane.ctx, url,
-                            pane.see, False, pane.drawn, state.covered, tab.generation,
+                            pane.see, self._effective_drive(pane), pane.drawn, state.covered, tab.generation,
                             page, document, tab.source)
 
     def resolve(self, pane=""):
@@ -507,8 +528,8 @@ class BrowserPanes:
 
         The caller must have finished all judged input and recheck its driver,
         owner-input and stop state separately. Ordinary looks keep using strict
-        still_current. Production snapshots keep drive=False until a separately
-        approved driving rollout; this helper cannot enable them.
+        still_current. Navigation preserves the current owner preference and exact
+        Private context grant; this helper never enables driving.
         """
         if (not isinstance(snapshot, PaneSnapshot) or snapshot.mode != "remote"
                 or not snapshot.see or not snapshot.drive
