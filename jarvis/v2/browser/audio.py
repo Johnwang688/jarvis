@@ -300,6 +300,14 @@ def _pactl(args: tuple[str, ...], timeout: float) -> bytes:
                 and int(args[1]) < 2**32 - 1))
     if not allowed or not 0 < timeout <= COMMAND_S:
         raise AudioRefused(MUTE_UNCERTAIN)
+    return run_bounded(args, timeout)
+
+
+def run_bounded(args: tuple[str, ...], timeout: float) -> bytes:
+    """The one bounded pactl child, shared by the mute and V15's volume duck: the
+    caller has already judged `args` against its own allowlist. Output is read in
+    capped chunks (never buffered whole), the child is killed at the deadline, and
+    one that will not die is reported as `_UnsettledMute` for the caller to reap."""
     process = None
     try:
         process = subprocess.Popen([str(PACTL), *args], stdin=subprocess.DEVNULL,

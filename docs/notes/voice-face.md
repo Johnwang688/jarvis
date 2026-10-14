@@ -1488,7 +1488,7 @@ Browser's own PulseAudio sink-inputs by about 15 dB while the HUD holds a short 
 puts them back exactly. It never unmutes, never touches another app's stream, and does
 nothing for Direct frames (cross-origin iframes, not observable or controllable from here).
 Code: `jarvis/v2/speech_duck.py`, `BrowserSound.duck_owners()` (`browser/sound.py`),
-`hud/src/lib/speech/duck.ts`. Tests: `tests/v2/speech_duck_check.py` (38),
+`hud/src/lib/speech/duck.ts`. Tests: `tests/v2/speech_duck_check.py` (58),
 `hud_backend_check` (route), `frame_check` (walk), `hud/src/lib/speech/duck.test.ts`,
 `tests/face/hud_v2_duck_check.py` (23). Committed and pushed on `claude/voice-v15`; not merged,
 built-and-installed or live-validated. **Physical audibility of the duck is UNMEASURED.**
@@ -1549,11 +1549,13 @@ expire restored the same way. The one other app's stream present earlier was not
   buffering, or inside the 300 ms hangover) takes the lease at once and renews it every second;
   pause, stop, end, the Settings switch going off, or `pagehide` end it. Requests never overlap and
   an `off` cannot overtake an `on`; a failed request is dropped (the next renewal, or expiry,
-  covers it). Settings, Voice: **"Lower Browser sound while Jarvis speaks"**, per window in
-  `localStorage` (`jarvis.duckBrowser`), **on by default**. Only the window that holds the
-  speech lock ever has an active queue, so only it holds a lease. Two windows that hand over
-  the lock can have the old window's `off` land after the new one's `on`; the new window's next
-  renewal (within 1 s) grants it again.
+  covers it). Settings, Voice: **"Lower Browser sound while Jarvis speaks"**, in
+  `localStorage` (`jarvis.duckBrowser`), **on by default**; one choice for every window (a
+  `storage` listener applies another window's change). Only the window that holds the speech
+  lock ever has an active queue, so only it holds a lease. Each window sends its own random lease
+  token (`window`, 32 hex, optional in the route) and the daemon keeps one deadline per token
+  (at most 16), so one window's `off` or expiry cannot end another's lease; the duck lasts while
+  any lease lives.
 - **Whose streams.** A sink-input is lowered only if its PID descends from a Remote Chrome
   named by `BrowserSound.duck_owners()`: an instance that launched audible
   (`instance.audio.applied`), is not closing or Private, and for which the owner's request and
@@ -1589,9 +1591,9 @@ expire restored the same way. The one other app's stream present earlier was not
 - **Orderly daemon shutdown:** `Daemon.stop()` calls `speech_ducker.stop()` first (before Chrome
   closes) and restores, bounded to about 6 s.
 - **`kill -9` of the daemon (or a pactl that never answers):** nothing can run. Each duck is
-  written to `~/.config/jarvis/speech_duck.json` (`config.SPEECH_DUCK_PATH`, 0600, regular file,
-  at most 16 entries and 64 KB, deleted when everything is restored) *before* the volume is
-  written. The next daemon start (`Ducker.recover()`, only for the owner's data folder) reads it;
+  written to `~/.config/jarvis/speech_duck.json` (`config.SPEECH_DUCK_PATH`, 0600 via a random
+  `mkstemp` file and `os.replace`, at most 64 KB; active ducks are always kept and only the oldest
+  leftovers are cut at 16; deleted when everything is restored) *before* the volume is written. The next daemon start (`Ducker.recover()`, only for the owner's data folder) reads it;
   while it holds an entry the idle worker polls every 3 s, and only when a Remote Chrome is
   audible: a Remote stream that appears carrying exactly the recorded ducked value is set back to
   the recorded prior value (also under a new lease). Whether a Chrome that outlives a
@@ -1602,6 +1604,33 @@ expire restored the same way. The one other app's stream present earlier was not
   volume in the Windows volume mixer, and nothing here changes the mute.
 - Chrome restarting mid-duck (B-SOUND's idle replacement, sound OFF then ON) is the same case: the
   vanished stream becomes a journal entry and the new stream is repaired when it appears.
+
+### Review fixes (2026-10-14, PR #156 review at `7f908b11`)
+
+- **A forged journal can no longer raise a volume.** On load an entry must have `prior` at most
+  100% per channel, `applied` within 2 of the duck of `prior`, equal channel counts, and a finite
+  time that is not in the future (beyond 300 s of skew); otherwise it is dropped. Every volume
+  written is at most 100% per channel (the runner refuses more; a restore or repair writes
+  `min(prior, 100%)`), and a duck writes `min(duck of prior, the stream's current volume)`, so it
+  can only lower. The regression is the reviewer's repro (`prior` 262144), plus a mutant for each
+  guard. A stream the owner boosted past 100% is left alone (giving it back would need a write
+  above the norm).
+- **The journal is written through `tempfile.mkstemp`** (random name, `O_EXCL`, 0600) then
+  `os.replace`; a FIFO or hardlink at the old predictable name cannot block the worker (tested).
+- **Restore is bounded**: one overall deadline for `stop()` (6 s, worker join included) and each
+  call gets only the time left; the first pactl failure stops that round of writes, and the rest
+  stay held and journaled. A leftover in the journal covers what shutdown could not restore.
+- pactl runs through the same capped streaming runner as the mute (`audio.run_bounded`; the
+  mute's own allowlist and tests are unchanged).
+- Only the owner's daemon reads or writes the journal (`Daemon._duck_journal`, the same
+  `_owns_data` rule as the carrier sweep).
+- `duck_owners()` excludes any instance that is not `audio.synchronized(True)`: a mute attempt
+  pending or ever made on it (tainted) is not ours to lower.
+- **One continuous duck is capped at 10 minutes** (`MAX_LEASE_S`): the volumes are restored and
+  stay so for 5 s even while renewals continue, then a request starts a new period (a stuck
+  window renewing for ever is audible as a short gap every 10 minutes, not a permanent duck; a
+  genuine 10-minute read-aloud has the same gap). The idle leftover poll backs off 3 s -> 60 s
+  while Chrome plays with nothing to repair.
 
 ### Not done, and not claimed
 

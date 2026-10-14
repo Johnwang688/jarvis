@@ -50,6 +50,17 @@ export function saveDuckBrowser(on: boolean, storage?: Pick<Storage, "setItem">)
   }
 }
 
+/** 32 lowercase hex characters, the daemon's lease token for one window. */
+export function newWindowToken(): string {
+  const bytes = new Uint8Array(16);
+  try {
+    crypto.getRandomValues(bytes);
+  } catch {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 const realClock: Clock = {
   now: () => Date.now(),
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
@@ -84,7 +95,12 @@ export function createSpeech(): Speech {
   void voices.load();
   controller.setEnabled(loadReadAloud());
   const unbind = bindFocus(gate, window, () => document.hasFocus());
-  const duck = new DuckLease({ send: (on, keepalive) => api.speechDuck(on, keepalive), clock: realClock }, loadDuckBrowser());
+  // This window's own lease token: another window's `off` cannot end it, nor this one's end theirs.
+  const lease = newWindowToken();
+  const duck = new DuckLease({ send: (on, keepalive) => api.speechDuck(on, lease, keepalive), clock: realClock }, loadDuckBrowser());
+  // The switch is one choice for every window: another window changing it applies here too.
+  const onStorage = (e: StorageEvent) => { if (e.key === DUCK_KEY || e.key === null) duck.setEnabled(loadDuckBrowser()); };
+  window.addEventListener("storage", onStorage);
   const unduck = controller.subscribe(() => duck.setSpeaking(controller.view().active));
   // A window that is going away ends its lease at once; the daemon's expiry covers a crash.
   const onHide = () => duck.release();
@@ -93,6 +109,7 @@ export function createSpeech(): Speech {
     controller, gate, player, voices, duck,
     dispose: () => {
       window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("storage", onStorage);
       unduck(); duck.dispose(); unbind(); controller.dispose(); gate.dispose(); player.dispose();
     },
   };

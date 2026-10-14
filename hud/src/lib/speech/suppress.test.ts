@@ -158,7 +158,8 @@ describe("the wiring is pinned", () => {
       expect(bodies[0]).toEqual({ text: "Hello there, friend.", voice: "bm_test", local_only: true });
       // Speech going active takes the Browser-duck lease; nothing else is ever put in that body.
       for (let i = 0; i < 20 && !ducks.length; i++) await new Promise((r) => setTimeout(r, 0));
-      expect(ducks[0]).toEqual({ on: true });
+      expect(ducks[0]).toMatchObject({ on: true });
+      expect(Object.keys(ducks[0]!).sort()).toEqual(["on", "window"]);
     } finally {
       speech.dispose();
       vi.unstubAllGlobals();

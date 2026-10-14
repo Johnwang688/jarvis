@@ -556,7 +556,8 @@ export default function App() {
   // the mic's.
   const speech = useMemo(() => createSpeech(), []);
   useEffect(() => () => speech.dispose(), [speech]);
-  const [duckBrowser, setDuckBrowser] = useState(() => speech.duck.isEnabled());
+  const duckBrowser = useSyncExternalStore(
+    useCallback((cb: () => void) => speech.duck.subscribe(cb), [speech]), () => speech.duck.isEnabled());
   const speechSubscribe = useCallback((cb: () => void) => speech.controller.subscribe(cb), [speech]);
   const speechView = useSyncExternalStore(speechSubscribe, () => speech.controller.view());
   // The mic is held off for the whole of a reply, between chunks included.
@@ -4051,7 +4052,7 @@ export default function App() {
               /><ReadAloudSetting on={speechView.enabled}
                 onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />
               <DuckBrowserSetting on={duckBrowser}
-                onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); setDuckBrowser(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
+                onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

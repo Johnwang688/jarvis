@@ -128,7 +128,9 @@ class BrowserSound:
         found, live = [], set()
         for instance in list(self.host._instances.values()):
             profile = instance.profile
-            if (instance.closing or profile == "private" or not instance.audio.applied
+            # `synchronized(True)`: launched audible, no mute attempt pending, and none ever
+            # made on it (a tainted instance may have been muted, so it is not ours to lower).
+            if (instance.closing or profile == "private" or not instance.audio.synchronized(True)
                     or not self.preference(profile)[0]):
                 continue
             live.add(profile)

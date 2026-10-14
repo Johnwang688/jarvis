@@ -277,9 +277,10 @@ export const api = {
   /**
    * Hold (`on`) or end the daemon's short lease that lowers the Remote Browser's sound while
    * Jarvis speaks (V15). Renewed about once a second; the daemon restores by itself if it stops.
+   * `window` is this window's own lease token (32 hex): its `off` ends only its own lease.
    */
-  speechDuck: (on: boolean, keepalive?: boolean) =>
-    req<{ on: boolean; ducked: number; lease_s: number }>("/speech/duck", { ...json({ on }), ...(keepalive ? { keepalive: true } : {}) }),
+  speechDuck: (on: boolean, window: string, keepalive?: boolean) =>
+    req<{ on: boolean; ducked: number; lease_s: number }>("/speech/duck", { ...json({ on, window }), ...(keepalive ? { keepalive: true } : {}) }),
   /** The fast path's roster and its default (`models.describe()`). */
   models: () => req<RosterView>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),

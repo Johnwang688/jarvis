@@ -33,6 +33,7 @@ export class DuckLease {
   private pumping = false;
   private dirty = false;
   private keepalive = false;
+  private listeners = new Set<() => void>();
 
   constructor(private readonly deps: DuckDeps, enabled = true) {
     this.enabled = enabled;
@@ -40,12 +41,20 @@ export class DuckLease {
 
   /** The Settings switch ("Lower Browser sound while Jarvis speaks"). */
   setEnabled(on: boolean): void {
+    const changed = this.enabled !== on;
     this.enabled = on;
     this.update();
+    if (changed) for (const cb of [...this.listeners]) { try { cb(); } catch { /* a subscriber never breaks the lease */ } }
   }
 
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  /** The switch changed (here, or in another window through `storage`). */
+  subscribe(cb: () => void): () => void {
+    this.listeners.add(cb);
+    return () => { this.listeners.delete(cb); };
   }
 
   /** The speech controller's `active`: playing, buffering, or inside the hangover. */

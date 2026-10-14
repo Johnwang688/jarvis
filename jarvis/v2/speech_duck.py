@@ -7,7 +7,8 @@ as the lease lives, the sink-inputs of the daemon's own Remote Browser are
 held about 15 dB lower, and every one is put back exactly when it ends.
 
     GET  /speech/duck            -> {"on": bool, "ducked": int, "lease_s": 3.0}
-    POST /speech/duck {on: bool} -> the same; on=true grants or renews the lease
+    POST /speech/duck {on: bool, window?: 32 hex} -> the same; on=true grants or renews
+                                 that window's lease, on=false ends only that window's
 
 Owner-only (the HUD listener, like the other pickers). The lease is the whole
 safety story: nothing here holds a volume for longer than `LEASE_S` after the
@@ -48,10 +49,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -81,11 +84,27 @@ CALL_S = 2.0
 STOP_S = 6.0
 MAX_STREAMS = audio.MUTE_CAP
 MAX_CHANNELS = 8
-#: No honest stream is louder than a few times the norm (65536); this only bounds what we will write.
-VOLUME_MAX = 4 * 65536
+#: PA_VOLUME_NORM, 100%. Nothing here ever *writes* a channel above it: a duck lowers,
+#: a restore gives back a volume that was at most this (a stream the owner boosted
+#: beyond 100% is left alone), and a journal entry above it is forged or corrupt.
+NORM = 65536
+#: What a listing may report (the owner can boost a stream); only reading is bounded by this.
+READ_MAX = 4 * NORM
 MAX_RESIDUE = 16
+JOURNAL_MAX_ROWS = MAX_RESIDUE + audio.MUTE_CAP     # held ducks and unconfirmed ones
 RESIDUE_TTL_S = 30 * 24 * 3600.0
+#: A journal entry stamped later than this is forged (or the clock moved a lot).
+SKEW_S = 300.0
 JOURNAL_MAX_BYTES = 64 * 1024
+#: Windows each keep their own lease; this many are remembered at once.
+MAX_WINDOWS = 16
+#: One continuous duck never lasts longer than this, however it is renewed; then
+#: the volumes rest this long, renewals or not, before a request can start a new one.
+MAX_LEASE_S = 600.0
+CAP_REST_S = 5.0
+#: The idle leftover repair backs off to this when no matching stream appears.
+IDLE_MAX_S = 60.0
+_WINDOW = re.compile(r"[0-9a-f]{32}")
 
 _LIST = ("--format=json", "list", "sink-inputs")
 
@@ -98,40 +117,26 @@ class DuckError(Exception):
 
 
 def pactl(args: tuple[str, ...], timeout: float = CALL_S) -> bytes:
-    """One bounded child, fixed argv, no shell. Only a listing and a *volume*
-    write are allowed here: mute, default devices and every other command are
-    refused before a process starts."""
+    """One bounded child, fixed argv, no shell, through the same capped runner as
+    the mute (`audio.run_bounded`). Only a listing and a *volume* write of at most
+    100% per channel are allowed here: mute, default devices and every other
+    command are refused before a process starts."""
     if args != _LIST:
         ok = (len(args) >= 3 and args[0] == "set-sink-input-volume"
               and re.fullmatch(r"[0-9]{1,10}", args[1]) is not None and int(args[1]) < 2**32 - 1
               and len(args) - 2 <= MAX_CHANNELS
-              and all(re.fullmatch(r"[0-9]{1,7}", v) is not None and int(v) <= VOLUME_MAX for v in args[2:]))
+              and all(re.fullmatch(r"[0-9]{1,6}", v) is not None and int(v) <= NORM for v in args[2:]))
         if not ok:
             raise DuckError("refused")
-    if not 0 < timeout <= 10:
+    if not 0 < timeout <= audio.COMMAND_S:
         raise DuckError("refused")
-    process = None
     try:
-        process = subprocess.Popen([str(audio.PACTL), *args], stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True,
-                                   env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-                                        "PULSE_SERVER": audio.PULSE_SERVER})
-        out, _ = process.communicate(timeout=timeout)
-        if process.returncode != 0 or len(out) > audio.OUTPUT_CAP:
-            raise DuckError("pactl failed")
-        return out
-    except (OSError, subprocess.TimeoutExpired):
-        raise DuckError("pactl unavailable or too slow") from None
-    finally:
-        if process is not None and process.poll() is None:
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.communicate(timeout=1)
-            except Exception:       # noqa: BLE001 - reaped in the background instead
-                threading.Thread(target=process.wait, name="speech-duck-reap", daemon=True).start()
+        return audio.run_bounded(args, timeout)
+    except audio._UnsettledMute as exc:
+        threading.Thread(target=exc.process.wait, name="speech-duck-reap", daemon=True).start()
+        raise DuckError("pactl too slow") from None
+    except audio.AudioRefused:
+        raise DuckError("pactl failed") from None
 
 
 @dataclass(frozen=True)
@@ -170,7 +175,7 @@ def parse(raw: bytes) -> list[Stream]:
             volume = []
             for entry in channels.values():
                 value = entry.get("value") if isinstance(entry, dict) else None
-                if type(value) is not int or not 0 <= value <= VOLUME_MAX:
+                if type(value) is not int or not 0 <= value <= READ_MAX:
                     raise ValueError
                 volume.append(value)
             out.append(Stream(index, int(pid), muted, tuple(volume)))
@@ -207,14 +212,24 @@ class Residue:
 
 def _volumes(value) -> tuple[int, ...] | None:
     if (isinstance(value, list) and 1 <= len(value) <= MAX_CHANNELS
-            and all(type(v) is int and 0 <= v <= VOLUME_MAX for v in value)):
+            and all(type(v) is int and 0 <= v <= NORM for v in value)):
         return tuple(value)
     return None
 
 
-def _read_journal(path: Path) -> list[Residue]:
-    """The journal, tolerating anything: missing, odd, oversized, non-regular or
-    corrupt is empty. Read without blocking and never through a symlink."""
+def _plausible(prior: tuple[int, ...], applied: tuple[int, ...]) -> bool:
+    """A record this module could have written: `applied` is the duck of `prior`
+    (give or take the server's rounding) and neither is above 100%. A journal is
+    a file a hostile process might forge; it can only ever lower a volume."""
+    if len(prior) != len(applied) or prior == applied:
+        return False
+    return all(abs(a - d) <= 2 for a, d in zip(applied, ducked(prior)))
+
+
+def _read_journal(path: Path, now: float) -> list[Residue]:
+    """The journal, tolerating anything: missing, odd, oversized, non-regular,
+    corrupt, implausible or from the future is empty (per entry). Read without
+    blocking and never through a symlink."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         try:
@@ -233,32 +248,46 @@ def _read_journal(path: Path) -> list[Residue]:
             if not isinstance(row, dict):
                 continue
             prior, applied, at = _volumes(row.get("prior")), _volumes(row.get("applied")), row.get("at")
-            if prior and applied and len(prior) == len(applied) and prior != applied \
-                    and isinstance(at, (int, float)) and not isinstance(at, bool):
+            if (prior and applied and _plausible(prior, applied)
+                    and isinstance(at, (int, float)) and not isinstance(at, bool)
+                    and math.isfinite(at) and 0 <= at <= now + SKEW_S):
                 out.append(Residue(prior, applied, float(at)))
-        return out[:MAX_RESIDUE]
+        return out[:JOURNAL_MAX_ROWS]
     except Exception:       # noqa: BLE001 - OSError, ValueError, UnicodeError, RecursionError ...
         return []
 
 
+def _clamp(volume: tuple[int, ...]) -> tuple[int, ...]:
+    """What may be written: never above 100% in any channel."""
+    return tuple(min(v, NORM) for v in volume)
+
+
 class Ducker:
-    """The lease and the ducked streams. One per daemon (`daemon.speech_ducker`).
+    """The leases and the ducked streams. One per daemon (`daemon.speech_ducker`).
 
     `owners()` returns the pinned Remote Chrome roots (`audio.OwnedChrome`) of
     profiles whose sound is permitted and audible right now, or `[]`; it never
-    starts the Browser. `run` is the pactl runner (tests inject a fake)."""
+    starts the Browser. `run` is the pactl runner (tests inject a fake).
+
+    Every HUD window holds its own lease (a token it chose), so one window's
+    `off` cannot end another's; the duck lasts while any lease lives, and never
+    longer than `MAX_LEASE_S` in one go."""
 
     def __init__(self, owners: Callable[[], list], *, run: Callable = pactl, clock=time.monotonic,
                  wall=time.time, journal: Callable[[], Path | None] | Path | None = None,
                  lease_s: float = LEASE_S, scan_s: float = SCAN_S, retry_s: float = RETRY_S,
-                 idle_s: float = IDLE_POLL_S, threaded: bool = True):
+                 idle_s: float = IDLE_POLL_S, max_lease_s: float = MAX_LEASE_S, threaded: bool = True):
         self._threaded = threaded            # tests drive `tick()` themselves
         self._owners, self._run, self._clock, self._wall = owners, run, clock, wall
         self._journal = journal
         self.lease_s, self.scan_s, self.retry_s, self.idle_s = lease_s, scan_s, retry_s, idle_s
+        self.max_lease_s = max_lease_s
+        self._idle_now = idle_s
         self._cv = threading.Condition()
         self._work = threading.Lock()        # one scan or restore at a time
-        self._deadline: float | None = None
+        self._leases: dict[str, float] = {}  # window token -> deadline (the injected clock)
+        self._since: float | None = None     # when the current unbroken duck began
+        self._rest_until = 0.0               # after the cap: no new lease before this
         self._stopped = False
         self._thread: threading.Thread | None = None
         self._held: dict[int, _Held] = {}
@@ -269,24 +298,33 @@ class Ducker:
 
     # -- the lease ------------------------------------------------------------------
 
-    def grant(self) -> bool:
-        """Grant or renew the lease. False once the daemon is stopping."""
+    def grant(self, window: str = "") -> bool:
+        """Grant or renew `window`'s lease. False once the daemon is stopping."""
         with self._cv:
             if self._stopped:
                 return False
-            self._deadline = self._clock() + self.lease_s
+            now = self._clock()
+            self._live_locked()                     # drop what expired, and a duck past its cap
+            if now < self._rest_until:
+                return True                         # resting after the cap: heard, not honoured
+            if not self._leases:
+                self._since = now
+            if window not in self._leases and len(self._leases) >= MAX_WINDOWS:
+                del self._leases[min(self._leases, key=self._leases.get)]
+            self._leases[window] = now + self.lease_s
+            self._idle_now = self.idle_s
             self._start_locked()
             self._cv.notify_all()
         return True
 
-    def release(self) -> None:
+    def release(self, window: str = "") -> None:
         with self._cv:
-            self._deadline = None
+            self._leases.pop(window, None)
             self._cv.notify_all()
 
     def status(self) -> dict:
         with self._cv:
-            on = self._deadline is not None and self._clock() < self._deadline and not self._stopped
+            on = self._live_locked()
         return {"on": on, "ducked": len(self._held), "lease_s": self.lease_s}
 
     def recover(self) -> None:
@@ -301,18 +339,23 @@ class Ducker:
                 self._cv.notify_all()
 
     def stop(self) -> None:
-        """Daemon shutdown: end the lease and put every stream back, bounded."""
+        """Daemon shutdown: end every lease and put streams back, within one overall
+        budget (`STOP_S`). Whatever is not back by then stays in the journal."""
+        end = time.monotonic() + STOP_S
         with self._cv:
             self._stopped = True
-            self._deadline = None
+            self._leases.clear()
             self._cv.notify_all()
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(STOP_S)
-        if self._work.acquire(timeout=STOP_S):
+            thread.join(max(0.0, min(STOP_S / 3, end - time.monotonic())))
+        if self._work.acquire(timeout=max(0.0, end - time.monotonic())):
             try:
                 if self._held:
-                    self._restore()
+                    try:
+                        self._restore(end)
+                    except DuckError:
+                        pass
                     if self._held:
                         LOG.warning("speech duck: %d stream(s) could not be restored at shutdown; "
                                     "the journal repairs them at the next start", len(self._held))
@@ -320,6 +363,8 @@ class Ducker:
                 LOG.warning("speech duck: restore at shutdown failed (%s)", type(exc).__name__)
             finally:
                 self._work.release()
+        elif self._held:
+            LOG.warning("speech duck: shutdown could not take the worker's turn; the journal repairs at the next start")
 
     # -- the worker -----------------------------------------------------------------
 
@@ -331,15 +376,25 @@ class Ducker:
             self._thread.start()
 
     def _live_locked(self) -> bool:
-        return self._deadline is not None and self._clock() < self._deadline and not self._stopped
+        """Is any lease alive (and under the cap)? Prunes as a side effect."""
+        if self._stopped:
+            return False
+        now = self._clock()
+        self._leases = {w: d for w, d in self._leases.items() if now < d}
+        if self._leases and self._since is not None and now - self._since >= self.max_lease_s:
+            self._leases.clear()                    # a window that renews for ever does not hold the volume for ever
+            self._rest_until = now + CAP_REST_S
+            LOG.warning("speech duck: one duck lasted %.0f s; restoring for %.0f s", self.max_lease_s, CAP_REST_S)
+        return bool(self._leases)
 
     def _next_wait_locked(self) -> float | None:
         if self._live_locked():
-            return max(0.01, min(self.scan_s, self._deadline - self._clock()))
+            until = min(max(self._leases.values()), self._since + self.max_lease_s)
+            return max(0.01, min(self.scan_s, until - self._clock()))
         if self._held:
             return self.retry_s
         if self._residue:
-            return self.idle_s
+            return self._idle_now
         return None
 
     def _loop(self) -> None:
@@ -385,8 +440,17 @@ class Ducker:
 
     # -- scanning -------------------------------------------------------------------
 
-    def _list(self) -> list[Stream]:
-        return parse(self._run(_LIST, CALL_S))
+    def _call(self, args: tuple[str, ...], deadline: float | None = None) -> bytes:
+        """One pactl call, never longer than `CALL_S` nor past `deadline` (real monotonic time)."""
+        timeout = CALL_S
+        if deadline is not None:
+            timeout = min(CALL_S, deadline - time.monotonic())
+            if timeout < 0.05:
+                raise DuckError("out of time")
+        return self._run(args, timeout)
+
+    def _list(self, deadline: float | None = None) -> list[Stream]:
+        return parse(self._call(_LIST, deadline))
 
     @staticmethod
     def _chain(owners, pid: int):
@@ -405,6 +469,8 @@ class Ducker:
         if not owners:
             return
         for stream in sorted(by_index.values(), key=lambda s: s.index):
+            if self._stopped:
+                return
             if stream.index in self._held or stream.index in self._free or stream.muted:
                 continue
             if len(self._held) >= MAX_STREAMS:
@@ -430,14 +496,17 @@ class Ducker:
             self._persist()
 
     def _duck_one(self, stream: Stream, chain, owners) -> None:
+        if any(v > NORM for v in stream.volume):
+            return              # boosted past 100% by the owner: giving it back would need a write above the norm
         prior = stream.volume
         # A stream born carrying exactly a duck level was handed it by PulseAudio's
         # memory of an earlier duck (a held one, or a lost one in the journal):
         # the volume to give back is that duck's prior, not this level.
         leftover = next((r for r in [*self._held.values(), *self._residue] if r.applied == stream.volume), None)
         if leftover is not None:
-            prior = leftover.prior
-        target = ducked(prior)
+            prior = _clamp(leftover.prior)
+        # A duck only ever lowers: never above what the stream has now, never above 100%.
+        target = tuple(min(d, c, NORM) for d, c in zip(ducked(prior), stream.volume))
         # Index reuse is the one race pactl cannot close: look again, on the same
         # PID and volume, immediately before writing.
         fresh = {s.index: s for s in self._list()}.get(stream.index)
@@ -450,7 +519,7 @@ class Ducker:
         self._persist()                 # before the write: a crash leaves a record, never a silent duck
         if stream.volume != target:
             try:
-                self._run(("set-sink-input-volume", str(stream.index), *map(str, target)), CALL_S)
+                self._call(("set-sink-input-volume", str(stream.index), *map(str, target)))
             except DuckError:
                 del self._held[stream.index]
                 self._persist()
@@ -464,10 +533,12 @@ class Ducker:
 
     # -- restoring ------------------------------------------------------------------
 
-    def _restore(self) -> None:
+    def _restore(self, deadline: float | None = None) -> None:
         """End of lease: every held stream returns to its prior volume unless the
-        owner moved it. A stream that cannot be written stays held and is retried."""
-        by_index = {s.index: s for s in self._list()}
+        owner moved it. The first pactl failure or timeout stops the writing (a
+        server that is not answering is not asked again and again); what is left
+        stays held, journaled, and is retried. `deadline` bounds the whole thing."""
+        by_index = {s.index: s for s in self._list(deadline)}
         failed = False
         for held in list(self._held.values()):
             stream = by_index.get(held.index)
@@ -476,12 +547,13 @@ class Ducker:
                 del self._held[held.index]
             elif stream.volume != held.applied:
                 del self._held[held.index]          # the owner's change stands
-            else:
+            elif not failed:
                 try:
-                    self._run(("set-sink-input-volume", str(held.index), *map(str, held.prior)), CALL_S)
+                    self._call(("set-sink-input-volume", str(held.index), *map(str, _clamp(held.prior))), deadline)
                     del self._held[held.index]
                 except DuckError:
                     failed = True
+            # after a failure: leave the rest held for the retry
         if not self._held:
             self._free.clear()
         self._persist()
@@ -500,13 +572,17 @@ class Ducker:
         owners = self._owners() or []
         if not owners:
             return
+        matched = False
         for stream in self._list():
             leftover = next((r for r in self._residue if r.applied == stream.volume), None)
             if leftover is None or stream.muted or self._chain(owners, stream.pid) is None:
                 continue
-            self._run(("set-sink-input-volume", str(stream.index), *map(str, leftover.prior)), CALL_S)
+            self._call(("set-sink-input-volume", str(stream.index), *map(str, _clamp(leftover.prior))))
             self._residue.remove(leftover)
             self._persist()
+            matched = True
+        # Nothing to repair while Chrome plays: look less and less often.
+        self._idle_now = self.idle_s if matched else min(self._idle_now * 2, IDLE_MAX_S)
 
     # -- the journal ----------------------------------------------------------------
 
@@ -525,27 +601,38 @@ class Ducker:
         self._loaded = True
         path = self._path()
         if path is not None:
-            self._residue = _read_journal(path)
+            self._residue = _read_journal(path, self._wall())
 
     def _persist(self) -> None:
-        """Held ducks and unconfirmed ones, or no file at all when there are none."""
+        """Held ducks and unconfirmed ones, or no file at all when there are none.
+        Held rows are never the ones cut: only the oldest leftovers are."""
         path = self._path()
         if path is None:
             return
         rows = [{"prior": list(h.prior), "applied": list(h.applied), "at": h.at} for h in self._held.values()]
-        rows += [{"prior": list(r.prior), "applied": list(r.applied), "at": r.at} for r in self._residue]
+        rows += [{"prior": list(r.prior), "applied": list(r.applied), "at": r.at} for r in self._residue[-MAX_RESIDUE:]]
+        tmp = None
         try:
             if not rows:
                 path.unlink(missing_ok=True)
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            # A random name made O_EXCL with mode 0600: nothing that already exists
+            # (a FIFO, a link) can be opened by this, so it can never block the worker.
+            fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+            tmp = name
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps({"streams": rows[-MAX_RESIDUE:]}) + "\n")
+                handle.write(json.dumps({"streams": rows}) + "\n")
             os.replace(tmp, path)
+            tmp = None
         except OSError as exc:
             LOG.warning("speech duck: journal not written (%s)", type(exc).__name__)
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
 
 # -- the route --------------------------------------------------------------------
@@ -566,12 +653,15 @@ def route(handler, daemon, parts, query):
         return 200, ducker.status()
     if handler.command != "POST":
         return None
-    body = _object(handler._body(), ("on",), ("on",))
+    body = _object(handler._body(), ("on", "window"), ("on",))
     if type(body["on"]) is not bool:
         fail(400, "on must be a boolean")
+    window = body.get("window", "")
+    if window != "" and not (isinstance(window, str) and _WINDOW.fullmatch(window)):
+        fail(400, "window must be 32 lowercase hex characters")
     if body["on"]:
-        if not ducker.grant():
+        if not ducker.grant(window):
             fail(409, "the daemon is stopping")
     else:
-        ducker.release()
+        ducker.release(window)
     return 200, ducker.status()

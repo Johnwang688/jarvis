@@ -9,13 +9,17 @@ Run:
 from __future__ import annotations
 
 import json
+import math
+import os
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -340,7 +344,7 @@ class Failures(Base):
 
     def test_garbage_from_pactl_writes_nothing(self):
         for raw in (b"not json", b"{}", b'[{"index": 1}]', b'[{"index":1,"mute":false,"properties":{"application.process.id":"x"},"volume":{}}]',
-                    json.dumps([stream(1, 120, (VOL := D.VOLUME_MAX + 1, VOL))]).encode()):
+                    json.dumps([stream(1, 120, (VOL := D.READ_MAX + 1, VOL))]).encode()):
             with self.subTest(raw=raw[:30]):
                 pulse = Pulse([])
                 pulse.run = lambda args, timeout, raw=raw: raw
@@ -455,6 +459,92 @@ class Journal(Base):
         self.assertLess(self.pulse.volume(1)[0], NORM)
 
 
+class Forged(Base):
+    """HIGH-1: a journal is a file a hostile process might write. Nothing it says can raise a volume."""
+
+    def forge(self, rows):
+        self.journal.write_text(json.dumps({"streams": rows}))
+
+    def idle_repair(self, volume, rows):
+        self.forge(rows)
+        self.pulse.rows[:] = [stream(1, 120, volume)]
+        d = self.make(); d.recover(); d.tick()
+        return d
+
+    def test_the_leads_repro_cannot_raise_a_stream_to_400_percent(self):
+        now = time.time()
+        d = self.idle_repair((NORM, NORM), [{"prior": [262144, 262144], "applied": [NORM, NORM], "at": now}])
+        self.assertEqual(d._residue, [])
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+        self.assertEqual(self.pulse.writes(), [])
+        d.grant(); d.tick()                                        # and under a lease the duck only lowers
+        self.assertLessEqual(max(self.pulse.volume(1)), NORM)
+        self.assertEqual(self.pulse.volume(1), D.ducked((NORM, NORM)))
+        d.release(); d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+
+    def test_implausible_future_and_non_finite_entries_are_dropped_on_load(self):
+        now = time.time()
+        good = {"prior": [NORM, NORM], "applied": list(D.ducked((NORM, NORM))), "at": now}
+        for what, row in (("prior above 100%", {**good, "prior": [NORM + 1, NORM], "applied": list(D.ducked((NORM + 1, NORM)))}),
+                          ("applied not the duck of prior", {**good, "applied": [30000, 30000]}),
+                          ("applied the same as prior", {**good, "applied": [NORM, NORM]}),
+                          ("applied raises", {"prior": [20000, 20000], "applied": [NORM, NORM], "at": now}),
+                          ("channel count differs", {**good, "applied": [good["applied"][0]]}),
+                          ("in the future", {**good, "at": now + 10 * D.SKEW_S}),
+                          ("negative time", {**good, "at": -5}),
+                          ("infinite time", {**good, "at": float("inf")}),
+                          ("boolean time", {**good, "at": True}),
+                          ("string volume", {**good, "prior": ["65536", "65536"]})):
+            with self.subTest(what=what):
+                self.forge([row])
+                d = self.make(); d.recover()
+                self.assertEqual(d._residue, [])
+        self.journal.write_text('{"streams": [{"prior": [65536, 65536], "applied": [36854, 36854], "at": NaN}]}')
+        d = self.make(); d.recover()
+        self.assertEqual(d._residue, [])
+        self.forge([good])
+        d = self.make(); d.recover()
+        self.assertEqual(len(d._residue), 1)                               # an honest record still loads
+        self.forge([{**good, "applied": [good["applied"][0] + 2, good["applied"][1] - 2]}])
+        d = self.make(); d.recover()
+        self.assertEqual(len(d._residue), 1)                               # the server's rounding is allowed
+
+    def test_a_duck_never_writes_above_the_streams_own_volume_or_100_percent(self):
+        # Defence in depth: even an in-memory leftover the loader would have refused cannot raise.
+        d = self.make()
+        d._load()
+        d._residue = [D.Residue((NORM, NORM), (30000, 30000), time.time())]
+        self.pulse.rows[:] = [stream(1, 120, (30000, 30000))]
+        d.grant(); d.tick()
+        self.assertTrue(all(int(v) <= 30000 for c in self.pulse.writes() for v in c[2:]), self.pulse.writes())
+        d2 = self.make(journal=None)
+        d2._residue = [D.Residue((262144, 262144), (30000, 30000), time.time())]
+        self.pulse.rows[:] = [stream(1, 120, (30000, 30000))]
+        d2.grant(); d2.tick()
+        self.assertLessEqual(max(self.pulse.volume(1)), 30000)
+        d2.release(); d2.tick()
+        self.assertLessEqual(max(self.pulse.volume(1)), D.NORM)
+
+    def test_a_restore_and_a_sweep_never_write_above_100_percent(self):
+        d = self.make(journal=None)
+        d._loaded = True
+        d._held[1] = D._Held(1, 120, (262144, 262144), D.ducked((NORM, NORM)), time.time())
+        self.pulse.rows[:] = [stream(1, 120, D.ducked((NORM, NORM)))]
+        d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+        d._residue = [D.Residue((262144, 262144), (36854, 36854), time.time())]
+        self.pulse.rows[:] = [stream(2, 120, (36854, 36854))]
+        d.tick()
+        self.assertEqual(self.pulse.volume(2), (NORM, NORM))
+
+    def test_a_stream_boosted_past_100_percent_is_left_alone(self):
+        self.pulse.rows[:] = [stream(1, 120, (90000, 90000))]
+        d = self.make(); d.grant(); d.tick()
+        self.assertEqual(self.pulse.writes(), [])
+        self.assertEqual(self.pulse.volume(1), (90000, 90000))
+
+
 class Worker(Base):
     def wait(self, check, what, limit=10.0):
         end = time.monotonic() + limit
@@ -497,6 +587,185 @@ class Worker(Base):
         self.assertFalse(d._thread.is_alive())
 
 
+class Hostile(Base):
+    def test_a_fifo_at_the_old_predictable_temp_name_cannot_hang_the_worker(self):
+        for name in (f".{self.journal.name}.{os.getpid()}.tmp", f".{self.journal.name}.tmp"):
+            os.mkfifo(self.journal.parent / name)
+        os.link  # a hardlink cannot be opened exclusively either; the random name never meets one
+        d = self.make()
+        done = threading.Event()
+
+        def work():
+            d.grant(); d.tick(); d.release(); d.tick()
+            done.set()
+        t = threading.Thread(target=work, daemon=True); t.start()
+        self.assertTrue(done.wait(5), "the worker blocked on a FIFO")
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+        self.assertFalse(self.journal.exists())
+
+    def test_the_journal_is_written_through_a_random_exclusive_file_and_leaves_no_litter(self):
+        d = self.make(); d.grant(); d.tick()
+        self.assertEqual(stat.S_IMODE(self.journal.stat().st_mode), 0o600)
+        self.assertEqual([p.name for p in self.journal.parent.iterdir() if p.name.endswith(".tmp")], [])
+        d.release(); d.tick()
+        self.assertEqual(list(self.journal.parent.iterdir()), [])
+
+    def test_a_journal_path_that_is_a_directory_is_not_fatal(self):
+        self.journal.mkdir()
+        d = self.make(); d.grant()
+        with self.assertLogs("jarvis.v2.speech_duck", level="WARNING"):
+            d.tick()
+        d.release(); d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+
+    def test_held_rows_survive_the_journal_cap_and_only_leftovers_are_cut(self):
+        d = self.make(); d._load()
+        d._residue = [D.Residue((NORM, NORM), (36854 - i, 36854 - i), time.time()) for i in range(D.MAX_RESIDUE + 10)]
+        self.pulse.rows[:] = [stream(1, 120, (50000, 50000))]
+        d.grant(); d.tick()
+        rows = json.loads(self.journal.read_text())["streams"]
+        self.assertIn([50000, 50000], [r["prior"] for r in rows], "the active duck is always recorded")
+        self.assertLessEqual(len(rows), D.MAX_RESIDUE + D.MAX_STREAMS)
+
+
+class Bounded(Base):
+    def test_restore_stops_writing_at_the_first_failure(self):
+        self.pulse.rows[:] = [stream(i, 120) for i in (1, 2, 3)]
+        d = self.make(); d.grant(); d.tick()
+        self.assertEqual(d.status()["ducked"], 3)
+        self.pulse.fail = lambda args: args[0] == "set-sink-input-volume"
+        before = len(self.pulse.commands)
+        d.release(); d.tick()
+        tries = [c for c in self.pulse.commands[before:] if c[0] == "set-sink-input-volume"]
+        self.assertEqual(len(tries), 1, "one timeout ends this round of writes")
+        self.assertEqual(d.status()["ducked"], 3)                       # all still held and journaled
+        self.assertTrue(self.journal.exists())
+        self.pulse.fail = None
+        d.tick()
+        self.assertTrue(all(self.pulse.volume(i) == (NORM, NORM) for i in (1, 2, 3)))
+
+    def test_stop_is_bounded_overall_even_when_pactl_is_slow(self):
+        d = self.make(); d.grant(); d.tick()
+        original = self.pulse.run
+
+        def slow(args, timeout):
+            time.sleep(min(timeout, 0.25))
+            raise D.DuckError("timed out")
+        d._run = slow
+        with patch.object(D, "STOP_S", 0.6):
+            began = time.monotonic()
+            with self.assertLogs("jarvis.v2.speech_duck", level="WARNING"):
+                d.stop()
+            took = time.monotonic() - began
+        self.assertLess(took, 1.5)
+        self.assertTrue(self.journal.exists(), "what was not restored stays journaled")
+        d._run = original
+
+    def test_each_call_gets_only_the_time_left_of_the_overall_deadline(self):
+        d = self.make(); d.grant(); d.tick()
+        seen = []
+        original = self.pulse.run
+
+        def watch(args, timeout):
+            seen.append(timeout)
+            return original(args, timeout)
+        d._run = watch
+        d._restore(time.monotonic() + 0.5)
+        self.assertTrue(seen and all(t <= 0.5 for t in seen), seen)
+        d.grant(); d.tick()
+        with self.assertRaises(D.DuckError):
+            d._restore(time.monotonic() - 1)                            # no time at all: no call
+
+    def test_the_cap_on_one_continuous_duck_restores_and_rests_even_while_renewed(self):
+        d = self.make(max_lease_s=10)
+        d.grant(); d.tick()
+        with self.assertLogs("jarvis.v2.speech_duck", level="WARNING"):
+            for _ in range(8):                                          # renewed every 1.5 s, for ever
+                self.clock.now += 1.5; d.grant(); d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM), "past the cap the duck is over")
+        self.assertFalse(d.status()["on"])
+        for _ in range(2):                                              # renewals during the rest are not honoured
+            self.clock.now += 1.5; d.grant(); d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+        self.clock.now += D.CAP_REST_S; d.grant(); d.tick()             # then a request starts a new period
+        self.assertLess(self.pulse.volume(1)[0], NORM)
+        d.release(); d.tick()
+
+
+class Windows(Base):
+    A, B = "a" * 32, "b" * 32
+
+    def test_one_windows_off_cannot_end_anothers_lease(self):
+        d = self.make()
+        d.grant(self.A); d.grant(self.B); d.tick()
+        d.release(self.A); d.tick()
+        self.assertLess(self.pulse.volume(1)[0], NORM)
+        self.assertTrue(d.status()["on"])
+        d.release(self.B); d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+
+    def test_each_lease_expires_on_its_own_and_the_latest_deadline_wins(self):
+        d = self.make()
+        d.grant(self.A); self.clock.now += 2; d.grant(self.B); d.tick()
+        self.clock.now += 2; d.tick()                                    # A is out, B has a second left
+        self.assertLess(self.pulse.volume(1)[0], NORM)
+        self.clock.now += 2; d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+
+    def test_the_number_of_remembered_windows_is_bounded(self):
+        d = self.make()
+        for i in range(D.MAX_WINDOWS * 3):
+            d.grant(f"{i:032x}")
+        self.assertLessEqual(len(d._leases), D.MAX_WINDOWS)
+
+
+class Backoff(Base):
+    def test_the_idle_leftover_repair_backs_off_when_nothing_matches_and_resets_on_a_request(self):
+        d = self.make(idle_s=3.0); d._load()
+        d._residue = [D.Residue((NORM, NORM), (36854, 36854), time.time())]
+        waits = []
+        for _ in range(8):
+            d.tick()
+            with d._cv:
+                waits.append(d._next_wait_locked())
+        self.assertEqual(waits[0], 6.0)
+        self.assertEqual(waits[-1], D.IDLE_MAX_S)
+        self.assertEqual(waits, sorted(waits))
+        d.grant(); d.release()
+        with d._cv:
+            self.assertEqual(d._next_wait_locked(), 3.0)
+
+    def test_a_chrome_that_was_muted_before_is_not_ducked(self):
+        from jarvis.v2.browser import host as H
+        from jarvis.v2.browser.sound import BrowserSound
+        host = H.BrowserHost()
+        sound = BrowserSound(host, probe=lambda: A.Availability(True, True))
+        host._sound = sound
+        profile = "p-12345678"
+        instance = H._Instance(profile, FOLDER, object(), object(), generation=1, audio=A.InstanceAudio(True))
+        host._instances[profile] = instance
+        sound._requests.add(profile)
+        root = self.procs.owner()
+        with patch.object(H, "chrome_pids", return_value=[100]), \
+                patch.object(A.OwnedChrome, "pin", side_effect=lambda pid, folder, reader=None: root):
+            self.assertEqual(len(sound.duck_owners()), 1)
+            attempt = instance.audio.begin_mute()
+            self.assertEqual(sound.duck_owners(), [], "a mute is in flight")
+            instance.audio.finish_mute(attempt)
+            self.assertEqual(sound.duck_owners(), [], "tainted: a mute was attempted on this instance")
+        host._stopped = True
+
+
+class OnlyTheOwnersDaemon(unittest.TestCase):
+    def test_the_journal_belongs_to_the_owners_daemon_alone(self):
+        from jarvis import config
+        from jarvis.v2.daemon import Daemon
+        mine = SimpleNamespace(_owns_data=lambda: True)
+        other = SimpleNamespace(_owns_data=lambda: False)
+        self.assertEqual(Daemon._duck_journal(mine), config.SPEECH_DUCK_PATH)
+        self.assertIsNone(Daemon._duck_journal(other))
+
+
 class Runner(unittest.TestCase):
     def test_nothing_but_a_listing_and_a_volume_write_is_ever_run(self):
         with patch.object(D.subprocess, "Popen") as start:
@@ -505,7 +774,7 @@ class Runner(unittest.TestCase):
                          ("set-sink-input-volume", "1"), ("set-sink-input-volume", "x", "100"),
                          ("set-sink-input-volume", str(2**32 - 1), "100"), ("set-sink-input-volume", "1", "-5"),
                          ("set-sink-input-volume", "1", "+5%"), ("set-sink-input-volume", "1", "100%"),
-                         ("set-sink-input-volume", "1", str(D.VOLUME_MAX + 1)),
+                         ("set-sink-input-volume", "1", str(D.NORM + 1)), ("set-sink-input-volume", "1", "262144"),
                          ("set-sink-input-volume", "1", *["100"] * (D.MAX_CHANNELS + 1)), ("set-sink-input-volume", "1; x", "5")):
                 with self.subTest(args=args), self.assertRaises(D.DuckError):
                     D.pactl(args, 1)
@@ -544,6 +813,14 @@ class Runner(unittest.TestCase):
                 D.pactl(LIST, 0.1)
         self.assertLess(time.monotonic() - began, 3)
         self.assertIsNotNone(procs[0].poll())
+
+    def test_output_is_read_through_the_shared_capped_runner(self):
+        real = subprocess.Popen
+        with patch.object(D.subprocess, "Popen", side_effect=lambda argv, **kw: real(
+                [sys.executable, "-c", "import os; os.write(1, b'x' * 300000)"], **kw)):
+            with self.assertRaises(D.DuckError):
+                D.pactl(LIST, 2)
+        self.assertIs(D.audio.run_bounded, A.run_bounded)
 
     def test_a_failing_or_missing_pactl_is_a_duck_error(self):
         real = subprocess.Popen

@@ -1832,6 +1832,15 @@ class Backend(unittest.TestCase):
         self.assertTrue(self.owner("GET", "/speech/duck")["on"])
         self.assertFalse(self.owner("POST", "/speech/duck", {"on": False})["on"])
         # Strict bodies: unknown keys, a missing key, a non-boolean, a query.
+        # A window's lease token is optional, 32 lowercase hex, and ends only its own lease.
+        a, b = "a" * 32, "b" * 32
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": True, "window": a})["on"])
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": True, "window": b})["on"])
+        self.assertTrue(self.owner("POST", "/speech/duck", {"on": False, "window": a})["on"], "b still holds its lease")
+        self.assertFalse(self.owner("POST", "/speech/duck", {"on": False, "window": b})["on"])
+        for body in ({"on": True, "window": "A" * 32}, {"on": True, "window": "a" * 31}, {"on": True, "window": 7},
+                     {"on": True, "window": None}, {"on": True, "window": "../" + "a" * 29}, {"window": a}):
+            self.owner("POST", "/speech/duck", body, status=400)
         for body in ({"on": True, "bogus": 1}, {"bogus": 1}, {}, {"on": "yes"}, {"on": 1}, {"on": None}, [], "on"):
             self.owner("POST", "/speech/duck", body, status=400)
         self.owner("GET", "/speech/duck?x=1", status=400)

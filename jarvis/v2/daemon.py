@@ -308,7 +308,7 @@ class Daemon:
         # lease (V15, speech_duck.py). Nothing starts until the first lease;
         # `recover()` at start only reads the journal of a crashed run.
         from .speech_duck import Ducker
-        self.speech_ducker = Ducker(self.browser.duck_owners, journal=lambda: config.SPEECH_DUCK_PATH)
+        self.speech_ducker = Ducker(self.browser.duck_owners, journal=self._duck_journal)
         from .browser.look import BrowserLook
         self.browser_look = BrowserLook(self)
         from .browser.drive import BrowserDrive
@@ -381,6 +381,11 @@ class Daemon:
             # journal, under the same "this is the owner's daemon" rule.
             if self._owns_data():
                 self.speech_ducker.recover()
+
+    def _duck_journal(self):
+        """The duck's journal is the owner's daemon's alone: a test or embedded daemon
+        on a folder of its own never reads or writes the owner's file."""
+        return config.SPEECH_DUCK_PATH if self._owns_data() else None
 
     def _owns_data(self) -> bool:
         try:

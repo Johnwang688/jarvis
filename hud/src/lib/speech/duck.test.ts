@@ -123,3 +123,19 @@ describe("DuckLease", () => {
     expect(sent.filter((s) => !s.on).length).toBe(1);
   });
 });
+
+describe("DuckLease switch", () => {
+  it("tells subscribers when the switch changes, not when it is set to what it already is", () => {
+    const { lease } = setup();
+    let n = 0;
+    const off = lease.subscribe(() => { n += 1; });
+    lease.setEnabled(true);
+    expect(n).toBe(0);
+    lease.setEnabled(false);
+    lease.setEnabled(false);
+    expect(n).toBe(1);
+    off();
+    lease.setEnabled(true);
+    expect(n).toBe(1);
+  });
+});

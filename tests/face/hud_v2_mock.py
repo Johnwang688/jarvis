@@ -659,7 +659,7 @@ class MockDaemon:
         self.calls: list[tuple[str, str, dict]] = []
         self.say_fail = False        # /say answers 503 (the local voice is down)
         self.duck_log: list[tuple[float, bool]] = []   # V15: every /speech/duck request, with its time
-        self.duck_until = 0.0                          # V15: the lease the daemon would hold
+        self.duck_leases: dict[str, float] = {}        # V15: window token -> the lease the daemon would hold
         self.duck_lease_s = 3.0
         self.speech_threads: dict[str, dict] = {}   # V7: thread id -> {voice, muted}, as the daemon keeps them
         self.ms_per_char = 12        # /say's tone length per character of text
@@ -1161,10 +1161,17 @@ class MockDaemon:
                 if path == "/speech/duck":
                     # V15: the real route's contract -- one boolean, nothing else -- and the
                     # daemon's lease: `on` holds the duck for `lease_s` from now, `off` ends it.
-                    if not isinstance(body, dict) or set(body) != {"on"} or not isinstance(body["on"], bool):
+                    window = body.get("window", "") if isinstance(body, dict) else None
+                    if (not isinstance(body, dict) or not set(body) <= {"on", "window"} or "on" not in body
+                            or not isinstance(body["on"], bool)
+                            or not (window == "" or (isinstance(window, str) and len(window) == 32
+                                                     and all(c in "0123456789abcdef" for c in window)))):
                         return self._err(400, "bad fields")
                     mock.duck_log.append((time.monotonic(), body["on"]))
-                    mock.duck_until = time.monotonic() + mock.duck_lease_s if body["on"] else 0.0
+                    if body["on"]:
+                        mock.duck_leases[window] = time.monotonic() + mock.duck_lease_s
+                    else:
+                        mock.duck_leases.pop(window, None)
                     return self._json({"on": body["on"], "ducked": 0, "lease_s": mock.duck_lease_s})
                 if path == "/say":
                     # V6: the real route's contract -- known keys only, a voice
@@ -1774,7 +1781,7 @@ class MockDaemon:
 
     def ducking(self) -> bool:
         """Would the daemon hold the Remote Browser's sound down right now?"""
-        return time.monotonic() < self.duck_until
+        return any(time.monotonic() < until for until in self.duck_leases.values())
 
     def saw(self, method: str, path: str) -> bool:
         return any(m == method and p == path for m, p, _ in self.calls)

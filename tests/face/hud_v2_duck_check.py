@@ -94,8 +94,10 @@ def main() -> int:
                   bool(until(lambda: ons() >= 3, timeout=8)), f"{ons()} requests")
             gaps = [b[0] - a[0] for a, b in zip(mock.duck_log, mock.duck_log[1:]) if a[1] and b[1]]
             check("renewals come well inside the 3 s lease", bool(gaps) and max(gaps) < 2.0, f"gaps {gaps}")
-            check("every request carries exactly one boolean key",
-                  all(set(b) == {"on"} and isinstance(b["on"], bool) for b in mock.sent("POST", "/speech/duck")))
+            sent = mock.sent("POST", "/speech/duck")
+            check("every request carries one boolean and this window's token (32 hex), nothing else",
+                  all(set(b) == {"on", "window"} and isinstance(b["on"], bool) and len(b["window"]) == 32 for b in sent))
+            check("one window uses one token", len({b["window"] for b in sent}) == 1)
             until(lambda: speech(page)["view"]["state"] == "idle", timeout=20)
             check("when speech ends the lease is ended with off", bool(until(last_off, timeout=3)))
             check("the daemon is no longer ducking", not mock.ducking())
