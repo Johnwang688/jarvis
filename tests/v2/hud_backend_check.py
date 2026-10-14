@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 import http.client
+import inspect
 import json
 import os
 from pathlib import Path
@@ -167,6 +168,8 @@ class Backend(unittest.TestCase):
                                 PROVIDER_DEFAULTS_PATH=self.extra / "provider_defaults.json",
                                 AVATAR_STATE_PATH=self.root / "avatar.json", AVATARS_DIR=self.root / "avatars",
                                 AVATAR_ENV="",
+                                # Never the owner's per-chat read-aloud voices (V7).
+                                SPEECH_VOICES_PATH=self.root / "speech.json",
                                 # Never the owner's real Discord files: the guild
                                 # file decides `GET /discord`'s answer (B1).
                                 DISCORD_GUILD_PATH=self.root / "discord_guild.json",
@@ -1743,6 +1746,147 @@ class Backend(unittest.TestCase):
         app = (hud / "App.tsx").read_text()
         self.assertIn("onMicModeChange(isMuted(mode),", app)
         self.assertEqual(app.count("api.mute("), 1)
+
+    def test_speech_voices_are_assigned_sticky_per_thread_and_owner_only(self):
+        """V7: each chat thread gets its own local voice, kept across calls and restarts."""
+        kokoro = {"af_a", "am_b", "bf_c", "bm_d", "ef_dora"}           # ef_: not English, never handed out
+        listed = [{"name": n, "backend": "kokoro", "kind": "builtin"} for n in sorted(kokoro)]
+        first, second, third = self.thread(), self.thread(), self.thread()
+        voices = patch.object(voice, "available_voices", return_value=kokoro)
+        catalog = patch.object(voice, "catalog", return_value=listed)
+        selected = patch.object(voice, "selected_voice", return_value="bm_d")
+        with voices, catalog, selected:
+            self.events_all()
+            # Owner-only, the HUD listener: the API listener and a missing Origin are refused.
+            self.request("GET", "/speech/voices", status=403)
+            self.request("POST", "/speech/voices", {"thread_id": first.id}, status=403)
+            self.request("POST", "/speech/voices", {"thread_id": first.id}, status=403,
+                         port=self.daemon.face_port, headers={"Origin": "http://evil.example"})
+            self.assertFalse(Path(config.SPEECH_VOICES_PATH).exists())
+            # The first thread takes the voice the owner hears now; later ones the next unused, in pool order.
+            one = self.owner("POST", "/speech/voices", {"thread_id": first.id})
+            two = self.owner("POST", "/speech/voices", {"thread_id": second.id})
+            three = self.owner("POST", "/speech/voices", {"thread_id": third.id})
+            self.assertEqual((one["voice"], two["voice"], three["voice"]), ("bm_d", "af_a", "am_b"))
+            self.assertEqual(self.owner("POST", "/speech/voices", {"thread_id": second.id})["voice"], "af_a")  # sticky
+            shown = self.owner("GET", "/speech/voices")
+            self.assertEqual(shown["pool"], ["af_a", "am_b", "bf_c", "bm_d"])
+            self.assertEqual({t: e["voice"] for t, e in shown["threads"].items()},
+                             {first.id: "bm_d", second.id: "af_a", third.id: "am_b"})
+            self.assertFalse(any(e["muted"] for e in shown["threads"].values()))
+            # Only an assignment that changed anything is published (a second window asking is quiet).
+            kinds = [e for e in self.events_all() if e["kind"] == "thread_voice"]
+            self.assertEqual(len(kinds), 3)
+            self.owner("POST", "/speech/voices", {"thread_id": second.id})
+            self.assertEqual([e for e in self.events_all() if e["kind"] == "thread_voice"], [])
+            # A choice, a mute, and "" for automatic again.
+            self.assertEqual(self.owner("POST", "/speech/voices", {"thread_id": second.id, "voice": "bf_c"})["voice"], "bf_c")
+            self.assertTrue(self.owner("POST", "/speech/voices", {"thread_id": second.id, "muted": True})["muted"])
+            again = self.owner("GET", "/speech/voices")["threads"][second.id]
+            self.assertEqual(again, {"voice": "bf_c", "muted": True})
+            self.assertEqual(self.owner("POST", "/speech/voices", {"thread_id": second.id, "voice": ""})["voice"], "af_a")
+            # Refusals: an unknown or non-English voice, a bad thread, both keys, an extra key.
+            for body, status in (({"thread_id": second.id, "voice": "nope"}, 400),
+                                 ({"thread_id": second.id, "voice": 7}, 400),
+                                 ({"thread_id": second.id, "muted": "yes"}, 400),
+                                 ({"thread_id": second.id, "voice": "af_a", "muted": True}, 400),
+                                 ({"thread_id": "../etc", "voice": "af_a"}, 400),
+                                 ({"thread_id": "deadbeef"}, 404),
+                                 ({"voice": "af_a"}, 400),
+                                 ({"thread_id": second.id, "extra": 1}, 400)):
+                self.owner("POST", "/speech/voices", body, status=status)
+            self.owner("GET", "/speech/voices?x=1", status=400)
+            # Stored on disk, and the same after a "restart" (a fresh read of the file).
+            stored = json.loads(Path(config.SPEECH_VOICES_PATH).read_text())["threads"]
+            self.assertEqual({t: e["voice"] for t, e in stored.items()}, {first.id: "bm_d", second.id: "af_a", third.id: "am_b"})
+            # A stored voice that is no longer installed is not served, and the thread is given another.
+            listed.remove({"name": "am_b", "backend": "kokoro", "kind": "builtin"})
+            kokoro.discard("am_b")
+            self.assertIsNone(self.owner("GET", "/speech/voices")["threads"][third.id]["voice"])
+            self.assertNotEqual(self.owner("POST", "/speech/voices", {"thread_id": third.id})["voice"], "am_b")
+            # Deleted threads are pruned on the next write.
+            Path(config.SPEECH_VOICES_PATH).write_text(json.dumps({"threads": {
+                "deadbeef": {"voice": "af_a", "muted": False}, first.id: {"voice": "bm_d", "muted": False}}}))
+            self.owner("POST", "/speech/voices", {"thread_id": second.id, "muted": False})
+            self.assertNotIn("deadbeef", json.loads(Path(config.SPEECH_VOICES_PATH).read_text())["threads"])
+
+    def test_speech_voices_survive_a_corrupt_store_and_reuse_when_the_pool_runs_out(self):
+        kokoro = {"af_a", "bm_d"}
+        listed = [{"name": n, "backend": "kokoro", "kind": "builtin"} for n in sorted(kokoro)]
+        threads = [self.thread() for _ in range(3)]
+        Path(config.SPEECH_VOICES_PATH).write_text("{not json")
+        with patch.object(voice, "available_voices", return_value=kokoro), \
+                patch.object(voice, "catalog", return_value=listed), \
+                patch.object(voice, "selected_voice", return_value="bm_d"):
+            got = [self.owner("POST", "/speech/voices", {"thread_id": t.id})["voice"] for t in threads]
+        self.assertEqual(got[:2], ["bm_d", "af_a"])
+        self.assertIn(got[2], kokoro)                                 # reused, still a real voice
+        # Pocket builtins follow the Kokoro voices when pocket-tts is installed -- English ones only.
+        from jarvis import pocket
+        from jarvis.v2 import speech_voices
+        with patch.object(voice, "available_voices", return_value=kokoro), patch.object(pocket, "available", return_value=True):
+            names = speech_voices.pool()
+        self.assertEqual(names[:2], ["af_a", "bm_d"])
+        self.assertIn("pocket:alba", names)
+        self.assertNotIn("pocket:lola", names)
+
+    def test_speech_voices_with_no_voice_to_give_store_and_publish_nothing(self):
+        """Review MED-2: no installed voice means no write and no event, however often it is asked."""
+        thread = self.thread()
+        with patch.object(voice, "available_voices", return_value=set()), \
+                patch.object(voice, "catalog", return_value=[]), \
+                patch.object(voice, "selected_voice", return_value="gone"):
+            self.events_all()
+            for _ in range(3):
+                got = self.owner("POST", "/speech/voices", {"thread_id": thread.id})
+                self.assertIsNone(got["voice"])
+            self.assertFalse(Path(config.SPEECH_VOICES_PATH).exists())
+            self.assertEqual([e for e in self.events_all() if e["kind"] == "thread_voice"], [])
+
+    def test_speech_voices_event_is_published_while_the_lock_is_held(self):
+        """Review LOW-2: two changes cannot reach the bus in another order than they were stored."""
+        from jarvis.v2 import speech_voices
+        thread = self.thread()
+        held = []
+        real = self.daemon.bus.publish
+        self.daemon.bus.publish = lambda event: (held.append(speech_voices._lock.locked()), real(event))[1]
+        self.addCleanup(lambda: setattr(self.daemon.bus, "publish", real))
+        with patch.object(voice, "available_voices", return_value={"af_a"}), \
+                patch.object(voice, "catalog", return_value=[{"name": "af_a", "backend": "kokoro", "kind": "builtin"}]), \
+                patch.object(voice, "selected_voice", return_value="af_a"):
+            self.owner("POST", "/speech/voices", {"thread_id": thread.id})
+            self.owner("POST", "/speech/voices", {"thread_id": thread.id, "muted": True})
+        self.assertEqual(held, [True, True])
+
+    def test_speech_voices_store_is_read_defensively(self):
+        """Review LOW-1: a FIFO, a device, an oversize or a deeply nested file is an empty store."""
+        from jarvis.v2 import speech_voices
+        path = Path(config.SPEECH_VOICES_PATH)
+        good = '{"threads": {"deadbeef": {"voice": "af_a", "muted": true}}}'
+        path.write_text(good)
+        self.assertEqual(speech_voices._read(), {"deadbeef": {"voice": "af_a", "muted": True}})
+        path.write_text("[" * 200_000)                       # json.loads: RecursionError
+        self.assertEqual(speech_voices._read(), {})
+        path.write_text('{"threads": {}, "pad": "' + "x" * (speech_voices._MAX_BYTES + 10) + '"}')
+        self.assertEqual(speech_voices._read(), {})
+        path.unlink()
+        os.mkfifo(path)                                       # must not block waiting for a writer
+        self.assertEqual(speech_voices._read(), {})
+        path.unlink()
+        path.symlink_to("/dev/zero")                          # endless: not a regular file
+        self.assertEqual(speech_voices._read(), {})
+
+    def test_deleting_a_thread_forgets_its_read_aloud_voice(self):
+        from jarvis.v2 import speech_voices
+        thread = self.thread()
+        Path(config.SPEECH_VOICES_PATH).write_text(json.dumps({"threads": {
+            thread.id: {"voice": "af_a", "muted": False}, "deadbeef": {"voice": "bm_d", "muted": False}}}))
+        speech_voices.forget(thread.id)
+        self.assertEqual(set(json.loads(Path(config.SPEECH_VOICES_PATH).read_text())["threads"]), {"deadbeef"})
+        speech_voices.forget("0badc0de")                      # unknown: nothing happens
+        # The delete path calls it.
+        from jarvis.v2 import projects
+        self.assertIn("speech_voices.forget(thread.id)", inspect.getsource(projects.delete_thread))
 
     def test_picker_body_keys_are_the_contract(self):
         """A6: the HUD sent {id}, {name} and {mute}; the daemon read model,

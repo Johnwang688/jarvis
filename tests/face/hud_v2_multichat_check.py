@@ -2252,6 +2252,18 @@ def _eight_chats_checks(page, mock, check, until):
     check("the sidebar marks all eight open threads, each with its pane",
           marked == [str(n) for n in range(1, 9)], str(marked))
 
+    # Read-aloud (V7) reads every open chat, pane 7's included, and the detector is held off
+    # while anything is being read (until V9's self-voice gating), so a hands-free utterance
+    # in the selected pane 6 would be dropped as "speaking" for as long as pane 7's streamed
+    # words are read, plus the 300 ms hangover. This section tests where voice is PLACED,
+    # not that suppression: pane 7's chat is muted from its voice chip (here by the bus
+    # event the daemon publishes), and this window takes the speaker lock, as a focused
+    # window does, so the mute is what is being relied on. Suppression while another pane
+    # is read is checked on its own in hud_v2_speech_check.py.
+    page.evaluate("() => window.dispatchEvent(new Event('focus'))")
+    mock.speech_threads["e7"] = {"voice": "pocket:dad", "muted": True}
+    mock.emit("thread_voice", {"thread_id": "e7", "voice": "pocket:dad", "muted": True})
+    until(lambda: page.evaluate("window.__hud.speech().voices.e7?.muted === true"), timeout=3)
     stop = {n: page.locator(_pane(n, '[data-testid="stop"]')) for n in range(1, 9)}
     mock.emit("turn_started", {}, thread_id="e7")
     until(lambda: _chat(page, 7)["busy"], timeout=3)
