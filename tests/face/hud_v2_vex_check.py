@@ -310,6 +310,7 @@ def _clean_output_checks(page, mock, check, until, fake):
 
 
 def _explicit_click_checks(page, mock, check, until, fake):
+    before = len(mock.calls)
     _reset(page, mock, until)
     check("setup: the view draws", _ready(page, until))
     btn = page.locator(_view(V, _tid("vex-download-btn")))
@@ -335,7 +336,7 @@ def _explicit_click_checks(page, mock, check, until, fake):
         page.keyboard.press(key)
     time.sleep(0.4)
     check("no key, no script click and no untrusted event downloads",
-          not mock_vex.state(mock)["downloads"] and not _posted(mock, "/projects/p3/vex/download"),
+          not mock_vex.state(mock)["downloads"] and not _posted_since(mock, before, "/projects/p3/vex/download"),
           str(mock_vex.state(mock)["downloads"]))
     # A name the daemon would refuse is refused here first.
     name = page.locator(_view(V, _tid("vex-name-input")))
