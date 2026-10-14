@@ -207,13 +207,13 @@ class OwnerAuth:
         session.retiring.add_done_callback(done)
 
     async def _send(self, session, method, params, *, current=None):
-        async def dispatch():
+        async def send_once():
             if current is not None and not current():
                 return False
             await session.cdp.send(method, params)
             return True
         try:
-            return await asyncio.wait_for(dispatch(), 2.0)
+            return await asyncio.wait_for(send_once(), 2.0)
         except Exception:
             return False
 
