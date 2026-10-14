@@ -8,9 +8,10 @@ merging or deploying. It is not a new authorization to expand product scope.
 
 At the initial checkpoint the current Codex team reserved four packages:
 `B-UI`, `B-DR`, `B-SOUND` and `B-CLASSIFIER`. **All four are now INSTALLED.**
-The next Browser batch is **TAKEN by the Codex lead**: `B-NATIVE`, `B-AUTH` and
-`B-FIND`. Other unclaimed packages remain available. A saved draft alone is not
-an active claim.
+In the next Browser batch, `B-AUTH` and `B-FIND` are **MERGED, not yet installed**;
+`B-NATIVE` remains **TAKEN by the Codex lead**. The urgent `VEX-DOWNLOAD` fix is
+also TAKEN. Other unclaimed packages remain available. A saved draft alone is
+not an active claim.
 
 **Voice packages owned by the Claude team (2026-10-13):** all of V0–V15. `V0`, `V3`, `V7` merged; `V2`, `V6` installed; the rest TAKEN.
 Slot1 is reserved for that team under the shared limit below.
@@ -122,11 +123,21 @@ current main and deliberately ports reviewed draft work.
   `browser-find-v2`: top-document find, owner context menu and finite cursors.
   Native picker fallbacks and real Windows IME acceptance are not included.
 
-Current validation snapshot: the isolated combined worktree includes main `5fb1f7e`
-and all three Browser implementations. Its build and **2,179 HUD unit tests in
-139 files passed**. The full HUD and backend release sweeps are still pending;
-these PRs are drafts and none of this batch is installed. Original failed fixture
-receipts are preserved alongside reviewed corrections.
+Current validation snapshot: the isolated combined worktree passed its build,
+**2,179 HUD unit tests in 139 files** and **3,222 full HUD checks**. The initial
+137-suite backend sweep passed 134; two fixture failures and one Find navigation
+interaction were corrected. All 14 affected suites then passed on combined head
+`ac8bdedec0c824971d763f26a2f879f2055cbbfb`, with unchanged source manifests and an
+inactive, empty memory-limited test scope. Original failures remain preserved.
+Independent source reviews passed. Auth #150 merged at `3b1205ae`; Find #151
+merged at `dd210803`. Neither is installed yet; Native #149 remains a draft with
+actual native lifecycle/child and real-HUD capability gates outstanding.
+
+GitGuardian's advisory failures on Auth/Find were independently adjudicated as
+three historical synthetic authentication fixtures. Dummy values were clarified
+without changing test inputs. The check remains recorded as failed; no scanner
+suppression, history rewrite or admin bypass was used. See #150 for exact paths
+and introducing commits.
 
 B-NATIVE can progress alongside B-AUTH. B-FIND develops isolated helpers/UI in
 parallel, then integrates B-AUTH's accepted navigation/attention/socket changes
@@ -139,7 +150,8 @@ Voice V3/V7/V8 and their App/capture/speech work remain with the Claude team;
 this batch does not claim voice work or native subagent visibility.
 
 **Test slots:** slot 1 remains reserved for the Claude voice team. Codex reserves
-slot 2 for B-NATIVE and slot 3 shared sequentially by B-AUTH/B-FIND. A reservation
+slot 2 for B-NATIVE and slot 3 for the urgent VEX-DOWNLOAD fix (the Auth/Find
+correction run is complete). A reservation
 is not a running job: the lead grants each heavy run after a memory check.
 At most three heavy test/build jobs globally, each capped at 3 GiB and no swap;
 start only with at least 4 GiB available. Native/provider probes need a concrete
@@ -151,8 +163,8 @@ acceptance remains separately identified, never inferred from synthetic tests.
 | ID | Feature | Status / owner | Dependencies / definition of done |
 |---|---|---|---|
 | B-NATIVE (BR-9d, BD-a/b/c) | Claude and Codex parent chats drive through the same Browser gate | **TAKEN — Codex lead / `browser_native`; draft [#149](https://github.com/Johnwang688/jarvis/pull/149)** | `codex/browser-native-v2` / `browser-native-v2`. Source review and 248 focused backend checks passed; exact installed Codex parent identity/admission and real MCP call passed against an isolated scripted provider. Both installed CLIs survived a 115.000-second private-card wait and returned the exact result in the next scripted provider request. Actual native lifecycle/child checks and combined release gates remain pending. No paid model, real-account or installed-release claim. [Native plan](2026-10-13-browser-driving-claude-codex.md). |
-| B-AUTH (BR-7) | HTTP Basic/Digest owner challenge form over the existing authenticated tab socket | **TAKEN — Codex lead / `browser_auth`; draft [#150](https://github.com/Johnwang688/jarvis/pull/150)** | `codex/browser-auth-v2` / `browser-auth-v2`, reviewed head `3b1f76d`. First protected navigation, delayed reply/original expiry, Digest, stale socket/nonce, restore, privacy and cleanup passed focused tests; 62 auth/Sound checks, nine native cases and 14 actual HUD assertions passed; five guard mutants were killed. Same-origin iframe prompts measured; in the installed-Chrome probe the first protected popup prompted only after explicit Reload, and separate OOPIF prompt delivery was absent in the bounded probe. Protected Sound restoration remains fail-closed with Retry. Combined sweep, security-check resolution, guarded merge and deployment pending. |
-| B-FIND (BR-7) | Find-in-page, bounded owner context menu, finite cursor shapes | **TAKEN — Codex lead / `browser_find`; draft [#151](https://github.com/Johnwang688/jarvis/pull/151)** | `codex/browser-find-v2` / `browser-find-v2`, stacked on #150. Fixed top-document search, five owner menu actions, finite cursor feedback and exact document/socket/hold guards implemented and independently reviewed. Focused backend/HUD, real Chrome, five guard mutants and 22 actual owner HUD assertions passed; fixture reliability follow-up, security-check resolution and combined release sweep pending. Native layout preemption remains unproven. No native picker/IME expansion. |
+| B-AUTH (BR-7) | HTTP Basic/Digest owner challenge form over the existing authenticated tab socket | **MERGED — [#150](https://github.com/Johnwang688/jarvis/pull/150); Codex lead / `browser_auth`; deployment pending** | Exact reviewed head `70460c2` merged at `3b1205ae`. First protected navigation, delayed reply/original expiry, Digest, stale identity, restore, privacy and cleanup passed focused checks; 62 auth/Sound checks, nine native cases, 14 actual HUD assertions and five guard mutants passed. Combined release correction gates passed as described above. Same-origin iframe prompts measured; first protected popup required explicit Reload, and separate OOPIF prompt delivery was absent in the bounded probe. Protected Sound restoration remains fail-closed with Retry. No real-account acceptance claim. |
+| B-FIND (BR-7) | Find-in-page, bounded owner context menu, finite cursor shapes | **MERGED — [#151](https://github.com/Johnwang688/jarvis/pull/151); Codex lead / `browser_find`; deployment pending** | Exact reviewed head `5e638ea` merged at `dd210803` after #150. Fixed top-document search, five owner menu actions, finite cursors and exact document/socket/hold guards passed independent review. Final focused evidence: 70 backend checks, 19 real driving cases, real Chrome owner tools, 22 actual owner HUD assertions and seven intended guard mutants; all 14 combined correction suites passed. Navigation discards stale document input without adding an approval hold. Native layout preemption remains unproven; native picker/IME expansion excluded. |
 | B-PICKERS (BR-7/M9) | Owner select/date/color fallback; assess datalist separately | **VERIFY — unclaimed** | Chrome 155 select/date/color popups were absent from screencast; datalist opening was not proven. Refine and review exact-element fallback design before implementation. Preserve input/change revalidation, bounds, focus, native-control privacy and stale-element refusal. Shared host/RemoteView integration waits for active Browser packages. |
 | B-IME (BR-7) | Finish real owner IME/composition acceptance | **VERIFY — unclaimed** | Composition transport exists in Remote UI; do not rebuild it blindly. Audit existing coverage, then validate real Windows composition and cancellation across holds/reconnects. Implement only demonstrated gaps. |
 | B-DIRECT-CAPTURE (BR-4/M6) | Direct iframe capture in installed app mode | **VERIFY — unclaimed** | Remote capture/annotation is installed. Direct currently offers explicit “Open in Remote” fallback. Requires actual Windows app-mode getDisplayMedia/CropTarget prompt and pixel evidence before enabling a Direct capture path. |
