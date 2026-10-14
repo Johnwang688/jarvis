@@ -687,17 +687,18 @@ Chrome-for-Testing fallback or Playwright in WSL.
 1. **"Over" collisions.** *Recommend:* keep "over" but require ≥ 500 ms of
    silence after it (and a short pause before it, once KWS exists). Make the
    list editable. It also sends in REVIEW.
-2. **Summary threshold.** *Recommend:* read up to 600 characters verbatim.
-   Beyond that, the first about 400 characters, then a ≤ 300-character
-   summary of the rest. The alternatives are summary-only or always
-   verbatim.
-3. **Continuation in AUTO.** *Recommend:* send at the 2.5 s pause and steer
-   continuations into the running turn. It is faster, and "over" covers an
-   instant send. The alternative is to wait out the 6 s window first.
-4. **Push-to-talk on a busy chat.** *Recommend:* it steers, as typing does,
-   and Stop interrupts.
-5. **Follow-up target.** *Recommend:* replying after a drawn pane spoke
-   selects that pane and sends there. Otherwise the selected chat (W-6).
+2. ~~Summary threshold.~~ **Answered (2026-10-13): summary only.** A
+   reply up to 600 characters is read verbatim. A longer one is replaced by
+   a short spoken summary (V8, Haiku 5.5 tier), with no verbatim lead-in. The
+   owner approved one paid V8 cost/latency probe, capped at $0.10.
+3. ~~Continuation in AUTO.~~ **Answered (2026-10-13):** as recommended. Send
+   at the 2.5 s pause; continuations steer the running turn. "Over" still
+   sends at once.
+4. ~~Push-to-talk on a busy chat.~~ **Answered (2026-10-13):** as
+   recommended. It steers, as typing does, and Stop interrupts.
+5. ~~Follow-up target.~~ **Answered (2026-10-13):** as recommended. A reply
+   right after a drawn pane spoke selects that pane and sends there;
+   otherwise the selected chat (W-6).
 6. **Local STT.** *Recommend:* make local Parakeet the default if V0 shows
    RTF < 0.3 and WER within 1 point of cloud, with cloud as a fallback you
    can switch off.
