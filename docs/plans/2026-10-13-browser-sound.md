@@ -1,6 +1,6 @@
 # Browser sound (BR-10)
 
-**Status:** implemented and independently reviewed in draft [PR #137](https://github.com/Johnwang688/jarvis/pull/137); lead merge/deployment pending, 2026-10-13.
+**Status (2026-10-13):** merged and installed in [PR #137](https://github.com/Johnwang688/jarvis/pull/137), merge `a857c1f19c8b0cdab393e90a7e039ea7ea81be4a`, HUD build `20261014T004949720546Z-7ff98f434711`. Normal capped guarded rebuild/restart exited with code 0; served exact build/source and three healthy providers were verified. Physical audio/echo remains unmeasured; V15 coordination is pending.
 
 It replaces amendment 1 §F's "how on works" where they differ. The switch's protected-state rule and the `browser_sound_check.py` outline (§H) carry forward. The earlier bounded M3 platform probe established headless WSLg routing and exact owned-stream mute/readback. Its original receipt has no Git head; physical audibility, echo and timing remain unmeasured. Route C is accepted; no Xvfb or leak-free Pulse subscription claim is made.
 
