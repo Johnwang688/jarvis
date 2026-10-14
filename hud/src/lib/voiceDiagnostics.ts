@@ -9,6 +9,8 @@ export type CapturePathName = "unknown" | "worklet" | "script_processor";
 /** V5: which detector judged the frames: Silero (ML, in a worker) or the energy fallback. */
 export type DetectorKind = "energy" | "silero";
 export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
+/** V14: the noise-suppression switch and the state of the RNNoise stage behind it. */
+export type NoisePhase = "off" | "waiting" | "loading" | "ready" | "failed";
 export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
@@ -37,7 +39,8 @@ export class VoiceDiagnostics {
   private listeners = new Set<() => void>();
   private rows: readonly VoiceDiagnostic[] = [];
   private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "",
-    detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0 };
+    detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0,
+    noiseWanted: false, noiseState: "off" as NoisePhase, noiseNote: "off", noiseMs: 0 };
   constructor(private now: () => number = () => performance.now()) {}
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   snapshot = () => this.value;
@@ -59,6 +62,17 @@ export class VoiceDiagnostics {
       detectorPhase: ["idle", "loading", "ready", "failed"].includes(phase) ? phase : "idle",
       detectorNote: String(note).slice(0, 200),
       detectorMs: bounded(frameMs * 100, 1_000_000) / 100,
+    };
+    this.publish();
+  }
+  /** The Noise suppression switch and its stage (V14). A sentence from a closed set, never engine text. */
+  noise(wanted: boolean, phase: NoisePhase, note = "", frameMs = 0) {
+    this.value = {
+      ...this.value,
+      noiseWanted: !!wanted,
+      noiseState: ["off", "waiting", "loading", "ready", "failed"].includes(phase) ? phase : "off",
+      noiseNote: String(note).slice(0, 200),
+      noiseMs: bounded(frameMs * 100, 1_000_000) / 100,
     };
     this.publish();
   }

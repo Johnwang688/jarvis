@@ -22,12 +22,18 @@
 // (`active() === false`) nothing is posted to the worker at all, and its state
 // is reset when listening resumes.
 //
-// **Seam for RNNoise (V14).** `denoise` runs on the copy the worker scores, never
-// on the frame the Capture records: speech-to-text takes the echo-cancelled
-// stream, not a denoised one (V0 section 2). A noise-suppression stage plugs in
-// there, in front of the VAD.
+// **Noise suppression (V14).** Off by default, a Settings → Voice switch. The
+// seam is "the copy the worker scores, never the frame the Capture records":
+// speech-to-text takes the echo-cancelled stream, not a denoised one (V0 section
+// 2), and `deliver` below always gets the raw frame. RNNoise itself runs in the
+// same worker (denoise.ts: `setNoiseSuppression` posts `denoise on|off`), because
+// 48 kHz WebAssembly does not belong on the window's thread. The worker loads it
+// only on `on`, and a failure there (fetch, checksum, runtime, too slow) turns it
+// off while Silero keeps scoring, raw; `status().noise` names the state and the
+// reason. The synchronous `denoise` option below remains for callers that hold a
+// main-thread filter of their own; the HUD uses the worker's.
 
-import { FAIL_TEXT, type FailCode, type FromWorker, type ToWorker } from "./protocol";
+import { DENOISE_FAIL_TEXT, FAIL_TEXT, type DenoiseFailCode, type FailCode, type FromWorker, type ToWorker } from "./protocol";
 
 export const MAX_PENDING = 16; // frames of audio waiting on the worker: 16 x 32 ms
 export const FRAME_DEADLINE_MS = 500; // the oldest unanswered frame may wait this long
@@ -44,6 +50,22 @@ export interface WorkerLike {
 export type DetectorName = "silero" | "energy";
 export type DetectorState = "idle" | "loading" | "ready" | "failed";
 
+export type NoiseState = "off" | "waiting" | "loading" | "ready" | "failed";
+
+export interface NoiseStatus {
+  /** The switch: whether the owner wants noise suppression. */
+  wanted: boolean;
+  /** off: not wanted. waiting: wanted, but the Silero worker is not running. loading, ready, failed: the RNNoise stage. */
+  state: NoiseState;
+  code: DenoiseFailCode | null;
+  /** One sentence for Settings → Voice, from a closed set. */
+  note: string;
+  /** Mean time suppression took per frame (ms), 0 until it has run. */
+  frameMs: number;
+  /** How long loading it took (fetch, checksum, compile, warm-up), 0 until ready. */
+  loadMs: number;
+}
+
 export interface DetectorStatus {
   /** The detector judging frames right now. */
   detector: DetectorName;
@@ -58,6 +80,8 @@ export interface DetectorStatus {
   scored: number;
   /** How long the worker took to become ready (fetch, checksum, compile, warm-up), 0 until it has. */
   loadMs: number;
+  /** Noise suppression in front of the VAD (V14). */
+  noise: NoiseStatus;
 }
 
 export interface StageOptions {
@@ -69,6 +93,8 @@ export interface StageOptions {
   active?: () => boolean;
   /** A noise-suppression stage in front of the VAD: given a frame, the one the VAD scores. */
   denoise?: (frame: Float32Array) => Float32Array;
+  /** The initial position of the Noise suppression switch (default off). */
+  noiseSuppression?: boolean;
   onStatus?: (status: DetectorStatus) => void;
 }
 
@@ -96,8 +122,17 @@ export class VadStage {
   private totalMs = 0;
   private loadMs = 0;
   private lastStatus = "";
+  private wantNoise = false;
+  private noiseState: NoiseState = "off";
+  private noiseCode: DenoiseFailCode | null = null;
+  private noiseScored = 0;
+  private noiseMs = 0;
+  private noiseLoadMs = 0;
 
-  constructor(private o: StageOptions) {}
+  constructor(private o: StageOptions) {
+    this.wantNoise = !!o.noiseSuppression;
+    this.noiseState = this.wantNoise ? "waiting" : "off";
+  }
 
   private now() {
     return (this.o.now ?? (() => performance.now()))();
@@ -116,12 +151,57 @@ export class VadStage {
       frameMs: this.scored ? this.totalMs / this.scored : 0,
       scored: this.scored,
       loadMs: silero ? this.loadMs : 0,
+      noise: this.noiseStatus(),
     };
+  }
+
+  private noiseStatus(): NoiseStatus {
+    const st = this.noiseState;
+    return {
+      wanted: this.wantNoise,
+      state: st,
+      code: st === "failed" ? this.noiseCode : null,
+      note: st === "ready" ? "RNNoise, running in the VAD worker; the detector hears the denoised signal, the recording stays as captured"
+        : st === "loading" ? "loading the noise-suppression model (the detector listens to the raw signal meanwhile)"
+        : st === "waiting" ? "waiting for the Silero VAD; the energy detector hears the raw signal"
+        : st === "failed" && this.noiseCode ? DENOISE_FAIL_TEXT[this.noiseCode]
+        : "off",
+      frameMs: this.noiseScored ? this.noiseMs / this.noiseScored : 0,
+      loadMs: st === "ready" ? this.noiseLoadMs : 0,
+    };
+  }
+
+  /** The Noise suppression switch. Safe at any time, before the worker exists included. */
+  setNoiseSuppression(on: boolean) {
+    on = !!on;
+    if (on === this.wantNoise) return;
+    this.wantNoise = on;
+    this.noiseCode = null;
+    this.noiseScored = 0; this.noiseMs = 0; this.noiseLoadMs = 0;
+    if (!on) {
+      this.noiseState = "off";
+      this.post({ type: "denoise", on: false });
+    } else if (this.worker && (this.state === "loading" || this.state === "ready")) {
+      this.noiseState = "loading";
+      this.post({ type: "denoise", on: true });
+    } else {
+      this.noiseState = "waiting";
+    }
+    this.publish();
+  }
+
+  /** Try noise suppression again after it failed (the switch stays on). */
+  retryNoise() {
+    if (!this.wantNoise || this.noiseState !== "failed" || !this.worker) return;
+    this.noiseCode = null;
+    this.noiseState = "loading";
+    this.post({ type: "denoise", on: true });
+    this.publish();
   }
 
   private publish() {
     const s = this.status();
-    const key = `${s.detector}|${s.state}|${s.code}|${s.note}`;
+    const key = `${s.detector}|${s.state}|${s.code}|${s.note}|${s.noise.wanted}|${s.noise.state}|${s.noise.code}`;
     if (key === this.lastStatus) return;
     this.lastStatus = key;
     try { this.o.onStatus?.(s); } catch { /* an observer cannot change detection */ }
@@ -144,6 +224,8 @@ export class VadStage {
     w.onerror = () => this.fail("worker");
     w.onmessageerror = () => this.fail("worker");
     try { w.postMessage({ type: "init" }); } catch { this.fail("worker"); return; }
+    this.noiseScored = 0; this.noiseMs = 0; this.noiseLoadMs = 0;
+    if (this.wantNoise) { this.noiseState = "loading"; this.noiseCode = null; this.post({ type: "denoise", on: true }); }
     this.publish();
   }
 
@@ -168,6 +250,9 @@ export class VadStage {
     if (!w) return;
     w.onmessage = null; w.onerror = null; w.onmessageerror = null;
     try { w.terminate(); } catch { /* already gone */ }
+    // The RNNoise instance lived in that worker: wanted, but nothing is running it now.
+    this.noiseState = this.wantNoise ? "waiting" : "off";
+    this.noiseCode = null;
   }
 
   private fail(code: FailCode) {
@@ -200,6 +285,8 @@ export class VadStage {
       }
     } else if (m.type === "failed") {
       this.fail(m.code in FAIL_TEXT ? m.code : "runtime");
+    } else if (m.type === "denoise") {
+      this.onNoise(m);
     } else if (m.type === "prob") {
       const h = this.pending.get(m.seq);
       if (!h) return;
@@ -209,12 +296,30 @@ export class VadStage {
       if (h.p !== null) {
         this.scored++;
         this.totalMs += Number.isFinite(m.ms) ? m.ms : 0;
+        if (this.noiseState === "ready" && typeof m.dms === "number" && Number.isFinite(m.dms) && m.dms > 0) {
+          this.noiseScored++;
+          this.noiseMs += m.dms;
+        }
       }
       const late = this.now() - h.sentAt > FRAME_DEADLINE_MS;
       this.drain();
       if (late) this.fail("late");
       else if (this.scored === 1) this.publish();
     }
+  }
+
+  private onNoise(m: Extract<FromWorker, { type: "denoise" }>) {
+    if (m.state === "off") { if (!this.wantNoise) { this.noiseState = "off"; this.publish(); } return; }
+    if (!this.wantNoise) return; // a late report from before the switch went off
+    if (m.state === "loading") this.noiseState = "loading";
+    else if (m.state === "ready") {
+      this.noiseState = "ready";
+      this.noiseLoadMs = Number.isFinite(m.loadMs) ? Math.max(0, m.loadMs) : 0;
+    } else if (m.state === "failed") {
+      this.noiseState = "failed";
+      this.noiseCode = m.code in DENOISE_FAIL_TEXT ? m.code : "runtime";
+    }
+    this.publish();
   }
 
   /** One mic frame. Ownership stays with the caller until `deliver` hands it on. */

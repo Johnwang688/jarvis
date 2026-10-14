@@ -90,6 +90,8 @@ import { SttRetry } from "./components/SttRetry";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReason } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
+import { NoiseSuppressionSetting } from "./components/NoiseSuppression";
+import { loadNoiseSuppression, saveNoiseSuppression } from "./lib/listen/pref";
 import { VadStage } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
@@ -2849,9 +2851,16 @@ export default function App() {
   const vadStage = useMemo(() => new VadStage({
     deliver: (frame, p) => capture.onFrame(frame, p),
     active: () => !isMuted(live.current.dictation),
-    onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
+    // V14: off unless the owner switched it on (this window's setting); nothing loads until then.
+    noiseSuppression: loadNoiseSuppression(),
+    onStatus: (s) => {
+      voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs);
+      voiceDiagnostics.noise(s.noise.wanted, s.noise.state, s.noise.note, s.noise.frameMs);
+    },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [capture, voiceDiagnostics]);
+  const [noiseOn, setNoiseOn] = useState(() => loadNoiseSuppression());
+  useEffect(() => { vadStage.setNoiseSuppression(noiseOn); }, [vadStage, noiseOn]);
   const [endPause, setEndPause] = useState(() => loadEndPause());
   useEffect(() => { capture.setEndPause(endPause); }, [capture, endPause]);
 
@@ -2978,6 +2987,9 @@ export default function App() {
         // The ML VAD stage (V5): what it is, and (for tests) a way to start it again.
         detector: () => vadStage.status(),
         retryDetector: () => vadStage.retry(),
+        // V14: noise suppression's state (wanted, off|waiting|loading|ready|failed, code, ms per frame), and a retry.
+        noise: () => vadStage.status().noise,
+        retryNoise: () => vadStage.retryNoise(),
         endPause: () => capture.endPauseMs,
         state: () => ({
           open: capture.vad.open,
@@ -4085,7 +4097,7 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><NoiseSuppressionSetting on={noiseOn} diagnostics={voiceDiagnostics} onChange={(on) => { saveNoiseSuppression(on); setNoiseOn(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} onRetryNoise={() => vadStage.retryNoise()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

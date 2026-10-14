@@ -1,0 +1,21 @@
+{
+  "model": {
+    "file": "rnnoise_0.2.wasm",
+    "what": "RNNoise 0.2 (Xiph.Org / Jean-Marc Valin / Mozilla / Amazon), the denoiser compiled to WebAssembly with its trained weights built in, from Jitsi's @jitsi/rnnoise-wasm 0.2.1",
+    "bytes": 1440118,
+    "sha256": "4f513a50613de74378331237886138eab52fa2650e8b1a41eb587d932d9b8850",
+    "derived_from": {
+      "package": "@jitsi/rnnoise-wasm 0.2.1 (Apache-2.0; RNNoise inside is BSD-3-Clause)",
+      "tarball": "https://registry.npmjs.org/@jitsi/rnnoise-wasm/-/rnnoise-wasm-0.2.1.tgz",
+      "tarball_sha256": "c80b015b69701699868086a30015e5e680bee41a68df4c8ad2daed8b1bbc1173",
+      "npm_integrity": "sha512-iEj77www43pS2Yq+cfLZb+hFuI7L5ccisBzzPMcOjjLsG4/LAlkD1CY58/8gc84nHdLBGmD/OPIWGnvYnXvB0A==",
+      "file_in_tarball": "package/dist/rnnoise-sync.js",
+      "file_sha256": "05a553f523d59502d133a6d05dbf1878137c9e7bcff06edf5561f7001b62f95f",
+      "how": "the WebAssembly binary is the base64 data URI inside that file, decoded unchanged (extract_wasm.py); none of the Emscripten glue is used",
+      "pinned_by": "tests/voice_v0/models.json (npm-jitsi-rnnoise-wasm-0.2.1) names the same tarball"
+    },
+    "licences": ["LICENSE-rnnoise-BSD-3-Clause.txt", "LICENSE-jitsi-rnnoise-wasm-Apache-2.0.txt"],
+    "interface": "imports a.a (resize heap) and a.b (memcpy); exports c memory, d ctors, e malloc, f free, g rnnoise_init, h rnnoise_create, i rnnoise_destroy, j rnnoise_process_frame",
+    "checked": "lib/listen/pins.ts carries the same digest and length; the worker compares the fetched bytes with both before compiling them"
+  }
+}
