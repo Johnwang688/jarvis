@@ -365,6 +365,9 @@ def main(argv: list[str]) -> int:
             srv.shutdown()
     if "kws" in only:
         res["kws_sherpa_wasm_under_node"] = kws_under_node(d)
+    import shutil
+
+    shutil.rmtree(d, ignore_errors=True)   # the audio temp dir is large and regenerated every run
     common.emit("browser_cpu" if only - {"vadquality"} else "browser_vadquality", res)
     return 0
 
