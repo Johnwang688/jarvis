@@ -1406,6 +1406,44 @@ def say(handler, body):
                   headers={"X-Speech-Ms": elapsed})
 
 
+def stt_settings_route(handler, daemon, query):
+    """`/stt/settings` (voice rework V13): the owner's speech-to-text switches.
+
+        GET  -> {backend, cloud_fallback, error, local: {installed, reason, loaded, threads, ...}}
+        POST {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool}  (at least one)
+
+    Owner-only, the HUD listener (like the other voice stores): an agent or a
+    page must not be able to point the owner's audio at the network. A read never
+    loads the model.
+    """
+    from jarvis import stt_local, stt_settings
+    from .daemon import _object
+    from .projects import owner_only
+
+    owner_only(handler, daemon)
+    _object(query, ())
+
+    def view():
+        return {**stt_settings.load(), "backends": list(stt_settings.BACKENDS), "local": stt_local.status()}
+
+    if handler.command == "GET":
+        return 200, view()
+    if handler.command != "POST":
+        return None
+    body = _object(handler._body(), ("backend", "cloud_fallback"))
+    if not body:
+        fail(400, "expected backend and/or cloud_fallback")
+    if "backend" in body and body["backend"] not in stt_settings.BACKENDS:
+        fail(400, f"backend must be one of {', '.join(stt_settings.BACKENDS)}")
+    if "cloud_fallback" in body and not isinstance(body["cloud_fallback"], bool):
+        fail(400, "cloud_fallback must be a boolean")
+    try:
+        stt_settings.update(**body)
+    except OSError as exc:
+        fail(500, f"the setting could not be saved ({type(exc).__name__})")
+    return 200, view()
+
+
 def pickers(handler, daemon, parts, query):
     from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
@@ -1454,9 +1492,15 @@ def pickers(handler, daemon, parts, query):
             fail(400, "audio is empty")
         try:
             # Dictation is bounded tighter than the library default (V-11).
-            text = voice.stt(data, mime=mime, timeout=config.STT_DICTATION_TIMEOUT_S,
-                             max_retries=config.STT_DICTATION_ATTEMPTS, budget=budget)
-            return 200, {"text": text, **ids}
+            # The HUD is the caller that opts in to the local engine (V13); the
+            # reply says which backend served the clip, for the diagnostics.
+            got = voice.stt_result(data, mime=mime, timeout=config.STT_DICTATION_TIMEOUT_S,
+                                   max_retries=config.STT_DICTATION_ATTEMPTS, budget=budget,
+                                   prefer_local=True)
+            served = {"backend": got.backend, "model": got.model}
+            if got.fallback:
+                served["fallback"] = got.fallback
+            return 200, {"text": got.text, **served, **ids}
         except llm.LLMError as exc:
             # A provider outage is a sentence for the HUD, not a traceback in
             # the daemon log. STTUnavailable's message is model ids and HTTP
@@ -1464,7 +1508,8 @@ def pickers(handler, daemon, parts, query):
             # it is named by type.
             message = str(exc) if isinstance(exc, voice.STTUnavailable) else (
                 f"speech-to-text failed ({type(exc).__name__})")
-            fail(502, message)     # logged as one warning line by _dispatch
+            # The owner's own switch forbade the only path left: a retry cannot fix it.
+            fail(409 if isinstance(exc, voice.STTBlocked) else 502, message)  # logged as one warning line by _dispatch
     body = handler._body()
     # The keys each control reads, and nothing else. A body carrying some
     # other key used to be read as "the key is absent", which for /model
@@ -1662,6 +1707,8 @@ def route(handler, daemon, parts, query):
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts in ([""], ["manifest.webmanifest"]) or parts[0] in ("assets", "icons")):
         return hud_files(handler, parts)
+    if parts == ["stt", "settings"]:
+        return stt_settings_route(handler, daemon, query)
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
         return pickers(handler, daemon, parts, query)
     if parts[0] == "speech":

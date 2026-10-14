@@ -1,0 +1,482 @@
+"""Local speech-to-text (voice rework V13, plan 3.5, answered Q6).
+
+Parakeet-TDT-0.6B-v3, int8, through `sherpa-onnx`, inside the daemon: the same
+model class the cloud path uses (`nvidia/parakeet-tdt-0.6b-v3`), with no network
+in the path. Measured in V0 (docs/notes/voice-face.md): real-time factor 0.042
+at 2-4 threads, about 1.1 GB resident once loaded and 1.9 GB peak while loading,
+and MORE than 4 threads was 4-18x slower, so the thread count is pinned
+(`config.STT_LOCAL_THREADS`, default 2, clamped to 1..4).
+
+What this module guarantees:
+
+- **Optional.** `sherpa_onnx` is imported only when the model is first loaded;
+  the daemon runs without it, and `status()` says what is missing.
+- **Lazy, and not held forever.** Nothing loads at start. The first decode loads
+  the model; after `config.STT_LOCAL_IDLE_MIN` idle minutes a daemon timer drops
+  it (`Engine.reap`), because WSL memory is tight.
+- **One decode at a time.** Requests queue on one lock, each waiting no longer
+  than its own deadline. A caller that gives up marks its job cancelled, so a
+  job that never started never runs: abandoned requests cannot stack up.
+- **Bounded by the caller's deadline.** `transcribe(timeout=)` returns or raises
+  within it (plus thread scheduling). The decode itself cannot be interrupted;
+  an abandoned one finishes in the background (a clip is capped at
+  `MAX_CLIP_S`, so that is seconds) while holding the lock.
+- **Safe errors.** Every `LocalSTTError` message is a fixed short sentence: no
+  path, no audio, no library text.
+- **WAV only.** The HUD sends 16-bit PCM WAV. Anything else is
+  `LocalSTTUnavailable` (the caller decides whether the cloud may take it); no
+  media decoder is run on uploaded bytes.
+
+Deploy (the lead, once): install `sherpa-onnx` into the daemon's venv and run
+`python -m jarvis.stt_local fetch` (about 490 MB, SHA256-pinned).
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import io
+import os
+import shutil
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import wave
+from pathlib import Path
+
+from . import config
+
+MODEL_NAME = "parakeet-tdt-0.6b-v3 int8 (local)"
+#: A clip longer than this is not decoded locally (measured to 60 s in V0;
+#: attention memory grows with length). V4's chunking keeps clips under it.
+MAX_CLIP_S = 90.0
+#: A WAV this large is not ours (90 s of 48 kHz stereo 16-bit is about 17 MB).
+MAX_WAV_BYTES = 32 << 20
+FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
+#: After a failed load, do not try again for this long (a broken file is not fixed by retrying).
+LOAD_RETRY_S = 60.0
+
+# The pinned download. tests/voice_stt_local_check.py asserts these equal V0's
+# tests/voice_v0/models.json entry, so the two cannot drift.
+MODEL_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+             "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2")
+MODEL_SHA256 = "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf"
+_MAX_UNPACKED = 3 << 30
+_MAX_MEMBERS = 5000
+
+
+class LocalSTTError(Exception):
+    """A local decode did not produce text. The message is short and safe to show."""
+
+
+class LocalSTTUnavailable(LocalSTTError):
+    """Not installed, not loadable, or this clip is not something it takes."""
+
+
+class LocalSTTTimeout(LocalSTTError):
+    """The caller's deadline passed (waiting for the engine, loading, or decoding)."""
+
+
+class LocalSTTFailed(LocalSTTError):
+    """The decode itself failed."""
+
+
+# ---- what is installed -------------------------------------------------------
+
+def dependency_present() -> bool:
+    try:
+        return importlib.util.find_spec("sherpa_onnx") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def model_dir() -> Path:
+    return Path(config.STT_LOCAL_MODEL_DIR).expanduser()
+
+
+def model_present(directory: Path | None = None) -> bool:
+    d = directory or model_dir()
+    try:
+        return all((d / name).is_file() for name in FILES)
+    except OSError:
+        return False
+
+
+def installed() -> tuple[bool, str]:
+    """(usable, reason when not). Cheap: no import of the library, no model read."""
+    if not dependency_present():
+        return False, "the sherpa-onnx package is not installed"
+    if not model_present():
+        return False, "the speech model is not downloaded"
+    return True, ""
+
+
+# ---- audio -------------------------------------------------------------------
+
+def wav_samples(audio: bytes, mime: str = "audio/wav"):
+    """(float32 mono samples, sample rate) from a PCM WAV; LocalSTTUnavailable otherwise."""
+    import numpy as np
+
+    kind = (mime or "").split(";", 1)[0].strip().lower()
+    if kind not in ("audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave") or audio[:4] != b"RIFF":
+        raise LocalSTTUnavailable("local speech-to-text takes WAV audio only")
+    if len(audio) > MAX_WAV_BYTES:
+        raise LocalSTTUnavailable("clip too large for local speech-to-text")
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as w:
+            channels, width, rate, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+            if width != 2 or channels < 1 or rate < 8000 or rate > 192000:
+                raise LocalSTTUnavailable("local speech-to-text takes 16-bit PCM WAV")
+            if frames / rate > MAX_CLIP_S:
+                raise LocalSTTUnavailable("clip too long for local speech-to-text")
+            raw = w.readframes(frames)
+    except LocalSTTUnavailable:
+        raise
+    except (wave.Error, EOFError, OSError):
+        raise LocalSTTUnavailable("local speech-to-text takes 16-bit PCM WAV") from None
+    pcm = np.frombuffer(raw[: len(raw) - len(raw) % (2 * channels)], dtype="<i2")
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    return (pcm.astype(np.float32) / 32768.0), rate
+
+
+# ---- the recognizer ----------------------------------------------------------
+
+class _Sherpa:
+    """The real backend. `decode(samples, rate) -> text`; sherpa resamples to 16 kHz itself."""
+
+    def __init__(self, directory: Path, threads: int):
+        import sherpa_onnx
+
+        self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=str(directory / FILES[0]), decoder=str(directory / FILES[1]),
+            joiner=str(directory / FILES[2]), tokens=str(directory / FILES[3]),
+            num_threads=threads, model_type="nemo_transducer", decoding_method="greedy_search",
+        )
+
+    def decode(self, samples, rate: int) -> str:
+        stream = self.recognizer.create_stream()
+        stream.accept_waveform(rate, samples)
+        self.recognizer.decode_stream(stream)
+        return stream.result.text
+
+    def close(self) -> None:
+        self.recognizer = None
+
+
+def _default_factory(threads: int):
+    ok, why = installed()
+    if not ok:
+        raise LocalSTTUnavailable(f"local speech-to-text is not set up: {why}")
+    return _Sherpa(model_dir(), threads)
+
+
+class _Job:
+    __slots__ = ("samples", "rate", "deadline", "done", "text", "error", "cancelled")
+
+    def __init__(self, samples, rate, deadline):
+        self.samples, self.rate, self.deadline = samples, rate, deadline
+        self.done = threading.Event()
+        self.text = ""
+        self.error: Exception | None = None
+        self.cancelled = False
+
+
+class Engine:
+    """One lazily loaded recognizer, one decode at a time, unloaded when idle.
+
+    `factory(threads)` builds a backend with `decode(samples, rate) -> str` (and
+    optionally `close()`); tests pass a fake. `clock` is a monotonic clock in
+    seconds. `schedule=False` leaves the idle timer off so a test calls
+    `reap()` itself.
+    """
+
+    def __init__(self, factory=None, *, threads: int | None = None, idle_s: float | None = None,
+                 clock=time.monotonic, schedule: bool = True):
+        self._factory = factory or _default_factory
+        self._threads = threads if threads is not None else config.STT_LOCAL_THREADS
+        self._idle_s = idle_s if idle_s is not None else config.STT_LOCAL_IDLE_MIN * 60
+        self._clock = clock
+        self._schedule = schedule
+        self._lock = threading.Lock()          # one decode (or load, or unload) at a time
+        self._state = threading.Lock()         # guards the fields below
+        self._backend = None
+        self._last_used = 0.0
+        self._timer: threading.Timer | None = None
+        self._load_failed_at: float | None = None
+        self._waiting = 0
+        self.loads = 0
+        self.decodes = 0
+
+    # -- state --------------------------------------------------------------
+    @property
+    def loaded(self) -> bool:
+        with self._state:
+            return self._backend is not None
+
+    @property
+    def waiting(self) -> int:
+        with self._state:
+            return self._waiting
+
+    @property
+    def threads(self) -> int:
+        return self._threads
+
+    @property
+    def idle_s(self) -> float:
+        return self._idle_s
+
+    # -- the one entry point --------------------------------------------------
+    def transcribe(self, audio: bytes, mime: str = "audio/wav", *, timeout: float) -> str:
+        """Text for one WAV clip, within `timeout` seconds; a LocalSTTError otherwise."""
+        samples, rate = wav_samples(audio, mime)
+        if len(samples) == 0:
+            return ""
+        job = _Job(samples, rate, self._clock() + max(0.0, timeout))
+        with self._state:
+            self._waiting += 1
+        threading.Thread(target=self._run, args=(job,), name="stt-local", daemon=True).start()
+        if not job.done.wait(max(0.0, timeout)):
+            job.cancelled = True
+            raise LocalSTTTimeout("local speech-to-text ran out of time")
+        if job.error is not None:
+            raise job.error
+        return job.text
+
+    def _run(self, job: _Job) -> None:
+        try:
+            left = job.deadline - self._clock()
+            if job.cancelled or left <= 0 or not self._lock.acquire(timeout=left):
+                job.error = LocalSTTTimeout("local speech-to-text ran out of time")
+                return
+            try:
+                if job.cancelled:
+                    return                      # the caller left while we queued: do not decode
+                backend = self._load()
+                if job.cancelled:
+                    return
+                job.text = (backend.decode(job.samples, job.rate) or "").strip()
+                with self._state:
+                    self.decodes += 1
+            finally:
+                with self._state:
+                    self._last_used = self._clock()
+                self._lock.release()
+                if self.loaded:
+                    self._arm()
+        except LocalSTTError as exc:
+            job.error = exc
+        except Exception as exc:  # noqa: BLE001 - library text never reaches a caller
+            job.error = LocalSTTFailed(f"local decode failed ({type(exc).__name__})")
+        finally:
+            with self._state:
+                self._waiting -= 1
+            job.done.set()
+
+    def _load(self):
+        with self._state:
+            backend = self._backend
+            failed_at = self._load_failed_at
+        if backend is not None:
+            return backend
+        if failed_at is not None and self._clock() - failed_at < LOAD_RETRY_S:
+            raise LocalSTTUnavailable("local speech-to-text failed to load")
+        try:
+            backend = self._factory(self._threads)
+        except LocalSTTError:
+            with self._state:
+                self._load_failed_at = self._clock()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            with self._state:
+                self._load_failed_at = self._clock()
+            raise LocalSTTUnavailable(f"local speech-to-text failed to load ({type(exc).__name__})") from None
+        with self._state:
+            self._backend, self._load_failed_at = backend, None
+            self.loads += 1
+        return backend
+
+    # -- idle unload ------------------------------------------------------------
+    def _arm(self) -> None:
+        if not self._schedule:
+            return
+        with self._state:
+            if self._timer is not None:
+                self._timer.cancel()
+            timer = threading.Timer(self._idle_s, self.reap)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def reap(self) -> bool:
+        """Unload when idle for `idle_s` and no decode is running; re-arm otherwise. True if unloaded."""
+        if not self._lock.acquire(blocking=False):
+            self._arm()                          # busy: look again later
+            return False
+        try:
+            with self._state:
+                idle = self._clock() - self._last_used
+                if self._backend is None:
+                    return False
+                if idle < self._idle_s:
+                    rearm = True
+                else:
+                    rearm = False
+                    backend, self._backend = self._backend, None
+            if rearm:
+                self._arm()
+                return False
+            self._close(backend)
+            return True
+        finally:
+            self._lock.release()
+
+    def unload(self) -> bool:
+        """Drop the model now (blocks behind a running decode). True if one was loaded."""
+        with self._lock:
+            with self._state:
+                backend, self._backend = self._backend, None
+                timer, self._timer = self._timer, None
+            if timer is not None:
+                timer.cancel()
+            if backend is None:
+                return False
+            self._close(backend)
+            return True
+
+    @staticmethod
+    def _close(backend) -> None:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
+        import gc
+
+        gc.collect()
+        try:        # hand freed pages back to the OS (best effort, glibc only)
+            import ctypes
+
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---- the daemon's engine -------------------------------------------------------
+
+_engine: Engine | None = None
+_engine_lock = threading.Lock()
+
+
+def engine() -> Engine:
+    global _engine
+    with _engine_lock:
+        if _engine is None:
+            _engine = Engine()
+        return _engine
+
+
+def set_engine(replacement: Engine | None) -> Engine | None:
+    """Swap the process engine (tests); returns the previous one."""
+    global _engine
+    with _engine_lock:
+        previous, _engine = _engine, replacement
+    return previous
+
+
+def available() -> bool:
+    """Whether a local decode can be attempted at all (dependency and model present).
+
+    A test engine installed with `set_engine` counts as available: the check is
+    about the process's engine, not the files.
+    """
+    with _engine_lock:
+        custom = _engine is not None and _engine._factory is not _default_factory
+    return True if custom else installed()[0]
+
+
+def status() -> dict:
+    """What Settings shows. Never loads the model."""
+    ok, why = installed()
+    with _engine_lock:
+        eng = _engine
+    return {
+        "installed": ok,
+        "reason": why,
+        "loaded": bool(eng and eng.loaded),
+        "threads": eng.threads if eng else config.STT_LOCAL_THREADS,
+        "idle_unload_min": round((eng.idle_s if eng else config.STT_LOCAL_IDLE_MIN * 60) / 60, 2),
+        "model": MODEL_NAME,
+        "fetch": "python -m jarvis.stt_local fetch",
+    }
+
+
+# ---- download (explicit, owner-run) --------------------------------------------
+
+def fetch(dest: Path | None = None, *, url: str = MODEL_URL, sha256: str = MODEL_SHA256) -> Path:
+    """Download, verify and unpack the pinned model into `dest` (default `model_dir()`).
+
+    The archive is hashed before anything is extracted, unpacked with tarfile's
+    `data` filter under member and size caps into a fresh directory, and only the
+    four model files are moved into place. Raises SystemExit with a sentence on
+    any failure; nothing is left half-written at `dest`.
+    """
+    import urllib.request
+
+    dest = Path(dest) if dest else model_dir()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=".stt-fetch-", dir=dest.parent))
+    try:
+        archive = work / "model.tar.bz2"
+        print(f"downloading {url} ...", file=sys.stderr)
+        req = urllib.request.Request(url, headers={"User-Agent": "jarvis-stt/1"})
+        with urllib.request.urlopen(req, timeout=120) as resp, archive.open("wb") as out:
+            shutil.copyfileobj(resp, out, 1 << 20)
+        digest = hashlib.sha256()
+        with archive.open("rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+        if digest.hexdigest() != sha256:
+            raise SystemExit(f"sha256 mismatch: got {digest.hexdigest()}, pinned {sha256}")
+        unpacked = work / "x"
+        unpacked.mkdir()
+        with tarfile.open(archive) as tar:
+            members = tar.getmembers()
+            if len(members) > _MAX_MEMBERS or sum(m.size for m in members) > _MAX_UNPACKED:
+                raise SystemExit("archive too large to unpack")
+            tar.extractall(unpacked, filter="data")
+        roots = [p for p in unpacked.iterdir()]
+        root = roots[0] if len(roots) == 1 and roots[0].is_dir() else unpacked
+        if not model_present(root):
+            raise SystemExit("the archive does not hold the expected model files")
+        staged = work / "model"
+        staged.mkdir()
+        for name in FILES:
+            shutil.move(str(root / name), str(staged / name))
+        (staged / ".verified").write_text(sha256 + "\n")
+        if dest.exists():
+            shutil.rmtree(dest)
+        os.replace(staged, dest)
+        return dest
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["fetch"]:
+        path = fetch()
+        print(f"ok: {path}")
+        return 0
+    if argv[:1] == ["status"]:
+        for key, value in status().items():
+            print(f"{key}: {value}")
+        return 0
+    print("usage: python -m jarvis.stt_local fetch | status", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

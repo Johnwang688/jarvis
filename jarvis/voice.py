@@ -17,8 +17,9 @@ import re
 import threading
 import time
 import wave
+from dataclasses import dataclass
 
-from . import avatars, config, llm
+from . import avatars, config, llm, stt_local, stt_settings
 
 _kokoro = None
 _kokoro_lock = threading.Lock()
@@ -419,12 +420,89 @@ def _fit_budget(left: float, models_left: int, max_attempts: int, cap: float | N
     return (min(per, cap) if cap else per), attempts
 
 
-def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
-        max_retries: int | None = None, budget: float | None = None) -> str:
-    """Transcribe spoken audio to text.
+@dataclass(frozen=True)
+class SttResult:
+    """One transcription and where it came from (shown in the HUD's diagnostics).
 
-    Tries `config.STT_MODEL`, then each of `config.STT_FALLBACK_MODELS`. A
-    model whose only provider is down answers `HTTP 404: Provider returned
+    `backend` is "local" or "cloud"; `model` names what answered; `fallback` is
+    the short, safe reason the local engine did NOT serve a clip that was meant
+    for it (None when local was not tried, or served it).
+    """
+    text: str
+    backend: str
+    model: str
+    fallback: str | None = None
+
+
+class STTBlocked(STTUnavailable):
+    """The owner's settings forbid the only path left (cloud switched off). Not a
+    fault a retry fixes, so the HUD route answers it with a 409, not a 502."""
+
+
+def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
+        max_retries: int | None = None, budget: float | None = None,
+        prefer_local: bool = False) -> str:
+    """Transcribe spoken audio to text; see `stt_result`. Returns the text only."""
+    return stt_result(audio, mime, timeout=timeout, max_retries=max_retries, budget=budget,
+                      prefer_local=prefer_local).text
+
+
+def stt_result(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
+               max_retries: int | None = None, budget: float | None = None,
+               prefer_local: bool = False) -> SttResult:
+    """Transcribe spoken audio, and say which backend did it.
+
+    The owner's switches (`stt_settings`) decide the path:
+
+    - A caller that does not pass `prefer_local` (Discord voice notes, the face
+      server) uses the cloud chain exactly as before, whatever `backend` says.
+      The HUD's dictation route opts in.
+    - With `prefer_local` and `backend` "local" or "auto", the local engine
+      (jarvis/stt_local.py) decodes first. If it fails or runs out of its share of
+      `budget`, the cloud chain answers with what is left, but only when
+      `cloud_fallback` is on; otherwise it raises `STTUnavailable` naming the
+      local failure, and nothing is uploaded.
+    - `cloud_fallback` off forbids EVERY upload, for every caller: the cloud
+      chain is never entered and `STTBlocked` is raised instead.
+    - "auto" with no local engine installed goes straight to the cloud.
+    """
+    if not audio:
+        raise ValueError("no audio")
+    cfg = stt_settings.load()
+    end = None if budget is None else _clock() + max(budget - STT_BUDGET_MARGIN_S, 1.0)
+    reason: str | None = None
+    tried_local = False
+    if prefer_local and cfg["backend"] in ("local", "auto"):
+        if cfg["backend"] == "auto" and not stt_local.available():
+            pass                                    # nothing to try: the cloud, without a complaint
+        else:
+            local_timeout = config.STT_LOCAL_TIMEOUT_S if end is None else max(end - _clock(), 0.5)
+            if end is not None and cfg["cloud_fallback"]:
+                local_timeout = max(local_timeout * config.STT_LOCAL_BUDGET_SHARE, 0.5)
+            tried_local = True
+            try:
+                text = stt_local.engine().transcribe(audio, mime, timeout=local_timeout)
+                return SttResult(text, "local", stt_local.MODEL_NAME)
+            except stt_local.LocalSTTError as exc:
+                reason = str(exc)
+    if not cfg["cloud_fallback"]:
+        if reason is not None:
+            raise STTUnavailable(f"{reason}; cloud fallback is off, so nothing was uploaded")
+        raise STTBlocked("cloud speech-to-text is switched off in Settings > Voice, "
+                         "and local speech-to-text is not selected here")
+    if reason is not None:
+        _warn_once(f"[voice] stt: local failed ({reason}); using the cloud")
+    # What the cloud chain may use: the caller's whole budget, less what local took.
+    left = budget if (end is None or not tried_local) else max(end - _clock() + STT_BUDGET_MARGIN_S, 1.0)
+    text, model = _cloud_stt(audio, mime, timeout=timeout, max_retries=max_retries, budget=left)
+    return SttResult(text, "cloud", model, reason)
+
+
+def _cloud_stt(audio: bytes, mime: str, *, timeout: float | None, max_retries: int | None,
+               budget: float | None) -> tuple[str, str]:
+    """The OpenRouter chain: `config.STT_MODEL`, then each fallback model. Returns (text, model).
+
+    A model whose only provider is down answers `HTTP 404: Provider returned
     404` (parakeet, 2026-10-08), so the fallback is a different provider, not
     a retry. Raises `STTUnavailable` naming each model and its status when
     none answers. `timeout` (seconds per attempt) and `max_retries` (attempts
@@ -434,8 +512,6 @@ def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
     with `timeout` and `max_retries` as ceilings. Without it the fixed limits
     apply, as for Discord voice notes and the face server.
     """
-    if not audio:
-        raise ValueError("no audio")
     ext = mime.rsplit("/", 1)[-1].split(";")[0] or "webm"
     models = [config.STT_MODEL] + [
         m for m in config.STT_FALLBACK_MODELS if m != config.STT_MODEL]
@@ -465,5 +541,5 @@ def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
         if failures:
             _warn_once(f"[voice] stt: {', '.join(failures)} failed; "
                        f"answered by {model}")
-        return text
+        return text, model
     raise STTUnavailable("speech-to-text unavailable: " + ", ".join(failures))

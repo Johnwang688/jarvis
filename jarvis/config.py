@@ -819,6 +819,45 @@ STT_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
 STT_DICTATION_TIMEOUT_S = 20.0
 STT_DICTATION_ATTEMPTS = 2
 
+# Local speech-to-text (voice rework V13, plan 3.5, answered Q6): Parakeet-TDT-0.6B-v3
+# int8 through sherpa-onnx, in the daemon (jarvis/stt_local.py). Measured in V0:
+# RTF 0.042 at 2-4 threads, about 1.1 GB resident (1.9 GB peak while loading), and
+# MORE than 4 threads was 4-18x slower, so the thread count is pinned (1..4).
+#
+# The backend the owner has not chosen yet. ONE LINE to flip: it becomes "local"
+# (or "auto") only after the paid cloud-vs-local WER comparison
+# (tests/stt_compare_probe.py) shows local within 1 point of cloud.
+STT_BACKEND_DEFAULT = "cloud"
+# Whether audio may be sent to the cloud at all (cloud backend, or fallback from
+# a failed/slow local decode). On by default so nothing changes until the owner
+# switches it off; off means NOTHING is uploaded and a local failure is an error.
+STT_CLOUD_FALLBACK_DEFAULT = True
+# The owner's choices (Settings -> Voice), beside speech.json. Protected state:
+# an agent that could write it could switch the owner's audio onto the network.
+STT_SETTINGS_PATH = Path(
+    os.environ.get("JARVIS_STT_SETTINGS", Path.home() / ".config" / "jarvis" / "stt.json")
+)
+STT_LOCAL_MODEL_NAME = "parakeet-tdt-0.6b-v3-int8"
+STT_LOCAL_MODEL_DIR = Path(os.environ.get(
+    "JARVIS_STT_LOCAL_MODEL", Path.home() / ".cache" / "jarvis-stt" / STT_LOCAL_MODEL_NAME))
+def _env_number(name: str, default: float, low: float, high: float) -> float:
+    """A bad value in the environment is the default, never an import error."""
+    try:
+        value = float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+    return max(low, min(high, value)) if value == value else default
+
+
+STT_LOCAL_THREADS = int(_env_number("JARVIS_STT_LOCAL_THREADS", 2, 1, 4))
+# Unload the model after this many idle minutes, so 1+ GB is not held forever.
+STT_LOCAL_IDLE_MIN = _env_number("JARVIS_STT_LOCAL_IDLE_MIN", 10, 1, 24 * 60)
+# A local decode with no caller deadline (Discord opt-in, tests) is abandoned after this.
+STT_LOCAL_TIMEOUT_S = 30.0
+# With cloud fallback ON, local gets at most this share of a caller's budget, so
+# the cloud chain keeps time to answer if local is slow.
+STT_LOCAL_BUDGET_SHARE = 0.45
+
 
 def _load_dotenv() -> None:
     env_file = REPO_ROOT / ".env"
