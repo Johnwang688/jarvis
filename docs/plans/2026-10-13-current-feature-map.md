@@ -10,8 +10,8 @@ At the initial checkpoint the current Codex team reserved four packages:
 `B-UI`, `B-DR`, `B-SOUND` and `B-CLASSIFIER`. **All four are now INSTALLED.**
 In the next Browser batch, `B-AUTH` and `B-FIND` are **MERGED, not yet installed**;
 `B-NATIVE` remains **TAKEN by the Codex lead**. The urgent `VEX-DOWNLOAD` fix is
-also TAKEN. Other unclaimed packages remain available. A saved draft alone is
-not an active claim.
+code-complete and independently reviewed, awaiting merge/deployment. Other
+unclaimed packages remain available. A saved draft alone is not an active claim.
 
 **Voice packages owned by the Claude team (2026-10-13):** all of V0–V15. `V0`, `V3`, `V7` merged; `V2`, `V6` installed; the rest TAKEN.
 Slot1 is reserved for that team under the shared limit below.
@@ -251,7 +251,7 @@ PR #125 itself adds plans, not the features those plans describe.
 | QA-LOAD | Remaining load-sensitive tests and reliable sweep reporting | **READY — unclaimed.** Reproduce unchanged VEX/terminal throughput bounds; retain performance assertions and distinguish regression from scheduler noise. Preserve per-suite output and real exit codes: an old lead wrapper could exit0 with failed suites. Audit old quota flake against current waits before editing. |
 | GIT-LIVE | Positive end-to-end native Git flow under the final approval policy | **VERIFY — unclaimed.** Local worktree/edit/commit and denied/resumed pushes were checked. Use a disposable authorized repo/branch and actual owner approval for the final positive flow; do not reuse old fixture-helper evidence as native proof. |
 | HUD-FOLLOWUPS | Reconcile the checkpoint's old `hud-open-followups` list | **VERIFY — unclaimed.** Most named input/draft/editor issues already merged above; recover the original list and close by evidence before making new edits. |
-| VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **TAKEN — Codex lead / `browser_auth`; urgent owner request.** Branch `codex/vex-download-device-status`, worktree `vex-download-device-status`. Reuse the guarded owner-click download and one-device reservation; distinguish disconnected from failed/unknown device reads. Read-only diagnosis precedes changes; independent review and fake-tool/device tests precede merge. No real robot operation is part of validation. |
+| VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **TAKEN — Codex lead / `browser_auth`; code complete and independently reviewed; not installed.** Branch `codex/vex-download-device-status`, runtime `70dfd6c`, [contract/verified gates](2026-10-13-vex-download-device-status.md). Stable actual-PTY Download output/final records; shared source-verified USB-only Brain/Controller checks with unknown/busy/stale preservation and bounded timestamped history. PASS: 38 focused Python, 50 targeted HUD units, production build, 49 selected actual-HUD checks, 9 feedback/narrow checks and 7 Build/Clean output regressions. Coordinator owns PR gates/merge/normal rebuild/restart. Real VEX tools/devices and robot Download acceptance **UNRUN**; no radio-link or extension-host health claim. |
 | VEX-UI | Broad VEX view redesign | **DEFERRED.** The urgent Clean/Build fix is installed. The narrow bug request does not itself expand into a full redesign or authorize real robot operations. |
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 
