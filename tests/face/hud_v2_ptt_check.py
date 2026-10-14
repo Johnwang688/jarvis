@@ -23,10 +23,14 @@ nothing of the HUD's and Space is push-to-talk):
   - held long enough, letting go sends what was said, and nothing is sent
     while it is held;
   - Ctrl+Shift+D, Ctrl+Alt+D and Meta+D are not it, and auto-repeat never
-    presses twice (one interrupt for one hold);
+    presses twice (one press for one hold);
   - under a card it does nothing and Escape still denies; muted it records
-    nothing but still stops his turn (as the orb does); after a crash it
-    refuses; a window that loses focus mid-hold lets go;
+    nothing; after a crash it refuses; a window that loses focus mid-hold
+    lets go;
+  - **V3 (2026-10-13, decision V-10 and answered Q4): push-to-talk no longer
+    interrupts a running turn** -- held on a busy chat it records (what is
+    said steers the turn) and held muted it does nothing; Stop is the
+    interrupt;
   - Space never starts the mic: in the box, on the page, a pane header, a
     separator, and in Monaco — where it used to start the mic and the space
     never appeared;
@@ -268,6 +272,8 @@ def _repeat_checks(page, mock, check, until):
     check("setup: a turn is running in the selected chat", ok)
     i0 = _interrupts(mock)
     _blur(page)
+    page.evaluate("""() => { const c = window.__hud.capture, p = c.press.bind(c); window.__presses = 0;
+      c.press = () => { window.__presses++; return p(); }; }""")
     page.keyboard.down("Control")
     page.keyboard.down("d")
     for _ in range(4):                # auto-repeat: the key is already down
@@ -281,10 +287,12 @@ def _repeat_checks(page, mock, check, until):
     check("setup: the keydowns after the first are auto-repeat",
           [k.get("repeat") for k in keys] == [False, True, True, True, True], str(keys))
     check("every one of them is taken from the browser", all(k.get("prevented") for k in keys), str(keys))
-    until(lambda: _interrupts(mock) > i0, timeout=3)
     time.sleep(0.4)
-    check("auto-repeat never presses twice: one hold stops his turn once",
-          held is not None and _interrupts(mock) == i0 + 1, f"held={held} interrupts={_interrupts(mock) - i0}")
+    presses = page.evaluate("window.__presses")
+    check("auto-repeat never presses twice: one hold is one press",
+          held is not None and presses == 1, f"held={held} presses={presses}")
+    check("V3: and it does not interrupt the running turn (Stop does)",
+          _interrupts(mock) == i0, f"interrupts={_interrupts(mock) - i0}")
     _end_t1(page, mock, until)
 
 
@@ -343,9 +351,9 @@ def _muted_checks(page, mock, check, until):
     i0 = _interrupts(mock)
     _blur(page)
     held, _, _ = _ptt_on_ctrl_d(page)
-    until(lambda: _interrupts(mock) > i0, timeout=3)
-    check("muted, it still stops his turn (the orb's interrupt half) and records nothing",
-          held is None and _interrupts(mock) == i0 + 1, f"held={held} interrupts={_interrupts(mock) - i0}")
+    time.sleep(0.5)
+    check("V3: muted, it records nothing and no longer interrupts the turn either (Stop does)",
+          held is None and _interrupts(mock) == i0, f"held={held} interrupts={_interrupts(mock) - i0}")
     _end_t1(page, mock, until)
 
 
