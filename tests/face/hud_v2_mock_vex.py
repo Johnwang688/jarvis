@@ -79,6 +79,10 @@ def state(mock) -> dict:
         "download_refuse": [],
         "download_exit": 0,
         "downloads": [],
+        "download_records": {},
+        "download_auto": True,
+        "connection": {"brain": True, "controller": False, "checked_at": "2026-10-13T12:00:00+00:00",
+                       "state": "ready", "message": "USB check complete.", "events": []},
         "info": {"text": "", "exit_code": 0},
         "info_refuse": None,
         "info_reads": [],
@@ -457,7 +461,14 @@ def handle(h, mock, method: str, path: str, body) -> bool:
             v["downloads"][-1]["terminal_id"] = row["id"]
             v["downloads"][-1]["sent"] = True
             mock.emit("vex_device", {"action": "download", "at": "2026-10-11T12:00:10+00:00"})
-            h._json({"terminal_id": row["id"]}, 202)
+            rid = secrets.token_hex(4)
+            v["download_records"][rid] = {"id": rid, "project_id": pid, "slot": slot,
+                "state": "succeeded" if code == 0 else "failed", "terminal_id": row["id"],
+                "exit_code": code, "output": "Downloading User Program\nFinished", "started": "2026-10-13T12:00:00+00:00",
+                "ended": "2026-10-13T12:00:01+00:00"}
+            if not v["download_auto"]:
+                v["download_records"][rid].update(state="running", exit_code=None, ended=None, output="Downloading <b>fixture</b>")
+            h._json({"terminal_id": row["id"], "download_id": rid}, 202)
             return True
         h._err(404, "route not found")
         return True
@@ -491,6 +502,15 @@ def handle(h, mock, method: str, path: str, body) -> bool:
         v["brain"] = row["id"]
         mock.emit("vex_device", {"action": "brain", "at": "2026-10-11T12:00:11+00:00"})
         h._json({"terminal_id": row["id"], "started": True})
+        return True
+    if len(parts) == 3 and parts[1] == "downloads" and method == "GET":
+        rec = v["download_records"].get(parts[2])
+        if rec is None: h._err(404, "download not found")
+        else: h._json(rec)
+        return True
+    if parts == ["vex", "device", "connection"] and method == "POST":
+        if not exactly(set(), set()): return True
+        h._json(v["connection"])
         return True
     if parts == ["vex", "device", "info"] and method == "POST":
         if not exactly({"read"}, set()):

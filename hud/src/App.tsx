@@ -3449,6 +3449,7 @@ export default function App() {
         return (
           <VexView
             pane={n}
+            drawn={info.drawn}
             projectId={pid}
             projectName={projectName(pid)}
             blocked={blocked}

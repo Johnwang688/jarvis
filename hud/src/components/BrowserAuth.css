@@ -1,0 +1,5 @@
+.browserauthform { flex: 0 0 auto; max-height: 80%; overflow: auto; border-bottom: 1px solid var(--border); background: var(--bg-1); }
+.browserauthform p { margin: 6px 0; overflow-wrap: anywhere; }
+.browserauthform label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin: 8px 0; }
+.browserauthform input { flex: 1 1 160px; min-width: 0; }
+.browserauthform .row { display: flex; flex-wrap: wrap; gap: 8px; }

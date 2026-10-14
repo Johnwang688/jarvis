@@ -15,7 +15,7 @@ import type { RosterView } from "./lib/roster";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 import { parseActivity, type ActivityView } from "./lib/activity";
 import { parseRow, parseRows, type InSpec } from "./lib/terminal";
-import { parseBuild, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
+import { parseBuild, parseDownload, parseConnection, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
 import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./lib/vexNew";
 
 import type { CaptureIdentity } from "./lib/pageCapture";
@@ -336,7 +336,18 @@ export const api = {
       return b;
     }),
   vexDownload: (projectId: string, body: { slot: number; name: string }) =>
-    req<{ terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/download`, json(body)),
+    req<{ terminal_id: string; download_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/download`, json(body)),
+  vexDownloadState: (id: string) =>
+    req<unknown>(`/vex/downloads/${encodeURIComponent(id)}`, {signal: AbortSignal.timeout(10_000)}).then(r => {
+      const d = parseDownload(r);
+      if (!d) throw new ApiError(500, "the daemon answered without a download record");
+      return d;
+    }),
+  vexConnection: () => req<unknown>("/vex/device/connection", {...json({}), signal: AbortSignal.timeout(10_000)}).then(r => {
+    const c = parseConnection(r);
+    if (!c) throw new ApiError(500, "the USB check response was not recognized");
+    return c;
+  }),
   vexBrain: () => req<{ terminal_id: string; started: boolean }>("/vex/brain", json({})),
   vexInfo: (read: "system" | "programs" = "system") =>
     req<{ text: string; exit_code: number | null; read?: string }>("/vex/device/info", json({ read })),
@@ -403,6 +414,18 @@ export const api = {
     const res = await fetch("/say", { ...json(body), signal: opts.signal });
     if (!res.ok) throw new ApiError(res.status, `say ${res.status}`);
     return res.arrayBuffer();
+  },
+  /**
+   * A short spoken summary of a long reply (`POST /speech/summary`, V8).
+   * `text` is the reply's filtered prose, never code. A failure or timeout is
+   * an error the caller turns into truncated prose.
+   */
+  async speechSummary(text: string, threadId: string, opts: { signal?: AbortSignal } = {}): Promise<string> {
+    const res = await fetch("/speech/summary", { ...json({ thread_id: threadId, text }), signal: opts.signal });
+    if (!res.ok) throw new ApiError(res.status, `speech summary ${res.status}`);
+    const body = await res.json();
+    if (typeof body?.summary !== "string") throw new ApiError(502, "speech summary: bad answer");
+    return body.summary;
   },
 };
 

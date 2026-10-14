@@ -13,6 +13,7 @@ class Page:
     def __init__(self,url='about:blank'):
         self.url=url;self.handlers={};self.closed=False;self.gotos=[]
         self.main_frame=SimpleNamespace(parent_frame=None,url=url)
+        self.context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=SimpleNamespace(on=Mock(),send=AsyncMock(return_value={}))))
     def on(self,name,callback):self.handlers[name]=callback
     async def opener(self):return None
     async def title(self):return 'Synthetic'
@@ -84,6 +85,46 @@ class Restart(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.host._tabs[old.id],new);self.assertTrue(self.host.loopback_open(33333))
         self.assertTrue(self.host.tickets.redeem(fresh_ticket,new.id,new.page_identity))
         self.assertNotIn('synthetic',repr(self.host.status()));self.assertNotIn('33333',repr(self.host.status()))
+    async def test_http_auth_during_restore_fails_into_explicit_retry_without_prompt_or_ticket(self):
+        old=self.tab(url='https://example.test/protected');await asyncio.sleep(0);await asyncio.sleep(0)
+        cdps=[]
+        class CDP:
+            def __init__(inner):inner.events={};inner.calls=[];inner.denied=asyncio.Event()
+            def on(inner,name,callback):inner.events[name]=callback
+            async def send(inner,method,params=None):
+                inner.calls.append((method,params))
+                if method=='Fetch.continueWithAuth':inner.denied.set()
+                return {}
+        async def ensure(tab):
+            if tab.cdp is None:tab.cdp=CDP();cdps.append(tab.cdp)
+            return tab.cdp
+        self.host._ensure_cdp=ensure;original=self.host._launch.side_effect
+        async def launch(profile,**kwargs):
+            instance=await original(profile,**kwargs);new_page=instance.context.new_page
+            async def protected_page():
+                page=await new_page();normal=page.goto
+                async def goto(url,**options):
+                    tab=next(tab for tab in self.host._tabs.values() if tab.page is page);cdp=tab.cdp
+                    raw={'requestId':'r1','networkId':'n1','request':{'url':url},
+                         'authChallenge':{'source':'Server','scheme':'basic','realm':'synthetic','origin':'https://example.test'}}
+                    cdp.events['Fetch.requestPaused'](raw);cdp.events['Fetch.authRequired'](raw)
+                    await cdp.denied.wait();await normal(url,**options)
+                page.goto=goto;return page
+            instance.context.new_page=protected_page;return instance
+        self.host._launch.side_effect=launch;await self.run_restart()
+        if self.host._auth._cleanup:await asyncio.gather(*tuple(self.host._auth._cleanup))
+        self.assertEqual(self.host._tabs,{})
+        self.assertIn(old.id,self.sound.restarts.descriptors)
+        self.assertEqual(self.sound.instance_status(self.host._instances[self.profile])['phase'],'failed')
+        self.assertFalse(self.host._auth._pending)
+        self.assertTrue(all(session.navigation is None for session in self.host._auth.sessions.values()))
+        self.assertTrue(cdps)
+        self.assertTrue(all(params['authChallengeResponse']['response']=='CancelAuth' for cdp in cdps for method,params in cdp.calls if method=='Fetch.continueWithAuth'))
+        self.host._running=lambda:True
+        with self.assertRaises(H.BrowserRefused):self.host.ticket(old.id)
+        self.sound.restarts.consider(self.host._instances[self.profile],self.generation);await asyncio.sleep(0)
+        self.assertEqual(self.host._launch.await_count,1)
+
     async def test_broker_already_pending_blocks_before_any_shutdown(self):
         old=self.tab();await asyncio.sleep(0);await asyncio.sleep(0)
         self.host._daemon.approvals.run_if_idle=lambda f:False

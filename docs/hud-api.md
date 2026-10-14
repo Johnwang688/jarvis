@@ -1521,18 +1521,19 @@ hashes it** (and, for a build, the five tools `make.exe` runs) against the
 SHA-256 `jarvis vex setup` recorded, and is 409 "the VEX tools changed since
 `jarvis vex setup` (<tool>); run it again" on a mismatch.
 
-**SSE `vex_device`** `{action: "download"|"brain"|"info", at}` — one per
+**SSE `vex_device`** `{action: "download"|"brain"|"info"|"connection", at}` — one per
 device action, when it starts; nothing else (no slot, name, path or output),
 as `terminal_attached`. A device action the window did not cause (a
 program running as the owner POSTing with a forged Origin) shows up here; the
-HUD can flag one it cannot match to its own click.
+HUD can flag one it cannot match to its own click. `connection` identifies a
+visible-window USB probe and is not an unclicked manual action notice.
 
 - `GET /vex/status` → `{configured, hint, vexcom_version, toolchain,
   sdks: {cpp, python}, extension_version, templates, project_folder, device,
   brain}`. `configured` false with `hint` (a sentence ending "run `jarvis
   vex setup` again") when `vex.json` is missing, malformed, or names a path
   that fails the use-time check. `device` is the device action running
-  (`"download"`, `"info"`, `"brain"` or null); `brain` the brain terminal's
+  (`"download"`, `"info"`, `"brain"`, `"connection"` or null); `brain` the brain terminal's
   id.
 - `GET /projects/{id}/vex` → detection: `{project_id, vex: true, name,
   language: "cpp"|"python", slot, sdk_version, printf_float, python_main,
@@ -1560,7 +1561,7 @@ HUD can flag one it cannot match to its own click.
   `file:line:col: error|warning:` lines (notes skipped; a file under the
   project comes back relative, with `/`); `bin` is `{path: "build/<name>.bin",
   size, mtime}` when this build wrote one. The last 32 are kept.
-- `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id}`.
+- `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id, download_id}`.
   `slot` an integer 1–8 (not a string, not a bool); `name`
   `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 `{error,
   code: "build_first"}` (`Vex._fresh`, judged under the project's build lock)
@@ -1583,6 +1584,31 @@ HUD can flag one it cannot match to its own click.
   --progress` (DishPy's flags) in the project folder (`program:
   "vex-download"`); 3-minute timeout. **No "run after download"** (V-3), and
   no other route, CLI or tool downloads.
+- `GET /vex/downloads/{id}` → `{id, project_id, slot, state:
+  "running"|"succeeded"|"failed"|"timed_out", terminal_id, exit_code, output,
+  started, ended}`. Actual PTY EOF settles the immutable final record, including
+  when the terminal was closed. Output is the latest 16 KiB of plain text,
+  memory-only; the last 32 records are retained. A missing terminal listing
+  cannot establish completion. Unknown/forgotten status never implies that
+  nothing was downloaded and never retries Download.
+- `POST /vex/device/connection` `{}` → `{brain, controller, checked_at, state:
+  "unknown"|"checking"|"ready"|"busy"|"error", message, events}`. Expresses
+  visible-window demand and immediately returns shared cached USB presence.
+  `brain`/`controller` are boolean or null (unknown); `checked_at` is the last
+  fully validated snapshot time. Up to 32 `{device: "brain"|"controller",
+  connected, at}` confirmed changes/baselines are retained in memory. No serial
+  numbers, port names or raw probe output are returned by this route.
+  One fingerprint-checked `vexcom --usb` runs at most every 5 seconds across
+  windows, with exponential error backoff up to 80 seconds and a 2-second probe
+  budget. Timeout never frees the device before actual PTY settlement. A busy
+  brain/download/manual read is never interrupted or closed for a probe.
+  Waiting owner actions have priority over new probes and may wait up to 4
+  seconds for an existing probe to settle, then receive an explicit busy refusal.
+  The complete bounded JSON must contain recognized `usb.vex`/`usb.dfu` arrays
+  with VEX VID 2888 and V5 Brain/Controller PID 0501/0503; truncated output,
+  unknown identities, errors and busy checks preserve prior confirmed values.
+  Empty fully validated lists confirm absence. This measures USB presence only,
+  not radio link, extension-host health, program execution or download readiness.
 - `POST /vex/brain` `{}` → `{terminal_id, started}`: the brain's user port,
   `vexcom.exe --user`, both ways (`program: "vex-brain"`, the only program
   terminal that takes typed input). One at a time: the open one comes back
@@ -1699,8 +1725,18 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   owner's Cancel dropped, nor after a card that came and went while the
   download ran. **Cancel** (until the download is sent) closes the
   build's program terminal (`DELETE /terminals/{id}`, which ends the build)
-  and sends nothing. The download's end is read from the terminal listing
-  (`exited`, `exit_code`).
+  and sends nothing. The returned `download_id` is polled every 0.6 seconds;
+  Download immediately shows elapsed progress, its program terminal and a
+  bounded inline output tail, then retains the actual final outcome/output.
+  Failed reads retry visibly for at most four minutes. Check status can recover
+  a late final receipt without sending Download; unknown status is labeled as
+  unknown. Exact operation identity and immutable final receipts reject stale
+  replies from overlapping status reads.
+- USB status: visible VEX panes demand the shared cached check; cards, crashes,
+  hidden windows and a Download chain pause demand. The view separates Tooling
+  configured state from USB Brain/Controller presence, labels paused/error or
+  older-than-12-second readings as last confirmed/stale, and shows last-check
+  time plus a timestamped connection log.
 - SSE `vex_device`: matched against the device actions this window started
   (recorded before each request; 30 s); one it did not start is said in the
   VEX view.
@@ -2855,7 +2891,10 @@ restart receive fixed notes. The memory-only store keeps at most16 entries and
 text, not already-staged image pixels. Nothing here sends a chat automatically.
 
 
-## Dormant Browser action tool (BR9b)
+## Dormant Browser action tool (BR9b snapshot)
+
+This records the original dormant state. For the implemented shared native
+contract, see [Native owner Browser driving](#native-owner-browser-driving-br9d).
 
 Production `hud_browser_act` always refuses because Agents may drive is OFF.
 There is no enable or execute HTTP endpoint. The typed tool accepts action, pane
@@ -2890,3 +2929,72 @@ executes downloaded bytes and no file content/digest is published.
 POST /browser/tabs/{tab_id}/sound accepts exactly {"on": boolean}. It requires the existing owner listener, Host/Origin checks and current tab/profile or bounded restoration descriptor. It returns {"on": boolean, "profile": string, "generation": integer}; the HUD requires the returned boolean to match and then reads authoritative status. Invalid bodies are 400, absent handles are 404, and holds, disabled permission, or Private ON are 409. POST /browser/tabs/{tab_id}/sound-retry retries an exact failed replacement under the same owner/hold boundary.
 
 The protected sound setting and the global sound status desired field mean permission, default allowed; they do not grant playback. Per-instance requested is memory-only owner intent, and applied describes launch mode. Generation, phase and reason report synchronization/pending/failure; applied may remain true while owned native mute and safe idle replacement settle, so it is not a guarantee of immediate speaker silence. Master OFF removes all requests. Master ON, daemon/instance restart, or a fresh cold launch never recreates a grant. A current running profile shares sound across its Remote tabs, including newly opened tabs; the last-tab close clears it. Sound state events carry generation/control state without page URLs.
+
+
+## Additions: owner HTTP authentication (B-AUTH)
+
+The existing owner-only `POST /browser/tabs`, tab `navigate`/`restore`/`history`,
+and pane address routes may return `loaded:false, auth_pending:true`. Internal
+host receipts include a fresh `nav_id`; pane adoption accepts only that exact
+currently pending operation and returns the adopted tab/context receipt. The URL
+is the actual blank/prior document until Chrome commits. The pending receipt does
+not mean loaded and is not a new source/see/loopback permission. A stored Remote
+restore retains its allocated handle and attaches its existing owner socket.
+
+On the existing authenticated single-tab socket, the host may send:
+
+```json
+{"t":"auth","id":"32 lowercase hex characters","origin":"https://example.test","realm":"untrusted plain text","scheme":"basic","expires_in":60}
+```
+
+`scheme` is `basic` or `digest`; realm is capped at 200 code points and origin is
+normalized without path/query/userinfo. `expires_in` is positive and at most 60.
+A fresh nonce binds the exact current CDP request, Page/document/instance, socket
+attachment generation, hold and visibility epoch. It never authorizes a different
+request/origin. Reconnect may rotate the nonce but cannot extend expiry/attempts.
+The prompt never takes focus on its own.
+
+Owner replies are exactly `{t:"auth",id,cancel:true}` or
+`{t:"auth",id,cancel:false,username,password}`. UTF-8 limits are 1024 username bytes
+and 4096 password bytes; controls are refused. There is no HTTP credential endpoint,
+MCP tool or persisted auth setting. Reply fields are transient and cleared after
+use/refusal. Host completion is `{t:"auth_closed",id,reason}`, where reason is one
+of `answered`, `cancelled`, `expired`, `reload`, `changed`, `refused`. A fixed private
+socket error may say Reload to retry after unsupported/exhausted authentication.
+No auth origin, realm, credentials or pending status is added to the general bus
+or `/status`. Ordinary Chrome in-memory auth caching is unchanged.
+
+At most one prompt per tab/eight per host and three submissions per explicit
+owner operation share one original 60-second deadline. Normal navigation retains
+20 seconds of non-auth work. Navigation/close/hold/detach/profile replacement
+invalidate old replies; auth admission blocks/drains page input and agent driving.
+Protected Sound-restoration auth fails closed into the existing explicit Retry;
+it cannot expose a partial replacement stream or weaken the restart barrier.
+
+Installed-Chrome capability measurements are narrower than the socket contract:
+same-origin iframe auth delivered a prompt, while a first protected popup request
+and an established separate OOPIF challenge delivered none during a two-second
+observation. Explicit owner Reload recovered the popup through `auth_pending` and
+its owner form. Use explicit top-level owner navigation for protected embedded
+pages; no universal popup/OOPIF delivery is promised. No credentials were sent in
+these capability probes.
+
+
+## Native owner Browser driving (BR9d)
+
+Foreground Claude ASK/AUTO and Codex AUTO HUD chats use `hud_browser_view` and
+owner-gated `hud_browser_act` through their session relay. The existing Browser
+settings, pane controls, private action cards and ticketed socket are the same
+owner surfaces. Driver frames identify the actual `fast`, `claude` or `codex`
+provider. Tasks, off-desk sources, children and strict contexts are refused.
+
+Actions bind the exact native parent/daemon turn and fresh Remote look refs;
+completion, Chat Stop, session replacement and old-carrier revocation cannot
+transfer those refs to another turn. Accepted desk steering alone updates owner
+words. Private action authorization remains deliberate, single-action and HUD
+only; its public event/decision labels exclude private arguments.
+
+Pane Stop/Resume and native Chat Stop are distinct: Codex's pre-existing
+incomplete-accounting guard requires a fresh chat after Chat Stop. See
+[Browser owner guidance and evidence](notes/browser.md#native-parent-browser-driving-br9d)
+for supported profiles and the offline acceptance limits.
