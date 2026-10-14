@@ -801,3 +801,394 @@ false holds, WASM Silero/RNNoise/KWS CPU, local Parakeet RTF/WER and speaker
 EER. Synthetic diagnostics checks establish none of those measurements.
 This package does not change wake recognition, add speech playback, alter
 approvals, retain retry clips, add continuation, or claim a live deployment.
+
+
+## 2026-10-13: V0 measurements (synthetic and offline, no product change)
+
+Package V0 of `docs/plans/2026-10-13-voice-rework.md` section 6. Probes live in
+`tests/voice_v0/`; nothing under `jarvis/` or `hud/` changed, no dependency was added to
+`pyproject.toml` or `hud/package.json`, and no paid API was called. **Everything below is
+synthetic**: Kokoro and Pocket text-to-speech, generated noise, and two TTS voices standing in
+for a television. No recording of a real person was made or used. Numbers say what the models
+and the browser cost on this machine and how they separate synthetic voices; they do **not**
+establish acoustic quality for the owner, which stays a manual gate (end of this section).
+
+### Setup, and how to re-run
+
+- Machine: Intel Core Ultra 9 275HX (24 threads), 15 GB, WSL2 Ubuntu on Windows 11, shared with
+  other agents. Every probe ran inside `systemd-run --user --scope -p MemoryMax=3G
+  -p MemorySwapMax=0 -p CPUQuota=800%` (4G for the Parakeet steps, whose peak is 1.9 GB). The
+  quota means "24 threads" below is 24 threads on an 8-core cap, a deliberately bad
+  configuration. `loadavg` at the time is recorded per run; other agents' suites made it 3 to
+  38, so timings carry that noise (repeat runs are quoted where they differ).
+- Python 3.14.4 probe venv at `~/.cache/jarvis-voice-v0/venv` (`sherpa-onnx` **1.13.8 has a
+  CPython 3.14 wheel**, which the plan listed as unverified; `onnxruntime` 1.31.0). Browser:
+  Playwright 1.61.0 driving the headless Chromium 149.0.7827.55 already in
+  `~/.cache/ms-playwright` (the Playwright version must match the installed Chromium revision;
+  1.63 wants a build that is not installed). Node v22.22.2 for the KWS WASM cross-check.
+- Fixtures: `tests/voice_v0/make_fixtures.py` renders 24 dictation-style sentences (no digits)
+  in 14 English Kokoro voices at speeds 0.9 to 1.2 (336 clips, 22 min) and 8 sentences in the 26
+  Pocket builtins (208 clips), with the repo's own model files, plus
+  `make_special_fixtures.py` (keywords, hard negatives, complete versus cut-off sentences).
+  They are generated, deterministic, and kept under `~/.cache/jarvis-voice-v0/fixtures`, not
+  committed.
+- Pinned downloads, each into its own directory under `~/.cache/jarvis-voice-models/` and
+  checked against a SHA256 in `tests/voice_v0/models.json` before use (npm tarballs also against
+  the registry's own digest). Sources: GitHub releases of `k2-fsa/sherpa-onnx` and
+  `snakers4/silero-vad`, the `pipecat-ai/smart-turn-v3` Hugging Face repo at commit f766f81,
+  and npm. `python tests/voice_v0/fetch_models.py` fetches them; `--record` prints digests for
+  new entries.
+
+| item | version / file | sha256 (first 16) | size |
+|---|---|---|---|
+| Parakeet-TDT-0.6B-v3, int8 | sherpa-onnx `asr-models` release | 5793d0fd397c5778 | 487 MB archive, 641 MB unpacked |
+| Silero VAD | snakers4/silero-vad v5.1.2 and v6.2.3 | 2623a2953f6ff3d2 / 1a153a22f4509e29 | 2.3 MB |
+| onnxruntime-web | 1.30.0 (npm) | d2228df7e4616bc3 | WASM 14.2 MB |
+| RNNoise WASM | @jitsi/rnnoise-wasm 0.2.1 (npm), the 0.2 model | c80b015b69701699 | 1.9 MB inlined |
+| sherpa-onnx KWS | zipformer gigaspeech 3.3M, 2024-01-01 | f170013b4716e41b | fp32 encoder 12.2 MB, int8 4.8 MB |
+| sherpa-onnx WASM (Node build) | sherpa-onnx 1.13.8 (npm) | 15dc53065cc6bbc7 | WASM 15.1 MB |
+| speaker: wespeaker ResNet34, wespeaker CAM++, 3D-Speaker CAM++, NeMo TitaNet-small | sherpa-onnx `speaker-recongition-models` release | 5ef208a9da14.., c46fad10b5f8.., 357a834f702b.., ad4a1802485d.. | 26 / 29 / 30 / 40 MB |
+| Smart Turn | `smart-turn-v3.2-cpu.onnx` | 2bb026316b14a660 | 8.3 MB |
+
+Re-run: `JARVIS_VOICE_V0=1 tests/voice_v0/run_all.sh [step ...]` (steps `fetch fixtures special
+browser vadquality stt ns contention speaker kws turn`), then `python
+tests/voice_v0/render_results.py` for the tables below. Every probe prints "skipped" and exits 0
+unless `JARVIS_VOICE_V0=1`, so none runs in the normal test sweep.
+`tests/voice_v0_helpers_check.py` is the only sweep-visible file: it checks the WER, EER and SNR
+helpers offline.
+
+### 1. CPU in Chromium: Silero VAD, RNNoise, KWS (plan 3.2, 3.4, 3.6; Q16)
+
+Method: each module runs single-threaded in its own Web Worker (the HUD is not cross-origin
+isolated, so no WASM threads) served from an ephemeral local port with the pinned `onnxruntime-web`.
+The main thread posts one frame per real-time interval, as an AudioWorklet port would: 512
+samples at 16 kHz (32 ms) for Silero, 480 samples at 48 kHz (10 ms) for RNNoise, which only runs at
+48 kHz. CPU is the browser's own process CPU time (CDP `SystemInfo.getProcessInfo`) over six 5 s
+segments, reported as the median of segments 2 to 6; segment 1 carries one-off JIT tier-up and is
+shown separately. A do-nothing worker at the same cadence is subtracted for the "above baseline"
+column. Silero's probabilities from this build match native onnxruntime on the same audio
+(precision 0.999, recall 0.905, 2 false-accept frames on both).
+
+| module | steady % of one core (median) | above null-worker baseline | first 5 s | worker ms/frame p50 / p95 (budget) | renderer RSS delta MB |
+|---|---|---|---|---|---|
+| Silero VAD v5.1.2 (ort-web 1.30.0) | 3.4 | 2.4 | 14.1 | 0.6 / 0.8 (32) | 89 |
+| Silero VAD v6.2.3 (ort-web 1.30.0) | 3.4 | 2.4 | 15.5 | 0.7 / 1.1 (32) | 40 |
+| RNNoise 0.2 (Jitsi WASM), 48 kHz | 5.6 | 3.4 | 7.6 | 0.3 / 0.6 (10) | 21 |
+| RNNoise + Silero together | 9.8 | 6.6 | 22.6 | - | - |
+
+Null worker (message passing only): 1.0% at 32 ms frames, 2.2% at 10 ms frames.
+
+| sherpa-onnx KWS WASM under Node/V8, 1 thread | CPU s per audio s (= fraction of a core) | wall s per audio s | RSS MB |
+|---|---|---|---|
+| int8 | 3.3% | 2.7% | 272 |
+| fp32 | 3.7% | 3.0% | 281 |
+
+Repeat run earlier the same day (load about 2): Silero 3.0% and 2.8%, RNNoise 5.0%, together 8.6%.
+Worker frame times are far inside budget (0.6 ms of 32 ms, 0.3 ms of 10 ms), no frame was late
+(`late_frames` 0 throughout), and a burst runs at 94 to 124x real time for Silero and 33x for RNNoise.
+
+**KWS in the browser was not measurable directly.** sherpa-onnx 1.13.8 ships no browser KWS WASM
+(its release assets carry TTS, VAD and speech-enhancement builds, and the HF Spaces for KWS and
+ASR are gone), and the npm `sherpa-onnx` package is the Node build: it calls `require("path")`
+unconditionally and uses NODERAWFS, so it does not initialise in a worker. The KWS row therefore
+runs that same WASM binary under Node, which has the same V8 WASM tiers as Chrome, one thread, 60 s
+of audio in 512-sample pushes; add the roughly 1% null-worker message cost. Native onnxruntime
+(Python, 1 thread) costs less: **1.6% (int8) and 1.8% (fp32) of a core**, so WASM is about 2x native.
+Two native threads cost 4.7 to 5.9% for no gain, since the model is tiny; use one.
+
+**Sum for the window**, steady state: RNNoise 5.6 + Silero 3.4 + KWS about 3.3 = **about 12% of one
+core** with all three (about 7% without RNNoise), plus a one-off roughly 0.6 CPU-seconds at
+start-up. Renderer memory grew by about 40 to 90 MB for Silero and 20 MB for RNNoise (noisy
+measurement); the KWS process peaked near 270 to 330 MB under Node.
+
+Caveats: headless Chromium on Linux, not the owner's Windows Chrome (same V8, different OS
+scheduling and CPU); synthetic bench audio; the machine was loaded; the resampling that a
+16 kHz pipeline would need around RNNoise (16 to 48 to 16 kHz) is not included. Place RNNoise
+before the 48-to-16 kHz downsample if it is used.
+
+**Supports Q16:** the cost threshold (at most 15% of a core for the KWS-in-window recommendation) is
+met with margin, even with RNNoise. It does not decide the other half, "acceptable misses": see
+section 4.
+
+### 2. Does RNNoise help the VAD or the STT? (plan 3.4, V14)
+
+Method: 36 clips joined with 0.8 s gaps. Ground truth is the clean signal's frame energy
+(32 ms frames above -50 dBFS, dilated by 3 frames). Degradations: 1/f noise and white noise at 10
+dB (and 0 dB) SNR, and two other Kokoro voices talking at 10 and 5 dB below the target as a "TV".
+Silero is run on the degraded signal, on RNNoise's output, and RNNoise's own speech
+probability is shown for reference. All at threshold 0.5, 5,598 frames.
+
+| condition | Silero precision / recall / false-accept frames | RNNoise then Silero | RNNoise's own VAD output |
+|---|---|---|---|
+| clean | 0.999 / 0.890 / 4 | 0.998 / 0.899 / 8 | 1.000 / 0.805 / 0 |
+| pink_10dB | 0.995 / 0.893 / 19 | 1.000 / 0.876 / 0 | 1.000 / 0.751 / 0 |
+| pink_0dB | 0.996 / 0.811 / 14 | 1.000 / 0.849 / 1 | 1.000 / 0.727 / 0 |
+| white_10dB | 0.997 / 0.875 / 13 | 1.000 / 0.875 / 0 | 1.000 / 0.756 / 0 |
+| tv_10dB | 0.961 / 0.959 / 181 | 0.959 / 0.958 / 188 | 0.969 / 0.923 / 137 |
+| tv_5dB | 0.960 / 0.961 / 184 | 0.955 / 0.963 / 211 | 0.966 / 0.940 / 152 |
+
+pink_noise_only: Silero accepts 0.0% of frames, after RNNoise 0.0%.
+
+white_noise_only: Silero accepts 0.0% of frames, after RNNoise 0.0%.
+
+tv_only_two_voices: Silero accepts 97.8% of frames, after RNNoise 97.9%.
+
+Reading: on generated noise Silero already has precision above 0.99, so the gain is small;
+RNNoise removes nearly all its false-accept frames (19 to 0, 14 to 1, 13 to 0) and adds 4 points
+of recall at 0 dB, at no cost on clean speech. **On the TV stand-in nothing helps**: it is speech,
+so Silero accepts 97.8% of the frames of a signal that is only two TTS voices, before and after
+RNNoise. The VAD cannot tell a TV from the owner; that is speaker verification's job (section 3).
+
+STT on the same degraded clips (Parakeet, 4 threads, the as-captured signal versus the same
+signal through RNNoise, 36 clips and 474 words, so one word is 0.2 points):
+
+| degradation | WER as captured | WER after RNNoise |
+|---|---|---|
+| clean | 1.1% | 0.4% (474 words) |
+| pink_10dB | 1.3% | 1.3% (474 words) |
+| pink_0dB | 5.3% | 10.8% (474 words) |
+| white_10dB | 1.1% | 2.1% (474 words) |
+| tv_10dB | 15.4% | 6.8% (474 words) |
+| tv_5dB | 20.7% | 20.5% (474 words) |
+
+RNNoise is **not a consistent win for STT**: it roughly doubles WER at 0 dB pink noise (5.3 to
+10.8%) and at 10 dB white noise (1.1 to 2.1%), halves it with the 10 dB TV (15.4 to 6.8%), and
+is unchanged at 5 dB TV. This supports plan 3.4's rule that STT takes the echo-cancelled stream,
+not the denoised one. **For V14:** RNNoise buys fewer false VAD accepts on steady noise and
+nothing against speech interference; its 3.4% extra core and a regression on part of the STT matrix
+argue for treating it as optional, behind a setting, and not before V5 shows the Silero worker
+false-accepts on the owner's real room noise.
+
+### 3. Local STT (plan 3.5; Q6)
+
+Method: Parakeet-TDT-0.6B-v3 int8 through `sherpa_onnx.OfflineRecognizer.from_transducer(...,
+model_type="nemo_transducer")`, greedy decoding, one subprocess per thread count so peak RSS is
+clean. 96 clips (4 to 5 s) spread over voices and sentences for the short RTF; 30 s and 60 s inputs
+are the same clips joined with 350 ms gaps. RTF is decode wall time over audio seconds. sherpa's own
+default is 1 thread. Warm-up decode excluded. No cloud STT was called.
+
+|---|---|---|---|---|---|---|---|
+| 1 | 1.9 | 1084 / 1832 | 0.074 / 0.092 | 0.072 | 0.090 | 0.07 | 3.7 / 3.2 |
+| 2 | 1.9 | 1100 / 1847 | 0.043 / 0.049 | 0.045 | 0.055 | 0.17 | 3.6 / 4.0 |
+| 4 | 2.4 | 1102 / 1853 | 0.042 / 0.053 | 0.033 | 0.040 | 0.33 | 6.9 / 7.8 |
+| 8 | 1.9 | 1125 / 1870 | 0.257 / 0.436 | 0.084 | 0.048 | 2.06 | 9.7 / 8.5 |
+| 24 | 4.0 | 1093 / 1843 | 0.751 / 1.390 | 0.280 | 0.268 | 5.99 | 38.2 / 12.0 |
+
+(The 24-thread row ran on an 8-core quota: oversubscription costs 10x. The 8-thread row ran
+while other suites loaded the machine. Both illustrate why the daemon should **pin** the thread
+count, not leave it at ONNX Runtime's all-cores default.)
+
+- **RTF 0.07 on one thread, 0.04 on two to four.** A 10 s dictation decodes in 0.4 to 0.7 s; a
+  60 s one in 2.4 to 5.4 s. One thread uses 0.07 CPU-seconds per audio second; four threads burn
+  0.33 for a 40% faster result.
+- **Memory is the real cost:** about **1.1 GB resident** after load (loading takes about 2 s)
+  and **1.8 to 1.9 GB peak** during load. That has to fit the daemon's budget next to Kokoro and
+  Pocket.
+
+WER, clean synthetic: 1.4% (13 sub, 4 del, 0 ins over 1233 words, 96 clips, 384 s of audio).
+
+The errors are word-end truncations of Kokoro's fast speech ("finis", "audien"), one homophone
+("pull request" heard as "poll request" in an earlier subset) and number format ("ten" to "10",
+which a normaliser would absorb). It is clean synthetic speech, so it bounds the model from
+below and says nothing about an accented or mumbling owner. Degraded copies of 40 clips:
+
+| degradation (synthetic) | WER |
+|---|---|
+| clean | 1.9% (519 words) |
+| pink_10dB | 2.3% (519 words) |
+| pink_0dB | 6.9% (519 words) |
+| white_10dB | 2.7% (519 words) |
+| tv_10dB | 6.4% (519 words) |
+| tv_5dB | 18.5% (519 words) |
+
+TV at 5 dB is the only condition that breaks it badly (18.5%), which is also where speaker
+verification must remove the second voice before STT.
+
+**Kokoro while Parakeet decodes** (same process, Parakeet 4 threads decoding a 26 s clip in a loop):
+
+| Kokoro (one 15-word sentence) | alone p50 / p95 s | during Parakeet p50 / p95 s | slowdown |
+|---|---|---|---|
+| daemon_default_threads | 4.03 / 5.54 | 8.10 / 13.45 | 2.01x |
+| pinned_4_threads | 0.80 / 0.90 | 1.63 / 1.99 | 2.03x |
+(load1 9.3 -> 7.9)
+
+Kokoro's per-sentence latency doubles while Parakeet runs, in both configurations. Note the daemon
+configuration (ONNX Runtime default threads) is itself slow on an 8-core quota (4 s a sentence
+against 0.8 s pinned to 4 threads), so that row measures this probe's cgroup, not the daemon;
+pin Kokoro's threads too. Decodes are short (RTF 0.07), so the overlap is a burst, not a
+steady state, but a reply being synthesized while the owner dictates will stutter.
+
+**Supports Q6 on RTF:** 0.07 against a 0.3 threshold, with 4x margin even under load, if the
+thread count is pinned to 1 to 4. **The other half of the Q6 condition, "WER within 1 point of
+cloud", is not measured**; it needs paid cloud calls on real recordings and is a stated
+owner-authorised follow-up. The synthetic WER (1.4%) and the same-class model make the claim
+plausible, not shown.
+
+### 4. Keyword spotting accuracy (plan 3.3, 3.6; V10, V11)
+
+Method: sherpa-onnx native KeywordSpotter, gigaspeech 3.3M, keywords JARVIS, OVER, CANCEL, PAUSE,
+RESUME, SKIP, STOP encoded with the model's BPE, 100 ms chunks plus 0.8 s of trailing silence.
+Positives are 8 voices x 15 phrases (isolated word, "Jarvis, pause.", carried in a sentence,
+trailing "...send it, over."), 184 expected keyword occurrences. Negatives are 12 similar-sounding
+or embedding phrases and 11.5 minutes of ordinary dictation (every other clip of the Kokoro
+set). Detection delay after the last word is a median 0.35 s (p95 0.64 s) in audio time, before
+compute.
+
+| model file | threads | CPU % of a core, real time | RSS MB |
+|---|---|---|---|
+| fp32 | 1 | 1.79 | 168 |
+| fp32 | 2 | 5.89 | 169 |
+| int8 | 1 | 1.56 | 167 |
+| int8 | 2 | 4.66 | 166 |
+
+| config (boost, threshold) | recall | JARVIS | OVER | CANCEL | PAUSE | RESUME | SKIP | STOP | stem-variant FA | unrelated FA | dictation FA/h |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1.0 / 0.15 | 76% | 92% | 75% | 100% | 38% | 62% | 50% | 71% | 33 | 1 | 0.0 (0 in 11.5 min) |
+| 1.0 / 0.25 | 73% | 90% | 68% | 100% | 38% | 69% | 50% | 67% | 32 | 1 | 0.0 (0 in 11.5 min) |
+| 1.0 / 0.4 | 64% | 79% | 62% | 92% | 19% | 56% | 31% | 62% | 29 | 1 | 0.0 (0 in 11.5 min) |
+| 2.0 / 0.15 | 67% | 94% | 32% | 96% | 38% | 69% | 50% | 71% | 34 | 1 | 5.2 (1 in 11.5 min) |
+| 2.0 / 0.25 | 58% | 85% | 28% | 92% | 38% | 44% | 31% | 62% | 31 | 1 | 0.0 (0 in 11.5 min) |
+| 2.0 / 0.4 | 40% | 52% | 25% | 71% | 25% | 25% | 19% | 42% | 21 | 1 | 0.0 (0 in 11.5 min) |
+| 1.0 / 0.25 int8 | 73% | 90% | 72% | 100% | 38% | 62% | 50% | 62% | 30 | 1 | 0.0 (0 in 11.5 min) |
+| JARVIS/CANCEL 1.0 #0.25; OVER/PAUSE/RESUME/SKIP/STOP 3.0 #0.1 / - | 59% | 88% | 15% | 100% | 38% | 44% | 56% | 58% | 33 | 3 | 10.5 (2 in 11.5 min) |
+
+With 10 dB pink noise recall is 66%, with 10 dB competing speech 62% (default config).
+
+"Stem-variant FA" counts hits on "skipped", "resumed", "cancer" and "pauses" (the model hears the
+keyword inside the longer word); "unrelated FA" is anything else (1 in 12 clips).
+
+- **Cheap and quiet:** 0 false accepts in 11.5 minutes of dictation at the default operating
+  point (the 95% upper bound on that is about 16 per hour, so this is "no evidence of trouble",
+  not "none"); one at the loosest setting. Nothing fired in the 60 s browser bench except a true "stop".
+- **But the short command words are weak:** recall is JARVIS 90%, CANCEL 100%, OVER 68 to 75%, STOP
+  67%, **RESUME 69%, SKIP 50%, PAUSE 38%** for isolated synthetic speech. Raising the boost for
+  the short words (the "tuned" row) cost recall on OVER and false accepts on dictation without
+  fixing PAUSE; it is not a free fix. Noise makes it worse: 66% with 10 dB pink noise and 62%
+  with a 10 dB competing voice.
+- **Implication for Q16 / V11:** CPU is fine, but "acceptable misses" is **not** established for
+  the commands. JARVIS and CANCEL look usable; the rest need either a longer phrase ("Jarvis
+  pause" as one keyword, which also handles V-6's "starts with Jarvis" rule), per-keyword tuning on
+  the owner's own voice, or the transcript path (phase 1, V9/V10) as the primary route with KWS
+  as an accelerator. Do not retire the Chrome recognizer on this evidence.
+- Open vocabulary works as advertised: the keyword list is a text file, no training.
+
+### 5. Speaker verification (plan 3.4, V12)
+
+Method: enrol a centroid from 3 clips of one voice, score held-out clips of that voice and of
+all other voices by cosine similarity, pool, and report equal error rate (EER). 40 synthetic speakers
+(14 Kokoro, 26 Pocket), 424 genuine and 16,536 impostor trials per condition. Clips are
+trimmed of Kokoro's digital-zero padding and given a -60 dBFS noise floor first (some models score
+exact-zero frames very differently). Conditions: clean full clips; the first 3 s;
+3 s with 15 dB pink noise and a 24 kbit/s Opus round trip (the codec the HUD uploads); and
+3 s with a second voice mixed in at 10 dB. **This is not owner-vs-TV EER and not a false-accept
+rate to expect.** Two clips of one synthetic voice differ only in text and speed, so
+genuine trials are easier than real life; the impostors are TTS voices, which are neither a TV
+nor your family. Use it to compare models and as a latency receipt.
+
+| model | EER clean full clip | EER 3 s | EER 3 s, noise + Opus | EER 3 s + second voice at 10 dB | FAR at 1% FRR (overlap) | EER threshold (3 s) |
+|---|---|---|---|---|---|---|
+| wespeaker_en_voxceleb_resnet34 | 1.12% | 1.23% | 3.79% | 13.68% | 72.7% | 0.813 |
+| wespeaker_en_voxceleb_CAM++ | 31.37% | 14.17% | 12.74% | 24.31% | 80.7% | 0.920 |
+| 3dspeaker_campplus_en_voxceleb | 24.76% | 9.91% | 10.67% | 15.80% | 84.8% | 0.858 |
+| nemo_titanet_small | 0.02% | 0.00% | 0.44% | 1.93% | 2.8% | 0.706 |
+
+Trials per condition: 424 genuine, 16536 impostor.
+
+| model | 3 s embedding p50 / p95 ms, 1 thread | 4 threads | RSS growth MB | 
+|---|---|---|---|
+| wespeaker_en_voxceleb_resnet34 | 101.9 / 152.2 | 33.8 / 41.4 | 30 |
+| wespeaker_en_voxceleb_CAM++ | 38.7 / 44.6 | 21.8 / 23.8 | 6 |
+| 3dspeaker_campplus_en_voxceleb | 36.2 / 43.2 | 25.0 / 27.6 | 0 |
+| nemo_titanet_small | 33.6 / 39.8 | 19.1 / 22.5 | 83 |
+
+- **NeMo TitaNet-small is the clear leader**: 0.0% EER at 3 s, 0.4% with noise and Opus, 1.9% with
+  a second voice at 10 dB, and 2.8% false accepts at 1% false rejects in that overlap case. WeSpeaker
+  ResNet34 is clean-good (1.2%) but 13.7% with overlap. **Both CAM++ models were poor here (10 to
+  31%) and behaved oddly: worse on the whole clip than on its first 3 s**; this was not
+  root-caused (it persisted after trimming and a noise floor), so read it as "failed on this input
+  in this runtime", not as a verdict on CAM++.
+- **Latency for 3 s of audio, 1 thread: 34 ms p50 / 40 ms p95 for TitaNet-small** (19 / 23 ms on 4
+  threads); about 3 s of dictation can be verified with 1% of the audio's duration. WeSpeaker
+  ResNet34 is 3x slower. Model file 40 MB; resident growth 66 to 83 MB.
+- The default Jarvis voice (`bm_george`), scored as an impostor against every enrolled centroid,
+  peaked at 0.69 against TitaNet's EER threshold of 0.71: rejected, but narrowly. V12's
+  enrollment screen should keep the plan's check against every builtin voice and show this margin.
+- The EER thresholds differ by model and condition (0.51 to 0.71 for TitaNet), so V12 must
+  derive the threshold from the owner's enrollment, as the plan says, not hard-code one.
+- TitaNet-small's licence was not checked here (NVIDIA NeMo); check before V12 ships it.
+
+### 6. Smart Turn (plan 3.2)
+
+Method: `smart-turn-v3.2-cpu.onnx` with pipecat's protocol (last 8 s, Whisper log-mel features
+via `WhisperFeatureExtractor(chunk_length=8)`, sigmoid output). Test set: 12 complete Kokoro sentences
+versus 12 fragments cut mid-sentence (at "the", "before", "but", ...), 6 voices each, 144 clips,
+followed by 0.2 to 1.0 s of silence, with and without a -55 dBFS noise floor.
+
+| trailing audio | p(complete) median: complete / incomplete | complete recall @0.5 | incomplete correct @0.5 | AUC | best-threshold accuracy |
+|---|---|---|---|---|---|
+| 0.2s_digital_silence | 0.974 / 0.940 | 100% | 19% | 0.73 | 72% @ 0.92 |
+| 0.5s_digital_silence | 0.973 / 0.927 | 100% | 18% | 0.72 | 69% @ 0.94 |
+| 1.0s_digital_silence | 0.974 / 0.933 | 100% | 18% | 0.71 | 70% @ 0.88 |
+| 0.5s_noise_floor_-55dBFS | 0.974 / 0.936 | 100% | 21% | 0.74 | 67% @ 0.79 |
+| 1.0s_noise_floor_-55dBFS | 0.974 / 0.889 | 100% | 31% | 0.75 | 72% @ 0.73 |
+
+| threads | features ms p50 / p95 | model ms p50 / p95 | total ms p50 / p95 | CPU ms p50 |
+|---|---|---|---|---|
+| 1 | 5.3 / 7.6 | 32.0 / 42.2 | 37.4 / 50.4 | 37.4 |
+| 4 | 5.3 / 6.0 | 11.7 / 13.3 | 17.1 / 19.0 | 65.7 |
+
+- **Fast enough:** about 37 ms per decision on one thread (5 ms features from the numpy
+  extractor, 32 ms model), 17 ms on four; 8 MB model, process RSS about 220 MB with the
+  `transformers` import (a daemon-side implementation would avoid that). It would run on the
+  daemon, since the log-mel front end does not exist in the browser.
+- **Not discriminating here:** it calls 100% of the complete sentences complete but also 69 to
+  82% of the cut-off fragments (AUC 0.71 to 0.75). Trailing silence did not matter (the feature
+  extractor pads with zeros either way). **Caveat:** a TTS fragment is not a person trailing off;
+  Kokoro closes a clipped phrase with sentence-final prosody, which is what the model listens to,
+  so this probably understates the model. It is still no evidence for it.
+- **Recommendation:** leave Smart Turn out of V5. The plan's own adoption test (beat the plain
+  2.5 s timer on the owner's dictation) cannot be run synthetically.
+
+### Findings against the plan, in one place
+
+| Plan item | Result | Effect |
+|---|---|---|
+| Q6: local STT default if RTF < 0.3 and WER within 1 point of cloud | RTF 0.07 (1 thread) / 0.04 (2 to 4); 1.1 GB resident, 1.9 GB peak; synthetic WER 1.4%; cloud WER **not measured** | RTF half met with margin; WER half open (paid, owner-authorised) |
+| Q16: KWS in the window if at most 15% of a core and acceptable misses | about 3.3% (KWS) and about 12% with Silero + RNNoise | cost met; misses **not** acceptable for PAUSE, SKIP, RESUME on synthetic speech; needs the owner-voice run |
+| 3.2 / V5: Silero in a worker | 2.4% above baseline (3.4% total), 0.6 ms/frame, no late frames | go; plan the one-off 0.6 CPU-s start-up |
+| 3.4 / V14: RNNoise | extra 3.4% core; fewer false accepts on noise, no help with speech; STT mixed | optional, off by default |
+| 3.4 / V12: speaker verification | TitaNet-small: 34 ms per 3 s, EER 0.0 to 1.9% synthetic, CAM++ poor | candidate is TitaNet-small via sherpa-onnx (Python 3.14 wheel exists); owner-vs-TV EER open |
+| 3.2: Smart Turn | 37 ms, but does not separate synthetic fragments | not adopted |
+| 3.4 self-voice gating step 1 (Chrome AEC) | **not measured** | manual gate |
+
+### Findings that are about the tooling
+
+- The sherpa-onnx WASM does not run in the browser as shipped (above); for KWS-in-window the
+  work in V11 is building or finding a browser KWS WASM, or running KWS on the daemon over a
+  local WebSocket, which Q16 already names as the fallback.
+- ONNX Runtime's default thread count is harmful on a shared or capped machine: 8 and 24 threads
+  were 4 to 10x slower than 1 to 4 for Parakeet. Pin threads for every local model.
+- Kokoro and Parakeet slow each other roughly 2x when they overlap; a single process lock for
+  heavy local audio models may be worth considering in V13.
+
+### Manual gate: what V0 could not measure (owner at the PC)
+
+None of these is faked above; each needs the owner's room, speakers or voice. The
+probes are ready to run; none writes audio to disk or calls the network, and none is
+in the normal test sweep (`JARVIS_VOICE_V0=1` required).
+
+| Measurement | Why not synthetic | How to run it | Fills |
+|---|---|---|---|
+| **Speaker echo return loss (ERLE)**, Chrome AEC against same-page Web Audio output | needs your speakers, mic, room and Windows' audio stack | `python tests/voice_v0/manual/aec_manual_server.py`, open the printed `http://127.0.0.1:PORT/aec_probe.html` in the **same Windows Chrome profile as the HUD**, click Start, stay silent for about 2 minutes. Four trials (AEC off/on x Web Audio/`<audio>`); copy the JSON | plan 3.4 self-voice step 1; whether the reference-correlation gate (step 2) is mandatory |
+| **False holds per hour of playback** | needs V9's barge-in | after V9: play 30 min of replies at your usual volume with the TV on and you silent; count holds in the diagnostics view | Q7 (3 false pauses / 10 min rule) |
+| **KWS misses at 1 m and 3 m, false accepts with TV** | distance, reverberation, your voice | `python tests/voice_v0/manual/owner_manual.py kws --seconds 60 --label "1 m"` (say each keyword about 10 times), again `--label "3 m"`, then silent with the TV on for 5+ min `--seconds 300 --label "TV"`; hits per hour = hits / minutes x 60 | Q16, V11 thresholds |
+| **VAD false accepts with the real TV** | the synthetic "TV" is two TTS voices | `owner_manual.py vad --minutes 5` (silent, TV on) | V5 (p>=0.5 share, speech onsets per minute) |
+| **Owner WER (local Parakeet)** | your voice; cloud comparison needs paid calls | `owner_manual.py wer --n 20` reads 20 prompts, transcribes locally, reports WER; audio never saved. For cloud, read the same 20 sentences into the HUD yourself and compare, or authorise a paid follow-up | Q6 "within 1 point of cloud" |
+| **Owner-vs-TV speaker EER** | your voice and a real TV | `owner_manual.py speaker --tv-minutes 3` (3 enrolment readings, 20 own clips, then TV windows) | V12 threshold and Guest voice default |
+| **A day's DropReason histogram** | needs a real day of use, and V1's ring keeps only the last 50 utterances, in memory, cleared on reload | Not obtainable from V1 alone. Add a counter in V3/V5, or tally by hand from Settings -> Voice -> Diagnostics at intervals | plan 6 |
+
+`owner_manual.py` reads the mic through PulseAudio (`parec`, WSLg `RDPSource`), so it
+measures the WSL path rather than Windows Chrome's capture. Use `aec_probe.html` for
+anything about the browser's own processing. `--source stdin` feeds raw 16 kHz s16le PCM
+instead (that is how the scripts were smoke-tested with synthetic audio).
+

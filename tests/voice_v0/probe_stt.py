@@ -71,16 +71,17 @@ def concat(clips: list[np.ndarray], seconds: float) -> np.ndarray:
 
 def worker(threads: int, limit: int, noisy: bool) -> dict:
     manifest = [c for c in common.load_manifest() if c["engine"] == "kokoro"]
-    # one voice-balanced subset: round-robin over voices
-    by_voice: dict[str, list[dict]] = {}
+    # Spread over voices AND sentences: voice k % V, sentence (5k + k // V) mod S. A plain "first N
+    # per voice" would only ever hit the first few sentences.
+    by_voice: dict[str, dict[int, dict]] = {}
     for c in manifest:
-        by_voice.setdefault(c["voice"], []).append(c)
+        by_voice.setdefault(c["voice"], {})[c["sentence"]] = c
+    voices = sorted(by_voice)
+    n_sent = len(next(iter(by_voice.values())))
     picked = []
-    for i in range(max(len(v) for v in by_voice.values())):
-        for v in by_voice.values():
-            if i < len(v):
-                picked.append(v[i])
-    picked = picked[:limit]
+    for k in range(limit):
+        v = voices[k % len(voices)]
+        picked.append(by_voice[v][(5 * k + k // len(voices)) % n_sent])
     audio = {c["file"]: common.read_wav(common.FIXTURES / c["file"]) for c in picked}
 
     rss0 = common.cur_rss_mb()
@@ -147,7 +148,9 @@ def ns_wer(threads: int = 4) -> dict:
     degradations only. The WAVs are 12 dictation clips joined with 0.8 s gaps; we cut them
     back apart by the known lengths (RNNoise preserves length) and decode clip by clip.
     """
-    res = json.loads((common.WORK / "results" / "browser_cpu.json").read_text())["vad_quality"]
+    results = common.WORK / "results"
+    src = results / "browser_vadquality.json"
+    res = json.loads((src if src.exists() else results / "browser_cpu.json").read_text())["vad_quality"]
     order = res["clip_order_for_stt"]
     by_file = {c["file"]: c for c in common.load_manifest()}
     lengths = [len(common.read_wav(common.FIXTURES / f)) for f in order]
@@ -172,44 +175,63 @@ def ns_wer(threads: int = 4) -> dict:
 
 
 def contention() -> dict:
-    """Kokoro time-to-first-audio alone vs while Parakeet decodes in the same process."""
+    """Kokoro synthesis time per sentence alone vs while Parakeet decodes in the same process.
+
+    Two Kokoro configurations: the daemon's (jarvis.voice: Kokoro(model, voices), ORT default threads
+    = all cores) and a pinned 4-thread session. Parakeet runs 4 threads in a background loop.
+    """
+    import onnxruntime as ort
     from kokoro_onnx import Kokoro
 
     from jarvis import config
 
-    k = Kokoro(str(config.KOKORO_MODEL), str(config.KOKORO_VOICES))
     sentence = "The build finished without errors, but the second test suite is still running."
-    k.create(sentence, voice="bm_george", speed=1.2, lang="en-gb")  # warm
-    alone = []
-    for _ in range(6):
-        t0 = time.perf_counter()
-        k.create(sentence, voice="bm_george", speed=1.2, lang="en-gb")
-        alone.append(time.perf_counter() - t0)
-    rec, _ = load(4)
     manifest = [c for c in common.load_manifest() if c["engine"] == "kokoro"][:6]
     longx = np.concatenate([common.read_wav(common.FIXTURES / c["file"]) for c in manifest])
-    stop = threading.Event()
-    busy = {"decodes": 0}
+    rec, _ = load(4)
 
-    def hog():
-        while not stop.is_set():
-            decode(rec, longx)
-            busy["decodes"] += 1
+    def make(pinned: bool):
+        if not pinned:
+            return Kokoro(str(config.KOKORO_MODEL), str(config.KOKORO_VOICES))
+        so = ort.SessionOptions()
+        so.intra_op_num_threads, so.inter_op_num_threads = 4, 1
+        sess = ort.InferenceSession(str(config.KOKORO_MODEL), sess_options=so, providers=["CPUExecutionProvider"])
+        return Kokoro.from_session(sess, str(config.KOKORO_VOICES))
 
-    th = threading.Thread(target=hog)
-    th.start()
-    time.sleep(1.0)
-    during = []
-    for _ in range(6):
-        t0 = time.perf_counter()
-        k.create(sentence, voice="bm_george", speed=1.2, lang="en-gb")
-        during.append(time.perf_counter() - t0)
-    stop.set()
-    th.join()
-    return {"kokoro_alone_s": common.summarize(alone), "kokoro_during_parakeet_s": common.summarize(during),
-            "parakeet_threads": 4, "parakeet_decodes_during": busy["decodes"],
-            "note": "Kokoro create() returns the whole sentence; first-audio is that latency here "
-                    "(the daemon sends whole chunks), so this is time-to-first-audio per chunk."}
+    def times(k, n=8):
+        out = []
+        for _ in range(n):
+            t0 = time.perf_counter()
+            samples, sr = k.create(sentence, voice="bm_george", speed=1.2, lang="en-gb")
+            out.append(time.perf_counter() - t0)
+        return out, len(samples) / sr
+
+    res = {"parakeet_threads": 4, "load1_at_start": os.getloadavg()[0]}
+    for label, pinned in (("daemon_default_threads", False), ("pinned_4_threads", True)):
+        k = make(pinned)
+        k.create(sentence, voice="bm_george", speed=1.2, lang="en-gb")  # warm
+        alone, audio_s = times(k)
+        stop, busy = threading.Event(), {"decodes": 0}
+
+        def hog():
+            while not stop.is_set():
+                decode(rec, longx)
+                busy["decodes"] += 1
+
+        th = threading.Thread(target=hog)
+        th.start()
+        time.sleep(1.0)
+        during, _ = times(k)
+        stop.set()
+        th.join()
+        res[label] = {"sentence_audio_s": audio_s, "kokoro_alone_s": common.summarize(alone),
+                      "kokoro_during_parakeet_s": common.summarize(during),
+                      "slowdown_p50": common.pct(during, 50) / common.pct(alone, 50),
+                      "parakeet_decodes_during": busy["decodes"]}
+    res["load1_at_end"] = os.getloadavg()[0]
+    res["note"] = ("Kokoro create() returns a whole sentence, which is how the daemon's /say works, so this latency "
+                   "is the time to first audio per chunk. Both models share this process's cores and the machine's load.")
+    return res
 
 
 def main(argv: list[str]) -> int:

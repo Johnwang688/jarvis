@@ -236,12 +236,12 @@ def _f32(b64: str) -> np.ndarray:
     return np.frombuffer(base64.b64decode(b64), dtype="<f4").copy()
 
 
-def vad_quality(b: Browser, d: Path) -> dict:
+def vad_quality(b: Browser, d: Path, n_clips: int = 36) -> dict:
     """Silero p(speech) on degraded speech, without and with RNNoise first (see module docstring)."""
     from scipy.signal import resample_poly
 
     clips = [c for c in common.load_manifest() if c["engine"] == "kokoro"]
-    picked = [clips[i] for i in range(0, len(clips), 28)][:12]
+    picked = [clips[(i * 9) % len(clips)] for i in range(n_clips)]   # spread over voices and sentences
     audio = {c["file"]: common.read_wav(common.FIXTURES / c["file"]) for c in picked}
     gap = np.zeros(int(0.8 * common.SR), np.float32)
     clean = np.concatenate([np.concatenate([audio[c["file"]], gap]) for c in picked])
@@ -359,13 +359,13 @@ def main(argv: list[str]) -> int:
                     "late_frames": [sum(c[k]["late_frames"] for c in r["cadence"]) for k in range(2)],
                     "worker_frame_ms_p95": [float(np.percentile(o["result"]["frame_ms"], 95)) for o in r["outs"]]}
             if "vadquality" in only:
-                res["vad_quality"] = vad_quality(b, d)
+                res["vad_quality"] = vad_quality(b, d, int(arg.get("--vq-clips", 36)))
         finally:
             b.close()
             srv.shutdown()
     if "kws" in only:
         res["kws_sherpa_wasm_under_node"] = kws_under_node(d)
-    common.emit("browser_cpu", res)
+    common.emit("browser_cpu" if only - {"vadquality"} else "browser_vadquality", res)
     return 0
 
 

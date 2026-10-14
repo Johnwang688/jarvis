@@ -3,7 +3,7 @@
 #
 #   JARVIS_VOICE_V0=1 tests/voice_v0/run_all.sh [step ...]
 #
-# Steps (default: all, in this order): fetch fixtures special browser stt ns contention speaker kws turn
+# Steps (default: all, in this order): fetch fixtures special browser vadquality stt ns contention speaker kws turn
 # Needs the probe venv (uv venv ~/.cache/jarvis-voice-v0/venv; uv pip install sherpa-onnx numpy scipy
 # soundfile onnxruntime kokoro-onnx playwright==<repo's> sentencepiece transformers psutil) and node.
 # Results land in ~/.cache/jarvis-voice-v0/results/*.json. Nothing here runs in the normal test sweep:
@@ -25,14 +25,15 @@ fi
 cap() { local mem="$1"; shift
   systemd-run --user --scope -q -p MemoryMax="$mem" -p MemorySwapMax=0 -p CPUQuota=800% -- "$@"; }
 
-steps=("$@"); [ ${#steps[@]} -eq 0 ] && steps=(fetch fixtures special browser stt ns contention speaker kws turn)
+steps=("$@"); [ ${#steps[@]} -eq 0 ] && steps=(fetch fixtures special browser vadquality stt ns contention speaker kws turn)
 for s in "${steps[@]}"; do
   echo "== $s"; case "$s" in
     fetch)      cap 3G "$PY" "$HERE/fetch_models.py" ;;
     fixtures)   cap 3G "$PY" "$HERE/make_fixtures.py" ;;
     special)    cap 3G "$PY" "$HERE/make_special_fixtures.py" ;;
-    browser)    cap 3G "$PY" "$HERE/probe_browser.py" ;;
-    stt)        cap 4G "$PY" "$HERE/probe_stt.py" --threads 1,2,4,8,24 --clips 40 --noisy --noisy-threads 4 ;;
+    browser)    cap 3G "$PY" "$HERE/probe_browser.py" --only silero,rnnoise,kws,combo ;;
+    vadquality) cap 3G "$PY" "$HERE/probe_browser.py" --only vadquality ;;
+    stt)        cap 4G "$PY" "$HERE/probe_stt.py" --threads 1,2,4,8,24 --clips 96 --noisy --noisy-threads 4 ;;
     ns)         cap 4G "$PY" "$HERE/probe_stt.py" --ns --threads 4 ;;
     contention) cap 4G "$PY" "$HERE/probe_stt.py" --contention ;;
     speaker)    cap 3G "$PY" "$HERE/probe_speaker.py" --threads 1,4 ;;
