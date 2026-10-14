@@ -2908,16 +2908,16 @@ On the existing authenticated single-tab socket, the host may send:
 {"t":"auth","id":"32 lowercase hex characters","origin":"https://example.test","realm":"untrusted plain text","scheme":"basic","expires_in":60}
 ```
 
-`scheme` is `basic` or `digest`; realm is capped at200 code points and origin is
-normalized without path/query/userinfo. `expires_in` is positive and at most60.
+`scheme` is `basic` or `digest`; realm is capped at 200 code points and origin is
+normalized without path/query/userinfo. `expires_in` is positive and at most 60.
 A fresh nonce binds the exact current CDP request, Page/document/instance, socket
 attachment generation, hold and visibility epoch. It never authorizes a different
 request/origin. Reconnect may rotate the nonce but cannot extend expiry/attempts.
 The prompt never takes focus on its own.
 
 Owner replies are exactly `{t:"auth",id,cancel:true}` or
-`{t:"auth",id,cancel:false,username,password}`. UTF-8 limits are1024 username bytes
-and4096 password bytes; controls are refused. There is no HTTP credential endpoint,
+`{t:"auth",id,cancel:false,username,password}`. UTF-8 limits are 1024 username bytes
+and 4096 password bytes; controls are refused. There is no HTTP credential endpoint,
 MCP tool or persisted auth setting. Reply fields are transient and cleared after
 use/refusal. Host completion is `{t:"auth_closed",id,reason}`, where reason is one
 of `answered`, `cancelled`, `expired`, `reload`, `changed`, `refused`. A fixed private
@@ -2926,8 +2926,16 @@ No auth origin, realm, credentials or pending status is added to the general bus
 or `/status`. Ordinary Chrome in-memory auth caching is unchanged.
 
 At most one prompt per tab/eight per host and three submissions per explicit
-owner operation share one original60-second deadline. Normal navigation retains
+owner operation share one original 60-second deadline. Normal navigation retains
 20 seconds of non-auth work. Navigation/close/hold/detach/profile replacement
 invalidate old replies; auth admission blocks/drains page input and agent driving.
 Protected Sound-restoration auth fails closed into the existing explicit Retry;
 it cannot expose a partial replacement stream or weaken the restart barrier.
+
+Installed-Chrome capability measurements are narrower than the socket contract:
+same-origin iframe auth delivered a prompt, while a first protected popup request
+and an established separate OOPIF challenge delivered none during a two-second
+observation. Explicit owner Reload recovered the popup through `auth_pending` and
+its owner form. Use explicit top-level owner navigation for protected embedded
+pages; no universal popup/OOPIF delivery is promised. No credentials were sent in
+these capability probes.

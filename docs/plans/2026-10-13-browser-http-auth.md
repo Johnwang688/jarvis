@@ -78,11 +78,15 @@ replacement ticket or weaken the exclusive restart barrier. Existing failed
 restoration placeholders expose the existing explicit owner Retry. This batch
 does not support answering authentication during Sound replacement.
 
-Top-level Basic/Digest, popup-first-request, subresource/frame and out-of-process
-frame capabilities require separate installed-Chrome receipts. A successful
-Basic top-level fixture does not establish popup or OOPIF interception. Missing
-CDP setup refuses with fixed words; it does not fall back to unrestricted access.
-Any measured gap must be reported with its exact fixture and safe retry behavior.
+Installed-Chrome capability probes use the actual host/gate/socket with no
+credentials. Same-origin iframe authentication delivered its exact owner prompt.
+A popup's first protected request had no OwnerAuth session or prompt during the
+two-second observation; explicit owner Reload returned `auth_pending` and delivered
+the prompt. An established separate OOPIF target reached the protected fixture but
+sent no owner prompt during the same bounded observation. These are measured gaps,
+not universal popup/OOPIF support. Use explicit top-level owner navigation for a
+protected embedded page; the popup Reload path was separately measured. Missing
+CDP setup refuses with fixed words and never bypasses the network gate.
 
 ## Verification contract
 
@@ -95,7 +99,17 @@ duplicate/cap limits, blocked control ports, hidden capture exclusion, no-secret
 canaries and Sound failed-restore cleanup. Independent source review and meaningful
 guard mutations precede the clean full regression sweep and exact-head merge.
 
-Current verification: 46 focused backend checks passed. The actual first-address
-Basic gate passed a22.153-second pending wait/one reply and unchanged60.002-second
-expiry. Six further native cases passed actual Digest and socket/navigation/profile/
-attempt cleanup. HUD, remaining core-boundary and capability checks are separate.
+Current verification: 46 focused backend checks and a later 62-check auth/Sound
+run passed. The actual first-address Basic gate passed a 22.153-second pending
+wait/one reply and unchanged 60.002-second expiry. Nine native matrix cases passed
+Digest, socket/navigation/attempt cleanup, stored restore without a new lease,
+Private cleanup and hidden capture exclusion. Three capability cases measured the
+limits above. Six guard baseline assertions passed; five scratch mutants failed
+for their intended assertions. The WT production HUD build passed, as did 2,092
+HUD unit checks plus the remaining 15 syntax asset checks under a finite fixture
+allowlist. Focused actual auth HUD passed all 14 checks, including standard Enter
+buttons, approval/Escape priority, strict Settings detach/reattach with a fresh
+ticket, cleared typed fields and narrow-pane layout. Its Python-only reconnect
+poll originally starved Playwright routed-socket callbacks; a side-effect-free
+browser round trip fixed that fixture without a product change. Root review and
+the combined integration sweep remain separate release gates.

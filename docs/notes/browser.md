@@ -1457,9 +1457,9 @@ existing explicit address transaction discloses source/adopts a fresh lease;
 stored Remote restore creates neither permission. No agent/MCP auth tool exists.
 
 One supervised navigation child keeps actual activity ownership through cleanup.
-Normal work retains an accumulated20-second budget; authentication shares one
-original60-second expiry and at most3 submissions per explicit operation. One
-prompt per tab/eight per host,128 paused-request records/callbacks, exact origin,
+Normal work retains an accumulated 20-second budget; authentication shares one
+original 60-second expiry and at most 3 submissions per explicit operation. One
+prompt per tab/eight per host, 128 paused-request records/callbacks, exact origin,
 Page/document/instance/socket/hold/visibility identity and bounded reply admission
 prevent stale or unbounded work. Authentication admission drops prior page input
 and old presses through the existing hold count. Owner answer/cancel stamps takeover.
@@ -1475,14 +1475,29 @@ Protected navigation during a committed Sound replacement cancels/settles withou
 a prompt or a usable replacement ticket, retaining existing explicit Retry. This
 batch does not hand pending auth through the exclusive Sound restart barrier.
 Hidden Direct capture does not adopt owner tabs or install the prompting controller.
-Popup-first-request and OOPIF capability need separate installed-Chrome receipts;
-the top-level Basic/Digest results do not establish those capabilities.
+Separate installed-Chrome probes delivered same-origin iframe auth. A popup's
+first protected request had no OwnerAuth session/prompt within two seconds;
+explicit owner Reload returned `auth_pending` and delivered a prompt. A previously
+established separate OOPIF target reached the protected fixture without delivering
+an owner prompt during the bounded two-second observation. These measured gaps
+sent no credentials. Use explicit top-level owner navigation for protected embedded
+pages; the popup Reload recovery was measured. Do not infer universal popup/OOPIF
+support from top-level Basic/Digest.
 
-Focused backend46 checks passed. Actual production-host/SOCKS/ticket/socket Basic
-proved first pending address, a22.153-second owner wait followed by one successful
-reply, and original60.002-second expiry; Chrome tree RSS1054.7MiB and cleanup passed.
-A separate6-case native matrix passed actual Digest, first allocation cancel,
-reconnect/old nonce, superseding navigation, profile close, and3 wrong attempts.
-These are synthetic local credentials and ephemeral daemons, not real accounts,
-installation or physical-device evidence. Full HUD and release checks are separate.
+Focused backend 46 checks passed. Actual production-host/SOCKS/ticket/socket Basic
+proved first pending address, a 22.153-second owner wait followed by one successful
+reply, and original 60.002-second expiry; Chrome tree RSS 1054.7 MiB and cleanup passed.
+A later 62-check auth/Sound run and nine-case native matrix passed, including
+Digest, first allocation cancel, reconnect/old nonce, superseding navigation,
+profile close, three wrong attempts, stored restore without a new lease, Private
+cleanup and hidden capture exclusion. Six guard baseline assertions passed and
+five scratch mutants failed their intended assertions. The WT production HUD
+build passed, with 2,092 HUD units plus the remaining 15 syntax asset checks under
+a finite fixture allowlist. Focused actual auth HUD passed 14 checks, including
+keyboard buttons, approval/Escape priority, strict Settings detach/reattach with a
+fresh ticket, cleared typed fields and narrow layout. A Python-only poll had
+starved routed socket callbacks; the fixture now pumps sync Playwright without
+changing the product. These are synthetic local credentials and ephemeral daemons,
+not real accounts, installation or physical-device evidence; final review and the
+combined release sweep remain separate.
 See [the focused interface plan](../plans/2026-10-13-browser-http-auth.md).
