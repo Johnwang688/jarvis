@@ -119,13 +119,13 @@ def main() -> int:
             stream(mock, REPLY)
             mock.emit("text", {"text": REPLY}, thread_id="t1")
             until(lambda: speech(page)["view"]["state"] == "playing", timeout=5)
-            page.evaluate("window.__hud.capture.press()")
+            page.locator("#orb").dispatch_event("pointerdown")   # the orb is push-to-talk
             check("a talk-key press pauses him", speech(page)["view"]["state"] == "paused")
-            page.evaluate("window.__hud.capture.release()")   # too short: nothing is sent
+            page.locator("#orb").dispatch_event("pointerup")   # too short: nothing is sent
             check("and he carries on when nothing was said",
                   bool(until(lambda: speech(page)["view"]["state"] == "playing", timeout=3)))
             page.locator('[data-testid="speech-toggle"]').click()
-            page.evaluate("window.__hud.capture.press(); window.__hud.capture.release()")
+            page.locator("#orb").dispatch_event("pointerdown"); page.locator("#orb").dispatch_event("pointerup")
             page.wait_for_timeout(300)
             check("paused from the strip first, a release does not resume him", speech(page)["view"]["state"] == "paused")
             page.locator('[data-testid="speech-stop"]').click()
