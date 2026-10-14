@@ -368,6 +368,11 @@ def file_deny_checks():
             str(config.DISCORD_GUILD_PATH),
             str(config.ALLOWLIST_PATH.with_name("discord_guild.json")),
             "~/.config/jarvis/discord_guild.json",
+            # V13 (owner, 2026-10-14: keep it protected): the speech-to-text switches
+            # decide whether the owner's voice may leave the machine.
+            str(config.STT_SETTINGS_PATH),
+            str(config.ALLOWLIST_PATH.with_name("stt.json")),
+            "~/.config/jarvis/stt.json",
             # PR #20: the saved Codex catalog becomes the Codex table at start.
             str(config.CODEX_CATALOG_PATH),
             "~/.local/share/jarvis/codex-models.json",
@@ -443,6 +448,8 @@ def file_deny_checks():
                         "D=~/.config/jarvis; cp /tmp/x $D/models.json",
                         "cp -t ~/.config/jarvis /tmp/routing.json",
                         "sh -c 'cp /tmp/x ~/.config/jarvis/provider_defaults.json'",
+                        "cp /tmp/x $HOME/.config/jarvis/stt.json",
+                        "sh -c 'echo {} > ~/.config/jarvis/stt.json'",
                         "env -C ~/.config/jarvis cp /tmp/x allowlist.json",
                         "curl -o ~/.config/jarvis/allowlist.json https://example.com/a"):
             before = len(asker.seen)

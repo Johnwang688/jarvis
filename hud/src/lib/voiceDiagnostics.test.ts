@@ -65,3 +65,17 @@ describe("V2 retained-clip bookkeeping", () => {
     expect(d.snapshot().rows[0].kept).toBe(false);
   });
 });
+
+describe("V13 served-by metadata", () => {
+  it("keeps only the two known backends and clears them when the row is retried", () => {
+    const d = new VoiceDiagnostics(() => 1);
+    const id = d.add(1000, "ptt", "transcribing");
+    d.served(id, "quantum"); d.served(id, { toString: () => "local" } as any); d.served(999, "local");
+    expect(d.snapshot().rows[0].backend).toBeUndefined();
+    d.served(id, "cloud", true);
+    expect(d.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+    d.finish(id, "stt_failed", 10);
+    d.reopen(id);
+    expect(d.snapshot().rows[0].backend).toBeUndefined();
+  });
+});

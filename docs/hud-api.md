@@ -321,7 +321,19 @@ every one of these routes asks (`kind`):
 - `POST /stt` body `audio/*` (WAV or webm) → `{"text"}` via `voice.stt`,
   which tries `STT_MODEL` then `STT_FALLBACK_MODELS`. When every model fails
   it is a **502** whose `error` names each model and its HTTP status (never a
-  response body), and the HUD shows that sentence.
+  response body), and the HUD shows that sentence. V13: the reply is
+  `{"text", "backend": "local"|"cloud", "model", "fallback"?}` (`fallback` is why
+  local did not serve a clip meant for it). With the owner's backend `local` or
+  `auto` the clip is decoded in the daemon first (`jarvis/stt_local.py`); with
+  `cloud_fallback` off nothing is uploaded: a local failure is a **502** and a
+  path that would need the cloud is a **409** (`STTBlocked`, not retried).
+- `GET /stt/settings` → `{backend, cloud_fallback, error, backends, local:
+  {installed, reason, loaded, threads, idle_unload_min, model, fetch}}`;
+  `POST /stt/settings {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool}`
+  (at least one; anything else a 400, nothing written). Owner-only, the HUD
+  listener. `stt.json` is protected state. A read never loads the model. After each
+  successful POST, and when a read finds the resolved value changed by itself, the
+  daemon publishes `{kind: "stt_settings", data: <the GET body>}` on `/events`.
 - `POST /say` `{text, voice?, instructions?, local_only?}` → audio bytes
   (`RIFF` or MP3; the client sniffs), `X-Speech-Ms` = synthesis time. Unknown
   keys are a 400. A `voice` must be one `GET /voices` lists, else **400**.

@@ -417,3 +417,53 @@ describe("clip retention is bounded", () => {
     expect(h.diagnostics.snapshot().rows[0].kept).toBe(false);
   });
 });
+
+describe("V13: which backend served the clip", () => {
+  const reply = (backend: unknown, fellBack?: boolean) => ({ text: "hello", backend, fellBack });
+  function withReplies() {
+    const diagnostics = new VoiceDiagnostics(() => 0);
+    const placed: string[] = [];
+    let next: ReturnType<typeof reply> | string = reply("local");
+    const stt = new SttAssembler<string>({
+      transcribe: async () => next,
+      place: b => { placed.push(...b.map(p => p.text)); },
+      diagnostics, now: () => Date.now(),
+    });
+    return { stt, diagnostics, placed, set: (r: typeof next) => { next = r; } };
+  }
+  it("records the backend on the diagnostics row, and the text still lands", async () => {
+    const h = withReplies();
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    await h.stt.settled();
+    expect(h.placed).toEqual(["hello"]);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "local", fellBack: false });
+  });
+  it("marks a clip the cloud answered because local failed", async () => {
+    const h = withReplies();
+    h.set(reply("cloud", true));
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+  });
+  it("a plain string reply still works, and an unknown backend is ignored", async () => {
+    const h = withReplies();
+    h.set("hi there");
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.placed).toEqual(["hi there"]);
+    expect(h.diagnostics.snapshot().rows[0].backend).toBeUndefined();
+    h.set(reply("<script>", true));
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[1].backend).toBeUndefined();
+    expect(JSON.stringify(h.diagnostics.snapshot())).not.toContain("script");
+  });
+  it("an empty transcript still says who heard it", async () => {
+    const h = withReplies();
+    h.set({ text: "  ", backend: "local", fellBack: false });
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ outcome: "empty_transcript", backend: "local" });
+  });
+});

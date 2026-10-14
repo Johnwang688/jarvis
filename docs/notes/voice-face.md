@@ -1481,6 +1481,151 @@ not interrupt; and `rv_stt_lands_selected`, which still described the pre-V2
 W-6 behaviour of sending to a chat selected during STT).
 Not claimed: a physical-microphone run, the 2.5 s pause, or a live deployment.
 
+## 2026-10-13: V13 local speech-to-text with a cloud-fallback switch
+
+Plan §3.5 and §4 V13; Q6 answered (build local Parakeet with a switchable cloud
+fallback; one paid comparison on synthetic speech, at most $0.25; local becomes
+the default only if its WER is within 1 point of cloud). **Status: built and
+tested on fakes plus one real-model smoke run; the default stays `cloud`, the
+paid comparison has NOT been run, and nothing is deployed.**
+
+- **Engine** (`jarvis/stt_local.py`). Parakeet-TDT-0.6B-v3 int8 through
+  `sherpa-onnx` (`OfflineRecognizer.from_transducer`, `nemo_transducer`, greedy),
+  inside the daemon. `sherpa_onnx` is imported only at first load, so the daemon
+  runs without it. Threads are pinned (`config.STT_LOCAL_THREADS`, default 2,
+  clamped 1..4; V0: more than 4 was 4-18x slower). Lazy load; a daemon
+  `threading.Timer` drops the model after `STT_LOCAL_IDLE_MIN` (default 10)
+  idle minutes (`Engine.reap`, never under a running decode). Decodes are
+  serialised on one lock; each request waits no longer than its own deadline,
+  and a caller that gave up marks its job cancelled so a job that never started
+  never runs (no stacking). The decode itself cannot be interrupted: an
+  abandoned one finishes in the background, a clip being capped at 90 s. A
+  failed load is not retried for 60 s. WAV (16-bit PCM, any rate/channels) only:
+  no media decoder runs on uploaded bytes, so Discord's Ogg would need a
+  decision before it opts in. Every `LocalSTTError` message is a fixed sentence
+  (no path, no library text).
+- **Policy** (`voice.stt_result`, `voice.stt` is its `.text`). Settings
+  (`jarvis/stt_settings.py`, `~/.config/jarvis/stt.json`, env
+  `JARVIS_STT_SETTINGS`): `backend` = `cloud`/`local`/`auto` and `cloud_fallback`
+  (bool, default on). Callers that do not pass `prefer_local` (Discord voice
+  notes, the face server) are unchanged: the cloud chain, whatever `backend`
+  says. The HUD's `/stt` opts in (`prefer_local=True`). With `local`/`auto`, local
+  decodes first; on failure or timeout the cloud answers with what is left of
+  the caller's budget, only if `cloud_fallback` is on. With a budget, local gets
+  at most `STT_LOCAL_BUDGET_SHARE` (0.45) of it while a fallback is allowed, and
+  all of it when not. `cloud_fallback` off forbids EVERY upload for every
+  caller: the cloud chain is never entered; a local failure is a visible 502
+  ("...cloud fallback is off, so nothing was uploaded"), and a path that would
+  need the cloud (backend `cloud`, or a caller that did not opt in) is
+  `STTBlocked`, a 409 the HUD does not retry. `auto` with no local engine goes
+  straight to the cloud without a complaint. The chosen backend and the reason
+  local did not serve are in the `/stt` reply (`backend`, `model`, `fallback`).
+- **Fail closed.** A missing `stt.json` is the defaults. One that exists but is
+  not JSON, not an object, a symlink, over 4 KB, or has a key of the wrong type
+  reads as `local` with no upload, and `/stt/settings` says so. A repair through
+  one switch keeps the other at its fail-closed value. `stt.json` is **protected
+  state** (`tools/files._protected_state_paths`): no agent write, grant or shell
+  command may change it, since flipping it could send the owner's voice to the
+  cloud and an upload cannot be undone. **Owner decision, 2026-10-14: keep it
+  protected** (plan §2, V-12a; the protected-state set, not the SELF_PROTECTED
+  source list). The shell detector and v2's layer 1 are pinned for it
+  (`tests/voice_stt_local_check.py`, `tests/v2/permissions_check.py`), and v2's
+  refusal says what the file is.
+- **Route.** `GET/POST /stt/settings`, owner-only on the HUD listener
+  (`{backend?, cloud_fallback?}`, validated before anything is written; a read
+  never loads the model). Settings -> Voice has a Speech-to-text section: the
+  three backends, the Cloud fallback switch, one sentence saying what happens to
+  the next clip, and the local engine's state (installed, loaded, threads, idle
+  unload, or how to install). The window keeps nothing: it shows the daemon's
+  answer after every change. Diagnostics rows say `· local`, `· cloud` or
+  `· cloud (local failed)` per clip (known values only, never daemon text).
+- **Real-model smoke** (`tests/voice_stt_local_real.py`, gated by
+  `JARVIS_STT_LOCAL_REAL=1`, V0 venv, 4G scope), one synthetic Kokoro clip:
+  WER 0, cold 2.7 s (load included), warm RTF 0.055, a 48 kHz stereo copy still
+  decodes, RSS 41 -> 1117 MB loaded -> **78 MB after unload** (`gc` plus
+  `malloc_trim`), reload on demand. Synthetic speech, one clip: it shows the
+  wiring works and that the 1.1 GB is returned, not accuracy.
+- **Deploy** (once, by the lead): install `sherpa-onnx` into the daemon venv
+  (the V0 probe venv has 1.13.8, which has a CPython 3.14 wheel), then
+  `python -m jarvis.stt_local fetch` (about 490 MB, SHA256-pinned, same digest as
+  `tests/voice_v0/models.json`, extracted with the `data` filter under member
+  and size caps into `~/.cache/jarvis-stt/parakeet-tdt-0.6b-v3-int8`; or point
+  `JARVIS_STT_LOCAL_MODEL` at an existing directory). Restart the daemon, then
+  Settings -> Voice shows "installed". Nothing changes until the owner picks
+  Local or Auto. The first load after each daemon start hashes about 640 MB of
+  model files (`verify_model`, once per file identity) on top of the 2-4 s load,
+  so the first clip after a start may miss its local share of the budget and
+  fall back to the cloud (or fail, with the fallback off).
+- **The default flip** is one line: `config.STT_BACKEND_DEFAULT = "cloud"`. Run
+  `tests/stt_compare_probe.py` first (header has the command; `--yes-spend`
+  required, `--dry-run` free, hard cap $0.24, estimate at 4x the listed price,
+  no key printed, no `.env` read); its output ends "local within 1 point of
+  cloud: YES/NO". Synthetic speech bounds the models from below and says nothing
+  about the owner's voice.
+
+Free checks: `tests/voice_stt_local_check.py` (settings, engine lazy load,
+threads, serialisation, deadline, abandoned jobs, idle unload, load-failure
+backoff, safe errors, audio handling, pin parity with V0's manifest, policy
+matrix incl. local-only never calling `llm.transcribe`, budget share, Discord/face
+unchanged), `tests/stt_compare_probe_check.py` (the probe's spend guards),
+`tests/v2/hud_backend_check.py` (`/stt` reply keys, 409, `/stt/settings`),
+`tests/v2/frame_check.py`, `hud/src/lib/sttSettings.test.ts`,
+`stt.test.ts`/`voiceDiagnostics.test.ts` (served-by), and
+`tests/face/hud_v2_stt_local_check.py` (real HUD, mock daemon, 17 checks).
+Mutations that each fail the Python suite: serialisation lock removed, idle
+reap that never unloads, a fallback-off path that still uploads, no budget share,
+a corrupt settings file that fails open, non-opt-in callers using local, the
+unpinned thread clamp, a cancelled job that still decodes after its load.
+Not done and not claimed: the paid comparison, any deployment, a run in the
+live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
+
+### V13 review fixes (2026-10-14)
+
+- **The privacy promise is scoped to HUD dictation.** Chrome's wake recognizer
+  (`webkitSpeechRecognition`, App.tsx) streams the microphone to Google whatever
+  `stt.json` says, so with Cloud fallback OFF (or its state not yet known) it
+  never starts: wake-by-voice is off until V11's local wake detection, and the
+  talk key still works. Settings -> Voice says so ("Dictation audio never leaves
+  this computer. Wake word by voice is off until local wake detection lands; use
+  the talk key."), and with it ON it says the wake word uses Chrome's speech
+  recognition (Google). With local chosen and the fallback on, the summary says
+  Discord voice notes and the face server still use the cloud. The window's copy
+  of the settings (`hud/src/state/sttSettings.ts`) is shared by the panel and the
+  recognizer's gate. **Every window hears a change at once:** the daemon
+  publishes an `stt_settings` event on `/events` after each successful POST and
+  whenever a read finds the resolved value changed by itself (a hand edit, a
+  corrupt file; `stt_settings.watch`), and each window applies it, because a
+  recognizer in a second window would otherwise keep streaming to Google. The
+  backstops are a re-read when the window becomes visible (`visibilitychange`,
+  not focus), on every event-stream (re)connect, every 60 s, and every 15 s
+  while the value is unknown. `hud_v2_stt_local_check.py` asserts the recognizer
+  never starts after a reload with the fallback off, stops when it is switched
+  off, and starts when it is switched on again; `hud_v2_stt_wake_windows_check.py`
+  (two pages, one mock that fans events out) asserts the other window stops with
+  no focus change, and carries a control run with the event dropped in which the
+  other window keeps streaming.
+- `wav_samples` maps any exception from `wave`/numpy on hostile bytes to
+  `LocalSTTUnavailable` (a fuzzed header was a 500); a queued job now waits for
+  the engine in 50 ms slices and leaves the queue as soon as its caller has gone.
+- `fetch` caps the download (700 MB) while streaming, refuses to replace a
+  directory without the `.verified` marker, and records per-file hashes there;
+  `verify_model` re-checks them when the model loads (once per file identity:
+  path, inode, size, mtime, ctime). This guards against corruption, not
+  tampering: the marker lives in the same writable directory. A marker that is
+  there but unreadable, not JSON or without a `files` table refuses ("run the
+  fetch again") rather than being trusted. A model directory the owner supplies
+  has no marker and is trusted as it is: only the download is verified. The
+  check runs under the engine's lock and the directory is writable by anything
+  running as the owner, so it cannot be made to hang or exhaust memory: the
+  marker and every model file are opened `O_NOFOLLOW | O_NONBLOCK` and must be
+  regular files (a symlink, FIFO or device refuses at once), the marker is
+  read to at most 64 KB, and each model file to at most its size, which must
+  equal the size `fetch` recorded in `.verified` (`sizes`).
+- The compare probe charges its estimate for a failed request too. An invalid
+  `backend` reads "using local" (the fallback keeps its value); `auto` with
+  nothing installed and the fallback off says the engine is not installed, not
+  that cloud was switched off.
+
 ## V15: lowering the Remote Browser's sound while Jarvis speaks (2026-10-13)
 
 Q14 is answered (plan section 7): duck Remote tabs through WSLg. The daemon lowers the Remote
