@@ -218,6 +218,38 @@ describe("a claim never carries his voice into the owner's message (M3)", () => 
   });
 });
 
+describe("a pause inside the owner's message does not cut off its beginning (M3 follow-up)", () => {
+  it.each([96, 200, 400])("'Jarvis' ... %i ms ... 'stop': the claim reaches back to 'Jarvis'", (gap) => {
+    const chunks: Float32Array[] = [];
+    const m = mk({}, chunks);
+    m.quiet(1500);
+    m.talk(1500, HIS, 0.95, 0.2);          // his voice
+    m.talk(600, OWNER, 0.95, 0.04);        // "Jarvis"
+    m.talk(gap, HIS, 0.95, 0.2);           // the comma: the gate hears only his echo
+    m.talk(500, OWNER, 0.95, 0.06);        // "stop"
+    expect(m.cap.vad.open).toBe(true);
+    expect(m.cap.onWake()).toBe("claimed");
+    m.quiet(3000, OWNER);
+    const all = chunks.reduce((n, c) => n + c.length, 0);
+    expect(all / 16, `${gap} ms gap`).toBeGreaterThanOrEqual(600 + gap + 500 - 60);          // the whole message, "Jarvis" included
+    expect(Math.abs(chunks[0][100]), "starts on the owner's first word, not on his voice").toBeLessThan(0.1);
+  });
+
+  it("a long quiet in his voice that ends the detector's utterance does end the run", () => {
+    const chunks: Float32Array[] = [];
+    const m = mk({}, chunks);
+    m.quiet(1500);
+    m.talk(600, OWNER, 0.95, 0.04);
+    m.talk(3000, HIS, 0.95, 0.2);          // the utterance closes (2.5 s pause)
+    expect(m.cap.vad.open).toBe(false);
+    m.talk(600, OWNER, 0.95, 0.06);
+    expect(m.cap.onWake()).toBe("claimed");
+    m.quiet(3000, OWNER);
+    const all = chunks.reduce((n, c) => n + c.length, 0);
+    expect(all / 16).toBeLessThan(1500);   // only the second message, not the first one nor his voice between
+  });
+});
+
 describe("a late wake hit after he stops is not kept in reserve (M4)", () => {
   it("within 1.5 s of his voice it is ignored; later it is armed as before", () => {
     const m = mk();

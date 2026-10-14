@@ -109,6 +109,17 @@ describe("in the window, placing a transcript calls no approval function", () =>
     expect(body).toContain("commands.fromTranscript(i.text, { card: live.current.approvals.length > 0, stale: i.late || i.retried })");
   });
 
+  it("a wake hit is dropped while his sentence says his name, before the capture is asked to claim anything (L-b)", () => {
+    const hit = strip(appSource).match(/const onWakeHit = useCallback\(\(\) => \{([\s\S]*?)\}, \[capture/);
+    expect(hit).not.toBeNull();
+    const text = hit![1];
+    const own = text.indexOf("speech.controller.sayingOwnName()");
+    const claim = text.indexOf("capture.onWake()");
+    expect(own).toBeGreaterThan(-1);
+    expect(claim).toBeGreaterThan(own);
+    expect(text.slice(own, claim)).toMatch(/return;/);
+  });
+
   it("a command's effects are the four controller calls, and 'stop' reaches no agent turn", () => {
     const m = appSource.match(/const commands = useMemo\(\(\) => new CommandRouter\(\{([\s\S]*?)\}\), \[speech\]\);/);
     expect(m).not.toBeNull();

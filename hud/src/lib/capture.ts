@@ -337,8 +337,11 @@ export class Capture {
     const verdict = self ?? CLEAR;
     this.selfActive = verdict.active;
     if (verdict.active) this.selfLastActiveAt = this.now();
-    if (!verdict.active || verdict.self) this.freeFrom = -1;
-    else if (this.freeFrom < 0) this.freeFrom = this.ring.written - frame.length;
+    // The run the gate let through ends when he goes inactive or the detector's utterance is closed. A frame judged
+    // his voice inside an open utterance (a comma between "Jarvis" and "stop") is a pause in the run, not its end:
+    // a claim must still reach back to the owner's first word.
+    if (!verdict.active || (verdict.self && !this.vad.open)) this.freeFrom = -1;
+    else if (!verdict.self && this.freeFrom < 0) this.freeFrom = this.ring.written - frame.length;
     // Anything that stops the detector listening ends the message it would
     // have continued: words after a card, a picker or his own voice are a new
     // thought, and need the wake word again.

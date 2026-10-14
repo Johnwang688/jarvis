@@ -83,8 +83,10 @@ export const GAP_SETTLE_MS = 1000;
 export const REPLY_GAP_MS = 3000;
 /** An excess over what the lock explains that follows the reference this closely, at any delay, is his voice. */
 export const GUARD_FRAMES = 20;
-export const GUARD_SCORE = 0.93;
+export const GUARD_SCORE = 0.9;
 export const GUARD_MIN_EXCESS = 0.003;
+/** ...and the reference must have been audible this many of those frames at the delay. */
+export const GUARD_MIN_AUDIBLE = 6;
 /** The room's ring after his last sample. */
 export const ECHO_TAIL_MS = 160;
 /** How long a lock is trusted once he has gone quiet: an echo for a while, a dry one for less (headphones come and go). */
@@ -242,6 +244,8 @@ export class SelfVoiceGate {
   private samples = 0;
   private lastPushAt = -Infinity;
   private settleUntil = -Infinity;
+  /** The wall time of the last push before the gap that set `settleUntil`: his voice may have ended anywhere after it. */
+  private gapFrom = -Infinity;
   /** The last wall time his voice was audible; a long silence makes the next reply a new one. */
   private lastActiveAt = -Infinity;
   /** The lock has been confirmed in this reply (or was learned in it). */
@@ -325,6 +329,7 @@ export class SelfVoiceGate {
     // mapping afresh, drop the history (it no longer lines up with the reference), and hold the mic closed
     // while he is audible until things have settled.
     if (now - this.lastPushAt > GAP_RESET_MS && this.lastPushAt > -Infinity) {
+      this.gapFrom = this.lastPushAt;
       this.offsets.reset();
       this.xs = [];
       this.freeUntil = -1;
@@ -345,8 +350,11 @@ export class SelfVoiceGate {
     // His echo can still arrive for LAG_MAX_MS (and a tail) after his last sample, and not a moment longer.
     // Judged up to the later of the frame's place on the clock and the clock itself: a frame that lags the
     // clock (lost frames) must not let the reference "end" early.
+    // After a gap the queued frames (a stall delivers them in a burst) are placed at "now", but they were heard
+    // from `gapFrom` on: while the gap settles, look back to where the frames really were.
     const hi = Math.max(tEnd, now);
-    const active = this.timeline.audibleBetween(tEnd - frameMs - LAG_MAX_MS - ECHO_TAIL_MS, hi);
+    const from = now < this.settleUntil ? Math.min(tEnd, this.gapFrom) : tEnd;
+    const active = this.timeline.audibleBetween(from - frameMs - LAG_MAX_MS - ECHO_TAIL_MS, hi);
     this.activeNow = active;
     this.playingNow = this.timeline.audibleBetween(tEnd - frameMs, hi);
     if (!active) {
@@ -426,7 +434,7 @@ export class SelfVoiceGate {
     const e = new Float64Array(k);
     let sumE = 0;
     for (let j = 0; j < k; j++) { e[j] = Math.max(0, x[j] - predicted(j)); sumE += e[j]; }
-    if (sumE / k < GUARD_MIN_EXCESS) return false;
+    if (sumE < GUARD_MIN_EXCESS * GUARD_MIN_AUDIBLE) return false;
     for (let l = 0; l <= lagCells; l++) {
       let sumY = 0; let sumEY = 0; let sumYY = 0; let audible = 0;
       for (let j = 0; j < k; j++) {
@@ -434,7 +442,7 @@ export class SelfVoiceGate {
         sumY += v; sumEY += e[j] * v; sumYY += v * v;
         if (v > REF_AUDIBLE_AMP) audible++;
       }
-      if (sumYY <= 1e-12 || audible < k / 2) continue;
+      if (sumYY <= 1e-12 || audible < GUARD_MIN_AUDIBLE) continue;
       const a = Math.min(MAX_GAIN, sumEY / sumYY);
       let diff = 0;
       for (let j = 0; j < k; j++) diff += Math.abs(e[j] - a * refAt(j, l));
@@ -485,10 +493,12 @@ export class SelfVoiceGate {
         let diff = 0;
         for (let j = 0; j < n; j++) diff += Math.abs(x[j] - a * refAt(j, held.lag));
         heldScore = 1 - diff / (sumX + a * sy);
-        // Confirmed: the room is still the room, and its gain drifts with the volume.
+        // The room is the room, and its gain drifts with the volume: followed whenever the lock explains the window
+        // (a volume step between replies must not wait for a whole window of evidence to be confirmed).
+        if (heldScore >= LOCK_SCORE) held.gain = held.gain * 0.8 + a * 0.2;
+        // Confirmed (trusted in this reply) only on enough of his voice and enough of the room's answer.
         if (heldScore >= LOCK_SCORE && audible >= LOCK_AUDIBLE_FRAMES && heard >= LOCK_HEARD_FRAMES) {
           held.at = now;
-          held.gain = held.gain * 0.8 + a * 0.2;
           this.confirmed = true;
         }
       }

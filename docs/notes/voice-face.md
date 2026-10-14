@@ -1821,7 +1821,7 @@ Plan decisions V-5, V-6, V-7 and §3.4, §3.10; owner's answers Q7, Q8, Q10, Q13
 - **Capture** (`onFrame(frame, p, self)`): a vetoed frame is not speech to the detector (Vad `veto`: no open, no hold,
   no floor update), is observed and reported as `self_voice`; the continuation window is closed while he is audible
   and the follow-up window when a new reply begins to sound (`playing` rising edge). A wake hit while he is audible
-  counts only against an utterance the owner opened (frames he vetoes never open one); otherwise it is ignored,
+  counts only against an utterance the owner opened (frames the gate vetoes do not open one, but a frame it misjudges can); otherwise it is ignored,
   reported (`self_voice`, source wake) and **not kept in reserve**. A wake hit under any suppression (the blanket
   hold, a card) is ignored too, so a reply saying "Jarvis" cannot pause itself. Claims are by name or key only.
 
@@ -1873,7 +1873,7 @@ The review found no path to an approval and no HIGH issue; it found fail-open wi
   after he last sounded) until this reply has confirmed it (echo: this window scores >= 0.9 with >= 12 audible and >= 12 heard frames;
   dry: 16 dry frames again), so "calibrating" (his voice) covers the first second or so of a reply that follows a pause. Also: a
   `devicechange` on `navigator.mediaDevices` drops the lock (`invalidate`), and whatever the owner's frames hold beyond the lock's
-  prediction is checked against the reference at every delay over the last 20 frames (`excessFollowsReference`, score >= 0.93): if it
+  prediction is checked against the reference at every delay over the last 20 frames (`excessFollowsReference`; since the delta round: score >= 0.9, the reference audible in >= 6 of those frames): if it
   follows, the frame is his, and a dry lock is dropped. Tests: headphones->speakers, delay 300->60, 60->450, 200->120 across a pause:
   0 frames let through (fail with the reverification removed). **Measured limit:** the volume turned up 4x in the middle of a reply
   lets about 11 frames (0.35 s) through before the guard's 20-frame window shows it follows the reference; the guard is the only help
@@ -1899,7 +1899,37 @@ The review found no path to an approval and no HIGH issue; it found fail-open wi
   his voice): then only Ctrl+D barges, which is the safe result. Settings -> Voice -> "Jarvis's own voice" shows learning / echo /
   dry. Whether the gate ever locks on the owner's speakers, and the real delay, are unmeasured.
 
-Free checks after the round: vitest 2567 tests / 157 files, `tsc`, `vite build`. Browser on the rebuilt `hud/dist`:
+Free checks after the round: vitest 2567 tests / 157 files (2584 after the delta round), `tsc`, `vite build`. Browser on the rebuilt `hud/dist`:
 `hud_v2_barge_check` 102 (adds `gate_own_name`, `gate_wake_command`), speech 56, multichat 343, steer 46, ptt 70.
 Mutations that fail on purpose (restored): `active` window back to `tEnd` with no gap reset (2 vitest); no reply reverification (4);
 no clip clamp (2); no arm guard (1); `card: false` in the router call (1); two-holder send lost / awaited summary cancelled (2).
+
+### V9 delta review of b9d5dfa (MED-1..3, L-a, L-b)
+
+- **MED-1 stall plus burst.** After a gap the queued frames were placed at "now", so a reply that ended inside the stall
+  looked finished and a 2 s stall let all 63 queued frames through. Now `gapFrom` (the last push before the gap) is kept, and
+  while the gap settles `active` looks back from `min(tEnd, gapFrom)`. Probes: stalls of 0.4, 1, 2 and 3 s with the reply
+  ending inside: 0 queued frames let through (the 2 s and 3 s cases fail without `gapFrom`).
+- **MED-2 volume step between replies under 3 s apart.** The held lock's gain drifts whenever the lock explains the window
+  (`heldScore >= LOCK_SCORE`); the audible/heard counts are required only to *confirm* it (set `confirmed`, `held.at`). With a
+  2 s pause a 4x-8x step lets 0 through (fails without the drift); with a 1 s pause x2 and a quieter room 0, x4 up to 3, x8 up
+  to 6 frames; with 0.25-0.5 s pauses up to ~11 frames per step (the guard needs a few frames of the new level).
+  `GUARD_SCORE` stays 0.9 (0.88 blocked 56% of an owner's speech over headphones in the synthetic room); the guard now needs the
+  reference audible in 6 frames, not half the window, so it can act sooner.
+- **MED-3 a comma between "Jarvis" and "stop".** A single frame judged his voice inside an open utterance reset the claim's
+  start, so the clip held only "stop" (not a command, so it was sent). `freeFrom` now resets only when he goes inactive or the
+  detector's utterance closes. Capture tests with 96, 200 and 400 ms gaps (fail with the old reset); browser: the upload covers
+  the whole owner audio and "Jarvis stop" is obeyed with nothing sent.
+- **L-a what is and is not claimed.** The gate fails closed for lost frames, stalls, a new reply after a pause (re-confirmed),
+  an exception, and an audio device change. It does **not** guarantee that his voice never opens the detector: a room change
+  with less than about 2.5 s of silence, a mid-reply volume step, or a delay that moves mid-reply can still open the VAD for up
+  to a few tenths of a second. What holds in those windows is that every route that turns an open utterance into a message is
+  closed to his voice: no follow-up or continuation window while he is audible, wake hits ignored while he says his name or
+  within 1.5 s after (unless they claim an utterance already open), claims start at the first frame the gate let through, and
+  an unclaimed utterance is dropped (`unclaimed`, with a diagnostics row). A TV that opens the VAD while a wake word is spoken
+  by the recognizer is the V12 (speaker verification) problem, not this gate's.
+- **L-b** a static pin: `onWakeHit` must call `sayingOwnName()` and return before `capture.onWake()`.
+
+After the delta round: vitest 2584 tests / 157 files; `hud_v2_barge_check` 115 (the `gate_wake_command` section now runs gaps of 0, 96, 200
+and 400 ms between "Jarvis" and "stop"), speech 56, multichat 343. Mutations that fail on purpose (restored): no `gapFrom` (2 vitest), gain drift only when
+confirmed (4), `freeFrom` reset on any self frame (3), the `sayingOwnName()` check removed from `onWakeHit` (1).

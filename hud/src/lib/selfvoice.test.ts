@@ -368,6 +368,71 @@ describe("SelfVoiceGate: lost frames (the clock and the mic's sample count part 
   });
 });
 
+describe("SelfVoiceGate: a stall that delivers its frames in a burst", () => {
+  /** A reply whose last sample falls inside a stall of `stallMs`: the mic's echo of it arrives in one burst afterwards. */
+  function burst(stallMs: number) {
+    const room = new Room();
+    const ref = speechlike(3.2, 24000, 910 + stallMs);
+    for (let i = 0; i < 20; i++) room.frame(() => 0.0005 * Math.sin(i * 7));
+    room.play(1, ref);
+    const echo = echoFrom(room, ref, 120, 0.3, 11);
+    for (let i = 0; i < 70; i++) room.frame(echo);               // 2.2 s of the 3.2 s reply: locked
+    expect(room.gate.status().lock).toBe("echo");
+    // The main thread stalls; the reply ends inside the stall; the mic's frames wait and arrive at once.
+    const frames = Math.round(stallMs / FRAME_MS);
+    room.now += stallMs;
+    const out: SelfFrame[] = [];
+    for (let i = 0; i < frames; i++) {
+      const f = new Float32Array(512);
+      for (let k = 0; k < 512; k++) f[k] = echo(room.frames * 512 + k);
+      room.frames++;
+      out.push(room.gate.push(f));
+    }
+    return out;
+  }
+
+  it.each([400, 1000, 2000, 3000])("a %i ms stall with his reply ending inside it: none of the queued echo gets through", (stall) => {
+    const out = burst(stall);
+    const free = out.filter((v) => !v.self).length;
+    expect(free, `${free} of ${out.length} queued frames let through`).toBe(0);
+  });
+});
+
+describe("SelfVoiceGate: the volume steps between replies less than 3 s apart (no re-confirmation)", () => {
+  function step(from: number, to: number, pauseFrames: number) {
+    const room = new Room();
+    const a = speechlike(5, 24000, 930);
+    for (let i = 0; i < 20; i++) room.frame(() => 0.0005 * Math.sin(i * 7));
+    room.play(1, a);
+    const e1 = echoFrom(room, a, 120, from, 12);
+    for (let i = 0; i < 150; i++) room.frame(e1);
+    expect(room.gate.status().lock).toBe("echo");
+    for (let i = 0; i < pauseFrames; i++) room.frame(() => 0.0004 * Math.sin(i));
+    const b = speechlike(6, 24000, 931);
+    room.play(2, b);
+    const e2 = echoFrom(room, b, 120, to, 13);
+    const v: SelfFrame[] = [];
+    for (let i = 0; i < 150; i++) v.push(room.frame(e2));
+    return v.filter((x) => !x.self).length;
+  }
+
+  it("x2 after a 1 s pause lets none through", () => {
+    expect(step(0.15, 0.3, 32)).toBe(0);
+  });
+  it("x4 after a 1 s pause lets almost none through (the guard needs a few frames of the new level)", () => {
+    expect(step(0.15, 0.6, 32)).toBeLessThanOrEqual(4);
+  });
+  it.each([[0.15, 0.6], [0.1, 0.8], [0.3, 0.9], [0.05, 0.4]])("%f to %f after a 2 s pause lets none through (the lock's gain followed the step)", (from, to) => {
+    expect(step(from, to, 64)).toBe(0);
+  });
+  it("x8 after a 1 s pause lets almost none through", () => {
+    expect(step(0.1, 0.8, 32)).toBeLessThanOrEqual(6);
+  });
+  it("a quieter room after a pause lets none through", () => {
+    expect(step(0.5, 0.08, 32)).toBe(0);
+  });
+});
+
 describe("SelfVoiceGate: the room changes", () => {
   it("headphones to speakers at the start of a reply: none of his voice gets through", () => {
     const room = new Room();

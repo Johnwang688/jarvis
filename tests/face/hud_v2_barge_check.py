@@ -384,32 +384,40 @@ def main(argv=None):
                 check("nothing was uploaded or sent", len(stts()) == st0 and len(_sent(mock, "t1")) == s0)
                 page.evaluate("() => { window.__sim.owner = null; }")
 
-            # ============ gate: the owner says "Jarvis stop" over him =================
+            # ============ gate: the owner says "Jarvis ... stop" over him, with a comma between =====
             def gate_wake_command():
-                reset()
-                mock.say_wav = wav_a
-                sim_start()
-                time.sleep(0.8)
-                say_reply(SHORT)
-                playing()
-                waits(lambda: state() == "idle", 12)
-                say_reply(REPLY, "t1")
-                playing()
-                time.sleep(2.4)
-                i0, s0 = len(interrupts()), len(_sent(mock, "t1"))
-                gate_ev = threading.Event()
-                mock.stt_script = [{"text": "Jarvis stop", "wait": gate_ev}]
-                page.evaluate("(s) => window.__sim.say(s)", clip_b)
-                waits(lambda: page.evaluate("window.__hud.capture.vad.open"), 4)
-                time.sleep(0.4)
-                page.evaluate("window.__hud.mic.wake()")
-                check("the owner's 'Jarvis' over him claims the utterance and pauses him", waits(lambda: state() == "paused", 3))
-                waits(lambda: not mock.stt_script, 10)
-                gate_ev.set()
-                check("'Jarvis stop' is obeyed: speech stops and the queue is empty", waits(lambda: state() == "idle" and speech()["view"]["queued"] == 0, 6))
-                time.sleep(0.5)
-                check("it sent nothing and interrupted nothing", len(_sent(mock, "t1")) == s0 and len(interrupts()) == i0)
-                page.evaluate("() => { window.__sim.owner = null; }")
+                for gap in (0, 96, 200, 400):
+                    reset()
+                    mock.say_wav = wav_a
+                    sim_start()
+                    time.sleep(0.8)
+                    say_reply(SHORT)
+                    playing()
+                    waits(lambda: state() == "idle", 12)
+                    say_reply(REPLY, "t1")
+                    playing()
+                    time.sleep(2.4)
+                    i0, s0, st0 = len(interrupts()), len(_sent(mock, "t1")), len(stts())
+                    gate_ev = threading.Event()
+                    mock.stt_script = [{"text": "Jarvis stop", "wait": gate_ev}]
+                    half = len(clip_b) // 2
+                    spoken = clip_b[:half] + [0.0] * int(16 * gap) + clip_b[half:]       # "Jarvis" ... "stop"
+                    page.evaluate("(s) => window.__sim.say(s)", spoken)
+                    # The hit arrives after the comma, as a recognizer reports a phrase after it was said.
+                    time.sleep(half / 16000 + gap / 1000 + 0.5)
+                    waits(lambda: page.evaluate("window.__hud.capture.vad.open"), 4)
+                    page.evaluate("window.__hud.mic.wake()")
+                    check(f"[{gap} ms] the owner's 'Jarvis' over him claims the utterance and pauses him", waits(lambda: state() == "paused", 3))
+                    waits(lambda: not mock.stt_script, 12)
+                    got = stts()[st0:]
+                    want = (len(spoken) / 16000) * 32000
+                    check(f"[{gap} ms] the clip reaches back to his first word (not only 'stop')",
+                          bool(got) and got[-1]["bytes"] >= want * 0.9, f"{got[-1]['bytes'] if got else 0} of {want:.0f} bytes")
+                    gate_ev.set()
+                    check(f"[{gap} ms] 'Jarvis stop' is obeyed: speech stops and the queue is empty", waits(lambda: state() == "idle" and speech()["view"]["queued"] == 0, 6))
+                    time.sleep(0.5)
+                    check(f"[{gap} ms] it sent nothing and interrupted nothing", len(_sent(mock, "t1")) == s0 and len(interrupts()) == i0)
+                    page.evaluate("() => { window.__sim.owner = null; }")
 
             run(gate_self_only)
             run(gate_owner_over)
