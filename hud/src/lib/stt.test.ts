@@ -259,6 +259,7 @@ describe("where AUTO may send (placementFor)", () => {
   it.each([
     ["captured in REVIEW", { ...cap, mode: "review" as const }, now, fresh],
     ["another chat is selected", cap, { ...now, chat: "t2" }, fresh],
+    ["the follow-up's pane was gone when claimed", { ...cap, boxOnly: true }, now, fresh],
     ["a card is waiting", cap, now, fresh],
     ["the text is late", cap, now, { late: true, retried: false }],
     ["the owner pressed Retry", cap, now, { late: false, retried: true }],

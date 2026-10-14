@@ -311,6 +311,14 @@ export interface SttCapture {
   mode: "auto" | "review" | "off";
   /** `draftKey` of the selected chat at capture; null with no chat. */
   chat: string | null;
+  /**
+   * V3: the words are for the selected chat's box whatever else holds -- a
+   * follow-up window named a pane that is gone or hidden by the time it was
+   * claimed, so where they belong is unclear.
+   */
+  boxOnly?: boolean;
+  /** The continuation window this message armed (`Capture`'s token), settled when it is placed. */
+  continuation?: number | null;
 }
 
 /** What is true when a transcript lands. */
@@ -344,7 +352,7 @@ export interface SttLanding {
  */
 export function placementFor(captured: SttCapture, landing: SttLanding, item: { late: boolean; retried: boolean }): "send" | "review" {
   const same = captured.chat !== null && captured.chat === landing.chat;
-  return captured.mode === "auto" && landing.mode === "auto" && same && (!landing.busy || landing.steers) && !landing.card
+  return captured.mode === "auto" && landing.mode === "auto" && same && !captured.boxOnly && (!landing.busy || landing.steers) && !landing.card
     && !item.late && !item.retried ? "send" : "review";
 }
 

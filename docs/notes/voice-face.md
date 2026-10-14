@@ -1364,42 +1364,55 @@ Plan decisions V-1, V-10 and the owner's answers to Q3-Q5. Stacked on V2.
   turn's status.
 - **Push-to-talk no longer interrupts** (`press()` in App.tsx; was the
   "interrupt half" until 2026-10-13). Stop (InputBar) is the interrupt.
-  Consequence: a first send in a compose row, between its thread opening and
-  the send's acknowledgement, had the orb as its only stop (the box offers
-  Stop only when `runningHere`); that window now has none. It ends with the
-  acknowledgement, about a request round trip. The
+  Consequence, closed: a first send in a compose row, between its thread
+  opening and the send's acknowledgement, had the orb as its only stop. The
+  box now offers Stop there too (`InputBar` `stoppable` = `runningHere ||
+  (busy && compose.sending)`) without turning Send into Steer; the stop
+  waits for the acknowledgement as before (`sendStops`). The
   Ctrl+D gesture, its repeat/blur/terminal/Monaco rules and the card refusal
   are unchanged. Muted, pressing records nothing and does nothing else.
 - **Continuation window** (`CONTINUE_MS` = 6 s, on the ring's sample clock,
-  so no timers). Opened when a claimed message goes out (wake word, follow-up
-  window or a previous continuation), speech whose onset falls inside it is
-  claimed as `continuation` with no wake word, and a continuation opens the
-  next window. Not opened by push-to-talk (releasing the key is the full stop;
-  an open question), and closed by: the mic going OFF or an unmute, anything
-  that suppresses the detector (card, picker, Settings, his own voice, no
-  chat, crash), `abandon()`, and the owner selecting another chat
-  (`closeContinuation()` from an effect on `selectedChat`). In AUTO the
-  continuation is just the next transcript: it steers if the first message's
-  turn is running, else it is the next message; in REVIEW it is appended to
-  the box by the existing `pendingTranscript` append. Segment gap, 2.5 s
-  message pause and the ML VAD are V5's; the pause stays `HANGOVER_MS`.
-  Consequence worth knowing: a wake word no longer claims "exactly one
-  utterance" in the sense that speech straight after it is the continuation
-  (`capture.test.ts` says so); an aside after the window has lapsed is not.
+  so no timers). A claimed message that goes out opens it; speech whose onset
+  falls inside is claimed as `continuation` with no wake word. **Stopgap cap
+  until speaker verification (V12), the lead's decision after review:** only a
+  `wake` or `follow_up` claim starts a chain; a chain allows at most
+  `CONTINUE_MAX_CLAIMS` = 2 continuation claims and ends `CONTINUE_CHAIN_MS`
+  = 20 s after the claim that started it, so TV or room speech with short gaps
+  cannot keep steering a running turn without a wake word. (Side effect: until
+  V4 removes the 30 s cap, only two continuations follow a cut message.)
+  Not opened by push-to-talk or an unclaimed message (releasing the key is the
+  full stop; an open question). The window is armed when the message ends, but
+  `Capture` hands the caller a token and App takes it back
+  (`cancelContinuation`) if the message did not go out: a refused or failed
+  upload, an empty transcript, a backlog refusal, a crashed window. It also
+  closes on: the mic going OFF or an unmute, anything that suppresses the
+  detector (card, picker, Settings, his own voice, no chat, crash), `abandon()`,
+  and the owner selecting another chat or another conversation in the pane
+  (`draftKey` change; a compose row becoming its own just-opened thread is not
+  one). In AUTO the continuation is just the next transcript: it steers if the
+  first message's turn is running, else it is the next message; in REVIEW it
+  is appended to the box by the existing `pendingTranscript` append. Segment
+  gap, 2.5 s message pause and the ML VAD are V5's; the pause stays
+  `HANGOVER_MS`. Consequence worth knowing: a wake word no longer claims
+  "exactly one utterance" in the sense that speech straight after it is the
+  continuation (`capture.test.ts` says so); an aside after the window has
+  lapsed is not.
 - **Follow-up target (Q5).** `Capture.openFollowUp(tag)` remembers what the
   window was opened for and hands it to `onListening(source, tag)`. App's
   `openFollowUpFor(pane)` opens it only for the selected chat or a *drawn*
   chat pane (hidden panes open none). On a `follow_up` claim for another drawn
   pane, App focuses that pane and selects it (`layout.focus` + `select`) - unless
   the owner has chosen a different chat since the window opened
-  (`followBase`) or the pane is no longer drawn - and files the clip under it
+  (`followBase`) - and files the clip under it
   (`voiceTarget`: the selection itself follows only after the next render).
-  Today only the selected chat's `turn_finished` calls it; a drawn pane's
+  If the pane is gone or hidden by the claim, the words
+  wait in the selected chat's box, unsent (`boxOnly`). Today only the selected
+  chat's `turn_finished` (or its spoken reply's end) calls it; a drawn pane's
   *spoken* reply will (V7). `window.__hud.followUpFor(pane)` is the test hook.
 
 Free checks: `capture.test.ts` (continuation at 5 s and not 7 s, window edge,
 chaining, PTT, mute, suppression, selection, abandon; claim tag), `stt.test.ts`
-(`placementFor` rows), `tests/face/hud_v2_steer_check.py` (43 checks:
+(`placementFor` rows), `tests/face/hud_v2_steer_check.py` (46 checks:
 busy+PTT steers, Stop, REVIEW, busy-but-other-thread, V2 conditions, card
 before and in flight with "Jarvis approve", continuation in AUTO and REVIEW,
 Ctrl+D on a busy chat, follow-up target). V2/older checks changed on purpose:

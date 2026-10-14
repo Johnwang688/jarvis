@@ -2,13 +2,14 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { Capture } from "./capture";
-import { CONTINUE_MS, HANGOVER_MS, PREROLL_MS, WAKE_GRACE_MS, samplesToMs } from "./vad";
+import { CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, HANGOVER_MS, PREROLL_MS, WAKE_GRACE_MS, samplesToMs } from "./vad";
 import type { ClaimSource } from "./voiceDiagnostics";
 
 function mk(opts: { muted?: () => boolean; suppressed?: () => boolean } = {}) {
   const sent: { ms: number; source?: ClaimSource }[] = [];
   const notes: string[] = [];
   const listens: { source?: ClaimSource; tag?: number | null }[] = [];
+  const tokens: (number | null | undefined)[] = [];
   let clock = 10_000;
   const cap = new Capture(
     {
@@ -17,11 +18,11 @@ function mk(opts: { muted?: () => boolean; suppressed?: () => boolean } = {}) {
       onLevel: () => {},
       onListening: (source, tag) => { notes.push("listening"); listens.push({ source, tag }); },
       onIdle: (n) => notes.push(n || "idle"),
-      onUtterance: (_wav, ms, source) => sent.push({ ms, source }),
+      onUtterance: (_wav, ms, source, token) => { sent.push({ ms, source }); tokens.push(token); },
     },
     () => clock,
   );
-  return { cap, sent, notes, listens, tick: (ms: number) => (clock += ms) };
+  return { cap, sent, notes, listens, tokens, tick: (ms: number) => (clock += ms) };
 }
 
 const QUIET = 0.0009;
@@ -245,12 +246,17 @@ describe("a window that stopped drawing sends nothing in hand (review of PR #32)
 // ring's sample clock, so these tests need no timers at all.
 describe("the continuation window (V3)", () => {
   /** A wake-claimed message, fed until it has gone out. The window opens there. */
-  function firstMessage(m: ReturnType<typeof mk>, via: "wake" | "follow_up" = "wake") {
+  function firstMessage(m: ReturnType<typeof mk>, via: "wake" | "follow_up" = "wake", speechMs = 1000) {
     m.cap.feedMs(2000, QUIET);
     if (via === "follow_up") m.cap.openFollowUp();
     m.cap.feedMs(400, SPEECH);
     if (via === "wake") m.cap.onWake();
-    m.cap.feedMs(1000, SPEECH);
+    // Long speech in breaths: a constant level for many seconds would walk the
+    // detector's floor up under itself, and these tests are about the timers.
+    for (let left = speechMs; left > 0; left -= 1500) {
+      m.cap.feedMs(Math.min(1500, left), SPEECH);
+      if (left > 1500) m.cap.feedMs(150, QUIET);
+    }
     while (m.sent.length === 0) m.cap.feedMs(64, QUIET, 1024);
   }
   /** `gap` ms of quiet after the message went out, then a second thing said. */
@@ -290,12 +296,83 @@ describe("the continuation window (V3)", () => {
     expect(m.sent[1].source).toBe("continuation");
   });
 
-  it("chains: a continuation is a message too, and opens the next window", () => {
+  it("chains: a continuation is a message too and opens the next window, up to the cap", () => {
+    expect(CONTINUE_MAX_CLAIMS).toBe(2);
     const m = mk();
     firstMessage(m);
-    expect(resume(m, 5000)).toBe(1);
-    expect(resume(m, 5000)).toBe(1);
+    expect(resume(m, 3000)).toBe(1);
+    expect(resume(m, 3000)).toBe(1);
     expect(m.sent.map((x) => x.source)).toEqual(["wake", "continuation", "continuation"]);
+  });
+
+  it("stopgap: a third continuation in one chain is not claimed, and the window is shut", () => {
+    const m = mk();
+    firstMessage(m);
+    resume(m, 3000);
+    resume(m, 3000);
+    expect(m.cap.continuing()).toBe(false);
+    expect(resume(m, 1000)).toBe(0);
+    expect(m.sent).toHaveLength(3);
+    // A new wake claim starts a fresh chain.
+    m.cap.feedMs(CONTINUE_MS + 1000, QUIET);
+    m.cap.feedMs(400, SPEECH);
+    m.cap.onWake();
+    m.cap.feedMs(1000, SPEECH);
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(m.sent).toHaveLength(4);
+    expect(resume(m, 3000)).toBe(1);
+  });
+
+  it("stopgap: the chain ends CONTINUE_CHAIN_MS after the claim that began it", () => {
+    expect(CONTINUE_CHAIN_MS).toBe(20000);
+    const longer = mk();
+    firstMessage(longer, "wake", 18000); // the message itself runs 18 s
+    expect(resume(longer, 3000)).toBe(0); // 3 s later is within 6 s of its end but past 20 s of its start
+    const control = mk();
+    firstMessage(control, "wake", 1000);
+    expect(resume(control, 3000)).toBe(1);
+  });
+
+  it("stopgap: TV-like speech with 2 s gaps after a wake steers at most twice", () => {
+    const m = mk();
+    firstMessage(m);
+    let claimed = 0;
+    for (let i = 0; i < 12; i++) claimed += resume(m, 2000);
+    expect(claimed).toBeLessThanOrEqual(CONTINUE_MAX_CLAIMS);
+    expect(claimed).toBe(2);
+  });
+
+  it("only a wake or follow-up claim starts a chain: a push-to-talk or unclaimed message never does", () => {
+    const m = mk();
+    m.cap.feedMs(2000, QUIET);
+    m.cap.press();
+    m.cap.feedMs(1200, SPEECH);
+    m.cap.release();
+    expect(m.tokens).toEqual([null]);
+    const u = mk();
+    u.cap.feedMs(2000, QUIET);
+    u.cap.feedMs(1200, SPEECH);
+    u.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(u.cap.continuing()).toBe(false);
+  });
+
+  it("a caller can take a window back when its message did not go out, and only that window", () => {
+    const m = mk();
+    firstMessage(m);
+    const token = m.tokens[0];
+    expect(token).toBeTruthy();
+    m.cap.cancelContinuation(999);
+    expect(m.cap.continuing()).toBe(true);
+    m.cap.cancelContinuation(token);
+    expect(m.cap.continuing()).toBe(false);
+    expect(resume(m, 500)).toBe(0);
+    // A later message's window is not closed by a stale token.
+    const n = mk();
+    firstMessage(n);
+    const stale = n.tokens[0];
+    resume(n, 2000);
+    n.cap.cancelContinuation(stale);
+    expect(n.cap.continueUntil).toBeGreaterThanOrEqual(0);
   });
 
   it("is not opened by speech nobody claimed", () => {

@@ -24,7 +24,7 @@
 // pre-roll or as a wake hit's back-dating.
 
 import {
-  CAP_RATE, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
+  CAP_RATE, CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs, wavBlob,
 } from "./vad";
 
@@ -45,7 +45,7 @@ export interface CaptureHooks {
   onListening: (source?: ClaimSource, tag?: number | null) => void;
   onIdle: (note?: string) => void;
   /** A finished, claimed utterance. The dictation mode decides what happens next. */
-  onUtterance: (wav: Blob, ms: number, source?: ClaimSource) => void;
+  onUtterance: (wav: Blob, ms: number, source?: ClaimSource, continuation?: number | null) => void;
 }
 
 export class Capture {
@@ -60,6 +60,16 @@ export class Capture {
    * claimed as that message's continuation (V3, plan §3.2).
    */
   continueUntil = -1;
+  /**
+   * The chain a continuation belongs to (a stopgap against room speech until
+   * speaker verification): begun by a wake or follow-up claim, it allows
+   * CONTINUE_MAX_CLAIMS continuation claims and ends CONTINUE_CHAIN_MS after it began.
+   */
+  chainFrom = -1;
+  chainClaims = 0;
+  /** Names the window the last message armed, so a caller can take back that one only. */
+  private continueToken = 0;
+  private tokenSeq = 0;
   wakeHitAt = -1e9;
   segClaimed = false;
   ptt: { from: number } | null = null;
@@ -116,11 +126,19 @@ export class Capture {
 
   /** Speech beginning now would continue the message just sent. */
   continuing() {
-    return this.continueUntil >= 0 && this.ring.written - this.vad.run <= this.continueUntil;
+    if (this.continueUntil < 0 || this.chainClaims >= CONTINUE_MAX_CLAIMS) return false;
+    const onset = this.ring.written - this.vad.run;
+    return onset <= this.continueUntil && onset <= this.chainFrom + msToSamples(CONTINUE_CHAIN_MS);
   }
 
   closeContinuation() {
     this.continueUntil = -1;
+    this.continueToken = 0;
+  }
+
+  /** The message that armed window `token` did not go out (upload failed, nothing heard, refused): take that window back. */
+  cancelContinuation(token: number | null | undefined) {
+    if (token && token === this.continueToken) this.closeContinuation();
   }
 
   /**
@@ -187,6 +205,7 @@ export class Capture {
       this.claimSource = this.ptt ? "ptt" : this.conversing() ? "follow_up" : this.now() - this.wakeHitAt < WAKE_GRACE_MS ? "wake"
         : continuing ? "continuation" : "unclaimed";
       this.segClaimed = this.conversing() || this.now() - this.wakeHitAt < WAKE_GRACE_MS || continuing;
+      if (this.claimSource === "continuation") this.chainClaims++;
       if (this.segClaimed) {
         // Saying his name claims exactly one utterance.
         this.wakeHitAt = -1e9;
@@ -215,11 +234,19 @@ export class Capture {
     const samples = this.ring.slice(from, to);
     this.vad.voiced = 0;
     if (!samples.length) { this.drop("too_short", 0); return; }
-    this.hooks.onUtterance(wavBlob(samples, CAP_RATE), samplesToMs(samples.length), this.claimSource);
     // The message ended here. Whatever follows soon enough continues it --
     // except after push-to-talk, whose release is the owner's own full stop:
-    // the next words need the key (or his name) again.
-    if (this.claimSource !== "ptt") this.continueUntil = this.ring.written + msToSamples(CONTINUE_MS);
+    // the next words need the key (or his name) again. Only a wake or
+    // follow-up claim starts a chain; a continuation extends it while claims
+    // remain. Armed before the hook runs, so a caller that refuses the clip
+    // can take its window back.
+    const source = this.claimSource;
+    if (source === "wake" || source === "follow_up") { this.chainFrom = from; this.chainClaims = 0; }
+    const arm = (source === "wake" || source === "follow_up" || source === "continuation")
+      && this.chainClaims < CONTINUE_MAX_CLAIMS;
+    this.continueToken = arm ? ++this.tokenSeq : 0;
+    this.continueUntil = arm ? this.ring.written + msToSamples(CONTINUE_MS) : -1;
+    this.hooks.onUtterance(wavBlob(samples, CAP_RATE), samplesToMs(samples.length), source, arm ? this.continueToken : null);
   }
 
   // ---- wake ---------------------------------------------------------------

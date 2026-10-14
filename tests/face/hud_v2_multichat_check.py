@@ -553,6 +553,9 @@ def _voice_checks(page, mock, check, until):
     check("the orb's strip acts for the selected chat and selects no pane", _sel(page) == 2)
     s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
     page.evaluate(UTTERANCE)
+    # V3: a sent message opens the continuation window, and this suite's fake
+    # capture device beeps; close it so a beep is not claimed as speech.
+    page.evaluate("window.__hud.capture.closeContinuation()")
     sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
     check("AUTO sends the utterance to the selected chat's thread",
           bool(sent) and sent[-1].get("text") == "what is the weather" and sent[-1].get("spoken") is True, str(sent))
@@ -1588,9 +1591,9 @@ def _rr_tab_never_authorizes_checks(page, mock, check, until):
 def _rr_placeholder_stop_checks(page, mock, check, until):
     """The orb or Stop pressed while a first send opens its thread: no
     interrupt names the send's placeholder id (`local-N`, no thread the
-    daemon knows). V3: push-to-talk no longer interrupts, and a compose row
-    offers no Stop until its send is acknowledged, so nothing asks for a stop
-    in this window and none reaches the thread once it exists. Kills: the
+    daemon knows). V3: push-to-talk no longer interrupts, so the box's Stop is
+    the way to stop a first send, and it is offered while the send is in
+    flight; the stop waits and reaches the thread once it exists. Kills: the
     orb and Stop interrupting whatever id the pane tracks."""
     _fresh(page, mock, until, SINGLE)
     held = []
@@ -1604,8 +1607,9 @@ def _rr_placeholder_stop_checks(page, mock, check, until):
         page.evaluate("document.activeElement && document.activeElement.blur()")
         _hold_keys(page, ["Control", "d"], hold=0.1)
         stop = page.locator(_pane(1, '[data-testid="stop"]'))
-        if stop.count():
-            stop.click()
+        check("V3: the box offers Stop while a compose row's first send is in flight",
+              bool(until(lambda: stop.count() == 1, timeout=2)))
+        stop.click()
         time.sleep(0.3)
         odd = [c[1] for c in mock.calls[n0:] if "interrupt" in c[1]]
         check("review 2: the orb and Stop send no interrupt for a first send's placeholder id",
@@ -1614,9 +1618,8 @@ def _rr_placeholder_stop_checks(page, mock, check, until):
     finally:
         page.unroute(OPEN_URL)
     new = until(lambda: _chat(page, 1)["threadId"], timeout=3)
-    time.sleep(0.3)
-    check("review 2 (V3): and no stop was asked for meanwhile, so none reaches the thread once it exists",
-          bool(new) and not mock.saw("POST", f"/threads/{new}/interrupt"), str(new))
+    check("review 2: and the stop asked for meanwhile reaches the thread once it exists",
+          bool(new) and bool(until(lambda: mock.saw("POST", f"/threads/{new}/interrupt"), timeout=3)), str(new))
     if new:
         mock.emit("turn_finished", {"stop": "interrupted"}, thread_id=new)
 
@@ -1647,14 +1650,17 @@ def _checkpoint_send_stop_checks(page, mock, check, until):
                   bool(until(lambda: _pumped(page) and held, timeout=3))
                   and not str(_chat(page, 1)["turnThreadId"]).startswith("local-"))
             if case == "new":
-                # A compose row offers no Stop until ACK makes it an open
-                # conversation, and (V3) push-to-talk no longer interrupts: the
-                # hold records, and asks for no stop at all.
+                # A compose row has no thread to steer until ACK, but the box
+                # offers Stop (V3: push-to-talk no longer interrupts). Push-to-
+                # talk asks for nothing; Stop's request waits for the ACK.
                 page.evaluate("document.activeElement && document.activeElement.blur()")
                 _hold_keys(page, ["Control", "d"], hold=0.1)
-            else:
-                stop = page.locator(_pane(1, '[data-testid="stop"]'))
-                stop.click()
+            stop = page.locator(_pane(1, '[data-testid="stop"]'))
+            if case == "new":
+                check("send/stop new (V3): the box offers Stop while the first send is held",
+                      bool(until(lambda: stop.count() == 1, timeout=2)))
+            stop.click()
+            if case != "new":
                 stop.click()
             page.wait_for_timeout(100)
             check(f"send/stop {case}: Stop waits for send acknowledgement", not stops, str(stops))
@@ -1670,13 +1676,12 @@ def _checkpoint_send_stop_checks(page, mock, check, until):
             held[0].fulfill(status=500 if case == "failed" else 202,
                             content_type="application/json", body=json.dumps(outcome))
             if case in ("new", "known", "stale", "queued"):
-                wanted = [] if case == "new" else [{"expected_turn_id": "a" * 32}]
+                wanted = [{"expected_turn_id": "a" * 32}]
                 if case == "queued":
                     wanted.append({"expected_turn_id": "b" * 32})
                 until(lambda: _pumped(page) and len(stops) >= len(wanted), timeout=3)
                 page.wait_for_timeout(100)
-                check(f"send/stop {case}: only the acknowledged exact turn identities are stopped"
-                      + (" (none: V3's push-to-talk asks for no stop)" if case == "new" else ""),
+                check(f"send/stop {case}: only the acknowledged exact turn identities are stopped",
                       stops == wanted, str(stops))
             else:
                 page.wait_for_timeout(150)

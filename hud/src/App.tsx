@@ -13,9 +13,10 @@ import { SendStops } from "./lib/sendStops";
 // activity and lifecycle events stay window-wide. **Ambiguous input goes to
 // the selected chat** (decisions W-6): the chat pane most recently clicked,
 // always one on screen, none with no chat drawn. Voice lands there when its
-// transcript does, the orb follows and interrupts its turn, the follow-up mic
-// window opens only when its turn ends, only its turn keeps the mic
-// suppressed, and files dropped outside a chat pane are staged in its box.
+// transcript does (steering its turn if one is running: V3), the orb follows
+// its turn (Stop interrupts it; push-to-talk does not), the follow-up mic
+// window opens only when its turn ends, no turn silences the mic, and files
+// dropped outside a chat pane are staged in its box.
 // Input that belongs to a thread — typed words, a steer, a hand-back, a first
 // send, a transcript — stays with that thread.
 
@@ -592,14 +593,25 @@ export default function App() {
   // submitted: the selection itself only follows after the next render, and a
   // clip must be filed under the chat it was said to, not the one before.
   const voiceTarget = useRef<PaneNo | null>(null);
+  // The claimed follow-up's pane is gone: its words may only wait in a box.
+  const voiceBoxOnly = useRef(false);
+  // Continuation windows whose message was placed (REVIEW box or chat); one
+  // that never was (upload failed, nothing heard, refused) is taken back.
+  const placedWindows = useRef(new Set<number>());
   const endListening = () => {
     const was = listenWas.current;
     listenWas.current = null;
-    if (!was) return;
     const at = live.current;
-    const c = at.chats[was.pane];
+    // The claim may have begun on an idle pane whose turn started meanwhile
+    // (a send landing while the next words were being said): then there is no
+    // saved line, but the orb is still on "listening" for a running turn.
+    const pane = was?.pane ?? at.selectedChat;
+    if (pane === null) return;
+    const c = at.chats[pane];
     if (!c.busy) return; // the turn finished meanwhile and set the pane itself
-    chatPatch(was.pane, { orb: turnOrb(at, c), status: c.status === LISTENING_STATUS ? was.status : c.status });
+    if (!was && at.orb !== "listening") return; // nothing of ours to undo
+    const status = c.status === LISTENING_STATUS ? (was?.status ?? "THINKING") : c.status;
+    chatPatch(pane, { orb: turnOrb(at, c), status });
   };
   const capture = useMemo(
     () =>
@@ -627,15 +639,23 @@ export default function App() {
           const at = live.current;
           let n = at.selectedChat;
           voiceTarget.current = null;
-          // Q5: a follow-up opened by a drawn pane's reply belongs to that
-          // pane, unless the owner chose another chat since (their click is
-          // newer than the reply).
-          if (source === "follow_up" && typeof tag === "number" && tag !== n && n === followBase.current
-              && chatsOnScreen().includes(tag as PaneNo)) {
-            layoutNow.current.focus(tag as PaneNo);
-            dispatch({ type: "select", pane: tag as PaneNo, front: true });
-            n = voiceTarget.current = tag as PaneNo;
+          voiceBoxOnly.current = false;
+          if (source === "follow_up" && typeof tag === "number" && tag !== n) {
+            if (!chatsOnScreen().includes(tag as PaneNo)) {
+              // The pane the window was opened for is gone or hidden: nobody
+              // can say where these words belong, so they wait in the
+              // selected chat's box, unsent.
+              voiceBoxOnly.current = true;
+            } else if (n === followBase.current) {
+              // Q5: a follow-up opened by a drawn pane's reply belongs to that
+              // pane, unless the owner chose another chat since (their click
+              // is newer than the reply).
+              layoutNow.current.focus(tag as PaneNo);
+              dispatch({ type: "select", pane: tag as PaneNo, front: true });
+              n = voiceTarget.current = tag as PaneNo;
+            }
           }
+          if (listenWas.current && listenWas.current.pane !== n) listenWas.current = null;
           if (n === null) return;
           // A turn's own orb and status come back when the listening is over.
           if (at.chats[n].busy && !listenWas.current) listenWas.current = { pane: n, status: at.chats[n].status };
@@ -644,13 +664,14 @@ export default function App() {
         onIdle: (note) => {
           const n = live.current.selectedChat;
           if (n !== null && live.current.chats[n].busy) { endListening(); return; }
+          listenWas.current = null;
           if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "idle", status: note || "" } });
           else dispatch({ type: "patch", patch: { orb: "idle" } });
         },
-        onUtterance: (wav, ms, source) => {
+        onUtterance: (wav, ms, source, continuation) => {
           // However it ends (sent, review, empty, failed, crashed), a talk-key
           // utterance that paused him is over: he resumes what remains.
-          void onUtterance(wav, ms, source).finally(() => { if (source === "ptt") speech.controller.endBargeIn(); });
+          void onUtterance(wav, ms, source, continuation).finally(() => { if (source === "ptt") speech.controller.endBargeIn(); });
         },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -673,7 +694,17 @@ export default function App() {
 
   // A message continues only in the chat it went to: choosing another chat
   // ends the continuation window (the click is the owner's newer intent).
-  useEffect(() => { capture.closeContinuation(); }, [state.selectedChat, capture]);
+  // Its conversation changing (another thread opened in the pane) ends it
+  // too -- but a compose row becoming its own just-opened thread does not.
+  const voiceChat = state.selectedChat === null ? null : draftKey(state.chats[state.selectedChat], state.selectedChat);
+  const voiceChatWas = useRef<{ pane: PaneNo | null; key: string | null }>({ pane: null, key: null });
+  useEffect(() => {
+    const was = voiceChatWas.current;
+    voiceChatWas.current = { pane: state.selectedChat, key: voiceChat };
+    const opened = state.selectedChat !== null ? live.current.chats[state.selectedChat].compose?.openedId : null;
+    if (was.pane === state.selectedChat && was.key?.startsWith("compose:") && voiceChat !== null && voiceChat === opened) return;
+    capture.closeContinuation();
+  }, [state.selectedChat, voiceChat, capture]);
 
   // The follow-up window a finished turn owes, opened once its reply has been
   // read (v1's `doneSpeaking`): only if the selected chat is still idle.
@@ -736,27 +767,32 @@ export default function App() {
   );
 
   const onUtterance = useCallback(
-    async (wav: Blob, ms: number, source: ClaimSource = "unclaimed") => {
+    async (wav: Blob, ms: number, source: ClaimSource = "unclaimed", continuation: number | null = null) => {
       // The length bounds the deadline and the retention caps, so it is never
       // guessed: take it from the WAV itself if the caller did not say.
       if (!Number.isFinite(ms) || ms <= 0) ms = Math.max(0, ((wav.size - 44) / 2 / CAP_RATE) * 1000);
       endListening();
       const target = voiceTarget.current;
+      const boxOnly = voiceBoxOnly.current;
       voiceTarget.current = null;
+      voiceBoxOnly.current = false;
+      // The message only keeps its continuation window if it goes out.
+      const refuse = () => capture.cancelContinuation(continuation);
       // A crashed window uploads nothing, and sends nothing, for anyone.
-      if (crashedRef.current) { voiceDiagnostics.add(ms, source, "suppressed:crash"); return; }
+      if (crashedRef.current) { refuse(); voiceDiagnostics.add(ms, source, "suppressed:crash"); return; }
       const mode = live.current.dictation;
       // OFF never reaches here (Capture refuses to claim while muted), but the
       // mode is checked again rather than assumed: the fail-closed direction
       // costs a discarded utterance and the other costs an upload.
-      if (outcomeFor(mode) === "discard") { voiceDiagnostics.add(ms, source, "muted"); return; }
-      if (ms <= 0) { voiceDiagnostics.add(0, source, "too_short"); return; }
+      if (outcomeFor(mode) === "discard") { refuse(); voiceDiagnostics.add(ms, source, "muted"); return; }
+      if (ms <= 0) { refuse(); voiceDiagnostics.add(0, source, "too_short"); return; }
       const at = live.current;
       // Where the words are for: the selected chat as it is when they were said.
       const said = target ?? at.selectedChat;
       const chat = said !== null ? draftKey(at.chats[said], said) : null;
-      const id = stt.submit(wav, ms, source, { mode, chat });
+      const id = stt.submit(wav, ms, source, { mode, chat, boxOnly, continuation });
       if (id === null) {
+        refuse();
         sttSay({ orb: "error", status: "STT BACKLOG", error: "Too many clips are waiting to be transcribed, so this one was not kept. Wait for them to finish." });
         return;
       }
@@ -764,6 +800,7 @@ export default function App() {
       // for good): the caller's `.finally` ends a talk-key barge-in then (V-7),
       // not when the upload merely starts.
       await stt.whenSettled(id);
+      if (continuation && !placedWindows.current.delete(continuation)) refuse();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch, stt],
@@ -796,6 +833,8 @@ export default function App() {
         });
         return;
       }
+      // The message goes out (to a box or a chat): its continuation window stays.
+      for (const i of batch) if (i.meta.continuation) placedWindows.current.add(i.meta.continuation);
       const chat = at.chats[n];
       const landing = {
         mode: at.dictation, chat: draftKey(chat, n), busy: chat.busy, card: at.approvals.length > 0,
@@ -1345,8 +1384,8 @@ export default function App() {
         }
         case "error":
           // Shown, but the turn is not over until `turn_finished` (which the
-          // daemon always sends): resetting `busy` here took the Stop and the
-          // orb's interrupt away from a turn that was still running.
+          // daemon always sends): resetting `busy` here took the Stop button
+          // away from a turn that was still running.
           for (const n of eitherPane(route)) chatPatch(n, { orb: "error", error: data.message || "error" });
           // The thread's line turns red, and stays red as "Ended on an error"
           // once the turn is over (the daemon ends a turn that said one `error`).
@@ -3327,6 +3366,10 @@ export default function App() {
           onSend={(text, files) => void send(n, text, files)}
           onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}
           running={runningHere(chat)}
+          // A compose row's first send in flight has no thread to steer yet
+          // (Enter must not open a second one), but it can be stopped: the
+          // stop waits for the acknowledgement (`sendStops`).
+          stoppable={runningHere(chat) || (chat.busy && !!chat.compose?.sending)}
           onStop={() => stopTurn(n)}
           restore={chat.restore}
           onRestoreTaken={(nonce) => dispatch({ type: "given_back", pane: n, nonce })}

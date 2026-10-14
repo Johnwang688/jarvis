@@ -372,6 +372,47 @@ def main(argv=None):
                       len(stts()) == st0, f"{len(stts()) - st0} uploads")
                 finish()
 
+            def continuation_cap():
+                reset()
+                s0 = len(_sent(mock, "t1"))
+                mock.stt_script = [{"text": "first part"}]
+                page.evaluate(WAKE)
+                waits(lambda: _chat(page, 1)["busy"])
+                w["send_status"] = "steered"
+                # TV-like speech with short gaps: only two continuations are claimed.
+                for i in range(5):
+                    st0 = len(stts())
+                    mock.stt_script = [{"text": f"room speech {i}"}]
+                    page.evaluate(SPEECH % 2000)
+                    waits(lambda: len(stts()) > st0, timeout=1.5)
+                    time.sleep(0.2)
+                time.sleep(0.5)
+                check("room speech with 2 s gaps after a wake steers at most twice without a wake word",
+                      len(_sent(mock, "t1")) - s0 == 3, f"{len(_sent(mock, 't1')) - s0} sends")
+                w.pop("send_status", None)
+                finish()
+
+            def continuation_needs_a_message_that_went_out():
+                reset()
+                mock.stt_script = [{"status": 400, "error": "bad audio"}]
+                page.evaluate(WAKE)
+                page.wait_for_selector('[data-testid="stt-retry"]', timeout=15000)
+                st0 = len(stts())
+                mock.stt_script = [{"text": "should not be heard"}]
+                page.evaluate(SPEECH % 2000)
+                time.sleep(0.6)
+                check("a message whose upload failed opens no continuation window", len(stts()) == st0)
+                reset()
+                mock.stt_script = [{"text": "   "}]
+                page.evaluate(WAKE)
+                waits(lambda: not mock.stt_script)
+                time.sleep(0.5)
+                st0 = len(stts())
+                mock.stt_script = [{"text": "should not be heard"}]
+                page.evaluate(SPEECH % 2000)
+                time.sleep(0.6)
+                check("nor does one whose transcript was empty", len(stts()) == st0)
+
             # ---- 8. the Ctrl+D gesture, unchanged -------------------------
             def ctrl_d_on_busy():
                 reset()
@@ -453,14 +494,16 @@ def main(argv=None):
                 s1 = len(_sent(mock, "t1"))
                 mock.stt_script = [{"text": "pane two went away"}]
                 page.evaluate(SPEECH % 2000)
-                got = until(lambda: _sent(mock, "t1")[s1:] or None, timeout=5)
-                check("a pane that went away before the claim gives the words to the selected chat",
-                      bool(got) and sel() == 1, f"{got} sel={sel()}")
-                finish("t1", 1)
+                got = until(lambda: _sent(mock, "t1")[s1:] or None, timeout=2)
+                check("a pane that went away before the claim: the words wait in the selected chat's box, unsent",
+                      waits(lambda: "pane two went away" in _box(page, 1).input_value()) and not got and sel() == 1,
+                      f"{got} sel={sel()}")
+                _box(page, 1).fill("")
 
             for section in (busy_steer, stop_interrupts, review_busy_box, busy_other_thread, v2_review_conditions,
                             card_blocks_voice, continuation_steers, continuation_review_appends,
-                            continuation_ends_with_the_chat, ptt_has_no_continuation, ctrl_d_on_busy,
+                            continuation_ends_with_the_chat, continuation_cap, continuation_needs_a_message_that_went_out,
+                            ptt_has_no_continuation, ctrl_d_on_busy,
                             followup_target):
                 run(section)
             context.close()

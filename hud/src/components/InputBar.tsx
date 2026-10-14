@@ -100,6 +100,14 @@ export function InputBar(props: {
   /** A turn is running in the open thread (2026-10-08): Enter steers it, and
    * a Stop button ends it. */
   running?: boolean;
+  /**
+   * Whether Stop is offered; defaults to `running`. It is wider than
+   * `running` while a compose row's first send is in flight (its thread
+   * opening, before the acknowledgement): Stop is there, but Enter must not
+   * steer, or a second Enter would open a second thread. V3 took
+   * push-to-talk's interrupt away, so the box is the way to stop it.
+   */
+  stoppable?: boolean;
   onStop?: () => void;
   /** Words and files handed back (a failed send, a dropped message): put back
    * in the box ahead of anything typed since, each exactly once. */
@@ -337,7 +345,7 @@ export function InputBar(props: {
           }}
           onKeyUp={(e) => e.stopPropagation()}
         />
-        {props.running ? (
+        {props.stoppable ?? props.running ? (
           <button
             type="button"
             className="iconbtn stop"
