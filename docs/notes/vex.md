@@ -58,7 +58,24 @@ escape sequences (`vex._ANSI`) from a strictly decoded snapshot and nothing
 else; the fake writes the same around its output and `UsbConsoleOutput`
 holds the live shape. With a plugged-in controller that snapshot is one
 `usb.vex` record (`0x2888`/`0x0503`, `"device":"ctrl"`) and parses to
-controller present. A real robot download is still unverified.
+controller present.
+
+**First real download (2026-10-14, after #172 merged and daemon2 restarted).**
+The owner downloaded `matchload_Test` to slot 3 through the V5 controller on
+COM3 (the brain by radio): vexcom printed `Device: COM3`, `vexcom utility
+V1.0.2b2`, `download :` and `0....10....20....` to `100`, the HUD settled
+"✓ In slot 3", and the USB panel read Controller Connected, Brain
+Disconnected (the brain was not on USB). Owner-reported from the HUD.
+
+**Status colours and download progress (same day, owner's request).** The
+indicators read `Brain:` / `Controller:` (no "USB" prefix; the note under them
+still says USB presence only): green connected, red disconnected, plain
+unknown, a stale reading dimmed beside "(last confirmed)". The Download
+section shows a bar from `lib/vex.ts` `downloadProgress`, which reads only a
+line of numbers and dots (a number per 10%, a dot per 2%; the last such line
+wins) and is full once the record has succeeded. Checks: `lib/vex.test.ts`
+and `_feedback_checks` in `tests/face/hud_v2_vex_check.py` (labels, computed
+colours against `--green`/`--red`, the bar at 34%, 70%, 100%).
 
 ## Original CLAUDE.md lines 2231–2491
 
