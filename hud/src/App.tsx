@@ -746,8 +746,9 @@ export default function App() {
       const chat = at.chats[n];
       const landing = {
         mode: at.dictation, chat: draftKey(chat, n), busy: chat.busy, card: at.approvals.length > 0,
-        // `send` steers exactly when the running turn is this thread's own.
-        steers: chat.busy && !!chat.threadId && chat.turnThreadId === chat.threadId,
+        // `send` steers exactly when the running turn is this thread's own
+        // (the box offers Stop and Steer on the same test).
+        steers: runningHere(chat),
       };
       // One spoken order: if any item must wait in the box, they all do.
       const sends = batch.every((i) => placementFor(i.meta, landing, i) === "send");
