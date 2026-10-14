@@ -118,7 +118,10 @@ def main():
         with sync_playwright() as pw:
             browser=pw.chromium.launch(headless=True,args=["--use-fake-ui-for-media-stream","--use-fake-device-for-media-stream"])
             try:owner_tools_checks(browser,mock,f"http://127.0.0.1:{mock.port}",v2.check,v2.until,v2.guard,v2.FAKE_RECOGNIZER)
-            except Exception as error:v2.check("owner tools scenario completes",False,str(error))
+            except Exception as error:
+                import traceback
+                traceback.print_exc()
+                v2.check("owner tools scenario completes",False,str(error))
             finally:browser.close()
     finally:mock.stop()
     print(f"{v2.CHECKS} owner tools checks, {len(v2.FAILURES)} failures")

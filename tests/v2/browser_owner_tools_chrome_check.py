@@ -74,10 +74,16 @@ class OwnerChrome(B.BrowserStream):
 
   # A same-URL document navigation withdraws the UI generation, even if its
   # location string is unchanged; old responses must not be replayed.
+  window.send(B.key(" ","Space",32));window.settled()
+  self.wait(lambda:"Space" in tab.keys_pressed,what="old-document key recorded")
   old_doc=tab.document_generation
   self.run_on(tab.page.reload())
   self.wait(lambda:tab.document_generation>old_doc)
   window.wait_for("owner_reset")
+  self.assertFalse(tab.keys_pressed or tab.pressed)
+  B.click(window,150,320);window.settled()
+  B.type_keys(window,"fresh",pace=True)
+  self.wait(lambda:self.js(tid,"document.getElementById('t').value")=="fresh",what="fresh-document ordinary input")
   with self.card():
    start=len(window.messages)
    window.send({"t":"find","seq":113,"query":QUERY,"backward":False});window.settled()

@@ -82,4 +82,3 @@ class DispatchBarriers(unittest.IsolatedAsyncioTestCase):
   self.assertFalse(self.tab.keys_pressed or self.tab.pressed)
 
 if __name__=="__main__":unittest.main()
-

@@ -50,7 +50,7 @@ correcting it to document required no product change.
 
 A subsequent independently reviewed document-input fix drops old queued input
 and depressed-key/button bookkeeping on commit, and pins document/hold identity
-before CDP acquisition and actual child dispatch. Four targeted synthetic
-regressions are prepared; execution is pending. The real HUD fixture includes
+before CDP acquisition and actual child dispatch. All44 focused document-generation, owner-tools, host activity and pure stream
+regressions passed, including the four targeted document-barrier cases. The real HUD fixture includes
 375px layout and auth/find/approval priority; it has not run at this writing.
 These receipts are not installation, deployment or complete-product validation.
