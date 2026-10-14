@@ -118,7 +118,7 @@ class DuckError(Exception):
 
 def pactl(args: tuple[str, ...], timeout: float = CALL_S) -> bytes:
     """One bounded child, fixed argv, no shell, through the same capped runner as
-    the mute (`audio.run_bounded`). Only a listing and a *volume* write of at most
+    the mute (`audio._run_bounded`). Only a listing and a *volume* write of at most
     100% per channel are allowed here: mute, default devices and every other
     command are refused before a process starts."""
     if args != _LIST:
@@ -131,7 +131,7 @@ def pactl(args: tuple[str, ...], timeout: float = CALL_S) -> bytes:
     if not 0 < timeout <= audio.COMMAND_S:
         raise DuckError("refused")
     try:
-        return audio.run_bounded(args, timeout)
+        return audio._run_bounded(args, timeout)
     except audio._UnsettledMute as exc:
         threading.Thread(target=exc.process.wait, name="speech-duck-reap", daemon=True).start()
         raise DuckError("pactl too slow") from None
@@ -149,8 +149,15 @@ class Stream:
 
 def parse(raw: bytes) -> list[Stream]:
     """The sink-inputs that belong to a Unix process, reduced to what ducking
-    reads. A stream with no PID is never ours and is dropped; anything malformed
-    is an error (nothing is then written)."""
+    reads.
+
+    Only a *structural* problem fails the whole listing (nothing is then written):
+    not a list, more than `STREAM_CAP` rows, a row that is not an object, an index
+    that is not an integer or is repeated, a `mute` that is not a boolean. Any other
+    stream's own oddity (no PID, a PID that is not a number, a volume out of range,
+    a bad channel map) just drops that row, so one foreign client's odd properties
+    cannot stop a restore. A dropped row is never written; a held index that is
+    missing from the result is treated as gone (it becomes a journal leftover)."""
     try:
         rows = json.loads(raw)
         if not isinstance(rows, list) or len(rows) > audio.STREAM_CAP:
@@ -159,29 +166,34 @@ def parse(raw: bytes) -> list[Stream]:
         for row in rows:
             if not isinstance(row, dict):
                 raise ValueError
-            index, muted, props = row.get("index"), row.get("mute"), row.get("properties")
-            if (type(index) is not int or not 0 <= index < 2**32 - 1 or index in seen
-                    or type(muted) is not bool or not isinstance(props, dict)):
+            index, muted = row.get("index"), row.get("mute")
+            if type(index) is not int or not 0 <= index < 2**32 - 1 or index in seen or type(muted) is not bool:
                 raise ValueError
             seen.add(index)
-            pid = props.get("application.process.id")
-            if pid is None:
-                continue
-            if not isinstance(pid, str) or re.fullmatch(r"[1-9][0-9]{0,9}", pid) is None or not 1 < int(pid) < 2**31:
-                raise ValueError
-            channels = row.get("volume")
-            if not isinstance(channels, dict) or not 1 <= len(channels) <= MAX_CHANNELS:
-                raise ValueError
-            volume = []
-            for entry in channels.values():
-                value = entry.get("value") if isinstance(entry, dict) else None
-                if type(value) is not int or not 0 <= value <= READ_MAX:
-                    raise ValueError
-                volume.append(value)
-            out.append(Stream(index, int(pid), muted, tuple(volume)))
+            stream = _stream(index, muted, row)
+            if stream is not None:
+                out.append(stream)
         return out
     except (ValueError, TypeError, RecursionError):
         raise DuckError("unreadable listing") from None
+
+
+def _stream(index: int, muted: bool, row: dict) -> Stream | None:
+    """One row's PID and volume, or None if it has none we can trust."""
+    props = row.get("properties")
+    pid = props.get("application.process.id") if isinstance(props, dict) else None
+    if not isinstance(pid, str) or re.fullmatch(r"[1-9][0-9]{0,9}", pid) is None or not 1 < int(pid) < 2**31:
+        return None
+    channels = row.get("volume")
+    if not isinstance(channels, dict) or not 1 <= len(channels) <= MAX_CHANNELS:
+        return None
+    volume = []
+    for entry in channels.values():
+        value = entry.get("value") if isinstance(entry, dict) else None
+        if type(value) is not int or not 0 <= value <= READ_MAX:
+            return None
+        volume.append(value)
+    return Stream(index, int(pid), muted, tuple(volume))
 
 
 def ducked(volume: tuple[int, ...]) -> tuple[int, ...]:
@@ -518,6 +530,10 @@ class Ducker:
         self._held[stream.index] = held
         self._persist()                 # before the write: a crash leaves a record, never a silent duck
         if stream.volume != target:
+            if self._stopped:           # stop() came in meanwhile: no duck is written after it
+                del self._held[stream.index]
+                self._persist()
+                return
             try:
                 self._call(("set-sink-input-volume", str(stream.index), *map(str, target)))
             except DuckError:

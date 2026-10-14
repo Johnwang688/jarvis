@@ -545,6 +545,78 @@ class Forged(Base):
         self.assertEqual(self.pulse.volume(1), (90000, 90000))
 
 
+class OneBadForeignStream(Base):
+    """A foreign client can set odd properties; it must not stop our streams being restored."""
+
+    def foreigners(self):
+        weird_pid = stream(7, 200); weird_pid["properties"]["application.process.id"] = "abc"
+        loud = stream(8, 200, (5 * NORM, 5 * NORM))
+        no_props = {"index": 9, "mute": False, "volume": {"front-left": {"value": 1}}, "properties": "x"}
+        short_volume = stream(10, 200); short_volume["volume"] = {}
+        return {"pid abc": weird_pid, "five times the volume": loud, "properties not an object": no_props,
+                "no channels": short_volume}
+
+    def test_a_bad_foreign_row_neither_blocks_the_duck_nor_is_ever_written(self):
+        for what, row in self.foreigners().items():
+            with self.subTest(what=what):
+                self.pulse.commands.clear()
+                self.pulse.rows[:] = [stream(1, 120), row]
+                d = self.make(journal=None); d.grant(); d.tick()
+                self.assertLess(self.pulse.volume(1)[0], NORM)
+                d.release(); d.tick()
+                self.assertEqual(self.pulse.volume(1), (NORM, NORM), "restored on release")
+                self.assertNotIn(row["index"], [int(c[1]) for c in self.pulse.writes()])
+
+    def test_a_bad_foreign_row_does_not_block_a_restore_at_shutdown_or_the_idle_repair(self):
+        for what, row in self.foreigners().items():
+            with self.subTest(what=what):
+                self.pulse.rows[:] = [stream(1, 120)]
+                d = self.make(journal=None); d.grant(); d.tick()
+                self.pulse.rows.append(row)                       # it appears mid-duck
+                d.tick()
+                d.stop()
+                self.assertEqual(self.pulse.volume(1), (NORM, NORM), "restored by stop()")
+        # the idle repair of a lost duck still finds its stream among odd ones
+        self.pulse.rows[:] = [self.foreigners()["pid abc"], stream(1, 120, D.ducked((NORM, NORM)))]
+        d = self.make(journal=None); d._loaded = True
+        d._residue = [D.Residue((NORM, NORM), D.ducked((NORM, NORM)), time.time())]
+        d.tick()
+        self.assertEqual(self.pulse.volume(1), (NORM, NORM))
+
+    def test_a_held_stream_that_turns_malformed_becomes_a_leftover_not_a_write(self):
+        d = self.make(); d.grant(); d.tick()
+        self.pulse.rows[0]["properties"]["application.process.id"] = "abc"
+        writes = len(self.pulse.writes())
+        d.release(); d.tick()
+        self.assertEqual(len(self.pulse.writes()), writes)
+        self.assertEqual(d.status()["ducked"], 0)
+        self.assertEqual(len(d._residue), 1)
+        self.assertTrue(self.journal.exists())
+
+    def test_only_a_structural_problem_fails_the_listing(self):
+        row = stream(1, 120)
+        for what, rows in (("not a list", {}), ("a row that is not an object", [row, 5]),
+                           ("an index that is not an integer", [{**row, "index": "1"}]),
+                           ("a repeated index", [row, stream(1, 121)]),
+                           ("a mute that is not a boolean", [{**row, "mute": 1}]),
+                           ("more rows than the cap", [stream(i, 120) for i in range(A.STREAM_CAP + 1)])):
+            with self.subTest(what=what), self.assertRaises(D.DuckError):
+                D.parse(json.dumps(rows).encode())
+        self.assertEqual(D.parse(json.dumps([row, {**stream(2, 120), "volume": "x"}]).encode()), [D.Stream(1, 120, False, (NORM, NORM))])
+
+    def test_no_duck_is_written_once_stop_has_been_called(self):
+        d = self.make()
+        original = d._persist
+
+        def stop_in_between():
+            original()
+            d._stopped = True                                   # stop() arrives after the record, before the write
+        d._persist = stop_in_between
+        d.grant(); d.tick()
+        self.assertEqual(self.pulse.writes(), [])
+        self.assertEqual(d.status()["ducked"], 0)
+
+
 class Worker(Base):
     def wait(self, check, what, limit=10.0):
         end = time.monotonic() + limit
@@ -820,7 +892,7 @@ class Runner(unittest.TestCase):
                 [sys.executable, "-c", "import os; os.write(1, b'x' * 300000)"], **kw)):
             with self.assertRaises(D.DuckError):
                 D.pactl(LIST, 2)
-        self.assertIs(D.audio.run_bounded, A.run_bounded)
+        self.assertIs(D.audio._run_bounded, A._run_bounded)
 
     def test_a_failing_or_missing_pactl_is_a_duck_error(self):
         real = subprocess.Popen

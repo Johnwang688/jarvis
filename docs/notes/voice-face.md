@@ -1632,6 +1632,18 @@ expire restored the same way. The one other app's stream present earlier was not
   genuine 10-minute read-aloud has the same gap). The idle leftover poll backs off 3 s -> 60 s
   while Chrome plays with nothing to repair.
 
+- **One odd foreign stream cannot block a restore.** `parse()` fails the whole listing only on
+  structural problems (not a list, more than 256 rows, a row that is not an object, an index that
+  is not an integer or is repeated, a `mute` that is not a boolean). A row with a non-numeric
+  `application.process.id`, a volume above the read bound or a bad channel map is just dropped,
+  never written; a held stream that turns malformed is treated as gone and becomes a journal
+  leftover. **Residual:** a listing larger than `OUTPUT_CAP` (256 KB) or with more than 256
+  streams, or a repeated index, still fails the listing, so nothing is written and the duck
+  cannot be undone until pactl answers sanely again (the journal covers a restart).
+- `audio._run_bounded` is private and applies no allowlist; only `audio._pactl` and
+  `speech_duck.pactl` call it, each after its own allowlist. `stop()` is rechecked immediately
+  before a duck is written.
+
 ### Not done, and not claimed
 
 No physical audibility, echo or latency measurement; the Windows-side mixer behaviour with the

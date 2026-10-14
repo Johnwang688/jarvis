@@ -300,12 +300,14 @@ def _pactl(args: tuple[str, ...], timeout: float) -> bytes:
                 and int(args[1]) < 2**32 - 1))
     if not allowed or not 0 < timeout <= COMMAND_S:
         raise AudioRefused(MUTE_UNCERTAIN)
-    return run_bounded(args, timeout)
+    return _run_bounded(args, timeout)
 
 
-def run_bounded(args: tuple[str, ...], timeout: float) -> bytes:
-    """The one bounded pactl child, shared by the mute and V15's volume duck: the
-    caller has already judged `args` against its own allowlist. Output is read in
+def _run_bounded(args: tuple[str, ...], timeout: float) -> bytes:
+    """The one bounded pactl child. Private on purpose: it applies NO allowlist, so
+    its only callers are `_pactl` above (listing and mute) and
+    `speech_duck.pactl` (listing and volume), and each must judge `args` against its
+    own allowlist before calling. Nothing else may import it. Output is read in
     capped chunks (never buffered whole), the child is killed at the deadline, and
     one that will not die is reported as `_UnsettledMute` for the caller to reap."""
     process = None
