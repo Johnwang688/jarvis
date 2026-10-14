@@ -71,3 +71,8 @@ plan disagree, this file wins.**
   - **Decided 2026-10-12 (the owner): push-to-talk keeps Ctrl+D in the editor, vim mode included.** Vim loses its
     half-page-down. Built that way in ED-8 (`monaco-vim` 0.4.4 works on Monaco 0.57; `:w` is the buffer's guarded
     save).
+- **A click in the tree opens a new tab (2026-10-14, the owner's request).** "When I click another file on the sidebar it
+  should open a new tab in the editor panel with the file instead of changing the current open file to the new clicked
+  file." This **amends plan §2.3**: a single click on a tree file now opens a normal (pinned) tab, re-clicking an open
+  file activates its tab, and the tree no longer creates italic preview tabs. The preview machinery (`openTab`/`pinTab`,
+  `Tabs.preview`, the tab strip's double-click pin) stays for saved pane specs.

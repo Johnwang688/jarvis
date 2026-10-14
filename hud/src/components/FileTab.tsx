@@ -142,8 +142,7 @@ const Node = memo(function Node(props: {
             data-git={(!withheld && git.file(path)) || undefined}
             title={e.policy === "env" ? "Jarvis can't read this file" : withheld ? "withheld"
               : git.file(path) ? GIT_WORDS[git.file(path)!] : undefined}
-            onClick={() => props.onOpen(path, false)}
-            onDoubleClick={() => props.onOpen(path, true)}
+            onClick={() => props.onOpen(path, true)}
             onContextMenu={(ev) => props.onMenu(ev, { path, dir: false, policy: e.policy })}
           >
             <span className="tw" />
@@ -386,8 +385,9 @@ export function FileTab(props: {
     if (props.blocked) return false;
     setAsk(null);
     setTreeOpen(false);
-    // A narrow pane folds its tree behind "Files" the moment a file opens, so
-    // there is no browsing click to click: every open there is a pinned tab.
+    // A click in the tree opens a normal (pinned) tab (2026-10-14, the owner's
+    // request); the tree no longer creates a preview. A narrow pane pins too.
+    // `pin` false stays for a caller that wants the preview behaviour.
     const pinned = pin || !!props.narrow;
     const dirty = (p: string) => !!bufOf(p)?.dirty;
     const next = openTab(tabsNow.current, path, { pin: pinned, keepPreview: dirty, dirty });

@@ -41,8 +41,9 @@ export function jarvisMayRead(kind: Kind): boolean {
 
 /**
  * A File pane's tabs: paths relative to the pane's project, in order; the
- * active one; and the preview tab (italic), which the next single click in
- * the tree replaces — until it is double-clicked or edited, which pins it.
+ * active one; and the preview tab (italic), which the next unpinned open
+ * replaces — until it is double-clicked or edited, which pins it. The tree
+ * no longer opens previews (2026-10-14); only a saved pane spec can carry one.
  */
 export interface Tabs {
   paths: string[];
@@ -69,10 +70,11 @@ export function parseTabs(raw: unknown): Tabs | null {
 }
 
 /**
- * Open `path`: activate its tab, or add one. A single click (`pin` false)
- * replaces the preview tab — unless the preview's buffer holds an edit
- * (`keepPreview`), which pins it instead — and the new tab is the preview. A
- * double click (`pin` true) adds a pinned tab, or pins the existing one.
+ * Open `path`: activate its tab, or add one. An unpinned open (`pin` false;
+ * the tree now always pins) replaces the preview tab — unless the preview's
+ * buffer holds an edit (`keepPreview`), which pins it instead — and the new
+ * tab is the preview. A pinned open (`pin` true) adds a pinned tab, or pins
+ * the existing one.
  *
  * Past TABS_MAX the oldest **clean** tab other than the one opening goes
  * (`dirty` says which hold an unsaved edit); when every other tab holds one,
