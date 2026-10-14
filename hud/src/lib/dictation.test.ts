@@ -116,8 +116,8 @@ describe("dictation mode", () => {
 });
 
 
-describe("orbLine and Guest voice (V-14)", () => {
-  it("adds GUEST VOICE to every line, so it is never absent while it is on", () => {
+describe("orbLine and the voice-check label (V-14, M3)", () => {
+  it("adds the label to every line, so it is never absent while the check is not judging", () => {
     const cases: Parameters<typeof orbLine>[0][] = [
       { mode: "auto", approvals: 0, orb: "idle" },
       { mode: "auto", approvals: 0, orb: "listening" },
@@ -128,12 +128,13 @@ describe("orbLine and Guest voice (V-14)", () => {
     ];
     for (const c of cases) {
       const plain = orbLine(c);
-      expect(orbLine({ ...c, guest: false })).toBe(plain);
-      expect(orbLine({ ...c, guest: true })).toBe(plain ? `${plain} · GUEST VOICE` : "GUEST VOICE");
+      expect(orbLine({ ...c, voiceLabel: "" })).toBe(plain);
+      expect(orbLine({ ...c, voiceLabel: "GUEST VOICE" })).toBe(plain ? `${plain} · GUEST VOICE` : "GUEST VOICE");
+      expect(orbLine({ ...c, voiceLabel: "VOICE CHECK OFF (not enrolled)" })).toContain("VOICE CHECK OFF (not enrolled)");
     }
   });
   it("does not change what the rest of the line means", () => {
-    expect(orbLine({ mode: "off", approvals: 0, orb: "idle", guest: true })).toMatch(/^MIC MUTED/);
-    expect(orbLine({ mode: "auto", approvals: 1, orb: "idle", guest: true })).toMatch(/^ANSWER THE AUTHORIZATION/);
+    expect(orbLine({ mode: "off", approvals: 0, orb: "idle", voiceLabel: "GUEST VOICE" })).toMatch(/^MIC MUTED/);
+    expect(orbLine({ mode: "auto", approvals: 1, orb: "idle", voiceLabel: "GUEST VOICE" })).toMatch(/^ANSWER THE AUTHORIZATION/);
   });
 });

@@ -1706,20 +1706,23 @@ winner, lazily loaded, unloaded after `JARVIS_SPEAKER_IDLE_MIN` (5) idle minutes
 subprocess); the daemon runs without it and `status()` says what is missing. The engine, the idle
 reaper and `fetch` copy V13's `stt_local.py` pattern. Deploy: install `sherpa-onnx` in the daemon
 venv, then `python -m jarvis.speaker fetch` (40 MB, SHA256 pinned and asserted equal to V0's
-`models.json`). **Licence not settled**: NGC's card says the model's licence is "covered by the
-NeMo Toolkit" (Apache-2.0); the sherpa-onnx ONNX repack carries no licence text. The lead should
-confirm before shipping the download.
+`models.json`). **Licence** (lead, 2026-10-14): fine. NGC's card says the model's licence is "covered by the NeMo
+Toolkit", which is Apache-2.0. Jarvis does not redistribute it: `python -m jarvis.speaker fetch`
+downloads the owner's copy from the upstream sherpa-onnx release, checked against a pinned SHA-256.
 
 **Verification (`/stt?verify=1`).** Before any transcription or upload. The order is pinned by tests:
 (1) Guest voice on: skipped, nothing embedded; (2) nothing enrolled (no `voiceprint.json`): skipped;
 (3) everything else fails closed: damaged, unsafe or other-model voiceprint (503), no engine (503),
 audio that is not 16-bit PCM WAV (415, no media decoder runs on uploaded bytes), a busy engine
-(503), no speech in the clip (422); (4) the first 3 s of speech (leading silence skipped by a
+(503); too little speech to judge (under 350 ms, the HUD's own `too_short`) is **200 `{text: "",
+verify: "no_speech"}`** with nothing transcribed (L2), not a refusal; (4) the first 3 s of speech (leading silence skipped by a
 -55 dBFS / -14 dB-below-loud gate) are embedded and compared by cosine with the enrolled centroid;
 below the threshold is **422 `not the enrolled speaker`**, no score, no `transcribe`. A clip under
-1.2 s (a command) uses a threshold 0.08 lower (`JARVIS_SPEAKER_SHORT_RELAX`). The reply to a match
-carries `verify`. Verification is requested by the client: the HUD asks for every chunk; a client that
-omits `verify` gets the old route (agents' tools are not owner voices).
+1.2 s (a command) uses a threshold 0.08 lower (`JARVIS_SPEAKER_SHORT_RELAX`), but never below the
+closest built-in voice plus 0.02 (L1: the voiceprint stores `impostor_max`). Only the **first 3 s of
+speech of each chunk** are judged (L7): a long chunk is vouched for by its opening, so the daemon
+verifies every chunk, not only the first, and a stranger who joins in the middle of a chunk is not
+heard by the check. The reply carries `verify`.
 
 **Guest voice.** One file, `guest.json`, in the store, so it survives HUD reloads and daemon
 restarts and has no timer. It skips step (4) and nothing else: `speaker.py` knows nothing about the
@@ -1786,22 +1789,23 @@ records what verification did (`voice matched`, `verification skipped (guest voi
 enrolled)`), never a score.
 
 **Tests (this PR).**
-- `tests/voice_speaker_check.py`: 52 (store 0700/0600, hostile files, a pipe holding good JSON,
+- `tests/voice_speaker_check.py`: 74 (store 0700/0600, hostile files, a pipe holding good JSON,
   delete, quality, hostile audio, propose/accept/rebuild, verification order, Guest, fail-closed
   engine, lazy load and idle unload, pins, no network or approval import).
-- `tests/v2/speaker_check.py`: 16 over real loopback listeners (owner-only 403 from the API port,
+- `tests/v2/speaker_check.py`: 22 over real loopback listeners (owner-only 403 from the API port,
   a foreign Origin, no Origin, `null`; content types; `/stt?verify=1` with a recorder in place of the
   cloud: a rejection never calls `transcribe`, Jarvis's own voices are rejected, Guest skips only the
   check, survives a daemon restart, never touches a pending approval).
-- `frame_check` walks the new routes; `hud_backend_check` 85/85, `voice_stt_check` 36 unchanged.
-- vitest 2372 tests / 149 files (was 2315 / 145): `speaker`, `enroll`, `SpeakerSettings`, `guestGate`,
+- `frame_check` walks the new routes; `v2/permissions_check` 1618 (V-12b lines added); `hud_backend_check` 85/85, `voice_stt_check` 36 unchanged.
+- vitest 2383 tests / 149 files (was 2315 / 145): `speaker`, `enroll`, `SpeakerSettings`, `guestGate`,
   and additions to `stt`, `dictation`, `SpeechStrip`; `tsc` and `vite build` clean.
-- Playwright `tests/face/hud_v2_speaker_check.py` 43 (real worklet, mock daemon): enrollment, a
+- Playwright `tests/face/hud_v2_speaker_check.py` 48 (real worklet, mock daemon): enrollment, a
   refused voice uploads nothing (the mock counts only clips that passed), Guest through reload and a
   bus event from another window, Jarvis speaking and a card still stop dictation with Guest on, no
   approval request from speech. Also re-run: `hud_v2_stt_check` 28 (its query expectation gained
   `verify=1`), `speech` 56, `chunks` 58, `ptt` 70, `steer` 46 (a teardown `BrokenPipeError` in the
   mock after its last check), `voice_diagnostics` 17.
+- Review-round mutations that fail on purpose (each fails at least one test; source restored byte for byte): the `g10 - 0.10` margin removed; the no-impostor branch ignoring the readings or with another margin; the proposal floor lowered to 0.30; weak readings or an overlap needing no confirming; `accept` never asking to confirm; short clips relaxing below the closest voice; verification only when asked; `/stt` not watching the gate; `no_speech` transcribed; chat voices never warned; the voice warning never firing; the model hash unchecked; the two files unprotected; the HUD not reading the truth back after a surprise skip, never labelling OFF, labelling before the daemon answered, never sending Accept anyway.
 - Mutations that fail on purpose (source restored byte for byte): guest flag ignored (unit and routes);
   a not-clean store treated as unenrolled (fail open); a rejection that still transcribes; store
   created 0755 or never tightened; reader following symlinks; no regular-file check; damaged voiceprint
@@ -1810,6 +1814,49 @@ enrolled)`), never a score.
   rest of a message not made late, `verify=1` not sent, orb line ignoring Guest, strip hidden for a
   guest, any truthy `guest` turning the label on, and **Guest also skipping the capture's suppression**
   (fails `guestGate.test.ts` and the Playwright "his own voice still never opens an utterance" check).
+
+**Review round 1 (the lead, 2026-10-14; no HIGH).**
+- **V-12b: `voiceprint.json` and `guest.json` are protected state** (plan §2): `files._protected_state_paths`
+  adds the two files, so the v1 write tools, the shell detector and v2 layer 1 refuse them; their
+  folder is an ancestor, so a write grant on it is refused and `rm -rf` of it is asked, never
+  auto-run. v2's refusal says it is speaker verification and the owner's, in Settings > Voice.
+  The readings and `impostors.json` stay ordinary. Tests: `voice_speaker_check.py` (`Protected`: set
+  membership, shell verdicts never ALLOW, v2 refusal text, ancestor grants) and the lists in
+  `tests/v2/permissions_check.py` (1618 checks, the v1/v2/shell sets still equal).
+- **M1 verification is forced.** The daemon verifies every `/stt` whenever the store is not "none", on every
+  listener; `verify=1` is a no-op (anything else is still a 400). An unenrolled reply without `verify=1` is
+  unchanged (`{text}`), so older callers see nothing new.
+- **M2 threshold floor.** `choose_threshold` is pure and pinned case by case. A proposal is never below
+  0.50 (`SPEAKER_PROPOSAL_FLOOR`); readings whose weakest 10 % score under 0.60 against each other
+  (`SPEAKER_GENUINE_FLOOR`), overlap a built-in voice, or whose supported threshold fell under the floor,
+  set `confirm`: the daemon's `accept` refuses with "record the readings again" unless `anyway: true`
+  (the HUD shows the warning and "Accept anyway"). The no-impostor branch is held to the same floor. A
+  threshold the owner types may go down to 0.30, with a warning in the status and the section.
+- **M3 gate changes the routes did not see.** `/stt` and `GET /speaker` publish `speaker_guest
+  {guest, enrolled, mode}` whenever the observed mode differs from the last one published (the first look
+  publishes), so an edited `guest.json` or a deleted or damaged `voiceprint.json` reaches every window
+  on the next clip (tests do both). The HUD labels every state in which the check is not judging:
+  GUEST VOICE, **VOICE CHECK OFF (not enrolled)** and VOICE CHECK BLOCKED, on the orb line and the strip.
+  Deviation to confirm: the OFF label shows only once this window has seen a voice enrolled
+  (remembered in localStorage, cleared by the owner's own Delete), because an owner who never enrolled
+  would otherwise carry a permanent line under the orb; before the daemon has answered nothing is labelled.
+  A reply whose `verify` is `skipped_*` while the window believed the check was on is flagged ("thought it
+  was checking your voice"), the label updates at once, and the truth is read back.
+- **L1** short-clip floor (above) and the real-model run now also refuses 1 s clips of the other voices
+  (0/156). Price: the owner's 1 s commands fell from 7/8 to 4/8 accepted, because the closest built-in voice
+  here (`af_heart`, 0.72) lifts the short threshold to 0.74.
+- **L2** `no_speech` (above). **L3** choosing a voice (`POST /voice`, `POST /speech/voices`, assignment) scores
+  a built-in voice against the voiceprint, once per voice (cached), and the reply carries `speaker_warning` when
+  it is within 0.05 of refusal; not asked when nobody is enrolled or Guest is on. The HUD shows it on the
+  window's error line (once per voice per window).
+- **L4** the model is opened `O_NOFOLLOW`, must be a regular file of at most 64 MB, is hashed once per load,
+  and the bytes hashed are copied to a `memfd` that the loader reads, so neither a swap nor an in-place rewrite
+  after the check changes what is loaded; the download is capped at 64 MB.
+- **L5** `guestGate.test.ts` lost its trivial half (a store fed to a Capture that never read it). What remains is
+  the structural guard (no gate module can read the switch; every `App.tsx` line that touches it is on a closed
+  list) and the Playwright check that Jarvis speaking and a waiting card still stop dictation with Guest on.
+- **L6** the prompt/note race: the status is adopted before the note, and the check waits with `until`.
+- **L7** documented above.
 
 **Not done and not claimed.** Barge-in and reference-correlation self-voice gating (V9: before
 enrollment only "Jarvis"/Ctrl+D pause playback, Q7, is V9's); KWS (V11); any run with a real voice,

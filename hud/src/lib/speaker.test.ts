@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  GUEST_LABEL, SpeakerStore, guestLabel, parseProposal, parseReadingResult, parseSpeakerStatus, speakerSummary,
+  BLOCKED_LABEL, GUEST_LABEL, OFF_LABEL, SpeakerStore, guestLabel, speakerLabel, parseProposal, parseReadingResult, parseSpeakerStatus, speakerSummary,
   type SpeakerApi, type SpeakerStatus,
 } from "./speaker";
 
@@ -8,10 +8,11 @@ const raw = (over: Record<string, unknown> = {}) => ({
   state: "not_enrolled", enrolled: false, readings: 0, readings_min: 3, readings_max: 6, prompts: ["one", "two", "three"],
   quality: { min_s: 6, max_s: 30, min_level_db: -40, max_level_db: -6, max_clip: 0.005, min_speech: 0.45 },
   guest: false, mode: "off", threshold: null, threshold_default: 0.6, threshold_min: 0.3, threshold_max: 0.9,
-  short_clip_s: 1.2, short_relax: 0.08, installed: true, reason: "", loaded: false, model: "nemo_en_titanet_small",
+  short_clip_s: 1.2, short_relax: 0.08, proposal_floor: 0.5, threshold_warning: "", installed: true, reason: "", loaded: false, model: "nemo_en_titanet_small",
   fetch: "python -m jarvis.speaker fetch", error: "", last: null, ...over,
 });
 const status = (over: Record<string, unknown> = {}) => parseSpeakerStatus(raw(over))!;
+beforeEach(() => { localStorage.clear(); });
 
 describe("parseSpeakerStatus", () => {
   it("reads the daemon's status", () => {
@@ -20,6 +21,7 @@ describe("parseSpeakerStatus", () => {
     expect(s.last).toEqual({ result: "matched", score: 0.81 });
     expect(s.quality.minS).toBe(6);
     expect(s.prompts).toHaveLength(3);
+    expect(s).toMatchObject({ proposalFloor: 0.5, thresholdWarning: "" });
   });
   it("is null for anything that is not an object", () => {
     for (const v of [null, undefined, 3, "x", [], true]) expect(parseSpeakerStatus(v)).toBeNull();
@@ -64,6 +66,17 @@ describe("the label", () => {
     expect(GUEST_LABEL).toBe("GUEST VOICE");
     expect(guestLabel(false)).toBe("");
   });
+  it("says whenever the check is not judging: guest, off after having been on, blocked", () => {
+    const v = (guest: boolean, mode: "off" | "guest" | "on" | "blocked", wasEnrolled: boolean) => speakerLabel({ guest, mode, wasEnrolled });
+    expect(speakerLabel({ guest: false, mode: "off", wasEnrolled: true, known: false })).toBe("");   // not asked yet: no guess
+    expect(v(true, "guest", false)).toBe("GUEST VOICE");
+    expect(v(false, "guest", false)).toBe("GUEST VOICE");
+    expect(v(false, "off", true)).toBe("VOICE CHECK OFF (not enrolled)");
+    expect(OFF_LABEL).toBe("VOICE CHECK OFF (not enrolled)");
+    expect(v(false, "off", false)).toBe("");                 // never enrolled: the quiet default
+    expect(v(false, "blocked", false)).toBe(BLOCKED_LABEL);
+    expect(v(false, "on", true)).toBe("");
+  });
 });
 
 function store(initial: SpeakerStatus | null = status(), overrides: Partial<SpeakerApi> = {}) {
@@ -79,7 +92,7 @@ function store(initial: SpeakerStatus | null = status(), overrides: Partial<Spea
 describe("SpeakerStore", () => {
   it("starts with no label and takes the daemon's status", async () => {
     const { s } = store(status({ guest: true, mode: "guest" }));
-    expect(s.snapshot()).toMatchObject({ guest: false, status: null });
+    expect(s.snapshot()).toMatchObject({ guest: false, status: null, known: false });
     await s.load();
     expect(s.snapshot()).toMatchObject({ guest: true, mode: "guest" });
   });
@@ -132,14 +145,73 @@ describe("SpeakerStore", () => {
   });
 });
 
+describe("when the gate changes behind the window's back (M3)", () => {
+  it("a voiceprint that disappears is labelled once this window has known one", async () => {
+    const { s } = store(status({ state: "enrolled", enrolled: true, mode: "on", threshold: 0.5 }));
+    await s.load();
+    expect(speakerLabel(s.snapshot())).toBe("");
+    s.apply({ guest: false, enrolled: false, mode: "off" });
+    expect(speakerLabel(s.snapshot())).toBe(OFF_LABEL);
+    expect(localStorage.getItem("jarvis.speaker.seenEnrolled")).toBe("1");
+  });
+  it("a window that never saw a voice enrolled stays quiet", async () => {
+    const { s } = store(status());
+    await s.load();
+    expect(speakerLabel(s.snapshot())).toBe("");
+  });
+  it("the memory survives a reload, and the owner's own Delete clears it", async () => {
+    const first = store(status({ state: "enrolled", enrolled: true, mode: "on" }));
+    await first.s.load();
+    const reloaded = store(status());
+    await reloaded.s.load();
+    expect(speakerLabel(reloaded.s.snapshot())).toBe(OFF_LABEL);
+    reloaded.s.forgetEnrolled();
+    expect(speakerLabel(reloaded.s.snapshot())).toBe("");
+    expect(speakerLabel(store(status()).s.snapshot())).toBe("");
+  });
+  it("a reply that says the check was skipped while this window believed it was on is flagged and corrected", async () => {
+    const { s, api } = store(status({ state: "enrolled", enrolled: true, mode: "on" }));
+    await s.load();
+    (api.status as any).mockImplementation(async () => status({ guest: true, mode: "guest", enrolled: true, state: "enrolled" }));
+    s.observe("matched");
+    expect(s.snapshot().warning).toBe("");
+    s.observe("skipped_guest");
+    expect(s.snapshot()).toMatchObject({ guest: true, mode: "guest" });
+    expect(s.snapshot().warning).toMatch(/Guest voice is on.*thought it was checking/);
+    await new Promise(r => setTimeout(r, 0));
+    expect(s.snapshot().warning).toBe("");                    // the read-back agrees, so the flag clears
+    expect(s.snapshot().guest).toBe(true);
+  });
+  it("skipped_unenrolled while it believed a voice was enrolled is flagged too", async () => {
+    const { s, api } = store(status({ state: "enrolled", enrolled: true, mode: "on" }));
+    await s.load();
+    (api.status as any).mockImplementation(async () => status());
+    s.observe("skipped_unenrolled");
+    expect(s.snapshot()).toMatchObject({ mode: "off", enrolled: false });
+    expect(s.snapshot().warning).toMatch(/no voiceprint is saved/);
+    expect(speakerLabel(s.snapshot())).toBe(OFF_LABEL);
+  });
+  it("an expected skip changes nothing", async () => {
+    const guest = store(status({ guest: true, mode: "guest" }));
+    await guest.s.load();
+    guest.s.observe("skipped_guest");
+    const none = store(status());
+    await none.s.load();
+    none.s.observe("skipped_unenrolled");
+    for (const x of [guest.s, none.s]) expect(x.snapshot().warning).toBe("");
+    expect(guest.api.status).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the wire", () => {
   it("parses a proposal and refuses a broken one", () => {
     const p = parseProposal({
       threshold: 0.48, bins: { lo: -0.2, width: 0.05, n: 24 }, genuine: { n: 9, min: 0.8, p10: 0.82, median: 0.9, hist: new Array(24).fill(1) },
       impostors: { n: 3, max: 0.3, median: 0.1, hist: [1, 2], closest: [{ voice: "af_x", score: 0.3 }, { voice: 1, score: 2 }] },
-      false_reject: 0, false_accept: 0, overlap: false, warning: "", readings: 3,
+      false_reject: 0, false_accept: 0, overlap: false, confirm: true, warning: "", readings: 3,
     })!;
     expect(p.threshold).toBe(0.48);
+    expect(p.confirm).toBe(true);
     expect(p.impostors.closest).toEqual([{ voice: "af_x", score: 0.3 }]);
     expect(p.genuine.hist).toHaveLength(24);
     for (const bad of [null, {}, { threshold: "x" }, { threshold: NaN, genuine: {}, impostors: {}, bins: {} }]) expect(parseProposal(bad)).toBeNull();

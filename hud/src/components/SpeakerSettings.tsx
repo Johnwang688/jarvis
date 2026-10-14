@@ -77,8 +77,9 @@ export function SpeakerSettings({ store, listen, blocked = false }: {
     try {
       const result = await api.speakerReading(rec.wav());
       setProblems(result?.problems ?? []);
-      setNote(result?.accepted ? `Reading ${result.readings} kept.` : "");
+      // The status first, then the note: the note must not show before the prompt and the count it describes (L6).
       store.adopt(await api.speaker());
+      setNote(result?.accepted ? `Reading ${result.readings} kept.` : "");
     } catch (e) { fail(e, "The reading could not be sent."); }
     finally { rec.clear(); recorder.current = null; setPhase("idle"); }
   }, [release, store]);
@@ -113,13 +114,13 @@ export function SpeakerSettings({ store, listen, blocked = false }: {
   const validThreshold = status !== null && Number.isFinite(wanted) && wanted >= status.thresholdMin && wanted <= status.thresholdMax;
 
   const accept = () => run(async () => {
-    store.adopt(await api.speakerAccept(validThreshold ? wanted : undefined));
+    store.adopt(await api.speakerAccept(validThreshold ? wanted : undefined, proposal?.confirm === true));
     setProposal(null); setNote("Verification is on: only your voice is accepted.");
   }, "The voiceprint could not be built.");
 
   const rebuild = () => run(async () => {
     const p = await api.speakerPropose();
-    store.adopt(await api.speakerAccept(p?.threshold));
+    store.adopt(await api.speakerAccept(p?.threshold, p?.confirm === true));
     setNote("The voiceprint was rebuilt from your readings.");
   }, "The voiceprint could not be rebuilt.");
 
@@ -130,6 +131,7 @@ export function SpeakerSettings({ store, listen, blocked = false }: {
 
   const remove = () => run(async () => {
     store.adopt(await api.speakerDelete());
+    store.forgetEnrolled();
     setProposal(null); setSure(false); setNote("Everything was deleted: the readings, the voiceprint and the Guest voice switch.");
   }, "Delete failed.");
 
@@ -151,6 +153,7 @@ export function SpeakerSettings({ store, listen, blocked = false }: {
         transcription, and the readings, the voiceprint and this switch stay in a private folder here, never uploaded.
       </p>
       {status ? <p data-testid="speaker-summary" role="status">{speakerSummary(status)}</p> : <p className="muted">Reading the voiceprint status…</p>}
+      {view.warning ? <p className="err" role="status" data-testid="speaker-mismatch">{view.warning}</p> : null}
       {status ? (
         <p className="muted" data-testid="speaker-engine">
           Speaker model: {status.installed ? `installed · ${status.loaded ? "loaded" : "not loaded"}` : `not installed (${status.reason || "unknown"})`}
@@ -216,13 +219,19 @@ export function SpeakerSettings({ store, listen, blocked = false }: {
             <div><span className="muted">Built-in voices</span><Hist counts={proposal.impostors.hist} tone="other" label="Built-in voices' similarity scores" /></div>
           </div>
           {proposal.warning ? <p className="err" data-testid="speaker-warning">{proposal.warning}</p> : null}
+          {status && validThreshold && wanted < status.proposalFloor ? (
+            <p className="err" data-testid="speaker-low-threshold">
+              A threshold below {status.proposalFloor.toFixed(2)} lets other voices through more easily. It is allowed, as your choice.
+            </p>
+          ) : null}
           <label>
             Threshold{" "}
             <input type="number" data-testid="speaker-threshold" step="0.01" min={status?.thresholdMin} max={status?.thresholdMax}
               value={threshold} onChange={e => setThreshold(e.target.value)} />
           </label>{" "}
           <button type="button" data-testid="speaker-accept" disabled={off || !validThreshold} onClick={() => { void accept(); }}>
-            Accept and turn on</button>
+            {proposal.confirm ? "Accept anyway" : "Accept and turn on"}</button>
+          {proposal.confirm ? <span className="muted"> Better: delete the readings and record them again.</span> : null}
         </div>
       ) : null}
 
@@ -239,6 +248,12 @@ export function SpeakerSettings({ store, listen, blocked = false }: {
                   value={threshold !== "" ? threshold : String(status.threshold ?? status.thresholdDefault)} onChange={e => setThreshold(e.target.value)} />
               </label>{" "}
               <button type="button" data-testid="speaker-save" disabled={off || !validThreshold} onClick={() => { void save(); }}>Save</button>
+              {status.thresholdWarning ? <p className="err" data-testid="speaker-threshold-warning">{status.thresholdWarning}.</p> : null}
+              {validThreshold && wanted < status.proposalFloor && !status.thresholdWarning ? (
+                <p className="err" data-testid="speaker-low-threshold">
+                  A threshold below {status.proposalFloor.toFixed(2)} lets other voices through more easily. It is allowed, as your choice.
+                </p>
+              ) : null}
               <p className="muted">
                 Higher refuses more voices, and more of yours. Clips under {status.shortClipS} s (commands) use a threshold
                 {" "}{status.shortRelax.toFixed(2)} lower.

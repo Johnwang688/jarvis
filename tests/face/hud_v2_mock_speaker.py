@@ -26,7 +26,9 @@ PROMPTS = ["The quick brown fox jumps over the lazy dog.", "Please read this sec
 
 def fresh() -> dict:
     return {"readings": 0, "enrolled": False, "guest": False, "threshold": None, "reject_next": 0, "installed": True,
-            "last": None, "analysed": False}
+            "last": None, "analysed": False,
+            # Levers: the next proposal asks for confirming; the next /stt reply names a verdict the HUD did not expect.
+            "confirm": False, "lie": None}
 
 
 def status(sp: dict) -> dict:
@@ -42,7 +44,9 @@ def status(sp: dict) -> dict:
         "prompts": PROMPTS,
         "quality": {"min_s": 6.0, "max_s": 30.0, "min_level_db": -40.0, "max_level_db": -6.0, "max_clip": 0.005, "min_speech": 0.45},
         "guest": sp["guest"], "mode": mode, "threshold": sp["threshold"], "threshold_default": 0.6,
-        "threshold_min": 0.3, "threshold_max": 0.9, "short_clip_s": 1.2, "short_relax": 0.08,
+        "threshold_min": 0.3, "threshold_max": 0.9, "proposal_floor": 0.5,
+        "threshold_warning": "" if sp["threshold"] is None or sp["threshold"] >= 0.5 else "the threshold is below 0.50: other voices may be accepted",
+        "short_clip_s": 1.2, "short_relax": 0.08,
         "voiceprint_readings": 3 if sp["enrolled"] else None, "voiceprint_model": "nemo_en_titanet_small" if sp["enrolled"] else None,
         "created": None, "installed": sp["installed"], "reason": "" if sp["installed"] else "the speaker model is not downloaded",
         "loaded": False, "threads": 1, "idle_unload_min": 5.0, "model": "nemo_en_titanet_small",
@@ -102,10 +106,14 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                          "genuine": {"n": 9, "min": 0.71, "p10": 0.73, "median": 0.8, "hist": [0] * 18 + [1, 2, 3, 2, 1, 0]},
                          "impostors": {"n": 12, "max": 0.31, "median": 0.1, "hist": [0, 0, 3, 4, 3, 1, 1] + [0] * 17,
                                        "closest": [{"voice": "af_heart", "score": 0.31}]},
-                         "false_reject": 0.0, "false_accept": 0.0, "overlap": False, "warning": "", "readings": sp["readings"]})
-        elif keys <= {"accept", "threshold"} and body.get("accept") is True:
+                         "false_reject": 0.0, "false_accept": 0.0, "overlap": False, "confirm": sp["confirm"],
+                         "warning": "your readings match each other weakly; record the readings again" if sp["confirm"] else "",
+                         "readings": sp["readings"]})
+        elif keys <= {"accept", "threshold", "anyway"} and body.get("accept") is True:
             t = body.get("threshold", 0.47)
-            if not isinstance(t, (int, float)) or isinstance(t, bool) or not 0.3 <= t <= 0.9:
+            if sp["confirm"] and body.get("anyway") is not True:
+                h._err(409, "the readings do not tell your voice from the built-in voices clearly: record the readings again; or accept anyway")
+            elif not isinstance(t, (int, float)) or isinstance(t, bool) or not 0.3 <= t <= 0.9:
                 h._err(400, "threshold must be a number from 0.3 to 0.9")
             elif sp["readings"] < 3:
                 h._err(409, "record 3 readings first")
@@ -136,6 +144,9 @@ def handle(h, mock, method: str, path: str, body) -> bool:
 def stt_verify(mock) -> tuple[int, dict] | str:
     """What `POST /stt?verify=1` does before the cloud: (status, error body) for a refusal, else the `verify` word."""
     sp = mock.speaker
+    if sp["lie"]:
+        verdict, sp["lie"] = sp["lie"], None
+        return verdict
     if sp["guest"]:
         return "skipped_guest"
     if not sp["enrolled"]:

@@ -3,7 +3,9 @@
     GET    /speaker             -> status: state, counts, threshold, Guest switch, engine
     POST   /speaker/reading     audio/wav body (one prompted reading) -> {accepted, problems, metrics, readings}
     POST   /speaker {"propose": true}                 -> the proposed threshold and both score distributions (stores nothing)
-    POST   /speaker {"accept": true, "threshold"?: n} -> builds the voiceprint from the readings: verification on
+    POST   /speaker {"accept": true, "threshold"?: n, "anyway"?: bool} -> builds the voiceprint from the readings:
+                                verification on. 409 "record the readings again" when they do not separate the owner's
+                                voice clearly (proposal `confirm`), unless `anyway` is true
     POST   /speaker {"threshold": n}                  -> tune an enrolled threshold
     POST   /speaker {"guest": bool}                   -> Guest voice on/off (persisted until the owner turns it off)
     DELETE /speaker             -> removes the readings, the voiceprint and the Guest switch (answers the status)
@@ -19,12 +21,39 @@ never lags (plan 3.4.1).
 """
 from __future__ import annotations
 
+import threading
+
 from jarvis import speaker
 
 
+_seen_lock = threading.Lock()
+
+
 def _publish(daemon, status: dict) -> None:
-    daemon.bus.publish({"kind": "speaker_guest", "data": {
-        "guest": status["guest"], "enrolled": status["enrolled"], "mode": status["mode"]}})
+    key = (status["guest"], status["enrolled"], status["mode"])
+    with _seen_lock:
+        daemon._speaker_seen = key
+        daemon.bus.publish({"kind": "speaker_guest", "data": {"guest": key[0], "enrolled": key[1], "mode": key[2]}})
+
+
+def watch(daemon) -> None:
+    """Publish `speaker_guest` when the mode the daemon observes is not the one last published (M3).
+
+    The routes publish their own changes; this catches the ones they do not see: `guest.json` edited by
+    hand, `voiceprint.json` deleted or damaged, a model that went missing. `/stt` and `GET /speaker` call it,
+    so the HUD's GUEST VOICE / VOICE CHECK OFF label follows the file, not the last click. The first call
+    publishes (nothing has been published since the daemon started).
+    """
+    try:
+        status = speaker.status()
+        key = (status["guest"], status["enrolled"], status["mode"])
+        with _seen_lock:
+            if getattr(daemon, "_speaker_seen", None) == key:
+                return
+            daemon._speaker_seen = key
+            daemon.bus.publish({"kind": "speaker_guest", "data": {"guest": key[0], "enrolled": key[1], "mode": key[2]}})
+    except Exception:  # noqa: BLE001 - watching never breaks a request
+        pass
 
 
 def route(handler, daemon, parts, query):
@@ -44,6 +73,7 @@ def route(handler, daemon, parts, query):
                 return None
             return 200, _reading(handler)
         if method == "GET":
+            watch(daemon)
             return 200, speaker.status()
         if method == "DELETE":
             result = speaker.delete()
@@ -56,12 +86,14 @@ def route(handler, daemon, parts, query):
                 fail(413, "request body exceeds 4 KiB")
         except ValueError:
             fail(400, "invalid body length")
-        body = _object(handler._body(), ("propose", "accept", "threshold", "guest"))
+        body = _object(handler._body(), ("propose", "accept", "threshold", "guest", "anyway"))
         keys = set(body)
         if keys == {"propose"} and body["propose"] is True:
             return 200, speaker.propose()
-        if keys <= {"accept", "threshold"} and body.get("accept") is True:
-            result = speaker.accept(body.get("threshold"))
+        if keys <= {"accept", "threshold", "anyway"} and body.get("accept") is True:
+            if "anyway" in body and not isinstance(body["anyway"], bool):
+                fail(400, "anyway must be a boolean")
+            result = speaker.accept(body.get("threshold"), body.get("anyway") is True)
             _publish(daemon, result)
             return 200, result
         if keys == {"threshold"}:

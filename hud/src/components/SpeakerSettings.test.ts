@@ -140,7 +140,40 @@ describe("Settings -> Voice -> Your voice", () => {
     expect(q("speaker-proposal")!.textContent).toContain("closest of 12 built-in voices scores 0.31");
     expect((q("speaker-threshold") as HTMLInputElement).value).toBe("0.47");
     await click("speaker-accept");
-    expect(mocks.speakerAccept).toHaveBeenCalledWith(0.47);
+    expect(mocks.speakerAccept).toHaveBeenCalledWith(0.47, false);
+  });
+
+  it("a proposal that needs confirming says so, offers Accept anyway, and passes anyway to the daemon", async () => {
+    const h = setup(status({ state: "enrolling", readings: 3 }));
+    mocks.speakerPropose.mockResolvedValue({
+      threshold: 0.5, bins: { lo: -0.2, width: 0.05, n: 24 }, genuine: { n: 9, min: 0.5, p10: 0.55, median: 0.7, hist: [] },
+      impostors: { n: 12, max: 0.1, median: 0.05, hist: [], closest: [] }, falseReject: 0.2, falseAccept: 0, overlap: false, confirm: true,
+      warning: "your readings match each other weakly; record the readings again, closer to the microphone in a quiet room", readings: 3,
+    });
+    mocks.speakerAccept.mockResolvedValue(status({ state: "enrolled", enrolled: true, mode: "on", readings: 3, threshold: 0.5 }));
+    await show(h);
+    await click("speaker-analyse");
+    expect(q("speaker-warning")!.textContent).toMatch(/record the readings again/);
+    expect(q("speaker-accept")!.textContent).toBe("Accept anyway");
+    expect(q("speaker-proposal")!.textContent).toContain("record them again");
+    await click("speaker-accept");
+    expect(mocks.speakerAccept).toHaveBeenCalledWith(0.5, true);
+  });
+
+  it("a typed threshold below the floor is allowed and warned about", async () => {
+    const h = setup(status({ state: "enrolled", enrolled: true, mode: "on", readings: 3, threshold: 0.5 }));
+    mocks.speakerThreshold.mockImplementation(async (t: number) => status({ state: "enrolled", enrolled: true, mode: "on", readings: 3, threshold: t, threshold_warning: "the threshold (0.35) is below 0.50: other voices may be accepted" }));
+    await show(h);
+    await act(async () => {
+      const input = q("speaker-threshold-tune") as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "0.35");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(q("speaker-low-threshold")!.textContent).toMatch(/below 0\.50/);
+    expect((q("speaker-save") as HTMLButtonElement).disabled).toBe(false);
+    await click("speaker-save");
+    expect(mocks.speakerThreshold).toHaveBeenCalledWith(0.35);
+    expect(q("speaker-threshold-warning")!.textContent).toMatch(/other voices may be accepted/);
   });
 
   it("a threshold outside the daemon's bounds cannot be accepted", async () => {
@@ -194,7 +227,7 @@ describe("Settings -> Voice -> Your voice", () => {
     await show(h);
     expect(q("speaker-threshold-tune")).toBeNull();
     await click("speaker-rebuild");
-    expect(mocks.speakerAccept).toHaveBeenCalledWith(0.44);
+    expect(mocks.speakerAccept).toHaveBeenCalledWith(0.44, false);
   });
 
   it("the Guest switch asks the daemon and shows its answer", async () => {

@@ -65,6 +65,15 @@ describe("GUEST VOICE on the strip (V-14)", () => {
     expect(strip.getAttribute("data-guest")).toBe("true");
     expect(host.querySelector('[data-testid="guest-toggle"]')!.getAttribute("aria-label")).toMatch(/Guest voice is on/);
   });
+  it("also says the check is off or blocked, in its own words, with no Guest button", async () => {
+    for (const label of ["VOICE CHECK OFF (not enrolled)", "VOICE CHECK BLOCKED"]) {
+      await render({ voiceLabel: label });
+      expect(host.querySelector('[data-testid="guest-label"]')!.textContent).toBe(label);
+      expect(host.querySelector('[data-testid="guest-toggle"]')).toBeNull();
+    }
+    await render({ voiceLabel: "" });
+    expect(host.querySelector('[data-testid="speech-strip"]')).toBeNull();
+  });
   it("is not the amber or red of a pending card or an error", () => {
     const css = themeCss;
     const rule = css.slice(css.indexOf("#speechstrip .guestnote"), css.indexOf("#speechstrip .btns"));

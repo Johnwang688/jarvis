@@ -41,6 +41,7 @@ Deploy (the lead, once): install `sherpa-onnx` into the daemon's venv and run
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -71,8 +72,8 @@ MODEL_SHA256 = "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e
 
 #: How much of a clip is embedded (plan 3.4: "the first <= 3 s").
 WINDOW_S = 3.0
-#: Less voiced audio than this in the window is too little to say whose it is.
-MIN_VOICED_S = 0.4
+#: Less voiced audio than this in the window is too little to say whose it is (the HUD's own `too_short`, 350 ms).
+MIN_VOICED_S = 0.35
 #: A clip is decoded only this far in (a 25 s chunk is verified by its first seconds).
 VERIFY_READ_S = 12.0
 MAX_VERIFY_WAV_BYTES = 16 << 20
@@ -302,14 +303,70 @@ def encode_wav(x, rate: int) -> bytes:
 
 # ---- the embedding engine ----------------------------------------------------
 
+#: The model is 40 MB; nothing near 64 MB is it.
+MAX_MODEL_BYTES = 64 << 20
+
+
+def _expected_sha() -> str:
+    given = (os.environ.get("JARVIS_SPEAKER_MODEL_SHA256") or "").strip().lower()
+    return given if re.fullmatch(r"[0-9a-f]{64}", given) else MODEL_SHA256
+
+
+@contextlib.contextmanager
+def verified_model(path: Path, sha256: str | None = None):
+    """Yield a path to exactly the bytes that were hashed (L4).
+
+    The file is opened `O_NOFOLLOW` (a symlink, a FIFO or a device is refused, never waited on), must be a regular
+    file of at most `MAX_MODEL_BYTES`, and its SHA-256 must be the pinned one. The bytes that were hashed are
+    copied into an anonymous in-memory file (`memfd`, Linux) and that is what the loader is pointed at
+    (`/proc/self/fd/N`), so neither a swap nor an in-place rewrite of the file after the check changes what is
+    loaded. Called once per model load, not per clip. Where `memfd_create` does not exist the verified path is
+    handed out as is.
+    """
+    want = sha256 or _expected_sha()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        raise VerifyUnavailable("the speaker model file cannot be opened safely") from None
+    held = -1
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or not 0 < st.st_size <= MAX_MODEL_BYTES:
+            raise VerifyUnavailable("the speaker model file is not a regular file of the expected size")
+        try:
+            held = os.memfd_create("speaker-model", os.MFD_CLOEXEC)
+        except (AttributeError, OSError):
+            held = -1
+        digest, size = hashlib.sha256(), 0
+        while True:
+            block = os.pread(fd, 1 << 20, size)
+            if not block:
+                break
+            size += len(block)
+            if size > MAX_MODEL_BYTES:
+                raise VerifyUnavailable("the speaker model file is not a regular file of the expected size")
+            digest.update(block)
+            if held >= 0:
+                os.write(held, block)
+        if digest.hexdigest() != want:
+            raise VerifyUnavailable("the speaker model file is not the pinned one: run `python -m jarvis.speaker fetch`")
+        proc = f"/proc/self/fd/{held}"
+        yield proc if held >= 0 and os.path.exists(proc) else str(path)
+    finally:
+        os.close(fd)
+        if held >= 0:
+            os.close(held)
+
+
 class _Sherpa:
     """The real backend. `embed(samples, rate) -> floats`; sherpa resamples to 16 kHz itself."""
 
     def __init__(self, path: Path, threads: int):
         import sherpa_onnx
 
-        cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(path), num_threads=threads, debug=False)
-        self.extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
+        with verified_model(path) as checked:
+            cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=checked, num_threads=threads, debug=False)
+            self.extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
 
     def embed(self, samples, rate: int):
         stream = self.extractor.create_stream()
@@ -771,6 +828,9 @@ class Voiceprint:
     readings: int
     windows: int
     created: str
+    #: The highest score any built-in voice got against this voiceprint when it was accepted (L1):
+    #: a short command's relaxed threshold never goes below it plus 0.02. None: not known.
+    impostor_max: float | None = None
 
 
 def _parse_voiceprint(raw) -> Voiceprint | None:
@@ -794,7 +854,12 @@ def _parse_voiceprint(raw) -> Voiceprint | None:
             return None
         ints.append(v)
     created = raw.get("created")
-    return Voiceprint(model, dim, values, t, ints[0], ints[1], created if isinstance(created, str) else "")
+    imax = None
+    if raw.get("impostor_max") is not None:
+        imax = _number(raw.get("impostor_max"))
+        if imax is None or not -1.0 <= imax <= 1.5:
+            return None
+    return Voiceprint(model, dim, values, t, ints[0], ints[1], created if isinstance(created, str) else "", imax)
 
 
 @dataclass
@@ -857,11 +922,19 @@ def _remember(result: str, score: float | None = None) -> None:
 
 
 def effective_threshold(vp: Voiceprint, seconds: float) -> float:
-    return vp.threshold - (config.SPEAKER_SHORT_RELAX if seconds < config.SPEAKER_SHORT_CLIP_S else 0.0)
+    """The threshold for a clip of `seconds`: a command (under `SPEAKER_SHORT_CLIP_S`) gets it relaxed by
+    `SPEAKER_SHORT_RELAX`, but never below the closest built-in voice plus 0.02 (L1), and never above the full one."""
+    if seconds >= config.SPEAKER_SHORT_CLIP_S:
+        return vp.threshold
+    relaxed = vp.threshold - config.SPEAKER_SHORT_RELAX
+    if vp.impostor_max is not None:
+        relaxed = max(relaxed, min(vp.threshold, vp.impostor_max + 0.02))
+    return relaxed
 
 
 def verify(audio: bytes, mime: str = "audio/wav") -> str:
-    """Whose voice is `audio`? "matched", "skipped_guest" or "skipped_unenrolled"; NotOwner, VerifyUnavailable or VerifyUnsupported otherwise.
+    """Whose voice is `audio`? "matched", "skipped_guest", "skipped_unenrolled" or "no_speech" (too little speech to
+    judge: the caller answers an empty text and transcribes nothing); NotOwner, VerifyUnavailable or VerifyUnsupported otherwise.
 
     The caller transcribes only when this returns. Order matters and is pinned by
     tests: the Guest switch first (skips verification and only that), then "is
@@ -888,8 +961,10 @@ def verify(audio: bytes, mime: str = "audio/wav") -> str:
         raise VerifyUnsupported(str(exc)) from None
     window = voiced_window(x, rate)
     if window is None:
-        _remember("rejected")
-        raise NotOwner("not the enrolled speaker")
+        # Too little speech to say whose it is (L2): not a refusal and not a transcription. The HUD
+        # answers it like any silent clip ("didn't catch that"), and nothing is uploaded.
+        _remember("no_speech")
+        return "no_speech"
     emb = engine().embed(window[0], rate)
     if emb.size != vp.dim:
         raise VerifyUnavailable("the saved voiceprint does not fit the speaker model: rebuild it in Settings, or turn on Guest voice")
@@ -948,6 +1023,10 @@ def status() -> dict:
         "threshold": None if vp is None else round(vp.threshold, 3),
         "threshold_default": config.SPEAKER_THRESHOLD_DEFAULT,
         "threshold_min": config.SPEAKER_THRESHOLD_MIN,
+        "proposal_floor": config.SPEAKER_PROPOSAL_FLOOR,
+        "threshold_warning": ("" if vp is None or vp.threshold >= config.SPEAKER_PROPOSAL_FLOOR else
+                              f"the threshold ({vp.threshold:.2f}) is below {config.SPEAKER_PROPOSAL_FLOOR:.2f}: "
+                              "other voices may be accepted"),
         "threshold_max": config.SPEAKER_THRESHOLD_MAX,
         "short_clip_s": config.SPEAKER_SHORT_CLIP_S,
         "short_relax": config.SPEAKER_SHORT_RELAX,
@@ -1044,8 +1123,11 @@ def synth_voice(name: str) -> bytes:
     return voice._local_tts(IMPOSTOR_TEXT, name, 1.0)
 
 
-def impostor_vectors(budget_s: float = IMPOSTOR_BUDGET_S) -> dict:
-    """voice name -> unit embedding of that voice speaking one sentence, cached per model in the store."""
+def impostor_vectors(budget_s: float = IMPOSTOR_BUDGET_S, names: list[str] | None = None) -> dict:
+    """voice name -> unit embedding of that voice speaking one sentence, cached per model in the store.
+
+    `names` limits it to those voices (L3: one newly used voice); default: every built-in voice read-aloud hands out.
+    """
     s = store()
     np = _np()
     model = _model_name()
@@ -1063,7 +1145,7 @@ def impostor_vectors(budget_s: float = IMPOSTOR_BUDGET_S) -> dict:
     changed = False
     out = {}
     eng = engine()
-    for name in impostor_voices():
+    for name in (impostor_voices() if names is None else names):
         if name in cache:
             try:
                 out[name] = _unit(cache[name], np)
@@ -1093,6 +1175,40 @@ def impostor_vectors(budget_s: float = IMPOSTOR_BUDGET_S) -> dict:
     return out
 
 
+#: How close to the owner's threshold a built-in voice may score before the owner is told (L3).
+VOICE_WARN_MARGIN = 0.05
+
+
+def voice_warning(name: str) -> str | None:
+    """A sentence when Jarvis speaking as `name` could pass for the owner, else None (L3).
+
+    Called when the speaking voice or a chat's voice (V7) changes. The voice is scored against the enrolled
+    centroid (its one-sentence embedding is cached beside the voiceprint, so only the first use speaks anything).
+    None also when nothing is enrolled, Guest voice is on, or the voice cannot be judged: a failure here must
+    never get in the way of choosing a voice.
+    """
+    try:
+        state = read_state()
+        vp = state.voiceprint
+        if state.kind != "enrolled" or state.guest or vp is None or vp.model != _model_name() or not available()[0]:
+            return None
+        got = impostor_vectors(budget_s=30.0, names=[name]).get(name)
+        if got is None or got.size != vp.dim:
+            return None
+        np = _np()
+        cen = np.asarray(vp.centroid, dtype=np.float64)
+        score = float(got @ cen / np.linalg.norm(cen))
+        # Judged at the short-clip threshold too: a command is the weakest check.
+        limit = min(effective_threshold(vp, 0.0), vp.threshold) - VOICE_WARN_MARGIN
+        if score >= limit:
+            return (f"{name} sounds like you (it scores {score:.2f} against your voiceprint, and the check refuses below "
+                    f"{vp.threshold:.2f}): Jarvis speaking as this voice may be taken for you. Choose another voice, or raise "
+                    "the threshold in Settings > Voice.")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 BIN_LO, BIN_WIDTH, BINS = -0.2, 0.05, 24
 
 
@@ -1109,6 +1225,42 @@ def _pct(sorted_scores, q: float) -> float:
     i = q * (len(sorted_scores) - 1)
     lo, hi = int(math.floor(i)), int(math.ceil(i))
     return sorted_scores[lo] + (sorted_scores[hi] - sorted_scores[lo]) * (i - lo)
+
+
+def choose_threshold(g10: float, top: float | None) -> dict:
+    """The proposed threshold from the owner's weakest 10 % of window scores (`g10`) and the closest built-in
+    voice (`top`, None when none could be scored). Pure, so the rules are pinned by a table of cases.
+
+    - Separated (`g10 > top`): halfway between them, but never nearer the owner than 0.10 below `g10` (a TV, a
+      cold or another room scores the owner lower than a quiet enrollment did), and never inside the impostors
+      (`top + 0.02` at least).
+    - Overlapping (`g10 <= top`): `top + 0.02`, which may refuse the owner's weakest readings.
+    - Nothing scored: `min(SPEAKER_THRESHOLD_DEFAULT, g10 - 0.05)`.
+    The result is clamped to [SPEAKER_PROPOSAL_FLOOR, SPEAKER_THRESHOLD_MAX]. `confirm` is True (the owner must
+    "accept anyway", and is told to record the readings again) when the unclamped value fell below the floor, the
+    owner's weakest readings score below `SPEAKER_GENUINE_FLOOR` against each other, or they overlap a built-in voice.
+    """
+    floor, ceiling = config.SPEAKER_PROPOSAL_FLOOR, config.SPEAKER_THRESHOLD_MAX
+    warnings: list[str] = []
+    overlap = top is not None and g10 <= top
+    if top is not None:
+        if g10 > top:
+            raw = max(top + 0.02, min((g10 + top) / 2, g10 - 0.10))
+        else:
+            raw = top + 0.02
+            warnings.append("your voice and one of Jarvis's built-in voices score alike")
+    else:
+        raw = min(config.SPEAKER_THRESHOLD_DEFAULT, g10 - 0.05)
+        warnings.append("no built-in voice could be scored, so the threshold comes from your readings alone")
+    if g10 < config.SPEAKER_GENUINE_FLOOR:
+        warnings.append(f"your readings match each other weakly (their weakest scores are {g10:.2f}, below {config.SPEAKER_GENUINE_FLOOR:.2f})")
+    if raw < floor:
+        warnings.append(f"the threshold the readings support ({raw:.2f}) is below {floor:.2f}, so it was raised to {floor:.2f} and may refuse you")
+    confirm = overlap or g10 < config.SPEAKER_GENUINE_FLOOR or raw < floor
+    if confirm:
+        warnings.append("record the readings again, closer to the microphone in a quiet room")
+    return {"threshold": max(floor, min(ceiling, raw)), "raw": raw, "confirm": confirm, "overlap": overlap,
+            "warning": "; ".join(warnings)}
 
 
 def propose() -> dict:
@@ -1135,22 +1287,8 @@ def propose() -> dict:
         imps = {name: float(v @ everything) for name, v in impostor_vectors().items()}
     g, imp = sorted(genuine), sorted(imps.values())
     g10 = _pct(g, 0.10)
-    lo_t, hi_t = config.SPEAKER_THRESHOLD_MIN, config.SPEAKER_THRESHOLD_MAX
-    warning = ""
-    if imp:
-        top = imp[-1]
-        if g10 > top:
-            # Halfway between the closest built-in voice and the owner's weakest reading, but
-            # never nearer the owner than 0.10 below that reading: a TV, a cold or another
-            # room will score the owner lower than a quiet enrollment did.
-            threshold = max(top + 0.02, min((g10 + top) / 2, g10 - 0.10))
-        else:
-            threshold = top + 0.02
-            warning = "your voice and one of Jarvis's built-in voices score alike: record the readings again, closer to the microphone"
-    else:
-        threshold = min(config.SPEAKER_THRESHOLD_DEFAULT, g10 - 0.05)
-        warning = "no built-in voice could be scored, so the threshold comes from your readings alone"
-    threshold = max(lo_t, min(hi_t, threshold))
+    chosen = choose_threshold(g10, imp[-1] if imp else None)
+    threshold, warning = chosen["threshold"], chosen["warning"]
     return {
         "threshold": round(threshold, 3),
         "bins": {"lo": BIN_LO, "width": BIN_WIDTH, "n": BINS},
@@ -1161,7 +1299,8 @@ def propose() -> dict:
                       "closest": [{"voice": n, "score": round(v, 3)} for n, v in sorted(imps.items(), key=lambda kv: -kv[1])[:3]]},
         "false_reject": round(sum(1 for v in g if v < threshold) / len(g), 3),
         "false_accept": round(sum(1 for v in imp if v >= threshold) / len(imp), 3) if imp else None,
-        "overlap": bool(imp) and g10 <= imp[-1],
+        "overlap": chosen["overlap"],
+        "confirm": chosen["confirm"],
         "warning": warning,
         "readings": len(per),
     }
@@ -1177,12 +1316,17 @@ def _check_threshold(value) -> float:
 def _write_voiceprint(vp: Voiceprint) -> None:
     store().write("voiceprint.json", json.dumps({
         "version": 1, "model": vp.model, "dim": vp.dim, "centroid": vp.centroid, "threshold": vp.threshold,
-        "readings": vp.readings, "windows": vp.windows, "created": vp.created,
+        "readings": vp.readings, "windows": vp.windows, "created": vp.created, "impostor_max": vp.impostor_max,
     }).encode())
 
 
-def accept(threshold=None) -> dict:
-    """Build the voiceprint from the stored readings and switch verification on. `threshold` defaults to `propose()`'s."""
+def accept(threshold=None, anyway: bool = False) -> dict:
+    """Build the voiceprint from the stored readings and switch verification on.
+
+    `threshold` defaults to `propose()`'s; one the owner gives may be as low as `SPEAKER_THRESHOLD_MIN` (the status
+    then carries a warning). When the analysis says the readings do not separate the owner's voice clearly
+    (`propose()["confirm"]`) this refuses with "record the readings again" unless `anyway` is True.
+    """
     t = None if threshold is None else _check_threshold(threshold)
     ok, why = available()
     if not ok:
@@ -1191,11 +1335,17 @@ def accept(threshold=None) -> dict:
         per = _load_readings()
         if len(per) < READINGS_MIN:
             raise EnrollError(f"record {READINGS_MIN} readings first")
+        proposal = propose()
+        if proposal["confirm"] and anyway is not True:
+            raise EnrollError(f"the readings do not tell your voice from the built-in voices clearly: {proposal['warning']}; "
+                              "or accept anyway")
         if t is None:
-            t = propose()["threshold"]
+            t = proposal["threshold"]
         vectors = [v for group in per for v in group]
         cen = _centroid(vectors)
-        _write_voiceprint(Voiceprint(_model_name(), int(cen.size), [float(v) for v in cen], t, len(per), len(vectors), _now()))
+        imax = proposal["impostors"]["max"]
+        _write_voiceprint(Voiceprint(_model_name(), int(cen.size), [float(v) for v in cen], t, len(per), len(vectors), _now(),
+                                     None if imax is None else float(imax)))
     return status()
 
 
@@ -1247,7 +1397,15 @@ def fetch(dest: Path | None = None, *, url: str = MODEL_URL, sha256: str = MODEL
         print(f"downloading {url} ...", file=sys.stderr)
         req = urllib.request.Request(url, headers={"User-Agent": "jarvis-speaker/1"})
         with urllib.request.urlopen(req, timeout=120) as resp, part.open("wb") as out:
-            shutil.copyfileobj(resp, out, 1 << 20)
+            total = 0
+            while True:
+                block = resp.read(1 << 20)
+                if not block:
+                    break
+                total += len(block)
+                if total > MAX_MODEL_BYTES:
+                    raise SystemExit(f"the download is larger than {MAX_MODEL_BYTES >> 20} MB: not the model")
+                out.write(block)
         digest = hashlib.sha256()
         with part.open("rb") as fh:
             for block in iter(lambda: fh.read(1 << 20), b""):

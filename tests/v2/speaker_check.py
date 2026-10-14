@@ -37,6 +37,7 @@ class Routes(unittest.TestCase):
     request = hbc.Backend.request
     owner = hbc.Backend.owner
     events_all = hbc.Backend.events_all
+    thread = hbc.Backend.thread
 
     def setUp(self):
         hbc.Backend.setUp(self)
@@ -129,6 +130,11 @@ class Routes(unittest.TestCase):
     def test_enrollment_flow_and_the_events_it_publishes(self):
         st = self.owner("GET", "/speaker")
         self.assertEqual((st["state"], st["mode"], st["guest"], st["readings"]), ("not_enrolled", "off", False, 0))
+        # The first look at the store is published once (nothing has been since the daemon started); a second changes nothing.
+        first = [e["data"] for e in self.events_all() if e["kind"] == "speaker_guest"]
+        self.assertEqual(first, [{"guest": False, "enrolled": False, "mode": "off"}])
+        self.owner("GET", "/speaker")
+        self.assertEqual(self.events_all(), [])
         self.assertEqual(len(st["prompts"]), 3)
         self.assertIn("min_s", st["quality"])
         bad = self.hud_audio("/speaker/reading", clip(OWNER, 2.0))
@@ -274,10 +280,103 @@ class Routes(unittest.TestCase):
             with self.subTest(q):
                 self.stt(clip(OWNER, 3), status=400, query=q)
         self.assertEqual(self.cloud, [])
-        # Without it, /stt is what it always was: the cloud transcribes, nothing is checked.
+        # M1 (the lead's decision): `verify` is optional and a no-op. Leave it out and an enrolled store still
+        # judges the clip, on every listener: there is no route around the check.
         self.enroll()
-        body = self.stt(clip(FRIEND, 3), query="")
-        self.assertEqual(body, {"text": "dictated words"})
+        self.stt(clip(FRIEND, 3), status=422, query="")
+        self.request("POST", "/stt", raw=clip(FRIEND, 3), status=422, headers=WAV)            # the API listener
+        self.assertEqual(self.cloud, [])
+        body = self.stt(clip(OWNER, 3, seed=61), query="")
+        self.assertEqual(body, {"text": "dictated words", "verify": "matched"})
+        self.assertEqual(self.stt(clip(OWNER, 3, seed=62))["verify"], "matched", "verify=1 is still accepted")
+
+    def test_an_unenrolled_reply_is_what_it_always_was_unless_asked(self):
+        self.assertEqual(self.stt(clip(OWNER, 3), query=""), {"text": "dictated words"})
+        self.assertEqual(self.stt(clip(OWNER, 3)), {"text": "dictated words", "verify": "skipped_unenrolled"})
+
+    def test_too_little_speech_is_an_empty_answer_not_a_refusal_and_not_an_upload(self):
+        """L2."""
+        self.enroll()
+        body = self.stt(clip(OWNER, 0.1), query="utterance_id=3&seq=4")
+        self.assertEqual(body, {"text": "", "utterance_id": 3, "seq": 4, "verify": "no_speech"})
+        self.assertEqual(self.cloud, [])
+        # Guest or unenrolled: nothing is decoded, so the clip goes on to the cloud as before.
+        self.owner("POST", "/speaker", {"guest": True})
+        self.assertEqual(self.stt(clip(OWNER, 0.1))["text"], "dictated words")
+
+    # -- M3: a change the routes did not make ------------------------------------------------------
+    def modes(self):
+        return [e["data"] for e in self.events_all() if e["kind"] == "speaker_guest"]
+
+    def test_a_gate_change_made_behind_the_routes_is_published_when_seen(self):
+        self.enroll()
+        self.events_all()
+        self.stt(clip(OWNER, 3, seed=70))
+        self.assertEqual(self.modes(), [], "an unchanged mode publishes nothing")
+        # guest.json edited by hand (an agent, an editor, the owner in a terminal): the next clip says so.
+        (self.dir / "guest.json").write_text('{"guest": true}')
+        body = self.stt(clip(FRIEND, 3))
+        self.assertEqual(body["verify"], "skipped_guest")
+        self.assertEqual(self.modes(), [{"guest": True, "enrolled": True, "mode": "guest"}])
+        self.stt(clip(FRIEND, 3))
+        self.assertEqual(self.modes(), [], "published once, not per clip")
+        # ... and back.
+        (self.dir / "guest.json").unlink()
+        self.stt(clip(FRIEND, 3), status=422)
+        self.assertEqual(self.modes(), [{"guest": False, "enrolled": True, "mode": "on"}])
+        # voiceprint.json deleted: the check is off, and the label must follow.
+        (self.dir / "voiceprint.json").unlink()
+        self.assertEqual(self.stt(clip(FRIEND, 3))["verify"], "skipped_unenrolled")
+        self.assertEqual(self.modes(), [{"guest": False, "enrolled": False, "mode": "off"}])
+        # A voiceprint that is damaged blocks everything, and that is published too.
+        self.enroll()
+        self.events_all()
+        (self.dir / "voiceprint.json").write_text("{")
+        self.stt(clip(OWNER, 3), status=503)
+        self.assertEqual(self.modes(), [{"guest": False, "enrolled": False, "mode": "blocked"}])
+
+    def test_a_gate_change_is_also_seen_by_a_status_read(self):
+        self.enroll()
+        self.events_all()
+        (self.dir / "voiceprint.json").unlink()
+        self.assertEqual(self.owner("GET", "/speaker")["mode"], "off")
+        self.assertEqual(self.modes(), [{"guest": False, "enrolled": False, "mode": "off"}])
+
+    def test_accept_anyway_over_http(self):
+        with patch.object(speaker, "synth_voice", lambda n: clip(OWNER, 5, seed=0)):
+            for i in range(3):
+                self.hud_audio("/speaker/reading", clip(OWNER, 10.5, seed=i))
+            self.assertTrue(self.owner("POST", "/speaker", {"propose": True})["confirm"])
+            refused = self.owner("POST", "/speaker", {"accept": True}, status=409)
+            self.assertIn("record the readings again", refused["error"])
+            self.owner("POST", "/speaker", {"accept": True, "anyway": "yes"}, status=400)
+            self.owner("POST", "/speaker", {"anyway": True}, status=400)
+            self.assertFalse((self.dir / "voiceprint.json").exists())
+            done = self.owner("POST", "/speaker", {"accept": True, "threshold": 0.6, "anyway": True})
+        self.assertEqual((done["mode"], done["threshold"]), ("on", 0.6))
+
+    def test_choosing_a_voice_that_sounds_like_the_owner_says_so(self):
+        """L3, on both routes that choose a voice."""
+        from jarvis import voice
+        self.enroll()
+        listed = [{"name": "af_twin", "backend": "kokoro", "kind": "builtin"}, {"name": "af_far", "backend": "kokoro", "kind": "builtin"}]
+        speak = lambda n: clip(OWNER if n == "af_twin" else STRANGER, 5, seed=4)       # noqa: E731
+        thread = self.thread()
+        with patch.object(speaker, "synth_voice", speak), patch.object(voice, "catalog", return_value=listed), \
+                patch.object(voice, "available_voices", return_value={"af_twin", "af_far"}), \
+                patch.object(voice, "set_voice", side_effect=lambda n: n), \
+                patch.object(voice, "selected_voice", return_value="af_far"):
+            near = self.owner("POST", "/voice", {"voice": "af_twin"})
+            self.assertIn("af_twin sounds like you", near["speaker_warning"])
+            self.assertEqual(near["voice"], "af_twin")
+            self.assertNotIn("speaker_warning", self.owner("POST", "/voice", {"voice": "af_far"}))
+            chat = self.owner("POST", "/speech/voices", {"thread_id": thread.id, "voice": "af_twin"})
+            self.assertIn("sounds like you", chat["speaker_warning"])
+            self.assertNotIn("speaker_warning", self.owner("POST", "/speech/voices", {"thread_id": thread.id, "voice": "af_far"}))
+            self.assertNotIn("speaker_warning", self.owner("POST", "/speech/voices", {"thread_id": thread.id, "muted": True}))
+            # Guest voice: the check is off, so there is nothing to warn about.
+            self.owner("POST", "/speaker", {"guest": True})
+            self.assertNotIn("speaker_warning", self.owner("POST", "/voice", {"voice": "af_twin"}))
 
     def test_enrolled_but_unable_to_verify_uploads_nothing(self):
         self.enroll()

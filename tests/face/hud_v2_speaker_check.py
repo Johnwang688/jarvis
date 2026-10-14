@@ -108,7 +108,8 @@ def main() -> int:
                 return page.evaluate("window.__hud.voiceDiagnostics().rows.at(-1)")
 
             def orb():
-                return page.locator('[data-testid="orb-status"]').inner_text()
+                # (the line is upper-cased by CSS, and inner_text sees that)
+                return page.locator('[data-testid="orb-status"]').inner_text().upper()
 
             # --- before enrollment ------------------------------------------------------------
             print("\nnot enrolled")
@@ -148,15 +149,24 @@ def main() -> int:
             sent = mock.sent("POST", "/speaker/reading")
             check("a good take was sent once, as WAV", len(sent) == 1 and sent[0]["type"] == "audio/wav" and sent[0]["bytes"] > 6 * 16000 * 2)
             check("and kept", page.locator('[data-testid="speaker-note"]').inner_text() == "Reading 1 kept.")
-            check("the next prompt is up", "second passage" in page.locator('[data-testid="speaker-prompt"]').inner_text())
+            check("the next prompt is up", bool(until(lambda: "second passage" in page.locator('[data-testid="speaker-prompt"]').inner_text(), timeout=4)))
             check("no analysis is offered with one reading", page.locator('[data-testid="speaker-analyse"]').count() == 0)
             # (two more readings: the daemon side keeps count; this section already proved the recording)
             mock.speaker["readings"] = 3
             page.locator('[data-testid="settings-close"]').click()
             open_settings(page, "Voice")
             until(lambda: page.locator('[data-testid="speaker-analyse"]').count() > 0, timeout=4)
+            # First the daemon says the readings do not separate the voice clearly (M2): it must be confirmed.
+            mock.speaker["confirm"] = True
             page.locator('[data-testid="speaker-analyse"]').click()
             until(lambda: page.locator('[data-testid="speaker-proposal"]').count() > 0, timeout=4)
+            check("a proposal that needs confirming says to record again and offers Accept anyway",
+                  "record the readings again" in page.locator('[data-testid="speaker-warning"]').inner_text()
+                  and page.locator('[data-testid="speaker-accept"]').inner_text() == "Accept anyway")
+            check("nothing is enrolled by looking", mock.speaker["enrolled"] is False)
+            mock.speaker["confirm"] = False
+            page.locator('[data-testid="speaker-analyse"]').click()
+            until(lambda: page.locator('[data-testid="speaker-accept"]').inner_text() == "Accept and turn on", timeout=4)
             check("the proposed threshold and both distributions are shown",
                   page.locator('[data-testid="speaker-proposed"]').inner_text() == "0.47"
                   and page.locator('.spk-hist').count() == 2)
@@ -236,6 +246,30 @@ def main() -> int:
             mock.speaker["guest"] = True
             mock.emit("speaker_guest", {"guest": True, "enrolled": True, "mode": "guest"})
             until(lambda: page.locator('[data-testid="guest-label"]').count() == 1, timeout=3)
+
+            # --- a gate change nobody told this window about (M3) -----------------------------------------
+            print("\nthe gate changes behind the routes")
+            mock.speaker["guest"] = False
+            mock.emit("speaker_guest", {"guest": False, "enrolled": True, "mode": "on"})
+            until(lambda: page.locator('[data-testid="guest-label"]').count() == 0, timeout=3)
+            # The voiceprint is deleted behind everyone's back: the daemon publishes what it sees.
+            mock.speaker["enrolled"] = False
+            mock.emit("speaker_guest", {"guest": False, "enrolled": False, "mode": "off"})
+            until(lambda: "VOICE CHECK OFF" in orb(), timeout=3)
+            check("the voice check being off is said on the orb line once a voice had been enrolled", "VOICE CHECK OFF (NOT ENROLLED)" in orb())
+            check("and on the strip", page.locator('[data-testid="guest-label"]').inner_text().upper() == "VOICE CHECK OFF (NOT ENROLLED)")
+            mock.speaker["enrolled"] = True
+            mock.emit("speaker_guest", {"guest": False, "enrolled": True, "mode": "on"})
+            until(lambda: page.locator('[data-testid="guest-label"]').count() == 0, timeout=3)
+            # guest.json edited by hand: no event, and the next transcript's reply says the check was skipped.
+            mock.speaker["guest"] = True
+            mock.world["stt_text"] = "unannounced guest"
+            page.evaluate(PTT)
+            page.wait_for_function("() => document.querySelector('[data-testid=\"input\"]').value.includes('unannounced guest')")
+            until(lambda: page.locator('[data-testid="guest-label"]').count() == 1, timeout=4)
+            check("a skip the window did not expect puts the label up from the reply alone", "GUEST VOICE" in orb())
+            page.locator('[data-testid="input"]').first.fill("")
+            mock.speaker["guest"] = True
 
             # --- Guest voice leaves the other gates alone -------------------------------------------------
             print("\nthe other gates")

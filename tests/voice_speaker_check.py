@@ -439,12 +439,47 @@ class Enrollment(Base):
         self.assertEqual(len(p["impostors"]["closest"]), 3)
         self.assertNotIn("centroid", json.dumps(p))
 
+    def test_a_proposal_that_needs_confirming_is_not_accepted_without_anyway(self):
+        with patch.object(speaker, "synth_voice", lambda n: clip(OWNER, 5, seed=0)):
+            for i in range(3):
+                speaker.add_reading(clip(OWNER, 10.5, seed=i))
+            self.assertTrue(speaker.propose()["confirm"])
+            with self.assertRaises(speaker.EnrollError) as raised:
+                speaker.accept()
+            self.assertIn("record the readings again", str(raised.exception))
+            with self.assertRaises(speaker.EnrollError):
+                speaker.accept(0.6)                       # a number typed by the owner does not skip the warning
+            self.assertFalse((self.dir / "voiceprint.json").exists())
+            st = speaker.accept(0.6, anyway=True)
+        self.assertEqual((st["mode"], st["threshold"]), ("on", 0.6))
+        self.assertGreater(json.loads((self.dir / "voiceprint.json").read_text())["impostor_max"], 0.9)
+
+    def test_accept_records_the_closest_built_in_voice(self):
+        self.enroll()
+        vp = json.loads((self.dir / "voiceprint.json").read_text())
+        self.assertIsNotNone(vp["impostor_max"])
+        self.assertAlmostEqual(vp["impostor_max"], speaker.propose()["impostors"]["max"], places=3)
+
+    def test_a_typed_threshold_may_go_down_to_the_minimum_with_a_warning(self):
+        self.enroll()
+        self.assertEqual(speaker.status()["threshold_warning"], "")
+        st = speaker.set_threshold(0.35)
+        self.assertEqual(st["threshold"], 0.35)
+        self.assertIn("below 0.50", st["threshold_warning"])
+        st = speaker.set_threshold(0.50)
+        self.assertEqual(st["threshold_warning"], "")
+        self.assertEqual(speaker.status()["proposal_floor"], config.SPEAKER_PROPOSAL_FLOOR)
+        st = speaker.accept(0.31)                            # also at Accept, when the readings are clear
+        self.assertIn("below 0.50", st["threshold_warning"])
+        with self.assertRaises(ValueError):
+            speaker.set_threshold(0.29)
+
     def test_propose_warns_when_a_built_in_voice_sounds_like_the_owner(self):
         with patch.object(speaker, "synth_voice", lambda n: clip(OWNER, 5, seed=0)):
             for i in range(3):
                 speaker.add_reading(clip(OWNER, 10.5, seed=i))
             p = speaker.propose()
-        self.assertTrue(p["overlap"])
+        self.assertTrue(p["overlap"] and p["confirm"])
         self.assertIn("alike", p["warning"])
         self.assertGreaterEqual(p["threshold"], min(p["impostors"]["max"] + 0.01, config.SPEAKER_THRESHOLD_MAX))
 
@@ -453,9 +488,11 @@ class Enrollment(Base):
             for i in range(3):
                 speaker.add_reading(clip(OWNER, 10.5, seed=i))
             p = speaker.propose()
-        self.assertEqual(p["impostors"]["n"], 0)
-        self.assertIn("no built-in voice", p["warning"])
-        self.assertLessEqual(p["threshold"], config.SPEAKER_THRESHOLD_DEFAULT)
+            self.assertEqual(p["impostors"]["n"], 0)
+            self.assertIn("no built-in voice", p["warning"])
+            self.assertLessEqual(p["threshold"], config.SPEAKER_THRESHOLD_DEFAULT)
+            speaker.accept(0.6)                                      # the voiceprint knows no closest voice
+        self.assertIsNone(json.loads((self.dir / "voiceprint.json").read_text())["impostor_max"])
 
     def test_impostor_embeddings_are_cached_per_model(self):
         for i in range(3):
@@ -528,6 +565,102 @@ class Enrollment(Base):
         self.assertEqual(speaker.verify(clip(OWNER, 3, seed=5)), "matched")
 
 
+class Threshold(unittest.TestCase):
+    """`choose_threshold`: the rules of the proposal, pinned case by case (M2)."""
+
+    def pick(self, g10, top):
+        return speaker.choose_threshold(g10, top)
+
+    def test_halfway_between_the_closest_voice_and_the_owners_weakest(self):
+        got = self.pick(0.95, 0.20)
+        self.assertAlmostEqual(got["threshold"], 0.575)
+        self.assertFalse(got["confirm"])
+        self.assertEqual(got["warning"], "")
+
+    def test_never_nearer_the_owner_than_a_tenth_below_the_weakest_reading(self):
+        # halfway would be 0.70; the margin says 0.68 (and 0.64 is the floor above the impostors)
+        got = self.pick(0.78, 0.62)
+        self.assertAlmostEqual(got["threshold"], 0.68)
+        # and the margin loses to "above the closest voice": halfway 0.75, margin 0.70, closest + 0.02 = 0.72
+        self.assertAlmostEqual(self.pick(0.80, 0.70)["threshold"], 0.72)
+        # a wide gap is halfway, not the margin
+        self.assertAlmostEqual(self.pick(0.86, 0.60)["threshold"], 0.73)
+
+    def test_overlap_goes_just_above_the_closest_voice_and_needs_confirming(self):
+        got = self.pick(0.70, 0.74)
+        self.assertAlmostEqual(got["threshold"], 0.76)
+        self.assertTrue(got["confirm"] and got["overlap"])
+        self.assertIn("score alike", got["warning"])
+        self.assertIn("record the readings again", got["warning"])
+        self.assertEqual(self.pick(0.95, 0.95)["threshold"], config.SPEAKER_THRESHOLD_MAX)      # clamped
+
+    def test_the_proposal_floor(self):
+        # Halfway would be 0.325: raised to the 0.50 floor, and the owner has to accept anyway.
+        got = self.pick(0.55, 0.10)
+        self.assertEqual(got["threshold"], config.SPEAKER_PROPOSAL_FLOOR)
+        self.assertTrue(got["confirm"])
+        self.assertIn("raised to 0.50", got["warning"])
+        self.assertIn("record the readings again", got["warning"])
+        # Exactly at the floor is fine.
+        got = self.pick(0.70, 0.30)
+        self.assertAlmostEqual(got["threshold"], 0.50)
+        self.assertFalse(got["confirm"])
+        # Just under is not.
+        self.assertTrue(self.pick(0.69, 0.30)["confirm"])
+        self.assertEqual(self.pick(0.69, 0.30)["threshold"], config.SPEAKER_PROPOSAL_FLOOR)
+
+    def test_readings_that_match_each_other_weakly_need_confirming_even_when_far_from_every_voice(self):
+        got = self.pick(0.59, 0.01)
+        self.assertTrue(got["confirm"])
+        self.assertIn("match each other weakly", got["warning"])
+        self.assertFalse(self.pick(0.61, 0.01)["warning"].count("weakly"))
+        self.assertTrue(self.pick(0.61, 0.01)["confirm"], "still below the floor: halfway is 0.31")
+
+    def test_no_built_in_voice_scored(self):
+        got = self.pick(0.90, None)
+        self.assertAlmostEqual(got["threshold"], 0.60)          # min(default 0.60, 0.85)
+        self.assertIn("no built-in voice", got["warning"])
+        self.assertFalse(got["confirm"])
+        self.assertAlmostEqual(self.pick(0.62, None)["threshold"], 0.57)            # g10 - 0.05 wins
+        self.assertFalse(self.pick(0.62, None)["confirm"])
+        low = self.pick(0.58, None)                             # weak readings: confirm, above the floor
+        self.assertTrue(low["confirm"])
+        self.assertAlmostEqual(low["threshold"], 0.53)
+        floor = self.pick(0.52, None)                           # the floor applies here too
+        self.assertEqual(floor["threshold"], config.SPEAKER_PROPOSAL_FLOOR)
+        self.assertTrue(floor["confirm"])
+        self.assertIn("raised to 0.50", floor["warning"])
+
+    def test_the_ceiling(self):
+        self.assertEqual(self.pick(1.0, 0.99)["threshold"], config.SPEAKER_THRESHOLD_MAX)
+
+
+class ShortClips(unittest.TestCase):
+    """L1: a command's relaxed threshold never drops to a built-in voice."""
+
+    def vp(self, imax, threshold=0.70):
+        return speaker.Voiceprint("m", 2, [1.0, 0.0], threshold, 3, 9, "", imax)
+
+    def test_relaxed_unless_a_built_in_voice_is_closer(self):
+        relax = config.SPEAKER_SHORT_RELAX
+        self.assertAlmostEqual(speaker.effective_threshold(self.vp(None), 1.0), 0.70 - relax)
+        self.assertAlmostEqual(speaker.effective_threshold(self.vp(0.30), 1.0), 0.70 - relax)
+        self.assertAlmostEqual(speaker.effective_threshold(self.vp(0.66), 1.0), 0.68)     # closest + 0.02
+        self.assertAlmostEqual(speaker.effective_threshold(self.vp(0.69), 1.0), 0.70)     # never above the full one
+        self.assertAlmostEqual(speaker.effective_threshold(self.vp(0.95), 1.0), 0.70)
+        self.assertAlmostEqual(speaker.effective_threshold(self.vp(0.66), 1.2), 0.70)     # not a command
+
+    def test_accept_stores_it_and_a_bad_one_is_damage(self):
+        for bad in ("high", True, 7, [0.5]):
+            raw = {"version": 1, "model": "m", "dim": 2, "centroid": [1.0, 0.0], "threshold": 0.6, "readings": 3,
+                   "windows": 9, "created": "", "impostor_max": bad}
+            self.assertIsNone(speaker._parse_voiceprint(raw), bad)
+        raw["impostor_max"] = None
+        self.assertIsNone(speaker._parse_voiceprint(raw).impostor_max)
+        del raw["impostor_max"]
+        self.assertIsNone(speaker._parse_voiceprint(raw).impostor_max)
+
+
 class Verification(Base):
     def test_unenrolled_skips_and_never_embeds(self):
         self.assertEqual(speaker.verify(clip(FRIEND, 3)), "skipped_unenrolled")
@@ -550,13 +683,16 @@ class Verification(Base):
             self.assertEqual(str(raised.exception), "not the enrolled speaker")
         self.assertEqual(speaker.status()["last"]["result"], "rejected")
 
-    def test_a_clip_with_no_speech_in_it_is_refused(self):
+    def test_a_clip_with_too_little_speech_is_not_judged_and_not_a_refusal(self):
+        """L2: no_speech, so the daemon answers an empty text and transcribes nothing; nobody is called a stranger."""
         self.enroll()
         before = FakeBackend.calls
-        for audio in (wav(np.zeros(RATE * 2, dtype=np.float32)), clip(OWNER, 0.1)):
-            with self.assertRaises(speaker.NotOwner):
-                speaker.verify(audio)
+        for audio in (wav(np.zeros(RATE * 2, dtype=np.float32)), clip(OWNER, 0.1), clip(OWNER, 0.3, pauses=False)):
+            self.assertEqual(speaker.verify(audio), "no_speech")
         self.assertEqual(FakeBackend.calls, before)
+        self.assertEqual(speaker.status()["last"]["result"], "no_speech")
+        self.assertEqual(speaker.MIN_VOICED_S, 0.35, "the HUD's own too_short (350 ms)")
+        self.assertEqual(speaker.verify(clip(OWNER, 0.45, pauses=False)), "matched", "a clip just over it is judged")
 
     def test_only_the_first_three_seconds_are_embedded(self):
         self.enroll()
@@ -694,6 +830,125 @@ class Verification(Base):
         speaker.status()
         speaker.status()
         self.assertEqual(self.engine.loads, loads)
+
+
+class VoiceWarnings(Base):
+    """L3: choosing a voice that could pass for the owner is said so."""
+
+    def test_a_voice_that_sounds_like_the_owner_is_named(self):
+        self.enroll()
+        with patch.object(speaker, "synth_voice", lambda n: clip(OWNER, 5, seed=4)):
+            warning = speaker.voice_warning("af_twin")
+        self.assertIn("af_twin sounds like you", warning)
+        self.assertIn("Settings > Voice", warning)
+        # (a near miss inside the margin counts too)
+        with patch.object(speaker, "synth_voice", lambda n: clip(100.0, 5, seed=4)):
+            self.assertIsNotNone(speaker.voice_warning("af_near"))
+
+    def test_a_different_voice_is_fine_and_is_cached(self):
+        self.enroll()
+        calls = []
+        far = lambda n: calls.append(n) or clip(STRANGER, 5, seed=4)      # noqa: E731
+        with patch.object(speaker, "synth_voice", far):
+            self.assertIsNone(speaker.voice_warning("af_far"))
+            self.assertIsNone(speaker.voice_warning("af_far"))
+        self.assertEqual(calls, ["af_far"], "spoken once, then read from the cache beside the voiceprint")
+
+    def test_nothing_is_said_when_there_is_nothing_to_check(self):
+        twin = lambda n: clip(OWNER, 5, seed=4)                         # noqa: E731
+        with patch.object(speaker, "synth_voice", twin):
+            self.assertIsNone(speaker.voice_warning("af_twin"))          # nobody enrolled
+            self.enroll()
+            speaker.set_guest(True)
+            self.assertIsNone(speaker.voice_warning("af_twin"))          # the check is off anyway
+            speaker.set_guest(False)
+            self.assertIsNotNone(speaker.voice_warning("af_twin"))
+        with patch.object(speaker, "synth_voice", lambda n: (_ for _ in ()).throw(RuntimeError("no tts"))):
+            self.assertIsNone(speaker.voice_warning("af_broken"))        # a voice that will not speak never blocks the choice
+        self.engine.model = "another"
+        with patch.object(speaker, "synth_voice", twin):
+            self.assertIsNone(speaker.voice_warning("af_twin2"))         # a stale voiceprint cannot be compared
+
+
+class ModelFile(unittest.TestCase):
+    """L4: the model is opened O_NOFOLLOW, must be a small regular file, and is hashed before it is loaded."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.body = b"pretend model " * 100
+        import hashlib
+
+        self.sha = hashlib.sha256(self.body).hexdigest()
+        self.path = self.tmp / "m.onnx"
+        self.path.write_bytes(self.body)
+
+    def test_a_good_file_is_handed_out_as_the_bytes_that_were_hashed(self):
+        with speaker.verified_model(self.path, self.sha) as handed:
+            self.assertEqual(Path(handed).read_bytes(), self.body)
+            self.assertTrue(handed.startswith("/proc/self/fd/"))
+            self.path.write_bytes(b"rewritten in place after the check")   # neither a rewrite ...
+            self.assertEqual(Path(handed).read_bytes(), self.body)
+            os.replace(self.path, self.tmp / "gone")                         # ... nor a swap changes what is read
+            self.assertEqual(Path(handed).read_bytes(), self.body)
+        self.assertFalse(os.path.exists(handed), "released afterwards")
+
+    def test_everything_else_is_refused(self):
+        outside = self.tmp / "outside.onnx"
+        outside.write_bytes(self.body)
+        link = self.tmp / "link.onnx"
+        link.symlink_to(outside)
+        pipe = self.tmp / "pipe.onnx"
+        os.mkfifo(pipe)
+        big = self.tmp / "big.onnx"
+        big.write_bytes(b"x" * 1024)
+        for label, path, sha, expect in (
+                ("symlink", link, self.sha, "cannot be opened"), ("fifo", pipe, self.sha, "regular file"),
+                ("directory", self.tmp, self.sha, "regular file"), ("missing", self.tmp / "nope", self.sha, "cannot be opened"),
+                ("wrong hash", self.path, "0" * 64, "not the pinned one"), ("empty", self.tmp / "e", self.sha, "")):
+            if label == "empty":
+                (self.tmp / "e").write_bytes(b"")
+                expect = "regular file"
+            with self.subTest(label):
+                with self.assertRaises(speaker.VerifyUnavailable) as raised:
+                    with speaker.verified_model(path, sha):
+                        self.fail("a refused model must not be handed out")
+                self.assertIn(expect, str(raised.exception))
+                self.assertNotIn(str(self.tmp), str(raised.exception))
+        with patch.object(speaker, "MAX_MODEL_BYTES", 512):
+            with self.assertRaises(speaker.VerifyUnavailable):
+                with speaker.verified_model(big, self.sha):
+                    pass
+
+    def test_the_pinned_hash_is_the_default_and_the_environment_cannot_blank_it(self):
+        for value, want in ((None, speaker.MODEL_SHA256), ("", speaker.MODEL_SHA256), ("nothex", speaker.MODEL_SHA256),
+                            ("AB" * 32, "ab" * 32)):
+            env = dict(os.environ)
+            env.pop("JARVIS_SPEAKER_MODEL_SHA256", None)
+            if value is not None:
+                env["JARVIS_SPEAKER_MODEL_SHA256"] = value
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(speaker._expected_sha(), want, value)
+
+    def test_the_download_is_capped(self):
+        import urllib.request
+
+        class Endless(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                return b"x" * min(n if n > 0 else 1 << 20, 1 << 20)
+
+        dest = self.tmp / "d" / "model.onnx"
+        with patch.object(urllib.request, "urlopen", lambda *a, **k: Endless()), patch.object(speaker, "MAX_MODEL_BYTES", 3 << 20):
+            with self.assertRaises(SystemExit) as raised:
+                speaker.fetch(dest)
+        self.assertIn("larger than 3 MB", str(raised.exception))
+        self.assertFalse(dest.exists())
+        self.assertEqual(list(dest.parent.iterdir()), [], "no scratch left")
 
 
 class EngineChecks(unittest.TestCase):

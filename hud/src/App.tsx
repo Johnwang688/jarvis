@@ -79,7 +79,7 @@ import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { SpeakerSettings } from "./components/SpeakerSettings";
-import { SpeakerStore } from "./lib/speaker";
+import { SpeakerStore, speakerLabel } from "./lib/speaker";
 import { ReadAloudSetting } from "./components/ReadAloud";
 import { createSpeech, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
@@ -565,6 +565,12 @@ export default function App() {
   // GUEST VOICE label and the switch, and learns of a change in another window from the bus.
   const speaker = useMemo(() => new SpeakerStore({ status: () => api.speaker(), guest: (on) => api.speakerGuest(on) }), []);
   const speakerView = useSyncExternalStore(speaker.subscribe, speaker.snapshot);
+  // What to say under the orb whenever the voice check is not judging the microphone (GUEST VOICE, VOICE CHECK OFF, VOICE CHECK BLOCKED).
+  const voiceLabel = speakerLabel(speakerView);
+  useEffect(() => {
+    speech.voices.onWarning = (message) => dispatch({ type: "patch", patch: { error: message } });
+    return () => { speech.voices.onWarning = null; };
+  }, [speech]);
   // The mic is held off for the whole of a reply, between chunks included.
   const speechPlaying = () => micSuppressedBySpeech(speech.controller.view());
   // A turn finished while its reply was still being read: the follow-up window
@@ -762,7 +768,9 @@ export default function App() {
         diagnostics: voiceDiagnostics,
         // V12: every chunk asks the daemon whose voice it is first; the daemon skips that when
         // nobody is enrolled or Guest voice is on, and a refusal uploads nothing.
-        transcribe: (blob, o) => api.stt(blob, { ...o, verify: true }),
+        // `verified` also tells this window what the daemon did about the check: a skip it did not expect
+        // (it believed the check was on) is flagged at once and the label follows the daemon (M3).
+        transcribe: (blob, o) => api.stt(blob, { ...o, verify: true, verified: (kind) => { o.verified(kind); speaker.observe(kind); } }),
         // The first attempt was judged by onChunk; a retry, automatic or
         // explicit, and a chunk that had to wait its turn, must not upload while
         // the mic is OFF, the window has crashed, or a card waits for an answer.
@@ -3057,7 +3065,7 @@ export default function App() {
     approvals: state.approvals.length,
     orb: state.orb,
     speech: speaking ? { state: speechView.state, label: speechLabel } : undefined,
-    guest: speakerView.guest,
+    voiceLabel,
   });
   // Playing, the orb shows his voice unless it carries a meaning of its own
   // (a tool, a card, an error) or the mic is mid-utterance.
@@ -3848,7 +3856,7 @@ export default function App() {
       <div
         id="shell"
         className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed " : "")
-          + (micTight ? "mic-tight " : "") + (!drawn.leftFolded && stripShown(speechView, speakerView.guest) ? "speech-on" : "")}
+          + (micTight ? "mic-tight " : "") + (!drawn.leftFolded && stripShown(speechView, voiceLabel !== "") ? "speech-on" : "")}
         style={{ ["--left-w" as any]: `${drawn.left}px`, ["--right-w" as any]: `${drawn.right}px` }}
       >
         {drawn.leftFolded ? (
@@ -4013,11 +4021,11 @@ export default function App() {
         level={state.level}
         outputLevel={() => speech.controller.level()}
         speech={<SpeechStrip view={speechView} label={speechLabel} blocked={workBlocked}
-          guest={speakerView.guest} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
+          guest={speakerView.guest} voiceLabel={voiceLabel} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
           onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
           onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
         speechRail={<SpeechStrip compact view={speechView} label={speechLabel} blocked={workBlocked}
-          guest={speakerView.guest} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
+          guest={speakerView.guest} voiceLabel={voiceLabel} canGuest={speakerView.enrolled} onGuest={(on) => { void speaker.setGuest(on); }}
           onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
           onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
         rings={state.avatar?.rings}
@@ -4074,7 +4082,11 @@ export default function App() {
               <><VoicePicker embedded
                 voices={voices}
                 override={voiceOverride}
-                onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
+                onPick={(name) => api.setVoice(name).then((r) => {
+                  void loadVoices();
+                  // V12 (L3): a voice that could pass for the enrolled owner is said so, not silently chosen.
+                  if (typeof r?.speaker_warning === "string" && r.speaker_warning) dispatch({ type: "patch", patch: { error: r.speaker_warning.slice(0, 400) } });
+                }).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
                 onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />

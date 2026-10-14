@@ -18,12 +18,13 @@ export function speechShown(view: SpeechView): boolean {
 }
 
 /**
- * Does the strip show? Also decides the sidebar's extra room. While Guest voice
- * is on it always does, whatever Jarvis is doing: the label that keeps it from
- * being forgotten is always visible (V-14).
+ * Does the strip show? Also decides the sidebar's extra room. While the voice
+ * check is not judging the microphone (Guest voice, or the check off or blocked) it
+ * always does, whatever Jarvis is doing: the label that keeps it from being
+ * forgotten is always visible (V-14, M3).
  */
-export function stripShown(view: SpeechView, guest = false): boolean {
-  return guest || speechShown(view);
+export function stripShown(view: SpeechView, flagged = false): boolean {
+  return flagged || speechShown(view);
 }
 
 export function SpeechStrip(props: {
@@ -40,13 +41,16 @@ export function SpeechStrip(props: {
   onClearMarks: () => void;
   /** Guest voice is on (V-14): the strip says so, and its button turns it off. */
   guest?: boolean;
+  /** What to say about the voice check when it is not judging (`speakerLabel`); shown whenever it is not empty. */
+  voiceLabel?: string;
   /** A voice is enrolled, so Guest voice means something: the strip offers the one-click switch. */
   canGuest?: boolean;
   onGuest?: (on: boolean) => void;
 }) {
   const { view } = props;
   const guest = props.guest === true;
-  if (!stripShown(view, guest)) return null;
+  const label = props.voiceLabel ?? (guest ? GUEST_LABEL : "");
+  if (!stripShown(view, guest || label !== "")) return null;
   const speech = speechShown(view);
   const guestButton = guest || (props.canGuest && speech && props.onGuest) ? (
     <button
@@ -61,7 +65,7 @@ export function SpeechStrip(props: {
     >G</button>
   ) : null;
   if (props.compact && !speech) {
-    return <div id="speechstrip" className="compact guest" data-testid="speech-strip" data-state="guest" data-guest="true">{guestButton}</div>;
+    return <div id="speechstrip" className="compact guest" data-testid="speech-strip" data-state="guest" data-guest={guest} data-voice-label={label}>{guestButton}</div>;
   }
   const paused = view.state === "paused";
   const toggle = (
@@ -86,7 +90,7 @@ export function SpeechStrip(props: {
       + (view.failed ? ` · ${view.failed} SKIPPED` : "");
   return (
     <div id="speechstrip" data-testid="speech-strip" data-state={speech ? view.state : "guest"} data-guest={guest} role="group" aria-label="Speech controls">
-      {guest ? <div className="guestnote" data-testid="guest-label" role="status">{GUEST_LABEL}</div> : null}
+      {label ? <div className="guestnote" data-testid="guest-label" role="status">{label}</div> : null}
       {note ? <div className="note" data-testid="speech-note" title={note}>{note}</div> : null}
       <div className="btns">
         {speech ? toggle : null}

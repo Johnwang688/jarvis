@@ -13,7 +13,6 @@
 // applied to sending: a window that restarts into a mic that sends on its own
 // is the wrong surprise. The choice persists in localStorage.
 
-import { GUEST_LABEL } from "./speaker";
 
 export type DictationMode = "auto" | "review" | "off";
 
@@ -75,11 +74,14 @@ export function orbLine(p: {
   status?: string; mode: DictationMode; approvals: number; orb: string;
   /** Jarvis's own voice (V6): playing or paused, and whose chat. */
   speech?: { state: "idle" | "buffering" | "playing" | "paused"; label?: string };
-  /** Guest voice is on (V14): speaker verification is off until the owner turns it off, and the line says so whatever else it says. */
-  guest?: boolean;
+  /**
+   * What the speaker check is doing when it is not judging the microphone (`speakerLabel`: GUEST VOICE, VOICE CHECK
+   * OFF, VOICE CHECK BLOCKED), said whatever else the line says so it is never forgotten.
+   */
+  voiceLabel?: string;
 }): string {
   const line = baseLine(p);
-  return p.guest ? (line ? `${line} · ${GUEST_LABEL}` : GUEST_LABEL) : line;
+  return p.voiceLabel ? (line ? `${line} · ${p.voiceLabel}` : p.voiceLabel) : line;
 }
 
 function baseLine(p: {

@@ -126,10 +126,11 @@ def main() -> int:
           f"({t_propose:.1f} s for {i['n']} built-in voices)")
     ok(g["n"] >= 6 and i["n"] >= 30, f"{g['n']} genuine windows scored against {i['n']} built-in voices")
     ok(g["p10"] > i["max"], f"the owner's weakest readings ({g['p10']}) score above every built-in voice ({i['max']})")
+    ok(not proposal["confirm"], f"nothing to confirm ({proposal['warning'] or 'no warning'})")
     ok(not proposal["overlap"] and proposal["false_reject"] == 0 and proposal["false_accept"] == 0, "no overlap at the proposed threshold")
     ok(i["max"] < proposal["threshold"] < g["p10"], f"the threshold ({proposal['threshold']}) sits between them")
 
-    st = speaker.accept(proposal["threshold"])
+    st = speaker.accept(proposal["threshold"], anyway=proposal["confirm"])
     ok(st["mode"] == "on" and st["enrolled"], "accept turns verification on")
     threshold = st["threshold"]
 
@@ -189,8 +190,30 @@ def main() -> int:
             hits += 1
         except speaker.NotOwner:
             pass
-    print(f"1 s owner commands accepted: {hits}/8 (threshold {threshold} less {config.SPEAKER_SHORT_RELAX})")
-    ok(hits >= 5, f"most of the owner's 1 s commands are accepted ({hits}/8)")
+    vp = speaker.read_state().voiceprint
+    short_t = speaker.effective_threshold(vp, 1.0)
+    print(f"1 s owner commands accepted: {hits}/8 (threshold {threshold}, short-clip threshold {short_t:.3f}, "
+          f"closest built-in voice {vp.impostor_max})")
+    # (7/8 before L1: with the closest built-in voice at 0.72 the short threshold is 0.74, not 0.714, and a
+    # one-second command from an owner whose voice resembles a built-in one is refused more often. The price of
+    # never relaxing down to a voice Jarvis can speak in; a command can be said again, or typed.)
+    ok(hits >= 3, f"about half of the owner's 1 s commands are still accepted ({hits}/8)")
+    ok(vp.impostor_max is not None and short_t >= min(vp.threshold, vp.impostor_max + 0.02) - 1e-9,
+       "the relaxed threshold stays above the closest built-in voice (L1)")
+    # ... and a one-second command from every other voice is refused all the same.
+    short_in = short_total = 0
+    for name in others:
+        for k, path in enumerate(clips(name)[:4]):
+            x = prep(read(path), 1500 + k)
+            short_total += 1
+            try:
+                got = speaker.verify(wav(x[:short]))
+                if got == "matched":
+                    short_in += 1
+            except speaker.NotOwner:
+                pass
+    print(f"1 s clips of other voices accepted: {short_in}/{short_total}")
+    ok(short_in == 0, f"no 1 s clip of {len(others)} other voices is accepted ({short_in}/{short_total})")
 
     ok(eng.loads == 1, "the model loaded once for all of it")
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024

@@ -1007,11 +1007,11 @@ class MockDaemon:
                         gate.wait(10)
                     # V12: verification comes first, and a refusal never reaches the "cloud".
                     verdict = None
-                    if parse_qs(url.query).get("verify") == ["1"]:
-                        verdict = mock_speaker.stt_verify(mock)
-                        if not isinstance(verdict, str):
-                            return self._json(verdict[1], verdict[0])
-                    extra = {} if verdict is None else {"verify": verdict}
+                    # (always asked, as the real daemon does; `verify=1` is a no-op)
+                    verdict = mock_speaker.stt_verify(mock)
+                    if not isinstance(verdict, str):
+                        return self._json(verdict[1], verdict[0])
+                    extra = {"verify": verdict} if (verdict != "skipped_unenrolled" or parse_qs(url.query).get("verify")) else {}
                     mock.cloud_uploads += 1
                     step = mock.stt_script.pop(0) if mock.stt_script else None
                     if step is not None:

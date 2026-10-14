@@ -31,6 +31,10 @@ export interface SpeakerStatus {
   threshold: number | null;
   thresholdDefault: number;
   thresholdMin: number;
+  /** A proposal is never below this; a typed threshold may be (down to `thresholdMin`) with a warning. */
+  proposalFloor: number;
+  /** The daemon's warning about the saved threshold ("" when none). */
+  thresholdWarning: string;
   thresholdMax: number;
   shortClipS: number;
   shortRelax: number;
@@ -77,6 +81,8 @@ export function parseSpeakerStatus(raw: unknown): SpeakerStatus | null {
     threshold: typeof r.threshold === "number" && Number.isFinite(r.threshold) ? r.threshold : null,
     thresholdDefault: num(r.threshold_default, 0.6),
     thresholdMin: num(r.threshold_min, 0.3),
+    proposalFloor: num(r.proposal_floor, 0.5),
+    thresholdWarning: str(r.threshold_warning),
     thresholdMax: num(r.threshold_max, 0.9),
     shortClipS: num(r.short_clip_s, 1.2),
     shortRelax: num(r.short_relax, 0.08),
@@ -99,6 +105,8 @@ export interface Proposal {
   falseReject: number;
   falseAccept: number | null;
   overlap: boolean;
+  /** The readings do not tell the owner's voice from the built-in voices clearly: record them again, or accept anyway. */
+  confirm: boolean;
   warning: string;
   readings: number;
 }
@@ -126,6 +134,7 @@ export function parseProposal(raw: unknown): Proposal | null {
     falseReject: num(r.false_reject, 0),
     falseAccept: typeof r.false_accept === "number" ? r.false_accept : null,
     overlap: r.overlap === true,
+    confirm: r.confirm === true,
     warning: str(r.warning),
     readings: num(r.readings, 0),
   };
@@ -153,18 +162,46 @@ export interface SpeakerView {
   guest: boolean;
   enrolled: boolean;
   mode: SpeakerMode;
+  /** The daemon has answered (a status or an event): until then the mode is a guess and nothing is labelled. */
+  known: boolean;
+  /** This window has seen a voice enrolled (kept across reloads): the voice check being OFF now is then news, not the default. */
+  wasEnrolled: boolean;
   /** The daemon's whole status, once it has answered. */
   status: SpeakerStatus | null;
   /** The last switch the daemon refused, as a sentence. */
   error: string;
+  /** The daemon skipped the voice check on a clip this window believed it was checking (M3); cleared when a read agrees. */
+  warning: string;
 }
 
-/** The label the orb line and the speech strip carry while Guest voice is on (plan 3.4.1). */
+/** The labels the orb line and the speech strip carry whenever the voice check is not judging the microphone (plan 3.4.1, M3). */
 export const GUEST_LABEL = "GUEST VOICE";
+export const OFF_LABEL = "VOICE CHECK OFF (not enrolled)";
+export const BLOCKED_LABEL = "VOICE CHECK BLOCKED";
 export const guestLabel = (guest: boolean): string => (guest ? GUEST_LABEL : "");
 
+/**
+ * What to say under the orb about speaker verification, or "". Guest voice always says so. Verification
+ * being off says so once this window has known a voice enrolled (an owner who never enrolled sees the
+ * quiet default; one whose voiceprint disappeared does not miss it). Enrolled but unable to verify
+ * (nothing is transcribed) always says so.
+ */
+export function speakerLabel(v: Pick<SpeakerView, "guest" | "mode" | "wasEnrolled"> & { known?: boolean }): string {
+  if (v.known === false) return "";
+  if (v.guest || v.mode === "guest") return GUEST_LABEL;
+  if (v.mode === "blocked") return BLOCKED_LABEL;
+  if (v.mode === "off" && v.wasEnrolled) return OFF_LABEL;
+  return "";
+}
+
+const SEEN_KEY = "jarvis.speaker.seenEnrolled";
+const memory = {
+  read(): boolean { try { return localStorage.getItem(SEEN_KEY) === "1"; } catch { return false; } },
+  write(on: boolean) { try { if (on) localStorage.setItem(SEEN_KEY, "1"); else localStorage.removeItem(SEEN_KEY); } catch { /* per-window convenience only */ } },
+};
+
 export class SpeakerStore {
-  private view: SpeakerView = { guest: false, enrolled: false, mode: "off", status: null, error: "" };
+  private view: SpeakerView = { guest: false, enrolled: false, mode: "off", known: false, wasEnrolled: memory.read(), status: null, error: "", warning: "" };
   private listeners = new Set<() => void>();
   /** A change this window asked for that the daemon has not answered: a late reload must not undo it. */
   private pendingGuest: boolean | null = null;
@@ -175,12 +212,13 @@ export class SpeakerStore {
   snapshot = (): SpeakerView => this.view;
 
   private set(next: Partial<SpeakerView>) {
+    if (next.enrolled === true && !this.view.wasEnrolled) { next = { ...next, wasEnrolled: true }; memory.write(true); }
     this.view = { ...this.view, ...next };
     for (const fn of this.listeners) { try { fn(); } catch { /* observers cannot affect speech */ } }
   }
 
   private take(status: SpeakerStatus) {
-    this.set({ status, guest: status.guest, enrolled: status.enrolled, mode: status.mode, error: "" });
+    this.set({ status, guest: status.guest, enrolled: status.enrolled, mode: status.mode, known: true, error: "", warning: "" });
   }
 
   /** Read the daemon's status (on start, on reconnect, and after Settings changes something). */
@@ -191,13 +229,28 @@ export class SpeakerStore {
     } catch { /* an older daemon, or none yet: no label until it answers */ }
   }
 
-  /** Another window (or this one) changed the switch: the bus's `speaker_guest`. */
+  /** Another window (or this one) changed the gate, or the daemon saw it change: the bus's `speaker_guest`. */
   apply(data: unknown): void {
     const r = obj(data);
     if (!r || typeof r.guest !== "boolean") return;
     const mode = MODES.includes(r.mode as string) ? r.mode as SpeakerMode : this.view.mode;
-    this.set({ guest: r.guest, enrolled: r.enrolled === true, mode, error: "" });
+    this.set({ guest: r.guest, enrolled: r.enrolled === true, mode, known: true, error: "", warning: "" });
     // The detail (counts, threshold) may have moved too; ask, once.
+    void this.load();
+  }
+
+  /**
+   * A transcript's reply said what the daemon did about the voice check. A skip this window did not expect
+   * (it believed the check was on) is flagged at once and the truth is read back (M3): the label follows the
+   * daemon, not the last click.
+   */
+  observe(kind: string): void {
+    const believed = this.view.mode;
+    if (kind === "skipped_guest" && !(this.view.guest || believed === "guest")) {
+      this.set({ guest: true, mode: "guest", warning: "The daemon skipped the voice check (Guest voice is on) although this window thought it was checking your voice." });
+    } else if (kind === "skipped_unenrolled" && (believed === "on" || believed === "blocked" || this.view.enrolled)) {
+      this.set({ enrolled: false, mode: "off", warning: "The daemon skipped the voice check (no voiceprint is saved) although this window thought it was checking your voice." });
+    } else return;
     void this.load();
   }
 
@@ -218,6 +271,9 @@ export class SpeakerStore {
 
   /** Settings changed something else (a reading, Accept, Delete): take the answer it was given. */
   adopt(status: SpeakerStatus | null) { if (status) this.take(status); }
+
+  /** The owner deleted the voiceprint on purpose: the voice check being off is the default again, not news. */
+  forgetEnrolled() { memory.write(false); this.set({ wasEnrolled: false }); }
 }
 
 /** The one sentence Settings shows for the daemon's status (plan 3.4: "Not enrolled: anyone's voice is accepted"). */

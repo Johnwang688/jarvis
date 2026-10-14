@@ -861,6 +861,13 @@ SPEAKER_IDLE_MIN = _speaker_number("JARVIS_SPEAKER_IDLE_MIN", 5, 1, 24 * 60)
 SPEAKER_THRESHOLD_DEFAULT = _speaker_number("JARVIS_SPEAKER_THRESHOLD", 0.60, 0.30, 0.90)
 SPEAKER_THRESHOLD_MIN = 0.30
 SPEAKER_THRESHOLD_MAX = 0.90
+# What the owner's enrollment is held to. A PROPOSED threshold is never below the floor, and
+# readings whose weakest 10 % score below the genuine floor against each other cannot tell the
+# owner's voice from a stranger's with any confidence: that proposal needs an explicit "accept
+# anyway" and says "record the readings again". A threshold the owner types may still go down to
+# SPEAKER_THRESHOLD_MIN, with a warning.
+SPEAKER_PROPOSAL_FLOOR = 0.50
+SPEAKER_GENUINE_FLOOR = 0.60
 # A clip under this is a command ("Jarvis pause"), whose embedding is noisier and
 # which only controls playback (plan 3.4): its threshold is lowered by this much.
 SPEAKER_SHORT_CLIP_S = 1.2

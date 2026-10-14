@@ -412,8 +412,8 @@ export const api = {
   /** Score the readings against each other and the built-in voices; nothing is stored. */
   speakerPropose: () => req<unknown>("/speaker", json({ propose: true })).then(parseProposal),
   /** Build the voiceprint and switch verification on (the threshold defaults to the proposal's). */
-  speakerAccept: (threshold?: number) =>
-    req<unknown>("/speaker", json(threshold === undefined ? { accept: true } : { accept: true, threshold })).then(parseSpeakerStatus),
+  speakerAccept: (threshold?: number, anyway = false) =>
+    req<unknown>("/speaker", json({ accept: true, ...(threshold === undefined ? {} : { threshold }), ...(anyway ? { anyway: true } : {}) })).then(parseSpeakerStatus),
   speakerThreshold: (threshold: number) => req<unknown>("/speaker", json({ threshold })).then(parseSpeakerStatus),
   speakerGuest: (guest: boolean) => req<unknown>("/speaker", json({ guest })).then(parseSpeakerStatus),
   /** Delete the readings, the voiceprint and the Guest switch. */

@@ -246,7 +246,7 @@ Capture (main): claim (PTT | wake | follow-up | continuation) → UtteranceRecor
   Pocket voice store.
   - It holds the centroid, threshold, model id and reference clips (open
     question 12).
-  - **It is not added to the protected/credential path detector (V-12).**
+  - **Only the two files that switch verification off, `voiceprint.json` and `guest.json`, are protected state (V-12b); the readings and the rest are not (V-12).**
     The owner judged it non-destructive configuration that is easy to put
     back. The worst an agent edit can do is make verification reject the
     owner or accept another voice. Either is visible in diagnostics and
