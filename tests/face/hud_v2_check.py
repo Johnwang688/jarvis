@@ -2281,7 +2281,12 @@ def open_defaults(page, pane=1):
 
 
 def writes(mock, since):
-    return [c for c in mock.calls[since:] if c[0] in ("POST", "PATCH") and c[1] not in ("/stt", "/mute")]
+    # The Browser re-posts its unchanged front state every 20 s (a heartbeat,
+    # state/browser.ts). Its phase is fixed at page boot, so a timing shift
+    # earlier in the suite can land it in any audit window; a passive empty
+    # receipt is never a write these audits are about.
+    return [c for c in mock.calls[since:] if c[0] in ("POST", "PATCH") and c[1] not in ("/stt", "/mute")
+            and not _empty_front_report(c)]
 
 
 
@@ -2359,7 +2364,7 @@ def thread_model_checks(page, mock):
           and page.evaluate("window.__pwned") is False)
     pick_model(page, "openai/gpt-5.6-luna")
     pick_effort(page, "low")
-    composing_writes = [c for c in writes(mock, since) if not _empty_front_report(c)]
+    composing_writes = writes(mock, since)
     check("choosing while composing sends nothing", not composing_writes, str(composing_writes))
 
     # A provider the project's profile cannot run is greyed out, with why.

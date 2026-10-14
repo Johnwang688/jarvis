@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import source from "./controller.ts?raw";
 import { SpeechController } from "./controller";
-import { MIC_OFF_MUTES_SPEECH, onMicModeChange, speakingThreads } from "./policy";
+import { MIC_OFF_MUTES_SPEECH, onMicModeChange } from "./policy";
 import { FakeClock, FakeGate, FakePlayer, FakeSay } from "./testkit";
 
 let clock: FakeClock;
@@ -98,13 +98,6 @@ describe("who is read", () => {
     await clock.advance(5000);
     expect(player.started).toEqual([]);
     expect(say.calls).toEqual([]);
-  });
-
-  it("speakingThreads is the selected chat's thread in V6, none for a task view", () => {
-    const chats = { 1: { threadId: "a", compose: null }, 2: { threadId: "b", compose: null } } as never;
-    const pending = { 1: null, 2: null } as never;
-    expect([...speakingThreads(chats, pending, 2 as never)]).toEqual(["b"]);
-    expect([...speakingThreads(chats, pending, null)]).toEqual([]);
   });
 
   it("closing the pane stops the sound at once and drops what was queued", async () => {

@@ -356,6 +356,15 @@ AVATAR_STATE_PATH = Path(
 # disturbing the owner's saved choice.
 AVATAR_ENV = os.environ.get("JARVIS_AVATAR", "")
 
+# Read-aloud (voice plan V7): each chat thread's own voice and mute, assigned by
+# the daemon so every HUD window agrees (jarvis/v2/speech_voices.py). Beside the
+# avatar pointer: machine-local state, not a field of `Thread`.
+SPEECH_VOICES_PATH = Path(
+    os.environ.get(
+        "JARVIS_SPEECH_VOICES", Path.home() / ".config" / "jarvis" / "speech.json"
+    )
+)
+
 # Custom Pocket TTS voices (clones and hybrids), one directory per voice —
 # see jarvis/pocket.py. Outside the repo like sessions: the store is the
 # owner's, bulk, and (for clones) audio of real people that does not belong
@@ -802,6 +811,13 @@ STT_MODEL = os.environ.get("JARVIS_STT_MODEL", "nvidia/parakeet-tdt-0.6b-v3")
 # list; empty disables the fallback.
 STT_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
     "JARVIS_STT_FALLBACK", "x-ai/grok-stt-1.0").split(",") if m.strip()]
+# HUD dictation (voice rework V2, plan §3.5): one request is 20 s per attempt
+# and two attempts per model, not llm.transcribe's 60 s x 3 default, so a dead
+# provider fails over to the next model in well under a minute and the window
+# can show a failure (and keep the clip for Retry) instead of "TRANSCRIBING"
+# for minutes. Discord voice notes keep the defaults.
+STT_DICTATION_TIMEOUT_S = 20.0
+STT_DICTATION_ATTEMPTS = 2
 
 
 def _load_dotenv() -> None:

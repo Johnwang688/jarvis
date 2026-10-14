@@ -658,6 +658,7 @@ class MockDaemon:
         self._sse_closed = False
         self.calls: list[tuple[str, str, dict]] = []
         self.say_fail = False        # /say answers 503 (the local voice is down)
+        self.speech_threads: dict[str, dict] = {}   # V7: thread id -> {voice, muted}, as the daemon keeps them
         self.ms_per_char = 12        # /say's tone length per character of text
         self.summary_text = "The change is done and all the tests pass."   # /speech/summary's answer (V8)
         self.summary_fail = False    # /speech/summary answers 502
@@ -679,6 +680,11 @@ class MockDaemon:
         # answers only once the Event is set: a transcript still in flight
         # (the crash checks land one after the window stopped drawing).
         self.stt_gate: threading.Event | None = None
+        # V2: per-request scripted answers, consumed in arrival order. Each is
+        # {"text": str} or {"status": int, "error": str}, with an optional
+        # {"wait": Event} that holds the answer until it is set. Empty: the
+        # old behaviour (`stt_text`).
+        self.stt_script: list[dict] = []
         # What the explorer moved to the trash (ED-7's `fs` delete).
         self.trashed: list[str] = []
 
@@ -839,6 +845,9 @@ class MockDaemon:
                     return self._json({"path": want, "parent": parent, "dirs": dirs})
                 if path == "/avatars":
                     return self._json(w["avatars"])
+                if path == "/speech/voices":
+                    # V7: the daemon's per-chat voice map, as the real route answers it.
+                    return self._json({"threads": mock.speech_threads, "pool": mock.speech_pool()})
                 if path == "/voices":
                     return self._json(w["voices"])
                 if path == "/models":
@@ -981,10 +990,18 @@ class MockDaemon:
                     n = int(self.headers.get("Content-Length") or 0)
                     raw = self.rfile.read(n) if n else b""
                     self._record("POST", "/stt", {"bytes": len(raw),
-                                                  "type": self.headers.get("Content-Type", "")})
+                                                  "type": self.headers.get("Content-Type", ""),
+                                                  "query": {k: v[0] for k, v in parse_qs(url.query).items()}})
                     gate = mock.stt_gate
                     if gate is not None:
                         gate.wait(10)
+                    step = mock.stt_script.pop(0) if mock.stt_script else None
+                    if step is not None:
+                        if step.get("wait") is not None:
+                            step["wait"].wait(20)
+                        if "status" in step:
+                            return self._json({"error": step.get("error", "scripted failure")}, step["status"])
+                        return self._json({"text": step["text"]})
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)
@@ -1115,6 +1132,31 @@ class MockDaemon:
                                         "default_effort": info["default_effort"],
                                         "default_source": info["default_source"]})
                     return self._json(payload)
+                if path == "/speech/voices":
+                    # V7: assign (idempotent, sticky, next unused voice of the pool),
+                    # choose, or mute -- the real route's keys and refusals.
+                    unknown = sorted(set(body) - {"thread_id", "voice", "muted"})
+                    if unknown or "thread_id" not in body:
+                        return self._err(400, "bad fields")
+                    tid = body["thread_id"]
+                    if not any(t["id"] == tid for t in w["threads"]):
+                        return self._err(404, "no such thread")
+                    pool = mock.speech_pool()
+                    entry = mock.speech_threads.setdefault(tid, {"voice": None, "muted": False})
+                    before = dict(entry)
+                    if "voice" in body:
+                        if body["voice"] and body["voice"] not in pool:
+                            return self._err(400, "unknown voice")
+                        entry["voice"] = body["voice"] or None
+                    if "muted" in body:
+                        entry["muted"] = bool(body["muted"])
+                    if entry["voice"] is None:
+                        used = {e["voice"] for k, e in mock.speech_threads.items() if k != tid and e["voice"]}
+                        entry["voice"] = next((v for v in pool if v not in used), pool[0])
+                    record = {"thread_id": tid, **entry}
+                    if entry != before:
+                        mock.emit("thread_voice", record)
+                    return self._json(record)
                 if path == "/say":
                     # V6: the real route's contract -- known keys only, a voice
                     # from the catalog, `local_only` a boolean -- answering a
@@ -1725,6 +1767,10 @@ class MockDaemon:
         return 200, {"ok": True, "op": op, "path": to, "from": rel,
                      "abs": f"/home/johnw/projects/Jarvis/{to}", "from_abs": f"/home/johnw/projects/Jarvis/{rel}",
                      "dir": is_dir, "kind": w["kinds"].get(to, "text")}
+
+    def speech_pool(self) -> list[str]:
+        """The voices the mock hands out, in order: its catalog."""
+        return [v["name"] for v in self.world["voices"]["voices"]]
 
     def sent(self, method: str, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == method and p == path]

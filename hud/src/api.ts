@@ -269,6 +269,11 @@ export const api = {
   voices: () => req<{ voices: VoiceEntry[]; override?: string }>("/voices"),
   /** `""` clears the override. The key is `voice` (the daemon refuses any other). */
   setVoice: (name: string) => req<any>("/voice", json({ voice: name })),
+  /** Read-aloud's per-chat voices and mutes (V7): the daemon's map and the voices it hands out. */
+  speechVoices: () => req<{ threads: Record<string, { voice: string | null; muted: boolean }>; pool: string[] }>("/speech/voices"),
+  /** Assign (no more keys), choose (`voice`; "" is automatic again) or mute one chat's voice. */
+  speechVoice: (threadId: string, change: { voice?: string; muted?: boolean } = {}) =>
+    req<{ thread_id: string; voice: string | null; muted: boolean }>("/speech/voices", json({ thread_id: threadId, ...change })),
   /** The fast path's roster and its default (`models.describe()`). */
   models: () => req<RosterView>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),
@@ -351,11 +356,18 @@ export const api = {
     }),
 
   // --- speech -------------------------------------------------------------
-  async stt(blob: Blob): Promise<string> {
-    const res = await fetch("/stt", {
+  /** `utteranceId`/`seq` name the clip for the daemon, which echoes them; `budgetMs` is the deadline it must fit inside (V2). */
+  async stt(blob: Blob, opts: { signal?: AbortSignal; utteranceId?: number; seq?: number; budgetMs?: number } = {}): Promise<string> {
+    const ids = new URLSearchParams();
+    if (Number.isSafeInteger(opts.utteranceId) && opts.utteranceId! >= 0) ids.set("utterance_id", String(opts.utteranceId));
+    if (Number.isSafeInteger(opts.seq) && opts.seq! >= 0) ids.set("seq", String(opts.seq));
+    // The client's whole deadline for this attempt: the daemon fits its model chain inside it.
+    if (Number.isSafeInteger(opts.budgetMs) && opts.budgetMs! > 0) ids.set("budget_ms", String(Math.round(opts.budgetMs!)));
+    const res = await fetch(ids.size ? `/stt?${ids}` : "/stt", {
       method: "POST",
       headers: { "Content-Type": blob.type || "audio/wav" },
       body: blob,
+      signal: opts.signal,
     });
     if (!res.ok) {
       // The daemon says which models failed and how (`speech-to-text

@@ -548,6 +548,20 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 #shell.speech-on #sidebar { padding-bottom: 224px; }
 #shell.mic-tight.speech-on #sidebar { padding-bottom: 180px; }
 
+/* A chat pane's voice chip (components/VoiceChip): the voice, a pulse while it
+   speaks, and inline when opened -- the strip wraps, so it is never clipped. */
+.voicechip { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+.tabs > .paneextras .voicechip > button.voicebtn {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; font: 11px var(--mono);
+  color: var(--text-muted); max-width: 140px;
+}
+.voicechip .vname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voicechip[data-speaking="true"] > button.voicebtn { color: var(--accent); border-color: var(--accent-line); }
+.voicechip[data-speaking="true"] .wave { animation: act-pulse 1.1s ease-in-out infinite; }
+.voicechip[data-muted="true"] > button.voicebtn { color: var(--text-muted); text-decoration: line-through; text-decoration-color: var(--border-strong); }
+.tabs > .paneextras .voicechip select { max-width: 130px; font: 11px var(--mono); }
+@media (prefers-reduced-motion: reduce) { .voicechip[data-speaking="true"] .wave { animation: none; } }
+
 /* Folded: the mode as one small button above the mini orb (a red OFF when muted). */
 #modecycle {
   position: fixed; left: 2px; bottom: 48px; width: 32px; height: 20px; z-index: 40; padding: 0;
@@ -1667,6 +1681,11 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .voice-diagnostics p { color: var(--text-muted); font-size: 11px; }
 .voice-diagnostic-rows { padding: 0; list-style: none; max-height: 250px; overflow: auto; font: 11px var(--mono); }
 .voice-diagnostic-rows li { border-top: 1px solid var(--border); padding: 6px 0; overflow-wrap: anywhere; }
+
+/* V2: a clip that could not be transcribed, kept for Retry. */
+.stt-retry-row { display: flex; flex-direction: column; gap: 6px; }
+.stt-retry-row + .stt-retry-row { margin-top: 8px; }
+.stt-retry-row .row { gap: 6px; }
 
 /* Owner options are a pane-local overlay; active page status stays visible. */
 .browserbody { position: relative; }

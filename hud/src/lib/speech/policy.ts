@@ -3,7 +3,7 @@
 // constant or small function here with its test beside it.
 
 import { shownThread, type Chats } from "../chats";
-import type { PaneNo } from "../workspace";
+import { PANE_NOS, inWorkspace, type PaneNo, type Workspace } from "../workspace";
 
 /**
  * Q15 -- which window speaks. "last-focused": focusing a window takes the Web
@@ -41,19 +41,24 @@ export function micSuppressedBySpeech(view: { active: boolean; blocked: boolean 
 }
 
 /**
- * Q15 / V-8 -- the threads that are read aloud: in V6, the selected chat's
- * only; task views and threads in no pane are silent. V7 widens this to every
- * chat pane, drawn or hidden, and nothing else here changes.
+ * V-8 / Q15 -- the threads that are read aloud: every thread shown in any chat
+ * pane of the workspace, *drawn or hidden* (a pane ⊞ folded away into `kept`
+ * still reads: its thread is open, it is only not on screen). A thread in no
+ * pane is silent, and so is a pane showing anything but chat -- a task view,
+ * a file -- though its parked conversation is still held in `chats`.
+ * Reading is one shared queue, each thread in its own voice (`floor.ts`).
  */
 export function speakingThreads(
+  ws: Pick<Workspace, "order" | "kept" | "panes">,
   chats: Chats,
   pending: Readonly<Record<PaneNo, string | null>>,
-  selected: PaneNo | null,
 ): Set<string> {
   const out = new Set<string>();
-  if (selected === null) return out;
-  const id = shownThread(chats[selected], pending[selected]);
-  if (id) out.add(id);
+  for (const n of PANE_NOS) {
+    if (!inWorkspace(ws, n) || ws.panes[n - 1].view !== "chat") continue;
+    const id = shownThread(chats[n], pending[n]);
+    if (id) out.add(id);
+  }
   return out;
 }
 

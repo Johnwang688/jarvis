@@ -486,3 +486,121 @@ describe("speech is active while a summary is awaited (review LOW-4)", () => {
     expect(player.started).toEqual(["Spoken as usual."]);
   });
 });
+
+describe("with the shared queue (V7): voices, mute, floor, backlog", () => {
+  const LONG = prose(900);
+
+  it("a thread's voice rides on its summary and on its verbatim messages", async () => {
+    const voiced = new SpeechController({ say: say.fn, player, clock, gate, summarize: sum.fn, voiceFor: (t) => (t === T ? "bm_george" : "af_nicole") });
+    voiced.setSpeakers(new Set([T, U]));
+    voiced.event({ kind: "text", thread_id: T, data: { text: LONG } });
+    voiced.event({ kind: "text", thread_id: U, data: { text: "Short one from the other chat." } });
+    sum.answer(SUMMARY);
+    await clock.advance(60_000);
+    expect(say.calls).toEqual([
+      { text: "Short one from the other chat.", voice: "af_nicole" },
+      { text: SUMMARY, voice: "bm_george" },
+    ]);
+    expect(voiced.items().past.map((i) => i.voice)).toEqual(["af_nicole", "bm_george"]);
+  });
+
+  it("muting the chat while its summary is awaited silences it, even if it is unmuted before the answer", async () => {
+    sum.ignoreAbort = true;
+    settle(LONG);
+    settle("Behind the summary.");
+    c.setMuted(new Set([T]));
+    c.setMuted(new Set());
+    sum.answer(SUMMARY);
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+    expect(sum.calls[0].signal.aborted).toBe(true);
+    // Muted and still muted at the answer: also silent.
+    settle(LONG);
+    c.setMuted(new Set([T]));
+    sum.answer(SUMMARY, 1);
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
+
+  it("muting works even after a reconnect forgot the thread's open message", async () => {
+    settle(LONG);
+    c.event({ kind: "_connected" });
+    c.setMuted(new Set([T]));
+    expect(sum.calls[0].signal.aborted).toBe(true);
+  });
+
+  it("a pending summary holds no floor: another chat speaks, and a summary that is ready goes in line", async () => {
+    settle(LONG);
+    settle("The other chat's long-ish message, said first.", U);
+    await clock.advance(1_000);
+    expect(player.started).toEqual(["The other chat's long-ish message, said first."]);
+    sum.answer(SUMMARY);
+    await clock.advance(60_000);
+    expect(player.started.at(-1)).toBe(SUMMARY);
+    expect(player.maxActive).toBe(1);
+  });
+
+  it("a delivered message is a finished message: its floor is free the moment it has been said", async () => {
+    settle("T says this much.");
+    await clock.advance(2_000);   // said in full; the floor holder is T's message
+    expect(player.started).toEqual(["T says this much."]);
+    settle("And U goes at once.", U);
+    await clock.advance(400);     // far under the 4 s a stalled holder is given
+    expect(player.started).toEqual(["T says this much.", "And U goes at once."]);
+  });
+
+  it("the turn's reply is marked final once it is queued, not before: after a summary, turnEnded follows the enqueue", async () => {
+    const queue = (c as unknown as { queue: { enqueue(e: unknown): unknown; turnEnded(t: string): void } }).queue;
+    const log: string[] = [];
+    const enqueue = queue.enqueue.bind(queue);
+    queue.enqueue = (e: unknown) => { log.push(`enqueue ${(e as { text: string }).text}`); return enqueue(e); };
+    const ended = queue.turnEnded.bind(queue);
+    queue.turnEnded = (t: string) => { log.push(`turnEnded ${t}`); ended(t); };
+    settle(LONG);
+    c.event({ kind: "turn_finished", thread_id: T, data: { stop: "end" } });
+    await clock.advance(2_000);
+    expect(log).toEqual([]);
+    sum.answer(SUMMARY);
+    await clock.advance(1_000);
+    expect(log).toEqual([`enqueue ${SUMMARY}`, `turnEnded ${T}`]);
+    // A short reply: marked at once.
+    log.length = 0;
+    settle("Done, all good.");
+    c.event({ kind: "turn_finished", thread_id: T, data: { stop: "end" } });
+    expect(log).toEqual(["enqueue Done, all good.", `turnEnded ${T}`]);
+  });
+
+  it("an interrupted turn never marks a reply, and a silenced turn's late summary marks nothing", async () => {
+    const queue = (c as unknown as { queue: { turnEnded(t: string): void } }).queue;
+    const ended: string[] = [];
+    queue.turnEnded = (t: string) => { ended.push(t); };
+    settle(LONG);
+    c.event({ kind: "turn_finished", thread_id: T, data: { stop: "interrupted" } });
+    sum.answer(SUMMARY);
+    await clock.advance(5_000);
+    expect(ended).toEqual([]);
+    settle(LONG);
+    c.event({ kind: "turn_finished", thread_id: T, data: { stop: "end" } });
+    c.event({ kind: "user_message", thread_id: T, data: {} });
+    sum.answer(SUMMARY, 1);
+    await clock.advance(5_000);
+    expect(ended).toEqual([]);
+  });
+
+  it("a backlog collapse takes interim messages that were queued, never a message whose summary is awaited", async () => {
+    const MID = prose(590);
+    settle(MID);                       // plays
+    settle(MID.replace(/^A/, "B"));    // queued
+    settle(MID.replace(/^A/, "C"));    // queued: more than a minute unplayed in all
+    await clock.advance(1_000);
+    settle(LONG);                      // closes with its summary out
+    expect(sum.calls).toHaveLength(1);
+    sum.answer(SUMMARY);
+    await clock.advance(10 * 60_000);
+    const said = player.started;
+    expect(said.filter((t) => t === SUMMARY)).toHaveLength(1);
+    expect(said.at(-1)).toBe(SUMMARY);
+    expect(said.some((t) => /^Skipping \d+ updates?\.$/.test(t))).toBe(true);
+    expect(c.items().past.filter((i) => i.mark === "collapsed").length).toBeGreaterThan(0);
+  });
+});
