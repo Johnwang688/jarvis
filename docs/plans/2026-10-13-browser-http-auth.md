@@ -63,7 +63,7 @@ in-memory HTTP-auth cache; this does not promise memory zeroization.
 `BrowserAuth` is an isolated plain-text form using the existing Graphite tokens.
 It does not autofocus, masks password entry, disables autocomplete, clears fields
 on replacement/hold/send and never queues a reply through a card. Enter submits
-only from its fields; Escape gives higher approvals priority. `RemoteView` keeps
+from its fields and retains standard button activation; Escape gives higher approvals priority. `RemoteView` keeps
 existing driving, instance, annotation, composition and clipboard guards. Active
 auth participates in `canInput`, while its own guarded submit bypasses ordinary
 page input. The auth controller exposes `_auth.blocked(tab)` for B-FIND admission.
@@ -95,5 +95,7 @@ duplicate/cap limits, blocked control ports, hidden capture exclusion, no-secret
 canaries and Sound failed-restore cleanup. Independent source review and meaningful
 guard mutations precede the clean full regression sweep and exact-head merge.
 
-Current verification: the first isolated synthetic run passed 30 checks covering
-bounds, state/controller and host activity. Native/HUD acceptance remains pending.
+Current verification: 46 focused backend checks passed. The actual first-address
+Basic gate passed a22.153-second pending wait/one reply and unchanged60.002-second
+expiry. Six further native cases passed actual Digest and socket/navigation/profile/
+attempt cleanup. HUD, remaining core-boundary and capability checks are separate.
