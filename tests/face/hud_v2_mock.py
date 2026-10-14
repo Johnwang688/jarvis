@@ -53,6 +53,10 @@ try:  # the terminals' HTTP routes (WP-C/WP-D); the socket is the test's fake PT
     from tests.face import hud_v2_mock_terminals as mock_terminals
 except ImportError:
     import hud_v2_mock_terminals as mock_terminals  # type: ignore[no-redef]
+try:  # the owner's voiceprint and `/stt?verify=1` (V12)
+    from tests.face import hud_v2_mock_speaker as mock_speaker
+except ImportError:
+    import hud_v2_mock_speaker as mock_speaker  # type: ignore[no-redef]
 try:  # the VEX routes (VX-1's contract, VX-2's view); builds and downloads are terminal rows
     from tests.face import hud_v2_mock_vex as mock_vex
 except ImportError:
@@ -685,6 +689,10 @@ class MockDaemon:
         # {"wait": Event} that holds the answer until it is set. Empty: the
         # old behaviour (`stt_text`).
         self.stt_script: list[dict] = []
+        # V12: the daemon's speaker store in miniature (hud_v2_mock_speaker), and how many clips
+        # reached the "cloud" -- only a clip that passed (or skipped) verification does.
+        self.speaker = mock_speaker.fresh()
+        self.cloud_uploads = 0
         # What the explorer moved to the trash (ED-7's `fs` delete).
         self.trashed: list[str] = []
 
@@ -749,6 +757,8 @@ class MockDaemon:
                 if mock_browser.handle(self, mock, "GET", path, {}):
                     return
                 if mock_terminals.handle(self, mock, "GET", path, {}):
+                    return
+                if mock_speaker.handle(self, mock, "GET", path, {}):
                     return
 
                 if mock.dev_fixture and mock.dev_fixture.handle(self, "GET", path, {k: v[0] for k, v in q.items()}):
@@ -995,14 +1005,27 @@ class MockDaemon:
                     gate = mock.stt_gate
                     if gate is not None:
                         gate.wait(10)
+                    # V12: verification comes first, and a refusal never reaches the "cloud".
+                    verdict = None
+                    if parse_qs(url.query).get("verify") == ["1"]:
+                        verdict = mock_speaker.stt_verify(mock)
+                        if not isinstance(verdict, str):
+                            return self._json(verdict[1], verdict[0])
+                    extra = {} if verdict is None else {"verify": verdict}
+                    mock.cloud_uploads += 1
                     step = mock.stt_script.pop(0) if mock.stt_script else None
                     if step is not None:
                         if step.get("wait") is not None:
                             step["wait"].wait(20)
                         if "status" in step:
                             return self._json({"error": step.get("error", "scripted failure")}, step["status"])
-                        return self._json({"text": step["text"]})
-                    return self._json({"text": w["stt_text"]})
+                        return self._json({"text": step["text"], **extra})
+                    return self._json({"text": w["stt_text"], **extra})
+                if path == "/speaker/reading":
+                    n = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(n) if n else b""
+                    self._record("POST", "/speaker/reading", {"bytes": len(raw), "type": self.headers.get("Content-Type", "")})
+                    return mock_speaker.reading(self, mock, raw)
                 body = self._body()
                 self._record("POST", path, body)
                 if mock.dev_fixture and mock.dev_fixture.handle(self, "POST", path, body):
@@ -1012,6 +1035,8 @@ class MockDaemon:
                 if mock_projects.handle(self, mock, "POST", path, body):
                     return
                 if mock_browser.handle(self, mock, "POST", path, body):
+                    return
+                if mock_speaker.handle(self, mock, "POST", path, body):
                     return
                 if mock_terminals.handle(self, mock, "POST", path, body):
                     return
@@ -1397,6 +1422,8 @@ class MockDaemon:
                     return
                 mock_vex.terminal_closing(mock, path)
                 if mock_browser.handle(self, mock, "DELETE", path, {}):
+                    return
+                if mock_speaker.handle(self, mock, "DELETE", path, {}):
                     return
                 if mock_terminals.handle(self, mock, "DELETE", path, {}):
                     return

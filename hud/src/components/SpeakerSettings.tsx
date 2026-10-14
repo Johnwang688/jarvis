@@ -170,7 +170,7 @@ export function SpeakerSettings({ store, listen, blocked = false }: {
       </p>
       {view.error ? <p className="err" role="status" data-testid="guest-error">{view.error}</p> : null}
 
-      {status && canRecord ? (
+      {status && canRecord && !enrolled ? (
         <div className="speaker-record">
           <h4>Reading {Math.min(status.readings + 1, status.readingsMax)}</h4>
           <p className="speaker-prompt" data-testid="speaker-prompt">{prompt}</p>
