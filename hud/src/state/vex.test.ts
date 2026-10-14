@@ -353,6 +353,27 @@ describe("Download feedback uses actual action receipts", () => {
     await next;
   });
 
+  it("late same-ID running reads cannot regress an already settled Download", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({terminal_id: "b0000001"});
+    const state = vi.spyOn(api, "vexDownloadState").mockRejectedValueOnce(Object.assign(new Error("forgotten"), {status: 404}));
+    await store.download("p3", 3, "dummy");
+    const d = {id: "b0000001", project_id: "p3", slot: 3, state: "running" as const, terminal_id: "b0000001",
+      exit_code: null, output: "old progress", started: "", ended: null};
+    let release!: (v: any) => void;
+    state.mockImplementationOnce(() => new Promise(r => {release = r;}));
+    const old = store.refreshDownload("p3");
+    state.mockResolvedValueOnce({...d, state: "succeeded", exit_code: 0, output: "actual Finished", ended: "done"});
+    await store.refreshDownload("p3");
+    release(d);
+    await old;
+    expect(store.run("p3").download?.state).toBe("succeeded");
+    expect(store.run("p3").download?.output).toBe("actual Finished");
+    expect(store.run("p3").downloaded?.ok).toBe(true);
+    expect(store.run("p3").downloadNote).toBe("");
+  });
+
   it("USB demand coalesces, keeps last confirmed values on error and refuses cards/chains", async () => {
     const store = new VexStore();
     await store.refreshStatus();

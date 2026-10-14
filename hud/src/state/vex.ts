@@ -396,11 +396,17 @@ export class VexStore {
       const d = await api.vexDownloadState(id);
       if (this.crashed || this.run(projectId).download?.id !== id) return null;
       if (d.id !== id || d.project_id !== projectId) throw new Error("download identity changed");
+      const current = this.run(projectId).download!;
+      // A settled backend receipt is immutable. Late overlapping manual reads
+      // must not regress it to running or replace its final output/outcome.
+      if (current.state !== "running") return current;
       this.patchRun(projectId, {download: d, downloadNote: ""});
       if (d.state !== "running") this.downloadEnded(projectId, d.slot, d);
       return d;
     } catch (e: any) {
       if (this.crashed || this.run(projectId).download?.id !== id) return null;
+      const current = this.run(projectId).download!;
+      if (current.state !== "running") return current;
       this.patchRun(projectId, {downloadNote: e?.status === 404
         ? "This download record is no longer available. Check its terminal; no download was retried."
         : "Could not read Download status. Retrying; check its terminal for output."});
