@@ -819,6 +819,53 @@ STT_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
 STT_DICTATION_TIMEOUT_S = 20.0
 STT_DICTATION_ATTEMPTS = 2
 
+# Speaker verification (voice rework V12, plan 3.4, decisions V-2, V-12, V-14,
+# answered Q7 and Q12): NeMo TitaNet-small through sherpa-onnx, inside the
+# daemon (jarvis/speaker.py), so another person's voice is refused BEFORE any
+# cloud speech-to-text call. Measured in V0 (docs/notes/voice-face.md): 34 ms
+# for 3 s of audio on one thread, about 80 MB resident.
+#
+# The store is the owner's enrollment: the readings (kept so a model upgrade can
+# re-derive the voiceprint, Q12), the voiceprint and the Guest voice switch. Mode
+# 0700 like the Pocket voice store, never uploaded, no route returns its audio or
+# embeddings. The owner decided (V-12) that it is NOT added to the protected-path
+# detector: the worst an agent edit can do is make verification reject the owner
+# or accept another voice, and neither can authorize anything (speech never
+# answers an approval card).
+SPEAKER_DIR = Path(
+    os.environ.get("JARVIS_SPEAKER_DIR", Path.home() / ".local" / "share" / "jarvis" / "speaker")
+)
+SPEAKER_MODEL_NAME = "nemo_en_titanet_small"
+SPEAKER_MODEL_PATH = Path(os.environ.get(
+    "JARVIS_SPEAKER_MODEL", Path.home() / ".cache" / "jarvis-speaker" / "nemo_en_titanet_small.onnx"))
+
+
+def _speaker_number(name: str, default: float, low: float, high: float) -> float:
+    """A bad value in the environment is the default, never an import error."""
+    try:
+        value = float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+    return max(low, min(high, value)) if value == value else default
+
+
+# One thread: V0 measured 34 ms per 3 s at 1 thread and 19 ms at 4, and an
+# utterance is verified once, so the cores are better left to everything else.
+SPEAKER_THREADS = int(_speaker_number("JARVIS_SPEAKER_THREADS", 1, 1, 4))
+# Unload the model (80 MB) after this many idle minutes.
+SPEAKER_IDLE_MIN = _speaker_number("JARVIS_SPEAKER_IDLE_MIN", 5, 1, 24 * 60)
+# Cosine-similarity threshold. The owner's enrollment PROPOSES one (V0: the
+# equal-error threshold alone ranged 0.51 to 0.71 across conditions, so it is
+# never hard-coded); this is what the proposal starts from when there is nothing
+# to fit, and the bounds anything saved or typed must stay inside.
+SPEAKER_THRESHOLD_DEFAULT = _speaker_number("JARVIS_SPEAKER_THRESHOLD", 0.60, 0.30, 0.90)
+SPEAKER_THRESHOLD_MIN = 0.30
+SPEAKER_THRESHOLD_MAX = 0.90
+# A clip under this is a command ("Jarvis pause"), whose embedding is noisier and
+# which only controls playback (plan 3.4): its threshold is lowered by this much.
+SPEAKER_SHORT_CLIP_S = 1.2
+SPEAKER_SHORT_RELAX = _speaker_number("JARVIS_SPEAKER_SHORT_RELAX", 0.08, 0.0, 0.25)
+
 
 def _load_dotenv() -> None:
     env_file = REPO_ROOT / ".env"
