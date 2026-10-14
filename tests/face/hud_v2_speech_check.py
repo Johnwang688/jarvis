@@ -114,6 +114,23 @@ def main() -> int:
             check("a fence nested under a list item is never sent to /say",
                   not any(("cat " in t or "sk-abc" in t or "export" in t) for t in said(mock)), str(said(mock)[-3:]))
 
+            print("\ntalking over him")
+            mock.ms_per_char = 60
+            stream(mock, REPLY)
+            mock.emit("text", {"text": REPLY}, thread_id="t1")
+            until(lambda: speech(page)["view"]["state"] == "playing", timeout=5)
+            page.evaluate("window.__hud.capture.press()")
+            check("a talk-key press pauses him", speech(page)["view"]["state"] == "paused")
+            page.evaluate("window.__hud.capture.release()")   # too short: nothing is sent
+            check("and he carries on when nothing was said",
+                  bool(until(lambda: speech(page)["view"]["state"] == "playing", timeout=3)))
+            page.locator('[data-testid="speech-toggle"]').click()
+            page.evaluate("window.__hud.capture.press(); window.__hud.capture.release()")
+            page.wait_for_timeout(300)
+            check("paused from the strip first, a release does not resume him", speech(page)["view"]["state"] == "paused")
+            page.locator('[data-testid="speech-stop"]').click()
+            mock.ms_per_char = 12
+
             print("\nstale speech")
             stream(mock, REPLY)
             mock.emit("text", {"text": REPLY}, thread_id="t1")

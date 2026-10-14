@@ -79,6 +79,7 @@ export class SpeechController {
   private wasLive = false;
   private hang: unknown = null;
   private idleListeners = new Set<() => void>();
+  private bargePaused = false;
 
   constructor(private readonly deps: ControllerDeps) {
     this.queue = new SpeechQueue({
@@ -212,9 +213,7 @@ export class SpeechController {
     if (!thread || !kind) return;
     // A message to the thread, by any means: the reply being read is stale.
     if (kind === "user_message") {
-      const mid = this.open.get(thread)?.stream;
-      if (mid?.open) mid.silence();   // a message in progress; a finished one has nothing left to silence
-      this.queue.dropThread(thread, "stale");
+      this.messageSent(thread);
       return;
     }
     if (!this.speaks(thread)) {
@@ -243,6 +242,13 @@ export class SpeechController {
       default:
         break;
     }
+  }
+
+  /** A message went to the thread, by any means: the reply being read is stale. */
+  messageSent(thread: string): void {
+    const mid = this.open.get(thread)?.stream;
+    if (mid?.open) mid.silence();   // a message in progress; a finished one has nothing left to silence
+    this.queue.dropThread(thread, "stale");
   }
 
   private slot(thread: string): Open {
@@ -277,12 +283,38 @@ export class SpeechController {
 
   // ---- controls -----------------------------------------------------------
 
-  pause(): void { this.queue.pause(); }
-  resume(): void { this.queue.resume(); }
+  // The owner's own controls. Any of them takes over from a barge-in's pause.
+  pause(): void { this.bargePaused = false; this.queue.pause(); }
+  resume(): void { this.bargePaused = false; this.queue.resume(); }
 
   toggle(): void {
+    this.bargePaused = false;
     if (this.queue.view().state === "paused") this.queue.resume();
     else this.queue.pause();
+  }
+
+  /**
+   * The owner starts talking over him (decision V-7: barge-in pauses, then
+   * resumes). Pauses speech that is in progress and remembers that *it* did; a
+   * pause the owner made from the strip is theirs, and is left alone.
+   */
+  bargeIn(): void {
+    const state = this.queue.view().state;
+    if (state !== "playing" && state !== "buffering") return;
+    this.queue.pause();
+    this.bargePaused = true;
+  }
+
+  /**
+   * The utterance that paused him is over, whatever came of it (nothing sent,
+   * dropped, failed, placed for review, or sent). Resumes what this barge-in
+   * paused, restarting the sentence (Q13); a thread a message went to has
+   * already lost its items (`messageSent`), so what resumes is what remains.
+   */
+  endBargeIn(): void {
+    if (!this.bargePaused) return;
+    this.bargePaused = false;
+    this.queue.resume();
   }
 
   /** The rest of the current message is not spoken. */
@@ -295,6 +327,7 @@ export class SpeechController {
 
   /** Stop speaking and clear the queue; messages still arriving stay quiet until they end. */
   stop(): void {
+    this.bargePaused = false;
     for (const s of this.open.values()) if (s.stream.open) s.stream.silence();
     this.queue.stop();
   }

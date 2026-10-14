@@ -595,7 +595,11 @@ export default function App() {
           chipOverlay.current || settingsNow.current ||
           crashedRef.current,
         suppressionReason: () => captureSuppression() ?? "speaking",
-        onDrop: (reason, ms, source) => { voiceDiagnostics.add(ms, source, reason); },
+        onDrop: (reason, ms, source) => {
+          voiceDiagnostics.add(ms, source, reason);
+          // A talk-key utterance that came to nothing: he carries on.
+          if (source === "ptt") speech.controller.endBargeIn();
+        },
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
         onListening: () => {
@@ -607,7 +611,11 @@ export default function App() {
           if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "idle", status: note || "" } });
           else dispatch({ type: "patch", patch: { orb: "idle" } });
         },
-        onUtterance: (wav, ms, source) => void onUtterance(wav, ms, source),
+        onUtterance: (wav, ms, source) => {
+          // However it ends (sent, review, empty, failed, crashed), a talk-key
+          // utterance that paused him is over: he resumes what remains.
+          void onUtterance(wav, ms, source).finally(() => { if (source === "ptt") speech.controller.endBargeIn(); });
+        },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -816,6 +824,8 @@ export default function App() {
           ...(spoken ? { spoken: true } : {}),
         });
         const status = result?.status ?? "started";
+        // A message went to this thread: the reply being read is stale (V-7).
+        if (status !== "dropped") speech.controller.messageSent(threadId);
         if (status === "started" && result.turn_id) {
           dispatch({ type: "mark", local, patch: { turn_id: result.turn_id, mark: undefined } });
         }
@@ -2538,9 +2548,10 @@ export default function App() {
       chatPatch(pane, { status: "MIC MUTED" });
       return;
     }
-    // Talking over him pauses him (barge-in proper is V9): the strip resumes it.
-    speech.controller.pause();
-    capture.press();
+    // Talking over him pauses him, and he resumes when the utterance is over
+    // (decision V-7; `endBargeIn` in onUtterance and on a drop). Self-voice
+    // gating and spoken commands are V9.
+    if (capture.press()) speech.controller.bargeIn();
   }, [capture, chatPatch, dispatch, interruptTurn, speech]);
 
   const release = useCallback(() => capture.release(), [capture]);

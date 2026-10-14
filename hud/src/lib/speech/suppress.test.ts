@@ -120,7 +120,11 @@ describe("the wiring is pinned", () => {
   });
 
   it("a talk-key press pauses speech, and a turn's follow-up waits for the speech to end", () => {
-    expect(appSource).toMatch(/speech\.controller\.pause\(\);\s*capture\.press\(\)/);
+    expect(appSource).toMatch(/if \(capture\.press\(\)\) speech\.controller\.bargeIn\(\)/);
+    // He resumes when the talk-key utterance is over: on a drop, and however it ends.
+    expect(appSource).toMatch(/source === "ptt"\) speech\.controller\.endBargeIn\(\)/);
+    expect(appSource).toMatch(/\.finally\(\(\) => \{ if \(source === "ptt"\) speech\.controller\.endBargeIn\(\)/);
+    expect(appSource).toContain("speech.controller.messageSent(threadId)");
     expect(appSource).toContain("followUpAfterSpeech.current = true");
     expect(appSource).toContain("speech.controller.onIdle(");
   });

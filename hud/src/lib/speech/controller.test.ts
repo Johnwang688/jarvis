@@ -306,3 +306,86 @@ describe("speech is output only", () => {
     }
   });
 });
+
+describe("barge-in pauses, then resumes (decision V-7)", () => {
+  const LONG = "A long sentence that is being read out loud to the owner right now.";
+
+  it("nothing sent: he resumes where he paused, restarting the sentence", async () => {
+    settle(LONG);
+    await clock.advance(500);
+    expect(c.view().state).toBe("playing");
+    c.bargeIn();
+    expect(c.view().state).toBe("paused");
+    expect(player.active).toBe(0);
+    await clock.advance(20_000);
+    expect(player.started).toEqual([LONG]);           // nothing plays while the owner talks
+    c.endBargeIn();                                    // empty, dropped, failed, or placed for review
+    await clock.advance(200);
+    expect(c.view().state).toBe("playing");
+    expect(player.started).toEqual([LONG, LONG]);     // the sentence restarts (Q13)
+    await clock.advance(20_000);
+    expect(c.view().state).toBe("idle");
+  });
+
+  it("a message sent: that thread's items are gone, and what remains resumes", async () => {
+    c.setSpeakers(new Set([T, "t2"]));
+    settle(LONG);
+    settle("Another thread has something to say as well, in full.", "t2");
+    await clock.advance(500);
+    c.bargeIn();
+    expect(c.view().state).toBe("paused");
+    c.event({ kind: "user_message", thread_id: T, data: { via: "hud" } });   // the send
+    c.endBargeIn();
+    await clock.advance(30_000);
+    expect(player.started).toEqual([LONG, "Another thread has something to say as well, in full."]);
+    expect(c.view().state).toBe("idle");
+  });
+
+  it("a message sent and nothing else left: nothing resumes, and nothing is stuck paused", async () => {
+    settle(LONG);
+    await clock.advance(500);
+    c.bargeIn();
+    c.messageSent(T);
+    c.endBargeIn();
+    expect(c.view().state).toBe("idle");
+    settle("Next reply.");
+    await clock.advance(5000);
+    expect(player.started.at(-1)).toBe("Next reply.");
+  });
+
+  it("paused from the strip first: a talk-key release does not resume him", async () => {
+    settle(LONG);
+    await clock.advance(500);
+    c.pause();                                         // the owner's own pause
+    c.bargeIn();
+    c.endBargeIn();
+    await clock.advance(20_000);
+    expect(c.view().state).toBe("paused");
+    expect(player.started).toEqual([LONG]);
+    c.resume();                                        // only the strip resumes it
+    await clock.advance(200);
+    expect(c.view().state).toBe("playing");
+  });
+
+  it("the owner taking over mid-barge-in wins: a strip pause or stop is not undone by the release", async () => {
+    settle(LONG);
+    await clock.advance(500);
+    c.bargeIn();
+    c.pause();                                         // the owner clicks pause while talking
+    c.endBargeIn();
+    expect(c.view().state).toBe("paused");
+    c.stop();
+    c.endBargeIn();
+    expect(c.view().state).toBe("idle");
+  });
+
+  it("a barge-in with nothing playing pauses nothing, so a later pause is not undone", async () => {
+    c.bargeIn();
+    expect(c.view().state).toBe("idle");
+    settle(LONG);
+    await clock.advance(500);
+    c.pause();
+    c.endBargeIn();
+    expect(c.view().state).toBe("paused");
+  });
+});
