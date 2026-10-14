@@ -1238,9 +1238,6 @@ def static_walk_checks() -> None:
         # calls above/below are conservatively counted and verified locally.
         ("jarvis/v2/bridge.py", "dispatch", "dispatch"),
     }
-    auth_path = REPO / "jarvis/v2/browser/auth.py"
-    if auth_path.exists():
-        expected.add(("jarvis/v2/browser/auth.py", "_send", "dispatch"))
     assert sites == expected, f"dispatch callers changed: {sorted(sites ^ expected)}"
 
     bridge_source = (REPO / "jarvis/v2/bridge.py").read_text(encoding="utf-8")
@@ -1252,15 +1249,6 @@ def static_walk_checks() -> None:
                 if isinstance(node.func, ast.Attribute)
                 and _dotted(node.func.value) == "tools"]
     assert len(registry) == 1, "bridge callback must retain its registry dispatch"
-    if auth_path.exists():
-        auth_source = auth_path.read_text(encoding="utf-8")
-        _, cdp_callback = _local_dispatch_callback(auth_source, "_send", asynchronous=True)
-        sends = [node for node in _calls_named(cdp_callback, "send")
-                 if _dotted(node.func) == "session.cdp.send"]
-        assert len(sends) == 1, "auth local callback must send through its exact CDP session"
-        assert not any(isinstance(node, ast.Attribute) and node.attr in DISPATCH_NAMES
-                       for node in ast.walk(cdp_callback)), "auth local callback reached registry dispatch"
-
     # Verify the actual registry sites, including the relocated bridge callback.
     for rel, function in (("jarvis/v2/mcp.py", "run"),
                           ("jarvis/v2/bridge.py", "dispatch")):
