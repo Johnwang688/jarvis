@@ -5,6 +5,7 @@ synthetic socket metadata/credentials and never starts the owner daemon.
 """
 import json
 import sys
+from urllib.parse import urlsplit
 from pathlib import Path
 REPO=Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:sys.path.insert(0,str(REPO))
@@ -21,14 +22,23 @@ class AuthRemote(Remote):
 
 def auth_checks(browser,mock,base,check,until,guard,init_script):
     ctx=browser.new_context(viewport={"width":1600,"height":1000},permissions=["microphone"])
-    guard(ctx);ctx.add_init_script(init_script);remote=AuthRemote(ctx,mock)
+    guard(ctx);ctx.add_init_script(init_script)
+    # Browser-owned state observes actual closure even for mocked routes. The
+    # installed Playwright route.on_close path errors on code-less ws.close().
+    ctx.add_init_script("""window.__authFixtureSockets=[];
+        const NativeSocket=window.WebSocket;
+        window.WebSocket=class extends NativeSocket {
+          constructor(...args){super(...args);window.__authFixtureSockets.push(this);}
+        };""")
+    remote=AuthRemote(ctx,mock)
     def pending_restore(route):
         response=route.fetch();row=response.json();tid=row["tab_id"]
         state(mock).rows[tid]["url"]="about:blank"
         row.update(url="about:blank",loaded=False,auth_pending=True)
         route.fulfill(response=response,json=row)
     ctx.route(base+"/browser/tabs/*/restore",pending_restore)
-    page=ctx.new_page();page.set_default_timeout(5000);errors=[]
+    page=ctx.new_page();page.set_default_timeout(5000);errors=[];browser_responses=[]
+    page.on("response",lambda response:browser_responses.append({"path":urlsplit(response.url).path,"status":response.status}) if "/browser/" in response.url else None)
     page.on("pageerror",lambda error:errors.append(str(error)))
     try:
         _boot(page,mock,base,until)
@@ -72,9 +82,28 @@ def auth_checks(browser,mock,base,check,until,guard,init_script):
         assert until(lambda:page.locator('[data-testid="approval-card"]').count()==0,timeout=4)
         check("Escape answers the higher card and never replays the old auth nonce",len(replies())==count and secret.is_disabled())
         prompt(5);check("A fresh post-approval nonce starts with empty fields",user.input_value()=="" and secret.input_value()=="")
-        secret.fill("synthetic-ui-disconnected-secret");count=len(remote.sockets)
+        secret.fill("synthetic-ui-disconnected-secret");count=len(remote.sockets);calls_before=len(mock.calls)
         page.keyboard.press("Control+,");assert until(lambda:page.locator('[data-testid="settings-page"]').count()==1,timeout=4)
-        page.locator('[data-testid="settings-close"]').click();assert until(lambda:len(remote.sockets)>count,timeout=4)
+        assert until(lambda:any(c[1]=="/browser/front" and c[2].get("covered") for c in mock.calls[calls_before:]),timeout=4), "Settings never published covered ownership"
+        assert until(lambda:page.evaluate("url=>window.__authFixtureSockets.some(s=>s.url===url&&s.readyState===WebSocket.CLOSED)",sock["ws"].url),timeout=4), "Settings never detached the old Remote socket"
+        page.locator('[data-testid="settings-close"]').click()
+        def reattached():
+            # Sync Playwright dispatches routed socket callbacks during API
+            # calls; Python-only sleep/polling would starve that event pump.
+            page.evaluate("0")
+            return len(remote.sockets)>count
+        if not until(reattached,timeout=4):
+            details={"sockets_before":count,"sockets_after":len(remote.sockets),"bad_tickets":remote.bad_tickets,
+                "settings_visible":page.locator('[data-testid="settings-page"]').count(),
+                "workspace_covered":page.locator('.workspace-surface').get_attribute("data-covered"),
+                "workspace_inert":page.locator('.workspace-surface').evaluate("e=>e.inert"),
+                "latest_front":next((call[2] for call in reversed(mock.calls) if call[1]=="/browser/front"),None),
+                "retained_host_tabs":list(state(mock).rows.values()),
+                "remote_views":page.locator('[data-testid="remote-view"]').count(),
+                "connection_errors":page.locator('[data-testid="remote-error"]').all_text_contents(),
+                "browser_responses":browser_responses,
+                "page_errors":errors}
+            raise AssertionError("Settings return did not reattach: "+json.dumps(details,sort_keys=True))
         sock=remote.sockets[-1];prompt(6)
         check("Reattachment discards previous typed auth and keeps the host handle",user.input_value()=="" and secret.input_value()=="" and len(state(mock).rows)==1)
         page.set_viewport_size({"width":375,"height":812})
@@ -92,7 +121,10 @@ def main():
         with sync_playwright() as pw:
             browser=pw.chromium.launch(headless=True,args=["--use-fake-ui-for-media-stream","--use-fake-device-for-media-stream"])
             try:auth_checks(browser,mock,f"http://127.0.0.1:{mock.port}",v2.check,v2.until,v2.guard,v2.FAKE_RECOGNIZER)
-            except Exception as exc:v2.check("Auth UI scenario completes",False,str(exc))
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                v2.check("Auth UI scenario completes",False,str(exc))
             finally:browser.close()
     finally:mock.stop()
     print(f"{v2.CHECKS} Auth UI checks, {len(v2.FAILURES)} failures")
