@@ -877,7 +877,8 @@ out-of-order replies, retention bounds), `tests/voice_stt_check.py`,
 unbounded automatic retry) each fail the vitest suite.
 
 Not done and not claimed: physical-microphone acceptance, a live provider
-outage test, chunked/overlapping STT (V4), continuation and steering (V3).
+outage test, chunked/overlapping STT (V4), continuation and steering (V3, its own section
+below).
 
 ## V6: streaming speech core (2026-10-13)
 
@@ -1339,3 +1340,88 @@ measures the WSL path rather than Windows Chrome's capture. Use `aec_probe.html`
 anything about the browser's own processing. `--source stdin` feeds raw 16 kHz s16le PCM
 instead (that is how the scripts were smoke-tested with synthetic audio).
 
+## 2026-10-13: V3 steering, push-to-talk, continuation
+
+Plan decisions V-1, V-10 and the owner's answers to Q3-Q5. Stacked on V2.
+
+- **A running turn no longer silences the mic.** `busy` is gone from the
+  capture's suppressors and from `SuppressionReason` (no `suppressed:busy`
+  row exists any more). Still suppressed: Jarvis speaking, no chat, a card, a
+  picker or chip overlay, Settings, a crashed window.
+- **Dictation into a busy chat steers.** `placementFor` (V2) boxed every
+  busy-chat transcript; it now sends one when the chat's running turn is its
+  own thread's (`landing.steers` = `runningHere(chat)`, the test that also
+  gives the box its Stop and Steer), through the same `send()` typing uses (`steer_queued`, `queued`
+  and the "not sent" give-back after Stop all apply). Kept from V2, each
+  still a box placement: a different chat than at capture, a waiting card, a
+  late or retried text, mode REVIEW at capture or now, OFF. New and
+  conservative: a busy chat whose turn is *not* its own thread's (pane moved
+  to another thread mid-turn, or a first send still opening its thread) boxes
+  the words, because `send()` would start a new turn there unseen.
+  A busy pane keeps its own orb and status while listening: the claim
+  borrows them and `endListening()` restores them (`turnOrb`, now exported)
+  when the capture ends; "didn't catch that" notes are not written over a
+  turn's status.
+- **Push-to-talk no longer interrupts** (`press()` in App.tsx; was the
+  "interrupt half" until 2026-10-13). Stop (InputBar) is the interrupt.
+  Consequence, closed: a first send in a compose row, between its thread
+  opening and the send's acknowledgement, had the orb as its only stop. The
+  box now offers Stop there too (`InputBar` `stoppable` = `runningHere ||
+  (busy && compose.sending)`) without turning Send into Steer; the stop
+  waits for the acknowledgement as before (`sendStops`). The
+  Ctrl+D gesture, its repeat/blur/terminal/Monaco rules and the card refusal
+  are unchanged. Muted, pressing records nothing and does nothing else.
+- **Continuation window** (`CONTINUE_MS` = 6 s, on the ring's sample clock,
+  so no timers). A claimed message that goes out opens it; speech whose onset
+  falls inside is claimed as `continuation` with no wake word. **Stopgap cap
+  until speaker verification (V12), the lead's decision after review:** only a
+  `wake` or `follow_up` claim starts a chain; a chain allows at most
+  `CONTINUE_MAX_CLAIMS` = 2 continuation claims and ends `CONTINUE_CHAIN_MS`
+  = 20 s after the message that started it *ended* (a long dictation still
+  gets its window), so TV or room speech with short gaps
+  cannot keep steering a running turn without a wake word. A too-short
+  *continuation* (a cough, a click) just drops and does not reopen the
+  follow-up window - that would let the next noise start a fresh chain; a
+  too-short wake or follow-up claim still gives the window back. (Side effect: until
+  V4 removes the 30 s cap, only two continuations follow a cut message.)
+  Not opened by push-to-talk or an unclaimed message (releasing the key is the
+  full stop; an open question). The window is armed when the message ends, but
+  `Capture` hands the caller a token and App takes it back
+  (`cancelContinuation`) if the message did not go out: a refused or failed
+  upload, an empty transcript, a backlog refusal, a crashed window. It also
+  closes on: the mic going OFF or an unmute, anything that suppresses the
+  detector (card, picker, Settings, his own voice, no chat, crash), `abandon()`,
+  and the owner selecting another chat or another conversation in the pane
+  (`draftKey` change; a compose row becoming its own just-opened thread is not
+  one). In AUTO the continuation is just the next transcript: it steers if the
+  first message's turn is running, else it is the next message; in REVIEW it
+  is appended to the box by the existing `pendingTranscript` append. Segment
+  gap, 2.5 s message pause and the ML VAD are V5's; the pause stays
+  `HANGOVER_MS`. Consequence worth knowing: a wake word no longer claims
+  "exactly one utterance" in the sense that speech straight after it is the
+  continuation (`capture.test.ts` says so); an aside after the window has
+  lapsed is not.
+- **Follow-up target (Q5).** `Capture.openFollowUp(tag)` remembers what the
+  window was opened for and hands it to `onListening(source, tag)`. App's
+  `openFollowUpFor(pane)` opens it only for the selected chat or a *drawn*
+  chat pane (hidden panes open none). On a `follow_up` claim for another drawn
+  pane, App focuses that pane and selects it (`layout.focus` + `select`) - unless
+  the owner has chosen a different chat since the window opened
+  (`followBase`) - and files the clip under it
+  (`voiceTarget`: the selection itself follows only after the next render).
+  If the pane is gone or hidden by the claim, the words
+  wait in the selected chat's box, unsent (`boxOnly`). Today only the selected
+  chat's `turn_finished` (or its spoken reply's end) calls it; a drawn pane's
+  *spoken* reply will (V7). `window.__hud.followUpFor(pane)` is the test hook.
+
+Free checks: `capture.test.ts` (continuation at 5 s and not 7 s, window edge,
+chaining, PTT, mute, suppression, selection, abandon; claim tag), `stt.test.ts`
+(`placementFor` rows), `tests/face/hud_v2_steer_check.py` (46 checks:
+busy+PTT steers, Stop, REVIEW, busy-but-other-thread, V2 conditions, card
+before and in flight with "Jarvis approve", continuation in AUTO and REVIEW,
+Ctrl+D on a busy chat, follow-up target). V2/older checks changed on purpose:
+`hud_v2_stt_check.py` (a busy chat steers), `hud_v2_ptt_check.py` (no
+interrupt), `hud_v2_multichat_check.py` (mic not suppressed by a turn; PTT does
+not interrupt; and `rv_stt_lands_selected`, which still described the pre-V2
+W-6 behaviour of sending to a chat selected during STT).
+Not claimed: a physical-microphone run, the 2.5 s pause, or a live deployment.

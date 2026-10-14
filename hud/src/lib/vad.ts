@@ -15,6 +15,15 @@ export const HANGOVER_MS = 1500; // silence this long closes one
 export const MIN_UTTER_MS = 350; // shorter is a cough, not a turn
 export const MAX_UTTER_MS = 30000; // a hard stop, never a normal ending
 export const FOLLOWUP_MS = 9000; // speak again after he answers, no wake word
+// V3: speech resuming this soon after a message ended continues it, no wake
+// word (plan §3.2). Counted in samples, like everything the detector decides.
+export const CONTINUE_MS = 6000;
+// ...but only a stopgap against room speech (a TV, other people) steering a
+// running turn for minutes with no wake word, until speaker verification (V12):
+// a chain begun by a wake or follow-up claim allows this many continuation
+// claims, and ends this long after the message that began it ended.
+export const CONTINUE_MAX_CLAIMS = 2;
+export const CONTINUE_CHAIN_MS = 20000;
 export const WAKE_GRACE_MS = 1200; // recognizer lag: a wake hit claims a slightly older utterance
 
 // How fast the floor chases the room, in seconds rather than in frames. Frames

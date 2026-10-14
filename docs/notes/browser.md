@@ -1444,3 +1444,45 @@ then waits for the new front receipt. Card, visibility, profile/context, active
 tab or pane replacement during that wait cancels the original capture. Capture
 controllers stay mounted while only their action controls are portaled; existing
 stills and ink survive menu changes. Ending annotation releases the local hold.
+
+
+## Owner HTTP authentication (B-AUTH, October 13)
+
+Owner-adopted Remote tabs intercept Server Basic/Digest through their exact page
+CDP session. The existing SOCKS/URL/control-port gates retain authority. A first
+protected address returns `loaded:false, auth_pending:true` and an exact live
+allocation receipt, then the real ticketed socket presents a plain owner form.
+The actual blank/prior URL remains document identity until commit. Only the
+existing explicit address transaction discloses source/adopts a fresh lease;
+stored Remote restore creates neither permission. No agent/MCP auth tool exists.
+
+One supervised navigation child keeps actual activity ownership through cleanup.
+Normal work retains an accumulated20-second budget; authentication shares one
+original60-second expiry and at most3 submissions per explicit operation. One
+prompt per tab/eight per host,128 paused-request records/callbacks, exact origin,
+Page/document/instance/socket/hold/visibility identity and bounded reply admission
+prevent stale or unbounded work. Authentication admission drops prior page input
+and old presses through the existing hold count. Owner answer/cancel stamps takeover.
+
+Credentials stay in transient owner socket fields and one guarded CDP response;
+replies clear fields on every controller exit, and no credentials enter replay,
+registry, bus, status, logs, config or browser storage. Chrome may retain its
+ordinary in-memory HTTP-auth cache. The form never autofocuses and higher cards
+invalidate old consent. Reconnect rotates only the nonce, preserving the original
+clock/attempts. Auth blocks preparation and between-event driving as owner attention.
+
+Protected navigation during a committed Sound replacement cancels/settles without
+a prompt or a usable replacement ticket, retaining existing explicit Retry. This
+batch does not hand pending auth through the exclusive Sound restart barrier.
+Hidden Direct capture does not adopt owner tabs or install the prompting controller.
+Popup-first-request and OOPIF capability need separate installed-Chrome receipts;
+the top-level Basic/Digest results do not establish those capabilities.
+
+Focused backend46 checks passed. Actual production-host/SOCKS/ticket/socket Basic
+proved first pending address, a22.153-second owner wait followed by one successful
+reply, and original60.002-second expiry; Chrome tree RSS1054.7MiB and cleanup passed.
+A separate6-case native matrix passed actual Digest, first allocation cancel,
+reconnect/old nonce, superseding navigation, profile close, and3 wrong attempts.
+These are synthetic local credentials and ephemeral daemons, not real accounts,
+installation or physical-device evidence. Full HUD and release checks are separate.
+See [the focused interface plan](../plans/2026-10-13-browser-http-auth.md).
