@@ -9,11 +9,21 @@
 // cannot land.
 
 import type { SpeechView } from "../lib/speech/controller";
+import { GUEST_LABEL } from "../lib/speaker";
 import { noPointerFocus } from "../lib/talkkey";
 
-/** Does the strip show for this view? Also decides the sidebar's extra room. */
-export function stripShown(view: SpeechView): boolean {
+/** Is there something of Jarvis's speech to control? */
+export function speechShown(view: SpeechView): boolean {
   return view.enabled && view.speaker && (view.state !== "idle" || view.failed > 0 || (view.blocked && view.queued > 0));
+}
+
+/**
+ * Does the strip show? Also decides the sidebar's extra room. While Guest voice
+ * is on it always does, whatever Jarvis is doing: the label that keeps it from
+ * being forgotten is always visible (V-14).
+ */
+export function stripShown(view: SpeechView, guest = false): boolean {
+  return guest || speechShown(view);
 }
 
 export function SpeechStrip(props: {
@@ -28,9 +38,31 @@ export function SpeechStrip(props: {
   onSkip: () => void;
   onStop: () => void;
   onClearMarks: () => void;
+  /** Guest voice is on (V-14): the strip says so, and its button turns it off. */
+  guest?: boolean;
+  /** A voice is enrolled, so Guest voice means something: the strip offers the one-click switch. */
+  canGuest?: boolean;
+  onGuest?: (on: boolean) => void;
 }) {
   const { view } = props;
-  if (!stripShown(view)) return null;
+  const guest = props.guest === true;
+  if (!stripShown(view, guest)) return null;
+  const speech = speechShown(view);
+  const guestButton = guest || (props.canGuest && speech && props.onGuest) ? (
+    <button
+      type="button"
+      data-testid="guest-toggle"
+      aria-pressed={guest}
+      aria-label={guest ? "Guest voice is on: turn it off" : "Turn Guest voice on"}
+      title={guest ? "Guest voice is ON: anyone can dictate. Click to verify your voice again." : "Guest voice: let anyone dictate"}
+      disabled={(props.blocked && !guest) || !props.onGuest}
+      onMouseDown={noPointerFocus}
+      onClick={() => props.onGuest?.(!guest)}
+    >G</button>
+  ) : null;
+  if (props.compact && !speech) {
+    return <div id="speechstrip" className="compact guest" data-testid="speech-strip" data-state="guest" data-guest="true">{guestButton}</div>;
+  }
   const paused = view.state === "paused";
   const toggle = (
     <button
@@ -46,22 +78,24 @@ export function SpeechStrip(props: {
     </button>
   );
   if (props.compact) {
-    return <div id="speechstrip" className="compact" data-testid="speech-strip" data-state={view.state}>{toggle}</div>;
+    return <div id="speechstrip" className="compact" data-testid="speech-strip" data-state={view.state} data-guest={guest}>{toggle}{guestButton}</div>;
   }
-  const note = view.blocked ? "CLICK ANYWHERE TO ENABLE SOUND"
+  const note = !speech ? "" : view.blocked ? "CLICK ANYWHERE TO ENABLE SOUND"
     : view.state === "idle" ? `${view.failed} SKIPPED${props.label ? ` · ${props.label}` : ""}`
     : `${paused ? "PAUSED" : "SPEAKING"}${props.label ? ` · ${props.label}` : ""}${view.queued ? ` · ${view.queued} QUEUED` : ""}`
       + (view.failed ? ` · ${view.failed} SKIPPED` : "");
   return (
-    <div id="speechstrip" data-testid="speech-strip" data-state={view.state} role="group" aria-label="Speech controls">
-      <div className="note" data-testid="speech-note" title={note}>{note}</div>
+    <div id="speechstrip" data-testid="speech-strip" data-state={speech ? view.state : "guest"} data-guest={guest} role="group" aria-label="Speech controls">
+      {guest ? <div className="guestnote" data-testid="guest-label" role="status">{GUEST_LABEL}</div> : null}
+      {note ? <div className="note" data-testid="speech-note" title={note}>{note}</div> : null}
       <div className="btns">
-        {toggle}
-        <button type="button" data-testid="speech-skip" aria-label="Skip this message" title="Skip the rest of this message"
-          disabled={props.blocked || view.state === "idle"} onMouseDown={noPointerFocus} onClick={props.onSkip}>⏭</button>
-        <button type="button" data-testid="speech-stop" aria-label="Stop speaking" title="Stop and clear the queue"
+        {speech ? toggle : null}
+        {speech ? <button type="button" data-testid="speech-skip" aria-label="Skip this message" title="Skip the rest of this message"
+          disabled={props.blocked || view.state === "idle"} onMouseDown={noPointerFocus} onClick={props.onSkip}>⏭</button> : null}
+        {speech ? <button type="button" data-testid="speech-stop" aria-label="Stop speaking" title="Stop and clear the queue"
           disabled={props.blocked || (view.state === "idle" && !view.failed)}
-          onMouseDown={noPointerFocus} onClick={view.state === "idle" ? props.onClearMarks : props.onStop}>⏹</button>
+          onMouseDown={noPointerFocus} onClick={view.state === "idle" ? props.onClearMarks : props.onStop}>⏹</button> : null}
+        {guestButton}
       </div>
     </div>
   );

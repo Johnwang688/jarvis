@@ -13,6 +13,8 @@
 // applied to sending: a window that restarts into a mic that sends on its own
 // is the wrong surprise. The choice persists in localStorage.
 
+import { GUEST_LABEL } from "./speaker";
+
 export type DictationMode = "auto" | "review" | "off";
 
 export const DICTATION_MODES: DictationMode[] = ["auto", "review", "off"];
@@ -72,6 +74,16 @@ export function outcomeFor(mode: DictationMode): UtteranceOutcome {
 export function orbLine(p: {
   status?: string; mode: DictationMode; approvals: number; orb: string;
   /** Jarvis's own voice (V6): playing or paused, and whose chat. */
+  speech?: { state: "idle" | "buffering" | "playing" | "paused"; label?: string };
+  /** Guest voice is on (V14): speaker verification is off until the owner turns it off, and the line says so whatever else it says. */
+  guest?: boolean;
+}): string {
+  const line = baseLine(p);
+  return p.guest ? (line ? `${line} · ${GUEST_LABEL}` : GUEST_LABEL) : line;
+}
+
+function baseLine(p: {
+  status?: string; mode: DictationMode; approvals: number; orb: string;
   speech?: { state: "idle" | "buffering" | "playing" | "paused"; label?: string };
 }): string {
   // Speech says itself over a *turn's* status (RESPONDING, RUNNING ...): mid-task

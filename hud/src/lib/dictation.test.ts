@@ -114,3 +114,26 @@ describe("dictation mode", () => {
     expect([...seen].sort()).toEqual([...DICTATION_MODES].sort());
   });
 });
+
+
+describe("orbLine and Guest voice (V-14)", () => {
+  it("adds GUEST VOICE to every line, so it is never absent while it is on", () => {
+    const cases: Parameters<typeof orbLine>[0][] = [
+      { mode: "auto", approvals: 0, orb: "idle" },
+      { mode: "auto", approvals: 0, orb: "listening" },
+      { mode: "off", approvals: 0, orb: "idle" },
+      { mode: "auto", approvals: 1, orb: "idle" },
+      { mode: "auto", approvals: 0, orb: "idle", status: "TRANSCRIBING" },
+      { mode: "auto", approvals: 0, orb: "idle", status: "RESPONDING", speech: { state: "playing", label: "chat" } },
+    ];
+    for (const c of cases) {
+      const plain = orbLine(c);
+      expect(orbLine({ ...c, guest: false })).toBe(plain);
+      expect(orbLine({ ...c, guest: true })).toBe(plain ? `${plain} · GUEST VOICE` : "GUEST VOICE");
+    }
+  });
+  it("does not change what the rest of the line means", () => {
+    expect(orbLine({ mode: "off", approvals: 0, orb: "idle", guest: true })).toMatch(/^MIC MUTED/);
+    expect(orbLine({ mode: "auto", approvals: 1, orb: "idle", guest: true })).toMatch(/^ANSWER THE AUTHORIZATION/);
+  });
+});
