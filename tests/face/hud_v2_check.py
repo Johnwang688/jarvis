@@ -2282,6 +2282,23 @@ def writes(mock, since):
     return [c for c in mock.calls[since:] if c[0] in ("POST", "PATCH") and c[1] not in ("/stt", "/mute")]
 
 
+
+def _empty_front_report(call):
+    """Only a passive empty Browser receipt may race the composing audit."""
+    if type(call) is not tuple or len(call) != 3:
+        return False
+    method, path, body = call
+    if method != "POST" or path != "/browser/front" or type(body) is not dict:
+        return False
+    if set(body) != {"window", "focus_seq", "focused_slot", "covered", "panes", "seq"}:
+        return False
+    return (type(body["window"]) is str and re.fullmatch(r"[0-9a-f]{32}", body["window"]) is not None
+            and type(body["seq"]) is int and body["seq"] > 0
+            and type(body["focus_seq"]) is int and body["focus_seq"] >= 0
+            and body["focused_slot"] is None and body["covered"] is False
+            and type(body["panes"]) is list and body["panes"] == [])
+
+
 def thread_model_checks(page, mock):
     print("\nthe model a thread runs on: provider, model, effort")
     w = mock.world
@@ -2340,7 +2357,8 @@ def thread_model_checks(page, mock):
           and page.evaluate("window.__pwned") is False)
     pick_model(page, "openai/gpt-5.6-luna")
     pick_effort(page, "low")
-    check("choosing while composing sends nothing", not writes(mock, since), str(writes(mock, since)))
+    composing_writes = [c for c in writes(mock, since) if not _empty_front_report(c)]
+    check("choosing while composing sends nothing", not composing_writes, str(composing_writes))
 
     # A provider the project's profile cannot run is greyed out, with why.
     project_select = page.locator('[data-testid="project-chip-select"]')

@@ -1095,7 +1095,11 @@ WORKFLOW_GIT_PARAGRAPH = (
 )
 
 
+FAST_DRIVE_PARAGRAPH = "On a desk turn, `hud_browser_act` can perform a short requested action in a\nvisible Remote Browser pane after a fresh look. The owner's global and pane\nswitches, Private opt-in, five quiet seconds and action gate must all permit it.\nSensitive actions ask on the owner's private card. Never drive off desk."
+
+
 PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]] = {
+    "On a desk turn, `hud_browser_act`": ((("hud_browser_act",), None),),
     "To change a file that already exists": (
         (("edit_file", "write_file", "read_file"), None),
         (("read_file",),
@@ -1186,7 +1190,7 @@ PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]
 def _original_prompt_rules() -> dict:
     """Index only our exact canonical paragraphs, never caller prefix matches."""
     paragraphs = [p.strip("\n") for p in SYSTEM_PROMPT.split("\n\n")]
-    paragraphs.append(WORKFLOW_GIT_PARAGRAPH)
+    paragraphs.extend((WORKFLOW_GIT_PARAGRAPH, FAST_DRIVE_PARAGRAPH))
     result = {}
     for opening, versions in PROMPT_TOOL_PARAGRAPHS.items():
         matches = [p for p in paragraphs if p.startswith(opening)]

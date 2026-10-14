@@ -1,4 +1,4 @@
-"""BR9c owner presentation with ticketed synthetic drive events; production stays OFF."""
+"""BR9c owner presentation with ticketed synthetic drive events; owner switch behavior is exercised with fake Chrome."""
 from __future__ import annotations
 import json,os,re,sys,time
 from datetime import datetime,timezone
@@ -50,7 +50,7 @@ def private_card(req_id,tid,text='PRIVATE_CARD_TEXT',category='ordinary'):
     return public,detail
 
 def drive_checks(browser,mock,base,check,until,guard,init_script):
-    print('\nBR9c: dormant Browser controls and exact private consent')
+    print('\nBR9c: Browser controls and exact private consent')
     ctx=browser.new_context(viewport={'width':1800,'height':1000},permissions=['microphone'])
     guard(ctx);ctx.add_init_script(init_script);remote=DriveRemote(ctx,mock);fixture=DriveFixture(mock)
     details={};reads=[];held=[]
@@ -75,7 +75,18 @@ def drive_checks(browser,mock,base,check,until,guard,init_script):
         status=page.locator(active+' [data-testid="drive-status"]');until(lambda:status.count()==1)
         check('BR9c banner names the displayed chat slot, not its internal ID','chat in pane 2 (fast path)' in status.inner_text())
         check('BR9c Browser front has a live owner receipt','a live owner window is required' not in page.locator(_pane(1)).inner_text())
-        check('BR9c pane drive switch remains disabled and unchecked',page.locator(_pane(1,'[data-testid="browser-drive"]')).is_disabled() and not page.locator(_pane(1,'[data-testid="browser-drive"]')).is_checked())
+        options=page.locator(_pane(1,'[data-testid="browser-options-toggle"]'))
+        options.click()
+        drive=page.locator(_pane(1,'[data-testid="browser-drive"]'))
+        until(lambda:drive.is_enabled())
+        check('DR named pane driving starts on',drive.is_checked())
+        before=sum(method=='PATCH' and path=='/browser/panes/1' for method,path,_ in mock.calls)
+        drive.evaluate('e=>e.click()')
+        check('DR scripted pane click does not change permission',drive.is_checked() and sum(method=='PATCH' and path=='/browser/panes/1' for method,path,_ in mock.calls)==before)
+        drive.click();until(lambda:not drive.is_checked())
+        check('DR pane opt-out reaches owner permission route',any(method=='PATCH' and path=='/browser/panes/1' and body.get('drive') is False for method,path,body in mock.calls))
+        drive.click();until(lambda:drive.is_checked())
+        options.click();until(lambda:page.locator(_pane(1,'[data-testid="browser-options"]')).is_hidden())
         check('BR9c neutral banner contains no authorization or pixel preview',not re.search('Authorize|Approve|Deny',status.inner_text(),re.I) and status.locator('canvas,img,svg').count()==0)
         for i in range(25):remote.send(sock,{'t':'agent','kind':'action','id':f'action{i}','at':time.time()*1000,'action':'click','outcome':'done','target':'<img src=x>PRIVATE_ACTION_LABEL'+str(i),'text':'x'*100})
         until(lambda:'Actions (20)' in status.inner_text());status.get_by_role('button',name='Actions (20)',exact=True).click()
@@ -95,7 +106,14 @@ def drive_checks(browser,mock,base,check,until,guard,init_script):
         page.keyboard.press('Control+,');until(lambda:page.locator('[data-testid="settings-page"]').count()==1)
         page.get_by_role('button',name='Browser',exact=True).click()
         setting=page.locator('[data-testid="browser-agents-drive"]')
-        check('BR9c Settings driving preference is visibly OFF',setting.is_disabled() and not setting.is_checked())
+        until(lambda:setting.is_enabled())
+        check('DR Settings global driving preference is ON',setting.is_checked())
+        before=sum(method=='PATCH' and path=='/browser/settings' and 'agents_may_drive' in body for method,path,body in mock.calls)
+        setting.evaluate('e=>e.click()')
+        check('DR scripted global click does not change permission',setting.is_checked() and sum(method=='PATCH' and path=='/browser/settings' and 'agents_may_drive' in body for method,path,body in mock.calls)==before)
+        setting.focus();page.keyboard.press('Space');until(lambda:not setting.is_checked())
+        check('DR global off uses only explicit owner settings PATCH',mock.browser_settings.value('agents_may_drive') is False)
+        setting.click();until(lambda:setting.is_checked())
         check('BR9c Settings covers existing work inertly',page.locator('.workspace-surface').evaluate('e=>e.inert'))
         old_count=len(remote.sockets);page.locator('[data-testid="settings-close"]').click();until(lambda:len(remote.sockets)>old_count)
         sock=remote.sockets[-1];until(lambda:status.get_by_test_id('drive-stop').count()==1)
@@ -160,13 +178,14 @@ def drive_checks(browser,mock,base,check,until,guard,init_script):
         until(lambda:page.evaluate('window.__hud.mic.state().open'))
         focus="({focused:window.__hud.workspace().ws.focused,selected:window.__hud.state().selectedChat,micOpen:window.__hud.mic.state().open,micClaimed:window.__hud.mic.state().claimed})"
         before=page.evaluate(focus);original=_ws(page)['ws']['panes'][0]['browser']['active'];old=len(state(mock).rows)
+        automatic_start=len(mock.calls)
         entry=fixture.add(mock.dev_port+11)
         until(lambda:len(_ws(page)['ws']['panes'][0]['browser']['tabs'])==2,timeout=5)
         current=_ws(page)['ws']['panes'][0]['browser']
         check('BR9c active driven pane gets a background Direct tab',current['active']==original and current['tabs'][-1].get('mode','direct')=='direct' and len(state(mock).rows)==old)
         check('BR9c auto-open retains exact focus/chat/mic ownership',page.evaluate(focus)==before and chat.evaluate('e=>e===document.activeElement'))
         check('BR9c automatic placement has an exact daemon receipt',bool(mock.posted('/dev-servers/'+entry.id+'/placed')))
-        check('BR9c no screenshot/capture/drive enable request was manufactured',not any('/capture' in path or bool(re.search(r'/browser/(?:act|tabs/[^/]+/act)(?:/|$)',path)) or body.get('drive') is True for _,path,body in mock.calls),str([path for _,path,body in mock.calls if '/capture' in path or bool(re.search(r'/browser/(?:act|tabs/[^/]+/act)(?:/|$)',path)) or body.get('drive') is True]))
+        check('BR9c no screenshot/capture/drive enable request was manufactured',not any('/capture' in path or bool(re.search(r'/browser/(?:act|tabs/[^/]+/act)(?:/|$)',path)) or body.get('drive') is True for _,path,body in mock.calls[automatic_start:]),str([path for _,path,body in mock.calls[automatic_start:] if '/capture' in path or bool(re.search(r'/browser/(?:act|tabs/[^/]+/act)(?:/|$)',path)) or body.get('drive') is True]))
         check('BR9c no page errors or control-listener request',not errors and not mock.api_hits,str(errors[:3]))
     except Exception:
         print('BR9c fixture state',page.evaluate('window.__hud?.workspace()'))

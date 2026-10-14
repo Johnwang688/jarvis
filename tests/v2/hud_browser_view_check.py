@@ -108,6 +108,7 @@ class Pure(unittest.TestCase):
                 return SimpleNamespace(cost_usd=0,cancelled=False,stopped_early=False,text="done")
             agent.run_turn=run_turn
             native=SimpleNamespace(agent=agent,model="fixture-pinned",effort=None,stop=threading.Event(),
+                pristine_system=F.config.SYSTEM_PROMPT+F.FAST_PROMPT,
                 brief=Brief(role=Role.CHAT,cwd="/tmp"),tool_names=["hud_browser_view"],project_id="p",
                 inbox_lock=threading.Lock(),inbox=[],leftover=[],accepting=False,cost_usd=0,turns=0)
             with patch.object(F.models,"tier",return_value="different-global"),patch.object(F.models,"cached_info",return_value=None if vision is None else SimpleNamespace(vision=vision)) as info,patch("jarvis.v2.tools.hud_browser_view.look_for_tool",return_value=L.LookResult(text="Dispatch marker",source="Fixture")) as look:

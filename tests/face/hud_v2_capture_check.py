@@ -43,9 +43,9 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
     annotation=page.locator(active+' [data-testid="browser-annotate"]')
     canvas=page.locator(active+' [data-testid="annotation-canvas"]')
     actions=page.locator(_pane(2,'[data-testid="browser-capture-actions"]'))
-    def options():
+    def options(opened=True):
         button=page.locator(_pane(2,'[data-testid="browser-options-toggle"]'))
-        if button.get_attribute("aria-expanded")!="true":button.click()
+        if (button.get_attribute("aria-expanded")=="true") != opened:button.click()
     def capture(label):
         options()
         actions.get_by_role("button",name=label,exact=True).click()
@@ -122,7 +122,7 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
         # Two drawn chats; select the second before Send, then choose the first
         # while the capture is delayed. The accepted pair follows the gesture.
         raw["preset"]="cols3";raw["panes"][2]={"view":"chat"}
-        boot();page.locator(_pane(3,'[data-testid="input"]')).click()
+        boot();options(False);page.locator(_pane(3,'[data-testid="input"]')).click()
         check("BR4 split fixture selects chat three",page.evaluate("window.__hud.state().selectedChat")==3)
         mode["hold"]=True;capture("Send to chat")
         until(lambda:bool(pending),timeout=3)
@@ -133,7 +133,7 @@ def capture_checks(browser,mock,base,check,until,guard,init_script):
               and page.evaluate("window.__hud.state().chats[1].files")==[])
         # A selected compose closes during the capture; another visible chat
         # receives nothing, and the whole pair is recoverable with its project.
-        boot();page.locator(_pane(3,'[data-testid="input"]')).click()
+        boot();options(False);page.locator(_pane(3,'[data-testid="input"]')).click()
         mode["hold"]=True;capture("Send to chat")
         until(lambda:bool(pending),timeout=3)
         page.locator('[data-testid="pane-3-close"]').click()
