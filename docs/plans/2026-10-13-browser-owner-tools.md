@@ -92,4 +92,12 @@ passed: restoring the old document approval hold failed the positive native
 navigation assertion; omitting document discard failed the old-input cutoff
 assertion. These were intended assertion failures with no test errors.
 
+The coordinator's combined correction run at
+`ac8bdedec0c824971d763f26a2f879f2055cbbfb` then passed all 14 selected suites,
+including toolset audit, complete profiles, the 19-case real action suite,
+document/driver/attention boundaries, native auth matrix and both focused HUD
+fixtures. Aggregate exit was 0 in 115.34s; source manifests stayed unchanged and
+the exact owned scope finished inactive with no remaining processes. Native
+lifecycle capabilities and final release review remain separately scoped.
+
 These receipts are not installation, deployment or complete-product validation.
