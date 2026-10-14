@@ -19,8 +19,11 @@ vi.mock("../api", () => ({
                               sdks: null, templates: false, device: null, brain: h.brain }),
     vexDownload: (pid: string, body: { slot: number; name: string }) => {
       h.downloads.push({ pid, ...body });
-      return h.download!(pid);
+      return h.download!(pid).then(r => ({...r, download_id: r.terminal_id}));
     },
+    vexDownloadState: async (id: string) => ({id, project_id: h.downloads.at(-1)?.pid ?? "p3", slot: 3,
+      state: "succeeded", terminal_id: id, exit_code: 0, output: "Finished", started: "", ended: ""}),
+    vexConnection: async () => ({brain: true, controller: false, state: "ready", checked_at: "", message: "", events: []}),
     vexBuild: async (pid: string, action: string) => {
       h.builds.push({ pid, action });
       return { build_id: `0000000${h.builds.length}`, terminal_id: `a000000${h.builds.length}` };
@@ -270,5 +273,116 @@ describe("what stopped a chain is what it says (delta review NIT)", () => {
     await store.download("p3", 1, "override", "override");
     expect(h.builds).toEqual([]);
     expect(store.run("p3").note).toMatch(/approval card came up before it built/);
+  });
+});
+
+describe("Download feedback uses actual action receipts", () => {
+  it("retains live output despite an absent terminal listing, then settles on EOF receipt", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({terminal_id: "b0000001"});
+    vi.spyOn(terminals, "row").mockReturnValue(null as any);
+    const d = {id: "b0000001", project_id: "p3", slot: 3, state: "running" as const,
+      terminal_id: "b0000001", exit_code: null, output: "Downloading <b>program</b>", started: "", ended: null};
+    const state = vi.spyOn(api, "vexDownloadState").mockResolvedValue(d);
+    const work = store.download("p3", 3, "dummy");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.run("p3").busy).toBe("download");
+    expect(store.run("p3").download?.output).toContain("<b>program</b>");
+    expect(store.run("p3").downloaded).toBeNull();
+    state.mockResolvedValue({...d, state: "succeeded", exit_code: 0, output: "Finished"});
+    await vi.advanceTimersByTimeAsync(600);
+    await work;
+    expect(store.run("p3").downloaded?.ok).toBe(true);
+    expect(store.run("p3").download?.output).toBe("Finished");
+    expect(h.downloads).toHaveLength(1);
+  });
+
+  it("failed status reads retry visibly; forgotten receipts never retry a Download", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({terminal_id: "b0000001"});
+    vi.spyOn(api, "vexDownloadState").mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(Object.assign(new Error("forgotten"), {status: 404}));
+    const work = store.download("p3", 3, "dummy");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.run("p3").downloadNote).toContain("Retrying");
+    await vi.advanceTimersByTimeAsync(600);
+    await work;
+    expect(store.run("p3").downloadNote).toContain("no longer available");
+    expect(store.run("p3").downloaded?.ok).toBeNull();
+    expect(h.downloads).toHaveLength(1);
+  });
+
+  it("manual recheck changes an unknown result to the actual late success", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({terminal_id: "b0000001"});
+    const state = vi.spyOn(api, "vexDownloadState").mockRejectedValue(Object.assign(new Error("forgotten"), {status: 404}));
+    await store.download("p3", 3, "dummy");
+    expect(store.run("p3").downloaded?.ok).toBeNull();
+    state.mockResolvedValue({id: "b0000001", project_id: "p3", slot: 3, state: "succeeded", terminal_id: "b0000001",
+      exit_code: 0, output: "late Finished", started: "", ended: ""});
+    await store.refreshDownload("p3");
+    expect(store.run("p3").downloaded?.ok).toBe(true);
+    expect(store.run("p3").note).toContain("Downloaded to slot 3");
+    expect(store.run("p3").download?.output).toBe("late Finished");
+    expect(h.downloads).toHaveLength(1);
+  });
+
+  it("a late manual status response cannot replace a newer Download", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({terminal_id: "b0000001"});
+    await store.download("p3", 3, "dummy");
+    let release!: (v: any) => void;
+    const state = vi.spyOn(api, "vexDownloadState").mockImplementationOnce(() => new Promise(r => {release = r;}));
+    const old = store.refreshDownload("p3");
+    h.download = async () => ({terminal_id: "b0000002"});
+    state.mockResolvedValue({id: "b0000002", project_id: "p3", slot: 3, state: "running", terminal_id: "b0000002",
+      exit_code: null, output: "new running", started: "", ended: null});
+    const next = store.download("p3", 3, "dummy");
+    await vi.advanceTimersByTimeAsync(0);
+    release({id: "b0000001", project_id: "p3", slot: 3, state: "succeeded", terminal_id: "b0000001", exit_code: 0, output: "old", started: "", ended: ""});
+    await old;
+    expect(store.run("p3").download?.id).toBe("b0000002");
+    expect(store.run("p3").downloaded).toBeNull();
+    state.mockResolvedValue({id: "b0000002", project_id: "p3", slot: 3, state: "succeeded", terminal_id: "b0000002",
+      exit_code: 0, output: "new end", started: "", ended: ""});
+    await vi.advanceTimersByTimeAsync(600);
+    await next;
+  });
+
+  it("late same-ID running reads cannot regress an already settled Download", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({terminal_id: "b0000001"});
+    const state = vi.spyOn(api, "vexDownloadState").mockRejectedValueOnce(Object.assign(new Error("forgotten"), {status: 404}));
+    await store.download("p3", 3, "dummy");
+    const d = {id: "b0000001", project_id: "p3", slot: 3, state: "running" as const, terminal_id: "b0000001",
+      exit_code: null, output: "old progress", started: "", ended: null};
+    let release!: (v: any) => void;
+    state.mockImplementationOnce(() => new Promise(r => {release = r;}));
+    const old = store.refreshDownload("p3");
+    state.mockResolvedValueOnce({...d, state: "succeeded", exit_code: 0, output: "actual Finished", ended: "done"});
+    await store.refreshDownload("p3");
+    release(d);
+    await old;
+    expect(store.run("p3").download?.state).toBe("succeeded");
+    expect(store.run("p3").download?.output).toBe("actual Finished");
+    expect(store.run("p3").downloaded?.ok).toBe(true);
+    expect(store.run("p3").downloadNote).toBe("");
+  });
+
+  it("USB demand coalesces, keeps last confirmed values on error and refuses cards/chains", async () => {
+    const store = new VexStore();
+    await store.refreshStatus();
+    const probe = vi.spyOn(api, "vexConnection");
+    await Promise.all([store.refreshConnection(), store.refreshConnection()]);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(store.connection?.brain).toBe(true);
+    store.setBlocked(true);
+    await store.refreshConnection();
+    expect(probe).toHaveBeenCalledTimes(1);
   });
 });

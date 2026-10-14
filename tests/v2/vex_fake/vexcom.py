@@ -38,6 +38,13 @@ if "--write" in args:
         time.sleep(0.05)
     print("Finished", flush=True)
     sys.exit(0)
+if args == ["--usb"]:
+    while (HERE / "HOLD_USB").exists():
+        time.sleep(0.05)
+    response = HERE / "USB_RESPONSE"
+    print(response.read_text() if response.exists() else json.dumps({"usb": {"vex": [
+        {"vid": "2888", "pid": "0501", "serialNo": "FAKE-NO-DEVICE"}], "dfu": []}}), flush=True)
+    sys.exit(0)
 if args in (["--json"], ["--programs"]):
     while (HERE / "HOLD_INFO").exists():
         time.sleep(0.05)

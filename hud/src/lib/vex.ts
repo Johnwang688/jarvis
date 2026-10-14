@@ -38,7 +38,7 @@ export interface VexStatus {
   /** Where new projects go (`vex.json`'s `project_folder`, V-4): the New VEX project dialog's default. */
   project_folder: string | null;
   /** The device action running now, if any. */
-  device: DeviceAction | null;
+  device: DeviceAction | "connection" | null;
   /** The brain terminal's id while it is open. */
   brain: string | null;
 }
@@ -101,7 +101,7 @@ export function isVexId(v: unknown): v is string {
 export function parseStatus(raw: unknown): VexStatus | null {
   if (!isObj(raw)) return null;
   const sdks = isObj(raw.sdks) ? { cpp: strOrNull(raw.sdks.cpp, 100), python: strOrNull(raw.sdks.python, 100) } : null;
-  const device = raw.device === "download" || raw.device === "info" || raw.device === "brain" ? raw.device : null;
+  const device = raw.device === "download" || raw.device === "info" || raw.device === "brain" || raw.device === "connection" ? raw.device : null;
   return {
     configured: raw.configured === true,
     hint: strOrNull(raw.hint),
@@ -175,6 +175,44 @@ export function parseBuild(raw: unknown): BuildView | null {
     started: str(raw.started, 64),
     ended: strOrNull(raw.ended, 64),
   };
+}
+
+export interface DownloadView {
+  id: string; project_id: string; slot: number; state: BuildState;
+  terminal_id: string | null; exit_code: number | null; output: string;
+  started: string; ended: string | null;
+}
+
+export function parseDownload(raw: unknown): DownloadView | null {
+  if (!isObj(raw) || !isVexId(raw.id) || typeof raw.project_id !== "string" || raw.project_id.length > 200
+    || !(BUILD_STATES as readonly unknown[]).includes(raw.state)
+    || typeof raw.slot !== "number" || !SLOTS.includes(raw.slot)) return null;
+  return { id: raw.id, project_id: raw.project_id, slot: raw.slot, state: raw.state as BuildState,
+    terminal_id: isVexId(raw.terminal_id) ? raw.terminal_id : null, exit_code: int(raw.exit_code),
+    output: typeof raw.output === "string" ? raw.output.slice(-16 * 1024) : "",
+    started: str(raw.started, 64), ended: strOrNull(raw.ended, 64) };
+}
+
+export interface ConnectionView {
+  brain: boolean | null; controller: boolean | null; checked_at: string | null;
+  state: "unknown" | "checking" | "ready" | "busy" | "error"; message: string;
+  events: { device: "brain" | "controller"; connected: boolean; at: string }[];
+}
+
+export function parseConnection(raw: unknown): ConnectionView | null {
+  if (!isObj(raw) || !["unknown", "checking", "ready", "busy", "error"].includes(String(raw.state))
+    || ![true, false, null].includes(raw.brain as boolean | null)
+    || ![true, false, null].includes(raw.controller as boolean | null)
+    || !Array.isArray(raw.events) || raw.events.length > 32) return null;
+  const events: ConnectionView["events"] = [];
+  for (const e of raw.events) {
+    if (!isObj(e) || (e.device !== "brain" && e.device !== "controller")
+      || typeof e.connected !== "boolean" || typeof e.at !== "string") return null;
+    events.push({device: e.device, connected: e.connected, at: e.at.slice(0, 64)});
+  }
+  return {brain: raw.brain as boolean | null, controller: raw.controller as boolean | null,
+    checked_at: strOrNull(raw.checked_at, 64), state: raw.state as ConnectionView["state"],
+    message: str(raw.message, 400), events};
 }
 
 /**

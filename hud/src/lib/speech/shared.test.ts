@@ -366,15 +366,30 @@ describe("many panes through one controller", () => {
     expect(player.started.at(-1)).toBe("A is back after unmuting.");
   });
 
-  it("skipThread skips only that chat and silences its open stream", async () => {
-    delta("a", "A is talking at some length here. And more is to come right now. Even more");
+  it("skipThread skips only that chat's current message", async () => {
+    // V8 holds a message until it closes, so the open message is never the playing one.
+    settle("a", "A is talking at some length here. And more is to come right now.");
     settle("b", "B is waiting for its turn.");
     await clock.advance(300);
     expect(player.started).toEqual(["A is talking at some length here."]);
+    delta("a", "A's next message is being written. ");
     c.skipThread("a");
-    delta("a", " is coming in after the skip. And again here.");
+    delta("a", "It carries on after the skip.");
+    c.event({ kind: "tool_started", thread_id: "a", data: {} });
     await clock.advance(30_000);
-    expect(player.started).toEqual(["A is talking at some length here.", "B is waiting for its turn."]);
+    expect(player.started).toEqual(["A is talking at some length here.", "B is waiting for its turn.",
+      "A's next message is being written.", "It carries on after the skip."]);
+  });
+
+  it("skipThread with nothing of that chat queued drops the message it is writing, and no other chat's", async () => {
+    delta("a", "A is writing this and it will be skipped. ");
+    delta("b", "B is writing this and it will be said. ");
+    c.skipThread("a");
+    delta("a", "More of A that must not be heard.");
+    c.event({ kind: "tool_started", thread_id: "a", data: {} });
+    c.event({ kind: "tool_started", thread_id: "b", data: {} });
+    await clock.advance(30_000);
+    expect(player.started).toEqual(["B is writing this and it will be said."]);
   });
 
   it("asks for a voice at synthesis time, so a chosen voice applies to what is not made yet", async () => {

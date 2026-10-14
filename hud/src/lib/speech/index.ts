@@ -54,6 +54,7 @@ export function createSpeech(): Speech {
   });
   const controller = new SpeechController({
     say: (text, opts) => api.say(text, { voice: opts.voice, localOnly: SAY_LOCAL_ONLY, signal: opts.signal }),
+    summarize: (text, opts) => api.speechSummary(text, opts.thread, { signal: opts.signal }),
     player,
     clock: realClock,
     gate,
