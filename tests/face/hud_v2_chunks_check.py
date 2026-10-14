@@ -165,6 +165,11 @@ def main(argv=None):
                 rate = (b - a) / 2.0
                 check("the sample clock runs at 16 kHz (the resampler is converting the device rate)",
                       14000 < rate < 18000, f"{rate:.0f} samples/s")
+                page.evaluate("() => { window.__frames = []; window.__hud.mic.listen(f => window.__frames.push(f.length)); }")
+                page.wait_for_timeout(1000)
+                frames = page.evaluate("window.__frames")
+                check("the frame seam V5 builds on delivers 512-sample frames, about 31 a second",
+                      len(frames) > 20 and set(frames) == {512}, f"{len(frames)} frames of {set(frames)}")
                 open_settings(page, "Voice")
                 check("Settings -> Voice says which path is live",
                       "AudioWorklet" in page.locator('[data-testid="voice-capture-path"]').inner_text())

@@ -2841,6 +2841,9 @@ export default function App() {
 
   // ---- microphone ---------------------------------------------------------
 
+  // The live microphone input (V4): its frames are the seam V5's VAD worker and
+  // V12's recorder read (`micInput.addFrameListener`).
+  const micInput = useRef<MicInput | null>(null);
   useEffect(() => {
     let input: MicInput | null = null;
     let stream: MediaStream | null = null;
@@ -2856,6 +2859,7 @@ export default function App() {
         // and the window says so rather than quietly capturing worse.
         input = await startMicInput({ stream, onFrame: (frame) => capture.onFrame(frame), workletUrl: micWorkletUrl });
         if (gone) { input.stop(); return; }
+        micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
         if (input.path !== "worklet") {
           dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${input.fallbackReason}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
@@ -2868,6 +2872,7 @@ export default function App() {
     })();
     return () => {
       gone = true;
+      micInput.current = null;
       stream?.getTracks().forEach((t) => t.stop());
       input?.stop();
     };
@@ -2948,6 +2953,8 @@ export default function App() {
       mic: {
         feedMs: (ms: number, amp: number, frame?: number) => capture.feedMs(ms, amp, frame),
         path: () => voiceDiagnostics.snapshot().path,
+        // Frame listeners, as V5/V12 will register them: read-only audio, 512 samples at 16 kHz.
+        listen: (fn: (frame: Float32Array) => void) => micInput.current?.addFrameListener(fn) ?? (() => {}),
         wake: () => onWakeHit(),
         state: () => ({
           open: capture.vad.open,
