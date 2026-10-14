@@ -7,13 +7,12 @@ registry: update the relevant row when claiming, handing off, opening a PR,
 merging or deploying. It is not a new authorization to expand product scope.
 
 At the initial checkpoint the current Codex team reserved four packages:
-`B-UI`, `B-DR`, `B-SOUND` and `B-CLASSIFIER`. B-UI and B-CLASSIFIER are now
-installed. **Only B-DR and B-SOUND remain TAKEN by this team. Do not duplicate
-them.** No other remaining implementation package is claimed by this team in
-this map. A saved draft is not an active claim.
+`B-UI`, `B-DR`, `B-SOUND` and `B-CLASSIFIER`. **All four are now INSTALLED.**
+No implementation packages remain claimed by this Codex team. A saved draft
+is not an active claim.
 
-**Three voice packages are TAKEN by the Claude team (2026-10-13):** `V0`, `V2`, `V6`.
-Its heavy test jobs wait for a free slot under the shared limit below.
+**Six voice packages are TAKEN by the Claude team (2026-10-13):** `V0`, `V2`, `V3`, `V6`, `V7`, `V8`.
+Slot1 is reserved for that team under the shared limit below.
 
 ## How teams coordinate
 
@@ -50,27 +49,34 @@ below. Other teams should name their integrator in their claim. Serialize merges
 through the leads; integrate latest main and review conflicting hunks before merging.
 A documentation-only merge does not need a daemon restart.
 
-## Current release — Browser batch installed (2026-10-13)
+## Current release — original Browser batch installed (2026-10-13)
 
-- [PR #132](https://github.com/Johnwang688/jarvis/pull/132) merged at
-  `df5099ab67bd72686ca27e6229807868b64757d5`; it includes the earlier
-  [PR #130](https://github.com/Johnwang688/jarvis/pull/130) classifier merge
-  `d2c2239326fe0e8b904da3b9dbde5a49128344e2`.
-- Both are installed in build `20261013T231914487165Z-953c09d1656d`, built
-  from `df5099ab67bd72686ca27e6229807868b64757d5`. Normal guarded
-  rebuild/restart succeeded; all three providers were healthy. At deployment,
-  tracked main was clean and main matched origin/main. Owner untracked files
-  were preserved.
-- Production Browser driving remains OFF; B-DR and B-SOUND are still active.
-  Browser UI and classifier installation does not claim real-account or
-  physical sound/device acceptance.
-- Slot1 has been released and is FREE for a coordinated new job. Slot2 B-SOUND
-  and slot3 B-DR remain active. Future heavy jobs must claim a slot with the
-  coordinating lead using the current registry; the limit is three globally.
-- Another team's [PR #131](https://github.com/Johnwang688/jarvis/pull/131)
-  proposes V0/V2/V6 ownership and was open at this release update. It is not
-  merged by this team; those rows stay unchanged until the claim merges.
-  Coordinate with its authors before proposing duplicate work.
+- [PR #137](https://github.com/Johnwang688/jarvis/pull/137) merged at
+  `a857c1f19c8b0cdab393e90a7e039ea7ea81be4a`, including installed
+  [#135](https://github.com/Johnwang688/jarvis/pull/135) fast-path driving,
+  [#132](https://github.com/Johnwang688/jarvis/pull/132) controls and
+  [#130](https://github.com/Johnwang688/jarvis/pull/130) classifier fixes.
+- Installed/served HUD build: `20261014T004949720546Z-7ff98f434711`, from
+  `a857c1f19c8b0cdab393e90a7e039ea7ea81be4a`. Normal capped guarded
+  rebuild/restart exited with code 0; exact source/build and installed state
+  were verified. Claude/Codex/fast were healthy, with zero turns or approvals
+  pending. Main matched origin/main; tracked files were clean, owner untracked
+  files preserved and protected-config modification times unchanged.
+- B-SOUND runtime freeze `502f62b6` passed build, 1,901 HUD unit tests and
+  **3,217/3,217 full mock HUD checks**. The immutable backend receipt was
+  **124/125**; reviewed fixture correction `3655a15` passed the complete
+  **36-test routes suite**, covering the sole failed suite. The original
+  failure remains preserved. The lead and a separate UI reviewer completed
+  independent source reviews; GitGuardian passed. Cursor automated reviewers did **not** run because of
+  quota/on-demand limits; their neutral checks are not review passes.
+- Guarded **fast-path** driving and owner sound controls are installed.
+  Native Claude/Codex driving remains **B-NATIVE HANDOFF**. Physical speaker
+  audibility and mic echo are **UNMEASURED**; V15 speech/Browser coordination
+  remains pending. Installation does not establish real-account/device acceptance.
+- **Slot 1 remains reserved for Claude V0/V2/V6. Slots 2 and 3 are FREE** for
+  coordinated use. At most three heavy jobs globally; claim a slot with the
+  named leads before launch. [PR #131](https://github.com/Johnwang688/jarvis/pull/131)
+  merged the Claude team's ownership; those feature rows are unchanged.
 
 ## Historical verified baseline — before this Browser batch
 
@@ -92,9 +98,9 @@ Worktrees below are under `/home/johnw/.cache/jarvis-lead/wt/`.
 
 | ID | Feature and acceptance scope | Status / owner | Branch / worktree | Current progress and remaining gate |
 |---|---|---|---|---|
-| B-UI | Compact Browser navigation, three-dot options, automatic localhost Direct / external Remote selection; Private remains Remote | **INSTALLED — #132; Codex lead / `vex_fix`** | `codex/browser-controls` / `browser-controls` | [PR #132](https://github.com/Johnwang688/jarvis/pull/132) merged at `df5099ab` and is installed in the current release above; reviewed product `1c572e5c` passes 66 focused HUD checks, typecheck/build, 39 Remote, 49 capture, 17 narrow-controls, 16 Direct-origin and 79 frame-focus checks. Independent actual-Chrome dismissal/capture checks pass 6/6; the initially found dismissal click-through is fixed. Options retain owner permissions while blocking page/agent input; explicit capture fallback remains. Original reservation completed. |
-| B-DR | Release guarded fast-path Browser driving with global and per-pane switches, named-profile defaults and transient Private opt-in | **TAKEN — Codex lead; implementer `plans_voice`** | `codex/driving-release` / `driving-release` | Product head `546bfccb`; focused backend/prompt checks, 1,830 HUD unit tests, 43 browser checks and mutation checks passed. Full integration and independent release checks remain. B-CLASSIFIER is installed; integrate installed B-UI and sound settings without weakening their guards. [Release plan](2026-10-13-browser-driving-release.md). |
-| B-SOUND | Owner-only Remote sound, master permission, memory-only profile state, structural mute, guarded profile restart and visible indicators | **TAKEN — Codex lead; implementer `sound_reconcile`** | `codex/browser-sound` / `browser-sound` | Integrated main at `26817560`; fixing independently found failed-restart recovery before final sweep/review. Chosen route is per-profile restart, with clear all-tabs label; no automatic cross-site re-mute claim. No physical-audibility acceptance yet. Voice ducking belongs to V15, not this PR. [Sound plan](2026-10-13-browser-sound.md). |
+| B-UI | Compact Browser navigation, three-dot options, automatic localhost Direct / external Remote selection; Private remains Remote | **INSTALLED — #132; Codex lead / `vex_fix`** | `codex/browser-controls` / `browser-controls` | [PR #132](https://github.com/Johnwang688/jarvis/pull/132) merged at `df5099ab` and is installed in the current release above; reviewed product `1c572e5c` passes 66 focused HUD checks, typecheck/build, 39 Remote, 17 narrow-controls, 16 Direct-origin and 79 frame-focus checks. Independent actual-Chrome dismissal/capture checks pass 6/6; the initially found dismissal click-through is fixed. Options retain owner permissions while blocking page/agent input; explicit capture fallback remains. Final integrated capture `22ab268` passes all 49 assertions after adapting fixtures to the final options-dismissal behavior; the earlier 49 receipt predates that fix. Original reservation completed. |
+| B-DR | Release guarded fast-path Browser driving with global and per-pane switches, named-profile defaults and transient Private opt-in | **INSTALLED — [#135](https://github.com/Johnwang688/jarvis/pull/135); Codex lead / `plans_voice`** | `codex/driving-release` / `driving-release` | Tested integration `22ab268` (product unchanged from reviewed `76177f39`) includes installed B-UI/B-CLASSIFIER and preserves Claude V0/V2/V6 claims. Build, 1,870 HUD units, 43 owner Browser checks, 19 execute + six scan real-Chrome tests, 33 view tests, independent authority probes and five mutants passed. Full HUD had 8/3,134 failures; reviewed fixture corrections passed all 215 complete affected checks, including final 49 capture assertions. Backend: 115 invoked, 108 initial passes; full corrected 88 Codex / 39 installer / 30 owner-browser run with one skip / 90 terminal / 33 view passed. Fake Pocket and four non-synthesis local groups passed; real local synthesis UNRUN (cached model paths were not configured in the initial isolated B-DR run). Original failures and RSS comparison retained. Merged at `c8a4bed` and installed in the current build above; original reservation completed. Fast-path only; native driving stays B-NATIVE handoff. [Release plan](2026-10-13-browser-driving-release.md). |
+| B-SOUND | Owner-only Remote sound, master permission, memory-only profile state, structural mute, guarded profile restart and visible indicators | **INSTALLED — [#137](https://github.com/Johnwang688/jarvis/pull/137); Codex lead / `sound_reconcile`** | codex/browser-sound / browser-sound | Reviewed final head `0d1e06e1` merged at `a857c1f` and is installed in the current build above; original reservation completed. Runtime freeze `502f62b6` passed build, 1,901 HUD units and 3,217 full HUD checks; backend 124/125 plus the full corrected 36-test routes suite covers all 125, with the original failure retained. Independent source reviews by the lead and a separate UI reviewer are complete; GitGuardian passed, Cursor automated reviews did not run (quota/on-demand limits). Per-profile restart and all-tabs/new-tabs/hidden-playback scope remain explicit; no automatic cross-site re-mute. Physical audio/echo UNMEASURED; V15 coordination remains pending. [Sound plan](2026-10-13-browser-sound.md). |
 | B-CLASSIFIER | Stop Haiku 5.5 truncating bounded Browser-review JSON; reject incomplete response metadata and retain ASK on failure | **INSTALLED — #130; Codex lead / `sound_reconcile`** | `codex/browser-classifier-budget` / `browser-classifier-budget` | Reviewed product `81f1fd0`; 37 canonical, 4 wire, 11 independent checks and 11 mutants passed. Approved 50-call confirmation: 49 valid replies, one timeout/ASK, zero truncation; p50 1.364650 s, p95 1.734687 s. [PR #130](https://github.com/Johnwang688/jarvis/pull/130) merged at `d2c2239`; current-main integration and four relevant regression suites passed. Installed with B-UI in the current release above; original reservation completed. All M11 spending charged/reserved is $0.01187951250, including unknown timeout reserve. Both paid 50-call approvals are consumed. |
 
 ## Browser and native-agent work still to assign
@@ -126,15 +132,15 @@ V-1…V-14. [Full voice plan](2026-10-13-voice-rework.md).
 
 | ID | Feature | Status / owner | Dependencies / acceptance |
 |---|---|---|---|
-| V0 | Measure speaker AEC, Silero/RNNoise/KWS cost, local STT real-time factor, speaker EER and Smart Turn | **TAKEN — Claude lead (owner's Claude Code session); implementer Sonnet 5.5 agent** | Branch `claude/voice-v0`, worktree `voice-v0`. Synthetic/offline only: local models, Kokoro-generated speech, no owner voice, no paid or cloud calls. Physical speaker AEC and owner-mic acceptance stay a separate manual gate. Publish CPU/RSS/latency/WER/EER receipts before choosing models or claiming acoustic quality. Claude lead integrates. |
+| V0 | Measure speaker AEC, Silero/RNNoise/KWS cost, local STT real-time factor, speaker EER and Smart Turn | **TAKEN — Claude lead (owner's Claude Code session); implementer Sonnet 5.5 agent** | Branch `claude/voice-v0`, worktree `voice-v0`. [PR #140](https://github.com/Johnwang688/jarvis/pull/140) open: synthetic receipts in voice-face notes; review fixes in progress. Synthetic/offline only: local models, Kokoro-generated speech, no owner voice, no paid or cloud calls. Physical speaker AEC and owner-mic acceptance stay a separate manual gate. Publish CPU/RSS/latency/WER/EER receipts before choosing models or claiming acoustic quality. Claude lead integrates. |
 | V1 | Mic constraints/readback, bounded drop/transcription diagnostics | **INSTALLED — #128** | Existing capture behavior retained. This is observability, not ML VAD, speaker verification or a proven acoustic fix. |
-| V2 | STT deadlines/retries, retained clips, visible errors and sequence ordering | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v2`, worktree `voice-v2`. Start from installed V1; keep clips for explicit retry and preserve transcript order on delayed replies. Capture code is shared with V3–V5: land sequentially. Merges before V6; V6 rebases onto its App/voice-state hunks. Claude lead integrates. |
-| V3 | Dictation steers busy chats; push-to-talk no longer interrupts; continuation window | **WAIT — unclaimed** | V2. Verify busy/idle transitions, owner destination identity and unchanged Ctrl+D gesture. |
+| V2 | STT deadlines/retries, retained clips, visible errors and sequence ordering | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v2`, worktree `voice-v2`. [PR #136](https://github.com/Johnwang688/jarvis/pull/136) open, review clean; merges after V6, then a full sweep. Start from installed V1; keep clips for explicit retry and preserve transcript order on delayed replies. Capture code is shared with V3–V5: land sequentially. Merges before V6; V6 rebases onto its App/voice-state hunks. Claude lead integrates. |
+| V3 | Dictation steers busy chats; push-to-talk no longer interrupts; continuation window | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v3`, stacked on V2 until it merges. Owner answered plan Q3–Q5 (send at the pause, then steer; PTT steers; reply goes to the pane that spoke). Verify busy/idle transitions, owner destination identity and unchanged Ctrl+D gesture. |
 | V4 | AudioWorklet/resampler, uncapped utterance recorder and chunked STT | **WAIT — unclaimed** | V2. Bounded buffering, ordered chunks and long dictation without silent truncation. |
 | V5 | Silero VAD worker, energy fallback and end-of-utterance timers | **WAIT — unclaimed** | V4 + V0 evidence. Test pause/continuation boundaries and degraded-worker fallback. |
-| V6 | Streaming speech core: prose filter, sentence splitting, /say, one-thread player/queue, controls and output separate from mic | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v6`, worktree `voice-v6`. Separate track from capture; App/voice-state boundary agreed inside the Claude team (V2 lands first). Skip code/diffs/tool calls; Web Lock prevents multiple speaking windows. Claude lead integrates. |
-| V7 | One shared queue across every open chat pane, per-thread voices, floor/stale/backlog rules | **WAIT — unclaimed** | V6. Hidden open panes speak; threads in no pane are silent; playback never overlaps. |
-| V8 | Bounded spoken summaries using Haiku tier, fallback, cost/latency measurement | **WAIT — unclaimed** | V6. Resolve the plan's summary-length inconsistencies before freezing acceptance; no new paid probe inherits the completed Browser budget. |
+| V6 | Streaming speech core: prose filter, sentence splitting, /say, one-thread player/queue, controls and output separate from mic | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v6`, worktree `voice-v6`. [PR #134](https://github.com/Johnwang688/jarvis/pull/134) open, review clean; final lead sweep running. Separate track from capture; App/voice-state boundary agreed inside the Claude team (V2 lands first). Skip code/diffs/tool calls; Web Lock prevents multiple speaking windows. Claude lead integrates. |
+| V7 | One shared queue across every open chat pane, per-thread voices, floor/stale/backlog rules | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v7`, stacked on V6 until it merges. Hidden open panes speak; threads in no pane are silent; playback never overlaps. Includes the per-pane voice chip (Q9). |
+| V8 | Bounded spoken summaries using Haiku tier, fallback, cost/latency measurement | **TAKEN — Claude lead; implementer Sonnet 5.5 agent** | Branch `claude/voice-v8`, stacked on V6 until it merges. Owner answered Q2: replies over 600 characters become a summary only. One paid cost/latency probe approved, capped at $0.10; no other paid calls. |
 | V9 | Barge-in, self-voice reference gating and transcript commands | **WAIT — unclaimed** | V5 + V6. Voice must never authorize an approval card; real speaker/headphone checks remain separate from fake audio tests. |
 | V10 | Trailing send/cancel words and Undo | **WAIT — unclaimed** | V5 + V2. Whole-utterance/trailing-silence semantics; ordinary prose containing “over” must not send early. |
 | V11 | Local wake/command/send keyword spotting; retire phrase-avatar Chrome recognition | **WAIT — unclaimed** | V0 + V9. Choose only after measured resource/accuracy evidence. |
@@ -178,7 +184,7 @@ PR #125 itself adds plans, not the features those plans describe.
 | Browser foundation | #69 engine/gate; #77 stream/input; #66 pure HUD; #68 rename; [#101](https://github.com/Johnwang688/jarvis/pull/101) profiles/Private; [#113](https://github.com/Johnwang688/jarvis/pull/113) Remote HUD | Remaining real sign-in/IME/performance gates appear above. |
 | Browser look/capture/fonts | [#109](https://github.com/Johnwang688/jarvis/pull/109) read-only look; [#115](https://github.com/Johnwang688/jarvis/pull/115) capture/annotation; [#116](https://github.com/Johnwang688/jarvis/pull/116) private Windows fonts; [#123](https://github.com/Johnwang688/jarvis/pull/123) native MCP looks | Direct app-mode capture and proven card preview are still gated above. |
 | Session MCP | [#117](https://github.com/Johnwang688/jarvis/pull/117) Claude; [#118](https://github.com/Johnwang688/jarvis/pull/118) Codex | Installed native terminal/read-only Browser tools do not imply BR-9d driving is installed. |
-| Dormant driving | #71 rules; [#122](https://github.com/Johnwang688/jarvis/pull/122) backend; [#124](https://github.com/Johnwang688/jarvis/pull/124) owner controls/cards | Enabling release is TAKEN as B-DR. |
+| Dormant driving | #71 rules; [#122](https://github.com/Johnwang688/jarvis/pull/122) backend; [#124](https://github.com/Johnwang688/jarvis/pull/124) owner controls/cards | B-DR enabling release [#135](https://github.com/Johnwang688/jarvis/pull/135) is installed for the fast path; native driving remains B-NATIVE handoff. |
 | VEX output | [#126](https://github.com/Johnwang688/jarvis/pull/126) Windows PTY handshake, visible Clean/Build output and clean process exit | Synthetic PTY/Windows shell checks passed; no real VEX tool, robot download or field test performed. |
 | Math | [#127](https://github.com/Johnwang688/jarvis/pull/127) bounded KaTeX rendering in shared Markdown | Installed; actual proof rendering, hostile input and narrow-layout checks passed. |
 | Test/command follow-ups | #90 scheduler-independent complexity checks; #75 and #100 runner/git/REPL handling | VEX and terminal throughput failures reproduced on unchanged baseline remain a separate VERIFY item, not hidden passes. |
@@ -194,14 +200,14 @@ PR #125 itself adds plans, not the features those plans describe.
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 
 Good starting points for another team, after claiming: **SV-0** or **QA-LOAD**
-(V0, V2 and V6 are now TAKEN by the Claude team). B-AUTH and B-NATIVE have
+(V0, V2, V3, V6, V7 and V8 are now TAKEN by the Claude team). B-AUTH and B-NATIVE have
 reusable drafts but more shared-file/dependency risk.
 
 ## Shared test, review and release contract
 
 - WSL has about **15GB RAM**. **At most three heavy HUD/browser test jobs in total
-  across all teams**, never three per team. Slot1 is FREE/released; slot2 B-SOUND
-  and slot3 B-DR are active at this release update. Claim any future heavy job
+  across all teams**, never three per team. Slot 1 is reserved for Claude V0/V2/V6;
+  slots 2 and 3 are FREE after sound deployment. Claim any future heavy job
   with the coordinating lead using the current registry before launch;
   availability changes. Builds and full sweeps count as heavy jobs.
 - Use `systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0` and monitor

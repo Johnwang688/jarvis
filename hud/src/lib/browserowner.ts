@@ -11,14 +11,14 @@ export interface FrontTab {
 }
 export interface FrontPane {
   pane_id: number; slot: number | null; drawn: boolean; profile: string; ctx: string | null;
-  see: boolean; drive: false; active: string | null; tabs: FrontTab[];
+  see: boolean; drive: boolean; active: string | null; tabs: FrontTab[];
 }
 export interface BrowserFront {
   window: string; focus_seq: number; focused_slot: number | null; covered: boolean; panes: FrontPane[];
 }
 export interface BrowserReceipt {
   window: string; seq: number;
-  panes: {pane_id:number;see:boolean;drive:false;tabs:{id:string;view_id:string;generation:number}[]}[];
+  panes: {pane_id:number;see:boolean;drive:boolean;tabs:{id:string;view_id:string;generation:number}[]}[];
   tab_id?: string | null; ctx?: string | null; url?: string;
 }
 export type BrowserWrite = (path:string, method:"POST"|"PATCH", body:Record<string,unknown>, signal:AbortSignal) => Promise<BrowserReceipt>;
@@ -27,7 +27,7 @@ const cancelled = () => new Error("That Browser action was cancelled because the
 
 export function browserFront(ws: Workspace, drawn: readonly PaneNo[], covered: boolean,
   window: string, profile: string | null, focused: PaneNo | null, focusSeq: number,
-  ports: DaemonPorts): BrowserFront {
+  ports: DaemonPorts, privateDrive: ReadonlyMap<number, string> = new Map()): BrowserFront {
   const retained = new Set([...ws.order, ...ws.kept]);
   const panes: FrontPane[] = [];
   ws.panes.forEach((spec, index) => {
@@ -43,7 +43,8 @@ export function browserFront(ws: Workspace, drawn: readonly PaneNo[], covered: b
     });
     panes.push({pane_id:pid,slot:ws.order.includes(pid) ? ws.order.indexOf(pid)+1 : null,
       drawn:drawn.includes(pid),profile:selectedProfile,ctx:spec.browserCtx ?? null,
-      see:spec.see !== false,drive:false,active:spec.browser?.active || null,tabs});
+      see:spec.see !== false,drive:spec.see !== false && (selectedProfile === "private"
+        ? !!spec.browserCtx && privateDrive.get(pid) === spec.browserCtx : spec.drive !== false),active:spec.browser?.active || null,tabs});
   });
   const chosen = panes.find((p) => p.pane_id === focused && p.drawn);
   return {window,focus_seq:focusSeq,focused_slot:covered ? null : chosen?.slot ?? null,covered,panes};

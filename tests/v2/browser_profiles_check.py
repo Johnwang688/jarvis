@@ -267,6 +267,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         self.host._gate=SimpleNamespace(revoke_closed_loopback=Mock())
         a=SimpleNamespace(id="a",loopback_port=33333,pending_port=None)
         b=SimpleNamespace(id="b",loopback_port=33333,pending_port=None)
+        self.host._tabs.update(a=a,b=b)
         self.host._sync_ports(a);self.host._sync_ports(b)
         a.loopback_port=None;self.host._sync_ports(a)
         self.assertTrue(self.host.loopback_open(33333))
@@ -279,6 +280,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         entered=asyncio.Event()
         async def goto(*args,**kw):entered.set();await asyncio.Event().wait()
         tab=SimpleNamespace(id="a",loopback_port=None,pending_port=None,page=SimpleNamespace(goto=goto))
+        self.host._tabs[tab.id]=tab
         going=asyncio.create_task(self.host._goto(tab,"http://127.0.0.1:33333",owner=True))
         await entered.wait();self.assertTrue(self.host.loopback_open(33333))
         going.cancel()

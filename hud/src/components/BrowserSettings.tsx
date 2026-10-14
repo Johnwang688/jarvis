@@ -1,5 +1,7 @@
-import { useState, useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore, useEffect } from "react";
+import { browserSettings } from "../state/browserSettings";
 import { api } from "../api";
+import { BrowserSoundSetting } from "./BrowserSound";
 import { devservers } from "../state/devserverClient";
 import { noPointerFocus } from "../lib/talkkey";
 
@@ -8,7 +10,9 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
   useSyncExternalStore(devservers.subscribe, devservers.version);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const enabled = devservers.enabled;
-  return <div className="block">
+  const drive = useSyncExternalStore(browserSettings.subscribe,browserSettings.drive);
+  useEffect(()=>{void browserSettings.refresh();},[]);
+  return <><div className="block">
     <label className="browser-auto-setting">
       <input type="checkbox" data-testid="browser-auto-open" checked={enabled === true}
         disabled={blocked || busy || enabled === null}
@@ -29,7 +33,9 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
     <p className="muted">Local servers can open in a Browser pane while your work stays in place.</p>
     {enabled === null ? <p className="muted">Waiting for the daemon's setting.</p> : null}
     {error ? <p className="err" role="status">{error}</p> : null}
-    <label className="browser-auto-setting"><input type="checkbox" data-testid="browser-agents-drive" checked={false} disabled />Agents may drive</label>
-    <p className="muted">Agent driving is not enabled.</p>
-  </div>;
+    <label className="browser-auto-setting"><input type="checkbox" data-testid="browser-agents-drive" checked={drive===true} disabled={blocked||busy||drive===null} onMouseDown={noPointerFocus}
+      onChange={async e=>{if(!e.nativeEvent.isTrusted||blocked||busy||drive===null)return;const value=e.target.checked;setBusy(true);setError("");
+        try{await browserSettings.setDrive(value);}catch(e){setError(e instanceof Error?e.message:"The setting could not be saved.");}finally{setBusy(false);}}} />Agents may drive</label>
+    <p className="muted">Allows requested actions in visible Remote panes with their own driving permission.</p>
+  </div><BrowserSoundSetting blocked={blocked} /></>;
 }

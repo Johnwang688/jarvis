@@ -1071,7 +1071,8 @@ fail-closed. This shared model change alone does not enable Remote or a tool.
 
 `browser/panes.py` now owns live window/pane/tab mappings for the pending Remote
 UI and BR5. Exact owner-only front, permission and address routes are documented
-in `docs/hud-api.md`. All reports carry initial see state; drive is always false.
+in `docs/hud-api.md`. All reports carry explicit see and drive preferences. Effective Remote drive requires
+the global switch and see; Private additionally requires this pane/context owner opt-in.
 Resolved dev-server identities survive entry expiry and cannot be erased by a
 passive report. Only successful owner address submission clears source; failure
 and stale navigation preserve it. Cached host document identities invalidate
@@ -1189,7 +1190,7 @@ never substitute a fresh hidden Remote load for the owner's Direct pixels.
 
 ## Current owner Remote Browser UI (BR3b, 2026-10-13)
 
-The Browser strip retains Direct tabs and adds Remote tabs backed by the owner host. Public HTTP(S) address entry chooses Remote; loopback defaults to Direct, with explicit mode conversion. Profile is per pane; mode is per tab. Jarvis can see defaults on and persists an explicit off across navigation, profile changes and copies. Agents may drive stays disabled. Private is always Remote, with one new off-record context for each copied pane; Private URLs, titles and origin grants are omitted from stored workspace state. An ended Private context never replays a stored page.
+The Browser strip retains Direct tabs and adds Remote tabs backed by the owner host. Public HTTP(S) address entry chooses Remote; loopback defaults to Direct, with explicit mode conversion. Profile is per pane; mode is per tab. Jarvis can see defaults on and persists an explicit off across navigation, profile changes and copies. Agents may drive is an owner setting, default on; named panes retain an explicit driving opt-out. Private opt-in is runtime-only and bound to the exact pane/context. Private is always Remote, with one new off-record context for each copied pane; Private URLs, titles and origin grants are omitted from stored workspace state. An ended Private context never replays a stored page.
 
 One ordered publisher uses the shared live SSE window identity for front reports, permission changes and owner address transactions. Layout/Settings/visibility changes revoke a slow address immediately with a newer sequence; confirmed mutation receipts remain current when React catches up. Only successful explicit address entry clears source restrictions. Default profile discovery preserves existing handles, while explicit profile conversion reserves allocation ahead of lazy restore. Restored persistent pages use the non-owner restore route; existing handles reattach without navigation. Failed host cleanup remains visible with an owner retry action.
 
@@ -1223,15 +1224,24 @@ probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels
 synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
 “Open this in Remote to annotate” and converts only on that second owner gesture.
 
+## BR10 sound helper groundwork (historical, superseded; 2026-10-13)
 
-## BR9b dormant Browser action backend (2026-10-13)
+The protected BrowserSettings schema now recognizes `sound`, a strict owner boolean defaulting OFF. `audio.py` contains the isolated WSLg launch composition and bounded owned-Pulse-stream helper: OFF keeps the original argument order and strips ambient PULSE_SERVER, ON removes only the mute flag and uses the fixed WSLg socket after capability checks. Font environment composition is retained by the caller. Process ownership pins Chrome's profile, executable, UID, start time and ancestry; mute uses fresh stream/process checks and fixed reasons, never global volume or unmute. Pulse index attribution remains best effort between its last check and command.
+
+A mute attempt taints that instance before command dispatch, including timeout or a late completion after ON. Only a fresh ON instance clears the taint. A killed utility whose exit has not settled keeps the instance pending until actual cleanup; the bounded caller returning does not release that reservation. Pure helper tests exercise these races with synthetic processes/Pulse replies and disposable utility children. This is implementation groundwork: Chrome launch/restart and HUD wiring are separate pending changes, and this paragraph is not a production sound or physical audibility receipt.
+The pure `activity.py` helper adds exact-instance activity and restart capabilities. Parent and child cleanup holds are independent; canceled waiters cannot erase actual coroutine work. Settings changes supersede only uncommitted replacements, current page holds invalidate a pending restart, and stale/forged cleanup cannot free another token. Its methods do no IO or permission work; broker-to-activity is the planned commit lock order. Twelve pure tests plus eight in-memory mutants verify admission/cleanup races. Host, broker and BR9b wiring still require the integrated implementation and independent review; helper tests do not establish that every production operation is covered.
+The independent HUD portion adds one window sound-status store, shared by the Browser Settings switch and Direct/Remote speaker buttons. The speaker opens Browser settings without sending page input or changing the preference; its Direct label explicitly leaves Direct audio unchanged. Desired and per-instance applied modes remain distinct, with fixed pending, Private, unavailable and retry wording. Approval/annotation blocking, Settings focus restoration, mounted workspace lifetime and source/see retention use the existing seams. Status is read from `/status.browser`; only an explicit enabled switch writes `sound`. Ambiguous read/save results disable new mutations until an authoritative retry/reconnect read. This UI contract still requires the pending host sound status/restart integration; it is not a claim of physical audio support.
+
+
+## BR9b Browser action backend (2026-10-13)
 
 `hud_browser_act` is explicit-only and serial in the fast path, with typed click,
 type, press, scroll, select, upload, navigate/back/forward operations. Production
-`_shipping_enabled()` unconditionally returns false; no environment flag, owner
-route or profile setting enables it. The checkpoint's global OFF decision wins.
-This is implemented infrastructure exercised with a fixture-only policy injection,
-not evidence that production driving, BR9c UI or BR9d live model drills work.
+`_shipping_enabled(daemon)` reads only BrowserSettings.agents_may_drive, per the
+owner's 2026-10-13 DR-0 decision. Missing file/key defaults on; existing bad or
+unreadable state fails closed. An unrelated repair never silently enables it.
+The owner-only settings PATCH changes it; no alternate environment/CLI gate exists.
+Free fixture coverage is separate from real owner interaction and paid model drills.
 
 A private turn scope binds the actual fast caller, original owner words, thread,
 turn, project and strict flag. Only a successful presented Remote look publishes
@@ -1326,10 +1336,43 @@ Transport now passes constant functions with bounded data arguments, decodes raw
 Blob ownership, and composes a byte-backed File. Neither production nor the
 accepted fixture forces page-global collection to conceal a previous peak.
 
+### BR10 exact-instance activity wiring
+
+The host now admits owner page operations and Remote capture/prepare/execute on their actual event-loop coroutine. A driver parent token spans preparation, review/cards, execution, download review and final notice. An unanswered owner CDP send keeps a separate child token after the short delivery waiter returns. Shutdown does not cancel already-running cleanup a second time. Owner-attention tokens bind the current tab object and instance generation; pending dialogs/choosers, popup adoption and download cleanup cannot be mistaken for idle work. The narrow `page_hold`/`release_page_hold` seam is available for later authentication challenges; no authentication feature is implemented here. Late old-tab callbacks cannot mutate a same-ID replacement's port lease, metadata, stream or download attribution. Only in-process pane metadata includes the instance generation.
+
+`PendingApprovals.run_if_idle` provides the approved broker-lock → activity-lock commitment ordering. The callback may only validate/mark an in-memory token, never perform IO or service callbacks. Four real-broker ordering tests include a card already inserted while its announcement is held. The sound coordinator is installed; its guarded replacement commitment uses this seam (current owner-controls note below). Pure integrated checks and six isolated actual-Chrome lifecycle probes passed; no audio was played or routed by those probes.
+### BR10 refused-attention cleanup
+
+The activity cap cannot leave a newly refused dialog or download untracked. A reserved overflow hold (one per exact instance, at most nine) covers a bounded batch of dismiss/cancel/delete cleanup. A failed, timed-out or over-cap batch retires only its exact original instance, checked again after the profile lock. Cancellation retains the hold through the child coroutine's actual finally. An already committed restart owns old-context teardown and admits no second cleanup batch. These paths never accept a dialog, release a download, or change a permission. Seven focused tests cover cap refusal, a newer preference during cleanup, cancellation, stale replacement, queue capacity, pre-start shutdown and committed ownership; four lifecycle mutants are assertion-detected.
+
+## Browser sound owner controls — October 13 reconciliation
+
+This current implementation note supersedes the earlier BR-10 helper behavior that persisted playback intent and opened Settings from the speaker. The merged October 13 sound plan selects a per-profile Chrome instance control. Archived decision payloads above remain unchanged.
+
+The protected sound setting is permission to use the owner speaker, not a playback preference. A missing file/key allows it by default. An existing malformed/unreadable setting fails closed, and an unrelated repair preserves sound OFF unless the owner explicitly changes it. Every ordinary daemon/instance start launches muted without a Pulse route, even if a prior instance had an in-memory grant. Only an explicit owner gesture can request profile sound; the exact committed replacement token and generation can transfer that request into its replacement. Master OFF clears all pending grants, and later master ON does not revive them.
+
+The trusted Remote speaker toggles that memory-only request directly, without opening Settings or forwarding focus/input to the page. Its label discloses that all Remote tabs in the profile share sound, including new tabs opened into the same running instance. Changing sites cannot independently mute a tab with this route. Closing the last profile tab or instance, forgetting/deleting the profile, an owner profile change, and daemon restart clear the grant. A profile change first sends the validated owner OFF action against an exact captured old-pane Remote handle, trying another handle if the first is absent; only all known absent handles (404) permit proceeding without that action. Held/rejected requests remain blocked.
+
+Already playing hidden/covered tabs keep playing and retain a readable profile indicator. Card/annotation, hidden/offline, unknown-state, and busy controls cannot toggle sound. Private ON is refused while Private sessions exist; Private URLs are never replayed to change launch mode. A fresh Private instance remains quiet. Direct pages retain their own page-click policy and receive no iframe autoplay delegation.
+
+Native OFF uses only validated owned Pulse streams and never global volume or another application's stream. It is best effort while an instance is busy; status does not claim immediate physical silence. Native operations settle before cleanup/replacement, and a tainted instance cannot be reused for ON. Replacement commitment uses the broker/activity boundary and exact instance generation. Restoration keeps immutable URL/lease admission, source/see state, and page identity invalidation; it creates no fresh local-network permission. Unsolicited restoration pages and cleanup tasks are bounded by the tab cap even across a waiting new-page allocation. Overflow retires the replacement for context teardown. After OFF or last-tab close, new allocations/adoptions into an audible launch mode are refused until structural mute/replacement completes; muting existing streams alone cannot admit new pages. No replacement stream ticket, socket attach, or pane identity is usable until controlled restoration navigation and the complete replacement finish. Retry is an explicit owner action and obeys the hold.
+
+The existing isolated M3 probe observed headless Chrome routing without Xvfb: its synthetic WAV advanced from 0.061902 to 0.821803 seconds, and one owned Pulse stream was float32le, mono, 44100 Hz, uncorked and unmuted. Muting that exact owned stream succeeded and read back muted. This establishes routing/control evidence; physical speaker audibility and echo behavior have not been confirmed by the owner. The implementation uses the accepted per-profile relaunch route, with no unproven claim that a subscription race is leak-free.
+
+Voice-queue ducking remains pending its consuming voice package. There is no new HTTP/App speaking hook or claimed ducking behavior in this release.
+
+Early verification before independent release review: 63 focused Python checks, a separate 49-check owner-route/dev-server pass, 54 focused HUD unit checks, 19 actual Chromium checks against an isolated mock HUD, and a HUD production build passed. Nine isolated owner-grant/admission guard mutations each produced a failed assertion. The review follow-ups cover bounded allocation floods, partial-restoration admission, owner close, OFF during an awaited allocation, and exact-handle profile fallback. These receipts verify control behavior and guarded replacement, not installation or physical playback.
+
+
+Final implementation receipts for installed [PR #137](https://github.com/Johnwang688/jarvis/pull/137): runtime freeze 502f62b62c75a125d572228d88e22c61effe1531 passed the production build, 119 HUD unit files / 1,901 tests, and the complete 3,217-check mock HUD sweep (948.64 seconds). The immutable backend sweep completed 124/125 canonical suites in 864.48 seconds. Its sole failure was a stale Browser routes fixture: two unregistered synthetic pages and the old single-event bus allowlist. Independently reviewed fixture-only 3655a15e1a33a0df43dbd82c8c9419bc672d3dc2 then passed the entire 36-test routes suite in 42.504 seconds. The original failure receipt remains preserved; no production guard or privacy canary was weakened. Together these receipts cover all 125 canonical suites, including real Chrome capture/drive/view and synthetic local TTS using existing public model assets.
+
+Speaker fix 5f5219f4783a0137658fb1e1299796e0e7b6140d separately passed 32 real mouse/touch/keyboard/lifecycle/375px checks and two isolated built-bundle assertion mutants. A dismissed options gesture sends no sound or page-input request; the next deliberate gesture works. A pending press cannot survive cards, options, instance replacement or production pagehide/pageshow disconnect/reconnect. This is lifecycle coverage, not physical network-outage measurement. Root and independent UI reviews passed the exact speaker and combined driving integration. Subsequent main integration changed only documentation and the reviewed routes fixture, with jarvis/ and hud/src/ byte-identical to the tested freeze. PR #137 merged at `a857c1f19c8b0cdab393e90a7e039ea7ea81be4a` and is installed/served as build `20261014T004949720546Z-7ff98f434711`. Normal capped guarded rebuild/restart exited with code 0; exact source/build and all three healthy providers were verified. Physical audio/echo remains unmeasured; V15 coordination is still pending.
 
 ## BR9c owner driving presentation (current)
 
-Production agent driving remains OFF, with both Settings and pane switches disabled.
+Production driving uses live Settings and pane switches. Global off preserves
+named pane preference; see-off clears it. Private permission requires an explicit
+owner mutation and expires with the pane/context or owner-window lifetime.
 The ticketed Remote socket alone supplies the memory-only driver banner and last
 20 actions. Displayed chat slots are resolved from the current workspace; hidden
 chats use fixed wording. Reattachment needs a fresh paused/list replay. Successful
@@ -1357,6 +1400,20 @@ The named always-ask layer uses a distinct private delegation card with exactly
 permits only reaching subsequent Browser checks, never authorizes a page action.
 It shares the same deadline, identity and one-shot no-Always consent lifecycle;
 no page identity, target, command or preview is invented for that card.
+
+## Driving release switch semantics (2026-10-13)
+
+DR-0 authorizes the production enable seam and two switches only. All classifier
+floors, private cards, five-second quiet rule, refs, desk/depth checks, action and
+hour budgets, ownership and between-event guards retain their previous behavior.
+Named HUD panes explicitly report their default-on preference and persist only
+an opt-out. Private consent is never serialized: only the owner permission PATCH
+grants it, bound to window, pane and live context; copied/forged front reports
+cannot grant it. See-off clears preference; navigation does not enable it.
+The fast prompt is re-narrowed from its pristine composition whenever the desk
+toolset changes, preserving the caller suffix while off-desk turns omit action
+guidance. Chrome preview capability remains unavailable. Paid classifier accuracy,
+real owner switch interaction and installation are separate acceptance evidence.
 
 
 ## Compact owner controls and automatic addresses (2026-10-13)

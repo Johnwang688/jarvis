@@ -1,12 +1,13 @@
 // Owner-only Browser coordination. One publisher orders discovery, permissions
 // and explicit URL entry; passive location messages never reset provenance.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ApiError, browserApi } from "../api";
 import type { LayoutControl } from "../components/Layout";
 import { browserFront, BrowserPublisher, type BrowserReceipt } from "../lib/browserowner";
 import { isLoopbackHost, judgeBrowserUrl, type DaemonPorts } from "../lib/browser";
 import { cleanTitle } from "../lib/remote";
 import { browserTabId, type PaneNo } from "../lib/workspace";
+import { browserSettings } from "./browserSettings";
 import { WINDOW_ID } from "../lib/windowId";
 import { useDaemonPorts } from "./daemonPorts";
 
@@ -35,6 +36,9 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   const [hidden,setHidden]=useState(document.hidden);
   covered=covered||hidden;
   useEffect(()=>{const changed=()=>setHidden(document.hidden);document.addEventListener("visibilitychange",changed);return()=>document.removeEventListener("visibilitychange",changed);},[]);
+  const globalDrive = useSyncExternalStore(browserSettings.subscribe, browserSettings.drive);
+  const privateDrive = useRef(new Map<number,string>());
+  const [driveRevision,setDriveRevision] = useState(0);
   const [profiles,setProfiles]=useState<BrowserProfile[]>([]);
   const [runtime,setRuntime]=useState<Record<string,BrowserRuntime>>({});
   const [error,setError]=useState("");
@@ -71,7 +75,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   const publish=useCallback(()=>{
     const c=now.current;
     if (!WINDOW_ID || c.status==="pending") return;
-    const front=browserFront(c.view.ws,c.view.fit.panes.filter(p=>!coveredPanes.current.has(p)),c.covered,WINDOW_ID,c.profiles[0]?.id??null,c.focus.pane,c.focus.seq,c.ports);
+    const front=browserFront(c.view.ws,c.view.fit.panes.filter(p=>!coveredPanes.current.has(p)),c.covered,WINDOW_ID,c.profiles[0]?.id??null,c.focus.pane,c.focus.seq,c.ports,privateDrive.current);
     const encoded=JSON.stringify(front);
     if(encoded!==frontCode.current){receipts.current=null;frontCode.current=encoded;}
     publisher.update(front);
@@ -104,8 +108,8 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     } catch(e) {if(mounted.current && seq===refreshNumber.current)setError(message(e));}
   },[]);
   const onEvent=useCallback((event:{kind:string;data?:any})=>{
-    if(event.kind==="_connected") { now.current.online=true; setOnline(true); publisher.connect(true); void refresh(); }
-    if(event.kind==="_disconnected") { now.current.online=false; epoch.current++; setOnline(false); publisher.connect(false); receipts.current=null; }
+    if(event.kind==="_connected") { now.current.online=true; setOnline(true); publisher.connect(true); void refresh(); void browserSettings.refresh(); }
+    if(event.kind==="_disconnected") { now.current.online=false; epoch.current++; setOnline(false); publisher.connect(false); receipts.current=null; privateDrive.current.clear(); setDriveRevision(v=>v+1); browserSettings.apply(null); }
     if(event.kind==="browser_viewed") {
       const data=event.data;
       if(!data || typeof data.tab_id!=="string" || typeof data.at!=="string"||!Number.isFinite(Date.parse(data.at)) || typeof data.refused!=="boolean")return;
@@ -117,6 +121,12 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
       }
     }
     if(event.kind==="browser_profiles_changed") void refresh();
+    if(event.kind==="browser_sound_changed") {
+      // Passive ordered rebind preserves source/see/focus leases. Existing
+      // capture identities become unavailable until the new receipt arrives.
+      receipts.current=null;
+      publisher.heartbeat();
+    }
   },[publisher,refresh,tab,patch]);
   useLayoutEffect(()=>{
     // Pin the initial default once. Deleting it later must show a missing
@@ -127,8 +137,15 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
       if(spec.view==="browser"&&!spec.browserProfile)view.setBrowserProfile(id,first,true);
     }
   },[profiles,view.ws,view.setBrowserProfile]);
-  useLayoutEffect(()=>{ publish(); },[view.ws,view.fit.panes,covered,focus,profiles,ports,status,publish]);
-  useEffect(()=>{ const timer=setInterval(()=>{if(now.current.online) {publisher.heartbeat(); void refresh();}},20000); return()=>clearInterval(timer); },[publisher,refresh]);
+  useLayoutEffect(()=>{
+    for (const [pane,ctx] of privateDrive.current) {
+      const spec=view.ws.panes[pane-1];
+      if (spec.view!=="browser" || ![...view.ws.order,...view.ws.kept].includes(pane as PaneNo) || spec.browserProfile!=="private" || spec.browserCtx!==ctx || spec.see===false || spec.browserPrivateEnded)
+        privateDrive.current.delete(pane);
+    }
+    publish();
+  },[view.ws,view.fit.panes,covered,focus,profiles,ports,status,publish,driveRevision]);
+  useEffect(()=>{ const timer=setInterval(()=>{if(now.current.online) {publisher.heartbeat(); void refresh(); void browserSettings.refresh();}},20000); return()=>clearInterval(timer); },[publisher,refresh]);
   useEffect(()=>{
     mounted.current=true;
     return()=>{mounted.current=false;epoch.current++;refreshNumber.current++;publisher.dispose();work.current.clear();};
@@ -197,14 +214,50 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     if(!allowed(pane))return;
     publish();
     await publisher.mutate(`/browser/panes/${pane}`,"PATCH",{see:value},(_,front)=>({...front,panes:front.panes.map(p=>p.pane_id===pane?{...p,see:value,drive:false}:p)}));
+    if (!value) {privateDrive.current.delete(pane);setDriveRevision(v=>v+1);}
     now.current.view.setBrowserSee(pane,value);
   },[allowed,publish,publisher]);
+  const driveReady=useCallback((pane:PaneNo)=>{
+    const spec=now.current.view.ws.panes[pane-1];
+    return selectedProfile(pane)!=="private" || (!!spec.browserCtx && !spec.browserPrivateEnded);
+  },[selectedProfile]);
+  const drivePreference=useCallback((pane:PaneNo)=>{
+    const spec=now.current.view.ws.panes[pane-1];
+    return spec.see!==false && (selectedProfile(pane)==="private"
+      ? !!spec.browserCtx && privateDrive.current.get(pane)===spec.browserCtx : spec.drive!==false);
+  },[selectedProfile]);
+  const drive=useCallback(async(pane:PaneNo,value:boolean)=>{
+    if (!allowed(pane) || browserSettings.drive()!==true) return;
+    const spec=now.current.view.ws.panes[pane-1];
+    if (value && spec.see===false) return;
+    const profile=selectedProfile(pane),ctx=spec.browserCtx;
+    if (profile==="private" && (!ctx || spec.browserPrivateEnded)) return;
+    publish();
+    await publisher.mutate(`/browser/panes/${pane}`,"PATCH",{drive:value},(_,front)=>({...front,panes:front.panes.map(p=>p.pane_id===pane?{...p,drive:value}:p)}));
+    const current=now.current.view.ws.panes[pane-1];
+    if (!allowed(pane) || current!==spec || selectedProfile(pane)!==profile || current.browserCtx!==ctx) {publish();return;}
+    if (profile==="private") {
+      if(value)privateDrive.current.set(pane,ctx!);else privateDrive.current.delete(pane);
+      setDriveRevision(v=>v+1);
+    } else now.current.view.setBrowserDrive(pane,value);
+  },[allowed,publish,publisher,selectedProfile]);
   const profile=useCallback(async(pane:PaneNo,value:string)=>{
     if(!allowed(pane))return;
-    const before=now.current.view.ws.panes[pane-1].browser?.active;
+    const oldPane=now.current.view.ws.panes[pane-1];
+    const before=oldPane.browser?.active;
+    const oldRemotes=[...new Set(oldPane.browser?.tabs.map(t=>t.remoteTabId).filter((id):id is string=>!!id)??[])];
+    if(selectedProfile(pane)!==value) {
+      for(const oldRemote of oldRemotes) {
+        let muted=false;
+        try {await browserApi.write("/tabs/"+oldRemote+"/sound",{on:false});muted=true;}
+        catch(e) {if(!(e instanceof ApiError)||e.status!==404)throw e;}
+        if(!allowed(pane)||now.current.view.ws.panes[pane-1]!==oldPane)return;
+        if(muted)break;
+      }
+    }
     const key=before?tabKey(pane,before):null;
     if(key)transitions.current.add(key);
-    try {now.current.view.setBrowserProfile(pane,value);await frame();}
+    try {privateDrive.current.delete(pane);setDriveRevision(v=>v+1);now.current.view.setBrowserProfile(pane,value);await frame();}
     finally {if(key)transitions.current.delete(key);}
     const active=now.current.view.ws.panes[pane-1].browser?.active;
     if(active&&allowed(pane)&&selectedProfile(pane)===value)await ensure(pane,active,true);
@@ -266,6 +319,6 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     const binding=receipts.current?.panes.find(p=>p.pane_id===pane)?.tabs.find(t=>t.id===id);
     return binding?{window:WINDOW_ID,pane_id:pane,local_tab_id:id,view_id:binding.view_id}:null;
   },[allowed]);
-  return {profiles,runtime,error,cleanupError,retryCleanup,online,covered,cover,uncover,captureIdentity,refresh,onEvent,ensure,submit,see,profile,convert,signin,location,history,adopt,focus:focusPane,selectedProfile};
+  return {profiles,runtime,error,cleanupError,retryCleanup,online,covered,cover,uncover,captureIdentity,refresh,onEvent,ensure,submit,see,drive,drivePreference,driveReady,globalDrive,profile,convert,signin,location,history,adopt,focus:focusPane,selectedProfile};
 }
 export type BrowserControl=ReturnType<typeof useBrowser>;

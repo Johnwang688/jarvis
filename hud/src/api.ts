@@ -84,6 +84,7 @@ export const api = {
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/claim", json(body)),
   actDevServer: (id: string, action: "renew" | "placed" | "dismiss", window: string) =>
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/" + action, json({ window })),
+  setBrowserSound: (sound: boolean) => req<unknown>("/browser/settings", patch({ sound })),
   setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
 
   captureBrowser: (tab: string, identity: CaptureIdentity, whole: boolean) => req<unknown>(
@@ -378,10 +379,18 @@ export const api = {
     const body = await res.json();
     return body.text || "";
   },
-  async say(text: string): Promise<Blob> {
-    const res = await fetch("/say", json({ text }));
+  /**
+   * One chunk of speech as audio bytes (`POST /say`). Read-aloud asks
+   * `localOnly`, so the daemon never sends the text to a cloud voice; a local
+   * failure is a 503 and the chunk is skipped. An unknown `voice` is a 400.
+   */
+  async say(text: string, opts: { voice?: string | null; localOnly?: boolean; signal?: AbortSignal } = {}): Promise<ArrayBuffer> {
+    const body: Record<string, unknown> = { text };
+    if (opts.voice) body.voice = opts.voice;
+    if (opts.localOnly) body.local_only = true;
+    const res = await fetch("/say", { ...json(body), signal: opts.signal });
     if (!res.ok) throw new ApiError(res.status, `say ${res.status}`);
-    return res.blob();
+    return res.arrayBuffer();
   },
 };
 

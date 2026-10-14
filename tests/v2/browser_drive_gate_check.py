@@ -57,11 +57,65 @@ class Gate(unittest.TestCase):
         self.judge.assert_not_called();self.approvals.ask.assert_not_called()
         return result
 
+    def test_host_activity_spans_prepare_review_execute_and_final_notice(self):
+        from jarvis.v2.browser.activity import BrowserActivity
+        gate=BrowserActivity();gate.opened(self.snap.profile,1);gate.desired(1)
+        self.state['owner_quiet_s']=5.0
+        self.host.begin_activity.side_effect=lambda *args:gate.enter(self.snap.profile,1)
+        self.host.end_activity.side_effect=gate.leave
+        stages=[]
+        def current(stage,value):
+            self.assertEqual(gate.counts(self.snap.profile)[0],1)
+            self.assertIsNone(gate.try_restart(self.snap.profile,1,1))
+            stages.append(stage);return value
+        self.host.prepare_action.side_effect=lambda *args,**kwargs:current('prepare',self.prepared)
+        self.judge.side_effect=lambda *args:current('review',A.ActVerdict('allow',R.ORDINARY,'fixed','model'))
+        self.host.execute_action.side_effect=lambda *args,**kwargs:current('execute',D.ActResult('acted','Done'))
+        self.host.wait_action_downloads.side_effect=lambda *args:current('downloads',None)
+        self.host.drive_finished.side_effect=lambda *args:current('finished',None)
+        self.assertEqual(self.action('click').outcome,'acted')
+        self.assertEqual(stages,['prepare','review','prepare','execute','downloads','finished'])
+        self.assertEqual(gate.counts(self.snap.profile)[0],0)
+        self.host.begin_activity.assert_called_once_with(self.snap.tab_id,self.snap.page_identity)
+        self.host.end_activity.assert_called_once()
+
+    def test_failed_driver_reservation_releases_parent_and_runs_no_page_io(self):
+        from jarvis.v2.browser.activity import BrowserActivity
+        from jarvis.v2.browser.drive_state import DriveStateRefused
+        gate=BrowserActivity();gate.opened(self.snap.profile,1);gate.desired(1)
+        self.state['owner_quiet_s']=5.0
+        self.host.begin_activity.side_effect=lambda *args:gate.enter(self.snap.profile,1)
+        self.host.end_activity.side_effect=gate.leave
+        with patch.object(self.service.state,'reserve',side_effect=DriveStateRefused('synthetic busy')):
+            self.refused_without_io()
+        self.assertEqual(gate.counts(self.snap.profile)[0],0)
+        self.host.end_activity.assert_called_once()
     def test_shipping_off_ignores_environment_and_has_zero_io(self):
         service=D.BrowserDrive(Mock())
+        service.daemon.browser_settings.value.return_value=False
         with patch.dict("os.environ",{"JARVIS_AGENTS_MAY_DRIVE":"1","JARVIS_BROWSER_DRIVE":"true"}):
             self.assertEqual(service.act(D.Action("type",target="e1",text="x")).text,"Refused: "+D.OFF)
-        service.daemon.assert_not_called();self.assertEqual(service.daemon.mock_calls,[])
+        service.daemon.browser_settings.value.assert_called_once_with("agents_may_drive")
+        self.assertEqual(service.daemon.mock_calls,[unittest.mock.call.browser_settings.value("agents_may_drive")])
+
+    def test_real_switch_rechecks_before_each_event_and_blocks_refs(self):
+        from jarvis.v2.browser.settings import BrowserSettings
+        self.daemon.browser_settings=BrowserSettings()
+        self.service=D.BrowserDrive(self.daemon)
+        self.service.state.publish(self.turn,self.snap,"a"*32,["e1"])
+        observed=[]
+        def execute(snapshot,action,prepared,identity,forms,guard,**kwargs):
+            guard();observed.append("first event")
+            self.daemon.browser_settings.update(agents_may_drive=False)
+            with self.assertRaises(D.LookRefused):guard()
+            return D.ActResult("stopped","Stopped after 32 characters")
+        self.host.execute_action.side_effect=execute
+        result=self.action(text="x"*96)
+        self.assertEqual(result.outcome,"stopped");self.assertEqual(observed,["first event"])
+        self.assertIn("32 characters",result.text)
+        with patch.object(self.service.state,"publish") as publish:
+            self.service.publish_look(self.snap,{"serial":"b"*32,"refs":[{"ref":"e1"}]})
+            publish.assert_not_called()
 
     def test_strict_desk_depth_caller_and_live_turn_fail_before_page(self):
         for change in ("strict","desk","depth","caller","stop"):

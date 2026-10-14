@@ -1648,11 +1648,14 @@ class Backend(unittest.TestCase):
             body = self.request("POST", "/stt", raw=b"RIFFaudio",
                                 headers={"Content-Type": "audio/wav"}, status=502)
             self.assertEqual(body["error"], "speech-to-text failed (LLMError)")
+        listed = [{"name": "test", "backend": "fake", "kind": "builtin"}]
         for audio, mime in ((b"RIFFwav", "audio/wav"), (b"MP3data", "audio/mpeg")):
-            with patch.object(voice, "tts", return_value=audio) as tts:
+            with patch.object(voice, "tts", return_value=audio) as tts, \
+                    patch.object(voice, "catalog", return_value=listed):
                 self.assertEqual(self.request("POST", "/say", {"text": "x" * 2500, "voice": "test"}), audio)
                 self.assertEqual(self.headers["Content-Type"], mime)
                 self.assertEqual(len(tts.call_args.args[0]), 2000)
+                self.assertTrue(self.headers["X-Speech-Ms"].isdigit())
         self.request("POST", "/say", {}, status=400)
         av = self.request("GET", "/avatars")
         self.assertIn("avatars", av)
@@ -1687,6 +1690,59 @@ class Backend(unittest.TestCase):
         self.assertNotEqual(models.selected(), "test/model")
         kinds = {e["kind"] for e in self.events_all()}
         self.assertTrue({"voice", "avatar", "model", "mute"} <= kinds)
+
+    def test_say_refuses_unknown_voices_and_local_only_never_reaches_the_cloud(self):
+        """V6: `/say` is the read-aloud synthesis route."""
+        from jarvis import llm
+        listed = [{"name": "bm_test", "backend": "kokoro", "kind": "builtin"}]
+
+        def cloud(*a, **kw):
+            raise AssertionError("llm.speech was called")
+
+        with patch.object(voice, "catalog", return_value=listed), \
+                patch.object(llm, "speech", side_effect=cloud) as speech, \
+                patch.object(voice, "_local_tts", return_value=b"RIFFlocal") as local:
+            # An unknown name is refused before any backend sees it.
+            self.request("POST", "/say", {"text": "hi", "voice": "nope"}, status=400)
+            self.request("POST", "/say", {"text": "hi", "voice": 7}, status=400)
+            self.request("POST", "/say", {"text": "hi", "local_only": "yes"}, status=400)
+            self.request("POST", "/say", {"text": "hi", "bogus": 1}, status=400)
+            local.assert_not_called()
+            speech.assert_not_called()
+            # A listed voice, local only: synthesized here.
+            self.assertEqual(self.request("POST", "/say", {"text": "hi", "voice": "bm_test", "local_only": True}),
+                             b"RIFFlocal")
+            self.assertEqual(local.call_args.args[1], "bm_test")
+            # The local backend failing: 503, and the cloud is still untouched.
+            local.side_effect = RuntimeError("kokoro is missing")
+            body = self.request("POST", "/say", {"text": "hi", "voice": "bm_test", "local_only": True}, status=503)
+            self.assertNotIn("kokoro", body["error"])
+            speech.assert_not_called()
+            # A cloud-configured backend is refused the same way, not used.
+            with patch.object(config, "TTS_BACKEND", "cloud"):
+                self.request("POST", "/say", {"text": "hi", "local_only": True}, status=503)
+            speech.assert_not_called()
+            # Without local_only the old fallback chain is unchanged.
+            speech.side_effect = None
+            speech.return_value = b"MP3cloud"
+            self.assertEqual(self.request("POST", "/say", {"text": "hi", "voice": "bm_test"}), b"MP3cloud")
+            speech.assert_called_once()
+
+    def test_mic_off_no_longer_mutes_voice_out(self):
+        """V6: the HUD stops posting `/mute` for the mic's OFF; `voice_out` reports the flag."""
+        voicectl.set_muted(False)
+        self.assertTrue(self.request("GET", "/voices")["voice_out"])
+        self.request("POST", "/mute", {"muted": True})
+        try:
+            self.assertFalse(self.request("GET", "/voices")["voice_out"])
+        finally:
+            voicectl.set_muted(False)
+        hud = Path(__file__).resolve().parents[2] / "hud" / "src"
+        # The mic's mode reaches `/mute` only through the policy, which says no.
+        self.assertIn("export const MIC_OFF_MUTES_SPEECH = false;", (hud / "lib/speech/policy.ts").read_text())
+        app = (hud / "App.tsx").read_text()
+        self.assertIn("onMicModeChange(isMuted(mode),", app)
+        self.assertEqual(app.count("api.mute("), 1)
 
     def test_picker_body_keys_are_the_contract(self):
         """A6: the HUD sent {id}, {name} and {mute}; the daemon read model,

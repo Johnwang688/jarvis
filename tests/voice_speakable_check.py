@@ -76,6 +76,9 @@ def main() -> int:
     assert voice.speakable(mixed) == "Here it is:\n\nThat is all.", voice.speakable(mixed)
     assert voice.speakable("```\nonly code\n```") == ""
     assert voice.speakable("~~~\nonly code\n~~~") == ""
+    # A fence nested under a list item is indented four or more spaces.
+    nested = "1. Do this:\n    ```bash\n    export KEY=sk-abcdef\n    ```\nDone."
+    assert voice.speakable(nested) == "Do this:\nDone.", voice.speakable(nested)
     print("ok  speakable: code fences dropped; a fence-only reply speaks nothing")
 
     # tts() applies it itself: the strip is a property of speaking, not of
