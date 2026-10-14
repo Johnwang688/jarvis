@@ -1488,7 +1488,7 @@ class BrowserHost:
         if tab.stream is not None:
             # The new document cannot receive a queued old-document release,
             # and the owner gate must not retain old depressed bookkeeping.
-            tab.stream.hold_through(notify=False)
+            tab.stream.discard_document_input()
             tab.pressed.clear()
             tab.keys_pressed.clear()
             tab.stream.send({"t": "owner_reset"})

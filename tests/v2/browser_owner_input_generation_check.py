@@ -20,12 +20,18 @@ class DocumentInput(unittest.TestCase):
    host._tabs[tab.id]=tab
    tab.keys_pressed["Space"]=stream.hold_count;tab.pressed["left"]=stream.hold_count
    stream.enqueue(sock,Msg("key","Input.dispatchKeyEvent",{"type":"keyUp","code":"Space","key":" "}))
+   taken=stream.take();self.assertIsNotNone(taken)
+   self.assertTrue(stream.deliverable(taken[0],taken[1]))
    stream.enqueue(sock,Msg("mouse","Input.dispatchMouseEvent",{"type":"mouseReleased","button":"left","buttons":0,"x":10,"y":20}))
    before=stream.hold_count
    host._landed(tab,NS(parent_frame=None,url="about:blank"))
    self.assertEqual(tab.document_generation,4)
    self.assertFalse(tab.keys_pressed);self.assertFalse(tab.pressed)
-   self.assertGreater(stream.hold_count,before);self.assertIsNone(stream.take())
+   self.assertEqual(stream.hold_count,before,"document retirement is not an approval hold")
+   self.assertIsNone(stream.take(),"queued old-document mouse release must be dropped")
+   self.assertFalse(stream.deliverable(taken[0],taken[1]),"already-taken old-document key release must be dropped")
+   stream.enqueue(sock,Msg("key","Input.dispatchKeyEvent",{"type":"rawKeyDown","code":"KeyA","key":"a"}))
+   fresh=stream.take();self.assertIsNotNone(fresh);self.assertTrue(stream.deliverable(fresh[0],fresh[1]))
    self.assertIn({"t":"owner_reset"},sent)
    self.assertIsNone(tab.input_task,"document retirement must send no synthetic input")
  def test_subframe_and_retired_callbacks_do_not_clear_current_input(self):

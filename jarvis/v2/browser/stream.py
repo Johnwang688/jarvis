@@ -644,6 +644,16 @@ class TabStream:
             return True
         return False
 
+    def discard_document_input(self) -> None:
+        """Retire received old-document input without recording an approval.
+
+        An expected navigation may finish its agent action on the fresh
+        document. Its queue cutoff must not look like an intervening card.
+        """
+        with self._lock:
+            self._drop_through = self._seq
+            self._queue.clear()
+
     def hold_through(self, *, notify: bool = True) -> None:
         """A hold was seen: everything received so far is dropped, now and
         whenever it would have been delivered — never replayed after the card."""
