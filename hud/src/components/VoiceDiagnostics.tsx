@@ -27,6 +27,10 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
         : `energy fallback — ${value.detectorNote || "not started"}`}
       {value.detectorPhase === "failed" && onRetryDetector ? <> <button type="button" data-testid="voice-detector-retry" onClick={onRetryDetector}>Try the Silero VAD again</button></> : null}
     </p>
+    {value.detectorLog.length > 0 ? <details data-testid="voice-detector-log">
+      <summary>Detector changes ({value.detectorLog.length})</summary>
+      <ol>{value.detectorLog.map((c, i) => <li key={i}>{(c.at / 1000).toFixed(1)} s after the window opened · {c.detector === "silero" ? "Silero" : "energy"} · {c.phase} · {c.note || "—"}</li>)}</ol>
+    </details> : null}
     <p data-testid="voice-end-pause">Message ends after {(meter.pause / 1000).toFixed(1)} s of quiet · segments are cut at {(SEGMENT_GAP_MS / 1000).toFixed(1)} s gaps · speech within {(CONTINUE_MS / 1000).toFixed(0)} s of a message continues it</p>
     <p data-testid="voice-capture-path">Capture: {value.path === "worklet" ? "AudioWorklet · 16 kHz mono, 512-sample frames" : value.path === "script_processor" ? `older ScriptProcessor path — ${value.pathNote || "AudioWorklet unavailable"}` : "not started"}</p>
     <p data-testid="voice-live-level">Level {muted ? "0.0000" : Number.isFinite(meter.rms) ? meter.rms.toFixed(4) : "—"} · Noise floor {Number.isFinite(meter.floor) ? meter.floor.toFixed(4) : "—"}</p>

@@ -52,12 +52,14 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   } else if (m.type === "reset") {
     chain = chain.then(() => { runner?.reset(); });
   } else if (m.type === "frame") {
+    const received = performance.now();
     chain = chain.then(async () => {
       if (!runner) return;
       const t0 = performance.now();
       try {
         const p = await runner.run(m.samples);
-        post({ type: "prob", seq: m.seq, p, ms: performance.now() - t0 });
+        const done = performance.now();
+        post({ type: "prob", seq: m.seq, p, ms: done - t0, total: done - received });
       } catch {
         post({ type: "failed", code: "runtime" });
       }

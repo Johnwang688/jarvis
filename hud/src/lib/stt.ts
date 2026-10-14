@@ -36,7 +36,7 @@
 // mic is OFF, the window crashed, a card is up) -- the same fail-closed rule as
 // the first attempt.
 
-import type { ClaimSource, VoiceDiagnostics } from "./voiceDiagnostics";
+import type { ClaimSource, DetectorKind, VoiceDiagnostics } from "./voiceDiagnostics";
 import { dropLeadingOverlap, dropTrailingOverlap } from "./joinChunks";
 
 export const STT_MAX_CLIPS = 20;
@@ -293,7 +293,7 @@ export class SttAssembler<M = undefined> {
    * `overlapMs` is how much of its start repeats the previous chunk's end.
    * Returns its id, or null when the backlog is full (visible, never silent).
    */
-  submit(blob: Blob, ms: number, source: ClaimSource, meta: M, opts: { group?: number; overlapMs?: number } = {}): number | null {
+  submit(blob: Blob, ms: number, source: ClaimSource, meta: M, opts: { group?: number; overlapMs?: number; detector?: DetectorKind } = {}): number | null {
     let g = opts.group === undefined ? undefined : this.groups.get(opts.group);
     if (opts.group !== undefined && (!g || !g.open)) return null; // a closed message takes no more
     const overlapMs = Math.max(0, Math.min(ms, opts.overlapMs ?? 0));
@@ -305,8 +305,8 @@ export class SttAssembler<M = undefined> {
         // A chunk lost from the middle of a message: the rest must not go out as if it were all of it.
         g.hadFailure = true;
         if (g.diag) this.o.diagnostics.finish(g.diag, "stt_failed", this.now() - g.lastAt);
-        else g.diag = this.o.diagnostics.add(ms - overlapMs, source, "stt_failed");
-      } else this.o.diagnostics.add(ms, source, "stt_failed");
+        else g.diag = this.o.diagnostics.add(ms - overlapMs, source, "stt_failed", opts.detector);
+      } else this.o.diagnostics.add(ms, source, "stt_failed", opts.detector);
       return null;
     }
     const id = ++this.nextId;
@@ -318,7 +318,7 @@ export class SttAssembler<M = undefined> {
       this.groups.set(g.key, g);
     }
     if (!g.uid) g.uid = id;
-    if (!g.diag) g.diag = this.o.diagnostics.add(ms - overlapMs, source, "transcribing");
+    if (!g.diag) g.diag = this.o.diagnostics.add(ms - overlapMs, source, "transcribing", opts.detector);
     else this.o.diagnostics.extend(g.diag, ms - overlapMs);
     g.members.push(id);
     g.parts.set(id, { text: "", overlap: overlapMs > 0 });

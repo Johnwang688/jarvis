@@ -33,4 +33,7 @@ export type ToWorker =
 export type FromWorker =
   | { type: "ready"; loadMs: number }
   | { type: "failed"; code: FailCode }
-  | { type: "prob"; seq: number; p: number; ms: number };
+  // `ms`: the model's own compute time; `total`: from the worker receiving the frame to
+  // answering it (queueing behind earlier frames included). Both are the worker's clock:
+  // a stalled main thread cannot make either of them late.
+  | { type: "prob"; seq: number; p: number; ms: number; total?: number };

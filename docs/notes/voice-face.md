@@ -1637,22 +1637,47 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   `crypto.subtle`, with a pure-JS SHA-256 behind it for an insecure-origin window). A changed or
   truncated model never runs. `onnxruntime-web` is pinned exactly in `package.json` (1.30.0, the
   integrity V0 recorded); its 14.2 MB `.wasm` is a Vite `?url` asset like the tree-sitter grammars.
-  `dist` grows by about 16.5 MB (wasm 14.2, model 2.3) plus the worker chunk (224 KB).
+  `dist` grows by about 16.5 MB (wasm 14.2, model 2.3) plus the Silero worker chunk (78 KB).
+  Licences travel with the vendored files (`hud/vendor/silero-vad/LICENSE.txt`,
+  `hud/vendor/onnxruntime-web/LICENSE.txt`: the npm package ships none, the text is the
+  onnxruntime repository's MIT licence). `npm ci` now also installs `protobufjs`
+  (onnxruntime-web's dependency), which has a `postinstall` script; it only prints a warning when a
+  package.json asks for a different version scheme, and does nothing here.
 - **CSP.** Unchanged and sufficient: the worker is `worker-src 'self'`, the WebAssembly compiles under
   the existing `'wasm-unsafe-eval'`, the model and wasm are `connect-src 'self'` fetches. No
   `unsafe-eval`, no blob worker, no CDN. `hud_v2_vad_check.py` loads it with the violation watch on.
-- **Energy fallback, visibly.** Until the worker says `ready` (`status().loadMs`: fetch, checksum, compile, warm-up) frames are
-  delivered at once with `p = null` and judged by energy. It stays on energy when: this window
-  cannot start a Worker (`no_worker`), the worker or its script fails (`worker`), the model cannot
-  be fetched (`fetch`) or fails its checksum (`hash`), the runtime cannot start (`runtime`), loading
-  takes over 20 s (`timeout`), a verdict is over 500 ms late (`late`), or more than 16 frames
-  (0.5 s of audio) wait on the worker (`backlog`: the queue is bounded, never grows). A failure is
-  **sticky for the window** (no flapping between detectors mid-sentence); every frame is still
-  delivered, in order, exactly once. Settings -> Voice -> Diagnostics shows `Speech detector:
-  Silero VAD (ML) . 0.6 ms per 32 ms frame` or `energy fallback - <reason sentence>` with **Try the
-  Silero VAD again**; the reason comes from a closed set of sentences (`protocol.ts` `FAIL_TEXT`),
-  never an engine message, URL or path. Each diagnostics row records which detector judged it
-  (`row.detector`). `__hud.mic.detector()` / `retryDetector()` are the test hooks.
+- **Energy fallback, visibly.** Until the worker says `ready` (`status().loadMs`: fetch, checksum,
+  compile, warm-up) frames are delivered at once with `p = null` and judged by energy. It stays on
+  energy when: this window cannot start a Worker (`no_worker`), the worker or its script fails
+  (`worker`), the model cannot be fetched (`fetch`) or fails its checksum (`hash`), the runtime
+  cannot start (`runtime`), loading takes over 20 s (`timeout`), or the worker is genuinely too slow
+  (`late`, `backlog`; next bullet). Every frame is still delivered, in order, exactly once.
+  Settings -> Voice -> Diagnostics shows `Speech detector: Silero VAD (ML) . 0.6 ms per 32 ms
+  frame` or `energy fallback - <reason sentence>` with **Try the Silero VAD again**, and a "Detector
+  changes" log (when, to what, why: every switch, bounded to 20); the reason comes from a closed set
+  of sentences (`protocol.ts` `FAIL_TEXT`), never an engine message, URL or path. The statistics are
+  republished every 64 verdicts. Each diagnostics row records the detector that **judged the
+  utterance** (`Capture.judgedBy`, set when it opened or the key was pressed, carried on the chunk
+  and the drop), not the one live when the row was written. `__hud.mic.detector()` /
+  `retryDetector()` are the test hooks.
+- **A busy main thread is not a slow worker (review MED-1).** A 700 ms stall of the page's main
+  thread queues the microphone's frames and the worker's verdicts and delivers them in a burst; the
+  worker meanwhile spent about 1 ms a frame. So the stage judges the worker only by what the worker
+  can be blamed for: lateness is the worker's own receive-to-answer time (`total` on the verdict;
+  `LATE_RUN` = 8 in a row over `FRAME_DEADLINE_MS` = 500 ms fails `late`); frames past the queue bound
+  (`MAX_PENDING` = 16) are not posted but delivered as energy in order, no failure, and the worker
+  starts clean at its next frame; the oldest unanswered frame (`HEAD_WAIT_MS` = 750) and a full queue
+  (`STRAIN_MS` = 1500) are timed over responsive time only (pushes at most `RESPONSIVE_GAP_MS` =
+  100 ms apart); a gap of `SLEEP_GAP_MS` = 2 s between frames (sleep/resume) is a reset, not a
+  failure. Browser check: 700, 1500 and 700 ms busy loops leave Silero in place and scoring.
+- **Automatic retry.** `late`, `backlog`, `timeout` and `worker` retry by themselves after 30 s,
+  2 min, 10 min, at most 3 per mic session (the count resets after 5 healthy minutes), and only at a
+  quiet moment: no utterance open or recording, the mic not OFF, Settings closed (`canRetry`).
+  `hash`, `no_worker` and `runtime` never retry on their own (the same bytes would fail the same way,
+  and a later mic open does not either); `fetch` is tried once more at the next mic open. The page
+  returning to the foreground (`visibilitychange`) or a sleep-sized gap re-arms a timing failure at
+  once, free of the count. The owner's button always tries. App passes the stage a per-run token
+  (`start()` returns it, `stop(token)` ignores a stale one) and stops it when the mic fails to open.
 - **OFF scores nothing.** While the mic is OFF no frame is posted to the worker; the worker's state
   is reset when listening resumes. Frames still reach the capture (it tracks the room), in order.
 - **Seam for RNNoise (V14).** `StageOptions.denoise(frame)` is applied to the copy the worker scores,
@@ -1663,36 +1688,61 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   2500 (the old `HANGOVER_MS` 1500 is now an alias of it, so the energy fallback ends a message at
   2.5 s too), `CONTINUE_MS` = 6000 with V3's chain cap (2 continuation claims, 20 s from the first
   message's end) unchanged. The message pause is tunable per window: Settings -> Voice -> "Pause
-  that ends a message" (1.5 / 2 / 2.5 / 3 / 4 s, `localStorage`, `Capture.setEndPause`, bounded to
-  1-6 s). **Consequence for tests and for use:** a message now goes out 2.5 s after the last word
+  that ends a message" (offers 1.5 / 2 / 2.5 / 3 / 4 s; `localStorage`; `Capture.setEndPause` accepts
+  1-6 s and takes effect at once, even mid-message). **Consequence for tests and for use:** a message now goes out 2.5 s after the last word
   (1.5 s before), the ring for an unclaimed utterance stays open that long, and every scripted
   suite that closed an utterance with a 1.5-2.2 s quiet feed needed 2.8 s (changed in
   `hud_v2_{check,layout,declutter,csp,steer,speech,multichat,voice_diagnostics,chunks}_check.py`).
+- **Weak level gate (stopgap until V12, the lead's decision).** The model calls any speech speech, so
+  room speech the energy test never opened (a distant TV, a conversation) would open follow-up and
+  continuation claims, which need no wake word. With the ML VAD only, those two claims need the
+  onset to have peaked at least `WEAK_CLAIM_GATE` = 1.4 x the energy threshold (0.0084 rms in a quiet
+  room, higher as the room's floor rises; `vad.peak` now starts from the loudest frame of the
+  run that opened the utterance). Wake and push-to-talk are not gated; the energy detector's claims
+  are untouched. A refused onset is an `unclaimed` drop and the follow-up window stays open. It is a
+  narrow gate: a TV above that level still claims; speaker verification (V12) is the real answer.
+- **First chunk at the first gap (plan §3.2's segment gap, the lead's decision).** The recorder
+  cuts the first chunk at the first quiet run of `CHUNK_GAP_MS` (700 ms) once `FIRST_CUT_SPEECH_MS` =
+  350 ms of speech has been heard (the pre-roll does not count), whatever its length, so the opening of
+  a long message is transcribing while the rest is said. Once per message; later chunks keep V4's
+  rule (open segment at least 8 s, then a 700 ms gap; 300 ms past 18 s; hard at 25 s). A final chunk
+  with no speech in it is never uploaded. Consequence: a message with a pause after its first
+  sentence is now two uploads (one message, one row, placed together).
 - **Free checks.** `lib/listen/{sha256,pins,runner,stage}.test.ts` (checksum vectors against node's
-  on every length around the block boundaries; the vendored file, manifest, `models.json` and
-  `pins.ts` agree; the Silero loop with a fake runtime; the stage with a fake worker, including a
-  random-event property test that every frame comes out exactly once, in order), `captureV5.test.ts`
-  (22: the timers, a 2.4 s pause continues and a 2.6 s pause ends, continuation at 5 s and not at
-  7 s, in ML and energy modes; the probability not the loudness decides; self-voice, OFF and a card
-  with p = 0.99; the recorder cuts at the 700 ms gap the model calls quiet), `voiceTiming.test.ts`,
-  `voiceDiagnostics.test.ts` (+2).
+  on every length around the block boundaries; the vendored file, manifest, licences, `models.json`
+  and `pins.ts` agree; the Silero loop with a fake runtime; the stage with a fake worker: ordering,
+  the queue bound, worker-judged lateness, 700 / 1500 / 5000 ms main-thread stalls that must not
+  fail it, sleep gaps, every automatic-retry rule, and a random-event property test that every frame
+  comes out exactly once, in order), `captureV5.test.ts` (the timers; a 2.4 s pause continues and a
+  2.6 s pause ends, continuation at 5 s and not at 7 s, in ML and energy modes; the probability not
+  the loudness decides; the weak gate; self-voice, OFF and a card with p = 0.99; the first-gap cut),
+  `recorder.test.ts` (+4 for the first-gap cut), `voiceTiming.test.ts`, `voiceDiagnostics.test.ts`
+  (+2).
 - **Browser check.** `tests/face/hud_v2_vad_check.py` (real Chromium, real worker, mock daemon;
   fixtures are synthetic Kokoro clips in `tests/face/fixtures/voice_v5/`, never a voice of a person):
-  Silero loads under the CSP and scores in real time; the model served is the pinned file; speech
-  through Chrome's fake microphone: 2.4 s continues and 2.6 s ends, continuation claimed 5 s after a
-  message ended and not 7 s; loud white + pink noise opens nothing with a follow-up window held
-  open; six failure modes fall back visibly with dictation still working (model 404, one byte
-  changed, truncated, wasm 500, Worker construction refused, a worker answering 1.5 s late); Try again
-  restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its "speech" is two
-  oscillators, which Silero rightly does not call speech) by failing the model fetch for its contexts.
-- **Counts.** vitest 2385 tests / 151 files (2315 / 145 on V4 after V8: +70, six new files), `tsc` and
-  `vite build` clean. Browser checks on the built `hud/dist`: `hud_v2_vad_check` 67, `chunks` 58,
-  `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17, `speech` 56, `multichat` 343, all pass;
-  `csp` 41 of 44, the three failures being the manifest/icon checks, which fail identically on V4's
-  own build in this headless-shell environment (`Page.getAppManifest` returns nothing). The full
-  `hud_v2_check` was not run.
-- **Mutations that fail on purpose** (source restored afterwards): no backlog bound (1 test); the
-  checksum not compared (3); the message pause back to 1.5 s (3); the probability ignored (8+).
+  Silero loads under the CSP and scores in real time; the model served is the pinned file; 700 /
+  1500 / 700 ms busy main-thread loops leave it in place; speech through Chrome's fake microphone:
+  a 2.2 s pause continues and a 2.8 s pause ends (the exact 2.4 / 2.6 s edges are in the vitest with
+  scripted probabilities: with real audio the model's ~100 ms onset lag put the edge within noise of
+  the 2.5 s timer, and an edge test there flaked once), the first chunk leaves at the first gap,
+  continuation claimed 5 s after a message ended and not 7 s; a 30 s dictation with 0.9 s breaths is
+  one message in four ordered chunks, placed as one; loud white + pink noise opens nothing with a
+  follow-up window held open; six failure modes fall back visibly with dictation still working and
+  the row saying energy judged it (model 404, one byte changed, truncated, wasm 500, Worker
+  construction refused, a worker answering 1.5 s late); the foreground re-arm restores Silero after the
+  late one; Try again restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its
+  "speech" is two oscillators, which Silero rightly does not call speech) by failing the model fetch
+  for its contexts.
+- **Counts.** vitest 2410 tests / 151 files (2315 / 145 on V4 after V8), `tsc` and `vite build`
+  clean. (`markdownMath.test.ts` has a 5 s wall budget that trips on a loaded machine and passes
+  alone.) Browser checks on the built `hud/dist` with `JARVIS_HUD_DEV=1` and the full Chromium:
+  `hud_v2_vad_check` 96, `chunks` 58, `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17,
+  `speech` 56, `multichat` 343, `csp` 44 of 44, all pass. (Without `JARVIS_HUD_DEV=1` the CSP check's
+  mock serves from an install that is not there and its 3 manifest/icon checks fail, V4 too.) The full
+  `hud_v2_check` was not run here.
+- **Mutations that fail on purpose** (source restored afterwards): no queue bound; the checksum not
+  compared (also the browser fallback check); the message pause back to 1.5 s; the probability
+  ignored; stalls counted as worker time; no weak gate; no first-gap cut; no automatic retry.
 - **Not done / not claimed.** Windows Chrome and a physical microphone: unmeasured (CPU of the
   worker there is V0's headless-Linux 3.4% of a core, not re-measured; V0's 28-39 ms slow first frame is
   expected to fall in the worker's warm-up before `ready`, not measured separately). A real person's voice, a room, a TV, real

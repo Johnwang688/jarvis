@@ -14,6 +14,11 @@
 //     first quiet run of CHUNK_GAP_MS ends it; past CHUNK_LATE_MS a shorter
 //     pause (CHUNK_LATE_GAP_MS) will do. Nothing is lost at such a cut, so the
 //     next chunk starts fresh (overlap 0);
+//   - the FIRST chunk is cut earlier (V5, plan §3.2's segment gap): at the first quiet run of
+//     CHUNK_GAP_MS once FIRST_CUT_SPEECH_MS of speech has been heard, whatever the chunk's
+//     length, so the opening of a long message is transcribing while the rest is still being
+//     said. Bounded: it happens once per message; every later chunk follows the rule above;
+//     and a final chunk with no speech in it is never uploaded;
 //   - failing that, hard at CHUNK_HARD_MS, in the middle of speech. The next
 //     chunk then starts CHUNK_OVERLAP_MS earlier, so a word the cut fell in is
 //     whole in one of them, and the transcripts are joined by the words the
@@ -26,6 +31,8 @@
 import { CAP_RATE, SEGMENT_GAP_MS, msToSamples, samplesToMs, wavBlob } from "./vad";
 
 export const CHUNK_SOFT_MS = 8_000;
+/** Speech heard (pre-roll not counted) before the first pause may cut the first chunk. */
+export const FIRST_CUT_SPEECH_MS = 350;
 export const CHUNK_GAP_MS = SEGMENT_GAP_MS; // the plan's segment gap (V5, vad.ts)
 export const CHUNK_LATE_MS = 18_000;
 export const CHUNK_LATE_GAP_MS = 300;
@@ -61,6 +68,7 @@ export class UtteranceRecorder {
   private len = 0;             // samples in the current chunk, overlap included
   private overlap = 0;         // leading samples shared with the previous chunk
   private voiced = 0;          // loud samples among the new ones
+  private heard = 0;           // loud samples pushed after the pre-roll (the first-cut rule)
   private quiet = 0;           // the trailing quiet run
   private index = 0;           // chunks flushed
   private total = 0;           // unique samples recorded (overlap counted once)
@@ -80,19 +88,24 @@ export class UtteranceRecorder {
   /** The pre-roll. It cannot be told apart quiet from loud, so it counts as speech. */
   start(preroll: Float32Array) {
     const step = 512;
-    for (let at = 0; at < preroll.length; at += step) this.push(preroll.subarray(at, Math.min(preroll.length, at + step)), true);
+    for (let at = 0; at < preroll.length; at += step) this.add(preroll.subarray(at, Math.min(preroll.length, at + step)), true, false);
   }
 
   /** One frame. Returns true when the message has reached its ceiling and must end. */
   push(frame: Float32Array, loud: boolean): boolean {
+    return this.add(frame, loud, true);
+  }
+
+  private add(frame: Float32Array, loud: boolean, live: boolean): boolean {
     if (this.done || !frame.length) return false;
     this.frames.push(frame.slice());
     this.len += frame.length;
     this.total += frame.length;
-    if (loud) { this.voiced += frame.length; this.quiet = 0; } else this.quiet += frame.length;
+    if (loud) { this.voiced += frame.length; this.quiet = 0; if (live) this.heard += frame.length; } else this.quiet += frame.length;
     const ms = samplesToMs(this.len);
     if (ms >= CHUNK_HARD_MS) this.cut(true);
     else if (ms >= CHUNK_SOFT_MS && this.quiet >= msToSamples(ms >= CHUNK_LATE_MS ? CHUNK_LATE_GAP_MS : CHUNK_GAP_MS)) this.cut(false);
+    else if (this.index === 0 && this.heard >= msToSamples(FIRST_CUT_SPEECH_MS) && this.quiet >= msToSamples(CHUNK_GAP_MS)) this.cut(false);
     return this.total >= msToSamples(UTTERANCE_LIMIT_MS);
   }
 

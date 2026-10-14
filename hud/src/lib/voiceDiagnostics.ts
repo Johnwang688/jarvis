@@ -9,6 +9,8 @@ export type CapturePathName = "unknown" | "worklet" | "script_processor";
 /** V5: which detector judged the frames: Silero (ML, in a worker) or the energy fallback. */
 export type DetectorKind = "energy" | "silero";
 export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
+/** One switch of the speech detector (V5), kept in memory with the rows: when, to what, and why. */
+export interface DetectorChange { at: number; detector: DetectorKind; phase: DetectorPhase; note: string }
 export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
@@ -37,7 +39,8 @@ export class VoiceDiagnostics {
   private listeners = new Set<() => void>();
   private rows: readonly VoiceDiagnostic[] = [];
   private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "",
-    detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0 };
+    detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0,
+    detectorLog: [] as readonly DetectorChange[] };
   constructor(private now: () => number = () => performance.now()) {}
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   snapshot = () => this.value;
@@ -53,18 +56,21 @@ export class VoiceDiagnostics {
   }
   /** Which detector is live and why it is the fallback when it is (V5). A sentence from a closed set, never engine text. */
   detector(kind: DetectorKind, phase: DetectorPhase, note = "", frameMs = 0) {
-    this.value = {
-      ...this.value,
-      detector: kind === "silero" ? "silero" : "energy",
-      detectorPhase: ["idle", "loading", "ready", "failed"].includes(phase) ? phase : "idle",
-      detectorNote: String(note).slice(0, 200),
-      detectorMs: bounded(frameMs * 100, 1_000_000) / 100,
-    };
+    const detector: DetectorKind = kind === "silero" ? "silero" : "energy";
+    const ph: DetectorPhase = ["idle", "loading", "ready", "failed"].includes(phase) ? phase : "idle";
+    const text = String(note).slice(0, 200);
+    const before = this.value;
+    let log = before.detectorLog;
+    // Every switch is written down; a statistics refresh (same detector, phase and words) is not a switch.
+    if (before.detector !== detector || before.detectorPhase !== ph || before.detectorNote !== text)
+      log = [...log, { at: bounded(this.now(), Number.MAX_SAFE_INTEGER), detector, phase: ph, note: text }].slice(-20);
+    this.value = { ...before, detector, detectorPhase: ph, detectorNote: text, detectorMs: bounded(frameMs * 100, 1_000_000) / 100, detectorLog: log };
     this.publish();
   }
-  add(ms: number, source: ClaimSource, outcome: VoiceOutcome): number {
+  /** `detector`: the one that judged the utterance (Capture knows; default: the one live now). */
+  add(ms: number, source: ClaimSource, outcome: VoiceOutcome, detector?: DetectorKind): number {
     const id = ++this.next;
-    this.rows = [...this.rows, { id, at: bounded(this.now(), Number.MAX_SAFE_INTEGER), ms: bounded(ms, 900_000), source: sources.includes(source) ? source : "unclaimed", detector: this.value.detector, outcome: outcomes.includes(outcome) ? outcome : "unclaimed" }].slice(-50);
+    this.rows = [...this.rows, { id, at: bounded(this.now(), Number.MAX_SAFE_INTEGER), ms: bounded(ms, 900_000), source: sources.includes(source) ? source : "unclaimed", detector: detector === "silero" || detector === "energy" ? detector : this.value.detector, outcome: outcomes.includes(outcome) ? outcome : "unclaimed" }].slice(-50);
     this.publish(); return id;
   }
   finish(id: number, outcome: VoiceOutcome, latencyMs: number) {

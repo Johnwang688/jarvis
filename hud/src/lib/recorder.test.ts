@@ -108,8 +108,8 @@ describe("UtteranceRecorder", () => {
 
   it("trims the closing silence but never into the overlap, and says nothing of a silent tail", () => {
     const a = mk();
-    a.feed(2000); a.feed(1500, 0, false);
-    a.rec.end(msToSamples(1300));
+    a.feed(2000); a.feed(600, 0, false);
+    a.rec.end(msToSamples(400));
     expect(a.chunks[0].ms).toBeCloseTo(2200, -1);
 
     // a cut at a pause leaves a silent remainder: not sent as a chunk of its own
@@ -126,6 +126,50 @@ describe("UtteranceRecorder", () => {
     c.feed(900, 0, false);
     c.rec.end(0);
     expect(c.chunks).toHaveLength(1);
+  });
+
+  describe("the first chunk is cut at the first gap (V5)", () => {
+    it("at the first 700 ms pause once 350 ms of speech has been heard, however short the chunk", () => {
+      const { rec, chunks, feed } = mk();
+      feed(1500); feed(600, 0, false);
+      expect(chunks).toHaveLength(0);
+      feed(200, 0, false);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toMatchObject({ index: 0, overlapMs: 0, startMs: 0 });
+      expect(chunks[0].ms).toBeCloseTo(2200, -2);
+      expect(rec.chunks).toBe(1);
+    });
+
+    it("not before 350 ms of speech: the pre-roll does not count, nor does a click", () => {
+      const a = mk();
+      a.rec.start(new Float32Array(msToSamples(800)).fill(0.2));
+      a.feed(900, 0, false);
+      expect(a.chunks).toHaveLength(0);
+      const b = mk();
+      b.feed(300); b.feed(900, 0, false);
+      expect(b.chunks).toHaveLength(0);
+      b.feed(100); b.feed(900, 0, false); // 400 ms heard in all: the next long pause cuts
+      expect(b.chunks).toHaveLength(1);
+    });
+
+    it("once only: a second early pause waits for the 8 s rule", () => {
+      const { chunks, feed } = mk();
+      feed(1500); feed(800, 0, false);
+      feed(2000); feed(800, 0, false);
+      expect(chunks).toHaveLength(1);
+      feed(6000); feed(800, 0, false);
+      expect(chunks).toHaveLength(2);
+      expect(chunks[1]).toMatchObject({ index: 1, overlapMs: 0 });
+    });
+
+    it("what follows an early cut is not sent when it is only silence", () => {
+      const { rec, chunks, feed } = mk();
+      feed(1500); feed(800, 0, false);
+      feed(3000, 0, false);
+      const s = rec.end(msToSamples(2000));
+      expect(chunks).toHaveLength(1);
+      expect(s.chunks).toBe(1);
+    });
   });
 
   it("abort discards what is held, keeps what left, and reports the loss", () => {

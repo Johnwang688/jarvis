@@ -28,6 +28,8 @@ describe("the pinned Silero model", () => {
 
   it("the licence travels with it", () => {
     expect(readFileSync(resolve(HUD, "vendor/silero-vad/LICENSE.txt"), "utf8")).toContain("MIT License");
+    expect(readFileSync(resolve(HUD, "vendor/onnxruntime-web/LICENSE.txt"), "utf8")).toContain("Microsoft Corporation");
+    expect(JSON.parse(readFileSync(resolve(HUD, "vendor/silero-vad/manifest.json"), "utf8")).model.pinned_by).toContain("lib/listen/pins.ts");
   });
 
   it("the frame arithmetic is Silero v5's at 16 kHz", () => {

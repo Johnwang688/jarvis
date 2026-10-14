@@ -641,8 +641,8 @@ export default function App() {
           chipOverlay.current || settingsNow.current ||
           crashedRef.current,
         suppressionReason: () => captureSuppression() ?? "speaking",
-        onDrop: (reason, ms, source) => {
-          voiceDiagnostics.add(ms, source, reason);
+        onDrop: (reason, ms, source, detector) => {
+          voiceDiagnostics.add(ms, source, reason, detector);
           // A talk-key utterance that came to nothing: he carries on.
           if (source === "ptt") speech.controller.endBargeIn();
         },
@@ -794,7 +794,7 @@ export default function App() {
       const u = utterances.current.get(chunk.utterance);
       if (!u || u.refused) return;
       const at = live.current;
-      const refuse = (reason: DropReason) => { u.refused = true; voiceDiagnostics.add(chunk.ms, chunk.source, reason); };
+      const refuse = (reason: DropReason) => { u.refused = true; voiceDiagnostics.add(chunk.ms, chunk.source, reason, chunk.detector); };
       if (crashedRef.current) { refuse("suppressed:crash"); return; }
       // OFF never reaches here (Capture refuses to claim while muted), but the
       // mode is checked again rather than assumed: the fail-closed direction
@@ -803,7 +803,7 @@ export default function App() {
       if (at.approvals.length) { refuse("suppressed:card"); return; }
       if (!Number.isFinite(chunk.ms) || chunk.ms <= 0) { refuse("too_short"); return; }
       if (u.gid === null) u.gid = stt.beginGroup(chunk.source, u.meta);
-      const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, { group: u.gid, overlapMs: chunk.overlapMs });
+      const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, { group: u.gid, overlapMs: chunk.overlapMs, detector: chunk.detector });
       if (id === null) {
         sttSay({ orb: "error", status: "STT BACKLOG", error: "Too many clips are waiting to be transcribed, so part of this message was not kept. Wait for them to finish." });
       }
@@ -2849,9 +2849,18 @@ export default function App() {
   const vadStage = useMemo(() => new VadStage({
     deliver: (frame, p) => capture.onFrame(frame, p),
     active: () => !isMuted(live.current.dictation),
+    // An automatic restart of the worker waits for a quiet moment: nothing being
+    // said or recorded, and Settings (where the owner reads the detector) closed.
+    canRetry: () => !capture.vad.open && !capture.recording() && !settingsNow.current,
     onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [capture, voiceDiagnostics]);
+  // Back in the foreground (or woken from sleep): the detector's timing history is stale, not failed.
+  useEffect(() => {
+    const visible = () => { if (document.visibilityState === "visible") vadStage.rearm(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
+  }, [vadStage]);
   const [endPause, setEndPause] = useState(() => loadEndPause());
   useEffect(() => { capture.setEndPause(endPause); }, [capture, endPause]);
 
@@ -2862,6 +2871,8 @@ export default function App() {
     let input: MicInput | null = null;
     let stream: MediaStream | null = null;
     let gone = false;
+    // This run's token for the VAD stage: a stale run's cleanup cannot stop the live one.
+    let vadRun: number | null = null;
     (async () => {
       try {
         stream = await openMicrophone(constraints => navigator.mediaDevices.getUserMedia(constraints));
@@ -2874,15 +2885,16 @@ export default function App() {
         // The frames go through the VAD stage (V5): Silero scores each in a worker and
         // the stage hands it on, in order, to the capture; until the worker is ready,
         // or if it cannot run, the capture judges by energy and the diagnostics say so.
-        vadStage.start();
+        vadRun = vadStage.start();
         input = await startMicInput({ stream, onFrame: (frame) => vadStage.push(frame), workletUrl: micWorkletUrl });
-        if (gone) { input.stop(); vadStage.stop(); return; }
+        if (gone) { input.stop(); vadStage.stop(vadRun); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
         if (input.path !== "worklet") {
           dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${input.fallbackReason}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
         }
       } catch {
+        if (vadRun !== null) vadStage.stop(vadRun);
         voiceDiagnostics.microphone("unavailable");
         // A window without a mic grant still types; every other affordance
         // stays exactly as it was.
@@ -2893,7 +2905,7 @@ export default function App() {
       micInput.current = null;
       stream?.getTracks().forEach((t) => t.stop());
       input?.stop();
-      vadStage.stop();
+      if (vadRun !== null) vadStage.stop(vadRun);
     };
   }, [capture, vadStage]);
 
