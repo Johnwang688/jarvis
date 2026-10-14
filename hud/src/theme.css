@@ -1682,6 +1682,15 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .voice-diagnostic-rows { padding: 0; list-style: none; max-height: 250px; overflow: auto; font: 11px var(--mono); }
 .voice-diagnostic-rows li { border-top: 1px solid var(--border); padding: 6px 0; overflow-wrap: anywhere; }
 
+/* V13: where speech-to-text runs. */
+.stt-settings { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
+.stt-settings h3 { font-size: 12px; }
+.stt-settings p { font-size: 11px; }
+.stt-backends { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.stt-backends label { display: block; }
+.stt-backends input[type="radio"] { width: auto; padding: 0; margin: 0 4px 0 0; accent-color: var(--accent); vertical-align: middle; }
+.stt-fallback { display: block; margin-top: 8px; }
+
 /* V2: a clip that could not be transcribed, kept for Retry. */
 .stt-retry-row { display: flex; flex-direction: column; gap: 6px; }
 .stt-retry-row + .stt-retry-row { margin-top: 8px; }

@@ -683,6 +683,12 @@ class MockDaemon:
         # {"wait": Event} that holds the answer until it is set. Empty: the
         # old behaviour (`stt_text`).
         self.stt_script: list[dict] = []
+        # V13: the owner's speech-to-text switches, as /stt/settings answers them.
+        self.stt_settings = {"backend": "cloud", "cloud_fallback": True, "error": "",
+                             "backends": ["cloud", "local", "auto"],
+                             "local": {"installed": True, "reason": "", "loaded": False, "threads": 2,
+                                       "idle_unload_min": 10.0, "model": "parakeet (local)",
+                                       "fetch": "python -m jarvis.stt_local fetch"}}
         # What the explorer moved to the trash (ED-7's `fs` delete).
         self.trashed: list[str] = []
 
@@ -846,6 +852,8 @@ class MockDaemon:
                 if path == "/speech/voices":
                     # V7: the daemon's per-chat voice map, as the real route answers it.
                     return self._json({"threads": mock.speech_threads, "pool": mock.speech_pool()})
+                if path == "/stt/settings":
+                    return self._json(mock.stt_settings)
                 if path == "/voices":
                     return self._json(w["voices"])
                 if path == "/models":
@@ -999,7 +1007,8 @@ class MockDaemon:
                             step["wait"].wait(20)
                         if "status" in step:
                             return self._json({"error": step.get("error", "scripted failure")}, step["status"])
-                        return self._json({"text": step["text"]})
+                        # V13: which backend served it, when a script says so.
+                        return self._json({"text": step["text"], **{k: step[k] for k in ("backend", "model", "fallback") if k in step}})
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)
@@ -1130,6 +1139,15 @@ class MockDaemon:
                                         "default_effort": info["default_effort"],
                                         "default_source": info["default_source"]})
                     return self._json(payload)
+                if path == "/stt/settings":
+                    if not body or set(body) - {"backend", "cloud_fallback"}:
+                        return self._err(400, "bad fields")
+                    if "backend" in body and body["backend"] not in mock.stt_settings["backends"]:
+                        return self._err(400, "bad backend")
+                    if "cloud_fallback" in body and not isinstance(body["cloud_fallback"], bool):
+                        return self._err(400, "bad cloud_fallback")
+                    mock.stt_settings.update(body)
+                    return self._json(mock.stt_settings)
                 if path == "/speech/voices":
                     # V7: assign (idempotent, sticky, next unused voice of the pool),
                     # choose, or mute -- the real route's keys and refusals.

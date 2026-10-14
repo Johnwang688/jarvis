@@ -79,6 +79,7 @@ import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { ReadAloudSetting } from "./components/ReadAloud";
+import { SttSettingsPanel } from "./components/SttSettings";
 import { createSpeech, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
@@ -4048,7 +4049,7 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

@@ -337,6 +337,7 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("POST", "/models", {"bogus": 1}), ("POST", "/mute", {"muted": "yes"}),
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
         ("GET", "/speech/voices", None), ("POST", "/speech/voices", {"bogus": 1}),
+        ("GET", "/stt/settings", None), ("POST", "/stt/settings", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
         ("GET", "/terminals/deadbeef/attach", None), ("DELETE", "/terminals/deadbeef", None),
         ("GET", "/vex/status", None), ("GET", "/vex/builds/deadbeef", None),

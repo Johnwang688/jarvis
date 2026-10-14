@@ -170,6 +170,8 @@ class Backend(unittest.TestCase):
                                 AVATAR_ENV="",
                                 # Never the owner's per-chat read-aloud voices (V7).
                                 SPEECH_VOICES_PATH=self.root / "speech.json",
+                                # Nor the owner's speech-to-text switches (V13).
+                                STT_SETTINGS_PATH=self.root / "stt.json",
                                 # Never the owner's real Discord files: the guild
                                 # file decides `GET /discord`'s answer (B1).
                                 DISCORD_GUILD_PATH=self.root / "discord_guild.json",
@@ -1609,18 +1611,71 @@ class Backend(unittest.TestCase):
         self.daemon.runner = None
         self.request("POST", f"/schedules/{cron['id']}/run-now", {}, status=409)
 
+    def test_stt_settings_route(self):
+        """V13: the owner's speech-to-text switches. Owner-only, validated, and they steer /stt for real."""
+        from jarvis import llm, stt_local, stt_settings
+        path = Path(config.STT_SETTINGS_PATH)
+        # Owner-only: the API listener, a missing Origin and a foreign Origin are refused, reads included.
+        self.request("GET", "/stt/settings", status=403)
+        self.request("POST", "/stt/settings", {"backend": "cloud"}, status=403)
+        self.request("POST", "/stt/settings", {"backend": "local"}, status=403,
+                     port=self.daemon.face_port, headers={"Origin": "http://evil.example"})
+        self.assertFalse(path.exists())
+        shown = self.owner("GET", "/stt/settings")
+        self.assertEqual((shown["backend"], shown["cloud_fallback"], shown["error"]), ("cloud", True, ""))
+        self.assertEqual(shown["backends"], ["cloud", "local", "auto"])
+        self.assertEqual(set(shown["local"]), {"installed", "reason", "loaded", "threads", "idle_unload_min", "model", "fetch"})
+        self.assertFalse(shown["local"]["loaded"], "a read never loads the model")
+        # Validation: nothing is written for a bad request.
+        for bad in ({}, {"backend": "wifi"}, {"backend": 3}, {"cloud_fallback": "yes"}, {"cloud_fallback": 1},
+                    {"backend": "local", "extra": 1}, {"unknown": True}):
+            self.owner("POST", "/stt/settings", bad, status=400)
+        self.owner("GET", "/stt/settings?x=1", status=400)
+        self.assertFalse(path.exists())
+        got = self.owner("POST", "/stt/settings", {"backend": "local", "cloud_fallback": False})
+        self.assertEqual((got["backend"], got["cloud_fallback"]), ("local", False))
+        self.assertEqual(json.loads(path.read_text()), {"backend": "local", "cloud_fallback": False})
+        self.assertEqual(self.owner("GET", "/stt/settings")["backend"], "local")
+        # They steer /stt: local-only never reaches the cloud, with a fake engine in place of sherpa.
+        class Fake:
+            def decode(self, samples, rate):
+                return "dictated locally"
+        previous = stt_local.set_engine(stt_local.Engine(lambda threads: Fake(), schedule=False))
+        self.addCleanup(stt_local.set_engine, previous)
+        import io as _io
+        import wave as _wave
+        buf = _io.BytesIO()
+        with _wave.open(buf, "wb") as w:
+            w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000), w.writeframes(b"\x01\x00" * 16000)
+        wav = buf.getvalue()
+        with patch.object(llm, "transcribe", side_effect=AssertionError("audio left the machine")) as cloud:
+            body = self.request("POST", "/stt?seq=4&budget_ms=15000", raw=wav, headers={"Content-Type": "audio/wav"})
+            self.assertEqual((body["text"], body["backend"], body["seq"]), ("dictated locally", "local", 4))
+            self.assertFalse(cloud.called)
+            # A local failure with the fallback off is a visible 502, still nothing uploaded.
+            stt_local.set_engine(stt_local.Engine(lambda threads: (_ for _ in ()).throw(RuntimeError("x")), schedule=False))
+            body = self.request("POST", "/stt", raw=wav, headers={"Content-Type": "audio/wav"}, status=502)
+            self.assertIn("nothing was uploaded", body["error"])
+            self.assertFalse(cloud.called)
+            # Cloud switched off and local not selected: 409, nothing uploaded.
+            self.owner("POST", "/stt/settings", {"backend": "cloud"})
+            self.request("POST", "/stt", raw=wav, headers={"Content-Type": "audio/wav"}, status=409)
+            self.assertFalse(cloud.called)
+
     def test_speech_pickers_and_fast_model_only(self):
-        with patch.object(voice, "stt", return_value="dictated") as stt:
-            self.assertEqual(self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}), {"text": "dictated"})
+        with patch.object(voice, "stt_result", return_value=voice.SttResult("dictated", "cloud", "m/x")) as stt:
+            self.assertEqual(self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+                             {"text": "dictated", "backend": "cloud", "model": "m/x"})
             # V2: dictation is bounded tighter than llm.transcribe's 60 s x 3.
-            stt.assert_called_once_with(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2, budget=None)
+            stt.assert_called_once_with(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2, budget=None,
+                                        prefer_local=True)
             # V2: the clip's ids are echoed so a delayed reply can be placed in order.
             self.assertEqual(self.request("POST", "/stt?utterance_id=7&seq=12", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
-                             {"text": "dictated", "utterance_id": 7, "seq": 12})
+                             {"text": "dictated", "backend": "cloud", "model": "m/x", "utterance_id": 7, "seq": 12})
             # MED-2: the client's deadline reaches the model chain, clamped, never echoed.
             stt.reset_mock()
             self.assertEqual(self.request("POST", "/stt?seq=3&budget_ms=15000", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
-                             {"text": "dictated", "seq": 3})
+                             {"text": "dictated", "backend": "cloud", "model": "m/x", "seq": 3})
             self.assertEqual(stt.call_args.kwargs["budget"], 15.0)
             self.request("POST", "/stt?budget_ms=1", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
             self.assertEqual(stt.call_args.kwargs["budget"], 1.0)
@@ -1642,15 +1697,29 @@ class Backend(unittest.TestCase):
         # and its status), never a traceback; a raw LLMError's body is not
         # reflected, because it can quote anything the provider sent back.
         down = voice.STTUnavailable("speech-to-text unavailable: a/one (HTTP 404), b/two (HTTP 503)")
-        with patch.object(voice, "stt", side_effect=down):
+        with patch.object(voice, "stt_result", side_effect=down):
             body = self.request("POST", "/stt", raw=b"RIFFaudio",
                                 headers={"Content-Type": "audio/wav"}, status=502)
             self.assertEqual(body["error"], str(down))
         from jarvis import llm
-        with patch.object(voice, "stt", side_effect=llm.LLMError("HTTP 500: never-expose-this")):
+        with patch.object(voice, "stt_result", side_effect=llm.LLMError("HTTP 500: never-expose-this")):
             body = self.request("POST", "/stt", raw=b"RIFFaudio",
                                 headers={"Content-Type": "audio/wav"}, status=502)
             self.assertEqual(body["error"], "speech-to-text failed (LLMError)")
+        # V13: the clip says which backend served it, and why local did not.
+        local = voice.SttResult("heard here", "local", "parakeet (local)")
+        with patch.object(voice, "stt_result", return_value=local):
+            self.assertEqual(self.request("POST", "/stt?seq=1", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+                             {"text": "heard here", "backend": "local", "model": "parakeet (local)", "seq": 1})
+        slow = voice.SttResult("from cloud", "cloud", "m/x", "local speech-to-text ran out of time")
+        with patch.object(voice, "stt_result", return_value=slow):
+            self.assertEqual(self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})["fallback"],
+                             "local speech-to-text ran out of time")
+        # The owner's own switch is a 409, not an outage: a retry cannot fix it.
+        off = voice.STTBlocked("cloud speech-to-text is switched off in Settings > Voice")
+        with patch.object(voice, "stt_result", side_effect=off):
+            body = self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=409)
+            self.assertEqual(body["error"], str(off))
         listed = [{"name": "test", "backend": "fake", "kind": "builtin"}]
         for audio, mime in ((b"RIFFwav", "audio/wav"), (b"MP3data", "audio/mpeg")):
             with patch.object(voice, "tts", return_value=audio) as tts, \
