@@ -439,6 +439,13 @@ export class Capture {
   onWake(): "claimed" | "armed" | "ignored" {
     if (this.hooks.muted()) return "armed"; // a result already in flight can land late
     if (this.ptt) return "armed"; // the talk key already owns this recording
+    // The detector is held off (a card, a picker, Settings, or V6's blanket hold while he speaks): a
+    // wake hit has nothing to claim. Without this a reply saying "Jarvis" under the blanket hold would
+    // claim the observed-but-suppressed utterance and pause himself for the frame it took to be truncated.
+    if (this.hooks.suppressed()) {
+      this.drop(`suppressed:${this.hooks.suppressionReason?.() ?? "speaking"}`, 0, "wake");
+      return "ignored";
+    }
     // V9: while his voice is audible, his own word "Jarvis" -- a reply that says it, a
     // recognizer that hears the speakers -- must not claim anything. A hit counts only
     // against an utterance the self-voice gate did not veto (frames it vetoes never open

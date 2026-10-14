@@ -130,6 +130,8 @@ export class SpeechController {
   private hang: unknown = null;
   private idleListeners = new Set<() => void>();
   private bargePaused = false;
+  /** The message a barge-in interrupted: what a send skips (V-7), not whatever is next in line by then. */
+  private bargedMessage: { thread: string; messageKey: string } | null = null;
 
   constructor(private readonly deps: ControllerDeps) {
     this.queue = new SpeechQueue({
@@ -525,9 +527,10 @@ export class SpeechController {
     const state = this.queue.view().state;
     if (state !== "playing" && state !== "buffering") {
       // Nothing sounds, but a summary is on its way: it waits for the owner to finish.
-      if (this.lanes.size > 0 && state === "idle") { this.holdDelivery = true; this.bargePaused = true; this.notify(); return true; }
+      if (this.lanes.size > 0 && state === "idle") { this.holdDelivery = true; this.bargePaused = true; this.bargedMessage = null; this.notify(); return true; }
       return false;
     }
+    this.bargedMessage = this.queue.headMessage();
     this.queue.pause();
     this.bargePaused = true;
     return true;
@@ -544,7 +547,14 @@ export class SpeechController {
   endBargeIn(opts: { skip?: boolean } = {}): void {
     if (!this.bargePaused) return;
     this.bargePaused = false;
-    if (opts.skip) this.skip();
+    const interrupted = this.bargedMessage;
+    this.bargedMessage = null;
+    if (opts.skip) {
+      // The message he was in the middle of goes (if a send did not already take it); the queue goes on.
+      // With nothing playing when he was held (a summary on its way), the one awaited is skipped.
+      if (interrupted) this.silenceIfOpen(this.queue.skipMessage(interrupted.thread, interrupted.messageKey), () => {});
+      else this.skip();
+    }
     this.release();
     this.queue.resume();
   }

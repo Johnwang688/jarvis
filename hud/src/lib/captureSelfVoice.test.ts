@@ -178,6 +178,19 @@ describe("while his voice is audible, only the owner's own act claims", () => {
 });
 
 describe("what the gate cannot excuse", () => {
+  it("a wake hit while the detector is suppressed (V6's blanket hold, a card) claims nothing and begins nothing", () => {
+    const state = { suppressed: true };
+    const m = mk(state);
+    m.quiet(1500);
+    m.talk(800, null); // observed, not acted on
+    expect(m.cap.onWake()).toBe("ignored");
+    expect(m.listens).toEqual([]);
+    expect(m.drops.some((d) => d.reason === "suppressed:speaking" && d.source === "wake")).toBe(true);
+    state.suppressed = false;
+    m.talk(800, null);
+    expect(m.listens).toEqual([]); // and it was not kept in reserve either
+  });
+
   it("a card, OFF and the rest still suppress whatever the verdict says", () => {
     const state = { suppressed: true };
     const m = mk(state);
