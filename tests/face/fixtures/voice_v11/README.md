@@ -19,3 +19,5 @@ set (`tests/voice_v0/make_special_fixtures.py`): no recording of a real person.
 | `kws_pos_10_am_adam.wav` | am_adam | "Jarvis, stop." |
 | `kws_pos_10_bf_emma.wav` | bf_emma | "Jarvis, stop." |
 | `kws_pos_11_am_adam.wav` | am_adam | "Hey Jarvis, can you hear me?" |
+| `kws_pos_08_am_adam.wav` | am_adam | "Jarvis, resume." |
+| `kws_pos_09_am_adam.wav` | am_adam | "Jarvis, skip." |

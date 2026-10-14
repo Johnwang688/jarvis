@@ -362,7 +362,7 @@ describe("SelfVoiceGate.audibleWithin (V11: a recognizer reports a word after it
     g.reference.start(1, new Float32Array(24000).fill(0.2), 24000); // a second of sound from t = 1000
     now = 1500;
     expect(g.audibleWithin(1000)).toBe(true);
-    now = 2000; g.reference.stop(1, 0);
+    now = 2000; g.reference.stop(1);
     now = 2900;
     expect(g.audibleWithin(1000)).toBe(true); // ended 900 ms ago
     now = 3200;

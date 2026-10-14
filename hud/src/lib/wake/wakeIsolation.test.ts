@@ -71,12 +71,13 @@ describe("approvals: no hit reaches one", () => {
 
   it("in the window, the stage's hits are the capture's wake path and four playback commands", () => {
     const a = appSource.indexOf("const wakeStage = useMemo(() => new WakeStage({");
-    const b = appSource.indexOf("}), [commands, onWakeHit, speech]);");
+    const b = appSource.indexOf("}), [commands, onWakeHit, speech, ownerOverHim]);");
     expect(a).toBeGreaterThan(0);
     expect(b).toBeGreaterThan(a);
     const block = strip(appSource.slice(a, b)).replace(/\s+/g, " ");
     expect(block).toContain("onWake: () => onWakeHit(speech.selfVoice.audibleWithin(WAKE_LAG_MS)),");
-    expect(block).toContain("onCommand: (c) => { commands.fromLocal(c, { card: live.current.approvals.length > 0 }); },");
+    expect(block).toContain("if (hisOwnWord(speech.selfVoice.audibleWithin(WAKE_LAG_MS), ownerOverHim.within(WAKE_LAG_MS, performance.now()))) return;");
+    expect(block).toContain("commands.fromLocal(c, { card: live.current.approvals.length > 0 });");
     expect(block).not.toMatch(/api\.|\bdecide\b|resolveApproval|interrupt|send\(/);
   });
 

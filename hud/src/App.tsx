@@ -97,6 +97,7 @@ import { VadStage } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeStage, WAKE_LAG_MS } from "./lib/wake/stage";
+import { OwnerMark, hisOwnWord } from "./lib/wake/guard";
 import { WakeWordSetting } from "./components/WakeWord";
 import { loadCardCommands, loadSensitivity, saveCardCommands, saveSensitivity } from "./lib/wake/wakeSettings";
 import type { Attachment, AvatarDesc, Schedule, Thread, VoiceEntry } from "./types";
@@ -2834,16 +2835,21 @@ export default function App() {
 
   // ---- microphone ---------------------------------------------------------
 
+  const ownerOverHim = useMemo(() => new OwnerMark(), []);
   // V5: the ML speech detector. Between the microphone and the capture; the OFF
   // mode scores nothing (it has no frames posted while muted).
   const vadStage = useMemo(() => new VadStage({
     // Every frame is judged against what the window is playing (V9) before the capture sees it.
     // The gate sees every frame (its clock needs them all); its verdict is used only while it is in force.
-    deliver: (frame, p) => { const v = speech.selfVoice.push(frame); capture.onFrame(frame, p, speech.selfVoice.runnable() ? v : null); },
+    deliver: (frame, p) => {
+      const v = speech.selfVoice.push(frame);
+      ownerOverHim.note(speech.selfVoice.runnable() ? v : null, performance.now()); // V11: for a spoken command under a card
+      capture.onFrame(frame, p, speech.selfVoice.runnable() ? v : null);
+    },
     active: () => !isMuted(live.current.dictation),
     onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [capture, voiceDiagnostics, speech]);
+  }), [capture, voiceDiagnostics, speech, ownerOverHim]);
   // V11: the local wake word. The same frames the VAD stage gets also go to a keyword worker, whose only
   // output is a hit: "Jarvis" is `onWakeHit` (the capture's V9 wake path, self-voice gate included), and while
   // an approval card is up (and the owner left it on) "Jarvis pause / resume / skip / stop" is `commands.fromLocal`
@@ -2853,11 +2859,15 @@ export default function App() {
   const wakeStage = useMemo(() => new WakeStage({
     // The spotter reports a word after it was spoken: if his voice sounded within that lag the word may be his own.
     onWake: () => onWakeHit(speech.selfVoice.audibleWithin(WAKE_LAG_MS)),
-    onCommand: (c) => { commands.fromLocal(c, { card: live.current.approvals.length > 0 }); },
+    // A command is his own voice reading out "Jarvis stop" unless the gate released the owner's over his.
+    onCommand: (c) => {
+      if (hisOwnWord(speech.selfVoice.audibleWithin(WAKE_LAG_MS), ownerOverHim.within(WAKE_LAG_MS, performance.now()))) return;
+      commands.fromLocal(c, { card: live.current.approvals.length > 0 });
+    },
     active: () => !isMuted(live.current.dictation) && !crashedRef.current,
     sensitivity: () => loadSensitivity(),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [commands, onWakeHit, speech]);
+  }), [commands, onWakeHit, speech, ownerOverHim]);
   useEffect(() => { wakeStage.setSensitivity(wakeSensitivity); }, [wakeStage, wakeSensitivity]);
   // The card decides which keyword set listens: the wake word is meaningless under one (onWakeHit refuses
   // it), so its recognizer becomes the command recognizer, only if the owner has that switched on.
@@ -2993,7 +3003,11 @@ export default function App() {
         listen: (fn: (frame: Float32Array) => void) => micInput.current?.addFrameListener(fn) ?? (() => {}),
         wake: () => onWakeHit(),
         // One frame through the stage, the gate and the capture, as the microphone's would go (V9 tests).
-        frame: (samples: ArrayLike<number>) => pushMicFrame(Float32Array.from(samples)),
+        // (A window with no microphone has not started the wake word either; the first frame does.)
+        frame: (samples: ArrayLike<number>) => {
+          if (wakeStage.status().state === "idle") wakeStage.start();
+          pushMicFrame(Float32Array.from(samples));
+        },
         // The ML VAD stage (V5): what it is, and (for tests) a way to start it again.
         detector: () => vadStage.status(),
         retryDetector: () => vadStage.retry(),
