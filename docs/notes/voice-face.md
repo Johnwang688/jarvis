@@ -1668,8 +1668,9 @@ a card or OFF cuts the recording):**
 Plan §3.5 and §4 V13; Q6 answered (build local Parakeet with a switchable cloud
 fallback; one paid comparison on synthetic speech, at most $0.25; local becomes
 the default only if its WER is within 1 point of cloud). **Status: built and
-tested on fakes plus one real-model smoke run; the default stays `cloud`, the
-paid comparison has NOT been run, and nothing is deployed.**
+tested on fakes plus one real-model smoke run; the default stays `cloud`. The
+paid comparison ran on 2026-10-14 (receipt below) and the build is installed; no
+physical-microphone run yet.**
 
 - **Engine** (`jarvis/stt_local.py`). Parakeet-TDT-0.6B-v3 int8 through
   `sherpa-onnx` (`OfflineRecognizer.from_transducer`, `nemo_transducer`, greedy),
@@ -1758,8 +1759,9 @@ Mutations that each fail the Python suite: serialisation lock removed, idle
 reap that never unloads, a fallback-off path that still uploads, no budget share,
 a corrupt settings file that fails open, non-opt-in callers using local, the
 unpinned thread clamp, a cancelled job that still decodes after its load.
-Not done and not claimed: the paid comparison, any deployment, a run in the
-live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
+Not done and not claimed: changing the default to local (the receipt does not
+support it), a run in the live daemon, a physical-microphone run, WAV-only means
+no Ogg/webm locally.
 
 ### V13 review fixes (2026-10-14)
 
@@ -1807,6 +1809,22 @@ live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
   `backend` reads "using local" (the fallback keeps its value); `auto` with
   nothing installed and the fallback off says the engine is not installed, not
   that cloud was switched off.
+
+### Paid comparison receipt (2026-10-14)
+
+The lead ran `tests/stt_compare_probe.py --yes-spend` from main f33c810 on 96
+synthetic Kokoro clips (1233 words). Local Parakeet-TDT-0.6B-v3 int8 WER was
+1.38%; cloud (`nvidia/parakeet-tdt-0.6b-v3` via OpenRouter) WER was 0.24%. The
+difference is +1.14 points, with a 95% bootstrap interval of +0.48 to +1.89. The
+Q6 condition ("local within 1 point of cloud") is NOT met, so
+`STT_BACKEND_DEFAULT` stays `"cloud"`; Local stays selectable in Settings -> Voice.
+Estimated spend was $0.0384 of the $0.24 cap. The estimate assumes 4x the listed
+price, so the real cost is lower. Typical local errors were word-ending slips
+such as "finis" for "finished" and "workets" for "worklets". The run used
+synthetic speech only, so it says nothing about the owner's voice. Deploy note:
+on 2026-10-14 the lead installed sherpa-onnx 1.13.8 into the daemon venv and
+fetched the pinned model to `~/.cache/jarvis-stt/parakeet-tdt-0.6b-v3-int8`
+(verified) with `python -m jarvis.stt_local fetch`.
 
 ## V15: lowering the Remote Browser's sound while Jarvis speaks (2026-10-13)
 
