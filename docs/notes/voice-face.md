@@ -1593,7 +1593,7 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   gone) is fixed when it is claimed, not when it ends: a chat switch halfway
   through a long dictation boxes it with "SPOKEN IN ANOTHER CHAT".
 
-Free checks: vitest 2347 tests / 145 files after the review fixes (2315 / 145 before them, 2216 / 138 before V8 was merged; first-cut new: `resample.test.ts` 9,
+Free checks: vitest 2351 tests / 145 files after the delta-review fixes (2347 after the first review fixes, 2315 before them, 2216 / 138 before V8 was merged; first-cut new: `resample.test.ts` 9,
 `joinChunks.test.ts` 11, `recorder.test.ts` 9, `captureChunks.test.ts` 30,
 `micInput.test.ts` 5, `stt.test.ts` +17 for groups; `capture.test.ts`,
 `captureDiagnostics.test.ts` and `speech/suppress.test.ts` adapted to the new
@@ -1630,8 +1630,7 @@ a card or OFF cuts the recording):**
   *adopts* the recording and release just finishes it. `claimSource` is reset after a key
   ends, so the detector's later `unclaimed` row is no longer labelled `ptt`.
 - **M3, a stopgap until V12.** A message claimed by the follow-up window or as a
-  continuation (no wake word, no talk key) ends at **60 s** (`CLAIM_CAP_MS`), sent as it
-  stands, with the error line saying so (`onLimit(ms, claimCap)`). A wake claim and the
+  continuation (no wake word, no talk key) ends at **60 s** (`CLAIM_CAP_MS`), boxed (late), with the error line saying so (`onLimit(ms, claimCap)`). A wake claim and the
   talk key keep the 15-minute ceiling; a key pressed over a hands-free message lifts the 60 s.
 - **M4.** `CaptureHooks.hardStop()` names a card, picker, Settings or crash on its own, so
   `suppressed:speaking` / `no_chat` (reported first) cannot mask one: a held key over his voice
@@ -1651,9 +1650,18 @@ a card or OFF cuts the recording):**
   frame; `onUtteranceEnd` closes the group even if a status write throws; a pane left
   saying LISTENING after a cut-short message now says TRANSCRIBING or nothing; the limit
   messages say "Say Jarvis or hold the talk key" (speaking on would not be claimed).
-- **Soft cuts repeat 200 ms of the quiet** before them (`CHUNK_SOFT_OVERLAP_MS`), so no first
-  phoneme sits on a chunk edge; `chunk.repeats` is false for them, so the join does not look
-  for echoed words ("very | very" stays).
+- **Soft cuts start the next chunk with 200 ms of digital silence** (`CHUNK_SOFT_OVERLAP_MS`),
+  so no first phoneme sits on a chunk edge; `chunk.repeats` is false for them, so the join does
+  not look for echoed words ("very | very" stays). (First tried as 200 ms of the quiet audio
+  before the cut; the delta review noted that "quiet" is only below the detector's threshold,
+  so a faint trailing word could be heard twice. Silence cannot echo, which is the safer pick.)
+- **The 60 s cap splits nothing (delta review).** A claim cut at the cap is announced
+  `truncated`, so it is placed late and boxed, and arms **no** continuation: a 91 s follow-up used
+  to be a 60 s piece sent and a 33 s continuation sent. A wake hit over a message the cap would
+  cut lifts the cap and makes it a wake claim, as the talk key does. The 15-minute ceiling still
+  sends as it stands.
+- **Gap marks once.** `[…]` is added only on a message's first placement; a retried chunk placed
+  alone adds none (chunks 2 and 4 failed, retry 2 gave "t2 […]" before).
 
 ## V8: spoken summaries (2026-10-13)
 
