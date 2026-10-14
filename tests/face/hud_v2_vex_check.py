@@ -466,7 +466,7 @@ def _card_checks(page, mock, check, until, fake):
     _approval(mock, "vexcard2")
     until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
     time.sleep(0.3)
-    controls = ["vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn", "vex-slot-pick",
+    controls = ["vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn", "vex-download-quick", "vex-slot-pick",
                 "vex-name-input", "vex-brain-btn", "vex-info-btn", "vex-programs-btn", "vex-error-0"]
     off = {t: page.locator(_view(V, _tid(t))).is_disabled() for t in controls}
     check("under a card every VEX control is disabled", all(off.values()), str(off))
@@ -474,7 +474,7 @@ def _card_checks(page, mock, check, until, fake):
     check("and the pane's project picker too", picker.is_disabled())
     inert = page.evaluate("() => !!document.querySelector('[data-testid=\"vex-view-2\"]').closest('[inert]')")
     check("and inert behind the veil", inert)
-    for t in ("vex-build-btn", "vex-download-btn", "vex-brain-btn", "vex-error-0"):
+    for t in ("vex-build-btn", "vex-download-btn", "vex-download-quick", "vex-brain-btn", "vex-error-0"):
         try:
             page.locator(_view(V, _tid(t))).click(force=True, timeout=500)
         except Exception:
@@ -613,7 +613,8 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("M1: and in every other VEX view, whatever project it shows",
           bar3.count() > 0 and want in bar3.inner_text(), bar3.inner_text() if bar3.count() else "")
     other = page.locator(_view(3, _tid("vex-download-btn")))
-    check("M1: another project's Download is off while it runs", other.is_disabled())
+    other_quick = page.locator(_view(3, _tid("vex-download-quick")))
+    check("M1: another project's Download is off while it runs", other.is_disabled() and other_quick.is_disabled())
     check("M1: so are the brain terminal and device info",
           page.locator(_view(3, _tid("vex-brain-btn"))).is_disabled()
           and page.locator(_view(3, _tid("vex-info-btn"))).is_disabled()
@@ -621,12 +622,13 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("M1: and every VEX pane's project picker",
           page.locator(_tid("pane-2-vex-project")).is_disabled()
           and page.locator(_tid("pane-3-vex-project")).is_disabled())
-    try:
-        other.click(force=True, timeout=500)
-    except Exception:
-        pass
+    for button in (other, other_quick):
+        try:
+            button.click(force=True, timeout=500)
+        except Exception:
+            pass
     time.sleep(0.3)
-    check("M1: a click on it sends nothing", not _posted_since(mock, base, "/projects/p5/vex/download")
+    check("M1: a click on either sends nothing", not _posted_since(mock, base, "/projects/p5/vex/download")
           and not [d for d in v["downloads"] if d["project_id"] == "p5"], str(v["downloads"]))
     # The reviewer's path: the chain's own pane moved to another project mid-build
     # (to File, its project picked there, back to VEX).
@@ -637,7 +639,8 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("M1: a pane moved to another project mid-build still says what is running",
           page.locator(_view(2)).get_attribute("data-project") == "p5" and bar2.count() > 0
           and want in bar2.inner_text())
-    check("M1: and its Download is off", page.locator(_view(2, _tid("vex-download-btn"))).is_disabled())
+    check("M1: and its Download is off", page.locator(_view(2, _tid("vex-download-btn"))).is_disabled()
+          and page.locator(_view(2, _tid("vex-download-quick"))).is_disabled())
     # Cancel: the build's program is stopped and nothing is sent.
     bid = _latest_build(mock)
     btid = v["builds"][bid]["terminal_id"]
