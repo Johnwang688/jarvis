@@ -47,6 +47,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -116,6 +117,79 @@ def model_present(directory: Path | None = None) -> bool:
 _verified: dict[tuple, bool] = {}
 
 
+MARKER_CAP = 64 << 10
+
+
+def _open_regular(path: Path) -> tuple[int, os.stat_result]:
+    """An fd for a regular file that is not a symlink, and its fstat; LocalSTTUnavailable otherwise.
+
+    `O_NOFOLLOW` (a symlink to /dev/zero is refused, not read), `O_NONBLOCK` (opening a FIFO
+    does not wait for a writer) and an `S_ISREG` check on the open fd (a FIFO or device is
+    refused before a byte is read). The model directory is writable by anything running as the
+    owner, so nothing in it may make the engine block or exhaust memory while it holds its lock.
+    """
+    again = "run `python -m jarvis.stt_local fetch` again"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        raise LocalSTTUnavailable(f"a speech model file is a link or cannot be opened: {again}") from None
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise LocalSTTUnavailable(f"a speech model file cannot be read: {again}") from None
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise LocalSTTUnavailable(f"a speech model file is not a regular file: {again}")
+    return fd, st
+
+
+def _read_marker(path: Path) -> bytes | None:
+    """The marker's bytes (at most MARKER_CAP), None if there is no marker; otherwise a refusal."""
+    again = "run `python -m jarvis.stt_local fetch` again"
+    try:
+        fd, st = _open_regular(path)
+    except FileNotFoundError:
+        return None
+    try:
+        if st.st_size > MARKER_CAP:
+            raise LocalSTTUnavailable(f"the speech model's record is too large: {again}")
+        data = os.read(fd, MARKER_CAP + 1)
+    except OSError:
+        raise LocalSTTUnavailable(f"the speech model's record is unreadable: {again}") from None
+    finally:
+        os.close(fd)
+    if len(data) > MARKER_CAP:
+        raise LocalSTTUnavailable(f"the speech model's record is too large: {again}")
+    return data
+
+
+def _hash_file(path: Path, expected_size) -> tuple[tuple, str]:
+    """(identity, sha256) of a model file, reading no more than its size. A file whose size is not
+    the recorded one is not hashed at all."""
+    fd, st = _open_regular(path)
+    try:
+        key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if isinstance(expected_size, int) and not isinstance(expected_size, bool) and expected_size != st.st_size:
+            return key, ""
+        if key in _verified:
+            return key, ""                 # the caller reads the cached verdict
+        digest, left = hashlib.sha256(), st.st_size
+        while left > 0:
+            block = os.read(fd, min(1 << 20, left))
+            if not block:
+                break
+            digest.update(block)
+            left -= len(block)
+        return key, digest.hexdigest() if left == 0 else ""
+    except OSError:
+        raise LocalSTTUnavailable("a speech model file cannot be read: run `python -m jarvis.stt_local fetch` again") from None
+    finally:
+        os.close(fd)
+
+
 def verify_model(directory: Path | None = None) -> None:
     """Check the model files against the hashes `fetch` recorded in `.verified`.
 
@@ -128,36 +202,33 @@ def verify_model(directory: Path | None = None) -> None:
     "something was recorded and cannot be read" is the corrupt case. Hashing about 640 MB
     takes seconds, so each file identity (path, inode, size, mtime, ctime) is hashed once
     per process. Raises LocalSTTUnavailable ("run the fetch again") on any mismatch.
+
+    Hostile entries cannot wedge the engine (this runs under its lock): the marker and
+    every model file are opened `O_NOFOLLOW | O_NONBLOCK` and must be regular files, the
+    marker is read to at most 64 KB, and each model file is read to at most its size (which
+    must equal the size `fetch` recorded). A symlink, FIFO or device refuses at once.
     """
     d = directory or model_dir()
-    marker = d / ".verified"
     again = "run `python -m jarvis.stt_local fetch` again"
-    try:
-        text = marker.read_text()
-    except FileNotFoundError:
+    text = _read_marker(d / ".verified")
+    if text is None:
         return
-    except OSError:
-        raise LocalSTTUnavailable(f"the speech model's record is unreadable: {again}") from None
     try:
-        recorded = json.loads(text)
-        recorded = recorded.get("files") if isinstance(recorded, dict) else None
-    except (ValueError, RecursionError):
-        recorded = None
+        record = json.loads(text)
+        recorded = record.get("files") if isinstance(record, dict) else None
+        sizes = record.get("sizes") if isinstance(record, dict) and isinstance(record.get("sizes"), dict) else {}
+    except (ValueError, RecursionError, UnicodeError):
+        recorded, sizes = None, {}
     if not isinstance(recorded, dict):
         raise LocalSTTUnavailable(f"the speech model's record is corrupt: {again}")
     for name in FILES:
         path = d / name
         try:
-            st = path.stat()
-        except OSError:
+            key, digest = _hash_file(path, sizes.get(name))
+        except FileNotFoundError:
             raise LocalSTTUnavailable(f"the speech model files are incomplete: {again}") from None
-        key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
         if key not in _verified:
-            digest = hashlib.sha256()
-            with path.open("rb") as fh:
-                for block in iter(lambda: fh.read(1 << 20), b""):
-                    digest.update(block)
-            _verified[key] = digest.hexdigest() == recorded.get(name)
+            _verified[key] = digest != "" and digest == recorded.get(name)
         if not _verified[key]:
             raise LocalSTTUnavailable(f"the speech model files do not match what was downloaded: {again}")
 
@@ -543,7 +614,7 @@ def fetch(dest: Path | None = None, *, url: str = MODEL_URL, sha256: str = MODEL
             raise SystemExit("the archive does not hold the expected model files")
         staged = work / "model"
         staged.mkdir()
-        hashes = {}
+        hashes, sizes = {}, {}
         for name in FILES:
             shutil.move(str(root / name), str(staged / name))
             h = hashlib.sha256()
@@ -551,7 +622,8 @@ def fetch(dest: Path | None = None, *, url: str = MODEL_URL, sha256: str = MODEL
                 for block in iter(lambda: fh.read(1 << 20), b""):
                     h.update(block)
             hashes[name] = h.hexdigest()
-        (staged / ".verified").write_text(json.dumps({"archive_sha256": sha256, "files": hashes}, indent=1) + "\n")
+            sizes[name] = (staged / name).stat().st_size
+        (staged / ".verified").write_text(json.dumps({"archive_sha256": sha256, "files": hashes, "sizes": sizes}, indent=1) + "\n")
         if dest.exists():
             shutil.rmtree(dest)
         os.replace(staged, dest)

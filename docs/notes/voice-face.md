@@ -1614,7 +1614,13 @@ live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
   tampering: the marker lives in the same writable directory. A marker that is
   there but unreadable, not JSON or without a `files` table refuses ("run the
   fetch again") rather than being trusted. A model directory the owner supplies
-  has no marker and is trusted as it is: only the download is verified.
+  has no marker and is trusted as it is: only the download is verified. The
+  check runs under the engine's lock and the directory is writable by anything
+  running as the owner, so it cannot be made to hang or exhaust memory: the
+  marker and every model file are opened `O_NOFOLLOW | O_NONBLOCK` and must be
+  regular files (a symlink, FIFO or device refuses at once), the marker is
+  read to at most 64 KB, and each model file to at most its size, which must
+  equal the size `fetch` recorded in `.verified` (`sizes`).
 - The compare probe charges its estimate for a failed request too. An invalid
   `backend` reads "using local" (the fallback keeps its value); `auto` with
   nothing installed and the fallback off says the engine is not installed, not

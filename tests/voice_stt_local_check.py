@@ -565,8 +565,96 @@ class EngineChecks(Base):
             self.assertIn("fetch", str(caught.exception))
         (d / ".verified").unlink()
         (d / ".verified").mkdir()                            # present but not a readable file
-        with self.assertRaises(stt_local.LocalSTTUnavailable):
-            stt_local.verify_model(d)
+        self._refuses_fast(d, containing="not a regular file")
+
+    def _refuses_fast(self, directory, *, containing, seconds=5.0):
+        """verify_model must refuse with `containing` in its message, in `seconds`: it runs under the
+        engine's lock, so a hang here is a wedged engine. Run it on a thread with a hard timeout."""
+        outcome = {}
+
+        def run():
+            try:
+                stt_local.verify_model(directory)
+                outcome["error"] = None
+            except BaseException as exc:  # noqa: BLE001
+                outcome["error"] = exc
+
+        t = threading.Thread(target=run, daemon=True)
+        started = time.monotonic()
+        t.start()
+        t.join(seconds)
+        self.assertFalse(t.is_alive(), "verify_model hung: a hostile entry wedged the engine")
+        self.assertLess(time.monotonic() - started, seconds)
+        self.assertIsInstance(outcome["error"], stt_local.LocalSTTUnavailable, repr(outcome))
+        self.assertIn(containing, str(outcome["error"]))
+        self.assertIn("fetch", str(outcome["error"]))
+        self.assertNotIn(str(directory), str(outcome["error"]))
+
+    def _fetched(self, name):
+        dest = Path(self.tmp.name) / name
+        self._fetch(dest, self._archive())
+        return dest
+
+    def test_a_fifo_marker_refuses_at_once(self):
+        d = self._fetched("fifo-marker")
+        (d / ".verified").unlink()
+        os.mkfifo(d / ".verified")
+        self._refuses_fast(d, containing="not a regular file")
+
+    def test_a_symlinked_marker_is_never_followed(self):
+        d = self._fetched("link-marker")
+        (d / ".verified").unlink()
+        (d / ".verified").symlink_to("/dev/zero")             # an endless read if it were followed
+        self._refuses_fast(d, containing="link")
+        (d / ".verified").unlink()
+        (d / ".verified").symlink_to(Path(self.tmp.name) / "nowhere")      # dangling
+        self._refuses_fast(d, containing="link")
+
+    def test_an_oversized_marker_is_refused_unread(self):
+        d = self._fetched("big-marker")
+        (d / ".verified").write_text(json.dumps({"files": {}, "pad": "x" * (stt_local.MARKER_CAP + 10)}))
+        self._refuses_fast(d, containing="too large")
+
+    def test_a_fifo_or_symlink_in_place_of_a_model_file_refuses_at_once(self):
+        d = self._fetched("hostile-file")
+        victim = d / "encoder.int8.onnx"
+        original = victim.read_bytes()
+        victim.unlink()
+        os.mkfifo(victim)
+        self._refuses_fast(d, containing="not a regular file")
+        victim.unlink()
+        victim.symlink_to("/dev/zero")
+        self._refuses_fast(d, containing="link")
+        victim.unlink()
+        real = Path(self.tmp.name) / "real-encoder"
+        real.write_bytes(original)                              # even a link to the right bytes is refused
+        victim.symlink_to(real)
+        self._refuses_fast(d, containing="link")
+        victim.unlink()
+        victim.write_bytes(original)                            # control: the genuine file passes again
+        stt_local.verify_model(d)
+
+    def test_a_file_longer_than_recorded_is_not_read_past_its_size(self):
+        d = self._fetched("grown")
+        victim = d / "joiner.int8.onnx"
+        victim.write_bytes(victim.read_bytes() + b"x" * 1000)
+        self._refuses_fast(d, containing="do not match")
+        reads = []
+        real_read = os.read
+
+        def counting(fd, n):
+            data = real_read(fd, n)
+            reads.append(len(data))
+            return data
+
+        # Even one the marker does not size is read only up to its own fstat size.
+        marker = json.loads((d / ".verified").read_text())
+        marker.pop("sizes")
+        (d / ".verified").write_text(json.dumps(marker))
+        with mock.patch.object(stt_local.os, "read", side_effect=counting):
+            with self.assertRaises(stt_local.LocalSTTUnavailable):
+                stt_local.verify_model(d)
+        self.assertLessEqual(max(reads), (d / "joiner.int8.onnx").stat().st_size)
 
     def test_a_replaced_file_is_not_hidden_by_the_cache(self):
         dest = Path(self.tmp.name) / "model-cache"
