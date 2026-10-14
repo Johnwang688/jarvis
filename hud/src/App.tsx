@@ -599,6 +599,7 @@ export default function App() {
     speech: speech.controller, clock: realClock,
     recording: () => !!captureRef.current && (captureRef.current.recording() || captureRef.current.ptt !== null),
   }), [speech]);
+  useEffect(() => () => barge.release(), [barge]);
   // "Jarvis pause / resume / skip / stop": four calls on his voice and nothing else. Stop clears the
   // speech queue; it never interrupts an agent's turn (Q8), and nothing here can answer a card (V-6).
   const commands = useMemo(() => new CommandRouter({
@@ -2893,7 +2894,8 @@ export default function App() {
   // mode scores nothing (it has no frames posted while muted).
   const vadStage = useMemo(() => new VadStage({
     // Every frame is judged against what the window is playing (V9) before the capture sees it.
-    deliver: (frame, p) => capture.onFrame(frame, p, speech.selfVoice.runnable() ? speech.selfVoice.push(frame) : null),
+    // The gate sees every frame (its clock needs them all); its verdict is used only while it is in force.
+    deliver: (frame, p) => { const v = speech.selfVoice.push(frame); capture.onFrame(frame, p, speech.selfVoice.runnable() ? v : null); },
     active: () => !isMuted(live.current.dictation),
     onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
   // eslint-disable-next-line react-hooks/exhaustive-deps

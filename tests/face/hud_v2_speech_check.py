@@ -355,7 +355,12 @@ def main() -> int:
             mock.emit("text", {"text": "Bravo is back after the unmute."}, thread_id="t2")
             check("unmuted, it is read again", bool(until(lambda: any("back after the unmute" in t for t in said(mock)), timeout=5)))
             until(lambda: speech(page)["view"]["state"] == "idle", timeout=8)
-            print("\nwhile another pane is read: hands-free is held off, the talk key is not (until V9)")
+            print("\nwhile another pane is read, with the self-voice gate off (V6's blanket hold, V9's fallback): hands-free is held off, the talk key is not")
+            # V9: with the gate in force hands-free speech is judged frame by frame instead (hud_v2_barge_check.py);
+            # the blanket hold is what remains when the owner switches the gate off or it cannot run.
+            H.open_settings(page, "Voice")
+            page.locator('[data-testid="self-voice-toggle"]').uncheck()
+            page.locator('[data-testid="settings-close"]').click()
             sel = page.evaluate("window.__hud.state().selectedChat")
             sel_tid = page.evaluate(f"window.__hud.state().chats[{sel}].threadId")
             reading = "t2" if sel_tid == "t1" else "t1"
@@ -374,6 +379,9 @@ def main() -> int:
                   bool(until(lambda: speech(page)["view"]["state"] == "playing", timeout=3)))
             page.locator('[data-testid="speech-stop"]').click()
             page.evaluate("window.__hud.capture.closeFollowUp()")
+            H.open_settings(page, "Voice")
+            page.locator('[data-testid="self-voice-toggle"]').check()
+            page.locator('[data-testid="settings-close"]').click()
             mock.ms_per_char = 12
             pool = [v["name"] for v in mock.world["voices"]["voices"]]
             other = next(v for v in pool if v != voices["t1"])
