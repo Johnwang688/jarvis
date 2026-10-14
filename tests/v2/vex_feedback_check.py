@@ -43,6 +43,7 @@ class Feedback(DaemonBase):
         self.assertEqual(read(), done)
         self.assertIsNone(self.daemon.vex._device)
         self.assertFalse(self.daemon.vex._held)
+        self.assertIsNone(self.daemon.vex._downloads[sent["download_id"]].timer)
 
     def test_download_timeout_is_final_failure_not_success(self):
         self.build()
@@ -116,6 +117,55 @@ class Feedback(DaemonBase):
             eventually(lambda: not host.connection.running)
             self.assertFalse(any(t["program"] == "vex-connection" for t in self.owner("GET", "/terminals")))
         self.assertEqual(self.check_usb()["state"], "error")
+
+    def test_truncated_ring_with_valid_empty_tail_cannot_disconnect(self):
+        self.check_usb()
+        ready = eventually(lambda: r if (r := self.check_usb())["state"] == "ready" else None)
+        host, start = self.daemon.vex, self.daemon.vex._start
+        def truncated(*args, **kwargs):
+            ended = kwargs["on_exit"]
+            def with_lost_prefix(terminal):
+                from types import SimpleNamespace
+                with patch.object(terminal, "history", return_value=SimpleNamespace(start=1024, data=b'{"usb":{"vex":[],"dfu":[]}}')):
+                    ended(terminal)
+            kwargs["on_exit"] = with_lost_prefix
+            return start(*args, **kwargs)
+        self.force_next()
+        with patch.object(host, "_start", truncated):
+            self.check_usb()
+            failed = eventually(lambda: r if (r := self.check_usb())["state"] == "error" else None)
+        self.assertTrue(failed["brain"])
+        self.assertEqual(failed["events"], ready["events"])
+        self.assertEqual(failed["checked_at"], ready["checked_at"])
+
+    def test_late_eof_closes_exact_probe_and_retains_holder_until_callback(self):
+        host, start = self.daemon.vex, self.daemon.vex._start
+        reached, permit = threading.Event(), threading.Event()
+        terminal_id = []
+        def delayed(*args, **kwargs):
+            ended = kwargs["on_exit"]
+            def late(terminal):
+                terminal_id.append(terminal.id)
+                reached.set()
+                if not permit.wait(3): raise AssertionError("late EOF cleanup barrier timed out")
+                ended(terminal)
+            kwargs["on_exit"] = late
+            return start(*args, **kwargs)
+        from jarvis.v2 import vex_connection
+        try:
+            with patch.object(host, "_start", delayed), patch.object(vex_connection, "PROBE_TIMEOUT", .1):
+                self.check_usb()
+                self.assertTrue(reached.wait(2))
+                time.sleep(.2)  # past probe budget; callback remains deliberately withheld
+                self.assertEqual(host._device["kind"], "connection")
+                self.assertTrue(host.connection.running)
+                self.assertIn(terminal_id[0], [r["id"] for r in self.owner("GET", "/terminals")])
+                permit.set()
+                eventually(lambda: not host.connection.running)
+                self.assertIsNone(host._device)
+                self.assertNotIn(terminal_id[0], [r["id"] for r in self.owner("GET", "/terminals")])
+        finally:
+            permit.set()
 
     def test_thread_start_failure_releases_exact_unused_holder(self):
         with patch("jarvis.v2.vex_connection.threading.Thread.start", side_effect=RuntimeError("no worker")):

@@ -1382,6 +1382,7 @@ class Download:
     output: str = ""
     ended: str | None = None
     timed_out: bool = False
+    timer: threading.Timer | None = None
 
     def view(self):
         return {key: getattr(self, key) for key in ("id", "project_id", "slot", "started",
@@ -1522,7 +1523,13 @@ class Vex:
         return terminal
 
     def _timer(self, seconds, action, *args) -> threading.Timer:
-        timer = threading.Timer(seconds, action, args)
+        def fire():
+            try:
+                action(*args)
+            finally:
+                with self._lock:
+                    self._timers.discard(timer)
+        timer = threading.Timer(seconds, fire)
         timer.daemon = True
         with self._lock:
             self._timers.add(timer)
@@ -1819,6 +1826,10 @@ class Vex:
                     record.output = output
                     record.state = "timed_out" if record.timed_out else "succeeded" if terminal.exit_code == 0 else "failed"
                     record.ended = _utcnow()
+                    timer, record.timer = record.timer, None
+                    if timer is not None:
+                        timer.cancel()
+                        self._timers.discard(timer)
             finally:
                 release()
                 with self._lock:
@@ -1851,7 +1862,13 @@ class Vex:
                     return
                 record.timed_out = True
             self._device_timeout(terminal)
-        self._timer(DOWNLOAD_TIMEOUT_S, timeout)
+        timer = self._timer(DOWNLOAD_TIMEOUT_S, timeout)
+        with self._lock:
+            if record.state == "running":
+                record.timer = timer
+            else:
+                timer.cancel()
+                self._timers.discard(timer)
         return {"terminal_id": terminal.id, "download_id": record.id}
 
     def download_state(self, download_id):

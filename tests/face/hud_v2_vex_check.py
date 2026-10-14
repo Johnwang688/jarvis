@@ -861,7 +861,7 @@ def _feedback_checks(page, mock, check, until, fake):
 
 
 SECTIONS = (
-    _feedback_checks,_offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks, _chain_checks, _card_checks,
+    _feedback_checks, _offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks, _chain_checks, _card_checks,
             _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _header_rebuild_checks,
             _still_stale_checks,
             _answer_card_checks, _passing_card_checks, _first_click_checks, _detect_again_checks,

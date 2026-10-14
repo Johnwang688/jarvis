@@ -314,6 +314,22 @@ describe("Download feedback uses actual action receipts", () => {
     expect(h.downloads).toHaveLength(1);
   });
 
+  it("manual recheck changes an unknown result to the actual late success", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({terminal_id: "b0000001"});
+    const state = vi.spyOn(api, "vexDownloadState").mockRejectedValue(Object.assign(new Error("forgotten"), {status: 404}));
+    await store.download("p3", 3, "dummy");
+    expect(store.run("p3").downloaded?.ok).toBeNull();
+    state.mockResolvedValue({id: "b0000001", project_id: "p3", slot: 3, state: "succeeded", terminal_id: "b0000001",
+      exit_code: 0, output: "late Finished", started: "", ended: ""});
+    await store.refreshDownload("p3");
+    expect(store.run("p3").downloaded?.ok).toBe(true);
+    expect(store.run("p3").note).toContain("Downloaded to slot 3");
+    expect(store.run("p3").download?.output).toBe("late Finished");
+    expect(h.downloads).toHaveLength(1);
+  });
+
   it("a late manual status response cannot replace a newer Download", async () => {
     vi.useFakeTimers();
     const store = new VexStore();
