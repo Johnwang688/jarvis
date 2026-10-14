@@ -117,6 +117,40 @@ class Matrix(R.AuthReal):
         self.assertNotIn(tab.id,self.host._tabs);self.assertFalse(self.host.loopback_open(self.authport))
         self.assertTrue(self.wait(lambda:not self.host._auth._pending and not self.host._auth._cleanup,5))
         self.assertEqual(O.chrome_tree(config.BROWSER_DIR),[])
+    def test_stored_restore_can_wait_without_minting_a_loopback_lease(self):
+        profile=self.profile();blank=self.owner("POST","/browser/tabs",{"profile":profile})
+        before={port:set(ids) for port,ids in self.host._port_owners.items()}
+        row=self.owner("POST",f"/browser/tabs/{blank['tab_id']}/restore",{"url":f"http://pub.test:{self.authport}/restore"})
+        self.assertIs(row["loaded"],False);self.assertIs(row["auth_pending"],True)
+        tab=self.host._tabs[row["tab_id"]];self.assertEqual(tab.page.url,"about:blank")
+        self.assertEqual(self.host._port_owners,before);self.assertFalse(self.host.loopback_open(self.authport))
+        window=self.connect(tab.id);self.reply(tab,window)
+        self.assertTrue(self.settled_auth(tab));self.assertEqual(self.host._port_owners,before)
+        self.privacy(tab)
+    def test_private_auth_context_close_settles_and_removes_private_instance(self):
+        self.addCleanup(lambda:self.host.close_profile("private") if "private" in self.host._instances else None)
+        tab,window,profile=self.pending("private",profile="private");nav=self.host._auth.sessions[tab.id].navigation
+        ctx=tab.ctx;self.assertIsNotNone(ctx)
+        row=self.owner("DELETE",f"/browser/contexts/{ctx}")
+        self.assertTrue(row["closed"]);self.assertTrue(nav.task.done())
+        self.assertNotIn(tab.id,self.host._tabs);self.assertNotIn("private",self.host._instances)
+        self.assertTrue(self.wait(lambda:not self.host._auth._pending and not self.host._auth._cleanup,5))
+        self.assertFalse(self.host.loopback_open(self.authport));self.assertEqual(O.chrome_tree(config.BROWSER_DIR),[])
+    def test_hidden_direct_capture_never_installs_or_publishes_owner_auth(self):
+        from types import SimpleNamespace
+        profile=self.profile();row=self.owner("POST","/browser/tabs",{"profile":profile,"url":self.target("public")})
+        tab=self.host._tabs[row["tab_id"]];before=set(self.host._auth.sessions)
+        owners={port:set(ids) for port,ids in self.host._port_owners.items()}
+        start=time.monotonic();result=None
+        try:
+            result=self.host.capture_look(SimpleNamespace(mode="direct",url=self.target("hidden")),False,False,[],lambda:None)
+        except Exception as exc:
+            self.assertIn(type(exc).__name__,("TimeoutError","BrowserRefused","Error"))
+        self.assertLess(time.monotonic()-start,30)
+        self.assertEqual(set(self.host._auth.sessions),before);self.assertFalse(self.host._auth._pending)
+        self.assertEqual(self.host._look_reserved,set());self.assertNotIn("private",self.host._instances)
+        self.assertEqual(self.host._port_owners,owners);self.privacy(tab)
+
     def test_three_wrong_submissions_share_one_original_budget(self):
         tab,window,profile=self.pending("wrong");budget=self.host._auth.sessions[tab.id].budget;started=budget.started
         for attempt in range(3):

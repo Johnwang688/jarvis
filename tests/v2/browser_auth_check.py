@@ -174,6 +174,14 @@ class Auth(unittest.IsolatedAsyncioTestCase):
             self.host._tabs.pop(fresh.id)
         self.assertEqual(self.auth._installing,{})
 
+    async def test_old_nonce_on_same_current_socket_is_rejected(self):
+        prompt=await self.challenge();nonce=prompt.nonce;self.auth.invalidate(self.tab);self.auth.refresh(self.tab)
+        self.assertNotEqual(prompt.nonce,nonce)
+        fields={"id":nonce,"cancel":False,"username":"fixture","password":"synthetic"}
+        await self.auth.answer(self.tab,self.sock,1,0,fields)
+        self.assertEqual(self.credentials(),[]);self.assertEqual(fields,{})
+        await self.answer(prompt);self.assertEqual(len(self.credentials()),1)
+
     async def test_redundant_attachment_refresh_keeps_the_live_nonce(self):
         prompt=await self.challenge();nonce=prompt.nonce
         self.auth.refresh(self.tab);self.auth.refresh(self.tab)
