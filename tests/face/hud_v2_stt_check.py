@@ -171,12 +171,22 @@ def main():
             page.wait_for_function("() => window.__hud.state().busy")
             check("setup: the selected chat is running t2's turn", page.evaluate("window.__hud.state().turnThreadId") == "t2")
             check("a busy chat keeps its own orb while words are transcribed", page.evaluate("window.__hud.state().orb") != "transcribing")
+            mock.world["send_status"] = "steered"
             gate.set()
-            check("AUTO: the chat started a turn meanwhile -> box, not a steer", box_has("dictated words"))
-            check("and nothing was sent or steered", len(sent_to()) == sends)
+            # V3 changed this deliberately (V2 boxed it): the chat's own turn
+            # is running, so the dictated words steer it, as typed words do.
+            for _ in range(60):
+                if len(sent_to()) > sends:
+                    break
+                page.wait_for_timeout(50)
+            check("AUTO: the chat started a turn meanwhile -> steers it (V3; V2 boxed this)",
+                  len(sent_to()) == sends + 1 and sent_to()[-1].endswith("/t2/send"))
+            check("and the words are not left in the box", box() == "")
+            mock.world.pop("send_status", None)
             mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
             page.wait_for_function("() => !window.__hud.state().busy")
             page.locator('[data-testid="input"]').first.fill("")
+            sends = len(sent_to())
 
             mock.stt_script = [{"status": 400, "error": "bad audio"}]
             page.evaluate("window.__hud.mic.feedMs(1500, .0009)")

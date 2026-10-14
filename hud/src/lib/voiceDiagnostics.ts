@@ -1,13 +1,13 @@
 // Window-local metadata only. No audio, transcript, device identity or error text.
-export type SuppressionReason = "card" | "picker" | "settings" | "crash" | "speaking" | "busy" | "no_chat";
+export type SuppressionReason = "card" | "picker" | "settings" | "crash" | "speaking" | "no_chat";
 export type DropReason = "unclaimed" | "too_short" | "muted" | "self_voice" | "not_owner" | "cancelled" | "empty_transcript" | "stt_failed" | `suppressed:${SuppressionReason}`;
-export type ClaimSource = "wake" | "follow_up" | "ptt" | "unclaimed";
+export type ClaimSource = "wake" | "follow_up" | "continuation" | "ptt" | "unclaimed";
 export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_chat" | "unplaced";
 export type MicCapability = "unknown" | "available" | "unavailable";
 export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
-const sources: ClaimSource[] = ["wake", "follow_up", "ptt", "unclaimed"];
-const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", ...["card", "picker", "settings", "crash", "speaking", "busy", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
+const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
+const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
 const bounded = (n: number, max: number) => Number.isFinite(n) ? Math.max(0, Math.min(max, Math.round(n))) : 0;
 export const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 /** Old/limited browsers may reject constraints; preserve the existing audio:true path. */
