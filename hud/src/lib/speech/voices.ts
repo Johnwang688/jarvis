@@ -23,7 +23,8 @@ export class ThreadVoices {
   private asking = new Map<string, Promise<string | null>>();
   private failedAt = new Map<string, number>();
   /** Mutes this window has set that the daemon has not answered yet: a reload of the map must not undo them. */
-  private muting = new Map<string, boolean>();
+  private muting = new Map<string, symbol>();
+  private mutingWant = new Map<string, boolean>();
   private listeners = new Set<() => void>();
   private _pool: readonly string[] = [];
   private _version = 0;
@@ -38,7 +39,7 @@ export class ThreadVoices {
       const got = await this.api.list();
       this._pool = got.pool;
       for (const [id, v] of Object.entries(got.threads)) {
-        const mine = this.muting.get(id);
+        const mine = this.mutingWant.get(id);
         this.map.set(id, { voice: v.voice, muted: mine ?? v.muted });
       }
       this.changed();
@@ -104,7 +105,10 @@ export class ThreadVoices {
     // The window acts at once; the daemon's answer (or another window's change) settles it.
     const before = this.info(thread);
     this.map.set(thread, { ...before, muted });
-    this.muting.set(thread, muted);
+    // This call's marker: a second toggle in flight replaces it, and the first's end must not clear the second's.
+    const mark = Symbol("mute");
+    this.muting.set(thread, mark);
+    this.mutingWant.set(thread, muted);
     this.changed();
     try {
       this.apply(await this.api.change(thread, { muted }));
@@ -112,7 +116,7 @@ export class ThreadVoices {
       this.map.set(thread, before);
       this.changed();
     } finally {
-      this.muting.delete(thread);
+      if (this.muting.get(thread) === mark) { this.muting.delete(thread); this.mutingWant.delete(thread); }
     }
   }
 

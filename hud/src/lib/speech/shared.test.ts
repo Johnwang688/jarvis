@@ -560,6 +560,24 @@ describe("ThreadVoices", () => {
     expect(v.info("t1").muted).toBe(false);           // settled: the daemon's word stands
   });
 
+  it("two quick mute toggles: the first finishing does not clear the second's in-flight marker", async () => {
+    const releases: (() => void)[] = [];
+    const api: VoicesApi = {
+      list: async () => ({ threads: { t1: { voice: "bm_a", muted: true } }, pool: [] }),
+      change: (thread, change) => new Promise((res) => {
+        releases.push(() => res({ thread_id: thread, voice: "bm_a", muted: change.muted ?? false }));
+      }),
+    };
+    const v = new ThreadVoices(api);
+    await v.load();
+    const first = v.mute("t1", true);
+    const second = v.mute("t1", false);
+    releases[0](); await first;                       // the first answer lands while the second is still out
+    await v.load();                                   // the daemon says whatever it says; the second toggle is unanswered
+    expect(v.info("t1").muted).toBe(false);           // the second toggle (unmuted) is kept, not the daemon's
+    releases[1](); await second;
+  });
+
   it("names voices for the chip", () => {
     expect(voiceLabel("bm_george")).toBe("George");
     expect(voiceLabel("pocket:bill_boerst")).toBe("Bill Boerst · pocket");
