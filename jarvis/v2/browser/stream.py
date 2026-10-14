@@ -260,6 +260,13 @@ def parse(raw: bytes) -> Msg:
     if not isinstance(m, dict) or not isinstance(m.get("t"), str):
         raise Bad("a message has no type")
     t = m["t"]
+    if t in ("find", "find_cancel", "cursor", "cursor_cancel"):
+        from .owner_tools import parse_message, OwnerBad
+        try:
+            fields = parse_message(m)
+        except OwnerBad as exc:
+            raise Bad(str(exc)) from None
+        return Msg(t, **{key: value for key, value in fields.items() if key != "t"})
     if t == "key":
         _fields(m, ("e",), ("e",))
         return Msg(t, "Input.dispatchKeyEvent", _key(m["e"]))
@@ -280,6 +287,21 @@ def parse(raw: bytes) -> Msg:
         if "text" in m:
             text = _clean_text(m["text"], cap_bytes=DIALOG_TEXT_MAX, allowed="\t", what="a dialog's answer")
         return Msg(t, id=m["id"], accept=m["accept"], text=text)
+    if t == "auth":
+        _fields(m, ("id", "cancel", "username", "password"), ("id", "cancel"))
+        if (not isinstance(m["id"], str) or not __import__("re").fullmatch(r"[0-9a-f]{32}", m["id"])
+                or type(m["cancel"]) is not bool):
+            raise Bad("an authentication answer has the wrong shape")
+        if m["cancel"]:
+            if "username" in m or "password" in m:
+                raise Bad("an authentication answer has the wrong shape")
+            return Msg(t, id=m["id"], cancel=True)
+        from .auth_state import credential_fields, AuthRefused
+        try:
+            username, password = credential_fields(m.get("username"), m.get("password"))
+        except AuthRefused:
+            raise Bad("authentication fields are invalid") from None
+        return Msg(t, id=m["id"], cancel=False, username=username, password=password)
     if t == "ack":
         _fields(m, ("id",), ("id",))
         if not _is_int(m["id"], 0, 0xFFFFFFFF):
@@ -621,6 +643,16 @@ class TabStream:
             self._held_notice = now
             return True
         return False
+
+    def discard_document_input(self) -> None:
+        """Retire received old-document input without recording an approval.
+
+        An expected navigation may finish its agent action on the fresh
+        document. Its queue cutoff must not look like an intervening card.
+        """
+        with self._lock:
+            self._drop_through = self._seq
+            self._queue.clear()
 
     def hold_through(self, *, notify: bool = True) -> None:
         """A hold was seen: everything received so far is dropped, now and
