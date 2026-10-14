@@ -184,7 +184,7 @@ this batch does not claim voice work or native subagent visibility.
 **Test slots:** slot 1 remains reserved for the Claude voice team. Codex slots
 2 and 3 are released: all Codex heavy jobs and installation are complete. Future
 heavy work requires a new coordinating-lead grant after a memory check.
-At most three heavy test/build jobs globally, each capped at 3 GiB and no swap;
+At most five heavy test/build jobs globally (raised from three on 2026-10-14, after WSL went from about 15 GB to 22 GB at the owner's request), each capped at 3 GiB and no swap;
 start only with at least 4 GiB available. Native/provider probes need a concrete
 reviewed plan; completed paid-probe exceptions are not reused. Physical/account
 acceptance remains separately identified, never inferred from synthetic tests.
@@ -293,8 +293,9 @@ other unclaimed packages or coordinate a handoff with the named lead.
 
 ## Shared test, review and release contract
 
-- WSL has about **15GB RAM**. **At most three heavy HUD/browser test jobs in total
-  across all teams**, never three per team. Slot 1 is reserved for the Claude
+- WSL has about **22GB RAM** (since 2026-10-14; it was about 15 GB). **At most five heavy HUD/browser test
+  jobs in total across all teams**, never five per team. The 4 GiB available floor still applies;
+  drop back to three if WSL comes under memory pressure. Slot 1 is reserved for the Claude
   voice team; Codex slots 2 and 3 are released after completed testing and
   installation. Claim any future heavy job with the coordinating lead using
   the current registry and obtain a per-job grant before launch;
