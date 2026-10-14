@@ -47,10 +47,10 @@ QUIET = "window.__hud.mic.feedMs(1500, .0009)"
 # Push-to-talk as the capture sees it (App.press is covered by hud_v2_ptt_check).
 PTT = "window.__hud.capture.press(); window.__hud.mic.feedMs(1200, .06); window.__hud.capture.release()"
 # Speech after `%d` ms of quiet: the words, then the pause that ends them.
-SPEECH = "{const m = window.__hud.mic; m.feedMs(%d, .0009); m.feedMs(1200, .06); m.feedMs(2200, .0005);}"
+SPEECH = "{const m = window.__hud.mic; m.feedMs(%d, .0009); m.feedMs(1200, .06); m.feedMs(2800, .0005);}"
 # A message said with the wake word.
 WAKE = ("{const m = window.__hud.mic; m.feedMs(2000, .0009); m.feedMs(400, .06); m.wake();"
-        " m.feedMs(1000, .06); m.feedMs(2200, .0005);}")
+        " m.feedMs(1000, .06); m.feedMs(2800, .0005);}")
 
 
 def main(argv=None):

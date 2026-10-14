@@ -30,7 +30,8 @@ describe("the model is checked before anything parses it", () => {
   });
 
   it("defaults to the real pin", async () => {
-    await expect(verifiedModel(async () => bytesOf(SILERO_BYTES))).rejects.toMatchObject({ code: "hash" });
+    // (not `.rejects`: were it accepted, a failing assertion would try to print 2.3 MB)
+    expect(await verifiedModel(async () => bytesOf(SILERO_BYTES)).then(() => "accepted", (e: FailError) => e.code)).toBe("hash");
     expect(SILERO_SHA256).toMatch(/^[0-9a-f]{64}$/);
   });
 });

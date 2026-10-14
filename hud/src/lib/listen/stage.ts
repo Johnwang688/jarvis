@@ -56,6 +56,8 @@ export interface DetectorStatus {
   frameMs: number;
   /** Frames the ML VAD scored so far. */
   scored: number;
+  /** How long the worker took to become ready (fetch, checksum, compile, warm-up), 0 until it has. */
+  loadMs: number;
 }
 
 export interface StageOptions {
@@ -92,6 +94,7 @@ export class VadStage {
   private wasActive = true;
   private scored = 0;
   private totalMs = 0;
+  private loadMs = 0;
   private lastStatus = "";
 
   constructor(private o: StageOptions) {}
@@ -112,6 +115,7 @@ export class VadStage {
         : "not started",
       frameMs: this.scored ? this.totalMs / this.scored : 0,
       scored: this.scored,
+      loadMs: silero ? this.loadMs : 0,
     };
   }
 
@@ -129,6 +133,7 @@ export class VadStage {
     this.code = null;
     this.scored = 0;
     this.totalMs = 0;
+    this.loadMs = 0;
     this.startedAt = this.now();
     if (typeof Worker === "undefined" && !this.o.createWorker) { this.fail("no_worker"); return; }
     let w: WorkerLike;
@@ -187,7 +192,12 @@ export class VadStage {
   private onMessage(m: FromWorker) {
     if (!m || typeof m !== "object") return;
     if (m.type === "ready") {
-      if (this.state === "loading") { this.state = "ready"; this.wasActive = true; this.publish(); }
+      if (this.state === "loading") {
+        this.state = "ready";
+        this.wasActive = true;
+        this.loadMs = Number.isFinite(m.loadMs) ? Math.max(0, m.loadMs) : 0;
+        this.publish();
+      }
     } else if (m.type === "failed") {
       this.fail(m.code in FAIL_TEXT ? m.code : "runtime");
     } else if (m.type === "prob") {

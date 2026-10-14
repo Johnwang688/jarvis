@@ -50,7 +50,7 @@ describe("energy until the worker is ready", () => {
   it("switches to Silero when the worker says ready, and says so", () => {
     const r = rig();
     ready(r);
-    expect(r.stage.status()).toMatchObject({ detector: "silero", state: "ready" });
+    expect(r.stage.status()).toMatchObject({ detector: "silero", state: "ready", loadMs: 400 });
     expect(r.statuses.map((s) => s.detector)).toEqual(["energy", "silero"]);
   });
 

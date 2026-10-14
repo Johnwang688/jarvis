@@ -1613,6 +1613,90 @@ a heuristic: a hard cut in the middle of a word the model hears differently in
 the two chunks can leave a fragment (shorter than four letters) or, rarely, drop a
 word repeated on purpose exactly at a cut.
 
+## V5: Silero VAD worker, energy fallback, the three timers (2026-10-14)
+
+Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
+
+- **Pipeline.** `micInput` frames -> `VadStage` (`lib/listen/stage.ts`) -> `Capture.onFrame(frame, p)`.
+  The stage posts a copy of each 512-sample frame to a **module Web Worker**
+  (`lib/listen/worker.ts`; onnxruntime-web 1.30.0 WASM build, one thread, no proxy: V0's
+  configuration) and hands the frame on, **in order**, once its probability is back (about a
+  millisecond). The capture's rules (OFF, suppression, claims, drops, chunks) did not change;
+  `Vad.feed(rms, n, written, prob?)` takes `p` instead of the energy test for that frame.
+- **Hysteresis and onset.** `p >= 0.5` turns speech on, `p < 0.35` turns it off, between holds
+  (`SPEECH_ON_P`/`SPEECH_OFF_P`); an utterance opens after 60 ms of it (`ONSET_MS`, two frames),
+  as before. This per-frame flag is `vad.loud`, which the recorder's pause cut reads. In ML mode
+  `longEnough` no longer asks the peak to clear the energy threshold (the model already said
+  speech); the energy floor is still tracked, so a fallback finds a current threshold.
+- **The model.** Silero VAD **v5.1.2** (the file V0's `check_silero_parity.py` ran; v6.2.3 costs the
+  same but has no browser parity check). Vendored in `hud/vendor/silero-vad/` with its MIT licence
+  and manifest (2,327,524 bytes), built by Vite into `dist/assets/silero_vad_v5.1.2-<hash>.onnx`,
+  served by the daemon from the HUD's own origin. `lib/listen/pins.ts` carries its SHA-256 (the
+  same digest as `silero-vad-v5.1.2` in `tests/voice_v0/models.json`); the worker checks the
+  fetched bytes' **length and SHA-256 before building a session** (`runner.ts` `verifiedModel`;
+  `crypto.subtle`, with a pure-JS SHA-256 behind it for an insecure-origin window). A changed or
+  truncated model never runs. `onnxruntime-web` is pinned exactly in `package.json` (1.30.0, the
+  integrity V0 recorded); its 14.2 MB `.wasm` is a Vite `?url` asset like the tree-sitter grammars.
+  `dist` grows by about 16.5 MB (wasm 14.2, model 2.3) plus the worker chunk (224 KB).
+- **CSP.** Unchanged and sufficient: the worker is `worker-src 'self'`, the WebAssembly compiles under
+  the existing `'wasm-unsafe-eval'`, the model and wasm are `connect-src 'self'` fetches. No
+  `unsafe-eval`, no blob worker, no CDN. `hud_v2_vad_check.py` loads it with the violation watch on.
+- **Energy fallback, visibly.** Until the worker says `ready` (`status().loadMs`: fetch, checksum, compile, warm-up) frames are
+  delivered at once with `p = null` and judged by energy. It stays on energy when: this window
+  cannot start a Worker (`no_worker`), the worker or its script fails (`worker`), the model cannot
+  be fetched (`fetch`) or fails its checksum (`hash`), the runtime cannot start (`runtime`), loading
+  takes over 20 s (`timeout`), a verdict is over 500 ms late (`late`), or more than 16 frames
+  (0.5 s of audio) wait on the worker (`backlog`: the queue is bounded, never grows). A failure is
+  **sticky for the window** (no flapping between detectors mid-sentence); every frame is still
+  delivered, in order, exactly once. Settings -> Voice -> Diagnostics shows `Speech detector:
+  Silero VAD (ML) . 0.6 ms per 32 ms frame` or `energy fallback - <reason sentence>` with **Try the
+  Silero VAD again**; the reason comes from a closed set of sentences (`protocol.ts` `FAIL_TEXT`),
+  never an engine message, URL or path. Each diagnostics row records which detector judged it
+  (`row.detector`). `__hud.mic.detector()` / `retryDetector()` are the test hooks.
+- **OFF scores nothing.** While the mic is OFF no frame is posted to the worker; the worker's state
+  is reset when listening resumes. Frames still reach the capture (it tracks the room), in order.
+- **Seam for RNNoise (V14).** `StageOptions.denoise(frame)` is applied to the copy the worker scores,
+  never to the frame the capture records (STT takes the echo-cancelled stream, V0 section 2). V12's
+  speaker verification still hangs on `Capture.hooks.onChunk` and `micInput.addFrameListener`.
+- **The three timers** (`lib/vad.ts`, all samples on the ring clock): `SEGMENT_GAP_MS` = 700 (the
+  recorder's `CHUNK_GAP_MS` now *is* this constant; chunking is otherwise V4's), `END_PAUSE_MS` =
+  2500 (the old `HANGOVER_MS` 1500 is now an alias of it, so the energy fallback ends a message at
+  2.5 s too), `CONTINUE_MS` = 6000 with V3's chain cap (2 continuation claims, 20 s from the first
+  message's end) unchanged. The message pause is tunable per window: Settings -> Voice -> "Pause
+  that ends a message" (1.5 / 2 / 2.5 / 3 / 4 s, `localStorage`, `Capture.setEndPause`, bounded to
+  1-6 s). **Consequence for tests and for use:** a message now goes out 2.5 s after the last word
+  (1.5 s before), the ring for an unclaimed utterance stays open that long, and every scripted
+  suite that closed an utterance with a 1.5-2.2 s quiet feed needed 2.8 s (changed in
+  `hud_v2_{check,layout,declutter,csp,steer,speech,multichat,voice_diagnostics,chunks}_check.py`).
+- **Free checks.** `lib/listen/{sha256,pins,runner,stage}.test.ts` (checksum vectors against node's
+  on every length around the block boundaries; the vendored file, manifest, `models.json` and
+  `pins.ts` agree; the Silero loop with a fake runtime; the stage with a fake worker, including a
+  random-event property test that every frame comes out exactly once, in order), `captureV5.test.ts`
+  (22: the timers, a 2.4 s pause continues and a 2.6 s pause ends, continuation at 5 s and not at
+  7 s, in ML and energy modes; the probability not the loudness decides; self-voice, OFF and a card
+  with p = 0.99; the recorder cuts at the 700 ms gap the model calls quiet), `voiceTiming.test.ts`,
+  `voiceDiagnostics.test.ts` (+2).
+- **Browser check.** `tests/face/hud_v2_vad_check.py` (real Chromium, real worker, mock daemon;
+  fixtures are synthetic Kokoro clips in `tests/face/fixtures/voice_v5/`, never a voice of a person):
+  Silero loads under the CSP and scores in real time; the model served is the pinned file; speech
+  through Chrome's fake microphone: 2.4 s continues and 2.6 s ends, continuation claimed 5 s after a
+  message ended and not 7 s; loud white + pink noise opens nothing with a follow-up window held
+  open; six failure modes fall back visibly with dictation still working (model 404, one byte
+  changed, truncated, wasm 500, Worker construction refused, a worker answering 1.5 s late); Try again
+  restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its "speech" is two
+  oscillators, which Silero rightly does not call speech) by failing the model fetch for its contexts.
+- **Mutations that fail on purpose** (source restored afterwards): no backlog bound (1 test); the
+  checksum not compared (3); the message pause back to 1.5 s (3); the probability ignored (8+).
+- **Not done / not claimed.** Windows Chrome and a physical microphone: unmeasured (CPU of the
+  worker there is V0's headless-Linux 3.4% of a core, not re-measured; V0's 28-39 ms slow first frame is
+  expected to fall in the worker's warm-up before `ready`, not measured separately). A real person's voice, a room, a TV, real
+  background noise: synthetic only, so false accepts on a TV (V0: 97.8% of two TTS voices) remain
+  speaker verification's (V12) problem. RNNoise (V14), barge-in and self-voice gating (V9) and
+  speaker verification (V12) are not here. The browser check's 2.4 s / 2.6 s margin is the model's
+  own: it passed with the clips trimmed to their first and last audible sample, so the silence
+  between words is the gap; in a real room the pause the model sees starts a little after the last
+  word. The hash proves the file is the pinned one, not that the pinned file is good for this room.
+
 ## V8: spoken summaries (2026-10-13)
 
 Owner's answers to open question 2: **summary only**, and (confirmed) **hold

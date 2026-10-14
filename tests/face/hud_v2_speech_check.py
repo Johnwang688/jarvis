@@ -55,7 +55,7 @@ UTTERANCE = """() => {
   const m = window.__hud.mic;
   m.feedMs(2000, 0.001);
   window.__hud.capture.openFollowUp();
-  m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+  m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
   return true;
 }"""
 TAGS = {"t1": "Alpha", "t2": "Bravo", "t3": "Charlie", "t9": "Zulu"}

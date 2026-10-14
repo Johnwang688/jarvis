@@ -66,7 +66,7 @@ def main():
             check("private fields never reach diagnostics", "private" not in page.locator('[data-testid="voice-diagnostics"]').inner_text().lower())
             # While Settings covers capture, a speech segment produces one reason, no upload.
             before = len(mock.sent('POST', '/stt'))
-            page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.mic.feedMs(1200, .06); window.__hud.mic.feedMs(1800, .0009)")
+            page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.mic.feedMs(1200, .06); window.__hud.mic.feedMs(2800, .0009)")
             check("suppressed utterance reports settings", page.evaluate("window.__hud.voiceDiagnostics().rows.at(-1).outcome") == "suppressed:settings")
             check("settings speech never uploaded", len(mock.sent('POST', '/stt')) == before)
             page.screenshot(path=os.environ.get('VOICE_DIAGNOSTICS_SCREENSHOT', '/tmp/voice-v1-diagnostics.png'))
@@ -86,7 +86,7 @@ def main():
             page.unroute('**/threads/*/send')
             page.locator('[data-testid="dictation-off"]').click()
             before = len(mock.sent('POST', '/stt'))
-            page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.mic.feedMs(1200, .06); window.__hud.mic.feedMs(1800, .0009)")
+            page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.mic.feedMs(1200, .06); window.__hud.mic.feedMs(2800, .0009)")
             check("OFF speech logged as muted", page.evaluate("window.__hud.voiceDiagnostics().rows.at(-1).outcome") == 'muted')
             check("OFF uploaded nothing", len(mock.sent('POST', '/stt')) == before)
             open_settings(page, 'Voice')

@@ -274,7 +274,7 @@ UTTERANCE = """() => {
   const m = window.__hud.mic;
   m.feedMs(2000, 0.001);
   window.__hud.capture.openFollowUp();
-  m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+  m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
   return true;
 }"""
 
@@ -1226,7 +1226,7 @@ def _rv_stale_status_checks(page, mock, check, until):
     txt = st.inner_text() if st.count() else ""
     check("review: a pane that stops being the selected chat does not go on saying LISTENING",
           "LISTENING" not in txt.upper(), txt)
-    page.evaluate("() => { const m = window.__hud.mic; m.feedMs(800, 0.06); m.feedMs(2200, 0.0005); return true; }")
+    page.evaluate("() => { const m = window.__hud.mic; m.feedMs(800, 0.06); m.feedMs(2800, 0.0005); return true; }")
     check("W-6: the utterance's transcript lands in the chat selected when it lands (pane 1)",
           bool(until(lambda: "what is the weather" in _box(page, 1).input_value(), timeout=5))
           and "what is the weather" not in _box(page, 2).input_value())

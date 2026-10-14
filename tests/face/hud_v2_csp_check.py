@@ -191,7 +191,7 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
         stt_before = len(mock.sent("POST", "/stt"))
         page.evaluate("""() => { const m = window.__hud.mic;
             m.feedMs(2000, 0.001); window.__hud.capture.openFollowUp();
-            m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005); }""")
+            m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005); }""")
         until(lambda: len(mock.sent("POST", "/stt")) > stt_before)
         check("a dictated clip reaches POST /stt under the policy",
               len(mock.sent("POST", "/stt")) > stt_before)

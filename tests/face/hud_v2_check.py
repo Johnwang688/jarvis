@@ -537,7 +537,7 @@ def dictation_checks(page, mock):
     stt_before = len(mock.sent("POST", "/stt"))
     page.evaluate("""
       const m = window.__hud.mic;
-      m.feedMs(2000, 0.001); m.feedMs(1400, 0.06); m.feedMs(2000, 0.0005);
+      m.feedMs(2000, 0.001); m.feedMs(1400, 0.06); m.feedMs(2800, 0.0005);
     """)
     time.sleep(0.4)
     check("OFF uploads nothing", len(mock.sent("POST", "/stt")) == stt_before)
@@ -562,7 +562,7 @@ def dictation_checks(page, mock):
       const m = window.__hud.mic;
       m.feedMs(2000, 0.001);
       window.__hud.capture.openFollowUp();
-      m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+      m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
     """)
     until(lambda: len(mock.sent("POST", "/stt")) > stt_before)
     check("REVIEW transcribes the utterance", len(mock.sent("POST", "/stt")) > stt_before)
@@ -585,7 +585,7 @@ def dictation_checks(page, mock):
       const m = window.__hud.mic;
       m.feedMs(2000, 0.001);
       window.__hud.capture.openFollowUp();
-      m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+      m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
     """)
     sent = until(lambda: mock.sent("POST", "/threads/t1/send")[sends_before:] or None)
     check("AUTO sends the finished utterance", bool(sent))
@@ -2864,7 +2864,7 @@ def provider_default_checks(page, mock):
           const m = window.__hud.mic;
           m.feedMs(2000, 0.001);
           window.__hud.capture.openFollowUp();
-          m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+          m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
         """)
         return until(lambda: len(mock.sent("POST", "/stt")) > before, timeout=1.0) is True
 
