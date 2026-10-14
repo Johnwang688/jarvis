@@ -156,6 +156,25 @@ class StartupOutput(DaemonBase):
         self.assertEqual(self.build()["state"], "succeeded")
 
 
+class UsbConsoleOutput(unittest.TestCase):
+    # The shape the live console wrote around `vexcom --usb` under a sized
+    # PTY after the reply (2026-10-14); the path is a stand-in.
+    LIVE = (b'\x1b[?9001h\x1b[?1004h\x1b[m\x1b]0;C:\\fake\\vexcom.exe\x07\x1b[?25h{\r\n'
+            b'\x1b[?9001l\x1b[?1004l  "usb": {\r\n    "dfu": [\r\n    ],\r\n    "vex": [\r\n'
+            b'      {"vid":"0x2888", "pid":"0x0503", "family":"v5", "device":"ctrl"}\r\n'
+            b'    ]\r\n  }\r\n}\r\n')
+
+    def test_console_sequences_around_the_json_are_ignored(self):
+        from jarvis.v2.vex_connection import usb_presence
+        self.assertEqual(usb_presence(self.LIVE), (False, True))
+
+    def test_anything_else_beside_the_json_still_refuses(self):
+        from jarvis.v2.vex_connection import usb_presence
+        for extra in (b"banner\r\n", b"\x1b[?25h(\r\n", b"\xff"):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                usb_presence(extra + self.LIVE)
+
+
 class DeviceStartup(DaemonBase):
     """The fake vexcom waits for interop's cursor reply, as the real one does
     under a sized PTY, and exits 91 without it."""

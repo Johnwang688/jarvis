@@ -50,10 +50,15 @@ one fixed `ESC[1;1R`, for the first exact query only, hidden from the ring.
 The brain terminal takes input and is not listed. The fake `vexcom` models
 the handshake with `STARTUP_DSR` beside it and exits 91 without the reply;
 `tests/v2/vex_output_check.py` (`DeviceStartup`, and the pinned set in
-`StartupProtocol`) fails against the build-only rule. The live `--usb` output
-for a plugged-in controller was one `usb.vex` record
-`{"vid":"0x2888","pid":"0x0503","family":"v5","device":"ctrl"}`, which the
-strict parser accepts. A real robot download is still unverified.
+`StartupProtocol`) fails against the build-only rule. After the reply the console wraps `--usb`'s
+JSON in its own sequences (`ESC[?9001h`, `ESC[?1004h`, an OSC 0 window title,
+`ESC[?25h`, the toggles off again after the first line), which the strict
+parse refused (review of #172, then seen live), so `usb_presence` removes
+escape sequences (`vex._ANSI`) from a strictly decoded snapshot and nothing
+else; the fake writes the same around its output and `UsbConsoleOutput`
+holds the live shape. With a plugged-in controller that snapshot is one
+`usb.vex` record (`0x2888`/`0x0503`, `"device":"ctrl"`) and parses to
+controller present. A real robot download is still unverified.
 
 ## Original CLAUDE.md lines 2231–2491
 

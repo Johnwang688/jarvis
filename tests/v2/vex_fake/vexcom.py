@@ -46,6 +46,13 @@ if (HERE / "STARTUP_DSR").is_file() and "--user" not in args:
     if reply != b"\x1b[1;1R":
         sys.exit(91)
     termios.tcsetattr(0, termios.TCSANOW, attrs)
+    # What the live console wrote around `--usb`'s JSON after the reply
+    # (2026-10-14): mode toggles, a window title (OSC 0), cursor show, and
+    # the toggles turned off again after the first line.
+    os.write(1, b"\x1b[?9001h\x1b[?1004h\x1b[m\x1b]0;C:\\fake\\vexcom.exe\x07\x1b[?25h")
+    CONSOLE_OFF = "\x1b[?9001l\x1b[?1004l"
+else:
+    CONSOLE_OFF = None
 if "--user" in args:
     print("brain user port open", flush=True)
     for line in sys.stdin:
@@ -62,8 +69,12 @@ if args == ["--usb"]:
     while (HERE / "HOLD_USB").exists():
         time.sleep(0.05)
     response = HERE / "USB_RESPONSE"
-    print(response.read_text() if response.exists() else json.dumps({"usb": {"vex": [
-        {"vid": "2888", "pid": "0501", "serialNo": "FAKE-NO-DEVICE"}], "dfu": []}}), flush=True)
+    text = response.read_text() if response.exists() else json.dumps({"usb": {"vex": [
+        {"vid": "2888", "pid": "0501", "serialNo": "FAKE-NO-DEVICE"}], "dfu": []}}, indent=2)
+    if CONSOLE_OFF:
+        first, _, rest = text.partition("\n")
+        text = first + "\n" + CONSOLE_OFF + rest
+    print(text, flush=True)
     sys.exit(0)
 if args in (["--json"], ["--programs"]):
     while (HERE / "HOLD_INFO").exists():
