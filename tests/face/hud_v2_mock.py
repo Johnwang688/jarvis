@@ -678,6 +678,11 @@ class MockDaemon:
         # answers only once the Event is set: a transcript still in flight
         # (the crash checks land one after the window stopped drawing).
         self.stt_gate: threading.Event | None = None
+        # V2: per-request scripted answers, consumed in arrival order. Each is
+        # {"text": str} or {"status": int, "error": str}, with an optional
+        # {"wait": Event} that holds the answer until it is set. Empty: the
+        # old behaviour (`stt_text`).
+        self.stt_script: list[dict] = []
         # What the explorer moved to the trash (ED-7's `fs` delete).
         self.trashed: list[str] = []
 
@@ -983,10 +988,18 @@ class MockDaemon:
                     n = int(self.headers.get("Content-Length") or 0)
                     raw = self.rfile.read(n) if n else b""
                     self._record("POST", "/stt", {"bytes": len(raw),
-                                                  "type": self.headers.get("Content-Type", "")})
+                                                  "type": self.headers.get("Content-Type", ""),
+                                                  "query": {k: v[0] for k, v in parse_qs(url.query).items()}})
                     gate = mock.stt_gate
                     if gate is not None:
                         gate.wait(10)
+                    step = mock.stt_script.pop(0) if mock.stt_script else None
+                    if step is not None:
+                        if step.get("wait") is not None:
+                            step["wait"].wait(20)
+                        if "status" in step:
+                            return self._json({"error": step.get("error", "scripted failure")}, step["status"])
+                        return self._json({"text": step["text"]})
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)

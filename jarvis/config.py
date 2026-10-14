@@ -811,6 +811,13 @@ STT_MODEL = os.environ.get("JARVIS_STT_MODEL", "nvidia/parakeet-tdt-0.6b-v3")
 # list; empty disables the fallback.
 STT_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
     "JARVIS_STT_FALLBACK", "x-ai/grok-stt-1.0").split(",") if m.strip()]
+# HUD dictation (voice rework V2, plan §3.5): one request is 20 s per attempt
+# and two attempts per model, not llm.transcribe's 60 s x 3 default, so a dead
+# provider fails over to the next model in well under a minute and the window
+# can show a failure (and keep the clip for Retry) instead of "TRANSCRIBING"
+# for minutes. Discord voice notes keep the defaults.
+STT_DICTATION_TIMEOUT_S = 20.0
+STT_DICTATION_ATTEMPTS = 2
 
 
 def _load_dotenv() -> None:

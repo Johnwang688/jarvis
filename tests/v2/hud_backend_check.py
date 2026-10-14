@@ -1612,7 +1612,30 @@ class Backend(unittest.TestCase):
     def test_speech_pickers_and_fast_model_only(self):
         with patch.object(voice, "stt", return_value="dictated") as stt:
             self.assertEqual(self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}), {"text": "dictated"})
-            stt.assert_called_once_with(b"RIFFaudio", mime="audio/wav")
+            # V2: dictation is bounded tighter than llm.transcribe's 60 s x 3.
+            stt.assert_called_once_with(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2, budget=None)
+            # V2: the clip's ids are echoed so a delayed reply can be placed in order.
+            self.assertEqual(self.request("POST", "/stt?utterance_id=7&seq=12", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+                             {"text": "dictated", "utterance_id": 7, "seq": 12})
+            # MED-2: the client's deadline reaches the model chain, clamped, never echoed.
+            stt.reset_mock()
+            self.assertEqual(self.request("POST", "/stt?seq=3&budget_ms=15000", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+                             {"text": "dictated", "seq": 3})
+            self.assertEqual(stt.call_args.kwargs["budget"], 15.0)
+            self.request("POST", "/stt?budget_ms=1", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
+            self.assertEqual(stt.call_args.kwargs["budget"], 1.0)
+            self.request("POST", "/stt?budget_ms=99999999", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
+            self.assertEqual(stt.call_args.kwargs["budget"], 600.0)
+            self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
+            self.assertIsNone(stt.call_args.kwargs["budget"])
+            for bad in ("budget_ms=-5", "budget_ms=abc", "budget_ms=1.5", "budget_ms="):
+                calls = stt.call_count
+                self.request("POST", "/stt?" + bad, raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=400)
+                self.assertEqual(stt.call_count, calls)
+            for bad in ("seq=-1", "seq=x", "seq=1.5", "utterance_id=", "seq=" + "9" * 40, "other=1", "seq=1&seq=2"):
+                calls = stt.call_count
+                self.request("POST", "/stt?" + bad, raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=400)
+                self.assertEqual(stt.call_count, calls, f"{bad}: a refused request must not call the provider")
             self.request("POST", "/stt", raw=b"text", headers={"Content-Type": "text/plain"}, status=400)
             self.request("POST", "/stt", raw=b"", headers={"Content-Type": "audio/webm"}, status=400)
         # A provider outage is a sentence for the HUD (502 naming each model

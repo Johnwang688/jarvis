@@ -46,3 +46,22 @@ describe("window-only bounded voice metadata", () => {
     d.add(1, "wake", "unclaimed"); expect(calls).toBe(1);
   });
 });
+
+describe("V2 retained-clip bookkeeping", () => {
+  it("reopens only a failed row, once settled again it keeps its kept flag and loses stale latency", () => {
+    const d = new VoiceDiagnostics(() => 5);
+    const id = d.add(1000, "ptt", "transcribing");
+    d.keep(id, true);
+    d.reopen(id);                                    // not failed: ignored
+    expect(d.snapshot().rows[0].outcome).toBe("transcribing");
+    d.finish(id, "stt_failed", 900);
+    expect(d.snapshot().rows[0]).toMatchObject({ outcome: "stt_failed", latencyMs: 900, kept: true });
+    d.reopen(id);
+    expect(d.snapshot().rows[0]).toMatchObject({ outcome: "transcribing", kept: true });
+    expect(d.snapshot().rows[0].latencyMs).toBeUndefined();
+    d.finish(id, "review", 100);
+    expect(d.snapshot().rows[0].outcome).toBe("review");
+    d.keep(id, false);
+    expect(d.snapshot().rows[0].kept).toBe(false);
+  });
+});
