@@ -1844,13 +1844,12 @@ ordinary messages. No import, name or route in the speech modules reaches an app
 A mis-heard "Jarvis" (Travis, Jarvas) is a message, not a command: STT spelling is not normalised.
 
 **Free checks.** vitest 2537 tests / 156 files (2385 / 151 on V5: +152; new `selfvoice` 19, `captureSelfVoice` 17, `barge` 21,
-`commands` 56, `approvalIsolation` 47, `player` +6; `suppress.test` wiring pins updated for the new wiring), `tsc`, `vite build`.
+`commands` 42, `approvalIsolation` 47, `player` +6; `suppress.test` wiring pins updated for the new wiring), `tsc`, `vite build`.
 **Browser:** `tests/face/hud_v2_barge_check.py` (95 checks; real Web Audio player, an in-page acoustic simulator mixing synthetic
 Kokoro clips as reply and "owner", mock daemon, scripted/gated `/stt`; sections gate_self_only, gate_owner_over, gate_wake_over,
 barge_transitions, commands, commands_not_messages, card, fallback). Existing voice suites on the final build: vad 67, chunks 58,
 stt 28, steer 46, ptt 70, speech 56 (its "another pane is read" section now runs with the gate switched off, because it asserts the
-blanket hold), voice_diagnostics 17, multichat 343 (flaky when the machine is loaded: different UTTERANCE checks time out at load
-average 16; see PR). Full `hud_v2_check` not run.
+blanket hold), voice_diagnostics 17, multichat 343 (two earlier runs at load average 16 failed 6 and 3 different UTTERANCE-based checks by 4-5 s timeouts, and a third 1; the rerun on the final build passed 343/343). Full `hud_v2_check` not run.
 **Mutations that fail on purpose** (source restored): gate verdict always "not his voice" (4 vitest, 4 browser); card refusal removed
 from the router (4); any voice pauses before enrollment (1); "stop" wired to an interrupt (1); a `decide` call added to transcript
 placement (1 vitest static pin, 3 browser: "Jarvis approve/yes/approve" with a card in flight gave one approval request each).
