@@ -1552,7 +1552,10 @@ paid comparison has NOT been run, and nothing is deployed.**
   and size caps into `~/.cache/jarvis-stt/parakeet-tdt-0.6b-v3-int8`; or point
   `JARVIS_STT_LOCAL_MODEL` at an existing directory). Restart the daemon, then
   Settings -> Voice shows "installed". Nothing changes until the owner picks
-  Local or Auto.
+  Local or Auto. The first load after each daemon start hashes about 640 MB of
+  model files (`verify_model`, once per file identity) on top of the 2-4 s load,
+  so the first clip after a start may miss its local share of the budget and
+  fall back to the cloud (or fail, with the fallback off).
 - **The default flip** is one line: `config.STT_BACKEND_DEFAULT = "cloud"`. Run
   `tests/stt_compare_probe.py` first (header has the command; `--yes-spend`
   required, `--dry-run` free, hard cap $0.24, estimate at 4x the listed price,
@@ -1588,18 +1591,30 @@ live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
   recognition (Google). With local chosen and the fallback on, the summary says
   Discord voice notes and the face server still use the cloud. The window's copy
   of the settings (`hud/src/state/sttSettings.ts`) is shared by the panel and the
-  recognizer's gate; it is re-read on focus and every 15 s while unknown.
-  `hud_v2_stt_local_check.py` asserts the recognizer never starts after a reload
-  with the fallback off, stops when it is switched off, and starts when it is
-  switched on again.
+  recognizer's gate. **Every window hears a change at once:** the daemon
+  publishes an `stt_settings` event on `/events` after each successful POST and
+  whenever a read finds the resolved value changed by itself (a hand edit, a
+  corrupt file; `stt_settings.watch`), and each window applies it, because a
+  recognizer in a second window would otherwise keep streaming to Google. The
+  backstops are a re-read when the window becomes visible (`visibilitychange`,
+  not focus), on every event-stream (re)connect, every 60 s, and every 15 s
+  while the value is unknown. `hud_v2_stt_local_check.py` asserts the recognizer
+  never starts after a reload with the fallback off, stops when it is switched
+  off, and starts when it is switched on again; `hud_v2_stt_wake_windows_check.py`
+  (two pages, one mock that fans events out) asserts the other window stops with
+  no focus change, and carries a control run with the event dropped in which the
+  other window keeps streaming.
 - `wav_samples` maps any exception from `wave`/numpy on hostile bytes to
   `LocalSTTUnavailable` (a fuzzed header was a 500); a queued job now waits for
   the engine in 50 ms slices and leaves the queue as soon as its caller has gone.
 - `fetch` caps the download (700 MB) while streaming, refuses to replace a
   directory without the `.verified` marker, and records per-file hashes there;
-  `verify_model` re-checks them when the model loads (once per file identity).
-  A model directory the owner supplies has no marker and is trusted as it is:
-  only the download is verified.
+  `verify_model` re-checks them when the model loads (once per file identity:
+  path, inode, size, mtime, ctime). This guards against corruption, not
+  tampering: the marker lives in the same writable directory. A marker that is
+  there but unreadable, not JSON or without a `files` table refuses ("run the
+  fetch again") rather than being trusted. A model directory the owner supplies
+  has no marker and is trusted as it is: only the download is verified.
 - The compare probe charges its estimate for a failed request too. An invalid
   `backend` reads "using local" (the fallback keeps its value); `auto` with
   nothing installed and the fallback off says the engine is not installed, not

@@ -26,6 +26,7 @@ import json
 import os
 import secrets
 import stat
+import threading
 from pathlib import Path
 
 from . import config
@@ -68,8 +69,41 @@ def _read(path: Path):
     return (value, None) if isinstance(value, dict) else (None, "not an object")
 
 
-def load() -> dict:
+_lock = threading.Lock()
+_last: tuple | None = None
+_watchers: dict[object, object] = {}
+
+
+def watch(key: object, callback) -> None:
+    """Call `callback(settings)` whenever a read finds a different resolved value than the last
+    read did (a hand edit, a corrupt file noticed). One callback per `key`, replaced on re-register.
+    A change this module's own `update` made is not reported: its caller publishes it."""
+    with _lock:
+        _watchers[key] = callback
+
+
+def _note(result: dict, quiet: bool) -> None:
+    global _last
+    token = (result["backend"], result["cloud_fallback"], result["error"])
+    with _lock:
+        changed = _last is not None and token != _last
+        _last = token
+        callbacks = list(_watchers.values()) if changed and not quiet else []
+    for callback in callbacks:
+        try:
+            callback(result)
+        except Exception:  # noqa: BLE001 - an observer cannot break a read
+            pass
+
+
+def load(_quiet: bool = False) -> dict:
     """`{backend, cloud_fallback, error}`; `error` is "" unless the file was untrustworthy."""
+    result = _load()
+    _note(result, _quiet)
+    return result
+
+
+def _load() -> dict:
     out = defaults()
     raw, problem = _read(_path())
     if problem:
@@ -132,4 +166,4 @@ def update(**changes) -> dict:
         except OSError:
             pass
         raise
-    return load()
+    return load(_quiet=True)

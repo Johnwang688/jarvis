@@ -80,7 +80,8 @@ import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { ReadAloudSetting } from "./components/ReadAloud";
 import { SttSettingsPanel } from "./components/SttSettings";
-import { sttSettingsStore, wakeRecognizerAllowed } from "./state/sttSettings";
+import { sttSettingsStore, wakeRecognizerAllowed, STT_BACKSTOP_MS, STT_UNKNOWN_RETRY_MS } from "./state/sttSettings";
+import { parseSttSettings } from "./lib/sttSettings";
 import { createSpeech, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
@@ -1254,6 +1255,11 @@ export default function App() {
       if (devservers.event(e)) return;
       if (kind === "_connected") { devservers.connect(); void speech.voices.load(); }
       if (kind === "thread_voice") speech.voices.apply(data);
+      // V13: another window (or a hand edit the daemon noticed) changed the speech-to-text
+      // switches. Every window applies it at once: Chrome's wake recognizer must stop
+      // streaming to Google as soon as the cloud is switched off, in whichever window it runs.
+      if (kind === "stt_settings") sttSettingsStore.apply(parseSttSettings(data));
+      if (kind === "_connected") void sttSettingsStore.refresh();
       if (kind === "_disconnected") { devservers.disconnect(); return; }
       const at = live.current;
       // Per pane (lib/chats `routeEvent`). Mine: the panes showing the thread
@@ -2638,11 +2644,14 @@ export default function App() {
   const wakeAllowed = wakeRecognizerAllowed(sttConfig);
   useEffect(() => {
     void sttSettingsStore.refresh();
-    // Another window may have changed it; and a daemon that was not up yet is asked again.
+    // The daemon's `stt_settings` event is how a change reaches this window; these are the
+    // backstops: when the window becomes visible, every minute, and every 15 s while unknown
+    // (a daemon that was not up yet).
     const again = () => { if (document.visibilityState !== "hidden") void sttSettingsStore.refresh(); };
     document.addEventListener("visibilitychange", again);
-    const timer = setInterval(() => { if (sttSettingsStore.snapshot() === null) void sttSettingsStore.refresh(); }, 15000);
-    return () => { document.removeEventListener("visibilitychange", again); clearInterval(timer); };
+    const backstop = setInterval(() => void sttSettingsStore.refresh(), STT_BACKSTOP_MS);
+    const unknown = setInterval(() => { if (sttSettingsStore.snapshot() === null) void sttSettingsStore.refresh(); }, STT_UNKNOWN_RETRY_MS);
+    return () => { document.removeEventListener("visibilitychange", again); clearInterval(backstop); clearInterval(unknown); };
   }, []);
 
   useEffect(() => {

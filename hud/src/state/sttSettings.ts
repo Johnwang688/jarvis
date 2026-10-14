@@ -4,6 +4,8 @@ import type { SttSettings } from "../lib/sttSettings";
 // The window's copy of the daemon's speech-to-text switches (V13). Memory only;
 // the daemon owns them. `null` means "not known yet" and is treated as the
 // closed answer wherever it matters (the wake-word recognizer stays off).
+export const STT_BACKSTOP_MS = 60_000;
+export const STT_UNKNOWN_RETRY_MS = 15_000;
 let value: SttSettings | null = null;
 let request = 0;
 const listeners = new Set<() => void>();

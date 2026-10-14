@@ -29,9 +29,12 @@ What this module guarantees:
 
 - **Integrity.** `fetch` verifies the download (size cap, then SHA256 against the pin)
   and records each model file's own hash in `.verified`; `verify_model` re-checks them
-  when the model loads (once per file identity per process). A model directory the
-  owner supplies themselves (`JARVIS_STT_LOCAL_MODEL`) has no marker and is trusted
-  as it is: only the download is verified.
+  when the model loads (once per file identity per process). That guards against
+  corruption, not tampering (the marker lives in the same writable directory). A model
+  directory the owner supplies themselves (`JARVIS_STT_LOCAL_MODEL`) has no marker and
+  is trusted as it is: only the download is verified; a marker that cannot be read
+  refuses. The first load after a daemon start hashes about 640 MB, so the first clip
+  may miss its local share of the budget and fall back to the cloud.
 
 Deploy (the lead, once): install `sherpa-onnx` into the daemon's venv and run
 `python -m jarvis.stt_local fetch` (about 490 MB, SHA256-pinned).
@@ -116,26 +119,39 @@ _verified: dict[tuple, bool] = {}
 def verify_model(directory: Path | None = None) -> None:
     """Check the model files against the hashes `fetch` recorded in `.verified`.
 
-    Only a directory that `fetch` made has them: a directory the owner pointed
-    `JARVIS_STT_LOCAL_MODEL` at is trusted as it is (documented, not verified).
-    Hashing about 640 MB takes seconds, so each file identity (path, size, mtime) is
-    hashed once per process. Raises LocalSTTUnavailable on a mismatch.
+    This guards against CORRUPTION (a truncated copy, a bad disk, a half-finished
+    download), not tampering: the marker sits in the same writable directory as the
+    files, so anyone who can change a model file can change its recorded hash. Only a
+    directory that `fetch` made has a marker. A directory without one (the owner's own,
+    via `JARVIS_STT_LOCAL_MODEL`) is trusted as it is. A marker that is there but
+    unreadable, not JSON, or without a `files` table is NOT trusted: it refuses, since
+    "something was recorded and cannot be read" is the corrupt case. Hashing about 640 MB
+    takes seconds, so each file identity (path, inode, size, mtime, ctime) is hashed once
+    per process. Raises LocalSTTUnavailable ("run the fetch again") on any mismatch.
     """
     d = directory or model_dir()
     marker = d / ".verified"
+    again = "run `python -m jarvis.stt_local fetch` again"
     try:
-        recorded = json.loads(marker.read_text()).get("files")
-    except (OSError, ValueError, AttributeError):
+        text = marker.read_text()
+    except FileNotFoundError:
         return
+    except OSError:
+        raise LocalSTTUnavailable(f"the speech model's record is unreadable: {again}") from None
+    try:
+        recorded = json.loads(text)
+        recorded = recorded.get("files") if isinstance(recorded, dict) else None
+    except (ValueError, RecursionError):
+        recorded = None
     if not isinstance(recorded, dict):
-        return
+        raise LocalSTTUnavailable(f"the speech model's record is corrupt: {again}")
     for name in FILES:
         path = d / name
         try:
             st = path.stat()
         except OSError:
-            raise LocalSTTUnavailable("the speech model files are incomplete: run the fetch again") from None
-        key = (str(path), st.st_size, st.st_mtime_ns)
+            raise LocalSTTUnavailable(f"the speech model files are incomplete: {again}") from None
+        key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
         if key not in _verified:
             digest = hashlib.sha256()
             with path.open("rb") as fh:
@@ -143,7 +159,7 @@ def verify_model(directory: Path | None = None) -> None:
                     digest.update(block)
             _verified[key] = digest.hexdigest() == recorded.get(name)
         if not _verified[key]:
-            raise LocalSTTUnavailable("the speech model files do not match what was downloaded: run the fetch again")
+            raise LocalSTTUnavailable(f"the speech model files do not match what was downloaded: {again}")
 
 
 def installed() -> tuple[bool, str]:

@@ -552,8 +552,33 @@ class EngineChecks(Base):
         for n in stt_local.FILES:
             (d / n).write_bytes(b"x")
         stt_local.verify_model(d)                            # nothing recorded: not verified, not refused
-        (d / ".verified").write_text("abcdef\n")             # V0-style marker, no per-file hashes
-        stt_local.verify_model(d)
+
+    def test_a_marker_that_cannot_be_read_refuses_instead_of_trusting(self):
+        d = Path(self.tmp.name) / "damaged"
+        d.mkdir()
+        for n in stt_local.FILES:
+            (d / n).write_bytes(b"x")
+        for text in ("abcdef\n", "{not json", "[]", "null", '{"files": []}', '{"files": "x"}', '{"archive_sha256": "x"}', "{" * 200):
+            (d / ".verified").write_text(text)
+            with self.assertRaises(stt_local.LocalSTTUnavailable, msg=text) as caught:
+                stt_local.verify_model(d)
+            self.assertIn("fetch", str(caught.exception))
+        (d / ".verified").unlink()
+        (d / ".verified").mkdir()                            # present but not a readable file
+        with self.assertRaises(stt_local.LocalSTTUnavailable):
+            stt_local.verify_model(d)
+
+    def test_a_replaced_file_is_not_hidden_by_the_cache(self):
+        dest = Path(self.tmp.name) / "model-cache"
+        self._fetch(dest, self._archive())
+        stt_local.verify_model(dest)
+        stat = (dest / "tokens.txt").stat()
+        replacement = dest / "tokens.new"
+        replacement.write_bytes(b"x" * stat.st_size)          # same size, new inode, same mtime below
+        os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        os.replace(replacement, dest / "tokens.txt")
+        with self.assertRaises(stt_local.LocalSTTUnavailable):
+            stt_local.verify_model(dest)
 
     def test_fetch_never_deletes_a_directory_it_did_not_make(self):
         mine = Path(self.tmp.name) / "owners"

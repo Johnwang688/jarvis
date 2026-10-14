@@ -331,7 +331,9 @@ every one of these routes asks (`kind`):
   {installed, reason, loaded, threads, idle_unload_min, model, fetch}}`;
   `POST /stt/settings {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool}`
   (at least one; anything else a 400, nothing written). Owner-only, the HUD
-  listener. `stt.json` is protected state. A read never loads the model.
+  listener. `stt.json` is protected state. A read never loads the model. After each
+  successful POST, and when a read finds the resolved value changed by itself, the
+  daemon publishes `{kind: "stt_settings", data: <the GET body>}` on `/events`.
 - `POST /say` `{text, voice?, instructions?, local_only?}` → audio bytes
   (`RIFF` or MP3; the client sniffs), `X-Speech-Ms` = synthesis time. Unknown
   keys are a 400. A `voice` must be one `GET /voices` lists, else **400**.

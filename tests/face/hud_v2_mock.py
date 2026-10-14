@@ -653,6 +653,10 @@ class MockDaemon:
         # dictation section's reload, went missing (the "approval-origin"
         # timeout).
         self._sse: collections.deque = collections.deque()
+        # V13: with `fanout` on, every /events connection gets every later frame (several windows
+        # at once) instead of the single newest connection taking over the queue.
+        self.fanout = False
+        self._log: list = []
         self._sse_cond = threading.Condition()
         self._sse_gen = 0
         self._sse_closed = False
@@ -686,6 +690,7 @@ class MockDaemon:
         # old behaviour (`stt_text`).
         self.stt_script: list[dict] = []
         # V13: the owner's speech-to-text switches, as /stt/settings answers them.
+        self.stt_publish = True
         self.stt_settings = {"backend": "cloud", "cloud_fallback": True, "error": "",
                              "backends": ["cloud", "local", "auto"],
                              "local": {"installed": True, "reason": "", "loaded": False, "threads": 2,
@@ -767,6 +772,25 @@ class MockDaemon:
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-store")
                     self.end_headers()
+                    if mock.fanout:
+                        with mock._sse_cond:
+                            at = len(mock._log)
+                            mock._sse_gen += 1
+                        while True:
+                            with mock._sse_cond:
+                                mock._sse_cond.wait_for(lambda: mock._sse_closed or len(mock._log) > at, timeout=0.5)
+                                if mock._sse_closed:
+                                    return
+                                event = mock._log[at] if len(mock._log) > at else None
+                                at += 1 if event is not None else 0
+                            try:
+                                if event is None:
+                                    self.wfile.write(b": keepalive\n\n")
+                                else:
+                                    self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                                self.wfile.flush()
+                            except Exception:
+                                return
                     with mock._sse_cond:
                         mock._sse_gen += 1
                         mine = mock._sse_gen
@@ -1149,6 +1173,9 @@ class MockDaemon:
                     if "cloud_fallback" in body and not isinstance(body["cloud_fallback"], bool):
                         return self._err(400, "bad cloud_fallback")
                     mock.stt_settings.update(body)
+                    # The daemon publishes the new state to every window (V13).
+                    if mock.stt_publish:
+                        mock.emit("stt_settings", dict(mock.stt_settings))
                     return self._json(mock.stt_settings)
                 if path == "/speech/voices":
                     # V7: assign (idempotent, sticky, next unused voice of the pool),
@@ -1588,6 +1615,7 @@ class MockDaemon:
             return
         with self._sse_cond:
             self._sse.append(frame)
+            self._log.append(frame)
             self._sse_cond.notify_all()
 
     def sse_connections(self) -> int:

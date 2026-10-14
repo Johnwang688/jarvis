@@ -1406,6 +1406,25 @@ def say(handler, body):
                   headers={"X-Speech-Ms": elapsed})
 
 
+def stt_view() -> dict:
+    from jarvis import stt_local, stt_settings
+    return {**stt_settings.load(), "backends": list(stt_settings.BACKENDS), "local": stt_local.status()}
+
+
+def watch_stt(daemon) -> None:
+    """Publish `stt_settings` to every window when the resolved value changes by itself
+    (a hand edit, a corrupt file noticed on a read), not only when the owner's POST does."""
+    from jarvis import stt_settings
+    if getattr(daemon, "_stt_watching", False):
+        return
+
+    def changed(_result):
+        daemon.bus.publish({"kind": "stt_settings", "data": stt_view()})
+
+    stt_settings.watch(id(daemon), changed)
+    daemon._stt_watching = True
+
+
 def stt_settings_route(handler, daemon, query):
     """`/stt/settings` (voice rework V13): the owner's speech-to-text switches.
 
@@ -1423,8 +1442,10 @@ def stt_settings_route(handler, daemon, query):
     owner_only(handler, daemon)
     _object(query, ())
 
+    watch_stt(daemon)
+
     def view():
-        return {**stt_settings.load(), "backends": list(stt_settings.BACKENDS), "local": stt_local.status()}
+        return stt_view()
 
     if handler.command == "GET":
         return 200, view()
@@ -1441,7 +1462,11 @@ def stt_settings_route(handler, daemon, query):
         stt_settings.update(**body)
     except OSError as exc:
         fail(500, f"the setting could not be saved ({type(exc).__name__})")
-    return 200, view()
+    # Every open window must hear it: Chrome's wake recognizer in another window streams the
+    # microphone to Google until it learns the cloud is off.
+    result = view()
+    daemon.bus.publish({"kind": "stt_settings", "data": result})
+    return 200, result
 
 
 SPEECH_SUMMARY_BODY_MAX = 1024 * 1024
@@ -1519,6 +1544,7 @@ def pickers(handler, daemon, parts, query):
             if not (raw.isascii() and raw.isdigit() and len(raw) <= 15):
                 fail(400, f"{key} must be a non-negative integer")
             ids[key] = int(raw)
+        watch_stt(daemon)
         # The client's whole deadline for this request (ms). The model chain is
         # fitted inside it (voice.stt); absent, the fixed dictation bounds apply.
         budget_ms = ids.pop("budget_ms", None)

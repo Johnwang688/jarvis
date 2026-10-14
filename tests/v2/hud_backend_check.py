@@ -1632,8 +1632,28 @@ class Backend(unittest.TestCase):
             self.owner("POST", "/stt/settings", bad, status=400)
         self.owner("GET", "/stt/settings?x=1", status=400)
         self.assertFalse(path.exists())
+        self.events_all()
         got = self.owner("POST", "/stt/settings", {"backend": "local", "cloud_fallback": False})
         self.assertEqual((got["backend"], got["cloud_fallback"]), ("local", False))
+        # Every window hears it (Chrome's wake recognizer in another one must stop streaming).
+        sent = [e for e in self.events_all() if e["kind"] == "stt_settings"]
+        self.assertEqual(len(sent), 1, "one event per successful POST, not two")
+        self.assertEqual((sent[0]["data"]["backend"], sent[0]["data"]["cloud_fallback"]), ("local", False))
+        self.assertIn("local", sent[0]["data"])
+        self.owner("POST", "/stt/settings", {"cloud_fallback": "no"}, status=400)
+        self.assertEqual([e for e in self.events_all() if e["kind"] == "stt_settings"], [], "a refused POST says nothing")
+        # A change the daemon notices by itself (a hand edit, a corrupt file) is published too.
+        path.write_text("{corrupt")
+        shown = self.owner("GET", "/stt/settings")
+        self.assertIn("no upload", shown["error"])
+        noticed = [e for e in self.events_all() if e["kind"] == "stt_settings"]
+        self.assertEqual(len(noticed), 1)
+        self.assertIn("no upload", noticed[0]["data"]["error"])
+        self.owner("GET", "/stt/settings")
+        self.assertEqual([e for e in self.events_all() if e["kind"] == "stt_settings"], [], "and only when it changes")
+        path.write_text(json.dumps({"backend": "local", "cloud_fallback": False}))
+        self.owner("GET", "/stt/settings")
+        self.events_all()
         self.assertEqual(json.loads(path.read_text()), {"backend": "local", "cloud_fallback": False})
         self.assertEqual(self.owner("GET", "/stt/settings")["backend"], "local")
         # They steer /stt: local-only never reaches the cloud, with a fake engine in place of sherpa.
