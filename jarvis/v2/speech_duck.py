@@ -431,9 +431,12 @@ class Ducker:
 
     def _duck_one(self, stream: Stream, chain, owners) -> None:
         prior = stream.volume
-        leftover = next((r for r in self._residue if r.applied == stream.volume), None)
+        # A stream born carrying exactly a duck level was handed it by PulseAudio's
+        # memory of an earlier duck (a held one, or a lost one in the journal):
+        # the volume to give back is that duck's prior, not this level.
+        leftover = next((r for r in [*self._held.values(), *self._residue] if r.applied == stream.volume), None)
         if leftover is not None:
-            prior = leftover.prior      # born ducked by PulseAudio's memory of a lost duck
+            prior = leftover.prior
         target = ducked(prior)
         # Index reuse is the one race pactl cannot close: look again, on the same
         # PID and volume, immediately before writing.

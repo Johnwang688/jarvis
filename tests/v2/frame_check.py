@@ -156,6 +156,7 @@ class Base(unittest.TestCase):
                                 V2_ALWAYS_ASK=self.root / "always-ask.json",
                                 AVATAR_STATE_PATH=self.root / "avatar.json", AVATARS_DIR=self.root / "avatars",
                                 AVATAR_ENV="",
+                                SPEECH_DUCK_PATH=self.root / "speech_duck.json",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
                                 # The Browser (BR-1a): no route below starts Chrome.
@@ -337,6 +338,7 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("POST", "/models", {"bogus": 1}), ("POST", "/mute", {"muted": "yes"}),
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
         ("GET", "/speech/voices", None), ("POST", "/speech/voices", {"bogus": 1}),
+        ("GET", "/speech/duck", None), ("POST", "/speech/duck", {"on": False}), ("POST", "/speech/duck", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
         ("GET", "/terminals/deadbeef/attach", None), ("DELETE", "/terminals/deadbeef", None),
         ("GET", "/vex/status", None), ("GET", "/vex/builds/deadbeef", None),
