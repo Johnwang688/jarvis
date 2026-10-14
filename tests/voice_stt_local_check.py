@@ -247,6 +247,22 @@ class EngineChecks(Base):
         self.assertEqual(len(backend.calls), 1, "the abandoned request was never decoded")
         self.assertEqual(eng.waiting, 0)
 
+    def test_a_caller_that_left_during_the_load_does_not_decode(self):
+        backend = FakeBackend()
+
+        def slow_factory(threads):
+            time.sleep(0.4)
+            return backend
+
+        eng = stt_local.Engine(slow_factory, schedule=False)
+        with self.assertRaises(stt_local.LocalSTTTimeout):
+            eng.transcribe(wav_bytes(), timeout=0.15)
+        time.sleep(0.6)
+        self.assertEqual(backend.calls, [], "nobody is waiting for the text, so none is decoded")
+        self.assertTrue(eng.loaded, "the load is not wasted: the next clip finds the model ready")
+        self.assertEqual(eng.transcribe(wav_bytes(), timeout=2), "local words")
+        self.assertEqual(eng.loads, 1)
+
     def test_a_slow_decode_times_out_on_time(self):
         eng = engine_with(FakeBackend(delay=1.0))
         started = time.monotonic()
