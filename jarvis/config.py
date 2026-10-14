@@ -828,10 +828,13 @@ STT_DICTATION_ATTEMPTS = 2
 # The store is the owner's enrollment: the readings (kept so a model upgrade can
 # re-derive the voiceprint, Q12), the voiceprint and the Guest voice switch. Mode
 # 0700 like the Pocket voice store, never uploaded, no route returns its audio or
-# embeddings. The owner decided (V-12) that it is NOT added to the protected-path
-# detector: the worst an agent edit can do is make verification reject the owner
-# or accept another voice, and neither can authorize anything (speech never
-# answers an approval card).
+# embeddings. Two of its files are protected state (V-12b, owner 2026-10-14):
+# `voiceprint.json` and `guest.json` switch the voice check off, so no agent write,
+# grant or shell command may change them, and their folder is an ancestor, so
+# deleting it is asked, never auto-run (jarvis/tools/files.py). The readings and
+# `impostors.json` are not protected (V-12): the worst an agent edit there can do is
+# lower a future proposal, and never below the proposal floor. Nothing here can
+# authorize anything (speech never answers an approval card).
 SPEAKER_DIR = Path(
     os.environ.get("JARVIS_SPEAKER_DIR", Path.home() / ".local" / "share" / "jarvis" / "speaker")
 )

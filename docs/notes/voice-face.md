@@ -1745,8 +1745,8 @@ Contents: `voiceprint.json` (centroid, threshold, model name, counts), `guest.js
 (our own 16-bit mono re-encoding, never the uploaded bytes; Q12: kept so a model upgrade can
 re-derive the voiceprint; at most 6, each at most 30 s), `impostors.json` (cached embeddings of the
 built-in voices, per model). Delete removes the folder (symlinks inside are removed, never followed;
-a symlinked folder is unlinked, its target untouched). **Not added to the protected-path detector
-(V-12).** No route returns audio or an embedding; the status carries counts, the threshold and the
+a symlinked folder is unlinked, its target untouched). **`voiceprint.json` and `guest.json`
+are protected state (V-12b); `readings/` and `impostors.json` are not (V-12).** No route returns audio or an embedding; the status carries counts, the threshold and the
 last score only.
 
 **Enrollment (Settings → Voice → Your voice).** Three prompted readings (`POST /speaker/reading`,
