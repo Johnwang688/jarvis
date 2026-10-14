@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio,json,os,select,subprocess,sys,threading,unittest
 from pathlib import Path
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
@@ -30,6 +31,20 @@ ACT="hud_browser_act"
 SECRET="PRIVATE_BROWSER_ACTION_CANARY"
 
 class Catalog(unittest.TestCase):
+ def test_child_hook_mutant_is_caught_with_driving_enabled(self):
+  import ast,inspect,textwrap
+  original=claude.ClaudeProvider._pre_tool_hook
+  tree=ast.parse(textwrap.dedent(inspect.getsource(original)));matched=[]
+  for node in ast.walk(tree):
+   if isinstance(node,ast.If) and ast.unparse(node.test)=="jarvis is not None and jarvis.foreground_only and data.get('agent_id')":matched.append(node)
+  self.assertEqual(len(matched),1);matched[0].test=ast.Constant(False);ast.fix_missing_locations(tree)
+  namespace=dict(vars(claude));exec(compile(tree,"<child-hook-guard-mutant>","exec"),namespace)
+  check=NativeClaude("test_enabled_child_act_hook_denies_before_permission_parent_still_allows")
+  result=unittest.TestResult()
+  with patch.object(claude.ClaudeProvider,"_pre_tool_hook",namespace["_pre_tool_hook"]):check.run(result)
+  self.assertEqual(result.testsRun,1);self.assertEqual(result.errors,[])
+  self.assertEqual(len(result.failures),1);self.assertIn("'allow' != 'deny'",result.failures[0][1])
+
  def test_exact_owner_action_hints_scope_and_timeout(self):
   for provider in ("claude","codex"):
    entry=session_tools.offered(provider,ACT)
@@ -140,6 +155,24 @@ class NativeClaude(F.DaemonHarness):
    result=self.call(F.token_of(self.run_brief(thread)),ACT,{"action":"click","target":"e1"})[1]
    self.assertTrue(result["isError"]);self.assertIn(D.OFF,result["text"])
    permit.assert_not_called();dispatch.assert_not_called();self.assertEqual(self.d.approvals.pending(),[])
+ def test_enabled_child_act_hook_denies_before_permission_parent_still_allows(self):
+  import claude_provider_check as cl
+  thread,session,release=self.held();permit=Mock(return_value=Decision.ALLOW)
+  service=SimpleNamespace(closed=False,enabled=lambda:True,state=S.DriveState())
+  with patch.object(D,"_installed",service),patch.object(tools,"dispatch") as dispatch,cl.fake():
+   provider=claude.ClaudeProvider();handle=provider.start(thread,self.run_brief(thread),permit)
+   try:
+    hook=provider._pre_tool_hook(handle.native)
+    data={"tool_name":"mcp__jarvis__"+ACT,"tool_input":{"action":"press","text":"Tab"},"agent_id":"child"}
+    result=claude._await(handle.native.loop,hook(data,"child-act",{}),5)
+    self.assertEqual(result["hookSpecificOutput"]["permissionDecision"],"deny")
+    self.assertIn("sub-agent",result["hookSpecificOutput"]["permissionDecisionReason"])
+    permit.assert_not_called();dispatch.assert_not_called();self.assertEqual(self.d.approvals.pending(),[])
+    data.pop("agent_id");parent=claude._await(handle.native.loop,hook(data,"parent-act",{}),5)
+    self.assertEqual(parent["hookSpecificOutput"]["permissionDecision"],"allow")
+    permit.assert_called_once();dispatch.assert_not_called();self.assertEqual(self.d.approvals.pending(),[])
+   finally:provider.close(handle)
+
  def test_native_turn_lifecycle_stop_replacement_and_offdesk(self):
   thread,session,release=self.held();turn=session.drive_turn
   self.assertEqual((turn.provider,turn.owner_words,turn.turn_id),("claude",T.HUD.text,session.turn_id))
@@ -179,6 +212,45 @@ class NativeClaude(F.DaemonHarness):
   self.claude.steer=refused
   self.assertEqual(self.d.deliver(thread.id,UserMessage("REFUSED_WORDS",desk=True,via="hud"))["status"],"queued")
   self.assertEqual(turn.owner_words,before);self.d.interrupt(thread.id)
+
+ def test_unconfirmed_steer_stays_delivered_without_browser_owner_authority(self):
+  self.claude.steer=lambda h,m:False
+  thread,session,release=self.held(UserMessage("ORIGINAL_OWNER",desk=True,via="hud"));turn=session.drive_turn;before=turn.owner_words
+  result=self.d.deliver(thread.id,UserMessage("UNCONFIRMED_OWNER",desk=True,via="hud"))
+  self.assertEqual((result["status"],result["mode"]),("steered","native"))
+  self.assertEqual(turn.owner_words,before);self.assertFalse(self.d._queues.get(thread.id))
+  self.assertTrue(session.desk.slot["present"])
+  self.d.deliver(thread.id,T.REMOTE)
+  self.assertFalse(session.desk.slot["present"]);self.assertEqual(turn.owner_words,before)
+  self.d.deliver(thread.id,UserMessage("UNKNOWN_CANNOT_REGAIN_DESK",desk=True,via="hud"))
+  self.assertFalse(session.desk.slot["present"]);self.assertEqual(turn.owner_words,before)
+  self.assertFalse(self.d._queues.get(thread.id));self.d.interrupt(thread.id)
+
+ def test_confirmed_steer_and_legacy_none_both_update_browser_words(self):
+  thread,session,release=self.held();turn=session.drive_turn
+  for receipt in (True,None):
+   self.claude.steer=lambda h,m:receipt
+   self.d.deliver(thread.id,UserMessage("CONFIRMED_"+str(receipt),desk=True,via="hud"))
+   self.assertIn("CONFIRMED_"+str(receipt),turn.owner_words)
+  self.d.interrupt(thread.id)
+
+ def test_confirmed_steer_after_stop_cannot_update_retired_turn_or_successor(self):
+  thread,session,release=self.held();turn=session.drive_turn;before=turn.owner_words
+  entered=threading.Event();answered=threading.Event()
+  def delayed(h,m):entered.set();self.assertTrue(answered.wait(3));return True
+  self.claude.steer=delayed
+  with ThreadPoolExecutor(1) as pool:
+   steering=pool.submit(self.d.deliver,thread.id,UserMessage("STALE_ACK_WORDS",desk=True,via="hud"))
+   try:
+    self.assertTrue(entered.wait(2));self.d.interrupt(thread.id);self.finish(thread,release)
+    _,successor,new_release=self.held(UserMessage("NEW_OWNER",desk=True,via="hud"),thread)
+    self.assertIsNot(successor.drive_turn,turn)
+    answered.set();result=steering.result(2)
+    self.assertEqual((result["status"],result["mode"]),("steered","native"))
+    self.assertTrue(turn.closed);self.assertEqual(turn.owner_words,before)
+    self.assertNotIn("STALE_ACK_WORDS",successor.drive_turn.owner_words)
+    self.d.interrupt(thread.id)
+   finally:answered.set()
 
  def test_offdesk_text_never_enters_native_classifier_owner_words(self):
   self.claude.steer=lambda h,m:None

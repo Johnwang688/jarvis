@@ -1363,7 +1363,7 @@ class CodexProvider:
             inputs.append({"type": "image", "url": f"data:{img['mime']};base64,{img['b64']}"})
         return inputs
 
-    def steer(self, h: SessionHandle, message: UserMessage) -> None:
+    def steer(self, h: SessionHandle, message: UserMessage) -> bool:
         """Append `message` to the running turn with `turn/steer`.
 
         The request is the app-server's own (verified in the 0.153.4 and
@@ -1380,6 +1380,8 @@ class CodexProvider:
         `interrupt` fallback, so the daemon interrupts the turn and runs the
         message next instead. No answer within STEER_TIMEOUT is *unknown*,
         not refused: it is taken as delivered and logged, never queued too.
+        Returns False for that unconfirmed receipt, so Browser owner context
+        cannot treat it as accepted; True means Codex answered successfully.
         """
         s = h.native
         if s is None or s.closed.is_set():
@@ -1412,9 +1414,9 @@ class CodexProvider:
                     waiter.abandoned = True
                     LOG.warning("Codex did not answer turn/steer %s within %.0f s; "
                                 "taken as delivered", rid, STEER_TIMEOUT)
-                    return
+                    return False
         if waiter.ok:
-            return
+            return True
         if waiter.unsupported:
             s.steer_unsupported = True
             raise SteerRefused("this Codex has no turn/steer", fallback="interrupt")

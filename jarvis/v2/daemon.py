@@ -1080,7 +1080,7 @@ class Daemon:
                            if not desk_message(session.brief, message) else None)
             self._log_user(session.thread, item, steer=True)
         try:
-            steer(handle, message)
+            steer_confirmed = steer(handle, message)
         except SteerRefused as exc:
             fallback, reason = exc.fallback, str(exc)
             if exc.before_write and reservation is not None:
@@ -1092,7 +1092,8 @@ class Daemon:
             fallback, reason = "queue", type(exc).__name__
         else:
             with self._lock:
-                if (drive_turn is not None and self._sessions.get(thread_id) is session
+                if (steer_confirmed is not False and drive_turn is not None
+                        and self._sessions.get(thread_id) is session
                         and session.drive_turn is drive_turn and not drive_turn.closed
                         and session.worker is drive_worker and session.turn_id == drive_turn.turn_id
                         and session.desk.slot is drive_desk and drive_desk.get("present") is True
