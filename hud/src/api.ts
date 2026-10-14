@@ -385,6 +385,18 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, `say ${res.status}`);
     return res.arrayBuffer();
   },
+  /**
+   * A short spoken summary of a long reply (`POST /speech/summary`, V8).
+   * `text` is the reply's filtered prose, never code. A failure or timeout is
+   * an error the caller turns into truncated prose.
+   */
+  async speechSummary(text: string, threadId: string, opts: { signal?: AbortSignal } = {}): Promise<string> {
+    const res = await fetch("/speech/summary", { ...json({ thread_id: threadId, text }), signal: opts.signal });
+    if (!res.ok) throw new ApiError(res.status, `speech summary ${res.status}`);
+    const body = await res.json();
+    if (typeof body?.summary !== "string") throw new ApiError(502, "speech summary: bad answer");
+    return body.summary;
+  },
 };
 
 /**

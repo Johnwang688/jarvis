@@ -28,7 +28,7 @@ beforeEach(() => {
 });
 
 describe("reading a streamed reply", () => {
-  it("speaks the prose as it streams, in order, one chunk at a time", async () => {
+  it("speaks the prose in order, one chunk at a time", async () => {
     stream(REPLY);
     settle(REPLY);
     finish();
@@ -38,10 +38,15 @@ describe("reading a streamed reply", () => {
     expect(c.view().state).toBe("idle");
   });
 
-  it("starts speaking before the turn has finished", async () => {
+  it("holds a message until it closes, because its length decides how it is said (V8)", async () => {
     stream(REPLY.slice(0, REPLY.length - 20));
-    await clock.advance(500);
-    expect(player.started.length).toBeGreaterThan(0);
+    await clock.advance(5_000);
+    expect(player.started).toEqual([]);
+    expect(say.calls).toEqual([]);
+    stream(REPLY.slice(REPLY.length - 20));
+    finish();
+    await clock.advance(60_000);
+    expect(player.started.join(" ")).toBe(REPLY);
   });
 
   it("never speaks code, a diff or a diagnostic", async () => {

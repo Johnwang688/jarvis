@@ -13,6 +13,13 @@
 //     interrupted turn.
 //   - A tool call closes the message in progress (its partial sentence is
 //     flushed); a reconnect discards partial text it can no longer finish.
+//   - A message is held until it closes, because its length decides how it is
+//     said (V8, `summary.ts`): up to 600 spoken characters it is read as
+//     written; longer, it is replaced by the daemon's summary (no verbatim
+//     lead-in), or, if that fails, its opening and "...and more on screen".
+//     The summary is asked for the moment the message closes, and a later
+//     message of the thread waits behind it (the thread's lane), so order
+//     holds. Anything that silences the thread cancels the request.
 //   - Nothing here can reach an approval: no import, no route, no event it
 //     answers. Speech is output only (decision V-6).
 //
@@ -21,6 +28,7 @@
 
 import { SpeechQueue, type Clock, type Player, type QueueView, type SpeechItem } from "./queue";
 import { ProseStream, type SpokenChunk } from "./stream";
+import { SUMMARY_DEADLINE_MS, needsSummary, spokenText, summaryChunk, truncatedProse, type Summarize } from "./summary";
 
 export interface SpeechEventLike {
   kind?: string;
@@ -43,6 +51,8 @@ export interface ControllerDeps {
   gate: SpeakerGateLike;
   /** A named voice for a thread; null leaves the choice to the daemon (the avatar's). V7 supplies per-thread voices. */
   voiceFor?: (thread: string) => string | null;
+  /** A spoken summary of a long message (`POST /speech/summary`). Absent: a long message is read truncated. */
+  summarize?: Summarize;
 }
 
 /** After the last chunk ends, speech still counts as active this long: the owner's own echo and the next chunk's lead-in. */
@@ -62,14 +72,26 @@ export interface SpeechView extends QueueView {
 
 interface Open {
   stream: ProseStream;
-  /** Message counter for keys; chunk counter within the message. */
+  /** Message counter for keys. */
   n: number;
-  seq: number;
+  /** The open message's chunks, held until it closes and its length is known. */
+  held: SpokenChunk[];
+}
+
+/** A summary requested and not yet answered. */
+interface Pending {
+  thread: string;
+  ctl: AbortController;
+  /** The client deadline passed: an abort that is not a cancellation. */
+  expired: boolean;
 }
 
 export class SpeechController {
   private readonly queue: SpeechQueue;
   private open = new Map<string, Open>();
+  /** Per thread, the tail of what must come out in order while a summary is awaited. */
+  private lanes = new Map<string, Promise<void>>();
+  private pending = new Set<Pending>();
   private speakers: ReadonlySet<string> = new Set();
   private on = true;
   private listeners = new Set<() => void>();
@@ -176,6 +198,7 @@ export class SpeechController {
 
   private leave(thread: string): void {
     this.open.delete(thread);
+    this.cancel(thread);
     this.queue.dropThread(thread, "thread_left");
   }
 
@@ -193,6 +216,7 @@ export class SpeechController {
 
   private clearAll(): void {
     this.open.clear();
+    this.cancel();
     this.queue.stop();
   }
 
@@ -224,11 +248,11 @@ export class SpeechController {
     const text = typeof data.text === "string" ? data.text : "";
     switch (kind) {
       case "text_delta":
-        this.emit(thread, this.slot(thread).stream.feed(text));
+        this.hold(thread, this.slot(thread).stream.feed(text));
         break;
       case "text":
-        this.emit(thread, this.slot(thread).stream.settle(text));
-        this.advance(thread);
+        this.hold(thread, this.slot(thread).stream.settle(text));
+        this.conclude(thread);
         break;
       case "tool_started":
       case "error":
@@ -237,7 +261,7 @@ export class SpeechController {
       case "turn_finished":
         this.finish(thread);
         // Stop pressed: this turn's speech goes too.
-        if (data.stop === "interrupted") this.queue.dropThread(thread, "stale");
+        if (data.stop === "interrupted") { this.cancel(thread); this.queue.dropThread(thread, "stale"); }
         break;
       default:
         break;
@@ -246,39 +270,121 @@ export class SpeechController {
 
   /** A message went to the thread, by any means: the reply being read is stale. */
   messageSent(thread: string): void {
-    const mid = this.open.get(thread)?.stream;
-    if (mid?.open) mid.silence();   // a message in progress; a finished one has nothing left to silence
+    const mid = this.open.get(thread);
+    if (mid?.stream.open) this.hush(mid);   // a message in progress; a finished one has nothing left to silence
+    this.cancel(thread);
     this.queue.dropThread(thread, "stale");
   }
 
   private slot(thread: string): Open {
     let s = this.open.get(thread);
-    if (!s) this.open.set(thread, (s = { stream: new ProseStream(), n: 0, seq: 0 }));
+    if (!s) this.open.set(thread, (s = { stream: new ProseStream(), n: 0, held: [] }));
     return s;
   }
 
   private finish(thread: string): void {
     const s = this.open.get(thread);
     if (!s || !s.stream.open) return;
-    this.emit(thread, s.stream.close());
-    this.advance(thread);
+    this.hold(thread, s.stream.close());
+    this.conclude(thread);
   }
 
-  /** The message is over: the next one is a new key. */
-  private advance(thread: string): void {
+  /** The message in progress will not be said: what it held goes, and what it still brings is ignored. */
+  private hush(s: Open): void {
+    s.stream.silence();
+    s.held = [];
+  }
+
+  private hold(thread: string, chunks: SpokenChunk[]): void {
     const s = this.open.get(thread);
-    if (s) { s.n += 1; s.seq = 0; }
+    if (s) s.held.push(...chunks);
   }
 
-  private emit(thread: string, chunks: SpokenChunk[]): void {
+  /**
+   * The message is over (V8). Up to 600 spoken characters it is said as
+   * written; longer, a summary is asked for at once and said in its place.
+   * The next message is a new key.
+   */
+  private conclude(thread: string): void {
     const s = this.open.get(thread);
     if (!s) return;
-    for (const chunk of chunks) {
-      this.queue.enqueue({
-        thread, messageKey: `${thread}:${s.n}`, seq: s.seq++, text: chunk.text, kind: chunk.kind,
-        voice: this.deps.voiceFor?.(thread) ?? null,
-      });
+    const held = s.held;
+    const key = `${thread}:${s.n}`;
+    s.held = [];
+    s.n += 1;
+    if (!held.length) return;
+    if (!needsSummary(held)) {
+      this.sequence(thread, () => this.deliver(thread, key, held));
+      return;
     }
+    const wait = this.summary(thread, spokenText(held));
+    this.sequence(thread, async () => {
+      const got = await wait;
+      if (got === "cancelled") return;
+      this.deliver(thread, key, got ?? truncatedProse(held));
+    });
+  }
+
+  /** Queue a message's chunks, if the thread is still to be read. */
+  private deliver(thread: string, key: string, chunks: readonly SpokenChunk[]): void {
+    if (!this.speaks(thread)) return;
+    const voice = this.deps.voiceFor?.(thread) ?? null;
+    chunks.forEach((chunk, seq) => {
+      this.queue.enqueue({ thread, messageKey: key, seq, text: chunk.text, kind: chunk.kind, voice });
+    });
+  }
+
+  /**
+   * The daemon's summary as one chunk to say; null when it failed, did not
+   * answer in time or came back unusable (the caller reads truncated prose);
+   * "cancelled" when the thread was silenced meanwhile (nothing is said).
+   */
+  private async summary(thread: string, text: string): Promise<SpokenChunk[] | null | "cancelled"> {
+    const summarize = this.deps.summarize;
+    if (!summarize) return null;
+    const entry: Pending = { thread, ctl: new AbortController(), expired: false };
+    this.pending.add(entry);
+    let timer: unknown = null;
+    const late = new Promise<null>((resolve) => {
+      timer = this.deps.clock.setTimeout(() => { entry.expired = true; entry.ctl.abort(); resolve(null); }, SUMMARY_DEADLINE_MS);
+    });
+    try {
+      const raw = await Promise.race([summarize(text, { thread, signal: entry.ctl.signal }), late]);
+      if (entry.ctl.signal.aborted && !entry.expired) return "cancelled";
+      const chunk = summaryChunk(raw);
+      return chunk ? [chunk] : null;
+    } catch {
+      return entry.ctl.signal.aborted && !entry.expired ? "cancelled" : null;
+    } finally {
+      this.deps.clock.clearTimeout(timer);
+      this.pending.delete(entry);
+    }
+  }
+
+  /** Cancel the summaries asked for `thread` (all of them when none is named). */
+  private cancel(thread?: string): void {
+    for (const p of this.pending) if (thread === undefined || p.thread === thread) p.ctl.abort();
+  }
+
+  /**
+   * Run `job` in the thread's order: at once when no summary is being awaited,
+   * else after everything before it. A later short message must not be said
+   * ahead of the long one that closed first.
+   */
+  private sequence(thread: string, job: () => void | Promise<void>): void {
+    const tail = this.lanes.get(thread);
+    let run: Promise<void>;
+    if (!tail) {
+      const r = job();
+      if (!(r instanceof Promise)) return;
+      run = r;
+    } else {
+      run = tail.then(job);
+    }
+    const lane: Promise<void> = run.catch(() => undefined).then(() => {
+      if (this.lanes.get(thread) === lane) this.lanes.delete(thread);
+    });
+    this.lanes.set(thread, lane);
   }
 
   // ---- controls -----------------------------------------------------------
@@ -320,15 +426,21 @@ export class SpeechController {
   /** The rest of the current message is not spoken. */
   skip(): void {
     const skipped = this.queue.skip();
-    if (!skipped) return;
+    if (!skipped) {
+      // Nothing sounded: the message being waited for -- held, or out for a summary -- is the current one.
+      for (const s of this.open.values()) if (s.stream.open) this.hush(s);
+      this.cancel();
+      return;
+    }
     const s = this.open.get(skipped.thread);
-    if (s?.stream.open && `${skipped.thread}:${s.n}` === skipped.messageKey) s.stream.silence();
+    if (s?.stream.open && `${skipped.thread}:${s.n}` === skipped.messageKey) this.hush(s);
   }
 
   /** Stop speaking and clear the queue; messages still arriving stay quiet until they end. */
   stop(): void {
     this.bargePaused = false;
-    for (const s of this.open.values()) if (s.stream.open) s.stream.silence();
+    for (const s of this.open.values()) if (s.stream.open) this.hush(s);
+    this.cancel();
     this.queue.stop();
   }
 
