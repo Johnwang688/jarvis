@@ -64,17 +64,20 @@ export interface SttPlaced<M> {
   latencyMs: number;
   /** True when this clip failed first, so later text was placed before it. */
   late: boolean;
+  /** True when the owner's Retry button produced this text. */
+  retried: boolean;
 }
 
 export type SttEvent =
   | { kind: "busy"; pending: number }
   | { kind: "retrying" }
-  | { kind: "failed"; id: number; message: string }
+  | { kind: "failed"; id: number; message: string; kept: boolean }
   | { kind: "empty" }
   | { kind: "blocked"; message: string };
 
 export interface SttOptions<M> {
-  transcribe: (blob: Blob, o: { signal: AbortSignal; utteranceId: number; seq: number }) => Promise<string>;
+  /** `budgetMs` is this attempt's whole client deadline: the daemon fits its model chain inside it. */
+  transcribe: (blob: Blob, o: { signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number }) => Promise<string>;
   /** Called in `seq` order with every text that is ready to be placed. */
   place: (batch: SttPlaced<M>[]) => void | Promise<void>;
   diagnostics: VoiceDiagnostics;
@@ -88,7 +91,7 @@ interface Entry<M> {
   id: number; seq: number; diag: number; ms: number; source: ClaimSource; meta: M;
   blob: Blob | null; bytes: number;
   state: SttState; attempts: number; autoRetries: number; error: string; text: string;
-  startedAt: number; hadFailure: boolean; cancelled: boolean;
+  startedAt: number; hadFailure: boolean; retried: boolean; cancelled: boolean;
   ac: AbortController | null; retryTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -156,14 +159,18 @@ export class SttAssembler<M = undefined> {
 
   /** Queue a finished clip. Returns its id, or null when the backlog is full (visible, never silent). */
   submit(blob: Blob, ms: number, source: ClaimSource, meta: M): number | null {
-    // Count only: a lone clip bigger than the byte/time caps is still sent once,
-    // and is dropped the moment it fails (see `fail`).
-    if (!this.makeRoom(0, 0, 1)) { this.o.diagnostics.add(ms, source, "stt_failed"); return null; }
+    // The incoming clip counts against every cap. Only a clip that cannot fit
+    // while other audio is held is refused; a lone oversize clip is still sent
+    // once, and is dropped (and said to be) the moment it fails.
+    if (!this.makeRoom(blob.size, ms, 1) && [...this.entries.values()].some(e => e.blob)) {
+      this.o.diagnostics.add(ms, source, "stt_failed");
+      return null;
+    }
     const id = ++this.nextId;
     const e: Entry<M> = {
       id, seq: id, diag: this.o.diagnostics.add(ms, source, "transcribing"), ms, source, meta,
       blob, bytes: blob.size, state: "transcribing", attempts: 0, autoRetries: 0, error: "", text: "",
-      startedAt: this.now(), hadFailure: false, cancelled: false, ac: null, retryTimer: null,
+      startedAt: this.now(), hadFailure: false, retried: false, cancelled: false, ac: null, retryTimer: null,
     };
     this.entries.set(id, e);
     this.o.diagnostics.keep(e.diag, true);
@@ -186,7 +193,7 @@ export class SttAssembler<M = undefined> {
     let text = "";
     let failure: unknown = null;
     try {
-      text = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: e.id, seq: e.seq }), expired]);
+      text = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: e.id, seq: e.seq, budgetMs: deadline }), expired]);
     } catch (error) { failure = error ?? new Error("transcription failed"); }
     clearTimeout(timer);
     if (e.cancelled) return;
@@ -221,8 +228,9 @@ export class SttAssembler<M = undefined> {
     e.state = "failed"; e.error = message; e.hadFailure = true;
     this.o.diagnostics.finish(e.diag, "stt_failed", this.now() - e.startedAt);
     this.makeRoom(0, 0, 0); // may evict this very clip when it alone is over the caps
+    const kept = this.entries.has(e.id);
     this.emit();
-    this.event({ kind: "failed", id: e.id, message });
+    this.event({ kind: "failed", id: e.id, message, kept });
     this.release();
   }
 
@@ -233,6 +241,7 @@ export class SttAssembler<M = undefined> {
     if (this.o.canUpload && !this.o.canUpload()) { this.event({ kind: "blocked", message: "NOT RETRIED · MIC OFF OR PAUSED" }); return false; }
     this.o.diagnostics.reopen(e.diag);
     e.startedAt = this.now();
+    e.retried = true;
     void this.attempt(e, true);
     return true;
   }
@@ -257,7 +266,7 @@ export class SttAssembler<M = undefined> {
     if (!batch.length) return;
     const items: SttPlaced<M>[] = batch.map(e => ({
       id: e.id, seq: e.seq, text: e.text.trim(), ms: e.ms, source: e.source, meta: e.meta, diag: e.diag,
-      latencyMs: this.now() - e.startedAt, late: e.hadFailure,
+      latencyMs: this.now() - e.startedAt, late: e.hadFailure, retried: e.retried,
     }));
     for (const e of batch) { this.entries.delete(e.id); e.blob = null; this.o.diagnostics.keep(e.diag, false); }
     this.emit();
@@ -270,13 +279,36 @@ export class SttAssembler<M = undefined> {
   settled() { return this.chain; }
 }
 
+/** Where and in which mode a clip was captured (the assembler's `meta`). */
+export interface SttCapture {
+  mode: "auto" | "review" | "off";
+  /** `draftKey` of the selected chat at capture; null with no chat. */
+  chat: string | null;
+}
+
+/** What is true when a transcript lands. */
+export interface SttLanding {
+  mode: "auto" | "review" | "off";
+  /** `draftKey` of the selected chat now; null with no chat. */
+  chat: string | null;
+  /** The selected chat is running a turn. */
+  busy: boolean;
+  /** An authorization card is waiting. */
+  card: boolean;
+}
+
 /**
- * AUTO sends a transcript on its own only if it was AUTO when the words were
- * said AND still is when they land. Anything else puts them in the box, unsent:
- * a late retry must never turn into a message the owner no longer expects.
+ * AUTO sends a transcript on its own only when nothing has moved since the
+ * words were said: it was AUTO then and still is, the same chat is selected
+ * and idle, no card is up, and it is neither a late text nor the product of
+ * the owner's Retry. Anything else puts the words in the box, unsent: a late
+ * or retried transcript must never become a message, to a chat or into a
+ * running turn, that the owner no longer expects.
  */
-export function placementFor(captured: "auto" | "review" | "off", landing: "auto" | "review" | "off"): "send" | "review" {
-  return captured === "auto" && landing === "auto" ? "send" : "review";
+export function placementFor(captured: SttCapture, landing: SttLanding, item: { late: boolean; retried: boolean }): "send" | "review" {
+  const same = captured.chat !== null && captured.chat === landing.chat;
+  return captured.mode === "auto" && landing.mode === "auto" && same && !landing.busy && !landing.card
+    && !item.late && !item.retried ? "send" : "review";
 }
 
 /** Play a kept clip. Web Audio, not <audio src=blob:>: the HUD's CSP media-src is 'self'. */

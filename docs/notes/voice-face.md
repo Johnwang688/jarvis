@@ -808,13 +808,25 @@ Plan §3.5 / decision V-11. A claimed utterance now goes through
 `hud/src/lib/stt.ts` (`SttAssembler`) instead of one bare `fetch`.
 
 - **Deadlines.** The client aborts each attempt at `max(15 s, 2 x clip)`, and
-  the deadline fires even when the transport ignores its abort signal. On the
-  daemon, `POST /stt` passes `config.STT_DICTATION_TIMEOUT_S` (20 s) and
-  `STT_DICTATION_ATTEMPTS` (2) to `voice.stt` -> `llm.transcribe`, instead of
-  60 s x 3 per model. Discord voice notes keep the old defaults.
-  `llm.transcribe` no longer sleeps after its last attempt. Known limit: a
-  client abort does not cancel the daemon's request, so an automatic retry can
-  overlap the first one on a slow provider.
+  the deadline fires even when the transport ignores its abort signal.
+  **Revised from plan §3.5 ("a 20 s per-attempt timeout and one retry per
+  model", unchanged for callers that state no deadline):** 20 s x 2 attempts x
+  2 models is about 82 s, so a hung primary could never fail over inside a
+  15 s client deadline. The client therefore sends its attempt's whole
+  deadline as `POST /stt?budget_ms=` (digits only, clamped to 1 s..600 s) and
+  the daemon fits the model chain inside it (`voice.stt(budget=)` ->
+  `_fit_budget`): 1 s is held back for the reply, the rest is shared evenly
+  over the models still to try (so a model that fails fast frees time for the
+  next), and a model gets two attempts only if each still has 6 s, else one;
+  per-attempt timeouts never exceed `config.STT_DICTATION_TIMEOUT_S` (20 s).
+  A 15 s deadline is one 7 s attempt on the primary, then the fallback with
+  what is left. With no `budget_ms` (Discord voice notes, the face server) the
+  fixed limits apply (20 s x `STT_DICTATION_ATTEMPTS` for dictation, llm's
+  defaults for the rest). `llm.transcribe` no longer sleeps after its last
+  attempt. Known limits: httpx timeouts are per phase (connect, read), not
+  wall-clock, so the fit is a bound on a hung read, not a hard guarantee; and a
+  client abort does not cancel the daemon's request, so each client retry
+  starts a fresh, budgeted chain that may overlap the old one.
 - **Retries.** One automatic retry after 2 s, only for failures a repeat could
   fix (timeout, network, 408/429, 5xx). Any other 4xx is not repeated. The
   Retry button is explicit and is one attempt per press. A retry (automatic
@@ -825,8 +837,12 @@ Plan §3.5 / decision V-11. A claimed utterance now goes through
   and 32 MiB. The oldest failed clip is evicted first (the diagnostics row then
   reads "audio not kept"); a new clip that cannot fit because 20 are still in
   flight is refused with a visible `STT BACKLOG` error, never by evicting audio
-  in flight. Reload clears everything. Nothing is persisted or uploaded except
-  the `/stt` request itself. The V1 ring still holds no audio; the clips live
+  in flight. The incoming clip counts against all three caps at submit; a
+  clip so large that it is evicted the moment it fails is reported as such
+  (`STT FAILED`, "too large to keep"), never as "audio is kept". Reload clears
+  everything. Held clips survive mic OFF until Discard or reload, and Retry is
+  blocked while OFF (see above); Discard uploads nothing, so it works while a
+  card is up. Nothing is persisted or uploaded except the `/stt` request itself. The V1 ring still holds no audio; the clips live
   in the assembler, and Play decodes them through Web Audio (the CSP's
   `media-src 'self'` excludes `blob:` for `<audio>`).
 - **Visible failure.** `STT FAILED · RETRY` under the orb, the window error
@@ -841,10 +857,16 @@ Plan §3.5 / decision V-11. A claimed utterance now goes through
   placed and the failed clip's text goes in when its retry lands (marked
   `late`). Texts that become ready together are one batch: REVIEW joins them
   with a space in one box update; AUTO sends them one by one.
-- **Mode at landing.** AUTO sends a transcript only if the mode was AUTO when
-  it was said and still is when it lands (`placementFor`); otherwise it goes
-  into the box unsent. A late Retry therefore never becomes a message the
-  owner no longer expects.
+- **Where it lands.** The capture records the mode and the selected chat
+  (`draftKey`) in the clip's `meta`. AUTO sends a transcript only when nothing
+  has moved: it was AUTO when said and still is, the same chat is still
+  selected, that chat is idle (a busy chat would be steered), no authorization
+  card is waiting, and the text is neither `late` (an earlier clip failed) nor
+  the product of the owner's Retry (`placementFor`). Otherwise the words go
+  into the selected chat's box, unsent. If any item in a batch must wait in the
+  box, the whole batch does, to keep the spoken order; AUTO items in one batch
+  are sent as one message, joined in order. While a chat runs a turn, dictation
+  progress never overwrites its orb or status line (errors still show).
 
 Free checks: `hud/src/lib/stt.test.ts` (fake clock: deadline expiry keeps the
 clip and shows the failure, bounded retry, Retry re-sends the same Blob,

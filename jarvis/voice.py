@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import re
 import threading
+import time
 import wave
 
 from . import avatars, config, llm
@@ -375,8 +376,30 @@ def _stt_reason(exc: Exception) -> str:
     return "failed after retries" if "attempts" in str(exc) else type(exc).__name__
 
 
+# A caller that states its own deadline (the HUD's dictation) gets the model
+# chain fitted inside it: this much is kept back for the reply to travel, and an
+# attempt is never given less than this much to answer.
+STT_BUDGET_MARGIN_S = 1.0
+STT_MIN_ATTEMPT_S = 6.0
+_clock = time.monotonic          # tests substitute a virtual clock
+
+
+def _fit_budget(left: float, models_left: int, max_attempts: int, cap: float | None) -> tuple[float, int] | None:
+    """(per-attempt timeout, attempts) for the next model, from the time left
+    shared evenly over the models still to try; None when there is no time.
+    Two attempts only when each still gets STT_MIN_ATTEMPT_S (plus the 1 s
+    backoff between them); a short budget is one attempt per model, so a hung
+    primary fails over instead of eating the client's whole deadline."""
+    slot = left / max(1, models_left)
+    if slot < 1.0:
+        return None
+    attempts = max(1, min(max_attempts, int((slot + 1.0) // (STT_MIN_ATTEMPT_S + 1.0))))
+    per = (slot - (attempts - 1)) / attempts
+    return (min(per, cap) if cap else per), attempts
+
+
 def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
-        max_retries: int | None = None) -> str:
+        max_retries: int | None = None, budget: float | None = None) -> str:
     """Transcribe spoken audio to text.
 
     Tries `config.STT_MODEL`, then each of `config.STT_FALLBACK_MODELS`. A
@@ -385,7 +408,10 @@ def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
     a retry. Raises `STTUnavailable` naming each model and its status when
     none answers. `timeout` (seconds per attempt) and `max_retries` (attempts
     per model) override `llm.transcribe`'s defaults; the HUD's dictation route
-    passes tighter ones (config.STT_DICTATION_*).
+    passes tighter ones (config.STT_DICTATION_*). `budget` (seconds) is the
+    caller's whole deadline: the models are tried inside it (see `_fit_budget`),
+    with `timeout` and `max_retries` as ceilings. Without it the fixed limits
+    apply, as for Discord voice notes and the face server.
     """
     if not audio:
         raise ValueError("no audio")
@@ -393,12 +419,20 @@ def stt(audio: bytes, mime: str = "audio/webm", *, timeout: float | None = None,
     models = [config.STT_MODEL] + [
         m for m in config.STT_FALLBACK_MODELS if m != config.STT_MODEL]
     failures: list[str] = []
-    limits: dict = {}
+    base: dict = {}
     if timeout is not None:
-        limits["timeout"] = timeout
+        base["timeout"] = timeout
     if max_retries is not None:
-        limits["max_retries"] = max_retries
-    for model in models:
+        base["max_retries"] = max_retries
+    end = None if budget is None else _clock() + max(budget - STT_BUDGET_MARGIN_S, 1.0)
+    for i, model in enumerate(models):
+        limits = dict(base)
+        if end is not None:
+            fit = _fit_budget(end - _clock(), len(models) - i, max_retries or 3, timeout)
+            if fit is None:
+                failures.append(f"{model} (no time left)")
+                continue
+            limits["timeout"], limits["max_retries"] = fit
         try:
             text = llm.transcribe(audio, model=model, filename=f"audio.{ext}", mime=mime, **limits)
         except llm.LLMError as exc:

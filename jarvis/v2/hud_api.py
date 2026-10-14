@@ -1396,19 +1396,23 @@ def pickers(handler, daemon, parts, query):
             fail(400, "expected audio/*")
         # V2: the client names each clip so a delayed reply can be placed in
         # capture order; both are echoed back verbatim (non-negative ints).
-        _object(query, ("utterance_id", "seq"))
+        _object(query, ("utterance_id", "seq", "budget_ms"))
         ids = {}
         for key, raw in query.items():
             if not (raw.isascii() and raw.isdigit() and len(raw) <= 15):
                 fail(400, f"{key} must be a non-negative integer")
             ids[key] = int(raw)
+        # The client's whole deadline for this request (ms). The model chain is
+        # fitted inside it (voice.stt); absent, the fixed dictation bounds apply.
+        budget_ms = ids.pop("budget_ms", None)
+        budget = None if budget_ms is None else min(max(budget_ms, 1000), 600_000) / 1000
         data = handler._raw_body()
         if not data:
             fail(400, "audio is empty")
         try:
             # Dictation is bounded tighter than the library default (V-11).
             text = voice.stt(data, mime=mime, timeout=config.STT_DICTATION_TIMEOUT_S,
-                             max_retries=config.STT_DICTATION_ATTEMPTS)
+                             max_retries=config.STT_DICTATION_ATTEMPTS, budget=budget)
             return 200, {"text": text, **ids}
         except llm.LLMError as exc:
             # A provider outage is a sentence for the HUD, not a traceback in

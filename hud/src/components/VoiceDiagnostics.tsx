@@ -1,14 +1,13 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { Capture } from "../lib/capture";
 import type { VoiceDiagnostics } from "../lib/voiceDiagnostics";
-import type { DictationMode } from "../lib/dictation";
-import { playClip, type SttAssembler } from "../lib/stt";
+import { playClip, type SttAssembler, type SttCapture } from "../lib/stt";
 
 const noSubscribe = () => () => {};
 const emptyClips = { clips: [], pending: 0 };
 const noClips = () => emptyClips;
 
-export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt }: { diagnostics: VoiceDiagnostics; capture: Capture; muted: boolean; stt?: SttAssembler<DictationMode> }) {
+export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt }: { diagnostics: VoiceDiagnostics; capture: Capture; muted: boolean; stt?: SttAssembler<SttCapture> }) {
   const value = useSyncExternalStore(diagnostics.subscribe, diagnostics.snapshot);
   const clips = useSyncExternalStore(stt?.subscribe ?? noSubscribe, stt?.snapshot ?? noClips).clips;
   const [meter, setMeter] = useState({ rms: 0, floor: 0 });

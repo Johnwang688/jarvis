@@ -350,11 +350,13 @@ export const api = {
     }),
 
   // --- speech -------------------------------------------------------------
-  /** `utteranceId`/`seq` name the clip for the daemon, which echoes them (V2). */
-  async stt(blob: Blob, opts: { signal?: AbortSignal; utteranceId?: number; seq?: number } = {}): Promise<string> {
+  /** `utteranceId`/`seq` name the clip for the daemon, which echoes them; `budgetMs` is the deadline it must fit inside (V2). */
+  async stt(blob: Blob, opts: { signal?: AbortSignal; utteranceId?: number; seq?: number; budgetMs?: number } = {}): Promise<string> {
     const ids = new URLSearchParams();
     if (Number.isSafeInteger(opts.utteranceId) && opts.utteranceId! >= 0) ids.set("utterance_id", String(opts.utteranceId));
     if (Number.isSafeInteger(opts.seq) && opts.seq! >= 0) ids.set("seq", String(opts.seq));
+    // The client's whole deadline for this attempt: the daemon fits its model chain inside it.
+    if (Number.isSafeInteger(opts.budgetMs) && opts.budgetMs! > 0) ids.set("budget_ms", String(Math.round(opts.budgetMs!)));
     const res = await fetch(ids.size ? `/stt?${ids}` : "/stt", {
       method: "POST",
       headers: { "Content-Type": blob.type || "audio/wav" },

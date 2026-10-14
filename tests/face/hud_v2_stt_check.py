@@ -37,6 +37,10 @@ def main():
             failures.append(name)
 
     mock = MockDaemon(0).start()
+    # A second thread, so the destination can change while words are in flight.
+    t2 = dict(mock.world["threads"][0], id="t2", title="other chat")
+    mock.world["threads"].append(t2)
+    mock.world["transcripts"]["t2"] = []
     try:
         base = f"http://127.0.0.1:{mock.port}"
         with sync_playwright() as pw:
@@ -77,7 +81,8 @@ def main():
             check("failure is visible in the Status pane", "Couldn't transcribe" in page.locator('[data-testid="stt-retry"]').inner_text())
             check("failure is said under the orb", "STT FAILED" in page.locator('[data-testid="orb-status"]').inner_text())
             first = stts()[0]
-            check("the clip is named for the daemon (utterance_id, seq)", first["query"] == {"utterance_id": "1", "seq": "1"})
+            check("the clip is named for the daemon and its deadline sent (utterance_id, seq, budget_ms)",
+                  first["query"] == {"utterance_id": "1", "seq": "1", "budget_ms": "15000"})
             check("both attempts sent the same bytes", stts()[1]["bytes"] == first["bytes"])
             check("nothing was sent to a chat", not any(p.endswith("/send") for m, p, b in mock.calls))
             check("diagnostics say the audio is kept", page.evaluate(
@@ -100,7 +105,6 @@ def main():
             mock.stt_script = [{"text": "alpha", "wait": hold}, {"text": "bravo"}]
             n = len(stts())
             page.evaluate(PTT)
-            page.wait_for_function(f"() => true")
             page.evaluate("window.__hud.mic.feedMs(1500, .0009)")
             page.evaluate(PTT)
             for _ in range(100):
@@ -113,6 +117,74 @@ def main():
             page.wait_for_function("() => document.querySelector('[data-testid=\"input\"]').value.includes('bravo')")
             check("placed in the order spoken, not the order answered", box().strip() == "alpha bravo")
             page.locator('[data-testid="input"]').first.fill("")
+
+            # --- AUTO sends only when nothing moved since the words were said
+            def sent_to():
+                return [p for m, p, b in mock.calls if m == "POST" and p.endswith("/send")]
+
+            def press_held():
+                """PTT while /stt is held; returns the Event that releases the answer."""
+                gate = threading.Event()
+                mock.stt_script = [{"text": "dictated words", "wait": gate}]
+                page.evaluate("window.__hud.mic.feedMs(1500, .0009)")
+                page.evaluate(PTT)
+                for _ in range(100):
+                    if not mock.stt_script:
+                        break
+                    page.wait_for_timeout(50)
+                return gate
+
+            def box_has(text):
+                try:
+                    page.wait_for_function("(t) => document.querySelector('[data-testid=\"input\"]').value.includes(t)", arg=text, timeout=5000)
+                    return True
+                except Exception:
+                    return False
+
+            page.locator('[data-testid="tab-chat"]').click()
+            page.locator('[data-testid="thread-t1"]').click()
+            page.locator('[data-testid="dictation-auto"]').click()
+            sends = len(sent_to())
+            gate = press_held()
+            gate.set()
+            for _ in range(60):
+                if len(sent_to()) > sends:
+                    break
+                page.wait_for_timeout(50)
+            check("positive control: AUTO on the same idle chat sends", len(sent_to()) == sends + 1 and sent_to()[-1].endswith("/t1/send"))
+
+            mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
+            page.wait_for_function("() => !window.__hud.state().busy")
+            sends = len(sent_to())
+            gate = press_held()
+            page.locator('[data-testid="thread-t2"]').click()
+            page.wait_for_function("() => Object.values(window.__hud.state().chats).some(c => c.threadId === 't2')")
+            gate.set()
+            check("AUTO: a different chat selected before the transcript landed -> box, unsent", box_has("dictated words"))
+            check("and nothing was sent to either chat", len(sent_to()) == sends)
+            page.locator('[data-testid="input"]').first.fill("")
+
+            gate = press_held()
+            mock.emit("turn_started", {}, thread_id="t2")
+            page.wait_for_function("() => window.__hud.state().busy")
+            check("setup: the selected chat is running t2's turn", page.evaluate("window.__hud.state().turnThreadId") == "t2")
+            check("a busy chat keeps its own orb while words are transcribed", page.evaluate("window.__hud.state().orb") != "transcribing")
+            gate.set()
+            check("AUTO: the chat started a turn meanwhile -> box, not a steer", box_has("dictated words"))
+            check("and nothing was sent or steered", len(sent_to()) == sends)
+            mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
+            page.wait_for_function("() => !window.__hud.state().busy")
+            page.locator('[data-testid="input"]').first.fill("")
+
+            mock.stt_script = [{"status": 400, "error": "bad audio"}]
+            page.evaluate("window.__hud.mic.feedMs(1500, .0009)")
+            page.evaluate(PTT)
+            page.wait_for_selector('[data-testid="stt-retry"]', timeout=15000)
+            mock.stt_script = [{"text": "after retry"}]
+            page.locator('[data-testid="stt-retry-button"]').click()
+            check("AUTO: text produced by Retry goes to the box, never sent", box_has("after retry") and len(sent_to()) == sends)
+            page.locator('[data-testid="input"]').first.fill("")
+            page.locator('[data-testid="dictation-review"]').click()
 
             # --- Retry is refused while the mic is OFF (nothing uploads)
             mock.stt_script = [{"status": 400, "error": "audio is empty"}]
@@ -134,7 +206,7 @@ def main():
             mock.stt_script = [{"text": "from diagnostics"}]
             page.locator('[data-testid="voice-clip-retry"]').click()
             page.wait_for_function("() => window.__hud.voiceDiagnostics().rows.some(r => r.outcome === 'review' && r.kept === false)")
-            check("Retry from diagnostics placed the text", True)
+            check("Retry from diagnostics placed the text", box_has("from diagnostics"))
             check("no Play/Retry left once placed", page.locator('[data-testid="voice-clip-play"]').count() == 0)
             page.screenshot(path=os.environ.get("STT_SCREENSHOT", "/tmp/voice-v2-stt.png"))
             context.close()

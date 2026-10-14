@@ -5,7 +5,7 @@ import {
 } from "./stt";
 import { VoiceDiagnostics } from "./voiceDiagnostics";
 
-type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number;
+type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number;
   resolve: (t: string) => void; reject: (e: unknown) => void };
 
 function harness(over: { canUpload?: () => boolean } = {}) {
@@ -228,14 +228,80 @@ describe("capture order (seq)", () => {
     h.calls[0].resolve("x");
     await flush();
     expect(h.placed[0][0].meta).toBe("review");
-    expect(placementFor("auto", "auto")).toBe("send");
-    expect(placementFor("review", "auto")).toBe("review");
-    expect(placementFor("auto", "review")).toBe("review");
-    expect(placementFor("auto", "off")).toBe("review");
+  });
+});
+
+describe("where AUTO may send (placementFor)", () => {
+  const cap = { mode: "auto" as const, chat: "t1" };
+  const now = { mode: "auto" as const, chat: "t1", busy: false, card: false };
+  const fresh = { late: false, retried: false };
+  it("sends only when nothing has moved", () => {
+    expect(placementFor(cap, now, fresh)).toBe("send");
+  });
+  it.each([
+    ["captured in REVIEW", { ...cap, mode: "review" as const }, now, fresh],
+    ["REVIEW now", cap, { ...now, mode: "review" as const }, fresh],
+    ["OFF now", cap, { ...now, mode: "off" as const }, fresh],
+    ["another chat is selected", cap, { ...now, chat: "t2" }, fresh],
+    ["no chat was selected at capture", { ...cap, chat: null }, { ...now, chat: null }, fresh],
+    ["the chat is running a turn", cap, { ...now, busy: true }, fresh],
+    ["a card is waiting", cap, { ...now, card: true }, fresh],
+    ["the text is late", cap, now, { late: true, retried: false }],
+    ["the owner pressed Retry", cap, now, { late: false, retried: true }],
+  ])("goes to the box when %s", (_name, c, l, i) => {
+    expect(placementFor(c as any, l as any, i)).toBe("review");
+  });
+  it("marks text produced by Retry or after a failure", async () => {
+    const h = harness();
+    const a = h.stt.submit(h.clip(), 1000, "ptt", "x")!;
+    h.calls[0].reject(Object.assign(new Error("bad"), { status: 400 }));
+    await flush();
+    h.stt.retry(a);
+    h.calls[1].resolve("t");
+    await flush();
+    expect(h.placed[0][0]).toMatchObject({ late: true, retried: true });
+  });
+});
+
+describe("the budget handed to the daemon", () => {
+  it("is the attempt's whole client deadline", () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 1000, "ptt", "x");
+    h.stt.submit(h.clip(), 20_000, "ptt", "x");
+    expect(h.calls.map(c => c.budgetMs)).toEqual([15_000, 40_000]);
   });
 });
 
 describe("clip retention is bounded", () => {
+  it("says so when the clip that just failed was itself too large to keep", async () => {
+    const h = harness();
+    h.stt.submit({ size: 33 * 1024 * 1024 } as Blob, 1000, "ptt", "x");
+    h.calls[0].reject(Object.assign(new Error("bad"), { status: 400 }));
+    await flush();
+    expect(h.events.at(-1)).toMatchObject({ kind: "failed", kept: false });
+    h.stt.submit(h.clip(), 500, "ptt", "x");
+    h.calls[1].reject(Object.assign(new Error("bad"), { status: 400 }));
+    await flush();
+    expect(h.events.at(-1)).toMatchObject({ kind: "failed", kept: true });
+  });
+
+  it("counts the incoming clip against the time cap, evicting failed clips to fit", async () => {
+    const h = harness();
+    for (let i = 0; i < 2; i++) { h.stt.submit(h.clip(), 4 * 60_000, "ptt", "x"); h.calls[i].reject(Object.assign(new Error("b"), { status: 400 })); await flush(); }
+    expect(h.stt.submit(h.clip(), 4 * 60_000, "ptt", "x")).not.toBeNull();
+    const ms = h.stt.snapshot().clips.reduce((n, c) => n + c.ms, 0);
+    expect(ms).toBeLessThanOrEqual(10 * 60_000);
+    expect(h.stt.snapshot().clips).toHaveLength(2);        // the oldest failed one made room
+  });
+
+  it("refuses an incoming clip that would exceed the caps while other audio is in flight", () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 6 * 60_000, "ptt", "x");
+    expect(h.stt.submit(h.clip(), 6 * 60_000, "ptt", "x")).toBeNull();
+    h.stt.submit({ size: 20 * 1024 * 1024 } as Blob, 1000, "ptt", "x");
+    expect(h.stt.submit({ size: 20 * 1024 * 1024 } as Blob, 1000, "ptt", "x")).toBeNull();
+  });
+
   async function fail(h: ReturnType<typeof harness>, i: number) {
     h.calls[i].reject(Object.assign(new Error("bad"), { status: 400 }));
     await flush();
