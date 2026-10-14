@@ -1262,3 +1262,53 @@ measures the WSL path rather than Windows Chrome's capture. Use `aec_probe.html`
 anything about the browser's own processing. `--source stdin` feeds raw 16 kHz s16le PCM
 instead (that is how the scripts were smoke-tested with synthetic audio).
 
+
+## V8: spoken summaries (2026-10-13)
+
+Owner's answer to open question 2: **summary only**. A message of up to 600
+spoken characters (what the speech filter lets through; code never counts) is
+read as written; a longer one is replaced by a short summary, with no verbatim
+lead-in. This **supersedes plan §3.8's** "read the opening to ~400 characters,
+then summarise the rest". Because the length decides how a message is said, the
+controller now **holds each message until it closes** (a `text`, a tool call, the
+turn's end) instead of speaking sentence by sentence while the model writes; this
+reverses V6's "speech starts while the model writes" for the per-message
+decision only. Mid-task messages are short and close at the next tool call, so the
+cost is the few seconds the message takes to finish. (`hud/src/lib/speech/controller.ts`,
+`summary.ts`; the 1200-character V6 stopgap is gone.)
+
+- **Route.** `POST /speech/summary {thread_id, text, spoken_prefix?}` ->
+  `{summary}` (`jarvis/v2/speech_summary.py`, `hud_api.speech_summary`). Same
+  checks as `/say` (HUD listener, Host/Origin, JSON, unknown keys -> 400).
+  `spoken_prefix` is accepted for the plan's contract; the HUD sends none.
+  Failures are 502/503/504 sentences carrying no provider text.
+- **Model.** Tier `speech_summary` (`JARVIS_SPEECH_SUMMARY_MODEL`, default
+  `anthropic/claude-haiku-5.5`), read straight from `config.TIERS`, **not**
+  through `models.tier()`: the default equals the orchestrator default, so
+  `tier()` would follow the owner's chat-model selection and a summary would
+  become an Opus call. A Chinese-hosted override is skipped for the default
+  (`models.cn_hosted`); with nothing acceptable the route is 503. A failing
+  model tries the next within the one deadline.
+- **Request.** `scrub` + `strip_invisible` on the text; `cache=False`;
+  `stream=False`, `max_retries=1`, `max_tokens=160`; the reply is wrapped in
+  `<reply>` tags and the system prompt says it is data. Output is cleaned with
+  `voice.speakable`, bounded to 300 characters at a sentence. A request never
+  exceeds `JARVIS_COMPACT_AT_TOKENS` (estimated at 3 characters a token, less
+  1000): longer text is summarised in sections in parallel and the sections'
+  summaries are summarised. Deadline: 6 s total on the daemon; the HUD waits 8 s.
+- **HUD failure path.** A failed, late (8 s) or unusable (empty, over 400
+  characters) summary reads whole sentences up to 400 characters and then
+  "...and more on screen." (kind `fallback`). Summaries sit in the thread's
+  order: a later message of the same thread waits behind a pending summary; other
+  threads do not. A message to the thread, Stop, an interrupted turn, the pane
+  closing, read-aloud off, losing the speech lock, and Skip with nothing
+  sounding all cancel a pending summary (the request is aborted, nothing is said).
+- **Not done / not claimed.** Live Haiku quality of the summaries and the
+  numbers below are unmeasured until the probe runs. Nothing was run against a
+  speaker.
+
+### Paid probe receipt (owner-approved, cap $0.10)
+
+Pending: `tests/speech_summary_probe.py --yes-spend` (24 synthetic replies, 800
+to 8000 characters, aborts before $0.09). Fill in date, model id, call count,
+total spend, tokens, p50/p95 here after the lead runs it.
