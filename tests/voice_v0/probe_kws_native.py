@@ -36,23 +36,25 @@ def kws_dir():
     return models.extracted("kws-zipformer-gigaspeech-3.3M")
 
 
-def write_keywords(path: str, score: float, threshold: float) -> None:
+def write_keywords(path: str, score: float, threshold: float, overrides: dict | None = None) -> None:
+    """Keyword file in sherpa's pre-tokenised format; `overrides` = {WORD: (score, threshold)}."""
     import sentencepiece as spm
 
     sp = spm.SentencePieceProcessor(model_file=str(kws_dir() / "bpe.model"))
     with open(path, "w") as fh:
         for w in KEYWORDS:
+            s, t = (overrides or {}).get(w, (score, threshold))
             pieces = sp.encode(w, out_type=str)
-            fh.write(f"{' '.join(pieces)} :{score} #{threshold} @{w}\n")
+            fh.write(f"{' '.join(pieces)} :{s} #{t} @{w}\n")
 
 
-def spotter(int8: bool, threads: int, score: float, threshold: float, tmp: str):
+def spotter(int8: bool, threads: int, score: float, threshold: float, tmp: str, overrides: dict | None = None):
     import sherpa_onnx
 
     d = kws_dir()
     suffix = ".int8.onnx" if int8 else ".onnx"
-    kw = f"{tmp}/kw_{score}_{threshold}.txt"
-    write_keywords(kw, score, threshold)
+    kw = f"{tmp}/kw_{score}_{threshold}_{abs(hash(str(overrides)))}.txt"
+    write_keywords(kw, score, threshold, overrides)
     return sherpa_onnx.KeywordSpotter(
         tokens=str(d / "tokens.txt"),
         encoder=str(d / f"encoder-epoch-12-avg-2-chunk-16-left-64{suffix}"),
@@ -93,7 +95,7 @@ def cpu_cost(int8: bool, threads: int, tmp: str, clips: list[np.ndarray]) -> dic
 
 
 def evaluate(sp, special: list[dict], audio: dict, dictation: list[tuple[dict, np.ndarray]]) -> dict:
-    tp = fn = fp = 0
+    tp = fn = fp = fp_stem = 0
     per_kw = {k: [0, 0] for k in KEYWORDS}  # [detected, expected]
     delays, false_hits = [], []
     for it in special:
@@ -109,10 +111,13 @@ def evaluate(sp, special: list[dict], audio: dict, dictation: list[tuple[dict, n
                                   if it["expect"][-1] == e else np.nan)
             else:
                 fn += 1
+        words = common.norm_words(it["text"])
         for w in got:
             if w.lower() not in it["expect"]:
+                stem = any(x.startswith(w.lower()[:4]) for x in words)   # skipped/resumed/cancelled/cancer/pauses
                 fp += 1
-                false_hits.append({"clip": it["text"], "voice": it["voice"], "kw": w})
+                fp_stem += stem
+                false_hits.append({"clip": it["text"], "voice": it["voice"], "kw": w, "stem_variant": stem})
     dict_fp, dict_audio = 0, 0.0
     for c, x in dictation:
         hits = run_clip(sp, x)
@@ -122,7 +127,8 @@ def evaluate(sp, special: list[dict], audio: dict, dictation: list[tuple[dict, n
             if w.lower() not in expected:
                 dict_fp += 1
     d = [v for v in delays if not np.isnan(v)]
-    return {"recall": tp / max(tp + fn, 1), "tp": tp, "fn": fn, "special_false_accepts": fp,
+    return {"recall": tp / max(tp + fn, 1), "tp": tp, "fn": fn, "special_false_accepts": fp, "special_false_accepts_stem_variants": fp_stem,
+            "special_false_accepts_unrelated": fp - fp_stem,
             "per_keyword_recall": {k: (v[0] / v[1] if v[1] else None) for k, v in per_kw.items()},
             "dictation_audio_min": dict_audio / 60, "dictation_false_accepts": dict_fp,
             "dictation_false_accepts_per_hour": dict_fp / (dict_audio / 3600) if dict_audio else None,
@@ -155,6 +161,12 @@ def main(argv: list[str]) -> int:
                 ev.update({"score": score, "threshold": thr, "int8": False})
                 res["grid"].append(ev)
                 print("grid", score, thr, ev["recall"], ev["dictation_false_accepts_per_hour"], file=sys.stderr)
+        tuned = {w: (3.0, 0.1) for w in ("OVER", "PAUSE", "RESUME", "SKIP", "STOP")}
+        sp = spotter(False, 1, 1.0, 0.25, tmp, tuned)
+        ev = evaluate(sp, special, audio, main_audio)
+        ev.update({"score": "JARVIS/CANCEL 1.0 #0.25; OVER/PAUSE/RESUME/SKIP/STOP 3.0 #0.1", "int8": False})
+        res["tuned_short_words"] = ev
+        print("tuned", ev["recall"], ev["dictation_false_accepts"], file=sys.stderr)
         # int8 at the default operating point, and under degradation at the default
         sp = spotter(True, 1, 1.0, 0.25, tmp)
         ev = evaluate(sp, special, audio, main_audio)
