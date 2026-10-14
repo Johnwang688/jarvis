@@ -16,10 +16,8 @@ current code. Historical “live” claims are not new deployment receipts.
 Invariants and decisions are retained byte for byte; their named paragraph
 references are in the notes. Preserved paths are repository-relative.
 
-Tool-call labels: A value split by shell quoting can still appear in a label;
-labels do not parse or evaluate shell commands. Treat labels as untrusted
-text, not proof that every secret was removed. See the full limits in
-[HUD workspace notes](docs/notes/hud-workspace.md).
+Tool-call labels are untrusted text: they don't parse shell, so a quote-split
+value can still appear in one. See [HUD workspace notes](docs/notes/hud-workspace.md).
 
 <!-- retained:chat-git-and-v2:begin -->
 ## Chat git worktrees (2026-10-13)
@@ -105,10 +103,9 @@ a model. Quota, title, cost and cache claims need evidence.
 The HUD uses **Graphite**: warm off-black/glacier-cyan, amber pending/red error,
 overriding the global palette. Preserve dimensions, input behavior and owner
 workspace/editor/Browser decisions. Driving uses owner switches.
-Owner HTTP Basic/Digest authentication uses the exact private tab socket only;
-credentials never enter tools, replay, status, logs or config. Navigation returns
-an exact auth-pending allocation until Chrome commits; see the current Browser
-note and HTTP-auth plan for bounded cleanup and restricted Sound restoration.
+Owner HTTP Basic/Digest auth uses only the exact private tab socket;
+credentials never enter tools, replay, status, logs or config. Pending
+navigation and cleanup: Browser note and HTTP-auth plan.
 
 ## Safety design (deliberate, do not loosen without asking)
 
@@ -213,8 +210,7 @@ not current completion evidence.
 
 ## Area index
 
-Read the matching notes before editing. Current architecture/decisions also
-live in the design/plans. Markers refer to the original file's lines.
+Read the matching notes, design and plans first.
 
 | Area | Notes and current entry point |
 |---|---|
