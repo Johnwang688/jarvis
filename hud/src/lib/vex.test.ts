@@ -282,12 +282,19 @@ describe("download progress reads vexcom's own progress line", () => {
     expect(downloadProgress(head + "0....10....20....30....40....50....60....70....80....\n90....100")).toBe(100);
     expect(downloadProgress(head + "0....10....20....30....40....50....60....70....80....90....100\n")).toBe(100);
   });
+  it("never reads a half-written number, so the bar does not jump back", () => {
+    expect(downloadProgress("0....10....20....30....40....50....60....70....80....90....10")).toBe(98);
+    expect(downloadProgress("0....1")).toBe(8);
+    expect(downloadProgress("0....10....2")).toBe(18);
+    expect(downloadProgress("0....10....20")).toBe(18);
+    expect(downloadProgress("0....10....20.")).toBe(22);
+  });
   it("takes the last progress line, so a later phase starts again", () => {
-    expect(downloadProgress("0....10....100\nverify :\n0....10")).toBe(10);
+    expect(downloadProgress("0....10....100\nverify :\n0....10....")).toBe(18);
   });
   it("reads only a line of numbers and dots, never other text", () => {
-    for (const text of ["", "Downloading User Program", "slot 3: 90%", "error 100", "100", "0....10 done", "0....999"]) {
-      expect(downloadProgress(text)).toBe(text === "0....999" ? 100 : null);
+    for (const text of ["", "Downloading User Program", "slot 3: 90%", "error 100", "100", "0....10 done", "1.0.2", "192.168.1.1"]) {
+      expect(downloadProgress(text)).toBeNull();
     }
   });
 });

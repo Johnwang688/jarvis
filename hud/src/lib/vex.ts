@@ -262,12 +262,19 @@ export function downloadProgress(output: string): number | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
     // A narrow terminal or vexcom itself may break the line: a run of
-    // numbers and dots with at least one dot is read wherever it starts.
-    if (!/^\d{1,3}(?:\.+\d{1,3})*\.*$/.test(line) || !line.includes(".")) continue;
-    const numbers = line.match(/\d+/g)!.map(Number);
-    const last = numbers[numbers.length - 1];
-    const dots = line.length - line.replace(/\.+$/, "").length;
-    return Math.max(0, Math.min(100, last + Math.min(dots, 4) * 2));
+    // numbers and dot runs (two or more, so "1.0.2" is not one) is read
+    // wherever it starts.
+    if (!/^\d{1,3}(?:\.{2,}\d{1,3})*\.*$/.test(line) || !line.includes("..")) continue;
+    const parts = line.split(/(\.+)/).filter(Boolean);
+    let last = parts.length - 1;
+    // A trailing number may be half written ("…90....10" on its way to 100):
+    // it counts only once dots follow it, or when it is 100. Otherwise the
+    // number before it and the dots between are what is known.
+    if (/^\d/.test(parts[last]) && parts[last] !== "100") last -= 1;
+    if (last < 0) continue;
+    const dots = parts[last].startsWith(".") ? parts[last].length : 0;
+    const base = dots ? Number(parts[last - 1] ?? 0) : Number(parts[last]);
+    return Math.max(0, Math.min(100, base + Math.min(dots, 4) * 2));
   }
   return null;
 }

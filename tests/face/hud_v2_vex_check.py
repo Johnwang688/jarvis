@@ -848,8 +848,8 @@ def _feedback_checks(page, mock, check, until, fake):
     check("the progress bar follows vexcom's progress line",
           bool(until(lambda: bar.count() == 1 and bar.get_attribute("aria-valuenow") == "34", timeout=4))
           and "34%" in bar.inner_text())
-    rec.update(output="Device: COM3\nvexcom utility V1.0.2b2\ndownload :\n0....10....20....30....40....50....60....70")
-    check("and moves as the download goes", bool(until(lambda: bar.get_attribute("aria-valuenow") == "70", timeout=4)))
+    rec.update(output="Device: COM3\nvexcom utility V1.0.2b2\ndownload :\n0....10....20....30....40....50....60....70.")
+    check("and moves as the download goes", bool(until(lambda: bar.get_attribute("aria-valuenow") == "72", timeout=4)))
     rec.update(state="succeeded", exit_code=0, output="Finished <script>fixture</script>", ended="2026-10-13T12:00:02+00:00")
     assert until(lambda: page.get_by_test_id("vex-downloaded").count() == 1)
     check("a finished download shows a full bar", bar.get_attribute("aria-valuenow") == "100")
