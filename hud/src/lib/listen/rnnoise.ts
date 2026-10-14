@@ -53,7 +53,11 @@ interface Exports {
 const PAGE = 65536;
 const MAX_HEAP = 256 * 1024 * 1024; // RNNoise needs a few MB; refuse anything near the 2 GB the glue allowed
 
-export async function createRnnoise(bytes: Uint8Array): Promise<RnnoiseEngine> {
+/** What createRnnoise needs of WebAssembly.instantiate; a test substitutes its own exports. */
+export type Instantiate = (bytes: Uint8Array, imports: WebAssembly.Imports) => Promise<{ instance: { exports: unknown } }>;
+const realInstantiate: Instantiate = (bytes, imports) => WebAssembly.instantiate(bytes as BufferSource, imports);
+
+export async function createRnnoise(bytes: Uint8Array, instantiate: Instantiate = realInstantiate): Promise<RnnoiseEngine> {
   let ex: Exports;
   try {
     const imports = {
@@ -74,7 +78,7 @@ export async function createRnnoise(bytes: Uint8Array): Promise<RnnoiseEngine> {
         },
       },
     };
-    const { instance } = await WebAssembly.instantiate(bytes as BufferSource, imports);
+    const { instance } = await instantiate(bytes, imports);
     ex = instance.exports as unknown as Exports;
     for (const name of ["d", "e", "f", "h", "i", "j"] as const) if (typeof ex[name] !== "function") throw new Error("export");
     if (!(ex.c instanceof WebAssembly.Memory)) throw new Error("memory");
@@ -88,14 +92,25 @@ export async function createRnnoise(bytes: Uint8Array): Promise<RnnoiseEngine> {
   if (!ptr || !state) throw new DenoiseFailError("runtime");
   let view = new Float32Array(ex.c.buffer, ptr, RNNOISE_FRAME);
   let alive = true;
+  // The heap may grow (and so detach its buffer) between frames or inside a call; a view of the old buffer reads nothing.
+  const refresh = () => { if (view.buffer !== ex.c.buffer) view = new Float32Array(ex.c.buffer, ptr, RNNOISE_FRAME); };
 
   const engine: RnnoiseEngine = {
     frame(io) {
       if (!alive) throw new Error("disposed");
       if (io.length !== RNNOISE_FRAME) throw new Error("bad frame");
-      if (view.buffer !== ex.c.buffer) view = new Float32Array(ex.c.buffer, ptr, RNNOISE_FRAME); // the heap grew
+      refresh();
+      // A NaN in would be poisoned state out, for every frame after it, until reset (measured: that frame itself
+      // comes out finite, the next clean ones do not), so refuse it before RNNoise sees it.
+      for (let i = 0; i < RNNOISE_FRAME; i++) if (!Number.isFinite(io[i])) throw new Error("non-finite input");
       for (let i = 0; i < RNNOISE_FRAME; i++) view[i] = io[i] * 32768;
       const vad = ex.j(state, ptr, ptr);
+      refresh(); // the call itself may have grown the heap
+      // Check the whole frame before writing any of it back: a NaN (or a detached view) out means the state is
+      // poisoned, and RNNoise's recurrent state would keep it until reset. The caller turns this into 'runtime'.
+      let bad = false;
+      for (let i = 0; i < RNNOISE_FRAME; i++) if (!Number.isFinite(view[i])) { bad = true; break; }
+      if (bad) throw new Error("non-finite output");
       for (let i = 0; i < RNNOISE_FRAME; i++) {
         const v = view[i] / 32768;
         io[i] = v > 1 ? 1 : v < -1 ? -1 : v;

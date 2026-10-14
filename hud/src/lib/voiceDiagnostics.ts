@@ -10,7 +10,7 @@ export type CapturePathName = "unknown" | "worklet" | "script_processor";
 export type DetectorKind = "energy" | "silero";
 export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
 /** V14: the noise-suppression switch and the state of the RNNoise stage behind it. */
-export type NoisePhase = "off" | "waiting" | "loading" | "ready" | "failed";
+export type NoisePhase = "off" | "closed" | "waiting" | "loading" | "ready" | "failed";
 export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
@@ -70,7 +70,7 @@ export class VoiceDiagnostics {
     this.value = {
       ...this.value,
       noiseWanted: !!wanted,
-      noiseState: ["off", "waiting", "loading", "ready", "failed"].includes(phase) ? phase : "off",
+      noiseState: ["off", "closed", "waiting", "loading", "ready", "failed"].includes(phase) ? phase : "off",
       noiseNote: String(note).slice(0, 200),
       noiseMs: bounded(frameMs * 100, 1_000_000) / 100,
     };

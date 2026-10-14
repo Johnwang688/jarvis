@@ -50,12 +50,12 @@ export interface WorkerLike {
 export type DetectorName = "silero" | "energy";
 export type DetectorState = "idle" | "loading" | "ready" | "failed";
 
-export type NoiseState = "off" | "waiting" | "loading" | "ready" | "failed";
+export type NoiseState = "off" | "closed" | "waiting" | "loading" | "ready" | "failed";
 
 export interface NoiseStatus {
   /** The switch: whether the owner wants noise suppression. */
   wanted: boolean;
-  /** off: not wanted. waiting: wanted, but the Silero worker is not running. loading, ready, failed: the RNNoise stage. */
+  /** off: not wanted. closed: wanted, but the microphone is not open (the stage is not started). waiting: wanted, but Silero failed so nothing runs it. loading, ready, failed: the RNNoise stage. */
   state: NoiseState;
   code: DenoiseFailCode | null;
   /** One sentence for Settings → Voice, from a closed set. */
@@ -131,7 +131,12 @@ export class VadStage {
 
   constructor(private o: StageOptions) {
     this.wantNoise = !!o.noiseSuppression;
-    this.noiseState = this.wantNoise ? "waiting" : "off";
+    this.noiseState = this.noiseIdle();
+  }
+
+  /** Wanted but nothing running it: the microphone is closed (the stage is not started), or Silero failed. */
+  private noiseIdle(): NoiseState {
+    return !this.wantNoise ? "off" : this.state === "failed" ? "waiting" : "closed";
   }
 
   private now() {
@@ -163,6 +168,7 @@ export class VadStage {
       code: st === "failed" ? this.noiseCode : null,
       note: st === "ready" ? "RNNoise, running in the VAD worker; the detector hears the denoised signal, the recording stays as captured"
         : st === "loading" ? "loading the noise-suppression model (the detector listens to the raw signal meanwhile)"
+        : st === "closed" ? "the microphone is closed"
         : st === "waiting" ? "waiting for the Silero VAD; the energy detector hears the raw signal"
         : st === "failed" && this.noiseCode ? DENOISE_FAIL_TEXT[this.noiseCode]
         : "off",
@@ -185,7 +191,7 @@ export class VadStage {
       this.noiseState = "loading";
       this.post({ type: "denoise", on: true });
     } else {
-      this.noiseState = "waiting";
+      this.noiseState = this.noiseIdle();
     }
     this.publish();
   }
@@ -239,6 +245,7 @@ export class VadStage {
     this.release();
     this.state = "idle";
     this.code = null;
+    this.noiseState = this.noiseIdle();
     this.held = [];
     this.pending.clear();
     this.publish();
@@ -251,7 +258,7 @@ export class VadStage {
     w.onmessage = null; w.onerror = null; w.onmessageerror = null;
     try { w.terminate(); } catch { /* already gone */ }
     // The RNNoise instance lived in that worker: wanted, but nothing is running it now.
-    this.noiseState = this.wantNoise ? "waiting" : "off";
+    this.noiseState = this.noiseIdle();
     this.noiseCode = null;
   }
 
@@ -260,6 +267,7 @@ export class VadStage {
     this.release();
     this.state = "failed";
     this.code = code;
+    this.noiseState = this.noiseIdle(); // release() ran before the state changed
     // Everything waiting is judged by energy now, in order.
     for (const h of this.held) if (!h.resolved) { h.resolved = true; h.p = null; }
     this.pending.clear();

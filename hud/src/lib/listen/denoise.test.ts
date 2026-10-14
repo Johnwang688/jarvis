@@ -11,7 +11,7 @@ import { ADAPTER_DELAY, Denoiser16k, lowpass, Suppressor, SLOW_FRAME_MS, SLOW_RU
 import { DenoiseFailError } from "./fail";
 import { RNNOISE_BYTES, RNNOISE_FRAME, RNNOISE_SHA256 } from "./pins";
 import type { DenoiseEvent } from "./protocol";
-import { createRnnoise, verifiedRnnoise, type RnnoiseEngine } from "./rnnoise";
+import { createRnnoise, verifiedRnnoise, type Instantiate, type RnnoiseEngine } from "./rnnoise";
 
 const HUD = resolve(__dirname, "../../..");
 const WASM = readFileSync(resolve(HUD, "vendor/rnnoise/rnnoise_0.2.wasm"));
@@ -388,6 +388,27 @@ describe("the Suppressor: off until asked, and nothing loads before that", () =>
     expect(eng.disposed).toBe(true);
   });
 
+  it("the slow rule's constants are the documented ones (16 frames in a row over 24 ms of a 32 ms budget)", () => {
+    expect(SLOW_RUN).toBe(16);
+    expect(SLOW_FRAME_MS).toBe(24);
+  });
+
+  it("with literals: 15 frames at 29 ms are tolerated, the 16th turns it off; 20 ms frames never do", async () => {
+    const clock = { t: 0, step: 0 };
+    const { s } = suppressor(async () => fakeEngine(), clock);
+    s.enable(); await settle();
+    const f = whiteNoise(512, 0.1);
+    clock.step = 20;
+    for (let i = 0; i < 100; i++) s.process(f);
+    expect(s.state).toBe("ready");
+    clock.step = 29;
+    for (let i = 0; i < 15; i++) s.process(f);
+    expect(s.state).toBe("ready");
+    s.process(f);
+    expect(s.state).toBe("failed");
+    expect(s.code).toBe("slow");
+  });
+
   it(`${SLOW_RUN} frames in a row slower than ${SLOW_FRAME_MS} ms turn it off ('slow'); a fast frame in between resets the count`, async () => {
     const clock = { t: 0, step: 0 };
     const { s, events } = suppressor(async () => fakeEngine(), clock);
@@ -412,5 +433,126 @@ describe("the Suppressor: off until asked, and nothing loads before that", () =>
     s.enable(); await settle();
     expect(s.state).toBe("ready");
     expect(s.process(whiteNoise(512, 0.1)).samples).toHaveLength(512);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The loader's own guards: a module without the expected exports, the heap
+// growing under the view, and poisoned (non-finite) output.
+
+/** A valid module that imports a.a and a.b, exports memory `c` and an empty function `d`, and nothing else. */
+const BARE = Uint8Array.from([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x01, 0x04, 0x01, 0x60, 0x00, 0x00,                               // type: () -> ()
+  0x02, 0x0d, 0x02, 0x01, 0x61, 0x01, 0x61, 0x00, 0x00, 0x01, 0x61, 0x01, 0x62, 0x00, 0x00, // imports a.a, a.b
+  0x03, 0x02, 0x01, 0x00,                                           // one function
+  0x05, 0x03, 0x01, 0x00, 0x01,                                     // memory, 1 page
+  0x07, 0x09, 0x02, 0x01, 0x63, 0x02, 0x00, 0x01, 0x64, 0x00, 0x02, // exports c (memory), d (function 2)
+  0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,                               // d's body: nothing
+]);
+
+describe("createRnnoise refuses a module that is not the pinned one's shape", () => {
+  it("the stand-in module is itself valid WebAssembly (so a refusal below is about its exports)", () => {
+    expect(WebAssembly.validate(BARE)).toBe(true);
+    const m = new WebAssembly.Module(BARE);
+    expect(WebAssembly.Module.exports(m).map((e) => e.name).sort()).toEqual(["c", "d"]);
+    expect(WebAssembly.Module.imports(m).map((i) => `${i.module}.${i.name}`)).toEqual(["a.a", "a.b"]);
+  });
+
+  it("missing exports are a 'runtime' failure, not a TypeError that escapes", async () => {
+    await expect(createRnnoise(BARE)).rejects.toBeInstanceOf(DenoiseFailError);
+    await expect(createRnnoise(BARE)).rejects.toMatchObject({ code: "runtime" });
+  });
+
+  it("so is memory that is not a WebAssembly.Memory", async () => {
+    const noMem: Instantiate = async () => ({ instance: { exports: { c: {}, d() {}, e() { return 8; }, f() {}, h() { return 1; }, i() {}, j() { return 0; } } } });
+    await expect(createRnnoise(new Uint8Array(1), noMem)).rejects.toMatchObject({ code: "runtime" });
+  });
+});
+
+/** Fake exports over a real WebAssembly.Memory; `j` is the process function, `grow` says when memory grows. */
+function fakeExports(opts: { process?: (heap: Float32Array) => void; growIn?: "j" | "h" | "never" } = {}) {
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 64 });
+  const PTR = 1024;
+  let creates = 0;
+  const heap = () => new Float32Array(memory.buffer, PTR, RNNOISE_FRAME);
+  const exports = {
+    c: memory,
+    d() {},
+    e: () => PTR,
+    f() {},
+    h() { creates++; if (opts.growIn === "h" && creates > 1) memory.grow(1); return 7; },
+    i() {},
+    j() {
+      if (opts.growIn === "j") memory.grow(1); // the call itself grows the heap, detaching the old buffer
+      (opts.process ?? ((h) => { for (let k = 0; k < h.length; k++) h[k] = h[k] * 0.5; }))(heap());
+      return 0.5;
+    },
+  };
+  const instantiate: Instantiate = async () => ({ instance: { exports } });
+  return { instantiate, memory, exports };
+}
+
+describe("the heap growing under the engine", () => {
+  it("a grow between frames is followed: the next frame is still processed (not read from a detached buffer)", async () => {
+    const fx = fakeExports({ growIn: "h" });
+    const e = await createRnnoise(new Uint8Array(1), fx.instantiate); // warm-up frame + reset: the reset's create grows memory
+    const x = Float32Array.from({ length: RNNOISE_FRAME }, (_, i) => (i % 2 ? 0.2 : -0.4));
+    e.frame(x);
+    for (let i = 0; i < RNNOISE_FRAME; i++) expect(x[i]).toBeCloseTo(i % 2 ? 0.1 : -0.2, 4);
+  });
+
+  it("a grow inside the call is followed too: the output is read from the new buffer", async () => {
+    const fx = fakeExports({ growIn: "j" });
+    const e = await createRnnoise(new Uint8Array(1), fx.instantiate);
+    const x = Float32Array.from({ length: RNNOISE_FRAME }, () => 0.5);
+    e.frame(x);
+    for (let i = 0; i < RNNOISE_FRAME; i++) expect(x[i]).toBeCloseTo(0.25, 4);
+    e.frame(x); // and again, after yet another grow
+    for (let i = 0; i < RNNOISE_FRAME; i++) expect(x[i]).toBeCloseTo(0.125, 4);
+  });
+});
+
+describe("poisoned output is a failure, not audio", () => {
+  it("a non-finite sample out throws, leaving the caller's frame unwritten", async () => {
+    const fx = fakeExports({ process: (h) => { h[100] = NaN; } });
+    const e = await createRnnoise(new Uint8Array(1), fx.instantiate).catch((err) => err);
+    // the warm-up frame is poisoned too: creating the engine fails, with 'runtime'
+    expect(e).toBeInstanceOf(DenoiseFailError);
+    expect((e as DenoiseFailError).code).toBe("runtime");
+  });
+
+  it("an engine that goes bad after warm-up throws on that frame and writes nothing back", async () => {
+    let bad = false;
+    const fx = fakeExports({ process: (h) => { for (let k = 0; k < h.length; k++) h[k] = bad && k === 7 ? Infinity : h[k]; } });
+    const e = await createRnnoise(new Uint8Array(1), fx.instantiate) as RnnoiseEngine;
+    bad = true;
+    const x = Float32Array.from({ length: RNNOISE_FRAME }, () => 0.3);
+    expect(() => e.frame(x)).toThrow();
+    expect(Array.from(x).every((v) => v === Math.fround(0.3))).toBe(true);
+  });
+
+  it("a NaN in the input of the real engine is refused on that frame (without the check it poisons every later frame)", async () => {
+    const e = await createRnnoise(await verifiedRnnoise(async () => wasmBytes()));
+    const x = whiteNoise(RNNOISE_FRAME, 0.05);
+    x[3] = NaN;
+    expect(() => e.frame(x)).toThrow();
+    e.reset();
+    const y = whiteNoise(RNNOISE_FRAME, 0.05, 2);
+    expect(() => e.frame(y)).not.toThrow(); // a reset clears the poisoned state
+    e.dispose();
+  });
+
+  it("through the Suppressor: NaN audio turns suppression off with 'runtime' and the frame is scored raw", async () => {
+    const eng = await createRnnoise(await verifiedRnnoise(async () => wasmBytes()));
+    const { s, events } = suppressor(async () => eng);
+    s.enable(); await settle();
+    const f = whiteNoise(512, 0.05);
+    f[10] = NaN;
+    const out = s.process(f);
+    expect(out.samples).toBe(f);
+    expect(s.state).toBe("failed");
+    expect(s.code).toBe("runtime");
+    expect(events.at(-1)).toEqual({ state: "failed", code: "runtime" });
   });
 });

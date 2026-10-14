@@ -31,6 +31,7 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
       Noise suppression: {value.noiseState === "ready"
         ? `on (RNNoise) · ${value.noiseMs ? value.noiseMs.toFixed(1) : "0.0"} ms per 32 ms frame · the detector hears the denoised signal, recordings stay raw`
         : value.noiseState === "loading" ? "on, loading"
+        : value.noiseState === "closed" ? "off (mic closed)"
         : value.noiseState === "waiting" ? "on, waiting for the Silero VAD (the energy detector hears the raw signal)"
         : value.noiseState === "failed" ? `off, fell back to the raw signal — ${value.noiseNote}`
         : "off"}

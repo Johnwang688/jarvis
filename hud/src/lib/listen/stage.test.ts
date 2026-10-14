@@ -343,10 +343,10 @@ describe("noise suppression (V14): off by default, and nothing loads", () => {
     expect(r.stage.status().noise.state).toBe("off");
   });
 
-  it("switched on before the worker exists: it waits, then asks as soon as the worker starts", () => {
+  it("switched on before the worker exists: it reads closed (the mic is not open), then asks as soon as the worker starts", () => {
     const r = rig();
     r.stage.setNoiseSuppression(true);
-    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "waiting" });
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed" });
     r.stage.start();
     expect(r.w().posted.map((m) => m.type)).toEqual(["init", "denoise"]);
     expect(r.stage.status().noise.state).toBe("loading");
@@ -354,7 +354,7 @@ describe("noise suppression (V14): off by default, and nothing loads", () => {
 
   it("an initial switch position of on behaves the same", () => {
     const r = rig({ noise: true });
-    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "waiting" });
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed" });
     r.stage.start();
     expect(denoiseMsgs(r.w())).toEqual([{ type: "denoise", on: true }]);
   });
@@ -421,11 +421,11 @@ describe("noise suppression falls back to raw, visibly, and the VAD keeps workin
     expect(Array.from(mine)).toEqual(Array.from(copy));
   });
 
-  it("a worker that is stopped forgets the noise stage but keeps the switch", () => {
+  it("a stopped stage (mic closed) forgets the noise stage but keeps the switch, and says the mic is closed", () => {
     const r = rig({ noise: true });
     ready(r);
     r.w().say({ type: "denoise", state: "ready", loadMs: 50 });
     r.stage.stop();
-    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "waiting" });
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed" });
   });
 });

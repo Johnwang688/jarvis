@@ -19,6 +19,7 @@ export function NoiseSuppressionSetting(props: { on: boolean; onChange: (on: boo
       <p data-testid="noise-suppression-state" data-state={v.noiseState}>
         {v.noiseState === "ready" ? "Running." : v.noiseState === "loading" ? "Loading…"
           : v.noiseState === "failed" ? `Not running: ${v.noiseNote}. The detector is listening to the raw signal.`
+          : v.noiseState === "closed" ? "Off (mic closed): the switch is on and takes effect when the microphone opens."
           : v.noiseState === "waiting" ? "On, waiting for the Silero VAD." : "Off: nothing is loaded."}
       </p>
       <p>
