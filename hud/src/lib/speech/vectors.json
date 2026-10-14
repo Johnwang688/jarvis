@@ -1,0 +1,1584 @@
+{
+ "sentences": [
+  {
+   "in": "Done. The tests pass.",
+   "out": [
+    "Done. The tests pass."
+   ]
+  },
+  {
+   "in": "Sure, I can do that. I checked the three files you asked about and found the migration is complete. The changelog now lists one hundred and sixty six call sites. Everything parses cleanly.",
+   "out": [
+    "Sure, I can do that.",
+    "I checked the three files you asked about and found the migration is complete.",
+    "The changelog now lists one hundred and sixty six call sites.",
+    "Everything parses cleanly."
+   ]
+  },
+  {
+   "in": "Right, here is what I found. The approval gate had seven separate ways past it, and every one of them was a second, older copy of an idea that the rules module already had right. I have fixed all seven.",
+   "out": [
+    "Right, here is what I found.",
+    "The approval gate had seven separate ways past it, and every one of them was a second, older copy of an idea that the rules module already had right. I have fixed all seven."
+   ]
+  },
+  {
+   "in": "Yes.",
+   "out": [
+    "Yes."
+   ]
+  },
+  {
+   "in": "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven.",
+   "out": [
+    "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven."
+   ]
+  },
+  {
+   "in": "I went through the whole inbox and grouped everything by urgency, which took a little digging because two threads were mislabeled. Here is the summary. Nothing is on fire.",
+   "out": [
+    "I went through the whole inbox and grouped everything by urgency,",
+    "which took a little digging because two threads were mislabeled. Here is the summary. Nothing is on fire."
+   ]
+  },
+  {
+   "in": "   ",
+   "out": [
+    ""
+   ]
+  },
+  {
+   "in": "Hello.",
+   "out": [
+    "Hello."
+   ]
+  },
+  {
+   "in": "Line one\nLine two\nLine three",
+   "out": [
+    "Line one Line two Line three"
+   ]
+  },
+  {
+   "in": "First sentence is here. Second sentence is also here, and it is longer than the first. Third.",
+   "out": [
+    "First sentence is here.",
+    "Second sentence is also here, and it is longer than the first. Third."
+   ]
+  },
+  {
+   "in": "Sure, I can do that for you right now, and then I will check the remaining three files in the directory carefully.",
+   "out": [
+    "Sure, I can do that for you right now,",
+    "and then I will check the remaining three files in the directory carefully."
+   ]
+  },
+  {
+   "in": "I found the problem: the approval gate was reading the wrong file, so every request was allowed to pass through.",
+   "out": [
+    "I found the problem: the approval gate was reading the wrong file,",
+    "so every request was allowed to pass through."
+   ]
+  },
+  {
+   "in": "This is a very long sentence without any punctuation that keeps going on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on until the end",
+   "out": [
+    "This is a very long sentence without any punctuation that keeps going",
+    "on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on",
+    "and on until the end"
+   ]
+  },
+  {
+   "in": "A short one. Another short one. And one more short sentence follows here.",
+   "out": [
+    "A short one. Another short one.",
+    "And one more short sentence follows here."
+   ]
+  },
+  {
+   "in": "Wait… what? Really! Yes. Fine.",
+   "out": [
+    "Wait… what? Really! Yes. Fine."
+   ]
+  },
+  {
+   "in": "The value is 3.5 percent, e.g. about one in thirty, i.e. small. Done.",
+   "out": [
+    "The value is 3.5 percent, e.g.",
+    "about one in thirty, i.e. small. Done."
+   ]
+  },
+  {
+   "in": "- first item\n- second item is a bit longer than the first\n- third",
+   "out": [
+    "- first item",
+    "- second item is a bit longer than the first - third"
+   ]
+  },
+  {
+   "in": "",
+   "out": [
+    ""
+   ]
+  },
+  {
+   "in": "   ",
+   "out": [
+    ""
+   ]
+  },
+  {
+   "in": "Hello.",
+   "out": [
+    "Hello."
+   ]
+  },
+  {
+   "in": "Line one\nLine two\nLine three",
+   "out": [
+    "Line one Line two Line three"
+   ]
+  },
+  {
+   "in": "First sentence is here. Second sentence is also here, and it is longer than the first. Third.",
+   "out": [
+    "First sentence is here.",
+    "Second sentence is also here, and it is longer than the first. Third."
+   ]
+  },
+  {
+   "in": "Sure, I can do that for you right now, and then I will check the remaining three files in the directory carefully.",
+   "out": [
+    "Sure, I can do that for you right now,",
+    "and then I will check the remaining three files in the directory carefully."
+   ]
+  },
+  {
+   "in": "I found the problem: the approval gate was reading the wrong file, so every request was allowed to pass through.",
+   "out": [
+    "I found the problem: the approval gate was reading the wrong file,",
+    "so every request was allowed to pass through."
+   ]
+  },
+  {
+   "in": "This is a very long sentence without any punctuation that keeps going on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on until the end",
+   "out": [
+    "This is a very long sentence without any punctuation that keeps going",
+    "on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on",
+    "and on until the end"
+   ]
+  },
+  {
+   "in": "A short one. Another short one. And one more short sentence follows here.",
+   "out": [
+    "A short one. Another short one.",
+    "And one more short sentence follows here."
+   ]
+  },
+  {
+   "in": "Wait… what? Really! Yes. Fine.",
+   "out": [
+    "Wait… what? Really! Yes. Fine."
+   ]
+  },
+  {
+   "in": "The value is 3.5 percent, e.g. about one in thirty, i.e. small. Done.",
+   "out": [
+    "The value is 3.5 percent, e.g.",
+    "about one in thirty, i.e. small. Done."
+   ]
+  },
+  {
+   "in": "- first item\n- second item is a bit longer than the first\n- third",
+   "out": [
+    "- first item",
+    "- second item is a bit longer than the first - third"
+   ]
+  }
+ ],
+ "speakable": [
+  {
+   "in": "**Done.** I checked *three* things.",
+   "out": "Done. I checked three things."
+  },
+  {
+   "in": "__bold__ and _italic_ and ~~struck~~",
+   "out": "bold and italic and struck"
+  },
+  {
+   "in": "***both at once***",
+   "out": "both at once"
+  },
+  {
+   "in": "# Report",
+   "out": "Report"
+  },
+  {
+   "in": "### Deeper heading",
+   "out": "Deeper heading"
+  },
+  {
+   "in": "- one\n- two\n- three",
+   "out": "one\ntwo\nthree"
+  },
+  {
+   "in": "1. first\n2) second",
+   "out": "first\nsecond"
+  },
+  {
+   "in": "- top\n  - nested",
+   "out": "top\n  nested"
+  },
+  {
+   "in": "Run `context.py` first.",
+   "out": "Run context.py first."
+  },
+  {
+   "in": "See [the docs](https://example.com) for more.",
+   "out": "See the docs for more."
+  },
+  {
+   "in": "![a diagram](https://example.com/x.png)",
+   "out": "a diagram"
+  },
+  {
+   "in": "Read <https://example.com/x> now.",
+   "out": "Read https://example.com/x now."
+  },
+  {
+   "in": "> quoted **line**",
+   "out": "quoted line"
+  },
+  {
+   "in": "---",
+   "out": ""
+  },
+  {
+   "in": "| name | qty |\n|---|---|\n| bolt | 12 |",
+   "out": "name, qty\nbolt, 12"
+  },
+  {
+   "in": "a \\* literal asterisk",
+   "out": "a * literal asterisk"
+  },
+  {
+   "in": "plain text with no markdown at all",
+   "out": "plain text with no markdown at all"
+  },
+  {
+   "in": "Use snake_case_name and MAX_STEPS here.",
+   "out": "Use snake_case_name and MAX_STEPS here."
+  },
+  {
+   "in": "That is 2 * 3 * 4 = 24.",
+   "out": "That is 2 * 3 * 4 = 24."
+  },
+  {
+   "in": "The file is jarvis/face/server.py, line 60.",
+   "out": "The file is jarvis/face/server.py, line 60."
+  },
+  {
+   "in": "It cost $0.0023 — about 5x the snapshot run.",
+   "out": "It cost $0.0023 — about 5x the snapshot run."
+  },
+  {
+   "in": "a_b and c_d",
+   "out": "a_b and c_d"
+  },
+  {
+   "in": "Here it is:\n\n```py\nx = 1\nprint(x)\n```\n\nThat is all.",
+   "out": "Here it is:\n\nThat is all."
+  },
+  {
+   "in": "```\nonly code\n```",
+   "out": ""
+  },
+  {
+   "in": "~~~\nonly code\n~~~",
+   "out": ""
+  },
+  {
+   "in": "Intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nOutro",
+   "out": "Intro\n\na, b\n1, 2\n\nOutro"
+  },
+  {
+   "in": "## Title\n\n> quote **bold** and `code`\n\n1. one\n2. two",
+   "out": "Title\n\nquote bold and code\n\none\ntwo"
+  },
+  {
+   "in": "Tight   spacing  and trailing spaces   \nnext line",
+   "out": "Tight   spacing  and trailing spaces\nnext line"
+  },
+  {
+   "in": "1. Do this:\n    ```bash\n    cat ~/.config/jarvis/.env\n    export KEY=sk-abcdef\n    ```\nDone.",
+   "out": "Do this:\nDone."
+  },
+  {
+   "in": "- a\n  - b\n    ```py\n    secret = 1\n    ```\nAfter.",
+   "out": "a\n  b\nAfter."
+  }
+ ],
+ "stable": [
+  {
+   "declared": [],
+   "final": [
+    "Done. The tests pass."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ]
+   ],
+   "text": "Done. The tests pass."
+  },
+  {
+   "declared": [
+    "Sure, I can do that.",
+    "I checked the three files you asked about and found the migration is complete.",
+    "The changelog now lists one hundred and sixty six call sites."
+   ],
+   "final": [
+    "Sure, I can do that.",
+    "I checked the three files you asked about and found the migration is complete.",
+    "The changelog now lists one hundred and sixty six call sites.",
+    "Everything parses cleanly."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     56,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     63,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     70,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     77,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     84,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     91,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     98,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     105,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     112,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     119,
+     [
+      "Sure, I can do that."
+     ]
+    ],
+    [
+     126,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     133,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     140,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     147,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     154,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     161,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     168,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     175,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ],
+    [
+     182,
+     [
+      "Sure, I can do that.",
+      "I checked the three files you asked about and found the migration is complete."
+     ]
+    ]
+   ],
+   "text": "Sure, I can do that. I checked the three files you asked about and found the migration is complete. The changelog now lists one hundred and sixty six call sites. Everything parses cleanly."
+  },
+  {
+   "declared": [
+    "Right, here is what I found."
+   ],
+   "final": [
+    "Right, here is what I found.",
+    "The approval gate had seven separate ways past it, and every one of them was a second, older copy of an idea that the rules module already had right. I have fixed all seven."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     63,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     70,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     77,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     84,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     91,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     98,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     105,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     112,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     119,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     126,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     133,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     140,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     147,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     154,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     161,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     168,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     175,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     182,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     189,
+     [
+      "Right, here is what I found."
+     ]
+    ],
+    [
+     196,
+     [
+      "Right, here is what I found."
+     ]
+    ]
+   ],
+   "text": "Right, here is what I found. The approval gate had seven separate ways past it, and every one of them was a second, older copy of an idea that the rules module already had right. I have fixed all seven."
+  },
+  {
+   "declared": [],
+   "final": [
+    "Yes."
+   ],
+   "samples": [],
+   "text": "Yes."
+  },
+  {
+   "declared": [],
+   "final": [
+    "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     []
+    ],
+    [
+     63,
+     []
+    ]
+   ],
+   "text": "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven."
+  },
+  {
+   "declared": [
+    "I went through the whole inbox and grouped everything by urgency,"
+   ],
+   "final": [
+    "I went through the whole inbox and grouped everything by urgency,",
+    "which took a little digging because two threads were mislabeled. Here is the summary. Nothing is on fire."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     []
+    ],
+    [
+     63,
+     []
+    ],
+    [
+     70,
+     []
+    ],
+    [
+     77,
+     []
+    ],
+    [
+     84,
+     []
+    ],
+    [
+     91,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     98,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     105,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     112,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     119,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     126,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     133,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     140,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     147,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     154,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     161,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ],
+    [
+     168,
+     [
+      "I went through the whole inbox and grouped everything by urgency,"
+     ]
+    ]
+   ],
+   "text": "I went through the whole inbox and grouped everything by urgency, which took a little digging because two threads were mislabeled. Here is the summary. Nothing is on fire."
+  },
+  {
+   "declared": [],
+   "final": [
+    ""
+   ],
+   "samples": [],
+   "text": "   "
+  },
+  {
+   "declared": [],
+   "final": [
+    "Hello."
+   ],
+   "samples": [],
+   "text": "Hello."
+  },
+  {
+   "declared": [],
+   "final": [
+    "Line one Line two Line three"
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ]
+   ],
+   "text": "Line one\nLine two\nLine three"
+  },
+  {
+   "declared": [
+    "First sentence is here."
+   ],
+   "final": [
+    "First sentence is here.",
+    "Second sentence is also here, and it is longer than the first. Third."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     [
+      "First sentence is here."
+     ]
+    ],
+    [
+     56,
+     [
+      "First sentence is here."
+     ]
+    ],
+    [
+     63,
+     [
+      "First sentence is here."
+     ]
+    ],
+    [
+     70,
+     [
+      "First sentence is here."
+     ]
+    ],
+    [
+     77,
+     [
+      "First sentence is here."
+     ]
+    ],
+    [
+     84,
+     [
+      "First sentence is here."
+     ]
+    ],
+    [
+     91,
+     [
+      "First sentence is here."
+     ]
+    ]
+   ],
+   "text": "First sentence is here. Second sentence is also here, and it is longer than the first. Third."
+  },
+  {
+   "declared": [
+    "Sure, I can do that for you right now,"
+   ],
+   "final": [
+    "Sure, I can do that for you right now,",
+    "and then I will check the remaining three files in the directory carefully."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     []
+    ],
+    [
+     63,
+     []
+    ],
+    [
+     70,
+     []
+    ],
+    [
+     77,
+     []
+    ],
+    [
+     84,
+     []
+    ],
+    [
+     91,
+     [
+      "Sure, I can do that for you right now,"
+     ]
+    ],
+    [
+     98,
+     [
+      "Sure, I can do that for you right now,"
+     ]
+    ],
+    [
+     105,
+     [
+      "Sure, I can do that for you right now,"
+     ]
+    ],
+    [
+     112,
+     [
+      "Sure, I can do that for you right now,"
+     ]
+    ]
+   ],
+   "text": "Sure, I can do that for you right now, and then I will check the remaining three files in the directory carefully."
+  },
+  {
+   "declared": [
+    "I found the problem: the approval gate was reading the wrong file,"
+   ],
+   "final": [
+    "I found the problem: the approval gate was reading the wrong file,",
+    "so every request was allowed to pass through."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     []
+    ],
+    [
+     63,
+     []
+    ],
+    [
+     70,
+     []
+    ],
+    [
+     77,
+     []
+    ],
+    [
+     84,
+     []
+    ],
+    [
+     91,
+     []
+    ],
+    [
+     98,
+     [
+      "I found the problem: the approval gate was reading the wrong file,"
+     ]
+    ],
+    [
+     105,
+     [
+      "I found the problem: the approval gate was reading the wrong file,"
+     ]
+    ],
+    [
+     112,
+     [
+      "I found the problem: the approval gate was reading the wrong file,"
+     ]
+    ]
+   ],
+   "text": "I found the problem: the approval gate was reading the wrong file, so every request was allowed to pass through."
+  },
+  {
+   "declared": [
+    "This is a very long sentence without any punctuation that keeps going"
+   ],
+   "final": [
+    "This is a very long sentence without any punctuation that keeps going",
+    "on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on",
+    "and on until the end"
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     []
+    ],
+    [
+     63,
+     []
+    ],
+    [
+     70,
+     []
+    ],
+    [
+     77,
+     []
+    ],
+    [
+     84,
+     []
+    ],
+    [
+     91,
+     []
+    ],
+    [
+     98,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     105,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     112,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     119,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     126,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     133,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     140,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     147,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     154,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     161,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     168,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     175,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     182,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     189,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     196,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     203,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     210,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     217,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     224,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     231,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     238,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     245,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     252,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     259,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     266,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     273,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     280,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     287,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     294,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     301,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     308,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ],
+    [
+     315,
+     [
+      "This is a very long sentence without any punctuation that keeps going"
+     ]
+    ]
+   ],
+   "text": "This is a very long sentence without any punctuation that keeps going on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on until the end"
+  },
+  {
+   "declared": [
+    "A short one. Another short one."
+   ],
+   "final": [
+    "A short one. Another short one.",
+    "And one more short sentence follows here."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     []
+    ],
+    [
+     63,
+     [
+      "A short one. Another short one."
+     ]
+    ],
+    [
+     70,
+     [
+      "A short one. Another short one."
+     ]
+    ]
+   ],
+   "text": "A short one. Another short one. And one more short sentence follows here."
+  },
+  {
+   "declared": [],
+   "final": [
+    "Wait… what? Really! Yes. Fine."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ]
+   ],
+   "text": "Wait… what? Really! Yes. Fine."
+  },
+  {
+   "declared": [
+    "The value is 3.5 percent, e.g."
+   ],
+   "final": [
+    "The value is 3.5 percent, e.g.",
+    "about one in thirty, i.e. small. Done."
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     [
+      "The value is 3.5 percent, e.g."
+     ]
+    ],
+    [
+     63,
+     [
+      "The value is 3.5 percent, e.g."
+     ]
+    ]
+   ],
+   "text": "The value is 3.5 percent, e.g. about one in thirty, i.e. small. Done."
+  },
+  {
+   "declared": [],
+   "final": [
+    "first item second item is a bit longer than the first third"
+   ],
+   "samples": [
+    [
+     7,
+     []
+    ],
+    [
+     14,
+     []
+    ],
+    [
+     21,
+     []
+    ],
+    [
+     28,
+     []
+    ],
+    [
+     35,
+     []
+    ],
+    [
+     42,
+     []
+    ],
+    [
+     49,
+     []
+    ],
+    [
+     56,
+     []
+    ],
+    [
+     63,
+     []
+    ]
+   ],
+   "text": "- first item\n- second item is a bit longer than the first\n- third"
+  }
+ ]
+}

@@ -1525,8 +1525,10 @@ def picker_checks(page, mock):
     roster_edit_checks(page, mock)
     page.locator('[data-testid="settings-close"]').click()
     mutes = mock.sent("POST", "/mute")
-    check("every /mute the window sent carried {muted: bool}",
-          bool(mutes) and all(set(b) == {"muted"} and isinstance(b["muted"], bool) for b in mutes),
+    # V6: the mic's OFF no longer mutes Jarvis, so the window posts no /mute at
+    # all (it used to, and the body had to be {muted: bool}: decisions A6).
+    check("the mic's modes post no /mute (any the window did send carried {muted: bool})",
+          all(set(b) == {"muted"} and isinstance(b["muted"], bool) for b in mutes) and not mutes,
           str(mutes))
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 

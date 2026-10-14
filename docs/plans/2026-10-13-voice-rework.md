@@ -707,13 +707,14 @@ Chrome-for-Testing fallback or Playwright in WSL.
    only "Jarvis" or Ctrl+D pause it until you enroll.
 8. **"Jarvis stop."** *Recommend:* it stops speech and clears the queue,
    never an agent turn.
-9. **Buttons.** *Recommend:* a speech strip under the orb, plus a per-pane
-   voice chip with skip and mute. Not the status column, which folds.
+9. ~~Buttons.~~ **Answered (2026-10-13):** a speech strip under the orb,
+   plus a per-pane voice chip with skip and mute. Not the status column,
+   which folds. (Strip in V6; the per-pane chip lands with V7.)
 10. **Commands under a card.** *Recommend:* playback commands only, through
     local KWS, with nothing uploaded and no approval effect.
-11. **Mute coupling and cloud TTS.** *Recommend:* mic OFF no longer mutes
-    Jarvis. Read-aloud never uses cloud TTS; a local failure skips the
-    chunk with a mark.
+11. ~~Mute coupling and cloud TTS.~~ **Answered (2026-10-13):** mic OFF no
+    longer mutes Jarvis. Read-aloud never uses cloud TTS; a local failure
+    skips the chunk with a mark.
 12. **Keep enrollment clips?** *Recommend:* yes, in the 0700 store, so a
     model upgrade can re-derive the voiceprint without re-recording. Delete
     removes all of it. (The store is not agent-protected; V-12.)
@@ -721,8 +722,8 @@ Chrome-for-Testing fallback or Playwright in WSL.
 14. **Browser sound.** *Recommend:* duck HUD-played Browser audio by about
     −15 dB, and offer "hold speech while a tab plays sound" (off) for Direct
     frames. Final answer in the Browser sound plan.
-15. **Which window speaks, and task views.** *Recommend:* the most recently
-    focused window. Task views stay silent.
+15. ~~Which window speaks, and task views.~~ **Answered (2026-10-13):** the
+    most recently focused window speaks. Task views stay silent.
 16. **KWS engine and placement.** *Recommend:* sherpa-onnx open-vocabulary
     KWS in the window if V0 shows ≤ 15% of a core and acceptable misses;
     otherwise on the daemon. Retire Chrome's cloud recognizer either way.

@@ -41,7 +41,9 @@ def _warn_once(message: str) -> None:
 # never invent words, only remove punctuation the owner was never meant to
 # hear. `speakable()` is idempotent — plain prose passes through unchanged.
 
-_MD_FENCE = re.compile(r"^\s{0,3}(?:```|~~~)")
+# A fence at any indent: one nested under a list item is indented four or more
+# spaces, and reading its code (a shell command, a key) aloud is the failure.
+_MD_FENCE = re.compile(r"^\s*(?:```|~~~)")
 _MD_RULE = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$")
 _MD_TABLE_RULE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
 _MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
@@ -290,13 +292,28 @@ def _local_tts(text: str, voice: str, speed: float) -> bytes:
     return _encode_wav(samples, sample_rate)
 
 
+class LocalTTSUnavailable(RuntimeError):
+    """`tts(local_only=True)` could not synthesize on this machine.
+
+    Raised instead of falling back to the cloud: a caller that asked for local
+    speech has said the text must not leave the PC (V6, read-aloud). The message
+    is short and safe to show a surface.
+    """
+
+
 def tts(
     text: str,
     voice: str | None = None,
     instructions: str | None = None,
     speed: float | None = None,
+    local_only: bool = False,
 ) -> bytes:
-    """Synthesize speech for `text`. Returns audio bytes (WAV local, MP3 cloud)."""
+    """Synthesize speech for `text`. Returns audio bytes (WAV local, MP3 cloud).
+
+    `local_only` never reaches `llm.speech`: a local failure (or a configured
+    cloud backend) raises `LocalTTSUnavailable` rather than sending the text
+    to a provider. Read-aloud uses it for everything an agent wrote.
+    """
     global _local_warned
     # Applied here, not only at the call sites, so no speech path can forget
     # it. Idempotent, so a caller that already stripped pays nothing.
@@ -344,9 +361,13 @@ def tts(
         try:
             return _local_tts(text, voice, speed)
         except Exception as exc:
+            if local_only:
+                raise LocalTTSUnavailable("local speech unavailable") from exc
             if not _local_warned:
                 _local_warned = True
                 print(f"[voice] local tts unavailable ({exc}); using OpenRouter")
+    if local_only:
+        raise LocalTTSUnavailable("local speech is not configured")
 
     return llm.speech(
         text=text,

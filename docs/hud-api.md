@@ -322,12 +322,18 @@ every one of these routes asks (`kind`):
   which tries `STT_MODEL` then `STT_FALLBACK_MODELS`. When every model fails
   it is a **502** whose `error` names each model and its HTTP status (never a
   response body), and the HUD shows that sentence.
-- `POST /say` as v1 → audio bytes (`RIFF` or MP3; the client sniffs).
+- `POST /say` `{text, voice?, instructions?, local_only?}` → audio bytes
+  (`RIFF` or MP3; the client sniffs), `X-Speech-Ms` = synthesis time. Unknown
+  keys are a 400. A `voice` must be one `GET /voices` lists, else **400**.
+  `local_only: true` (read-aloud sends it) never calls the cloud voice: a local
+  failure, or a cloud-configured backend, is a **503** and the HUD skips the
+  chunk. `GET /voices` also reports `voice_out` (v1's mute flag, no longer
+  moved by the mic's OFF).
 - The HUD keeps v1's `/converse`-style streaming for **chat turns** as a
   client convenience? **No.** v2 chat is `POST /threads/{id}/send` (202)
   plus `/events?thread=` for the stream; TTS is the client calling
-  `/say` per settled sentence (the speculator ported to the client is
-  optional; not in this package).
+  `/say` per settled chunk. V6 ported the sentence splitter to the client
+  (`hud/src/lib/speech/`): chunks are made while the model writes.
 
 ## Events (`GET /events`, SSE)
 

@@ -76,6 +76,10 @@ import { loadSettingsSection, saveSettingsSection, type SettingsSection } from "
 import { useInstallApp } from "./state/installApp";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
+import { SpeechStrip, stripShown } from "./components/SpeechStrip";
+import { ReadAloudSetting } from "./components/ReadAloud";
+import { createSpeech, saveReadAloud } from "./lib/speech";
+import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture } from "./lib/capture";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type ClaimSource } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
@@ -540,12 +544,34 @@ export default function App() {
     release: target => pageDrafts.current.release(target),
   }), [dispatch]);
 
+  // ---- speech (V6) --------------------------------------------------------
+
+  // Jarvis's voice: the event stream's prose, read aloud by this window if it
+  // holds the speech lock (lib/speech). Output only; its own on/off switch, not
+  // the mic's.
+  const speech = useMemo(() => createSpeech(), []);
+  useEffect(() => () => speech.dispose(), [speech]);
+  const speechSubscribe = useCallback((cb: () => void) => speech.controller.subscribe(cb), [speech]);
+  const speechView = useSyncExternalStore(speechSubscribe, () => speech.controller.view());
+  // The mic is held off for the whole of a reply, between chunks included.
+  const speechPlaying = () => micSuppressedBySpeech(speech.controller.view());
+  // A turn finished while its reply was still being read: the follow-up window
+  // opens when the speech goes idle, not at `turn_finished` (it would run out,
+  // or hear him, mid-reply).
+  const followUpAfterSpeech = useRef(false);
+  // The threads read now (lib/speech/policy `speakingThreads`): a thread that
+  // leaves the set stops speaking at once.
+  const speakerKey = [...speakingThreads(state.chats, pendingThread.current, state.selectedChat)].join(",");
+  useEffect(() => {
+    speech.controller.setSpeakers(new Set(speakerKey ? speakerKey.split(",") : []));
+  }, [speech, speakerKey]);
+
   // ---- capture ------------------------------------------------------------
 
   const voiceDiagnostics = useMemo(() => new VoiceDiagnostics(), []);
   const captureSuppression = (): SuppressionReason | null => {
     const at = live.current;
-    if (at.orb === "speaking") return "speaking";
+    if (at.orb === "speaking" || speechPlaying()) return "speaking";
     if (at.selectedChat === null) return "no_chat";
     if (at.chats[at.selectedChat].busy) return "busy";
     if (at.approvals.length) return "card";
@@ -562,7 +588,7 @@ export default function App() {
         // suppresses the mic — a long turn in another pane must not silence
         // it — and with no chat on screen there is nobody to talk to.
         suppressed: () =>
-          live.current.orb === "speaking" ||
+          live.current.orb === "speaking" || speechPlaying() ||
           live.current.selectedChat === null ||
           live.current.chats[live.current.selectedChat].busy ||
           live.current.approvals.length > 0 ||
@@ -570,7 +596,11 @@ export default function App() {
           chipOverlay.current || settingsNow.current ||
           crashedRef.current,
         suppressionReason: () => captureSuppression() ?? "speaking",
-        onDrop: (reason, ms, source) => { voiceDiagnostics.add(ms, source, reason); },
+        onDrop: (reason, ms, source) => {
+          voiceDiagnostics.add(ms, source, reason);
+          // A talk-key utterance that came to nothing: he carries on.
+          if (source === "ptt") speech.controller.endBargeIn();
+        },
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
         onListening: () => {
@@ -582,11 +612,26 @@ export default function App() {
           if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "idle", status: note || "" } });
           else dispatch({ type: "patch", patch: { orb: "idle" } });
         },
-        onUtterance: (wav, ms, source) => void onUtterance(wav, ms, source),
+        onUtterance: (wav, ms, source) => {
+          // However it ends (sent, review, empty, failed, crashed), a talk-key
+          // utterance that paused him is over: he resumes what remains.
+          void onUtterance(wav, ms, source).finally(() => { if (source === "ptt") speech.controller.endBargeIn(); });
+        },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
+
+  // The follow-up window a finished turn owes, opened once its reply has been
+  // read (v1's `doneSpeaking`): only if the selected chat is still idle.
+  useEffect(() => speech.controller.onIdle(() => {
+    if (!followUpAfterSpeech.current) return;
+    followUpAfterSpeech.current = false;
+    const at = live.current;
+    if (at.selectedChat === null || at.chats[at.selectedChat].busy || at.approvals.length) return;
+    if (isMuted(at.dictation)) return;
+    capture.openFollowUp();
+  }), [speech, capture]);
 
   // Words spoken while no chat pane was on screen: they wait, unsent, for the
   // next chat selected (decisions W-6: ambiguous input goes to the selected
@@ -780,6 +825,8 @@ export default function App() {
           ...(spoken ? { spoken: true } : {}),
         });
         const status = result?.status ?? "started";
+        // A message went to this thread: the reply being read is stale (V-7).
+        if (status !== "dropped") speech.controller.messageSent(threadId);
         if (status === "started" && result.turn_id) {
           dispatch({ type: "mark", local, patch: { turn_id: result.turn_id, mark: undefined } });
         }
@@ -1035,6 +1082,7 @@ export default function App() {
       browserSound.event(e);
       const kind = e.kind;
       const data = e.data || e;
+      try { speech.controller.event(e); } catch { /* speech never breaks the stream */ }
       if (devservers.event(e)) return;
       if (kind === "_connected") devservers.connect();
       if (kind === "_disconnected") { devservers.disconnect(); return; }
@@ -1171,7 +1219,10 @@ export default function App() {
           // Only the selected chat's own turn opens the follow-up window. A
           // Discord turn, or a turn in another pane, finishing must not start
           // the HUD listening.
-          if (followUp) capture.openFollowUp();
+          if (followUp) {
+            if (speech.controller.view().active) followUpAfterSpeech.current = true;
+            else capture.openFollowUp();
+          }
           break;
         }
         case "error":
@@ -2499,8 +2550,11 @@ export default function App() {
       chatPatch(pane, { status: "MIC MUTED" });
       return;
     }
-    capture.press();
-  }, [capture, chatPatch, dispatch, interruptTurn]);
+    // Talking over him pauses him, and he resumes when the utterance is over
+    // (decision V-7; `endBargeIn` in onUtterance and on a drop). Self-voice
+    // gating and spoken commands are V9.
+    if (capture.press()) speech.controller.bargeIn();
+  }, [capture, chatPatch, dispatch, interruptTurn, speech]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -2714,6 +2768,9 @@ export default function App() {
     (window as any).__hud = {
       capture,
       voiceDiagnostics: () => voiceDiagnostics.snapshot(),
+      // Jarvis's voice, read-only: the strip's view, the queue's live and past
+      // items (text, thread, state), and whether this window holds the lock.
+      speech: () => ({ view: speech.controller.view(), ...speech.controller.items(), speaker: speech.gate.isSpeaker() }),
       mic: {
         feedMs: (ms: number, amp: number, frame?: number) => capture.feedMs(ms, amp, frame),
         wake: () => onWakeHit(),
@@ -2765,8 +2822,9 @@ export default function App() {
     dispatch({ type: "patch", patch: { dictation: mode } });
     if (live.current.selectedChat !== null) chatPatch(live.current.selectedChat, { status: "" });
     if (wasMuted && !isMuted(mode)) capture.markUnmute();
-    if (isMuted(mode)) capture.closeFollowUp();
-    api.mute(isMuted(mode)).catch(() => {});
+    if (isMuted(mode)) { capture.closeFollowUp(); followUpAfterSpeech.current = false; }
+    // The mic's OFF no longer mutes Jarvis (lib/speech/policy, Q11).
+    onMicModeChange(isMuted(mode), (m) => api.mute(m).catch(() => {}));
   };
 
   const decide = async (reqId: string, allow: boolean, always = false) => {
@@ -2794,12 +2852,21 @@ export default function App() {
   // it): the selected chat's turn status, else a card's question, else MIC
   // MUTED, else the orb's state (lib/dictation `orbLine`). Folded, the orb is
   // a 36px dot with no line under it, so the selected chat's bar says it.
+  const speechThreadId = selected !== null ? shownThread(state.chats[selected], pendingThread.current[selected]) : null;
+  const speechThread = speechThreadId ? state.threads.find((t) => t.id === speechThreadId) ?? null : null;
+  const speechLabel = speechThread ? threadLabel(speechThread).text : "";
+  const speaking = speechView.enabled && speechView.speaker;
   const orbStatus = orbLine({
     status: selected !== null ? state.chats[selected].status : "",
     mode: state.dictation,
     approvals: state.approvals.length,
     orb: state.orb,
+    speech: speaking ? { state: speechView.state, label: speechLabel } : undefined,
   });
+  // Playing, the orb shows his voice unless it carries a meaning of its own
+  // (a tool, a card, an error) or the mic is mid-utterance.
+  const orbShown = speaking && (speechView.state === "playing" || speechView.state === "buffering") && (state.orb === "idle" || state.orb === "thinking" || state.orb === "composing")
+    ? "speaking" : state.orb;
   const projectName = (id: string | null) => state.projects.find((p) => p.id === id)?.name || "…";
   const threadOf = (id: string | null) => (id ? state.threads.find((t) => t.id === id) || null : null);
   const drawnChats = fit.panes.filter((n) => ws.panes[n - 1].view === "chat");
@@ -3565,7 +3632,7 @@ export default function App() {
       <div
         id="shell"
         className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed " : "")
-          + (micTight ? "mic-tight" : "")}
+          + (micTight ? "mic-tight " : "") + (!drawn.leftFolded && stripShown(speechView) ? "speech-on" : "")}
         style={{ ["--left-w" as any]: `${drawn.left}px`, ["--right-w" as any]: `${drawn.right}px` }}
       >
         {drawn.leftFolded ? (
@@ -3725,8 +3792,15 @@ export default function App() {
         onDismiss={id => { if (!blockedNow.current && !settingsNow.current) void devservers.dismiss(id); }} />
 
       <Orb
-        state={state.orb}
+        state={orbShown}
         level={state.level}
+        outputLevel={() => speech.controller.level()}
+        speech={<SpeechStrip view={speechView} label={speechLabel} blocked={workBlocked}
+          onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
+          onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
+        speechRail={<SpeechStrip compact view={speechView} label={speechLabel} blocked={workBlocked}
+          onToggle={() => speech.controller.toggle()} onSkip={() => speech.controller.skip()}
+          onStop={() => speech.controller.stop()} onClearMarks={() => speech.controller.clearMarks()} />}
         rings={state.avatar?.rings}
         accent={state.avatar?.accent}
         avatarUrl={state.avatar ? `/avatar.svg?v=${avatarCacheBust}` : null}
@@ -3783,7 +3857,8 @@ export default function App() {
                 override={voiceOverride}
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
-              /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} /></>
+              /><ReadAloudSetting on={speechView.enabled}
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

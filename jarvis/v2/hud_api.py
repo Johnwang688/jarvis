@@ -1195,7 +1195,7 @@ def frame_headers(handler, csp: str | None = None) -> list[tuple[str, str]]:
     return [("Content-Security-Policy", content_security_policy(csp)), ("X-Frame-Options", "DENY")]
 
 
-def binary(handler, data, mime, *, csp=None, status=200):
+def binary(handler, data, mime, *, csp=None, status=200, headers=None):
     # Checked before a byte is written: a bad policy is one 400 (the
     # dispatcher's answer to a ValueError), never half a response.
     frame_headers(handler, csp)
@@ -1204,6 +1204,8 @@ def binary(handler, data, mime, *, csp=None, status=200):
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("X-Content-Type-Options", "nosniff")
+    for name, value in (headers or {}).items():
+        handler.send_header(name, value)
     # Folded into the one policy by the handler's `end_headers` (`frame_headers`).
     handler._csp = csp
     handler.end_headers()
@@ -1366,6 +1368,44 @@ def preview_route(handler, daemon, parts, query):
     return binary(handler, data, mimetypes.guess_type(target.name)[0] or "application/octet-stream")
 
 
+SAY_MAX_CHARS = 2000
+
+
+def say(handler, body):
+    """`POST /say`: one chunk of speech as audio (V6).
+
+    `voice`, when named, must be a voice `catalog()` lists: an unknown name
+    used to fail inside Kokoro and then reach the cloud carrying that name.
+    `local_only` (read-aloud sets it) never calls `llm.speech` -- on a local
+    failure the answer is 503 and the chunk is skipped. `X-Speech-Ms` is the
+    synthesis time, for the HUD's diagnostics.
+    """
+    import time
+    from jarvis import voice
+    text = str(body.get("text", "")).strip()
+    if not text:
+        fail(400, "no text to say")
+    name = body.get("voice")
+    if name is not None:
+        if not isinstance(name, str):
+            fail(400, "voice must be a string")
+        name = name.strip() or None
+    if name is not None and name not in {entry["name"] for entry in voice.catalog()}:
+        fail(400, "unknown voice")
+    local_only = body.get("local_only", False)
+    if not isinstance(local_only, bool):
+        fail(400, "local_only must be a boolean")
+    started = time.monotonic()
+    try:
+        audio = voice.tts(text[:SAY_MAX_CHARS], voice=name, instructions=body.get("instructions"),
+                          local_only=local_only)
+    except voice.LocalTTSUnavailable as exc:
+        fail(503, str(exc))
+    elapsed = str(int((time.monotonic() - started) * 1000))
+    return binary(handler, audio, "audio/wav" if audio.startswith(b"RIFF") else "audio/mpeg",
+                  headers={"X-Speech-Ms": elapsed})
+
+
 def pickers(handler, daemon, parts, query):
     from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
@@ -1382,7 +1422,10 @@ def pickers(handler, daemon, parts, query):
                 fail(404, "no avatar art")
             return binary(handler, art.encode(), "image/svg+xml", csp=AVATAR_CSP)
         if name == "voices":
-            return 200, {"current": voice.selected_voice(), "override": voice._voice_override, "voices": voice.catalog()}
+            # `voice_out`: Jarvis's spoken replies, the v1 mute flag. The mic's
+            # OFF no longer posts it (V6), so it moves only by `/mute` itself.
+            return 200, {"current": voice.selected_voice(), "override": voice._voice_override,
+                         "voices": voice.catalog(), "voice_out": not voicectl.is_muted()}
         if name == "models":
             return 200, models.describe()
         if name == "models/catalog":
@@ -1414,15 +1457,12 @@ def pickers(handler, daemon, parts, query):
     # — the HUD sent {id}, {name} and {mute} for weeks and every click quietly
     # undid itself (decisions A6). An unknown key is now a 400 that names it.
     keys = {"mute": ("muted",), "avatar": ("slug",), "voice": ("voice",), "model": ("model",),
-            "models": ("add", "remove", "model", "effort")}.get(name)
+            "models": ("add", "remove", "model", "effort"),
+            "say": ("text", "voice", "instructions", "local_only")}.get(name)
     if keys is not None:
-        _object(body, keys, () if name == "models" else keys)
+        _object(body, keys, () if name in ("models", "say") else keys)
     if name == "say":
-        text = str(body.get("text", "")).strip()
-        if not text:
-            fail(400, "no text to say")
-        audio = voice.tts(text[:2000], voice=body.get("voice"), instructions=body.get("instructions"))
-        return binary(handler, audio, "audio/wav" if audio.startswith(b"RIFF") else "audio/mpeg")
+        return say(handler, body)
     if name == "mute":
         if not isinstance(body["muted"], bool):
             fail(400, "muted must be a boolean")
