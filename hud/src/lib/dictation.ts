@@ -5,9 +5,9 @@
 //   AUTO    send when speech ends (v1's behaviour)
 //   REVIEW  the transcript lands in the input box and the box is focused;
 //           nothing is ever sent without a click or an Enter
-//   OFF     v1's mic mute: nothing claimed, nothing uploaded, the wake
-//           recognizer stopped outright (it streams audio to Google's speech
-//           service — a muted mic must stop that too)
+//   OFF     v1's mic mute: nothing claimed, nothing uploaded, the local wake
+//           word (V11) posts and hears nothing (before V11 this stopped Chrome's
+//           cloud recognizer, which streamed the room to Google's speech service)
 //
 // A fresh window boots into REVIEW, the mic-fails-toward-muted reasoning
 // applied to sending: a window that restarts into a mic that sends on its own

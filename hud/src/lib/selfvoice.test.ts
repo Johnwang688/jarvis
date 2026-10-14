@@ -353,3 +353,29 @@ describe("SelfVoiceGate: failing closed", () => {
     expect(LAG_MAX_MS).toBeGreaterThanOrEqual(600);
   });
 });
+
+describe("SelfVoiceGate.audibleWithin (V11: a recognizer reports a word after it was said)", () => {
+  it("is true while he sounds and for the look-back after, false before and after that", () => {
+    const g = new SelfVoiceGate(() => now);
+    let now = 1000;
+    expect(g.audibleWithin(1000)).toBe(false);
+    g.reference.start(1, new Float32Array(24000).fill(0.2), 24000); // a second of sound from t = 1000
+    now = 1500;
+    expect(g.audibleWithin(1000)).toBe(true);
+    now = 2000; g.reference.stop(1, 0);
+    now = 2900;
+    expect(g.audibleWithin(1000)).toBe(true); // ended 900 ms ago
+    now = 3200;
+    expect(g.audibleWithin(1000)).toBe(false);
+    expect(g.audibleWithin(1500)).toBe(true);
+  });
+
+  it("is not switched off by the owner's gate switch (the blanket hold has no lag, this does)", () => {
+    let now = 0;
+    const g = new SelfVoiceGate(() => now);
+    g.setEnabled(false);
+    g.reference.start(1, new Float32Array(2400).fill(0.2), 24000);
+    now = 50;
+    expect(g.audibleWithin(1000)).toBe(true);
+  });
+});

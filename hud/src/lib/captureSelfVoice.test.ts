@@ -147,6 +147,24 @@ describe("while his voice is audible, only the owner's own act claims", () => {
     expect(m.ends[0].truncated).toBe(false);
   });
 
+  it("V11: a hit that the spotter reports after his voice has gone quiet, but within its lag of it, is still his word", () => {
+    const m = mk();
+    m.quiet(1500);
+    m.quiet(1500); // the gate says nothing is active now...
+    expect(m.cap.onWake(true)).toBe("ignored"); // ...but the caller saw him audible within the spotter's lag
+    expect(m.drops.some((d) => d.reason === "self_voice" && d.source === "wake")).toBe(true);
+    m.talk(800, null);
+    expect(m.listens).toEqual([]); // and it was not kept in reserve for the owner's next words
+  });
+
+  it("V11: the same late hit during an utterance the owner opened is honoured", () => {
+    const m = mk();
+    m.quiet(1500);
+    m.talk(800, OWNER);
+    expect(m.cap.onWake(true)).toBe("claimed");
+    expect(m.listens).toEqual(["wake"]);
+  });
+
   it("a wake hit with his voice not audible is exactly as before (armed, then claims the next utterance)", () => {
     const m = mk();
     m.quiet(1500);

@@ -266,6 +266,20 @@ export class SelfVoiceGate {
     this.freeUntil = -1;
   }
 
+  /**
+   * Did any sound of his play in the last `ms`? A recognizer reports a word some time after it was spoken (the local
+   * wake word, V11: 0.35 s typically, 0.64 s at p95, plus the echo delay), so a hit that lands just after a reply
+   * ended can still be that reply's own "Jarvis". Reads the reference clock only; never throws.
+   */
+  audibleWithin(ms: number): boolean {
+    try {
+      const now = this.now();
+      return this.timeline.audibleBetween(now - ms, now);
+    } catch {
+      return true; // fail closed, like the rest of the gate
+    }
+  }
+
   /** Is reference gating in force? When not, the caller holds the mic for the whole of a reply, as V6 did. */
   runnable(): boolean {
     return this.supportedFlag && this.enabledFlag && !this.brokenFlag;

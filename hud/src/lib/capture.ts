@@ -432,11 +432,11 @@ export class Capture {
 
   /**
    * A wake phrase was heard. Nothing starts recording here — the mic has been
-   * running all along. The recognizer reports a phrase several hundred ms
-   * after it was said, so the detector usually already has an utterance open:
+   * running all along. The wake word is reported several hundred ms after it
+   * was said (V11's local keyword spotter: ~0.35 s median, 0.64 s at p95), so the detector usually already has an utterance open:
    * claim that one, and back-date its start far enough to cover the lag.
    */
-  onWake(): "claimed" | "armed" | "ignored" {
+  onWake(heardHim = false): "claimed" | "armed" | "ignored" {
     if (this.hooks.muted()) return "armed"; // a result already in flight can land late
     if (this.ptt) return "armed"; // the talk key already owns this recording
     // The detector is held off (a card, a picker, Settings, or V6's blanket hold while he speaks): a
@@ -452,7 +452,9 @@ export class Capture {
     // one), so it is honoured when the owner is speaking over him and ignored otherwise;
     // and it is never held in reserve for the next utterance, which is how a reply
     // saying "Jarvis" would claim the owner's next word.
-    if (this.selfActive && !(this.vad.open && !this.segClaimed)) {
+    // `heardHim` (V11): the hit came from the local keyword spotter, which reports a word a few hundred ms after it
+    // ended, and his voice was audible within that lag -- so the word may be his though the gate has gone quiet since.
+    if ((this.selfActive || heardHim) && !(this.vad.open && !this.segClaimed)) {
       this.drop("self_voice", 0, "wake");
       return "ignored";
     }

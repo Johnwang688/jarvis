@@ -96,7 +96,9 @@ import { EndPauseSetting } from "./components/EndPause";
 import { VadStage } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
-import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
+import { WakeStage, WAKE_LAG_MS } from "./lib/wake/stage";
+import { WakeWordSetting } from "./components/WakeWord";
+import { loadCardCommands, loadSensitivity, saveCardCommands, saveSensitivity } from "./lib/wake/wakeSettings";
 import type { Attachment, AvatarDesc, Schedule, Thread, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
@@ -324,8 +326,8 @@ export default function App() {
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
   // else, so nothing is heard or sent on their behalf from then on — no
   // push-to-talk, wake word, follow-up window or dictated send (review of
-  // PR #32). The ref is what the capture hooks read; the state re-runs the
-  // wake recognizer's effect, which stops it.
+  // PR #32). The ref is what the capture hooks read, and the wake stage's
+  // `active()` reads it too, so a crashed window hears nothing and posts nothing to the keyword worker.
   const [crashed, setCrashed] = useState(false);
   const browser = useBrowser(view, settingsOpen || crashed, blocked);
   const crashedRef = useRef(false);
@@ -2461,17 +2463,11 @@ export default function App() {
       setAvatars(r.avatars || []);
       const active = (r.avatars || []).find((a) => a.slug === r.active) || null;
       setAvatarCacheBust(Date.now());
-      dispatch({
-        type: "patch",
-        patch: {
-          avatar: active,
-          // Every degradation path leaves him summonable: with no avatar, or
-          // an avatar with no stated phrase, the built-in still fires.
-          wakePatterns: compileWake(active?.wake_source || active?.wake) || WAKE_PATTERNS,
-        },
-      });
+      // (The avatar's wake phrases used to be compiled to patterns here for Chrome's cloud recognizer.
+      // Voice wake is the local "Jarvis" for every avatar now: V11, docs/notes/voice-face.md.)
+      dispatch({ type: "patch", patch: { avatar: active } });
     } catch {
-      dispatch({ type: "patch", patch: { wakePatterns: WAKE_PATTERNS.slice() } });
+      /* the avatar stays as it was */
     }
   }, [dispatch]);
 
@@ -2699,68 +2695,16 @@ export default function App() {
 
   // ---- wake word ----------------------------------------------------------
 
-  useEffect(() => {
-    const SR: any = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return;
-    if (isMuted(state.dictation)) return; // a muted mic stops the recognizer outright
-    if (crashed) return; // so does a window that stopped drawing
-    const gate = new WakeGate();
-    let recog: any = new SR();
-    let dead = false;
-    recog.continuous = true;
-    recog.interimResults = true;
-    recog.lang = "en-US";
-    recog.onstart = () => gate.restart();
-    recog.onresult = (e: any) => {
-      let text = "";
-      // Concatenated from resultIndex: a two-word phrase can straddle a
-      // segment boundary, and matching the pieces separately would miss it.
-      for (let i = e.resultIndex; i < e.results.length; i++) text += e.results[i][0].transcript;
-      const patterns = live.current.wakePatterns.length ? live.current.wakePatterns : WAKE_PATTERNS;
-      if (!matchesWake(text, patterns)) return;
-      if (!gate.shouldFire(e.results.length - 1, performance.now())) return;
-      onWakeHit();
-    };
-    recog.onend = () => {
-      if (dead) return;
-      setTimeout(() => {
-        gate.restart();
-        try {
-          recog.start();
-        } catch {
-          /* already running */
-        }
-      }, 300);
-    };
-    try {
-      recog.start();
-    } catch {
-      /* already running */
-    }
-    (window as any).__hudRecog = recog;
-    return () => {
-      dead = true;
-      try {
-        recog.onend = null;
-        recog.stop();
-      } catch {
-        /* nothing to stop */
-      }
-      recog = null;
-      // The handle has to go with it: a stopped recognizer that still answers
-      // "yes, I am here" is exactly the kind of state a surface confabulates
-      // around — and here it would say the mic is still streaming to Google's
-      // speech service when it is not.
-      delete (window as any).__hudRecog;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dictation, crashed]);
+  // The wake word is heard locally (V11): `wakeStage` below runs a small keyword model in a worker on
+  // the microphone's own frames and calls `onWakeHit`. Chrome's cloud speech recognizer used to do this,
+  // streaming the room's audio to Google whenever the mic was not OFF; it is gone, not switched off, and
+  // nothing in this window constructs one.
 
-  const onWakeHit = useCallback(() => {
+  const onWakeHit = useCallback((heardHim = false) => {
     if (crashedRef.current) return;
     if (live.current.approvals.length) return; // never talk over a pending authorization
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
-    capture.onWake();
+    capture.onWake(heardHim);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capture]);
 
@@ -2900,6 +2844,28 @@ export default function App() {
     onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [capture, voiceDiagnostics, speech]);
+  // V11: the local wake word. The same frames the VAD stage gets also go to a keyword worker, whose only
+  // output is a hit: "Jarvis" is `onWakeHit` (the capture's V9 wake path, self-voice gate included), and while
+  // an approval card is up (and the owner left it on) "Jarvis pause / resume / skip / stop" is `commands.fromLocal`
+  // -- four calls on his voice, never an approval. Nothing is uploaded for either; there is no cloud stand-by.
+  const [wakeSensitivity, setWakeSensitivity] = useState(() => loadSensitivity());
+  const [cardCommands, setCardCommands] = useState(() => loadCardCommands());
+  const wakeStage = useMemo(() => new WakeStage({
+    // The spotter reports a word after it was spoken: if his voice sounded within that lag the word may be his own.
+    onWake: () => onWakeHit(speech.selfVoice.audibleWithin(WAKE_LAG_MS)),
+    onCommand: (c) => { commands.fromLocal(c, { card: live.current.approvals.length > 0 }); },
+    active: () => !isMuted(live.current.dictation) && !crashedRef.current,
+    sensitivity: () => loadSensitivity(),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [commands, onWakeHit, speech]);
+  useEffect(() => { wakeStage.setSensitivity(wakeSensitivity); }, [wakeStage, wakeSensitivity]);
+  // The card decides which keyword set listens: the wake word is meaningless under one (onWakeHit refuses
+  // it), so its recognizer becomes the command recognizer, only if the owner has that switched on.
+  useEffect(() => {
+    commands.setLocalUnderCard(cardCommands);
+    wakeStage.setCommands(cardCommands && state.approvals.length > 0);
+  }, [commands, wakeStage, cardCommands, state.approvals.length]);
+  const pushMicFrame = useCallback((frame: Float32Array) => { vadStage.push(frame); wakeStage.push(frame); }, [vadStage, wakeStage]);
   const [endPause, setEndPause] = useState(() => loadEndPause());
   useEffect(() => { capture.setEndPause(endPause); }, [capture, endPause]);
 
@@ -2923,8 +2889,9 @@ export default function App() {
         // the stage hands it on, in order, to the capture; until the worker is ready,
         // or if it cannot run, the capture judges by energy and the diagnostics say so.
         vadStage.start();
-        input = await startMicInput({ stream, onFrame: (frame) => vadStage.push(frame), workletUrl: micWorkletUrl });
-        if (gone) { input.stop(); vadStage.stop(); return; }
+        wakeStage.start();
+        input = await startMicInput({ stream, onFrame: pushMicFrame, workletUrl: micWorkletUrl });
+        if (gone) { input.stop(); vadStage.stop(); wakeStage.stop(); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
         if (input.path !== "worklet") {
@@ -2942,8 +2909,9 @@ export default function App() {
       stream?.getTracks().forEach((t) => t.stop());
       input?.stop();
       vadStage.stop();
+      wakeStage.stop();
     };
-  }, [capture, vadStage]);
+  }, [capture, vadStage, wakeStage, pushMicFrame]);
 
   // ---- files dropped on the window -----------------------------------------
 
@@ -3025,10 +2993,15 @@ export default function App() {
         listen: (fn: (frame: Float32Array) => void) => micInput.current?.addFrameListener(fn) ?? (() => {}),
         wake: () => onWakeHit(),
         // One frame through the stage, the gate and the capture, as the microphone's would go (V9 tests).
-        frame: (samples: ArrayLike<number>) => vadStage.push(Float32Array.from(samples)),
+        frame: (samples: ArrayLike<number>) => pushMicFrame(Float32Array.from(samples)),
         // The ML VAD stage (V5): what it is, and (for tests) a way to start it again.
         detector: () => vadStage.status(),
         retryDetector: () => vadStage.retry(),
+        // The local wake word (V11): what it is, whether it is listening, and (for tests) a way to try it again.
+        // There is no recognizer object any more; nothing here is a stream to anyone's cloud.
+        wakeEngine: () => wakeStage.status(),
+        wakeRunning: () => wakeStage.running(),
+        retryWake: () => wakeStage.retry(),
         endPause: () => capture.endPauseMs,
         state: () => ({
           open: capture.vad.open,
@@ -3068,7 +3041,7 @@ export default function App() {
       // The editor settings (ED-8), read-only: stored, in force, and each File editor's own.
       editorSettings: () => editorSettingsProbe(),
     };
-  }, [capture, dispatch, onWakeHit, reconcileBusy, splitFrom]);
+  }, [capture, dispatch, onWakeHit, pushMicFrame, wakeStage, reconcileBusy, splitFrom]);
 
   // ---- actions ------------------------------------------------------------
 
@@ -4136,7 +4109,9 @@ export default function App() {
                 onPick={(name) => api.setVoice(name).then(loadVoices).catch(() => {})}
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
-                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><SelfVoiceSetting gate={speech.selfVoice} onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
+                onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} /><SelfVoiceSetting gate={speech.selfVoice} onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} /><WakeWordSetting stage={wakeStage} muted={isMuted(state.dictation)} sensitivity={wakeSensitivity}
+                onSensitivity={(s) => { saveSensitivity(s); setWakeSensitivity(s); }}
+                cardCommands={cardCommands} onCardCommands={(on) => { saveCardCommands(on); setCardCommands(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded
