@@ -131,6 +131,36 @@ def main() -> int:
             page.locator('[data-testid="speech-stop"]').click()
             mock.ms_per_char = 12
 
+            print("\nlong replies become a spoken summary (V8)")
+            mock.ms_per_char = 12
+            long_prose = " ".join(f"This is sentence number {i} of a long reply, and it says one more thing." for i in range(12))
+            long_text = long_prose + "\n" + CODE
+            n = len(said(mock))
+            stream(mock, long_text)
+            mock.emit("text", {"text": long_text}, thread_id="t1")
+            until(lambda: len(said(mock)) > n and speech(page)["view"]["state"] == "idle", timeout=10)
+            asked = mock.sent("POST", "/speech/summary")
+            check("a reply over 600 characters asks for a summary, once", len(asked) == 1, str(asked)[:200])
+            check("the summariser got the thread and the prose, never the code",
+                  asked[0].get("thread_id") == "t1" and "sentence number 11" in asked[0].get("text", "")
+                  and "secret_code" not in asked[0].get("text", ""), str(asked[0])[:200])
+            check("only the summary was said: no verbatim lead-in", said(mock)[n:] == [mock.summary_text], str(said(mock)[n:]))
+            n = len(said(mock))
+            mock.summary_fail = True
+            mock.emit("text", {"text": long_text}, thread_id="t1")
+            until(lambda: speech(page)["view"]["state"] == "idle" and len(said(mock)) > n + 1, timeout=10)
+            tail = said(mock)[n:]
+            check("when the summary fails the opening is read, then 'and more on screen'",
+                  tail[0].startswith("This is sentence number 0") and tail[-1] == "…and more on screen."
+                  and len(" ".join(tail[:-1])) <= 400, str(tail))
+            mock.summary_fail = False
+            n, m = len(said(mock)), len(mock.sent("POST", "/speech/summary"))
+            mock.emit("text", {"text": REPLY}, thread_id="t1")
+            until(lambda: len(said(mock)) > n, timeout=5)
+            until(lambda: speech(page)["view"]["state"] == "idle", timeout=8)
+            check("a short reply is read as written and asks for no summary",
+                  len(mock.sent("POST", "/speech/summary")) == m and "I have fixed all seven." in " ".join(said(mock)[n:]))
+
             print("\nstale speech")
             stream(mock, REPLY)
             mock.emit("text", {"text": REPLY}, thread_id="t1")
