@@ -1,0 +1,14 @@
+# Probe venv for tests/voice_v0 (Python 3.14.4):  uv venv ~/.cache/jarvis-voice-v0/venv
+#   uv pip install --python ~/.cache/jarvis-voice-v0/venv/bin/python -r tests/voice_v0/requirements.txt
+# Versions the recorded results used. Needs node (v22) for kws_node_wasm.js, ffmpeg for the Opus round trip,
+# and Chromium revision 1228 for playwright 1.61.0 (PLAYWRIGHT_BROWSERS_PATH=~/.cache/ms-playwright).
+sherpa-onnx==1.13.8
+onnxruntime==1.31.0
+kokoro-onnx==0.6.1
+numpy==2.5.4
+scipy==1.18.1
+soundfile==0.14.0
+sentencepiece==0.2.2
+transformers==5.19.0
+playwright==1.61.0
+psutil==7.2.2
