@@ -69,6 +69,7 @@ class OwnerAuth:
         self.sessions = {}
         self._pending = set()
         self._installing = {}
+        self._install_tasks = set()
         self._cleanup = set()
         self._answer_lock = threading.Lock()
         self._answers = {}
@@ -96,36 +97,43 @@ class OwnerAuth:
 
     async def install(self, tab):
         pending = self._installing.get(tab.id)
-        if pending is not None:
-            return await asyncio.shield(pending)
+        if pending is not None and pending[0] is tab:
+            session = await asyncio.shield(pending[1])
+            if session.tab is not tab or not self.current(session):
+                raise RuntimeError("authentication session changed")
+            return session
+        if len(self._install_tasks) >= bounds.REQUESTS_MAX:
+            raise RuntimeError("authentication setup is busy")
         task = asyncio.create_task(self._install(tab))
-        self._installing[tab.id] = task
+        entry = (tab, task)
+        self._installing[tab.id] = entry
+        self._install_tasks.add(task)
         def done(finished):
-            if self._installing.get(tab.id) is finished:
+            self._install_tasks.discard(finished)
+            if self._installing.get(tab.id) is entry:
                 self._installing.pop(tab.id, None)
             if not finished.cancelled():
                 finished.exception()
         task.add_done_callback(done)
-        try:
-            return await asyncio.shield(task)
-        finally:
-            if task.done() and self._installing.get(tab.id) is task:
-                self._installing.pop(tab.id, None)
+        return await asyncio.shield(task)
 
     async def _install(self, tab):
         old = self.sessions.get(tab.id)
         if old is not None:
             if self.current(old):
-                return old
-            if not old.closed:
+                if old.tab is tab:
+                    return old
                 raise RuntimeError("authentication session changed")
-            self.sessions.pop(tab.id, None)
-        cdp = await self.host._ensure_cdp(tab)
+            self.release(old.tab)
+        page = tab.page
         instance = self.host._instances.get(tab.profile)
-        if cdp is None or instance is None or self.host._tabs.get(tab.id) is not tab:
+        if self.host._tabs.get(tab.id) is not tab or instance is None:
             raise RuntimeError("authentication session changed")
-        session = Session(tab, tab.page, instance, cdp)
-        # Publish handlers before enabling: the first protected request is covered.
+        cdp = await self.host._ensure_cdp(tab)
+        if (cdp is None or self.host._tabs.get(tab.id) is not tab or tab.page is not page
+                or self.host._instances.get(tab.profile) is not instance or instance.closing):
+            raise RuntimeError("authentication session changed")
+        session = Session(tab, page, instance, cdp)
         self.sessions[tab.id] = session
         cdp.on("Fetch.requestPaused", lambda raw: self._schedule(session, self._request(session, self._event(raw))))
         cdp.on("Fetch.authRequired", lambda raw: self._schedule(session, self._challenge(session, self._event(raw))))
@@ -133,10 +141,15 @@ class OwnerAuth:
         cdp.on("Network.loadingFailed", lambda raw: self._completed(session, raw))
         try:
             await cdp.send("Network.enable")
+            if not self.current(session):
+                raise RuntimeError("authentication session changed")
             await cdp.send("Fetch.enable", {"handleAuthRequests": True})
+            if not self.current(session):
+                raise RuntimeError("authentication session changed")
         except BaseException:
             session.closed = True
-            self.sessions.pop(tab.id, None)
+            if self.sessions.get(tab.id) is session:
+                self.sessions.pop(tab.id, None)
             await self._send(session, "Fetch.disable", {})
             raise
         return session
@@ -510,6 +523,20 @@ class OwnerAuth:
                 tab.stream.send_to(sock, {"t": "auth_closed", "id": nonce, "reason": "answered"})
             self.host.release_page_hold(tab, prompt.key, prompt.token)
 
+    async def _clear_navigation(self, session, nav):
+        if session.navigation is not nav:
+            return
+        if session.prompt is not None:
+            await self._finish(session.prompt, "changed", cancel=True)
+        # _finish awaits CDP. An old finally cannot erase a newer operation.
+        if session.navigation is nav:
+            session.navigation = None
+            session.restart = None
+            session.tab.pending_port = None
+            self.host._sync_ports(session.tab)
+            self.host._publish_pane_tabs()
+            nav.ready.set()
+
     async def cancel_navigation(self, tab):
         session = self.sessions.get(tab.id)
         if session is None or session.tab is not tab:
@@ -521,10 +548,14 @@ class OwnerAuth:
         if session.prompt is not None:
             await self._finish(session.prompt, "changed", cancel=True)
         if nav is not None and nav.task is not asyncio.current_task():
-            if not nav.task.done():
-                nav.task.cancel()
-                await self._send(session, "Page.stopLoading", {})
-            await asyncio.gather(nav.task, return_exceptions=True)
+            try:
+                if not nav.task.done():
+                    if not nav.task.cancelling():
+                        nav.task.cancel()
+                    await self._send(session, "Page.stopLoading", {})
+                await asyncio.gather(nav.task, return_exceptions=True)
+            finally:
+                await self._clear_navigation(session, nav)
 
     def release(self, tab):
         session = self.sessions.get(tab.id)
@@ -545,6 +576,8 @@ class OwnerAuth:
                 tasks += (nav.task,)
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            if nav is not None:
+                await self._clear_navigation(session, nav)
             if self.sessions.get(tab.id) is session:
                 self.sessions.pop(tab.id, None)
         task = asyncio.create_task(cleanup())
@@ -563,12 +596,13 @@ class OwnerAuth:
             if session.prompt is not None:
                 await self._finish(session.prompt, "changed", cancel=True)
         tasks = [task for session in self.sessions.values() for task in session.tasks]
-        tasks += list(self._cleanup) + list(self._installing.values()) + list(self._answer_tasks)
+        tasks += list(self._cleanup) + list(self._install_tasks) + list(self._answer_tasks)
         current = asyncio.current_task()
         if tasks:
             await asyncio.gather(*(task for task in tasks if task is not current), return_exceptions=True)
         self.sessions.clear()
         self._installing.clear()
+        self._install_tasks.clear()
         self._pending.clear()
 
     async def navigate(self, tab, operation, *, owner=False, port=None, restart_token=None):
@@ -620,21 +654,17 @@ class OwnerAuth:
                 from .host import _net_error
                 nav.result = {"loaded": False, "error": _net_error(exc)}
             finally:
-                if session.navigation is nav:
-                    if session.prompt is not None:
-                        await self._finish(session.prompt, "changed", cancel=True)
-                    session.navigation = None
-                    session.restart = None
-                    tab.pending_port = None
-                    self.host._sync_ports(tab)
-                    self.host._publish_pane_tabs()
-                    nav.ready.set()
+                await self._clear_navigation(session, nav)
         async def owned():
-            if restart_token is not None:
-                if not self.host.activity.restart_current(restart_token, tab.profile, session.instance.generation):
-                    raise RuntimeError("Browser restart changed")
-                return await child()
-            return await self.host._activity_run(tab, child)
+            try:
+                if restart_token is not None:
+                    if not self.host.activity.restart_current(restart_token, tab.profile, session.instance.generation):
+                        raise RuntimeError("Browser restart changed")
+                    return await child()
+                return await self.host._activity_run(tab, child)
+            finally:
+                # Admission can fail before child() ever starts.
+                await self._clear_navigation(session, nav)
         nav.task = asyncio.create_task(owned())
         def done(task):
             if not task.cancelled():

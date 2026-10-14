@@ -144,6 +144,36 @@ class Auth(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tab.stream.hold_count,old+1)
         self.assertIsNone(self.tab.stream.take());self.assertFalse(self.auth.input_current(self.tab,pin))
 
+    async def test_failed_navigation_admission_clears_exact_pending_operation(self):
+        async def refused(tab,operation):raise RuntimeError("synthetic capacity refusal")
+        self.host._activity_run=refused
+        async def operation():self.fail("unadmitted navigation started")
+        with self.assertRaisesRegex(RuntimeError,"capacity"):
+            await self.auth.navigate(self.tab,operation,owner=True,port=18761)
+        self.assertIsNone(self.session.navigation);self.assertIsNone(self.tab.pending_port)
+        self.assertEqual(self.host.activity.counts("private")[0],0)
+
+    async def test_old_install_completion_or_failure_cannot_remove_a_successor(self):
+        for fail in (False,True):
+            entered=asyncio.Event();finish=asyncio.Event()
+            class Delayed(CDP):
+                async def send(inner,method,params=None):
+                    if method=="Fetch.enable":
+                        entered.set();await finish.wait()
+                        if fail:raise RuntimeError("synthetic old setup failure")
+                    return await super().send(method,params)
+            old=SimpleNamespace(**vars(self.tab));old.id="aaaaaaaa";old.page=object();old.cdp=Delayed()
+            self.host._tabs[old.id]=old
+            previous=asyncio.create_task(self.auth.install(old));await entered.wait()
+            fresh=SimpleNamespace(**vars(old));fresh.page=object();fresh.cdp=CDP()
+            self.host._tabs[fresh.id]=fresh;current=await self.auth.install(fresh)
+            self.assertIs(current.tab,fresh);finish.set()
+            with self.assertRaises(RuntimeError):await previous
+            self.assertIs(self.auth.sessions[fresh.id],current)
+            self.auth.release(fresh);await asyncio.gather(*tuple(self.auth._cleanup))
+            self.host._tabs.pop(fresh.id)
+        self.assertEqual(self.auth._installing,{})
+
     async def test_redundant_attachment_refresh_keeps_the_live_nonce(self):
         prompt=await self.challenge();nonce=prompt.nonce
         self.auth.refresh(self.tab);self.auth.refresh(self.tab)
@@ -163,7 +193,7 @@ class Auth(unittest.IsolatedAsyncioTestCase):
             install=asyncio.create_task(self.auth.install(tab));await entered.wait();install.cancel()
             with self.assertRaises(asyncio.CancelledError):await install
             self.assertIn(tab.id,self.auth._installing);finish.set()
-            await asyncio.gather(*tuple(self.auth._installing.values()))
+            await asyncio.gather(*tuple(self.auth._install_tasks))
             await asyncio.sleep(0)
             self.assertNotIn(tab.id,self.auth._installing)
             self.auth.release(tab);await asyncio.gather(*tuple(self.auth._cleanup))
