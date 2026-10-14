@@ -583,14 +583,23 @@ export default function App() {
   // ---- capture ------------------------------------------------------------
 
   const voiceDiagnostics = useMemo(() => new VoiceDiagnostics(), []);
-  const captureSuppression = (): SuppressionReason | null => {
+  // What stops a recording whatever else is true (Capture `hardStop`): a card, a
+  // picker, Settings or a crashed window, in the order that names the strongest.
+  // Asked on its own, so his voice or a closed chat cannot mask one of them.
+  const captureHardStop = (): SuppressionReason | null => {
     const at = live.current;
-    if (at.orb === "speaking" || speechPlaying()) return "speaking";
-    if (at.selectedChat === null) return "no_chat";
+    if (crashedRef.current) return "crash";
     if (at.approvals.length) return "card";
     if (at.picker !== null || chipOverlay.current) return "picker";
     if (settingsNow.current) return "settings";
-    if (crashedRef.current) return "crash";
+    return null;
+  };
+  const captureSuppression = (): SuppressionReason | null => {
+    const at = live.current;
+    const hard = captureHardStop();
+    if (hard) return hard;
+    if (at.orb === "speaking" || speechPlaying()) return "speaking";
+    if (at.selectedChat === null) return "no_chat";
     return null;
   };
   // V3: listening on a chat that is running a turn borrows its orb and status
@@ -638,6 +647,7 @@ export default function App() {
           chipOverlay.current || settingsNow.current ||
           crashedRef.current,
         suppressionReason: () => captureSuppression() ?? "speaking",
+        hardStop: () => captureHardStop(),
         onDrop: (reason, ms, source) => {
           voiceDiagnostics.add(ms, source, reason);
           // A talk-key utterance that came to nothing: he carries on.
@@ -687,7 +697,9 @@ export default function App() {
         },
         onChunk: (chunk) => onChunk(chunk),
         onUtteranceEnd: (end) => onUtteranceEnd(end),
-        onLimit: () => dispatch({ type: "patch", patch: { error: "That message reached the 15-minute limit and was sent as it stood. Keep talking to start another." } }),
+        onLimit: (_ms, claimCap) => dispatch({ type: "patch", patch: { error: claimCap
+          ? "That message reached the 60-second limit for speech with no wake word or talk key, and was sent as it stood. Say Jarvis or hold the talk key to carry on."
+          : "That message reached the 15-minute limit and was sent as it stood. Say Jarvis or hold the talk key to start another." } }),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -758,7 +770,10 @@ export default function App() {
         // The first attempt was judged by onChunk; a retry, automatic or
         // explicit, and a chunk that had to wait its turn, must not upload while
         // the mic is OFF, the window has crashed, or a card waits for an answer.
-        canUpload: () => !crashedRef.current && !isMuted(live.current.dictation) && !live.current.approvals.length,
+        // The owner's own Retry may be pressed from Settings or with a picker open (the
+        // Settings row is the way back to it); nothing else uploads under either.
+        canUpload: (explicit) => !crashedRef.current && !isMuted(live.current.dictation) && !live.current.approvals.length
+          && (explicit || (live.current.picker === null && !chipOverlay.current && !settingsNow.current)),
         maxInFlight: STT_MAX_IN_FLIGHT,
         place: (batch) => placeTranscripts(batch),
         onEvent: (e) => {
@@ -798,6 +813,8 @@ export default function App() {
       // costs a discarded chunk and the other costs an upload.
       if (outcomeFor(at.dictation) === "discard") { refuse("muted"); return; }
       if (at.approvals.length) { refuse("suppressed:card"); return; }
+      if (at.picker !== null || chipOverlay.current) { refuse("suppressed:picker"); return; }
+      if (settingsNow.current) { refuse("suppressed:settings"); return; }
       if (!Number.isFinite(chunk.ms) || chunk.ms <= 0) { refuse("too_short"); return; }
       if (u.gid === null) u.gid = stt.beginGroup(chunk.source, u.meta);
       const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, { group: u.gid, overlapMs: chunk.overlapMs });
@@ -816,13 +833,26 @@ export default function App() {
     (end: UtteranceEnd) => {
       const u = utterances.current.get(end.utterance);
       utterances.current.delete(end.utterance);
-      endListening();
       const finish = () => { if (end.source === "ptt") speech.controller.endBargeIn(); };
       // The message only keeps its continuation window if it goes out.
       const refuse = () => capture.cancelContinuation(end.continuation);
+      // The group is closed whatever else fails here: an open one holds every later message.
+      try {
+        endListening();
+        // Whatever is left saying LISTENING (an idle chat's orb: `endListening` only
+        // restores a running turn's) says what is true now.
+        for (const n of PANE_NOS) {
+          const c = live.current.chats[n];
+          if (!c.busy && c.status === LISTENING_STATUS) {
+            chatPatch(n, stt.snapshot().pending > 0 ? { orb: "transcribing", status: "TRANSCRIBING" } : { orb: "idle", status: "" });
+          }
+        }
+      } catch { /* a status line cannot keep a message open */ }
       if (!u || u.gid === null) { refuse(); finish(); return; }
       u.meta.continuation = end.continuation;
-      stt.closeGroup(u.gid);
+      // Cut short (OFF, a card, a crash) or partly refused: what is placed is not all
+      // of what was said, so it is marked late and AUTO boxes it instead of sending it.
+      stt.closeGroup(u.gid, { late: end.truncated || u.refused });
       // Resolve only when the message's fate is known (placed or sent, empty,
       // failed for good): a talk-key barge-in ends then (V-7), not when the
       // first upload merely starts.
@@ -2857,13 +2887,18 @@ export default function App() {
         // An AudioWorklet resamples to 16 kHz mono in 512-sample frames (V4).
         // Without one the same resampler runs behind the old ScriptProcessor,
         // and the window says so rather than quietly capturing worse.
-        input = await startMicInput({ stream, onFrame: (frame) => capture.onFrame(frame), workletUrl: micWorkletUrl });
+        const fellBack = (path: string, why: string) => {
+          voiceDiagnostics.capturePath(path as "script_processor", why);
+          dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${why}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
+        };
+        input = await startMicInput({
+          stream, onFrame: (frame) => capture.onFrame(frame), workletUrl: micWorkletUrl,
+          onPathChange: (path, why) => { if (!gone) fellBack(path, why); },
+        });
         if (gone) { input.stop(); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
-        if (input.path !== "worklet") {
-          dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${input.fallbackReason}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
-        }
+        if (input.path !== "worklet") fellBack(input.path, input.fallbackReason);
       } catch {
         voiceDiagnostics.microphone("unavailable");
         // A window without a mic grant still types; every other affordance
@@ -3004,7 +3039,7 @@ export default function App() {
     dispatch({ type: "patch", patch: { dictation: mode } });
     if (live.current.selectedChat !== null) chatPatch(live.current.selectedChat, { status: "" });
     if (wasMuted && !isMuted(mode)) capture.markUnmute();
-    if (isMuted(mode)) { capture.closeFollowUp(); followUpAfterSpeech.current = false; }
+    if (isMuted(mode)) { capture.muteNow(); capture.closeFollowUp(); followUpAfterSpeech.current = false; }
     // The mic's OFF no longer mutes Jarvis (lib/speech/policy, Q11).
     onMicModeChange(isMuted(mode), (m) => api.mute(m).catch(() => {}));
   };

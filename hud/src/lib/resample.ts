@@ -5,7 +5,9 @@
 // The old path averaged each run of input samples (a boxcar), which has almost
 // no stop band: anything the browser's microphone chain left above 8 kHz folded
 // straight back into the speech band at 16 kHz. This is a windowed-sinc
-// low-pass at 90% of the output Nyquist with a Kaiser window, so it is the same
+// low-pass at 85% of the output Nyquist (6.8 kHz: 3 dB down at 6.5 kHz, 9 dB at
+// 7 kHz, 80+ dB beyond 8.5 kHz, the tone that would alias to 7.5 kHz) with a Kaiser
+// window, so it is the same
 // operation whatever the device rate (48 k, 44.1 k, 16 k, 8 k).
 
 export const OUT_RATE = 16000;
@@ -14,8 +16,8 @@ export const MIC_PROCESSOR = "jarvis-mic";
 /** Samples per frame handed to the capture (plan §3.1: 512 at 16 kHz, 32 ms). */
 export const FRAME_SAMPLES = 512;
 
-const ZEROS = 10; // side lobes per side, in output-sample units
-const CUT = 0.9; // of the output Nyquist
+const ZEROS = 14; // side lobes per side, in output-sample units
+const CUT = 0.85; // of the output Nyquist: 6.8 kHz, so a tone just above Nyquist (8.5 kHz) is 80 dB down
 const BETA = 8.6; // Kaiser: about 80 dB of stop band
 const PER_SAMPLE = 256; // table entries per input sample
 
@@ -35,8 +37,10 @@ export class Resampler {
   private ratio: number;       // input samples per output sample
   private half: number;        // kernel half-width in input samples
   private table: Float32Array; // kernel, PER_SAMPLE entries per input sample
-  private hist: Float32Array;    // input not yet fully used, preceded by the kernel's silent history
-  private histStart: number;     // absolute input index of hist[0] (negative at first: the silence)
+  private buf: Float32Array;     // input not yet fully used, preceded by the kernel's silent history
+  private len = 0;                // samples of `buf` in use
+  private outBuf = new Float32Array(1024);
+  private histStart: number;      // absolute input index of buf[0] (negative at first: the silence)
   private produced = 0;          // output samples made so far
 
   constructor(readonly inRate: number, readonly outRate: number = OUT_RATE) {
@@ -55,7 +59,8 @@ export class Resampler {
       const win = r >= 1 ? 0 : bessel0(BETA * Math.sqrt(1 - r * r)) / norm;
       this.table[i] = (CUT / this.scale) * sinc * win;
     }
-    this.hist = new Float32Array(this.half); // silence before the first sample
+    this.buf = new Float32Array(this.half + 1024); // silence before the first sample
+    this.len = this.half;
     this.histStart = -this.half;
   }
 
@@ -63,7 +68,8 @@ export class Resampler {
   get lookahead() { return this.half; }
 
   reset() {
-    this.hist = new Float32Array(this.half);
+    this.buf.fill(0, 0, this.half);
+    this.len = this.half;
     this.histStart = -this.half;
     this.produced = 0;
   }
@@ -75,18 +81,35 @@ export class Resampler {
     return this.table[i] + (this.table[i + 1] - this.table[i]) * f;
   }
 
+  /** The converted samples, as a copy the caller owns. */
   process(input: Float32Array): Float32Array {
-    if (this.inRate === this.outRate) return Float32Array.from(input);
-    const work = new Float32Array(this.hist.length + input.length);
-    work.set(this.hist);
-    work.set(input, this.hist.length);
+    return this.processShared(input).slice();
+  }
+
+  /**
+   * The same, without allocating per call: the result is a view into a buffer the
+   * next call overwrites (and, at equal rates, `input` itself). For a caller that
+   * copies it straight away, as the worklet's framer does on the audio thread.
+   */
+  processShared(input: Float32Array): Float32Array {
+    if (this.inRate === this.outRate) return input;
+    if (this.len + input.length > this.buf.length) {
+      const grown = new Float32Array(Math.max(this.buf.length * 2, this.len + input.length));
+      grown.set(this.buf.subarray(0, this.len));
+      this.buf = grown;
+    }
+    this.buf.set(input, this.len);
+    this.len += input.length;
+    const work = this.buf, end = this.len;
     const base = this.histStart; // absolute input index of work[0]
-    const out = new Float32Array(Math.ceil(input.length / this.ratio) + 2);
+    const need = Math.ceil(input.length / this.ratio) + 2;
+    if (this.outBuf.length < need) this.outBuf = new Float32Array(need * 2);
+    const out = this.outBuf;
     let k = 0;
     for (;;) {
       const t = this.produced * this.ratio;      // centre, in input samples from the start
       const c = Math.floor(t) - base;            // index of the centre sample in `work`
-      if (c + this.half >= work.length) break;   // not enough lookahead yet
+      if (c + this.half >= end) break;           // not enough lookahead yet
       let acc = 0;
       for (let m = -this.half + 1; m <= this.half; m++) {
         const j = c + m;
@@ -97,9 +120,10 @@ export class Resampler {
       this.produced++;
     }
     // The next output needs nothing earlier than its centre minus the kernel.
-    const need = Math.floor(this.produced * this.ratio) - base - this.half + 1;
-    const cut = Math.max(0, Math.min(work.length, need));
-    this.hist = work.slice(cut);
+    const next = Math.floor(this.produced * this.ratio) - base - this.half + 1;
+    const cut = Math.max(0, Math.min(end, next));
+    work.copyWithin(0, cut, end);
+    this.len = end - cut;
     this.histStart += cut;
     return out.subarray(0, k);
   }
@@ -137,7 +161,7 @@ export class MicFramer {
   }
 
   pushMono(mono: Float32Array) {
-    const out = this.resampler.process(mono);
+    const out = this.resampler.processShared(mono);
     if (this.fill + out.length > this.pending.length) {
       const grown = new Float32Array(Math.max(this.pending.length * 2, this.fill + out.length));
       grown.set(this.pending.subarray(0, this.fill));

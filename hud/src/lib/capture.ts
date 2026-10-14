@@ -30,7 +30,7 @@ import {
   CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs,
 } from "./vad";
-import { UtteranceRecorder, type RecordedChunk } from "./recorder";
+import { CLAIM_CAP_MS, UTTERANCE_LIMIT_MS, UtteranceRecorder, type RecordedChunk } from "./recorder";
 
 import type { ClaimSource, DropReason, SuppressionReason } from "./voiceDiagnostics";
 
@@ -77,8 +77,19 @@ export interface CaptureHooks {
   onChunk: (chunk: UtteranceChunk) => void;
   /** Called exactly once for every `onListening`, after its last chunk. */
   onUtteranceEnd: (end: UtteranceEnd) => void;
-  /** The message reached the 15-minute ceiling and was sent as it stood. */
-  onLimit?: (ms: number) => void;
+  /**
+   * The message reached its ceiling and was sent as it stood: the 15-minute one,
+   * or (`claimCap`) the 60 s one for a claim made without the wake word or the
+   * talk key.
+   */
+  onLimit?: (ms: number, claimCap: boolean) => void;
+  /**
+   * Why a recording must stop whatever else is true -- a card, a picker, Settings
+   * or a crashed window -- independent of which suppression reason is reported
+   * first. Without it only `suppressionReason()` decides, which his own voice
+   * (`speaking`) or a closed chat (`no_chat`) can mask.
+   */
+  hardStop?: () => SuppressionReason | null;
 }
 
 /** Reasons that stop a recording even when the owner is holding the talk key. */
@@ -111,7 +122,7 @@ export class Capture {
   private tokenSeq = 0;
   wakeHitAt = -1e9;
   segClaimed = false;
-  ptt: { from: number; at: number } | null = null;
+  ptt: { from: number; at: number; adopted: boolean } | null = null;
   /** The recording of the claimed message in progress, if any. */
   private rec: UtteranceRecorder | null = null;
   private utterances = 0;
@@ -208,13 +219,20 @@ export class Capture {
 
   // ---- recording ----------------------------------------------------------
 
-  private beginRecording(from: number): number {
+  /**
+   * `announce` runs before the pre-roll is fed in: a long pre-roll (a wake word
+   * late into room speech) already cuts chunks, and the consumer must know the
+   * message before its first chunk arrives.
+   */
+  private beginRecording(from: number, announce: (id: number) => void): number {
     const id = ++this.utterances;
     const source = () => this.claimSource;
+    const capped = this.claimSource === "follow_up" || this.claimSource === "continuation";
     const rec = new UtteranceRecorder(id, (chunk) => {
       try { this.hooks.onChunk({ ...chunk, source: source() }); } catch { /* a consumer cannot break the audio path */ }
-    });
+    }, capped ? CLAIM_CAP_MS : UTTERANCE_LIMIT_MS);
     this.rec = rec;
+    announce(id);
     // Nothing from before the last unmute ever leaves, however far back the pre-roll reaches.
     rec.start(this.ring.slice(Math.max(from, this.micFloorSample), this.ring.written));
     return id;
@@ -270,11 +288,12 @@ export class Capture {
     const rec = this.rec;
     if (!rec) return;
     const ms = rec.ms;
+    const claimCap = rec.limitMs < UTTERANCE_LIMIT_MS;
     this.finishRecording(0);
     this.vad.open = false;
     this.segClaimed = false;
     this.ptt = null;
-    try { this.hooks.onLimit?.(ms); } catch { /* ditto */ }
+    try { this.hooks.onLimit?.(ms, claimCap); } catch { /* ditto */ }
   }
 
   /** Called when the mic unmutes: everything before this point stays local. */
@@ -295,7 +314,16 @@ export class Capture {
     // have continued: words after a card, a picker or his own voice are a new
     // thought, and need the wake word again.
     if (muted || suppressed) this.closeContinuation();
-    const reason: DropReason | null = muted ? "muted" : suppressed ? `suppressed:${this.hooks.suppressionReason?.() ?? "speaking"}` : null;
+    let reason: DropReason | null = muted ? "muted" : suppressed ? `suppressed:${this.hooks.suppressionReason?.() ?? "speaking"}` : null;
+    // `hardStop` is asked on its own: his own voice or a closed chat can be the
+    // reason reported first while a card, a picker or Settings is also up. The
+    // harder reason is the one a drop and a truncation then name.
+    let hardWhy: DropReason | null = null;
+    if (reason) {
+      const hard = muted ? "muted" as const : this.hooks.hardStop?.();
+      hardWhy = hard ? (hard === "muted" ? "muted" : `suppressed:${hard}`) : HARD_STOPS.has(reason) ? reason : null;
+      if (hardWhy) reason = hardWhy;
+    }
     if (reason && !this.wasBlocked && this.vad.open && !this.ptt && !this.blockedAlreadyReported) {
       this.drop(reason, samplesToMs(this.vad.voiced));
       this.blockedAlreadyReported = true;
@@ -309,7 +337,7 @@ export class Capture {
     // nothing from a crashed window. The talk key is the owner's own word, so
     // it carries on through his own voice (barge-in) and a chat closing, which
     // the old pipeline also let a held key do.
-    if (this.rec && reason && (!this.ptt || HARD_STOPS.has(reason))) this.truncate(reason);
+    if (this.rec && reason && (!this.ptt || hardWhy)) this.truncate(reason);
     // The ceiling and the pause-tracking read what the detector saw in this frame.
     this.vad.uncapped = this.segClaimed || this.rec !== null;
     if (muted || suppressed) {
@@ -358,8 +386,7 @@ export class Capture {
         this.wakeHitAt = -1e9;
         const tag = this.claimSource === "follow_up" ? this.followUpTag : null;
         this.closeFollowUp();
-        const id = this.beginRecording(this.vad.openedAt);
-        this.hooks.onListening(this.claimSource, tag, id);
+        this.beginRecording(this.vad.openedAt, (id) => this.hooks.onListening(this.claimSource, tag, id));
       }
       return;
     }
@@ -404,8 +431,7 @@ export class Capture {
         this.ring.written - msToSamples(WAKE_GRACE_MS + PREROLL_MS),
       );
       this.closeFollowUp();
-      const id = this.beginRecording(this.vad.openedAt);
-      this.hooks.onListening("wake", null, id);
+      this.beginRecording(this.vad.openedAt, (id) => this.hooks.onListening("wake", null, id));
       return "claimed";
     }
     return "armed";
@@ -418,25 +444,31 @@ export class Capture {
     if (this.ptt) return false;
     this.claimSource = "ptt";
     const at = this.ring.written;
-    this.ptt = { from: Math.max(0, at - msToSamples(PREROLL_MS)), at };
+    this.ptt = { from: Math.max(0, at - msToSamples(PREROLL_MS)), at, adopted: this.rec !== null };
     this.segClaimed = false;
     this.closeFollowUp();
     this.closeContinuation();
-    // A hands-free message already being recorded is simply carried on by the key.
-    const id = this.rec ? this.rec.id : this.beginRecording(this.ptt.from);
-    this.hooks.onListening("ptt", null, id);
+    if (this.rec) {
+      // A hands-free message already being recorded is simply carried on by the key,
+      // which lifts its 60 s stopgap: the owner is holding the key.
+      this.rec.limitMs = UTTERANCE_LIMIT_MS;
+      this.hooks.onListening("ptt", null, this.rec.id);
+    } else this.beginRecording(this.ptt.from, (id) => this.hooks.onListening("ptt", null, id));
     return true;
   }
 
   release() {
     if (!this.ptt) return;
-    const { at } = this.ptt;
+    const { at, adopted } = this.ptt;
     this.ptt = null;
     const rec = this.rec;
     if (!rec) return;
-    if (samplesToMs(this.ring.written - at) < MIN_UTTER_MS && rec.chunks === 0) {
+    // A tap on the key over a hands-free message that was already going is not
+    // "too short": the message is not the tap's, and finishes as it would have.
+    if (!adopted && samplesToMs(this.ring.written - at) < MIN_UTTER_MS && rec.chunks === 0) {
       this.drop("too_short", samplesToMs(this.ring.written - at), "ptt");
       this.stopRecording(false);
+      this.claimSource = "unclaimed"; // the detector may still be inside the tap: that is not the key's
       this.hooks.onIdle("TOO SHORT");
       return;
     }
@@ -447,6 +479,20 @@ export class Capture {
     this.vad.open = false;
     this.segClaimed = false;
     this.finishRecording(0);
+    this.claimSource = "unclaimed";
+  }
+
+  /**
+   * The mic was switched OFF: a recording in progress ends now, without waiting
+   * for the next frame to notice. What already left stays; the held tail is a
+   * `muted` drop.
+   */
+  muteNow() {
+    this.closeContinuation();
+    if (!this.rec) return;
+    if (!this.ptt) { this.drop("muted", samplesToMs(this.vad.voiced)); this.blockedAlreadyReported = true; }
+    this.truncate("muted");
+    this.vad.open = false;
   }
 
   /** Test hook: script a room through the real detector, no microphone. */

@@ -8,8 +8,8 @@
 
 import { describe, expect, it } from "vitest";
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./capture";
-import { CHUNK_HARD_MS, CHUNK_OVERLAP_MS, UTTERANCE_LIMIT_MS } from "./recorder";
-import { SttAssembler, STT_MAX_CLIPS, STT_MAX_IN_FLIGHT, type SttPlaced } from "./stt";
+import { CHUNK_HARD_MS, CHUNK_OVERLAP_MS, CLAIM_CAP_MS, UTTERANCE_LIMIT_MS } from "./recorder";
+import { GAP_MARK, SttAssembler, STT_MAX_CLIPS, STT_MAX_IN_FLIGHT, placementFor, type SttPlaced } from "./stt";
 import { HANGOVER_MS, samplesToMs } from "./vad";
 import { VoiceDiagnostics, type ClaimSource, type DropReason } from "./voiceDiagnostics";
 
@@ -37,14 +37,21 @@ interface Rig {
   placed: SttPlaced<{ id: string }>[];
   uploads: () => number;
   diagnostics: VoiceDiagnostics;
-  state: { muted: boolean; reason: "card" | "picker" | "settings" | "crash" | "speaking" | "no_chat" | null; fail: (chunk: number) => boolean; allowUpload: boolean };
+  state: {
+    muted: boolean; reason: "card" | "picker" | "settings" | "crash" | "speaking" | "no_chat" | null;
+    /** A card, picker, Settings or crash that is up whatever `reason` (reported first) says. */
+    hard: "card" | "picker" | "settings" | "crash" | null;
+    fail: (chunk: number) => boolean; allowUpload: boolean; useHardStop: boolean;
+  };
+  limits: { ms: number; claimCap: boolean }[];
   /** Speak words `from..to` (a word is 900 ms of level, then a 100 ms dip, as speech has), optionally pausing `pauseMs` after every `every` words. */
   say(from: number, to: number, o?: { every?: number; pauseMs?: number }): void;
   settle(): Promise<void>;
 }
 
 function rig(): Rig {
-  const state: Rig["state"] = { muted: false, reason: null, fail: () => false, allowUpload: true };
+  const state: Rig["state"] = { muted: false, reason: null, hard: null, fail: () => false, allowUpload: true, useHardStop: true };
+  const limits: Rig["limits"] = [];
   let clock = 10_000;
   const chunks: UtteranceChunk[] = [];
   const ends: UtteranceEnd[] = [];
@@ -65,7 +72,9 @@ function rig(): Rig {
   });
   const groups = new Map<number, { gid: number | null; meta: { id: string } }>();
   const cap = new Capture({
-    suppressed: () => state.reason !== null, suppressionReason: () => state.reason ?? "speaking",
+    suppressed: () => state.reason !== null || state.hard !== null, suppressionReason: () => state.reason ?? state.hard ?? "speaking",
+    hardStop: () => (state.useHardStop ? state.hard : null),
+    onLimit: (ms, claimCap) => limits.push({ ms, claimCap }),
     muted: () => state.muted, onLevel: () => {}, onIdle: () => {},
     onDrop: (reason, ms, source) => drops.push({ reason, ms, source }),
     onListening: (_s, _t, u) => { groups.set(u!, { gid: null, meta: { id: `u${u}` } }); },
@@ -79,7 +88,7 @@ function rig(): Rig {
     onUtteranceEnd: e => {
       ends.push(e);
       const g = groups.get(e.utterance);
-      if (g?.gid != null) stt.closeGroup(g.gid);
+      if (g?.gid != null) stt.closeGroup(g.gid, { late: e.truncated });
     },
   }, () => clock);
   const say: Rig["say"] = (from, to, o = {}) => {
@@ -90,7 +99,7 @@ function rig(): Rig {
     }
   };
   return {
-    cap, stt, chunks, ends, drops, placed, diagnostics, state, say,
+    cap, stt, chunks, ends, drops, placed, diagnostics, state, say, limits,
     uploads: () => calls,
     settle: async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); await stt.settled(); for (let i = 0; i < 20; i++) await Promise.resolve(); await stt.settled(); },
   };
@@ -137,7 +146,7 @@ describe("no cap: long messages are transcribed whole, in order", () => {
     expect(r.ends).toHaveLength(1);
     expect(r.ends[0].ms).toBeGreaterThan(36_000);   // the old cap closed this at 30 s
     expect(r.chunks.length).toBeGreaterThanOrEqual(2);
-    expect(r.chunks.every(c => c.overlapMs === 0)).toBe(true);              // cut at pauses: nothing repeated
+    expect(r.chunks.every(c => !c.repeats)).toBe(true);                     // cut at pauses: nothing is echoed
     expect(r.placed).toHaveLength(1);
     expect(r.placed[0].text).toBe(words(0, 35));
     expect(r.drops).toEqual([]);
@@ -190,13 +199,13 @@ describe("the memory behind a long message is bounded", () => {
 
   it("ends at the 15-minute ceiling with the message sent as it stood, and says so", async () => {
     const r = rig();
-    let limit = -1;
-    (r.cap as any).hooks.onLimit = (ms: number) => { limit = ms; };
     r.cap.feedMs(2000, QUIET);
     r.cap.press();
     for (let s = 0; s < 905; s += 5) r.say(0, 4);
     await r.settle();
-    expect(limit).toBeGreaterThanOrEqual(UTTERANCE_LIMIT_MS);
+    expect(r.limits).toHaveLength(1);
+    expect(r.limits[0].claimCap).toBe(false);
+    expect(r.limits[0].ms).toBeGreaterThanOrEqual(UTTERANCE_LIMIT_MS);
     expect(r.ends).toHaveLength(1);
     expect(r.ends[0].ms).toBeGreaterThanOrEqual(UTTERANCE_LIMIT_MS);
     expect(r.cap.recording()).toBe(false);
@@ -225,7 +234,8 @@ describe("a failed chunk", () => {
     expect(t.endsWith("w59")).toBe(true);
     expect(t).not.toContain("w30");                                       // the failed chunk's middle is missing
     // ... the words after it are in order
-    const nums = t.split(" ").map(w => Number(w.slice(1)));
+    expect(t).toContain(GAP_MARK);                                        // and a mark where it belongs
+    const nums = t.split(" ").filter(w => w !== GAP_MARK).map(w => Number(w.slice(1)));
     expect(nums).toEqual([...nums].sort((a, b) => a - b));
     // Retry puts them back
     r.state.fail = () => false;
@@ -407,5 +417,202 @@ describe("continuation and the chain cap survive chunking (V3)", () => {
     expect(r.ends[1].source).toBe("continuation");
     await r.settle();
     expect(r.placed.map(p => p.text.split(" ")[0])).toEqual(["w0", "w31"]);
+  });
+});
+
+describe("a message cut short is never sent as if it were whole (H1)", () => {
+  const auto = { mode: "auto" as const, chat: "t1" };
+  const idle = { mode: "auto" as const, chat: "t1", busy: false, steers: false, card: false };
+
+  async function cutShort(how: (r: Rig) => void) {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.openFollowUp();
+    r.say(0, 9, { every: 9, pauseMs: 900 });          // a breath after nine words: the first half leaves
+    r.say(10, 10);
+    how(r);
+    r.say(11, 14);
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    await r.settle();
+    return r;
+  }
+
+  it.each([
+    ["his own voice begins (suppressed:speaking)", (r: Rig) => { r.state.reason = "speaking"; }],
+    ["the mic goes OFF", (r: Rig) => { r.state.muted = true; }],
+    ["a card appears", (r: Rig) => { r.state.reason = "card"; r.state.hard = "card"; }],
+  ])("%s: what already left is placed late, so AUTO boxes it", async (_n, how) => {
+    const r = await cutShort(how);
+    expect(r.chunks.length).toBeGreaterThanOrEqual(1);
+    expect(r.ends[0].truncated).toBe(true);
+    expect(r.placed).toHaveLength(1);
+    expect(r.placed[0].late).toBe(true);
+    expect(placementFor({ ...auto }, idle, r.placed[0])).toBe("review");
+    expect(r.placed[0].text.startsWith("w0")).toBe(true);
+    expect(r.placed[0].text).not.toContain("w14");
+  });
+
+  it("a message that finished is not late (the positive control)", async () => {
+    const r = await cutShort(() => {});
+    expect(r.ends[0].truncated).toBe(false);
+    expect(r.placed[0].late).toBe(false);
+    expect(placementFor({ ...auto }, idle, r.placed[0])).toBe("send");
+  });
+});
+
+describe("the pre-roll of a late claim keeps its first chunk (M1)", () => {
+  it("27 s of speech nobody claimed, then a wake: every chunk reaches the consumer and the message is whole", async () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.say(0, 26);
+    expect(r.cap.onWake()).toBe("claimed");
+    r.say(27, 30);
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    await r.settle();
+    expect(r.chunks[0].utterance).toBe(r.ends[0].utterance);
+    expect(r.chunks.length).toBeGreaterThanOrEqual(2);          // the pre-roll alone is more than 25 s
+    expect(r.placed).toHaveLength(1);
+    expect(r.placed[0].text).toBe(words(0, 30));
+  });
+});
+
+describe("a tap on the talk key over a hands-free message (M2)", () => {
+  it("does not drop the message: it carries on and is sent whole", async () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.openFollowUp();
+    r.say(0, 3);
+    expect(r.cap.press()).toBe(true);
+    r.cap.feedMs(100, 0.06);
+    r.cap.release();                                           // a tap, well under 350 ms
+    r.say(4, 6);
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    await r.settle();
+    expect(r.drops.map(d => d.reason)).not.toContain("too_short");
+    expect(r.ends[0]).toMatchObject({ truncated: false });
+    expect(r.placed).toHaveLength(1);
+    expect(r.placed[0].text.startsWith("w0")).toBe(true);
+    expect(r.placed[0].text).toContain("w3");
+  });
+
+  it("a tap alone is still too short, and what the detector heard around it is not labelled ptt", () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.press();
+    r.cap.feedMs(100, 0.06);
+    r.cap.release();
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    expect(r.drops.map(d => [d.reason, d.source])).toEqual([["too_short", "ptt"], ["unclaimed", "unclaimed"]]);
+  });
+});
+
+describe("a claim without the wake word or the talk key ends at 60 s (M3, until V12)", () => {
+  const long = (r: Rig) => { r.say(0, 69); r.cap.feedMs(HANGOVER_MS + 400, QUIET); };
+
+  it("a follow-up claim is sent as it stands at 60 s, and the window says why", async () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.openFollowUp();
+    long(r);
+    await r.settle();
+    expect(r.limits[0]).toMatchObject({ claimCap: true });
+    expect(r.limits[0].ms).toBeGreaterThanOrEqual(CLAIM_CAP_MS);
+    expect(r.limits[0].ms).toBeLessThan(CLAIM_CAP_MS + 100);
+    expect(r.ends[0]).toMatchObject({ source: "follow_up", truncated: false });
+    expect(r.ends[0].ms).toBeLessThan(CLAIM_CAP_MS + 100);
+    expect(r.placed[0].text.split(" ").length).toBeLessThanOrEqual(62);
+  });
+
+  it("a continuation claim is capped the same way", () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.say(0, 1); r.cap.onWake(); r.say(2, 3);
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);                 // the wake-claimed message ends and arms the window
+    r.say(10, 80);                                          // speech soon after continues it
+    expect(r.ends.map(e => e.source)).toEqual(["wake", "continuation"]);   // the second was cut at 60 s
+    expect(r.limits).toHaveLength(1);
+    expect(r.limits[0].claimCap).toBe(true);
+  });
+
+  it("a wake claim, a talk-key hold, and a hands-free message the key took over are not capped", async () => {
+    const wake = rig();
+    wake.cap.feedMs(2000, QUIET); wake.say(0, 1); wake.cap.onWake(); wake.say(2, 79);
+    wake.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    expect(wake.limits).toEqual([]);
+    expect(wake.ends[0].ms).toBeGreaterThan(79_000);
+
+    const ptt = rig();
+    ptt.cap.feedMs(2000, QUIET); ptt.cap.press(); ptt.say(0, 119); ptt.cap.release();
+    expect(ptt.limits).toEqual([]);
+    expect(ptt.ends[0].ms).toBeGreaterThan(119_000);
+
+    const adopted = rig();
+    adopted.cap.feedMs(2000, QUIET); adopted.cap.openFollowUp(); adopted.say(0, 19);
+    adopted.cap.press();
+    adopted.say(20, 89);
+    adopted.cap.release();
+    expect(adopted.limits).toEqual([]);
+    expect(adopted.ends[0].ms).toBeGreaterThan(89_000);
+    await Promise.all([wake.settle(), ptt.settle(), adopted.settle()]);
+  });
+});
+
+describe("hard stops do not depend on which reason is reported first (M4)", () => {
+  it.each([
+    ["speaking", "card"], ["speaking", "picker"], ["speaking", "settings"], ["no_chat", "card"], ["no_chat", "settings"], ["speaking", "crash"],
+  ] as const)("a held key over %s stops when a %s appears", (reason, hard) => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.press();
+    r.state.reason = reason;
+    r.say(0, 2);
+    expect(r.cap.recording()).toBe(true);                    // his own voice alone does not stop the key
+    r.state.hard = hard;
+    r.say(3, 4);
+    expect(r.cap.recording(), `${reason}+${hard}`).toBe(false);
+    expect(r.drops.map(d => d.reason)).toEqual([`suppressed:${hard}`]);
+    r.cap.release();
+  });
+
+  it("the mutant that asks only the first reason lets the key carry on under a card (the control)", () => {
+    const r = rig();
+    r.state.useHardStop = false;
+    r.cap.feedMs(2000, QUIET);
+    r.cap.press();
+    r.state.reason = "speaking"; r.state.hard = "card";
+    r.say(0, 4);
+    expect(r.cap.recording()).toBe(true);
+  });
+
+  it("a hands-free message names the card, not his voice, as the reason", () => {
+    const r = rig();
+    r.cap.feedMs(2000, QUIET);
+    r.cap.openFollowUp();
+    r.say(0, 1);
+    r.state.reason = "speaking"; r.state.hard = "card";
+    r.say(2, 3);
+    r.cap.feedMs(HANGOVER_MS + 400, QUIET);
+    expect(r.drops.map(d => d.reason)).toEqual(["suppressed:card"]);
+  });
+});
+
+describe("switching the mic OFF ends a recording at once (L5)", () => {
+  it("without waiting for the next frame, once, whatever kind of recording it is", () => {
+    for (const key of [false, true]) {
+      const r = rig();
+      r.cap.feedMs(2000, QUIET);
+      if (key) r.cap.press(); else r.cap.openFollowUp();
+      r.say(0, 2);
+      expect(r.cap.recording()).toBe(true);
+      r.cap.muteNow();
+      expect(r.cap.recording()).toBe(false);
+      expect(r.ends).toHaveLength(1);
+      expect(r.ends[0].truncated).toBe(true);
+      r.state.muted = true;
+      r.say(3, 5);
+      r.cap.release();
+      expect(r.drops.filter(d => d.reason === "muted" && d.source !== "unclaimed")).toHaveLength(1);
+      expect(r.chunks).toHaveLength(0);
+    }
   });
 });

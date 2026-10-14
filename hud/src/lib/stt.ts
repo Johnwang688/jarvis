@@ -37,7 +37,10 @@
 // the first attempt.
 
 import type { ClaimSource, VoiceDiagnostics } from "./voiceDiagnostics";
-import { dropLeadingOverlap, dropTrailingOverlap } from "./joinChunks";
+import { dropLeadingOverlap, dropTrailingOverlap, overlapMerge } from "./joinChunks";
+
+/** Where a chunk of a late message is missing: its words are not here, and Retry adds them at the end. */
+export const GAP_MARK = "[…]";
 
 export const STT_MAX_CLIPS = 20;
 export const STT_MAX_CLIP_MS = 10 * 60_000;
@@ -102,8 +105,12 @@ export interface SttOptions<M> {
   /** Called in `seq` order with every text that is ready to be placed. */
   place: (batch: SttPlaced<M>[]) => void | Promise<void>;
   diagnostics: VoiceDiagnostics;
-  /** Consulted before every upload that did not start the moment its clip was submitted, and every retry. */
-  canUpload?: () => boolean;
+  /**
+   * Consulted before every upload (a chunk's first attempt too, since it may have
+   * waited its turn) and every retry. `explicit` is the owner's own Retry press,
+   * which the owner may make from Settings or with a picker open.
+   */
+  canUpload?: (explicit: boolean) => boolean;
   /** Uploads at once; later chunks wait their turn, in `seq` order. Default: no limit. */
   maxInFlight?: number;
   onEvent?: (e: SttEvent) => void;
@@ -111,7 +118,7 @@ export interface SttOptions<M> {
 }
 
 interface Entry<M> {
-  id: number; gid: number; seq: number; diag: number; ms: number; overlapMs: number; source: ClaimSource; meta: M;
+  id: number; gid: number; seq: number; diag: number; ms: number; overlapMs: number; repeats: boolean; source: ClaimSource; meta: M;
   blob: Blob | null; bytes: number;
   state: SttState; attempts: number; autoRetries: number; error: string; text: string;
   startedAt: number; hadFailure: boolean; retried: boolean; cancelled: boolean;
@@ -134,6 +141,8 @@ interface Group<M> {
   placed: Set<number>;
   lastAt: number;
   hadFailure: boolean;
+  /** The message is not all of what was said (it was cut short): never sent on its own. */
+  partial: boolean;
   /** Handed to `place`, which has not returned yet. */
   placing: number;
 }
@@ -273,15 +282,20 @@ export class SttAssembler<M = undefined> {
     const key = ++this.groupSeq;
     this.groups.set(key, {
       key, uid: 0, source, meta, diag: 0, open: true, members: [], parts: new Map(), placed: new Set(),
-      lastAt: this.now(), hadFailure: false, placing: 0,
+      lastAt: this.now(), hadFailure: false, partial: false, placing: 0,
     });
     return key;
   }
 
-  /** The message has ended; no chunk will follow. */
-  closeGroup(gid: number) {
+  /**
+   * The message has ended; no chunk will follow. `late`: it ended before the
+   * owner finished (the mic went OFF, a card appeared) or part of it was refused,
+   * so what is placed is marked late and AUTO boxes it instead of sending it.
+   */
+  closeGroup(gid: number, opts: { late?: boolean } = {}) {
     const g = this.groups.get(gid);
     if (!g) return;
+    if (opts.late) g.partial = true;
     g.open = false;
     if (!g.members.length) { this.settleGroup(g); this.groups.delete(gid); return; }
     this.release();
@@ -290,13 +304,16 @@ export class SttAssembler<M = undefined> {
 
   /**
    * Queue a finished clip -- or, with `opts.group`, one chunk of a message.
-   * `overlapMs` is how much of its start repeats the previous chunk's end.
+   * `overlapMs` is how much of its start repeats the previous chunk's end; `repeats`
+   * (default: whenever there is overlap) says that overlap may hold words the previous
+   * text also ends with, which the join then says once.
    * Returns its id, or null when the backlog is full (visible, never silent).
    */
-  submit(blob: Blob, ms: number, source: ClaimSource, meta: M, opts: { group?: number; overlapMs?: number } = {}): number | null {
+  submit(blob: Blob, ms: number, source: ClaimSource, meta: M, opts: { group?: number; overlapMs?: number; repeats?: boolean } = {}): number | null {
     let g = opts.group === undefined ? undefined : this.groups.get(opts.group);
     if (opts.group !== undefined && (!g || !g.open)) return null; // a closed message takes no more
     const overlapMs = Math.max(0, Math.min(ms, opts.overlapMs ?? 0));
+    const repeats = overlapMs > 0 && (opts.repeats ?? true);
     // The incoming clip counts against every cap. Only a clip that cannot fit
     // while other audio is held is refused; a lone oversize clip is still sent
     // once, and is dropped (and said to be) the moment it fails.
@@ -313,7 +330,7 @@ export class SttAssembler<M = undefined> {
     if (!g) {
       g = {
         key: ++this.groupSeq, uid: 0, source, meta, diag: 0, open: false, members: [], parts: new Map(), placed: new Set(),
-        lastAt: this.now(), hadFailure: false, placing: 0,
+        lastAt: this.now(), hadFailure: false, partial: false, placing: 0,
       };
       this.groups.set(g.key, g);
     }
@@ -321,10 +338,10 @@ export class SttAssembler<M = undefined> {
     if (!g.diag) g.diag = this.o.diagnostics.add(ms - overlapMs, source, "transcribing");
     else this.o.diagnostics.extend(g.diag, ms - overlapMs);
     g.members.push(id);
-    g.parts.set(id, { text: "", overlap: overlapMs > 0 });
+    g.parts.set(id, { text: "", overlap: repeats });
     g.lastAt = this.now();
     const e: Entry<M> = {
-      id, gid: g.key, seq: id, diag: g.diag, ms, overlapMs, source, meta: g.meta,
+      id, gid: g.key, seq: id, diag: g.diag, ms, overlapMs, repeats, source, meta: g.meta,
       blob, bytes: blob.size, state: "waiting", attempts: 0, autoRetries: 0, error: "", text: "",
       startedAt: this.now(), hadFailure: false, retried: false, cancelled: false, ac: null, retryTimer: null, cancel: null,
     };
@@ -347,7 +364,7 @@ export class SttAssembler<M = undefined> {
       const { e, explicit } = this.queue.shift()!;
       if (e.cancelled || !e.blob) continue;
       // A chunk that waited its turn is judged again: the mic may be OFF now, a card up.
-      if (this.o.canUpload && !this.o.canUpload()) { this.fail(e, "not sent: dictation is paused"); continue; }
+      if (this.o.canUpload && !this.o.canUpload(explicit)) { this.fail(e, "not sent: dictation is paused"); continue; }
       this.running++;
       void this.attempt(e, explicit).finally(() => { this.running--; this.pump(); });
     }
@@ -382,7 +399,7 @@ export class SttAssembler<M = undefined> {
         e.retryTimer = setTimeout(() => {
           e.retryTimer = null;
           if (e.cancelled) return;
-          if (this.o.canUpload && !this.o.canUpload()) { this.fail(e, "not retried: dictation is paused"); return; }
+          if (this.o.canUpload && !this.o.canUpload(false)) { this.fail(e, "not retried: dictation is paused"); return; }
           this.schedule(e, false);
         }, STT_RETRY_DELAY_MS);
         this.emit();
@@ -395,7 +412,7 @@ export class SttAssembler<M = undefined> {
     // A blank text is a normal answer for a chunk of mostly silence: it is
     // settled with the rest of its message (release).
     e.text = typeof text === "string" ? text : "";
-    g?.parts.set(e.id, { text: e.text.trim(), overlap: e.overlapMs > 0 });
+    g?.parts.set(e.id, { text: e.text.trim(), overlap: e.repeats });
     // The words are in hand; the audio is only needed to try again, and a long
     // message may wait many chunks for its last one. Holding every chunk's audio
     // until then would make its length a memory bound, so it is let go here.
@@ -425,7 +442,7 @@ export class SttAssembler<M = undefined> {
   retry(id: number): boolean {
     const e = this.entries.get(id);
     if (!e || e.state !== "failed" || !e.blob) return false;
-    if (this.o.canUpload && !this.o.canUpload()) { this.event({ kind: "blocked", message: "NOT RETRIED · MIC OFF OR PAUSED" }); return false; }
+    if (this.o.canUpload && !this.o.canUpload(true)) { this.event({ kind: "blocked", message: "NOT RETRIED · MIC OFF OR PAUSED" }); return false; }
     const g = this.groups.get(e.gid);
     if (g) { this.o.diagnostics.reopen(g.diag); g.lastAt = this.now(); }
     e.startedAt = this.now();
@@ -452,22 +469,39 @@ export class SttAssembler<M = undefined> {
     if (g) this.settleGroup(g);
   }
 
-  /** The message's words: each ready chunk's text in order, with what an overlap repeats said once. */
+  /**
+   * The message's words: each ready chunk's text in order, with what an overlap
+   * repeats said once, and a mark where a chunk that failed would have gone.
+   */
   private joined(g: Group<M>, ready: Entry<M>[]): string {
-    const pieces: string[] = [];
-    for (const e of ready) {
-      let t = e.text.trim();
+    const acc: string[] = [];
+    const inBatch = new Set(ready.map(e => e.id));
+    for (let at = 0; at < g.members.length; at++) {
+      const id = g.members[at];
+      const e = this.entries.get(id);
+      if (!e) continue;
+      if (e.state === "failed") { if (acc[acc.length - 1] !== GAP_MARK) acc.push(GAP_MARK); continue; }
+      if (e.state !== "ready" || !inBatch.has(id)) continue;
+      const t = e.text.trim();
       if (!t) continue;
-      const at = g.members.indexOf(e.id);
-      const prev = g.parts.get(g.members[at - 1]);
+      const prevId = g.members[at - 1];
+      const prev = g.parts.get(prevId);
       const nextId = g.members[at + 1];
       const next = nextId === undefined ? undefined : g.parts.get(nextId);
-      if (e.overlapMs > 0 && prev?.text) t = dropLeadingOverlap(prev.text, t);
+      let add = t.split(/\s+/);
+      if (e.repeats && prev?.text) {
+        if (inBatch.has(prevId)) {
+          const m = overlapMerge(prev.text, t);
+          acc.length -= Math.min(m.dropBefore, acc.length);
+          add = add.slice(m.dropAfter);
+        } else add = dropLeadingOverlap(prev.text, t).split(/\s+/).filter(Boolean);
+      }
       // A retried chunk whose successor was placed without it: its tail repeats the successor's head.
-      if (next?.overlap && next.text && g.placed.has(nextId)) t = dropTrailingOverlap(t, next.text);
-      if (t) pieces.push(t);
+      if (next?.overlap && next.text && g.placed.has(nextId)) add = dropTrailingOverlap(add.join(" "), next.text).split(/\s+/).filter(Boolean);
+      acc.push(...add.filter(Boolean));
     }
-    return pieces.join(" ");
+    // A mark alone says nothing; a message of only blanks and failures places nothing.
+    return acc.some(w => w !== GAP_MARK) ? acc.join(" ") : "";
   }
 
   /** Place, in capture order, every message no earlier chunk is still waiting on. */
@@ -495,7 +529,7 @@ export class SttAssembler<M = undefined> {
         id: ready[0].id, seq: ready[0].seq, text,
         ms: ready.reduce((n, e) => n + e.ms - e.overlapMs, 0),
         source: g.source, meta: g.meta, diag: g.diag,
-        latencyMs: this.now() - g.lastAt, late: g.hadFailure, retried: ready.some(e => e.retried), parts: ready.length,
+        latencyMs: this.now() - g.lastAt, late: g.hadFailure || g.partial, retried: ready.some(e => e.retried), parts: ready.length,
       };
       for (const e of ready) { this.entries.delete(e.id); e.blob = null; g.placed.add(e.id); }
       this.syncKept(g);

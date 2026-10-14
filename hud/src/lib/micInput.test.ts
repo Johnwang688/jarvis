@@ -106,6 +106,33 @@ describe("startMicInput", () => {
     expect(input.path).toBe("script_processor");
   });
 
+  it("falls back, visibly, when the module never answers", async () => {
+    vi.stubGlobal("AudioWorkletNode", FakeWorklet);
+    const { ctx } = fakeContext();
+    ctx.audioWorklet.addModule = () => new Promise(() => {});
+    const input = await startMicInput({ stream: stream().s, onFrame: () => {}, workletUrl: "/x.js", createContext: () => ctx, moduleTimeoutMs: 20 });
+    expect(input.path).toBe("script_processor");
+    expect(input.fallbackReason).toBe("the AudioWorklet module did not load (TimeoutError)");
+  });
+
+  it("a processor that fails while running hands the microphone to the fallback and says so", async () => {
+    vi.stubGlobal("AudioWorkletNode", FakeWorklet);
+    const { ctx, calls } = fakeContext();
+    const frames: Float32Array[] = [];
+    const changes: [string, string][] = [];
+    const input = await startMicInput({ stream: stream().s, onFrame: f => frames.push(f), workletUrl: "/x.js", createContext: () => ctx, onPathChange: (p, r) => changes.push([p, r]) });
+    expect(input.path).toBe("worklet");
+    (workletNodes[0] as any).onprocessorerror();
+    expect(input.path).toBe("script_processor");
+    expect(input.fallbackReason).toMatch(/failed while running/);
+    expect(changes).toEqual([["script_processor", input.fallbackReason]]);
+    const block = new Float32Array(2048).fill(0.2);
+    for (let i = 0; i < 20; i++) calls.script!.onaudioprocess!({ inputBuffer: { getChannelData: () => block } });
+    expect(frames.length).toBeGreaterThan(0);
+    (workletNodes[0] as any).onprocessorerror();              // a second error changes nothing
+    expect(changes).toHaveLength(1);
+  });
+
   it("stop() releases the microphone and the context", async () => {
     vi.stubGlobal("AudioWorkletNode", FakeWorklet);
     const { ctx, calls } = fakeContext();

@@ -52,6 +52,26 @@ describe("Resampler (windowed sinc)", () => {
     expect(db(rms(old, 300, old.length - 300), ref)).toBeGreaterThan(-30);
   });
 
+  it("a tone just above the output Nyquist (8.5 kHz, which would alias to 7.5 kHz) is 60 dB down, and the speech band is flat to 6 kHz", () => {
+    const ref = 0.5 / Math.SQRT2;
+    const level = (hz: number) => {
+      const y = run(new Resampler(48000), sine(hz, 48000, 48000), 128);
+      return db(rms(y, 300, y.length - 300), ref);
+    };
+    expect(level(8500)).toBeLessThan(-60);
+    expect(level(9000)).toBeLessThan(-60);
+    for (const hz of [300, 1000, 3400, 6000]) expect(level(hz), `${hz} Hz`).toBeGreaterThan(-1);
+  });
+
+  it("converting does not allocate per call beyond the result it returns (processShared reuses its buffer)", () => {
+    const r = new Resampler(48000);
+    const x = new Float32Array(128).fill(0.1);
+    const a = r.processShared(x);
+    const first = a.buffer;
+    for (let i = 0; i < 50; i++) expect(r.processShared(x).buffer).toBe(first);
+    expect(r.process(x).buffer).not.toBe(first);          // process() hands the caller its own copy
+  });
+
   it("is the same stream however it is blocked", () => {
     const x = sine(440, 48000, 9000);
     const one = run(new Resampler(48000), x, x.length);
