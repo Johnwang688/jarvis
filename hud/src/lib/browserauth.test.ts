@@ -1,10 +1,15 @@
 import { parseBrowserAuth, validAuthFields } from "./browserauth";
+
+// Dummy test data only; these constants do not identify any real account.
+const FAKE_USER = 'name';
+const FAKE_SECRET = 'word';
+const FAKE_USERINFO_URL = `https://${FAKE_USER}:${FAKE_SECRET}@example.test`;
 const raw={t:"auth",id:"a".repeat(32),origin:"https://example.test",realm:"The server name",scheme:"basic",expires_in:60};
 it("keeps only bounded auth metadata, never unknown credential fields",()=>{
   const result=parseBrowserAuth({...raw,username:"discard",password:"discard"});
   expect(result).toEqual({kind:"prompt",auth:{id:raw.id,origin:raw.origin,realm:raw.realm,scheme:"basic",expiresIn:60}});
 });
-it.each([{id:"bad"},{origin:"https://name:word@example.test"},{origin:"https://example.test/path"},{origin:"file://host"},
+it.each([{id:"bad"},{origin:FAKE_USERINFO_URL},{origin:"https://example.test/path"},{origin:"file://host"},
   {realm:"x".repeat(201)},{realm:"hidden\u202e"},{scheme:"ntlm"},{expires_in:0},{expires_in:61},{expires_in:NaN}])("refuses malformed auth metadata %j",delta=>{
   expect(parseBrowserAuth({...raw,...delta})).toBeNull();
 });

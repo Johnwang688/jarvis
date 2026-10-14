@@ -8,6 +8,11 @@ from jarvis.v2.browser.auth_state import (
     AuthBudget, AuthRefused, NavigationClock, challenge, credential_fields, origin,
 )
 
+# Dummy test data only; these constants do not identify any real account.
+FAKE_USER = 'name'
+FAKE_SECRET = 'word'
+FAKE_USERINFO_URL = f"http://{FAKE_USER}:{FAKE_SECRET}@example.test"
+
 
 class AuthState(unittest.TestCase):
     def test_origin_matches_scheme_host_and_effective_port_without_path_or_query(self):
@@ -20,7 +25,7 @@ class AuthState(unittest.TestCase):
                 challenge(requested, {"source":"Server", "scheme":"Basic", "realm":"fixture", "origin":changed})
 
     def test_policy_refusals_and_proxy_unknown_malformed_challenges_never_prompt(self):
-        for value in ("about:blank", "file:///tmp/file", "http://name:word@example.test", "http://127.0.0.1:8402", "https://example.test/\x00", None):
+        for value in ("about:blank", "file:///tmp/file", FAKE_USERINFO_URL, "http://127.0.0.1:8402", "https://example.test/\x00", None):
             with self.assertRaises(AuthRefused):origin(value)
         with self.assertRaises(AuthRefused):origin("http://localhost:18739", refused=frozenset({18739}))
         requested=origin("https://example.test")

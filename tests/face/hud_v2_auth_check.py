@@ -13,6 +13,10 @@ from tests.face.hud_v2_layout_check import _boot,_pane,_set_ws,_set_storage,_app
 from tests.face.hud_v2_remote_check import Remote
 from tests.face.hud_v2_mock_browser import state
 
+# Synthetic fixture-only fields, never owner or service credentials.
+FAKE_USER = 'fixture'
+FAKE_SECRET = 'synthetic-ui-secret-1'
+
 class AuthRemote(Remote):
     def receive(self,sock,text):
         super().receive(sock,text)
@@ -64,10 +68,10 @@ def auth_checks(browser,mock,base,check,until,guard,init_script):
         before=len(remote.inputs())
         page.locator(active+' [data-testid="remote-input"]').evaluate("e=>e.dispatchEvent(new KeyboardEvent('keydown',{key:'x',code:'KeyX',bubbles:true}))")
         check("Auth attention blocks page input",len(remote.inputs())==before)
-        user.fill("fixture");secret.fill("synthetic-ui-secret-1")
+        user.fill(FAKE_USER);secret.fill(FAKE_SECRET)
         signin=form.get_by_role("button",name="Sign in",exact=True);signin.focus();signin.press("Enter")
         assert until(lambda:form.count()==0,timeout=4)
-        check("Keyboard Enter activates Sign in exactly once",len(replies())==1 and replies()[0]=={"t":"auth","id":format(1,"032x"),"cancel":False,"username":"fixture","password":"synthetic-ui-secret-1"})
+        check("Keyboard Enter activates Sign in exactly once",len(replies())==1 and replies()[0]=={"t":"auth","id":format(1,"032x"),"cancel":False,"username":FAKE_USER,"password":FAKE_SECRET})
         check("Auth credentials are absent from browser storage and ordinary HTTP requests",
               "synthetic-ui-secret" not in page.evaluate("JSON.stringify({...localStorage})") and "synthetic-ui-secret" not in json.dumps(mock.calls))
         prompt(2);cancel=form.get_by_role("button",name="Cancel",exact=True);cancel.focus();cancel.press("Enter")
