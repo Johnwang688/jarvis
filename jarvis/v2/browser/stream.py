@@ -260,6 +260,13 @@ def parse(raw: bytes) -> Msg:
     if not isinstance(m, dict) or not isinstance(m.get("t"), str):
         raise Bad("a message has no type")
     t = m["t"]
+    if t in ("find", "find_cancel", "cursor", "cursor_cancel"):
+        from .owner_tools import parse_message, OwnerBad
+        try:
+            fields = parse_message(m)
+        except OwnerBad as exc:
+            raise Bad(str(exc)) from None
+        return Msg(t, **{key: value for key, value in fields.items() if key != "t"})
     if t == "key":
         _fields(m, ("e",), ("e",))
         return Msg(t, "Input.dispatchKeyEvent", _key(m["e"]))
@@ -636,6 +643,16 @@ class TabStream:
             self._held_notice = now
             return True
         return False
+
+    def discard_document_input(self) -> None:
+        """Retire received old-document input without recording an approval.
+
+        An expected navigation may finish its agent action on the fresh
+        document. Its queue cutoff must not look like an intervening card.
+        """
+        with self._lock:
+            self._drop_through = self._seq
+            self._queue.clear()
 
     def hold_through(self, *, notify: bool = True) -> None:
         """A hold was seen: everything received so far is dropped, now and

@@ -655,6 +655,8 @@ class BrowserHost:
         from .auth import OwnerAuth
         self._auth = OwnerAuth(self)
         self._auth.navigation_timeout = NAV_TIMEOUT_S
+        from .owner_tools import OwnerTools
+        self._owner_tools = OwnerTools(self)
         self._next_instance_generation = 0
         self._instances: dict[str, _Instance] = {}
         self._closing_instances: dict[str, _Instance] = {}
@@ -1368,6 +1370,7 @@ class BrowserHost:
             # A stale old release must not revoke replacement tickets.
             if self._tabs.get(tab.id) is tab:
                 self.tickets.revoke(tab.id)
+        self._owner_tools.invalidate(tab, closed=True)
         self._auth.release(tab)
         tab.loopback_port = tab.pending_port = None
         self._sync_ports(tab)
@@ -1481,6 +1484,14 @@ class BrowserHost:
             return
         # Invalidate before judging/publishing the new URL. Playwright emits
         # framenavigated for same-document changes and same-URL reloads too.
+        self._owner_tools.invalidate(tab)
+        if tab.stream is not None:
+            # The new document cannot receive a queued old-document release,
+            # and the owner gate must not retain old depressed bookkeeping.
+            tab.stream.discard_document_input()
+            tab.pressed.clear()
+            tab.keys_pressed.clear()
+            tab.stream.send({"t": "owner_reset"})
         self._auth.document_changed(tab)
         tab.document_generation += 1
         tab.pane_ready = False
@@ -1918,6 +1929,7 @@ class BrowserHost:
                 if tab.stream is not None:
                     tab.stream.hold_through()
                 self._auth.invalidate(tab)
+                self._owner_tools.invalidate(tab)
         elif isinstance(record, dict) and record.get("kind") == "approval_resolved":
             async def refresh_auth():
                 for tab in list(self._tabs.values()):
@@ -1999,12 +2011,18 @@ class BrowserHost:
         row = {"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx, "opener": tab.opener}
 
         def attached():
+            self._owner_tools.invalidate(tab, attachment=True)
             LOG.info("browser tab %s attached", tab.id)
             self._attached_event(tab.id)
             self._submit(self._on_attached(tab))
 
+        def detached():
+            if tab.stream.attached() is None:
+                self._owner_tools.invalidate(tab, attachment=True)
+            self._submit(self._on_detached(tab))
+
         _serve_stream(tab.stream, sock, tab_row=row, on_attached=attached,
-                      on_detached=lambda: self._submit(self._on_detached(tab)),
+                      on_detached=detached,
                       handle=lambda s, msg: self._handle(tab, s, msg))
 
     def _handle(self, tab: _Tab, sock, msg) -> None:
@@ -2012,8 +2030,12 @@ class BrowserHost:
         if self._tabs.get(tab.id) is not tab or self._stopped:
             return
         stream = tab.stream
+        if not stream.holds(sock):
+            return
         t = msg.t
-        if t == "auth":
+        if t in ("find", "find_cancel", "cursor", "cursor_cancel"):
+            self._owner_tools.receive(tab, sock, {"t": t, **msg.fields})
+        elif t == "auth":
             if self.input_held():
                 stream.hold_through()
                 msg.fields.clear()
@@ -2031,12 +2053,14 @@ class BrowserHost:
         elif t == "ack":
             stream.ack(sock, msg.fields["id"])
         elif t == "resize":
+            self._owner_tools.invalidate(tab)
             stream.viewport = (msg.fields["width"], msg.fields["height"], msg.fields["scale"])
             self._submit(self._set_viewport(tab))
         elif t == "visible":
             if stream.set_visible(sock, msg.fields["visible"]):
                 self._submit(self._sync_screencast(tab))
             if not msg.fields["visible"]:
+                self._owner_tools.invalidate(tab)
                 self._auth.invalidate(tab)
             async def refresh_auth():
                 self._auth.refresh(tab)
@@ -2211,8 +2235,18 @@ class BrowserHost:
 
     @_tab_activity
     async def _deliver(self, tab: _Tab, method: str, params: dict) -> None:
+        page, page_identity, document = tab.page, tab.page_identity, tab.document_generation
+        stream, attachment, held_at_entry = tab.stream, tab.stream.gen, tab.stream.hold_count
+        instance = self._instances.get(tab.profile)
+        def same_document():
+            return (not self._stopped and self._tabs.get(tab.id) is tab
+                    and tab.page is page and tab.page_identity == page_identity
+                    and tab.document_generation == document and tab.stream is stream
+                    and stream.gen == attachment and stream.hold_count == held_at_entry
+                    and self._instances.get(tab.profile) is instance
+                    and instance is not None and not instance.closing and not instance.restoring)
         cdp = await self._ensure_cdp(tab)
-        if cdp is None:
+        if cdp is None or not same_document():
             return
         if self.input_held():
             tab.stream.hold_through()
@@ -2261,7 +2295,8 @@ class BrowserHost:
         # until Chrome answers. Input arriving meanwhile is dropped.
         auth_epoch = self._auth.input_epoch(tab)
         async def send_current_auth():
-            if self._auth.input_current(tab, auth_epoch):
+            if (same_document() and not self.input_held()
+                    and self._auth.input_current(tab, auth_epoch)):
                 await cdp.send(method, params)
         task = asyncio.ensure_future(self._activity_run(tab, send_current_auth))
         tab.input_task = task
