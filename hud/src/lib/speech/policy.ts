@@ -31,6 +31,16 @@ export const SKIP_FAILED_CHUNKS = true;
 export const SUPPRESS_MIC_WHILE_SPEAKING = true;
 
 /**
+ * Is the detector held off because Jarvis is speaking? True for the whole of a
+ * reply -- playing, buffering between chunks, and the hangover after the last
+ * one -- not only while a chunk sounds; false while paused, and while the
+ * platform is blocking audio (nothing is audible, so nothing can be echoed).
+ */
+export function micSuppressedBySpeech(view: { active: boolean; blocked: boolean }): boolean {
+  return SUPPRESS_MIC_WHILE_SPEAKING && view.active && !view.blocked;
+}
+
+/**
  * Q15 / V-8 -- the threads that are read aloud: in V6, the selected chat's
  * only; task views and threads in no pane are silent. V7 widens this to every
  * chat pane, drawn or hidden, and nothing else here changes.

@@ -20,7 +20,7 @@
 // code as nothing, a long table as "a table". Everything else goes through
 // `speakableLine`, the port of `voice.speakable()`.
 
-import { MD_FENCE, MD_RULE, MD_TABLE_RULE, speakableLine } from "./speakable";
+import { MD_RULE, MD_TABLE_RULE, speakableLine } from "./speakable";
 
 /** A table of at most this many rows (header included) reads as a list; longer is "a table". */
 export const TABLE_ROWS_READ = 4;
@@ -124,6 +124,12 @@ export class ProseFilter {
     }
     out += this.early();
     return this.emit(out);
+  }
+
+  /** The line in progress can no longer be finished (a gap in the stream): forget it, keep the modes (a fence stays open). */
+  discardLine(): void {
+    this.pending = "";
+    this.lineEmitted = false;
   }
 
   /** The message ends: the last line is a whole line, and every mode resets. */

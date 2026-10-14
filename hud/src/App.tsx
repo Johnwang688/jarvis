@@ -78,7 +78,7 @@ import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { ReadAloudSetting } from "./components/ReadAloud";
 import { createSpeech, saveReadAloud } from "./lib/speech";
-import { SUPPRESS_MIC_WHILE_SPEAKING, onMicModeChange, speakingThreads } from "./lib/speech/policy";
+import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture } from "./lib/capture";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type ClaimSource } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
@@ -552,7 +552,12 @@ export default function App() {
   useEffect(() => () => speech.dispose(), [speech]);
   const speechSubscribe = useCallback((cb: () => void) => speech.controller.subscribe(cb), [speech]);
   const speechView = useSyncExternalStore(speechSubscribe, () => speech.controller.view());
-  const speechPlaying = () => SUPPRESS_MIC_WHILE_SPEAKING && speech.controller.view().state === "playing";
+  // The mic is held off for the whole of a reply, between chunks included.
+  const speechPlaying = () => micSuppressedBySpeech(speech.controller.view());
+  // A turn finished while its reply was still being read: the follow-up window
+  // opens when the speech goes idle, not at `turn_finished` (it would run out,
+  // or hear him, mid-reply).
+  const followUpAfterSpeech = useRef(false);
   // The threads read now (lib/speech/policy `speakingThreads`): a thread that
   // leaves the set stops speaking at once.
   const speakerKey = [...speakingThreads(state.chats, pendingThread.current, state.selectedChat)].join(",");
@@ -607,6 +612,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
+
+  // The follow-up window a finished turn owes, opened once its reply has been
+  // read (v1's `doneSpeaking`): only if the selected chat is still idle.
+  useEffect(() => speech.controller.onIdle(() => {
+    if (!followUpAfterSpeech.current) return;
+    followUpAfterSpeech.current = false;
+    const at = live.current;
+    if (at.selectedChat === null || at.chats[at.selectedChat].busy || at.approvals.length) return;
+    if (isMuted(at.dictation)) return;
+    capture.openFollowUp();
+  }), [speech, capture]);
 
   // Words spoken while no chat pane was on screen: they wait, unsent, for the
   // next chat selected (decisions W-6: ambiguous input goes to the selected
@@ -1191,7 +1207,10 @@ export default function App() {
           // Only the selected chat's own turn opens the follow-up window. A
           // Discord turn, or a turn in another pane, finishing must not start
           // the HUD listening.
-          if (followUp) capture.openFollowUp();
+          if (followUp) {
+            if (speech.controller.view().active) followUpAfterSpeech.current = true;
+            else capture.openFollowUp();
+          }
           break;
         }
         case "error":
@@ -2519,8 +2538,10 @@ export default function App() {
       chatPatch(pane, { status: "MIC MUTED" });
       return;
     }
+    // Talking over him pauses him (barge-in proper is V9): the strip resumes it.
+    speech.controller.pause();
     capture.press();
-  }, [capture, chatPatch, dispatch, interruptTurn]);
+  }, [capture, chatPatch, dispatch, interruptTurn, speech]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -2788,7 +2809,7 @@ export default function App() {
     dispatch({ type: "patch", patch: { dictation: mode } });
     if (live.current.selectedChat !== null) chatPatch(live.current.selectedChat, { status: "" });
     if (wasMuted && !isMuted(mode)) capture.markUnmute();
-    if (isMuted(mode)) capture.closeFollowUp();
+    if (isMuted(mode)) { capture.closeFollowUp(); followUpAfterSpeech.current = false; }
     // The mic's OFF no longer mutes Jarvis (lib/speech/policy, Q11).
     onMicModeChange(isMuted(mode), (m) => api.mute(m).catch(() => {}));
   };
@@ -2831,7 +2852,7 @@ export default function App() {
   });
   // Playing, the orb shows his voice unless it carries a meaning of its own
   // (a tool, a card, an error) or the mic is mid-utterance.
-  const orbShown = speaking && speechView.state === "playing" && (state.orb === "idle" || state.orb === "thinking" || state.orb === "composing")
+  const orbShown = speaking && (speechView.state === "playing" || speechView.state === "buffering") && (state.orb === "idle" || state.orb === "thinking" || state.orb === "composing")
     ? "speaking" : state.orb;
   const projectName = (id: string | null) => state.projects.find((p) => p.id === id)?.name || "…";
   const threadOf = (id: string | null) => (id ? state.threads.find((t) => t.id === id) || null : null);

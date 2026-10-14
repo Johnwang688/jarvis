@@ -106,6 +106,14 @@ def main() -> int:
             page.locator('[data-testid="speech-stop"]').click()
             check("stop clears the queue", speech(page)["view"]["state"] == "idle" and speech(page)["view"]["queued"] == 0)
 
+            print("\nnested fences")
+            nested = "1. Do this first:\n    ```bash\n    cat ~/.config/jarvis/.env\n    export KEY=sk-abcdef\n    ```\nThat was the step."
+            mock.emit("text", {"text": nested}, thread_id="t1")
+            until(lambda: any("That was the step" in t for t in said(mock)), timeout=5)
+            until(lambda: speech(page)["view"]["state"] == "idle", timeout=8)
+            check("a fence nested under a list item is never sent to /say",
+                  not any(("cat " in t or "sk-abc" in t or "export" in t) for t in said(mock)), str(said(mock)[-3:]))
+
             print("\nstale speech")
             stream(mock, REPLY)
             mock.emit("text", {"text": REPLY}, thread_id="t1")
@@ -122,6 +130,7 @@ def main() -> int:
 
             print("\nthe mic is not the voice")
             page.locator('#orbdock [data-testid="dictation-off"]').click()
+            page.wait_for_timeout(500)    # a request the click started would have landed by now
             check("mic OFF posts no /mute", not mock.sent("POST", "/mute"))
             mock.ms_per_char = 12
             mock.emit("text", {"text": "Spoken with the microphone off."}, thread_id="t1")

@@ -72,7 +72,7 @@ export function outcomeFor(mode: DictationMode): UtteranceOutcome {
 export function orbLine(p: {
   status?: string; mode: DictationMode; approvals: number; orb: string;
   /** Jarvis's own voice (V6): playing or paused, and whose chat. */
-  speech?: { state: "idle" | "playing" | "paused"; label?: string };
+  speech?: { state: "idle" | "buffering" | "playing" | "paused"; label?: string };
 }): string {
   // Speech says itself over a *turn's* status (RESPONDING, RUNNING ...): mid-task
   // updates are read while the turn runs. It never covers what the mic is doing

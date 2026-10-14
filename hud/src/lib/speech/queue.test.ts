@@ -232,3 +232,71 @@ describe("play order is replaceable", () => {
     expect(player.maxActive).toBe(1);
   });
 });
+
+describe("buffering: the gap between chunks is not silence", () => {
+  it("is 'buffering' from enqueue until the sound starts, and again between chunks, never 'idle'", async () => {
+    synth.latency = 400;
+    q.enqueue(entry("First chunk of a reply."));
+    q.enqueue(entry("Second chunk of a reply."));
+    expect(q.view().state).toBe("buffering");
+    const seen = new Set<string>();
+    for (let i = 0; i < 400; i++) {
+      await clock.advance(50);
+      seen.add(q.view().state);
+      if (q.view().state === "idle") break;
+    }
+    expect(seen.has("playing")).toBe(true);
+    // Every state between the first enqueue and the last chunk ending is active.
+    expect(player.started).toHaveLength(2);
+    expect(q.view().state).toBe("idle");
+  });
+
+  it("a paused queue is paused, not buffering", async () => {
+    q.enqueue(entry("A chunk that is playing now."));
+    await clock.advance(300);
+    q.pause();
+    expect(q.view().state).toBe("paused");
+  });
+});
+
+describe("the watchdog", () => {
+  it("stops a sound that never ends, counts it, and moves on", async () => {
+    player.stuck = true;
+    q.enqueue(entry("Stuck sound."));
+    q.enqueue(entry("After the stuck one."));
+    await clock.advance(200);
+    expect(q.view().state).toBe("playing");
+    player.stuck = false;
+    await clock.advance("Stuck sound.".length * MS_PER_CHAR + 2000 + 500);
+    expect(q.past()[0]).toMatchObject({ text: "Stuck sound.", state: "skipped", mark: "play_failed" });
+    expect(q.view().failed).toBe(1);
+    expect(player.active).toBeLessThanOrEqual(1);
+    await clock.advance(10_000);
+    expect(player.started.at(-1)).toBe("After the stuck one.");
+    expect(q.view().state).toBe("idle");
+  });
+
+  it("does not fire while the platform is holding audio back for a gesture", async () => {
+    player.stuck = true;
+    player.isBlocked = true;
+    q.enqueue(entry("Waits for the owner."));
+    await clock.advance(60_000);
+    expect(q.view()).toMatchObject({ state: "playing", failed: 0, blocked: true });
+  });
+});
+
+describe("the synthesis deadline", () => {
+  it("is not spent waiting behind another request", async () => {
+    // The daemon makes one at a time: "One." answers at 15 s, and "Two." (queued behind it)
+    // at 30 s -- 15 s of its own, though more than the 20 s deadline after it was sent.
+    const slowFirst = new SpeechQueue({
+      synth: (item) => new Promise((res) => clock.setTimeout(() => res({ text: item.text, ms: 100 }), item.text === "One." ? 15_000 : 30_000)),
+      player, clock,
+    });
+    slowFirst.enqueue(entry("One."));
+    slowFirst.enqueue(entry("Two."));
+    await clock.advance(32_000);
+    expect(slowFirst.view().failed).toBe(0);
+    expect(player.started).toEqual(["One.", "Two."]);
+  });
+});

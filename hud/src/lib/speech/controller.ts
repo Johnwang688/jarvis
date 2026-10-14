@@ -45,7 +45,15 @@ export interface ControllerDeps {
   voiceFor?: (thread: string) => string | null;
 }
 
+/** After the last chunk ends, speech still counts as active this long: the owner's own echo and the next chunk's lead-in. */
+export const HANGOVER_MS = 300;
+
 export interface SpeechView extends QueueView {
+  /**
+   * Speech is in progress for suppression: playing, or buffering between
+   * chunks, or within `HANGOVER_MS` of the last one ending. Not while paused.
+   */
+  active: boolean;
   /** Read-aloud is on (its own switch, not the mic's). */
   enabled: boolean;
   /** This window holds the speech lock. */
@@ -68,6 +76,9 @@ export class SpeechController {
   private cached: SpeechView | null = null;
   private unsubs: (() => void)[] = [];
   private wasSpeaker: boolean;
+  private wasLive = false;
+  private hang: unknown = null;
+  private idleListeners = new Set<() => void>();
 
   constructor(private readonly deps: ControllerDeps) {
     this.queue = new SpeechQueue({
@@ -75,7 +86,7 @@ export class SpeechController {
       player: deps.player,
       synth: (item, signal) =>
         deps.say(item.text, { voice: item.voice, signal }).then((bytes) => deps.player.decode(bytes)),
-      onChange: () => this.notify(),
+      onChange: () => { this.settle(); this.notify(); },
     });
     this.wasSpeaker = deps.gate.isSpeaker();
     this.unsubs.push(deps.gate.subscribe(() => this.gateChanged()));
@@ -88,10 +99,39 @@ export class SpeechController {
   view(): SpeechView {
     const q = this.queue.view();
     const speaker = this.deps.gate.isSpeaker();
+    const active = q.state === "playing" || q.state === "buffering" || this.hang !== null;
     const old = this.cached;
-    if (old && old.state === q.state && old.thread === q.thread && old.queued === q.queued && old.failed === q.failed
+    if (old && old.active === active && old.state === q.state && old.thread === q.thread && old.queued === q.queued && old.failed === q.failed
       && old.blocked === q.blocked && old.enabled === this.on && old.speaker === speaker) return old;
-    return (this.cached = { ...q, enabled: this.on, speaker });
+    return (this.cached = { ...q, active, enabled: this.on, speaker });
+  }
+
+  /** Called when speech goes idle (after the hangover): the follow-up window opens here. */
+  onIdle(cb: () => void): () => void {
+    this.idleListeners.add(cb);
+    return () => { this.idleListeners.delete(cb); };
+  }
+
+  /** The queue changed: keep the hangover that holds `active` just after the last chunk. */
+  private settle(): void {
+    const state = this.queue.view().state;
+    const live = state === "playing" || state === "buffering";
+    if (live) {
+      this.wasLive = true;
+      if (this.hang !== null) { this.deps.clock.clearTimeout(this.hang); this.hang = null; }
+    } else if (state === "idle" && this.wasLive && this.hang === null) {
+      this.wasLive = false;
+      this.hang = this.deps.clock.setTimeout(() => {
+        this.hang = null;
+        this.notify();
+        for (const cb of [...this.idleListeners]) {
+          try { cb(); } catch { /* a listener never breaks speech */ }
+        }
+      }, HANGOVER_MS);
+    } else if (state === "paused") {
+      this.wasLive = false;
+      if (this.hang !== null) { this.deps.clock.clearTimeout(this.hang); this.hang = null; }
+    }
   }
 
   subscribe(cb: () => void): () => void {
@@ -160,8 +200,12 @@ export class SpeechController {
   event(e: SpeechEventLike): void {
     const kind = e.kind;
     if (kind === "_connected" || kind === "_disconnected") {
-      // Text in flight cannot be finished after a gap; what is queued still plays.
-      this.open.clear();
+      // The sentence in flight cannot be finished after a gap (`ProseStream.gap`);
+      // what is queued still plays.
+      for (const [thread, s] of this.open) {
+        s.stream.gap();
+        if (!s.stream.open) this.open.delete(thread);
+      }
       return;
     }
     const thread = e.thread_id;
@@ -260,6 +304,9 @@ export class SpeechController {
   dispose(): void {
     for (const off of this.unsubs) off();
     this.unsubs = [];
+    if (this.hang !== null) this.deps.clock.clearTimeout(this.hang);
+    this.hang = null;
+    this.idleListeners.clear();
     this.clearAll();
     this.listeners.clear();
   }

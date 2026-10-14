@@ -34,6 +34,7 @@ export class ProseStream {
   private spoken = 0;
   private capped = false;
   private quiet = false;
+  private gapped = false;
 
   constructor(private readonly cap = SPOKEN_CAP_CHARS) {}
 
@@ -51,9 +52,23 @@ export class ProseStream {
     return this.quiet;
   }
 
+  /**
+   * The event stream dropped and came back. Deltas in the gap are lost, so the
+   * sentence in progress cannot be finished: it is forgotten at the next delta
+   * or at a close, but kept for the settled `text`, whose remainder after what
+   * already streamed is exactly what the gap swallowed (nothing is said twice).
+   */
+  gap(): void {
+    if (this.open) this.gapped = true;
+  }
+
   /** One `text_delta`: the chunks that just became settled. */
   feed(delta: string): SpokenChunk[] {
     if (this.quiet || !delta) return [];
+    if (this.gapped) {
+      this.gapped = false;
+      this.filter.discardLine();
+    }
     this.raw += delta;
     this.speech += this.filter.push(delta);
     return this.take(false);
@@ -66,6 +81,7 @@ export class ProseStream {
    * is spoken twice. The trailing "[cut off ...]" is never spoken.
    */
   settle(text: string): SpokenChunk[] {
+    this.gapped = false;   // the whole text is in hand: its remainder continues the line
     const body = (text || "").replace(CUT_OFF_TAIL, "");
     if (!this.quiet) {
       let rest = "";
@@ -83,9 +99,11 @@ export class ProseStream {
   close(): SpokenChunk[] {
     let out: SpokenChunk[] = [];
     if (!this.quiet) {
+      if (this.gapped) this.filter.discardLine();
       this.speech += this.filter.end();
       out = this.take(true);
     }
+    this.gapped = false;
     this.filter = new ProseFilter();
     this.raw = "";
     this.speech = "";

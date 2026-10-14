@@ -270,6 +270,20 @@ describe("failure and the controls", () => {
     expect(player.started.join(" ")).not.toContain("tail of the same");
   });
 
+  it("a message whose text arrives after a reconnect is not spoken twice", async () => {
+    const FIRST = "The first sentence was fully read out before the stream dropped. ";
+    const FULL = FIRST + "The rest of the reply arrived while it was down, in full.";
+    delta(FIRST + "The rest of the reply arr");
+    await clock.advance(3000);
+    c.event({ kind: "_disconnected" });
+    c.event({ kind: "_connected" });
+    settle(FULL);
+    await clock.advance(30_000);
+    const said = player.started.join(" ");
+    expect(said.split("The first sentence was fully read out").length - 1).toBe(1);
+    expect(said).toContain("arrived while it was down");
+  });
+
   it("a reconnect discards text that can no longer be finished", async () => {
     delta("Half a sentence that never finishe");
     c.event({ kind: "_disconnected" });

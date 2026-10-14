@@ -58,6 +58,8 @@ export interface Player {
   level(): number;
   /** The platform is holding audio back (an autoplay policy); the owner must interact. */
   blocked(): boolean;
+  /** How long `audio` lasts in ms, for the watchdog; unknown skips it. */
+  duration?(audio: unknown): number;
   /** Told when `blocked()` may have changed. */
   subscribeBlocked?(cb: () => void): () => void;
 }
@@ -68,7 +70,8 @@ export type PlayOrder = (live: readonly SpeechItem[]) => readonly SpeechItem[];
 
 export const fifo: PlayOrder = (live) => live;
 
-export type QueueState = "idle" | "playing" | "paused";
+/** `buffering`: items are live and the next is being made: speech has not ended, so nothing may flicker or listen. */
+export type QueueState = "idle" | "buffering" | "playing" | "paused";
 
 export interface QueueView {
   state: QueueState;
@@ -94,9 +97,11 @@ export interface QueueDeps {
 
 export const PREFETCH = 2;
 export const SYNTH_TIMEOUT_MS = 20_000;
+/** A sound that has not ended this long after its length is stopped and counted as failed. */
+export const WATCHDOG_MS = 2_000;
 const HISTORY = 40;
 
-type Slot = { item: SpeechItem; audio?: unknown; abort?: AbortController; timer?: unknown };
+type Slot = { item: SpeechItem; audio?: unknown; abort?: AbortController; timer?: unknown; watch?: unknown };
 
 export class SpeechQueue {
   private slots: Slot[] = [];
@@ -122,7 +127,7 @@ export class SpeechQueue {
 
   view(): QueueView {
     const live = this.live();
-    const state: QueueState = this.current ? "playing" : this.paused && live.length ? "paused" : "idle";
+    const state: QueueState = this.current ? "playing" : !live.length ? "idle" : this.paused ? "paused" : "buffering";
     const head = this.current?.slot.item ?? this.order(live)[0];
     const view: QueueView = {
       state,
@@ -170,6 +175,7 @@ export class SpeechQueue {
       // The sentence in hand restarts on resume (Q13): back to `ready`, audio kept.
       this.current = null;
       cur.slot.item.state = "ready";
+      this.unwatch(cur.slot);
       cur.handle.stop();
     }
     this.pump();
@@ -225,12 +231,36 @@ export class SpeechQueue {
     if (mark) slot.item.mark = mark;
     slot.abort?.abort();
     if (slot.timer !== undefined) this.deps.clock.clearTimeout(slot.timer);
+    this.unwatch(slot);
     slot.abort = undefined;
     slot.timer = undefined;
     slot.audio = undefined;
     this.slots = this.slots.filter((s) => s !== slot);
     this.history.push(slot.item);
     if (this.history.length > HISTORY) this.history.shift();
+  }
+
+  private unwatch(slot: Slot): void {
+    if (slot.watch !== undefined) this.deps.clock.clearTimeout(slot.watch);
+    slot.watch = undefined;
+  }
+
+  /** A sound that never ended: stop it and count it, so one stuck source cannot hold the queue (and the mic) forever. */
+  private watchdog(slot: Slot, ms: number): void {
+    slot.watch = undefined;
+    if (this.current?.slot !== slot) return;
+    // Waiting for the owner's first gesture is not a stuck source.
+    if (this.deps.player.blocked()) { this.arm(slot, ms); return; }
+    const { handle } = this.current;
+    this.current = null;
+    this.failed += 1;
+    this.retire(slot, "skipped", "play_failed");
+    handle.stop();
+    this.pump();
+  }
+
+  private arm(slot: Slot, ms: number): void {
+    slot.watch = this.deps.clock.setTimeout(() => this.watchdog(slot, ms), ms);
   }
 
   private finishWhere(match: (i: SpeechItem) => boolean, state: "skipped" | "dropped", mark: ItemMark): void {
@@ -276,6 +306,16 @@ export class SpeechQueue {
       this.synthesize(slotOf(item));
     }
 
+    // The synthesis deadline runs for the oldest request only: the daemon makes
+    // one at a time, so a younger one waits its turn and is not timed while it does.
+    const oldest = this.order(this.live()).find((i) => i.state === "synthesizing");
+    if (oldest) {
+      const slot = slotOf(oldest);
+      if (slot.timer === undefined) {
+        slot.timer = this.deps.clock.setTimeout(() => { slot.timer = undefined; this.synthFailed(slot, "tts_timeout"); }, this.timeout);
+      }
+    }
+
     // Playback: the head, once it is ready, and only when nothing plays.
     if (this.current || this.paused) return;
     const head = this.order(this.live())[0];
@@ -292,6 +332,8 @@ export class SpeechQueue {
     }
     head.state = "playing";
     this.current = { slot, handle };
+    const length = this.deps.player.duration?.(slot.audio);
+    if (typeof length === "number" && Number.isFinite(length)) this.arm(slot, length + WATCHDOG_MS);
     handle.done.then((how) => {
       if (this.current?.slot !== slot || how !== "ended") return;
       this.current = null;
@@ -306,18 +348,19 @@ export class SpeechQueue {
     });
   }
 
+  private synthFailed(slot: Slot, mark: ItemMark): void {
+    if (!this.slots.includes(slot) || slot.item.state !== "synthesizing") return;
+    this.failed += 1;
+    this.retire(slot, "skipped", mark);
+    this.pump();
+  }
+
   private synthesize(slot: Slot): void {
     const { item } = slot;
     item.state = "synthesizing";
     const abort = new AbortController();
     slot.abort = abort;
-    const fail = (mark: ItemMark) => {
-      if (!this.slots.includes(slot) || item.state !== "synthesizing") return;
-      this.failed += 1;
-      this.retire(slot, "skipped", mark);
-      this.pump();
-    };
-    slot.timer = this.deps.clock.setTimeout(() => { slot.timer = undefined; fail("tts_timeout"); }, this.timeout);
+    const fail = (mark: ItemMark) => this.synthFailed(slot, mark);
     let started: Promise<unknown>;
     try {
       started = Promise.resolve(this.deps.synth({ ...item }, abort.signal));

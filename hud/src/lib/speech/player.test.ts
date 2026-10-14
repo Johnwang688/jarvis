@@ -28,6 +28,8 @@ class FakeContext {
   createBufferSource() { const s = new FakeSource(); this.sources.push(s); return s as unknown as AudioBufferSourceNode; }
   async decodeAudioData(b: ArrayBuffer) { return { decoded: b.byteLength }; }
   addEventListener(_t: string, f: () => void) { this.listeners.push(f); }
+  removeEventListener(_t: string, f: () => void) { this.listeners = this.listeners.filter((x) => x !== f); }
+  listenerCount() { return this.listeners.length; }
   async resume() { this.resumed++; this.state = "running"; this.listeners.forEach((f) => f()); }
   async close() {}
 }
@@ -87,5 +89,21 @@ describe("WebAudioPlayer", () => {
     expect(player.blocked()).toBe(false);
     expect(told).toBeGreaterThan(0);
     expect(t.handlers.has("pointerdown")).toBe(false);   // the listener goes once it worked
+  });
+
+  it("reports a buffer's length in ms for the watchdog", () => {
+    const { player } = make();
+    expect(player.duration({ duration: 1.5 })).toBe(1500);
+    expect(Number.isFinite(player.duration({}))).toBe(false);
+  });
+
+  it("dispose removes the gesture and statechange listeners", async () => {
+    const { ctx, t, player } = make();
+    await player.decode(new ArrayBuffer(1));
+    expect(t.handlers.has("pointerdown")).toBe(true);
+    expect(ctx.listenerCount()).toBe(1);
+    player.dispose();
+    expect(t.handlers.has("pointerdown")).toBe(false);
+    expect(ctx.listenerCount()).toBe(0);
   });
 });

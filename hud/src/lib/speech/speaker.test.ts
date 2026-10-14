@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { SPEECH_LOCK, SpeakerGate, bindFocus, type LockManagerLike, type LockOptions } from "./speaker";
 
-/** Web Locks semantics for one origin: exclusive, `ifAvailable`, and `steal` (the holder's request rejects). */
+/** Web Locks semantics for one origin: exclusive, `ifAvailable`, `steal` (the holder's request rejects), and waiting with an abort signal. */
 class FakeLocks implements LockManagerLike {
   holder: { reject: (e: unknown) => void; resolve: () => void } | null = null;
   names: string[] = [];
+  private waiters: (() => void)[] = [];
 
   request(name: string, options: LockOptions, callback: (lock: unknown) => unknown): Promise<unknown> {
     this.names.push(name);
@@ -15,7 +16,10 @@ class FakeLocks implements LockManagerLike {
         try {
           await callback({ name });
         } finally {
-          if (this.holder === held) this.holder = null;
+          if (this.holder === held) {
+            this.holder = null;
+            this.waiters.shift()?.();
+          }
         }
         resolve(undefined);
       };
@@ -28,7 +32,13 @@ class FakeLocks implements LockManagerLike {
         void take();
         return;
       }
-      reject(new Error("would wait"));
+      // Wait for the holder to let go; the signal gives up the wait.
+      const go = () => { void take(); };
+      this.waiters.push(go);
+      options.signal?.addEventListener("abort", () => {
+        this.waiters = this.waiters.filter((w) => w !== go);
+        reject(new DOMException("aborted", "AbortError"));
+      });
     });
   }
 }
@@ -78,6 +88,36 @@ describe("one window speaks", () => {
     b.claim();
     await tick();
     expect(seen).toEqual([true, false]);
+  });
+
+  it("a window waiting for the floor gets it when the speaking window closes, with no focus event", async () => {
+    const locks = new FakeLocks();
+    const a = new SpeakerGate(locks);
+    const b = new SpeakerGate(locks);
+    a.claim();
+    await tick();
+    b.offer();
+    await tick();
+    expect(b.isSpeaker()).toBe(false);
+    a.dispose();
+    await tick();
+    expect(b.isSpeaker()).toBe(true);
+  });
+
+  it("a waiting window that is then focused takes the floor at once, and the wait does not leak it back", async () => {
+    const locks = new FakeLocks();
+    const a = new SpeakerGate(locks);
+    const b = new SpeakerGate(locks);
+    a.claim();
+    await tick();
+    b.offer();
+    await tick();
+    b.claim();
+    await tick();
+    expect([a.isSpeaker(), b.isSpeaker()]).toEqual([false, true]);
+    b.dispose();
+    await tick();
+    expect(b.isSpeaker()).toBe(false);
   });
 
   it("a window that closes gives the floor back for the next to take", async () => {

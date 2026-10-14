@@ -82,12 +82,15 @@ export class FakePlayer implements Player {
       this.clock.clearTimeout(timer);
       finish(how);
     };
-    const timer = this.clock.setTimeout(() => end("ended"), a.ms);
+    const timer = this.clock.setTimeout(() => end("ended"), this.stuck ? 1e12 : a.ms);
     return { done, stop: () => end("stopped") };
   }
 
   level() { return this.lastLevel; }
   blocked() { return this.isBlocked; }
+  /** `stuck`: a source that never ends by itself (a wedged audio device). */
+  stuck = false;
+  duration(audio: unknown) { return (audio as FakeAudio).ms; }
 }
 
 export class FakeSynth {

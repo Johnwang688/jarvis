@@ -21,6 +21,8 @@ export class WebAudioPlayer implements Player {
   private analyser: AnalyserNode | null = null;
   private samples: Float32Array<ArrayBuffer> | null = null;
   private gestureBound = false;
+  private wake: (() => void) | null = null;
+  private onState: (() => void) | null = null;
   private onBlocked = new Set<() => void>();
 
   constructor(
@@ -45,7 +47,8 @@ export class WebAudioPlayer implements Player {
       } catch {
         this.analyser = null;
       }
-      ctx.addEventListener?.("statechange", () => this.changed());
+      this.onState = () => this.changed();
+      ctx.addEventListener?.("statechange", this.onState);
       this.bindGesture();
     }
     return this.ctx;
@@ -59,12 +62,16 @@ export class WebAudioPlayer implements Player {
     const target = this.target;
     const wake = () => {
       void ctx.resume().catch(() => {});
-      if (ctx.state === "running") {
-        for (const g of GESTURES) target.removeEventListener(g, wake, true);
-        this.gestureBound = false;
-      }
+      if (ctx.state === "running") this.unbindGesture();
     };
+    this.wake = wake;
     for (const g of GESTURES) target.addEventListener(g, wake, true);
+  }
+
+  private unbindGesture(): void {
+    if (this.wake && this.target) for (const g of GESTURES) this.target.removeEventListener(g, this.wake, true);
+    this.wake = null;
+    this.gestureBound = false;
   }
 
   private changed(): void {
@@ -109,6 +116,11 @@ export class WebAudioPlayer implements Player {
     };
   }
 
+  /** How long a decoded buffer lasts, in ms (the queue's watchdog). */
+  duration(audio: unknown): number {
+    return ((audio as AudioBuffer | null)?.duration ?? NaN) * 1000;
+  }
+
   /** 0..1, from the analyser; 0 when nothing is sounding. */
   level(): number {
     const { analyser, samples } = this;
@@ -125,6 +137,9 @@ export class WebAudioPlayer implements Player {
 
   dispose(): void {
     const ctx = this.ctx;
+    this.unbindGesture();
+    if (ctx && this.onState) ctx.removeEventListener?.("statechange", this.onState);
+    this.onState = null;
     this.ctx = null;
     this.analyser = null;
     this.onBlocked.clear();

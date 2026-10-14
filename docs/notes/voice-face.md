@@ -827,3 +827,7 @@ While a chunk plays the capture detector stays suppressed, as v1 did (self-voice
 gating is V9). Not done: multi-pane shared queue and per-thread voices (V7),
 summaries (V8), barge-in and spoken commands (V9), the follow-up window opening
 when speech ends (V3/V5), and any physical speaker or Windows-audio acceptance.
+
+The v1 mute flag (`voicectl`, `POST /mute`) and the `set_voice_mute` tool no longer
+affect read-aloud: the HUD's read-aloud switch (Settings → Voice) and the speech
+strip are its only controls, and the mic's OFF touches neither.
