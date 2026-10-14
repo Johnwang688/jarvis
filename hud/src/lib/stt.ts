@@ -99,9 +99,12 @@ export type SttEvent =
   | { kind: "empty" }
   | { kind: "blocked"; message: string };
 
+/** What the daemon says about a transcript (V13): the text and which backend heard it. */
+export interface SttReply { text: string; backend?: unknown; /** Present when local was meant to serve the clip and did not. */ fellBack?: boolean }
+
 export interface SttOptions<M> {
   /** `budgetMs` is this attempt's whole client deadline: the daemon fits its model chain inside it. */
-  transcribe: (blob: Blob, o: { signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number }) => Promise<string>;
+  transcribe: (blob: Blob, o: { signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number }) => Promise<string | SttReply>;
   /** Called in `seq` order with every text that is ready to be placed. */
   place: (batch: SttPlaced<M>[]) => void | Promise<void>;
   diagnostics: VoiceDiagnostics;
@@ -385,10 +388,12 @@ export class SttAssembler<M = undefined> {
     expired.catch(() => {}); cancelled.catch(() => {});
     this.emit();
     this.event({ kind: "busy", pending: this.value.pending });
-    let text = "";
+    let text: unknown = "";
     let failure: unknown = null;
+    let served: SttReply | null = null;
     try {
-      text = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: g?.uid ?? e.id, seq: e.seq, budgetMs: deadline }), expired, cancelled]);
+      const reply = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: g?.uid ?? e.id, seq: e.seq, budgetMs: deadline }), expired, cancelled]);
+      if (reply && typeof reply === "object") { served = reply; text = reply.text; } else text = reply;
     } catch (error) { failure = error ?? new Error("transcription failed"); }
     clearTimeout(timer);
     e.cancel = null;
@@ -409,6 +414,7 @@ export class SttAssembler<M = undefined> {
       this.fail(e, describe(failure, deadline));
       return;
     }
+    if (served) this.o.diagnostics.served(e.diag, served.backend, served.fellBack === true);
     // A blank text is a normal answer for a chunk of mostly silence: it is
     // settled with the rest of its message (release).
     e.text = typeof text === "string" ? text : "";

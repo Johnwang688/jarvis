@@ -6,7 +6,8 @@ export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_c
 export type MicCapability = "unknown" | "available" | "unavailable";
 /** How the microphone reaches the capture (V4): the AudioWorklet, or the older ScriptProcessor fallback. */
 export type CapturePathName = "unknown" | "worklet" | "script_processor";
-export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; }
+export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
+export type SttBackend = "local" | "cloud";
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
 const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
@@ -64,6 +65,14 @@ export class VoiceDiagnostics {
     const row = this.rows.find(x => x.id === id);
     if (!row) return;
     this.rows = this.rows.map(x => x.id === id ? { ...x, ms: bounded(x.ms + ms, 900_000) } : x);
+    this.publish();
+  }
+  /** V13: which backend served the clip. Anything but "local"/"cloud" is ignored. */
+  served(id: number, backend: unknown, fellBack = false) {
+    if (backend !== "local" && backend !== "cloud") return;
+    const row = this.rows.find(x => x.id === id);
+    if (!row) return;
+    this.rows = this.rows.map(x => x.id === id ? { ...x, backend, fellBack: fellBack === true } : x);
     this.publish();
   }
   /** An explicit Retry: the row is in flight again, so it can settle again. */

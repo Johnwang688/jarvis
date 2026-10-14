@@ -1526,6 +1526,15 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .vexchain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--bg-2); border: 1px solid var(--accent-line); border-radius: var(--radius); padding: 6px 10px; color: var(--text); }
 .vexinfo { font: 12px var(--mono); background: var(--bg-inset); padding: 6px 8px; border-radius: 4px; white-space: pre-wrap; margin: 0; max-height: calc(30vh / var(--ui-zoom, 1)); overflow: auto; }
 .small.ok { color: var(--green); }
+.vexusb.ok { color: var(--green); }
+.vexusb.bad { color: var(--red); }
+.vexusb.stale { opacity: 0.6; }
+.vexprogress { display: flex; align-items: center; gap: 8px; max-width: 360px; }
+.vexprogress-track { flex: 1 1 auto; height: 7px; overflow: hidden; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 3px; }
+.vexprogress-fill { display: block; height: 100%; background: var(--accent); transition: width 0.3s linear; }
+.vexprogress-fill.ok { background: var(--green); }
+.vexprogress-pct { flex: none; width: 36px; text-align: right; font: 11px var(--mono); color: var(--text-2); }
+@media (prefers-reduced-motion: reduce) { .vexprogress-fill { transition: none; } }
 
 /* ED-8: the editor settings — the File pane's ⚙, its dialog, and vim's status
    line (its mode and the `:` command line, which monaco-vim draws as text and
@@ -1681,6 +1690,15 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .voice-diagnostics p { color: var(--text-muted); font-size: 11px; }
 .voice-diagnostic-rows { padding: 0; list-style: none; max-height: 250px; overflow: auto; font: 11px var(--mono); }
 .voice-diagnostic-rows li { border-top: 1px solid var(--border); padding: 6px 0; overflow-wrap: anywhere; }
+
+/* V13: where speech-to-text runs. */
+.stt-settings { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
+.stt-settings h3 { font-size: 12px; }
+.stt-settings p { font-size: 11px; }
+.stt-backends { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.stt-backends label { display: block; }
+.stt-backends input[type="radio"] { width: auto; padding: 0; margin: 0 4px 0 0; accent-color: var(--accent); vertical-align: middle; }
+.stt-fallback { display: block; margin-top: 8px; }
 
 /* V2: a clip that could not be transcribed, kept for Retry. */
 .stt-retry-row { display: flex; flex-direction: column; gap: 6px; }

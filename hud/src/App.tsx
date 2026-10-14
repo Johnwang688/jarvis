@@ -79,6 +79,9 @@ import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { DuckBrowserSetting, ReadAloudSetting } from "./components/ReadAloud";
+import { SttSettingsPanel } from "./components/SttSettings";
+import { sttSettingsStore, wakeRecognizerAllowed, STT_BACKSTOP_MS, STT_UNKNOWN_RETRY_MS } from "./state/sttSettings";
+import { parseSttSettings } from "./lib/sttSettings";
 import { createSpeech, saveDuckBrowser, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
@@ -1304,6 +1307,11 @@ export default function App() {
       if (devservers.event(e)) return;
       if (kind === "_connected") { devservers.connect(); void speech.voices.load(); }
       if (kind === "thread_voice") speech.voices.apply(data);
+      // V13: another window (or a hand edit the daemon noticed) changed the speech-to-text
+      // switches. Every window applies it at once: Chrome's wake recognizer must stop
+      // streaming to Google as soon as the cloud is switched off, in whichever window it runs.
+      if (kind === "stt_settings") sttSettingsStore.apply(parseSttSettings(data));
+      if (kind === "_connected") void sttSettingsStore.refresh();
       if (kind === "_disconnected") { devservers.disconnect(); return; }
       const at = live.current;
       // Per pane (lib/chats `routeEvent`). Mine: the panes showing the thread
@@ -2681,9 +2689,27 @@ export default function App() {
 
   // ---- wake word ----------------------------------------------------------
 
+  // V13: Chrome's recognizer streams the microphone to Google. With "Cloud
+  // fallback" off (or not yet known) it never starts, so wake-by-voice is off
+  // until local wake detection (V11); the talk key still works.
+  const sttConfig = useSyncExternalStore(sttSettingsStore.subscribe, sttSettingsStore.snapshot);
+  const wakeAllowed = wakeRecognizerAllowed(sttConfig);
+  useEffect(() => {
+    void sttSettingsStore.refresh();
+    // The daemon's `stt_settings` event is how a change reaches this window; these are the
+    // backstops: when the window becomes visible, every minute, and every 15 s while unknown
+    // (a daemon that was not up yet).
+    const again = () => { if (document.visibilityState !== "hidden") void sttSettingsStore.refresh(); };
+    document.addEventListener("visibilitychange", again);
+    const backstop = setInterval(() => void sttSettingsStore.refresh(), STT_BACKSTOP_MS);
+    const unknown = setInterval(() => { if (sttSettingsStore.snapshot() === null) void sttSettingsStore.refresh(); }, STT_UNKNOWN_RETRY_MS);
+    return () => { document.removeEventListener("visibilitychange", again); clearInterval(backstop); clearInterval(unknown); };
+  }, []);
+
   useEffect(() => {
     const SR: any = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) return;
+    if (!wakeAllowed) return; // no upload allowed: Chrome's cloud recognizer stays off
     if (isMuted(state.dictation)) return; // a muted mic stops the recognizer outright
     if (crashed) return; // so does a window that stopped drawing
     const gate = new WakeGate();
@@ -2736,7 +2762,7 @@ export default function App() {
       delete (window as any).__hudRecog;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dictation, crashed]);
+  }, [state.dictation, crashed, wakeAllowed]);
 
   const onWakeHit = useCallback(() => {
     if (crashedRef.current) return;
@@ -4101,7 +4127,7 @@ export default function App() {
               /><ReadAloudSetting on={speechView.enabled}
                 onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />
               <DuckBrowserSetting on={duckBrowser}
-                onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
+                onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

@@ -557,9 +557,13 @@ def _voice_checks(page, mock, check, until):
     check("AUTO sends the utterance to the selected chat's thread",
           bool(sent) and sent[-1].get("text") == "what is the weather" and sent[-1].get("spoken") is True, str(sent))
     check("and nothing to the other pane's", len(_sent(mock, "t1")) == s1)
+    # The AUTO message armed a 6 s continuation window on the live mic. The
+    # fake capture device is real audio the script did not write (its beeps),
+    # so ambient sound could claim that window and put the orb on "listening".
+    page.evaluate("window.__hud.capture.closeContinuation()")
     _dictation(page, "review")
     until(lambda: _chat(page, 2)["busy"], timeout=3)
-    check("the orb now shows the selected chat's own turn", bool(until(lambda: orb() == "thinking", timeout=2)),
+    check("the orb now shows the selected chat's own turn",bool(until(lambda: orb() == "thinking", timeout=2)),
           str(orb()))
     stt = len(mock.sent("POST", "/stt"))
     page.evaluate(UTTERANCE)
