@@ -8,9 +8,10 @@ merging or deploying. It is not a new authorization to expand product scope.
 
 At the initial checkpoint the current Codex team reserved four packages:
 `B-UI`, `B-DR`, `B-SOUND` and `B-CLASSIFIER`. **All four are now INSTALLED.**
-The next Browser batch is **TAKEN by the Codex lead**: `B-NATIVE`, `B-AUTH` and
-`B-FIND`. Other unclaimed packages remain available. A saved draft alone is not
-an active claim.
+In the next Browser batch, `B-AUTH` and `B-FIND` are **INSTALLED**, as is the
+urgent `VEX-DOWNLOAD` fix. `B-NATIVE` is now **INSTALLED** after its reviewed
+native acceptance and guarded deployment. Other unclaimed packages remain available.
+A saved draft alone is not an active claim.
 
 **Voice packages owned by the Claude team (2026-10-13):** all of V0–V15. `V0`, `V3`, `V7` merged; `V2`, `V6` installed; the rest TAKEN.
 Slot1 is reserved for that team under the shared limit below.
@@ -71,8 +72,8 @@ A documentation-only merge does not need a daemon restart.
   independent source reviews; GitGuardian passed. Cursor automated reviewers did **not** run because of
   quota/on-demand limits; their neutral checks are not review passes.
 - Guarded **fast-path** driving and owner sound controls are installed.
-  Native Claude/Codex driving was not part of that installed batch; it is now
-  **B-NATIVE TAKEN** in the next batch below. Physical speaker
+  Native Claude/Codex driving was not part of that installed batch; its later
+  **B-NATIVE installation** is recorded in the next batch below. Physical speaker
   audibility and mic echo are **UNMEASURED**; V15 speech/Browser coordination
   remains pending. Installation does not establish real-account/device acceptance.
 - At this Browser release, slots 2 and 3 were released. **Current reservations
@@ -114,7 +115,8 @@ current main and deliberately ports reviewed draft work.
 
 - **B-NATIVE** — `browser_native`, branch `codex/browser-native-v2`, worktree
   `browser-native-v2`: Claude/Codex parent driving through the installed shared
-  gate. No child/task/off-desk driving or change to existing authority/budgets.
+  gate. **Installed; implementation reservation complete.** No child/task/off-desk
+  driving or change to existing authority/budgets.
 - **B-AUTH** — `browser_auth`, branch `codex/browser-auth-v2`, worktree
   `browser-auth-v2`: owner Basic/Digest challenges, including first protected
   navigation, exact request identity, bounded waits and credential privacy.
@@ -122,15 +124,56 @@ current main and deliberately ports reviewed draft work.
   `browser-find-v2`: top-document find, owner context menu and finite cursors.
   Native picker fallbacks and real Windows IME acceptance are not included.
 
-Current validation snapshot: the isolated combined worktree includes main `5fb1f7e`
-and all three Browser implementations. Its build and **2,179 HUD unit tests in
-139 files passed**. The full HUD and backend release sweeps are still pending;
-these PRs are drafts and none of this batch is installed. Original failed fixture
-receipts are preserved alongside reviewed corrections.
+Current validation snapshot: the isolated combined worktree passed its build,
+**2,179 HUD unit tests in 139 files** and **3,222 full HUD checks**. The initial
+137-suite backend sweep passed 134; two fixture failures and one Find navigation
+interaction were corrected. All 14 affected suites then passed on combined head
+`ac8bdedec0c824971d763f26a2f879f2055cbbfb`, with unchanged source manifests and an
+inactive, empty memory-limited test scope. Original failures remain preserved.
+Independent source reviews passed. Auth #150 merged at `3b1205ae`; Find #151
+merged at `dd210803`. Both are installed; Native [#149](https://github.com/Johnwang688/jarvis/pull/149)
+subsequently passed its supported native CLI/HUD lifecycle gates and merged from
+reviewed head `20eb04bf45e121ae88ff796d2a3c905e4c6c46cb` at
+`11b7db8cd7475c8e0d8b51646100e068bd698b75`.
 
-B-NATIVE can progress alongside B-AUTH. B-FIND develops isolated helpers/UI in
-parallel, then integrates B-AUTH's accepted navigation/attention/socket changes
-before its final freeze. Shared `host.py`, `stream.py`, `RemoteView` and Browser
+Verified Native installation: source `11b7db8cd7475c8e0d8b51646100e068bd698b75`,
+served HUD build `20261014T052420758225Z-2350d3b4a8b1`. Normal guarded
+rebuild/restart exited 0 in 14.611 seconds under a 3 GiB / zero-swap scope;
+Claude/Codex/fast health was OK, with zero running turns and pending approvals.
+Primary HEAD, tracked cleanliness and owner-untracked metadata were unchanged;
+the exact build scope ended inactive and empty. Local receipt:
+`/home/johnw/.cache/jarvis-lead/codex-oct13/batch2-native-install-8a9f96bf1fa14199b88f47614ed2db27.json`.
+Eleven current-main regression suites passed; the original stale callback-name
+dispatch-audit failure and its separate corrected pass remain retained. See the
+[measured Native acceptance](2026-10-13-browser-native-offline-cli.md) for supported
+CLI/HUD profiles and composed evidence. Codex Chat Stop requires a fresh chat;
+Claude's literal live child Act-hook observation remains UNRUN. Subscription
+account authentication, paid-model judgment and physical/device acceptance are
+not established by this deployment.
+
+Verified installed release: Auth [#150](https://github.com/Johnwang688/jarvis/pull/150),
+Find [#151](https://github.com/Johnwang688/jarvis/pull/151) and VEX
+[#158](https://github.com/Johnwang688/jarvis/pull/158) are included in source
+`f26848d1cf0186423754e7b2d139fd030bff7f42`, served HUD build
+`20261014T043013447556Z-2350d3b4a8b1`. The normal guarded rebuild/restart exited 0;
+Claude/Codex/fast health was OK, with zero turns and zero approvals, and primary
+owner untracked files unchanged. The pinned-main smoke passed the build, 50 VEX
+units, nine feedback/narrow HUD checks, dispatch-toolset checks and nine auth-state
+tests; source stayed unchanged and every test scope was inactive and empty.
+Real VEX tools/devices and robot Download remain **UNRUN**; USB-only indicators
+do not establish radio pairing or extension-host health. Browser real-account
+and physical sound acceptance are not implied by this installation.
+
+GitGuardian's advisory failures on Auth/Find were independently adjudicated as
+three historical synthetic authentication fixtures. Dummy values were clarified
+without changing test inputs. The check remains recorded as failed; no scanner
+suppression, history rewrite or admin bypass was used. See #150 for exact paths
+and introducing commits.
+
+B-NATIVE implementation and its reservation are complete. B-FIND developed
+isolated helpers/UI in parallel, then integrated B-AUTH's accepted
+navigation/attention/socket changes before its final freeze. Shared `host.py`,
+`stream.py`, `RemoteView` and Browser
 state changes must preserve the installed sound activity/restart and capture
 identity contracts. Each feature publishes its proposed interface before shared
 integration. The lead serializes merges/deployments; independent reviews,
@@ -138,10 +181,10 @@ meaningful boundary tests and current-main integration precede each merge.
 Voice V3/V7/V8 and their App/capture/speech work remain with the Claude team;
 this batch does not claim voice work or native subagent visibility.
 
-**Test slots:** slot 1 remains reserved for the Claude voice team. Codex reserves
-slot 2 for B-NATIVE and slot 3 shared sequentially by B-AUTH/B-FIND. A reservation
-is not a running job: the lead grants each heavy run after a memory check.
-At most three heavy test/build jobs globally, each capped at 3 GiB and no swap;
+**Test slots:** slot 1 remains reserved for the Claude voice team. Codex slots
+2 and 3 are released: all Codex heavy jobs and installation are complete. Future
+heavy work requires a new coordinating-lead grant after a memory check.
+At most five heavy test/build jobs globally (raised from three on 2026-10-14, after WSL went from about 15 GB to 22 GB at the owner's request), each capped at 3 GiB and no swap;
 start only with at least 4 GiB available. Native/provider probes need a concrete
 reviewed plan; completed paid-probe exceptions are not reused. Physical/account
 acceptance remains separately identified, never inferred from synthetic tests.
@@ -150,9 +193,9 @@ acceptance remains separately identified, never inferred from synthetic tests.
 
 | ID | Feature | Status / owner | Dependencies / definition of done |
 |---|---|---|---|
-| B-NATIVE (BR-9d, BD-a/b/c) | Claude and Codex parent chats drive through the same Browser gate | **TAKEN — Codex lead / `browser_native`; draft [#149](https://github.com/Johnwang688/jarvis/pull/149)** | `codex/browser-native-v2` / `browser-native-v2`. Source review and 248 focused backend checks passed; exact installed Codex parent identity/admission and real MCP call passed against an isolated scripted provider. Both installed CLIs survived a 115.000-second private-card wait and returned the exact result in the next scripted provider request. Actual native lifecycle/child checks and combined release gates remain pending. No paid model, real-account or installed-release claim. [Native plan](2026-10-13-browser-driving-claude-codex.md). |
-| B-AUTH (BR-7) | HTTP Basic/Digest owner challenge form over the existing authenticated tab socket | **TAKEN — Codex lead / `browser_auth`; draft [#150](https://github.com/Johnwang688/jarvis/pull/150)** | `codex/browser-auth-v2` / `browser-auth-v2`, reviewed head `3b1f76d`. First protected navigation, delayed reply/original expiry, Digest, stale socket/nonce, restore, privacy and cleanup passed focused tests; 62 auth/Sound checks, nine native cases and 14 actual HUD assertions passed; five guard mutants were killed. Same-origin iframe prompts measured; in the installed-Chrome probe the first protected popup prompted only after explicit Reload, and separate OOPIF prompt delivery was absent in the bounded probe. Protected Sound restoration remains fail-closed with Retry. Combined sweep, security-check resolution, guarded merge and deployment pending. |
-| B-FIND (BR-7) | Find-in-page, bounded owner context menu, finite cursor shapes | **TAKEN — Codex lead / `browser_find`; draft [#151](https://github.com/Johnwang688/jarvis/pull/151)** | `codex/browser-find-v2` / `browser-find-v2`, stacked on #150. Fixed top-document search, five owner menu actions, finite cursor feedback and exact document/socket/hold guards implemented and independently reviewed. Focused backend/HUD, real Chrome, five guard mutants and 22 actual owner HUD assertions passed; fixture reliability follow-up, security-check resolution and combined release sweep pending. Native layout preemption remains unproven. No native picker/IME expansion. |
+| B-NATIVE (BR-9d, BD-a/b/c) | Claude and Codex parent chats drive through the same Browser gate | **INSTALLED — [#149](https://github.com/Johnwang688/jarvis/pull/149); Codex lead / `browser_native`; verified release above** | Reviewed head `20eb04bf` merged at `11b7db8c`; original reservation complete. Actual CLI + real HUD guarded action/resume passed for Claude ASK/AUTO and Codex AUTO; Codex ASK is unsupported by production policy. Both CLIs passed 115-second scripted private-card transport, actual sensitive HUD cards, pane Stop/Resume and production Chat Stop via `Daemon.interrupt` while real CDP typing settled. Codex Chat Stop requires a fresh chat; same-chat continuation remains refused. Actual Codex child host denial passed; Claude 2.1.295 child catalog omission plus separate Driving-ON hook guard/mutant are distinct evidence, with literal live child Act-hook observation UNRUN. Eleven current-main regression suites and the separate corrected dispatch audit passed; original failures retained. Subscription/account authentication, paid-model judgment and physical-device acceptance remain UNRUN. [Native plan](2026-10-13-browser-driving-claude-codex.md). |
+| B-AUTH (BR-7) | HTTP Basic/Digest owner challenge form over the existing authenticated tab socket | **INSTALLED — [#150](https://github.com/Johnwang688/jarvis/pull/150); Codex lead / `browser_auth`; verified build above** | Exact reviewed head `70460c2` merged at `3b1205ae`. First protected navigation, delayed reply/original expiry, Digest, stale identity, restore, privacy and cleanup passed focused checks; 62 auth/Sound checks, nine native cases, 14 actual HUD assertions and five guard mutants passed. Combined release correction gates passed as described above. Same-origin iframe prompts measured; first protected popup required explicit Reload, and separate OOPIF prompt delivery was absent in the bounded probe. Protected Sound restoration remains fail-closed with Retry. No real-account acceptance claim. |
+| B-FIND (BR-7) | Find-in-page, bounded owner context menu, finite cursor shapes | **INSTALLED — [#151](https://github.com/Johnwang688/jarvis/pull/151); Codex lead / `browser_find`; verified build above** | Exact reviewed head `5e638ea` merged at `dd210803` after #150. Fixed top-document search, five owner menu actions, finite cursors and exact document/socket/hold guards passed independent review. Final focused evidence: 70 backend checks, 19 real driving cases, real Chrome owner tools, 22 actual owner HUD assertions and seven intended guard mutants; all 14 combined correction suites passed. Navigation discards stale document input without adding an approval hold. Native layout preemption remains unproven; native picker/IME expansion excluded. |
 | B-PICKERS (BR-7/M9) | Owner select/date/color fallback; assess datalist separately | **VERIFY — unclaimed** | Chrome 155 select/date/color popups were absent from screencast; datalist opening was not proven. Refine and review exact-element fallback design before implementation. Preserve input/change revalidation, bounds, focus, native-control privacy and stale-element refusal. Shared host/RemoteView integration waits for active Browser packages. |
 | B-IME (BR-7) | Finish real owner IME/composition acceptance | **VERIFY — unclaimed** | Composition transport exists in Remote UI; do not rebuild it blindly. Audit existing coverage, then validate real Windows composition and cancellation across holds/reconnects. Implement only demonstrated gaps. |
 | B-DIRECT-CAPTURE (BR-4/M6) | Direct iframe capture in installed app mode | **VERIFY — unclaimed** | Remote capture/annotation is installed. Direct currently offers explicit “Open in Remote” fallback. Requires actual Windows app-mode getDisplayMedia/CropTarget prompt and pixel evidence before enabling a Direct capture path. |
@@ -239,22 +282,23 @@ PR #125 itself adds plans, not the features those plans describe.
 | QA-LOAD | Remaining load-sensitive tests and reliable sweep reporting | **READY — unclaimed.** Reproduce unchanged VEX/terminal throughput bounds; retain performance assertions and distinguish regression from scheduler noise. Preserve per-suite output and real exit codes: an old lead wrapper could exit0 with failed suites. Audit old quota flake against current waits before editing. |
 | GIT-LIVE | Positive end-to-end native Git flow under the final approval policy | **VERIFY — unclaimed.** Local worktree/edit/commit and denied/resumed pushes were checked. Use a disposable authorized repo/branch and actual owner approval for the final positive flow; do not reuse old fixture-helper evidence as native proof. |
 | HUD-FOLLOWUPS | Reconcile the checkpoint's old `hud-open-followups` list | **VERIFY — unclaimed.** Most named input/draft/editor issues already merged above; recover the original list and close by evidence before making new edits. |
-| VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **TAKEN — Codex lead / `browser_auth`; urgent owner request.** Branch `codex/vex-download-device-status`, worktree `vex-download-device-status`. Reuse the guarded owner-click download and one-device reservation; distinguish disconnected from failed/unknown device reads. Read-only diagnosis precedes changes; independent review and fake-tool/device tests precede merge. No real robot operation is part of validation. |
+| VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **INSTALLED — [#158](https://github.com/Johnwang688/jarvis/pull/158); Codex lead / `browser_auth`; verified build above.** Branch `codex/vex-download-device-status`, runtime `70dfd6c`, [contract/verified gates](2026-10-13-vex-download-device-status.md). Stable actual-PTY Download output/final records; shared source-verified USB-only Brain/Controller checks with unknown/busy/stale preservation and bounded timestamped history. PASS: 38 focused Python, 50 targeted HUD units, production build, 49 selected actual-HUD checks, 9 feedback/narrow checks and 7 Build/Clean output regressions. Merged at `f26848d1` and installed by the normal guarded rebuild/restart above. Real VEX tools/devices and robot Download acceptance **UNRUN**; no radio-link or extension-host health claim. |
 | VEX-UI | Broad VEX view redesign | **DEFERRED.** The urgent Clean/Build fix is installed. The narrow bug request does not itself expand into a full redesign or authorize real robot operations. |
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 
 Good starting points for another team, after claiming: **SV-0** or **QA-LOAD**
 (Claude voice ownership/status is recorded in the individual rows above).
-B-NATIVE, B-AUTH and B-FIND are reserved by Codex; choose other unclaimed
-packages or coordinate a handoff with the named lead.
+B-NATIVE, B-AUTH and B-FIND are installed; their implementation reservations are complete. Choose
+other unclaimed packages or coordinate a handoff with the named lead.
 
 ## Shared test, review and release contract
 
-- WSL has about **15GB RAM**. **At most three heavy HUD/browser test jobs in total
-  across all teams**, never three per team. Slot 1 is reserved for the Claude
-  voice team; slot 2 is Codex B-NATIVE and slot 3 is Codex B-AUTH/B-FIND
-  sequentially, with per-job lead admission. Claim any future heavy job
-  with the coordinating lead using the current registry before launch;
+- WSL has about **22GB RAM** (since 2026-10-14; it was about 15 GB). **At most five heavy HUD/browser test
+  jobs in total across all teams**, never five per team. The 4 GiB available floor still applies;
+  drop back to three if WSL comes under memory pressure. Slot 1 is reserved for the Claude
+  voice team; Codex slots 2 and 3 are released after completed testing and
+  installation. Claim any future heavy job with the coordinating lead using
+  the current registry and obtain a per-job grant before launch;
   availability changes. Builds and full sweeps count as heavy jobs.
 - Use `systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0` and monitor
   memory; start only with at least4GiB available. Reduce concurrency if pressure

@@ -3,7 +3,7 @@ import {
   BUILD_FIRST_CODE, BUILD_FIRST_STEPS, DOWNLOAD_NAME, DeviceLedger, SETUP_COMMAND, buildLine, chainCancellable, chainLine,
   stillStale,
   defaultName, downloadLabel, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
-  parseStatus, setupNote, slotRefusal, type BuildError, type BuildView,
+  parseStatus, parseDownload, parseConnection, setupNote, slotRefusal, type BuildError, type BuildView,
 } from "./vex";
 
 const err = (over: Partial<BuildError> = {}): BuildError => ({
@@ -250,5 +250,24 @@ describe("last builds across a reload", () => {
     expect(parseLastBuilds(JSON.stringify({ p3: "0a1b2c3d", p4: "bad", "": "0a1b2c3d" }))).toEqual({ p3: "0a1b2c3d" });
     expect(parseLastBuilds("not json")).toEqual({});
     expect(parseLastBuilds(null)).toEqual({});
+  });
+});
+
+describe("bounded VEX feedback records", () => {
+  it("parses Download outcomes without inferring success from an exit code", () => {
+    const d = {id: "a0000001", project_id: "p3", slot: 3, state: "running", terminal_id: "b0000001",
+      exit_code: 0, output: "x".repeat(20000), started: "", ended: null};
+    expect(parseDownload(d)?.state).toBe("running");
+    expect(parseDownload(d)?.output.length).toBe(16384);
+    expect(parseDownload({...d, slot: 9})).toBeNull();
+    expect(parseDownload({...d, state: "done"})).toBeNull();
+  });
+  it("USB unknown is distinct from disconnected and history has a strict bound", () => {
+    const c = {brain: null, controller: false, state: "busy", checked_at: null, message: "busy", events: []};
+    expect(parseConnection(c)?.brain).toBeNull();
+    expect(parseConnection(c)?.controller).toBe(false);
+    expect(parseConnection({...c, brain: 0})).toBeNull();
+    expect(parseConnection({...c, events: new Array(33).fill({device: "brain", connected: false, at: ""})})).toBeNull();
+    expect(parseConnection({...c, events: [{device: "radio", connected: true, at: ""}]})).toBeNull();
   });
 });

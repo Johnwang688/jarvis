@@ -9,6 +9,33 @@ conflicts using the latest explicit owner decision and current implementation.
 Paths in preserved prose are repository-relative. Source labels refer to the
 original file. Keep payloads verbatim; later notes belong outside the markers.
 
+## Download feedback and USB diagnostics (2026-10-13)
+
+The additive Download record (`download_id`, owner `GET /vex/downloads/{id}`)
+keeps live/final plain-text output and actual PTY completion independently of
+terminal-list timing. The HUD shows elapsed progress, terminal access and inline
+output, retains the final result, and labels lost status unknown. Status reads
+never resend a Download; the trusted pointer/card/chain and build/device locks
+remain authoritative.
+
+The fixed read-only `--usb` exception is source-verified from the vendor's
+distributed readable extension JavaScript, not executable decompilation or a
+guessed fake schema: [contract and SHA-256 evidence](../plans/2026-10-13-vex-download-device-status.md).
+Shared visible-window demand uses the same fingerprint/PTY/device reservation,
+5-second minimum spacing, bounded error backoff and 2-second read budget. An
+existing owner device action is never interrupted; actual EOF owns cleanup even
+after timeout. Strict complete `usb.vex`/`usb.dfu` snapshots identify V5 Brain
+(2888:0501) and Controller (2888:0503). Unknown identities, truncated output,
+errors and busy checks retain last confirmed values rather than inventing a
+disconnect. The UI separates configured tooling from USB presence, marks stale
+readings and retains a bounded timestamped connection log.
+
+USB presence does not establish radio pairing, download readiness or extension
+health. Real hardware/tool validation is **UNRUN**; all automated checks use
+fake programs/devices and temporary configuration. No robot download or installed
+HUD/daemon restart is part of these receipts. The preserved flag inventory below
+is historical; the current fixed `--usb` exception above supersedes it.
+
 ## Original CLAUDE.md lines 2231–2491
 
 <!-- claude-source:002231-002491:begin -->

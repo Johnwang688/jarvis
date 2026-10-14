@@ -71,7 +71,7 @@ import os
 from pathlib import Path
 import re
 import threading
-from typing import Iterable
+from typing import Callable, Iterable
 
 from jarvis import config, permissions as v1_permissions, protected_state, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
@@ -93,6 +93,7 @@ L_WIDENING = "sandbox-widening"
 # human decision, and never logged as one.
 L_JARVIS_TOOL = "jarvis-tool"
 L_JARVIS_DELEGATE = "jarvis-session-delegate"
+L_JARVIS_GATED = "jarvis-gated"
 
 # Tools that carry a shell command line, per provider.
 COMMAND_TOOLS = frozenset({
@@ -159,6 +160,8 @@ class PermitContext:
     provider: str = ""
     project: Project | None = None
     task: Task | None = None
+    # Factory captures exact request-time session/worker/turn, not a successor.
+    delegation_cancelled: Callable | None = field(default=None, repr=False)
 
     @property
     def task_id(self) -> str | None:
@@ -968,6 +971,11 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
+            if delegated is not None and delegated.owner_gated:
+                # Rule matching sees the original arguments, but no page facts
+                # or owner text leave through the generic approval surface.
+                decision = _ask_owner_delegation(asker, ctx, delegated.name)
+                return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
             decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK)
             return finish(decision, L_ALWAYS_ASK, reason)
 
@@ -977,6 +985,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # threads never get a jarvis server), so only a chat brief is ALLOWed
         # here; the daemon's bridge judges the call itself.
         if delegated is not None:
+            if delegated.owner_gated:
+                return finish(Decision.ALLOW, L_JARVIS_GATED,
+                              "delegate only; the Browser safety gate decides execution")
             if delegated.read_only:
                 return finish(Decision.ALLOW, L_JARVIS_TOOL,
                               "read-only Jarvis tool; the daemon checks the turn")
@@ -1009,6 +1020,26 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                       "no opinion; the provider's own reviewer decides")
 
     return permit
+
+
+def _ask_owner_delegation(asker, ctx: PermitContext, tool: str) -> Decision:
+    """One metadata-only HUD consent, never a Browser action approval."""
+    if tool != "hud_browser_act":
+        return Decision.DENY
+    request = ApprovalRequest(
+        tool=tool, args={}, command=None, layer=L_ALWAYS_ASK,
+        reason="Your named rule asks before Browser delegation. Browser safety checks still decide each action.",
+        thread_id=ctx.thread_id, task_id=ctx.task_id, provider=ctx.provider or None,
+        allowlistable=False, headline="Allow Browser safety checks for this call?",
+        hud_only=True, browser={"kind": "delegation", "tool": tool}, max_wait_s=120)
+    try:
+        from jarvis import runtime
+        native_cancelled = ctx.delegation_cancelled() if ctx.delegation_cancelled else lambda: False
+        stop = runtime.should_stop()
+        return Decision(asker.ask(request, cancelled=lambda: native_cancelled() or stop()))
+    except Exception:
+        # No exception text: a failing approval adapter may contain arguments.
+        return Decision.DENY
 
 
 def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,

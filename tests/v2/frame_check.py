@@ -336,6 +336,7 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("GET", "/models", None), ("GET", "/models/catalog", None), ("POST", "/model", {"bogus": 1}),
         ("POST", "/models", {"bogus": 1}), ("POST", "/mute", {"muted": "yes"}),
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
+        ("POST", "/speech/summary", {}), ("POST", "/speech/summary", {"bogus": 1}),
         ("GET", "/speech/voices", None), ("POST", "/speech/voices", {"bogus": 1}),
         ("GET", "/stt/settings", None), ("POST", "/stt/settings", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),

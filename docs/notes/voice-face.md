@@ -1572,3 +1572,132 @@ a corrupt settings file that fails open, non-opt-in callers using local, the
 unpinned thread clamp, a cancelled job that still decodes after its load.
 Not done and not claimed: the paid comparison, any deployment, a run in the
 live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
+
+## V8: spoken summaries (2026-10-13)
+
+Owner's answers to open question 2: **summary only**, and (confirmed) **hold
+until close, then speak**. A message is held until it closes (a `text`, a tool
+call, the turn's end). Up to 600 spoken characters (what the speech filter lets
+through; code never counts) it is then read as written; a longer one is
+replaced by a short summary, with no verbatim lead-in. This **supersedes plan
+§3.8's** "read the opening to ~400 characters, then summarise the rest" (the
+plan now carries the amendment) and reverses V6's "speech starts while the
+model writes" for the per-message decision. Mid-task messages are short and
+close at the next tool call, so the cost is the few seconds the message takes
+to finish. (`hud/src/lib/speech/controller.ts`, `summary.ts`; the 1200-character
+V6 stopgap is gone.)
+
+- **Route.** `POST /speech/summary {thread_id, text}` -> `{summary}`
+  (`jarvis/v2/speech_summary.py`, `hud_api.speech_summary`). Unlike `/say` and
+  `/stt` (which have no owner check; tracked as a follow-up, unchanged here),
+  it is **owner-only** (`projects.owner_only`, before the body is read): it is
+  a paid model call. Then: body capped at 1 MiB (413), `text` over 300,000
+  characters refused (400) before any cleaning, at most 4 in flight (429, a
+  timed-out call keeps its slot until it returns), unknown keys 400. Failures
+  are 400/429/502/503/504 sentences carrying no provider text. `spoken_prefix`
+  from the plan's contract is not accepted: under summary-only there is no
+  spoken opening.
+- **Model.** Tier `speech_summary` (`JARVIS_SPEECH_SUMMARY_MODEL`, default
+  `anthropic/claude-haiku-5.5`), read straight from `config.TIERS`, **not**
+  through `models.tier()`: the default equals the orchestrator default, so
+  `tier()` would follow the owner's chat-model selection and an Opus pick would
+  make every summary an Opus call (owner confirmed this must not happen). A
+  Chinese-hosted override is skipped for the default (`models.cn_hosted`); with
+  nothing acceptable the route is 503. A failing model tries the next within the
+  one deadline. `JARVIS_CHAT_PROVIDER` is not applied to this call (`provider=""`).
+- **Request.** `scrub` + `strip_invisible` on the text, then `untrusted.fence`
+  (fresh nonce per call, marker phrases neutralized) so a reply cannot close its
+  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=1024` (a ceiling; was 160, see the receipt), two tries per model.
+  Output is cleaned with `voice.speakable`, bounded to 300 characters at a
+  sentence. A request never exceeds `min(JARVIS_COMPACT_AT_TOKENS, 90k)`
+  (estimated at 3 characters a token, less 1000): longer text is summarised in
+  at most 4 parallel sections, then the sections' summaries are summarised.
+  Deadline: 6 s total on the daemon; the HUD waits 8 s. A timed-out call's cost
+  is logged as unknown.
+- **HUD failure path.** A failed, late (8 s) or unusable (empty, over 400
+  characters) summary reads whole sentences up to 400 characters and then
+  "...and more on screen." (kind `fallback`).
+- **Ordering and silencing.** Summaries sit in the thread's order: a later
+  message of the same thread waits behind a pending summary; other threads do
+  not. A per-thread **epoch** is captured when a message closes and checked at
+  `deliver()`: a send to the thread, Stop, an interrupted turn, Skip with nothing
+  sounding (it takes the oldest awaited summary and its thread only), the pane leaving, read-aloud off and the lock lost all bump it, so
+  the pending summary *and every message queued behind it* are dropped even if
+  the summariser answers despite its abort (review HIGH-1; vitest pins each path
+  and the mutations of the epoch check and its bumps fail them).
+- **While a summary is awaited** (`SpeechView.summarizing`) speech counts as
+  `active` (the detector stays held off), `onIdle` (the follow-up window) is
+  withheld and then paid once nothing is coming, and a barge-in holds the
+  delivery until `endBargeIn` (a send in between drops it).
+- **With V7's shared queue.** `deliver()` is still the only place anything is
+  enqueued: it takes the thread's known voice (`voiceFor`, asked again at
+  synthesis), queues the whole message and calls `queue.endMessage` at once, so
+  the floor is free the moment it has been said. A message out for its summary
+  has no items, so it holds no floor and the backlog collapse cannot see it; it
+  is queued when the answer comes. `turnEnded` (marks the reply a collapse never
+  takes) runs in the thread's lane after the reply is queued, not at
+  `turn_finished`, or it would mark the wrong message. Mute and a pane leaving
+  go through `prune` -> `leave` -> `cancel`, which also finds a thread that
+  only has a summary pending (after a reconnect forgot its open message).
+  `skipThread` with nothing of that chat queued drops its awaited summary, else
+  the message it is writing. `shared.test.ts`'s old skipThread case assumed
+  speech while a message streams and was rewritten for hold-until-close.
+- **Not done / not claimed.** Live Haiku quality of the summaries and the
+  numbers below are unmeasured until the probe runs. Nothing was run against a
+  speaker.
+
+### Paid probe receipt (owner-approved, cap $0.10)
+
+Run by the lead on **2026-10-14** from the main checkout
+(`tests/speech_summary_probe.py --yes-spend`), model
+`anthropic/claude-haiku-5.5`, 24 calls on synthetic replies of 723 to 8053
+characters, no real chat content. Numbers as relayed by the lead (the console
+output itself was not kept):
+
+| | |
+|---|---|
+| Calls | 24, of which **7 failed with 502** (29%) |
+| Total spend | $0.002314 (cap $0.10) |
+| Mean cost per call | $0.000136 |
+| Prompt tokens, mean | 902 |
+| Completion tokens, mean | 92 |
+| Latency | p50 1.46 s, p95 2.1 s |
+| Failed inputs (characters) | 786, 832, 1742, 1778, 3635, 3644, 8053 |
+
+Cost and latency are well inside the plan's estimate ($0.0003 a summary, a
+second or so). The failure rate is not acceptable: the owner would hear the
+truncated fallback about three times in ten.
+
+**Cause.** Not proven. The probe kept only "502" for the failed calls, and the
+route answers a fixed sentence, so the internal reason was lost. What the code
+shows: the inputs are not the cause (the seven are scattered across all four
+sizes and the first call of the run was one of them; `prepare()` leaves every
+probe text unchanged, so `scrub` and the fence are not involved), and there are
+only three ways `summarize` returns a 502: the call raises (a provider or
+network error, one attempt, no retry), the reply comes back with no text, or the
+text is empty after `clean()`. The bounds in `clean()` cannot empty a reply that
+has words, whatever its sentence ends (tested). The likeliest cause is the first
+two together: `max_tokens=160` was the *whole* budget, so a model that reasons
+before it answers could spend it on reasoning and return nothing (finish reason
+`length`), and a transient 429/5xx/529 was never tried again. A mean of 92
+completion tokens for replies of at most 300 characters (about 70 tokens) is
+consistent with some thinking being counted.
+
+**Fix (V8 fix, `claude/voice-v8-fix`).** `OUT_MAX_TOKENS` 160 -> 1024 (a ceiling;
+length is still the prompt's and `clean()`'s job); each model gets two tries
+inside the one 6 s deadline, the second for a transient HTTP error (anything but
+400/401/402/403/404/413/422) or an empty reply, with a retry that must leave
+0.3 s; content parts are read as text. Every failure now carries a **reason
+code and numbers only** (`SummaryError.reason`/`.detail`: `http_<status>`,
+`llm_error`, `empty_content`, `empty_after_clean`, `exception:<Class>`, `deadline`;
+finish reason, completion and reasoning tokens, whether a reasoning field was
+present, raw length), logged and printed by the probe, never sent to the HUD.
+Tests in `tests/v2/speech_summary_check.py` (`FailedSummaries`) reproduce each
+path with a fake reply, and two mutations (the old 160-token budget, a single
+attempt) fail them.
+
+**Still to do.** A second probe (owner's OK; same cap) to confirm the failure
+rate and to read the reason codes from a real run. If `empty_content` shows
+`finish=length` with `reasoning_tokens` close to the budget, the cause was the
+budget; if `http_*`, the retry; if neither, the next step is turning reasoning
+off for this call.

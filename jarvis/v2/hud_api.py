@@ -1444,6 +1444,42 @@ def stt_settings_route(handler, daemon, query):
     return 200, view()
 
 
+SPEECH_SUMMARY_BODY_MAX = 1024 * 1024
+
+
+def speech_summary(handler, daemon):
+    """`POST /speech/summary`: the line spoken in place of a long reply (V8).
+
+    `{thread_id, text}` -> `{summary}`. `text` is the reply's prose after the
+    HUD's speech filter (never code). It is a paid model call, so it is the
+    owner's (`owner_only`, before the body is read), the body is capped at
+    1 MiB, and `speech_summary.py` limits it to four at a time. The model,
+    fencing, scrubbing, deadline and bounds are that module's. A failure is a
+    sentence with no provider text in it; the HUD reads truncated prose.
+    """
+    from . import speech_summary as S
+    from .daemon import _object
+    from .projects import owner_only
+    owner_only(handler, daemon)
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        fail(400, "invalid body length")
+    if length > SPEECH_SUMMARY_BODY_MAX:
+        fail(413, "request body exceeds 1 MiB")
+    body = _object(handler._body(), ("thread_id", "text"), ("thread_id", "text"))
+    for key in ("thread_id", "text"):
+        if not isinstance(body.get(key), str):
+            fail(400, f"{key} must be a string")
+    if not body["thread_id"].strip() or len(body["thread_id"]) > 200:
+        fail(400, "invalid thread_id")
+    try:
+        result = S.summarize(body["text"])
+    except S.SummaryError as exc:
+        fail(exc.status, exc.message)
+    return 200, {"summary": result.text}
+
+
 def pickers(handler, daemon, parts, query):
     from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
@@ -1510,6 +1546,8 @@ def pickers(handler, daemon, parts, query):
                 f"speech-to-text failed ({type(exc).__name__})")
             # The owner's own switch forbade the only path left: a retry cannot fix it.
             fail(409 if isinstance(exc, voice.STTBlocked) else 502, message)  # logged as one warning line by _dispatch
+    if name == "speech/summary":
+        return speech_summary(handler, daemon)   # owner-only, and reads its own (capped) body
     body = handler._body()
     # The keys each control reads, and nothing else. A body carrying some
     # other key used to be read as "the key is absent", which for /model
@@ -1709,7 +1747,7 @@ def route(handler, daemon, parts, query):
         return hud_files(handler, parts)
     if parts == ["stt", "settings"]:
         return stt_settings_route(handler, daemon, query)
-    if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
+    if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt", "speech/summary"):
         return pickers(handler, daemon, parts, query)
     if parts[0] == "speech":
         # Read-aloud's per-thread voices and mutes (V7): owner-only.

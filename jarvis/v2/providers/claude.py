@@ -904,6 +904,16 @@ class ClaudeProvider:
                         ),
                     }
                 }
+            if jarvis is not None and jarvis.owner_gated:
+                from ..browser.drive import admission_for_tool, OFF
+                if jarvis.name != "hud_browser_act" or not admission_for_tool():
+                    if tool_use_id:
+                        session.denied_tools.add(tool_use_id)
+                    else:
+                        session.denial_without_id = True
+                    return {"hookSpecificOutput": {
+                        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                        "permissionDecisionReason": HOOK_REFUSAL_PREFIX + OFF}}
             decision = await self._decide(session, name, args)
             if decision is Decision.ALLOW and jarvis is not None:
                 # Explicit under both profiles (D-5): under ASK it pre-empts the
@@ -979,12 +989,13 @@ class ClaudeProvider:
         pending = _Pending()
         with session.mutex:
             session.pending[req_id] = pending
+        private_act = name in ("hud_browser_act", "mcp__jarvis__hud_browser_act")
         session.emit(
             EventKind.APPROVAL_REQUESTED,
             req_id=req_id,
             tool=name,
-            args=args,
-            command=_command(args),
+            args={} if private_act else args,
+            command=None if private_act else _command(args),
         )
         try:
             decision = await self._race(session, pending, name, args)
@@ -1598,7 +1609,8 @@ class ClaudeProvider:
                         Event(
                             EventKind.TOOL_STARTED,
                             session.thread_id,
-                            {"call_id": block.id, "name": block.name, "args": args},
+                            {"call_id": block.id, "name": block.name,
+                             "args": {} if block.name in ("hud_browser_act", "mcp__jarvis__hud_browser_act") else args},
                         )
                     )
             return out
@@ -1624,7 +1636,7 @@ class ClaudeProvider:
     @staticmethod
     def _tool_summary(name: str, text: str) -> str:
         canonical = name.removeprefix("mcp__jarvis__")
-        if canonical in ("terminal_read", "hud_browser_view"):
+        if canonical in ("terminal_read", "hud_browser_view", "hud_browser_act"):
             from jarvis import tools
             return tools.private_summary(canonical, text)
         return text[:SUMMARY_CHARS]
@@ -1643,12 +1655,13 @@ class ClaudeProvider:
             denied = True
             session.denial_without_id = False
         session.denied_tools.discard(block.tool_use_id)
-        private_read = name.removeprefix("mcp__jarvis__") in ("terminal_read", "hud_browser_view")
+        private_read = name.removeprefix("mcp__jarvis__") in ("terminal_read", "hud_browser_view", "hud_browser_act")
+        private_act = name in ("hud_browser_act", "mcp__jarvis__hud_browser_act")
         summary = self._tool_summary(name, text)
         if private_read:
             if denied:
                 summary = self._tool_summary(name, "Refused")
-            elif block.is_error and summary not in ("refused", "error"):
+            elif block.is_error and summary not in ("refused", "error", "stopped"):
                 summary = self._tool_summary(name, "Error")
         out: list[Event] = []
         if declined:
@@ -1662,8 +1675,8 @@ class ClaudeProvider:
                     session.thread_id,
                     {
                         "tool": name,
-                        "args": args,
-                        "command": _command(args),
+                        "args": {} if private_act else args,
+                        "command": None if private_act else _command(args),
                         "reason": (summary if private_read
                                    else match.group("reason").strip() if match
                                    else text[:SUMMARY_CHARS]),
@@ -1677,8 +1690,8 @@ class ClaudeProvider:
                 {
                     "call_id": block.tool_use_id,
                     "name": name,
-                    "ok": not bool(block.is_error) and not declined,
-                    "outcome": "denied" if denied else "failed" if block.is_error else "ok",
+                    "ok": not bool(block.is_error) and not declined and not (private_act and summary == "stopped"),
+                    "outcome": "denied" if denied else "failed" if block.is_error or (private_act and summary == "stopped") else "ok",
                     "summary": summary,
                 },
             )

@@ -652,6 +652,11 @@ class BrowserHost:
         self._activity_work = ActivityWork(self.activity)
         from .attention_cleanup import AttentionCleanup
         self._attention_cleanup = AttentionCleanup(self)
+        from .auth import OwnerAuth
+        self._auth = OwnerAuth(self)
+        self._auth.navigation_timeout = NAV_TIMEOUT_S
+        from .owner_tools import OwnerTools
+        self._owner_tools = OwnerTools(self)
         self._next_instance_generation = 0
         self._instances: dict[str, _Instance] = {}
         self._closing_instances: dict[str, _Instance] = {}
@@ -672,6 +677,7 @@ class BrowserHost:
         from .sound import BrowserSound
         self._sound = BrowserSound(self)
         self._next_page_identity = 0
+        self._auth_pending: dict[str, str] = {}
         self._pane_tabs: dict[str, dict] = {}  # private in-process identity cache; never status/bus
         self._guarded = 0
         self.timings: dict[str, float] = {}
@@ -917,6 +923,7 @@ class BrowserHost:
     async def _shutdown(self) -> None:
         await self._sound.settle()
         await self._activity_work.settle()
+        await self._auth.settle()
         looks=list(self._look_tasks)
         for task in looks:task.cancel()
         if looks:await asyncio.gather(*looks,return_exceptions=True)
@@ -1009,14 +1016,16 @@ class BrowserHost:
                 pass
             return ActResult("stopped", "Stopped: the Browser action timed out; look again.")
 
-    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text):
+    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text, *, provider="fast"):
         tab = self.require_tab(tab_id)
         target = "" if prepared.context_flagged or prepared.target is None else prepared.target.name
         rect = None
         if prepared.rect and not prepared.context_flagged:
             left, top, right, bottom = prepared.rect
             rect = {"x": left, "y": top, "width": right-left, "height": bottom-top}
-        tab.stream.agent_driver(thread_id, "fast")
+        if provider not in ("fast", "claude", "codex"):
+            raise ValueError("invalid Browser driver provider")
+        tab.stream.agent_driver(thread_id, provider)
         tab.stream.agent_action({"id": action_id, "at": datetime.now(timezone.utc).isoformat(), "action": action,
             "target": target, "text": text if action in ("type", "select") else "",
             "outcome": outcome, "rect": rect, "page_identity": tab.page_identity,
@@ -1302,7 +1311,7 @@ class BrowserHost:
         tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
                    page_identity=self._next_page_identity,
                    stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab),
-                                    blocked=lambda: bool(tab.dialogs)),   # on arrival: a dialog only
+                                    blocked=lambda: bool(tab.dialogs) or self._auth.blocked(tab)),
                    cdp_lock=asyncio.Lock(), cast_lock=asyncio.Lock(), wakeup=asyncio.Event())
         self._tabs[tab.id] = tab
         page.on("framenavigated", lambda frame: self._landed(tab, frame))
@@ -1363,6 +1372,8 @@ class BrowserHost:
             # A stale old release must not revoke replacement tickets.
             if self._tabs.get(tab.id) is tab:
                 self.tickets.revoke(tab.id)
+        self._owner_tools.invalidate(tab, closed=True)
+        self._auth.release(tab)
         tab.loopback_port = tab.pending_port = None
         self._sync_ports(tab)
         for key, token in list(tab.activity_holds.items()):
@@ -1475,6 +1486,15 @@ class BrowserHost:
             return
         # Invalidate before judging/publishing the new URL. Playwright emits
         # framenavigated for same-document changes and same-URL reloads too.
+        self._owner_tools.invalidate(tab)
+        if tab.stream is not None:
+            # The new document cannot receive a queued old-document release,
+            # and the owner gate must not retain old depressed bookkeeping.
+            tab.stream.discard_document_input()
+            tab.pressed.clear()
+            tab.keys_pressed.clear()
+            tab.stream.send({"t": "owner_reset"})
+        self._auth.document_changed(tab)
         tab.document_generation += 1
         tab.pane_ready = False
         self._publish_pane_tabs()
@@ -1485,7 +1505,9 @@ class BrowserHost:
             # judged then (review of PR #69: judging "" blanked every pop-up).
             return
         port = policy.loopback_port(url)
-        if port == tab.pending_port and port is not None:
+        auth_session = self._auth.sessions.get(tab.id)
+        auth_refused = bool(auth_session and auth_session.navigation and auth_session.navigation.refused)
+        if port == tab.pending_port and port is not None and not auth_refused:
             tab.loopback_port = port
         elif port != tab.loopback_port:
             tab.loopback_port = None
@@ -1647,17 +1669,26 @@ class BrowserHost:
             if (owner or instance is None or self._tabs.get(tab.id) is not tab
                     or not self.activity.restart_current(restart_token, tab.profile, instance.generation)):
                 raise BrowserRefused(409, "this Browser replacement is no longer current")
-        if owner:
-            tab.pending_port = policy.loopback_port(url)
-            self._sync_ports(tab)
-        try:
-            await tab.page.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
-            return {"loaded": True}
-        except Exception as exc:  # noqa: BLE001
-            return {"loaded": False, "error": _net_error(exc)}
-        finally:
-            tab.pending_port = None
-            self._sync_ports(tab)
+        if url in SIGNIN_PAGES:
+            await self._auth.cancel_navigation(tab)
+            try:
+                await tab.page.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
+                return {"loaded": True}
+            except Exception as exc:
+                return {"loaded": False, "error": _net_error(exc)}
+        return await self._auth.navigate(tab,
+            lambda: tab.page.goto(url, wait_until="commit", timeout=0),
+            owner=owner, port=policy.loopback_port(url), restart_token=restart_token)
+
+    async def cancel_navigation(self, tab: _Tab) -> None:
+        """Settle the exact supervised auth/navigation child before teardown."""
+        await self._auth.cancel_navigation(tab)
+
+    def auth_pending_current(self, tab_id, nav_id) -> bool:
+        """Private exact live allocation receipt; no host-loop submission."""
+        with self._lock:
+            return bool(not self._stopped and isinstance(nav_id, str)
+                        and self._auth_pending.get(tab_id) == nav_id)
 
     def _tab(self, tab_id) -> _Tab:
         if not isinstance(tab_id, str) or not TAB_ID.fullmatch(tab_id):
@@ -1706,11 +1737,8 @@ class BrowserHost:
             tab.signin = False
             step = {"back": tab.page.go_back, "forward": tab.page.go_forward,
                     "reload": tab.page.reload}[action]
-            try:
-                await step(wait_until="commit", timeout=NAV_TIMEOUT_S * 1000)
-                return {"tab_id": tab.id, "loaded": True}
-            except Exception as exc:  # noqa: BLE001
-                return {"tab_id": tab.id, "loaded": False, "error": _net_error(exc)}
+            return {"tab_id": tab.id, **(await self._auth.navigate(tab,
+                lambda: step(wait_until="commit", timeout=0), owner=True))}
 
     def close_tab(self, tab_id) -> dict:
         if not self._running():
@@ -1733,6 +1761,7 @@ class BrowserHost:
             if tab is None:
                 return {"tab_id": tab_id, "closed": True}
             try:
+                await self._auth.cancel_navigation(tab)
                 await asyncio.wait_for(tab.page.close(), CLOSE_TIMEOUT_S)
             finally:
                 self._dropped(tab)
@@ -1901,6 +1930,13 @@ class BrowserHost:
             for tab in list(self._tabs.values()):
                 if tab.stream is not None:
                     tab.stream.hold_through()
+                self._auth.invalidate(tab)
+                self._owner_tools.invalidate(tab)
+        elif isinstance(record, dict) and record.get("kind") == "approval_resolved":
+            async def refresh_auth():
+                for tab in list(self._tabs.values()):
+                    self._auth.refresh(tab)
+            self._submit(refresh_auth())
 
     # -- windows' sockets (BR-1b, stream.py) ------------------------------------------------
 
@@ -1977,12 +2013,18 @@ class BrowserHost:
         row = {"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx, "opener": tab.opener}
 
         def attached():
+            self._owner_tools.invalidate(tab, attachment=True)
             LOG.info("browser tab %s attached", tab.id)
             self._attached_event(tab.id)
             self._submit(self._on_attached(tab))
 
+        def detached():
+            if tab.stream.attached() is None:
+                self._owner_tools.invalidate(tab, attachment=True)
+            self._submit(self._on_detached(tab))
+
         _serve_stream(tab.stream, sock, tab_row=row, on_attached=attached,
-                      on_detached=lambda: self._submit(self._on_detached(tab)),
+                      on_detached=detached,
                       handle=lambda s, msg: self._handle(tab, s, msg))
 
     def _handle(self, tab: _Tab, sock, msg) -> None:
@@ -1990,8 +2032,18 @@ class BrowserHost:
         if self._tabs.get(tab.id) is not tab or self._stopped:
             return
         stream = tab.stream
+        if not stream.holds(sock):
+            return
         t = msg.t
-        if msg.input:
+        if t in ("find", "find_cancel", "cursor", "cursor_cancel"):
+            self._owner_tools.receive(tab, sock, {"t": t, **msg.fields})
+        elif t == "auth":
+            if self.input_held():
+                stream.hold_through()
+                msg.fields.clear()
+                return
+            self._auth.receive(tab, sock, stream.gen, self.capture_hold_epoch(), msg.fields)
+        elif msg.input:
             stream.enqueue(sock, msg)
         elif t == "dialog":
             if self.input_held():
@@ -2003,11 +2055,18 @@ class BrowserHost:
         elif t == "ack":
             stream.ack(sock, msg.fields["id"])
         elif t == "resize":
+            self._owner_tools.invalidate(tab)
             stream.viewport = (msg.fields["width"], msg.fields["height"], msg.fields["scale"])
             self._submit(self._set_viewport(tab))
         elif t == "visible":
             if stream.set_visible(sock, msg.fields["visible"]):
                 self._submit(self._sync_screencast(tab))
+            if not msg.fields["visible"]:
+                self._owner_tools.invalidate(tab)
+                self._auth.invalidate(tab)
+            async def refresh_auth():
+                self._auth.refresh(tab)
+            self._submit(refresh_auth())
         elif t == "takeover":
             stream.answer_takeover(sock, msg)
         elif t == "resume":
@@ -2032,9 +2091,12 @@ class BrowserHost:
             self._located(tab, url=tab.page.url)
             await self._titled(tab)
         await self._sync_screencast(tab)
+        self._auth.refresh(tab)
 
     @_tab_activity
     async def _on_detached(self, tab: _Tab) -> None:
+        if tab.stream.attached() is None:
+            self._auth.invalidate(tab)
         await self._sync_screencast(tab)
         # A press a dropped socket cut off is let go off the page, never as a
         # click (BR-2's HeldButtons rule) — unless a card is up: then nothing
@@ -2175,8 +2237,18 @@ class BrowserHost:
 
     @_tab_activity
     async def _deliver(self, tab: _Tab, method: str, params: dict) -> None:
+        page, page_identity, document = tab.page, tab.page_identity, tab.document_generation
+        stream, attachment, held_at_entry = tab.stream, tab.stream.gen, tab.stream.hold_count
+        instance = self._instances.get(tab.profile)
+        def same_document():
+            return (not self._stopped and self._tabs.get(tab.id) is tab
+                    and tab.page is page and tab.page_identity == page_identity
+                    and tab.document_generation == document and tab.stream is stream
+                    and stream.gen == attachment and stream.hold_count == held_at_entry
+                    and self._instances.get(tab.profile) is instance
+                    and instance is not None and not instance.closing and not instance.restoring)
         cdp = await self._ensure_cdp(tab)
-        if cdp is None:
+        if cdp is None or not same_document():
             return
         if self.input_held():
             tab.stream.hold_through()
@@ -2186,7 +2258,7 @@ class BrowserHost:
         # one: nothing banked behind a stuck page lands later, perhaps under a
         # card. Judged here, never on arrival, where every event of an
         # ordinary burst finds its predecessor still in flight (PR #77 delta).
-        if tab.dialogs or (tab.input_task is not None and not tab.input_task.done()):
+        if tab.dialogs or self._auth.blocked(tab) or (tab.input_task is not None and not tab.input_task.done()):
             tab.stream.drop_blocked_input()
             return
         hold_count = tab.stream.hold_count
@@ -2223,7 +2295,12 @@ class BrowserHost:
                 tab.pressed.pop(button, None)
         # Timeout leaves the call alive, but no later input may follow it
         # until Chrome answers. Input arriving meanwhile is dropped.
-        task = asyncio.ensure_future(self._activity_run(tab, lambda: cdp.send(method, params)))
+        auth_epoch = self._auth.input_epoch(tab)
+        async def send_current_auth():
+            if (same_document() and not self.input_held()
+                    and self._auth.input_current(tab, auth_epoch)):
+                await cdp.send(method, params)
+        task = asyncio.ensure_future(self._activity_run(tab, send_current_auth))
         tab.input_task = task
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
         await asyncio.wait({task}, timeout=DELIVER_WAIT_S)
@@ -2480,6 +2557,7 @@ class BrowserHost:
         paused the tab, and how long since the owner's last input to it."""
         tab = self.require_tab(tab_id)
         return {**tab.stream.owner_state(), "held": self.input_held(),
+                "auth": self._auth.blocked(tab),
                 "depressed": bool(tab.pressed or tab.keys_pressed),
                 "input_busy": bool(tab.input_task is not None and not tab.input_task.done())}
 
@@ -2503,6 +2581,10 @@ class BrowserHost:
         }
         with self._lock:
             self._pane_tabs = rows
+            self._auth_pending = {
+                tab_id: session.navigation.id for tab_id, session in self._auth.sessions.items()
+                if self._auth.current(session) and session.navigation is not None
+                and session.prompt is not None}
 
     def pane_tab(self, tab_id: str) -> dict | None:
         """A copied navigation identity, safe on the CDP loop or caller thread.

@@ -2210,7 +2210,8 @@ class Reach(unittest.TestCase):
 
     NEEDLES = re.compile(r"""['"]/vex\b|['"]vex['"]|jarvis\.v2\.vex\b|from\s+\.\s+import\s+vex\b|"""
                          r"""from\s+\.vex\s+import|\.vex\.|\bvexcom\b|create_program|\bVex\(""", re.I)
-    ALLOWED = {"jarvis/v2/vex.py", "jarvis/v2/vex_setup.py", "jarvis/v2/hud_api.py",
+    # vex_connection.py: the USB-presence half of vex.py (5b0ac8c), imported only by it.
+    ALLOWED = {"jarvis/v2/vex.py", "jarvis/v2/vex_connection.py", "jarvis/v2/vex_setup.py", "jarvis/v2/hud_api.py",
                "jarvis/v2/daemon.py", "jarvis/v2/terminals.py", "jarvis/rules.py",
                "jarvis/config.py", "jarvis/__main__.py"}
 

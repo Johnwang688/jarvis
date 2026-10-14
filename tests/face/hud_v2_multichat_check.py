@@ -2171,6 +2171,11 @@ def _thinking_box_cap_checks(page, mock, check, until):
         FORTY_LINES, MIN_LOG_PX, MIN_LOG_SHARE, SHARE, SINGLE as D_SINGLE, _box_parts, _fresh as d_fresh,
     )
     z = 1.6
+    # The pane header carries the chat's voice chip, whose width follows the voice's name. Which
+    # voice t1 has depends on which chats asked the daemon first earlier in this run (V8's
+    # hold-until-close moved that), and a long name wraps the header and takes the log's height:
+    # that is not what this check is about, so t1 reads in the pool's first voice.
+    mock.speech_threads["t1"] = {"voice": mock.speech_pool()[0], "muted": False}
     ws = json.loads(D_SINGLE)
     ws["panel"] = {"open": True, "height": 120}
     # Keep the min-log term tighter than 35% after removing the tool ticker.

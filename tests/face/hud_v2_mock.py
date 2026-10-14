@@ -660,6 +660,8 @@ class MockDaemon:
         self.say_fail = False        # /say answers 503 (the local voice is down)
         self.speech_threads: dict[str, dict] = {}   # V7: thread id -> {voice, muted}, as the daemon keeps them
         self.ms_per_char = 12        # /say's tone length per character of text
+        self.summary_text = "The change is done and all the tests pass."   # /speech/summary's answer (V8)
+        self.summary_fail = False    # /speech/summary answers 502
         self.httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         # The sidebar dots' races (2026-10-09): while `activity_gate` is an
@@ -1197,6 +1199,18 @@ class MockDaemon:
                     self.end_headers()
                     self.wfile.write(audio)
                     return
+                if path == "/speech/summary":
+                    # V8: the real route's contract -- thread_id and text required,
+                    # nothing else -- answering
+                    # `summary_text` (or a 502 when `summary_fail`).
+                    unknown = sorted(set(body) - {"thread_id", "text"})
+                    if unknown:
+                        return self._err(400, f"unknown fields ({len(unknown)})")
+                    if not isinstance(body.get("thread_id"), str) or not isinstance(body.get("text"), str):
+                        return self._err(400, "thread_id and text must be strings")
+                    if mock.summary_fail:
+                        return self._err(502, "the summary could not be made")
+                    return self._json({"summary": mock.summary_text})
                 if path in PICKER_KEYS:
                     # The real daemon's keys, enforced the way it enforces
                     # them: an unknown key is a 400 naming it. The mock used
