@@ -95,7 +95,7 @@ describe("Markdown math", () => {
     const budget = dom(Array.from({ length: MAX_MATH_SOURCE / MAX_FORMULA + 1 }, () => "$" + formula + "$").join(" ") + " END");
     expect(budget.querySelectorAll(".katex")).toHaveLength(MAX_MATH_SOURCE / MAX_FORMULA);
     expect(budget.textContent).toContain(" END");
-  });
+  }, 30000); // budget-exhaustion renders are slow under full-suite load (passes alone in ~1 s)
 
   it("bounds repeated invalid delimiters without rescanning each lookahead", () => {
     for (const source of ["$ ".repeat(120000), "$1".repeat(120000),

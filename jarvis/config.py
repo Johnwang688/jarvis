@@ -365,6 +365,16 @@ SPEECH_VOICES_PATH = Path(
     )
 )
 
+# Browser ducking (voice plan V15, jarvis/v2/speech_duck.py): the small journal
+# of volumes the daemon lowered while Jarvis spoke, kept only while a duck is
+# unrestored so a crash can be repaired at the next start. Machine-local, tiny,
+# and deleted as soon as every stream is back where it was.
+SPEECH_DUCK_PATH = Path(
+    os.environ.get(
+        "JARVIS_SPEECH_DUCK", Path.home() / ".config" / "jarvis" / "speech_duck.json"
+    )
+)
+
 # Custom Pocket TTS voices (clones and hybrids), one directory per voice —
 # see jarvis/pocket.py. Outside the repo like sessions: the store is the
 # owner's, bulk, and (for clones) audio of real people that does not belong
@@ -819,6 +829,46 @@ STT_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
 STT_DICTATION_TIMEOUT_S = 20.0
 STT_DICTATION_ATTEMPTS = 2
 
+# Local speech-to-text (voice rework V13, plan 3.5, answered Q6): Parakeet-TDT-0.6B-v3
+# int8 through sherpa-onnx, in the daemon (jarvis/stt_local.py). Measured in V0:
+# RTF 0.042 at 2-4 threads, about 1.1 GB resident (1.9 GB peak while loading), and
+# MORE than 4 threads was 4-18x slower, so the thread count is pinned (1..4).
+#
+# The backend the owner has not chosen yet. ONE LINE to flip: it becomes "local"
+# (or "auto") only after the paid cloud-vs-local WER comparison
+# (tests/stt_compare_probe.py) shows local within 1 point of cloud.
+STT_BACKEND_DEFAULT = "cloud"
+# Whether audio may be sent to the cloud at all (cloud backend, or fallback from
+# a failed/slow local decode). On by default so nothing changes until the owner
+# switches it off; off means NOTHING is uploaded and a local failure is an error.
+STT_CLOUD_FALLBACK_DEFAULT = True
+# The owner's choices (Settings -> Voice), beside speech.json. Protected state:
+# an agent that could write it could switch the owner's audio onto the network.
+STT_SETTINGS_PATH = Path(
+    os.environ.get("JARVIS_STT_SETTINGS", Path.home() / ".config" / "jarvis" / "stt.json")
+)
+STT_LOCAL_MODEL_NAME = "parakeet-tdt-0.6b-v3-int8"
+STT_LOCAL_MODEL_DIR = Path(os.environ.get(
+    "JARVIS_STT_LOCAL_MODEL", Path.home() / ".cache" / "jarvis-stt" / STT_LOCAL_MODEL_NAME))
+def _env_number(name: str, default: float, low: float, high: float) -> float:
+    """A bad value in the environment is the default, never an import error."""
+    try:
+        value = float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+    return max(low, min(high, value)) if value == value else default
+
+
+STT_LOCAL_THREADS = int(_env_number("JARVIS_STT_LOCAL_THREADS", 2, 1, 4))
+# Unload the model after this many idle minutes, so 1+ GB is not held forever.
+STT_LOCAL_IDLE_MIN = _env_number("JARVIS_STT_LOCAL_IDLE_MIN", 10, 1, 24 * 60)
+# A local decode with no caller deadline (Discord opt-in, tests) is abandoned after this.
+STT_LOCAL_TIMEOUT_S = 30.0
+# With cloud fallback ON, local gets at most this share of a caller's budget, so
+# the cloud chain keeps time to answer if local is slow.
+STT_LOCAL_BUDGET_SHARE = 0.45
+
+
 # Speaker verification (voice rework V12, plan 3.4, decisions V-2, V-12, V-14,
 # answered Q7 and Q12): NeMo TitaNet-small through sherpa-onnx, inside the
 # daemon (jarvis/speaker.py), so another person's voice is refused BEFORE any
@@ -841,27 +891,16 @@ SPEAKER_DIR = Path(
 SPEAKER_MODEL_NAME = "nemo_en_titanet_small"
 SPEAKER_MODEL_PATH = Path(os.environ.get(
     "JARVIS_SPEAKER_MODEL", Path.home() / ".cache" / "jarvis-speaker" / "nemo_en_titanet_small.onnx"))
-
-
-def _speaker_number(name: str, default: float, low: float, high: float) -> float:
-    """A bad value in the environment is the default, never an import error."""
-    try:
-        value = float(os.environ.get(name) or default)
-    except ValueError:
-        return default
-    return max(low, min(high, value)) if value == value else default
-
-
 # One thread: V0 measured 34 ms per 3 s at 1 thread and 19 ms at 4, and an
 # utterance is verified once, so the cores are better left to everything else.
-SPEAKER_THREADS = int(_speaker_number("JARVIS_SPEAKER_THREADS", 1, 1, 4))
+SPEAKER_THREADS = int(_env_number("JARVIS_SPEAKER_THREADS", 1, 1, 4))
 # Unload the model (80 MB) after this many idle minutes.
-SPEAKER_IDLE_MIN = _speaker_number("JARVIS_SPEAKER_IDLE_MIN", 5, 1, 24 * 60)
+SPEAKER_IDLE_MIN = _env_number("JARVIS_SPEAKER_IDLE_MIN", 5, 1, 24 * 60)
 # Cosine-similarity threshold. The owner's enrollment PROPOSES one (V0: the
 # equal-error threshold alone ranged 0.51 to 0.71 across conditions, so it is
 # never hard-coded); this is what the proposal starts from when there is nothing
 # to fit, and the bounds anything saved or typed must stay inside.
-SPEAKER_THRESHOLD_DEFAULT = _speaker_number("JARVIS_SPEAKER_THRESHOLD", 0.60, 0.30, 0.90)
+SPEAKER_THRESHOLD_DEFAULT = _env_number("JARVIS_SPEAKER_THRESHOLD", 0.60, 0.30, 0.90)
 SPEAKER_THRESHOLD_MIN = 0.30
 SPEAKER_THRESHOLD_MAX = 0.90
 # What the owner's enrollment is held to. A PROPOSED threshold is never below the floor, and
@@ -874,7 +913,7 @@ SPEAKER_GENUINE_FLOOR = 0.60
 # A clip under this is a command ("Jarvis pause"), whose embedding is noisier and
 # which only controls playback (plan 3.4): its threshold is lowered by this much.
 SPEAKER_SHORT_CLIP_S = 1.2
-SPEAKER_SHORT_RELAX = _speaker_number("JARVIS_SPEAKER_SHORT_RELAX", 0.08, 0.0, 0.25)
+SPEAKER_SHORT_RELAX = _env_number("JARVIS_SPEAKER_SHORT_RELAX", 0.08, 0.0, 0.25)
 
 
 def _load_dotenv() -> None:

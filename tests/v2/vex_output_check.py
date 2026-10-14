@@ -66,6 +66,25 @@ class StartupProtocol(unittest.TestCase):
                     input_.assert_not_called()
                 self.assertEqual(term.history().data, data)
 
+    def test_every_input_disabled_vex_program_is_answered_but_not_the_brain(self):
+        # The download, USB check and device read hung on the live machine
+        # (2026-10-14) because only vex-build was answered.
+        self.assertEqual(T.STARTUP_REPLY_PROGRAMS,
+                         {"vex-build", "vex-download", "vex-connection", "vex-info"})
+        for program in sorted(T.STARTUP_REPLY_PROGRAMS):
+            with self.subTest(program=program):
+                term = self.terminal(program=program, input_ok=False)
+                with patch.object(term, "queue_input") as input_:
+                    term._output(b"\x1b[6n{}\r\n")
+                    input_.assert_called_once_with(b"\x1b[1;1R")
+                self.assertEqual(term.history().data, b"{}\r\n")
+        for program in ("vex-download", "vex-connection", "vex-info"):
+            with self.subTest(program=program, input_ok=True):
+                term = self.terminal(program=program, input_ok=True)
+                with patch.object(term, "queue_input") as input_:
+                    term._output(b"\x1b[6n")
+                    input_.assert_not_called()
+
     def test_eof_preserves_partial_prefix_before_exit_hook(self):
         for prefix in (b"\x1b", b"\x1b[", b"\x1b[6"):
             term = self.terminal(program="vex-build", input_ok=False)
@@ -135,6 +154,59 @@ class StartupOutput(DaemonBase):
         self.assertFalse(term.alive())
         (self.folder / "HOLD").unlink()
         self.assertEqual(self.build()["state"], "succeeded")
+
+
+class UsbConsoleOutput(unittest.TestCase):
+    # The shape the live console wrote around `vexcom --usb` under a sized
+    # PTY after the reply (2026-10-14); the path is a stand-in.
+    LIVE = (b'\x1b[?9001h\x1b[?1004h\x1b[m\x1b]0;C:\\fake\\vexcom.exe\x07\x1b[?25h{\r\n'
+            b'\x1b[?9001l\x1b[?1004l  "usb": {\r\n    "dfu": [\r\n    ],\r\n    "vex": [\r\n'
+            b'      {"vid":"0x2888", "pid":"0x0503", "family":"v5", "device":"ctrl"}\r\n'
+            b'    ]\r\n  }\r\n}\r\n')
+
+    def test_console_sequences_around_the_json_are_ignored(self):
+        from jarvis.v2.vex_connection import usb_presence
+        self.assertEqual(usb_presence(self.LIVE), (False, True))
+
+    def test_anything_else_beside_the_json_still_refuses(self):
+        from jarvis.v2.vex_connection import usb_presence
+        for extra in (b"banner\r\n", b"\x1b[?25h(\r\n", b"\xff"):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                usb_presence(extra + self.LIVE)
+
+
+class DeviceStartup(DaemonBase):
+    """The fake vexcom waits for interop's cursor reply, as the real one does
+    under a sized PTY, and exits 91 without it."""
+
+    def setUp(self):
+        super().setUp()
+        (self.world.vexcom_dir / "STARTUP_DSR").write_text("")
+
+    def test_usb_check_completes(self):
+        self.owner("POST", "/vex/device/connection", {})
+        ready = eventually(lambda: r if (r := self.owner("POST", "/vex/device/connection", {}))[
+            "state"] in ("ready", "error") else None, timeout=4, what="USB check")
+        self.assertEqual(ready["state"], "ready", ready["message"])
+        self.assertTrue(ready["brain"])
+
+    def test_download_completes_without_the_query_in_its_output(self):
+        self.build()
+        sent = self.owner("POST", f"/projects/{self.project.id}/vex/download",
+                          {"slot": 3, "name": "fixture"}, status=202)
+        done = eventually(lambda: r if (r := self.owner("GET", f"/vex/downloads/{sent['download_id']}"))[
+            "state"] != "running" else None, timeout=4, what="download")
+        self.assertEqual((done["state"], done["exit_code"]), ("succeeded", 0))
+        self.assertIn("Finished", done["output"])
+        term = self.daemon.terminals.get(sent["terminal_id"])
+        self.assertNotIn(b"\x1b[6n", term.history().data)
+
+    def test_device_reads_complete(self):
+        for read, expect in (("system", '"vexos"'), ("programs", "override")):
+            with self.subTest(read=read):
+                answer = self.owner("POST", "/vex/device/info", {"read": read})
+                self.assertEqual(answer["exit_code"], 0)
+                self.assertIn(expect, answer["text"])
 
 
 if __name__ == "__main__":

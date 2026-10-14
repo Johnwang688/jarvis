@@ -39,6 +39,9 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import select
+import socket
+import threading
 from pathlib import Path
 import sys
 
@@ -92,6 +95,8 @@ def _api_listener(handler, daemon) -> bool:
 
 
 def _annotations(entry) -> dict:
+    if entry.owner_gated:
+        return {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True}
     if entry.read_only:
         return {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
     return {"readOnlyHint": False}
@@ -142,6 +147,23 @@ def _body(handler) -> dict:
             "codex_context": value.get("codex_context")}
 
 
+def _request_alive(connection):
+    """Consumed-body socket lifetime; peek only, without a watchdog or IO wait."""
+    lock = threading.Lock()
+    def alive():
+        with lock:
+            try:
+                readable, _, _ = select.select([connection], [], [], 0)
+                if not readable:
+                    return True
+                return bool(connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT))
+            except BlockingIOError:
+                return True
+            except (OSError, ValueError, TypeError):
+                return False
+    return alive
+
+
 def route(handler, daemon, parts, query):
     """`/mcp/*`, or None for every other path."""
     if not parts or parts[0] != "mcp":
@@ -161,7 +183,8 @@ def route(handler, daemon, parts, query):
         return 200, {"tools": listing(provider)}
     body = _body(handler)
     return 200, call(daemon, session, caller, body["name"], body["arguments"],
-                     codex_context=body["codex_context"])
+                     codex_context=body["codex_context"],
+                     request_alive=_request_alive(handler.connection))
 
 
 def _approver(session, current):
@@ -186,7 +209,7 @@ def _approver(session, current):
     return approve
 
 
-def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=None) -> dict:
+def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=None, request_alive=None) -> dict:
     """Run one offered tool for `session`, in the daemon. `{text, isError}`
     (plus `image` for a tool that returns one)."""
     from jarvis import runtime, tools
@@ -216,6 +239,8 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         worker = session.worker
         turn_id = session.turn_id if worker is not None else None
         desk = session.desk.slot if worker is not None else {"present": False}
+        browser_call = name in ("hud_browser_view", "hud_browser_act")
+        drive_turn = getattr(session, "drive_turn", None) if worker is not None else None
 
     native_current = None
     if caller.provider == "codex" and entry.foreground_only:
@@ -231,13 +256,26 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
             return {"text": "Refused: this Jarvis tool is only available to the current foreground chat turn.",
                     "isError": True}
 
+    if entry.owner_gated:
+        from .browser.drive import admission_for_tool, OFF
+        if name != "hud_browser_act" or not admission_for_tool():
+            return {"text": "Refused: " + OFF, "isError": True}
+
     def current():
         with daemon._lock:
             live = (live_session() and session.worker is worker
                     and (session.turn_id if session.worker is not None else None) == turn_id
-                    and not session.cancelled.is_set())
+                    and not session.cancelled.is_set()
+                    and (not browser_call or getattr(session, "drive_turn", None) is drive_turn)
+                    and (drive_turn is None or not drive_turn.closed))
         if not live:
             return False
+        if browser_call and request_alive is not None:
+            try:
+                if not request_alive():
+                    return False
+            except Exception:
+                return False
         try:
             return native_current is None or native_current() is True
         except Exception:
@@ -248,9 +286,11 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
     approve = _approver(session, current)
     LOG.debug("jarvis-mcp call %s for thread %s", name, thread.id)
 
-    def run():
+    def dispatch():
         runtime.bind(caller=who, depth=0, tool_names=names, approve=approve,
                      desk=desk, should_stop=lambda: not current())
+        if entry.owner_gated and drive_turn is None:
+            return tools.ToolResult("Refused: this Browser action needs the current owner chat turn.")
         # Codex native approval delegates transport for every offered tool.
         # Unlike Claude it has no PreToolUse hook, so nondangerous entries
         # still need the exact session permit (STRICT/named always-ask).
@@ -269,10 +309,16 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
             return tools.ToolResult("Refused: this chat turn is no longer current.")
         return tools.dispatch(name, json.dumps(arguments), approve=approve)
 
+    def run():
+        from .browser.drive_state import bind_turn
+        with bind_turn(drive_turn if browser_call else None):
+            return dispatch()
+
     result = contextvars.Context().run(run)
     text = result.text
     payload = {"text": text,
-               "isError": text.startswith(("Error:", "Refused:", "The user declined"))}
+               "isError": (text.startswith(("Error:", "Refused:", "The user declined"))
+                           or (name == "hud_browser_act" and text.startswith("Stopped:")))}
     if result.image_b64 is not None:
         payload["image"] = {"data": result.image_b64, "mimeType": result.mime}
     return payload

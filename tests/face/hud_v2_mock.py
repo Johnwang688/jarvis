@@ -657,11 +657,18 @@ class MockDaemon:
         # dictation section's reload, went missing (the "approval-origin"
         # timeout).
         self._sse: collections.deque = collections.deque()
+        # V13: with `fanout` on, every /events connection gets every later frame (several windows
+        # at once) instead of the single newest connection taking over the queue.
+        self.fanout = False
+        self._log: list = []
         self._sse_cond = threading.Condition()
         self._sse_gen = 0
         self._sse_closed = False
         self.calls: list[tuple[str, str, dict]] = []
         self.say_fail = False        # /say answers 503 (the local voice is down)
+        self.duck_log: list[tuple[float, bool]] = []   # V15: every /speech/duck request, with its time
+        self.duck_leases: dict[str, float] = {}        # V15: window token -> the lease the daemon would hold
+        self.duck_lease_s = 3.0
         self.speech_threads: dict[str, dict] = {}   # V7: thread id -> {voice, muted}, as the daemon keeps them
         self.ms_per_char = 12        # /say's tone length per character of text
         self.summary_text = "The change is done and all the tests pass."   # /speech/summary's answer (V8)
@@ -693,6 +700,13 @@ class MockDaemon:
         # reached the "cloud" -- only a clip that passed (or skipped) verification does.
         self.speaker = mock_speaker.fresh()
         self.cloud_uploads = 0
+        # V13: the owner's speech-to-text switches, as /stt/settings answers them.
+        self.stt_publish = True
+        self.stt_settings = {"backend": "cloud", "cloud_fallback": True, "error": "",
+                             "backends": ["cloud", "local", "auto"],
+                             "local": {"installed": True, "reason": "", "loaded": False, "threads": 2,
+                                       "idle_unload_min": 10.0, "model": "parakeet (local)",
+                                       "fetch": "python -m jarvis.stt_local fetch"}}
         # What the explorer moved to the trash (ED-7's `fs` delete).
         self.trashed: list[str] = []
 
@@ -771,6 +785,25 @@ class MockDaemon:
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-store")
                     self.end_headers()
+                    if mock.fanout:
+                        with mock._sse_cond:
+                            at = len(mock._log)
+                            mock._sse_gen += 1
+                        while True:
+                            with mock._sse_cond:
+                                mock._sse_cond.wait_for(lambda: mock._sse_closed or len(mock._log) > at, timeout=0.5)
+                                if mock._sse_closed:
+                                    return
+                                event = mock._log[at] if len(mock._log) > at else None
+                                at += 1 if event is not None else 0
+                            try:
+                                if event is None:
+                                    self.wfile.write(b": keepalive\n\n")
+                                else:
+                                    self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                                self.wfile.flush()
+                            except Exception:
+                                return
                     with mock._sse_cond:
                         mock._sse_gen += 1
                         mine = mock._sse_gen
@@ -858,6 +891,8 @@ class MockDaemon:
                 if path == "/speech/voices":
                     # V7: the daemon's per-chat voice map, as the real route answers it.
                     return self._json({"threads": mock.speech_threads, "pool": mock.speech_pool()})
+                if path == "/stt/settings":
+                    return self._json(mock.stt_settings)
                 if path == "/voices":
                     return self._json(w["voices"])
                 if path == "/models":
@@ -1019,7 +1054,8 @@ class MockDaemon:
                             step["wait"].wait(20)
                         if "status" in step:
                             return self._json({"error": step.get("error", "scripted failure")}, step["status"])
-                        return self._json({"text": step["text"], **extra})
+                        # V13: which backend served it, when a script says so.
+                        return self._json({"text": step["text"], **{k: step[k] for k in ("backend", "model", "fallback") if k in step}, **extra})
                     return self._json({"text": w["stt_text"], **extra})
                 if path == "/speaker/reading":
                     n = int(self.headers.get("Content-Length") or 0)
@@ -1157,6 +1193,18 @@ class MockDaemon:
                                         "default_effort": info["default_effort"],
                                         "default_source": info["default_source"]})
                     return self._json(payload)
+                if path == "/stt/settings":
+                    if not body or set(body) - {"backend", "cloud_fallback"}:
+                        return self._err(400, "bad fields")
+                    if "backend" in body and body["backend"] not in mock.stt_settings["backends"]:
+                        return self._err(400, "bad backend")
+                    if "cloud_fallback" in body and not isinstance(body["cloud_fallback"], bool):
+                        return self._err(400, "bad cloud_fallback")
+                    mock.stt_settings.update(body)
+                    # The daemon publishes the new state to every window (V13).
+                    if mock.stt_publish:
+                        mock.emit("stt_settings", dict(mock.stt_settings))
+                    return self._json(mock.stt_settings)
                 if path == "/speech/voices":
                     # V7: assign (idempotent, sticky, next unused voice of the pool),
                     # choose, or mute -- the real route's keys and refusals.
@@ -1182,6 +1230,21 @@ class MockDaemon:
                     if entry != before:
                         mock.emit("thread_voice", record)
                     return self._json(record)
+                if path == "/speech/duck":
+                    # V15: the real route's contract -- one boolean, nothing else -- and the
+                    # daemon's lease: `on` holds the duck for `lease_s` from now, `off` ends it.
+                    window = body.get("window", "") if isinstance(body, dict) else None
+                    if (not isinstance(body, dict) or not set(body) <= {"on", "window"} or "on" not in body
+                            or not isinstance(body["on"], bool)
+                            or not (window == "" or (isinstance(window, str) and len(window) == 32
+                                                     and all(c in "0123456789abcdef" for c in window)))):
+                        return self._err(400, "bad fields")
+                    mock.duck_log.append((time.monotonic(), body["on"]))
+                    if body["on"]:
+                        mock.duck_leases[window] = time.monotonic() + mock.duck_lease_s
+                    else:
+                        mock.duck_leases.pop(window, None)
+                    return self._json({"on": body["on"], "ducked": 0, "lease_s": mock.duck_lease_s})
                 if path == "/say":
                     # V6: the real route's contract -- known keys only, a voice
                     # from the catalog, `local_only` a boolean -- answering a
@@ -1597,6 +1660,7 @@ class MockDaemon:
             return
         with self._sse_cond:
             self._sse.append(frame)
+            self._log.append(frame)
             self._sse_cond.notify_all()
 
     def sse_connections(self) -> int:
@@ -1801,6 +1865,10 @@ class MockDaemon:
 
     def sent(self, method: str, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == method and p == path]
+
+    def ducking(self) -> bool:
+        """Would the daemon hold the Remote Browser's sound down right now?"""
+        return any(time.monotonic() < until for until in self.duck_leases.values())
 
     def saw(self, method: str, path: str) -> bool:
         return any(m == method and p == path for m, p, _ in self.calls)

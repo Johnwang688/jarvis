@@ -1016,14 +1016,16 @@ class BrowserHost:
                 pass
             return ActResult("stopped", "Stopped: the Browser action timed out; look again.")
 
-    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text):
+    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text, *, provider="fast"):
         tab = self.require_tab(tab_id)
         target = "" if prepared.context_flagged or prepared.target is None else prepared.target.name
         rect = None
         if prepared.rect and not prepared.context_flagged:
             left, top, right, bottom = prepared.rect
             rect = {"x": left, "y": top, "width": right-left, "height": bottom-top}
-        tab.stream.agent_driver(thread_id, "fast")
+        if provider not in ("fast", "claude", "codex"):
+            raise ValueError("invalid Browser driver provider")
+        tab.stream.agent_driver(thread_id, provider)
         tab.stream.agent_action({"id": action_id, "at": datetime.now(timezone.utc).isoformat(), "action": action,
             "target": target, "text": text if action in ("type", "select") else "",
             "outcome": outcome, "rect": rect, "page_identity": tab.page_identity,
@@ -1044,6 +1046,11 @@ class BrowserHost:
         return ("<!doctype html><meta charset=utf-8><title>Browser restored</title>"
                 "<body><p>This page was left blank after the sound setting changed. "
                 "Enter an address or use Sign in to open it again.</p>")
+
+    def duck_owners(self):
+        """Pinned Chrome roots that Jarvis's speech may lower (V15); `[]` when
+        nothing is audible. Never starts Chrome."""
+        return self._sound.duck_owners()
 
     def set_sound(self, tab_id, on):
         self._refuse_if_held()

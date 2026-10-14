@@ -179,13 +179,16 @@ def _protected_state_paths() -> set[Path]:
     # them could open the owner's home network, or every server on this
     # machine, to the pages his Browser loads) and "open dev servers
     # automatically".
+    # `stt.json` (V13, 2026-10-13) holds the owner's speech-to-text switches,
+    # among them "never upload audio" and which backend hears the microphone
+    # (an agent that could flip them could send the owner's voice to the cloud).
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
-             "provider_defaults.json", "vex.json", "browser.json")
+             "provider_defaults.json", "vex.json", "browser.json", "stt.json")
     allow = config.ALLOWLIST_PATH.expanduser()
     paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
              config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser(),
              config.CODEX_CATALOG_PATH.expanduser(), config.VEX_PATH.expanduser(),
-             config.BROWSER_SETTINGS_PATH.expanduser()}
+             config.BROWSER_SETTINGS_PATH.expanduser(), config.STT_SETTINGS_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
     # The speaker store's two files that switch the voice check off (V12, V-12b,
     # owner 2026-10-14): `voiceprint.json` (whose voice is the owner's) and

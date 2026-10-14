@@ -552,14 +552,21 @@ def _voice_checks(page, mock, check, until):
     _dictation(page, "auto")
     check("the orb's strip acts for the selected chat and selects no pane", _sel(page) == 2)
     s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
-    page.evaluate(UTTERANCE)
+    # The AUTO message arms a 6 s continuation window on the live mic. The fake
+    # capture device is real audio the script did not write (its beeps), so a beep
+    # that lands in that window is claimed as the message's continuation and puts
+    # the orb on "listening" for the 1.5 s hangover. The window is closed in the
+    # same evaluate as the utterance: closing it after the send was seen left a
+    # gap in which a beep could already have been claimed (V4's worklet delivers
+    # the device's frames as soon as the page yields, so the race was visible).
+    page.evaluate("() => { const r = (" + UTTERANCE + ")(); window.__hud.capture.closeContinuation(); return r; }")
     sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
     check("AUTO sends the utterance to the selected chat's thread",
           bool(sent) and sent[-1].get("text") == "what is the weather" and sent[-1].get("spoken") is True, str(sent))
     check("and nothing to the other pane's", len(_sent(mock, "t1")) == s1)
     _dictation(page, "review")
     until(lambda: _chat(page, 2)["busy"], timeout=3)
-    check("the orb now shows the selected chat's own turn", bool(until(lambda: orb() == "thinking", timeout=2)),
+    check("the orb now shows the selected chat's own turn",bool(until(lambda: orb() == "thinking", timeout=2)),
           str(orb()))
     stt = len(mock.sent("POST", "/stt"))
     page.evaluate(UTTERANCE)

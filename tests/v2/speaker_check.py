@@ -79,7 +79,11 @@ class Routes(unittest.TestCase):
         return self.owner("POST", "/speaker", body)
 
     def stt(self, audio, status=200, query="verify=1", mime="audio/wav"):
-        return self.hud_audio("/stt" + ("?" + query if query else ""), audio, status, mime)
+        body = self.hud_audio("/stt" + ("?" + query if query else ""), audio, status, mime)
+        # (V13 adds which backend served the clip; these checks are about the voice check)
+        if status == 200 and isinstance(body, dict):
+            body = {k: v for k, v in body.items() if k not in ("backend", "model", "fallback")}
+        return body
 
     # -- owner-only, content types, and nothing created for a stranger ----------------
     def test_every_speaker_route_is_the_owners_alone(self):
@@ -201,6 +205,16 @@ class Routes(unittest.TestCase):
         # A rejected clip, also sent with ids and a budget, still goes nowhere.
         self.stt(clip(FRIEND, 3), status=422, query="verify=1&utterance_id=3&seq=4&budget_ms=15000")
         self.assertEqual(len(self.cloud), 1)
+
+    def test_a_refusal_and_a_silent_clip_reach_neither_the_local_engine_nor_the_cloud(self):
+        """V13's `stt_result` (local first, cloud as fallback) comes after the voice check, for both."""
+        from jarvis import voice
+        self.enroll()
+        with patch.object(voice, "stt_result", side_effect=AssertionError("transcribed")):
+            self.stt(clip(FRIEND, 3), status=422)
+            self.stt(clip(STRANGER, 3), status=422, query="")
+            self.assertEqual(self.stt(clip(OWNER, 0.1))["verify"], "no_speech")
+        self.assertEqual(self.cloud, [])
 
     def test_jarvis_own_voices_are_rejected_before_any_cloud_call(self):
         """Plan 3.4 (3): once enrolled, verification rejects Jarvis's voices."""

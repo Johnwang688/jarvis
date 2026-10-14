@@ -9,7 +9,8 @@ export type CapturePathName = "unknown" | "worklet" | "script_processor";
 /** What the daemon did about whose voice a clip was (V12): the score itself is never kept here. */
 export type VerifyResult = "matched" | "skipped_guest" | "skipped_unenrolled" | "no_speech";
 const verifyResults: VerifyResult[] = ["matched", "skipped_guest", "skipped_unenrolled", "no_speech"];
-export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V12: speaker verification's answer for the message. */ verify?: VerifyResult; /** V12: how many chunks of the message the daemon refused as not the owner's. */ rejected?: number; }
+export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V12: speaker verification's answer for the message. */ verify?: VerifyResult; /** V12: how many chunks of the message the daemon refused as not the owner's. */ rejected?: number; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
+export type SttBackend = "local" | "cloud";
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
 const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
@@ -67,6 +68,21 @@ export class VoiceDiagnostics {
     const row = this.rows.find(x => x.id === id);
     if (!row) return;
     this.rows = this.rows.map(x => x.id === id ? { ...x, ms: bounded(x.ms + ms, 900_000) } : x);
+    this.publish();
+  }
+  /**
+   * V13: which backend served the clip. Anything but "local"/"cloud" is ignored.
+   * A long message is one row served by several chunks (V4), so this accumulates
+   * and never hides that audio left the PC: once any chunk was answered by the
+   * cloud the row says `cloud`, and once one fell back it stays `fellBack`, however
+   * the later chunks were served. A Retry (`reopen`) starts the row afresh.
+   */
+  served(id: number, backend: unknown, fellBack = false) {
+    if (backend !== "local" && backend !== "cloud") return;
+    const row = this.rows.find(x => x.id === id);
+    if (!row) return;
+    const next: SttBackend = row.backend === "cloud" ? "cloud" : backend;
+    this.rows = this.rows.map(x => x.id === id ? { ...x, backend: next, fellBack: x.fellBack === true || fellBack === true } : x);
     this.publish();
   }
   /** An explicit Retry: the row is in flight again, so it can settle again. */

@@ -27,6 +27,7 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt }: { di
     {!value.rows.length ? <p>No utterances yet.</p> : <ol className="voice-diagnostic-rows" aria-label="Recent utterances">
       {[...value.rows].reverse().map(row => <li key={row.id} data-testid="voice-diagnostic-row">
         #{row.id} · {row.source.replace("_", " ")} · {(row.ms / 1000).toFixed(2)} s · {row.outcome.replaceAll("_", " ")}{row.latencyMs !== undefined ? ` · ${(row.latencyMs / 1000).toFixed(2)} s to outcome` : ""}
+        {row.backend ? ` · ${row.backend}${row.fellBack ? " (local failed)" : ""}` : ""}
         {row.kept ? " · audio kept" : row.outcome === "stt_failed" ? " · audio not kept" : ""}
         {row.verify === "skipped_guest" ? " · verification skipped (guest voice)" : row.verify === "skipped_unenrolled" ? " · verification skipped (no voice enrolled)" : row.verify === "matched" ? " · voice matched" : row.verify === "no_speech" ? " · too little speech to check" : ""}
         {row.rejected ? ` · ${row.rejected} part${row.rejected === 1 ? "" : "s"} not your voice` : ""}

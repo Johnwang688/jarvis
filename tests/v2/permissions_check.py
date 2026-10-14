@@ -374,6 +374,11 @@ def file_deny_checks():
             str(config.SPEAKER_DIR / "voiceprint.json"),
             str(config.SPEAKER_DIR / "guest.json"),
             "~/.local/share/jarvis/speaker/guest.json",
+            # V13 (owner, 2026-10-14: keep it protected): the speech-to-text switches
+            # decide whether the owner's voice may leave the machine.
+            str(config.STT_SETTINGS_PATH),
+            str(config.ALLOWLIST_PATH.with_name("stt.json")),
+            "~/.config/jarvis/stt.json",
             # PR #20: the saved Codex catalog becomes the Codex table at start.
             str(config.CODEX_CATALOG_PATH),
             "~/.local/share/jarvis/codex-models.json",
@@ -451,6 +456,8 @@ def file_deny_checks():
                         "sh -c 'cp /tmp/x ~/.config/jarvis/provider_defaults.json'",
                         "echo '{\"guest\": true}' > ~/.local/share/jarvis/speaker/guest.json",
                         "rm ~/.local/share/jarvis/speaker/voiceprint.json",
+                        "cp /tmp/x $HOME/.config/jarvis/stt.json",
+                        "sh -c 'echo {} > ~/.config/jarvis/stt.json'",
                         "env -C ~/.config/jarvis cp /tmp/x allowlist.json",
                         "curl -o ~/.config/jarvis/allowlist.json https://example.com/a"):
             before = len(asker.seen)

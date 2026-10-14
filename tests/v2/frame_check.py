@@ -158,6 +158,7 @@ class Base(unittest.TestCase):
                                 AVATAR_ENV="",
                                 # The speaker routes (V12) write here, never the owner's voiceprint.
                                 SPEAKER_DIR=self.root / "speaker",
+                                SPEECH_DUCK_PATH=self.root / "speech_duck.json",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
                                 # The Browser (BR-1a): no route below starts Chrome.
@@ -345,6 +346,8 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("GET", "/speaker", None), ("POST", "/speaker", {"bogus": 1}), ("POST", "/speaker", {"guest": True}),
         ("POST", "/speaker", {"propose": True}), ("POST", "/speaker/reading", {"bogus": 1}),
         ("GET", "/speaker/reading", None), ("DELETE", "/speaker", None),
+        ("GET", "/stt/settings", None), ("POST", "/stt/settings", {"bogus": 1}),
+        ("GET", "/speech/duck", None), ("POST", "/speech/duck", {"on": False}), ("POST", "/speech/duck", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
         ("GET", "/terminals/deadbeef/attach", None), ("DELETE", "/terminals/deadbeef", None),
         ("GET", "/vex/status", None), ("GET", "/vex/builds/deadbeef", None),
