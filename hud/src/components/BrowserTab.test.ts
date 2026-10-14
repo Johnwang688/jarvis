@@ -24,6 +24,7 @@ beforeEach(()=>{
     runtime:{},error:"",cleanupError:"",selectedProfile:()=> "p-11111111",focus:vi.fn(),
     cover:vi.fn(),uncover:vi.fn().mockResolvedValue(undefined),ensure:vi.fn().mockResolvedValue(undefined),
     profile:vi.fn(),see:vi.fn(),history:vi.fn(),convert:vi.fn(),
+    drive:vi.fn(),drivePreference:()=>true,driveReady:()=>true,globalDrive:true,
     submit:vi.fn().mockImplementation((_pane,_id,raw,chosen)=>Promise.resolve(addressTarget(raw,DEFAULT_PORTS,false,chosen))),
   } as unknown as BrowserControl;
   props={pane:1,slot:1,drawn:true,projectId:null,control,liveFrames:[],

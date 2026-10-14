@@ -116,6 +116,7 @@ export class SttAssembler<M = undefined> {
   private nextId = 0;
   private listeners = new Set<() => void>();
   private chain: Promise<void> = Promise.resolve();
+  private waiters = new Map<number, (() => void)[]>();
   private value: SttSnapshot = { clips: [], pending: 0 };
   private now: () => number;
 
@@ -123,6 +124,24 @@ export class SttAssembler<M = undefined> {
 
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   snapshot = () => this.value;
+  /**
+   * Resolves once the clip's fate is known: its text was placed (the placer has
+   * run), it came back empty, it failed for good (after the one automatic
+   * retry), or it was discarded. An unknown or already settled clip resolves
+   * at once. The caller uses it for work that must wait for the outcome (V6's
+   * barge-in resumes speech only then); a later explicit Retry is not waited on.
+   */
+  whenSettled(id: number): Promise<void> {
+    const e = this.entries.get(id);
+    if (!e || e.state === "failed") return Promise.resolve();
+    return new Promise<void>(done => { this.waiters.set(id, [...(this.waiters.get(id) ?? []), done]); });
+  }
+  private settle(id: number) {
+    const w = this.waiters.get(id);
+    this.waiters.delete(id);
+    for (const fn of w ?? []) fn();
+  }
+
   /** The kept audio for a clip, for Play. Null once it is placed, discarded or evicted. */
   clip(id: number): Blob | null { return this.entries.get(id)?.blob ?? null; }
 
@@ -224,7 +243,7 @@ export class SttAssembler<M = undefined> {
       this.entries.delete(e.id); e.blob = null;
       this.o.diagnostics.keep(e.diag, false);
       this.o.diagnostics.finish(e.diag, "empty_transcript", this.now() - e.startedAt);
-      this.emit(); this.event({ kind: "empty" }); this.release();
+      this.emit(); this.event({ kind: "empty" }); this.settle(e.id); this.release();
       return;
     }
     e.text = text; e.state = "ready"; e.error = "";
@@ -238,6 +257,7 @@ export class SttAssembler<M = undefined> {
     const kept = this.entries.has(e.id);
     this.emit();
     this.event({ kind: "failed", id: e.id, message, kept });
+    this.settle(e.id);
     this.release();
   }
 
@@ -260,7 +280,7 @@ export class SttAssembler<M = undefined> {
     e.cancelled = true; e.ac?.abort(); clearTimeout(e.retryTimer ?? undefined);
     if (e.state !== "failed") this.o.diagnostics.finish(e.diag, "cancelled", this.now() - e.startedAt);
     this.drop(e);
-    this.emit(); this.release();
+    this.emit(); this.settle(id); this.release();
   }
 
   /** Place, in capture order, every ready text no earlier clip is still waiting on. */
@@ -279,7 +299,7 @@ export class SttAssembler<M = undefined> {
     this.emit();
     this.chain = this.chain.then(() => this.o.place(items)).catch(() => {
       for (const i of items) this.o.diagnostics.finish(i.diag, "unplaced", i.latencyMs);
-    });
+    }).then(() => { for (const i of items) this.settle(i.id); });
   }
 
   /** Resolves when every placement handed over so far has run (tests, teardown). */

@@ -22,6 +22,7 @@ import type { OrbState } from "../state/store";
 import { DICTATION_MODES, nextMode, type DictationMode } from "../lib/dictation";
 import { palette } from "../lib/orbpalette";
 import { noPointerFocus } from "../lib/talkkey";
+import type { ReactNode } from "react";
 
 interface Ring {
   r: number;
@@ -76,10 +77,20 @@ export function Orb(props: {
   zoom?: number;
   onPress: () => void;
   onRelease: () => void;
+  /**
+   * Jarvis's own output level (0..1), read each frame while he speaks: the orb
+   * breathes with his voice rather than with the room. Not state, so speech
+   * does not re-render the window.
+   */
+  outputLevel?: () => number;
+  /** The speech strip (components/SpeechStrip), above the mic strip. */
+  speech?: ReactNode;
+  /** Folded into the rail, where the dock is a scaled 36px orb: the strip is one button beside it, outside the scaling. */
+  speechRail?: ReactNode;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const live = useRef({ state: props.state, level: props.level, rings: props.rings, accent: props.accent });
-  live.current = { state: props.state, level: props.level, rings: props.rings, accent: props.accent };
+  const live = useRef({ state: props.state, level: props.level, rings: props.rings, accent: props.accent, out: props.outputLevel });
+  live.current = { state: props.state, level: props.level, rings: props.rings, accent: props.accent, out: props.outputLevel };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -94,7 +105,8 @@ export function Orb(props: {
     let smooth = 0;
 
     const draw = (now: number) => {
-      const { state, level, rings: ringName, accent } = live.current;
+      const { state, rings: ringName, accent, out } = live.current;
+      const level = state === "speaking" && out ? out() : live.current.level;
       // An unknown ring set falls back to the default rather than drawing
       // nothing: the orb *is* the push-to-talk button, so an avatar that could
       // blank it would take the surface's main control with it.
@@ -190,6 +202,7 @@ export function Orb(props: {
       className={props.compact ? "mini" : props.tight ? "tight" : undefined}
       data-mode={props.mode}
     >
+      {props.compact ? null : props.speech}
       <div id="micstrip">
         <div id="dictation" data-testid="dictation" title="What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes the mic">
           {DICTATION_MODES.map((m) => (
@@ -242,6 +255,7 @@ export function Orb(props: {
         {props.status || ""}
       </div>
     </div>
+    {props.compact ? props.speechRail : null}
     {folded ? (
       // The dock is scaled down to a 36px mini orb, and so would a strip inside
       // it be; a short window has no room above the orb for it. Either way the

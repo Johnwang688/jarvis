@@ -317,22 +317,22 @@ class Tickets:
 
     def __init__(self, clock=time.monotonic):
         self._lock = threading.Lock()
-        self._tickets: dict[str, tuple[str, float]] = {}
+        self._tickets: dict[str, tuple[str, float, int | None]] = {}
         self._clock = clock
 
     def _expire(self, now: float) -> None:
-        for ticket in [k for k, (_, until) in self._tickets.items() if until <= now]:
+        for ticket in [k for k, (_, until, _) in self._tickets.items() if until <= now]:
             del self._tickets[ticket]
 
-    def mint(self, tab_id: str) -> str:
+    def mint(self, tab_id: str, page_identity: int | None = None) -> str:
         ticket = secrets.token_urlsafe(32)
         with self._lock:
             now = self._clock()
             self._expire(now)
-            self._tickets[ticket] = (tab_id, now + TICKET_TTL_S)
+            self._tickets[ticket] = (tab_id, now + TICKET_TTL_S, page_identity)
         return ticket
 
-    def redeem(self, ticket, tab_id: str) -> bool:
+    def redeem(self, ticket, tab_id: str, page_identity: int | None = None) -> bool:
         """Spent by being presented, whatever the answer."""
         if not isinstance(ticket, str) or not ticket:
             return False
@@ -340,7 +340,13 @@ class Tickets:
             now = self._clock()
             entry = self._tickets.pop(ticket, None)
             self._expire(now)
-        return entry is not None and entry[1] > now and hmac.compare_digest(entry[0], tab_id)
+        return (entry is not None and entry[1] > now and entry[2] == page_identity
+                and hmac.compare_digest(entry[0], tab_id))
+
+    def revoke(self, tab_id: str) -> None:
+        with self._lock:
+            for ticket in [k for k, row in self._tickets.items() if row[0] == tab_id]:
+                self._tickets.pop(ticket, None)
 
     def clear(self) -> None:
         with self._lock:

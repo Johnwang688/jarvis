@@ -372,6 +372,19 @@ class PendingApprovals:
         with self._lock:
             return [p.request for p in self._pending.values() if not p.event.is_set()]
 
+    def run_if_idle(self, commit: Callable[[], bool]) -> bool:
+        """Linearize a short lifecycle commitment against approval admission.
+
+        Internal coordination only: commit may validate/mark an in-memory
+        Browser activity token. It must not perform IO, wait, publish, call
+        other services or re-enter this broker. Lock order is broker ->
+        Browser activity. Approval policy and answering remain unchanged.
+        """
+        with self._lock:
+            if self._closed or any(not item.event.is_set() for item in self._pending.values()):
+                return False
+            return bool(commit())
+
     def owner_details(self, req_id: str) -> dict:
         """One still-pending private card. The HTTP caller enforces owner access."""
         with self._lock:

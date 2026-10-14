@@ -19,6 +19,9 @@ class NavigationIdentity(unittest.IsolatedAsyncioTestCase):
         self.page = SimpleNamespace(url=self.frame.url, main_frame=self.frame)
         self.tab = H._Tab("0123abcd", "p-0123abcd", None, self.page, page_identity=1)
         self.host._tabs[self.tab.id] = self.tab
+        instance = H._Instance(self.tab.profile, Path("/synthetic"), None, None, generation=1)
+        self.host._instances[self.tab.profile] = instance
+        self.host.activity.opened(self.tab.profile, instance.generation)
 
     def test_same_url_and_same_document_navigation_invalidate_without_hud_report(self):
         self.host._landed(self.tab, self.frame)

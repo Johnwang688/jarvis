@@ -278,6 +278,44 @@ describe("where AUTO may send (placementFor)", () => {
   });
 });
 
+describe("whenSettled (V6's barge-in resumes only when the fate is known)", () => {
+  it("waits for the placer, and for failure after the automatic retry", async () => {
+    const h = harness();
+    const a = h.stt.submit(h.clip(), 1000, "ptt", "x")!;
+    let doneA = false; void h.stt.whenSettled(a).then(() => { doneA = true; });
+    await flush();
+    expect(doneA).toBe(false);                       // upload started: not settled
+    h.calls[0].resolve("hi");
+    await flush();
+    expect(doneA).toBe(true);
+    expect(h.texts()).toEqual(["hi"]);
+
+    const b = h.stt.submit(h.clip(), 1000, "ptt", "x")!;
+    let doneB = false; void h.stt.whenSettled(b).then(() => { doneB = true; });
+    h.calls[1].reject(Object.assign(new Error("down"), { status: 502 }));
+    await flush();
+    expect(doneB).toBe(false);                       // waiting on its automatic retry
+    await vi.advanceTimersByTimeAsync(STT_RETRY_DELAY_MS);
+    h.calls[2].reject(Object.assign(new Error("down"), { status: 502 }));
+    await flush();
+    expect(doneB).toBe(true);
+    await expect(h.stt.whenSettled(b)).resolves.toBeUndefined();   // already failed: immediate
+  });
+
+  it("an empty transcript and a discard settle too", async () => {
+    const h = harness();
+    const a = h.stt.submit(h.clip(), 1000, "ptt", "x")!;
+    const b = h.stt.submit(h.clip(), 1000, "ptt", "x")!;
+    let n = 0; void h.stt.whenSettled(a).then(() => n++); void h.stt.whenSettled(b).then(() => n++);
+    h.calls[0].resolve("  ");
+    await flush();
+    expect(n).toBe(1);
+    h.stt.discard(b);
+    await flush();
+    expect(n).toBe(2);
+  });
+});
+
 describe("the budget handed to the daemon", () => {
   it("is the attempt's whole client deadline", () => {
     const h = harness();

@@ -38,6 +38,18 @@ class Integration(unittest.TestCase):
             self.assertTrue(action_tool.hud_browser_act('click',target='e1').startswith('Refused:'))
             act.assert_not_called()
 
+    def test_prompt_renarrows_each_desk_transition_from_pristine(self):
+        provider=H.FastPathProvider();handle=provider.start(H.thread('prompt-turn'),H.brief(system_append="\n\nPinned caller context"),H.allow_all)
+        self.addCleanup(provider.close,handle)
+        native=handle.native
+        for desk in (False,True,False,True):
+            provider._turn_tools(native,desk)
+            held={s['function']['name'] for s in native.agent.tool_specs}
+            self.assertEqual('hud_browser_act' in held,desk)
+            self.assertEqual('On a desk turn, `hud_browser_act`' in native.agent._base_system,desk)
+            self.assertTrue(native.agent._base_system.endswith('Pinned caller context'))
+            self.assertEqual(native.agent._base_system,H.config.narrow_prompt(native.pristine_system,held))
+
     def test_actual_worker_scope_exhaustion_has_no_handoff_and_consistent_transcript(self):
         provider=H.FastPathProvider();handle=provider.start(H.thread('drive-turn'),H.brief(),H.allow_all)
         self.addCleanup(provider.close,handle)

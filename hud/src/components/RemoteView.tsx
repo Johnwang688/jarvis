@@ -10,7 +10,7 @@ import type { DriveLease } from "../lib/drivestate";
 
 interface PageDialog {id:string;kind:string;message:string;default:string}
 export interface RemoteViewProps {
-  tabId:string; live:boolean; blocked:boolean; zoom:number; projectId:string|null;
+  tabId:string; instanceGeneration?:number; live:boolean; blocked:boolean; zoom:number; projectId:string|null;
   inputHeld?:()=>boolean;
   onLocation:(url:string,title:string)=>void; onPopup:(id:string)=>void;
   onAction:(action:PaneAction)=>void; onOwnerFocus:()=>void; onRetry?:()=>Promise<unknown>;
@@ -24,6 +24,7 @@ export function RemoteView(props:RemoteViewProps) {
   const input=useRef<HTMLTextAreaElement>(null);
   const socket=useRef<WebSocket|null>(null);
   const generation=useRef(0);
+  const connectedInstance=useRef<number|undefined>(undefined);
   const driveLease=useRef<DriveLease|null>(null);
   const drive=useDriving(props.tabId);
   const inputEpoch=useRef(0);
@@ -38,7 +39,7 @@ export function RemoteView(props:RemoteViewProps) {
   const [dialogs,setDialogs]=useState<PageDialog[]>([]);
   const [chooser,setChooser]=useState<{id:string;multiple:boolean}|null>(null);
   const [downloads,setDownloads]=useState(false);
-  const canInput=()=>latest.current.live&&!latest.current.blocked&&!latest.current.inputHeld?.()&&socket.current?.readyState===WebSocket.OPEN;
+  const canInput=()=>latest.current.live&&!latest.current.blocked&&!latest.current.inputHeld?.()&&connectedInstance.current===latest.current.instanceGeneration&&socket.current?.readyState===WebSocket.OPEN;
   const send=(body:object,inputMessage=false)=>{
     const ws=socket.current;
     if(!ws||ws.readyState!==WebSocket.OPEN||(inputMessage&&!canInput()))return false;
@@ -76,8 +77,8 @@ export function RemoteView(props:RemoteViewProps) {
     const lease=driving.attach(props.tabId);driveLease.current=lease;
     const controller=new AbortController();
     setConnected(false);setError("");setDialogs([]);setChooser(null);setSecurity("unknown");
-    keys.current=new HeldKeys();buttons.current=new HeldButtons();clipboard.current=null;
-    const current=()=>!gone&&generation.current===gen&&latest.current.tabId===props.tabId;
+    keys.current=new HeldKeys();buttons.current=new HeldButtons();clipboard.current=null;composing.current=false;inputEpoch.current++;
+    const current=()=>!gone&&generation.current===gen&&latest.current.tabId===props.tabId&&latest.current.instanceGeneration===props.instanceGeneration;
     const pipe=new FramePipe<ImageBitmap>(
       bytes=>createImageBitmap(new Blob([bytes.slice().buffer],{type:"image/jpeg"})),
       (bitmap,meta:FrameMeta)=>{
@@ -100,7 +101,7 @@ export function RemoteView(props:RemoteViewProps) {
         const url=new URL(`/browser/tabs/${props.tabId}/attach`,window.location.href);
         url.protocol=url.protocol==="https:"?"wss:":"ws:";url.searchParams.set("ticket",row.ticket);
         ws=new WebSocket(url);ws.binaryType="arraybuffer";socket.current=ws;
-        ws.onopen=()=>{if(!current())return;if(lease)driving.connected(lease);setConnected(true);send({t:"visible",visible:true});resize();};
+        ws.onopen=()=>{if(!current())return;connectedInstance.current=props.instanceGeneration;if(lease)driving.connected(lease);setConnected(true);send({t:"visible",visible:true});resize();};
         ws.onmessage=async(event)=>{
           if(!current())return;
           if(event.data instanceof ArrayBuffer) {
@@ -153,7 +154,7 @@ export function RemoteView(props:RemoteViewProps) {
       if(ws){ws.onmessage=null;ws.onopen=null;ws.onclose=null;ws.onerror=null;ws.close();}
       keys.current=new HeldKeys();buttons.current=new HeldButtons();composing.current=false;
     };
-  },[props.tabId,props.live,retry]);
+  },[props.tabId,props.live,props.instanceGeneration,retry]);
   useLayoutEffect(()=>resize(),[props.zoom]);
   const point=(event:{clientX:number;clientY:number})=>clientToPage({x:event.clientX,y:event.clientY},canvas.current?.getBoundingClientRect()??{left:0,top:0},latest.current.zoom,geometry.current.place,geometry.current.view);
   const mouse=(kind:"down"|"up"|"move",event:React.MouseEvent)=>{

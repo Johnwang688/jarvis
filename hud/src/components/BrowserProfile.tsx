@@ -1,3 +1,4 @@
+import { noPointerFocus } from "../lib/talkkey";
 import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { browserApi } from "../api";
@@ -16,6 +17,8 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
     finally{setPending(false);}
   };
   const disabled=props.blocked||pending||!props.control.online;
+  const driveReason = props.blocked ? "Finish the approval or annotation first" : !props.see ? "Allow Jarvis to see this pane first" : props.control.globalDrive!==true ? "Agents may drive is off or unavailable" : !props.control.driveReady(props.pane) ? "Open this Private session first" : "Allow Jarvis to drive this pane when asked";
+
   const status=<>
     {pending?<p className="small muted" role="status">Applying Browser change…</p>:null}
     {error?<p className="err" role="status">{error}</p>:null}
@@ -31,7 +34,7 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
       </select></label>
       <button disabled={disabled} onClick={()=>{setManage(v=>!v);setConfirm(null);setLabel(row?.label??"");}}>Manage</button>
       <label title="Allow Jarvis to read this pane when asked. Navigation never turns this on."><input type="checkbox" data-testid="browser-see" checked={props.see} disabled={disabled} onChange={e=>void run(()=>props.control.see(props.pane,e.target.checked))}/> Jarvis can see</label>
-      <label title="Agents may drive is off"><input type="checkbox" data-testid="browser-drive" checked={false} disabled/> Jarvis can drive</label>
+      <label title={driveReason}><input type="checkbox" data-testid="browser-drive" checked={props.control.drivePreference(props.pane)} disabled={disabled||!props.see||props.control.globalDrive!==true||!props.control.driveReady(props.pane)} onMouseDown={noPointerFocus} onChange={e=>{if(e.nativeEvent.isTrusted)void run(()=>props.control.drive(props.pane,e.target.checked));}}/> Jarvis can drive</label>
     </div>
     {props.selected==="private"?<p className="small muted">Private · Remote only · This pane has a separate temporary session.</p>:null}
     {props.privateEnded&&props.selected==="private"?<button disabled={disabled} onClick={()=>void run(()=>props.control.profile(props.pane,"private"))}>Start a new Private session</button>:null}
