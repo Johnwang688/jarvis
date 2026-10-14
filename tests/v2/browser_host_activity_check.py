@@ -21,6 +21,7 @@ class Host(unittest.IsolatedAsyncioTestCase):
         self.tab=H._Tab('1234abcd',self.profile,None,self.page,page_identity=1,document_generation=1,pane_ready=True,
             location=(self.page.url,'Synthetic'),stream=TabStream('1234abcd',held=lambda:False,wake=lambda:None),
             cdp_lock=asyncio.Lock(),cast_lock=asyncio.Lock(),wakeup=asyncio.Event())
+        self.tab.cdp=SimpleNamespace(on=Mock(),send=AsyncMock(return_value={}))
         self.host._tabs[self.tab.id]=self.tab;self.host._publish_snapshot()
 
     async def asyncTearDown(self):
@@ -83,6 +84,25 @@ class Host(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.host.activity.try_restart(self.profile,1,1))
         finish.set();await self.tab.input_task
         self.assertEqual(self.host.activity.counts(self.profile)[0],0)
+
+    async def test_auth_cut_off_old_key_and_mouse_release_never_types_or_clicks(self):
+        class Sock:
+            def send_text(self,text):return True
+        sock=Sock();self.tab.stream._sock=sock
+        session=await self.host._auth.install(self.tab)
+        self.tab.keys_pressed["KeyA"]=self.tab.stream.hold_count
+        self.tab.pressed["left"]=self.tab.stream.hold_count
+        raw={"requestId":"r1","networkId":"n1","request":{"url":"https://example.test/protected"},
+             "authChallenge":{"source":"Server","scheme":"basic","realm":"fixture","origin":"https://example.test"}}
+        await self.host._auth._request(session,raw);await self.host._auth._challenge(session,raw)
+        prompt=session.prompt;self.assertIsNotNone(prompt)
+        await self.host._auth.answer(self.tab,sock,self.tab.stream.gen,0,{"id":prompt.nonce,"cancel":True})
+        self.tab.cdp.send.reset_mock()
+        await self.host._deliver(self.tab,"Input.dispatchKeyEvent",{"type":"keyUp","key":"a","code":"KeyA"})
+        await self.host._deliver(self.tab,"Input.dispatchMouseEvent",{"type":"mouseReleased","x":5,"y":5,"button":"left","buttons":0})
+        calls=self.tab.cdp.send.call_args_list
+        self.assertFalse(any(c.args[0]=="Input.dispatchKeyEvent" for c in calls))
+        self.assertEqual([c.args[1]["type"] for c in calls if c.args[0]=="Input.dispatchMouseEvent"],["mouseMoved"])
 
     async def test_attention_hold_cancels_pending_restart_and_pins_answer_cleanup(self):
         restart=self.host.activity.try_restart(self.profile,1,1)
