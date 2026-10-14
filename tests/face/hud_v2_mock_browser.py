@@ -111,6 +111,10 @@ def handle(h, mock, method, path, body):
                 if tid not in host.rows: raise PaneRefused(404,"no such tab")
                 if method=="DELETE":out=host.close_tab(tid)
                 elif parts[3] in ("navigate","restore"):out=host.navigate(tid,body["url"],owner=parts[3]=="navigate")
+                elif parts[3]=="sound":
+                    if type(body.get("on")) is not bool:raise PaneRefused(400,"on must be a boolean")
+                    if host.input_held():raise PaneRefused(409,"an approval card is waiting")
+                    out={"on":body["on"],"profile":host.rows[tid]["profile"]}
                 elif parts[3]=="history":out={"tab_id":tid,"loaded":True}
                 elif parts[3]=="ticket":
                     ticket=secrets.token_hex(16);host.tickets[ticket]=tid;out={"ticket":ticket,"expires_in":30}

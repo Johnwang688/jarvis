@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore, useEffect } from "react";
 import { browserSettings } from "../state/browserSettings";
 import { api } from "../api";
+import { BrowserSoundSetting } from "./BrowserSound";
 import { devservers } from "../state/devserverClient";
 import { noPointerFocus } from "../lib/talkkey";
 
@@ -11,7 +12,7 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
   const enabled = devservers.enabled;
   const drive = useSyncExternalStore(browserSettings.subscribe,browserSettings.drive);
   useEffect(()=>{void browserSettings.refresh();},[]);
-  return <div className="block">
+  return <><div className="block">
     <label className="browser-auto-setting">
       <input type="checkbox" data-testid="browser-auto-open" checked={enabled === true}
         disabled={blocked || busy || enabled === null}
@@ -36,5 +37,5 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
       onChange={async e=>{if(!e.nativeEvent.isTrusted||blocked||busy||drive===null)return;const value=e.target.checked;setBusy(true);setError("");
         try{await browserSettings.setDrive(value);}catch(e){setError(e instanceof Error?e.message:"The setting could not be saved.");}finally{setBusy(false);}}} />Agents may drive</label>
     <p className="muted">Allows requested actions in visible Remote panes with their own driving permission.</p>
-  </div>;
+  </div><BrowserSoundSetting blocked={blocked} /></>;
 }

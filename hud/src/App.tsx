@@ -24,6 +24,7 @@ import { flushSync } from "react-dom";
 import { CaptureDrafts } from "./lib/captureDraft";
 import type { CaptureDestination } from "./components/BrowserCapture";
 import { api, subscribe } from "./api";
+import { browserSound } from "./state/browserSoundClient";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
   type ChatPatch, type State,
@@ -1031,6 +1032,7 @@ export default function App() {
   useEffect(() => {
     const stop = subscribe((e: any) => {
       browser.onEvent(e);
+      browserSound.event(e);
       const kind = e.kind;
       const data = e.data || e;
       if (devservers.event(e)) return;
@@ -3269,6 +3271,11 @@ export default function App() {
             newTabNote={Object.entries(devUnseen).filter(([key]) => key.startsWith(n + ":")).map(([, host]) => host).at(-1)}
             blocked={workBlocked}
             limitMessage={browserFull === n}
+            onSoundSettings={() => {
+              if (blockedNow.current || settingsNow.current || live.current.picker || chipOverlay.current || crashedRef.current) return;
+              chooseSettingsSection("Browser");
+              settingsKeyRef.current();
+            }}
             onLoaded={(id, url) => view.setBrowserUrl(n, url, id)}
             onSubmitted={(id, url) => view.submitBrowserUrl(n, url, id)}
             onKeepOrigin={(id, origin) => view.setTabKeepOrigin(n, id, origin)}

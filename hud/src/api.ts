@@ -84,6 +84,7 @@ export const api = {
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/claim", json(body)),
   actDevServer: (id: string, action: "renew" | "placed" | "dismiss", window: string) =>
     req<unknown>("/dev-servers/" + encodeURIComponent(id) + "/" + action, json({ window })),
+  setBrowserSound: (sound: boolean) => req<unknown>("/browser/settings", patch({ sound })),
   setBrowserAutoOpen: (auto_open: boolean) => req<{ auto_open: boolean }>("/browser/settings", patch({ auto_open })),
 
   captureBrowser: (tab: string, identity: CaptureIdentity, whole: boolean) => req<unknown>(

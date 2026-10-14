@@ -57,6 +57,39 @@ class Gate(unittest.TestCase):
         self.judge.assert_not_called();self.approvals.ask.assert_not_called()
         return result
 
+    def test_host_activity_spans_prepare_review_execute_and_final_notice(self):
+        from jarvis.v2.browser.activity import BrowserActivity
+        gate=BrowserActivity();gate.opened(self.snap.profile,1);gate.desired(1)
+        self.state['owner_quiet_s']=5.0
+        self.host.begin_activity.side_effect=lambda *args:gate.enter(self.snap.profile,1)
+        self.host.end_activity.side_effect=gate.leave
+        stages=[]
+        def current(stage,value):
+            self.assertEqual(gate.counts(self.snap.profile)[0],1)
+            self.assertIsNone(gate.try_restart(self.snap.profile,1,1))
+            stages.append(stage);return value
+        self.host.prepare_action.side_effect=lambda *args,**kwargs:current('prepare',self.prepared)
+        self.judge.side_effect=lambda *args:current('review',A.ActVerdict('allow',R.ORDINARY,'fixed','model'))
+        self.host.execute_action.side_effect=lambda *args,**kwargs:current('execute',D.ActResult('acted','Done'))
+        self.host.wait_action_downloads.side_effect=lambda *args:current('downloads',None)
+        self.host.drive_finished.side_effect=lambda *args:current('finished',None)
+        self.assertEqual(self.action('click').outcome,'acted')
+        self.assertEqual(stages,['prepare','review','prepare','execute','downloads','finished'])
+        self.assertEqual(gate.counts(self.snap.profile)[0],0)
+        self.host.begin_activity.assert_called_once_with(self.snap.tab_id,self.snap.page_identity)
+        self.host.end_activity.assert_called_once()
+
+    def test_failed_driver_reservation_releases_parent_and_runs_no_page_io(self):
+        from jarvis.v2.browser.activity import BrowserActivity
+        from jarvis.v2.browser.drive_state import DriveStateRefused
+        gate=BrowserActivity();gate.opened(self.snap.profile,1);gate.desired(1)
+        self.state['owner_quiet_s']=5.0
+        self.host.begin_activity.side_effect=lambda *args:gate.enter(self.snap.profile,1)
+        self.host.end_activity.side_effect=gate.leave
+        with patch.object(self.service.state,'reserve',side_effect=DriveStateRefused('synthetic busy')):
+            self.refused_without_io()
+        self.assertEqual(gate.counts(self.snap.profile)[0],0)
+        self.host.end_activity.assert_called_once()
     def test_shipping_off_ignores_environment_and_has_zero_io(self):
         service=D.BrowserDrive(Mock())
         service.daemon.browser_settings.value.return_value=False

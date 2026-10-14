@@ -224,7 +224,7 @@ class BrowserDrive:
         except Exception:return True
 
     def act(self,action:Action)->ActResult:
-        snapshot=None;lease=None;outcome="refused";action_id=random.token_hex(16)
+        snapshot=None;lease=None;activity=None;outcome="refused";action_id=random.token_hex(16)
         try:
             turn=self._turn();turn.attempted=True
             turn.pane=action.pane if action.pane in tuple(str(i) for i in range(1,9)) else ""
@@ -234,6 +234,8 @@ class BrowserDrive:
             turn.pane=str(snapshot.slot)
             row=self._owner(snapshot)
             capability=self.state.capability(turn,snapshot,action.target) if action.target else None
+            activity=self.daemon.browser.begin_activity(snapshot.tab_id,snapshot.page_identity)
+            self._binding(snapshot)
             lease=self.state.reserve(turn,snapshot.tab_id)
             stop=runtime.should_stop()
             guard=Guard(self,turn,snapshot,lease,capability,row["input_serial"],row["attachment_generation"],
@@ -312,6 +314,7 @@ class BrowserDrive:
                         "tab_id":snapshot.view_id,"action_id":action_id,"at":utcnow(),"outcome":outcome}})
                     self.daemon.browser.drive_finished(snapshot.tab_id,action_id,outcome)
                 except Exception:pass
+            if activity is not None:self.daemon.browser.end_activity(activity)
 
     def install(self):
         global _installed

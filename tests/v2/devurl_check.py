@@ -581,14 +581,14 @@ class Settings(unittest.TestCase):
 
     def test_saved_owner_only_keeping_what_it_does_not_know(self):
         self.path.parent.mkdir(parents=True)
-        self.path.write_text(json.dumps({"auto_open": True, "lan": True, "sound": False}))
+        self.path.write_text(json.dumps({"auto_open": True, "lan": True, "sound": False, "future_switch": False}))
         settings = self.settings()
         self.assertEqual(settings.update(auto_open=False),
                          {**S.DEFAULTS, "lan": True, "auto_open": False, "sound": False})
-        self.assertEqual(json.loads(self.path.read_text()), {"auto_open": False, "lan": True, "sound": False})
+        self.assertEqual(json.loads(self.path.read_text()), {"auto_open": False, "lan": True, "sound": False, "future_switch": False})
         self.assertEqual(settings.update(local_servers=True)["local_servers"], True)
         self.assertEqual(json.loads(self.path.read_text()),
-                         {"auto_open": False, "lan": True, "local_servers": True, "sound": False})
+                         {"auto_open": False, "lan": True, "local_servers": True, "sound": False, "future_switch": False})
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual([p.name for p in self.path.parent.iterdir()], ["browser.json"], "no temp left")
         for bad in ({"auto_open": "no"}, {"auto_open": 1}, {"other": True}):

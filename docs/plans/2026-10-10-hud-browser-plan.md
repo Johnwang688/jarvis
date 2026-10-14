@@ -382,10 +382,10 @@ Saves write only the new names. A rolled-back HUD shows that pane's default view
 
 ## 9. Limits, stated plainly
 
-- **Sound is not in the pane.**
-  - It might reach your speakers through WSLg if headless Chrome can play it (M3).
-  - An Xvfb display would add sound, but it is another lever for same-user programs, so it waits until you ask (B-12).
-  - One switch covers the whole browser; there is no per-tab mute.
+- **Sound uses the owner's Remote profile speaker.**
+  - M3 observed headless Chrome routing and exact owned Pulse mute without Xvfb; physical speaker audibility remains unconfirmed.
+  - The October 13 sound plan supersedes this earlier sound scope: permission defaults allowed, while every cold daemon/instance starts muted and only an explicit owner gesture grants memory-only playback.
+  - The accepted route applies to all Remote tabs in one profile, including fresh tabs in that running instance. It cannot independently mute on a tab's site change; hidden/covered audio continues with an indicator.
 - **Video** runs at roughly 15–30 fps with no A/V sync.
 - **DRM** (EME) video may show black. Netflix-class services will probably refuse.
 - **WebRTC calls won't work:** there is no UDP through the gate.

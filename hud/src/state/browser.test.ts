@@ -1,12 +1,13 @@
 import { act, createElement, useCallback, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { ApiError } from "../api";
 import { useBrowser, addressTarget, type BrowserControl } from "./browser";
 import { browserSettings } from "./browserSettings";
 import { defaultWorkspace, setBrowserDrive, setBrowserProfile, setBrowserRemote, setBrowserSee, addBrowserTab, closeBrowserTab, submitBrowserUrl, setView, type Workspace } from "../lib/workspace";
 import type { LayoutControl } from "../components/Layout";
 import { DEFAULT_PORTS } from "../lib/browser";
 const mocks=vi.hoisted(()=>({get:vi.fn(),write:vi.fn(),remove:vi.fn()}));
-vi.mock("../api",()=>({browserApi:mocks,ApiError:class extends Error {status=404;}}));
+vi.mock("../api",()=>({browserApi:mocks,ApiError:class extends Error {constructor(public status:number,message:string){super(message);}}}));
 vi.mock("./daemonPorts",()=>({useDaemonPorts:()=>({ports:DEFAULT_PORTS,status:"ok"})}));
 vi.mock("../lib/windowId",()=>({WINDOW_ID:"a".repeat(32)}));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
@@ -117,6 +118,45 @@ it("keeps cleanup failure visible across receipts and lets the owner retry",asyn
   mocks.remove.mockRejectedValueOnce(new Error("busy"));await act(async()=>set(w=>closeBrowserTab(w,1,"page01")));
   expect(browser.cleanupError).toContain("finish closing");await act(async()=>browser.focus(1));expect(browser.cleanupError).toContain("finish closing");
   mocks.remove.mockResolvedValue({});await act(async()=>browser.retryCleanup());expect(mocks.remove).toHaveBeenCalledTimes(2);expect(browser.cleanupError).toBe("");
+});
+
+it("owner profile change mutes exact old Remote profile before changing pane state",async()=>{
+  source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd"});
+  await connected();const held=deferred<unknown>();
+  const original=mocks.write.getMockImplementation()!;
+  mocks.write.mockImplementation((path,...rest)=>path==="/tabs/0123abcd/sound"?held.promise:original(path,...rest));
+  let job!:Promise<void>;await act(async()=>{job=browser.profile(1,"private");});
+  expect(mocks.write).toHaveBeenCalledWith("/tabs/0123abcd/sound",{on:false});
+  expect(workspace.panes[0].browserProfile).toBe("p-11111111");
+  await act(async()=>{held.resolve({on:false});await job;});
+  expect(workspace.panes[0].browserProfile).toBe("private");
+});
+
+
+it.each([404,403,409])("profile change handles a known absent tab only (HTTP %i)",async(status)=>{
+  source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd"});
+  await connected();const original=mocks.write.getMockImplementation()!;
+  mocks.write.mockImplementation((path,...args)=>path==="/tabs/0123abcd/sound"?Promise.reject(new ApiError(status,"absent or held")):original(path,...args));
+  if(status===404) {
+    await act(async()=>browser.profile(1,"private"));
+    expect(workspace.panes[0].browserProfile).toBe("private");
+  } else {
+    await act(async()=>{await expect(browser.profile(1,"private")).rejects.toThrow("absent or held");});
+    expect(workspace.panes[0].browserProfile).toBe("p-11111111");
+    expect(mocks.write.mock.calls.some(([p])=>p==="/tabs")).toBe(false);
+  }
+});
+
+
+it("profile change retries another exact old-pane handle after an absent handle",async()=>{
+  source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd"});
+  source=addBrowserTab(source,1,"https://second.test/",{id:"page02",mode:"remote"});
+  source=setBrowserRemote(source,1,"page02",{mode:"remote",remoteTabId:"abcd0123"});
+  await connected();const original=mocks.write.getMockImplementation()!;
+  mocks.write.mockImplementation((path,...args)=>path==="/tabs/0123abcd/sound"?Promise.reject(new ApiError(404,"absent")):original(path,...args));
+  await act(async()=>browser.profile(1,"private"));
+  expect(mocks.write).toHaveBeenCalledWith("/tabs/abcd0123/sound",{on:false});
+  expect(workspace.panes[0].browserProfile).toBe("private");
 });
 
 it("Private driving is opt-in for the exact live pane context and forgotten on reconnect",async()=>{

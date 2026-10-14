@@ -2877,3 +2877,10 @@ anonymous descriptor. Fixed on-disk hold markers survive restart; release grants
 do not. Ambiguous/late files have no release route and stay held/deletable; close
 the tainted tab and open a fresh owner tab before downloading again. No approval
 executes downloaded bytes and no file content/digest is published.
+
+
+### Owner Browser sound
+
+POST /browser/tabs/{tab_id}/sound accepts exactly {"on": boolean}. It requires the existing owner listener, Host/Origin checks and current tab/profile or bounded restoration descriptor. It returns {"on": boolean, "profile": string, "generation": integer}; the HUD requires the returned boolean to match and then reads authoritative status. Invalid bodies are 400, absent handles are 404, and holds, disabled permission, or Private ON are 409. POST /browser/tabs/{tab_id}/sound-retry retries an exact failed replacement under the same owner/hold boundary.
+
+The protected sound setting and the global sound status desired field mean permission, default allowed; they do not grant playback. Per-instance requested is memory-only owner intent, and applied describes launch mode. Generation, phase and reason report synchronization/pending/failure; applied may remain true while owned native mute and safe idle replacement settle, so it is not a guarantee of immediate speaker silence. Master OFF removes all requests. Master ON, daemon/instance restart, or a fresh cold launch never recreates a grant. A current running profile shares sound across its Remote tabs, including newly opened tabs; the last-tab close clears it. Sound state events carry generation/control state without page URLs.

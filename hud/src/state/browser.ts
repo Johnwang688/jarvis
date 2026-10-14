@@ -121,6 +121,12 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
       }
     }
     if(event.kind==="browser_profiles_changed") void refresh();
+    if(event.kind==="browser_sound_changed") {
+      // Passive ordered rebind preserves source/see/focus leases. Existing
+      // capture identities become unavailable until the new receipt arrives.
+      receipts.current=null;
+      publisher.heartbeat();
+    }
   },[publisher,refresh,tab,patch]);
   useLayoutEffect(()=>{
     // Pin the initial default once. Deleting it later must show a missing
@@ -237,7 +243,18 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   },[allowed,publish,publisher,selectedProfile]);
   const profile=useCallback(async(pane:PaneNo,value:string)=>{
     if(!allowed(pane))return;
-    const before=now.current.view.ws.panes[pane-1].browser?.active;
+    const oldPane=now.current.view.ws.panes[pane-1];
+    const before=oldPane.browser?.active;
+    const oldRemotes=[...new Set(oldPane.browser?.tabs.map(t=>t.remoteTabId).filter((id):id is string=>!!id)??[])];
+    if(selectedProfile(pane)!==value) {
+      for(const oldRemote of oldRemotes) {
+        let muted=false;
+        try {await browserApi.write("/tabs/"+oldRemote+"/sound",{on:false});muted=true;}
+        catch(e) {if(!(e instanceof ApiError)||e.status!==404)throw e;}
+        if(!allowed(pane)||now.current.view.ws.panes[pane-1]!==oldPane)return;
+        if(muted)break;
+      }
+    }
     const key=before?tabKey(pane,before):null;
     if(key)transitions.current.add(key);
     try {privateDrive.current.delete(pane);setDriveRevision(v=>v+1);now.current.view.setBrowserProfile(pane,value);await frame();}
