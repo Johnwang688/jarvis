@@ -25,6 +25,15 @@ class Parser(unittest.TestCase):
                         {**valid,"backward":1},{**valid,"script":"evil"},{k:v for k,v in valid.items() if k!="backward"}):
             with self.assertRaises(O.OwnerBad):O.parse_message(changed)
 
+    def test_existing_stream_accepts_only_finite_owner_protocol(self):
+        from jarvis.v2.browser.stream import parse, Bad
+        for value in ({"t":"find","seq":1,"query":"term","backward":False},
+                      {"t":"cursor","seq":2,"x":1,"y":2},
+                      {"t":"find_cancel","seq":3},{"t":"cursor_cancel","seq":4}):
+            message=parse(json.dumps(value).encode())
+            self.assertEqual(message.t,value["t"]);self.assertFalse(message.input)
+            with self.assertRaises(Bad):parse(json.dumps({**value,"script":"forbidden"}).encode())
+
     def test_cursor_numeric_and_css_vocabulary_bounds(self):
         value={"t":"cursor","seq":1,"x":1.5,"y":0}
         self.assertEqual(O.parse_message(value),value)

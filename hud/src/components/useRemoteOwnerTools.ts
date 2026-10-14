@@ -1,5 +1,5 @@
 import {useEffect,useLayoutEffect,useRef,useState,type RefObject} from "react";
-import {OwnerRequests,findShortcut,type OwnerCursor} from "../lib/remoteowner";
+import {OwnerRequests,findShortcut,cursorReply,ownerReset,type OwnerCursor} from "../lib/remoteowner";
 import type {PaneAction} from "../lib/remote";
 import type {FindState,OwnerMenuAction} from "./RemoteOwnerTools";
 
@@ -18,13 +18,20 @@ export function useRemoteOwnerTools(options:Options) {
   const [menu,setMenu]=useState<{x:number;y:number;bounds:{width:number;height:number}}|null>(null);
   const menuOpen=useRef(false),ignoreGesture=useRef(false);
   const cursorTimer=useRef<ReturnType<typeof setTimeout>|null>(null),findTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
+  const cursorDeadline=useRef<ReturnType<typeof setTimeout>|null>(null);
   const epoch=useRef(0);
   const cancelTimers=()=>{
     if(cursorTimer.current!==null)clearTimeout(cursorTimer.current);
     if(findTimer.current!==null)clearTimeout(findTimer.current);
-    cursorTimer.current=findTimer.current=null;
+    if(cursorDeadline.current!==null)clearTimeout(cursorDeadline.current);
+    cursorTimer.current=findTimer.current=cursorDeadline.current=null;
   };
   const reset=()=>{
+    // Cancellation controls do no page IO and remain allowed during a local
+    // overlay/blur. Revoke host receiving generations before forgetting ours.
+    const findCancel=requests.current.cancelFind(),cursorCancel=requests.current.cancelCursor();
+    if(findCancel)latest.current.send(findCancel);
+    if(cursorCancel)latest.current.send(cursorCancel);
     epoch.current++;cancelTimers();requests.current.reset();setCursor("default");
     findOpen.current=false;setFind(false);setQuery("");setStatus("idle");menuOpen.current=false;setMenu(null);
   };
@@ -41,6 +48,7 @@ export function useRemoteOwnerTools(options:Options) {
   };
   const clearCursor=()=>{
     if(cursorTimer.current!==null)clearTimeout(cursorTimer.current);cursorTimer.current=null;
+    if(cursorDeadline.current!==null)clearTimeout(cursorDeadline.current);cursorDeadline.current=null;
     const message=requests.current.cancelCursor();setCursor("default");
     if(message&&latest.current.canInput())latest.current.send(message);
   };
@@ -79,7 +87,13 @@ export function useRemoteOwnerTools(options:Options) {
       cursorTimer.current=null;
       if(at!==epoch.current||!latest.current.canInput()||menuOpen.current||findOpen.current)return;
       const message=requests.current.nextCursor(performance.now());
-      if(message&&!latest.current.send(message))clearCursor();
+      if(message){
+        if(!latest.current.send(message)){clearCursor();return;}
+        cursorDeadline.current=setTimeout(()=>{
+          cursorDeadline.current=null;
+          if(at===epoch.current)clearCursor();
+        },2500);
+      }
     },100);
   };
   const move=(point:{x:number;y:number;inside:boolean})=>{
@@ -88,7 +102,7 @@ export function useRemoteOwnerTools(options:Options) {
   };
   const receive=(message:unknown)=>{
     const value=message as {t?:unknown};
-    if(value?.t==="owner_reset"){reset();return;}
+    if(ownerReset(message)){reset();return;}
     if(!latest.current.canInput()){reset();return;}
     if(value?.t==="find"){
       const result=requests.current.found(message);if(!result)return;
@@ -96,12 +110,16 @@ export function useRemoteOwnerTools(options:Options) {
       if(findOpen.current)setStatus(!result.available?"unavailable":result.matched?"matched":"missing");
     }
     if(value?.t==="cursor"){
+      const reply=cursorReply(message);
+      if(!reply||!requests.current.awaitingCursor(reply.seq))return;
+      if(cursorDeadline.current!==null)clearTimeout(cursorDeadline.current);cursorDeadline.current=null;
       const keyword=requests.current.cursorResult(message);if(keyword)setCursor(keyword);
       scheduleCursor();
     }
   };
   const context=(event:React.MouseEvent)=>{
     event.preventDefault();event.stopPropagation();
+    if(event.button!==2)return;
     if(!latest.current.canInput()){reset();return;}
     if(findOpen.current)return;
     const surface=latest.current.surface.current,box=surface?.getBoundingClientRect();if(!surface||!box||!box.width||!box.height)return;

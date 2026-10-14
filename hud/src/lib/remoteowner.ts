@@ -26,6 +26,7 @@ export function findReply(value:unknown):FindReply|null {
 export function cursorReply(value:unknown):CursorReply|null {
   const v=object(value);return v&&Object.keys(v).length===3&&v.t==="cursor"&&sequence(v.seq)&&typeof v.cursor==="string"&&(CURSORS as readonly string[]).includes(v.cursor)?v as unknown as CursorReply:null;
 }
+export function ownerReset(value:unknown):boolean {const v=object(value);return !!v&&Object.keys(v).length===1&&v.t==="owner_reset";}
 export class OwnerRequests {
   private seq=0;
   private pendingFind:number|null=null;
@@ -42,6 +43,7 @@ export class OwnerRequests {
     this.pendingFind=seq;return{t:"find" as const,seq,query,backward};
   }
   cancelFind() {
+    if(this.pendingFind===null)return null;
     this.pendingFind=null;const seq=this.nextSequence();
     return seq===null?null:{t:"find_cancel" as const,seq};
   }
@@ -59,6 +61,7 @@ export class OwnerRequests {
     this.pendingCursor={seq,version:this.version};this.sampled=this.version;this.cursorAt=now;
     return{t:"cursor" as const,seq,...this.point};
   }
+  awaitingCursor(seq:number):boolean {return this.pendingCursor?.seq===seq;}
   cursorResult(value:unknown):OwnerCursor|null {
     const result=cursorReply(value),pending=this.pendingCursor;
     if(!result||!pending||pending.seq!==result.seq)return null;
@@ -67,6 +70,7 @@ export class OwnerRequests {
     this.cursor=result.cursor;return this.cursor;
   }
   cancelCursor() {
+    if(this.pendingCursor===null&&this.point===null&&this.cursor==="default")return null;
     this.pendingCursor=null;this.point=null;this.version++;this.cursor="default";
     const seq=this.nextSequence();return seq===null?null:{t:"cursor_cancel" as const,seq};
   }

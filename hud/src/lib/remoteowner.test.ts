@@ -1,9 +1,10 @@
-import {CURSORS,OwnerRequests,cursorKeyword,cursorReply,findReply,findShortcut,ownerMenuPosition,validFindQuery} from "./remoteowner";
+import {CURSORS,OwnerRequests,cursorKeyword,cursorReply,findReply,findShortcut,ownerMenuPosition,ownerReset,validFindQuery} from "./remoteowner";
 describe("owner find/cursor bounds",()=>{
  it("bounds Unicode query, controls and malformed reply fields",()=>{
   expect(validFindQuery("😀".repeat(256))).toBe(true);
   for(const query of ["","x".repeat(257),"\n","\t","\u0000","\u0085","\u202e","\ud800"])expect(validFindQuery(query)).toBe(false);
   expect(findReply({t:"find",seq:1,available:true,matched:false})).not.toBeNull();
+  expect(ownerReset({t:"owner_reset"})).toBe(true);expect(ownerReset({t:"owner_reset",query:"private"})).toBe(false);
   for(const value of [{t:"find",seq:true,available:true,matched:false},{t:"find",seq:1,available:true,matched:false,text:"secret"},{t:"find",seq:1,available:1,matched:true}])expect(findReply(value)).toBeNull();
  });
  it("accepts only finite cursor keywords",()=>{

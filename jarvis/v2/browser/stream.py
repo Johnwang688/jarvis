@@ -260,6 +260,13 @@ def parse(raw: bytes) -> Msg:
     if not isinstance(m, dict) or not isinstance(m.get("t"), str):
         raise Bad("a message has no type")
     t = m["t"]
+    if t in ("find", "find_cancel", "cursor", "cursor_cancel"):
+        from .owner_tools import parse_message, OwnerBad
+        try:
+            fields = parse_message(m)
+        except OwnerBad as exc:
+            raise Bad(str(exc)) from None
+        return Msg(t, **{key: value for key, value in fields.items() if key != "t"})
     if t == "key":
         _fields(m, ("e",), ("e",))
         return Msg(t, "Input.dispatchKeyEvent", _key(m["e"]))

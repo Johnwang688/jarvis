@@ -64,3 +64,26 @@ it("coalesces movement and leaves metadata out of input takeover",async()=>{
  await act(async()=>owner.clearCursor());expect(owner.cursor).toBe("default");
  await act(async()=>owner.receive({t:"cursor",seq:request[0].seq,cursor:"text"}));expect(owner.cursor).toBe("default");
 });
+
+it("a silently dropped cursor reply expires to default and permits a later owner move",async()=>{
+ vi.useFakeTimers();await act(async()=>{owner.move({x:1,y:1,inside:true});vi.advanceTimersByTime(100);});
+ const one=send.mock.calls.find(([m])=>m.t==="cursor")![0];
+ await act(async()=>vi.advanceTimersByTime(2500));
+ expect(owner.cursor).toBe("default");expect(send.mock.calls.some(([m])=>m.t==="cursor_cancel"&&m.seq>one.seq)).toBe(true);
+ await act(async()=>owner.receive({t:"cursor",seq:one.seq,cursor:"pointer"}));expect(owner.cursor).toBe("default");
+ await act(async()=>{owner.move({x:2,y:1,inside:true});vi.advanceTimersByTime(100);});
+ expect(send.mock.calls.filter(([m])=>m.t==="cursor")).toHaveLength(2);
+});
+it("malformed reset metadata cannot close an owner find",async()=>{
+ await act(async()=>owner.openFind());await act(async()=>owner.receive({t:"owner_reset",query:"untrusted"}));expect(owner.find).toBe(true);
+ await act(async()=>owner.receive({t:"owner_reset"}));expect(owner.find).toBe(false);
+});
+
+it("local blur/overlay reset sends finite host cancellation before forgetting pending requests",async()=>{
+ await act(async()=>owner.openFind());await act(async()=>owner.edit("query"));await act(async()=>owner.run(false));
+ const request=send.mock.calls.find(([m])=>m.t==="find")![0];
+ held=true;await act(async()=>owner.reset());
+ expect(send.mock.calls.some(([m])=>m.t==="find_cancel"&&m.seq>request.seq)).toBe(true);
+ held=false;await act(async()=>owner.receive({t:"find",seq:request.seq,available:true,matched:true}));
+ expect(owner.find).toBe(false);
+});
