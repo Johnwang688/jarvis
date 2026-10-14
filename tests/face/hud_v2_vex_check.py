@@ -62,7 +62,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tests.face import hud_v2_mock_vex as mock_vex  # noqa: E402
-from tests.face.hud_v2_layout_check import _approval, _boot, _pane, _set_storage, _set_ws  # noqa: E402
+from tests.face.hud_v2_layout_check import _approval, _boot, _pane, _set_storage, _set_ws, _ws  # noqa: E402
 from tests.face.hud_v2_terminal_check import FakePty, pumping  # noqa: E402
 
 VIEW = (1800, 900)
@@ -860,6 +860,27 @@ def _feedback_checks(page, mock, check, until, fake):
         events=[*v["connection"]["events"], {"device": "brain", "connected": False, "at": at}])
     assert until(lambda: "USB Brain: Disconnected" in page.get_by_test_id("vex-usb-brain").inner_text())
     check("confirmed disconnect has a timestamped log entry", page.get_by_test_id("vex-connection-log").locator("time").count() == 3)
+    page.set_viewport_size({"width": 375, "height": 812})
+    try:
+        connection = page.get_by_test_id("vex-connection")
+        output = page.get_by_test_id("vex-download-output")
+        def geometry():
+            return page.evaluate("""() => {
+              const shape=id=>{const e=document.querySelector('[data-testid="'+id+'"]');
+                return e?{rect:e.getBoundingClientRect().toJSON(),scrollWidth:e.scrollWidth,clientWidth:e.clientWidth}:null};
+              return {width:innerWidth,connection:shape('vex-connection'),output:shape('vex-download-output')};
+            }""")
+        assert until(lambda: _ws(page)["fit"]["panes"] == [V] and connection.is_visible() and output.is_visible()
+                     and connection.evaluate("e=>e.getBoundingClientRect().width<=innerWidth")), "narrow VEX pane did not settle: " + json.dumps(geometry())
+        fits = all(el.evaluate("e=>e.scrollWidth<=e.clientWidth+1 && e.getBoundingClientRect().left>=0 && e.getBoundingClientRect().right<=innerWidth+1")
+                   for el in (connection, output))
+        check("USB status and Download output fit a 375px VEX pane", fits, "" if fits else json.dumps(geometry()))
+        import os
+        capture = os.environ.get("VEX_FEEDBACK_SCREENSHOT")
+        if capture:
+            page.screenshot(path=capture, full_page=True)
+    finally:
+        page.set_viewport_size({"width": VIEW[0], "height": VIEW[1]})
 
 
 SECTIONS = (
