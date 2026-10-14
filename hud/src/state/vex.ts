@@ -28,7 +28,7 @@ import { terminals } from "../components/Terminal";
 import {
   BUILD_FIRST_STEPS, DeviceLedger, LAST_BUILDS_KEY, chainCancellable, isVexId, needsBuildFirst, nameRefusal,
   parseDeviceRecord, parseLastBuilds, slotRefusal, stillStale, type BuildView, type ChainView, type Detection,
-  type DeviceAction, type DeviceRead, type VexStatus,
+  type DeviceAction, type DeviceRead, type VexStatus, type DownloadView, type ConnectionView,
 } from "../lib/vex";
 
 const POLL_MS = 600;
@@ -47,13 +47,16 @@ export interface ProjectRun {
   build: BuildView | null;
   startingBuild: { action: "build" | "rebuild" | "clean"; started: number } | null;
   buildNote: string;
+  download: DownloadView | null;
+  downloadNote: string;
+  downloadStarted: number | null;
   /** What this project's chain is doing now. */
   busy: "build" | "download" | null;
   /** A sentence about the last action: a refusal in the daemon's words, or progress. */
   note: string;
   noteTone: "ok" | "bad" | "info";
   /** The last download's end. */
-  downloaded: { slot: number; ok: boolean; code: number | null } | null;
+  downloaded: { slot: number; ok: boolean | null; code: number | null } | null;
 }
 
 /** The window's one running download chain (M1). */
@@ -76,7 +79,7 @@ type Detected =
   | { state: "error"; message: string; at: number };
 
 const blankRun = (): ProjectRun => ({ build: null, startingBuild: null, buildNote: "",
-  busy: null, note: "", noteTone: "info", downloaded: null });
+  busy: null, note: "", noteTone: "info", downloaded: null, download: null, downloadNote: "", downloadStarted: null });
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -101,6 +104,10 @@ function saveLast(v: Record<string, string>) {
 export class VexStore {
   status: VexStatus | null = null;
   statusError = "";
+  connection: ConnectionView | null = null;
+  connectionError = "";
+  private connectionPending = false;
+  private connectionAt = 0;
   info: { text: string; exit_code: number | null; read: DeviceRead } | null = null;
   /** The device read on its way, if any (one at a time: the daemon's device reservation). */
   infoBusy: DeviceRead | null = null;
@@ -365,6 +372,42 @@ export class VexStore {
     }
   }
 
+  /** Visible panes demand one coalesced cached check, never behind a card or chain. */
+  async refreshConnection(): Promise<void> {
+    if (!this.mayAct() || this.chain || this.infoBusy || this.connectionPending
+      || !this.status?.configured || document.visibilityState !== "visible" || Date.now() - this.connectionAt < 1000) return;
+    this.connectionPending = true;
+    this.connectionAt = Date.now();
+    try {
+      this.connection = await api.vexConnection();
+      this.connectionError = "";
+    } catch {
+      this.connectionError = "USB status unavailable; last confirmed state retained.";
+    } finally {
+      this.connectionPending = false;
+      this.changed();
+    }
+  }
+
+  async refreshDownload(projectId: string, expectedId?: string): Promise<DownloadView | null> {
+    const id = expectedId ?? this.run(projectId).download?.id;
+    if (!id || this.crashed) return null;
+    try {
+      const d = await api.vexDownloadState(id);
+      if (this.crashed || this.run(projectId).download?.id !== id) return null;
+      if (d.id !== id || d.project_id !== projectId) throw new Error("download identity changed");
+      this.patchRun(projectId, {download: d, downloadNote: ""});
+      if (d.state !== "running") this.downloadEnded(projectId, d.slot, d);
+      return d;
+    } catch (e: any) {
+      if (this.crashed || this.run(projectId).download?.id !== id) return null;
+      this.patchRun(projectId, {downloadNote: e?.status === 404
+        ? "This download record is no longer available. Check its terminal; no download was retried."
+        : "Could not read Download status. Retrying; check its terminal for output."});
+      return null;
+    }
+  }
+
   // -- download --------------------------------------------------------------
 
   /**
@@ -417,7 +460,7 @@ export class VexStore {
       chain.phase = p;
       this.changed();
     };
-    this.patchRun(projectId, { busy: "download", note: "Downloading…", noteTone: "info", downloaded: null });
+    this.patchRun(projectId, { busy: "download", note: "Downloading…", noteTone: "info", downloaded: null, download: null, downloadNote: "", downloadStarted: Date.now() });
     let paused = false;
     try {
       await this.refreshStatus();
@@ -486,19 +529,16 @@ export class VexStore {
         return;
       }
       phase("download");
-      if (sent.refused || !sent.terminal) {
+      if (sent.refused || !sent.terminal || !sent.id) {
         this.say(projectId, sent.refused || "the download could not start");
         return;
       }
       void terminals.showProgram(sent.terminal);
-      const end = await this.awaitExit(sent.terminal);
-      this.patchRun(projectId, {
-        downloaded: { slot, ok: end.code === 0, code: end.code },
-        note: end.code === 0 ? `Downloaded to slot ${slot}. Start it on the brain or the controller.`
-          : end.code === null ? "The download's end was not seen; its terminal says how it went."
-            : `The download failed (exit ${end.code}); its terminal says why.`,
-        noteTone: end.code === 0 ? "ok" : "bad",
-      });
+      const seeded: DownloadView = {id: sent.id, project_id: projectId, slot, state: "running",
+        terminal_id: sent.terminal, exit_code: null, output: "", started: new Date().toISOString(), ended: null};
+      this.patchRun(projectId, {download: seeded});
+      const end = await this.followDownload(projectId, sent.id);
+      this.downloadEnded(projectId, slot, end);
     } finally {
       if (this.chain === chain) this.chain = null;
       this.patchRun(projectId, { busy: null });
@@ -515,6 +555,18 @@ export class VexStore {
         }
       }
     }
+  }
+
+  private downloadEnded(projectId: string, slot: number, d: DownloadView | null) {
+    const ok = d ? d.state === "succeeded" : null;
+    this.patchRun(projectId, {
+      downloaded: {slot, ok, code: d?.exit_code ?? null},
+      note: ok === true ? `Downloaded to slot ${slot}. Start it on the brain or the controller.`
+        : !d ? "Download outcome unknown. Check status or its terminal; no download was retried."
+          : d.state === "timed_out" ? "Download timed out. Check its terminal and the brain before retrying."
+            : `Download failed (exit ${d.exit_code ?? "unknown"}); check its terminal.`,
+      noteTone: ok === true ? "ok" : ok === null ? "info" : "bad",
+    });
   }
 
   /** The owner's Cancel on the running chain: its build stopped, its download never sent. */
@@ -537,28 +589,28 @@ export class VexStore {
   }
 
   private async sendDownload(projectId: string, slot: number, name: string):
-      Promise<{ terminal: string | null; refused: string; code: unknown }> {
+      Promise<{ terminal: string | null; id: string | null; refused: string; code: unknown }> {
     this.ledger.expect("download", Date.now());
     try {
       const r = await api.vexDownload(projectId, { slot, name });
-      return { terminal: isVexId(r?.terminal_id) ? r.terminal_id : null, refused: "", code: null };
+      return { terminal: isVexId(r?.terminal_id) ? r.terminal_id : null, id: isVexId(r?.download_id) ? r.download_id : null, refused: "", code: null };
     } catch (e: any) {
       this.ledger.withdraw("download");
-      return { terminal: null, refused: e?.message || "the download could not start", code: e?.body?.code ?? null };
+      return { terminal: null, id: null, refused: e?.message || "the download could not start", code: e?.body?.code ?? null };
     }
   }
 
-  /** A program terminal's end, read from the listing. */
-  private async awaitExit(id: string): Promise<{ code: number | null }> {
+  /** Actual Download receipts own completion; a missing/stale terminal list proves nothing. */
+  private async followDownload(projectId: string, id: string): Promise<DownloadView | null> {
     const until = Date.now() + DOWNLOAD_WAIT_MAX_MS;
-    while (Date.now() < until) {
-      await terminals.refresh();
-      const row = terminals.row(id);
-      if (!row) return { code: terminals.sessions.get(id)?.exitCode ?? null };
-      if (row.exited) return { code: row.exit_code };
+    while (!this.crashed && Date.now() < until) {
+      const d = await this.refreshDownload(projectId, id);
+      if (d && d.id === id && d.state !== "running") return d;
+      if (this.run(projectId).downloadNote.startsWith("This download record")) return null;
       await sleep(POLL_MS);
     }
-    return { code: null };
+    this.patchRun(projectId, {downloadNote: "Automatic status checks stopped. Check status or open the terminal; no download was retried."});
+    return null;
   }
 
   // -- the brain terminal and device info ---------------------------------------

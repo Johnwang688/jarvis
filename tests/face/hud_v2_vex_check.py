@@ -825,7 +825,43 @@ def _ed7_beside_checks(page, mock, check, until, fake):
     check("ED-7: and the download button is reachable", page.locator(_view(V, _tid("vex-download-btn"))).is_visible())
 
 
-SECTIONS = (_offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks, _chain_checks, _card_checks,
+def _feedback_checks(page, mock, check, until, fake):
+    _reset(page, mock, until)
+    v = mock_vex.state(mock)
+    v["download_auto"] = False
+    page.get_by_test_id("vex-download-btn").click()
+    until(lambda: page.get_by_test_id("vex-download-output").count() == 1)
+    check("Download shows actual live plain-text output", "<b>fixture</b>" in page.get_by_test_id("vex-download-output").inner_text()
+          and page.get_by_test_id("vex-download-output").locator("b").count() == 0)
+    check("exited terminal listing cannot invent Download completion", page.evaluate("() => window.__hudVex.run('p3').busy") == "download"
+          and page.get_by_test_id("vex-downloaded").count() == 0)
+    rec = next(iter(v["download_records"].values()))
+    rec.update(state="succeeded", exit_code=0, output="Finished <script>fixture</script>", ended="2026-10-13T12:00:02+00:00")
+    until(lambda: page.get_by_test_id("vex-downloaded").count() == 1)
+    check("Download settles visibly and retains output/terminal control", "In slot" in page.get_by_test_id("vex-downloaded").inner_text()
+          and "Finished <script>fixture</script>" in page.get_by_test_id("vex-download-output").inner_text()
+          and page.get_by_test_id("vex-download-output-btn").is_visible())
+    from datetime import datetime, timezone
+    at = datetime.now(timezone.utc).isoformat()
+    v["connection"] = {"brain": True, "controller": False, "checked_at": at, "state": "ready", "message": "USB check complete.",
+        "events": [{"device": "brain", "connected": True, "at": at}, {"device": "controller", "connected": False, "at": at}]}
+    until(lambda: "USB Brain: Connected" in page.get_by_test_id("vex-usb-brain").inner_text())
+    check("USB Brain/Controller and tooling have distinct indicators", "USB Controller: Disconnected" in page.get_by_test_id("vex-usb-controller").inner_text()
+          and "Tooling: Configured" in page.get_by_test_id("vex-tooling").inner_text())
+    page.get_by_test_id("vex-connection").locator("summary").click()
+    check("connection log contains timestamps and confirmed transitions", page.get_by_test_id("vex-connection-log").locator("time").count() == 2)
+    v["connection"].update(state="error", message="Unsupported USB response; retained.")
+    until(lambda: "last confirmed" in page.get_by_test_id("vex-usb-brain").inner_text())
+    check("USB errors preserve last confirmed hardware state", "Connected (last confirmed)" in page.get_by_test_id("vex-usb-brain").inner_text()
+          and "Unsupported" in page.get_by_test_id("vex-connection-note").inner_text())
+    v["connection"].update(state="ready", brain=False, checked_at=at,
+        events=[*v["connection"]["events"], {"device": "brain", "connected": False, "at": at}])
+    until(lambda: "USB Brain: Disconnected" in page.get_by_test_id("vex-usb-brain").inner_text())
+    check("confirmed disconnect has a timestamped log entry", page.get_by_test_id("vex-connection-log").locator("time").count() == 3)
+
+
+SECTIONS = (
+    _feedback_checks,_offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks, _chain_checks, _card_checks,
             _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _header_rebuild_checks,
             _still_stale_checks,
             _answer_card_checks, _passing_card_checks, _first_click_checks, _detect_again_checks,
@@ -854,6 +890,8 @@ def vex_checks(browser, mock, base, check, until, guard, init_script):
             try:
                 section(page, mock, check, until, fake)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
+                import traceback
+                traceback.print_exc()
                 lines = [ln.strip() for ln in str(e).splitlines() if ln.strip()]
                 check(f"{section.__name__.strip('_')} ran to the end", False, " | ".join(lines[:3])[:300])
                 try:

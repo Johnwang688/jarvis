@@ -6,8 +6,11 @@ owner's VS Code VEX extension already downloaded, **run in place through WSL
 interop** (V-1, V-5). Nothing is copied, bundled or committed: VEX's licence
 forbids redistribution and decompiling, so the only `vexcom` flags used here
 are the ones DishPy's MIT source uses (`--name --slot --write --progress` for
-a download, `--user` for the brain's user port) and two reads the owner's own
-`vexcom --help` lists (`--json`, system info; `--programs`; `DEVICE_READS`).
+a download, `--user` for the brain's user port), two reads the owner's own
+`vexcom --help` lists (`--json`, system info; `--programs`; `DEVICE_READS`), and
+fixed read-only `--usb` from the vendor-distributed readable extension source
+(evidence: docs/plans/2026-10-13-vex-download-device-status.md). USB presence
+never asserts radio connectivity or download readiness.
 Which files those are is
 `config.VEX_PATH` (`vex.json`), written only by the human-run `jarvis vex
 setup` (`vex_setup.py`) and refused to every agent write tool
@@ -1368,6 +1371,24 @@ class Build:
 
 
 @dataclass
+class Download:
+    id: str
+    project_id: str
+    slot: int
+    started: str
+    terminal_id: str | None = None
+    state: str = "running"
+    exit_code: int | None = None
+    output: str = ""
+    ended: str | None = None
+    timed_out: bool = False
+
+    def view(self):
+        return {key: getattr(self, key) for key in ("id", "project_id", "slot", "started",
+                "terminal_id", "state", "exit_code", "output", "ended")}
+
+
+@dataclass
 class NewProject:
     id: str
     name: str
@@ -1399,6 +1420,11 @@ class Vex:
     def __init__(self, daemon):
         self.daemon = daemon
         self._lock = threading.Lock()
+        self._device_idle = threading.Condition(self._lock)
+        self._device_waiters = 0
+        self._downloads = collections.OrderedDict()
+        from .vex_connection import Connection
+        self.connection = Connection(self)
         self._builds: collections.OrderedDict[str, Build] = collections.OrderedDict()
         self._news: collections.OrderedDict[str, NewProject] = collections.OrderedDict()
         # One device action at a time: {"kind": "download"|"info"|"brain", "terminal_id"}.
@@ -1517,11 +1543,24 @@ class Vex:
         reservation's holder has: `release()` frees it at most once and never
         another holder's reservation; `bind(terminal_id)` names its terminal."""
         with self._lock:
+            if kind == "connection" and self._device_waiters:
+                raise VexError("An owner device action is waiting")
+            # Owner actions wait boundedly for an already-running read-only probe.
+            # Waiting owners prevent a visible-window probe from taking the next turn.
+            if kind != "connection" and self._device and self._device["kind"] == "connection":
+                self._device_waiters += 1
+                try:
+                    self._device_idle.wait_for(lambda: self._device is None or self._stopped, timeout=4.0)
+                finally:
+                    self._device_waiters -= 1
+            if self._stopped:
+                raise VexError("Jarvis is stopping")
             busy = self._device
             if busy is not None:
                 what = {"brain": "The brain terminal is using the brain's port; close it first",
                         "download": "A download is running",
-                        "info": "A device-info read is running"}[busy["kind"]]
+                        "info": "A device-info read is running",
+                        "connection": "A USB check is still settling"}[busy["kind"]]
                 raise VexError(f"{what}. One device action at a time.")
             token = secrets.token_hex(8)
             self._device = {"kind": kind, "terminal_id": None, "token": token}
@@ -1530,6 +1569,7 @@ class Vex:
             with self._lock:
                 if self._device is not None and self._device["token"] == token:
                     self._device = None
+                    self._device_idle.notify_all()
                     return True
             return False
 
@@ -1764,12 +1804,26 @@ class Vex:
             raise
         with self._lock:
             self._held.add(lock)
+            record = Download(self._id(self._downloads), project.id, slot, _utcnow())
+            self._keep(self._downloads, record.id, record)
 
         def ended(terminal):
-            release()
-            with self._lock:
-                self._held.discard(lock)
-            lock.release()
+            try:
+                output = _visible(plain(terminal.history().data))[-BUILD_OUTPUT_CAP:]
+            except Exception:
+                output = "Output preview unavailable; check the terminal."
+            try:
+                with self._lock:
+                    record.terminal_id = terminal.id
+                    record.exit_code = terminal.exit_code
+                    record.output = output
+                    record.state = "timed_out" if record.timed_out else "succeeded" if terminal.exit_code == 0 else "failed"
+                    record.ended = _utcnow()
+            finally:
+                release()
+                with self._lock:
+                    self._held.discard(lock)
+                lock.release()
             LOG.info("vex download to slot %d for project %s ended (exit %s)", slot, project.name,
                      terminal.exit_code)
 
@@ -1783,13 +1837,39 @@ class Vex:
             release()
             with self._lock:
                 self._held.discard(lock)
+                record.state, record.ended = "failed", _utcnow()
             lock.release()
             raise
+        with self._lock:
+            record.terminal_id = terminal.id
         bind(terminal.id)
         self._announce("download")
         LOG.info("vex download to slot %d started for project %s", slot, project.name)
-        self._timer(DOWNLOAD_TIMEOUT_S, self._device_timeout, terminal)
-        return {"terminal_id": terminal.id}
+        def timeout():
+            with self._lock:
+                if record.state != "running":
+                    return
+                record.timed_out = True
+            self._device_timeout(terminal)
+        self._timer(DOWNLOAD_TIMEOUT_S, timeout)
+        return {"terminal_id": terminal.id, "download_id": record.id}
+
+    def download_state(self, download_id):
+        from .daemon import APIError
+        if not isinstance(download_id, str) or not _ID.fullmatch(download_id):
+            raise _api(400, "download id must be eight lowercase hex characters")
+        with self._lock:
+            record = self._downloads.get(download_id)
+            if record is None:
+                raise _api(404, "download record not found")
+            view = record.view()
+        if view["state"] == "running" and view["terminal_id"]:
+            try:
+                terminal = self.daemon.terminals.get(view["terminal_id"])
+                view["output"] = _visible(plain(terminal.history().data))[-BUILD_OUTPUT_CAP:]
+            except APIError:
+                pass  # Actual EOF owns settlement, even if the listing no longer has this terminal.
+        return view
 
     def _fresh(self, root, name) -> dict:
         """`build/<name>.bin` if it may be sent, else `BuildFirst`.
@@ -2025,6 +2105,7 @@ class Vex:
         cancelled, and any build lock still held released."""
         with self._lock:
             self._stopped = True
+            self._device_idle.notify_all()
             timers, self._timers = list(self._timers), set()
             held, self._held = list(self._held), set()
         for timer in timers:
@@ -2082,6 +2163,13 @@ def route(handler, daemon, parts, query):
         if len(parts) == 3 and parts[1] == "builds" and method == "GET":
             _object(query, ())
             return 200, vex.build(parts[2])
+        if len(parts) == 3 and parts[1] == "downloads" and method == "GET":
+            _object(query, ())
+            return 200, vex.download_state(parts[2])
+        if parts == ["vex", "device", "connection"] and method == "POST":
+            _object(query, ())
+            _object(handler._body(), ())
+            return 200, vex.connection.want()
         if parts == ["vex", "device", "info"] and method == "POST":
             _object(query, ())
             body = _object(handler._body(), ("read",))
