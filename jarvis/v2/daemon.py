@@ -208,6 +208,7 @@ class _Session:
     caller_key: str | None = None
     origin_tag: str | None = field(default=None, repr=False)
     desk: DeskState = field(default_factory=DeskState, repr=False)
+    drive_turn: object = field(default=None, repr=False)
 
 
 class Daemon:
@@ -844,6 +845,7 @@ class Daemon:
                                        "effective_effort": applied[1]}})
             if isinstance(exc, SessionLost):
                 session.lost = True
+                self._retire_drive(session)
         if isinstance(exc, SessionLost):
             raise DaemonError(f"the {thread.provider.value} session closed after a refused "
                               "model switch; send again to resume it on "
@@ -1071,6 +1073,9 @@ class Daemon:
             # ends meanwhile hands it back (`undelivered`) by identity.
             item = _Queued(message, data, uuid.uuid4().hex, session.turn_id or "")
             session.steered.append(item)
+            drive_turn = session.drive_turn
+            drive_worker = session.worker
+            drive_desk = session.desk.slot
             reservation = (session.desk.reserve()
                            if not desk_message(session.brief, message) else None)
             self._log_user(session.thread, item, steer=True)
@@ -1086,6 +1091,13 @@ class Daemon:
             LOG.warning("Steering thread %s failed (%s)", thread_id, type(exc).__name__)
             fallback, reason = "queue", type(exc).__name__
         else:
+            with self._lock:
+                if (drive_turn is not None and self._sessions.get(thread_id) is session
+                        and session.drive_turn is drive_turn and not drive_turn.closed
+                        and session.worker is drive_worker and session.turn_id == drive_turn.turn_id
+                        and session.desk.slot is drive_desk and drive_desk.get("present") is True
+                        and desk_message(session.brief, message) and not session.cancelled.is_set()):
+                    drive_turn.accept_desk_steer(message.text)
             return {"status": "steered", "mode": "native", "turn_id": item.turn_id,
                     "message_id": item.message_id}
         finally:
@@ -1115,6 +1127,7 @@ class Daemon:
                 item.interrupting = True
                 session.cancelled.set()
                 session.desk.end()
+                self._retire_drive(session)
                 interrupt = True
             elif len(waiting) >= QUEUE_MAX:
                 self._drop_waiting(session.thread, "three messages were already waiting", [item])
@@ -1180,6 +1193,15 @@ class Daemon:
         if session.thread.archived or is_archived(self.stores, session.thread.project_id):
             raise DaemonError("this thread is archived; restore it from the Archive to continue")
 
+    def _retire_drive(self, session):
+        """Under the session lock; revoke refs while active input keeps its lease."""
+        turn = getattr(session, "drive_turn", None)
+        if turn is not None:
+            turn.closed = True
+            session.drive_turn = None
+            from .browser.drive import retire_turn
+            retire_turn(turn.key)
+
     def _begin(self, session, message, data, *, queued: "_Queued | None" = None) -> str:
         """Under the lock: start a turn. `queued` is a message that waited:
         its `user` record is already in the log, so its turn opens with a
@@ -1191,6 +1213,14 @@ class Daemon:
         session.questions.clear()
         session.turn_id = queued.turn_id if queued is not None else uuid.uuid4().hex
         session.desk.begin(session.brief, message, session.turn_id)
+        self._retire_drive(session)
+        if (session.thread.provider in (ProviderName.CLAUDE, ProviderName.CODEX)
+                and session.brief.role == Role.CHAT and session.brief.task_id is None):
+            from .browser.drive_state import DriveTurn
+            session.drive_turn = DriveTurn(
+                thread_id, session.turn_id, session.brief.profile == PermissionProfile.STRICT,
+                session.brief.cwd or "", message.text if session.desk.slot.get("present") is True else "",
+                provider=session.thread.provider.value)
         worker = threading.Thread(target=self._turn, args=(session, message),
                                   name=f"jarvis-turn-{thread_id}", daemon=True)
         turn_id = session.turn_id
@@ -1321,6 +1351,24 @@ class Daemon:
 
     # -- approvals (design §6) ---------------------------------------------
 
+    def _delegation_cancelled(self, thread_id):
+        """Capture one native permission request, never a later turn on its handle."""
+        with self._lock:
+            session = self._sessions.get(thread_id)
+            worker = session.worker if session is not None else None
+            turn = session.drive_turn if session is not None else None
+            turn_id = session.turn_id if session is not None else None
+            slot = session.desk.slot if session is not None else None
+        def cancelled():
+            with self._lock:
+                return (self._stopping or session is None or worker is None or turn is None
+                        or self._sessions.get(thread_id) is not session
+                        or session.worker is not worker or session.drive_turn is not turn
+                        or session.turn_id != turn_id or turn.turn_id != turn_id or turn.closed
+                        or session.desk.slot is not slot or slot.get("present") is not True
+                        or session.cancelled.is_set() or session.closing or session.retired or session.lost)
+        return cancelled
+
     def _permit(self, thread_id: str, brief: Brief) -> PermissionCallback:
         thread = self.stores.threads.get(thread_id)
         project = None
@@ -1336,7 +1384,8 @@ class Daemon:
         ctx = PermitContext(
             thread_id=thread_id, brief=brief,
             provider=thread.provider.value if thread is not None else "",
-            project=project, task=task)
+            project=project, task=task,
+            delegation_cancelled=lambda: self._delegation_cancelled(thread_id))
         return build_permit(ctx, self.approvals)
 
     def _approval_requested(self, request: ApprovalRequest) -> None:
@@ -1375,7 +1424,7 @@ class Daemon:
             from .tool_calls import label
             data = event.data or {}
             try:
-                tool_label = ("Browser action" if data.get("name")=="hud_browser_act" else
+                tool_label = ("Browser action" if data.get("name") in ("hud_browser_act", "mcp__jarvis__hud_browser_act") else
                               label(data.get("name"), data.get("args"), session.brief.cwd))
             except Exception:
                 from .approvals import clean_line
@@ -1413,7 +1462,7 @@ class Daemon:
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
             data=record.get("data") or {}
-            if data.get("name")=="hud_browser_act":
+            if data.get("name") in ("hud_browser_act", "mcp__jarvis__hud_browser_act"):
                 if event.kind==EventKind.TOOL_STARTED:
                     record["data"]={"call_id":data.get("call_id"),"name":"hud_browser_act","args":{}}
                 elif event.kind==EventKind.TOOL_FINISHED:
@@ -1423,6 +1472,14 @@ class Daemon:
                     record["data"]={"call_id":data.get("call_id"),"name":"hud_browser_act",
                         "ok":data.get("ok") is True,"outcome":data.get("outcome") if data.get("outcome") in ("ok","denied","failed") else "failed",
                         "summary":safe}
+            if (event.kind == EventKind.APPROVAL_REQUESTED
+                    and data.get("tool") in ("hud_browser_act", "mcp__jarvis__hud_browser_act")):
+                record["data"] = {"req_id": data.get("req_id"), "tool": "hud_browser_act",
+                                  "args": {}, "command": None}
+            if (event.kind == EventKind.REVIEWER_DECLINED
+                    and data.get("tool") in ("hud_browser_act", "mcp__jarvis__hud_browser_act")):
+                record["data"] = {"tool": "hud_browser_act", "args": {},
+                                  "command": None, "reason": "refused"}
             if tool_label is not None:
                 record["data"] = {**record.get("data", {}), "label": tool_label}
             if event.kind == EventKind.QUESTION and (event.data or {}).get("req_id"):
@@ -1508,6 +1565,7 @@ class Daemon:
         with self._lock:
             terminal = None
             worker, turn_id, desk_slot = session.worker, session.turn_id, session.desk.slot
+            drive_turn = session.drive_turn
         failed = False
         fatal = False
         # Who is calling, on this turn's own thread (a fresh context): an
@@ -1533,6 +1591,10 @@ class Daemon:
                 if event.kind == EventKind.TURN_FINISHED:
                     terminal = event
                     break
+                if event.kind == EventKind.ERROR:
+                    with self._lock:
+                        if session.drive_turn is drive_turn:
+                            self._retire_drive(session)
                 self._record(session, event)
                 failed |= event.kind == EventKind.ERROR
                 fatal |= event.kind == EventKind.ERROR and bool((event.data or {}).get("fatal"))
@@ -1546,6 +1608,8 @@ class Daemon:
         finally:
             with self._lock:
                 session.desk.end()
+                if session.drive_turn is drive_turn:
+                    self._retire_drive(session)
             # Steered messages the provider took but never delivered (the fast
             # path's final answer came first): they run next, as turns of their
             # own — unless the owner stopped this one.
@@ -1604,6 +1668,7 @@ class Daemon:
                     keeps = getattr(session.provider, "keeps_session_on_error", False) is True
                     if (fatal and not keeps) or self._provider_closed(session):
                         session.lost = True
+                        self._retire_drive(session)
                     if session.lost and self._sessions.get(session.thread.id) is session:
                         # The provider closed it; the next send resumes afresh.
                         self._sessions.pop(session.thread.id, None)
@@ -1647,6 +1712,7 @@ class Daemon:
                 return {"ok": True}  # this turn's stop is already on its way
             session.cancelled.set()
             session.desk.end()
+            self._retire_drive(session)
             session.owner_stopped = True
             if session.turn_id:
                 session.stopped_turns.append(session.turn_id)
@@ -1687,6 +1753,7 @@ class Daemon:
         # §1.4). The provider's close then removes its carrier.
         with self._lock:
             session.desk.end()
+            self._retire_drive(session)
         self.callers.revoke(session)
         self._dev_hook("session_closed", session.origin_tag)
         for operation in (session.provider.interrupt, session.provider.close):
@@ -1701,6 +1768,7 @@ class Daemon:
             session.closing = True
             session.cancelled.set()
             session.desk.end()
+            self._retire_drive(session)
             worker = session.worker
         cleanup = threading.Thread(target=self._cleanup, args=(session,), daemon=True)
         cleanup.start()
@@ -1756,6 +1824,7 @@ class Daemon:
                 session.closing = True
                 session.cancelled.set()
                 session.desk.end()
+                self._retire_drive(session)
                 if session.handle is not None:
                     job = threading.Thread(target=self._cleanup, args=(session,), daemon=True)
                     job.start()
