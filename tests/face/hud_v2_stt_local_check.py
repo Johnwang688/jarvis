@@ -56,13 +56,20 @@ def main():
             context.route("**/*", route)
             guard_live(context, failures.append)
             watch_csp(context, failures.append)
-            context.add_init_script(FAKE_RECOGNIZER + FAKE_MIC)
+            # Count every start of Chrome's wake recognizer (it streams the microphone to Google).
+            COUNT_STARTS = """(() => { const P = window.SpeechRecognition.prototype, s = P.start;
+              P.start = function () { window.__srStarts = (window.__srStarts || 0) + 1; return s.call(this); }; })();"""
+            context.add_init_script(FAKE_RECOGNIZER + COUNT_STARTS + FAKE_MIC)
             page = context.new_page()
             page.on("pageerror", lambda e: failures.append(f"page error {e}"))
             page.goto(base)
             page.wait_for_selector('[data-testid="sidebar"]')
             page.wait_for_function("() => window.__hud && window.__hud.voiceDiagnostics().mic === 'available'")
             page.evaluate("window.__hud.mic.feedMs(2000, .0009)")
+
+            page.wait_for_function("() => !!window.__hudRecog", timeout=10000)
+            check("with cloud fallback on the wake recognizer runs (as before V13)",
+                  page.evaluate("window.__srStarts || 0") >= 1)
 
             def stts():
                 return mock.sent("POST", "/stt")
@@ -108,9 +115,18 @@ def main():
             check("with the fallback on it says the cloud is the safety net", "sent to the cloud" in summary())
 
             page.locator('[data-testid="stt-cloud-fallback"]').click()
-            page.wait_for_function("() => document.querySelector('[data-testid=\"stt-summary\"]').innerText.includes('Nothing is uploaded')")
+            page.wait_for_function("() => document.querySelector('[data-testid=\"stt-summary\"]').innerText.includes('never leaves this computer')")
             check("switching cloud fallback off writes it", mock.stt_settings["cloud_fallback"] is False)
-            check("and says nothing is uploaded", "Nothing is uploaded" in summary() and "sent to the cloud" not in summary())
+            check("and says dictation never leaves this computer", "Dictation audio never leaves this computer" in summary()
+                  and "sent to the cloud" not in summary())
+            page.wait_for_function("() => !window.__hudRecog")
+            starts = page.evaluate("window.__srStarts || 0")
+            page.wait_for_timeout(800)
+            check("fallback OFF stops Chrome's wake recognizer and does not restart it",
+                  page.evaluate("window.__srStarts || 0") == starts and page.evaluate("!window.__hudRecog"))
+            check("and Settings says plainly that wake by voice is off",
+                  page.locator('[data-testid="stt-wake-note"]').inner_text()
+                  == "Wake word by voice is off until local wake detection lands; use the talk key.")
             check("the switch is unchecked", not page.locator('[data-testid="stt-cloud-fallback"]').is_checked())
 
             # A daemon that says the engine is missing: the sentence follows.
@@ -120,16 +136,28 @@ def main():
             check("not installed + fallback off warns that dictation will fail, still uploading nothing",
                   "Nothing is uploaded" in summary() and "not installed" in page.locator('[data-testid="stt-local-status"]').inner_text())
 
-            # A reload shows the daemon's values, not a window-local copy.
+            # A reload shows the daemon's values, not a window-local copy, and with the fallback
+            # off the recognizer never starts at all in the new page.
             page.reload()
             page.wait_for_selector('[data-testid="sidebar"]')
             open_settings(page, "Voice")
             page.wait_for_selector('[data-testid="stt-settings"]')
             page.wait_for_function("() => document.querySelector('[data-testid=\"stt-backend-auto\"]').checked")
+            page.wait_for_timeout(1000)
+            check("after a reload with the fallback off, Chrome's recognizer never starts",
+                  page.evaluate("window.__srStarts || 0") == 0 and page.evaluate("!window.__hudRecog"))
             check("after a reload the daemon's values are shown", page.locator('[data-testid="stt-backend-auto"]').is_checked()
                   and not page.locator('[data-testid="stt-cloud-fallback"]').is_checked())
 
             page.screenshot(path=os.environ.get("STT_LOCAL_SCREENSHOT", "/tmp/voice-v13-stt-local.png"))
+
+            page.locator('[data-testid="stt-cloud-fallback"]').click()
+            page.wait_for_function("() => !!window.__hudRecog", timeout=10000)
+            check("switching the fallback back on lets the recognizer start again",
+                  page.evaluate("window.__srStarts || 0") >= 1
+                  and "streams the microphone to Google" in page.locator('[data-testid="stt-wake-note"]').inner_text())
+            page.locator('[data-testid="stt-cloud-fallback"]').click()      # off again for what follows
+            page.wait_for_function("() => !window.__hudRecog")
 
             # --- the owner's switch refusing the upload: a visible failure, not retried
             page.locator('[data-testid="settings-close"]').click() if page.locator('[data-testid="settings-close"]').count() else page.keyboard.press("Escape")

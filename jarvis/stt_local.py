@@ -27,6 +27,12 @@ What this module guarantees:
   `LocalSTTUnavailable` (the caller decides whether the cloud may take it); no
   media decoder is run on uploaded bytes.
 
+- **Integrity.** `fetch` verifies the download (size cap, then SHA256 against the pin)
+  and records each model file's own hash in `.verified`; `verify_model` re-checks them
+  when the model loads (once per file identity per process). A model directory the
+  owner supplies themselves (`JARVIS_STT_LOCAL_MODEL`) has no marker and is trusted
+  as it is: only the download is verified.
+
 Deploy (the lead, once): install `sherpa-onnx` into the daemon's venv and run
 `python -m jarvis.stt_local fetch` (about 490 MB, SHA256-pinned).
 """
@@ -35,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import sys
@@ -103,6 +110,42 @@ def model_present(directory: Path | None = None) -> bool:
         return False
 
 
+_verified: dict[tuple, bool] = {}
+
+
+def verify_model(directory: Path | None = None) -> None:
+    """Check the model files against the hashes `fetch` recorded in `.verified`.
+
+    Only a directory that `fetch` made has them: a directory the owner pointed
+    `JARVIS_STT_LOCAL_MODEL` at is trusted as it is (documented, not verified).
+    Hashing about 640 MB takes seconds, so each file identity (path, size, mtime) is
+    hashed once per process. Raises LocalSTTUnavailable on a mismatch.
+    """
+    d = directory or model_dir()
+    marker = d / ".verified"
+    try:
+        recorded = json.loads(marker.read_text()).get("files")
+    except (OSError, ValueError, AttributeError):
+        return
+    if not isinstance(recorded, dict):
+        return
+    for name in FILES:
+        path = d / name
+        try:
+            st = path.stat()
+        except OSError:
+            raise LocalSTTUnavailable("the speech model files are incomplete: run the fetch again") from None
+        key = (str(path), st.st_size, st.st_mtime_ns)
+        if key not in _verified:
+            digest = hashlib.sha256()
+            with path.open("rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    digest.update(block)
+            _verified[key] = digest.hexdigest() == recorded.get(name)
+        if not _verified[key]:
+            raise LocalSTTUnavailable("the speech model files do not match what was downloaded: run the fetch again")
+
+
 def installed() -> tuple[bool, str]:
     """(usable, reason when not). Cheap: no import of the library, no model read."""
     if not dependency_present():
@@ -115,7 +158,20 @@ def installed() -> tuple[bool, str]:
 # ---- audio -------------------------------------------------------------------
 
 def wav_samples(audio: bytes, mime: str = "audio/wav"):
-    """(float32 mono samples, sample rate) from a PCM WAV; LocalSTTUnavailable otherwise."""
+    """(float32 mono samples, sample rate) from a PCM WAV; LocalSTTUnavailable for anything else.
+
+    Whatever the bytes are (a fuzzed header, a lying frame count), nothing but
+    LocalSTTUnavailable comes out: the HUD route would otherwise answer a 500.
+    """
+    try:
+        return _wav_samples(audio, mime)
+    except LocalSTTError:
+        raise
+    except Exception:  # noqa: BLE001 - wave/numpy errors on hostile bytes
+        raise LocalSTTUnavailable("local speech-to-text takes 16-bit PCM WAV") from None
+
+
+def _wav_samples(audio: bytes, mime: str):
     import numpy as np
 
     kind = (mime or "").split(";", 1)[0].strip().lower()
@@ -123,18 +179,13 @@ def wav_samples(audio: bytes, mime: str = "audio/wav"):
         raise LocalSTTUnavailable("local speech-to-text takes WAV audio only")
     if len(audio) > MAX_WAV_BYTES:
         raise LocalSTTUnavailable("clip too large for local speech-to-text")
-    try:
-        with wave.open(io.BytesIO(audio), "rb") as w:
-            channels, width, rate, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
-            if width != 2 or channels < 1 or rate < 8000 or rate > 192000:
-                raise LocalSTTUnavailable("local speech-to-text takes 16-bit PCM WAV")
-            if frames / rate > MAX_CLIP_S:
-                raise LocalSTTUnavailable("clip too long for local speech-to-text")
-            raw = w.readframes(frames)
-    except LocalSTTUnavailable:
-        raise
-    except (wave.Error, EOFError, OSError):
-        raise LocalSTTUnavailable("local speech-to-text takes 16-bit PCM WAV") from None
+    with wave.open(io.BytesIO(audio), "rb") as w:
+        channels, width, rate, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+        if width != 2 or channels < 1 or rate < 8000 or rate > 192000:
+            raise LocalSTTUnavailable("local speech-to-text takes 16-bit PCM WAV")
+        if frames / rate > MAX_CLIP_S:
+            raise LocalSTTUnavailable("clip too long for local speech-to-text")
+        raw = w.readframes(frames)
     pcm = np.frombuffer(raw[: len(raw) - len(raw) % (2 * channels)], dtype="<i2")
     if channels > 1:
         pcm = pcm.reshape(-1, channels).mean(axis=1)
@@ -169,6 +220,7 @@ def _default_factory(threads: int):
     ok, why = installed()
     if not ok:
         raise LocalSTTUnavailable(f"local speech-to-text is not set up: {why}")
+    verify_model()
     return _Sherpa(model_dir(), threads)
 
 
@@ -247,8 +299,7 @@ class Engine:
 
     def _run(self, job: _Job) -> None:
         try:
-            left = job.deadline - self._clock()
-            if job.cancelled or left <= 0 or not self._lock.acquire(timeout=left):
+            if not self._acquire(job):
                 job.error = LocalSTTTimeout("local speech-to-text ran out of time")
                 return
             try:
@@ -274,6 +325,15 @@ class Engine:
             with self._state:
                 self._waiting -= 1
             job.done.set()
+
+    def _acquire(self, job: _Job) -> bool:
+        """Wait for the engine in short slices, so a caller that has left (or a deadline that
+        has passed) frees this thread at once instead of at the end of someone else's decode."""
+        while True:
+            if job.cancelled or job.deadline - self._clock() <= 0:
+                return False
+            if self._lock.acquire(timeout=min(0.05, max(0.0, job.deadline - self._clock()))):
+                return True
 
     def _load(self):
         with self._state:
@@ -416,29 +476,42 @@ def status() -> dict:
 
 # ---- download (explicit, owner-run) --------------------------------------------
 
-def fetch(dest: Path | None = None, *, url: str = MODEL_URL, sha256: str = MODEL_SHA256) -> Path:
+MAX_DOWNLOAD = 700 << 20        # the pinned archive is 487 MB; anything much bigger is not it
+
+
+def fetch(dest: Path | None = None, *, url: str = MODEL_URL, sha256: str = MODEL_SHA256,
+          max_bytes: int = MAX_DOWNLOAD) -> Path:
     """Download, verify and unpack the pinned model into `dest` (default `model_dir()`).
 
-    The archive is hashed before anything is extracted, unpacked with tarfile's
-    `data` filter under member and size caps into a fresh directory, and only the
-    four model files are moved into place. Raises SystemExit with a sentence on
-    any failure; nothing is left half-written at `dest`.
+    The download is cut off at `max_bytes` before anything is hashed; the archive is
+    hashed before anything is extracted, unpacked with tarfile's `data` filter under
+    member and size caps into a fresh directory, and only the four model files are
+    moved into place, with their own hashes recorded in `.verified` (checked again at
+    load by `verify_model`). An existing `dest` is replaced only if it carries that
+    marker, i.e. is an earlier download of this model: a directory the owner made is
+    never deleted. Raises SystemExit with a sentence on any failure; nothing is left
+    half-written at `dest`.
     """
     import urllib.request
 
     dest = Path(dest) if dest else model_dir()
+    if dest.exists() and not (dest / ".verified").is_file():
+        raise SystemExit(f"{dest} exists and is not an earlier download of this model "
+                         "(no .verified marker); remove it yourself or choose another folder")
     dest.parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=".stt-fetch-", dir=dest.parent))
     try:
         archive = work / "model.tar.bz2"
         print(f"downloading {url} ...", file=sys.stderr)
         req = urllib.request.Request(url, headers={"User-Agent": "jarvis-stt/1"})
+        digest, size = hashlib.sha256(), 0
         with urllib.request.urlopen(req, timeout=120) as resp, archive.open("wb") as out:
-            shutil.copyfileobj(resp, out, 1 << 20)
-        digest = hashlib.sha256()
-        with archive.open("rb") as fh:
-            for block in iter(lambda: fh.read(1 << 20), b""):
+            for block in iter(lambda: resp.read(1 << 20), b""):
+                size += len(block)
+                if size > max_bytes:
+                    raise SystemExit(f"download is larger than {max_bytes >> 20} MB: not the pinned model, stopped")
                 digest.update(block)
+                out.write(block)
         if digest.hexdigest() != sha256:
             raise SystemExit(f"sha256 mismatch: got {digest.hexdigest()}, pinned {sha256}")
         unpacked = work / "x"
@@ -454,9 +527,15 @@ def fetch(dest: Path | None = None, *, url: str = MODEL_URL, sha256: str = MODEL
             raise SystemExit("the archive does not hold the expected model files")
         staged = work / "model"
         staged.mkdir()
+        hashes = {}
         for name in FILES:
             shutil.move(str(root / name), str(staged / name))
-        (staged / ".verified").write_text(sha256 + "\n")
+            h = hashlib.sha256()
+            with (staged / name).open("rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+            hashes[name] = h.hexdigest()
+        (staged / ".verified").write_text(json.dumps({"archive_sha256": sha256, "files": hashes}, indent=1) + "\n")
         if dest.exists():
             shutil.rmtree(dest)
         os.replace(staged, dest)

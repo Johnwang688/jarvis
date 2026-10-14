@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseSttSettings, sttSummary, STT_CHOICES } from "./sttSettings";
+import { parseSttSettings, sttSummary, wakeNote, STT_CHOICES } from "./sttSettings";
+import { wakeRecognizerAllowed } from "../state/sttSettings";
 
 const daemon = (over: Record<string, unknown> = {}, local: Record<string, unknown> = {}) => ({
   backend: "cloud", cloud_fallback: true, error: "", backends: ["cloud", "local", "auto"],
@@ -33,16 +34,19 @@ describe("parseSttSettings", () => {
   });
 });
 
-describe("sttSummary says what happens to the next clip", () => {
+describe("sttSummary says what happens to the next dictation clip", () => {
   const s = (over = {}, local = {}) => parseSttSettings(daemon(over, local));
   it("cloud", () => {
-    expect(sttSummary(s())).toMatch(/sent to the cloud/);
+    expect(sttSummary(s())).toMatch(/dictation audio is sent to the cloud/);
+    expect(sttSummary(s())).toMatch(/Discord voice notes and the face server use the cloud too/);
     expect(sttSummary(s({ cloud_fallback: false }))).toMatch(/will fail/);
   });
   it("local with and without the fallback", () => {
-    expect(sttSummary(s({ backend: "local" }))).toMatch(/on this computer\. If that fails.*cloud/);
+    const on = sttSummary(s({ backend: "local" }));
+    expect(on).toMatch(/on this computer\. If that fails.*cloud/);
+    expect(on).toMatch(/Discord voice notes and the face server still use the cloud/);
     const closed = sttSummary(s({ backend: "local", cloud_fallback: false }));
-    expect(closed).toMatch(/Nothing is uploaded/);
+    expect(closed).toBe("Dictation audio never leaves this computer. A local failure shows an error.");
     expect(closed).not.toMatch(/sent to the cloud/);
   });
   it("local that is not installed", () => {
@@ -50,5 +54,22 @@ describe("sttSummary says what happens to the next clip", () => {
     expect(sttSummary(s({ backend: "auto" }, missing))).toMatch(/goes to the cloud/);
     expect(sttSummary(s({ backend: "local" }, missing))).toMatch(/falls back to the cloud/);
     expect(sttSummary(s({ backend: "local", cloud_fallback: false }, missing))).toMatch(/will fail\. Nothing is uploaded/);
+  });
+});
+
+describe("the wake word is a separate path (Chrome's recognizer streams to Google)", () => {
+  const s = (over = {}) => parseSttSettings(daemon(over));
+  it("says plainly that it is off when the fallback is off", () => {
+    expect(wakeNote(s({ cloud_fallback: false }))).toBe("Wake word by voice is off until local wake detection lands; use the talk key.");
+  });
+  it("says it reaches Google when uploading is allowed, whatever backend is chosen", () => {
+    for (const backend of ["cloud", "local", "auto"]) expect(wakeNote(s({ backend }))).toMatch(/streams the microphone to Google/);
+  });
+  it("Chrome's recognizer may run only when uploading is allowed; unknown is closed", () => {
+    expect(wakeRecognizerAllowed(null)).toBe(false);
+    expect(wakeRecognizerAllowed(s({ cloud_fallback: false }))).toBe(false);
+    expect(wakeRecognizerAllowed(s({ backend: "local", cloud_fallback: false }))).toBe(false);
+    expect(wakeRecognizerAllowed(s({ cloud_fallback: true }))).toBe(true);
+    expect(wakeRecognizerAllowed(parseSttSettings("garbage"))).toBe(false);
   });
 });

@@ -159,6 +159,19 @@ class Settings(Base):
         self.assertEqual(stt_settings.load()["backend"], "local")
         self.assertTrue(stt_settings.load()["cloud_fallback"], "an absent key is its default")
 
+    def test_error_messages_say_what_actually_happens(self):
+        self.write(backend="sideways", cloud_fallback=True)
+        got = stt_settings.load()
+        self.assertEqual((got["backend"], got["cloud_fallback"]), ("local", True))
+        self.assertEqual(got["error"], "stt.json has an invalid backend: using local")
+        self.assertNotIn("no upload", got["error"], "the fallback is on, so the message must not claim otherwise")
+        self.write(backend="cloud", cloud_fallback="yes")
+        got = stt_settings.load()
+        self.assertIn("no upload", got["error"])
+        self.assertIn("cloud_fallback", got["error"])
+        self.write(backend=3, cloud_fallback=3)
+        self.assertEqual(stt_settings.load()["error"].count("stt.json has an invalid"), 2)
+
     def test_symlink_is_not_followed(self):
         target = Path(self.tmp.name) / "elsewhere.json"
         target.write_text('{"backend": "cloud", "cloud_fallback": true}')
@@ -187,6 +200,40 @@ class Settings(Base):
         protected = {p.name for p in files._protected_state_paths()}
         self.assertIn("stt.json", protected)
         self.assertIn(self.settings.resolve(), files._protected_state())
+
+    def test_shell_detector_refuses_writes_to_stt_json(self):
+        """Owner decision 2026-10-14: keep it protected (a flip toward upload cannot be undone once audio is sent)."""
+        from jarvis import permissions, rules
+        home = Path(self.tmp.name) / "home"
+        allow = home / ".config" / "jarvis" / "allowlist.json"
+        allow.parent.mkdir(parents=True)
+        target = allow.parent / "stt.json"
+        with mock.patch.object(config, "ALLOWLIST_PATH", allow), \
+                mock.patch.object(config, "STT_SETTINGS_PATH", Path(self.tmp.name) / "moved" / "stt.json"):
+            for command in (f"cp /tmp/x {target}", f"echo '{{}}' > {target}", f"sh -c 'cp /tmp/x {target}'",
+                            f"cp /tmp/x {Path(self.tmp.name) / 'moved' / 'stt.json'}",
+                            f"cd {allow.parent} && cp /tmp/x stt.json"):
+                verdict = permissions.static_verdict(command)
+                self.assertNotEqual(verdict.decision, rules.ALLOW, f"{command}: {verdict}")
+
+    def test_v2_layer_one_refuses_stt_json(self):
+        from jarvis.v2 import permissions as v2
+        home = Path(self.tmp.name) / "home2"
+        allow = home / ".config" / "jarvis" / "allowlist.json"
+        allow.parent.mkdir(parents=True)
+        target = allow.parent / "stt.json"
+        with mock.patch.object(config, "ALLOWLIST_PATH", allow), \
+                mock.patch.object(config, "STT_SETTINGS_PATH", Path(self.tmp.name) / "moved2" / "stt.json"):
+            self.assertIn(target.resolve(), v2.protected_paths())
+            for path in (str(target), str(Path(self.tmp.name) / "moved2" / "stt.json")):
+                self.assertTrue(v2.denied_file(path), f"a write tool may not write {path}")
+            reason = v2.denied_file(str(target))
+            self.assertIn("speech-to-text", reason)
+            self.assertNotIn("permission state", reason, "it is not the allowlist, and the text must not say it is")
+            self.assertIn("Settings > Voice", reason)
+            self.assertTrue(v2.denied_command(f"cp /tmp/x {target}"))
+            self.assertTrue(v2._command_writes_protected_state(f"cp /tmp/x {target}"))
+            self.assertIsNone(v2._command_writes_protected_state(f"cp {target} /tmp/stt.bak"), "a read is not a write")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -361,6 +408,71 @@ class EngineChecks(Base):
         self.assertEqual(eng.transcribe(wav_bytes(0.0), timeout=5), "", "an empty clip is empty text")
         self.assertEqual(eng.loads, 1)
 
+    def test_hostile_wav_bytes_never_escape_as_anything_but_unavailable(self):
+        import random
+        base = bytearray(wav_bytes(0.2))
+        rng = random.Random(13)
+        eng = engine_with(FakeBackend())
+        for _ in range(400):
+            blob = bytearray(base)
+            for _ in range(rng.randint(1, 6)):
+                blob[rng.randrange(0, 60)] = rng.randrange(256)
+            if rng.random() < 0.3:
+                blob = blob[: rng.randrange(0, len(blob))]
+            try:
+                stt_local.wav_samples(bytes(blob), "audio/wav")
+            except stt_local.LocalSTTUnavailable:
+                pass            # the only failure a caller ever sees
+        # The fuzzed case that used to be a RuntimeError, and a frame count that lies.
+        lying = bytearray(base)
+        lying[40:44] = (0xFFFFFFF0).to_bytes(4, "little")
+        for blob in (bytes(lying), b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\xff" * 40):
+            with self.assertRaises(stt_local.LocalSTTUnavailable):
+                eng.transcribe(blob, "audio/wav", timeout=2)
+        with mock.patch("wave.open", side_effect=RuntimeError("library detail")):
+            with self.assertRaises(stt_local.LocalSTTUnavailable) as caught:
+                stt_local.wav_samples(bytes(base), "audio/wav")
+        self.assertNotIn("library detail", str(caught.exception))
+
+    def test_a_job_cancelled_while_it_waits_for_the_engine_never_runs(self):
+        """The caller's deadline and the job's are the same instant, so this drives `_run` with a
+        job whose own deadline is far away: only the cancel flag can stop it."""
+        backend = FakeBackend()
+        eng = engine_with(backend)
+        job = stt_local._Job([0.0] * 1600, 16000, time.monotonic() + 30)
+        eng._lock.acquire()                      # the engine is busy with someone else's decode
+        runner = threading.Thread(target=eng._run, args=(job,))
+        eng._waiting += 1
+        runner.start()
+        time.sleep(0.15)
+        self.assertFalse(job.done.is_set(), "it is queued")
+        job.cancelled = True                     # the caller gave up
+        self.assertTrue(job.done.wait(1.0), "a cancelled job leaves the queue at once, not at its deadline")
+        eng._lock.release()
+        runner.join(2)
+        time.sleep(0.1)
+        self.assertEqual(backend.calls, [], "and is never decoded")
+        self.assertEqual((eng.waiting, eng.loads), (0, 0), "nor loaded for")
+        self.assertIsInstance(job.error, stt_local.LocalSTTTimeout)
+
+    def test_a_caller_that_leaves_at_the_instant_the_engine_frees_up_does_not_decode(self):
+        """The race the sliced wait cannot close: cancelled between acquiring the lock and starting."""
+        backend = FakeBackend()
+
+        class Racy(stt_local.Engine):
+            def _acquire(self, job):
+                got = super()._acquire(job)
+                job.cancelled = True            # the caller timed out right as the lock was handed over
+                return got
+
+        eng = Racy(lambda t: backend, schedule=False)
+        job = stt_local._Job([0.0] * 1600, 16000, time.monotonic() + 30)
+        eng._waiting += 1
+        eng._run(job)
+        self.assertEqual((backend.calls, eng.loads), ([], 0), "neither loaded nor decoded for nobody")
+        self.assertFalse(eng._lock.locked(), "and the lock is released")
+        self.assertEqual(eng.waiting, 0)
+
     def test_status_never_loads(self):
         with mock.patch.object(stt_local, "installed", return_value=(False, "the sherpa-onnx package is not installed")):
             status = stt_local.status()
@@ -386,6 +498,104 @@ class EngineChecks(Base):
         pinned = json.loads((ROOT / "tests" / "voice_v0" / "models.json").read_text())["models"]["parakeet-tdt-0.6b-v3-int8"]
         self.assertEqual(stt_local.MODEL_SHA256, pinned["sha256"])
         self.assertEqual(stt_local.MODEL_URL, pinned["url"])
+
+    def _archive(self, files=None):
+        import tarfile
+        files = files if files is not None else {n: f"content of {n}".encode() for n in stt_local.FILES}
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:bz2") as tar:
+            for name, data in files.items():
+                info = tarfile.TarInfo(f"sherpa-onnx-model/{name}")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    def _fetch(self, dest, blob, **kw):
+        import hashlib
+        import urllib.request
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch.object(urllib.request, "urlopen", return_value=Resp(blob)):
+            return stt_local.fetch(dest, sha256=hashlib.sha256(blob).hexdigest(), **kw)
+
+    def test_fetch_records_per_file_hashes_and_load_checks_them(self):
+        dest = Path(self.tmp.name) / "model"
+        self._fetch(dest, self._archive())
+        marker = json.loads((dest / ".verified").read_text())
+        self.assertEqual(set(marker["files"]), set(stt_local.FILES))
+        self.assertTrue(stt_local.model_present(dest))
+        stt_local.verify_model(dest)                          # intact: silent
+        (dest / "encoder.int8.onnx").write_bytes(b"swapped")
+        with self.assertRaises(stt_local.LocalSTTUnavailable) as caught:
+            stt_local.verify_model(dest)
+        self.assertIn("do not match", str(caught.exception))
+        self.assertNotIn(str(dest), str(caught.exception))
+        # The default factory checks before it builds anything.
+        with mock.patch.object(config, "STT_LOCAL_MODEL_DIR", dest), \
+                mock.patch.object(stt_local, "installed", return_value=(True, "")):
+            with self.assertRaises(stt_local.LocalSTTUnavailable):
+                stt_local._default_factory(2)
+        # A same-size swap behind the cache is caught too (new mtime = new identity).
+        (dest / "encoder.int8.onnx").unlink()
+        with self.assertRaises(stt_local.LocalSTTUnavailable):
+            stt_local.verify_model(dest)
+
+    def test_a_directory_without_the_marker_is_trusted_as_the_owners_own(self):
+        d = Path(self.tmp.name) / "mine"
+        d.mkdir()
+        for n in stt_local.FILES:
+            (d / n).write_bytes(b"x")
+        stt_local.verify_model(d)                            # nothing recorded: not verified, not refused
+        (d / ".verified").write_text("abcdef\n")             # V0-style marker, no per-file hashes
+        stt_local.verify_model(d)
+
+    def test_fetch_never_deletes_a_directory_it_did_not_make(self):
+        mine = Path(self.tmp.name) / "owners"
+        mine.mkdir()
+        (mine / "precious.txt").write_text("keep")
+        with self.assertRaises(SystemExit) as caught:
+            self._fetch(mine, self._archive())
+        self.assertIn("no .verified marker", str(caught.exception))
+        self.assertEqual((mine / "precious.txt").read_text(), "keep")
+        # An earlier download of this model is replaced.
+        dest = Path(self.tmp.name) / "earlier"
+        self._fetch(dest, self._archive())
+        (dest / "stale.txt").write_text("old")
+        self._fetch(dest, self._archive({n: b"new" for n in stt_local.FILES}))
+        self.assertFalse((dest / "stale.txt").exists())
+        self.assertEqual((dest / "tokens.txt").read_bytes(), b"new")
+
+    def test_fetch_stops_a_download_that_is_too_big(self):
+        import urllib.request
+
+        class Endless(io.RawIOBase):
+            read_total = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                Endless.read_total += n
+                return b"x" * n
+
+        dest = Path(self.tmp.name) / "capped"
+        with mock.patch.object(urllib.request, "urlopen", return_value=Endless()):
+            with self.assertRaises(SystemExit) as caught:
+                stt_local.fetch(dest, max_bytes=2 << 20)
+        self.assertIn("larger than 2 MB", str(caught.exception))
+        self.assertLessEqual(Endless.read_total, 3 << 20, "it stopped reading at the cap, not at the end of an endless stream")
+        self.assertFalse(dest.exists())
+        self.assertEqual([p.name for p in Path(self.tmp.name).iterdir() if p.name.startswith(".stt-fetch")], [])
+        self.assertLessEqual(stt_local.MAX_DOWNLOAD, 1 << 30)
 
     def test_fetch_refuses_a_bad_digest(self):
         import urllib.request
@@ -517,8 +727,10 @@ class Policy(Base):
         self.write(backend="auto", cloud_fallback=False)
         stt_local.set_engine(None)
         with mock.patch.object(stt_local, "installed", return_value=(False, "no")), boom.patch():
-            with self.assertRaises(voice.STTBlocked):
+            with self.assertRaises(voice.STTBlocked) as caught:
                 voice.stt_result(wav_bytes(), "audio/wav", prefer_local=True)
+        self.assertIn("not installed", str(caught.exception))
+        self.assertNotIn("switched off", str(caught.exception), "cloud was never the choice, so do not say it was switched off")
         self.assertEqual(boom.calls, [])
 
     def test_cloud_switched_off_blocks_every_caller_and_uploads_nothing(self):

@@ -275,12 +275,12 @@ def main(argv: list[str]) -> int:
                 failures += 1
                 consecutive += 1
                 print(f"  cloud request failed: HTTP {exc.code}")
-                meter.charge(0.0)
+                meter.charge(est)       # a failed request may still have been billed: count the estimate
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 consecutive += 1
                 print("  cloud request failed: " + scrub(type(exc).__name__, key))
-                meter.charge(0.0)
+                meter.charge(est)
             else:
                 consecutive = 0
                 cloud_ms.append((time.perf_counter() - t0) * 1000)

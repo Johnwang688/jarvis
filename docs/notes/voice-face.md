@@ -1526,8 +1526,11 @@ paid comparison has NOT been run, and nothing is deployed.**
   one switch keeps the other at its fail-closed value. `stt.json` is **protected
   state** (`tools/files._protected_state_paths`): no agent write, grant or shell
   command may change it, since flipping it could send the owner's voice to the
-  cloud. **This is an addition to the SELF_PROTECTED set, made without a prior
-  owner decision; drop it from `files.py` if unwanted.**
+  cloud and an upload cannot be undone. **Owner decision, 2026-10-14: keep it
+  protected** (plan §2, V-12a; the protected-state set, not the SELF_PROTECTED
+  source list). The shell detector and v2's layer 1 are pinned for it
+  (`tests/voice_stt_local_check.py`, `tests/v2/permissions_check.py`), and v2's
+  refusal says what the file is.
 - **Route.** `GET/POST /stt/settings`, owner-only on the HUD listener
   (`{backend?, cloud_fallback?}`, validated before anything is written; a read
   never loads the model). Settings -> Voice has a Speech-to-text section: the
@@ -1572,6 +1575,35 @@ a corrupt settings file that fails open, non-opt-in callers using local, the
 unpinned thread clamp, a cancelled job that still decodes after its load.
 Not done and not claimed: the paid comparison, any deployment, a run in the
 live daemon, a physical-microphone run, WAV-only means no Ogg/webm locally.
+
+### V13 review fixes (2026-10-14)
+
+- **The privacy promise is scoped to HUD dictation.** Chrome's wake recognizer
+  (`webkitSpeechRecognition`, App.tsx) streams the microphone to Google whatever
+  `stt.json` says, so with Cloud fallback OFF (or its state not yet known) it
+  never starts: wake-by-voice is off until V11's local wake detection, and the
+  talk key still works. Settings -> Voice says so ("Dictation audio never leaves
+  this computer. Wake word by voice is off until local wake detection lands; use
+  the talk key."), and with it ON it says the wake word uses Chrome's speech
+  recognition (Google). With local chosen and the fallback on, the summary says
+  Discord voice notes and the face server still use the cloud. The window's copy
+  of the settings (`hud/src/state/sttSettings.ts`) is shared by the panel and the
+  recognizer's gate; it is re-read on focus and every 15 s while unknown.
+  `hud_v2_stt_local_check.py` asserts the recognizer never starts after a reload
+  with the fallback off, stops when it is switched off, and starts when it is
+  switched on again.
+- `wav_samples` maps any exception from `wave`/numpy on hostile bytes to
+  `LocalSTTUnavailable` (a fuzzed header was a 500); a queued job now waits for
+  the engine in 50 ms slices and leaves the queue as soon as its caller has gone.
+- `fetch` caps the download (700 MB) while streaming, refuses to replace a
+  directory without the `.verified` marker, and records per-file hashes there;
+  `verify_model` re-checks them when the model loads (once per file identity).
+  A model directory the owner supplies has no marker and is trusted as it is:
+  only the download is verified.
+- The compare probe charges its estimate for a failed request too. An invalid
+  `backend` reads "using local" (the fallback keeps its value); `auto` with
+  nothing installed and the fallback off says the engine is not installed, not
+  that cloud was switched off.
 
 ## V8: spoken summaries (2026-10-13)
 

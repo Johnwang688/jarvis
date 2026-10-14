@@ -81,14 +81,14 @@ def load() -> dict:
                 out["backend"] = raw["backend"]
             else:
                 out["backend"] = "local"
-                errors.append("backend")
+                errors.append("stt.json has an invalid backend: using local")
         if "cloud_fallback" in raw:
             if isinstance(raw["cloud_fallback"], bool):
                 out["cloud_fallback"] = raw["cloud_fallback"]
             else:
                 out["cloud_fallback"] = False
-                errors.append("cloud_fallback")
-    out["error"] = (f"stt.json has an invalid {', '.join(errors)}: failing closed (no upload)" if errors else "")
+                errors.append("stt.json has an invalid cloud_fallback: failing closed, no upload")
+    out["error"] = "; ".join(errors)
     return out
 
 

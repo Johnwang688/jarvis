@@ -144,6 +144,17 @@ class Guards(Harness):
         self.assertIn("failures in a row", out)
         self.assertNotIn(KEY, out)
         self.assertIn("no cloud clip completed", out)
+        result = json.loads((self.fixtures.parent / "work" / "results" / "stt_compare.json").read_text())
+        self.assertGreater(result["spent_usd_estimate"], 0, "a failed request may have been billed: it is counted")
+        self.assertEqual(result["requests"], probe.MAX_CONSECUTIVE_FAILURES)
+
+    def test_failed_requests_count_toward_the_cap(self):
+        def broken(wav, model, key):
+            raise RuntimeError("down")
+
+        code, out, spy = self.run_main("--yes-spend", "--clips", "12", "--price-per-min", "0.6", cloud=broken)
+        self.assertEqual(spy.call_count, 4, "four failed requests already use up the $0.24 estimate")
+        self.assertIn("stopped before the $0.24 cap", out)
 
     def test_the_key_is_never_printed_and_goes_only_to_the_request(self):
         code, out, spy = self.run_main("--yes-spend", "--clips", "3")

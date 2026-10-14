@@ -292,6 +292,11 @@ def denied_file(target: str, cwd: str | None = None, *, folder: bool = False) ->
                 "Ask the owner to change it by hand.")
     resolved = _resolve(path)
     if resolved in protected_paths():
+        if path.name == "stt.json" or resolved == _resolve(config.STT_SETTINGS_PATH):
+            return (f"{path.name} holds the owner's speech-to-text switches, including whether "
+                    "audio may be uploaded. Changing it could send the owner's voice off this "
+                    "machine, which cannot be undone, so it is the owner's to change in "
+                    "Settings > Voice.")
         return (f"{path.name} is Jarvis's own permission state. Changing it "
                 "would widen what runs without anyone being asked, so it is "
                 "the owner's to edit by hand.")

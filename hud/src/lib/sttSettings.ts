@@ -46,22 +46,29 @@ export function parseSttSettings(raw: unknown): SttSettings {
   };
 }
 
-/** One sentence: what happens to the next clip, so the owner never has to infer it from two controls. */
+/** What happens to the next HUD dictation clip, so the owner never has to infer it from two controls. */
 export function sttSummary(s: SttSettings): string {
   const usesLocal = s.backend !== "cloud";
   if (!usesLocal) {
     return s.cloudFallback
-      ? "Audio is sent to the cloud speech model (OpenRouter)."
-      : "Cloud speech-to-text is off and Local is not chosen: dictation will fail until you choose Local or switch cloud fallback on.";
+      ? "HUD dictation audio is sent to the cloud speech model (OpenRouter). Discord voice notes and the face server use the cloud too."
+      : "Cloud speech-to-text is off and Local is not chosen: HUD dictation will fail until you choose Local or switch cloud fallback on. Nothing is uploaded.";
   }
   if (!s.local.installed) {
     return s.cloudFallback
       ? (s.backend === "auto"
-        ? "Local speech-to-text is not installed, so audio goes to the cloud."
-        : "Local speech-to-text is not installed, so every clip falls back to the cloud.")
-      : "Local speech-to-text is not installed and cloud fallback is off: dictation will fail. Nothing is uploaded.";
+        ? "Local speech-to-text is not installed, so HUD dictation audio goes to the cloud. Discord voice notes and the face server use the cloud too."
+        : "Local speech-to-text is not installed, so every dictation clip falls back to the cloud. Discord voice notes and the face server use the cloud too.")
+      : "Local speech-to-text is not installed and cloud fallback is off: HUD dictation will fail. Nothing is uploaded.";
   }
   return s.cloudFallback
-    ? "Audio is transcribed on this computer. If that fails or is too slow, the clip is sent to the cloud."
-    : "Audio is transcribed on this computer only. Nothing is uploaded; a local failure shows an error.";
+    ? "HUD dictation is transcribed on this computer. If that fails or is too slow, the clip is sent to the cloud. Discord voice notes and the face server still use the cloud."
+    : "Dictation audio never leaves this computer. A local failure shows an error.";
+}
+
+/** The wake word is a different path (Chrome's recognizer, Google's service), so it gets its own sentence. */
+export function wakeNote(s: SttSettings): string {
+  return s.cloudFallback
+    ? "Wake word by voice uses Chrome's speech recognition, which streams the microphone to Google, whatever is chosen above."
+    : "Wake word by voice is off until local wake detection lands; use the talk key.";
 }

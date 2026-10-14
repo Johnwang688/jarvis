@@ -1,9 +1,10 @@
 // Settings -> Voice: speech-to-text backend and the cloud-fallback switch (V13).
 // The daemon owns both (`/stt/settings`); this reads them when it opens and after
 // every change, and shows the daemon's answer rather than assuming it took.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
-import { STT_CHOICES, sttSummary, type SttChoice, type SttSettings } from "../lib/sttSettings";
+import { STT_CHOICES, sttSummary, wakeNote, type SttChoice } from "../lib/sttSettings";
+import { sttSettingsStore } from "../state/sttSettings";
 
 const LABEL: Record<SttChoice, string> = { cloud: "Cloud", local: "Local", auto: "Auto" };
 const HINT: Record<SttChoice, string> = {
@@ -13,16 +14,17 @@ const HINT: Record<SttChoice, string> = {
 };
 
 export function SttSettingsPanel({ blocked = false }: { blocked?: boolean }) {
-  const [value, setValue] = useState<SttSettings | null>(null);
+  // The window's one copy, shared with the wake-word recognizer's gate.
+  const value = useSyncExternalStore(sttSettingsStore.subscribe, sttSettingsStore.snapshot);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const load = useCallback(() => api.sttSettings().then(v => { setValue(v); setError(""); })
+  const load = useCallback(() => api.sttSettings().then(v => { sttSettingsStore.apply(v); setError(""); })
     .catch(e => setError(e instanceof Error ? e.message : "The speech-to-text settings could not be read.")), []);
   useEffect(() => { void load(); }, [load]);
   const change = async (c: { backend?: SttChoice; cloud_fallback?: boolean }) => {
     if (blocked || busy) return;
     setBusy(true); setError("");
-    try { setValue(await api.setSttSettings(c)); }
+    try { sttSettingsStore.apply(await api.setSttSettings(c)); }
     catch (e) { setError(e instanceof Error ? e.message : "The setting could not be saved."); }
     finally { setBusy(false); }
   };
@@ -46,10 +48,11 @@ export function SttSettingsPanel({ blocked = false }: { blocked?: boolean }) {
         Cloud fallback
       </label>
       <p className="muted">
-        On: audio may be sent to the cloud when Cloud is chosen, or when local speech-to-text fails or is slow.
-        Off: nothing is ever uploaded, and a local failure shows an error.
+        On: HUD dictation audio may be sent to the cloud when Cloud is chosen, or when local speech-to-text fails or is slow.
+        Off: HUD dictation never uploads anything, a local failure shows an error, and wake word by voice is off.
       </p>
       {value ? <p data-testid="stt-summary">{sttSummary(value)}</p> : null}
+      {value ? <p data-testid="stt-wake-note">{wakeNote(value)}</p> : null}
       {value ? (
         <p className="muted" data-testid="stt-local-status">
           Local engine: {value.local.installed ? `installed · ${value.local.loaded ? "loaded" : "not loaded"} · ${value.local.threads} threads · unloads after ${value.local.idleUnloadMin} min idle` : `not installed (${value.local.reason || "unknown"})`}

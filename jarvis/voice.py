@@ -488,6 +488,9 @@ def stt_result(audio: bytes, mime: str = "audio/webm", *, timeout: float | None 
     if not cfg["cloud_fallback"]:
         if reason is not None:
             raise STTUnavailable(f"{reason}; cloud fallback is off, so nothing was uploaded")
+        if prefer_local and cfg["backend"] == "auto":
+            raise STTBlocked("local speech-to-text is not installed and cloud fallback is off, "
+                             "so nothing was uploaded (install it, or switch cloud fallback on)")
         raise STTBlocked("cloud speech-to-text is switched off in Settings > Voice "
                          "(choose Local, or switch cloud fallback on)")
     if reason is not None:

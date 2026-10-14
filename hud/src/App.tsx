@@ -80,6 +80,7 @@ import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { ReadAloudSetting } from "./components/ReadAloud";
 import { SttSettingsPanel } from "./components/SttSettings";
+import { sttSettingsStore, wakeRecognizerAllowed } from "./state/sttSettings";
 import { createSpeech, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
@@ -2630,9 +2631,24 @@ export default function App() {
 
   // ---- wake word ----------------------------------------------------------
 
+  // V13: Chrome's recognizer streams the microphone to Google. With "Cloud
+  // fallback" off (or not yet known) it never starts, so wake-by-voice is off
+  // until local wake detection (V11); the talk key still works.
+  const sttConfig = useSyncExternalStore(sttSettingsStore.subscribe, sttSettingsStore.snapshot);
+  const wakeAllowed = wakeRecognizerAllowed(sttConfig);
+  useEffect(() => {
+    void sttSettingsStore.refresh();
+    // Another window may have changed it; and a daemon that was not up yet is asked again.
+    const again = () => { if (document.visibilityState !== "hidden") void sttSettingsStore.refresh(); };
+    document.addEventListener("visibilitychange", again);
+    const timer = setInterval(() => { if (sttSettingsStore.snapshot() === null) void sttSettingsStore.refresh(); }, 15000);
+    return () => { document.removeEventListener("visibilitychange", again); clearInterval(timer); };
+  }, []);
+
   useEffect(() => {
     const SR: any = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) return;
+    if (!wakeAllowed) return; // no upload allowed: Chrome's cloud recognizer stays off
     if (isMuted(state.dictation)) return; // a muted mic stops the recognizer outright
     if (crashed) return; // so does a window that stopped drawing
     const gate = new WakeGate();
@@ -2685,7 +2701,7 @@ export default function App() {
       delete (window as any).__hudRecog;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dictation, crashed]);
+  }, [state.dictation, crashed, wakeAllowed]);
 
   const onWakeHit = useCallback(() => {
     if (crashedRef.current) return;
