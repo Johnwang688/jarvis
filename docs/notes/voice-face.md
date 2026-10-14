@@ -1750,10 +1750,10 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   late one; Try again restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its
   "speech" is two oscillators, which Silero rightly does not call speech) by failing the model fetch
   for its contexts.
-- **Counts.** vitest 2420 tests / 151 files (2315 / 145 on V4 after V8), `tsc` and `vite build`
+- **Counts.** vitest 2488 tests / 154 files (after merging V4, V13 and V15) (2315 / 145 on V4 after V8), `tsc` and `vite build`
   clean. (`markdownMath.test.ts` has a 5 s wall budget that trips on a loaded machine and passes
   alone.) Browser checks on the built `hud/dist` with `JARVIS_HUD_DEV=1` and the full Chromium:
-  `hud_v2_vad_check` 96, `chunks` 58, `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17,
+  `hud_v2_vad_check` 96, `chunks` 65, `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17,
   `speech` 56, `multichat` 343, `csp` 44 of 44, all pass. (Without `JARVIS_HUD_DEV=1` the CSP check's
   mock serves from an install that is not there and its 3 manifest/icon checks fail, V4 too.) The full
   `hud_v2_check` was not run here.
