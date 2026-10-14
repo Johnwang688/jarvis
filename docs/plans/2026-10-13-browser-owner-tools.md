@@ -75,4 +75,21 @@ uses the explicit existing browser cache with temporary HOME, valid IDs, actual
 hit-target assertions and owner-focused resizing of the already-booted workspace.
 No production changes were needed for those corrections.
 
+The combined action regression exposed one production integration issue: using
+an approval hold to discard document input made an expected agent navigation
+stop at its own commit. Document retirement now has a dedicated atomic queue
+cutoff; it leaves the approval counter unchanged. Queued and already-taken old
+input stays undeliverable, new owner intent works, and the existing document
+checks still run before CDP acquisition and actual send. Actual approval holds
+still stop the unchanged driver guard.
+
+The reviewed correction passed 70 focused pure checks, the unchanged 19-case
+real Chrome action suite (including navigation and the existing full-upload
+resource exception), the owner-tools Chrome case, and all 22 strengthened HUD
+checks. The HUD poll now pumps routed Playwright callbacks, and reset focus is
+asserted against the actual active element. Both additional mutation baselines
+passed: restoring the old document approval hold failed the positive native
+navigation assertion; omitting document discard failed the old-input cutoff
+assertion. These were intended assertion failures with no test errors.
+
 These receipts are not installation, deployment or complete-product validation.
