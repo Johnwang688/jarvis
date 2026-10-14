@@ -10,8 +10,10 @@ daemon's side — owner-only routes, the API listener's 403, the 409's etag —
 is `tests/v2/editor_files_check.py`.
 
 What it pins, each written to fail on b04d6e8 (ED-1's main):
-  - **tabs**: a single click opens an italic preview tab the next single
-    click replaces; a double click or an edit pins it; middle-click and ×
+  - **tabs**: a single click in the tree opens a normal (pinned) tab and the
+    first stays; re-clicking an open file just activates it; a saved preview
+    tab (still possible from a pane spec) is italic and a double click on it
+    pins it; middle-click and ×
     close; closing the last tab on an unsaved edit asks Save / Don't save /
     Cancel, and Save saves first;
   - **one buffer per file**: the same file in two panes is one model — an
@@ -58,7 +60,7 @@ from tests.face.hud_v2_mock import etag_of  # noqa: E402
 
 ENV_SECRET = "sk-mock-ed2-fake-0000"
 # Wide enough that panes 2 and 3 of three columns are not narrow (a narrow
-# pane folds its tree and opens every file pinned).
+# pane folds its tree at once).
 WIDE = (2400, 1000)
 TWO = json.dumps({"preset": "cols3", "focused": 2,
                   "panes": [{"view": "chat"}, {"view": "file"}, {"view": "file"}, {"view": "task"}]})
@@ -109,7 +111,9 @@ def _fresh(page, mock, until, ws: str | None = TWO, keep_files=None):
 
 def _open(page, until, n: int, name: str, double: bool = False) -> bool:
     """Click `name` in pane N's tree; True once its tab is active and, for a
-    text file, Monaco shows it."""
+    text file, Monaco shows it. `double` is kept for old callers: since
+    2026-10-14 a single click already opens a pinned tab, so it is the same
+    click (a dblclick would only click twice more on the same row)."""
     row = page.locator(_pane(n, f'[data-testid="file-{name}"]'))
     until(lambda: row.count() > 0, timeout=4)
     toggle = page.locator(_pane(n, '[data-testid="tree-toggle"]'))
@@ -119,10 +123,7 @@ def _open(page, until, n: int, name: str, double: bool = False) -> bool:
             toggle.click()
             until(lambda: row.first.is_visible(), timeout=2)
         try:
-            if double:
-                row.dblclick(timeout=2000)
-            else:
-                row.click(timeout=2000)
+            row.click(timeout=2000)
             break
         except Exception:
             continue
@@ -167,7 +168,8 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
     keep = {k: dict(v) for k, v in mock.world["files"].items()}
     try:
         _boot(page, mock, base, until)
-        for section in (_tab_checks, _narrow_checks, _shared_checks, _reload_in_place_checks, _conflict_checks,
+        for section in (_tab_checks, _saved_preview_checks, _narrow_checks, _shared_checks, _reload_in_place_checks,
+                        _conflict_checks,
                         _gone_checks, _persist_checks, _env_checks, _kinds_checks, _add_to_chat_checks,
                         _unmount_checks, _card_checks,
                         # The review of PR #49, each failing on f869543.
@@ -192,31 +194,46 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
 
 # ---------------------------------------------------------------------------
 
+def _seed_preview(page, mock, until, path: str = "calc.py", project: str = "p1") -> None:
+    """The tree no longer opens preview tabs (2026-10-14), so a preview tab is
+    seeded the way one can still arrive: in the pane's saved `editors` spec."""
+    ws = json.dumps({"preset": "cols3", "focused": 2, "panes": [
+        {"view": "chat"},
+        {"view": "file", "projectId": project, "editors": {"paths": [path], "active": path, "preview": path}},
+        {"view": "file"}, {"view": "task"}]})
+    _set_ws(page, ws)
+    _boot(page, mock, None, until, reload=True)
+    until(lambda: page.locator(_tab(2, path)).count() == 1 and "def " in _text(page, 2), timeout=10)
+
+
 def _tab_checks(page, mock, check, until):
     check("setup: calc.py opens in pane 2", _open(page, until, 2, "calc.py"))
     calc = page.locator(_tab(2, "calc.py"))
-    check("a single click opens a preview tab (italic)", calc.get_attribute("data-preview") == "true"
-          and calc.evaluate("e => getComputedStyle(e.querySelector('.edtab-name')).fontStyle") == "italic")
+    check("a single click in the tree opens a pinned tab (not a preview, not italic)",
+          calc.get_attribute("data-preview") == "false"
+          and calc.evaluate("e => getComputedStyle(e.querySelector('.edtab-name')).fontStyle") != "italic")
     _open(page, until, 2, "README.md")
     readme = page.locator(_tab(2, "README.md"))
-    check("the next single click replaces the preview tab",
-          calc.count() == 0 and readme.count() == 1 and readme.get_attribute("data-preview") == "true")
-    readme.dblclick()
-    until(lambda: readme.get_attribute("data-preview") == "false", timeout=2)
-    check("a double click on the tab pins it", readme.get_attribute("data-preview") == "false")
-    _open(page, until, 2, "calc.py")
-    check("a pinned tab stays when another file previews beside it",
-          readme.count() == 1 and calc.count() == 1 and calc.get_attribute("data-preview") == "true")
+    check("a click on a second file opens a second tab, and the first stays",
+          calc.count() == 1 and readme.count() == 1 and readme.get_attribute("data-preview") == "false"
+          and calc.get_attribute("data-preview") == "false")
+    # Re-clicking an open file just activates its tab: no duplicate.
+    page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=3)
+    check("clicking an already-open file activates its tab without a duplicate",
+          calc.count() == 1 and readme.count() == 1
+          and page.locator(_pane(2, '.edtab')).count() == 2
+          and page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py")
     check("setup: an edit", _type(page, until, 2, "\n#pinned_by_an_edit"))
-    until(lambda: calc.get_attribute("data-preview") == "false", timeout=2)
-    check("an edit pins the preview tab", calc.get_attribute("data-preview") == "false")
-    # Double-clicking a tree row opens a pinned tab directly.
-    _open(page, until, 2, "notes.txt", double=True)
+    check("an edit leaves the tab pinned", calc.get_attribute("data-preview") == "false"
+          and calc.get_attribute("data-dirty") == "true")
+    _open(page, until, 2, "notes.txt")
     notes = page.locator(_tab(2, "notes.txt"))
-    until(lambda: notes.count() == 1 and notes.get_attribute("data-preview") == "false", timeout=4)
-    check("a double click in the tree opens a pinned tab, and the edited tab is kept",
+    until(lambda: notes.count() == 1, timeout=4)
+    check("a click on a third file opens a tab, and the edited tab is kept",
           notes.count() == 1 and notes.get_attribute("data-preview") == "false"
-          and calc.count() == 1 and calc.get_attribute("data-dirty") == "true")
+          and calc.count() == 1 and calc.get_attribute("data-dirty") == "true"
+          and readme.count() == 1 and page.locator(_pane(2, '.edtab')).count() == 3)
     # Middle-click closes a clean tab at once.
     readme.click(button="middle")
     until(lambda: readme.count() == 0, timeout=2)
@@ -242,6 +259,24 @@ def _tab_checks(page, mock, check, until):
     check("Save saves it first, then closes the tab",
           calc.count() == 0 and len(sent) == 1 and sent[0]["path"] == "calc.py"
           and mock.world["files"]["calc.py"]["content"].endswith("#pinned_by_an_edit"), str(sent))
+
+
+def _saved_preview_checks(page, mock, check, until):
+    """A saved pane spec can still carry a preview tab (buffers.ts keeps the
+    machinery): it renders italic, a double click on the tab pins it, and a
+    click in the tree adds a tab beside it instead of replacing it."""
+    _seed_preview(page, mock, until)
+    calc = page.locator(_tab(2, "calc.py"))
+    check("a saved preview tab is restored as a preview (italic)", calc.get_attribute("data-preview") == "true"
+          and calc.evaluate("e => getComputedStyle(e.querySelector('.edtab-name')).fontStyle") == "italic")
+    _open(page, until, 2, "README.md")
+    readme = page.locator(_tab(2, "README.md"))
+    check("a click in the tree no longer replaces it: a new pinned tab opens beside",
+          calc.count() == 1 and calc.get_attribute("data-preview") == "true"
+          and readme.count() == 1 and readme.get_attribute("data-preview") == "false")
+    calc.dblclick()
+    until(lambda: calc.get_attribute("data-preview") == "false", timeout=2)
+    check("a double click on the preview tab pins it", calc.get_attribute("data-preview") == "false")
 
 
 def _narrow_checks(page, mock, check, until):
@@ -321,7 +356,11 @@ def _shared_checks(page, mock, check, until):
 
 
 def _reload_in_place_checks(page, mock, check, until):
-    check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
+    # The tree opens pinned tabs now, so the preview this section guards is
+    # seeded through the pane's saved spec.
+    _seed_preview(page, mock, until)
+    check("setup: calc.py open in pane 2 as a (saved) preview tab",
+          page.locator(_tab(2, "calc.py")).get_attribute("data-preview") == "true")
     before = _text(page, 2)
     p1 = next(p for p in mock.world["projects"] if p["id"] == "p1")
     abs_calc = mock.abs_of(p1, "calc.py")
