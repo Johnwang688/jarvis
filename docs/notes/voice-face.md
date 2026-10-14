@@ -1656,7 +1656,8 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
 - **OFF scores nothing.** While the mic is OFF no frame is posted to the worker; the worker's state
   is reset when listening resumes. Frames still reach the capture (it tracks the room), in order.
 - **Seam for RNNoise (V14).** `StageOptions.denoise(frame)` is applied to the copy the worker scores,
-  never to the frame the capture records (STT takes the echo-cancelled stream, V0 section 2). V12's
+  never to the frame the capture records (STT takes the echo-cancelled stream, V0 section 2). V14 runs RNNoise
+  inside the worker instead (section below). V12's
   speaker verification still hangs on `Capture.hooks.onChunk` and `micInput.addFrameListener`.
 - **The three timers** (`lib/vad.ts`, all samples on the ring clock): `SEGMENT_GAP_MS` = 700 (the
   recorder's `CHUNK_GAP_MS` now *is* this constant; chunking is otherwise V4's), `END_PAUSE_MS` =
@@ -1702,6 +1703,100 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   own: it passed with the clips trimmed to their first and last audible sample, so the silence
   between words is the gap; in a real room the pause the model sees starts a little after the last
   word. The hash proves the file is the pinned one, not that the pinned file is good for this room.
+
+## V14: noise suppression in front of the VAD, off by default (2026-10-14)
+
+Plan §3.4, Q16 ("build it as a setting, off by default"). Stacked on V5 (`claude/voice-v5`).
+
+- **A Settings -> Voice switch, "Noise suppression", off by default.** Per window, in `localStorage`
+  (`jarvis.hud.voice.noiseSuppression`, `1` is on; anything else, a blocked store included, is off;
+  `lib/listen/pref.ts`). It needs **no reload**: `VadStage.setNoiseSuppression(on)` posts `denoise on|off` to the
+  running VAD worker. While it is off **nothing loads**: no request for the RNNoise binary, no compile, no memory
+  (the browser check watches the network for it). Settings -> Voice -> Diagnostics has a `Noise suppression:` line
+  (`off` / `on, loading` / `on (RNNoise) . 1.0 ms per 32 ms frame . the detector hears the denoised signal, recordings stay raw` /
+  `on, waiting for the Silero VAD` / `off, fell back to the raw signal - <reason>` with **Try noise suppression again**).
+  Test hooks: `__hud.mic.noise()`, `retryNoise()`, `makeStage(opts)` (a second stage for scoring a fixture by hand).
+- **It changes only what the VAD scores.** The stage still hands the worker a copy and delivers the raw frame to
+  the capture, in order, so the ring, the recorder and every upload are exactly what the microphone gave. There is
+  no second "denoise the recording too" switch: the plan never asks for one, and V0 section 2 measured RNNoise
+  doubling WER at 0 dB pink noise, so STT stays on the as-captured (echo-cancelled) stream. Verified three ways:
+  `stage.test.ts` (the delivered frame is the pushed frame, untouched after the worker rewrites its copy), the
+  browser check (the ring's level with suppression on and ready equals the level with it off, on a loud steady noise
+  that RNNoise alone would cut by 15 dB or more; an uploaded clip is a byte-for-byte slice of the ring).
+- **Where it runs, and the seam.** In the V5 VAD worker (`lib/listen/worker.ts`), not through the stage's
+  synchronous `denoise(frame)` option: that seam runs on the window's thread, and RNNoise is 48 kHz WebAssembly
+  (the option stays, unused by the HUD). Per frame the worker calls `Suppressor.process` on the copy, then Silero.
+  `Suppressor` (`lib/listen/denoise.ts`) owns the lifecycle: `off` -> `loading` -> `ready` | `failed`.
+- **Resampling.** RNNoise needs 48 kHz in frames of 480; the HUD is 16 kHz in 512s. `Denoiser16k` works on 160-sample
+  (10 ms) blocks: x3 up (95-tap Kaiser-windowed sinc low-pass, polyphase, cutoff 7.8 kHz, 0.3 dB flat to 6 kHz,
+  more than 55 dB down from 9 kHz), RNNoise in place, low-pass and decimate by 3. A held-back block means a 512
+  frame can always be filled; the output always has exactly as many samples as the input, in any chunking (tested:
+  the same samples for chunks of 512, 256, 128, 32). RNNoise runs before the 48-to-16 kHz downsample, as V0 advised.
+- **Latency: 511 samples = 31.9 ms, constant** (cross-correlation of the output with the input on both Kokoro clips;
+  `denoise.test.ts` pins 480-540). About 20 ms of it is inside RNNoise 0.2 (its output lags its input by two 10 ms
+  frames), 10 ms is the held block, 2 ms the filters. The VAD scores audio one frame older than the frame it labels.
+  The capture absorbs that: it needs 60 ms of speech to open, its 800 ms pre-roll reaches back far past the lag, so no
+  start of speech is lost; the message-end timer starts about 32 ms later.
+- **CPU.** Measured 1.03 ms per 32 ms frame in headless Chromium and 1.05 ms under Node (about 3.3% of one core),
+  against V0's 3.4% above baseline. Ready in tens of milliseconds once the 1.4 MB binary is cached (not measured
+  on a cold Windows Chrome).
+- **The binary, vendored and verified like Silero.** `hud/vendor/rnnoise/rnnoise_0.2.wasm` (1,440,118 bytes, SHA-256
+  `4f513a50...b8850`) is the WebAssembly binary inside `@jitsi/rnnoise-wasm` 0.2.1's `rnnoise-sync.js` (the file
+  V0 ran; the tarball is `npm-jitsi-rnnoise-wasm-0.2.1` in `tests/voice_v0/models.json`, SHA-256 `c80b015b...c1173`),
+  base64-decoded unchanged by `hud/vendor/rnnoise/extract_wasm.py`, which checks the tarball (or the js), and the
+  result, against `manifest.json`. None of the Emscripten glue is used: `lib/listen/rnnoise.ts` compiles the bytes
+  itself with the two imports the binary asks for (heap growth, memcpy). Licences travel with it: RNNoise is
+  BSD-3-Clause (Xiph.Org, Mozilla, Amazon, Jean-Marc Valin), Jitsi's build Apache-2.0. Vite builds it into
+  `dist/assets/rnnoise_0.2-<hash>.wasm` (+1.4 MB), served from the HUD's origin. The worker checks the fetched
+  bytes' **length and SHA-256 before compiling** (`rnnoise.ts` `verifiedRnnoise`, the same pure-JS SHA-256 behind
+  `crypto.subtle` as Silero); `pins.ts` holds the digest, `denoise.test.ts` ties the vendored file, the manifest,
+  `pins.ts` and V0's list together.
+- **CSP.** Unchanged and sufficient, the same as Silero: same-origin module worker, `connect-src 'self'` fetch,
+  `WebAssembly.instantiate` under the existing `'wasm-unsafe-eval'`. No `unsafe-eval`, no blob worker, no CDN. The
+  browser check reads the CSP header on the binary's response.
+- **Failure is visible and soft.** A missing binary (`fetch`), changed, truncated or padded bytes (`hash`), a runtime
+  that cannot start it or a frame that traps (`runtime`), or 16 frames in a row slower than 24 ms (`slow`) turn
+  suppression off: the VAD keeps scoring, raw; the switch stays on (the owner's choice) with the reason in a
+  sentence from a closed set (`protocol.ts` `DENOISE_FAIL_TEXT`; no URL, path or engine text), and **Try noise
+  suppression again** (or switching it off and on). If Silero itself is on the energy fallback, the line says
+  suppression is waiting: the energy detector hears the raw signal. `reset` (mic back from OFF) resets the filters
+  and RNNoise's state with Silero's.
+- **Does it help? A little, on one kind of noise, and not on voices.** On the browser fixture (the six Kokoro
+  utterances of `tests/face/fixtures/voice_v5` with 0.8 s gaps, in generated pink noise 5 dB below the speech;
+  V0's scoring: a frame is a false accept when Silero says speech where the clean signal's energy, dilated by
+  three frames, says silence), Silero's **false-accept frames fell from 10 to 0 and speech recall went from
+  0.967 to 0.946** (931 frames, 665 of speech). That is V0's finding again (section 2: 19 to 0, 14 to 1, 13 to 0)
+  and its price. Other things measured offline while choosing a fixture (native onnxruntime on the same Silero file,
+  RNNoise output from this adapter): steady white, pink, fan, rain, crackle and siren-like noise alone never reach
+  `p >= 0.5` on Silero either way, so a noise-only fixture cannot show a gain; steady vowel-like buzzes and a chord
+  *raise* Silero's peak probability after RNNoise (0.72 to 0.97 for a 120 Hz buzz, 0.10 to 0.59 for a chord) without
+  sustaining it above 0.5. V0 stays right that it does nothing against competing speech or a TV; that is speaker
+  verification's job (V12).
+- **Not here.** Plan §3.4 says the denoised stream also feeds KWS and verification. The worker does not send audio
+  back, so V11/V12 do not see the denoised signal yet; if they want it, it is one more message from the worker
+  (they should weigh that against V0's WER regression before using it for STT-adjacent work). Not measured:
+  Windows Chrome, a physical microphone, a real room, a real TV; the cold first load of the 1.4 MB binary.
+- **Free checks.** `lib/listen/denoise.test.ts` (29: filter response; the adapter with the engine doing nothing:
+  same length for any chunking, same samples for any chunking, unity gain 200 Hz to 6 kHz, constant delay, reset;
+  the vendored binary against `pins.ts`, the manifest, V0's tarball digest and the two licences; one changed,
+  truncated or padded byte refused with `hash`, an unreadable file `fetch`, junk with a matching pin `runtime`; the
+  real RNNoise under Node: steady white and low-passed noise at -30 dBFS come out 15 dB or more quieter, a Kokoro
+  clip keeps its energy within 3 dB and correlates above 0.8, speech in noise drops the noise at least 10 dB more
+  than the speech, the 511-sample latency, 1.05 ms per frame, reset equals a fresh engine; the `Suppressor`
+  lifecycle with a fake engine: nothing loads while off, loading/ready events, disable frees the engine, off while
+  loading frees the engine that arrives, failure codes, retry, a trapping engine, the slow rule, a throwing
+  observer), `pref.test.ts` (3), `stage.test.ts` (+14: off and silent by default, on after the worker is up, on
+  before it exists, off, failure codes, retry, Silero failing, the raw frame delivered), `voiceDiagnostics.test.ts` (+2).
+- **Browser check.** `tests/face/hud_v2_denoise_check.py` (real Chromium, real worker, mock daemon, synthetic
+  audio only): sections `off_by_default`, `toggle_live`, `false_accepts`, `recorded_raw`, `fallbacks` (404, one
+  byte changed, truncated, padded; each with Silero still scoring and a working retry).
+- **Counts.** vitest 2433 tests / 153 files (2385 / 151 on V5: +48, two new files), `tsc` and `vite build` clean.
+  Browser checks on the built `hud/dist`: `hud_v2_denoise_check` 72, `vad` 67, `chunks` 58, `stt` 28, `csp` 44,
+  `voice_diagnostics` 17, all pass. The full `hud_v2_check` was not run.
+- **Mutations that fail on purpose** (source restored afterwards): the switch on by default (2 vitest); the SHA-256
+  not compared in `verifiedRnnoise` (1: "refused if one byte changed, truncated or padded"); no held-back block in
+  the adapter (3: chunk invariance, delay, latency); RNNoise loaded when the worker starts instead of on the switch
+  (the browser check's "nothing was requested for RNNoise" fails).
 
 ## V8: spoken summaries (2026-10-13)
 
