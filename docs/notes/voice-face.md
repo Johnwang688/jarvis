@@ -1772,6 +1772,10 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   expiry; AUTO cancel with a chunk held in flight and Undo; cancel does not recall a send and `NOTHING TO CANCEL`; a card
   in flight (verbatim, zero approval requests) and a card up (nothing uploaded); busy chat steers; the lists in
   Settings (refusals, bound, persistence); edited lists, the toggle, an empty list, hostile storage.
+- **Counts.** vitest 2438 tests / 154 files (2385 / 151 on V5: +53, three new files; one unrelated
+  `markdownMath` timing test failed once in a full run under a load average of 24 and passed alone), `tsc` and
+  `vite build` clean. Browser checks on the built `hud/dist`: `hud_v2_words_check` 68, `chunks` 58, `stt` 28,
+  `steer` 46, `ptt` 70, `speech` 56 all pass; `vad` and `multichat`: see the PR. The full `hud_v2_check` was not run.
 - **Mutations that fail on purpose** (source restored afterwards): dropping the quiet test (6 vitest tests);
   ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks).
 - **Not done / not claimed.** A real person's voice, a physical microphone, and how Parakeet transcribes a spoken "over"
