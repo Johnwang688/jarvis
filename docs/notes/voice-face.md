@@ -1533,6 +1533,12 @@ one of my own after muting it to test).
   call is therefore bounded (2 s) and failure is non-fatal and retried; under such load the
   duck is simply late, never stuck.
 
+**Live smoke of the finished code (same day, real pactl and real `/proc`, a throwaway
+headless Chrome with a temporary profile and a temporary journal):** the stream was attributed
+by `OwnedChrome.chain`, went 65536 -> 36854 per channel under a lease, the journal held
+prior/applied, `release()` restored 65536 exactly and deleted the journal, and a lease left to
+expire restored the same way. The one other app's stream present earlier was not touched.
+
 ### What it does
 
 - **Route** `GET`/`POST /speech/duck` (owner-only, HUD listener, like `/speech/voices`);
