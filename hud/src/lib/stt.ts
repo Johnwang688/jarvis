@@ -58,8 +58,9 @@ export interface SttClipView {
   id: number;
   /** The message this clip belongs to (its own id when it is a whole message). */
   group: number;
-  /** Position among the message's chunks that are still held, from 1. */
+  /** Which chunk of its message this is, from 1, and how many the message has had so far. */
   part: number;
+  of: number;
   diag: number;
   seq: number;
   ms: number;
@@ -119,7 +120,11 @@ interface Entry<M> {
 
 /** One message: a clip, or the chunks a long dictation was cut into. */
 interface Group<M> {
-  id: number; source: ClaimSource; meta: M;
+  /** Creation order; what `beginGroup` hands back. */
+  key: number;
+  /** What the daemon is told the utterance is: the id of its first chunk (0 until there is one). */
+  uid: number;
+  source: ClaimSource; meta: M;
   diag: number;
   /** More chunks may still be submitted. The group's text is not placed until it is closed. */
   open: boolean;
@@ -155,6 +160,7 @@ export class SttAssembler<M = undefined> {
   private entries = new Map<number, Entry<M>>();
   private groups = new Map<number, Group<M>>();
   private nextId = 0;
+  private groupSeq = 0;
   private listeners = new Set<() => void>();
   private chain: Promise<void> = Promise.resolve();
   private waiters = new Map<number, (() => void)[]>();
@@ -202,11 +208,11 @@ export class SttAssembler<M = undefined> {
   }
   private settleGroup(g: Group<M>) {
     if (!this.groupDone(g)) return;
-    const w = this.groupWaiters.get(g.id);
-    this.groupWaiters.delete(g.id);
+    const w = this.groupWaiters.get(g.key);
+    this.groupWaiters.delete(g.key);
     for (const fn of w ?? []) fn();
     // Nothing of it is held any more (failed chunks included): forget its texts.
-    if (!g.members.some(id => this.entries.has(id))) this.groups.delete(g.id);
+    if (!g.members.some(id => this.entries.has(id))) this.groups.delete(g.key);
   }
 
   /** The kept audio for a clip, for Play. Null once it is placed, discarded or evicted. */
@@ -214,13 +220,11 @@ export class SttAssembler<M = undefined> {
 
   private emit() {
     const all = [...this.entries.values()].filter(e => e.blob).sort((a, b) => a.seq - b.seq);
-    const parts = new Map<number, number>();
     this.value = {
       pending: all.filter(e => e.state === "transcribing" || e.state === "waiting").length,
       clips: all.map(e => {
-        const part = (parts.get(e.gid) ?? 0) + 1;
-        parts.set(e.gid, part);
-        return { id: e.id, group: e.gid, part, diag: e.diag, seq: e.seq, ms: e.ms, bytes: e.bytes, state: e.state, attempts: e.attempts, error: e.error };
+        const g = this.groups.get(e.gid);
+        return { id: e.id, group: g?.uid ?? e.id, part: g ? g.members.indexOf(e.id) + 1 : 1, of: g ? g.members.length : 1, diag: e.diag, seq: e.seq, ms: e.ms, bytes: e.bytes, state: e.state, attempts: e.attempts, error: e.error };
       }),
     };
     for (const fn of this.listeners) { try { fn(); } catch { /* observers cannot affect transcription */ } }
@@ -266,12 +270,12 @@ export class SttAssembler<M = undefined> {
    * placed before, and everything is placed together after.
    */
   beginGroup(source: ClaimSource, meta: M): number {
-    const id = ++this.nextId;
-    this.groups.set(id, {
-      id, source, meta, diag: 0, open: true, members: [], parts: new Map(), placed: new Set(),
+    const key = ++this.groupSeq;
+    this.groups.set(key, {
+      key, uid: 0, source, meta, diag: 0, open: true, members: [], parts: new Map(), placed: new Set(),
       lastAt: this.now(), hadFailure: false, placing: 0,
     });
-    return id;
+    return key;
   }
 
   /** The message has ended; no chunk will follow. */
@@ -308,18 +312,19 @@ export class SttAssembler<M = undefined> {
     const id = ++this.nextId;
     if (!g) {
       g = {
-        id, source, meta, diag: 0, open: false, members: [], parts: new Map(), placed: new Set(),
+        key: ++this.groupSeq, uid: 0, source, meta, diag: 0, open: false, members: [], parts: new Map(), placed: new Set(),
         lastAt: this.now(), hadFailure: false, placing: 0,
       };
-      this.groups.set(id, g);
+      this.groups.set(g.key, g);
     }
+    if (!g.uid) g.uid = id;
     if (!g.diag) g.diag = this.o.diagnostics.add(ms - overlapMs, source, "transcribing");
     else this.o.diagnostics.extend(g.diag, ms - overlapMs);
     g.members.push(id);
     g.parts.set(id, { text: "", overlap: overlapMs > 0 });
     g.lastAt = this.now();
     const e: Entry<M> = {
-      id, gid: g.id, seq: id, diag: g.diag, ms, overlapMs, source, meta: g.meta,
+      id, gid: g.key, seq: id, diag: g.diag, ms, overlapMs, source, meta: g.meta,
       blob, bytes: blob.size, state: "waiting", attempts: 0, autoRetries: 0, error: "", text: "",
       startedAt: this.now(), hadFailure: false, retried: false, cancelled: false, ac: null, retryTimer: null, cancel: null,
     };
@@ -366,7 +371,7 @@ export class SttAssembler<M = undefined> {
     let text = "";
     let failure: unknown = null;
     try {
-      text = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: e.gid, seq: e.seq, budgetMs: deadline }), expired, cancelled]);
+      text = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: g?.uid ?? e.id, seq: e.seq, budgetMs: deadline }), expired, cancelled]);
     } catch (error) { failure = error ?? new Error("transcription failed"); }
     clearTimeout(timer);
     e.cancel = null;
@@ -391,7 +396,11 @@ export class SttAssembler<M = undefined> {
     // settled with the rest of its message (release).
     e.text = typeof text === "string" ? text : "";
     g?.parts.set(e.id, { text: e.text.trim(), overlap: e.overlapMs > 0 });
-    e.state = "ready"; e.error = "";
+    // The words are in hand; the audio is only needed to try again, and a long
+    // message may wait many chunks for its last one. Holding every chunk's audio
+    // until then would make its length a memory bound, so it is let go here.
+    e.state = "ready"; e.error = ""; e.blob = null;
+    this.syncKept(g);
     this.emit(); this.release();
   }
 
@@ -464,7 +473,7 @@ export class SttAssembler<M = undefined> {
   /** Place, in capture order, every message no earlier chunk is still waiting on. */
   private release() {
     const out: { g: Group<M>; ents: Entry<M>[]; item: SttPlaced<M> }[] = [];
-    for (const g of [...this.groups.values()].sort((a, b) => a.id - b.id)) {
+    for (const g of [...this.groups.values()].sort((a, b) => a.key - b.key)) {
       if (g.open) break; // still being spoken: it holds the line for what follows
       const live = g.members.map(id => this.entries.get(id)).filter((e): e is Entry<M> => !!e);
       if (live.some(e => e.state === "transcribing" || e.state === "waiting")) break;

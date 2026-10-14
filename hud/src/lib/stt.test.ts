@@ -8,7 +8,7 @@ import { VoiceDiagnostics } from "./voiceDiagnostics";
 type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number;
   resolve: (t: string) => void; reject: (e: unknown) => void };
 
-function harness(over: { canUpload?: () => boolean } = {}) {
+function harness(over: { canUpload?: () => boolean; maxInFlight?: number } = {}) {
   const calls: Call[] = [];
   const placed: SttPlaced<string>[][] = [];
   const events: SttEvent[] = [];
@@ -16,7 +16,7 @@ function harness(over: { canUpload?: () => boolean } = {}) {
   const stt = new SttAssembler<string>({
     transcribe: (blob, o) => new Promise<string>((resolve, reject) => { calls.push({ blob, ...o, resolve, reject }); }),
     place: b => { placed.push(b); },
-    diagnostics, canUpload: over.canUpload, onEvent: e => events.push(e), now: () => Date.now(),
+    diagnostics, canUpload: over.canUpload, maxInFlight: over.maxInFlight, onEvent: e => events.push(e), now: () => Date.now(),
   });
   const clip = (n = 100) => new Blob([new Uint8Array(n)], { type: "audio/wav" });
   const texts = () => placed.flat().map(p => p.text);
@@ -415,5 +415,243 @@ describe("clip retention is bounded", () => {
     expect(h.stt.clip(id)).toBeNull();
     expect(h.stt.snapshot().clips).toEqual([]);
     expect(h.diagnostics.snapshot().rows[0].kept).toBe(false);
+  });
+});
+
+describe("chunked messages (V4)", () => {
+  const sub = (h: ReturnType<typeof harness>, g: number, overlapMs = 0, ms = 8000) =>
+    h.stt.submit(h.clip(), ms, "ptt", "meta", { group: g, overlapMs })!;
+  const open = (h: ReturnType<typeof harness>) => h.stt.beginGroup("ptt", "meta");
+
+  it("places one message, once the message has ended and every chunk has answered, chunks joined in order", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g); sub(h, g); sub(h, g);
+    h.calls[2].resolve("three"); h.calls[0].resolve("one");
+    await flush();
+    expect(h.texts()).toEqual([]);                       // chunk two is still out, and the message is still open
+    h.calls[1].resolve("two");
+    await flush();
+    expect(h.texts()).toEqual([]);                       // all answered, but the message has not ended
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["one two three"]);
+    expect(h.placed).toHaveLength(1);
+    expect(h.placed[0][0]).toMatchObject({ parts: 3, late: false, retried: false, meta: "meta" });
+    expect(h.stt.snapshot().clips).toEqual([]);          // every chunk's audio released
+  });
+
+  it("names the daemon's utterance by its first chunk and each chunk by its own seq", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g); sub(h, g);
+    expect(h.calls.map(c => [c.utteranceId, c.seq])).toEqual([[1, 1], [1, 2]]);
+    void g;
+  });
+
+  it("an unchunked clip is still utterance = seq", () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 1000, "ptt", "x");
+    expect(h.calls[0]).toMatchObject({ utteranceId: 1, seq: 1 });
+  });
+
+  it("takes the words an overlap repeats off once, and only where the recorder overlapped", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g, 0); sub(h, g, 500); sub(h, g, 0);
+    h.calls[0].resolve("we plan the work and then");
+    h.calls[1].resolve("and then we build it");
+    h.calls[2].resolve("build it again");            // a cut at a pause: the repeat is speech
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["we plan the work and then we build it build it again"]);
+  });
+
+  it("is one diagnostics row for the whole message, whose length is the audio, overlap once", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g, 0, 25000); sub(h, g, 500, 10000);
+    expect(h.diagnostics.snapshot().rows).toHaveLength(1);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ outcome: "transcribing", ms: 34500, kept: true });
+    h.calls[0].resolve("a"); h.calls[1].resolve("b");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.diagnostics.snapshot().rows[0].kept).toBe(false);
+  });
+
+  it("at most maxInFlight chunks upload at once, the rest in seq order", async () => {
+    const h = harness({ maxInFlight: 2 });
+    const g = open(h);
+    for (let i = 0; i < 5; i++) sub(h, g);
+    expect(h.calls.map(c => c.seq)).toEqual([1, 2]);
+    expect(h.stt.snapshot().clips.map(c => c.state)).toEqual(["transcribing", "transcribing", "waiting", "waiting", "waiting"]);
+    h.calls[1].resolve("b");                              // the later chunk finishes first
+    await flush();
+    expect(h.calls.map(c => c.seq)).toEqual([1, 2, 3]);
+    h.calls[0].resolve("a"); await flush();
+    expect(h.calls.map(c => c.seq)).toEqual([1, 2, 3, 4]);
+    h.calls[2].resolve("c"); h.calls[3].resolve("d"); await flush();
+    h.calls[4].resolve("e");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["a b c d e"]);
+  });
+
+  it("a chunk waiting for its turn is not uploaded if uploads stopped being allowed meanwhile", async () => {
+    let ok = true;
+    const h = harness({ maxInFlight: 1, canUpload: () => ok });
+    const g = open(h);
+    sub(h, g); sub(h, g);
+    expect(h.calls).toHaveLength(1);
+    ok = false;                                           // a card came up, or the mic went OFF
+    h.calls[0].resolve("one"); await flush();
+    expect(h.calls).toHaveLength(1);                      // chunk two never left
+    const failed = h.stt.snapshot().clips.filter(c => c.state === "failed");
+    expect(failed.map(c => c.error)).toEqual(["not sent: dictation is paused"]);
+    expect(h.stt.clip(failed[0].id)).not.toBeNull();     // kept, so Retry can send it when allowed
+  });
+
+  describe("a chunk that fails", () => {
+    async function threeWithMiddleFailed() {
+      const h = harness();
+      const g = open(h);
+      const ids = [sub(h, g, 0), sub(h, g, 500), sub(h, g, 500)];
+      h.calls[0].resolve("alpha beta gamma");
+      h.calls[2].resolve("delta epsilon zeta");
+      h.calls[1].reject(Object.assign(new Error("down"), { status: 400 }));
+      await flush();
+      h.stt.closeGroup(g);
+      await flush();
+      return { h, g, ids };
+    }
+
+    it("is kept and retryable while the others are placed in order, marked late so AUTO will not send half a message", async () => {
+      const { h, ids } = await threeWithMiddleFailed();
+      expect(h.texts()).toEqual(["alpha beta gamma delta epsilon zeta"]);
+      expect(h.placed[0][0]).toMatchObject({ late: true, retried: false, parts: 2 });
+      expect(h.stt.clip(ids[1])).not.toBeNull();
+      expect(h.stt.snapshot().clips).toHaveLength(1);
+      expect(h.stt.snapshot().clips[0]).toMatchObject({ id: ids[1], state: "failed", part: 2, of: 3 });
+      expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ outcome: "stt_failed", kept: true });
+    });
+
+    it("lands late, alone, and without the words its neighbours already said", async () => {
+      const { h, ids } = await threeWithMiddleFailed();
+      expect(h.stt.retry(ids[1])).toBe(true);
+      expect(h.diagnostics.snapshot().rows[0].outcome).toBe("transcribing");
+      h.calls[3].resolve("gamma and delta");              // overlaps both neighbours
+      await flush();
+      expect(h.texts()).toEqual(["alpha beta gamma delta epsilon zeta", "and"]);
+      expect(h.placed[1][0]).toMatchObject({ late: true, retried: true, parts: 1 });
+      expect(h.stt.snapshot().clips).toEqual([]);
+    });
+
+    it("whenGroupSettled waits for the automatic retry, then resolves as the chunk is left failed", async () => {
+      const h = harness();
+      const g = open(h);
+      sub(h, g);
+      h.stt.closeGroup(g);
+      let done = false; void h.stt.whenGroupSettled(g).then(() => { done = true; });
+      h.calls[0].reject(Object.assign(new Error("down"), { status: 502 }));
+      await flush();
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(STT_RETRY_DELAY_MS);
+      h.calls[1].reject(Object.assign(new Error("down"), { status: 502 }));
+      await flush();
+      expect(done).toBe(true);
+    });
+  });
+
+  it("a chunk of silence in the middle is a normal answer, not an empty message", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g); sub(h, g); sub(h, g);
+    h.calls[0].resolve("before"); h.calls[1].resolve("  "); h.calls[2].resolve("after");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["before after"]);
+    expect(h.events.some(e => e.kind === "empty")).toBe(false);
+  });
+
+  it("a message of only silence is empty, once", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g); sub(h, g);
+    h.calls[0].resolve(""); h.calls[1].resolve(" ");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual([]);
+    expect(h.events.filter(e => e.kind === "empty")).toHaveLength(1);
+    expect(h.diagnostics.snapshot().rows[0].outcome).toBe("empty_transcript");
+  });
+
+  it("holds the line for a later message while it is still being spoken, then frees it", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g);
+    h.calls[0].resolve("long message");
+    await flush();
+    h.stt.submit(h.clip(), 1000, "ptt", "meta");        // the next message arrives while the first is open
+    h.calls[1].resolve("short one");
+    await flush();
+    expect(h.texts()).toEqual([]);
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["long message", "short one"]);
+  });
+
+  it("a message that never uploaded anything closes without a trace; one lost to the backlog says so and is late", async () => {
+    const h = harness();
+    const empty = open(h);
+    h.stt.closeGroup(empty);
+    await expect(h.stt.whenGroupSettled(empty)).resolves.toBeUndefined();
+    expect(h.diagnostics.snapshot().rows).toEqual([]);
+
+    const g = open(h);
+    sub(h, g);                                            // in flight
+    expect(h.stt.submit({ size: 20 * 1024 * 1024 } as Blob, 1000, "ptt", "meta", { group: g })).not.toBeNull();
+    expect(h.stt.submit({ size: 20 * 1024 * 1024 } as Blob, 1000, "ptt", "meta", { group: g })).toBeNull();
+    h.calls[0].resolve("kept"); h.calls[1].resolve("also");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.placed[0][0]).toMatchObject({ text: "kept also", late: true });   // part of it is missing: never sent on its own
+    expect(h.diagnostics.snapshot().rows[0].outcome).toBe("stt_failed");
+  });
+
+  it("lets a chunk's audio go once its words are in, so a long message is not bound by its length", async () => {
+    const h = harness();
+    const g = open(h);
+    for (let i = 0; i < STT_MAX_CLIPS + 10; i++) {
+      const id = sub(h, g);                              // each is accepted: none is waiting on the others' audio
+      expect(id).not.toBeNull();
+      h.calls[i].resolve(`w${i}`);
+      await flush();
+      expect(h.stt.clip(id)).toBeNull();
+    }
+    expect(h.stt.snapshot().clips).toEqual([]);
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()[0].split(" ")).toHaveLength(STT_MAX_CLIPS + 10);
+  });
+
+  it("cannot submit to a message that has ended", () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g);
+    h.stt.closeGroup(g);
+    expect(h.stt.submit(h.clip(), 1000, "ptt", "meta", { group: g })).toBeNull();
+  });
+
+  it("discarding one chunk does not cancel the others", async () => {
+    const h = harness();
+    const g = open(h);
+    const a = sub(h, g), b = sub(h, g);
+    h.stt.discard(a);
+    h.calls[1].resolve("rest");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["rest"]);
+    expect(h.stt.clip(b)).toBeNull();
+    expect(h.diagnostics.snapshot().rows[0].outcome).not.toBe("cancelled");
   });
 });
