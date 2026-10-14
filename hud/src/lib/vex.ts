@@ -250,6 +250,29 @@ export function downloadLabel(slot: number): string {
 }
 
 /**
+ * How far a download is, 0-100, from vexcom's own progress line, or null
+ * before it prints one. The live format (2026-10-14) is a `download :` line,
+ * then `0....10....20....` up to `100`: a number every 10% and four dots
+ * between, so each dot after the last number is 2%. The last such line
+ * counts (a later phase starts again at 0). Output is untrusted text: only a
+ * line made of nothing but those numbers and dots is read.
+ */
+export function downloadProgress(output: string): number | null {
+  const lines = (output || "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    // A narrow terminal or vexcom itself may break the line: a run of
+    // numbers and dots with at least one dot is read wherever it starts.
+    if (!/^\d{1,3}(?:\.+\d{1,3})*\.*$/.test(line) || !line.includes(".")) continue;
+    const numbers = line.match(/\d+/g)!.map(Number);
+    const last = numbers[numbers.length - 1];
+    const dots = line.length - line.replace(/\.+$/, "").length;
+    return Math.max(0, Math.min(100, last + Math.min(dots, 4) * 2));
+  }
+  return null;
+}
+
+/**
  * Whether a click on the Download button is the owner's own: a trusted
  * pointer click with the primary button, and **the first click of a run**
  * (`detail` exactly 1). Enter or Space on a focused button makes a click with

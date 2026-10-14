@@ -842,8 +842,17 @@ def _feedback_checks(page, mock, check, until, fake):
     check("exited terminal listing cannot invent Download completion", page.evaluate("() => window.__hudVex.run('p3').busy") == "download"
           and page.get_by_test_id("vex-downloaded").count() == 0)
     rec = next(iter(v["download_records"].values()))
+    bar = page.get_by_test_id("vex-download-progress")
+    check("no progress bar before vexcom prints its progress line", bar.count() == 0)
+    rec.update(output="Device: COM3\nvexcom utility V1.0.2b2\ndownload :\n0....10....20....30..")
+    check("the progress bar follows vexcom's progress line",
+          bool(until(lambda: bar.count() == 1 and bar.get_attribute("aria-valuenow") == "34", timeout=4))
+          and "34%" in bar.inner_text())
+    rec.update(output="Device: COM3\nvexcom utility V1.0.2b2\ndownload :\n0....10....20....30....40....50....60....70")
+    check("and moves as the download goes", bool(until(lambda: bar.get_attribute("aria-valuenow") == "70", timeout=4)))
     rec.update(state="succeeded", exit_code=0, output="Finished <script>fixture</script>", ended="2026-10-13T12:00:02+00:00")
     assert until(lambda: page.get_by_test_id("vex-downloaded").count() == 1)
+    check("a finished download shows a full bar", bar.get_attribute("aria-valuenow") == "100")
     check("Download settles visibly and retains output/terminal control", "In slot" in page.get_by_test_id("vex-downloaded").inner_text()
           and "Finished <script>fixture</script>" in page.get_by_test_id("vex-download-output").inner_text()
           and page.get_by_test_id("vex-download-output-btn").is_visible())
@@ -851,10 +860,14 @@ def _feedback_checks(page, mock, check, until, fake):
     at = datetime.now(timezone.utc).isoformat()
     v["connection"] = {"brain": True, "controller": False, "checked_at": at, "state": "ready", "message": "USB check complete.",
         "events": [{"device": "brain", "connected": True, "at": at}, {"device": "controller", "connected": False, "at": at}]}
-    assert until(lambda: "USB Brain: Connected" in page.get_by_test_id("vex-usb-brain").inner_text())
-    check("USB Brain/Controller and tooling have distinct indicators", "USB Brain: Connected" in page.get_by_test_id("vex-usb-brain").inner_text()
-          and "USB Controller: Disconnected" in page.get_by_test_id("vex-usb-controller").inner_text()
+    assert until(lambda: page.get_by_test_id("vex-usb-brain").inner_text().startswith("Brain: Connected"))
+    check("Brain/Controller and tooling have distinct indicators", page.get_by_test_id("vex-usb-brain").inner_text() == "Brain: Connected"
+          and page.get_by_test_id("vex-usb-controller").inner_text() == "Controller: Disconnected"
           and "Tooling: Configured" in page.get_by_test_id("vex-tooling").inner_text())
+    color = lambda tid: page.get_by_test_id(tid).evaluate("e => getComputedStyle(e).color")
+    css = lambda name: page.evaluate(f"() => {{ const e = document.createElement('span'); e.style.color = 'var({name})'; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; }}")
+    check("connected is green and disconnected red", color("vex-usb-brain") == css("--green")
+          and color("vex-usb-controller") == css("--red"), f"{color('vex-usb-brain')} {color('vex-usb-controller')}")
     page.get_by_test_id("vex-connection").locator("summary").click()
     check("connection log contains timestamps and confirmed transitions", page.get_by_test_id("vex-connection-log").locator("time").count() == 2)
     v["connection"].update(state="error", message="Unsupported USB response; retained.")
@@ -863,7 +876,7 @@ def _feedback_checks(page, mock, check, until, fake):
           and "Unsupported" in page.get_by_test_id("vex-connection-note").inner_text())
     v["connection"].update(state="ready", brain=False, checked_at=at,
         events=[*v["connection"]["events"], {"device": "brain", "connected": False, "at": at}])
-    assert until(lambda: "USB Brain: Disconnected" in page.get_by_test_id("vex-usb-brain").inner_text())
+    assert until(lambda: page.get_by_test_id("vex-usb-brain").inner_text() == "Brain: Disconnected")
     check("confirmed disconnect has a timestamped log entry", page.get_by_test_id("vex-connection-log").locator("time").count() == 3)
     page.set_viewport_size({"width": 375, "height": 812})
     try:
