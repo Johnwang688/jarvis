@@ -627,7 +627,12 @@ export default function App() {
               : `Speech-to-text failed: ${e.message}. The audio was too large to keep, so it cannot be retried.`;
             sttSay({ orb: "error", status: e.kept ? "STT FAILED · RETRY" : "STT FAILED", error: sttError.current });
           } else if (e.kind === "empty") sttSay({ orb: "idle", status: "DIDN'T CATCH THAT" });
-          else if (e.kind === "blocked") sttSay({ status: e.message });
+          else if (e.kind === "blocked") {
+            // On the window's error line as well: a busy chat's status line is
+            // not ours to write, and a Retry that seems to do nothing is worse.
+            sttSay({ status: e.message });
+            dispatch({ type: "patch", patch: { error: "Not retried: the mic is OFF, the window is paused, or an authorization card is waiting. Fix that, then press Retry." } });
+          }
         },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -689,8 +694,11 @@ export default function App() {
       const sends = batch.every((i) => placementFor(i.meta, landing, i) === "send");
       if (!sends) {
         done("review");
+        // Words spoken in one chat that landed in another say so.
+        const moved = batch.some((i) => i.meta.chat !== landing.chat);
         // A chat running a turn keeps its own orb and status line.
-        chatPatch(n, { ...(chat.busy ? {} : { orb: "idle" as const, status: "" }), pendingTranscript: batch.map((i) => i.text).join(" ") });
+        chatPatch(n, { ...(chat.busy ? {} : { orb: "idle" as const, status: moved ? "SPOKEN IN ANOTHER CHAT · IN THE BOX" : "" }), pendingTranscript: batch.map((i) => i.text).join(" ") });
+        if (moved && chat.busy) dispatch({ type: "patch", patch: { error: "What you said was spoken in another chat. It is in this chat's box, unsent." } });
         return;
       }
       // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).

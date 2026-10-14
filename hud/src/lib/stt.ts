@@ -137,18 +137,25 @@ export class SttAssembler<M = undefined> {
 
   private event(e: SttEvent) { try { this.o.onEvent?.(e); } catch { /* ditto */ } }
 
-  /** Evict the oldest failed clips until `extra` fits; false when it still cannot. */
+  /**
+   * Make room for `extra`, evicting the oldest failed clips -- but only if that
+   * admits it: the fit is computed first, so failed audio is never thrown away
+   * for a clip that will be refused anyway.
+   */
   private makeRoom(extraBytes: number, extraMs: number, extraClips: number): boolean {
-    for (;;) {
-      const held = [...this.entries.values()].filter(e => e.blob);
-      const over = held.length + extraClips > STT_MAX_CLIPS
-        || held.reduce((n, e) => n + e.ms, 0) + extraMs > STT_MAX_CLIP_MS
-        || held.reduce((n, e) => n + e.bytes, 0) + extraBytes > STT_MAX_CLIP_BYTES;
-      if (!over) return true;
-      const victim = held.filter(e => e.state === "failed").sort((a, b) => a.seq - b.seq)[0];
-      if (!victim) return false;
-      this.drop(victim);
+    const held = [...this.entries.values()].filter(e => e.blob);
+    const victims = held.filter(e => e.state === "failed").sort((a, b) => a.seq - b.seq);
+    let clips = held.length + extraClips;
+    let ms = held.reduce((n, e) => n + e.ms, 0) + extraMs;
+    let bytes = held.reduce((n, e) => n + e.bytes, 0) + extraBytes;
+    const evict: Entry<M>[] = [];
+    while (clips > STT_MAX_CLIPS || ms > STT_MAX_CLIP_MS || bytes > STT_MAX_CLIP_BYTES) {
+      const v = victims.shift();
+      if (!v) return false;
+      evict.push(v); clips--; ms -= v.ms; bytes -= v.bytes;
     }
+    for (const v of evict) this.drop(v);
+    return true;
   }
 
   private drop(e: Entry<M>) {

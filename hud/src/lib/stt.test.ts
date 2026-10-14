@@ -294,6 +294,17 @@ describe("clip retention is bounded", () => {
     expect(h.stt.snapshot().clips).toHaveLength(2);        // the oldest failed one made room
   });
 
+  it("never evicts failed clips for an incoming clip that will be refused anyway", async () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 6 * 60_000, "ptt", "x");                   // in flight
+    h.stt.submit(h.clip(), 3 * 60_000, "ptt", "x");
+    h.calls[1].reject(Object.assign(new Error("b"), { status: 400 }));
+    await flush();
+    const failedId = h.stt.snapshot().clips.find(c => c.state === "failed")!.id;
+    expect(h.stt.submit(h.clip(), 6 * 60_000, "ptt", "x")).toBeNull(); // 6+3+6 > 10, and 6+6 > 10 even without the failed one
+    expect(h.stt.clip(failedId)).not.toBeNull();                       // still retryable
+  });
+
   it("refuses an incoming clip that would exceed the caps while other audio is in flight", () => {
     const h = harness();
     h.stt.submit(h.clip(), 6 * 60_000, "ptt", "x");

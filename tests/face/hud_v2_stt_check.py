@@ -162,6 +162,8 @@ def main():
             gate.set()
             check("AUTO: a different chat selected before the transcript landed -> box, unsent", box_has("dictated words"))
             check("and nothing was sent to either chat", len(sent_to()) == sends)
+            check("and the window says the words came from another chat",
+                  "ANOTHER CHAT" in page.locator('[data-testid="orb-status"]').inner_text().upper())
             page.locator('[data-testid="input"]').first.fill("")
 
             gate = press_held()
@@ -197,6 +199,7 @@ def main():
             page.wait_for_timeout(600)
             check("OFF: Retry uploads nothing", len(stts()) == before)
             check("OFF: Retry says why", "NOT RETRIED" in page.locator('[data-testid="orb-status"]').inner_text())
+            check("OFF: and on the error line, which a busy chat cannot swallow", "Not retried" in page.evaluate("window.__hud.state().error"))
             page.locator('[data-testid="dictation-review"]').click()
 
             # --- Settings -> Voice lists the kept clip with Play and Retry
