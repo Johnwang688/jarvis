@@ -42,7 +42,9 @@ def browser() -> None:
     print(f"\nNull worker (message passing only): {f(r['baseline_null_worker_16k_frames']['steady_pct_median'])}% at 32 ms frames, "
           f"{f(r['baseline_null_worker_48k_frames']['steady_pct_median'])}% at 10 ms frames.")
     k = d.get("kws_sherpa_wasm_under_node")
-    if k:
+    if k and "skipped" in k:
+        print(f"\nKWS WASM under Node was skipped: {k['skipped']}")
+    elif k:
         print("\n| sherpa-onnx KWS WASM under Node/V8, 1 thread | CPU s per audio s (= fraction of a core) | wall s per audio s | RSS MB |\n|---|---|---|---|")
         for flag in ("int8", "fp32"):
             x = k[flag]

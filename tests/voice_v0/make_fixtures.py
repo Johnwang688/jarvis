@@ -10,6 +10,12 @@ JARVIS_KOKORO_MODEL / JARVIS_KOKORO_VOICES (same defaults as jarvis/config.py).
 (needs torch and the cached HF weights; run it with an interpreter that has
 them, e.g. HF_HUB_OFFLINE=1 <repo .venv>/bin/python ... --pocket).
 
+Note on the Pocket path: it no longer goes through jarvis.pocket.synthesize, so the clips skip
+jarvis's `_repad` (boundary padding) and `_encode_wav` and are resampled straight from the model's
+output. Pocket fixtures regenerated now therefore differ slightly (padding, resampler) from the
+clips behind the numbers recorded in docs/notes/voice-face.md, and this new Pocket path has NOT
+been run end to end (only the pocket_tts calls were checked on one short phrase).
+
 No `jarvis` import anywhere in tests/voice_v0/: jarvis.config reads the credential
 .env on import, which a measurement probe must not do.
 """

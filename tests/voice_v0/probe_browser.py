@@ -219,20 +219,32 @@ def summarize_job(r: dict, base: dict) -> dict:
     }
 
 
-def kws_under_node(d: Path) -> dict:
-    """sherpa-onnx's own KWS WASM build, run under Node (V8). See module docstring for why not Chromium."""
+def kws_under_node(d: Path, allow_no_netns: bool = False) -> dict:
+    """sherpa-onnx's own KWS WASM build, run under Node (V8). See module docstring for why not Chromium.
+
+    Fails closed: pinned third-party npm code only runs with no network. Without an unprivileged network
+    namespace the step is skipped (and the reason recorded) unless --allow-no-netns was given.
+    """
+    import shutil
     import subprocess
 
     out = {}
-    pkg = models.ensure("npm-sherpa-onnx-1.13.8") / "x" / "package"
-    model = models.extracted("kws-zipformer-gigaspeech-3.3M")
-    import shutil
-
     node = shutil.which("node")
+    if not node:
+        msg = "node not found on PATH; install Node 22 to measure the KWS WASM build"
+        print("kws node: skipped:", msg, file=sys.stderr)
+        return {"skipped": msg}
     # Pinned third-party npm code executes here: empty environment, and no network where the kernel allows
     # an unprivileged network namespace. (Node's --permission model breaks Emscripten's process.binding.)
     jail = ["unshare", "-rn"] if shutil.which("unshare") and subprocess.run(
         ["unshare", "-rn", "true"], capture_output=True).returncode == 0 else []
+    if not jail and not allow_no_netns:
+        msg = ("no unprivileged network namespace (`unshare -rn true` failed); not running downloaded npm code "
+               "without network confinement. Pass --allow-no-netns to run it under `env -i` only")
+        print("kws node: skipped:", msg, file=sys.stderr)
+        return {"skipped": msg}
+    pkg = models.ensure("npm-sherpa-onnx-1.13.8") / "x" / "package"
+    model = models.extracted("kws-zipformer-gigaspeech-3.3M")
     out["confinement"] = ("env -i" + (" + unshare -rn (no network)" if jail else " only (no network namespace available)"))
     for flag in ("fp32", "int8"):
         p = subprocess.run([*jail, "env", "-i", "JARVIS_VOICE_V0=1", node, str(HERE / "kws_node_wasm.js"), str(pkg),
@@ -387,7 +399,7 @@ def _run(arg: dict, d: Path, only: set, nseg: int, seg_s: float, seconds: float)
             b.close()
             srv.shutdown()
     if "kws" in only:
-        res["kws_sherpa_wasm_under_node"] = kws_under_node(d)
+        res["kws_sherpa_wasm_under_node"] = kws_under_node(d, bool(arg.get("--allow-no-netns")))
     common.emit("browser_cpu" if only - {"vadquality"} else "browser_vadquality", res)
     return 0
 

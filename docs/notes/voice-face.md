@@ -832,6 +832,11 @@ establish acoustic quality for the owner, which stays a manual gate (end of this
   in 14 English Kokoro voices at speeds 0.9 to 1.2 (336 clips, 22 min) and 8 sentences in the 26
   Pocket builtins (208 clips), with the repo's own model files, plus
   `make_special_fixtures.py` (keywords, hard negatives, complete versus cut-off sentences).
+  `--pocket` now calls the `pocket_tts` library directly instead of `jarvis.pocket.synthesize`
+  (to avoid importing `jarvis.config`), which skips jarvis's `_repad`/`_encode_wav` boundary
+  padding, so Pocket fixtures regenerated today differ slightly from the clips behind the
+  recorded numbers; that new Pocket path has **not** been run end to end (only the library calls
+  were checked on one short phrase).
   They are generated, deterministic, and kept under `~/.cache/jarvis-voice-v0/fixtures`, not
   committed.
 - Pinned downloads, each into its own directory under `~/.cache/jarvis-voice-models/` and
@@ -899,7 +904,9 @@ Repeat run earlier the same day (load 2 to 5): Silero 3.0% and 2.8%, RNNoise 5.0
 Typical worker frame times are far inside budget (p95 0.8 ms of 32 ms for Silero, 0.6 ms of 10 ms
 for RNNoise) and the main thread never posted a frame late (`late_frames` 0). A single frame can
 exceed the budget: the slowest Silero frame was 28 to 36 ms in the paced runs and 38 to 39 ms in
-bursts, both on the first call (JIT warm-up), once per worker. A burst runs at 94x (v5.1.2) and 114x
+bursts, probably the first call of each worker (JIT warm-up; the slowest frame's index was not
+logged, so this is an inference). RNNoise's slowest burst frame was 11.2 ms against its 10 ms budget,
+likewise once. A burst runs at 94x (v5.1.2) and 114x
 (v6.2.3) real time for Silero and 33x for RNNoise.
 
 **KWS in the browser was not measurable directly.** sherpa-onnx 1.13.8 ships no browser KWS WASM
