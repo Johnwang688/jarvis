@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from pathlib import Path
 REPO=Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:sys.path.insert(0,str(REPO))
-from tests.face.hud_v2_layout_check import _boot,_pane,_set_ws,_set_storage,_approval
+from tests.face.hud_v2_layout_check import _boot,_pane,_set_ws,_set_storage,_ws,_approval
 from tests.face.hud_v2_remote_check import Remote
 from tests.face.hud_v2_mock_browser import state
 
@@ -111,8 +111,19 @@ def auth_checks(browser,mock,base,check,until,guard,init_script):
         sock=remote.sockets[-1];prompt(6)
         check("Reattachment discards previous typed auth and keeps the host handle",user.input_value()=="" and secret.input_value()=="" and len(state(mock).rows)==1)
         page.set_viewport_size({"width":375,"height":812})
-        assert until(lambda:form.is_visible(),timeout=4)
-        check("Auth form remains within a narrow pane",form.evaluate("e=>e.scrollWidth<=e.clientWidth+1"))
+        # A previously visible form does not prove the resize observer and
+        # workspace fit have committed the new narrow-pane geometry yet.
+        def narrow_geometry():
+            return page.evaluate("""() => {
+              const form=document.querySelector('[data-testid="browser-auth"]');
+              const shape=e=>e?{rect:e.getBoundingClientRect().toJSON(),scrollWidth:e.scrollWidth,clientWidth:e.clientWidth,visibility:getComputedStyle(e).visibility}:null;
+              return {viewport:{width:innerWidth,height:innerHeight},form:shape(form),pane:shape(form?.closest('[data-testid="pane-2"]')),visible:!!form?.getClientRects().length,inert:!!form?.closest('[inert]')};
+            }""")
+        settled=until(lambda:_ws(page)["fit"]["panes"]==[2] and form.is_visible()
+                      and form.evaluate("e=>e.getBoundingClientRect().width<=innerWidth"),timeout=4)
+        assert settled, "narrow Browser layout never settled: "+json.dumps(narrow_geometry(),sort_keys=True)
+        fits=form.evaluate("e=>e.scrollWidth<=e.clientWidth+1")
+        check("Auth form remains within a narrow pane",fits,"" if fits else json.dumps(narrow_geometry(),sort_keys=True))
         check("Auth UI has no page errors, stale tickets or control-listener requests",not errors and remote.bad_tickets==0 and not mock.api_hits,str(errors[:3]))
     finally:ctx.close()
 
