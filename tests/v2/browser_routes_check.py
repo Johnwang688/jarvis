@@ -535,6 +535,11 @@ class Pure(unittest.TestCase):
             host = H.BrowserHost()
             tab = H._Tab(id="aaaaaaaa", profile="p-00000000", ctx=None, page=None, cdp=CDP())
             tab.stream = S.TabStream(tab.id, blocked=lambda: tab.input_task is not None and not tab.input_task.done())
+            instance = H._Instance(tab.profile, Path("/synthetic/browser-route-fixture"),
+                                   SimpleNamespace(), SimpleNamespace(), generation=1)
+            host._instances[tab.profile] = instance
+            host._tabs[tab.id] = tab
+            self.assertTrue(host.activity.opened(tab.profile, instance.generation))
             with patch.object(H, "DELIVER_WAIT_S", 0.01):
                 await host._deliver(tab, "Input.insertText", {"text": "first"})
                 await host._deliver(tab, "Input.insertText", {"text": "banked"})
@@ -570,6 +575,11 @@ class Pure(unittest.TestCase):
                     sent.append(params)
             host = H.BrowserHost()
             tab = H._Tab(id="aaaaaaaa", profile="p-00000000", ctx=None, page=None, cdp=CDP(), stream=S.TabStream("aaaaaaaa"))
+            instance = H._Instance(tab.profile, Path("/synthetic/browser-route-fixture"),
+                                   SimpleNamespace(), SimpleNamespace(), generation=1)
+            host._instances[tab.profile] = instance
+            host._tabs[tab.id] = tab
+            self.assertTrue(host.activity.opened(tab.profile, instance.generation))
             await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "rawKeyDown", "code": "Space"})
             tab.stream.hold_through(notify=False)
             await host._deliver(tab, "Input.dispatchKeyEvent", {"type": "char", "code": "Space", "text": " "})
@@ -1522,10 +1532,14 @@ class BrowserStream(unittest.TestCase):
             self.assertNotIn(needle, text, f"{needle} reached the bus")
             self.assertFalse([line for line in self.logs if needle in line], f"{needle} reached the log")
         kinds = {r.get("kind") for r in self.records if "browser" in str(r.get("kind"))}
-        self.assertEqual(kinds, {"browser_attached"})
+        self.assertEqual(kinds, {"browser_attached", "browser_sound_changed"})
         for record in self.records:
             if record.get("kind") == "browser_attached":
                 self.assertEqual(set(record["data"]), {"tab_id", "at"})
+            elif record.get("kind") == "browser_sound_changed":
+                self.assertEqual(set(record["data"]), {"generation"})
+                self.assertIs(type(record["data"]["generation"]), int)
+                self.assertGreaterEqual(record["data"]["generation"], 0)
 
     def test_16_stop_tells_every_window_and_leaves_nothing(self):
         window = self.attached(self.tab)
