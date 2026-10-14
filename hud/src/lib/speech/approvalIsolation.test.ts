@@ -104,6 +104,11 @@ describe("in the window, placing a transcript calls no approval function", () =>
     expect(body).not.toMatch(/\bdecide\s*\(|resolveApproval|approval_drop|\/approv/);
   });
 
+  it("the router is told whether a card is up, from the window's own approvals, and a stale clip from the clip itself", () => {
+    // Mutating either to a constant (a card is never up) would let a command through under a card.
+    expect(body).toContain("commands.fromTranscript(i.text, { card: live.current.approvals.length > 0, stale: i.late || i.retried })");
+  });
+
   it("a command's effects are the four controller calls, and 'stop' reaches no agent turn", () => {
     const m = appSource.match(/const commands = useMemo\(\(\) => new CommandRouter\(\{([\s\S]*?)\}\), \[speech\]\);/);
     expect(m).not.toBeNull();

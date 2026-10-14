@@ -71,9 +71,15 @@ export function createSpeech(): Speech {
   const gate = new SpeakerGate(browserLocks());
   const player = new WebAudioPlayer();
   // The player is the reference: the gate hears exactly what Web Audio puts out (V9).
-  const selfVoice = new SelfVoiceGate();
+  // No Web Audio, no reference: the gate is then not in force and the blanket hold applies.
+  const hasWebAudio = typeof window !== "undefined" && !!(window.AudioContext ?? (window as unknown as { webkitAudioContext?: unknown }).webkitAudioContext);
+  const selfVoice = new SelfVoiceGate(undefined, hasWebAudio);
   selfVoice.setEnabled(loadSelfVoiceGate());
   player.setReference(selfVoice.reference);
+  // An audio device came or went (headphones, a speaker): what was learned of the room is not to be trusted.
+  const devices = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+  const onDevices = () => selfVoice.invalidate();
+  try { devices?.addEventListener?.("devicechange", onDevices); } catch { /* an environment without the event */ }
   const voices = new ThreadVoices({
     list: () => api.speechVoices(),
     change: (thread, change) => api.speechVoice(thread, change),
@@ -91,6 +97,6 @@ export function createSpeech(): Speech {
   const unbind = bindFocus(gate, window, () => document.hasFocus());
   return {
     controller, gate, player, selfVoice, voices,
-    dispose: () => { unbind(); controller.dispose(); gate.dispose(); player.dispose(); },
+    dispose: () => { unbind(); try { devices?.removeEventListener?.("devicechange", onDevices); } catch { /* ditto */ } controller.dispose(); gate.dispose(); player.dispose(); },
   };
 }

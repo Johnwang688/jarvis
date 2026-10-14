@@ -600,6 +600,11 @@ export default function App() {
     recording: () => !!captureRef.current && (captureRef.current.recording() || captureRef.current.ptt !== null),
   }), [speech]);
   useEffect(() => () => barge.release(), [barge]);
+  // His own sentences are checked for the wake word with the same patterns the recognizer's hits are (V9).
+  useEffect(() => {
+    speech.controller.setNameMatcher((text) => matchesWake(text, live.current.wakePatterns.length ? live.current.wakePatterns : WAKE_PATTERNS));
+    return () => speech.controller.setNameMatcher(null);
+  }, [speech]);
   // "Jarvis pause / resume / skip / stop": four calls on his voice and nothing else. Stop clears the
   // speech queue; it never interrupts an agent's turn (Q8), and nothing here can answer a card (V-6).
   const commands = useMemo(() => new CommandRouter({
@@ -2760,9 +2765,12 @@ export default function App() {
     if (crashedRef.current) return;
     if (live.current.approvals.length) return; // never talk over a pending authorization
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
+    // The window knows what he is saying: while a sentence that contains the wake word is sounding (or just did),
+    // a hit may be the recognizer hearing him say it. It claims nothing; the talk key pauses him (V9).
+    if (speech.controller.sayingOwnName()) { voiceDiagnostics.add(0, "wake", "self_voice"); return; }
     capture.onWake();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capture]);
+  }, [capture, speech, voiceDiagnostics]);
 
   // ---- push to talk -------------------------------------------------------
 

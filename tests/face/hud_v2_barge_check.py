@@ -21,7 +21,7 @@ network, no real voice, no paid call):
 
 Run (after `cd hud && npm run build`), under a temp HOME, the worktree PYTHONPATH, a 3G scope and
 a slot:  python tests/face/hud_v2_barge_check.py [section,section]
-Sections: gate_self_only, gate_owner_over, gate_wake_over, barge_transitions, commands,
+Sections: gate_self_only, gate_owner_over, gate_wake_over, gate_own_name, gate_wake_command, barge_transitions, commands,
           commands_not_messages, card, fallback.
 Not claimed: a physical speaker or microphone, Windows audio, the Silero detector in these runs
 (the stage runs on energy here), or a real person's voice.
@@ -355,9 +355,67 @@ def main(argv=None):
                 page.evaluate("() => { window.__sim.owner = null; }")
                 _ = (n0, st0)
 
+            # ============ gate: his reply says his name; the room (a TV) is speaking ==
+            def gate_own_name():
+                reset()
+                mock.say_wav = wav_a
+                sim_start()
+                time.sleep(0.8)
+                say_reply(SHORT)                       # learn the room
+                playing()
+                waits(lambda: state() == "idle", 12)
+                st0, s0 = len(stts()), len(_sent(mock, "t1"))
+                watch_reset()
+                say_reply("Jarvis here: the approval gate was the whole problem.")
+                playing()
+                time.sleep(2.6)
+                page.evaluate("(s) => window.__sim.say(s)", clip_b)       # the TV talks over him and holds the detector open
+                waits(lambda: page.evaluate("window.__hud.capture.vad.open"), 4)
+                time.sleep(0.3)
+                n0 = len(rows())
+                page.evaluate("window.__hud.mic.wake()")                  # the recognizer hears the room say 'Jarvis'
+                check("a wake hit while his sentence says his name claims nothing, even with an utterance open",
+                      page.evaluate("window.__hud.capture.segClaimed") is False and page.evaluate("window.__hud.capture.recording()") is False)
+                check("it is reported, with its source", any(x["outcome"] == "self_voice" and x["source"] == "wake" for x in rows()[n0:]),
+                      str(rows()[n0:]))
+                check("and he was not paused by it", "paused" not in watch()["states"], str(watch()["states"]))
+                waits(lambda: state() == "idle", 12)
+                time.sleep(3.0)
+                check("nothing was uploaded or sent", len(stts()) == st0 and len(_sent(mock, "t1")) == s0)
+                page.evaluate("() => { window.__sim.owner = null; }")
+
+            # ============ gate: the owner says "Jarvis stop" over him =================
+            def gate_wake_command():
+                reset()
+                mock.say_wav = wav_a
+                sim_start()
+                time.sleep(0.8)
+                say_reply(SHORT)
+                playing()
+                waits(lambda: state() == "idle", 12)
+                say_reply(REPLY, "t1")
+                playing()
+                time.sleep(2.4)
+                i0, s0 = len(interrupts()), len(_sent(mock, "t1"))
+                gate_ev = threading.Event()
+                mock.stt_script = [{"text": "Jarvis stop", "wait": gate_ev}]
+                page.evaluate("(s) => window.__sim.say(s)", clip_b)
+                waits(lambda: page.evaluate("window.__hud.capture.vad.open"), 4)
+                time.sleep(0.4)
+                page.evaluate("window.__hud.mic.wake()")
+                check("the owner's 'Jarvis' over him claims the utterance and pauses him", waits(lambda: state() == "paused", 3))
+                waits(lambda: not mock.stt_script, 10)
+                gate_ev.set()
+                check("'Jarvis stop' is obeyed: speech stops and the queue is empty", waits(lambda: state() == "idle" and speech()["view"]["queued"] == 0, 6))
+                time.sleep(0.5)
+                check("it sent nothing and interrupted nothing", len(_sent(mock, "t1")) == s0 and len(interrupts()) == i0)
+                page.evaluate("() => { window.__sim.owner = null; }")
+
             run(gate_self_only)
             run(gate_owner_over)
             run(gate_wake_over)
+            run(gate_own_name)
+            run(gate_wake_command)
             page.evaluate("() => { clearInterval(window.__sim.timer); window.__sim.timer = null; window.__sim.owner = null; }")
 
             # ============ barge: every transition of the state machine ==============

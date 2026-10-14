@@ -246,3 +246,39 @@ describe("the owner's own controls win, and holders count", () => {
     expect(clock.pendingTimers()).toBeLessThan(5);
   });
 });
+
+describe("two holders, and what a send skips", () => {
+  it("a send by either holder skips the interrupted message, whichever lets go last (L2)", async () => {
+    for (const order of [["sent", "dropped"], ["dropped", "sent"]] as const) {
+      c.stop();
+      settle(LONG);
+      settle(NEXT, B);
+      await clock.advance(500);
+      b.begin("key", 1);
+      b.begin("wake", 2);
+      b.end(order[0], 1);
+      b.end(order[1], 2);
+      await clock.advance(30_000);
+      expect(player.started.filter((t) => t === LONG), order.join()).toHaveLength(1);   // not played again
+      expect(player.started).toContain(NEXT);
+      player.started.length = 0;
+    }
+  });
+
+  it("with nothing sounding when he was held, a send cancels nothing: another chat's awaited summary is not his to skip (L3)", async () => {
+    let release!: (s: string) => void;
+    const sum = new Promise<string>((r) => { release = r; });
+    const say = new FakeSay(clock);
+    const c2 = new SpeechController({ say: say.fn, player, clock, gate: new FakeGate(), summarize: () => sum });
+    c2.setSpeakers(new Set([A, B]));
+    const b2 = new BargeIn({ speech: c2, clock, recording: () => false });
+    const long = ("This is a sentence in a long reply that needs a summary. ").repeat(14);
+    c2.event({ kind: "text", thread_id: B, data: { text: long } });      // B's summary is on its way
+    await clock.advance(50);
+    expect(b2.begin("key", 1)).toBe(true);                               // held with nothing sounding
+    b2.end("sent", 1);                                                    // the owner's message went to chat A
+    release("A short spoken summary of the long reply.");
+    await clock.advance(30_000);
+    expect(player.started.join(" ")).toContain("A short spoken summary");  // B's summary was not cancelled
+  });
+});

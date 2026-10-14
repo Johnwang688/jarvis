@@ -1859,3 +1859,47 @@ and tail constants are unmeasured outside synthetic rooms); Silero in the new br
 under a card (V11); verified-owner barge-in (V12); speaker verification. The echo recorded into a claimed message's pre-roll while he was
 still speaking goes to STT with the owner's words (Chrome's echo canceller is the only help there). A Bluetooth/changing output delay
 beyond 640 ms is not learned (blanket hold applies until a lock forms).
+
+### V9 review round (Opus review of 0cdde33: M1-M4, L1-L5)
+
+The review found no path to an approval and no HIGH issue; it found fail-open windows in the gate. Changes:
+- **M1 lost frames.** Frames that never arrive left the mic's sample count behind the clock, so the reference "ended" early
+  (`!active` returned CLEAR before any lateness check; the review's probe let about 2 s of his voice through). Now `active` is judged up
+  to `max(tEnd, now)`; the clock mapping is rebuilt when a push comes more than `GAP_RESET_MS` (250 ms) after the last (history
+  dropped too), and for `GAP_SETTLE_MS` (1 s of wall time) every frame while he is audible is his voice; `sampleEnd` is counted from
+  the frames' own lengths. Tests: gaps of 0.8, 1.2, 2 and 4 s mid-reply and with a reply starting at once, and a burst after a stall:
+  0 frames let through (the 0.8 s case fails with the old `tEnd`-only window and no gap reset).
+- **M2 room changes.** A lock learned in an earlier reply is not trusted in a new one (a reply starting more than `REPLY_GAP_MS` = 3 s
+  after he last sounded) until this reply has confirmed it (echo: this window scores >= 0.9 with >= 12 audible and >= 12 heard frames;
+  dry: 16 dry frames again), so "calibrating" (his voice) covers the first second or so of a reply that follows a pause. Also: a
+  `devicechange` on `navigator.mediaDevices` drops the lock (`invalidate`), and whatever the owner's frames hold beyond the lock's
+  prediction is checked against the reference at every delay over the last 20 frames (`excessFollowsReference`, score >= 0.93): if it
+  follows, the frame is his, and a dry lock is dropped. Tests: headphones->speakers, delay 300->60, 60->450, 200->120 across a pause:
+  0 frames let through (fail with the reverification removed). **Measured limit:** the volume turned up 4x in the middle of a reply
+  lets about 11 frames (0.35 s) through before the guard's 20-frame window shows it follows the reference; the guard is the only help
+  for a change that happens mid-reply.
+  *Cost, said plainly:* the guard and the reverification make the gate block the owner when they cannot tell; a short window correlates
+  by chance too often (with 12 frames and 0.9 it blocked 75% of an owner's speech over a dry lock in the synthetic room), which is why
+  the window is 20 frames. Over headphones the owner's speech over him is released, but the first second of each reply that follows a
+  pause is closed to voice barge-in (the talk key is not).
+- **M3 his own name.** `SpeechController.sayingOwnName()` is true while a playing sentence matches the window's wake patterns and for
+  `NAME_GRACE_MS` (2 s) after; `onWakeHit` ignores a hit then (reported `self_voice`, source wake), even with an utterance open (a TV).
+  The pattern check fails closed if it throws. Also: while his voice is audible a claim starts no earlier than the first frame the gate
+  let through (`Capture.beginRecording`, covering the wake back-dating, the 800 ms pre-roll and the talk key); the clip carries none
+  of his words. Tests: capture clips with a 0.2-amplitude vetoed voice contain nothing above 0.1 (and the unclamped control does);
+  browser `gate_own_name` and `gate_wake_command` ("Jarvis stop" over him: obeyed, nothing sent, no interrupt).
+- **M4.** A wake hit within `SELF_ARM_GUARD_MS` (1.5 s) of his voice last being audible is ignored unless it claims an utterance
+  already open; it is not armed.
+- **L1** a static pin on `card: live.current.approvals.length > 0` at the router call (mutating it to `false` fails
+  `approvalIsolation.test.ts`). **L2** with two holders a send by either skips the interrupted message. **L3** a send skips only
+  what was sounding when he was held: another chat's awaited summary is not cancelled. **L4** `setSupported` removed; `supported`
+  comes from the window having Web Audio (`createSpeech`).
+- **L5, to check on the owner's PC.** On real hardware Chrome's echo canceller leaves a residual that may score below 0.9 against
+  the reference and exceed 0.004 above the room's noise, so the gate can stay in "learning" (every frame while he is audible is
+  his voice): then only Ctrl+D barges, which is the safe result. Settings -> Voice -> "Jarvis's own voice" shows learning / echo /
+  dry. Whether the gate ever locks on the owner's speakers, and the real delay, are unmeasured.
+
+Free checks after the round: vitest 2567 tests / 157 files, `tsc`, `vite build`. Browser on the rebuilt `hud/dist`:
+`hud_v2_barge_check` 102 (adds `gate_own_name`, `gate_wake_command`), speech 56, multichat 343, steer 46, ptt 70.
+Mutations that fail on purpose (restored): `active` window back to `tEnd` with no gap reset (2 vitest); no reply reverification (4);
+no clip clamp (2); no arm guard (1); `card: false` in the router call (1); two-holder send lost / awaited summary cancelled (2).

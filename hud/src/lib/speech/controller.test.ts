@@ -387,3 +387,54 @@ describe("barge-in pauses, then resumes (decision V-7)", () => {
     expect(c.view().state).toBe("paused");
   });
 });
+
+describe("his own name (V9): a wake hit while he says it may be the room hearing him", () => {
+  const name = (t: string) => /\bjarvis\b/i.test(t);
+
+  it("is true while a sentence that contains it sounds, and for two seconds after", async () => {
+    c.setNameMatcher(name);
+    expect(c.sayingOwnName()).toBe(false);
+    settle("Jarvis here: the build passed.");
+    await clock.advance(500);
+    expect(c.view().state).toBe("playing");
+    expect(c.sayingOwnName()).toBe(true);
+    await clock.advance(1500);
+    expect(c.view().state).toBe("idle");
+    expect(c.sayingOwnName()).toBe(true);          // the room's tail and the recognizer's lag
+    await clock.advance(2100);
+    expect(c.sayingOwnName()).toBe(false);
+  });
+
+  it("is false for sentences that do not say it, and when no matcher is set", async () => {
+    settle("The build passed without a single error.");
+    await clock.advance(500);
+    expect(c.sayingOwnName()).toBe(false);
+    c.setNameMatcher(name);
+    expect(c.sayingOwnName()).toBe(false);
+    await clock.advance(30_000);
+    settle("Jarvis again.");
+    await clock.advance(200);
+    c.setNameMatcher(null);
+    await clock.advance(30_000);
+    expect(c.sayingOwnName()).toBe(false);
+  });
+
+  it("a barge-in that pauses him ends the sentence, and the grace runs from there", async () => {
+    c.setNameMatcher(name);
+    settle("Jarvis here: the build passed, and everything else is fine as well.");
+    await clock.advance(500);
+    expect(c.sayingOwnName()).toBe(true);
+    c.bargeIn();
+    await clock.advance(100);
+    expect(c.sayingOwnName()).toBe(true);
+    await clock.advance(2100);
+    expect(c.sayingOwnName()).toBe(false);
+  });
+
+  it("fails closed: a matcher that throws hears his name", async () => {
+    c.setNameMatcher(() => { throw new Error("bad pattern"); });
+    settle("Anything at all to say here.");
+    await clock.advance(500);
+    expect(c.sayingOwnName()).toBe(true);
+  });
+});

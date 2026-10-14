@@ -88,6 +88,9 @@ export interface CaptureHooks {
   onLimit?: (ms: number) => void;
 }
 
+/** A wake hit within this long of his voice last being audible is not kept in reserve for the next utterance. */
+export const SELF_ARM_GUARD_MS = 1500;
+
 /** Reasons that stop a recording even when the owner is holding the talk key. */
 const HARD_STOPS: ReadonlySet<DropReason> = new Set<DropReason>([
   "muted", "suppressed:card", "suppressed:picker", "suppressed:settings", "suppressed:crash",
@@ -134,6 +137,10 @@ export class Capture {
   selfActive = false;
   private wasSelfObserved = false;
   private wasPlaying = false;
+  /** The last time (the capture's clock) his voice was audible to the self-voice gate. */
+  private selfLastActiveAt = -1e9;
+  /** The first sample of the run of frames the gate let through while he was audible; -1 when the last frame was his. */
+  private freeFrom = -1;
 
   private drop(reason: DropReason, ms: number, source = this.claimSource) {
     try { this.hooks.onDrop?.(reason, ms, source); } catch { /* diagnostics cannot change capture */ }
@@ -238,8 +245,12 @@ export class Capture {
       try { this.hooks.onChunk({ ...chunk, source: source() }); } catch { /* a consumer cannot break the audio path */ }
     });
     this.rec = rec;
-    // Nothing from before the last unmute ever leaves, however far back the pre-roll reaches.
-    rec.start(this.ring.slice(Math.max(from, this.micFloorSample), this.ring.written));
+    // Nothing from before the last unmute ever leaves, however far back the pre-roll reaches. And while his
+    // voice is audible (V9), nothing from before the first frame the gate let through: the pre-roll and a
+    // wake hit's back-dating would carry his own words into the owner's message.
+    let start = Math.max(from, this.micFloorSample);
+    if (this.selfActive) start = Math.max(start, this.freeFrom >= 0 ? this.freeFrom : this.ring.written);
+    rec.start(this.ring.slice(start, this.ring.written));
     return id;
   }
 
@@ -325,6 +336,9 @@ export class Capture {
     const suppressed = this.hooks.suppressed();
     const verdict = self ?? CLEAR;
     this.selfActive = verdict.active;
+    if (verdict.active) this.selfLastActiveAt = this.now();
+    if (!verdict.active || verdict.self) this.freeFrom = -1;
+    else if (this.freeFrom < 0) this.freeFrom = this.ring.written - frame.length;
     // Anything that stops the detector listening ends the message it would
     // have continued: words after a card, a picker or his own voice are a new
     // thought, and need the wake word again.
@@ -452,7 +466,10 @@ export class Capture {
     // one), so it is honoured when the owner is speaking over him and ignored otherwise;
     // and it is never held in reserve for the next utterance, which is how a reply
     // saying "Jarvis" would claim the owner's next word.
-    if (this.selfActive && !(this.vad.open && !this.segClaimed)) {
+    // Nor a hit that comes late, just after he stopped (the recognizer reports a phrase well after it was
+    // said): armed, it would claim the owner's next words. Only a claim of an utterance already open is allowed.
+    const claimable = this.vad.open && !this.segClaimed;
+    if ((this.selfActive || this.now() - this.selfLastActiveAt < SELF_ARM_GUARD_MS) && !claimable) {
       this.drop("self_voice", 0, "wake");
       return "ignored";
     }
