@@ -1016,14 +1016,16 @@ class BrowserHost:
                 pass
             return ActResult("stopped", "Stopped: the Browser action timed out; look again.")
 
-    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text):
+    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text, *, provider="fast"):
         tab = self.require_tab(tab_id)
         target = "" if prepared.context_flagged or prepared.target is None else prepared.target.name
         rect = None
         if prepared.rect and not prepared.context_flagged:
             left, top, right, bottom = prepared.rect
             rect = {"x": left, "y": top, "width": right-left, "height": bottom-top}
-        tab.stream.agent_driver(thread_id, "fast")
+        if provider not in ("fast", "claude", "codex"):
+            raise ValueError("invalid Browser driver provider")
+        tab.stream.agent_driver(thread_id, provider)
         tab.stream.agent_action({"id": action_id, "at": datetime.now(timezone.utc).isoformat(), "action": action,
             "target": target, "text": text if action in ("type", "select") else "",
             "outcome": outcome, "rect": rect, "page_identity": tab.page_identity,

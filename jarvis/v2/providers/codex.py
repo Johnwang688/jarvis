@@ -1076,7 +1076,7 @@ class CodexProvider:
                         or p.get("turnId") != s.turn_id):
                     return
                 name = mcp[2] if mcp is not None else "mcp"
-                if action.get("server") == "jarvis" and action.get("toolName") in ("terminal_read", "hud_browser_view"):
+                if action.get("server") == "jarvis" and action.get("toolName") in ("terminal_read", "hud_browser_view", "hud_browser_act"):
                     name = action["toolName"]
                 yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name,
                                   args={}, command=None, reason="refused")
@@ -1144,11 +1144,11 @@ class CodexProvider:
             s.mcp_items[call_id] = (*identity, False)
             args = item.get("arguments")
             yield self._event(h, EventKind.TOOL_STARTED, call_id=call_id, name=name,
-                              args=args if isinstance(args, dict) else {})
+                              args=args if isinstance(args, dict) and not (server == "jarvis" and tool == "hud_browser_act") else {})
         if method != "item/completed":
             return
         s.mcp_items[call_id] = (*identity, True)
-        private = server == "jarvis" and tool in ("terminal_read", "hud_browser_view")
+        private = server == "jarvis" and tool in ("terminal_read", "hud_browser_view", "hud_browser_act")
         result = item.get("result")
         content = result.get("content") if isinstance(result, dict) else None
         # Text blocks only, bounded before concatenating; structured metadata,
@@ -1165,10 +1165,13 @@ class CodexProvider:
         denied = server == "jarvis" and text.startswith(("Refused", "The user declined"))
         failed = (item.get("status") != "completed" or item.get("error") is not None
                   or not isinstance(content, list) or (private and not text)
-                  or (server == "jarvis" and text.startswith("Error:")))
+                  or (server == "jarvis" and text.startswith("Error:"))
+                  or (server == "jarvis" and tool == "hud_browser_act" and text.startswith("Stopped:")))
         if private:
             from jarvis import tools
-            summary = tools.private_summary(tool, "Refused" if denied else "Error" if failed else text)
+            summary = tools.private_summary(tool, "Refused" if denied else
+                                            text if tool == "hud_browser_act" and text.startswith("Stopped:") else
+                                            "Error" if failed else text)
         else:
             summary = text[:200] or ("error" if failed else "completed")
         yield self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name=name,
@@ -1180,7 +1183,7 @@ class CodexProvider:
             if not done:
                 h.native.mcp_items[call_id] = (server, tool, name, True)
                 yield self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name=name,
-                                  ok=False, outcome="failed", summary=("refused" if tool == "hud_browser_view" else "error") if server == "jarvis" and tool in ("terminal_read", "hud_browser_view") else "interrupted")
+                                  ok=False, outcome="failed", summary=("stopped" if tool == "hud_browser_act" else "refused" if tool == "hud_browser_view" else "error") if server == "jarvis" and tool in ("terminal_read", "hud_browser_view", "hud_browser_act") else "interrupted")
 
     @staticmethod
     def _reply(s, request, result=None, **kwargs):
@@ -1360,7 +1363,7 @@ class CodexProvider:
             inputs.append({"type": "image", "url": f"data:{img['mime']};base64,{img['b64']}"})
         return inputs
 
-    def steer(self, h: SessionHandle, message: UserMessage) -> None:
+    def steer(self, h: SessionHandle, message: UserMessage) -> bool:
         """Append `message` to the running turn with `turn/steer`.
 
         The request is the app-server's own (verified in the 0.153.4 and
@@ -1377,6 +1380,8 @@ class CodexProvider:
         `interrupt` fallback, so the daemon interrupts the turn and runs the
         message next instead. No answer within STEER_TIMEOUT is *unknown*,
         not refused: it is taken as delivered and logged, never queued too.
+        Returns False for that unconfirmed receipt, so Browser owner context
+        cannot treat it as accepted; True means Codex answered successfully.
         """
         s = h.native
         if s is None or s.closed.is_set():
@@ -1409,9 +1414,9 @@ class CodexProvider:
                     waiter.abandoned = True
                     LOG.warning("Codex did not answer turn/steer %s within %.0f s; "
                                 "taken as delivered", rid, STEER_TIMEOUT)
-                    return
+                    return False
         if waiter.ok:
-            return
+            return True
         if waiter.unsupported:
             s.steer_unsupported = True
             raise SteerRefused("this Codex has no turn/steer", fallback="interrupt")

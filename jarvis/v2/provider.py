@@ -196,11 +196,14 @@ class Provider(Protocol):
     # Optional, like `set_model` (2026-10-08, steering). A provider without
     # `steer` has every message sent during a turn queued behind it.
     #
-    # def steer(self, h: SessionHandle, message: UserMessage) -> None:
+    # def steer(self, h: SessionHandle, message: UserMessage) -> bool | None:
     #     """Deliver `message` into the turn running on `h`, at the provider's
     #     next safe point — never inside a tool batch, and never as an answer
     #     to anything the turn is waiting on. Returns once the provider has
-    #     taken it; raises `SteerRefused` when it cannot. Called from a thread
+    #     taken it; raises `SteerRefused` when it cannot. An unconfirmed receipt
+    #     may return False: still delivered for queue policy, but not accepted
+    #     as Browser owner context. True or legacy None confirms delivery.
+    #     Called from a thread
     #     other than the one draining `send()`."""
     #
     # def undelivered(self, h: SessionHandle) -> list[UserMessage]:
