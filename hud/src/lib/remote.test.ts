@@ -446,6 +446,31 @@ describe("coordinates under the HUD's zoom and the window's DPR", () => {
       .toEqual({ x: 200, y: 100, inside: true });
   });
 
+  // The daemon lays a page with a min-width out wider than the pane (host.py
+  // `_fit`): an 800 × 960 frame at the pane's device pixels in a 500 × 600
+  // canvas. It is drawn at 500/800 and fills the backing store; a pointer
+  // anywhere on it, its right edge included, is a point of the wider page.
+  it("a fitted frame wider than the canvas fills it and maps input to the wider page", () => {
+    const css = { width: 500, height: 600 };
+    const view = { width: 800, height: 960 };
+    const place = placeFrame(css, view);
+    expect(place).toEqual({ x: 0, y: 0, scale: 0.625 });
+    for (const [zoom, dpr] of [[100, 1], [160, 1.5]]) {
+      const dest = frameDest(place, view, zoom, dpr);
+      const back = backingSize(css, zoom, dpr);
+      expect(dest.width).toBeCloseTo(back.width, 6);
+      expect(dest.height).toBeCloseTo(back.height, 6);
+    }
+    const box = { left: 10, top: 20 };
+    expect(clientToPage({ x: 10 + 487.5, y: 20 + 12.5 }, box, 100, place, view)).toEqual({ x: 780, y: 20, inside: true });
+    expect(clientToPage({ x: 10 + 250, y: 20 + 300 }, box, 100, place, view)).toEqual({ x: 400, y: 480, inside: true });
+    // At 160% the same canvas point is 1.6 × as far into the screen.
+    expect(clientToPage({ x: 10 + 487.5 * 1.6, y: 20 + 12.5 * 1.6 }, box, 160, place, view))
+      .toEqual({ x: 780, y: 20, inside: true });
+    // Past the canvas's right edge: clamped to the page's, not the pane's.
+    expect(clientToPage({ x: 10 + 520, y: 20 }, box, 100, place, view)).toEqual({ x: 800, y: 0, inside: false });
+  });
+
   it("off the frame is clamped and marked", () => {
     const view = { width: 400, height: 300 };
     const place = placeFrame({ width: 800, height: 600 }, view);
