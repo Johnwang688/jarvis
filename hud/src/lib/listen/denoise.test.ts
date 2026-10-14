@@ -159,7 +159,13 @@ describe("the pinned RNNoise binary", () => {
     expect(v0.npm_integrity).toBe(manifest.derived_from.npm_integrity);
   });
 
-  it("travels with both licences", () => {
+  it("travels with its licences, and the Emscripten / musl (MIT) notice the binary needs", () => {
+    const notice = readFileSync(resolve(HUD, "vendor/rnnoise/NOTICE-emscripten-musl-MIT.txt"), "utf8");
+    expect(notice).toContain("Emscripten authors");
+    expect(notice).toContain("Rich Felker");
+    expect(notice).toContain("Permission is hereby granted, free of charge");
+    const manifest = JSON.parse(readFileSync(resolve(HUD, "vendor/rnnoise/manifest.json"), "utf8")).model;
+    expect(manifest.licences).toContain("NOTICE-emscripten-musl-MIT.txt");
     expect(readFileSync(resolve(HUD, "vendor/rnnoise/LICENSE-rnnoise-BSD-3-Clause.txt"), "utf8")).toContain("Xiph.Org Foundation");
     expect(readFileSync(resolve(HUD, "vendor/rnnoise/LICENSE-jitsi-rnnoise-wasm-Apache-2.0.txt"), "utf8")).toContain("Apache License");
   });

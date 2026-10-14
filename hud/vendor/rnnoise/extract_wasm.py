@@ -22,13 +22,24 @@ def sha(b: bytes) -> str:
 def main(argv):
     src = Path(argv[1]).read_bytes()
     if src[:2] == b"\x1f\x8b":
-        assert sha(src) == M["derived_from"]["tarball_sha256"], "tarball digest differs from the pin"
+        if sha(src) != M["derived_from"]["tarball_sha256"]:
+            raise SystemExit("tarball digest differs from the pin")
         with tarfile.open(fileobj=io.BytesIO(src), mode="r:gz") as t:
-            src = t.extractfile(M["derived_from"]["file_in_tarball"]).read()
-    assert sha(src) == M["derived_from"]["file_sha256"], "rnnoise-sync.js digest differs from the pin"
+            member = t.extractfile(M["derived_from"]["file_in_tarball"])
+            if member is None:
+                raise SystemExit("the tarball has no " + M["derived_from"]["file_in_tarball"])
+            src = member.read()
+    if sha(src) != M["derived_from"]["file_sha256"]:
+        raise SystemExit("rnnoise-sync.js digest differs from the pin")
     m = re.search(rb"data:application/octet-stream;base64,([A-Za-z0-9+/=]+)", src)
-    wasm = base64.b64decode(m.group(1), validate=True)
-    assert len(wasm) == M["bytes"] and sha(wasm) == M["sha256"], "decoded wasm differs from the pin"
+    if m is None:
+        raise SystemExit("no embedded WebAssembly data URI in rnnoise-sync.js")
+    try:
+        wasm = base64.b64decode(m.group(1), validate=True)
+    except ValueError:
+        raise SystemExit("the embedded data URI is not valid base64")
+    if len(wasm) != M["bytes"] or sha(wasm) != M["sha256"]:
+        raise SystemExit("decoded wasm differs from the pin")
     out = Path(argv[2]) if len(argv) > 2 else HERE / M["file"]
     out.write_bytes(wasm)
     print(f"{out}: {len(wasm)} bytes, sha256 {sha(wasm)}")

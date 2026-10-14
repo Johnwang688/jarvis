@@ -14,7 +14,11 @@
       "how": "the WebAssembly binary is the base64 data URI inside that file, decoded unchanged (extract_wasm.py); none of the Emscripten glue is used",
       "pinned_by": "tests/voice_v0/models.json (npm-jitsi-rnnoise-wasm-0.2.1) names the same tarball"
     },
-    "licences": ["LICENSE-rnnoise-BSD-3-Clause.txt", "LICENSE-jitsi-rnnoise-wasm-Apache-2.0.txt"],
+    "licences": [
+      "LICENSE-rnnoise-BSD-3-Clause.txt",
+      "LICENSE-jitsi-rnnoise-wasm-Apache-2.0.txt",
+      "NOTICE-emscripten-musl-MIT.txt"
+    ],
     "interface": "imports a.a (resize heap) and a.b (memcpy); exports c memory, d ctors, e malloc, f free, g rnnoise_init, h rnnoise_create, i rnnoise_destroy, j rnnoise_process_frame",
     "checked": "lib/listen/pins.ts carries the same digest and length; the worker compares the fetched bytes with both before compiling them"
   }

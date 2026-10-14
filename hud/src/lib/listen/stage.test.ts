@@ -426,6 +426,6 @@ describe("noise suppression falls back to raw, visibly, and the VAD keeps workin
     ready(r);
     r.w().say({ type: "denoise", state: "ready", loadMs: 50 });
     r.stage.stop();
-    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed" });
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed", note: "the microphone is closed" });
   });
 });
