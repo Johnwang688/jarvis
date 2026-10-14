@@ -1377,8 +1377,12 @@ Plan decisions V-1, V-10 and the owner's answers to Q3-Q5. Stacked on V2.
   until speaker verification (V12), the lead's decision after review:** only a
   `wake` or `follow_up` claim starts a chain; a chain allows at most
   `CONTINUE_MAX_CLAIMS` = 2 continuation claims and ends `CONTINUE_CHAIN_MS`
-  = 20 s after the claim that started it, so TV or room speech with short gaps
-  cannot keep steering a running turn without a wake word. (Side effect: until
+  = 20 s after the message that started it *ended* (a long dictation still
+  gets its window), so TV or room speech with short gaps
+  cannot keep steering a running turn without a wake word. A too-short
+  *continuation* (a cough, a click) just drops and does not reopen the
+  follow-up window - that would let the next noise start a fresh chain; a
+  too-short wake or follow-up claim still gives the window back. (Side effect: until
   V4 removes the 30 s cap, only two continuations follow a cut message.)
   Not opened by push-to-talk or an unclaimed message (releasing the key is the
   full stop; an open question). The window is armed when the message ends, but

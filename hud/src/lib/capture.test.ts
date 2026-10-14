@@ -323,14 +323,45 @@ describe("the continuation window (V3)", () => {
     expect(resume(m, 3000)).toBe(1);
   });
 
-  it("stopgap: the chain ends CONTINUE_CHAIN_MS after the claim that began it", () => {
+  it("stopgap: the chain ends CONTINUE_CHAIN_MS after the message that began it ended", () => {
     expect(CONTINUE_CHAIN_MS).toBe(20000);
-    const longer = mk();
-    firstMessage(longer, "wake", 18000); // the message itself runs 18 s
-    expect(resume(longer, 3000)).toBe(0); // 3 s later is within 6 s of its end but past 20 s of its start
-    const control = mk();
-    firstMessage(control, "wake", 1000);
-    expect(resume(control, 3000)).toBe(1);
+    // A long dictation still gets its window: the clock starts when it ends.
+    const dictation = mk();
+    firstMessage(dictation, "wake", 18000);
+    expect(resume(dictation, 3000)).toBe(1);
+    // A long continuation pushes the next past 20 s of the chain, though one claim remains.
+    const m = mk();
+    firstMessage(m);
+    m.cap.feedMs(3000, QUIET);
+    for (let left = 18000; left > 0; left -= 1500) {
+      m.cap.feedMs(Math.min(1500, left), SPEECH);
+      if (left > 1500) m.cap.feedMs(150, QUIET);
+    }
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(m.sent.map((x) => x.source)).toEqual(["wake", "continuation"]);
+    expect(resume(m, 3000)).toBe(0);
+  });
+
+  it("a too-short continuation just drops: it does not reopen the follow-up window", () => {
+    const m = mk();
+    firstMessage(m);
+    m.cap.feedMs(2000, QUIET);
+    m.cap.feedMs(150, SPEECH); // a cough inside the window
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(m.cap.conversing()).toBe(false);
+    m.cap.feedMs(CONTINUE_MS, QUIET); // the continuation window lapses
+    m.cap.feedMs(1200, SPEECH);
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(m.sent.map((x) => x.source)).toEqual(["wake"]);
+  });
+
+  it("a too-short wake-claimed or follow-up-claimed utterance still gives the window back", () => {
+    const m = mk();
+    m.cap.feedMs(2000, QUIET);
+    m.cap.openFollowUp();
+    m.cap.feedMs(150, SPEECH);
+    m.cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(m.cap.conversing()).toBe(true);
   });
 
   it("stopgap: TV-like speech with 2 s gaps after a wake steers at most twice", () => {

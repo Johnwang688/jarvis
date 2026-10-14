@@ -553,9 +553,6 @@ def _voice_checks(page, mock, check, until):
     check("the orb's strip acts for the selected chat and selects no pane", _sel(page) == 2)
     s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
     page.evaluate(UTTERANCE)
-    # V3: a sent message opens the continuation window, and this suite's fake
-    # capture device beeps; close it so a beep is not claimed as speech.
-    page.evaluate("window.__hud.capture.closeContinuation()")
     sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
     check("AUTO sends the utterance to the selected chat's thread",
           bool(sent) and sent[-1].get("text") == "what is the weather" and sent[-1].get("spoken") is True, str(sent))

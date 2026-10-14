@@ -3366,9 +3366,9 @@ export default function App() {
           onSend={(text, files) => void send(n, text, files)}
           onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}
           running={runningHere(chat)}
-          // A compose row's first send in flight has no thread to steer yet
-          // (Enter must not open a second one), but it can be stopped: the
-          // stop waits for the acknowledgement (`sendStops`).
+          // A compose row's first send in flight has no thread to steer yet,
+          // but it can be stopped: the stop waits for the acknowledgement
+          // (`sendStops`).
           stoppable={runningHere(chat) || (chat.busy && !!chat.compose?.sending)}
           onStop={() => stopTurn(n)}
           restore={chat.restore}

@@ -103,9 +103,9 @@ export function InputBar(props: {
   /**
    * Whether Stop is offered; defaults to `running`. It is wider than
    * `running` while a compose row's first send is in flight (its thread
-   * opening, before the acknowledgement): Stop is there, but Enter must not
-   * steer, or a second Enter would open a second thread. V3 took
-   * push-to-talk's interrupt away, so the box is the way to stop it.
+   * opening, before the acknowledgement): Stop is there, but the box is not
+   * "running" (no Steer look). V3 took push-to-talk's interrupt away, so the
+   * box is the way to stop it.
    */
   stoppable?: boolean;
   onStop?: () => void;

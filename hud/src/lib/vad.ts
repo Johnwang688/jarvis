@@ -21,7 +21,7 @@ export const CONTINUE_MS = 6000;
 // ...but only a stopgap against room speech (a TV, other people) steering a
 // running turn for minutes with no wake word, until speaker verification (V12):
 // a chain begun by a wake or follow-up claim allows this many continuation
-// claims, and ends this long after the claim that began it.
+// claims, and ends this long after the message that began it ended.
 export const CONTINUE_MAX_CLAIMS = 2;
 export const CONTINUE_CHAIN_MS = 20000;
 export const WAKE_GRACE_MS = 1200; // recognizer lag: a wake hit claims a slightly older utterance

@@ -63,7 +63,8 @@ export class Capture {
   /**
    * The chain a continuation belongs to (a stopgap against room speech until
    * speaker verification): begun by a wake or follow-up claim, it allows
-   * CONTINUE_MAX_CLAIMS continuation claims and ends CONTINUE_CHAIN_MS after it began.
+   * CONTINUE_MAX_CLAIMS continuation claims and ends CONTINUE_CHAIN_MS after
+   * that claim's message ended (so a long dictation still gets its window).
    */
   chainFrom = -1;
   chainClaims = 0;
@@ -222,7 +223,11 @@ export class Capture {
     if (!longEnough(this.vad)) {
       this.drop("too_short", samplesToMs(this.vad.voiced));
       this.vad.voiced = 0;
-      this.openFollowUp(); // he was addressed; give the owner the window back
+      // He was addressed; give the owner the window back -- but only if a wake
+      // word or the follow-up window did the addressing. A too-short
+      // continuation (a cough, a TV's click) just drops: reopening follow-up
+      // would let the next noise start a fresh chain with no wake word.
+      if (this.claimSource === "wake" || this.claimSource === "follow_up") this.openFollowUp();
       this.hooks.onIdle("DIDN'T CATCH THAT");
       return;
     }
@@ -241,7 +246,7 @@ export class Capture {
     // remain. Armed before the hook runs, so a caller that refuses the clip
     // can take its window back.
     const source = this.claimSource;
-    if (source === "wake" || source === "follow_up") { this.chainFrom = from; this.chainClaims = 0; }
+    if (source === "wake" || source === "follow_up") { this.chainFrom = this.ring.written; this.chainClaims = 0; }
     const arm = (source === "wake" || source === "follow_up" || source === "continuation")
       && this.chainClaims < CONTINUE_MAX_CLAIMS;
     this.continueToken = arm ? ++this.tokenSeq : 0;
