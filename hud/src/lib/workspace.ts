@@ -186,6 +186,8 @@ export interface PaneSpec {
   browserCtx?: string;
   /** Stored only when off. Navigation/profile/copy never enable seeing. */
   see?: false;
+  /** Named profile preference: an explicit off persists; Private opt-in never does. */
+  drive?: false;
   /** A stored Private session is reattached, never implicitly recreated. */
   browserPrivateEnded?: true;
   /**
@@ -369,6 +371,7 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
     spec.browserProfile = v.browserProfile;
   }
   if (v.see === false) spec.see = false;
+  if (v.drive === false || spec.see === false) spec.drive = false;
   if (spec.browserProfile === "private") {
     if (typeof v.browserCtx === "string" && /^[0-9a-f]{8}$/.test(v.browserCtx)) spec.browserCtx = v.browserCtx;
     if (v.browserPrivateEnded === true || (v.browserCtx != null && !spec.browserCtx)) spec.browserPrivateEnded = true;
@@ -827,7 +830,16 @@ export function setBrowserSee(ws: Workspace, pane: PaneNo, see: boolean): Worksp
   const spec = ws.panes[pane - 1];
   if ((spec.see !== false) === see) return ws;
   const next = { ...spec };
-  if (see) delete next.see; else next.see = false;
+  if (see) delete next.see; else { next.see = false; next.drive = false; }
+  return { ...ws, panes: ws.panes.map((p, i) => i === pane - 1 ? next : p) as Panes };
+}
+
+/** Named-profile preference only. Private consent belongs to the live controller. */
+export function setBrowserDrive(ws: Workspace, pane: PaneNo, drive: boolean): Workspace {
+  const spec = ws.panes[pane - 1];
+  if (spec.browserProfile === "private" || (drive && spec.see === false)) return ws;
+  const next = { ...spec };
+  if (drive) delete next.drive; else next.drive = false;
   return { ...ws, panes: ws.panes.map((p, i) => i === pane - 1 ? next : p) as Panes };
 }
 
@@ -980,6 +992,7 @@ export function copySpec(spec: PaneSpec): PaneSpec {
       out.projectId = spec.projectId;
       if (spec.browserProfile) out.browserProfile = spec.browserProfile;
       if (spec.see === false) out.see = false;
+      if (spec.drive === false) out.drive = false;
       if (spec.browser) {
         const ids = spec.browser.tabs.map((t) => t.id);
         const tabs = spec.browser.tabs.map((t) => {

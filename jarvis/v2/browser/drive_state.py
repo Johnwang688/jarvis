@@ -1,4 +1,4 @@
-"""Bounded in-memory ownership and ref capabilities for the dormant BR9b driver.
+"""Bounded in-memory ownership and ref capabilities for the BR9b driver.
 
 No browser IO, provider, approval or production enable switch lives here.
 """

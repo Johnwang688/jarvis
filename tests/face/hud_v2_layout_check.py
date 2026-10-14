@@ -969,6 +969,20 @@ def _pane(n: int, sel: str = "") -> str:
     return f'[data-testid="pane-{n}"]' + (f" {sel}" if sel else "")
 
 
+
+def _project_root(page, pane: int) -> None:
+    """Use the owner options gesture, then uncover the frame for later checks."""
+    button = page.locator(_pane(pane, '[data-testid="browser-options-toggle"]'))
+    panel = page.locator(_pane(pane, '[data-testid="browser-options"]'))
+    if button.get_attribute("aria-expanded") != "true":
+        button.click()
+    panel.wait_for(state="visible")
+    page.locator(_pane(pane, '[data-testid="browser-project"]')).click()
+    if button.get_attribute("aria-expanded") == "true":
+        button.click()
+    panel.wait_for(state="hidden")
+
+
 def _ptt_on_space(page) -> object:
     """Hold Space where focus is now; what push-to-talk made of it (Space is
     no key of push-to-talk's since 2026-10-10: it must never start the mic)."""
@@ -1412,7 +1426,7 @@ def _workspace_checks(page, mock, check, until):
     until(lambda: _attr(page, _pane(2), "data-view") == "browser", timeout=2)
 
     # Hidden, never unmounted: the same frame after one pane and back.
-    page.locator(_pane(2, '[data-testid="browser-project"]')).click()
+    _project_root(page, 2)
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
     page.evaluate("document.querySelector('[data-testid=\"pane-2\"] iframe').__kept = 42")
     src = page.locator(_pane(2, "iframe")).get_attribute("src")
@@ -1688,7 +1702,7 @@ def _grid_card_checks(page, mock, check, until):
         page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
         until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0
               or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-        page.locator(_pane(3, '[data-testid="browser-project"]')).click()
+        _project_root(page, 3)
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
         until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
         check(f"at {zoom}% Monaco, a preview frame and a terminal are on screen",
@@ -1778,7 +1792,7 @@ def _card_focus_checks(page, mock, check, until):
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, two)
     _boot(page, mock, None, until, reload=True)
-    page.locator(_pane(2, '[data-testid="browser-project"]')).click()
+    _project_root(page, 2)
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
     time.sleep(0.3)
     # A click as a hand makes it: the pointer moves over the frame first (its
@@ -2419,7 +2433,7 @@ def _eight_checks(page, mock, check, until):
     until(lambda: page.locator(_pane(5, term)).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
     page.locator(_pane(7, '[data-testid="file-calc.py"]')).click()
     until(lambda: page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
-    page.locator(_pane(8, '[data-testid="browser-project"]')).click()
+    _project_root(page, 8)
     until(lambda: page.locator(_pane(8, "iframe")).count() > 0, timeout=4)
     shows = {
         1: _visible(page, _pane(1, '[data-testid="input"]')),
@@ -2574,7 +2588,7 @@ def _eight_checks(page, mock, check, until):
         page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
         until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0
               or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-        page.locator(_pane(3, '[data-testid="browser-project"]')).click()
+        _project_root(page, 3)
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
         until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
         drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]

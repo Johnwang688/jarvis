@@ -2250,8 +2250,8 @@ starts Chrome but `POST /browser/tabs` or the dedicated profile sign-in route.
 | Route | Body | Answer |
 |---|---|---|
 | `GET /browser` | — | `/status` → `browser` (below) plus `profiles: [{id, label, created}]` and `settings` |
-| `GET /browser/settings` | — | `{lan, local_servers, auto_open}` |
-| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool, auto_open?: bool}`, at least one, each a boolean (else **400** `<key> must be a boolean`) | `{lan, local_servers, auto_open}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
+| `GET /browser/settings` | — | `{lan, local_servers, auto_open, sound, agents_may_drive}` |
+| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool, auto_open?: bool, sound?: bool, agents_may_drive?: bool}`, at least one, each a boolean (else **400** `<key> must be a boolean`) | `{lan, local_servers, auto_open, sound, agents_may_drive}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
 | `GET /browser/tabs` | — | `[{tab_id, profile, ctx, url, title}]` — the title cleaned to one line of 120; `[]` while nothing runs |
 | `POST /browser/tabs` | `{profile?, ctx?, url?}` | **201** `{tab_id, profile, ctx, loaded, error?}` |
 | `DELETE /browser/tabs/<id>` | — | `{tab_id, closed: true}` |
@@ -2665,7 +2665,7 @@ Agents may drive remains OFF; `drive:true` is refused with 409.
   `{pane_id,slot,drawn,profile,ctx,see,drive,active,tabs}`. Stable `pane_id` is 1–8;
   displayed `slot` is separately 1–8 or null. A drawn pane needs a slot. Profile
   is `p-<8hex>` or `private`, ctx is null or the Private context's eight-hex ID,
-  see/drawn are booleans, drive is false, active is a local tab ID or null.
+  see/drawn/drive are required booleans; drive is an owner preference, active is a local tab ID or null. Missing/malformed wire values refuse.
   Each pane has at most twelve tabs with unique six-lowercase-alphanumeric IDs:
   Direct `{id,mode:"direct",url,source}` or Remote
   `{id,mode:"remote",tab_id,source}`. An unallocated Remote tab has `tab_id:null`
@@ -2692,7 +2692,7 @@ Agents may drive remains OFF; `drive:true` is refused with 409.
   normal loopback gate lease; a Direct submission does not. It never enables
   see or drive. Observed navigation/history/full reports do not clear source.
 
-Successful report/PATCH receipts are `{window,seq,panes:[{pane_id,see,drive:false,
+Successful report/PATCH receipts are `{window,seq,panes:[{pane_id,see,drive:bool,
  tabs:[{id,view_id,generation}]}]}`. Address adds `tab_id`, `ctx` and the host's
 current `url`. Direct `view_id` is a host-minted opaque binding ID; Remote uses
 its daemon tab ID. Heartbeats preserve unchanged IDs/generations. The UI must
@@ -2818,9 +2818,10 @@ The registry's internal after_navigation(snapshot) is only for reconciliation
 after completed judged input. It accepts URL/document generation advancement
 while requiring the exact same page identity, window, pane, selected tab, source,
 profile/context, generation and permissions. Ordinary still_current is
-unchanged. Current production snapshots keep drive:false, so this helper
-cannot enable driving. This infrastructure does not expose a driving tool by
-itself.
+unchanged. Effective drive requires the global switch, pane preference, see,
+Remote mode and an exact runtime pane/context Private opt-in where applicable.
+Navigation never enables it; a false receipt under global off never clears the
+HUD's saved preference. This infrastructure does not expose a driving tool itself.
 
 ## Owner immutable Browser captures (BR4)
 

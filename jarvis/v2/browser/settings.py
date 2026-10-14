@@ -8,6 +8,8 @@ One small JSON object at `config.BROWSER_SETTINGS_PATH`
 (`~/.config/jarvis/browser.json`, env `JARVIS_BROWSER_SETTINGS`). It holds the
 owner's switches for the HUD's Browser, each a boolean:
 
+- **`agents_may_drive`** (DR-0): on by owner decision. Existing invalid or
+  unreadable settings fail closed; only the owner settings route changes it.
 - **`lan`** (B-5, BR-1a): the Browser's gate admits private-network addresses.
   **Off** by default.
 - **`local_servers`** (BR-1a): the gate admits every loopback port that is not
@@ -64,8 +66,8 @@ import time
 
 LOG = logging.getLogger(__name__)
 
-DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": True}
-FAIL_CLOSED_KEYS = frozenset({"sound"})
+DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": True, "agents_may_drive": True}
+FAIL_CLOSED_KEYS = frozenset({"sound", "agents_may_drive"})
 _UNKNOWN = object()
 _UNREADABLE = object()
 FILE_CAP = 64 * 1024
@@ -92,12 +94,12 @@ def _read(path: Path) -> dict | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        LOG.warning("browser settings not read (%s); using the defaults", type(exc).__name__)
+        LOG.warning("browser settings not read (%s); using safe settings values", type(exc).__name__)
         return None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > FILE_CAP:
-            LOG.warning("browser settings not read (not a small regular file); using the defaults")
+            LOG.warning("browser settings not read (not a small regular file); using safe settings values")
             return None
         chunks, size = [], 0
         while size <= FILE_CAP:
@@ -107,7 +109,7 @@ def _read(path: Path) -> dict | None:
             chunks.append(chunk)
             size += len(chunk)
     except OSError as exc:
-        LOG.warning("browser settings not read (%s); using the defaults", type(exc).__name__)
+        LOG.warning("browser settings not read (%s); using safe settings values", type(exc).__name__)
         return None
     finally:
         os.close(fd)
@@ -116,7 +118,7 @@ def _read(path: Path) -> dict | None:
     try:
         value = json.loads(b"".join(chunks))
     except ValueError:
-        LOG.warning("browser settings not read (not JSON); using the defaults")
+        LOG.warning("browser settings not read (not JSON); using safe settings values")
         return None
     return value if isinstance(value, dict) else None
 

@@ -2,7 +2,8 @@ import { act, createElement, useCallback, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ApiError } from "../api";
 import { useBrowser, addressTarget, type BrowserControl } from "./browser";
-import { defaultWorkspace, setBrowserProfile, setBrowserRemote, setBrowserSee, addBrowserTab, closeBrowserTab, submitBrowserUrl, setView, type Workspace } from "../lib/workspace";
+import { browserSettings } from "./browserSettings";
+import { defaultWorkspace, setBrowserDrive, setBrowserProfile, setBrowserRemote, setBrowserSee, addBrowserTab, closeBrowserTab, submitBrowserUrl, setView, type Workspace } from "../lib/workspace";
 import type { LayoutControl } from "../components/Layout";
 import { DEFAULT_PORTS } from "../lib/browser";
 const mocks=vi.hoisted(()=>({get:vi.fn(),write:vi.fn(),remove:vi.fn()}));
@@ -18,6 +19,7 @@ function Harness({covered,blocked}:typeof props){
   const view={ws,fit:{panes:[1]},
     setBrowserProfile:useCallback((...a:Parameters<typeof setBrowserProfile> extends [any,...infer T]?T:never)=>setWs(w=>setBrowserProfile(w,...a)),[]),
     setBrowserRemote:useCallback((...a:Parameters<typeof setBrowserRemote> extends [any,...infer T]?T:never)=>setWs(w=>setBrowserRemote(w,...a)),[]),
+    setBrowserDrive:useCallback((...a:Parameters<typeof setBrowserDrive> extends [any,...infer T]?T:never)=>setWs(w=>setBrowserDrive(w,...a)),[]),
     setBrowserSee:useCallback((...a:Parameters<typeof setBrowserSee> extends [any,...infer T]?T:never)=>setWs(w=>setBrowserSee(w,...a)),[]),
     addBrowserTab:useCallback((...a:Parameters<typeof addBrowserTab> extends [any,...infer T]?T:never)=>setWs(w=>addBrowserTab(w,...a)),[]),
     submitBrowserUrl:useCallback((...a:Parameters<typeof submitBrowserUrl> extends [any,...infer T]?T:never)=>setWs(w=>submitBrowserUrl(w,...a)),[]),
@@ -29,11 +31,11 @@ const deferred=<T,>()=>{let resolve!:(v:T)=>void;const promise=new Promise<T>(r=
 let front:any;
 beforeEach(()=>{
   source=initial();props={covered:false,blocked:false};front=null;
-  mocks.get.mockReset().mockImplementation((path)=>Promise.resolve(path==="/profiles"?[{id:"p-11111111",label:"Main",created:"now"}]:[]));
+  mocks.get.mockReset().mockImplementation((path)=>Promise.resolve(path==="/settings"?{agents_may_drive:true}:path==="/profiles"?[{id:"p-11111111",label:"Main",created:"now"}]:[]));
   mocks.remove.mockReset().mockResolvedValue({});
   mocks.write.mockReset().mockImplementation((path,body)=>{
     if(path==="/front")front=structuredClone(body);
-    if(path.includes("/panes/")&&!path.endsWith("/address")){const p=front.panes.find((p:any)=>path.endsWith("/"+p.pane_id));p.see=body.see;}
+    if(path.includes("/panes/")&&!path.endsWith("/address")){const p=front.panes.find((p:any)=>path.endsWith("/"+p.pane_id));if(typeof body.see==="boolean")p.see=body.see;if(body.see===false)p.drive=false;if(typeof body.drive==="boolean")p.drive=body.drive;}
     if(path==="/front"||path.startsWith("/panes/"))return Promise.resolve({window:body.window,seq:body.seq,panes:front.panes.map((p:any)=>({pane_id:p.pane_id,see:p.see,drive:false,tabs:p.tabs.map((t:any)=>({id:t.id,view_id:"v_"+"a".repeat(24),generation:1}))}))});
     if(path==="/tabs")return Promise.resolve({tab_id:"0123abcd",profile:body.profile,ctx:body.profile==="private"?"1234abcd":null,loaded:true});
     return Promise.resolve({loaded:true});
@@ -157,6 +159,50 @@ it("profile change retries another exact old-pane handle after an absent handle"
   expect(workspace.panes[0].browserProfile).toBe("private");
 });
 
+it("Private driving is opt-in for the exact live pane context and forgotten on reconnect",async()=>{
+ source=setBrowserProfile(source,1,"private");source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd",ctx:"1234abcd"});
+ await connected();expect(browser.drivePreference(1)).toBe(false);expect(front.panes[0].drive).toBe(false);
+ await act(async()=>browser.drive(1,true));expect(browser.drivePreference(1)).toBe(true);expect(front.panes[0].drive).toBe(true);
+ expect((workspace.panes[0] as any).drive).toBeUndefined();
+ await act(async()=>set(w=>setBrowserRemote(w,1,"page01",{mode:"remote",remoteTabId:"0123abcd",ctx:"11111111"})));
+ expect(browser.drivePreference(1)).toBe(false);expect(front.panes[0].drive).toBe(false);
+ await act(async()=>browser.drive(1,true));expect(browser.drivePreference(1)).toBe(true);
+ await act(async()=>set(w=>setView(w,1,"chat")));await act(async()=>set(w=>setView(w,1,"browser")));
+ expect(browser.drivePreference(1)).toBe(false);
+ await act(async()=>browser.drive(1,true));
+ await act(async()=>browser.onEvent({kind:"_disconnected"}));await act(async()=>browser.onEvent({kind:"_connected"}));
+ expect(browser.drivePreference(1)).toBe(false);expect(front.panes[0].drive).toBe(false);
+});
+it("effective-off receipts preserve named preference; see-off permanently clears it",async()=>{
+ await connected();expect(browser.drivePreference(1)).toBe(true);
+ await act(async()=>browserSettings.apply(false));expect(browser.drivePreference(1)).toBe(true);
+ expect(workspace.panes[0].drive).toBeUndefined();
+ await act(async()=>browserSettings.apply(true));await act(async()=>browser.see(1,false));await act(async()=>browser.see(1,true));
+ expect(browser.drivePreference(1)).toBe(false);expect(front.panes[0].drive).toBe(false);
+});
+
+it.each(["blocked","covered"])("pending Private permission cannot persist after pane becomes %s",async(kind)=>{
+ source=setBrowserProfile(source,1,"private");source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd",ctx:"1234abcd"});
+ await connected();const pending=deferred<any>(),saved=mocks.write.getMockImplementation()!;
+ mocks.write.mockImplementation((p,...a)=>p==="/panes/1"?pending.promise:saved(p,...a));
+ let job!:Promise<void>;await act(async()=>{job=browser.drive(1,true);});
+ if(kind==="covered")job.catch(()=>{});
+ const body=mocks.write.mock.calls.find(([p])=>p==="/panes/1")![1];
+ await render({[kind]:true});
+ await act(async()=>{pending.resolve({window:body.window,seq:body.seq,panes:[]});await job.catch(()=>{});});
+ expect(browser.drivePreference(1)).toBe(false);expect((workspace.panes[0] as any).drive).toBeUndefined();
+ await render({blocked:false,covered:false});expect(front.panes[0].drive).toBe(false);
+});
+it("pending Private permission cannot survive pane context replacement",async()=>{
+ source=setBrowserProfile(source,1,"private");source=setBrowserRemote(source,1,"page01",{mode:"remote",remoteTabId:"0123abcd",ctx:"1234abcd"});
+ await connected();const pending=deferred<any>(),saved=mocks.write.getMockImplementation()!;
+ mocks.write.mockImplementation((p,...a)=>p==="/panes/1"?pending.promise:saved(p,...a));
+ let job!:Promise<void>;await act(async()=>{job=browser.drive(1,true);});job.catch(()=>{});
+ const body=mocks.write.mock.calls.find(([p])=>p==="/panes/1")![1];
+ await act(async()=>set(w=>setBrowserRemote(w,1,"page01",{mode:"remote",remoteTabId:"11111111",ctx:"11111111"})));
+ await act(async()=>{pending.resolve({window:body.window,seq:body.seq,panes:[]});await job.catch(()=>{});});
+ expect(browser.drivePreference(1)).toBe(false);expect(front.panes[0].drive).toBe(false);
+});
 it("pane options revoke drawn eligibility while preserving preferences and exact instance ownership", async () => {
   source=setBrowserSee(source,1,false); await connected();
   const oldOwner={}, newOwner={};

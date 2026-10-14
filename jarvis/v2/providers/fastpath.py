@@ -10,7 +10,7 @@ Two rules make that split safe, and both are mechanical rather than prompted:
 
 **The structural boundary (§8.1).** `FAST_TOOLS` has no generic write, shell,
 desktop or spawn tool. Its typed Browser action exception is independently
-gated and unconditionally OFF in production. Read-only Browser looks require
+gated by the owner's global and pane switches. Read-only Browser looks require
 the live desk and pane permission. Toolset and per-tool gates enforce this;
 prompts do not authorize an action. The prompt carries the
 escalation *test*, but the toolset is what makes a misjudgement harmless.
@@ -81,17 +81,19 @@ FAST_PROMPT = """
 ## This conversation is the fast path
 
 You are answering on Jarvis's conversation fast path: cheap, quick, and
-deliberately unable to change anything. You have no tool that writes a file,
-runs a command, drives a browser, or spawns anything, and you have a budget of \
+deliberately limited. You have no tool that writes a file,
+runs a command or spawns anything, and you have a budget of \
 %(steps)d steps for this turn. That is not a mistake in your toolset — it is the \
 design.
 
 **Propose a task** with `task_propose` when the request needs any one of:
-editing a file, running a command, more than one page fetched, a browser, a
+editing a file, running a command, more than one page fetched, a browser task beyond the guarded desk tools, a
 deliverable (a file, a PR, a report), or more than your step budget. Any one is
 sufficient. Do not attempt such a request here and do not apologise for the
 limit — say in one line what you opened and that it will ask if anything is
 unclear.
+
+%(drive)s
 
 **Answer directly** when the request is a question you can settle from memory,
 this transcript, one read or one fetch; a control request (mute, avatar,
@@ -100,7 +102,7 @@ music); or ordinary conversation. Most turns are this.
 When you are unsure, propose. A task that turns out to be small costs a little;
 a real job answered as if it were chat costs the owner their trust in the
 answer.
-""" % {"steps": FAST_MAX_STEPS}
+""" % {"steps": FAST_MAX_STEPS, "drive": config.FAST_DRIVE_PARAGRAPH}
 
 
 # --- the toolset ------------------------------------------------------------
@@ -309,6 +311,7 @@ class _Native:
     desk: dict = field(default_factory=lambda: {"present": False})
     # The thread's project, for `runtime.caller()` (the peers plan's Phase 0).
     project_id: str | None = None
+    pristine_system: str = ""
 
 
 # --- the provider -----------------------------------------------------------
@@ -367,10 +370,12 @@ class FastPathProvider:
         session: sessions.Session,
     ) -> SessionHandle:
         tool_names = self._toolset(brief)
+        pristine_system = config.SYSTEM_PROMPT + FAST_PROMPT + (brief.system_append or "")
         native = _Native(
+            pristine_system=pristine_system,
             agent=Agent(
                 model=brief.model or models.tier("orchestrator"),
-                system=config.SYSTEM_PROMPT + FAST_PROMPT + (brief.system_append or ""),
+                system=pristine_system,
                 # Off the desk until a turn says otherwise (`_turn_tools`).
                 tool_names=[name for name in tool_names if name not in DESK_TOOLS],
                 max_steps=FAST_MAX_STEPS,
@@ -443,6 +448,7 @@ class FastPathProvider:
         if names != list(agent._base_tool_names):
             agent._base_tool_names = names
             agent.tool_specs = tools.specs(names)
+            agent._base_system = config.narrow_prompt(native.pristine_system, set(names))
 
     @staticmethod
     def _approver(brief: Brief, permit: PermissionCallback):

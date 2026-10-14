@@ -31,16 +31,17 @@ def configure(page, mock, until, preset="single", views=("chat",), width=1600):
 
 def _discovery_only(call):
     method, path, body = call
-    if method == "GET" and path == "/browser/profiles" and body == {}:
+    if method == "GET" and path in ("/browser/profiles", "/browser/settings") and body == {}:
         return True
     # BR3b publishes Direct panes too. This must not hide Remote allocation,
-    # navigation, tickets or a front report containing any Remote handle.
+    # navigation, tickets or a front report containing any Remote handle. Named
+    # drive is a saved preference; Direct remains structurally non-drivable.
     if method != "POST" or path != "/browser/front" or not isinstance(body, dict):
         return False
     return (isinstance(body.get("panes"), list) and all(
-        isinstance(pane, dict) and pane.get("ctx") is None
-        and isinstance(pane.get("profile"), str) and pane["profile"].startswith("p-")
-        and pane.get("drive") is False and isinstance(pane.get("tabs"), list)
+        isinstance(pane, dict) and "ctx" in pane and pane["ctx"] is None
+        and isinstance(pane.get("profile"), str) and re.fullmatch(r"p-[0-9a-f]{8}", pane["profile"])
+        and type(pane.get("drive")) is bool and isinstance(pane.get("tabs"), list)
         and all(isinstance(tab, dict) and tab.get("mode") == "direct" and "tab_id" not in tab
                 for tab in pane["tabs"]) for pane in body["panes"]))
 
@@ -63,14 +64,17 @@ def autoopen_checks(browser, check, until, guard, init_script):
     print("\nautomatic Direct tabs: real claim registry, focus, cards and windows")
     direct = {"panes": [{"profile": "p-11111111", "ctx": None, "drive": False,
                          "tabs": [{"id": "abcdef", "mode": "direct", "url": "http://localhost:12345/"}]}]}
-    check("AO3 call audit admits read-only profiles and Direct-only front discovery",
+    enabled_direct=json.loads(json.dumps(direct));enabled_direct["panes"][0]["drive"]=True
+    check("AO3 call audit admits exact read-only settings and Direct-only preference discovery",
           _discovery_only(("GET", "/browser/profiles", {}))
-          and _discovery_only(("POST", "/browser/front", direct)))
+          and _discovery_only(("GET", "/browser/settings", {}))
+          and _discovery_only(("POST", "/browser/front", direct))
+          and _discovery_only(("POST", "/browser/front", enabled_direct)))
     unsafe_fronts = []
     for field, value in (("mode", "remote"), ("tab_id", "1234abcd")):
         changed = json.loads(json.dumps(direct)); changed["panes"][0]["tabs"][0][field] = value
         unsafe_fronts.append(("POST", "/browser/front", changed))
-    for field, value in (("ctx", "1234abcd"), ("drive", True), ("profile", "private")):
+    for field, value in (("ctx", "1234abcd"), ("drive", "true"), ("profile", "private")):
         changed = json.loads(json.dumps(direct)); changed["panes"][0][field] = value
         unsafe_fronts.append(("POST", "/browser/front", changed))
     check("AO3 call audit never hides Remote front, navigation, tickets, allocation or profile writes",
@@ -78,7 +82,10 @@ def autoopen_checks(browser, check, until, guard, init_script):
               ("POST", "/browser/tabs", {}),
               ("POST", "/browser/contexts", {}), ("POST", "/browser/tabs/1234abcd/ticket", {}),
               ("POST", "/browser/panes/1/tabs/abcdef/address", {"mode": "remote"}),
-              ("POST", "/browser/profiles", {}), ("GET", "/browser/profiles", {"extra": True})]))
+              ("POST", "/browser/profiles", {}), ("GET", "/browser/profiles", {"extra": True}),
+              ("GET", "/browser/settings", {"extra": True}),
+              ("PATCH", "/browser/settings", {"agents_may_drive": True}),
+              ("POST", "/browser/act", {})]))
     sections = (_split, _behind, _quiet, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
     for section in sections:
         if os.environ.get("AUTO_ONLY") and os.environ["AUTO_ONLY"] not in section.__name__: continue
@@ -98,7 +105,7 @@ def autoopen_checks(browser, check, until, guard, init_script):
             section(browser, context, page, mock, fixture, check, until, guard, init_script)
             added = browser_calls(mock)[len(before_browser):]
             check(section.__name__ + " never invokes Remote browser routes",
-                  added == [] if section is not _settings else all(method == "PATCH" and path == "/browser/settings" and set(body) == {"auto_open"} for method, path, body in added),
+                  added == [] if section is not _settings else all(method == "PATCH" and path == "/browser/settings" and set(body) == {"auto_open"} and type(body["auto_open"]) is bool for method, path, body in added),
                   str(added))
             check(section.__name__ + " has no page errors", not errors, "; ".join(errors[:2]))
         except Exception as error:
