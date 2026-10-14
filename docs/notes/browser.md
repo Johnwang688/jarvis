@@ -1224,7 +1224,7 @@ probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels
 synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
 “Open this in Remote to annotate” and converts only on that second owner gesture.
 
-## BR10 sound helper groundwork (2026-10-13)
+## BR10 sound helper groundwork (historical, superseded; 2026-10-13)
 
 The protected BrowserSettings schema now recognizes `sound`, a strict owner boolean defaulting OFF. `audio.py` contains the isolated WSLg launch composition and bounded owned-Pulse-stream helper: OFF keeps the original argument order and strips ambient PULSE_SERVER, ON removes only the mute flag and uses the fixed WSLg socket after capability checks. Font environment composition is retained by the caller. Process ownership pins Chrome's profile, executable, UID, start time and ancestry; mute uses fresh stream/process checks and fixed reasons, never global volume or unmute. Pulse index attribution remains best effort between its last check and command.
 
@@ -1361,8 +1361,12 @@ The existing isolated M3 probe observed headless Chrome routing without Xvfb: it
 
 Voice-queue ducking remains pending its consuming voice package. There is no new HTTP/App speaking hook or claimed ducking behavior in this release.
 
-Verification before independent release review: 63 focused Python checks, a separate 49-check owner-route/dev-server pass, 54 focused HUD unit checks, 19 actual Chromium checks against an isolated mock HUD, and a HUD production build passed. Nine isolated owner-grant/admission guard mutations each produced a failed assertion. The review follow-ups cover bounded allocation floods, partial-restoration admission, owner close, OFF during an awaited allocation, and exact-handle profile fallback. These receipts verify control behavior and guarded replacement, not installation or physical playback.
+Early verification before independent release review: 63 focused Python checks, a separate 49-check owner-route/dev-server pass, 54 focused HUD unit checks, 19 actual Chromium checks against an isolated mock HUD, and a HUD production build passed. Nine isolated owner-grant/admission guard mutations each produced a failed assertion. The review follow-ups cover bounded allocation floods, partial-restoration admission, owner close, OFF during an awaited allocation, and exact-handle profile fallback. These receipts verify control behavior and guarded replacement, not installation or physical playback.
 
+
+Final implementation receipts for draft [PR #137](https://github.com/Johnwang688/jarvis/pull/137): runtime freeze 502f62b62c75a125d572228d88e22c61effe1531 passed the production build, 119 HUD unit files / 1,901 tests, and the complete 3,217-check mock HUD sweep (948.64 seconds). The immutable backend sweep completed 124/125 canonical suites in 864.48 seconds. Its sole failure was a stale Browser routes fixture: two unregistered synthetic pages and the old single-event bus allowlist. Independently reviewed fixture-only 3655a15e1a33a0df43dbd82c8c9419bc672d3dc2 then passed the entire 36-test routes suite in 42.504 seconds. The original failure receipt remains preserved; no production guard or privacy canary was weakened. Together these receipts cover all 125 canonical suites, including real Chrome capture/drive/view and synthetic local TTS using existing public model assets.
+
+Speaker fix 5f5219f4783a0137658fb1e1299796e0e7b6140d separately passed 32 real mouse/touch/keyboard/lifecycle/375px checks and two isolated built-bundle assertion mutants. A dismissed options gesture sends no sound or page-input request; the next deliberate gesture works. A pending press cannot survive cards, options, instance replacement or production pagehide/pageshow disconnect/reconnect. This is lifecycle coverage, not physical network-outage measurement. Root and independent UI reviews passed the exact speaker and combined driving integration. Subsequent main integration changed only documentation and the reviewed routes fixture, with jarvis/ and hud/src/ byte-identical to the tested freeze. Merge and deployment remain the lead's final step.
 
 ## BR9c owner driving presentation (current)
 
