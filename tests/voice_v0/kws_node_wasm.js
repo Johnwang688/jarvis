@@ -1,11 +1,18 @@
 // sherpa-onnx's own WASM KWS under Node/V8 (single thread).
 //
-//   node tests/voice_v0/kws_node_wasm.js <sherpa-onnx pkg dir> <kws model dir> <keywords.txt> <audio.f32> [int8]
+//   unshare -rn env -i JARVIS_VOICE_V0=1 node tests/voice_v0/kws_node_wasm.js <sherpa-onnx pkg dir> \
+//       <kws model dir> <keywords.txt> <audio.f32> [int8]
+//
+// This executes pinned, integrity-checked third-party npm code, so probe_browser.py runs it with an
+// empty environment (`env -i`) and, where unprivileged user namespaces work, no network (`unshare -rn`).
+// Node's permission model (--permission) was tried and cannot be used: the Emscripten runtime calls
+// process.binding(), which the model denies (ERR_ACCESS_DENIED), so the module never initialises.
 //
 // Cross-check for probe_browser.py: same Emscripten build, same engine (V8) and
 // WASM tier as Chrome, without the browser's page/worker overhead. Prints one
 // JSON line: CPU seconds per audio second over a paced-less burst, plus hits.
 'use strict';
+if (process.env.JARVIS_VOICE_V0 !== '1') { console.log('skipped: set JARVIS_VOICE_V0=1 to run the V0 KWS WASM check'); process.exit(0); }
 const fs = require('fs');
 const path = require('path');
 const [, , pkg, modelDir, keywordsFile, audioFile, int8Flag] = process.argv;

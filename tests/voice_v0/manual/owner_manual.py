@@ -1,7 +1,11 @@
 """Owner-run measurements that need a real microphone (V0 manual gate).
 
 Everything here runs LOCALLY, keeps audio only in memory, writes nothing to disk
-and makes no network call. Run it yourself, at the PC, in the room and seat you
+and makes no network call while measuring. It needs JARVIS_VOICE_V0=1, the probe
+venv, and the pinned models: it downloads any that are missing on first use, so run
+`JARVIS_VOICE_V0=1 python tests/voice_v0/fetch_models.py` first (about 950 MB).
+`wer` loads Parakeet (about 1.1 GB resident, 1.9 GB peak); run these under a cap, e.g.
+`systemd-run --user --scope -q -p MemoryMax=4G -p MemorySwapMax=0 -- python ...`. Run it yourself, at the PC, in the room and seat you
 really use. It reads the mic through PulseAudio (`parec`, WSLg's RDPSource by
 default), so it measures the WSL/Linux path, not Windows Chrome's; for the
 browser's own echo cancellation use aec_probe.html instead.

@@ -807,7 +807,9 @@ approvals, retain retry clips, add continuation, or claim a live deployment.
 
 Package V0 of `docs/plans/2026-10-13-voice-rework.md` section 6. Probes live in
 `tests/voice_v0/`; nothing under `jarvis/` or `hud/` changed, no dependency was added to
-`pyproject.toml` or `hud/package.json`, and no paid API was called. **Everything below is
+`pyproject.toml` or `hud/package.json`, and no paid API was called. No probe imports `jarvis`
+(its `config` import reads the credential `.env`); Kokoro's model paths come from the same
+`JARVIS_KOKORO_*` variables and defaults. **Everything below is
 synthetic**: Kokoro and Pocket text-to-speech, generated noise, and two TTS voices standing in
 for a television. No recording of a real person was made or used. Numbers say what the models
 and the browser cost on this machine and how they separate synthetic voices; they do **not**
@@ -834,10 +836,17 @@ establish acoustic quality for the owner, which stays a manual gate (end of this
   committed.
 - Pinned downloads, each into its own directory under `~/.cache/jarvis-voice-models/` and
   checked against a SHA256 in `tests/voice_v0/models.json` before use (npm tarballs also against
-  the registry's own digest). Sources: GitHub releases of `k2-fsa/sherpa-onnx` and
+  the registry's own digest; tar extraction is capped at 3 GB and 5,000 members). A later run
+  re-hashes single-file models; for archives only the extracted tree remains, so it trusts the
+  `.verified` marker that records the archive's digest. **Downloaded code does execute**: the
+  pinned `onnxruntime-web` and RNNoise WASM run inside headless Chromium, served only from the
+  loopback server, with every other host made unresolvable (`--host-resolver-rules`); the pinned
+  `sherpa-onnx` npm package runs under Node with an empty environment (`env -i`) and, where an
+  unprivileged network namespace exists, no network (`unshare -rn`). Node's `--permission` model
+  was tried for this and cannot be used: Emscripten's runtime calls `process.binding`, which it denies. Sources: GitHub releases of `k2-fsa/sherpa-onnx` and
   `snakers4/silero-vad`, the `pipecat-ai/smart-turn-v3` Hugging Face repo at commit f766f81,
-  and npm. `python tests/voice_v0/fetch_models.py` fetches them; `--record` prints digests for
-  new entries.
+  and npm. `JARVIS_VOICE_V0=1 python tests/voice_v0/fetch_models.py` fetches them (about 950 MB); `--record`
+  prints digests for new entries.
 
 | item | version / file | sha256 (first 16) | size |
 |---|---|---|---|
@@ -850,10 +859,12 @@ establish acoustic quality for the owner, which stays a manual gate (end of this
 | speaker: wespeaker ResNet34, wespeaker CAM++, 3D-Speaker CAM++, NeMo TitaNet-small | sherpa-onnx `speaker-recongition-models` release | 5ef208a9da14.., c46fad10b5f8.., 357a834f702b.., ad4a1802485d.. | 26 / 29 / 30 / 40 MB |
 | Smart Turn | `smart-turn-v3.2-cpu.onnx` | 2bb026316b14a660 | 8.3 MB |
 
-Re-run: `JARVIS_VOICE_V0=1 tests/voice_v0/run_all.sh [step ...]` (steps `fetch fixtures special
+Probe venv: `tests/voice_v0/requirements.txt` pins the versions used. Re-run: `JARVIS_VOICE_V0=1 tests/voice_v0/run_all.sh [step ...]` (steps `fetch fixtures special
 browser vadquality stt ns contention speaker kws turn`), then `python
-tests/voice_v0/render_results.py` for the tables below. Every probe prints "skipped" and exits 0
-unless `JARVIS_VOICE_V0=1`, so none runs in the normal test sweep.
+tests/voice_v0/render_results.py` for the tables below. Every script in `tests/voice_v0/`
+(downloads, fixture generators, probes, the node check, the echo-page server) prints "skipped"
+and exits 0 unless `JARVIS_VOICE_V0=1`, with no bypass for the STT worker subprocesses (they
+inherit the variable), so none runs in the normal test sweep.
 `tests/voice_v0_helpers_check.py` is the only sweep-visible file: it checks the WER, EER and SNR
 helpers offline.
 
@@ -866,8 +877,9 @@ samples at 16 kHz (32 ms) for Silero, 480 samples at 48 kHz (10 ms) for RNNoise,
 48 kHz. CPU is the browser's own process CPU time (CDP `SystemInfo.getProcessInfo`) over six 5 s
 segments, reported as the median of segments 2 to 6; segment 1 carries one-off JIT tier-up and is
 shown separately. A do-nothing worker at the same cadence is subtracted for the "above baseline"
-column. Silero's output from this build matches native onnxruntime: on a 12-clip check both give precision
-0.999, recall 0.905 and 2 false-accept frames.
+column. Silero's output from this build matches native onnxruntime: `check_silero_parity.py` re-scores
+the 36-clip "clean" condition of section 2 natively and gets the identical precision 0.999,
+recall 0.890 and 4 false-accept frames.
 
 | module | steady % of one core (median) | above null-worker baseline | first 5 s | worker ms/frame p50 / p95 (budget) | renderer RSS delta MB |
 |---|---|---|---|---|---|
@@ -884,8 +896,11 @@ Null worker (message passing only): 1.0% at 32 ms frames, 2.2% at 10 ms frames.
 | fp32 | 3.7% | 3.0% | 281 |
 
 Repeat run earlier the same day (load 2 to 5): Silero 3.0% and 2.8%, RNNoise 5.0%, together 8.6%.
-Worker frame times are far inside budget (0.6 ms of 32 ms, 0.3 ms of 10 ms), no frame was late
-(`late_frames` 0 throughout), and a burst runs at 94 to 124x real time for Silero and 33x for RNNoise.
+Typical worker frame times are far inside budget (p95 0.8 ms of 32 ms for Silero, 0.6 ms of 10 ms
+for RNNoise) and the main thread never posted a frame late (`late_frames` 0). A single frame can
+exceed the budget: the slowest Silero frame was 28 to 36 ms in the paced runs and 38 to 39 ms in
+bursts, both on the first call (JIT warm-up), once per worker. A burst runs at 94x (v5.1.2) and 114x
+(v6.2.3) real time for Silero and 33x for RNNoise.
 
 **KWS in the browser was not measurable directly.** sherpa-onnx 1.13.8 ships no browser KWS WASM
 (its release assets carry TTS, VAD and speech-enhancement builds, and the k2-fsa Hugging Face
@@ -896,9 +911,10 @@ of audio in 512-sample pushes; add the roughly 1% null-worker message cost. Nati
 (Python, 1 thread) costs less: **1.6% (int8) and 1.8% (fp32) of a core**, so WASM is about 2x native.
 Two native threads cost 4.7 to 5.9% for no gain, since the model is tiny; use one.
 
-**Sum for the window**, steady state: RNNoise 5.6 + Silero 3.4 + KWS about 3.3 = **about 12% of one
-core** with all three (about 7% without RNNoise), plus a one-off roughly 0.6 CPU-seconds at
-start-up. Renderer memory grew by about 40 to 90 MB for Silero and 20 MB for RNNoise (noisy
+**Sum for the window**, steady state: measured RNNoise + Silero together 9.8% (8.6% in the repeat
+run) + KWS 3.3% under Node + about 1% worker message passing for KWS = **about 12 to 14% of one core**
+with all three, against the 15% bar; about 7 to 8% without RNNoise. The first 5 s of the combined
+RNNoise + Silero run cost 22.6% (JIT tier-up, roughly 0.6 CPU-seconds in all), before KWS. Renderer memory grew by about 40 to 90 MB for Silero and 20 MB for RNNoise (noisy
 measurement); the KWS process peaked at 250 to 330 MB under Node.
 
 Caveats: headless Chromium on Linux, not the owner's Windows Chrome (same V8, different OS
@@ -906,9 +922,11 @@ scheduling and CPU); synthetic bench audio; the machine was loaded; the resampli
 16 kHz pipeline would need around RNNoise (16 to 48 to 16 kHz) is not included. Place RNNoise
 before the 48-to-16 kHz downsample if it is used.
 
-**Supports Q16:** the cost threshold (at most 15% of a core for the KWS-in-window recommendation) is
-met with margin, even with RNNoise. It does not decide the other half, "acceptable misses": see
-section 4.
+**Q16, cost half: near the bar, not comfortably under it.** All three modules come to about 12 to
+14% of a core on this machine, against 15%; without RNNoise it is about 7 to 8%. The KWS figure is a
+Node/V8 proxy (not measured in a browser), the machine was loaded, and Windows Chrome on the owner's
+CPU is unmeasured, so treat the margin as unconfirmed. It does not decide the other half,
+"acceptable misses": see section 4.
 
 ### 2. Does RNNoise help the VAD or the STT? (plan 3.4, V14)
 
@@ -1030,7 +1048,10 @@ plausible, not shown.
 
 Method: sherpa-onnx native KeywordSpotter, gigaspeech 3.3M, keywords JARVIS, OVER, CANCEL, PAUSE,
 RESUME, SKIP, STOP encoded with the model's BPE, 100 ms chunks plus 0.8 s of trailing silence.
-Positives are 8 voices x 15 phrases (isolated word, "Jarvis, pause.", carried in a sentence,
+Recall pools the positive phrases with the few negative-group phrases that legitimately contain
+a keyword; n per keyword (positive + incidental) is JARVIS 48+0, OVER 24+16, CANCEL 16+8, PAUSE
+16+0, RESUME 16+0, SKIP 16+0, STOP 16+8 (`render_results.py` prints it), so the single-word rates are
+over 16 to 48 trials from 8 voices. Positives are 8 voices x 15 phrases (isolated word, "Jarvis, pause.", carried in a sentence,
 trailing "...send it, over."): 152 expected keyword occurrences, plus 32 in negative phrases that
 legitimately contain one ("the game is over there"), 184 in all. Negatives are 12 similar-sounding
 or embedding phrases and 11.5 minutes of ordinary dictation (every other clip of the Kokoro
@@ -1160,7 +1181,7 @@ followed by 0.2 to 1.0 s of silence, with and without a -55 dBFS noise floor.
 | Plan item | Result | Effect |
 |---|---|---|
 | Q6: local STT default if RTF < 0.3 and WER within 1 point of cloud | RTF 0.07 (1 thread) / 0.04 (2 to 4); 1.1 GB resident, 1.9 GB peak; synthetic WER 1.4%; cloud WER **not measured** | RTF half met with margin; WER half open (paid, owner-authorised) |
-| Q16: KWS in the window if at most 15% of a core and acceptable misses | about 3.3% (KWS) and about 12% with Silero + RNNoise | cost met; misses **not** acceptable for PAUSE, SKIP, RESUME on synthetic speech; needs the owner-voice run |
+| Q16: KWS in the window if at most 15% of a core and acceptable misses | KWS about 3.3% (Node proxy); all three about 12 to 14% (about 7 to 8% without RNNoise) | cost **near** the bar, unconfirmed on Windows Chrome; misses **not** acceptable for PAUSE, SKIP, RESUME on synthetic speech; needs the owner-voice run |
 | 3.2 / V5: Silero in a worker | 2.4% above baseline (3.4% total), 0.6 ms/frame, no late frames | go; plan the one-off 0.6 CPU-s start-up |
 | 3.4 / V14: RNNoise | extra 3.4% core; fewer false accepts on noise, no help with speech; STT mixed | optional, off by default |
 | 3.4 / V12: speaker verification | TitaNet-small: 34 ms per 3 s, EER 0.0 to 1.9% synthetic, CAM++ poor | candidate is TitaNet-small via sherpa-onnx (Python 3.14 wheel exists); owner-vs-TV EER open |
@@ -1180,14 +1201,21 @@ followed by 0.2 to 1.0 s of silence, with and without a -55 dBFS noise floor.
 ### Manual gate: what V0 could not measure (owner at the PC)
 
 None of these is faked above; each needs the owner's room, speakers or voice. The
-probes are ready to run; none writes audio to disk or calls the network, and none is
-in the normal test sweep (`JARVIS_VOICE_V0=1` required).
+probes are ready to run; none writes audio to disk or calls the network while measuring, and
+none is in the normal test sweep (`JARVIS_VOICE_V0=1` required). The scripts need the probe venv
+and the pinned models, and download any that are missing on first use, so run
+`JARVIS_VOICE_V0=1 python tests/voice_v0/fetch_models.py` first (about 950 MB). The `wer` and
+`speaker` runs load local models (Parakeet peaks at about 1.9 GB resident), so cap them, for
+example `systemd-run --user --scope -q -p MemoryMax=4G -p MemorySwapMax=0 -- python ...`.
+The echo page needs `JARVIS_VOICE_V0=1` for its server too, and fetches only `/stimulus.wav`
+from it; the numbers it prints hold no browser string or device name, and it labels an ERLE as a
+lower bound when the echo with cancellation on is at or below the noise floor.
 
 | Measurement | Why not synthetic | How to run it | Fills |
 |---|---|---|---|
-| **Speaker echo return loss (ERLE)**, Chrome AEC against same-page Web Audio output | needs your speakers, mic, room and Windows' audio stack | `python tests/voice_v0/manual/aec_manual_server.py`, open the printed `http://127.0.0.1:PORT/aec_probe.html` in the **same Windows Chrome profile as the HUD**, click Start, stay silent for about 2 minutes. Four trials (AEC off/on x Web Audio/`<audio>`); copy the JSON | plan 3.4 self-voice step 1; whether the reference-correlation gate (step 2) is mandatory |
+| **Speaker echo return loss (ERLE)**, Chrome AEC against same-page Web Audio output | needs your speakers, mic, room and Windows' audio stack | `JARVIS_VOICE_V0=1 python tests/voice_v0/manual/aec_manual_server.py`, open the printed `http://127.0.0.1:PORT/aec_probe.html` in the **same Windows Chrome profile as the HUD**, click Start, stay silent for about 2 minutes. Four trials (AEC off/on x Web Audio/`<audio>`); copy the JSON | plan 3.4 self-voice step 1; whether the reference-correlation gate (step 2) is mandatory |
 | **False holds per hour of playback** | needs V9's barge-in | after V9: play 30 min of replies at your usual volume with the TV on and you silent; count holds in the diagnostics view | Q7 (3 false pauses / 10 min rule) |
-| **KWS misses at 1 m and 3 m, false accepts with TV** | distance, reverberation, your voice | `python tests/voice_v0/manual/owner_manual.py kws --seconds 60 --label "1 m"` (say each keyword about 10 times), again `--label "3 m"`, then silent with the TV on for 5+ min `--seconds 300 --label "TV"`; hits per hour = hits / minutes x 60 | Q16, V11 thresholds |
+| **KWS misses at 1 m and 3 m, false accepts with TV** | distance, reverberation, your voice | `JARVIS_VOICE_V0=1 python tests/voice_v0/manual/owner_manual.py kws --seconds 60 --label "1 m"` (say each keyword about 10 times), again `--label "3 m"`, then silent with the TV on for 5+ min `--seconds 300 --label "TV"`; hits per hour = hits / minutes x 60 | Q16, V11 thresholds |
 | **VAD false accepts with the real TV** | the synthetic "TV" is two TTS voices | `owner_manual.py vad --minutes 5` (silent, TV on) | V5 (p>=0.5 share, speech onsets per minute) |
 | **Owner WER (local Parakeet)** | your voice; cloud comparison needs paid calls | `owner_manual.py wer --n 20` reads 20 prompts, transcribes locally, reports WER; audio never saved. For cloud, read the same 20 sentences into the HUD yourself and compare, or authorise a paid follow-up | Q6 "within 1 point of cloud" |
 | **Owner-vs-TV speaker EER** | your voice and a real TV | `owner_manual.py speaker --tv-minutes 3` (3 enrolment readings, 20 own clips, then TV windows) | V12 threshold and Guest voice default |

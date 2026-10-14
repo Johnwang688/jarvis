@@ -1,6 +1,6 @@
 """Synthetic fixtures for the KWS and Smart Turn probes (Kokoro only).
 
-    PYTHONPATH=<worktree> python tests/voice_v0/make_special_fixtures.py
+    JARVIS_VOICE_V0=1 python tests/voice_v0/make_special_fixtures.py
 
 Writes under ~/.cache/jarvis-voice-v0/fixtures/special/ with special.json:
   kws        isolated keywords, keywords in carrier phrases, trailing send/cancel
@@ -14,9 +14,8 @@ from __future__ import annotations
 import json
 import sys
 
+import common  # noqa: F401,I001  (first: pins BLAS threads before numpy loads)
 import numpy as np
-
-import common
 
 KWS_VOICES = ["af_heart", "af_bella", "am_adam", "am_michael", "bf_emma", "bm_george", "bm_lewis", "af_sarah"]
 
@@ -82,18 +81,20 @@ TURN_INCOMPLETE = [
 
 
 def main() -> int:
+    if not common.gated("generate the KWS and Smart Turn fixtures"):
+        return 0
     import onnxruntime as ort
     from kokoro_onnx import Kokoro
 
-    from jarvis import config
+    model_path, voices_path = common.kokoro_paths()
 
     out = common.FIXTURES / "special"
     out.mkdir(parents=True, exist_ok=True)
     so = ort.SessionOptions()
     so.intra_op_num_threads = 4
     so.inter_op_num_threads = 1
-    k = Kokoro.from_session(ort.InferenceSession(str(config.KOKORO_MODEL), sess_options=so,
-                                                 providers=["CPUExecutionProvider"]), str(config.KOKORO_VOICES))
+    k = Kokoro.from_session(ort.InferenceSession(str(model_path), sess_options=so,
+                                                 providers=["CPUExecutionProvider"]), str(voices_path))
 
     def synth(text: str, voice: str, speed: float = 1.0) -> np.ndarray:
         lang = "en-gb" if voice[0] == "b" else "en-us"

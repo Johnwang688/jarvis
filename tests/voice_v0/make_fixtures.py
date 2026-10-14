@@ -1,25 +1,26 @@
 """Generate synthetic speech fixtures with the repo's local Kokoro (and Pocket).
 
-    PYTHONPATH=<worktree> python tests/voice_v0/make_fixtures.py [--pocket]
+    JARVIS_VOICE_V0=1 python tests/voice_v0/make_fixtures.py [--pocket]
 
 Writes 16 kHz mono WAVs plus manifest.json (text, voice, speed) under
 ~/.cache/jarvis-voice-v0/fixtures/. Synthetic only; never a real person's
-voice. Kokoro runs through kokoro_onnx with the same model files the daemon
-uses (config.KOKORO_MODEL / KOKORO_VOICES). `--pocket` additionally renders the
-Pocket builtin voices through `jarvis.pocket.synthesize`, which needs the repo
-venv (torch); run that half with the repo's interpreter.
+voice. Kokoro runs through kokoro_onnx with the daemon's model files, found via
+JARVIS_KOKORO_MODEL / JARVIS_KOKORO_VOICES (same defaults as jarvis/config.py).
+`--pocket` renders the Pocket builtin voices through the `pocket_tts` library
+(needs torch and the cached HF weights; run it with an interpreter that has
+them, e.g. HF_HUB_OFFLINE=1 <repo .venv>/bin/python ... --pocket).
+
+No `jarvis` import anywhere in tests/voice_v0/: jarvis.config reads the credential
+.env on import, which a measurement probe must not do.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-import wave
-import io
 
+import common  # noqa: F401,I001  (first: pins BLAS threads before numpy loads)
 import numpy as np
-
-import common
 
 # Dictation-style sentences. No digits, so STT number formatting cannot add
 # normalisation noise to the WER.
@@ -56,20 +57,19 @@ KOKORO_EN = ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam
 
 
 def kokoro_clips() -> list[dict]:
+    import onnxruntime as ort
     from kokoro_onnx import Kokoro
 
-    from jarvis import config
-
-    import onnxruntime as ort
+    model_path, voices_path = common.kokoro_paths()
 
     # The daemon's default session grabs every core and oversubscribes a shared
     # machine; four intra-op threads is plenty for fixture generation.
     so = ort.SessionOptions()
     so.intra_op_num_threads = 4
     so.inter_op_num_threads = 1
-    sess = ort.InferenceSession(str(config.KOKORO_MODEL), sess_options=so, providers=["CPUExecutionProvider"])
-    k = Kokoro.from_session(sess, str(config.KOKORO_VOICES))
-    have = set(np.load(str(config.KOKORO_VOICES)).files)
+    sess = ort.InferenceSession(str(model_path), sess_options=so, providers=["CPUExecutionProvider"])
+    k = Kokoro.from_session(sess, str(voices_path))
+    have = set(np.load(str(voices_path)).files)
     clips = []
     for vi, voice in enumerate(v for v in KOKORO_EN if v in have):
         lang = "en-gb" if voice[0] == "b" else "en-us"
@@ -88,17 +88,27 @@ def kokoro_clips() -> list[dict]:
     return clips
 
 
-def pocket_clips() -> list[dict]:
-    from jarvis import pocket
+# The Pocket TTS builtins (same list as jarvis/pocket.py). Not imported from there: jarvis.pocket
+# imports jarvis.config, whose import reads the credential .env.
+POCKET_BUILTINS = (
+    "alba", "anna", "azelma", "bill_boerst", "caro_davy", "charles", "cosette", "eponine", "eve", "fantine",
+    "george", "jane", "javert", "jean", "marius", "mary", "michael", "paul", "peter_yearsley", "stuart_bell",
+    "vera", "estelle", "giovanni", "juergen", "lola", "rafael",
+)
 
+
+def pocket_clips() -> list[dict]:
+    """Pocket TTS through the `pocket_tts` library directly (needs torch: run with an interpreter that has it)."""
+    from pocket_tts import TTSModel
+
+    model = TTSModel.load_model()
     clips = []
-    for vi, name in enumerate(pocket.BUILTINS):
+    for name in POCKET_BUILTINS:
+        state = model.get_state_for_audio_prompt(name)
         for si, text in enumerate(SENTENCES[:8]):
-            data = pocket.synthesize(text, name)
-            with wave.open(io.BytesIO(data)) as w:
-                sr = w.getframerate()
-                pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768
-            x = common.resample_to_16k(pcm, sr)
+            audio = model.generate_audio(state, text)
+            pcm = audio.detach().cpu().numpy().astype("float32").reshape(-1)
+            x = common.resample_to_16k(pcm, int(model.sample_rate))
             fn = f"pocket_{name}_{si:02d}.wav"
             common.write_wav(common.FIXTURES / fn, x)
             clips.append({"file": fn, "text": text, "voice": f"pocket:{name}", "engine": "pocket",
@@ -108,6 +118,8 @@ def pocket_clips() -> list[dict]:
 
 
 def main(argv: list[str]) -> int:
+    if not common.gated("generate the synthetic fixtures (Kokoro; --pocket needs torch)"):
+        return 0
     common.FIXTURES.mkdir(parents=True, exist_ok=True)
     mpath = common.FIXTURES / "manifest.json"
     existing = json.loads(mpath.read_text()) if mpath.exists() else []

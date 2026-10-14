@@ -141,6 +141,18 @@ def kws() -> None:
     print("| model file | threads | CPU % of a core, real time | RSS MB |\n|---|---|---|---|")
     for c in d["cpu"]:
         print(f"| {'int8' if c['int8'] else 'fp32'} | {c['threads']} | {c['cpu_pct_of_one_core_realtime']:.2f} | {c['rss_mb']:.0f} |")
+    # Denominators: expected occurrences per keyword in the special fixtures. Recall below pools the
+    # positive phrases with the few "hard negative" phrases that legitimately contain a keyword.
+    sp = common.FIXTURES / "special" / "special.json"
+    if sp.exists():
+        pos, inc = {}, {}
+        for it in json.loads(sp.read_text()):
+            if it["group"].startswith("kws_"):
+                tgt = pos if it["group"] == "kws_pos" else inc
+                for w in it.get("expect", []):
+                    tgt[w.upper()] = tgt.get(w.upper(), 0) + 1
+        print("\nn per keyword (positive phrases + negative-group phrases that really contain the word; recall pools both):")
+        print(", ".join(f"{k} {pos.get(k, 0)}+{inc.get(k, 0)}" for k in ("JARVIS", "OVER", "CANCEL", "PAUSE", "RESUME", "SKIP", "STOP")))
     print("\n| config (boost, threshold) | recall | JARVIS | OVER | CANCEL | PAUSE | RESUME | SKIP | STOP | stem-variant FA | unrelated FA | dictation FA/h |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
     rows = list(d["grid"]) + [d["int8_default"], d["tuned_short_words"]]
     for g in rows:

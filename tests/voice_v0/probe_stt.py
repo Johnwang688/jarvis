@@ -183,7 +183,7 @@ def contention() -> dict:
     import onnxruntime as ort
     from kokoro_onnx import Kokoro
 
-    from jarvis import config
+    model_path, voices_path = common.kokoro_paths()   # not jarvis.config: its import reads the credential .env
 
     sentence = "The build finished without errors, but the second test suite is still running."
     manifest = [c for c in common.load_manifest() if c["engine"] == "kokoro"][:6]
@@ -192,11 +192,11 @@ def contention() -> dict:
 
     def make(pinned: bool):
         if not pinned:
-            return Kokoro(str(config.KOKORO_MODEL), str(config.KOKORO_VOICES))
+            return Kokoro(str(model_path), str(voices_path))
         so = ort.SessionOptions()
         so.intra_op_num_threads, so.inter_op_num_threads = 4, 1
-        sess = ort.InferenceSession(str(config.KOKORO_MODEL), sess_options=so, providers=["CPUExecutionProvider"])
-        return Kokoro.from_session(sess, str(config.KOKORO_VOICES))
+        sess = ort.InferenceSession(str(model_path), sess_options=so, providers=["CPUExecutionProvider"])
+        return Kokoro.from_session(sess, str(voices_path))
 
     def times(k, n=8):
         out = []
@@ -235,8 +235,9 @@ def contention() -> dict:
 
 
 def main(argv: list[str]) -> int:
-    if os.environ.get("JARVIS_VOICE_V0") != "1" and not any(a.startswith("--worker") for a in argv):
-        print("skipped: set JARVIS_VOICE_V0=1 to run the V0 STT probe (needs fixtures and models)")
+    # Workers are spawned by this process and inherit JARVIS_VOICE_V0 through the environment; there is
+    # no bypass, so running a worker by hand without the gate also skips.
+    if not common.gated("run the V0 STT probe (needs fixtures and models)"):
         return 0
     arg = common.parse_args(argv)
     if "--worker" in arg:

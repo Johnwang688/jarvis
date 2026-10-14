@@ -64,3 +64,9 @@ def conditions():
         for s in snrs:
             conds[f"{kind}_{s}dB"] = mk(kind, s)
     return conds
+
+
+if __name__ == "__main__":
+    # A library for the probes; run directly it only reports the gate and lists the conditions.
+    if common.gated("list the synthetic degradation conditions"):
+        print("\n".join(conditions()))

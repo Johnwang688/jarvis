@@ -4,18 +4,15 @@
 #   JARVIS_VOICE_V0=1 tests/voice_v0/run_all.sh [step ...]
 #
 # Steps (default: all, in this order): fetch fixtures special browser vadquality stt ns contention speaker kws turn
-# Needs the probe venv (uv venv ~/.cache/jarvis-voice-v0/venv; uv pip install sherpa-onnx numpy scipy
-# soundfile onnxruntime kokoro-onnx playwright==<repo's> sentencepiece transformers psutil) and node.
+# Needs the probe venv from tests/voice_v0/requirements.txt (pinned versions), node, ffmpeg and Playwright Chromium.
 # Results land in ~/.cache/jarvis-voice-v0/results/*.json. Nothing here runs in the normal test sweep:
 # every probe exits 0 with "skipped" unless JARVIS_VOICE_V0=1.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
 PY="${JARVIS_VOICE_V0_PYTHON:-$HOME/.cache/jarvis-voice-v0/venv/bin/python}"
 export JARVIS_VOICE_V0="${JARVIS_VOICE_V0:-}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
-export PYTHONPATH="$REPO"          # fixtures use the repo's Kokoro config; harmless elsewhere
 
 if [ "$JARVIS_VOICE_V0" != "1" ]; then
   echo "skipped: set JARVIS_VOICE_V0=1 (downloads models, uses ~4 GB disk, runs ~45 min)"; exit 0

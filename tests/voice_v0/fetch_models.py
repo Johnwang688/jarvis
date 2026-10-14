@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import sys
 
+import common  # noqa: F401,I001
 import models
 
 
 def main(argv: list[str]) -> int:
+    if not common.gated("download the pinned V0 models (about 950 MB)"):
+        return 0
     record = "--record" in argv
     names = [a for a in argv if not a.startswith("--")] or list(models.manifest())
     for name in names:

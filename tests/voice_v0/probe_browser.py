@@ -134,7 +134,11 @@ def cpu_total(cdp) -> tuple[float, dict]:
 class Browser:
     def __init__(self, base: str, pw):
         self.base = base
-        self.browser = pw.chromium.launch(headless=True, args=["--autoplay-policy=no-user-gesture-required"])
+        # Everything the pages run (onnxruntime-web, RNNoise, the harness) comes from the loopback server; the
+        # resolver rule makes any other host unresolvable, so downloaded code cannot reach the network.
+        self.browser = pw.chromium.launch(headless=True, args=[
+            "--autoplay-policy=no-user-gesture-required",
+            "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"])
         self.version = self.browser.version
         self.cdp = self.browser.new_browser_cdp_session()
         self.page = self.browser.new_page()
@@ -222,9 +226,18 @@ def kws_under_node(d: Path) -> dict:
     out = {}
     pkg = models.ensure("npm-sherpa-onnx-1.13.8") / "x" / "package"
     model = models.extracted("kws-zipformer-gigaspeech-3.3M")
+    import shutil
+
+    node = shutil.which("node")
+    # Pinned third-party npm code executes here: empty environment, and no network where the kernel allows
+    # an unprivileged network namespace. (Node's --permission model breaks Emscripten's process.binding.)
+    jail = ["unshare", "-rn"] if shutil.which("unshare") and subprocess.run(
+        ["unshare", "-rn", "true"], capture_output=True).returncode == 0 else []
+    out["confinement"] = ("env -i" + (" + unshare -rn (no network)" if jail else " only (no network namespace available)"))
     for flag in ("fp32", "int8"):
-        p = subprocess.run(["node", str(HERE / "kws_node_wasm.js"), str(pkg), str(model), str(d / "keywords.txt"),
-                            str(d / "bench16.f32"), flag], capture_output=True, text=True, timeout=600)
+        p = subprocess.run([*jail, "env", "-i", "JARVIS_VOICE_V0=1", node, str(HERE / "kws_node_wasm.js"), str(pkg),
+                            str(model), str(d / "keywords.txt"), str(d / "bench16.f32"), flag],
+                           capture_output=True, text=True, timeout=600)
         out[flag] = json.loads(p.stdout.strip().splitlines()[-1]) if p.returncode == 0 else {"error": p.stderr[-800:]}
         print("kws node", flag, {k: v for k, v in out[flag].items() if k != "hits"}, file=sys.stderr)
     return out
@@ -303,7 +316,6 @@ def main(argv: list[str]) -> int:
     if os.environ.get("JARVIS_VOICE_V0") != "1":
         print("skipped: set JARVIS_VOICE_V0=1 to run the V0 browser probe (needs fixtures, models, Playwright Chromium)")
         return 0
-    from playwright.sync_api import sync_playwright
 
     arg = common.parse_args(argv)
     seg_s = float(arg.get("--seg-seconds", 5))
@@ -311,6 +323,17 @@ def main(argv: list[str]) -> int:
     seconds = seg_s * nseg
     only = set(str(arg.get("--only", "silero,rnnoise,kws,combo,vadquality")).split(","))
     d = Path(tempfile.mkdtemp(prefix="voice-v0-audio-", dir=common.WORK))
+    try:
+        return _run(arg, d, only, nseg, seg_s, seconds)
+    finally:
+        import shutil
+
+        shutil.rmtree(d, ignore_errors=True)   # large, regenerated every run
+
+
+def _run(arg: dict, d: Path, only: set, nseg: int, seg_s: float, seconds: float) -> int:
+    from playwright.sync_api import sync_playwright
+
     x16 = bench_audio(60)
     u16 = audio_url_name(d, "bench16.f32", x16)
     u48 = audio_url_name(d, "bench48.f32", to_48k(x16))
@@ -365,9 +388,6 @@ def main(argv: list[str]) -> int:
             srv.shutdown()
     if "kws" in only:
         res["kws_sherpa_wasm_under_node"] = kws_under_node(d)
-    import shutil
-
-    shutil.rmtree(d, ignore_errors=True)   # the audio temp dir is large and regenerated every run
     common.emit("browser_cpu" if only - {"vadquality"} else "browser_vadquality", res)
     return 0
 

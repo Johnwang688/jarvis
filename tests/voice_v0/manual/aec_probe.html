@@ -20,7 +20,7 @@ saved; the numbers below are the only output. Run it in the same Chrome profile 
 <div id="summary"></div>
 <pre id="json"></pre>
 <script type="module">
-const STIM_URL = new URLSearchParams(location.search).get('stim') || '/stimulus.wav';
+const STIM_URL = '/stimulus.wav';   // fixed: the page fetches nothing else
 const $ = (id) => document.getElementById(id);
 const db = (x) => 10 * Math.log10(x + 1e-12);
 
@@ -74,7 +74,9 @@ async function trial(cfg, stimBuf, stimBlobUrl) {
   const skip = Math.floor(48000 / 128);
   const play = power(chunks.slice(t0 + skip, t1));
   return { name: cfg.name, aec: settings.echoCancellation, aecRequested: cfg.aec, floor_dbfs: db(floor), play_dbfs: db(play),
-           echo_above_floor_db: db(Math.max(play - floor, 1e-12)), device: settings.deviceId ? 'set' : 'default' };
+           echo_above_floor_db: db(Math.max(play - floor, floor * 0.01)),
+           // true when the echo is indistinguishable from (or below) the noise floor
+           at_floor: (play - floor) <= floor * 0.01 };
 }
 
 $('go').onclick = async () => {
@@ -88,15 +90,15 @@ $('go').onclick = async () => {
       const r = await trial(cfg, stimBuf, stimBlobUrl);
       res.push(r);
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${r.name}</td><td>${r.aec}</td><td>${r.floor_dbfs.toFixed(1)}</td><td>${r.play_dbfs.toFixed(1)}</td><td>${r.echo_above_floor_db.toFixed(1)}</td>`;
+      tr.innerHTML = `<td>${r.name}</td><td>${r.aec}</td><td>${r.floor_dbfs.toFixed(1)}</td><td>${r.play_dbfs.toFixed(1)}</td><td>${r.at_floor ? 'at or below floor (clamped to ' : ''}${r.echo_above_floor_db.toFixed(1)}${r.at_floor ? ')' : ''}</td>`;
       $('t').tBodies[0].appendChild(tr);
     }
     const erle = (off, on) => (off.echo_above_floor_db - on.echo_above_floor_db);
-    const sum = { web_audio_ERLE_db: erle(res[0], res[1]), element_ERLE_db: erle(res[2], res[3]), trials: res,
-                  userAgent: navigator.userAgent, outputs: (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind !== 'videoinput').map((d) => `${d.kind}:${d.label || '(label hidden)'}`) };
-    $('summary').innerHTML = `<p><b>ERLE, same-page Web Audio:</b> ${sum.web_audio_ERLE_db.toFixed(1)} dB &nbsp; <b>ERLE, audio element:</b> ${sum.element_ERLE_db.toFixed(1)} dB</p>
+    const bound = (off, on) => (on.at_floor ? ' (a LOWER BOUND: the AEC-on echo is at or below the noise floor)' : '') + (off.at_floor ? ' (UNRELIABLE: the AEC-off echo is not above the floor; raise the volume)' : '');
+    const sum = { web_audio_ERLE_db: erle(res[0], res[1]), element_ERLE_db: erle(res[2], res[3]), trials: res };
+    $('summary').innerHTML = `<p><b>ERLE, same-page Web Audio:</b> ${sum.web_audio_ERLE_db.toFixed(1)} dB${bound(res[0], res[1])} &nbsp; <b>ERLE, audio element:</b> ${sum.element_ERLE_db.toFixed(1)} dB${bound(res[2], res[3])}</p>
       <p>Read: ERLE (echo return loss enhancement) is how many dB lower the echo is with cancellation on. Under about 10 dB for Web Audio means
-      Chrome is not cancelling the HUD's own output and the reference-correlation gate (plan 3.4 step 2) is essential. Copy the JSON below into the V0 results note.</p>`;
+      Chrome is not cancelling the HUD's own output and the reference-correlation gate (plan 3.4 step 2) is essential. Copy the JSON below into the V0 results note; it holds only the numbers (no browser string, no device names).</p>`;
     $('json').textContent = JSON.stringify(sum, null, 2);
     $('status').textContent = 'done';
   } catch (e) {

@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 SR = 16000
+GATE = "JARVIS_VOICE_V0"
 WORK = Path(os.environ.get("JARVIS_VOICE_V0_DIR", Path.home() / ".cache" / "jarvis-voice-v0"))
 FIXTURES = WORK / "fixtures"
 
@@ -185,3 +186,25 @@ def parse_args(argv: list[str]) -> dict:
                 out[a] = True
         i += 1
     return out
+
+
+def gated(what: str) -> bool:
+    """True when JARVIS_VOICE_V0=1. Otherwise print a one-line skip so the caller can exit 0.
+
+    Every script in tests/voice_v0/ that downloads, generates, serves or measures calls this first.
+    """
+    if os.environ.get(GATE) == "1":
+        return True
+    print(f"skipped: set {GATE}=1 to {what}")
+    return False
+
+
+def kokoro_paths() -> tuple[Path, Path]:
+    """Kokoro model and voices, resolved here and NOT through jarvis.config.
+
+    Importing jarvis.config runs its _load_dotenv(), which reads the credential .env; a measurement
+    probe has no business doing that. The defaults and override variables match config.py.
+    """
+    home = Path.home() / ".cache" / "jarvis-tts"
+    return (Path(os.environ.get("JARVIS_KOKORO_MODEL", home / "kokoro-v1.0.onnx")),
+            Path(os.environ.get("JARVIS_KOKORO_VOICES", home / "voices-v1.0.bin")))

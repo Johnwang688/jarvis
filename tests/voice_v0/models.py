@@ -19,6 +19,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "models.json"
+# Extraction caps (the largest pinned archive unpacks to ~650 MB in under 20 members).
+MAX_UNPACKED = 3 << 30
+MAX_MEMBERS = 5000
 ROOT = Path(os.environ.get("JARVIS_VOICE_MODELS", Path.home() / ".cache" / "jarvis-voice-models"))
 
 
@@ -45,7 +48,14 @@ def fetch(name: str, record: bool = False) -> Path:
     target = ROOT / name
     marker = target / ".verified"
     if marker.exists() and entry.get("sha256") and marker.read_text().strip() == entry["sha256"]:
-        return target
+        # Single-file entries are re-hashed every time (cheap, and a swapped file is caught). Archive entries
+        # keep only the extracted tree (the 487 MB archive is deleted after unpacking), so for those the marker,
+        # which records the archive's verified digest, is what we can check.
+        if entry.get("extract"):
+            return target
+        f = target / entry["url"].rsplit("/", 1)[-1]
+        if f.is_file() and sha256_file(f) == entry["sha256"]:
+            return target
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
@@ -74,6 +84,11 @@ def fetch(name: str, record: bool = False) -> Path:
         out = target / "x"
         out.mkdir()
         with tarfile.open(archive) as tar:
+            members = tar.getmembers()
+            total = sum(m.size for m in members)
+            if len(members) > MAX_MEMBERS or total > MAX_UNPACKED:
+                shutil.rmtree(target)
+                raise SystemExit(f"{name}: archive too large to unpack ({len(members)} members, {total >> 20} MB)")
             tar.extractall(out, filter="data")
         archive.unlink()
     marker.write_text(digest)
