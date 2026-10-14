@@ -92,7 +92,7 @@ import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
 import { NoiseSuppressionSetting } from "./components/NoiseSuppression";
 import { loadNoiseSuppression, saveNoiseSuppression } from "./lib/listen/pref";
-import { VadStage } from "./lib/listen/stage";
+import { VadStage, type StageOptions } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
@@ -2990,6 +2990,9 @@ export default function App() {
         // V14: noise suppression's state (wanted, off|waiting|loading|ready|failed, code, ms per frame), and a retry.
         noise: () => vadStage.status().noise,
         retryNoise: () => vadStage.retryNoise(),
+        // For checks only: a second, separate stage (its own worker) the caller feeds by hand and reads the
+        // probabilities of, so a fixture can be scored with noise suppression off and on without a microphone.
+        makeStage: (o: StageOptions) => new VadStage(o),
         endPause: () => capture.endPauseMs,
         state: () => ({
           open: capture.vad.open,
