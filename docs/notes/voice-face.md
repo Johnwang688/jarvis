@@ -1778,7 +1778,7 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   in `__hud`), `capture.ts` (`UtteranceEnd.tailMs`, `finishRecording`'s quiet argument, `endNow`), `stt.ts`
   (`SttCapture.tailMs`), `voiceDiagnostics.ts` (two outcomes), `chats.ts` (two capture statuses),
   `InputBar.tsx` (`undo`), `theme.css`.
-- **Free checks.** `lib/voiceWords.test.ts` (38: reading, the list, planning, ledger, hold), `captureWords.test.ts` (10:
+- **Free checks.** `lib/voiceWords.test.ts` (51: reading, the list, planning, ledger, hold), `captureWords.test.ts` (10:
   the tail of quiet for pause, talk key, short key, truncation; `endNow`), `voiceWordsFlow.test.ts` (5: the real
   Capture, assembler and plan; a cancel whose last chunk is still in flight; the same words without quiet; a failed chunk).
   `tests/face/hud_v2_words_check.py` (68, real HUD, mock daemon, synthetic fake microphone): REVIEW + over sends the box;
@@ -1786,16 +1786,13 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   expiry; AUTO cancel with a chunk held in flight and Undo; cancel does not recall a send and `NOTHING TO CANCEL`; a card
   in flight (verbatim, zero approval requests) and a card up (nothing uploaded); busy chat steers; the lists in
   Settings (refusals, bound, persistence); edited lists, the toggle, an empty list, hostile storage.
-- **Counts.** vitest 2438 tests / 154 files (2385 / 151 on V5: +53, three new files; one unrelated
-  `markdownMath` timing test failed once in a full run under a load average of 24 and passed alone), `tsc` and
-  `vite build` clean. Browser checks on the built `hud/dist`: `hud_v2_words_check` 68, `chunks` 58, `stt` 28,
-  `steer` 46, `ptt` 70, `speech` 56, `multichat` 343 all pass; `vad` 67 passes at a load average of about 4. At a load of
-  10-25 its three "2.4 s pause continues" checks failed in three full runs (the message ended at the pause, 5.3 s + 4.2 s
-  instead of one 11 s upload) while V5's own build passed once at load 15; run alone (`pauses`) it passes on this branch.
-  Nothing on this branch touches the pause path (`Capture`'s additions only read the quiet run), but a margin of 100 ms of
-  real-time fake-microphone audio is load-sensitive, so treat that check as flaky under load. The full `hud_v2_check` was not run.
+- **Counts.** vitest 2451 tests / 154 files (2385 / 151 on V5), `tsc` and `vite build` clean. Browser checks on the
+  built `hud/dist`: `hud_v2_words_check` 84, `chunks` 58, `stt` 28, `steer` 46, `speech` 56, `multichat` 343 all pass;
+  `vad` 67 passed at a load average of about 4 before the review fixes and was not rerun (its three "2.4 s pause
+  continues" checks failed in three full runs at load 10-25 and pass alone: a 100 ms margin of real-time fake-microphone
+  audio is load-sensitive, and nothing here touches the pause path). The full `hud_v2_check` was not run.
 - **Mutations that fail on purpose** (source restored afterwards): dropping the quiet test (6 vitest tests);
-  ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks).
+  ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks); the ledger matching inside words (4 vitest tests); `UndoHold.take` without its expiry guard (1); the typing guard disabled (5 browser checks).
 - **Not done / not claimed.** A real person's voice, a physical microphone, and how Parakeet transcribes a spoken "over"
   or "cancel" (it may write "Over." or "Ova"; the lists are the remedy). The ledger cannot see text the owner edited
   into a different shape. A send word does not recall a message already sent, by design.
