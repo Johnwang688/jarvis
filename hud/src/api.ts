@@ -274,6 +274,12 @@ export const api = {
   /** Assign (no more keys), choose (`voice`; "" is automatic again) or mute one chat's voice. */
   speechVoice: (threadId: string, change: { voice?: string; muted?: boolean } = {}) =>
     req<{ thread_id: string; voice: string | null; muted: boolean }>("/speech/voices", json({ thread_id: threadId, ...change })),
+  /**
+   * Hold (`on`) or end the daemon's short lease that lowers the Remote Browser's sound while
+   * Jarvis speaks (V15). Renewed about once a second; the daemon restores by itself if it stops.
+   */
+  speechDuck: (on: boolean, keepalive?: boolean) =>
+    req<{ on: boolean; ducked: number; lease_s: number }>("/speech/duck", { ...json({ on }), ...(keepalive ? { keepalive: true } : {}) }),
   /** The fast path's roster and its default (`models.describe()`). */
   models: () => req<RosterView>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),

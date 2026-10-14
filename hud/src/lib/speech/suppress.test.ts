@@ -132,11 +132,18 @@ describe("the wiring is pinned", () => {
   it("createSpeech asks /say for a local voice", async () => {
     expect(indexSource).toContain("localOnly: SAY_LOCAL_ONLY");
     const bodies: Record<string, unknown>[] = [];
+    const ducks: Record<string, unknown>[] = [];
     // Read-aloud also asks the daemon for the chat's voice (`/speech/voices`, V7):
     // it answers with a voice here, so the one `/say` that follows names it.
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (String(url).startsWith("/speech/voices")) {
         return new Response(JSON.stringify({ thread_id: T, voice: "bm_test", muted: false, threads: {}, pool: [] }),
+          { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (String(url) === "/speech/duck") {
+        // V15: the lease that lowers the Remote Browser's sound while speech is active.
+        ducks.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ on: true, ducked: 0, lease_s: 3 }),
           { status: 200, headers: { "Content-Type": "application/json" } });
       }
       bodies.push(JSON.parse(String(init?.body)));
@@ -149,6 +156,9 @@ describe("the wiring is pinned", () => {
       speech.controller.event({ kind: "text", thread_id: T, data: { text: "Hello there, friend." } });
       for (let i = 0; i < 20 && !bodies.length; i++) await new Promise((r) => setTimeout(r, 0));
       expect(bodies[0]).toEqual({ text: "Hello there, friend.", voice: "bm_test", local_only: true });
+      // Speech going active takes the Browser-duck lease; nothing else is ever put in that body.
+      for (let i = 0; i < 20 && !ducks.length; i++) await new Promise((r) => setTimeout(r, 0));
+      expect(ducks[0]).toEqual({ on: true });
     } finally {
       speech.dispose();
       vi.unstubAllGlobals();

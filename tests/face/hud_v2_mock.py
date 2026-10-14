@@ -658,6 +658,9 @@ class MockDaemon:
         self._sse_closed = False
         self.calls: list[tuple[str, str, dict]] = []
         self.say_fail = False        # /say answers 503 (the local voice is down)
+        self.duck_log: list[tuple[float, bool]] = []   # V15: every /speech/duck request, with its time
+        self.duck_until = 0.0                          # V15: the lease the daemon would hold
+        self.duck_lease_s = 3.0
         self.speech_threads: dict[str, dict] = {}   # V7: thread id -> {voice, muted}, as the daemon keeps them
         self.ms_per_char = 12        # /say's tone length per character of text
         self.httpd: ThreadingHTTPServer | None = None
@@ -1155,6 +1158,14 @@ class MockDaemon:
                     if entry != before:
                         mock.emit("thread_voice", record)
                     return self._json(record)
+                if path == "/speech/duck":
+                    # V15: the real route's contract -- one boolean, nothing else -- and the
+                    # daemon's lease: `on` holds the duck for `lease_s` from now, `off` ends it.
+                    if not isinstance(body, dict) or set(body) != {"on"} or not isinstance(body["on"], bool):
+                        return self._err(400, "bad fields")
+                    mock.duck_log.append((time.monotonic(), body["on"]))
+                    mock.duck_until = time.monotonic() + mock.duck_lease_s if body["on"] else 0.0
+                    return self._json({"on": body["on"], "ducked": 0, "lease_s": mock.duck_lease_s})
                 if path == "/say":
                     # V6: the real route's contract -- known keys only, a voice
                     # from the catalog, `local_only` a boolean -- answering a
@@ -1760,6 +1771,10 @@ class MockDaemon:
 
     def sent(self, method: str, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == method and p == path]
+
+    def ducking(self) -> bool:
+        """Would the daemon hold the Remote Browser's sound down right now?"""
+        return time.monotonic() < self.duck_until
 
     def saw(self, method: str, path: str) -> bool:
         return any(m == method and p == path for m, p, _ in self.calls)

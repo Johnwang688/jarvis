@@ -8,6 +8,7 @@ import { SpeechController } from "./controller";
 import { WebAudioPlayer } from "./player";
 import type { Clock } from "./queue";
 import { SAY_LOCAL_ONLY } from "./policy";
+import { DuckLease } from "./duck";
 import { SpeakerGate, bindFocus, browserLocks } from "./speaker";
 import { ThreadVoices } from "./voices";
 
@@ -30,6 +31,25 @@ export function saveReadAloud(on: boolean, storage?: Pick<Storage, "setItem">): 
   }
 }
 
+const DUCK_KEY = "jarvis.duckBrowser";
+
+/** "Lower Browser sound while Jarvis speaks" (V15): a per-window convenience in localStorage, default on. */
+export function loadDuckBrowser(storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    return (storage ?? window.localStorage).getItem(DUCK_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function saveDuckBrowser(on: boolean, storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? window.localStorage).setItem(DUCK_KEY, on ? "on" : "off");
+  } catch {
+    /* a window with storage blocked still works, it just forgets */
+  }
+}
+
 const realClock: Clock = {
   now: () => Date.now(),
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
@@ -42,6 +62,8 @@ export interface Speech {
   player: WebAudioPlayer;
   /** Each chat's voice and mute (V7), kept by the daemon. */
   voices: ThreadVoices;
+  /** Holds the daemon's short lease that lowers the Remote Browser's sound while speech is active (V15). */
+  duck: DuckLease;
   dispose(): void;
 }
 
@@ -62,8 +84,16 @@ export function createSpeech(): Speech {
   void voices.load();
   controller.setEnabled(loadReadAloud());
   const unbind = bindFocus(gate, window, () => document.hasFocus());
+  const duck = new DuckLease({ send: (on, keepalive) => api.speechDuck(on, keepalive), clock: realClock }, loadDuckBrowser());
+  const unduck = controller.subscribe(() => duck.setSpeaking(controller.view().active));
+  // A window that is going away ends its lease at once; the daemon's expiry covers a crash.
+  const onHide = () => duck.release();
+  window.addEventListener("pagehide", onHide);
   return {
-    controller, gate, player, voices,
-    dispose: () => { unbind(); controller.dispose(); gate.dispose(); player.dispose(); },
+    controller, gate, player, voices, duck,
+    dispose: () => {
+      window.removeEventListener("pagehide", onHide);
+      unduck(); duck.dispose(); unbind(); controller.dispose(); gate.dispose(); player.dispose();
+    },
   };
 }
