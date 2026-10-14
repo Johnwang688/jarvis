@@ -18,7 +18,8 @@ function mk(opts: { muted?: () => boolean; suppressed?: () => boolean } = {}) {
       onLevel: () => {},
       onListening: (source, tag) => { notes.push("listening"); listens.push({ source, tag }); },
       onIdle: (n) => notes.push(n || "idle"),
-      onUtterance: (_wav, ms, source, token) => { sent.push({ ms, source }); tokens.push(token); },
+      onChunk: () => {},
+      onUtteranceEnd: (e) => { if (e.chunks && !e.truncated) { sent.push({ ms: e.ms, source: e.source }); tokens.push(e.continuation); } },
     },
     () => clock,
   );

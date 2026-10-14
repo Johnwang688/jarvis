@@ -13,7 +13,9 @@ export const PREROLL_MS = 800; // rewound from before speech was detected
 export const ONSET_MS = 60; // sustained speech this long opens an utterance
 export const HANGOVER_MS = 1500; // silence this long closes one
 export const MIN_UTTER_MS = 350; // shorter is a cough, not a turn
-export const MAX_UTTER_MS = 30000; // a hard stop, never a normal ending
+// V4: a hard stop for an utterance nobody claimed (room speech that never pauses).
+// A claimed one is uncapped: the recorder cuts it into chunks (recorder.ts).
+export const MAX_UTTER_MS = 30000;
 export const FOLLOWUP_MS = 9000; // speak again after he answers, no wake word
 // V3: speech resuming this soon after a message ended continues it, no wake
 // word (plan §3.2). Counted in samples, like everything the detector decides.
@@ -75,6 +77,10 @@ export class Vad {
   open = false;
   openedAt = 0;
   peak = 0;
+  /** The last frame was above the threshold (what the recorder reads for its pauses). */
+  loud = false;
+  /** Set by the caller while the utterance is claimed: it is then never closed by MAX_UTTER_MS. */
+  uncapped = false;
 
   reset() {
     this.floor = 0.02;
@@ -86,6 +92,8 @@ export class Vad {
     this.open = false;
     this.openedAt = 0;
     this.peak = 0;
+    this.loud = false;
+    this.uncapped = false;
   }
 
   /**
@@ -106,6 +114,7 @@ export class Vad {
     this.thresh = Math.max(this.floor * 3.0, 0.006);
 
     const loud = rms > this.thresh;
+    this.loud = loud;
     if (loud) {
       this.run += n;
       this.quiet = 0;
@@ -134,7 +143,7 @@ export class Vad {
     }
 
     this.peak = Math.max(this.peak, rms);
-    if (written - this.openedAt >= msToSamples(MAX_UTTER_MS)) {
+    if (!this.uncapped && written - this.openedAt >= msToSamples(MAX_UTTER_MS)) {
       this.open = false;
       return "cap";
     }

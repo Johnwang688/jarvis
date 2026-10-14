@@ -1481,6 +1481,188 @@ not interrupt; and `rv_stt_lands_selected`, which still described the pre-V2
 W-6 behaviour of sending to a chat selected during STT).
 Not claimed: a physical-microphone run, the 2.5 s pause, or a live deployment.
 
+## 2026-10-13: V4 AudioWorklet, uncapped recorder, chunked STT
+
+Plan decisions V-1 and V-11, §3.1 and §3.5. Stacked on V2/V3; builds the seam
+V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on.
+
+- **Microphone.** `lib/micInput.ts` opens an `AudioWorklet` (`lib/micWorklet.ts`,
+  bundled by Vite as its own same-origin module via `?worker&url`, so the CSP's
+  `script-src 'self'` covers it; no CDN). All the logic is `MicFramer`
+  (`lib/resample.ts`): render quanta at the device rate -> **windowed-sinc**
+  resample (Kaiser beta 8.6, 85 % of the output Nyquist, 3 dB down at 6.5 kHz, 9 dB at 7 kHz,
+  80+ dB beyond 8.5 kHz,
+  zero group delay, position counted rather than accumulated; since the review: 85 % of the
+  output Nyquist, 14 lobes) -> mono ->
+  **512-sample frames at 16 kHz** posted to the main thread as transferred
+  `Float32Array`s. They queue there if the main thread stalls instead of being
+  dropped, which `ScriptProcessorNode` could not promise. The old boxcar
+  average let a 12 kHz tone through 30 dB down; the new one is 80+ dB down at 8.5 kHz,
+  the tone that would alias to 7.5 kHz (the first cut, at 90 % and 10 lobes, measured only
+  -29 dB there, which the review caught; `resample.test.ts` pins 8.5 and 9 kHz at -60 dB).
+- **Fallback, visibly.** No `audioWorklet` (insecure origin, old browser), no
+  `AudioWorkletNode`, a module that fails to load, or a node that cannot be built:
+  the *same* resampler runs behind a `ScriptProcessorNode`. `VoiceDiagnostics.path`
+  / `pathNote` name the path (Settings -> Voice, `voice-capture-path`) and the
+  window error line says "The microphone is using the older capture path: <reason>".
+  The reason never contains a URL or device name. Neither path available = the
+  existing "microphone unavailable".
+- **Seam for V5/V12.** `MicInput.addFrameListener(fn)` (also `__hud.mic.listen`)
+  gets every frame after the capture; V5's VAD worker posts from there and the
+  worklet needs no change. Per-utterance audio is `Capture.hooks.onChunk(chunk)`:
+  `chunk.samples` is the chunk's 16 kHz PCM (do not mutate or keep it),
+  `chunk.index`, `chunk.startMs`, `chunk.overlapMs`, `chunk.source`. V12 embeds the
+  first <= 3 s of chunk 0 there and can refuse the whole message before any upload
+  by not forwarding it. `vad.loud` is the per-frame speech flag the recorder reads;
+  V5 supplies it from its probability.
+- **`UtteranceRecorder` (`lib/recorder.ts`), no cap.** The 40 s ring is now only
+  the pre-roll. A claim (follow-up, wake, continuation, talk key) starts a
+  recorder with the ring's audio from before the speech, then every frame until
+  the message ends. `vad.uncapped` is set while a claim is live, so `MAX_UTTER_MS`
+  (30 s) now only closes an utterance **nobody claimed** (room speech that never
+  pauses). The talk key has no limit and no longer loses its start past 40 s.
+  Ceiling: **15 minutes** (`UTTERANCE_LIMIT_MS`), after which the message goes as it
+  stands and the error line says so (`Capture.hooks.onLimit`), never silently.
+- **Chunks.** Memory is bounded by the chunk, not the message: the recorder holds
+  at most one chunk (`CHUNK_HARD_MS` 25 s plus a frame). A chunk is cut at a pause
+  where there is one: once it is `CHUNK_SOFT_MS` (8 s) long, the first quiet run of
+  `CHUNK_GAP_MS` (700 ms); past `CHUNK_LATE_MS` (18 s), a quiet run of 300 ms. Such a
+  cut loses nothing, so the next chunk has overlap 0. Failing that, a hard cut at
+  25 s in speech, and the next chunk repeats the last `CHUNK_OVERLAP_MS` (500 ms).
+  (Plan §3.5's single "700 ms segment gap" is V5's timer; here the gap is read
+  off the energy detector's per-frame flag, and the constants are exported for V5.)
+  A final chunk with no speech in it is not sent unless it is the first (a held
+  talk key is the owner's say-so). `end(trim)` drops the silence that proved the
+  message ended, never into the overlap.
+- **Capture contract changed.** `CaptureHooks.onUtterance` is gone. `onListening(source,
+  tag, utterance)` names the message; `onChunk(chunk)` for each chunk; and
+  `onUtteranceEnd({utterance, source, ms, chunks, continuation, truncated})`
+  **exactly once** for every `onListening`, after the last chunk (also when nothing
+  was uploaded: chunks 0). The continuation window / chain cap (V3) arm at the
+  message's end as before, and the token rides on `onUtteranceEnd`.
+- **A recording stops uploading the moment the detector may not listen.**
+  The mic going OFF, a card, a picker, Settings or a crash end the recording at
+  once: what already left stays (it was captured while allowed), what is held is
+  discarded and reported as that `DropReason` (`muted`, `suppressed:*`) with
+  `truncated: true`; no continuation is armed. A **held talk key** carries on
+  through `suppressed:speaking` and `suppressed:no_chat` (barge-in, V7: it pauses
+  speech and records over the tail), but is stopped by the five above. This is
+  stricter than before for a card appearing while the key is held (the old
+  pipeline let the held key finish and upload). While the key is held the detector
+  neither claims a second utterance beside it nor ends it at a pause, and a wake
+  hit during it is ignored. A talk key pressed over a hands-free recording carries
+  that recording on as `ptt`. A tap < 350 ms held is `too_short` as before.
+  The unmute clamp (`micFloorSample`) now limits where the pre-roll *starts*;
+  `captureChunks.test.ts` proves no audio from before it is in any chunk.
+- **STT groups (`lib/stt.ts`).** `SttAssembler` keeps every V2 rule per clip
+  (deadline `max(15 s, 2 x clip)`, one automatic retry, kept audio, Retry,
+  `seq`, caps) and adds a *group*: `beginGroup`, `submit(..., {group, overlapMs})`,
+  `closeGroup`, `whenGroupSettled`. A group is one diagnostics row (its length is the
+  audio, overlap once), one `meta`, one placement. Its text is placed once, when the
+  message has ended and no chunk is in flight: texts in order, the words an
+  overlap repeats said once (`lib/joinChunks.ts`: longest run of words ending one
+  and beginning the next, <= 8 words, exact match, with a fragment of >= 4 letters
+  allowed only at the two edges where a cut can fall inside a word; applied only
+  where the recorder overlapped, so "very | very" across a cut at a pause is kept).
+  **At most two uploads in flight** (`STT_MAX_IN_FLIGHT`, passed by App; the class
+  itself is unbounded unless told), the rest in `seq` order; a chunk that waited its
+  turn is re-judged by `canUpload` when it starts (a card or OFF that came up
+  meanwhile makes it `failed`, "not sent: dictation is paused", kept, never
+  uploaded). The daemon is told `utterance_id` = the first chunk's id (= `seq` for an
+  unchunked clip, so V2's numbering is unchanged) and `seq` = the chunk's own.
+  - **A chunk's audio is released once its words are in**; a failed chunk keeps its
+    own for Retry. Otherwise a long message would hold every chunk until its end and
+    its length would become a memory bound (found by test: ten minutes tripped the
+    20-clip cap at the 21st chunk).
+  - **A failed chunk** does not hold the line: the others are placed together, in
+    order, marked `late` (so AUTO boxes them, never sends half a message). The failed
+    chunk shows `Couldn't transcribe 12.3 s (part 2 of 3 of a longer message)` in the
+    Status pane with Retry/Discard, and Play/Retry on the Settings row. Its retry
+    lands alone, `late` and `retried`, with the words its neighbours already said
+    taken off its head and tail. Discarding one chunk does not cancel the others.
+  - A chunk of silence in the middle is a normal blank answer; a message of only
+    silence is `empty_transcript` once. A chunk refused by the backlog caps marks
+    the message `late` and shows `STT BACKLOG`; the audio of that chunk is gone.
+  - `STT FAILED`, "TRANSCRIBING n" and the rest are as V2; "TRANSCRIBING" is not
+    written over LISTENING while the message is still being spoken.
+- **App.** `onUtterance` is replaced by `onChunk` (re-judges crash, OFF and a waiting
+  card before every chunk, as it judged the whole utterance; begins the group with
+  the first chunk) and `onUtteranceEnd` (closes the group, ends listening, resolves
+  the continuation token and a talk-key barge-in only when the *whole message's*
+  fate is known). What a message is for (chat, mode, a follow-up pane that is
+  gone) is fixed when it is claimed, not when it ends: a chat switch halfway
+  through a long dictation boxes it with "SPOKEN IN ANOTHER CHAT".
+
+Free checks: vitest 2351 tests / 145 files after the delta-review fixes (2347 after the first review fixes, 2315 before them, 2216 / 138 before V8 was merged; first-cut new: `resample.test.ts` 9,
+`joinChunks.test.ts` 11, `recorder.test.ts` 9, `captureChunks.test.ts` 30,
+`micInput.test.ts` 5, `stt.test.ts` +17 for groups; `capture.test.ts`,
+`captureDiagnostics.test.ts` and `speech/suppress.test.ts` adapted to the new
+hooks), `tsc` + `vite build`, and `tests/face/hud_v2_chunks_check.py` (the real
+worklet in real time, the fallbacks, 45 s PTT, 36 s hands-free, failed chunk,
+two in flight, OFF, card and card mid-message). Mutations that fail on purpose:
+restoring the 30 s cap on claimed utterances (3 tests), dropping the overlap
+dedupe (4), letting a card not stop a held key (2), not re-judging a queued chunk
+(2). Source restored byte for byte afterwards.
+
+Not done and not claimed: Silero/ML VAD, the 2.5 s pause and 700 ms/6 s timers
+(V5); speaker verification (V12); any physical-microphone, Windows-Chrome or
+live-daemon run. The 45 s and 36 s cases run as scripted frames through the real
+detector, recorder and assembler (and the HUD with a mock daemon); only a ~14 s
+dictation ran in real time through the worklet, so a 45 s *real-time* worklet run,
+the worklet's CPU in Chrome (V0 measured the VAD, not this) and whether Chrome on
+Windows delivers the worklet frames without gaps under load are unmeasured. A
+transcript appears when the message ends, not chunk by chunk. Joining by words is
+a heuristic: a hard cut in the middle of a word the model hears differently in
+the two chunks can leave a fragment (shorter than four letters) or, rarely, drop a
+word repeated on purpose exactly at a cut.
+
+**Review fixes (2026-10-14, the lead's Opus review of the first cut; the owner confirmed that
+a card or OFF cuts the recording):**
+- **H1, a cut-short message is late.** `closeGroup(gid, {late})`: App passes
+  `end.truncated || u.refused`, so a message cut by OFF, a card, a picker, Settings, a
+  crash or his own voice is placed `late` even though every chunk that left answered, and
+  AUTO boxes it (it used to be sent as if whole). `late` = a chunk failed **or** the message
+  was cut short.
+- **M1.** `onListening` is announced **before** the pre-roll is fed to the recorder: a long
+  pre-roll (27 s of room speech, then a wake word) cuts chunks while it is fed, and they
+  used to reach the consumer before it knew the message and were dropped silently.
+- **M2.** A tap on the talk key over a hands-free message is not "too short": the key
+  *adopts* the recording and release just finishes it. `claimSource` is reset after a key
+  ends, so the detector's later `unclaimed` row is no longer labelled `ptt`.
+- **M3, a stopgap until V12.** A message claimed by the follow-up window or as a
+  continuation (no wake word, no talk key) ends at **60 s** (`CLAIM_CAP_MS`), boxed (late), with the error line saying so (`onLimit(ms, claimCap)`). A wake claim and the
+  talk key keep the 15-minute ceiling; a key pressed over a hands-free message lifts the 60 s.
+- **M4.** `CaptureHooks.hardStop()` names a card, picker, Settings or crash on its own, so
+  `suppressed:speaking` / `no_chat` (reported first) cannot mask one: a held key over his voice
+  or a closed chat now stops when a card or Settings arrives, and the drop names the card.
+  App's `captureSuppression` lists the hard reasons first as well. `canUpload(explicit)` and
+  `onChunk` also refuse under a picker or Settings; the owner's own **Retry** (`explicit`) is
+  still allowed from Settings, which is where the Retry row lives.
+- **L1.** When the previous chunk heard only the start of a word ("transcrip") and the next
+  hears it whole, the fragment is dropped and the whole word kept (`overlapMerge`);
+  `MAX_OVERLAP_WORDS` is 4.
+- **L3.** A late message placed around a failed chunk carries `[…]` (`GAP_MARK`) where the
+  missing part belongs (first, middle or last); Retry's text still lands at the end.
+- **L4.** `onprocessorerror` hands the microphone to the ScriptProcessor and says so
+  (`onPathChange`); `addModule` times out after 8 s into the same fallback;
+  `Resampler.processShared` allocates nothing per call on the audio thread.
+- **L5.** `Capture.muteNow()` (App `setMode` OFF) ends a recording at once, not at the next
+  frame; `onUtteranceEnd` closes the group even if a status write throws; a pane left
+  saying LISTENING after a cut-short message now says TRANSCRIBING or nothing; the limit
+  messages say "Say Jarvis or hold the talk key" (speaking on would not be claimed).
+- **Soft cuts start the next chunk with 200 ms of digital silence** (`CHUNK_SOFT_OVERLAP_MS`),
+  so no first phoneme sits on a chunk edge; `chunk.repeats` is false for them, so the join does
+  not look for echoed words ("very | very" stays). (First tried as 200 ms of the quiet audio
+  before the cut; the delta review noted that "quiet" is only below the detector's threshold,
+  so a faint trailing word could be heard twice. Silence cannot echo, which is the safer pick.)
+- **The 60 s cap splits nothing (delta review).** A claim cut at the cap is announced
+  `truncated`, so it is placed late and boxed, and arms **no** continuation: a 91 s follow-up used
+  to be a 60 s piece sent and a 33 s continuation sent. A wake hit over a message the cap would
+  cut lifts the cap and makes it a wake claim, as the talk key does. The 15-minute ceiling still
+  sends as it stands.
+- **Gap marks once.** `[…]` is added only on a message's first placement; a retried chunk placed
+  alone adds none (chunks 2 and 4 failed, retry 2 gave "t2 […]" before).
+
 ## 2026-10-13: V13 local speech-to-text with a cloud-fallback switch
 
 Plan §3.5 and §4 V13; Q6 answered (build local Parakeet with a switchable cloud
