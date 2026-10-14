@@ -691,6 +691,8 @@ def delete_thread(daemon, thread_id: str) -> dict:
         _stage(stores.threads.path(thread.id).parent, staging / "threads" / thread.id)
         stores.threads._pending.pop(thread.id, None)
     trash = _to_trash(daemon, staging)
+    from . import speech_voices
+    speech_voices.forget(thread.id)      # its read-aloud voice entry goes with it
     daemon.bus.publish({"kind": "thread_deleted", "thread_id": thread.id,
                         "project_id": thread.project_id,
                         "data": {"thread_id": thread.id, "project_id": thread.project_id}})

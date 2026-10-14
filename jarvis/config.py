@@ -356,6 +356,15 @@ AVATAR_STATE_PATH = Path(
 # disturbing the owner's saved choice.
 AVATAR_ENV = os.environ.get("JARVIS_AVATAR", "")
 
+# Read-aloud (voice plan V7): each chat thread's own voice and mute, assigned by
+# the daemon so every HUD window agrees (jarvis/v2/speech_voices.py). Beside the
+# avatar pointer: machine-local state, not a field of `Thread`.
+SPEECH_VOICES_PATH = Path(
+    os.environ.get(
+        "JARVIS_SPEECH_VOICES", Path.home() / ".config" / "jarvis" / "speech.json"
+    )
+)
+
 # Custom Pocket TTS voices (clones and hybrids), one directory per voice —
 # see jarvis/pocket.py. Outside the repo like sessions: the store is the
 # owner's, bulk, and (for clones) audio of real people that does not belong
@@ -942,6 +951,12 @@ TIERS: dict[str, str] = {
     # because transcripts flow through here during compaction (owner's call,
     # 2026-07-30 — see CLAUDE.md "Decisions already made").
     "cheap": os.environ.get("JARVIS_CHEAP", "openai/gpt-oss-20b"),
+    # The line spoken aloud in place of a reply over 600 characters (V8, voice
+    # plan V-13). Haiku 5.5, the owner's choice; never Chinese-hosted (a
+    # reply is personal data), which jarvis/v2/speech_summary.py enforces on
+    # an override. Read straight from here, not through models.tier(): a
+    # one-shot summary does not follow the chat-model selection.
+    "speech_summary": os.environ.get("JARVIS_SPEECH_SUMMARY_MODEL") or "anthropic/claude-haiku-5.5",
 }
 
 SYSTEM_PROMPT = """You are Jarvis, a personal assistant agent running on the user's machine.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MORE_ON_SCREEN, ProseStream, SPOKEN_CAP_CHARS } from "./stream";
+import { ProseStream } from "./stream";
 
 const texts = (cs: { text: string }[]) => cs.map((c) => c.text);
 
@@ -80,12 +80,11 @@ describe("ProseStream", () => {
     expect(texts(s.settle("Fresh."))).toEqual(["Fresh."]);
   });
 
-  it("caps a very long reply with 'and more on screen'", () => {
+  it("has no cap of its own: a very long reply streams out whole (the controller decides, V8)", () => {
     const long = Array.from({ length: 60 }, (_, i) => `Sentence number ${i} is here and reasonably long.`).join(" ");
     const out = run(long, 50);
-    expect(out[out.length - 1]).toBe(MORE_ON_SCREEN);
-    expect(out.slice(0, -1).join(" ").length).toBeLessThanOrEqual(SPOKEN_CAP_CHARS + 60);
-    expect(out.filter((t) => t === MORE_ON_SCREEN)).toHaveLength(1);
+    expect(out).toHaveLength(60);
+    expect(out.join(" ")).toBe(long);
   });
 
   describe("a gap in the event stream", () => {

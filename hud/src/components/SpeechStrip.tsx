@@ -49,7 +49,7 @@ export function SpeechStrip(props: {
     return <div id="speechstrip" className="compact" data-testid="speech-strip" data-state={view.state}>{toggle}</div>;
   }
   const note = view.blocked ? "CLICK ANYWHERE TO ENABLE SOUND"
-    : view.state === "idle" ? `${view.failed} SKIPPED`
+    : view.state === "idle" ? `${view.failed} SKIPPED${props.label ? ` · ${props.label}` : ""}`
     : `${paused ? "PAUSED" : "SPEAKING"}${props.label ? ` · ${props.label}` : ""}${view.queued ? ` · ${view.queued} QUEUED` : ""}`
       + (view.failed ? ` · ${view.failed} SKIPPED` : "");
   return (

@@ -105,6 +105,10 @@ a model. Quota, title, cost and cache claims need evidence.
 The HUD uses **Graphite**: warm off-black/glacier-cyan, amber pending/red error,
 overriding the global palette. Preserve dimensions, input behavior and owner
 workspace/editor/Browser decisions. Driving uses owner switches.
+Owner HTTP Basic/Digest authentication uses the exact private tab socket only;
+credentials never enter tools, replay, status, logs or config. Navigation returns
+an exact auth-pending allocation until Chrome commits; see the current Browser
+note and HTTP-auth plan for bounded cleanup and restricted Sound restoration.
 
 ## Safety design (deliberate, do not loosen without asking)
 

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import source from "./controller.ts?raw";
 import { SpeechController } from "./controller";
-import { MIC_OFF_MUTES_SPEECH, onMicModeChange, speakingThreads } from "./policy";
+import { MIC_OFF_MUTES_SPEECH, onMicModeChange } from "./policy";
 import { FakeClock, FakeGate, FakePlayer, FakeSay } from "./testkit";
 
 let clock: FakeClock;
@@ -28,7 +28,7 @@ beforeEach(() => {
 });
 
 describe("reading a streamed reply", () => {
-  it("speaks the prose as it streams, in order, one chunk at a time", async () => {
+  it("speaks the prose in order, one chunk at a time", async () => {
     stream(REPLY);
     settle(REPLY);
     finish();
@@ -38,10 +38,15 @@ describe("reading a streamed reply", () => {
     expect(c.view().state).toBe("idle");
   });
 
-  it("starts speaking before the turn has finished", async () => {
+  it("holds a message until it closes, because its length decides how it is said (V8)", async () => {
     stream(REPLY.slice(0, REPLY.length - 20));
-    await clock.advance(500);
-    expect(player.started.length).toBeGreaterThan(0);
+    await clock.advance(5_000);
+    expect(player.started).toEqual([]);
+    expect(say.calls).toEqual([]);
+    stream(REPLY.slice(REPLY.length - 20));
+    finish();
+    await clock.advance(60_000);
+    expect(player.started.join(" ")).toBe(REPLY);
   });
 
   it("never speaks code, a diff or a diagnostic", async () => {
@@ -93,13 +98,6 @@ describe("who is read", () => {
     await clock.advance(5000);
     expect(player.started).toEqual([]);
     expect(say.calls).toEqual([]);
-  });
-
-  it("speakingThreads is the selected chat's thread in V6, none for a task view", () => {
-    const chats = { 1: { threadId: "a", compose: null }, 2: { threadId: "b", compose: null } } as never;
-    const pending = { 1: null, 2: null } as never;
-    expect([...speakingThreads(chats, pending, 2 as never)]).toEqual(["b"]);
-    expect([...speakingThreads(chats, pending, null)]).toEqual([]);
   });
 
   it("closing the pane stops the sound at once and drops what was queued", async () => {

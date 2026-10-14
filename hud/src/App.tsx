@@ -80,6 +80,7 @@ import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { ReadAloudSetting } from "./components/ReadAloud";
 import { createSpeech, saveReadAloud } from "./lib/speech";
+import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture } from "./lib/capture";
 import { SttAssembler, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
@@ -563,12 +564,20 @@ export default function App() {
   // opens when the speech goes idle, not at `turn_finished` (it would run out,
   // or hear him, mid-reply).
   const followUpAfterSpeech = useRef(false);
-  // The threads read now (lib/speech/policy `speakingThreads`): a thread that
-  // leaves the set stops speaking at once.
-  const speakerKey = [...speakingThreads(state.chats, pendingThread.current, state.selectedChat)].join(",");
+  // The threads read now (lib/speech/policy `speakingThreads`): every thread
+  // shown in any chat pane, hidden panes included, through the one queue. A
+  // thread that leaves the set (its pane closed or changed) stops speaking at
+  // once. A voice is given by the daemon only when a chat is first read
+  // (`voiceFor`), so chats that are merely open use none up.
+  const speakerKey = [...speakingThreads(view.ws, state.chats, pendingThread.current)].sort().join(",");
   useEffect(() => {
-    speech.controller.setSpeakers(new Set(speakerKey ? speakerKey.split(",") : []));
+    const threads = speakerKey ? speakerKey.split(",") : [];
+    speech.controller.setSpeakers(new Set(threads));
   }, [speech, speakerKey]);
+  const voicesVersion = useSyncExternalStore(
+    useCallback((cb: () => void) => speech.voices.subscribe(cb), [speech]), () => speech.voices.version());
+  // The chats the owner muted from a pane's chip: silent like a thread in no pane.
+  useEffect(() => { speech.controller.setMuted(speech.voices.muted()); }, [speech, voicesVersion]);
 
   // ---- capture ------------------------------------------------------------
 
@@ -1241,7 +1250,8 @@ export default function App() {
       const data = e.data || e;
       try { speech.controller.event(e); } catch { /* speech never breaks the stream */ }
       if (devservers.event(e)) return;
-      if (kind === "_connected") devservers.connect();
+      if (kind === "_connected") { devservers.connect(); void speech.voices.load(); }
+      if (kind === "thread_voice") speech.voices.apply(data);
       if (kind === "_disconnected") { devservers.disconnect(); return; }
       const at = live.current;
       // Per pane (lib/chats `routeEvent`). Mine: the panes showing the thread
@@ -2925,7 +2935,11 @@ export default function App() {
       voiceDiagnostics: () => voiceDiagnostics.snapshot(),
       // Jarvis's voice, read-only: the strip's view, the queue's live and past
       // items (text, thread, state), and whether this window holds the lock.
-      speech: () => ({ view: speech.controller.view(), ...speech.controller.items(), speaker: speech.gate.isSpeaker() }),
+      speech: () => ({
+        view: speech.controller.view(), ...speech.controller.items(), speaker: speech.gate.isSpeaker(),
+        voices: Object.fromEntries(PANE_NOS.map((n) => shownThread(live.current.chats[n], pendingThread.current[n]))
+          .filter((id): id is string => !!id).map((id) => [id, speech.voices.info(id)])),
+      }),
       mic: {
         feedMs: (ms: number, amp: number, frame?: number) => capture.feedMs(ms, amp, frame),
         wake: () => onWakeHit(),
@@ -3007,7 +3021,8 @@ export default function App() {
   // it): the selected chat's turn status, else a card's question, else MIC
   // MUTED, else the orb's state (lib/dictation `orbLine`). Folded, the orb is
   // a 36px dot with no line under it, so the selected chat's bar says it.
-  const speechThreadId = selected !== null ? shownThread(state.chats[selected], pendingThread.current[selected]) : null;
+  // The strip names the chat being read, which in several panes is not the selected one.
+  const speechThreadId = speechView.thread;
   const speechThread = speechThreadId ? state.threads.find((t) => t.id === speechThreadId) ?? null : null;
   const speechLabel = speechThread ? threadLabel(speechThread).text : "";
   const speaking = speechView.enabled && speechView.speaker;
@@ -3432,6 +3447,7 @@ export default function App() {
         return (
           <VexView
             pane={n}
+            drawn={info.drawn}
             projectId={pid}
             projectName={projectName(pid)}
             blocked={blocked}
@@ -3521,8 +3537,23 @@ export default function App() {
     const dirty = spec.view === "file" && !!dirtyPanes[n];
     const profileOf = profileProject(spec, n);
     const refusal = refused[n];
+    // A chat pane's voice chip (V7): the voice it reads in, skip and mute.
+    const readThread = spec.view === "chat" && info.drawn ? shownThread(state.chats[n], pendingThread.current[n]) : null;
     return (
       <>
+        {readThread ? (
+          <VoiceChip
+            pane={n}
+            info={speech.voices.info(readThread)}
+            pool={speech.voices.pool()}
+            speaking={speechView.state === "playing" && speechView.thread === readThread}
+            active={speech.controller.items().live.some((i) => i.thread === readThread)}
+            blocked={workBlocked}
+            onChoose={(voice) => void speech.voices.choose(readThread, voice)}
+            onSkip={() => speech.controller.skipThread(readThread)}
+            onMute={(muted) => void speech.voices.mute(readThread, muted)}
+          />
+        ) : null}
         {refusal && dirtyPanes[refusal.pane] ? (
           <span className="chip panepin warn" data-testid={`pane-${n}-refused`} role="status"
                 title="Switching that pane away would close its file and drop the edit">

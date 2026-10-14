@@ -2171,6 +2171,11 @@ def _thinking_box_cap_checks(page, mock, check, until):
         FORTY_LINES, MIN_LOG_PX, MIN_LOG_SHARE, SHARE, SINGLE as D_SINGLE, _box_parts, _fresh as d_fresh,
     )
     z = 1.6
+    # The pane header carries the chat's voice chip, whose width follows the voice's name. Which
+    # voice t1 has depends on which chats asked the daemon first earlier in this run (V8's
+    # hold-until-close moved that), and a long name wraps the header and takes the log's height:
+    # that is not what this check is about, so t1 reads in the pool's first voice.
+    mock.speech_threads["t1"] = {"voice": mock.speech_pool()[0], "muted": False}
     ws = json.loads(D_SINGLE)
     ws["panel"] = {"open": True, "height": 120}
     # Keep the min-log term tighter than 35% after removing the tool ticker.
@@ -2252,6 +2257,18 @@ def _eight_chats_checks(page, mock, check, until):
     check("the sidebar marks all eight open threads, each with its pane",
           marked == [str(n) for n in range(1, 9)], str(marked))
 
+    # Read-aloud (V7) reads every open chat, pane 7's included, and the detector is held off
+    # while anything is being read (until V9's self-voice gating), so a hands-free utterance
+    # in the selected pane 6 would be dropped as "speaking" for as long as pane 7's streamed
+    # words are read, plus the 300 ms hangover. This section tests where voice is PLACED,
+    # not that suppression: pane 7's chat is muted from its voice chip (here by the bus
+    # event the daemon publishes), and this window takes the speaker lock, as a focused
+    # window does, so the mute is what is being relied on. Suppression while another pane
+    # is read is checked on its own in hud_v2_speech_check.py.
+    page.evaluate("() => window.dispatchEvent(new Event('focus'))")
+    mock.speech_threads["e7"] = {"voice": "pocket:dad", "muted": True}
+    mock.emit("thread_voice", {"thread_id": "e7", "voice": "pocket:dad", "muted": True})
+    until(lambda: page.evaluate("window.__hud.speech().voices.e7?.muted === true"), timeout=3)
     stop = {n: page.locator(_pane(n, '[data-testid="stop"]')) for n in range(1, 9)}
     mock.emit("turn_started", {}, thread_id="e7")
     until(lambda: _chat(page, 7)["busy"], timeout=3)

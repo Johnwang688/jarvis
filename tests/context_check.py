@@ -46,7 +46,7 @@ def config_default_checks() -> None:
         source.write_text(Path(config.__file__).read_text())
         defaults = runpy.run_path(str(source))
         assert defaults["COMPACT_AT_TOKENS"] == 90_000, "compaction default must be 90k"
-        for tier in ("orchestrator", "subagent", "compaction", "review"):
+        for tier in ("orchestrator", "subagent", "compaction", "review", "speech_summary"):
             assert defaults["TIERS"][tier] == "anthropic/claude-haiku-5.5", tier
         for tier in ("worker", "cheap"):
             assert defaults["TIERS"][tier] == "openai/gpt-oss-20b", tier
@@ -62,6 +62,10 @@ def config_default_checks() -> None:
         assert overrides["TIERS"]["subagent"] == "test/child"
         assert overrides["TIERS"]["compaction"] == "test/summary"
         assert overrides["TIERS"]["review"] == "test/review"
+        os.environ["JARVIS_SPEECH_SUMMARY_MODEL"] = "test/speech"
+        assert runpy.run_path(str(source))["TIERS"]["speech_summary"] == "test/speech"
+        os.environ["JARVIS_SPEECH_SUMMARY_MODEL"] = ""
+        assert runpy.run_path(str(source))["TIERS"]["speech_summary"] == "anthropic/claude-haiku-5.5"
 
     assert context.ContextPolicy().compact_at_tokens == config.COMPACT_AT_TOKENS
     assert Agent(tool_names=["get_datetime"]).policy.compact_at_tokens == config.COMPACT_AT_TOKENS

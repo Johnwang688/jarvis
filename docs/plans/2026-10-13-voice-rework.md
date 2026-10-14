@@ -374,6 +374,13 @@ This is new HUD code (`lib/speech/*.ts`); synthesis stays `/say`.
 
 ### 3.8 Spoken summaries (V-4)
 
+> **Amended (2026-10-13, owner's answer to Q2):** summary only, with each
+> message held until it closes. The "verbatim stops after the sentence
+> crossing 400 characters ... covering the rest" rule below is superseded:
+> up to 600 characters a message is read as written once it closes; longer,
+> only the summary is said (the 400-character opening is the *failure*
+> fallback). See §7 Q2 and `docs/notes/voice-face.md` ("V8").
+
 - **Rule (open question 2).**
   - Prose ≤ **600 characters** (about 35–40 s at the 1.2× default,
     `config.py:224`) is read verbatim as it streams.
@@ -684,13 +691,19 @@ Chrome-for-Testing fallback or Playwright in WSL.
 
 ## 7. Open questions for the owner
 
-1. **"Over" collisions.** *Recommend:* keep "over" but require ≥ 500 ms of
-   silence after it (and a short pause before it, once KWS exists). Make the
-   list editable. It also sends in REVIEW.
-2. ~~Summary threshold.~~ **Answered (2026-10-13): summary only.** A
-   reply up to 600 characters is read verbatim. A longer one is replaced by
-   a short spoken summary (V8, Haiku 5.5 tier), with no verbatim lead-in. The
-   owner approved one paid V8 cost/latency probe, capped at $0.10.
+1. ~~"Over" collisions.~~ **Answered (2026-10-13):** as recommended. A
+   trailing "over" sends only when followed by >= 500 ms of silence (and a
+   short pause before it once KWS exists); "cancel" likewise discards. The
+   word list is editable, and it also sends in REVIEW.
+2. ~~Summary threshold.~~ **Answered (2026-10-13): summary only, and
+   hold-until-close ("wait, then speak").** A message is held until it
+   closes (a `text`, a tool call or the turn's end); then, if it is up to 600
+   characters, it is read verbatim, and if it is longer it is replaced by a
+   short spoken summary (V8, Haiku 5.5 tier), with no verbatim lead-in. This
+   supersedes §3.8's "read the opening to about 400 characters, then
+   summarise the rest" and V-3's speak-while-streaming for the per-message
+   decision. The owner approved one paid V8 cost/latency probe, capped at
+   $0.10.
 3. ~~Continuation in AUTO.~~ **Answered (2026-10-13):** as recommended. Send
    at the 2.5 s pause; continuations steer the running turn. "Over" still
    sends at once.
@@ -699,34 +712,43 @@ Chrome-for-Testing fallback or Playwright in WSL.
 5. ~~Follow-up target.~~ **Answered (2026-10-13):** as recommended. A reply
    right after a drawn pane spoke selects that pane and sends there;
    otherwise the selected chat (W-6).
-6. **Local STT.** *Recommend:* make local Parakeet the default if V0 shows
-   RTF < 0.3 and WER within 1 point of cloud, with cloud as a fallback you
-   can switch off.
-7. **Barge-in before enrollment.** *Recommend:* any non-self voice pauses
-   playback. If more than 3 false pauses per 10 minutes with the TV on,
-   only "Jarvis" or Ctrl+D pause it until you enroll.
-8. **"Jarvis stop."** *Recommend:* it stops speech and clears the queue,
-   never an agent turn.
+6. ~~Local STT.~~ **Answered (2026-10-13):** build local Parakeet with a
+   cloud-fallback switch; one paid cloud-vs-local WER comparison on
+   synthetic speech is approved, capped at $0.25; local becomes the default
+   only if its WER is within 1 point of cloud.
+7. ~~Barge-in before enrollment.~~ **Answered (2026-10-13): stricter than
+   recommended.** Before enrollment only "Jarvis" or the talk key (Ctrl+D)
+   pause playback; other voices do not.
+8. ~~"Jarvis stop."~~ **Answered (2026-10-13):** as recommended. It stops
+   speech and clears the queue, never an agent turn.
 9. ~~Buttons.~~ **Answered (2026-10-13):** a speech strip under the orb,
    plus a per-pane voice chip with skip and mute. Not the status column,
    which folds. (Strip in V6; the per-pane chip lands with V7.)
-10. **Commands under a card.** *Recommend:* playback commands only, through
-    local KWS, with nothing uploaded and no approval effect.
+10. ~~Commands under a card.~~ **Answered (2026-10-13):** as recommended.
+    Playback commands only (pause, resume, skip, stop), recognized locally,
+    nothing uploaded, no approval effect.
 11. ~~Mute coupling and cloud TTS.~~ **Answered (2026-10-13):** mic OFF no
     longer mutes Jarvis. Read-aloud never uses cloud TTS; a local failure
     skips the chunk with a mark.
-12. **Keep enrollment clips?** *Recommend:* yes, in the 0700 store, so a
-    model upgrade can re-derive the voiceprint without re-recording. Delete
-    removes all of it. (The store is not agent-protected; V-12.)
+12. ~~Keep enrollment clips?~~ **Answered (2026-10-13):** keep them in the
+    0700 local store so a model upgrade can re-derive the voiceprint;
+    Delete removes all of it.
 13. **Resume point.** *Recommend:* restart the interrupted sentence.
-14. **Browser sound.** *Recommend:* duck HUD-played Browser audio by about
-    −15 dB, and offer "hold speech while a tab plays sound" (off) for Direct
-    frames. Final answer in the Browser sound plan.
+14. ~~Browser sound.~~ **Answered (2026-10-13): duck Remote tabs through
+    WSLg.** Remote Browser audio plays through WSLg's PulseAudio, not the
+    HUD, so the daemon lowers the Remote browser's own sink-inputs (about
+    -15 dB) only while Jarvis speaks, under a short renewable HUD lease that
+    always restores on expiry, crash or disconnect. It never unmutes, never
+    touches other apps' streams, and does nothing for Direct frames. A
+    Settings switch, on by default. If a probe cannot identify the browser's
+    streams, fall back to "hold speech while a tab plays".
 15. ~~Which window speaks, and task views.~~ **Answered (2026-10-13):** the
     most recently focused window speaks. Task views stay silent.
-16. **KWS engine and placement.** *Recommend:* sherpa-onnx open-vocabulary
-    KWS in the window if V0 shows ≤ 15% of a core and acceptable misses;
-    otherwise on the daemon. Retire Chrome's cloud recognizer either way.
+16. ~~KWS engine and placement.~~ **Answered (2026-10-13):** local KWS
+    for the wake word "Jarvis" only (V0: about 90% synthetic recall);
+    commands are recognized from the short transcript after the wake word,
+    so their accuracy matches dictation. Retire Chrome's cloud recognizer.
+    V14 (RNNoise): build it as a setting, off by default.
 17. ~~How long Guest voice stays on.~~ **Answered (2026-10-13):** until you
     switch it off. It survives reloads and restarts, and is always labelled
     (V-14, §3.4.1).

@@ -9,6 +9,7 @@ import { WebAudioPlayer } from "./player";
 import type { Clock } from "./queue";
 import { SAY_LOCAL_ONLY } from "./policy";
 import { SpeakerGate, bindFocus, browserLocks } from "./speaker";
+import { ThreadVoices } from "./voices";
 
 const KEY = "jarvis.readAloud";
 
@@ -39,22 +40,31 @@ export interface Speech {
   controller: SpeechController;
   gate: SpeakerGate;
   player: WebAudioPlayer;
+  /** Each chat's voice and mute (V7), kept by the daemon. */
+  voices: ThreadVoices;
   dispose(): void;
 }
 
 export function createSpeech(): Speech {
   const gate = new SpeakerGate(browserLocks());
   const player = new WebAudioPlayer();
+  const voices = new ThreadVoices({
+    list: () => api.speechVoices(),
+    change: (thread, change) => api.speechVoice(thread, change),
+  });
   const controller = new SpeechController({
     say: (text, opts) => api.say(text, { voice: opts.voice, localOnly: SAY_LOCAL_ONLY, signal: opts.signal }),
+    summarize: (text, opts) => api.speechSummary(text, opts.thread, { signal: opts.signal }),
     player,
     clock: realClock,
     gate,
+    voiceFor: voices.voiceFor,
   });
+  void voices.load();
   controller.setEnabled(loadReadAloud());
   const unbind = bindFocus(gate, window, () => document.hasFocus());
   return {
-    controller, gate, player,
+    controller, gate, player, voices,
     dispose: () => { unbind(); controller.dispose(); gate.dispose(); player.dispose(); },
   };
 }
