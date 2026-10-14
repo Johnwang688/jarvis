@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+
+# BLAS threads would hide behind process-CPU numbers; probes pin them before numpy loads.
+for _v in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
 import re
 import resource
 import time
@@ -158,5 +162,26 @@ def emit(name: str, payload: dict) -> None:
     """Print a machine-readable result line and drop it in WORK/results/."""
     out = WORK / "results"
     out.mkdir(parents=True, exist_ok=True)
+    payload = {**payload, "_env": {"loadavg_at_finish": os.getloadavg(), "cpus": os.cpu_count(),
+                                   "date": time.strftime("%Y-%m-%d %H:%M:%S")}}
     (out / f"{name}.json").write_text(json.dumps(payload, indent=2, default=float))
     print(json.dumps(payload, indent=2, default=float))
+
+
+def parse_args(argv: list[str]) -> dict:
+    """Tiny flag parser: `--k=v`, `--k v` and bare `--flag` (value True)."""
+    out: dict = {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            if "=" in a:
+                k, v = a.split("=", 1)
+                out[k] = v
+            elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                out[a] = argv[i + 1]
+                i += 1
+            else:
+                out[a] = True
+        i += 1
+    return out

@@ -1,0 +1,106 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Jarvis V0: speaker echo probe</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  td, th { border: 1px solid #8884; padding: .3rem .6rem; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  button { font: inherit; padding: .5rem 1rem; }
+  pre { background: #8881; padding: .6rem; overflow: auto; }
+</style>
+<h1>Speaker echo probe (V0, manual)</h1>
+<p>Measures how much of a <b>synthetic Kokoro voice played from this page</b> leaks into the microphone with Chrome's
+echo cancellation off and on. Play it through your <b>speakers</b> at the volume you really use, sit where you really sit,
+and <b>stay silent</b> for the whole run (about 2 minutes). No microphone audio leaves this page: nothing is uploaded or
+saved; the numbers below are the only output. Run it in the same Chrome profile and the same audio device as the HUD.</p>
+<p><button id="go">Start</button> <span id="status"></span></p>
+<div id="dev"></div>
+<table id="t"><thead><tr><th>trial</th><th>AEC setting (readback)</th><th>noise floor dBFS</th><th>playback-time mic dBFS</th><th>echo above floor dB</th></tr></thead><tbody></tbody></table>
+<div id="summary"></div>
+<pre id="json"></pre>
+<script type="module">
+const STIM_URL = new URLSearchParams(location.search).get('stim') || '/stimulus.wav';
+const $ = (id) => document.getElementById(id);
+const db = (x) => 10 * Math.log10(x + 1e-12);
+
+const TRIALS = [
+  { name: 'A  AEC off, Web Audio out', aec: false, out: 'webaudio' },
+  { name: 'B  AEC on,  Web Audio out', aec: true, out: 'webaudio' },
+  { name: 'C  AEC off, audio-element out', aec: false, out: 'element' },
+  { name: 'D  AEC on,  audio-element out', aec: true, out: 'element' },
+];
+
+async function recorderModule(ctx) {
+  const src = `class R extends AudioWorkletProcessor {
+    process(inputs) { const x = inputs[0][0]; if (x) this.port.postMessage(x.slice()); return true; } }
+    registerProcessor('rec', R);`;
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+}
+
+async function trial(cfg, stimBuf, stimBlobUrl) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: cfg.aec, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+  const settings = stream.getAudioTracks()[0].getSettings();
+  const ctx = new AudioContext({ sampleRate: 48000 });
+  await recorderModule(ctx);
+  const node = new AudioWorkletNode(ctx, 'rec');
+  const chunks = [];
+  node.port.onmessage = (e) => chunks.push(e.data);
+  ctx.createMediaStreamSource(stream).connect(node);
+  await new Promise((r) => setTimeout(r, 3000));            // noise floor: nothing playing
+  const t0 = chunks.length;
+  let ended;
+  if (cfg.out === 'webaudio') {
+    const out = new AudioContext();                          // a second context: same page, default sink
+    const s = out.createBufferSource();
+    s.buffer = await out.decodeAudioData(stimBuf.slice(0));
+    s.connect(out.destination);
+    ended = new Promise((r) => { s.onended = r; });
+    s.start();
+  } else {
+    const a = new Audio(stimBlobUrl);
+    ended = new Promise((r) => { a.onended = r; });
+    await a.play();
+  }
+  await ended;
+  const t1 = chunks.length;
+  await new Promise((r) => setTimeout(r, 500));
+  stream.getTracks().forEach((t) => t.stop());
+  await ctx.close();
+  const power = (arr) => { let s = 0, n = 0; for (const c of arr) for (const v of c) { s += v * v; n++; } return s / Math.max(n, 1); };
+  const floor = power(chunks.slice(0, t0));
+  // skip the first second of playback (the canceller is still converging)
+  const skip = Math.floor(48000 / 128);
+  const play = power(chunks.slice(t0 + skip, t1));
+  return { name: cfg.name, aec: settings.echoCancellation, aecRequested: cfg.aec, floor_dbfs: db(floor), play_dbfs: db(play),
+           echo_above_floor_db: db(Math.max(play - floor, 1e-12)), device: settings.deviceId ? 'set' : 'default' };
+}
+
+$('go').onclick = async () => {
+  $('go').disabled = true;
+  try {
+    const stimBuf = await (await fetch(STIM_URL)).arrayBuffer();
+    const stimBlobUrl = URL.createObjectURL(new Blob([stimBuf], { type: 'audio/wav' }));
+    const res = [];
+    for (const cfg of TRIALS) {
+      $('status').textContent = `running ${cfg.name} ... keep quiet`;
+      const r = await trial(cfg, stimBuf, stimBlobUrl);
+      res.push(r);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r.name}</td><td>${r.aec}</td><td>${r.floor_dbfs.toFixed(1)}</td><td>${r.play_dbfs.toFixed(1)}</td><td>${r.echo_above_floor_db.toFixed(1)}</td>`;
+      $('t').tBodies[0].appendChild(tr);
+    }
+    const erle = (off, on) => (off.echo_above_floor_db - on.echo_above_floor_db);
+    const sum = { web_audio_ERLE_db: erle(res[0], res[1]), element_ERLE_db: erle(res[2], res[3]), trials: res,
+                  userAgent: navigator.userAgent, outputs: (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind !== 'videoinput').map((d) => `${d.kind}:${d.label || '(label hidden)'}`) };
+    $('summary').innerHTML = `<p><b>ERLE, same-page Web Audio:</b> ${sum.web_audio_ERLE_db.toFixed(1)} dB &nbsp; <b>ERLE, audio element:</b> ${sum.element_ERLE_db.toFixed(1)} dB</p>
+      <p>Read: ERLE (echo return loss enhancement) is how many dB lower the echo is with cancellation on. Under about 10 dB for Web Audio means
+      Chrome is not cancelling the HUD's own output and the reference-correlation gate (plan 3.4 step 2) is essential. Copy the JSON below into the V0 results note.</p>`;
+    $('json').textContent = JSON.stringify(sum, null, 2);
+    $('status').textContent = 'done';
+  } catch (e) {
+    $('status').textContent = 'failed: ' + e;
+  }
+};
+</script>

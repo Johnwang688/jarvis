@@ -27,9 +27,9 @@ import sys
 import threading
 import time
 
+import common  # noqa: F401,I001  (first: pins BLAS threads before numpy loads)
 import numpy as np
 
-import common
 import models
 
 PER_COUNT_DEFAULT = "1,4,8,24"
@@ -94,6 +94,10 @@ def worker(threads: int, limit: int, noisy: bool) -> dict:
         text, wall, cpu = decode(rec, audio[c["file"]])
         dur = len(audio[c["file"]]) / common.SR
         rows.append({"text": text, "ref": c["text"], "dur": dur, "wall": wall, "cpu": cpu})
+    mism = [{"ref": r["ref"], "hyp": r["text"]} for r in rows
+            if common.norm_words(r["ref"]) != common.norm_words(r["text"])]
+    out["load1_at_start"] = os.getloadavg()[0]
+    out["mismatch_examples"] = mism[:10]
     out["short"] = {
         "n": len(rows), "audio_s": sum(r["dur"] for r in rows),
         "rtf": common.summarize([r["wall"] / r["dur"] for r in rows]),
@@ -116,6 +120,7 @@ def worker(threads: int, limit: int, noisy: bool) -> dict:
     if noisy:
         out["noisy"] = noisy_wer(rec, picked, audio)
     out["peak_rss_mb"] = common.peak_rss_mb()
+    out["load1_at_end"] = os.getloadavg()[0]
     return out
 
 
@@ -133,6 +138,37 @@ def noisy_wer(rec, picked, audio) -> dict:
             hyps.append(text)
         res[cond] = common.wer(refs, hyps)
     return res
+
+
+def ns_wer(threads: int = 4) -> dict:
+    """STT WER on noisy vs RNNoise-denoised audio written by probe_browser.py (vadquality).
+
+    Answers "does noise suppression raise or lower the word error rate" for synthetic
+    degradations only. The WAVs are 12 dictation clips joined with 0.8 s gaps; we cut them
+    back apart by the known lengths (RNNoise preserves length) and decode clip by clip.
+    """
+    res = json.loads((common.WORK / "results" / "browser_cpu.json").read_text())["vad_quality"]
+    order = res["clip_order_for_stt"]
+    by_file = {c["file"]: c for c in common.load_manifest()}
+    lengths = [len(common.read_wav(common.FIXTURES / f)) for f in order]
+    gap = int(0.8 * common.SR)
+    rec, _ = load(threads)
+    out = {}
+    for cond in res["conditions"]:
+        if cond.endswith("_only") or "only" in cond:
+            continue
+        row = {}
+        for variant, fname in (("as_captured", f"{cond}.wav"), ("rnnoise", f"{cond}__rnnoise.wav")):
+            x = common.read_wav(common.WORK / "denoised" / fname)
+            pos, refs, hyps = 0, [], []
+            for f, n in zip(order, lengths, strict=True):
+                seg = x[pos: pos + n + gap // 2]
+                pos += n + gap
+                refs.append(by_file[f]["text"])
+                hyps.append(decode(rec, seg)[0])
+            row[variant] = common.wer(refs, hyps)
+        out[cond] = row
+    return out
 
 
 def contention() -> dict:
@@ -177,13 +213,16 @@ def contention() -> dict:
 
 
 def main(argv: list[str]) -> int:
-    if os.environ.get("JARVIS_VOICE_V0") != "1" and "--worker" not in argv:
+    if os.environ.get("JARVIS_VOICE_V0") != "1" and not any(a.startswith("--worker") for a in argv):
         print("skipped: set JARVIS_VOICE_V0=1 to run the V0 STT probe (needs fixtures and models)")
         return 0
-    arg = {a.split("=")[0]: (a.split("=", 1)[1] if "=" in a else True) for a in argv if a.startswith("--")}
+    arg = common.parse_args(argv)
     if "--worker" in arg:
         res = worker(int(arg["--worker"]), int(arg.get("--clips", 40)), "--noisy" in arg)
         print("RESULT " + json.dumps(res, default=float))
+        return 0
+    if "--ns" in arg:
+        common.emit("stt_noise_suppression", ns_wer(int(arg.get("--threads", 4))))
         return 0
     if "--contention" in arg:
         common.emit("stt_contention", contention())

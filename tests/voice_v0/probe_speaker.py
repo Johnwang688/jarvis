@@ -14,7 +14,7 @@ of 3 clips; test = cosine against the centroid; genuine = held-out clips of
 the enrolled voice, impostor = clips of every other voice. Conditions:
   clean_full   whole clips
   clean_3s     first 3 s only (the length /stt?verify would embed)
-  degraded_3s  first 3 s through Opus 24 kbit/s (what the HUD uploads) plus
+  degraded_3s  first 3 s through Opus 24 kbit/s (the codec the HUD uploads; Ogg container here) plus
                pink noise at 15 dB SNR
   overlap_3s   first 3 s with a second voice mixed in at 10 dB (a TV talking)
 """
@@ -27,9 +27,9 @@ import sys
 import tempfile
 import time
 
+import common  # noqa: F401,I001  (first: pins BLAS threads before numpy loads)
 import numpy as np
 
-import common
 import make_noisy
 import models
 
@@ -43,7 +43,7 @@ MODELS = {
 
 def opus_roundtrip(x: np.ndarray, kbps: int = 24) -> np.ndarray:
     with tempfile.TemporaryDirectory() as td:
-        src, enc, dec = f"{td}/a.wav", f"{td}/a.webm", f"{td}/b.wav"
+        src, enc, dec = f"{td}/a.wav", f"{td}/a.ogg", f"{td}/b.wav"
         common.write_wav(src, x)
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src, "-c:a", "libopus", "-b:a", f"{kbps}k", enc], check=True)
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", enc, "-ar", "16000", "-ac", "1", dec], check=True)
@@ -63,6 +63,17 @@ def embed(ex, x: np.ndarray) -> np.ndarray:
     s.input_finished()
     e = np.asarray(ex.compute(s), dtype=np.float64)
     return e / (np.linalg.norm(e) + 1e-12)
+
+
+def prep(x: np.ndarray, seed: int) -> np.ndarray:
+    """Trim Kokoro's digital-zero padding and lay a faint pink noise floor (-60 dBFS) under the clip.
+
+    Exact-zero frames are unlike any microphone, and some embedders (CAM++ here) score same-voice pairs
+    very differently with and without them, which would make the model comparison about padding.
+    """
+    idx = np.where(np.abs(x) > 0.003)[0]
+    x = x[idx[0]: idx[-1] + 1] if len(idx) else x
+    return (x + make_noisy.pink(len(x), seed=seed) * 10 ** (-60 / 20)).astype(np.float32)
 
 
 def conditions(clips, audio):
@@ -129,20 +140,22 @@ def score_condition(embs: np.ndarray, clips, enroll_idx_per_voice, voices, jarvi
     }
 
 
-def run_model(name: str, threads: int, clips, audio, conds, enroll_idx, voices):
+def run_model(name: str, threads: int, clips, audio, cond_audio, enroll_idx, voices):
     ex = extractor(name, threads)
     out = {"model": name, "file": MODELS[name]}
     embed(ex, audio[clips[0]["file"]][: 3 * common.SR])  # warm
-    for cname, fn in conds.items():
-        embs = np.stack([embed(ex, fn(i)) for i in range(len(clips))])
+    for cname, waves in cond_audio.items():
+        embs = np.stack([embed(ex, w) for w in waves])
         out[cname] = score_condition(embs, clips, enroll_idx, voices)
     return out
 
 
 def latency(name: str, threads: int, audio, clips) -> dict:
+    rss0 = common.cur_rss_mb()
     ex = extractor(name, threads)
-    xs = [audio[c["file"]][: 3 * common.SR] for c in clips[:60]]
-    xs = [x for x in xs if len(x) >= 3 * common.SR][:50]
+    # exactly 3 s of audio per call: sentences are 3-5 s, so join neighbours of one voice and cut
+    xs = [np.concatenate([audio[clips[(i * 11 + k) % len(clips)]["file"]] for k in range(3)])[: 3 * common.SR]
+          for i in range(50)]
     embed(ex, xs[0])
     times, cpus = [], []
     for x in xs:
@@ -151,14 +164,15 @@ def latency(name: str, threads: int, audio, clips) -> dict:
         times.append(c.wall * 1000)
         cpus.append(c.cpu * 1000)
     return {"model": name, "threads": threads, "audio_s": 3.0, "n": len(times),
-            "wall_ms": common.summarize(times), "cpu_ms": common.summarize(cpus), "rss_mb": common.cur_rss_mb()}
+            "wall_ms": common.summarize(times), "cpu_ms": common.summarize(cpus),
+            "rss_growth_mb_from_loading_this_extractor": common.cur_rss_mb() - rss0, "process_rss_mb": common.cur_rss_mb()}
 
 
 def main(argv: list[str]) -> int:
     if os.environ.get("JARVIS_VOICE_V0") != "1":
         print("skipped: set JARVIS_VOICE_V0=1 to run the V0 speaker probe (needs fixtures and models)")
         return 0
-    arg = {a.split("=")[0]: (a.split("=", 1)[1] if "=" in a else True) for a in argv if a.startswith("--")}
+    arg = common.parse_args(argv)
     threads = [int(t) for t in str(arg.get("--threads", "1,4")).split(",")]
     only = arg.get("--models")
     names = [m for m in MODELS if not only or m in str(only).split(",")]
@@ -166,17 +180,19 @@ def main(argv: list[str]) -> int:
     clips = [c for c in all_clips if c["engine"] == "kokoro"]
     pocket = [c for c in all_clips if c["engine"] == "pocket"]
     clips += pocket  # Pocket voices join as extra speakers (enrolled with sentences 0-2 too)
-    audio = {c["file"]: common.read_wav(common.FIXTURES / c["file"]) for c in clips}
+    audio = {c["file"]: prep(common.read_wav(common.FIXTURES / c["file"]), i) for i, c in enumerate(clips)}
     voices = sorted({c["voice"] for c in clips})
     enroll_idx = {v: [i for i, c in enumerate(clips) if c["voice"] == v and c["sentence"] in (0, 1, 2)] for v in voices}
     conds = conditions(clips, audio)
+    # waveforms are built once (Opus round trips are slow) and shared by every model
+    cond_audio = {cname: [fn(i) for i in range(len(clips))] for cname, fn in conds.items()}
     res = {"note": "SYNTHETIC speakers (Kokoro/Pocket voices); not owner-vs-TV EER",
            "speakers": len(voices), "kokoro_voices": len({c["voice"] for c in clips if c["engine"] == "kokoro"}),
            "pocket_voices": len({c["voice"] for c in clips if c["engine"] == "pocket"}), "clips": len(clips),
            "eer": [], "latency": []}
     for n in names:
         t0 = time.time()
-        res["eer"].append(run_model(n, 1, clips, audio, conds, enroll_idx, voices))
+        res["eer"].append(run_model(n, 1, clips, audio, cond_audio, enroll_idx, voices))
         print(f"{n}: eer done in {time.time() - t0:.0f}s", file=sys.stderr)
         for t in threads:
             res["latency"].append(latency(n, t, audio, clips))

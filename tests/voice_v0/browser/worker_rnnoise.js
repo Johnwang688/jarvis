@@ -4,6 +4,13 @@ import createRNNWasmModuleSync from '/rnnoise/rnnoise-sync.js';
 
 let m, state, inPtr, idx, busy = 0, frames = 0, frameMs = [];
 const F = 480;
+function b64(f32) {
+  const u8 = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
 
 async function init() {
   const t0 = performance.now();
@@ -36,7 +43,7 @@ self.onmessage = (e) => {
       const t0 = performance.now();
       for (let i = 0; i < n; i++) frame(s.subarray(i * F, (i + 1) * F), out, i * F, vad);
       self.postMessage({ id: d.id, frames, busy_ms: busy, wall_ms: performance.now() - t0, audio_s: (n * F) / 48000,
-                         frame_ms: Array.from(frameMs), out, vad: Float32Array.from(vad) });
+                         frame_ms: Array.from(frameMs), out_b64: b64(out), vad_b64: b64(Float32Array.from(vad)) });
     }
   } catch (err) { self.postMessage({ id: d.id, error: String(err.stack || err) }); }
 };

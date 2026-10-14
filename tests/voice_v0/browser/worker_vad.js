@@ -40,6 +40,13 @@ async function frame(x) {
   return p;
 }
 
+function b64(f32) {
+  const u8 = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
 let chain = Promise.resolve();
 self.onmessage = (e) => {
   const m = e.data;
@@ -56,7 +63,7 @@ self.onmessage = (e) => {
       for (let i = 0; i < n; i++) await frame(s.subarray(i * N, (i + 1) * N).slice());
       const wall = performance.now() - t0;
       self.postMessage({ id: m.id, frames, busy_ms: busy, wall_ms: wall, audio_s: (n * N) / 16000,
-                         frame_ms: Array.from(frameMs), probs: Float32Array.from(probs) });
+                         frame_ms: Array.from(frameMs), probs_b64: b64(Float32Array.from(probs)) });
     })().catch((err) => self.postMessage({ id: m.id, error: String(err.stack || err) }));
   }
 };

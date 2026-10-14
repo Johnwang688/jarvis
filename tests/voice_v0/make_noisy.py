@@ -7,9 +7,9 @@ television: it is NOT a recording of one.
 
 from __future__ import annotations
 
+import common  # noqa: F401,I001  (first: pins BLAS threads before numpy loads)
 import numpy as np
 
-import common
 
 
 def _rng(seed: int) -> np.random.Generator:

@@ -22,9 +22,9 @@ import json
 import os
 import sys
 
+import common  # noqa: F401,I001  (first: pins BLAS threads before numpy loads)
 import numpy as np
 
-import common
 import make_noisy
 import models
 

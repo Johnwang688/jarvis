@@ -20,9 +20,9 @@ import json
 import os
 import sys
 
+import common  # noqa: F401,I001  (first: pins BLAS threads before numpy loads)
 import numpy as np
 
-import common
 import models
 
 
@@ -59,7 +59,7 @@ def main(argv: list[str]) -> int:
     if os.environ.get("JARVIS_VOICE_V0") != "1":
         print("skipped: set JARVIS_VOICE_V0=1 to run the V0 Smart Turn probe (needs fixtures and models)")
         return 0
-    arg = {a.split("=")[0]: (a.split("=", 1)[1] if "=" in a else True) for a in argv if a.startswith("--")}
+    arg = common.parse_args(argv)
     items = json.loads((common.FIXTURES / "special" / "special.json").read_text())
     turn = [i for i in items if i["group"].startswith("turn_")]
     audio = {i["file"]: common.read_wav(common.FIXTURES / "special" / i["file"]) for i in turn}
@@ -67,17 +67,33 @@ def main(argv: list[str]) -> int:
     features, predict = make_predict(sess)
     res = {"model": "smart-turn-v3.2-cpu", "input_names": [i.name for i in sess.get_inputs()],
            "note": "SYNTHETIC Kokoro sentences vs. fragments; see module docstring", "behaviour": {}, "latency": []}
-    for silence in (0.2, 0.5, 1.0):
+    import make_noisy
+
+    def auc(pos, neg):  # P(complete scores above incomplete), ties half
+        pos, neg = np.asarray(pos), np.asarray(neg)
+        return float((np.sum(pos[:, None] > neg[None, :]) + 0.5 * np.sum(pos[:, None] == neg[None, :])) / (len(pos) * len(neg)))
+
+    # (label, trailing silence s, noise floor RMS in dBFS or None). Kokoro's silence is digital zero, which the
+    # model may read as padding, so the noise-floor variants add pink noise over the whole clip as a mic would.
+    for label, silence, floor in (("0.2s_digital_silence", 0.2, None), ("0.5s_digital_silence", 0.5, None),
+                                  ("1.0s_digital_silence", 1.0, None), ("0.5s_noise_floor_-55dBFS", 0.5, -55.0),
+                                  ("1.0s_noise_floor_-55dBFS", 1.0, -55.0)):
         pad = np.zeros(int(silence * common.SR), np.float32)
         rows = {"turn_complete": [], "turn_incomplete": []}
-        for i in turn:
-            rows[i["group"]].append(predict(np.concatenate([audio[i["file"]], pad])))
+        for k, i in enumerate(turn):
+            x = np.concatenate([audio[i["file"]], pad])
+            if floor is not None:
+                nz = make_noisy.pink(len(x), seed=k)
+                x = x + nz * 10 ** (floor / 20)
+            rows[i["group"]].append(predict(x.astype(np.float32)))
         comp, inc = np.array(rows["turn_complete"]), np.array(rows["turn_incomplete"])
-        acc = float((np.sum(comp > 0.5) + np.sum(inc <= 0.5)) / (len(comp) + len(inc)))
-        res["behaviour"][f"{silence}s_silence"] = {
+        best = max(((np.sum(comp > t) + np.sum(inc <= t)) / (len(comp) + len(inc)), t) for t in np.linspace(0.05, 0.995, 120))
+        res["behaviour"][label] = {
             "complete_p": common.summarize(list(comp)), "incomplete_p": common.summarize(list(inc)),
             "complete_recall@0.5": float(np.mean(comp > 0.5)), "incomplete_correct@0.5": float(np.mean(inc <= 0.5)),
-            "accuracy@0.5": acc, "n_complete": len(comp), "n_incomplete": len(inc),
+            "accuracy@0.5": float((np.sum(comp > 0.5) + np.sum(inc <= 0.5)) / (len(comp) + len(inc))),
+            "auc": auc(comp, inc), "best_threshold_accuracy": float(best[0]), "best_threshold": float(best[1]),
+            "n_complete": len(comp), "n_incomplete": len(inc),
         }
     # latency, split into feature extraction vs model run, for a typical 6 s window
     x = np.concatenate([audio[turn[0]["file"]], np.zeros(int(0.5 * common.SR), np.float32)])

@@ -12,7 +12,6 @@
 const WORKERS = {
   silero: ['/harness/worker_vad.js', 'module'],
   rnnoise: ['/harness/worker_rnnoise.js', 'module'],
-  kws: ['/harness/worker_kws.js', 'classic'],
   null: ['/harness/worker_null.js', 'module'],
 };
 
@@ -50,37 +49,48 @@ window.prepare = async function (spec) {
   return { id, init };
 };
 
-// Phase 2: run it. Python samples process CPU around this call.
-window.run = async function (id) {
+// Phase 2a: burst, as fast as the worker can go.
+window.burst = async function (id) {
   const { spec, worker, audio, init, errors } = jobs.get(id);
-  const out = { spec, init, errors };
-  if (spec.mode === 'burst') {
-    const copy = audio.slice();
-    out.result = await rpc(worker, { type: 'burst', samples: copy, spec }, [copy.buffer]);
-  } else {
-    const frame = spec.frame;
-    const intervalMs = (frame / spec.rate) * 1000;
-    const total = Math.floor((spec.seconds * 1000) / intervalMs);
-    const t0 = performance.now();
-    let late = 0;
-    let maxLate = 0;
-    for (let i = 0; i < total; i++) {
-      const due = t0 + i * intervalMs;
-      const wait = due - performance.now();
-      if (wait > 2) await new Promise((r) => setTimeout(r, wait - 1));
-      const lateBy = performance.now() - due;
-      if (lateBy > intervalMs) late++;
-      maxLate = Math.max(maxLate, lateBy);
-      const off = (i * frame) % (audio.length - frame);
-      const f = audio.slice(off, off + frame);
-      worker.postMessage({ type: 'frame', samples: f }, [f.buffer]);
-    }
-    out.cadence = { frames: total, interval_ms: intervalMs, late_frames: late, max_late_ms: maxLate,
-                    wall_ms: performance.now() - t0 };
-    out.result = await rpc(worker, { type: 'flush' });
-  }
+  const copy = audio.slice();
+  const result = await rpc(worker, { type: 'burst', samples: copy, spec }, [copy.buffer]);
   worker.terminate();
   jobs.delete(id);
-  return out;
+  return { spec, init, errors, result };
+};
+
+// Phase 2b: paced, in segments. Python samples process CPU between segments, so
+// JIT tier-up (a one-off) can be told apart from the steady state.
+window.pacedSegment = async function (id, seconds) {
+  const job = jobs.get(id);
+  const { spec, worker, audio } = job;
+  const frame = spec.frame;
+  const intervalMs = (frame / spec.rate) * 1000;
+  const total = Math.floor((seconds * 1000) / intervalMs);
+  job.next = job.next || 0;
+  const t0 = performance.now();
+  let late = 0;
+  let maxLate = 0;
+  for (let i = 0; i < total; i++) {
+    const due = t0 + i * intervalMs;
+    const wait = due - performance.now();
+    if (wait > 2) await new Promise((r) => setTimeout(r, wait - 1));
+    const lateBy = performance.now() - due;
+    if (lateBy > intervalMs) late++;
+    maxLate = Math.max(maxLate, lateBy);
+    const off = ((job.next++) * frame) % (audio.length - frame);
+    const f = audio.slice(off, off + frame);
+    worker.postMessage({ type: 'frame', samples: f }, [f.buffer]);
+  }
+  return { frames: total, interval_ms: intervalMs, late_frames: late, max_late_ms: maxLate,
+           wall_ms: performance.now() - t0 };
+};
+
+window.finish = async function (id) {
+  const { spec, worker, init, errors } = jobs.get(id);
+  const result = await rpc(worker, { type: 'flush' });
+  worker.terminate();
+  jobs.delete(id);
+  return { spec, init, errors, result };
 };
 window.harnessReady = true;
