@@ -1649,6 +1649,12 @@ def route(handler, daemon, parts, query):
         return hud_files(handler, parts)
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
         return pickers(handler, daemon, parts, query)
+    if parts[0] == "speech":
+        # Read-aloud's per-thread voices and mutes (V7): owner-only.
+        from . import speech_voices as _speech_voices
+        mounted = _speech_voices.route(handler, daemon, parts, query)
+        if mounted is not None:
+            return mounted
     if parts[0] == "terminals":
         # The owner's terminals (WP-C): owner-only, the HUD listener only,
         # and the attach socket also needs a single-use ticket.

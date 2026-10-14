@@ -7,7 +7,10 @@
 // to the rest of the window:
 //
 //   - Only the window holding the speech lock builds a queue (`speaker.ts`).
-//   - Only threads in `setSpeakers` are read (`policy.speakingThreads`).
+//   - Only threads in `setSpeakers` are read (`policy.speakingThreads`): every
+//     thread shown in any chat pane, hidden panes included, through the one
+//     queue and its floor rules (`floor.ts`), each in its own voice (`voiceFor`).
+//     A chat the owner muted (`setMuted`) is not read either.
 //   - A thread leaving that set stops at once; so does an owner send to it
 //     (a `user_message` event: the reply it was reading is stale) and an
 //     interrupted turn.
@@ -19,6 +22,7 @@
 // The controller has no timers of its own and touches no DOM: the clock,
 // player, synthesizer and speaker gate are injected.
 
+import { Floor } from "./floor";
 import { SpeechQueue, type Clock, type Player, type QueueView, type SpeechItem } from "./queue";
 import { ProseStream, type SpokenChunk } from "./stream";
 
@@ -41,8 +45,13 @@ export interface ControllerDeps {
   player: Player;
   clock: Clock;
   gate: SpeakerGateLike;
-  /** A named voice for a thread; null leaves the choice to the daemon (the avatar's). V7 supplies per-thread voices. */
-  voiceFor?: (thread: string) => string | null;
+  /**
+   * The voice for a thread: a named voice, or null to leave the choice to the
+   * daemon (the avatar's). Asked when a chunk is synthesized, not when it is
+   * queued, so a voice chosen from the chip applies to what has not been made
+   * yet, and a thread whose voice is still being assigned waits for it.
+   */
+  voiceFor?: (thread: string) => string | null | Promise<string | null>;
 }
 
 /** After the last chunk ends, speech still counts as active this long: the owner's own echo and the next chunk's lead-in. */
@@ -70,7 +79,10 @@ interface Open {
 export class SpeechController {
   private readonly queue: SpeechQueue;
   private open = new Map<string, Open>();
+  /** The next message number of each thread: it outlives `open`, so a key is never reused. */
+  private counters = new Map<string, number>();
   private speakers: ReadonlySet<string> = new Set();
+  private muted: ReadonlySet<string> = new Set();
   private on = true;
   private listeners = new Set<() => void>();
   private cached: SpeechView | null = null;
@@ -85,8 +97,15 @@ export class SpeechController {
     this.queue = new SpeechQueue({
       clock: deps.clock,
       player: deps.player,
-      synth: (item, signal) =>
-        deps.say(item.text, { voice: item.voice, signal }).then((bytes) => deps.player.decode(bytes)),
+      floor: new Floor(deps.clock),
+      synth: async (item, signal) => {
+        let voice = item.voice;
+        try {
+          const chosen = await deps.voiceFor?.(item.thread);
+          if (typeof chosen === "string") voice = chosen;
+        } catch { /* the daemon's own voice: still a voice */ }
+        return deps.player.decode(await deps.say(item.text, { voice, signal }));
+      },
       onChange: () => { this.settle(); this.notify(); },
     });
     this.wasSpeaker = deps.gate.isSpeaker();
@@ -166,21 +185,39 @@ export class SpeechController {
     this.notify();
   }
 
-  /** The threads to read now; any thread that left has its speech dropped. */
+  /** The threads to read now (every one shown in a chat pane); any thread that left has its speech dropped. */
   setSpeakers(threads: ReadonlySet<string>): void {
     this.speakers = threads;
-    const known = new Set<string>([...this.open.keys(), ...this.queue.items().map((i) => i.thread)]);
-    for (const thread of known) if (!threads.has(thread)) this.leave(thread);
+    this.prune();
     this.notify();
   }
 
+  /** The chats the owner muted: silent like a thread in no pane, and its speech goes at once. */
+  setMuted(threads: ReadonlySet<string>): void {
+    this.muted = threads;
+    this.prune();
+    this.notify();
+  }
+
+  private prune(): void {
+    const known = new Set<string>([...this.open.keys(), ...this.queue.items().map((i) => i.thread)]);
+    for (const thread of known) if (!this.speaks(thread)) this.leave(thread);
+  }
+
   private leave(thread: string): void {
+    this.endOpen(thread);
     this.open.delete(thread);
     this.queue.dropThread(thread, "thread_left");
   }
 
+  /** The message in progress for `thread` ends here (it will get no more chunks). */
+  private endOpen(thread: string): void {
+    const s = this.open.get(thread);
+    if (s) this.queue.endMessage(`${thread}:${s.n}`);
+  }
+
   private speaks(thread: string): boolean {
-    return this.on && this.deps.gate.isSpeaker() && this.speakers.has(thread);
+    return this.on && this.deps.gate.isSpeaker() && this.speakers.has(thread) && !this.muted.has(thread);
   }
 
   private gateChanged(): void {
@@ -236,8 +273,10 @@ export class SpeechController {
         break;
       case "turn_finished":
         this.finish(thread);
-        // Stop pressed: this turn's speech goes too.
+        // Stop pressed: this turn's speech goes too. Otherwise the last message
+        // is the reply, which a backlog never collapses.
         if (data.stop === "interrupted") this.queue.dropThread(thread, "stale");
+        else this.queue.turnEnded(thread);
         break;
       default:
         break;
@@ -248,12 +287,13 @@ export class SpeechController {
   messageSent(thread: string): void {
     const mid = this.open.get(thread)?.stream;
     if (mid?.open) mid.silence();   // a message in progress; a finished one has nothing left to silence
+    this.endOpen(thread);
     this.queue.dropThread(thread, "stale");
   }
 
   private slot(thread: string): Open {
     let s = this.open.get(thread);
-    if (!s) this.open.set(thread, (s = { stream: new ProseStream(), n: 0, seq: 0 }));
+    if (!s) this.open.set(thread, (s = { stream: new ProseStream(), n: this.counters.get(thread) ?? 0, seq: 0 }));
     return s;
   }
 
@@ -267,16 +307,22 @@ export class SpeechController {
   /** The message is over: the next one is a new key. */
   private advance(thread: string): void {
     const s = this.open.get(thread);
-    if (s) { s.n += 1; s.seq = 0; }
+    if (!s) return;
+    this.queue.endMessage(`${thread}:${s.n}`);
+    s.n += 1;
+    s.seq = 0;
+    this.counters.set(thread, s.n);
   }
 
   private emit(thread: string, chunks: SpokenChunk[]): void {
     const s = this.open.get(thread);
     if (!s) return;
+    const known = this.deps.voiceFor?.(thread);
+    const voice = typeof known === "string" ? known : null;
     for (const chunk of chunks) {
       this.queue.enqueue({
         thread, messageKey: `${thread}:${s.n}`, seq: s.seq++, text: chunk.text, kind: chunk.kind,
-        voice: this.deps.voiceFor?.(thread) ?? null,
+        voice: voice ?? null,
       });
     }
   }
@@ -319,7 +365,15 @@ export class SpeechController {
 
   /** The rest of the current message is not spoken. */
   skip(): void {
-    const skipped = this.queue.skip();
+    this.silenceIfOpen(this.queue.skip());
+  }
+
+  /** One chat's current message (else its next one) is not spoken: the voice chip's "skip this chat". */
+  skipThread(thread: string): void {
+    this.silenceIfOpen(this.queue.skipThread(thread));
+  }
+
+  private silenceIfOpen(skipped: { thread: string; messageKey: string } | null): void {
     if (!skipped) return;
     const s = this.open.get(skipped.thread);
     if (s?.stream.open && `${skipped.thread}:${s.n}` === skipped.messageKey) s.stream.silence();

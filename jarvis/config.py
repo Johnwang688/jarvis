@@ -356,6 +356,15 @@ AVATAR_STATE_PATH = Path(
 # disturbing the owner's saved choice.
 AVATAR_ENV = os.environ.get("JARVIS_AVATAR", "")
 
+# Read-aloud (voice plan V7): each chat thread's own voice and mute, assigned by
+# the daemon so every HUD window agrees (jarvis/v2/speech_voices.py). Beside the
+# avatar pointer: machine-local state, not a field of `Thread`.
+SPEECH_VOICES_PATH = Path(
+    os.environ.get(
+        "JARVIS_SPEECH_VOICES", Path.home() / ".config" / "jarvis" / "speech.json"
+    )
+)
+
 # Custom Pocket TTS voices (clones and hybrids), one directory per voice —
 # see jarvis/pocket.py. Outside the repo like sessions: the store is the
 # owner's, bulk, and (for clones) audio of real people that does not belong

@@ -269,6 +269,11 @@ export const api = {
   voices: () => req<{ voices: VoiceEntry[]; override?: string }>("/voices"),
   /** `""` clears the override. The key is `voice` (the daemon refuses any other). */
   setVoice: (name: string) => req<any>("/voice", json({ voice: name })),
+  /** Read-aloud's per-chat voices and mutes (V7): the daemon's map and the voices it hands out. */
+  speechVoices: () => req<{ threads: Record<string, { voice: string | null; muted: boolean }>; pool: string[] }>("/speech/voices"),
+  /** Assign (no more keys), choose (`voice`; "" is automatic again) or mute one chat's voice. */
+  speechVoice: (threadId: string, change: { voice?: string; muted?: boolean } = {}) =>
+    req<{ thread_id: string; voice: string | null; muted: boolean }>("/speech/voices", json({ thread_id: threadId, ...change })),
   /** The fast path's roster and its default (`models.describe()`). */
   models: () => req<RosterView>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),
