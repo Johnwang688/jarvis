@@ -98,13 +98,17 @@ export class SpeechController {
       clock: deps.clock,
       player: deps.player,
       floor: new Floor(deps.clock),
-      synth: async (item, signal) => {
-        let voice = item.voice;
-        try {
-          const chosen = await deps.voiceFor?.(item.thread);
-          if (typeof chosen === "string") voice = chosen;
-        } catch { /* the daemon's own voice: still a voice */ }
-        return deps.player.decode(await deps.say(item.text, { voice, signal }));
+      synth: (item, signal) => {
+        // The thread's voice is asked for now, so a voice chosen since the chunk
+        // was queued applies, and one still being assigned is waited for. A
+        // voice that is already known costs no extra turn of the event loop.
+        const speak = (voice: string | null) => deps.say(item.text, { voice, signal }).then((bytes) => deps.player.decode(bytes));
+        let asked: ReturnType<NonNullable<ControllerDeps["voiceFor"]>> | undefined;
+        try { asked = deps.voiceFor?.(item.thread); } catch { asked = undefined; }
+        if (asked && typeof asked === "object" && "then" in asked) {
+          return asked.then((v) => speak(typeof v === "string" ? v : item.voice), () => speak(item.voice));
+        }
+        return speak(typeof asked === "string" ? asked : item.voice);
       },
       onChange: () => { this.settle(); this.notify(); },
     });

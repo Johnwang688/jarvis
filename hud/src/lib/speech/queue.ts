@@ -397,6 +397,8 @@ export class SpeechQueue {
     if (this.current || this.paused) return;
     const head = this.order(this.live())[0];
     if (!head || head.state !== "ready") return;
+    // Another message holds the floor and has not yielded: this one waits (floor.ts).
+    if (this.deps.floor?.holds(head)) return;
     const slot = slotOf(head);
     let handle: PlayHandle;
     try {

@@ -126,6 +126,14 @@ export class Floor {
       || a.id - b.id);
   };
 
+  /**
+   * Is `item` kept from playing because another message holds the floor? A
+   * holder with nothing ready still holds it, until `settle` yields it.
+   */
+  holds(item: SpeechItem): boolean {
+    return this.holder !== null && item.messageKey !== this.holder;
+  }
+
   // ---- yielding ------------------------------------------------------------
 
   /**
