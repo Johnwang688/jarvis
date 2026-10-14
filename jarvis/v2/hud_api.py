@@ -1406,26 +1406,37 @@ def say(handler, body):
                   headers={"X-Speech-Ms": elapsed})
 
 
-def speech_summary(body):
+SPEECH_SUMMARY_BODY_MAX = 1024 * 1024
+
+
+def speech_summary(handler, daemon):
     """`POST /speech/summary`: the line spoken in place of a long reply (V8).
 
-    `{thread_id, text, spoken_prefix?}` -> `{summary}`. `text` is the reply's
-    prose after the HUD's speech filter (never code); `spoken_prefix` is what
-    was already read aloud, empty under the owner's "summary only" answer. The
-    model, scrubbing, deadline and bounds are `speech_summary.py`'s. A failure
-    is a sentence with no provider text in it; the HUD reads truncated prose.
+    `{thread_id, text}` -> `{summary}`. `text` is the reply's prose after the
+    HUD's speech filter (never code). It is a paid model call, so it is the
+    owner's (`owner_only`, before the body is read), the body is capped at
+    1 MiB, and `speech_summary.py` limits it to four at a time. The model,
+    fencing, scrubbing, deadline and bounds are that module's. A failure is a
+    sentence with no provider text in it; the HUD reads truncated prose.
     """
     from . import speech_summary as S
+    from .daemon import _object
+    from .projects import owner_only
+    owner_only(handler, daemon)
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        fail(400, "invalid body length")
+    if length > SPEECH_SUMMARY_BODY_MAX:
+        fail(413, "request body exceeds 1 MiB")
+    body = _object(handler._body(), ("thread_id", "text"), ("thread_id", "text"))
     for key in ("thread_id", "text"):
         if not isinstance(body.get(key), str):
             fail(400, f"{key} must be a string")
-    prefix = body.get("spoken_prefix", "")
-    if not isinstance(prefix, str):
-        fail(400, "spoken_prefix must be a string")
     if not body["thread_id"].strip() or len(body["thread_id"]) > 200:
         fail(400, "invalid thread_id")
     try:
-        result = S.summarize(body["text"], spoken_prefix=prefix)
+        result = S.summarize(body["text"])
     except S.SummaryError as exc:
         fail(exc.status, exc.message)
     return 200, {"summary": result.text}
@@ -1475,6 +1486,8 @@ def pickers(handler, daemon, parts, query):
             message = str(exc) if isinstance(exc, voice.STTUnavailable) else (
                 f"speech-to-text failed ({type(exc).__name__})")
             fail(502, message)     # logged as one warning line by _dispatch
+    if name == "speech/summary":
+        return speech_summary(handler, daemon)   # owner-only, and reads its own (capped) body
     body = handler._body()
     # The keys each control reads, and nothing else. A body carrying some
     # other key used to be read as "the key is absent", which for /model
@@ -1483,15 +1496,11 @@ def pickers(handler, daemon, parts, query):
     # undid itself (decisions A6). An unknown key is now a 400 that names it.
     keys = {"mute": ("muted",), "avatar": ("slug",), "voice": ("voice",), "model": ("model",),
             "models": ("add", "remove", "model", "effort"),
-            "say": ("text", "voice", "instructions", "local_only"),
-            "speech/summary": ("thread_id", "text", "spoken_prefix")}.get(name)
+            "say": ("text", "voice", "instructions", "local_only")}.get(name)
     if keys is not None:
-        _object(body, keys, ("thread_id", "text") if name == "speech/summary" else
-                () if name in ("models", "say") else keys)
+        _object(body, keys, () if name in ("models", "say") else keys)
     if name == "say":
         return say(handler, body)
-    if name == "speech/summary":
-        return speech_summary(body)
     if name == "mute":
         if not isinstance(body["muted"], bool):
             fail(400, "muted must be a boolean")

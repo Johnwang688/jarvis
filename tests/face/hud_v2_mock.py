@@ -1141,9 +1141,9 @@ class MockDaemon:
                     return
                 if path == "/speech/summary":
                     # V8: the real route's contract -- thread_id and text required,
-                    # spoken_prefix optional, nothing else -- answering
+                    # nothing else -- answering
                     # `summary_text` (or a 502 when `summary_fail`).
-                    unknown = sorted(set(body) - {"thread_id", "text", "spoken_prefix"})
+                    unknown = sorted(set(body) - {"thread_id", "text"})
                     if unknown:
                         return self._err(400, f"unknown fields ({len(unknown)})")
                     if not isinstance(body.get("thread_id"), str) or not isinstance(body.get("text"), str):
