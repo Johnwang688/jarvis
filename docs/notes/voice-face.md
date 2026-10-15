@@ -2247,11 +2247,19 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   expiry; AUTO cancel with a chunk held in flight and Undo; cancel does not recall a send and `NOTHING TO CANCEL`; a card
   in flight (verbatim, zero approval requests) and a card up (nothing uploaded); busy chat steers; the lists in
   Settings (refusals, bound, persistence); edited lists, the toggle, an empty list, hostile storage.
-- **Counts** (after merging V5 at 57c7de8, which carries main with V12 and V4). vitest 2633 tests / 162 files, `tsc` and
-  `vite build` clean. Browser checks on the merged build: `hud_v2_words_check` 84, `chunks` 65, `stt` 28, `steer` 46,
-  `vad` 96, all pass (`speech` 56 and `multichat` 343 passed on the pre-merge build and were not rerun). The `vad`
-  suite's "2.4 s pause continues" checks are load-sensitive: they failed at load 10-25 before the merge and passed at
-  load 4-7. The full `hud_v2_check` was not run.
+- **His own voice** (merge of main with V9, 01c2422). The self-voice gate keeps his frames from opening an utterance;
+  V10 adds the other half: if his voice was audible at any point while a recording was open (`verdict.active`, or already
+  audible when it began), the message reports `tailMs` 0, so no send or cancel word is read from it however much quiet
+  follows (his reply could be the last words of the transcript). A hands-free recording is truncated when he starts
+  speaking anyway; this covers the talk key, which carries on through his voice (barge-in). `captureWords.test.ts` pins it;
+  removing the `selfInRec` test fails 3 of its tests. The `CommandRouter` runs first and takes only whole "Jarvis ..."
+  utterances; the word steps run on what is left, and a cancelled message tells the barge-in it was dropped
+  (`bargeEnd("dropped")`) while a word-sent one reports `sent`.
+- **Counts** (after merging main at 01c2422). vitest 2837 tests / 168 files, `tsc` and `vite build` clean. Browser checks
+  on the merged build: `hud_v2_words_check` 84, `chunks` 65, `stt` 28, `steer` 46, `vad` 96, `barge` 115, `speech` 56, all
+  pass (`multichat` passed at 343 on the build before the V5 and main merges and was not rerun). The `vad` suite's
+  "2.4 s pause continues" checks are load-sensitive (they failed at load 10-25 before, passed at load 4-7). The full
+  `hud_v2_check` was not run.
 - **Mutations that fail on purpose** (source restored afterwards): dropping the quiet test (6 vitest tests);
   ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks); the ledger matching inside words (4 vitest tests); `UndoHold.take` without its expiry guard (1); the typing guard disabled (5 browser checks).
 - **Not done / not claimed.** A real person's voice, a physical microphone, and how Parakeet transcribes a spoken "over"
