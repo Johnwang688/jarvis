@@ -505,3 +505,37 @@ cases, all failing on `main`). The child tests fail on `main` with the
 identity mismatch. The two that pin unchanged behavior
 (unknown thread, the session's own request) pass on `main` as they should,
 so they were proven with mutants instead.
+
+## A file approval is judged on every version of its item (2026-10-15)
+
+Follow-up to #195's review. A `fileChange` item can change after it starts:
+`item/fileChange/patchUpdated` replaces its `changes`. Until now the session
+kept only the latest version (`s.items`) and a child only its latest
+(`child_items`). So a later, partial update could hide a destination an
+earlier version had reported, and an unreadable version was forgotten once a
+readable one followed.
+
+Now every stored `fileChange` item carries `_PATHS_SEEN`: the union of every
+path any version reported (`item/started`, each `patchUpdated`,
+`item/completed`) and the first reason any version could not be read
+(`_remember`, on the early path, in `_notification` and in `_note_child`).
+A file approval is judged on that union, and it is declined unasked if any
+version was unreadable; the latest version's kind checks still apply.
+
+`args["paths"]` is set from the union *after* the request's own fields are
+merged. A request carrying a `paths` field can no longer replace what layer
+1 judges: before this, such a field (an unknown field, so a widening) became
+the judged paths.
+
+Checks in `tests/v2/codex_provider_check.py`:
+- `test_file_approval_is_judged_on_every_version_of_its_item` (session, chat
+  and task);
+- `test_file_approval_before_the_turn_start_reply_sees_every_version` (the
+  recorded `patch_approval`, with the update and request ahead of the reply);
+- `test_child_file_approval_is_judged_on_every_version_of_its_item`.
+
+The "destination added by an update" cases pin `patchUpdated` on each path
+and pass on `main`; the union, sticky-unreadable and request-`paths` cases
+fail there. Six mutants are killed: `patchUpdated` ignored on the session's
+early path, on its later path and on the child's; latest version only; an
+unreadable version forgotten; the request's `paths` kept.

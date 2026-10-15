@@ -16,8 +16,10 @@ warning. What keeps a newer version from loosening the gate is narrower than
   different command from its item is declined, while a `writeStdin` or
   `approvalId` one (where a difference is expected) is a widening with both
   commands judged by layer 1 and shown;
-- a file approval is judged on every path its item's changes write, a
-  rename's destination (`kind.move_path`) included, and declined unasked,
+- a file approval is judged on every path its item's changes write, in
+  every version the item reported (`_remember`: `item/started` and each
+  `patchUpdated`), a rename's destination (`kind.move_path`) included, never
+  on a `paths` the request supplies, and declined unasked,
   in every profile, when its item was never seen, is not a `fileChange`, or
   names no file, or a change's path or kind cannot be read
   (`_change_paths`): the request itself names no paths (Codex 0.161 starts
@@ -293,6 +295,28 @@ def _change_paths(changes) -> tuple[list[str], str | None]:
             # destination (the schema has none): not guessed at.
             problem = problem or "a change's kind has an unknown field"
     return paths, problem
+
+
+# Every path a fileChange item has ever reported, by `item/started`, each
+# `item/fileChange/patchUpdated` and `item/completed`, and the first reason
+# any version could not be read: kept on the stored item under this key. A
+# later, partial update cannot hide an earlier destination from layer 1, and
+# an unreadable version is not forgotten when a readable one follows.
+_PATHS_SEEN = "_jarvis_paths_seen"
+
+
+def _remember(prev, item: dict) -> dict:
+    """`item` to store, carrying the union of its paths with `prev`'s (the
+    version stored before it, if any)."""
+    if item.get("type") != "fileChange":
+        return item
+    paths, problem = _change_paths(item.get("changes", []))
+    before = prev.get(_PATHS_SEEN) if isinstance(prev, dict) and prev.get("type") == "fileChange" else None
+    if before:
+        seen, seen_problem = before
+        paths = seen + [x for x in paths if x not in seen]
+        problem = seen_problem or problem
+    return {**item, _PATHS_SEEN: (paths, problem)}
 
 
 def _content(value) -> bool:
@@ -1045,7 +1069,7 @@ class CodexProvider:
                     if method in ("item/started", "item/fileChange/patchUpdated") and params.get("threadId") == s.thread_id:
                         item = params.get("item") or {"id": params["itemId"], "type": "fileChange", "changes": params.get("changes", [])}
                         if item.get("type") != "mcpToolCall":
-                            s.items[item["id"]] = item
+                            s.items[item["id"]] = _remember(s.items.get(item["id"]), item)
                     early.append(msg)
                     continue
                 if params.get("threadId") not in (None, s.thread_id):
@@ -1152,7 +1176,7 @@ class CodexProvider:
             if kind == "mcpToolCall":
                 yield from self._mcp_item(h, method, p, item)
                 return
-            s.items[item["id"]] = item
+            s.items[item["id"]] = _remember(s.items.get(item["id"]), item)
             if kind in ("commandExecution", "fileChange"):
                 name, args = self._tool(item)
                 if method == "item/started":
@@ -1372,12 +1396,13 @@ class CodexProvider:
         if (tid != s.thread_id and tid in s.children
                 and item.get("type") in ("commandExecution", "fileChange")
                 and isinstance(item.get("id"), str) and item["id"]):
-            s.child_items.pop(item["id"], None)
+            owner, prev = s.child_items.pop(item["id"], (None, None))
             if method == "item/completed":
                 return      # no approval follows a finished item
-            # Only what an approval is judged on is kept.
-            s.child_items[item["id"]] = (tid, {k: item[k] for k in ("id", "type", "command", "cwd", "changes")
-                                               if k in item})
+            # Only what an approval is judged on is kept, with every path any
+            # version of it reported (never another thread's).
+            kept = {k: item[k] for k in ("id", "type", "command", "cwd", "changes") if k in item}
+            s.child_items[item["id"]] = (tid, _remember(prev if owner == tid else None, kept))
             while len(s.child_items) > CHILD_ITEM_LIMIT:
                 s.child_items.pop(next(iter(s.child_items)))
 
@@ -1446,7 +1471,10 @@ class CodexProvider:
                 # to judge, so it is declined unasked in every profile
                 # (owner rule: unknown approvals fail closed). A command
                 # approval carries its own command and is judged on it.
+                # Judged on every path the item ever reported (`_remember`),
+                # and declined if any version of it could not be read.
                 paths, unreadable = _change_paths(item.get("changes", [])) if item else ([], None)
+                paths, unreadable = item.get(_PATHS_SEEN, (paths, unreadable)) if item else (paths, unreadable)
                 why = ("its item was not seen" if not item else unreadable
                        or (None if paths else "its item names no file"))
                 if why:
@@ -1458,6 +1486,10 @@ class CodexProvider:
             # Only non-null values: a `command: null` must not erase the item's
             # real command and leave the never-approvable rules judging "".
             args.update({k: v for k, v in p.items() if v is not None})
+            if not shell:
+                # What layer 1 judges and the card shows: every path the item
+                # ever reported — and never a `paths` the request supplied.
+                args["paths"] = list(paths)
             declined, also = None, []
             item_command = item.get("command") if isinstance(item.get("command"), str) else None
             if shell and (not isinstance(args.get("command"), str) or not args["command"].strip()):
