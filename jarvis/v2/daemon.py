@@ -209,6 +209,9 @@ class _Session:
     origin_tag: str | None = field(default=None, repr=False)
     desk: DeskState = field(default_factory=DeskState, repr=False)
     drive_turn: object = field(default=None, repr=False)
+    # Which session ran a native sub-agent (SV-1, subagents.py): when this
+    # one ends, so do its children's CLI, and the record says so.
+    subagent_key: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class Daemon:
@@ -324,6 +327,15 @@ class Daemon:
         # the session ends. Memory only: a restart forgets every one.
         from .callers import CallerTokens
         self.callers = CallerTokens()
+        # Native sub-agents (SV-1, subagents.py): their own record, never the
+        # thread's log; on the bus only ids, statuses and times.
+        from .subagents import SubagentRecords
+        def live_key(thread_id):
+            # Lock-free on purpose: called under the record's own lock, and a
+            # dict read is atomic.
+            session = self._sessions.get(thread_id)
+            return session.subagent_key if session is not None and not session.closing else None
+        self.subagents = SubagentRecords(stores, self.bus.publish, live_key)
         self.started_at = time.monotonic()
 
     def start(self) -> None:
@@ -805,6 +817,11 @@ class Daemon:
         except Exception as exc:
             self._switch_refused(session, want, exc)
             return
+        if session.thread.provider == ProviderName.CLAUDE:
+            # Claude switches by reconnecting: the old CLI, and every
+            # sub-agent it was running, is gone (SV-1).
+            self.subagents.end_session(session.thread, session.subagent_key,
+                                       "the session restarted for a model switch")
         with self._lock:
             session.applied = want
             session.applied_record = (session.thread.model, session.thread.effort)
@@ -1439,6 +1456,9 @@ class Daemon:
                 "decision": Decision(decision).value, "allowlisted": entry}
 
     def _record(self, session, event):
+        if event.kind in (EventKind.SUBAGENT, EventKind.SUBAGENT_EVENT):
+            self._record_subagent(session, event)
+            return
         # Scrub reads credential files: never do this while holding _lock.
         tool_label = None
         if event.kind == EventKind.TOOL_STARTED:
@@ -1537,6 +1557,22 @@ class Daemon:
                         or (event.kind == EventKind.ERROR and len(ledger._rows) != rows)):
                     self.bus.publish({"kind": "usage_updated", "data": {"provider": thread.provider.value}})
             self.bus.publish(record)
+
+    def _record_subagent(self, session, event):
+        """A native sub-agent's record (SV-1): its own file and a words-free
+        bus record, never the thread's log, the ledger or the turn's text.
+        Cleaned and labelled outside the lock (the scrub and a tool's label
+        may read credential files), as the parent's calls are."""
+        from .subagents import SubagentRecords
+        prepared = SubagentRecords.prepare(event, getattr(session.brief, "cwd", None))
+        with self._lock:
+            if session.retired:
+                return
+            if event.thread_id != session.thread.id:
+                raise ValueError("provider event belongs to another thread")
+            thread, turn_id, key = session.thread, session.turn_id, session.subagent_key
+        if prepared is not None:
+            self.subagents.record(thread, turn_id, key, prepared)
 
     def _finish(self, session, event):
         with self._lock:
@@ -1782,6 +1818,10 @@ class Daemon:
                 operation(session.handle)
             except Exception:
                 LOG.exception("Provider cleanup failed for %s", session.thread.id)
+        try:
+            self.subagents.end_session(session.thread, session.subagent_key)
+        except Exception:
+            LOG.warning("Cannot end the sub-agents of %s", session.thread.id, exc_info=True)
 
     def close_thread(self, thread_id):
         session = self._session(thread_id)

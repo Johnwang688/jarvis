@@ -78,6 +78,13 @@ class EventKind(str, Enum):
     USAGE = "usage"
     TURN_FINISHED = "turn_finished"
     ERROR = "error"
+    # A native sub-agent of the session (SV-1, 2026-10-15): Claude Code's
+    # Agent children. Kinds of their own, never the old kinds with a tag: a
+    # consumer that does not know them (Discord, the runner, titles, the
+    # ledger, the HUD's prose, voice) ignores them, so a child's words can
+    # never pass for the orchestrator's.
+    SUBAGENT = "subagent"                       # lifecycle
+    SUBAGENT_EVENT = "subagent_event"           # one thing a sub-agent said or did
 
 
 @dataclass
@@ -99,6 +106,17 @@ class Event:
     #     `cost_usd` was measured against, which the daemon saves on the thread)
     #   turn_finished: {"stop": "end"|"max_turns"|"interrupted"|"error"}
     #   error: {"message": str, "fatal": bool}
+    #   subagent: {"sid", "op": "started"|"progress"|"finished", "status":
+    #     "running"|"backgrounded"|"done"|"failed"|"stopped", "task_id",
+    #     "parent_sid", "depth", "background", "name", "kind", "last_tool",
+    #     "tokens", "tool_uses", "duration_ms", "stop_reason"} (keys present
+    #     when known). `sid` is "cl:<the spawning Agent call's id>". Never a
+    #     `usage`: a sub-agent's tokens ride here, outside the ledger.
+    #   subagent_event: {"sid", "event": {"kind", "data"}}, the inner kind one
+    #     of text, thinking, tool_started, tool_finished, reviewer_declined
+    #     (each with the data above) or result {"text", "status"}: the CLI's
+    #     closing summary. Never a delta.
+    #   approval_requested from a sub-agent's call also carries "subagent": sid.
 
 
 class Decision(str, Enum):
@@ -168,6 +186,9 @@ class UserMessage:
 # Codex also passes `widening="SANDBOX WIDENING: …"` (keyword-only) for an
 # approval that would widen its sandbox; `permissions.build_permit` asks a human
 # for it every time, and a callback that does not take the keyword denies.
+# Claude passes `subagent="<label>"` (keyword-only, SV-1) for a call one of its
+# Agent children makes: it names the child on the card and decides nothing. It
+# is passed only to a callback that takes it, so the answer never depends on it.
 PermissionCallback = Callable[[str, dict, Brief], Decision]   # (tool_name, args, brief)
 
 

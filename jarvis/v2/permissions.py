@@ -807,13 +807,35 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
 # the callback
 
 
+# A native sub-agent's name on an approval card (SV-1): the provider cleans
+# it, and so does this, since it lands on an authorization surface. Only
+# these characters survive (anything else "_"), so it can neither draw the
+# card's own " · " parts nor close its ‹ ›; one space at a time; capped.
+SUBAGENT_LABEL_CAP = 40
+_SUBAGENT_UNSAFE = re.compile(r"[^A-Za-z0-9 _./-]+")
+_SUBAGENT_PROVIDERS = {"claude": "Claude", "codex": "Codex"}
+
+
+def subagent_origin(ctx: PermitContext, subagent: str) -> str:
+    """Who asks, when a native sub-agent does: "Claude sub-agent ‹name› (not
+    the orchestrator)", then the task's own attribution if there is one."""
+    name = " ".join(_SUBAGENT_UNSAFE.sub("_", " ".join(str(subagent).split())).split()).strip(" _")
+    if len(name) > SUBAGENT_LABEL_CAP:
+        name = name[:SUBAGENT_LABEL_CAP - 1].rstrip() + "…"
+    who = (f"{_SUBAGENT_PROVIDERS.get(ctx.provider, 'A')} sub-agent ‹{name or 'unnamed'}› "
+           "(not the orchestrator)")
+    task = ctx.origin()
+    return f"{who} in {task}" if task else who
+
+
 def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
     """The §6 callback for one thread. `asker` is a `PendingApprovals` or a
     `DenyAll`; its `human_backed` flag is what layer 4 turns on."""
 
     def permit(tool: str, args: dict, brief: Brief | None = None, *,
                widening: str | None = None, grants: Iterable[tuple[str, str]] = (),
-               also_commands: Iterable[str] = (), dangerous_tool: bool = False) -> Decision:
+               also_commands: Iterable[str] = (), dangerous_tool: bool = False,
+               subagent: str | None = None) -> Decision:
         """`widening` is set only by a provider whose approval would widen
         its own sandbox if accepted (Codex: extra permissions, network, a
         grant root, terminal input). Such a call is asked of a human every
@@ -832,8 +854,15 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         Codex chat called (decisions D-3: `gmail_send`). After layer 1 the
         owner is asked every time, whatever the profile, with no Always —
         never a standing yes, never the provider's reviewer — and strict
-        denies. Like `widening`, the model cannot reach it."""
+        denies. Like `widening`, the model cannot reach it.
+
+        `subagent` is set only by a provider whose native sub-agent made the
+        call (Claude, SV-1): its name, for the card's "requested by" line.
+        It decides nothing — every layer below reads exactly what it reads
+        without it, so a child is never answered more loosely (or more
+        strictly) than its orchestrator would be."""
         brief = brief if brief is not None else ctx.brief
+        who = subagent_origin(ctx, subagent) if subagent is not None else None
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
         command = _command_of(args) if tool in COMMAND_TOOLS else ""
@@ -897,7 +926,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             match = always_ask_match(tool, args, brief, ctx.project)
             reason = widening + (f" (also always-ask rule {match[0]})" if match else "")
             decision = _ask(asker, ctx, tool, args, command, reason, L_WIDENING,
-                            allowlistable=False, headline=widening)
+                            allowlistable=False, headline=widening, origin=who)
             return finish(decision, L_WIDENING, reason)
 
         # --- a dangerous Jarvis tool from a chat's jarvis-mcp: the owner ----
@@ -916,7 +945,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             reason = ("a dangerous Jarvis tool: the owner decides every call"
                       + (f" (also always-ask rule {match[0]})" if match else ""))
             decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN,
-                            allowlistable=False)
+                            allowlistable=False, origin=who)
             return finish(decision, L_HUMAN, reason)
 
         # A native hook's exact offered Jarvis call delegates to this
@@ -984,9 +1013,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             if delegated is not None and delegated.owner_gated:
                 # Rule matching sees the original arguments, but no page facts
                 # or owner text leave through the generic approval surface.
-                decision = _ask_owner_delegation(asker, ctx, delegated.name)
+                decision = _ask_owner_delegation(asker, ctx, delegated.name, origin=who)
                 return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
-            decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK)
+            decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK, origin=who)
             return finish(decision, L_ALWAYS_ASK, reason)
 
         # --- jarvis-tool: a read-only Jarvis session tool --------------------
@@ -1024,7 +1053,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                           "already allowlisted")
         if profile == PermissionProfile.ASK:
             reason = "ask profile: every gated call reaches the owner"
-            decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN)
+            decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN, origin=who)
             return finish(decision, L_HUMAN, reason)
         return finish(Decision.ALLOW, L_REVIEWER,
                       "no opinion; the provider's own reviewer decides")
@@ -1032,12 +1061,13 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
     return permit
 
 
-def _ask_owner_delegation(asker, ctx: PermitContext, tool: str) -> Decision:
+def _ask_owner_delegation(asker, ctx: PermitContext, tool: str, *,
+                          origin: str | None = None) -> Decision:
     """One metadata-only HUD consent, never a Browser action approval."""
     if tool != "hud_browser_act":
         return Decision.DENY
     request = ApprovalRequest(
-        tool=tool, args={}, command=None, layer=L_ALWAYS_ASK,
+        tool=tool, args={}, command=None, layer=L_ALWAYS_ASK, origin=origin or "",
         reason="Your named rule asks before Browser delegation. Browser safety checks still decide each action.",
         thread_id=ctx.thread_id, task_id=ctx.task_id, provider=ctx.provider or None,
         allowlistable=False, headline="Allow Browser safety checks for this call?",
@@ -1054,11 +1084,11 @@ def _ask_owner_delegation(asker, ctx: PermitContext, tool: str) -> Decision:
 
 def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
          reason: str, layer: str, *, allowlistable: bool = True,
-         headline: str = "") -> Decision:
+         headline: str = "", origin: str | None = None) -> Decision:
     request = ApprovalRequest(
         tool=tool, args=args, command=command or None, reason=reason, layer=layer,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
-        provider=ctx.provider or None, origin=ctx.origin(),
+        provider=ctx.provider or None, origin=origin if origin is not None else ctx.origin(),
         allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "")
     try:
         return Decision(asker.ask(request))

@@ -570,3 +570,151 @@ feature on. In 0.161.0's code mode (`code_mode_host`, stable and on),
 The union and caps are defence for a Codex that does stream patches.
 `subagent_fixtures_check.test_a_multi_file_patch_arrives_whole` pins the
 recording, so a newer CLI that starts streaming fails there, by name.
+
+## Claude sub-agents are their own (SV-1, 2026-10-15)
+
+Before this, every message a Claude Agent child sent became the parent's
+TEXT/THINKING/TOOL_* (`_translate` never read `parent_tool_use_id`), so a
+child's words and calls landed in the transcript the owner reads as Jarvis's
+reply, the Discord mirror, a task's result and, after the voice rework, the
+voice. Now (plan `docs/plans/2026-10-13-subagent-view.md` SV-1, adjusted by
+the SV-0 findings):
+
+**The provider** (`claude.py`, "native sub-agents"). A child is a sid,
+`cl:<spawning Agent call id>` (`child_sid`; an id the pattern does not fit is
+hashed, never dropped). A message tagged with `parent_tool_use_id` is built
+exactly as the parent's would be (`_blocks`, `_tool_result`: `_safe`, the
+private summaries, the denial mapping) and then each event is wrapped as
+`SUBAGENT_EVENT {sid, event: {kind, data}}`. Nothing tagged is ever the
+parent's: an unannounced tag still gets a sid of its own, and a tagged stream
+event (2.1.295 sends none) is dropped. The `task_*` system messages, read by
+`subtype` and raw `data`, give `SUBAGENT` lifecycle events: `task_started`
+with `task_type: local_agent` starts a child (name = `description`, kind =
+`subagent_type`, `is_backgrounded`, `spawn_depth`, `parent_task_id` → parent
+sid); `local_bash` and anything else is ignored. `task_progress` gives
+tokens/tool uses/last tool; `task_updated` (`killed` → stopped) and
+`task_notification` give the end, said once; the notification's `summary`
+becomes the child's `result` entry. Children are session state, not turn
+state: they outlive turns, and `child_tools`/`child_denied` keep their calls'
+names and refusals across turns (bounded: `CHILD_LIMIT` 256 children, oldest
+finished out; `CHILD_TOOL_LIMIT` 1024). In `_read`, a tagged message no longer
+opens an "unknown" CLI turn (a background child talks between turns as a
+matter of course); it still counts as `turn_work`.
+
+**Background children are normal.** Status `backgrounded` (live, not waited
+for) is never ended by the turn. Only a top-level foreground child still live
+when its message's turn ends is stopped, inferred ("the turn ended"); the
+CLI's later word replaces that. The daemon ends live children when their
+session goes (`_cleanup`: close, archive, loss; a Claude model switch, which
+reconnects) and reads any still marked live back as stopped after a restart.
+
+**Approval cards.** The hook's `agent_id` is the child's `task_id`, whose
+`task_started` always comes first (SV-0 finding 3), so `agent_id → task_id →
+sid → name` gives the card's label (`child_label`: scrubbed, `[A-Za-z0-9
+_./-]` only, 40 characters). `_decide` passes it as `permit(...,
+subagent=label)` only to a callback that takes the keyword (a raise would
+deny). `build_permit` uses it for the card's `origin` alone ("Claude sub-agent
+‹name› (not the orchestrator)", then " in task …"), re-cleaned there. Every
+layer reads exactly what it reads without it: a child is never answered more
+loosely, or more strictly, than its orchestrator would be. Codex keeps its
+SV-2a widening path; the two differ because a Codex child's approval *is* a
+widening of its sandbox, while a Claude child runs under the parent's hook.
+The logged gate question carries `subagent: sid`.
+
+**The daemon** (`subagents.py`, `Daemon._record_subagent`). The new kinds
+never reach `log.jsonl`, the ledger or the generic publish. They are cleaned
+outside the daemon lock (the scrub and a tool's label may read credential
+files) into a per-thread record: memory (`THREAD_LIMIT` 32 threads LRU,
+`CHILD_LIMIT` 64 children, `ENTRY_LIMIT` 300 entries each, `TEXT_CAP` 4000)
+and the thread's own `subagents.jsonl` (a cold read takes the last
+`LOAD_BYTES`, 4 MiB). Tool entries keep a label and an outcome, never
+arguments or a result summary; `hud_browser_act` is "Browser action";
+thinking is not kept. The bus gets one `subagent` record per change with ids,
+status, times and a count only. Routes: owner-only `GET
+/threads/{id}/subagents` and `.../subagents/{sid}/transcript`
+(`docs/hud-api.md`, "Native sub-agents"). The runner, Discord and titles
+needed no change: they read `text`/`tool_*`, which children no longer are.
+
+**Did SV-1 make the between-turn stall worse? No.** It changes only how a
+message already read is translated. It adds no read, no buffering and no work
+on the SDK's reader task; the stall's cause — nobody reads the CLI between
+sends, so the SDK's 100-message buffer fills and the CLI blocks in its next
+hook — is untouched. A child's messages that arrive between turns are still
+read by the next send, now recorded as the child's (with that send's
+`turn_id`).
+
+### What SV-6 must do for Claude's injected turns
+
+Claude Code 2.1.295 starts an orchestrator turn by itself when a background
+child finishes: `init`, a full streamed assistant turn (deltas included),
+and a `result` whose `origin.kind` is `task-notification`, with no `query()`
+(SV-0 finding 6; `one_default`, `parallel_default` — one per finished child —
+`stop_bg`, `background_unread`). Today `_read` reads that turn at the next
+send: its result is recognised as `injected` and does not end the send, but
+its **words and tool calls are handed out as the next owner message's turn**
+(pinned: `claude_subagents_check.test_known_gap_an_injected_turns_words_land_in_the_next_send`),
+and its usage is booked to that turn. Attributing it to the next owner
+message is wrong, and leaving it unread is what stalls. SV-6 must:
+
+1. **Drain the stream continuously.** One reader per client, always reading
+   while connected (not on request, as `_Pump` does now), so the SDK's buffer
+   never fills and a hook is never left unanswered between turns. It must
+   never block on a consumer: what it hands on goes to bounded queues, and
+   past the bound it drops `stream_event` deltas first, never whole messages,
+   results or `task_*`.
+2. **Route what it reads by owner**, keeping `_read`'s rules for a send:
+   - tagged messages and `task_*` → translated (`_translate` already does it)
+     and handed to the daemon at once through a session-level sink, since no
+     turn queue exists between sends (`session.events is None`); the daemon's
+     `_record_subagent` already takes them with no turn;
+   - a CLI turn that starts with no send waiting for it (an unechoed `init`
+     or assistant message while no send reads, or a replayed user message
+     whose `origin.kind` is not human) → **its own turn**, never the next
+     owner message's: the daemon opens a system-originated turn (a fresh
+     `turn_id`, a `user`-like record saying a background agent finished,
+     `via: "system"`), records its text/tools/usage under it and closes it
+     with its own `turn_finished`. While it runs, an owner message queues or
+     steers by the existing rules (the CLI queues our `query()` behind it
+     anyway; `_read` takes over at our echo).
+   - everything else → held, in order, for the send that owns it (the
+     message's echo still decides, as now).
+3. **Decide what surfaces show** (owner questions): whether an injected turn
+   posts to Discord and is spoken; how the HUD marks it ("after sub-agent X
+   finished").
+4. **Keep the existing rules**: `_read`'s injected/leftover/stopped logic
+   stays the fallback for a turn that starts while a send is reading; the
+   owner's Stop is `client.interrupt()`, which also kills background agents
+   (say so on the Stop button); a model switch or close still ends them.
+5. **Prove it offline** with the SV-0 harness: `background_flood` re-recorded
+   under the drain must show the late child's next request about 4 s after
+   its `sleep`, not after disconnect; and a replay test must show an injected
+   turn's text under its own `turn_id`, never the next send's.
+
+**Interim options (proposed, not shipped).** (a) Ask the orchestrator, through
+`system_append`, to pass `run_in_background: false` unless it means to
+continue without the result: no injected turns, no stall, but slower turns
+and a change to how the model uses its tool. (b) A between-turn drain that
+only reads into a bounded in-memory deque the next `_read` consumes first:
+prevents the stall without fixing attribution, but `_Pump`'s read-on-request
+contract and the steer holds' "any frame is life" timing would change, so it
+needs its own review. (c) Mark the injected turn's words inside the next
+turn with a system line ("a background agent finished while you were
+away"): cheap, attribution still wrong in the record. None is in SV-1.
+
+Checks (free, offline): `tests/v2/claude_subagents_check.py` (provider, from
+the recordings via `tests/v2/claude_replay.py`: one, parallel, background,
+nested, failed, stopped, interrupted, labels, privacy, bounds) and
+`tests/v2/subagent_routes_check.py` (daemon, routes, readers, permit
+matrix): 30 and 20 tests. On `main` 26 of the 30 and 19 of the 20 fail; the
+five that pass there pin unchanged behaviour (the gate's answer, a permit
+without the keyword, the ledger) and are proven by mutants instead. 24
+mutants, all killed: tagged messages as the parent's, a child's text before
+`_safe`, a tagged delta, turn end stopping background or nested children,
+`local_bash` as a child, the daemon logging/publishing the new kinds as
+ordinary records, a name on the bus, routes not owner-only, the label
+computed under the daemon's lock, `hud_browser_act` not rewritten, `args` in
+a transcript, unbounded entries, a closed session or a restart leaving
+children live; and for the label: none, a widening (stricter), an outright
+allow (looser), ignored by the card, uncleaned in permit or provider, forced
+on a permit without the keyword, riding in `args`, taken from the task's
+current activity.
