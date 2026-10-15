@@ -1,7 +1,7 @@
 """Native sub-agents' record (SV-1, 2026-10-15).
 
-A Claude chat's own Agent children (and, from SV-2, Codex's) are not the
-orchestrator: what they say is not Jarvis's reply. The provider hands them
+A Claude chat's own Agent children (and, since SV-2, a Codex chat's child
+agents) are not the orchestrator: what they say is not Jarvis's reply. The provider hands them
 over as two kinds of their own (`EventKind.SUBAGENT`, `SUBAGENT_EVENT`), and
 this module is where they land instead of the thread's `log.jsonl`:
 
@@ -36,7 +36,12 @@ command and feeds its output to the orchestrator — the wrong session for a
 child's command (SV-1, recorded in `docs/hud-api.md`).
 
 A child is live (`running`, or `backgrounded`: the CLI's default, a child
-that outlives its turn) until the CLI says otherwise. Jarvis ends one itself
+that outlives its turn) until the CLI says otherwise. An ended Codex child is
+live again only on its provider's own `started` from the session that ran it
+(a child given another turn); any other live word after an end is stale.
+
+A child's words (`text`, `result`) are scrubbed here, the same way for both
+providers (`redact.scrub_text`), before memory, the file or a route sees them. Jarvis ends one itself
 only when the session that ran it is gone (`end_session`: closed, lost,
 reconnected for a model switch) or, read back from disk, when no session with
 its key is live — a restart, after which the CLI that ran it is gone too.
@@ -107,6 +112,18 @@ def _clean(value: Any, cap: int) -> str:
     except Exception:  # noqa: BLE001 — unscrubbable text is not shown
         return "[withheld]"
     return clean_line(value, cap)
+
+
+def _words(text: str) -> str:
+    """A child's words for its record, scrubbed the same way whichever
+    provider ran it (`redact.scrub_text`: Jarvis's credential values, the
+    known key shapes, bearer tokens, JWTs, jarvis-mcp tokens), then capped. A
+    scrub that fails withholds them (SV-2 review)."""
+    from .redact import scrub_text
+    try:
+        return scrub_text(text[:TEXT_CAP * 2])[:TEXT_CAP]
+    except Exception:  # noqa: BLE001 — unscrubbable text is not shown
+        return "[withheld]"
 
 
 def _public(entry: dict) -> dict:
@@ -223,13 +240,13 @@ class SubagentRecords:
             text = body.get("text")
             if not isinstance(text, str) or not text.strip():
                 return None
-            entry = {"role": "assistant", "text": text[:TEXT_CAP]}
+            entry = {"role": "assistant", "text": _words(text)}
         elif kind == "result":
             text = body.get("text")
             if not isinstance(text, str) or not text.strip():
                 return None
             status = body.get("status") if body.get("status") in STATUSES else None
-            entry = {"role": "result", "text": text[:TEXT_CAP], "status": status}
+            entry = {"role": "result", "text": _words(text), "status": status}
         elif kind == "tool_started":
             name = body.get("name") if isinstance(body.get("name"), str) else ""
             call_id = _id(body.get("call_id"))
@@ -343,9 +360,17 @@ class SubagentRecords:
             status = data.get("status")
             if status in STATUSES:
                 if status in LIVE and not was_live:
-                    # A child once ended is not revived by a stale word;
-                    # only the CLI's later finish replaces an inferred stop.
-                    status = child.status
+                    if (op == "started" and child.sid.startswith("cx:")
+                            and child.key is not None and child.key == line.get("key")):
+                        # Codex's own word that an ended child runs again (a
+                        # child given more to do, SV-2), from the session
+                        # that ran it: live again. Codex only: Claude has no
+                        # such turn, so for it every later live word is stale.
+                        child.ended_at = child.stop_reason = None
+                    else:
+                        # A child once ended is not revived by a stale word;
+                        # only the CLI's later finish replaces an inferred stop.
+                        status = child.status
                 child.status = status
             if op == "finished" and child.status not in LIVE:
                 child.ended_at = at
