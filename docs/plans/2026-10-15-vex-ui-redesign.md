@@ -42,8 +42,11 @@ The owner approved the layout ("your redesign layout is good") and answered §13
 4. **Simulator: the existing Browser (Direct tab beside the VEX pane), no VEX
    tab.** The simulator inherits every Browser feature as the Browser grows; no
    VEX-specific copy of those features.
-5. Brain tab connection: pending the owner's answer to the clarified question
-   (connect on an explicit click vs. whenever the tab is shown).
+5. **The Brain tab connects only when the owner clicks Connect** — never
+   automatically when the tab is shown (owner's answer, 2026-10-15; Q5's
+   recommendation). VX-UI-1's placeholder Brain tab says so and keeps today's
+   "Open the brain terminal" click (it opens in the bottom panel until
+   VX-UI-4a).
 6. **Stop cancels whatever VEX action is running** — pressing it during a
    download stops the download (likewise a running clean or build). It is not
    a "stop the program on the brain" control (no `vexcom --stop`).
