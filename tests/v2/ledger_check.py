@@ -57,6 +57,43 @@ class LedgerChecks(unittest.TestCase):
         rows = [json.loads(line) for p in self.ledger.root.glob("*") for line in p.read_text().splitlines()]
         self.assertFalse(any("spend_usd" in r for r in rows if r["provider"] == "claude"))
 
+    def test_codex_partial_turns_are_a_highwater_count_and_a_lower_bound(self):
+        """2026-10-15: a Codex event's `partial_turns` is the session's count
+        of turns that ended interrupted or failed. Taken as a high-water
+        delta per thread, like its tokens; nonzero makes the day's figure a
+        lower bound, said with "≥" and never by adding a number."""
+        self.usage(P.CODEX, input=100, partial_turns=0)
+        self.assertEqual(self.ledger.partial_turns(provider="codex"), 0)
+        self.assertNotIn("≥", self.ledger.state(P.CODEX)["reason"])
+        self.usage(P.CODEX, input=100, partial_turns=1)     # the stopped turn's own event
+        self.usage(P.CODEX, input=130, partial_turns=1)     # the next turn: no new partial turn
+        self.usage(P.CODEX, input=130, partial_turns=0)     # never lowers the mark
+        state = self.ledger.state(P.CODEX)
+        self.assertEqual(state["totals"], {"work_tokens": 130, "equivalent_usd": 0, "spend_usd": 0,
+                                           "partial_turns": 1})
+        self.assertIn("local daily work_tokens: ≥130/", state["reason"])
+        self.assertEqual(self.ledger.partial_turns(task_id=self.task.id), 1)
+        self.usage(P.CODEX, input=130, partial_turns=3)
+        self.assertEqual(self.ledger.partial_turns(provider="codex"), 3)
+        # Durable: a restart restores the mark, and a replay counts nothing twice.
+        event = Event(K.USAGE, self.threads[P.CODEX].id, {"input": 140, "partial_turns": 4})
+        self.ledger.on_event(event, event_id="once")
+        self.ledger = UsageLedger(self.stores, clock=lambda: self.now)
+        self.ledger.on_event(event, event_id="once")
+        self.usage(P.CODEX, input=140, partial_turns=4)
+        self.assertEqual(self.ledger.partial_turns(provider="codex"), 4)
+        self.assertEqual(self.ledger.state(P.CODEX)["totals"]["partial_turns"], 4)
+        # The next day starts clean; the mark carries on.
+        self.now += 86400
+        self.usage(P.CODEX, input=150, partial_turns=4)
+        self.assertEqual(self.ledger.state(P.CODEX)["totals"]["partial_turns"], 0)
+        self.assertNotIn("≥", self.ledger.state(P.CODEX)["reason"])
+        # Other providers never carry one, and a bad value is refused.
+        self.assertEqual(self.ledger.state(P.CLAUDE)["totals"]["partial_turns"], 0)
+        for bad in (-1, True, 1.5, "2"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.usage(P.CODEX, input=150, partial_turns=bad)
+
     def test_thresholds_and_visible_window(self):
         for p, amount in [(P.CODEX, 12_750_000), (P.CLAUDE, 3_400_000), (P.FAST, 4.25)]:
             self.assertEqual(self.ledger.state(p)["state"], "available")

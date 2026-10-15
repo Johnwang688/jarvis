@@ -1197,7 +1197,8 @@ class CodexProvider:
                     saw_usage |= any(params["tokenUsage"]["total"].values())
                     u = s.accounting.usage()
                     yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
-                                      cached=u.cached_tokens, cost_usd=None, provider_reported=params["tokenUsage"])
+                                      cached=u.cached_tokens, cost_usd=None, provider_reported=params["tokenUsage"],
+                                      partial_turns=s.accounting.partial_turns)
                 elif method == "turn/completed":
                     status = params["turn"]["status"]
                     err = params["turn"].get("error") or {}
@@ -1226,6 +1227,15 @@ class CodexProvider:
                         s.accounting.partial_turns += 1
                     s.accounting.save()
                     completed = True
+                    if status in ("interrupted", "failed"):
+                        # Said at once, not on the next usage report (which
+                        # may never come): the ledger and the HUD show these
+                        # totals as a lower bound. No new numbers: the totals
+                        # are the ones already reported.
+                        u = s.accounting.usage()
+                        yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
+                                          cached=u.cached_tokens, cost_usd=None, provider_reported={},
+                                          partial_turns=s.accounting.partial_turns)
                     yield from self._mcp_unfinished(h)
                     yield self._event(h, EventKind.TURN_FINISHED,
                                       stop={"completed": "end", "interrupted": "interrupted"}.get(status, "error"))
@@ -1284,7 +1294,8 @@ class CodexProvider:
             u = s.accounting.usage()
             yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
                               cached=u.cached_tokens, cost_usd=None,
-                              provider_reported={"rate_limits": p["rateLimits"]})
+                              provider_reported={"rate_limits": p["rateLimits"]},
+                              partial_turns=s.accounting.partial_turns)
         elif method == "item/agentMessage/delta":
             yield self._event(h, EventKind.TEXT_DELTA, text=p["delta"])
         elif method in ("item/reasoning/summaryTextDelta", "item/reasoning/textDelta"):

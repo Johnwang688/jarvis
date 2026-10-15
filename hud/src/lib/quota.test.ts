@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allowanceBar, barsFor, clampPct, level, meterFor, resetsIn } from "./quota";
+import { allowanceBar, barsFor, clampPct, level, meterFor, partialNote, partialTurns, resetsIn } from "./quota";
 import type { ProviderUsage } from "../types";
 
 const T0 = Date.parse("2026-09-15T00:00:00Z");
@@ -99,6 +99,38 @@ describe("what the panel is allowed to draw", () => {
     expect(bar).toMatchObject({ level: "ok", name: "local allowance" });
     expect(bar!.note).toContain("412,000");
     expect(bar!.note).toContain("2,000,000");
+  });
+
+  it("a count that may be low says so: ≥ and 'may be low', never a made-up figure", () => {
+    const bar = allowanceBar(
+      provider({
+        today: { work_tokens: 412000, spend_usd: 0, equivalent_usd: 0, partial_turns: 2 },
+        allowance: { work_tokens: 2000000 },
+      }),
+    );
+    expect(bar!.lowerBound).toBe(true);
+    expect(bar!.note).toBe(`≥ ${(412000).toLocaleString()} / ${(2000000).toLocaleString()} tok (may be low)`);
+    expect(bar!.percent).toBeCloseTo(20.6, 6);
+    const exact = allowanceBar(
+      provider({
+        today: { work_tokens: 412000, spend_usd: 0, equivalent_usd: 0, partial_turns: 0 },
+        allowance: { work_tokens: 2000000 },
+      }),
+    );
+    expect(exact!.lowerBound).toBe(false);
+    expect(exact!.note).not.toContain("≥");
+    expect(exact!.note).not.toContain("may be low");
+  });
+
+  it("partial turns: absent, zero or malformed is none", () => {
+    expect(partialTurns(undefined)).toBe(0);
+    expect(partialTurns(provider({}))).toBe(0);
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, "3" as unknown as number]) {
+      expect(partialTurns(provider({ today: { work_tokens: 1, spend_usd: 0, equivalent_usd: 0, partial_turns: bad } }))).toBe(0);
+    }
+    expect(partialTurns(provider({ today: { work_tokens: 1, spend_usd: 0, equivalent_usd: 0, partial_turns: 3 } }))).toBe(3);
+    expect(partialNote(1)).toBe("1 stopped or failed turn today: Jarvis's token count may be low");
+    expect(partialNote(3)).toContain("3 stopped or failed turns");
   });
 
   it("no allowance means no second bar, rather than a bar of zero", () => {

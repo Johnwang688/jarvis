@@ -88,17 +88,38 @@ export function barsFor(p: ProviderUsage, now: number = Date.now()): Bar[] {
  * as a second, thinner bar and labelled. Null when there is no allowance for it
  * to be a fraction of.
  */
-export function allowanceBar(p: ProviderUsage): (Bar & { used: number; total: number }) | null {
+export function allowanceBar(
+  p: ProviderUsage,
+): (Bar & { used: number; total: number; lowerBound: boolean }) | null {
   const total = p?.allowance?.work_tokens;
   if (!total || total <= 0) return null;
   const used = p?.today?.work_tokens ?? 0;
   const percent = clampPct((used / total) * 100);
+  const lowerBound = partialTurns(p) > 0;
   return {
     name: "local allowance",
     percent,
     level: level(percent),
-    note: `${used.toLocaleString()} / ${total.toLocaleString()} tok`,
+    note: `${lowerBound ? "≥ " : ""}${used.toLocaleString()} / ${total.toLocaleString()} tok`
+      + (lowerBound ? " (may be low)" : ""),
     used,
     total,
+    lowerBound,
   };
+}
+
+/**
+ * Today's Codex turns that ended interrupted or failed (`today.partial_turns`).
+ * Their usage may be under-reported — a request cut off mid-stream may never
+ * have been counted — so any local token figure that includes them is a lower
+ * bound. Zero for an older daemon that does not send it, or a bad value.
+ */
+export function partialTurns(p: ProviderUsage | undefined): number {
+  const n = p?.today?.partial_turns;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/** The sentence the Usage panel shows beside Codex when `partialTurns` > 0. */
+export function partialNote(n: number): string {
+  return `${n} stopped or failed turn${n === 1 ? "" : "s"} today: Jarvis's token count may be low`;
 }
