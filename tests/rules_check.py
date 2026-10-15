@@ -3499,16 +3499,24 @@ def cost_checks() -> None:
     `COST_RUNNERS`, nested 60 and 1,000 deep, is judged by `decide`,
     `static_verdict`, `command_touch`, `owner_op`, `runners_unsure`, v2's
     always-ask match and `run_readonly` in under 100 ms of calling-thread CPU
-    time each (with the separate 3 s wall deadline still enforced; at
-    16675fb `npx --x ` sixty deep took 52 s and 139 s; a thousand nested
-    `npx` raised RecursionError on main), never ALLOW, never an exception;
-    and a line past the budget is never covered by an allowlist entry."""
+    time at this machine's idle speed each (`tests/loadclock.py`: a busy
+    SMT sibling slows every instruction, so a miss is judged again at the
+    machine's present speed, never excusing more than 3x; the separate 3 s
+    wall deadline is still enforced; at 16675fb `npx --x ` sixty deep took
+    52 s and 139 s; a thousand nested `npx` raised RecursionError on main),
+    never ALLOW, never an exception; and a line past the budget is never
+    covered by an allowlist entry. With `charge` a no-op the slowest line
+    takes ~545 CPU ms idle, and is still caught under load (QA-LOAD)."""
     import time
 
     from jarvis import config
+    from tests import loadclock
     from jarvis import protected_state as S
     from jarvis.v2 import permissions as v2
 
+    # The bound's strength: the limit, and how much a busy machine may excuse.
+    assert COST_LIMIT == 0.1, COST_LIMIT
+    loadclock.pinned()
     slowest = (0.0, "")
     with gate_home() as home:
         config.ALLOWLIST_PATH.write_text(json.dumps(
@@ -3540,23 +3548,24 @@ def cost_checks() -> None:
             if line:
                 count += 1
                 for name, read in readers:
-                    took = None
-                    for _ in range(2):          # the faster of two: a busy machine is not a regression
+                    held = None
+                    for _ in range(3):          # the best of three: a pause hits one run
                         rules._runners_unsure_cached.cache_clear()
                         rules._vex_line_cached.cache_clear()
                         # This work is synchronous. Do not charge other test processes
-                        # stealing CPU time against this parser-complexity budget.
+                        # stealing CPU time against this parser-complexity budget,
+                        # nor the slower CPU they leave it (`loadclock`).
                         start = time.thread_time()
                         with recorded() as ran, _deadline(3):
                             value = read(line)
-                        elapsed = time.thread_time() - start
-                        took = elapsed if took is None else min(took, elapsed)
-                        if took < COST_LIMIT:
+                        run = loadclock.judge(time.thread_time() - start, COST_LIMIT)
+                        held = run if held is None or run.idle < held.idle else held
+                        if held.idle < COST_LIMIT:
                             break
                     assert not ran, (runner, depth, name)
-                    assert took < COST_LIMIT, f"{name} took {took:.3f} CPU s on {runner!r} x{depth}"
-                    if took > slowest[0]:
-                        slowest = (took, f"{name} on {runner!r} x{depth}")
+                    assert held.idle < COST_LIMIT, f"{name} took {held} on {runner!r} x{depth}"
+                    if held.idle > slowest[0]:
+                        slowest = (held.idle, f"{name} on {runner!r} x{depth}")
                     if name in ("decide", "static"):
                         assert value != rules.ALLOW, (name, runner, depth, value)
                 assert not permissions.allows("run_command", {"command": line}), (runner, depth)
@@ -3588,7 +3597,7 @@ def cost_checks() -> None:
         config.ALLOWLIST_PATH.write_text("[]")
     print(f"ok  cost: {len(COST_RUNNERS)} runner forms nested 60 and 1,000 deep, and 4 wide ones "
           f"({count} lines) "
-          f"judged by 7 readers each in under {COST_LIMIT * 1000:.0f} CPU ms (slowest "
+          f"judged by 7 readers each in under {COST_LIMIT * 1000:.0f} CPU ms at idle speed (slowest "
           f"{slowest[0] * 1000:.0f} CPU ms, {slowest[1]}); never ALLOW, never an exception, never "
           "covered past the budget")
 
