@@ -223,6 +223,20 @@ export class SpeechQueue {
     return { thread, messageKey };
   }
 
+  /** The message being said, or else the one next in line: what a barge-in interrupts. */
+  headMessage(): { thread: string; messageKey: string } | null {
+    const head = this.current?.slot.item ?? this.order(this.live())[0];
+    return head ? { thread: head.thread, messageKey: head.messageKey } : null;
+  }
+
+  /** Skip one named message, if it is still live (a barge-in's interrupted message after a send). */
+  skipMessage(thread: string, messageKey: string): { thread: string; messageKey: string } | null {
+    if (!this.slots.some((s) => s.item.thread === thread && s.item.messageKey === messageKey)) return null;
+    this.finishWhere((i) => i.thread === thread && i.messageKey === messageKey, "skipped", "skipped");
+    this.pump();
+    return { thread, messageKey };
+  }
+
   /** Skip one thread's current message (else its first queued one): the chip's "skip this chat". */
   skipThread(thread: string): { thread: string; messageKey: string } | null {
     const playing = this.current?.slot.item;

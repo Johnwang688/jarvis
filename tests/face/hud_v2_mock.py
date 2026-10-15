@@ -671,6 +671,7 @@ class MockDaemon:
         self.duck_lease_s = 3.0
         self.speech_threads: dict[str, dict] = {}   # V7: thread id -> {voice, muted}, as the daemon keeps them
         self.ms_per_char = 12        # /say's tone length per character of text
+        self.say_wav: bytes | None = None   # V9: answer this recording (synthetic speech) instead of a tone
         self.summary_text = "The change is done and all the tests pass."   # /speech/summary's answer (V8)
         self.summary_fail = False    # /speech/summary answers 502
         self.httpd: ThreadingHTTPServer | None = None
@@ -1262,7 +1263,7 @@ class MockDaemon:
                         return self._err(400, "local_only must be a boolean")
                     if mock.say_fail:
                         return self._err(503, "local speech unavailable")
-                    audio = wav_tone(max(80, len(body["text"]) * mock.ms_per_char))
+                    audio = mock.say_wav if mock.say_wav is not None else wav_tone(max(80, len(body["text"]) * mock.ms_per_char))
                     self.send_response(200)
                     self.send_header("Content-Type", "audio/wav")
                     self.send_header("Content-Length", str(len(audio)))

@@ -676,3 +676,27 @@ describe("noise suppression falls back to raw, visibly, and the VAD keeps workin
     expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed", note: "the microphone is closed" });
   });
 });
+
+describe("what the self-voice gate and the capture are handed (V9 x V14)", () => {
+  it("is the very frame the microphone pushed, bit for bit, with noise suppression ready: the gate compares raw mic frames, as before V14", () => {
+    const got: Float32Array[] = [];
+    const workers: FakeWorker[] = [];
+    const stage = new VadStage({
+      deliver: (f) => got.push(f),
+      createWorker: () => { const w = new FakeWorker(); workers.push(w); return w; },
+      noiseSuppression: true,
+    });
+    stage.start();
+    const w = workers[0];
+    w.say({ type: "ready", loadMs: 1 });
+    w.say({ type: "denoise", state: "ready", loadMs: 1 });
+    const mine = Float32Array.from({ length: 512 }, (_, i) => Math.sin(i / 5) * 0.3);
+    const copy = Array.from(mine);
+    stage.push(mine);
+    w.frames()[0].samples.fill(0); // the worker's denoised result lands in ITS copy
+    w.say({ type: "prob", seq: 1, p: 0.7, ms: 1, dms: 0.4 });
+    expect(got).toHaveLength(1);
+    expect(got[0]).toBe(mine);
+    expect(Array.from(got[0])).toEqual(copy);
+  });
+});

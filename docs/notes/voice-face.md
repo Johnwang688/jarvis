@@ -2606,3 +2606,155 @@ reason code was produced, because nothing failed, so none is recorded here.
 because the replies are now complete. Both means cover successful calls only:
 the first run's $0.000136 is its $0.002314 total over the 17 calls that returned
 a summary, and this run's $0.000176 is over all 24.
+
+## V9: self-voice gating, barge-in, spoken commands (2026-10-14)
+
+Plan decisions V-5, V-6, V-7 and §3.4, §3.10; owner's answers Q7, Q8, Q10, Q13. Stacked on V5
+(`claude/voice-v5`). HIGH risk (approval isolation). Nothing here can answer an approval card.
+
+**Self-voice reference gate** (`lib/selfvoice.ts`, replaces V6's blanket `speechPlaying()` hold).
+- The player feeds the gate what it plays (`WebAudioPlayer.setReference`: each decoded buffer's
+  samples read once at `start()`, a stop at `stop()`/`onended`; a sound started while the context is
+  suspended is reported when it runs). The gate keeps power per 8 ms hop in `performance.now()` time.
+- Mic frames are placed on that clock with a min-filter over arrival lateness (a burst after a stall
+  lands where it belongs). Judging is on amplitude envelopes, so no sample-accurate alignment is needed.
+- **The room is learned, then frames are judged against it.** Over the last 1.28 s the mic envelope x is
+  compared to the reference y at delays 0-640 ms (gain by least squares; S = 1 - sum|x-ay| / (sum x +
+  a sum y)); S >= 0.9 with >= 12 audible and >= 12 heard frames is an `echo` lock (delay, gain). A mic that
+  stays at the room's noise (mean < 0.001, max < 0.004 above noise) for 16 frames while he is audible at the
+  longest delay is a `dry` lock (headphones, a good canceller). An echo lock is trusted 10 min after he went
+  quiet, a dry one 30 s. A rival lock must beat the held one by 0.03.
+  *Why not decide frames from a short window's score:* independent speech envelopes reached S >= 0.8 at
+  the best of 41 delays about 40% of the time over 16 frames (measured; 12 of 33000 windows at 40 frames
+  reached 0.88), so a frame decision from a short window would pass chance alignments for echo.
+- With a lock, a frame is the owner's only when the newest two frames are each more than 2x the echo the
+  lock predicts (+ 0.006 floor; prediction takes +/-2 cells of delay and a 4-frame tail); then four more
+  frames stay free (`OWNER_HANGOVER_FRAMES`). Everything else while he is audible is his voice.
+  **Without a lock (the first 1-2 s of the first reply) every frame while he is audible is his voice** (V6's
+  blanket hold for that second), so the owner's wake barge-in needs a second of settled reply or the talk key.
+- **Fails closed:** an exception, a frame more than 1.5 s behind the clock, or a lock-less mic is "his voice" while
+  he is audible; an exception also makes `runnable()` false, which brings back V6's hold for the whole of a reply
+  (`speechPlaying() = micSuppressedBySpeech(view) && !selfVoice.runnable()`). The owner's switch (Settings ->
+  Voice -> "Jarvis's own voice", `localStorage jarvis.selfVoiceGate`) does the same; the line there names
+  learning / echo with its delay / dry / off / stopped.
+- Measured on synthetic rooms (`selfvoice.test.ts`; speech-like envelopes through a reverb with a gain wobble,
+  delays 30-590 ms, gains 0.05-0.65): 40 rooms x 120 frames, **0 of 4800 echo frames let through**, >= 38 of 40
+  locked; a second voice about 3x louder than the echo is released on >70% of its loud frames; the owner starting
+  to speak is released within 8 frames. Chance-lock rate with independent voices is nonzero (a few % of 3.5 s runs
+  at 0.88; 0.9 chosen): its effect is wrong predictions, never a pass for real echo, because the true echo lock
+  scores higher and a rival must beat it.
+- **Capture** (`onFrame(frame, p, self)`): a vetoed frame is not speech to the detector (Vad `veto`: no open, no hold,
+  no floor update), is observed and reported as `self_voice`; the continuation window is closed while he is audible
+  and the follow-up window when a new reply begins to sound (`playing` rising edge). A wake hit while he is audible
+  counts only against an utterance the owner opened (frames the gate vetoes do not open one, but a frame it misjudges can); otherwise it is ignored,
+  reported (`self_voice`, source wake) and **not kept in reserve**. A wake hit under any suppression (the blanket
+  hold, a card) is ignored too, so a reply saying "Jarvis" cannot pause itself. Claims are by name or key only.
+
+**Barge-in** (`lib/speech/barge.ts`; one place begins it, one ends it). `onListening` for source `wake` or `ptt`
+begins; `onUtteranceEnd` (once per claim, dropped or not) ends it. Q7: **before enrollment only the wake word and the
+talk key pause playback**; `setVerifiedVoice`/`verifiedOnset` is V12's seam (never turned on in V9, unit-tested with a
+fake). V-7: nothing came of it (too short, empty, failed, REVIEW box, cancelled, not_owner) -> resume, restarting the
+sentence (Q13); a message sent/steered -> the message he was in the middle of is skipped (`bargedMessage`, whichever chat),
+the rest of the queue goes on; a command -> the command decides. Ten-second safety (`BARGE_HOLD_MS`) ends a hold nothing is
+feeding, but waits while a message or the key is still being spoken. The owner's strip pause/resume/stop take over from a barge-in.
+
+**Commands** (`lib/speech/commands.ts`). Whole-utterance match: optional fillers (uh, um, hey, ok, so, well, please, now),
+"jarvis", exactly one of pause/resume/skip/stop, fillers. "Jarvis, stop the build", "pause the build", "stop", "Jarvis stop it"
+are messages. Four calls on the speech controller and nothing else (stop = clear speech queue, never an agent turn, Q8). Not
+obeyed under a card or from a late/retried clip (diagnostics `suppressed:card` / `cancelled`; new outcome `command`).
+**Under a card voice commands are OFF for transcripts** (the capture is suppressed, nothing uploads; one in flight when the card
+appears is refused). Q10's local recognition under a card is V11: `CommandRouter.fromLocal` + `setLocalUnderCard` are the seam, off.
+"Jarvis approve/yes/allow" are not commands; with a card up they land in the box like any late transcript; with none they are
+ordinary messages. No import, name or route in the speech modules reaches an approval (`approvalIsolation.test.ts`).
+A mis-heard "Jarvis" (Travis, Jarvas) is a message, not a command: STT spelling is not normalised.
+
+**Free checks.** vitest 2537 tests / 156 files (2385 / 151 on V5: +152; new `selfvoice` 19, `captureSelfVoice` 17, `barge` 21,
+`commands` 42, `approvalIsolation` 47, `player` +6; `suppress.test` wiring pins updated for the new wiring), `tsc`, `vite build`.
+**Browser:** `tests/face/hud_v2_barge_check.py` (95 checks; real Web Audio player, an in-page acoustic simulator mixing synthetic
+Kokoro clips as reply and "owner", mock daemon, scripted/gated `/stt`; sections gate_self_only, gate_owner_over, gate_wake_over,
+barge_transitions, commands, commands_not_messages, card, fallback). Existing voice suites on the final build: vad 67, chunks 58,
+stt 28, steer 46, ptt 70, speech 56 (its "another pane is read" section now runs with the gate switched off, because it asserts the
+blanket hold), voice_diagnostics 17, multichat 343 (two earlier runs at load average 16 failed 6 and 3 different UTTERANCE-based checks by 4-5 s timeouts, and a third 1; the rerun on the final build passed 343/343). Full `hud_v2_check` not run.
+**Mutations that fail on purpose** (source restored): gate verdict always "not his voice" (4 vitest, 4 browser); card refusal removed
+from the router (4); any voice pauses before enrollment (1); "stop" wired to an interrupt (1); a `decide` call added to transcript
+placement (1 vitest static pin, 3 browser: "Jarvis approve/yes/approve" with a card in flight gave one approval request each).
+
+**Not done / not claimed.** Physical speakers, Windows audio, a real room, a real voice, a TV (synthetic echo only: the lock threshold
+and tail constants are unmeasured outside synthetic rooms); Silero in the new browser runs (energy detector there); a spoken command
+under a card (V11); verified-owner barge-in (V12); speaker verification. The echo recorded into a claimed message's pre-roll while he was
+still speaking goes to STT with the owner's words (Chrome's echo canceller is the only help there). A Bluetooth/changing output delay
+beyond 640 ms is not learned (blanket hold applies until a lock forms).
+
+### V9 review round (Opus review of 0cdde33: M1-M4, L1-L5)
+
+The review found no path to an approval and no HIGH issue; it found fail-open windows in the gate. Changes:
+- **M1 lost frames.** Frames that never arrive left the mic's sample count behind the clock, so the reference "ended" early
+  (`!active` returned CLEAR before any lateness check; the review's probe let about 2 s of his voice through). Now `active` is judged up
+  to `max(tEnd, now)`; the clock mapping is rebuilt when a push comes more than `GAP_RESET_MS` (250 ms) after the last (history
+  dropped too), and for `GAP_SETTLE_MS` (1 s of wall time) every frame while he is audible is his voice; `sampleEnd` is counted from
+  the frames' own lengths. Tests: gaps of 0.8, 1.2, 2 and 4 s mid-reply and with a reply starting at once, and a burst after a stall:
+  0 frames let through (the 0.8 s case fails with the old `tEnd`-only window and no gap reset).
+- **M2 room changes.** A lock learned in an earlier reply is not trusted in a new one (a reply starting more than `REPLY_GAP_MS` = 3 s
+  after he last sounded) until this reply has confirmed it (echo: this window scores >= 0.9 with >= 12 audible and >= 12 heard frames;
+  dry: 16 dry frames again), so "calibrating" (his voice) covers the first second or so of a reply that follows a pause. Also: a
+  `devicechange` on `navigator.mediaDevices` drops the lock (`invalidate`), and whatever the owner's frames hold beyond the lock's
+  prediction is checked against the reference at every delay over the last 20 frames (`excessFollowsReference`; since the delta round: score >= 0.9, the reference audible in >= 6 of those frames): if it
+  follows, the frame is his, and a dry lock is dropped. Tests: headphones->speakers, delay 300->60, 60->450, 200->120 across a pause:
+  0 frames let through (fail with the reverification removed). **Measured limit:** the volume turned up 4x in the middle of a reply
+  lets about 11 frames (0.35 s) through before the guard's 20-frame window shows it follows the reference; the guard is the only help
+  for a change that happens mid-reply.
+  *Cost, said plainly:* the guard and the reverification make the gate block the owner when they cannot tell; a short window correlates
+  by chance too often (with 12 frames and 0.9 it blocked 75% of an owner's speech over a dry lock in the synthetic room), which is why
+  the window is 20 frames. Over headphones the owner's speech over him is released, but the first second of each reply that follows a
+  pause is closed to voice barge-in (the talk key is not).
+- **M3 his own name.** `SpeechController.sayingOwnName()` is true while a playing sentence matches the window's wake patterns and for
+  `NAME_GRACE_MS` (2 s) after; `onWakeHit` ignores a hit then (reported `self_voice`, source wake), even with an utterance open (a TV).
+  The pattern check fails closed if it throws. Also: while his voice is audible a claim starts no earlier than the first frame the gate
+  let through (`Capture.beginRecording`, covering the wake back-dating, the 800 ms pre-roll and the talk key); the clip carries none
+  of his words. Tests: capture clips with a 0.2-amplitude vetoed voice contain nothing above 0.1 (and the unclamped control does);
+  browser `gate_own_name` and `gate_wake_command` ("Jarvis stop" over him: obeyed, nothing sent, no interrupt).
+- **M4.** A wake hit within `SELF_ARM_GUARD_MS` (1.5 s) of his voice last being audible is ignored unless it claims an utterance
+  already open; it is not armed.
+- **L1** a static pin on `card: live.current.approvals.length > 0` at the router call (mutating it to `false` fails
+  `approvalIsolation.test.ts`). **L2** with two holders a send by either skips the interrupted message. **L3** a send skips only
+  what was sounding when he was held: another chat's awaited summary is not cancelled. **L4** `setSupported` removed; `supported`
+  comes from the window having Web Audio (`createSpeech`).
+- **L5, to check on the owner's PC.** On real hardware Chrome's echo canceller leaves a residual that may score below 0.9 against
+  the reference and exceed 0.004 above the room's noise, so the gate can stay in "learning" (every frame while he is audible is
+  his voice): then only Ctrl+D barges, which is the safe result. Settings -> Voice -> "Jarvis's own voice" shows learning / echo /
+  dry. Whether the gate ever locks on the owner's speakers, and the real delay, are unmeasured.
+
+Free checks after the round: vitest 2567 tests / 157 files (2584 after the delta round), `tsc`, `vite build`. Browser on the rebuilt `hud/dist`:
+`hud_v2_barge_check` 102 (adds `gate_own_name`, `gate_wake_command`), speech 56, multichat 343, steer 46, ptt 70.
+Mutations that fail on purpose (restored): `active` window back to `tEnd` with no gap reset (2 vitest); no reply reverification (4);
+no clip clamp (2); no arm guard (1); `card: false` in the router call (1); two-holder send lost / awaited summary cancelled (2).
+
+### V9 delta review of b9d5dfa (MED-1..3, L-a, L-b)
+
+- **MED-1 stall plus burst.** After a gap the queued frames were placed at "now", so a reply that ended inside the stall
+  looked finished and a 2 s stall let all 63 queued frames through. Now `gapFrom` (the last push before the gap) is kept, and
+  while the gap settles `active` looks back from `min(tEnd, gapFrom)`. Probes: stalls of 0.4, 1, 2 and 3 s with the reply
+  ending inside: 0 queued frames let through (the 2 s and 3 s cases fail without `gapFrom`).
+- **MED-2 volume step between replies under 3 s apart.** The held lock's gain drifts whenever the lock explains the window
+  (`heldScore >= LOCK_SCORE`); the audible/heard counts are required only to *confirm* it (set `confirmed`, `held.at`). With a
+  2 s pause a 4x-8x step lets 0 through (fails without the drift); with a 1 s pause x2 and a quieter room 0, x4 up to 3, x8 up
+  to 6 frames; with 0.25-0.5 s pauses up to ~11 frames per step (the guard needs a few frames of the new level).
+  `GUARD_SCORE` stays 0.9 (0.88 blocked 56% of an owner's speech over headphones in the synthetic room); the guard now needs the
+  reference audible in 6 frames, not half the window, so it can act sooner.
+- **MED-3 a comma between "Jarvis" and "stop".** A single frame judged his voice inside an open utterance reset the claim's
+  start, so the clip held only "stop" (not a command, so it was sent). `freeFrom` now resets only when he goes inactive or the
+  detector's utterance closes. Capture tests with 96, 200 and 400 ms gaps (fail with the old reset); browser: the upload covers
+  the whole owner audio and "Jarvis stop" is obeyed with nothing sent.
+- **L-a what is and is not claimed.** The gate fails closed for lost frames, stalls, a new reply after a pause (re-confirmed),
+  an exception, and an audio device change. It does **not** guarantee that his voice never opens the detector: a room change
+  with less than about 2.5 s of silence, a mid-reply volume step, or a delay that moves mid-reply can still open the VAD for up
+  to a few tenths of a second. What holds in those windows is that every route that turns an open utterance into a message is
+  closed to his voice: no follow-up or continuation window while he is audible, wake hits ignored while he says his name or
+  within 1.5 s after (unless they claim an utterance already open), claims start at the first frame the gate let through, and
+  an unclaimed utterance is dropped (`unclaimed`, with a diagnostics row). A TV that opens the VAD while a wake word is spoken
+  by the recognizer is the V12 (speaker verification) problem, not this gate's.
+- **L-b** a static pin: `onWakeHit` must call `sayingOwnName()` and return before `capture.onWake()`.
+
+After the delta round: vitest 2584 tests / 157 files; `hud_v2_barge_check` 115 (the `gate_wake_command` section now runs gaps of 0, 96, 200
+and 400 ms between "Jarvis" and "stop"), speech 56, multichat 343. Mutations that fail on purpose (restored): no `gapFrom` (2 vitest), gain drift only when
+confirmed (4), `freeFrom` reset on any self frame (3), the `sayingOwnName()` check removed from `onWakeHit` (1).

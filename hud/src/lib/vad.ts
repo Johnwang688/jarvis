@@ -146,21 +146,31 @@ export class Vad {
    *                 Without it (the worker not ready, or fallen back) the frame is judged
    *                 by energy, as before V5. The noise floor is tracked either way, so a
    *                 fallback finds a current threshold.
+   * @param veto     the frame is his own voice (V9, selfvoice.ts): it can neither open nor hold an
+   *                 utterance open, whatever `prob` or `rms` say, and it leaves the noise floor alone.
    */
-  feed(rms: number, n: number, written: number, prob?: number | null): VadEvent {
+  feed(rms: number, n: number, written: number, prob?: number | null, veto = false): VadEvent {
     this.rms = rms;
     // The floor falls fast and rises slowly, so a room that goes quiet is
     // tracked within a breath while a passing conversation has to be sustained
     // to raise it. While an utterance is open it rises slower still: the
     // owner's own voice must not walk the threshold up underneath itself and
     // cut the sentence off, which is exactly the "recording gets cut" report.
-    const tc = rms < this.floor ? FLOOR_FALL_TC : this.open ? FLOOR_RISE_OPEN_TC : FLOOR_RISE_IDLE_TC;
-    this.floor += (rms - this.floor) * (1 - Math.exp(-(n / CAP_RATE) / tc));
-    this.floor = Math.max(this.floor, 0.0008);
-    this.thresh = Math.max(this.floor * 3.0, 0.006);
+    // A vetoed frame (V9: it is his own voice coming back) is not the room, so
+    // it does not move the floor either.
+    if (!veto) {
+      const tc = rms < this.floor ? FLOOR_FALL_TC : this.open ? FLOOR_RISE_OPEN_TC : FLOOR_RISE_IDLE_TC;
+      this.floor += (rms - this.floor) * (1 - Math.exp(-(n / CAP_RATE) / tc));
+      this.floor = Math.max(this.floor, 0.0008);
+      this.thresh = Math.max(this.floor * 3.0, 0.006);
+    }
 
     let loud: boolean;
-    if (typeof prob === "number" && Number.isFinite(prob)) {
+    if (veto) {
+      // His own voice is never speech to this detector, whatever the model or the level says.
+      this.speech = false;
+      loud = false;
+    } else if (typeof prob === "number" && Number.isFinite(prob)) {
       this.ml = true;
       this.prob = prob;
       if (prob >= SPEECH_ON_P) this.speech = true;
