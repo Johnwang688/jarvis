@@ -62,7 +62,7 @@ CHECKS = 0
 # A SpeechRecognition that counts its constructions, installed before the page's own script runs.
 # Since V11 the wake word is heard locally and the HUD never constructs one, so `__srConstructed`
 # stays 0 and nothing ever calls `__sr`; the class stays so any construction is counted, not a crash.
-FAKE_RECOGNIZER = """
+PLAIN_RECOGNIZER = """
 window.__wakeFires = 0;
 window.__srConstructed = 0;
 class FakeSR {
@@ -80,6 +80,20 @@ window.__say = (segments, resultIndex) => {
   window.__sr.onresult({ resultIndex: resultIndex || 0, results });
 };
 """
+
+# The sidebar shows a project's five most recent chats (2026-10-15). Most suites find a chat row by
+# its testid in a project that holds more than five, so they start with every project's full list
+# asked for, as an owner who pressed "Show more" would have. Only when nothing is stored: the
+# recent-chats suite runs on PLAIN_RECOGNIZER and so sees the real default.
+SHOW_ALL_CHATS = """
+try {
+  if (localStorage.getItem('jarvis.hud.sidebar.showmore') === null) {
+    localStorage.setItem('jarvis.hud.sidebar.showmore',
+      JSON.stringify({ p1: true, p2: true, p3: true, p4: true, p7: true, p9: true }));
+  }
+} catch (e) {}
+"""
+FAKE_RECOGNIZER = PLAIN_RECOGNIZER + SHOW_ALL_CHATS
 
 
 def check(name: str, ok: bool, detail: str = ""):
@@ -3109,6 +3123,16 @@ def main():
                                  guard, FAKE_RECOGNIZER)
             finally:
                 toolcalls_mock.stop()
+
+            # The sidebar's five most recent chats per project (2026-10-15): a
+            # context and a mock of their own — it opens threads and reloads.
+            from tests.face.hud_v2_recent_chats_check import recent_chats_checks
+            recent_mock = MockDaemon(0).start()
+            try:
+                recent_chats_checks(browser, recent_mock, f"http://127.0.0.1:{recent_mock.port}", check, until,
+                                    guard, PLAIN_RECOGNIZER)
+            finally:
+                recent_mock.stop()
 
             from tests.face.hud_v2_math_check import math_checks
             math_mock = MockDaemon(0).start()
