@@ -1588,17 +1588,18 @@ and clicks. Both measured on Chrome 155 headless, raw CDP, before any change:
 - **What else follows Chrome's own scale** (measured): `fromSurface`
   screenshots (looks, captures) come at RASTER_SCALE, then the edge cap;
   `masked_image` scales each mask by the image's own size, so masks still
-  cover their fields, and the two mask tests now place their probe pixels by
-  that scale. Layout and input coordinates do not change: a click at CSS
-  (600, 400) lands at clientX/Y (600, 400) under every scale. Contexts are
-  created with `device_scale_factor=1`, so a page no window shows keeps
-  devicePixelRatio 1. Chrome divides the emulated scale by its own in
+  cover their fields; the two mask tests place their probe pixels by that
+  scale, one of them near each field's far corner, where an unscaled mask
+  would not reach. Layout and input coordinates do not change: a click at CSS
+  (600, 400) lands at clientX/Y (600, 400) under every scale. A page no
+  window shows keeps devicePixelRatio 1: Playwright emulates its context's
+  `viewport` at `deviceScaleFactor || 1`. Chrome divides the emulated scale by its own in
   float32, so a page's devicePixelRatio can read 1.0000000298 for 1 or
   0.62499998 for 0.625 (`browser_fit_check` compares it to 1e-6); a page
   choosing `srcset` candidates may then take the next one up. A wheel scrolls by the delta sent under every scale,
   but the WheelEvent's `deltaY` reads delta × Chrome's scale ÷ the page's
   (it read 400 for 600 at 150% before this change, 600 now by that rule; a 1× window now
-  reads 1.5×), which matters only to pages with their own wheel handlers.
+  reads 900 for 600), which matters only to pages with their own wheel handlers.
 - **The cost**, on a full page of text at 1200 × 800 CSS: press → changed
   frame p50/p95 17/18 ms at 1× against 38/45 ms at 1.5×, 338 against 638 KB
   a frame, nearly all of it JPEG encoding of 2.25× the pixels. Quality stays
@@ -1628,7 +1629,8 @@ and clicks. Both measured on Chrome 155 headless, raw CDP, before any change:
   clears the queue). A drag on a page that falls behind reaches it as fewer
   points (CDP has no coalesced-events list), accepted.
   `browser_input_merge_check` covers each rule; five mutants (no type,
-  buttons, point, attachment or bound check) each fail it.
+  buttons, point, attachment or bound check) each fail it, and the cap rule's
+  test fails against the version that checked the cap before merging.
 
 The Direct tab no longer shows "the Browser only loads local servers" while
 the owner's typed external address opens in Remote: `DirectTab.ownerGo`

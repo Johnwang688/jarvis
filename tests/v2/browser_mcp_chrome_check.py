@@ -82,6 +82,9 @@ class RelayChrome(B.Real):
    self.assertEqual(image.getpixel((round(120*k),round(170*k))),(255,0,170))
    self.assertEqual(image.getpixel((round(300*k),round(90*k))),(24,26,29))
    self.assertEqual(image.getpixel((round(300*k),round(190*k))),(24,26,29))
+   # Far corners: covered only by a mask scaled with the image.
+   self.assertEqual(image.getpixel((round(495*k),round(105*k))),(24,26,29))
+   self.assertEqual(image.getpixel((round(495*k),round(225*k))),(24,26,29))
   after=self.run_on(self.pg.evaluate("[changes.length,events.length,scrollX,scrollY,document.activeElement.tagName]"))
   self.assertEqual(after,before)
   serialized=json.dumps(self.records)+json.dumps(self.logs)

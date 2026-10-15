@@ -1224,9 +1224,7 @@ class BrowserHost:
                 artifacts_dir=str(artifacts), downloads_path=str(incoming),
                 accept_downloads=True, handle_sigint=False, handle_sigterm=False,
                 handle_sighup=False, timeout=LAUNCH_TIMEOUT_S * 1000,
-                # A page no window shows keeps devicePixelRatio 1, as before
-                # RASTER_SCALE (unset, it takes Chrome's own scale).
-                viewport={"width": 1280, "height": 800}, device_scale_factor=1)
+                viewport={"width": 1280, "height": 800})
         except Exception as exc:  # noqa: BLE001 - Playwright's message holds the command line
             LOG.warning("Chrome did not start for a Browser profile: %s", type(exc).__name__)
             await loop.run_in_executor(None, stop_pids, folder)
@@ -1686,8 +1684,7 @@ class BrowserHost:
                 ctx = self._new_id(instance.private_contexts)
                 context = await instance.browser.new_context(
                     proxy={"server": f"socks5://127.0.0.1:{self._gate.port}", "bypass": "<-loopback>"},
-                    accept_downloads=True, viewport={"width": 1280, "height": 800},
-                    device_scale_factor=1)
+                    accept_downloads=True, viewport={"width": 1280, "height": 800})
                 instance.private_contexts[ctx] = context
                 context.on("page", lambda page, c=ctx: self._adopt(instance, page, c))
             context = instance.private_contexts.get(ctx)

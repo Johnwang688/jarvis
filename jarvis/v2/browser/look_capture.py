@@ -69,7 +69,7 @@ async def _hidden(host,url):
             instance=await host._instance(PRIVATE)
             context=await instance.browser.new_context(
                 proxy={"server":f"socks5://127.0.0.1:{host._gate.port}","bypass":"<-loopback>"},
-                accept_downloads=False,viewport={"width":1280,"height":800},device_scale_factor=1)
+                accept_downloads=False,viewport={"width":1280,"height":800})
             instance.private_contexts[ctx]=context
             page=await context.new_page()
             context.on("page",lambda popup:asyncio.create_task(popup.close()))

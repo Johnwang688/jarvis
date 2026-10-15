@@ -999,7 +999,8 @@ class BrowserStream(unittest.TestCase):
         self.wait(lambda: (self.js(tab, "scrollY") or 0) > 0, what="the wheel scrolled")
         # Chrome reports deltaY × its own scale ÷ the page's (measured; the
         # scroll itself is the delta sent), so a 1× window reads 1.5×.
-        self.assertEqual(self.log(tab, "wheel")[0]["dy"], 600 * H.RASTER_SCALE / self.js(tab, "devicePixelRatio"))
+        self.assertAlmostEqual(self.log(tab, "wheel")[0]["dy"],
+                               600 * H.RASTER_SCALE / self.js(tab, "devicePixelRatio"), delta=1e-3)
         # A bad message is refused in words and reaches nothing.
         before = len(self.log(tab))
         window.send({"t": "key", "e": {"type": "char", "key": "x"}})
