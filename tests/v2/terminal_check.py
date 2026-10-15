@@ -709,6 +709,35 @@ class Lifecycle(Base):
         self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
         self.assertTrue(self.open_terminal()["readable"])
 
+    def test_changing_the_switch_publishes_exactly_an_id_a_boolean_and_a_time(self):
+        # Another HUD window's switch catches up from this record (the daemon's
+        # flag stays the truth): only on a change, never output.
+        events = self.daemon.bus.subscribe()
+        tid = self.open_terminal()["id"]
+
+        def drained():
+            out = []
+            while True:
+                try:
+                    out.append(events.get_nowait())
+                except Exception:
+                    return [r for r in out if r["kind"] == "terminal_readable"]
+
+        self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
+        self.owner("PATCH", f"/terminals/{tid}", {"readable": False})   # no change, no record
+        self.owner("PATCH", f"/terminals/{tid}", {"readable": True})
+        # A refused PATCH changes nothing and publishes nothing.
+        self.request("PATCH", f"/terminals/{tid}", {"readable": False}, port=self.daemon.port, status=403)
+        self.request("PATCH", f"/terminals/{tid}", {"readable": "yes"}, status=400)
+        records = drained()
+        self.assertEqual([r["data"]["readable"] for r in records], [False, True], records)
+        for record in records:
+            self.assertEqual(set(record), {"kind", "data"})
+            self.assertEqual(set(record["data"]), {"terminal_id", "readable", "at"})
+            self.assertEqual(record["data"]["terminal_id"], tid)
+            self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertTrue(self.term(tid).readable)
+
     def test_a_terminal_can_be_made_unreadable_from_its_first_byte(self):
         # WP-G2: a split's copy of a terminal Jarvis may not read is created
         # with the switch off, never readable for the round trip a PATCH takes.
@@ -1247,11 +1276,12 @@ class Leaks(Base):
         # (two here), each exactly {terminal_id, at} — and one `terminal_read`
         # for the read, exactly {terminal_id, lines, at, refused}.
         self.assertEqual(sorted(r["kind"] for r in drained),
-                         ["terminal_attached"] * 2 + ["terminal_read"], drained)
+                         ["terminal_attached"] * 2 + ["terminal_read", "terminal_readable"], drained)
         for record in drained:
             self.assertEqual(set(record), {"kind", "data"})
-            keys = ({"terminal_id", "at"} if record["kind"] == "terminal_attached"
-                    else {"terminal_id", "lines", "at", "refused"})
+            keys = {"terminal_attached": {"terminal_id", "at"},
+                    "terminal_readable": {"terminal_id", "readable", "at"},
+                    }.get(record["kind"], {"terminal_id", "lines", "at", "refused"})
             self.assertEqual(set(record["data"]), keys)
             self.assertEqual(record["data"]["terminal_id"], tid)
             self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")

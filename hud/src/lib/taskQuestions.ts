@@ -27,3 +27,20 @@ export function openQuestions(task: Task | null | undefined): Asked[] {
   return out;
 }
 
+
+/**
+ * The task list once the daemon has accepted an answer: that question holds
+ * the text, so `openQuestions` stops asking it without waiting for the next
+ * `refreshTasks()`. Call it only after `/answer` resolved — a refusal leaves the
+ * list, the row and the typed words as they were. Nothing here is the truth
+ * (the refresh that follows is); a task, index or question it does not find is
+ * returned untouched, and the other tasks keep their identity.
+ */
+export function markAnswered(tasks: Task[], taskId: string, index: number, text: string): Task[] {
+  return tasks.map((t) => {
+    const questions = t.id === taskId ? t.spec?.questions : undefined;
+    const asked = questions?.[index];
+    if (!questions || !asked || asked.answer != null) return t;
+    return { ...t, spec: { ...t.spec, questions: questions.map((x, i) => (i === index ? { ...x, answer: text } : x)) } };
+  });
+}

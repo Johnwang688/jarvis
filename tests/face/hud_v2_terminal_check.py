@@ -539,7 +539,7 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                         _autoopen_click_checks, _autoopen_card_checks, _autoopen_refusal_checks,
                         _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks,
-                        _closed_while_ticketing_checks, _readable_checks,
+                        _closed_while_ticketing_checks, _readable_checks, _readable_elsewhere_checks,
                         _hold_checks,
                         _read_note_checks, _integration_checks, _osc_link_checks, _browser_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
@@ -1646,6 +1646,35 @@ def _hold_checks(page, mock, base, check, until, fake):
     until(lambda: fake.sent(tid)[before:] == b"\x04", timeout=2)
     check("and a fresh Ctrl+D after it is the shell's again", fake.sent(tid)[before:] == b"\x04",
           repr(fake.sent(tid)[before:]))
+
+
+def _readable_elsewhere_checks(page, mock, base, check, until, fake):
+    """`terminal_readable` on the bus (2026-10-15): another window's change to
+    "Jarvis can read" reaches this window's switch without a reload. The
+    record is an id and a boolean; it only moves the display, and sends nothing."""
+    tid = _fresh(page, mock, base, until, fake)
+    sw = page.locator(_sel(tid, '[data-testid="term-readable"]'))
+    check("the switch starts on", sw.get_attribute("aria-pressed") == "true")
+    n = len(mock.sent("PATCH", f"/terminals/{tid}"))
+    typed = fake.sent(tid)
+    fake._row(tid)["readable"] = False           # what another window's PATCH did to the daemon
+    mock.emit("terminal_readable", {"terminal_id": tid, "readable": False, "at": "2026-10-15T12:00:00+00:00"})
+    check("another window turning it off shows here without a reload",
+          until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3) is True
+          and "can't read" in sw.inner_text(), sw.get_attribute("aria-pressed"))
+    fake._row(tid)["readable"] = True
+    mock.emit("terminal_readable", {"terminal_id": tid, "readable": True, "at": "2026-10-15T12:00:01+00:00"})
+    check("and back on",
+          until(lambda: sw.get_attribute("aria-pressed") == "true", timeout=3) is True
+          and "Jarvis can read" in sw.inner_text())
+    for bad in ({"terminal_id": "../etc", "readable": False}, {"terminal_id": tid, "readable": "false"},
+                {"terminal_id": tid}):
+        mock.emit("terminal_readable", bad)
+    page.wait_for_timeout(300)
+    check("a record of the wrong shape changes nothing", sw.get_attribute("aria-pressed") == "true")
+    check("the event only moves the display: no request, nothing typed, the daemon's flag untouched",
+          len(mock.sent("PATCH", f"/terminals/{tid}")) == n and fake.sent(tid) == typed
+          and fake._row(tid)["readable"] is True)
 
 
 def _read_note_checks(page, mock, base, check, until, fake):

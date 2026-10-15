@@ -217,6 +217,9 @@ function DirectTab(props: {
   const [stolen, setStolen] = useState(false);
   const [load, setLoad] = useState(0);
   const [ownerError,setOwnerError]=useState("");
+  // An address this Direct tab cannot frame, on its way to Remote: its
+  // refusal is not shown while the owner's submit runs (the tab turns Remote).
+  const [opening,setOpening]=useState("");
   if (storedUrl !== props.tab.url) {
     setStoredUrl(props.tab.url);
     setTyped(props.tab.url);
@@ -242,16 +245,20 @@ function DirectTab(props: {
   useEffect(() => () => cancelLoad(key), [key]);
   const verdict = known && attempt ? judgeBrowserUrl(attempt, ports) : null;
   const src = verdict?.ok ? verdict.url : "";
-  const reason = verdict && !verdict.ok ? verdict.reason : "";
+  const refused = verdict && !verdict.ok ? verdict.reason : "";
+  const reason = refused && !(opening && opening === attempt) ? refused : "";
   const ownerGo=async(raw:string)=>{
     if(props.optionsBlocked)return;
     setOwnerError("");
     const direct=judgeBrowserUrl(raw,ports);
-    if(!direct.ok)setAttempt(raw);
+    if(!direct.ok){setAttempt(raw);setOpening(raw);}
     try {
       await props.control!.submit(props.pane as PaneNo,props.tab.id,raw);
+      // Normally this tab is Remote by now and gone; one still Direct says why.
+      setOpening(o=>o===raw?"":o);
       ownLoad(key);setStolen(false);setLoad(n=>n+1);
     }catch(e){
+      setOpening(o=>o===raw?"":o);
       if(!direct.ok)props.onLoaded(props.tab.id,raw.length<=2048?raw:"");
       setOwnerError(cleanTitle(e instanceof Error?e.message:"The address could not be loaded.",300));
     }
@@ -317,6 +324,7 @@ function DirectTab(props: {
       </div> : null}
       {viewed?<div className="small muted" data-testid="browser-viewed">{viewed.refused?"Jarvis look refused":"Jarvis looked"} · {new Date(viewed.at).toLocaleTimeString()}</div>:null}
       {reason && !ownerError ? <div className="pad err" data-testid="browser-refused">{reason}</div> : null}
+      {refused && !reason && !ownerError ? <div className="pad muted" role="status" data-testid="browser-opening">Opening…</div> : null}
       {ownerError?<div className="pad err" role="status" data-testid="browser-refused">{ownerError}</div>:null}
     </> : null}
     {props.captureDestination && props.control ? <BrowserCapture remoteTabId={null}
@@ -334,7 +342,7 @@ function DirectTab(props: {
     </div> : src && props.live ? <FrameHost pane={props.pane} tab={props.tab.id} slot={props.slot}
       drawn={props.drawn} active={props.active} src={src} sandbox={sandboxFor(!!grant)}
       keepOrigin={!!grant} load={load} onStolen={(focusNotice) => { noticeWants.current = focusNotice; setStolen(true); }} />
-      : !src && props.active && !reason ? <div className="pad muted">Nothing loaded.</div> : null}
+      : !src && props.active && !refused ? <div className="pad muted">Nothing loaded.</div> : null}
   </div>;
 }
 
