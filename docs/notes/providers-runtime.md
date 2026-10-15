@@ -488,7 +488,7 @@ A known child's server request never ends the orchestrator's turn, and its
   notice. A child request naming no `turnId` is refused, not fatal.
 
 A request from any other thread is still a fatal identity mismatch.
-Child notifications are still skipped.
+Child notifications were still skipped then; SV-2 (below) routes them.
 
 **Known limit (MED-2 of the #195 review): a long wait on a child's card can
 close the session.** While the owner decides on any card, the turn loop does
@@ -755,3 +755,107 @@ children live; and for the label: none, a widening (stricter), an outright
 allow (looser), ignored by the card, uncleaned in permit or provider, forced
 on a permit without the keyword, riding in `args`, taken from the task's
 current activity.
+
+## Codex sub-agents are their own (SV-2, 2026-10-15)
+
+Before this, a known Codex child's notifications were dropped by the turn
+loop's thread filter: the owner saw nothing of what a child did. Now (plan
+`docs/plans/2026-10-13-subagent-view.md` SV-2, narrowed by the SV-0 findings
+8–14) they feed the record and routes SV-1 built, as the same two kinds.
+
+**The provider** (`codex.py`, "What a child says and does"). SV-2a's
+registration stays the only identity source: a `subAgentActivity`
+`item/started` of kind `started` on the session's thread or a known child's
+(`_note_child`, at wire-read time). It now also makes the child's
+`_ChildView` (sid `cx:<threadId>`, `child_sid`, hashed if the id does not
+fit; name = SV-2a's cleaned label; depth and parent sid from the announcing
+child), forgotten with its `children` entry at `CHILD_LIMIT`. In `send`,
+after the early queue and before the thread/turn filters, a message on a
+known child's thread goes to `_child_notification` and never further; a
+message on the session's thread first passes `_announce`, which emits the
+child's `started` (whatever turn the item names) and notes an
+`interrupted` (the model's `interrupt_agent`). What a child sends becomes:
+
+- its turn: `turn/started` sets `running` (an ended child given another turn
+  — `sendInput`, `followupTask` — is announced `started` again);
+  `turn/completed` gives `done`/`failed`/`stopped` once per turn, with
+  `duration_ms`, a stop reason, and for `failed` Codex's error message as a
+  `result` entry (scrubbed, 4000 characters). `thread/closed` stops a live
+  one. The parent-side `completed` is never read (SV-0: absent for failed and
+  externally interrupted children);
+- `thread/tokenUsage/updated`: the child's `tokens` (its thread's total) on
+  a lifecycle `progress`. Never `s.accounting`, never a USAGE event;
+- a command/file/MCP item: `tool_started` with only what the daemon's label
+  reads (a command and folder; a patch's paths, at most 20, never its diff;
+  MCP arguments, none for `hud_browser_act`), then `tool_finished` with an
+  outcome (`denied` for `declined`), never a result. Open calls per child are
+  bounded (`CHILD_CALL_LIMIT`, 256);
+- a completed `agentMessage`: `text`, scrubbed (`secrets.scrub`; a scrub
+  that raises withholds it), capped at 4000;
+- a reviewer's denial (`item/autoApprovalReview/completed`, tasks only):
+  `reviewer_declined` with the tool's name alone;
+- anything else — deltas, reasoning, plans, its brief, `wait` calls, status
+  changes, `error` (the turn's end carries it), `model/rerouted` — nothing.
+  A malformed shape is dropped, never fatal.
+
+The parent's turn, TEXT/TOOL_*, USAGE, `s.items` and accounting see none of
+it. The turn's end ends no child: every Codex child may outlive it (SV-0),
+so `background` is always false and status stays `running` until its own
+turn ends. `live_subagents` lets the daemon's model-switch reconciliation
+keep them (a Codex switch rides the next `turn/start`). SV-2a's request
+handling is unchanged.
+
+**The daemon** needed no new path: `_record_subagent`, `subagents.py`, the
+two owner routes, the bus record and `end_session` (close, archive, loss, a
+fatal send, restart) take Codex's events as they are. One rule changed in
+the record: an ended child is live again on a `started` from the session
+that ran it (its key), and only then; any other live word after an end
+stays stale, as SV-1 had it. Claude never sends `started` for a child it
+already knows, so its behaviour is unchanged.
+
+**Found while testing, not changed.** In the provider replay of
+`parent_interrupt`, the send after an interrupted orchestrator turn is fatal
+("Codex previous turn accounting incomplete"): `codex.py` marks an
+interrupted turn's accounting incomplete, and `codex_usage.Accounting`
+refuses to resume one. So after the owner's Stop on a Codex chat, its
+children run on only until the next message closes the session (and its
+app-server); the record then reads them `stopped`, "the session that ran it
+ended". Whether the Stop-then-continue path itself is right for Codex chats
+is outside SV-2.
+
+**Between turns nobody reads the connection** (SV-6). Child traffic that
+arrives after the parent's turn is read by the next send, recorded under
+that send's `turn_id`; the 4096-message queue limit (SV-2a's MED-2) is
+unchanged.
+
+**For SV-4 (owner decision).** Codex's `turn/interrupt` on a child's thread
+ends that child's turn (`stopped`, "its turn was interrupted"), but a
+command it is running runs to its end, and the orchestrator's model is not
+told: no `subAgentActivity`, and its `wait_agent` times out (SV-0 finding
+12). Offer per-child Stop with "ends its turn; a running command may
+finish", or keep it absent.
+
+Checks (free, offline): `tests/v2/codex_subagents_check.py`, 32 tests:
+the 13 recordings (one, parallel, nested, fail, child_interrupt,
+close_agent, approval, approval_accept, patch_approval_child,
+one_multi_agent_v2, and no_wait, parent_interrupt, steer_parent over two
+sends) through the real `CodexProvider` over real pipes
+(`codex_provider_check`'s replaying peer), then those events through a real
+daemon: isolation (parent events, accounting, log, transcript route,
+Discord, titles, bus, ledger), lifecycle, privacy, bounds and the record's
+revival rule. On `main` 28 of the 32 fail; the four that pass pin
+unchanged behaviour (parent accounting, ledger, no deltas, malformed shapes
+not fatal) and are proven by mutants. 25 mutants, all killed: a child's
+items as the parent's, its tokens into the accounting or as USAGE, its turn
+end ending the parent's, an unannounced thread recorded, the end read from
+the parent's notice, the parent's turn end stopping children, unscrubbed
+text, a diff or `hud_browser_act`'s arguments in the envelope, a delta
+passed on, the record never reviving or reviving on another session's
+word, no second `started`, interrupted read as done, a reviewer's rationale
+kept, a forgotten child keeping its record, unbounded open calls, a name on
+the bus, the daemon logging the kinds, `live_subagents` empty, a failure's
+reason dropped, a malformed turn fatal, `interrupt_agent` not told apart, a
+nested child's parent dropped. `codex_provider_check` (111),
+`claude_subagents_check` (31), `subagent_routes_check` (28),
+`subagent_fixtures_check` (25) and `codex_session_mcp_check` (34) pass
+unchanged.
