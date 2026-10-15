@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { Capture, type UtteranceEnd } from "./capture";
+import type { SelfFrame } from "./selfvoice";
 import { END_PAUSE_MS } from "./vad";
 import { SEND_WORD_SILENCE_MS } from "./voiceWords";
 
@@ -82,6 +83,58 @@ describe("tailMs: the quiet behind the last word", () => {
     m.quiet(200);
     expect(m.ends).toHaveLength(1);
     expect(m.ends[0]).toMatchObject({ truncated: true, tailMs: 0 });
+  });
+});
+
+describe("his own voice never earns a send or cancel word (V9's veto)", () => {
+  const HIS: SelfFrame = { active: true, playing: true, self: true, reason: "echo" };
+  const ECHO: SelfFrame = { active: true, playing: false, self: false, reason: "unexplained" };
+
+  const ptt = (during: SelfFrame | null, ms = 300) => {
+    const m = mk();
+    m.quiet(2000);
+    m.cap.press();
+    m.talk(1200);
+    if (during) m.cap.feedMs(ms, 0.0009, 512, null, during);
+    m.quiet(800);                       // plenty of clean quiet after it
+    m.cap.release();
+    return m.ends[0];
+  };
+
+  it("push-to-talk with no voice of his: the quiet counts", () => {
+    expect(ptt(null).tailMs).toBeGreaterThanOrEqual(SEND_WORD_SILENCE_MS);
+  });
+
+  it("his voice sounding while the key is held: no trailing silence, however much quiet follows", () => {
+    expect(ptt(HIS).tailMs).toBe(0);
+    expect(ptt(ECHO).tailMs).toBe(0);                  // audible within the echo delay, not judged his: still no
+  });
+
+  it("his voice already audible when the recording began", () => {
+    const m = mk();
+    m.quiet(2000);
+    m.cap.feedMs(200, 0.0009, 512, null, ECHO);
+    m.cap.press();
+    m.cap.feedMs(1200, 0.06, 512, null, ECHO);
+    m.quiet(800);
+    m.cap.release();
+    expect(m.ends[0].tailMs).toBe(0);
+  });
+
+  it("the next message is judged afresh", () => {
+    const m = mk();
+    m.quiet(2000);
+    m.cap.press();
+    m.talk(1200);
+    m.cap.feedMs(300, 0.0009, 512, null, HIS);
+    m.quiet(800);
+    m.cap.release();
+    m.quiet(1500);
+    m.cap.press();
+    m.talk(1200);
+    m.quiet(800);
+    m.cap.release();
+    expect(m.ends.map((e) => e.tailMs > 0)).toEqual([false, true]);
   });
 });
 

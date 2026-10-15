@@ -4,6 +4,7 @@
 // parts meet.
 
 import { api } from "../../api";
+import { SelfVoiceGate } from "../selfvoice";
 import { SpeechController } from "./controller";
 import { WebAudioPlayer } from "./player";
 import type { Clock } from "./queue";
@@ -26,6 +27,25 @@ export function loadReadAloud(storage?: Pick<Storage, "getItem">): boolean {
 export function saveReadAloud(on: boolean, storage?: Pick<Storage, "setItem">): void {
   try {
     (storage ?? window.localStorage).setItem(KEY, on ? "on" : "off");
+  } catch {
+    /* a window with storage blocked still works, it just forgets */
+  }
+}
+
+const GATE_KEY = "jarvis.selfVoiceGate";
+
+/** Self-voice gating on/off, a per-window convenience (default on). Off is V6's blanket hold: the mic is held for the whole of a reply. */
+export function loadSelfVoiceGate(storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    return (storage ?? window.localStorage).getItem(GATE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function saveSelfVoiceGate(on: boolean, storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? window.localStorage).setItem(GATE_KEY, on ? "on" : "off");
   } catch {
     /* a window with storage blocked still works, it just forgets */
   }
@@ -61,7 +81,7 @@ export function newWindowToken(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-const realClock: Clock = {
+export const realClock: Clock = {
   now: () => Date.now(),
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
   clearTimeout: (h) => window.clearTimeout(h as number),
@@ -71,6 +91,8 @@ export interface Speech {
   controller: SpeechController;
   gate: SpeakerGate;
   player: WebAudioPlayer;
+  /** What the window is playing, as the reference for telling his voice from the owner's (V9). */
+  selfVoice: SelfVoiceGate;
   /** Each chat's voice and mute (V7), kept by the daemon. */
   voices: ThreadVoices;
   /** Holds the daemon's short lease that lowers the Remote Browser's sound while speech is active (V15). */
@@ -81,6 +103,16 @@ export interface Speech {
 export function createSpeech(): Speech {
   const gate = new SpeakerGate(browserLocks());
   const player = new WebAudioPlayer();
+  // The player is the reference: the gate hears exactly what Web Audio puts out (V9).
+  // No Web Audio, no reference: the gate is then not in force and the blanket hold applies.
+  const hasWebAudio = typeof window !== "undefined" && !!(window.AudioContext ?? (window as unknown as { webkitAudioContext?: unknown }).webkitAudioContext);
+  const selfVoice = new SelfVoiceGate(undefined, hasWebAudio);
+  selfVoice.setEnabled(loadSelfVoiceGate());
+  player.setReference(selfVoice.reference);
+  // An audio device came or went (headphones, a speaker): what was learned of the room is not to be trusted.
+  const devices = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+  const onDevices = () => selfVoice.invalidate();
+  try { devices?.addEventListener?.("devicechange", onDevices); } catch { /* an environment without the event */ }
   const voices = new ThreadVoices({
     list: () => api.speechVoices(),
     change: (thread, change) => api.speechVoice(thread, change),
@@ -107,10 +139,11 @@ export function createSpeech(): Speech {
   const onHide = () => duck.release();
   window.addEventListener("pagehide", onHide);
   return {
-    controller, gate, player, voices, duck,
+    controller, gate, player, selfVoice, voices, duck,
     dispose: () => {
       window.removeEventListener("pagehide", onHide);
       window.removeEventListener("storage", onStorage);
+      try { devices?.removeEventListener?.("devicechange", onDevices); } catch { /* ditto */ }
       unduck(); duck.dispose(); unbind(); controller.dispose(); gate.dispose(); player.dispose();
     },
   };

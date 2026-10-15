@@ -106,4 +106,84 @@ describe("WebAudioPlayer", () => {
     expect(t.handlers.has("pointerdown")).toBe(false);
     expect(ctx.listenerCount()).toBe(0);
   });
+
+  describe("the self-voice reference (V9)", () => {
+    const buf = (n = 100) => ({ sampleRate: 24000, getChannelData: () => new Float32Array(n).fill(0.2) });
+    const sink = () => {
+      const log: string[] = [];
+      return { log, start: (id: number, samples: Float32Array, rate: number) => log.push(`start ${id} ${samples.length} ${rate}`), stop: (id: number) => log.push(`stop ${id}`) };
+    };
+
+    it("reports each sound as it starts and as it stops", async () => {
+      const { ctx, player } = make();
+      const s = sink();
+      player.setReference(s);
+      await ctx.resume();
+      const h = player.play(buf());
+      expect(s.log).toEqual(["start 1 100 24000"]);
+      h.stop();
+      expect(s.log).toEqual(["start 1 100 24000", "stop 1"]);
+      ctx.sources[0].onended?.();                     // a late natural end after the stop changes nothing more than a repeat
+      expect(s.log.filter((l) => l.startsWith("start"))).toHaveLength(1);
+    });
+
+    it("a natural end is reported as a stop", async () => {
+      const { ctx, player } = make();
+      const s = sink();
+      player.setReference(s);
+      await ctx.resume();
+      const h = player.play(buf());
+      ctx.sources[0].onended?.();
+      await h.done;
+      expect(s.log).toEqual(["start 1 100 24000", "stop 1"]);
+    });
+
+    // A real context resumes later, not inside the call: the page waits for a gesture.
+    const slow = (ctx: FakeContext) => {
+      const real = ctx.resume.bind(ctx);
+      ctx.resume = async () => {};
+      return () => real();
+    };
+
+    it("a sound started while the context is suspended is not a reference until it runs", async () => {
+      const { ctx, player } = make();
+      const run = slow(ctx);
+      const s = sink();
+      player.setReference(s);
+      await player.decode(new ArrayBuffer(1));       // the context exists, suspended
+      player.play(buf());
+      expect(s.log).toEqual([]);                      // suspended: nothing is audible yet
+      await run();                                    // statechange
+      expect(s.log).toEqual(["start 1 100 24000"]);
+    });
+
+    it("a sound stopped before the context ran is never a reference", async () => {
+      const { ctx, player } = make();
+      const run = slow(ctx);
+      const s = sink();
+      player.setReference(s);
+      await player.decode(new ArrayBuffer(1));
+      player.play(buf()).stop();
+      await run();
+      expect(s.log.filter((l) => l.startsWith("start"))).toEqual([]);
+    });
+
+    it("a buffer that cannot be read, or a sink that throws, never breaks playback", async () => {
+      const { ctx, player } = make();
+      player.setReference({ start: () => { throw new Error("no"); }, stop: () => { throw new Error("no"); } });
+      await ctx.resume();
+      const h = player.play(buf());
+      h.stop();
+      expect(await h.done).toBe("stopped");
+      const h2 = player.play({});                     // no getChannelData
+      expect(ctx.sources[1].started).toBe(1);
+      h2.stop();
+    });
+
+    it("with no reference nothing is asked", async () => {
+      const { ctx, player } = make();
+      await ctx.resume();
+      expect(() => player.play(buf()).stop()).not.toThrow();
+    });
+  });
 });

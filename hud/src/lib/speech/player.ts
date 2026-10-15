@@ -6,10 +6,17 @@
 // element would need. Pause is "stop the source"; resume plays the sentence
 // again from its start (open question 13), so no offsets are tracked.
 //
+// What it plays is also the *reference* the self-voice gate judges the microphone
+// against (V9, lib/selfvoice.ts): `setReference` hands it each sound as it starts
+// (the decoded samples, read once) and as it stops. A sound started while the
+// context is suspended is reported when the context runs, because that is when it
+// is first audible. The reference can never break playback.
+//
 // Chrome starts an AudioContext suspended until the page has seen a gesture.
 // The player listens for one and resumes; until then `blocked()` is true and a
 // source scheduled on the suspended context simply waits, so nothing is lost.
 
+import type { ReferenceSink } from "../selfvoice";
 import type { PlayHandle, Player } from "./queue";
 
 type ContextFactory = () => AudioContext;
@@ -24,6 +31,10 @@ export class WebAudioPlayer implements Player {
   private wake: (() => void) | null = null;
   private onState: (() => void) | null = null;
   private onBlocked = new Set<() => void>();
+  private reference: ReferenceSink | null = null;
+  private refIds = 0;
+  /** Sounds started while the context was suspended: not audible, so not yet a reference. */
+  private waiting = new Map<number, AudioBuffer>();
 
   constructor(
     private readonly make: ContextFactory = () => {
@@ -74,7 +85,32 @@ export class WebAudioPlayer implements Player {
     this.gestureBound = false;
   }
 
+  /** The self-voice gate's feed (V9). */
+  setReference(sink: ReferenceSink | null): void {
+    this.reference = sink;
+    if (!sink) this.waiting.clear();
+  }
+
+  private refStart(id: number, buffer: AudioBuffer): void {
+    const sink = this.reference;
+    if (!sink) return;
+    try {
+      if (this.ctx && this.ctx.state !== "running") { this.waiting.set(id, buffer); return; }
+      sink.start(id, buffer.getChannelData(0), buffer.sampleRate);
+    } catch { /* a buffer that cannot be read is simply not a reference */ }
+  }
+
+  private refStop(id: number): void {
+    this.waiting.delete(id);
+    try { this.reference?.stop(id); } catch { /* ditto */ }
+  }
+
   private changed(): void {
+    if (this.waiting.size && this.ctx?.state === "running") {
+      const ready = [...this.waiting];
+      this.waiting.clear();
+      for (const [id, buffer] of ready) this.refStart(id, buffer);
+    }
     for (const cb of [...this.onBlocked]) {
       try { cb(); } catch { /* never breaks playback */ }
     }
@@ -95,20 +131,24 @@ export class WebAudioPlayer implements Player {
     const source = ctx.createBufferSource();
     source.buffer = audio as AudioBuffer;
     source.connect(this.analyser ?? ctx.destination);
+    const refId = ++this.refIds;
     let finish!: (how: "ended" | "stopped") => void;
     const done = new Promise<"ended" | "stopped">((resolve) => { finish = resolve; });
     let stopped = false;
     source.onended = () => {
       try { source.disconnect(); } catch { /* already gone */ }
+      this.refStop(refId);
       finish(stopped ? "stopped" : "ended");
     };
     if (ctx.state === "suspended") void ctx.resume().catch(() => {});
     source.start();
+    this.refStart(refId, source.buffer as AudioBuffer);
     return {
       done,
       stop: () => {
         if (stopped) return;
         stopped = true;
+        this.refStop(refId);
         try { source.stop(); } catch { /* never started, or ended */ }
         // `onended` may not fire for a source that never played; settle anyway.
         finish("stopped");
@@ -143,6 +183,8 @@ export class WebAudioPlayer implements Player {
     this.ctx = null;
     this.analyser = null;
     this.onBlocked.clear();
+    this.waiting.clear();
+    this.reference = null;
     void ctx?.close().catch(() => {});
   }
 }

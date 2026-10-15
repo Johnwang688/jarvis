@@ -70,6 +70,9 @@ export interface ControllerDeps {
   summarize?: Summarize;
 }
 
+/** A wake hit this soon after a sentence that said his name ended may still be his own voice (recognizer lag, the room's tail). */
+export const NAME_GRACE_MS = 2000;
+
 /** After the last chunk ends, speech still counts as active this long: the owner's own echo and the next chunk's lead-in. */
 export const HANGOVER_MS = 300;
 
@@ -130,6 +133,12 @@ export class SpeechController {
   private hang: unknown = null;
   private idleListeners = new Set<() => void>();
   private bargePaused = false;
+  /** Does this text contain the wake word? (V9: so a sentence that says his name cannot be mistaken for the owner saying it.) */
+  private isName: ((text: string) => boolean) | null = null;
+  /** Until when (clock time) a sentence that said his name counts as still being heard; Infinity while it sounds. */
+  private nameUntil = -Infinity;
+  /** The message a barge-in interrupted: what a send skips (V-7), not whatever is next in line by then. */
+  private bargedMessage: { thread: string; messageKey: string } | null = null;
 
   constructor(private readonly deps: ControllerDeps) {
     this.queue = new SpeechQueue({
@@ -178,6 +187,7 @@ export class SpeechController {
 
   /** The queue changed: keep the hangover that holds `active` just after the last chunk. */
   private settle(): void {
+    this.trackName();
     const state = this.queue.view().state;
     const live = state === "playing" || state === "buffering";
     if (live) {
@@ -197,6 +207,35 @@ export class SpeechController {
       this.wasLive = false;
       if (this.hang !== null) { this.deps.clock.clearTimeout(this.hang); this.hang = null; }
     }
+  }
+
+  /**
+   * V9: the wake word as a regular expression of the window (`setNameMatcher`). While a sentence that contains
+   * it is playing, and for NAME_GRACE_MS after it ended, a wake hit may be the room hearing him say it, so
+   * the caller ignores it (`sayingOwnName`). The owner then pauses him with the talk key.
+   */
+  setNameMatcher(fn: ((text: string) => boolean) | null): void {
+    this.isName = fn;
+    this.trackName();
+  }
+
+  sayingOwnName(): boolean {
+    return this.nameUntil === Infinity || this.deps.clock.now() < this.nameUntil;
+  }
+
+  private trackName(): void {
+    const match = this.isName;
+    let sounding = false;
+    if (match) {
+      for (const i of this.queue.items()) {
+        if (i.state !== "playing") continue;
+        let hit = false;
+        try { hit = match(i.text); } catch { hit = true; }   // fail closed: a matcher that throws hears his name
+        if (hit) { sounding = true; break; }
+      }
+    }
+    if (sounding) this.nameUntil = Infinity;
+    else if (this.nameUntil === Infinity) this.nameUntil = this.deps.clock.now() + NAME_GRACE_MS;
   }
 
   private fireIdle(): void {
@@ -517,17 +556,21 @@ export class SpeechController {
   /**
    * The owner starts talking over him (decision V-7: barge-in pauses, then
    * resumes). Pauses speech that is in progress and remembers that *it* did; a
-   * pause the owner made from the strip is theirs, and is left alone.
+   * pause the owner made from the strip is theirs, and is left alone. Returns
+   * whether there was speech to hold (playing, buffering, or a summary on its
+   * way), so a caller knows whether anything waits to be resumed.
    */
-  bargeIn(): void {
+  bargeIn(): boolean {
     const state = this.queue.view().state;
     if (state !== "playing" && state !== "buffering") {
       // Nothing sounds, but a summary is on its way: it waits for the owner to finish.
-      if (this.lanes.size > 0 && state === "idle") { this.holdDelivery = true; this.bargePaused = true; this.notify(); }
-      return;
+      if (this.lanes.size > 0 && state === "idle") { this.holdDelivery = true; this.bargePaused = true; this.bargedMessage = null; this.notify(); return true; }
+      return false;
     }
+    this.bargedMessage = this.queue.headMessage();
     this.queue.pause();
     this.bargePaused = true;
+    return true;
   }
 
   /**
@@ -535,12 +578,28 @@ export class SpeechController {
    * dropped, failed, placed for review, or sent). Resumes what this barge-in
    * paused, restarting the sentence (Q13); a thread a message went to has
    * already lost its items (`messageSent`), so what resumes is what remains.
+   * `skip`: a message went out (V-7), so the message he was in the middle of (if something was sounding) is
+   * not resumed either, whichever chat it was for -- the rest of the queue is.
    */
-  endBargeIn(): void {
+  endBargeIn(opts: { skip?: boolean } = {}): void {
     if (!this.bargePaused) return;
     this.bargePaused = false;
+    const interrupted = this.bargedMessage;
+    this.bargedMessage = null;
+    if (opts.skip) {
+      // The message he was in the middle of goes (if a send did not already take it); the queue goes on.
+      // With nothing playing when he was held (a summary on its way), the one awaited is skipped.
+      // With nothing sounding when he was held (a summary on its way, or nothing), there is nothing to skip: a
+      // summary awaited for another chat is not his to cancel.
+      if (interrupted) this.silenceIfOpen(this.queue.skipMessage(interrupted.thread, interrupted.messageKey), () => {});
+    }
     this.release();
     this.queue.resume();
+  }
+
+  /** A barge-in's pause is in force (the owner has not paused, resumed or stopped since). */
+  bargeHeld(): boolean {
+    return this.bargePaused;
   }
 
   /** The rest of the current message is not spoken. */

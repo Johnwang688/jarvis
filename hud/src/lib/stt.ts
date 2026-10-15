@@ -660,6 +660,8 @@ export interface SttCapture {
    * word counts only when this is at least `SEND_WORD_SILENCE_MS`.
    */
   tailMs?: number;
+  /** The capture's utterance id: what a barge-in that this message began is called (V9). */
+  utterance?: number;
 }
 
 /** What is true when a transcript lands. */
