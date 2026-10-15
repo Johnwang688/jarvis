@@ -106,7 +106,9 @@ def run_checks(root: Path) -> None:
     print(f"ok  shell: {len(blocked)} protected forms refused in both tools, globs included")
 
     # 4. the backstop — the exact shape of the leak this was written for
-    leak = "grep -RIn OPENROUTER_API_KEY ."
+    # `-r`, not `-R`: run_readonly refuses the symlink-following mode since
+    # review 2 of PR #182 (a nested `link -> ~/.ssh`); the leak is the same.
+    leak = "grep -rIn OPENROUTER_API_KEY ."
     assert protected_in_command(leak) is None, "the pre-check is not what catches this"
     raw = run_readonly(leak)
     assert SECRET in raw, "fixture is wrong — the raw grep should expose the key"

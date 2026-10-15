@@ -19,6 +19,7 @@ be a way to run dangerous tools unguarded (the same rule that makes
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable, Iterable, Iterator
@@ -98,6 +99,28 @@ _DESK: ContextVar[dict | None] = ContextVar("jarvis_desk", default=None)
 _CALLER: ContextVar[dict | None] = ContextVar("jarvis_caller", default=None)
 CALLER_KEYS = ("thread_id", "project_id", "provider", "turn_id")
 
+# The folder this run works in (2026-10-14, fast-path edits decision F-6): an
+# absolute path, or None. The v2 fast path binds its thread's project folder
+# for each turn; v1's file tools place a relative path there
+# (`files.in_working_dir`), `shell._run` starts its commands there, and the
+# gate-state check (`protected_state.command_touches`) and the `.env` value
+# scrubber judge a command line there. Unbound — every v1 surface, a
+# workflow, a task, a script — is the process's own directory, exactly as
+# before. Only a path is placed: every safety check still runs on the
+# absolute, resolved result. `Agent.run_turn` never sets it, so a folder the
+# provider bound survives the loop's own bind.
+_WORKDIR: ContextVar[str | None] = ContextVar("jarvis_workdir", default=None)
+
+# Tools this agent's approver must pass although the registry marks them safe
+# (2026-10-14, fast-path edits decision F-3). `dispatch()` sends a call to the
+# approver when its tool is `dangerous` *or* named here; nothing else about
+# dispatch changes (the toolset check, then the verdict, then the approver).
+# The v2 fast path binds `write_file` and `edit_file` for an owner's desk
+# turn, so every edit it makes goes through the daemon's §6 permit and the
+# owner's allowlist, as a command does. Empty — every other agent — keeps the
+# registry's flags. Binding it can only add asks, never remove one.
+_ASK_TOOLS: ContextVar[frozenset[str]] = ContextVar("jarvis_ask_tools", default=frozenset())
+
 MAX_DEPTH = 2
 
 
@@ -112,6 +135,8 @@ def bind(
     proposal: dict | None = None,
     desk: dict | None = None,
     caller: dict | None = None,
+    workdir: str | None = None,
+    ask_tools: frozenset[str] | set[str] | None = None,
 ) -> None:
     """Bind the current agent's per-run state. Called by `Agent.run_turn`."""
     if plan is not None:
@@ -134,6 +159,12 @@ def bind(
         _DESK.set(desk)
     if caller is not None:
         _CALLER.set({key: caller.get(key) for key in CALLER_KEYS})
+    if workdir is not None:
+        # Only an absolute path is a place; anything else binds nothing
+        # rather than a folder relative to wherever the process happens to be.
+        _WORKDIR.set(workdir if os.path.isabs(workdir) else None)
+    if ask_tools is not None:
+        _ASK_TOOLS.set(frozenset(ask_tools))
 
 
 
@@ -293,6 +324,18 @@ def desk_images() -> bool:
     """The current pinned model is known to accept images; never inferred by a tool."""
     slot = _DESK.get()
     return bool(at_desk() and slot is not None and slot.get("images") is True)
+
+
+def working_dir() -> str | None:
+    """The absolute folder this run works in, or None: the process's own
+    directory (every v1 surface). See `_WORKDIR`."""
+    return _WORKDIR.get()
+
+
+def ask_tools() -> frozenset[str]:
+    """Tools this agent's approver must pass though they are not `dangerous`.
+    Empty unless a provider bound some. See `_ASK_TOOLS`."""
+    return _ASK_TOOLS.get()
 
 
 def caller() -> dict | None:

@@ -65,9 +65,22 @@ TIMEOUT_S = 60
 
 
 def _run(command: str) -> str:
+    # Started in the run's working folder: the v2 fast path's project
+    # (`runtime.working_dir()`, decision F-6 of 2026-10-14). The gate-state
+    # check judged the line in that same folder (`protected_state`), so what
+    # was judged is what runs. Unbound — every v1 surface — is None, which
+    # inherits the process's directory, as before.
+    from .. import runtime
+
     try:
         proc = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=TIMEOUT_S
+            command, shell=True, capture_output=True, text=True, timeout=TIMEOUT_S,
+            cwd=runtime.working_dir(),
+            # Nothing to read from: a program that would take stdin (`rg TODO`
+            # with no folder named, in a process whose stdin is a pipe) reads
+            # an empty input or searches its folder, rather than hanging
+            # until the timeout.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {TIMEOUT_S}s."
@@ -112,6 +125,12 @@ def run_readonly(
         command, _SUBSTITUTIONS, double_is_quote=False
     ):
         return "Error: shell operators are not allowed here. Use run_command."
+    # Parameter expansion (review 2 of PR #182): `cat $HOME/.ssh/id` names a
+    # file this check never sees as written, so no `$` bash would expand —
+    # bare or inside double quotes — is run here. Structural, not a parser.
+    if rules.first_unquoted(command, ("$",), double_is_quote=False):
+        return ("Error: `$` expands to text this check cannot see. Single-quote a literal "
+                "`$` (e.g. grep 'foo$' file), or use run_command.")
 
     # Judge the command that actually runs, not the costume it arrived in.
     # `env` is on the allowlist because printing the environment is a read, and
@@ -196,8 +215,174 @@ def run_readonly(
             f"Error: {binary} {writing}, so it is not a read. Use run_command if "
             "this really needs to change things."
         )
+    # What it reads, judged as `read_file` judges it (review of PR #182, H1):
+    # the allowlist above says which *program* runs, never which files, so
+    # `cat ~/.config/gh/hosts.yml`, a grep of the Browser profile and `cat`
+    # of a symlink into ~/.ssh were all a read. Not overridable by approval.
+    _recursive, follows = _search_modes(binary, tokens)
+    if follows:
+        return f"Error: {follows}. Symlinks named on the line are judged; nested ones are not."
+    reached = _credential_operand(binary, tokens)
+    if reached:
+        return (f"Error: {reached} is in a credential folder, or holds one this search would "
+                "read (SSH, cloud and Git logins, "
+                "Jarvis's own credentials or the owner's Browser profile), which Jarvis does "
+                "not read. Ask the owner for what you need instead.")
 
     return _run(command)
+
+
+# How many files one operand's glob may name before the line is refused as
+# too broad to judge, rather than judged in part.
+_GLOB_CAP = 2000
+
+# Short options that take a value (the rest of their cluster, or the next
+# word), per searcher: the value is never read as more options.
+_VALUED_SHORT = {"grep": "efmABCdD", "rg": "ABCEMTdefgjmrt"}
+# grep's long spellings of recursion, and of recursion that follows every
+# symlink. GNU getopt takes any unambiguous prefix, so a long option that is
+# a prefix of one of these counts as it (review 2 of PR #182).
+_GREP_RECURSIVE = ("--recursive", "--dereference-recursive", "--directories")
+_GREP_FOLLOWS = "--dereference-recursive"
+
+
+def _search_modes(binary: str, tokens: list[str]) -> tuple[bool, str | None]:
+    """(recursive, refusal) for a searcher's options.
+
+    Recursive: `rg` always; grep with `-r`, `-R`, `-d`/`--directories` naming
+    anything but `read` or `skip`, or a long option that is a prefix of
+    `--recursive`, `--dereference-recursive` or `--directories`. A recursive
+    search reads every file below the folders it names, so the caller judges
+    those folders as holders of a credential folder.
+
+    The modes that follow *every* symlink below them (grep `-R` and
+    `--dereference-recursive`; rg `-L` and `--follow`) are refused outright: a
+    symlink deep in a tree (`link -> ~/.ssh`) is not on the line to be
+    judged. Plain `grep -r` and `rg` follow only the symlinks named on the
+    line, which are judged.
+    """
+    if binary not in _VALUED_SHORT:
+        return False, None
+    follows_msg = (f"a {binary} that follows every symlink below the folders it searches "
+                   f"({'-R' if binary == 'grep' else '-L/--follow'}); use "
+                   f"{'grep -r' if binary == 'grep' else 'rg'}, which follows only those named")
+    recursive = binary == "rg"
+    valued = _VALUED_SHORT[binary]
+    words = tokens[1:]
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--":
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if binary == "rg":
+                if name == "--follow" or (len(name) > 2 and "--follow".startswith(name)):
+                    return recursive, follows_msg
+                continue
+            if len(name) > 2 and _GREP_FOLLOWS.startswith(name):
+                return True, follows_msg
+            if len(name) > 2 and any(full.startswith(name) for full in _GREP_RECURSIVE):
+                recursive = True
+            continue
+        if not word.startswith("-") or word == "-":
+            continue
+        cluster = word[1:]
+        for k, char in enumerate(cluster):
+            if binary == "grep" and char == "R":
+                return True, follows_msg
+            if binary == "rg" and char == "L":
+                return True, follows_msg
+            if binary == "grep" and char == "r":
+                recursive = True
+            if char in valued:
+                value = cluster[k + 1:]
+                if not value and i < len(words):
+                    value = words[i]
+                    i += 1
+                if binary == "grep" and char == "d" and not _grep_dir_action_harmless(value):
+                    recursive = True
+                break
+    return recursive, None
+
+
+def _grep_dir_action_harmless(value: str) -> bool:
+    """`-d ACTION` that is surely `read` or `skip` (grep takes an unambiguous
+    prefix); anything else, `recurse` in any spelling included, is not."""
+    return bool(value) and ("read".startswith(value) and len(value) >= 3
+                            or "skip".startswith(value))
+
+
+def _credential_operand(binary: str, tokens: list[str]) -> str | None:
+    """The first operand of a `run_readonly` line that is, or reaches into, a
+    credential folder (`config.credential_dirs()`), or None.
+
+    Every word after the program is judged as a path where the shell would
+    find it: `~` expanded, a relative word placed in the run's working folder
+    (`runtime.working_dir()`, else the process's own), a glob expanded, and a
+    symlink followed (`files.credential_folder_judge`, the read tools' own
+    judge). Patterns and other non-paths simply judge as nothing. A recursive
+    search (`grep -r`, `rg`) of a folder that *holds* a credential folder
+    reads it too, so that is refused as well. A glob too broad to judge is
+    refused rather than judged in part.
+    """
+    import glob
+    import os
+
+    from .. import runtime
+    from .files import _credential_roots, credential_folder_judge
+
+    judge = credential_folder_judge()
+    base = runtime.working_dir() or os.getcwd()
+    roots = [str(root) for root in _credential_roots()]
+    recursive, _follows = _search_modes(binary, tokens)
+    def place(text: str) -> str:
+        text = os.path.expanduser(text)
+        return text if os.path.isabs(text) else os.path.join(base, text)
+
+    words = []      # (as written, placed path) for an operand or a long option's value
+    attached = []   # the same for every path-like tail of a short-option cluster
+    for word in tokens[1:]:
+        if word.startswith("--"):
+            if "=" in word and word.split("=", 1)[1]:
+                words.append((word, place(word.split("=", 1)[1])))
+            continue
+        if word.startswith("-") and len(word) > 1:
+            # A value glued to a short option (`-f/abs`, `-nf/abs`) is never
+            # a word of its own (review 3 of PR #182: `file -f<key>`, `date
+            # -f<key>` and `ss -F<key>` printed it). No per-program table of
+            # which letters take a value: every tail of the cluster that
+            # looks like a path is judged. A `~` mid-word is literal to the
+            # shell, so judging it expanded only errs toward refusing.
+            for k in range(2, len(word)):
+                tail = word[k:]
+                if tail.startswith(("/", "~", ".")) or "/" in tail:
+                    attached.append((word, place(tail)))
+            continue
+        words.append((word, place(word)))
+    if recursive and not any(os.path.exists(path) for _word, path in words):
+        # `rg session`, `grep -r x`: no folder named, so the one they search
+        # is the one they run in.
+        words.append((".", base))
+    for word, path in words + attached:
+        if glob.has_magic(path):
+            found = []
+            for match in glob.iglob(path):
+                found.append(match)
+                if len(found) > _GLOB_CAP:
+                    return word
+        else:
+            found = [path]
+        for candidate in found:
+            if judge(candidate):
+                return word
+            if recursive:
+                real = os.path.realpath(candidate)
+                if any(root == real or root.startswith(real.rstrip(os.sep) + os.sep)
+                       for root in roots):
+                    return word
+    return None
 
 
 @tool(dangerous=True)

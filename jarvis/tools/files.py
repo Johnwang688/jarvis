@@ -300,8 +300,30 @@ def _protect_refusal(target: Path) -> str:
     )
 
 
+def in_working_dir(path: str) -> str:
+    """`path`, placed in the run's working folder when it is relative.
+
+    The v2 fast path binds its thread's project folder for each turn
+    (`runtime.working_dir()`, decision F-6 of 2026-10-14), so `src/app.py`
+    means the project's file, not one under whatever directory the daemon was
+    started in. Done first, before any check, so every check below — the
+    credential name, the credential folder, the env-file rule, SELF_PROTECTED
+    and the gate's state — judges the same absolute path the tool then
+    touches, never a relative spelling resolved somewhere else. An absolute or
+    `~` path is returned as written, and with nothing bound every path is
+    returned as written: the process directory, as before.
+    """
+    from .. import runtime
+
+    base = runtime.working_dir()
+    text = str(path)
+    if base is None or os.path.isabs(os.path.expanduser(text)):
+        return text
+    return os.path.join(base, text)
+
+
 def _resolve(path: str) -> Path:
-    return Path(path).expanduser().resolve()
+    return Path(in_working_dir(path)).expanduser().resolve()
 
 
 # Credential folders (`config.credential_dirs()`: ~/.ssh, ~/.aws, ~/.config/gh,
@@ -425,6 +447,7 @@ def read_file(
     The line numbers are display only. When passing text to edit_file, use the
     file's own content without the number-and-tab prefix.
     """
+    path = in_working_dir(path)
     target = _resolve(path)
     # Checked before .exists() so the refusal is the same whether or not the
     # file is there, and against both spellings so a symlink cannot launder it
@@ -488,6 +511,7 @@ def write_file(
     file that already exists, prefer edit_file — it costs a fraction as much
     and cannot drop the parts you were not changing.
     """
+    path = in_working_dir(path)
     target = _resolve(path)
     if _self_protected(target):
         return _protect_refusal(target)
@@ -547,6 +571,7 @@ def edit_file(
     The file must have been read with read_file first, the same rule write_file
     follows.
     """
+    path = in_working_dir(path)
     target = _resolve(path)
     if _self_protected(target):
         return _protect_refusal(target)

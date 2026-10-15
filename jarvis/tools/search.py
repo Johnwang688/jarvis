@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Annotated, Callable, Iterable
 
 from . import tool
-from .files import credential_folder_judge
+from .files import credential_folder_judge, in_working_dir
 from .secrets import is_env_credential, is_protected
 
 MODES = ("content", "files", "count")
@@ -555,7 +555,9 @@ def grep_files(
     """
     if mode not in MODES:
         return f"Error: mode must be one of {', '.join(MODES)}."
-    root = Path(path).expanduser().resolve()
+    # A relative path is the run's working folder's (the v2 fast path's
+    # project, decision F-6); with nothing bound, the process's, as before.
+    root = Path(in_working_dir(path)).expanduser().resolve()
     if not root.exists():
         return f"Error: {root} does not exist."
     try:

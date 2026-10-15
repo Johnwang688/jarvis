@@ -848,11 +848,18 @@ def _search_dirs() -> list[Path]:
     except OSError:
         here = _JARVIS_ROOT
 
+    # The run's working folder first, when one is bound (the v2 fast path's
+    # project, decision F-6 of 2026-10-14): its commands run there, so its
+    # `.env` is the one whose values a command's output could carry.
+    from .. import runtime
+
+    bound = runtime.working_dir()
     home = Path.home()
-    for directory in [here, *here.parents][:12]:
-        add(directory)
-        if directory == home:
-            break
+    for start in ([Path(bound)] if bound else []) + [here]:
+        for directory in [start, *start.parents][:12]:
+            add(directory)
+            if directory == home:
+                break
     add(home)
     add(_JARVIS_ROOT)
     return found
@@ -1098,6 +1105,34 @@ def env_files_in(directory: Path) -> tuple[Path, ...]:
         return ()
 
 
+def _process_env_values() -> tuple[str, ...]:
+    """Credential values in this process's own environment, by name, for
+    `scrub` (never `secret_values`).
+
+    `run_readonly("env")` (or `cat /proc/self/environ`) prints the process
+    environment, and in the daemon that holds the provider keys it was
+    started with (review of PR #182: the fast path's desk turn could print
+    OPENROUTER_API_KEY; the same read was open on v1's surfaces before). Only
+    a variable whose *name* reads as a credential (`*_API_KEY`, `*_TOKEN`,
+    `*SECRET*` …) and whose value is at least 8 characters and not a plain
+    setting is withheld — never PATH or LS_COLORS, which the length rule for
+    unnamed values would catch."""
+    found = []
+    for key, value in os.environ.items():
+        # `PWD`/`OLDPWD` read as "password" to the name rule, and their value
+        # is the working folder — withholding it blanked every path in every
+        # tool's output. A plain value (a path, a number, a host) is a
+        # setting under any name.
+        if key in _SHELL_STATE or _plain(value):
+            continue
+        if len(value) >= 8 and _secret_named(_key_parts(key)) and _secret_entry(key, value):
+            found.append(value)
+    return tuple(found)
+
+
+_SHELL_STATE = frozenset({"PWD", "OLDPWD"})
+
+
 def secret_values() -> list[str]:
     """Every credential-looking value in a reachable protected file: every
     credential env file in the working folder, its parents up to home, home
@@ -1180,7 +1215,10 @@ def scrub(text: str) -> str:
     if not text:
         return text
     out = _drop_attributed_lines(text)
-    for value in secret_values():
+    # The process's own credential-named environment values too, here only:
+    # a tool's output is what `env` reaches. `secret_values()` — the
+    # Browser's, gitops' and the action reviewer's list — stays the files'.
+    for value in sorted(set(secret_values()) | set(_process_env_values()), key=len, reverse=True):
         if value in out:
             out = out.replace(value, REDACTED)
     return out

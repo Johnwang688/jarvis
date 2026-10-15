@@ -2197,3 +2197,74 @@ regression cases live at the end of `READONLY_MUST_REFUSE` in
 verified to fail against the intermediate version.
 
 <!-- claude-source:008944-009194:end -->
+
+## Fast-path desk edits and the gate (2026-10-14)
+
+Current rule, beside the preserved notes above (decisions F-1..F-7,
+`docs/plans/2026-10-14-fast-path-edits-decisions.md`). The fast path's §8.1
+"no tool can change anything" now holds for every turn **except the owner's
+own chat turn at the HUD**, which holds `write_file`, `edit_file`,
+`run_command` and `run_readonly`. What keeps that safe:
+
+- **Toolset.** Desk-only, like the desk tools. Every other turn's request
+  carries no schema for them and dispatch refuses them as text; an off-desk
+  steer re-binds the toolset at the next step boundary. Everything F-7 lists
+  (spawning, git tools, task/workflow verbs, `load_tools`, `skill_write`,
+  `memory_delete`, the forbidden prefixes) stays out, asserted at import.
+- **One gate, the permit's.** The fast path's approver is the daemon's §6
+  permit with no v1 human-backed flag. Before 2026-10-14 it was
+  `permissions.gate(ask)`, which marks *any* approver human-backed: had the
+  fast path held a dangerous tool, dispatch would have auto-run a rules-ALLOW
+  command and `gate` an allowlisted one before the permit — past the
+  always-ask rules, and for a `DenyAll` asker too. The permit's layer 4 does
+  both itself, with the asker's real `human_backed`, after layer 2.
+- **AUTO is ASK on the fast path.** Layer 5's AUTO answer means "the
+  provider's reviewer decides"; the fast path has none, so its permit is asked
+  with an ASK copy of the brief.
+- **Edits and reads are asked too.** `write_file`, `edit_file` and
+  `run_readonly` are not `dangerous` in v1; the fast path names them in
+  `runtime.ask_tools()`, which makes `dispatch` send them to the approver as it
+  does a dangerous tool. Binding it can only add asks. `run_readonly` joined
+  after review (H1: on a desk turn it read `~/.config/gh/hosts.yml`, the
+  Browser profile and an ssh key behind a project symlink unasked); rules'
+  ALLOW still runs an ordinary read unasked.
+- **`run_readonly` judges what it reads, on every surface** (review H1). Each
+  operand is placed where the shell finds it (`~`, the working folder, globs,
+  symlinks) and judged by the read tools' own credential-folder judge; a
+  recursive grep/rg of a folder holding a credential folder is refused too.
+  Review 2 closed three ways past it: no `$` bash would expand is run
+  (`cat $HOME/.ssh/…`; single-quote a literal `$`); grep's every spelling of
+  recursion counts (`-d recurse`, `-drecurse`, `--directories=recurse`, any
+  unambiguous prefix of `--recursive`/`--dereference-recursive`/
+  `--directories`); and the modes that follow every nested symlink are
+  refused outright (grep `-R`/`--dereference-recursive`, rg `-L`/`--follow`),
+  since `link -> ~/.ssh` deep in a tree is not on the line to judge. Plain
+  `grep -r` and `rg` follow only symlinks named on the line, which are judged.
+  Review 3: a value glued to a short option (`file -f<key>`, `date -f<key>`,
+  `ss -F<key>`, `-nf/abs`) is judged too — every tail of a short-option
+  cluster that looks like a path (starts with `/`, `~`, `.` or holds a `/`),
+  for every program, with no table of which letters take a value.
+  **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
+  reaches the same three forms, because the permit's `credentials-path` rule
+  neither expands `$HOME` nor follows recursion.
+  The `.env` scrubber also withholds credential-named values from the
+  process's own environment, so `env` cannot print the daemon's keys. An Always on an edit
+  card is a standing `{"tool": "write_file"}` grant, as an Always on Claude's
+  Write is for `Write`.
+- **Where it runs is where it is judged.** The bound folder is the project's
+  physical one (`realpath`, review M1: `cd ..` from a symlinked project
+  leaves the physical parent). Open, for every provider: the permit's layer 1
+  judges at the brief's raw `cwd`. With `runtime.working_dir()` bound,
+  v1's file tools absolutize a relative path before every check,
+  `protected_state.command_touches` judges a line there (so v1's
+  `static_verdict`, `allows` and `run_command`'s own refusal agree with the
+  permit's layer 1, which uses the brief's `cwd`), and the scrubber reads that
+  folder's `.env` values. A write into a credential folder is put to the owner
+  by the permit's `credentials-path` always-ask rule and then refused by v1's
+  write tool whatever the answer.
+
+Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init__.py`
+(one condition in dispatch), `jarvis/tools/files.py` (`in_working_dir`),
+`jarvis/tools/secrets.py` (search folders, process-environment values),
+`jarvis/protected_state.py` (default `cwd`). Each change only places a path,
+adds an ask or withholds more.
