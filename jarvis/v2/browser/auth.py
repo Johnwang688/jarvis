@@ -545,16 +545,23 @@ class OwnerAuth:
         nav = session.navigation
         if nav is not None:
             nav.refused = True
-        if session.prompt is not None:
+        prompt = session.prompt
+        if prompt is not None:
             # Stop the navigation while it is still paused on its challenge.
             # CancelAuth first let Chrome go on to commit the 401 it held, and
             # a renderer slow to commit it (any busy machine) interrupted the
             # newer navigation this cancel makes way for ("navigation failed").
+            # The prompt is superseded from here on: marked answering before
+            # that await, so no refresh republishes it with a fresh nonce
+            # (`_publish`), no reply can answer it (`_answer`) and no receipt
+            # adopts it; `_finish` still sends its `auth_closed`.
+            prompt.answering = True
+            self.host._publish_pane_tabs()
             if (nav is not None and nav.task is not None
                     and nav.task is not asyncio.current_task() and not nav.task.done()):
                 await self._send(session, "Page.stopLoading", {})
-            if session.prompt is not None:          # (the stop may have settled it)
-                await self._finish(session.prompt, "changed", cancel=True)
+            if session.prompt is prompt:            # (the stop may have settled it)
+                await self._finish(prompt, "changed", cancel=True)
         if nav is not None and nav.task is not asyncio.current_task():
             try:
                 if not nav.task.done():
@@ -698,4 +705,5 @@ class OwnerAuth:
     def receipt_current(self, tab, nav_id):
         session = self.sessions.get(tab.id)
         return bool(session and self.current(session) and session.navigation
-                    and session.navigation.id == nav_id and session.prompt is not None)
+                    and session.navigation.id == nav_id and session.prompt is not None
+                    and not session.prompt.answering)

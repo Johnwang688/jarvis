@@ -1579,9 +1579,22 @@ sweeps failed `test_new_navigation_cancels_pending_without_late_resurrection`
 five times on that line. The cancel now stops the navigation while it is still
 paused on its challenge, then finishes the prompt if the stop has not already
 settled it (reason `changed`, as before; no credential is sent either way).
-`browser_auth_matrix_real_check`'s
+
+The prompt is superseded from the moment the cancel starts, before it awaits
+the stop (up to `_send`'s 2 s): it is marked `answering`, so a `refresh` in
+that window (HUD `visible`, `approval_resolved`, an attach) cannot republish
+it with a fresh nonce, no reply can answer it, and neither `receipt_current`
+nor the host's `auth_pending_current` cache adopts it; `_finish` still sends
+its `auth_closed`. Without that (review MED-1) a refresh republished the
+prompt as a second answerable card and an answer sent `ProvideCredentials`.
+
+Receipts: `browser_auth_check`'s
+`test_a_superseded_prompt_is_never_republished_or_answered_while_it_stops`
+holds the fake `Page.stopLoading`, refreshes and answers: one card, no
+credentials, no receipt (without the mark: two cards, a receipt and one
+`ProvideCredentials`). `browser_auth_matrix_real_check`'s
 `test_superseding_a_prompt_stops_its_401_before_it_can_commit` stalls that
 test's own renderers (its temp profile's Chrome tree only) for 0.5 s across the
-cancel, which made the late commit happen every time: the old order failed 3 of
-3, the new one passes; the six auth suites pass, and the matrix 3 of 3 under
-48 burner scopes.
+cancel, which makes the late commit happen every time, and checks the window's
+`auth_closed` (`changed`) and that no credential request reached the server:
+the old order failed 3 of 3, the new one passes.

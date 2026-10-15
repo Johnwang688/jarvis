@@ -116,9 +116,11 @@ class Matrix(R.AuthReal):
         # a renderer slow to commit it (any busy machine) then interrupted the
         # owner's navigation: {"loaded": false, "error": "navigation failed"}.
         # Stalling this test's own renderers (its temp profile only) across the
-        # cancel makes that commit late every time: 4 of 4 failed before.
+        # cancel makes that commit late every time: the old order failed 3 of 3.
         import os,signal
+        before=self.counts["credential_requests"]
         tab,window,profile=self.pending("late");old=self.host._auth.sessions[tab.id].navigation
+        prompt=window.last("auth");self.assertIsNotNone(prompt)
         # (Chrome rewrites its children's command lines into one string.)
         pids=[pid for pid in O.chrome_tree(config.BROWSER_DIR) if "--type=renderer" in " ".join(O.proc_argv(pid))]
         self.assertTrue(pids,"no renderer of this test's Chrome to stall")
@@ -134,6 +136,8 @@ class Matrix(R.AuthReal):
         self.assertEqual(tab.page.url,"about:blank")
         self.assertIsNone(self.host._auth.sessions[tab.id].navigation)
         self.assertFalse(self.host.loopback_open(self.authport));self.assertFalse(self.host._auth._pending)
+        self.assertTrue(window.until(lambda w:bool(w.last("auth_closed",id=prompt["id"],reason="changed")),timeout=5))
+        self.assertEqual(self.counts["credential_requests"],before)
     def test_close_profile_while_waiting_settles_exact_child(self):
         tab,window,profile=self.pending("closed");nav=self.host._auth.sessions[tab.id].navigation
         start=time.monotonic();self.host.close_profile(profile)
