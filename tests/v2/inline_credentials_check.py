@@ -80,7 +80,8 @@ UNTOUCHED = [
     "docker run -u 1000:1000 img",             # -u is curl's only
     "docker login --password-stdin -u bob",
     "gh auth login --with-token < token.txt",
-    "app --token-file /tmp/t --no-password db",
+    "app --token-file /tmp/t --no-password production_db",
+    "app --password --interactive run",       # an option is never the value
     "OLDPWD=/tmp PWD=/x ls",
     "git -c credential.helper= push",
     "curl -u bob https://example.invalid",     # curl asks for it
