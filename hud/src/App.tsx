@@ -84,7 +84,10 @@ import { DuckBrowserSetting, ReadAloudSetting } from "./components/ReadAloud";
 import { SttSettingsPanel } from "./components/SttSettings";
 import { sttSettingsStore, wakeRecognizerAllowed, STT_BACKSTOP_MS, STT_UNKNOWN_RETRY_MS } from "./state/sttSettings";
 import { parseSttSettings } from "./lib/sttSettings";
-import { createSpeech, saveDuckBrowser, saveReadAloud } from "./lib/speech";
+import { createSpeech, realClock, saveDuckBrowser, saveReadAloud, saveSelfVoiceGate } from "./lib/speech";
+import { BargeIn } from "./lib/speech/barge";
+import { CommandRouter } from "./lib/speech/commands";
+import { SelfVoiceSetting } from "./components/SelfVoice";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./lib/capture";
@@ -579,8 +582,11 @@ export default function App() {
     speech.voices.onWarning = (message) => dispatch({ type: "patch", patch: { error: message } });
     return () => { speech.voices.onWarning = null; };
   }, [speech]);
-  // The mic is held off for the whole of a reply, between chunks included.
-  const speechPlaying = () => micSuppressedBySpeech(speech.controller.view());
+  // V6's blanket hold: the mic is deaf for the whole of a reply, between chunks included.
+  // V9 replaces it with the self-voice gate (frames that are his own voice open nothing,
+  // so the owner can talk over him) and keeps it as the fallback for whenever that gate
+  // cannot run: no reference from the player, the owner's switch, an error in the gate.
+  const speechPlaying = () => micSuppressedBySpeech(speech.controller.view()) && !speech.selfVoice.runnable();
   // A turn finished while its reply was still being read: the follow-up window
   // opens when the speech goes idle, not at `turn_finished` (it would run out,
   // or hear him, mid-reply).
@@ -599,6 +605,31 @@ export default function App() {
     useCallback((cb: () => void) => speech.voices.subscribe(cb), [speech]), () => speech.voices.version());
   // The chats the owner muted from a pane's chip: silent like a thread in no pane.
   useEffect(() => { speech.controller.setMuted(speech.voices.muted()); }, [speech, voicesVersion]);
+
+  // ---- barge-in and spoken commands (V9) -------------------------------------
+
+  // The capture is made below; the barge-in's safety asks it whether a message is still being spoken.
+  const captureRef = useRef<Capture | null>(null);
+  // Talking over him pauses him, then he resumes (decision V-7): only the wake word and the talk key
+  // do it, until a voice is enrolled (Q7). Output only: it reaches the speech controller's pause and resume.
+  const barge = useMemo(() => new BargeIn({
+    speech: speech.controller, clock: realClock,
+    recording: () => !!captureRef.current && (captureRef.current.recording() || captureRef.current.ptt !== null),
+  }), [speech]);
+  useEffect(() => () => barge.release(), [barge]);
+  // His own sentences are checked for the wake word with the same patterns the recognizer's hits are (V9).
+  useEffect(() => {
+    speech.controller.setNameMatcher((text) => matchesWake(text, live.current.wakePatterns.length ? live.current.wakePatterns : WAKE_PATTERNS));
+    return () => speech.controller.setNameMatcher(null);
+  }, [speech]);
+  // "Jarvis pause / resume / skip / stop": four calls on his voice and nothing else. Stop clears the
+  // speech queue; it never interrupts an agent's turn (Q8), and nothing here can answer a card (V-6).
+  const commands = useMemo(() => new CommandRouter({
+    pause: () => speech.controller.pause(),
+    resume: () => speech.controller.resume(),
+    skip: () => speech.controller.skip(),
+    stop: () => speech.controller.stop(),
+  }), [speech]);
 
   // ---- capture ------------------------------------------------------------
 
@@ -668,11 +699,9 @@ export default function App() {
           crashedRef.current,
         suppressionReason: () => captureSuppression() ?? "speaking",
         hardStop: () => captureHardStop(),
-        onDrop: (reason, ms, source, detector) => {
-          voiceDiagnostics.add(ms, source, reason, detector);
-          // A talk-key utterance that came to nothing: he carries on.
-          if (source === "ptt") speech.controller.endBargeIn();
-        },
+        // (A barge-in that came to nothing is over when its utterance ends -- `onUtteranceEnd`, which
+        // every claimed utterance reaches exactly once, dropped or not.)
+        onDrop: (reason, ms, source, detector) => { voiceDiagnostics.add(ms, source, reason, detector); },
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
         onListening: (source, tag, utterance) => {
@@ -699,9 +728,11 @@ export default function App() {
           if (utterance !== undefined && !utterances.current.has(utterance)) {
             utterances.current.set(utterance, {
               gid: null, refused: false,
-              meta: { mode: at.dictation, chat: n !== null ? draftKey(at.chats[n], n) : null, boxOnly, continuation: null },
+              meta: { mode: at.dictation, chat: n !== null ? draftKey(at.chats[n], n) : null, boxOnly, continuation: null, utterance },
             });
           }
+          // The wake word and the talk key are the owner addressing him: they pause what he is saying (Q7).
+          if (utterance !== undefined && (source === "wake" || source === "ptt")) barge.begin(source === "ptt" ? "key" : "wake", utterance);
           if (listenWas.current && listenWas.current.pane !== n) listenWas.current = null;
           if (n === null) return;
           // A turn's own orb and status come back when the listening is over.
@@ -724,6 +755,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
+  captureRef.current = capture;
 
   /**
    * The follow-up window belongs to the pane whose reply opened it (Q5): a
@@ -851,14 +883,15 @@ export default function App() {
     [dispatch, stt],
   );
 
-  // The message is over (sent whole, cut short, or never uploaded). However it
-  // ends (sent, review, empty, failed, crashed), a talk-key utterance that
-  // paused him is over: he resumes what remains.
+  // The message is over (sent whole, cut short, or never uploaded).
   const onUtteranceEnd = useCallback(
     (end: UtteranceEnd) => {
       const u = utterances.current.get(end.utterance);
       utterances.current.delete(end.utterance);
-      const finish = () => { if (end.source === "ptt") speech.controller.endBargeIn(); };
+      // However it ends (sent, review, a command, empty, failed, crashed, never uploaded), the utterance
+      // that paused him is over: he resumes what remains, unless a message went out (`placeTranscripts`
+      // has said so by now) or a command decided otherwise.
+      const finish = () => barge.end("dropped", end.utterance);
       // The message only keeps its continuation window if it goes out.
       const refuse = () => capture.cancelContinuation(end.continuation);
       // The group is closed whatever else fails here: an open one holds every later message.
@@ -881,8 +914,8 @@ export default function App() {
       // of what was said, so it is marked late and AUTO boxes it instead of sending it.
       stt.closeGroup(u.gid, { late: end.truncated || u.refused });
       // Resolve only when the message's fate is known (placed or sent, empty,
-      // failed for good): a talk-key barge-in ends then (V-7), not when the
-      // first upload merely starts.
+      // failed for good): a barge-in ends then (V-7), not when the first
+      // upload merely starts.
       void stt.whenGroupSettled(u.gid).then(() => {
         if (end.continuation && !placedWindows.current.delete(end.continuation)) refuse();
         finish();
@@ -898,20 +931,37 @@ export default function App() {
   // busy chat whose turn is not its own thread's, or a waiting card all put
   // the words in the box instead. A busy chat's own turn is steered (V3).
   const placeTranscripts = useCallback(
-    async (batch: SttPlaced<SttCapture>[]) => {
-      const done = (outcome: "suppressed:crash" | "unplaced" | "review" | "handed_to_chat", items = batch) =>
+    async (placed: SttPlaced<SttCapture>[]) => {
+      const done = (outcome: "suppressed:crash" | "unplaced" | "review" | "handed_to_chat" | "command" | "suppressed:card" | "cancelled", items = placed) =>
         items.forEach((i) => voiceDiagnostics.finish(i.diag, outcome, i.latencyMs));
+      // Whatever becomes of an utterance's words, the barge-in it began (V-7) hears of it: a message that went out
+      // skips the message he was in the middle of; anything else lets him resume (`onUtteranceEnd` is the net).
+      const bargeEnd = (outcome: "sent" | "boxed" | "dropped", items = placed) =>
+        items.forEach((i) => { if (i.meta.utterance !== undefined) barge.end(outcome, i.meta.utterance); });
       if (sttError.current && live.current.error === sttError.current) dispatch({ type: "patch", patch: { error: "" } });
       sttError.current = "";
       // The window crashed while this was being transcribed: the words go
       // nowhere -- not to a chat the owner cannot see, not into a box.
-      if (crashedRef.current) { done("suppressed:crash"); return; }
+      if (crashedRef.current) { done("suppressed:crash"); bargeEnd("dropped"); return; }
+      // Spoken playback commands (V9): an utterance that is, as a whole, "Jarvis pause / resume / skip / stop"
+      // is run on his voice and is never a message. Four calls on the speech controller and nothing else: not
+      // an interrupt, not a send, not an approval. Under a card, or from a late or retried clip, it is not
+      // obeyed (Q10: no command under a card without local recognition, which is V11).
+      const batch: SttPlaced<SttCapture>[] = [];
+      for (const i of placed) {
+        const r = commands.fromTranscript(i.text, { card: live.current.approvals.length > 0, stale: i.late || i.retried });
+        if (r.kind === "none") { batch.push(i); continue; }
+        done(r.kind === "ran" ? "command" : r.why === "card" ? "suppressed:card" : "cancelled", [i]);
+        bargeEnd("dropped", [i]);
+      }
+      if (!batch.length) return;
       const at = live.current;
       const n = at.selectedChat;
       if (n === null) {
         // No chat on screen: never sent anywhere. It waits for the next chat
         // selected, in its box, unsent -- and the window says so.
-        done("unplaced");
+        done("unplaced", batch);
+        bargeEnd("boxed", batch);
         unplaced.current.push(...batch.map((i) => i.text));
         dispatch({
           type: "patch",
@@ -931,7 +981,8 @@ export default function App() {
       // One spoken order: if any item must wait in the box, they all do.
       const sends = batch.every((i) => placementFor(i.meta, landing, i) === "send");
       if (!sends) {
-        done("review");
+        done("review", batch);
+        bargeEnd("boxed", batch);
         // Words spoken in one chat that landed in another say so.
         const moved = batch.some((i) => i.meta.chat !== landing.chat);
         // A chat running a turn keeps its own orb and status line.
@@ -940,7 +991,8 @@ export default function App() {
         return;
       }
       // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
-      done("handed_to_chat");
+      done("handed_to_chat", batch);
+      bargeEnd("sent", batch);
       await send(n, batch.map((i) => i.text).join(" "), [], true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2791,9 +2843,12 @@ export default function App() {
     if (crashedRef.current) return;
     if (live.current.approvals.length) return; // never talk over a pending authorization
     if (live.current.picker || chipOverlay.current || settingsNow.current) return;
+    // The window knows what he is saying: while a sentence that contains the wake word is sounding (or just did),
+    // a hit may be the recognizer hearing him say it. It claims nothing; the talk key pauses him (V9).
+    if (speech.controller.sayingOwnName()) { voiceDiagnostics.add(0, "wake", "self_voice"); return; }
     capture.onWake();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capture]);
+  }, [capture, speech, voiceDiagnostics]);
 
   // ---- push to talk -------------------------------------------------------
 
@@ -2816,10 +2871,9 @@ export default function App() {
       return;
     }
     // Talking over him pauses him, and he resumes when the utterance is over
-    // (decision V-7; `endBargeIn` in onUtterance and on a drop). Self-voice
-    // gating and spoken commands are V9.
-    if (capture.press()) speech.controller.bargeIn();
-  }, [capture, chatPatch, dispatch, speech]);
+    // (decision V-7): `onListening` begins the barge-in, `onUtteranceEnd` ends it.
+    capture.press();
+  }, [capture, chatPatch, dispatch]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -2925,14 +2979,16 @@ export default function App() {
   // V5: the ML speech detector. Between the microphone and the capture; the OFF
   // mode scores nothing (it has no frames posted while muted).
   const vadStage = useMemo(() => new VadStage({
-    deliver: (frame, p) => capture.onFrame(frame, p),
+    // Every frame is judged against what the window is playing (V9) before the capture sees it.
+    // The gate sees every frame (its clock needs them all); its verdict is used only while it is in force.
+    deliver: (frame, p) => { const v = speech.selfVoice.push(frame); capture.onFrame(frame, p, speech.selfVoice.runnable() ? v : null); },
     active: () => !isMuted(live.current.dictation),
     // An automatic restart of the worker waits for a quiet moment: nothing being
     // said or recorded, and Settings (where the owner reads the detector) closed.
     canRetry: () => !capture.vad.open && !capture.recording() && !settingsNow.current,
     onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [capture, voiceDiagnostics]);
+  }), [capture, voiceDiagnostics, speech]);
   // Back in the foreground (or woken from sleep): the detector's timing history is stale, not failed.
   useEffect(() => {
     const visible = () => { if (document.visibilityState === "visible") vadStage.rearm(); };
@@ -3064,6 +3120,7 @@ export default function App() {
       // items (text, thread, state), and whether this window holds the lock.
       speech: () => ({
         view: speech.controller.view(), ...speech.controller.items(), speaker: speech.gate.isSpeaker(),
+        barge: barge.held(), selfVoice: speech.selfVoice.status(),
         voices: Object.fromEntries(PANE_NOS.map((n) => shownThread(live.current.chats[n], pendingThread.current[n]))
           .filter((id): id is string => !!id).map((id) => [id, speech.voices.info(id)])),
       }),
@@ -3073,6 +3130,8 @@ export default function App() {
         // Frame listeners, as V5/V12 will register them: read-only audio, 512 samples at 16 kHz.
         listen: (fn: (frame: Float32Array) => void) => micInput.current?.addFrameListener(fn) ?? (() => {}),
         wake: () => onWakeHit(),
+        // One frame through the stage, the gate and the capture, as the microphone's would go (V9 tests).
+        frame: (samples: ArrayLike<number>) => vadStage.push(Float32Array.from(samples)),
         // The ML VAD stage (V5): what it is, and (for tests) a way to start it again.
         detector: () => vadStage.status(),
         retryDetector: () => vadStage.retry(),
@@ -4194,7 +4253,7 @@ export default function App() {
               <DuckBrowserSetting on={duckBrowser}
                 onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} />
                 <SpeakerSettings store={speaker} blocked={blocked}
-                  listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
+                  listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><SelfVoiceSetting gate={speech.selfVoice} onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded
