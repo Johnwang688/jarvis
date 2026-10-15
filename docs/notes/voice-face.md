@@ -2247,11 +2247,11 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   expiry; AUTO cancel with a chunk held in flight and Undo; cancel does not recall a send and `NOTHING TO CANCEL`; a card
   in flight (verbatim, zero approval requests) and a card up (nothing uploaded); busy chat steers; the lists in
   Settings (refusals, bound, persistence); edited lists, the toggle, an empty list, hostile storage.
-- **Counts.** vitest 2456 tests / 154 files (2385 / 151 on V5), `tsc` and `vite build` clean. Browser checks on the
-  built `hud/dist`: `hud_v2_words_check` 84, `chunks` 58, `stt` 28, `steer` 46, `speech` 56, `multichat` 343 all pass;
-  `vad` 67 passed at a load average of about 4 before the review fixes and was not rerun (its three "2.4 s pause
-  continues" checks failed in three full runs at load 10-25 and pass alone: a 100 ms margin of real-time fake-microphone
-  audio is load-sensitive, and nothing here touches the pause path). The full `hud_v2_check` was not run.
+- **Counts** (after merging V5 at 57c7de8, which carries main with V12 and V4). vitest 2633 tests / 162 files, `tsc` and
+  `vite build` clean. Browser checks on the merged build: `hud_v2_words_check` 84, `chunks` 65, `stt` 28, `steer` 46,
+  `vad` 96, all pass (`speech` 56 and `multichat` 343 passed on the pre-merge build and were not rerun). The `vad`
+  suite's "2.4 s pause continues" checks are load-sensitive: they failed at load 10-25 before the merge and passed at
+  load 4-7. The full `hud_v2_check` was not run.
 - **Mutations that fail on purpose** (source restored afterwards): dropping the quiet test (6 vitest tests);
   ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks); the ledger matching inside words (4 vitest tests); `UndoHold.take` without its expiry guard (1); the typing guard disabled (5 browser checks).
 - **Not done / not claimed.** A real person's voice, a physical microphone, and how Parakeet transcribes a spoken "over"
