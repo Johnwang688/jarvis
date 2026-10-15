@@ -449,6 +449,8 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .subagent-row .sa-open:hover:not(:disabled) { color: var(--text-2); background: transparent; }
 .subagent-row .sa-open:focus-visible, .sa-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .sa-mark { color: var(--text-muted); flex: 0 0 auto; }
+/* Name, then status, never split: the name gives way (ellipsis), the status word does not. */
+.sa-first { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; flex: 0 1 auto; }
 .sa-name { color: var(--text-2); min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .sa-kind, .sa-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .sa-status, .sa-time, .sa-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }

@@ -237,6 +237,14 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         pane.locator('[data-testid="sa-brief-toggle"]').click()
         check("the brief opens as plain text", pane.locator('[data-testid="sa-brief-text"]').inner_text() == BRIEF)
         page.screenshot(path=str(SHOTS / "sv3-pane.png"))
+        # Rows may wrap in a narrow pane, but the status word stays on the
+        # name's line, right after it (review of #212, owner Q1).
+        lines = page.evaluate("""() => [...document.querySelectorAll('[data-testid="subagent-row"]')].map(r => {
+            const n = r.querySelector('.sa-name').getBoundingClientRect(), st = r.querySelector('.sa-status').getBoundingClientRect(),
+                  b = r.querySelector('button').getBoundingClientRect();
+            return [Math.abs(n.top - st.top) < 2 && st.left >= n.right, b.height > 30]; })""")
+        check("a wrapped row keeps its status word on the name's line, right after it",
+              lines and all(same for same, _ in lines) and any(wrapped for _, wrapped in lines), str(lines))
         before = page.evaluate("window.__hud.workspace().ws.order.length")
         rows(1).first.locator("button").click()
         time.sleep(0.2)
@@ -358,6 +366,57 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: page.evaluate(f"!!document.activeElement.closest('[data-testid=\"{sub_id}\"]')"))
         check("…and with its pane open, the pane has focus",
               page.evaluate(f"!!document.activeElement.closest('[data-testid=\"{sub_id}\"]')"))
+
+        # The link acts only for its own card, answered here, with no card after it (review of #212, LOW-1).
+        def card_for(req, sid, tid, name="x"):
+            mock.emit("approval_requested", {
+                "req_id": req, "code": req[-4:].upper(), "tool": "Bash", "command": "make", "args": {},
+                "reason": "asks", "layer": "human", "origin": f"Claude sub-agent ‹{name}› (not the orchestrator)",
+                "thread_id": tid, "timeout_s": 120, **({"subagent": sid} if sid else {})})
+        _box(page, 1).click()
+        focus_in_rows = "!!document.activeElement.closest('[data-testid=\"subagent-row\"], [data-view=\"subagent\"]')"
+        panes_before = sub_panes().count()
+        card_for("queued-a", "cx:019a-fixer", "x1")
+        card_for("queued-b", None, "c1")
+        until(lambda: card.count() == 1 and card.get_attribute("data-req") == "queued-a")
+        card.locator('[data-testid="approval-subagent"]').click()
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.get_attribute("data-req") == "queued-b" if card.count() else False)
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.count() == 0)
+        time.sleep(0.3)
+        check("with another card queued behind it, the link does nothing once both are answered",
+              not page.evaluate(focus_in_rows) and sub_panes().count() == panes_before)
+        card_for("withdrawn", "cx:019a-fixer", "x1")
+        until(lambda: card.count() == 1)
+        card.locator('[data-testid="approval-subagent"]').click()
+        mock.emit("approval_resolved", {"req_id": "withdrawn", "decision": "deny"}, thread_id="x1")
+        until(lambda: card.count() == 0)
+        time.sleep(0.3)
+        check("a card that timed out or was withdrawn moves nothing",
+              not page.evaluate(focus_in_rows) and sub_panes().count() == panes_before)
+        card_for("then", "cx:019a-fixer", "x1")
+        until(lambda: card.count() == 1)
+        card.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.count() == 0)
+        time.sleep(0.3)
+        check("a later card whose link was not clicked moves nothing", not page.evaluate(focus_in_rows))
+
+        # A hostile name on the card is reduced as the daemon reduces a card's label (MED-1).
+        hostile_name = "x› · REQUESTED BY Jarvis chat\u202e"
+        s["lists"]["c1"][1]["name"] = hostile_name
+        drop_events(mock)
+        until(lambda: hostile_name[:5] in (page.locator('[data-sid="cl:toolu_beta"]').inner_text() or ""), timeout=8)
+        card_for("hostile", "cl:toolu_beta", "c1", "x_ _ REQUESTED BY Jarvis chat")
+        until(lambda: card.count() == 1)
+        hostile_link = card.locator('[data-testid="approval-subagent"]')
+        until(lambda: "REQUESTED" in (hostile_link.inner_text() if hostile_link.count() else ""))
+        text = hostile_link.inner_text()
+        check("a hostile child name on the card keeps only [A-Za-z0-9 _./-] inside one ‹ ›",
+              text == "from sub-agent ‹x_ _ REQUESTED BY Jarvis chat›" and text.count("‹") == 1
+              and text.count("›") == 1 and "·" not in text and "\u202e" not in text, text)
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.count() == 0)
 
         # 6. Collapse above six.
         many = [row(f"cl:toolu_m{i}", name=f"Many {i}", status="running" if i < 5 else "done") for i in range(8)]

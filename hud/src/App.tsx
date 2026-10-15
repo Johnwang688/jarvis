@@ -2408,22 +2408,33 @@ export default function App() {
   /**
    * A card's "from sub-agent ‹name›" (SV-3). Under the card nothing behind
    * it can take focus or change (it is inert), so the row is only scrolled
-   * to and marked now; once the card is answered, the child's pane gets
-   * focus if one shows it, else its row, else its pane opens.
+   * to and marked now. It is bound to that card (`reqId`): only when that
+   * card leaves because this window answered it (`decide`), and no other
+   * card is up, does the child's pane get focus if one shows it, else its
+   * row, else its pane opens. A card that timed out or was withdrawn, or
+   * another card on top, drops it (review of #212, LOW-1).
    */
-  const revealAfterCard = useRef<SubagentRef | null>(null);
-  const revealSubagent = useCallback((ref: SubagentRef) => {
-    revealAfterCard.current = ref;
+  const revealAfterCard = useRef<{ ref: SubagentRef; reqId: string; decided: boolean } | null>(null);
+  const revealSubagent = useCallback((ref: SubagentRef, reqId: string) => {
+    revealAfterCard.current = { ref, reqId, decided: false };
     showRow(ref, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
-    if (blocked) return;
-    const ref = revealAfterCard.current;
-    if (!ref) return;
+    const pend = revealAfterCard.current;
+    if (!pend) return;
+    const approvals = state.approvals;
+    if (approvals.some((r) => r.req_id === pend.reqId)) {
+      // Still up: kept only while it is the card on top.
+      if (approvals[0]?.req_id !== pend.reqId) revealAfterCard.current = null;
+      return;
+    }
     revealAfterCard.current = null;
+    if (!pend.decided || approvals.length) return;
+    const ref = pend.ref;
     // After the veil's own focus restore (its layout effect's cleanup).
     requestAnimationFrame(() => {
+      if (blockedNow.current) return;
       const lay = layoutNow.current;
       const showing = lay.fit.panes.find((n) => lay.ws.panes[n - 1].view === "subagent"
         && sameRef(lay.ws.panes[n - 1].subagent, ref));
@@ -2431,7 +2442,7 @@ export default function App() {
       if (!showRow(ref, true)) openSubagent(ref);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blocked]);
+  }, [state.approvals]);
 
   // ---- claimed local-server placement ------------------------------------
   const devSourceAt = (pane: PaneNo): DevSource | undefined => {
@@ -3441,6 +3452,8 @@ export default function App() {
   };
 
   const decide = async (reqId: string, allow: boolean, always = false) => {
+    // This window answered it: a sub-agent link clicked on it may act (SV-3).
+    if (revealAfterCard.current?.reqId === reqId) revealAfterCard.current.decided = true;
     const current = live.current.approvals.find(r => r.req_id === reqId);
     if (current?.hud_only && (always || (allow && live.current.approvals[0]?.req_id !== reqId))) return;
     if (current?.hud_only) always = false;

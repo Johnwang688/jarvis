@@ -66,6 +66,7 @@ interface Pane {
   again: boolean;
   watchers: number;
   timer: ReturnType<typeof setTimeout> | null;
+  due: number;
 }
 
 export interface PaneView { data: SubTranscript | null; failed: Failure; loading: boolean }
@@ -195,15 +196,20 @@ export function createSubagentStore(fetchers: Fetchers) {
       p.inflight = false;
       if (panes.get(key) === p) {
         publishPane(key, p);
-        if (p.again) schedulePane(threadId, sid);
+        if (p.again) schedulePane(threadId, sid, SOON_MS);
       }
     }
   }
 
-  function schedulePane(threadId: string, sid: string) {
+  /** Read a shown child's transcript again in `ms` (or sooner, if a read is already due sooner). */
+  function schedulePane(threadId: string, sid: string, ms = SOON_MS) {
     const p = panes.get(paneKey(threadId, sid));
-    if (!p || p.timer) return;
-    p.timer = setTimeout(() => { p.timer = null; void loadPane(threadId, sid); }, SOON_MS);
+    if (!p) return;
+    const due = Date.now() + ms;
+    if (p.timer && p.due <= due) return;
+    if (p.timer) clearTimeout(p.timer);
+    p.due = due;
+    p.timer = setTimeout(() => { p.timer = null; void loadPane(threadId, sid); }, ms);
   }
 
   return {
@@ -227,6 +233,12 @@ export function createSubagentStore(fetchers: Fetchers) {
       const t = threads.get(threadId);
       const rec = cleanBus(data);
       if (!t || !rec) return;
+      if (t.watchers <= 0 && ![...panes.keys()].some((k) => k.startsWith(threadId + "|"))) {
+        // Nothing shows it: no work for it now, and the next `watch` reads
+        // it whole again (review of #212, LOW-2).
+        t.loaded = false;
+        return;
+      }
       const known = t.rows.some((r) => r.sid === rec.sid);
       if (t.inflight) {
         t.replay.push(rec);
@@ -237,8 +249,11 @@ export function createSubagentStore(fetchers: Fetchers) {
         }
       }
       setRows(threadId, t, applyBus(t.rows, rec));
-      schedule(threadId, !known || rec.op !== "progress" ? SOON_MS : LAZY_MS);
-      if (panes.has(paneKey(threadId, rec.sid))) schedulePane(threadId, rec.sid);
+      const soon = !known || rec.op !== "progress";
+      schedule(threadId, soon ? SOON_MS : LAZY_MS);
+      // A shown child's pane: soon for a start or an end, at most every
+      // LAZY_MS for progress (review of #212, LOW-3).
+      if (panes.has(paneKey(threadId, rec.sid))) schedulePane(threadId, rec.sid, soon ? SOON_MS : LAZY_MS);
     },
     /** The event stream came back: whatever was said in the gap is read again. */
     reconnect() {
@@ -261,7 +276,7 @@ export function createSubagentStore(fetchers: Fetchers) {
       const key = paneKey(threadId, sid);
       let p = panes.get(key);
       if (!p) {
-        p = { data: null, failed: "", inflight: false, again: false, watchers: 0, timer: null };
+        p = { data: null, failed: "", inflight: false, again: false, watchers: 0, timer: null, due: 0 };
         panes.set(key, p);
         publishPane(key, p);
         void loadPane(threadId, sid);

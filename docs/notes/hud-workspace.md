@@ -1294,7 +1294,9 @@ No Stop (SV-4) and no between-turn drain (SV-6) here.
   progress. Records heard while a read is on its way are laid over it
   (`lib/subagents.ts` `foldList`); a stale one (fewer `entries`, or a live word
   for an ended child that is not Codex's own `started`) never takes a row
-  back. A fold-equals-live property test covers 1,000 random runs. Bounds: 64
+  back. A record for a thread nothing shows any more is not applied and
+  schedules nothing; the thread is read whole when shown again. A
+  fold-equals-live property test covers 1,000 random runs. Bounds: 64
   children per thread (the daemon's), 32 threads (least recently used
   unwatched out), 256 records waiting on a read (past that, read again).
   Nothing is stored; a reload reads it all again.
@@ -1325,23 +1327,36 @@ No Stop (SV-4) and no between-turn drain (SV-6) here.
   else the notice "No room for another pane: close one or use ⊞". Never a
   chat pane taken over, never under a card.
 - **The pane** (`components/SubagentPane.tsx`) is the transcript route as
-  served, read again behind each record about that child: header (name,
+  served, read again behind each record about that child (250 ms after a
+  start or an end, at most every 1.5 s for progress): header (name,
   provider, kind, status and reason, elapsed, tools, tokens, declined, "of
   ‹chat›", "Show in chat"), the **brief collapsed** ("Brief" disclosure,
   plain text; "Codex does not send a sub-agent's brief." for a Codex child),
-  then texts (Markdown, sanitised), tool calls as `ToolGroupRow` groups
+  then texts (Markdown, sanitised; format characters such as bidi overrides
+  and zero-widths are stripped from texts and the brief, lines kept), tool calls as `ToolGroupRow` groups
   (label and outcome only), the closing result and reviewer declines. No
   input box. It follows the bottom only when the reader is there. A 404 says
   "This sub-agent's record is gone." with Close; a 400 "Update Jarvis to see
   sub-agents."
 - **The card's link.** A card a child's call raised carries its sid
   (`subagent`; Codex's since this package, the owner's 2026-10-15 decision).
-  The card shows "from sub-agent ‹name›" under REQUESTED BY, with
+  The card shows "from sub-agent ‹name›" under REQUESTED BY, the name
+  reduced by the daemon's card-label rule (`lib/subagents.ts` `cardLabel`,
+  as `child_label`/`subagent_origin`: runs outside `[A-Za-z0-9 _./-]` become
+  "_", at most 40 characters), so a name cannot draw ‹ ›, · or a line of its
+  own on the authorization surface; with
   "(not the orchestrator)" unchanged in the origin or headline. The link is
   out of the Tab order and never takes focus from a pointer, like AUTHORIZE,
   and decides nothing. Behind a card nothing can take focus, so a click only
-  scrolls to and marks the row (`.sa-flash`); once the card is answered the
-  child's pane gets focus if one shows it, else its row, else its pane opens.
+  scrolls to and marks the row (`.sa-flash`). The click is bound to that
+  card's `req_id`: only when that card leaves because this window answered it
+  and no other card is up does the child's pane get focus if one shows it,
+  else its row, else its pane opens. A timeout, a withdrawal or another card
+  on top drops it.
+- **Rows wrap, the status does not.** In a narrow pane a row wraps its
+  badge, kind, tool and numbers onto a second line; the name and the status
+  word right after it stay together on the first (the name gives way with an
+  ellipsis).
 - **Silent.** A `subagent` record never touches the chat's ops, status line,
   orb, speech or Discord. The bus record is handled by its thread id only.
 - **Daemon side, for the brief and the card** (see `docs/hud-api.md`):
@@ -1358,5 +1373,10 @@ No Stop (SV-4) and no between-turn drain (SV-6) here.
   also a section of `hud_v2_check.py`); `tests/v2/subagent_routes_check.py`,
   `claude_subagents_check.py` and `codex_provider_check.py` for the brief and
   the card's sid.
+- **Follow-up once PR #205 merges:** its inline-credential log redaction
+  should also be applied to the child's brief and texts on their way into
+  `subagents.jsonl` and the transcript route (today `redact.scrub_text`). The
+  parent's Agent-call arguments, which carry the same brief in `log.jsonl` and
+  on the bus, are #205's to redact.
 - **Deploying is the owner's step**: `jarvis restart` for the daemon half,
   then `jarvis hud rebuild` and reload the window.

@@ -43,12 +43,15 @@ export const SubagentRow = memo(function SubagentRow({ threadId, sid, drawn }: {
          data-provider={provider}>
       <button type="button" className="sa-open" aria-label={`Open sub-agent ${name} in a pane`}
               onMouseDown={noPointerFocus} onClick={() => subagents.open({ threadId, sid: row.sid })}>
-        <span className="sa-mark" aria-hidden="true">◇</span>
-        <span className="sa-name" data-testid="subagent-name">{name}</span>
+        {/* Name and status stay together on the first line; the rest may wrap under them. */}
+        <span className="sa-first">
+          <span className="sa-mark" aria-hidden="true">◇</span>
+          <span className="sa-name" data-testid="subagent-name">{name}</span>
+          <span className={`sa-status ${mark.tone}`} data-testid="subagent-status"
+                title={row.stop_reason || undefined}>{mark.word}</span>
+        </span>
         <span className={`badge ${provider}`}>{PROVIDER_WORD[provider]}</span>
         {row.kind ? <span className="sa-kind">{row.kind}</span> : null}
-        <span className={`sa-status ${mark.tone}`} data-testid="subagent-status"
-              title={row.stop_reason || undefined}>{mark.word}</span>
         {row.last_tool ? <span className="sa-tool" data-testid="subagent-tool">{row.last_tool}</span> : null}
         <Elapsed row={row} drawn={drawn} />
         {row.tool_uses !== undefined ? <span className="sa-count">{toolsText(row.tool_uses)}</span> : null}

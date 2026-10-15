@@ -54,7 +54,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import inspect
 import json
 import logging
 import os
@@ -92,6 +91,7 @@ from ...tools import secrets
 from ..model import PermissionProfile, ProviderName, Thread
 from .. import running_cost
 from ..provider import (
+    takes_keyword as _takes_keyword,
     Brief,
     BriefRefused,
     Decision,
@@ -1847,7 +1847,9 @@ class ClaudeProvider:
                 # on this one lifecycle event only, never kept here; the
                 # record scrubs and caps it and serves it on the owner's
                 # transcript route alone, never the bus or the log.
-                event.data["brief"] = _safe(brief[:CHILD_BRIEF_CHARS])
+                # Scrubbed whole, then cut: a credential across the cut is
+                # never left half-shown (review of #212, LOW-5).
+                event.data["brief"] = _safe(brief)[:CHILD_BRIEF_CHARS]
             return [event]
         with session.mutex:
             sid = session.tasks.get(task_id) if task_id else None
@@ -2292,17 +2294,6 @@ def _takes_subagent(permit: Any) -> bool:
     handed it: one that does not would raise, and a raise denies — the label
     must never change an answer, either way."""
     return _takes_keyword(permit, "subagent")
-
-
-def _takes_keyword(permit: Any, name: str) -> bool:
-    """Whether `permit` takes the keyword `name` (or any keyword)."""
-    try:
-        params = inspect.signature(permit).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(p.kind is p.VAR_KEYWORD
-               or (p.name == name and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
-               for p in params)
 
 
 def _count(value: Any) -> int | None:

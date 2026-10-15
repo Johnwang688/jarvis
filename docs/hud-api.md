@@ -3289,7 +3289,8 @@ task's. The HUD shows it as "REQUESTED BY …", Discord as "Origin: …".
 raised carries `"subagent": "<sid>"` in its public JSON (the bus's
 `approval_requested`, `GET /approvals`), for Claude's and Codex's children
 alike, so the HUD can draw "from sub-agent ‹name›" on it as a link to the
-child's row. The provider hands the sid to the permit callback beside the
+child's row (the name from the list route, reduced on the card by the same
+`[A-Za-z0-9 _./-]` rule, at most 40 characters). The provider hands the sid to the permit callback beside the
 label (`subagent_sid`, only to a callback that takes the keyword); it is an
 id matching the sid pattern or nothing, never a word the model chose, and
 no layer reads it. A private (Browser) card's projection leaves it out.

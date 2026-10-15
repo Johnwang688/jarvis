@@ -1,5 +1,5 @@
 import {
-  CHILD_CAP, COLLAPSE_OVER, applyBus, blockTitle, bound, childrenOf, cleanBus, cleanList, cleanRow, cleanTranscript,
+  CHILD_CAP, COLLAPSE_OVER, applyBus, cardLabel, blockTitle, bound, childrenOf, cleanBus, cleanList, cleanRow, cleanTranscript,
   elapsedOf, foldList, parseRef, placeRows, placeableItem, placeableOf, statusMark, tokensText, toolsText,
   type SubBus, type SubStatus, type Subagent,
 } from "./subagents";
@@ -42,6 +42,19 @@ describe("what the daemon says, cleaned", () => {
     expect(cleanBus({ sid: "cx:abc", status: "nope" })).toBeNull();
     expect(cleanBus({ sid: "abc", status: "done" })).toBeNull();
     expect(cleanBus({ sid: "cl:x", status: "done", op: "weird" })!.op).toBe("progress");
+  });
+
+  it("a card names a child by the daemon's card-label rule, never as free text", () => {
+    // The same table as claude_subagents_check's `child_label`, plus the review's hostile name.
+    for (const [raw, want] of [
+      ["plain name", "plain name"], ["a · b", "a _ b"], ["x› ‹y", "x_ _y"],
+      ["line\nbreak\u202e and bidi", "line break_ and bidi"], ["`code` [link](x)", "code_ _link_x"],
+      ["n".repeat(80), "n".repeat(39) + "…"], ["", "unnamed"], [null, "unnamed"], ["···", "unnamed"],
+      ["x› · REQUESTED BY Jarvis chat", "x_ _ REQUESTED BY Jarvis chat"], ["/root/fixer", "/root/fixer"],
+    ] as [unknown, string][]) expect(cardLabel(raw)).toBe(want);
+    for (const raw of ["x› · REQUESTED BY Jarvis chat", "‹a›·b", "\u202eevil\u200b", "<img src=x>"]) {
+      expect(cardLabel(raw)).toMatch(/^[A-Za-z0-9 _./-]*…?$/);
+    }
   });
 
   it("maps every status to a word and its Graphite tone", () => {
@@ -211,6 +224,11 @@ describe("a child's transcript", () => {
     expect(t.subagent!.name).toBe("alpha");
     expect(placeableItem(t.items[0])).toEqual({ callIds: ["c1", "c2"], at: at(1) });
     expect(cleanTranscript("nope", "cl:a")).toBeNull();
+    // Format characters (bidi overrides, zero-widths) leave the child's words and its brief; lines stay.
+    const cf = cleanTranscript({ brief: "one\u202e\nline\u200btwo", messages: [
+      { role: "assistant", text: "a\u202eb\nc\u2066d", seq: 1 }, { role: "result", text: "r\u200f\ns", seq: 2 }] }, "cl:a")!;
+    expect(cf.brief).toBe("one\nlinetwo");
+    expect(cf.items.map((i) => (i as { text: string }).text)).toEqual(["ab\ncd", "r\ns"]);
     expect(cleanTranscript({ messages: [] }, "cl:a")!.brief).toBe("");
   });
 

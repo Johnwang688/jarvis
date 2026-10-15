@@ -296,6 +296,16 @@ class Lifecycle(unittest.TestCase):
         brief = next(d["brief"] for d in life(got, "cl:toolu_sv0_alpha") if "brief" in d)
         self.assertNotIn(FAKE_TOKEN, brief)
         self.assertLessEqual(len(brief), claude.CHILD_BRIEF_CHARS)
+        # Scrubbed whole, then cut: a token across the cut leaves no part of
+        # itself behind (review of #212, LOW-5).
+        def straddle(rs):
+            for r in rs:
+                if r["src"] == "cli" and r["data"].get("subtype") == "task_started":
+                    r["data"]["prompt"] = "y" * (claude.CHILD_BRIEF_CHARS - 13) + " " + FAKE_TOKEN
+            return rs
+        got, *_ = R.run("one_fg", edit=straddle)
+        brief = next(d["brief"] for d in life(got, "cl:toolu_sv0_alpha") if "brief" in d)
+        self.assertNotIn(FAKE_TOKEN[:12], brief)
 
     def test_stop_and_its_name_never_reach_the_parents_text(self):
         got, *_ = R.run("stop_fg")

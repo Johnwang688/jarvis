@@ -244,6 +244,23 @@ export function elapsedOf(row: Pick<Subagent, "started_at" | "ended_at" | "statu
 
 export const displayName = (row: Pick<Subagent, "name"> | undefined) => row?.name || "unnamed";
 
+/**
+ * A child's name on an approval card: the daemon's card-label rule
+ * (`permissions.subagent_origin`, Claude's `child_label`): whitespace runs to
+ * one space, every run of anything outside `[A-Za-z0-9 _./-]` to "_", spaces
+ * and "_" trimmed, at most 40 characters ("…" last), "unnamed" when nothing
+ * is left. So a name cannot draw the card's own ‹ ›, · or words in another
+ * script on the surface that gates approvals (review of #212, MED-1).
+ */
+export function cardLabel(name: unknown): string {
+  if (typeof name !== "string") return "unnamed";
+  const spaced = name.split(/\s+/).filter(Boolean).join(" ");
+  let label = spaced.replace(/[^A-Za-z0-9 _./-]+/g, "_").split(" ").filter(Boolean).join(" ")
+    .replace(/^[ _]+|[ _]+$/g, "");
+  if (label.length > NAME_CAP) label = label.slice(0, NAME_CAP - 1).trimEnd() + "…";
+  return label || "unnamed";
+}
+
 /** The collapsed line for a run of rows: "Sub-agents · 8 (5 running)". */
 export function blockTitle(rows: readonly Pick<Subagent, "status">[]): string {
   const live = rows.filter((r) => isLive(r.status)).length;
@@ -323,6 +340,9 @@ export interface SubTranscript {
  * arguments or results, which the route never serves anyway), the CLI's
  * closing word, and a reviewer's decline by the tool's name.
  */
+/** A child's words or brief for the pane: format characters (bidi overrides, zero-widths) out, lines kept. */
+const words = (text: string) => Array.from(text.replace(/\p{Cf}/gu, "")).slice(0, TEXT_CAP).join("");
+
 export function cleanTranscript(raw: unknown, sid: string): SubTranscript | null {
   if (!isObj(raw)) return null;
   const items: PaneItem[] = [];
@@ -331,9 +351,9 @@ export function cleanTranscript(raw: unknown, sid: string): SubTranscript | null
     if (!isObj(m)) continue;
     const seq = count(m.seq) ?? 0, at = when(m.at);
     if (m.role === "assistant" && typeof m.text === "string" && m.text.trim()) {
-      items.push({ kind: "text", text: Array.from(m.text).slice(0, TEXT_CAP).join(""), at, seq });
+      items.push({ kind: "text", text: words(m.text), at, seq });
     } else if (m.role === "result" && typeof m.text === "string" && m.text.trim()) {
-      items.push({ kind: "result", text: Array.from(m.text).slice(0, TEXT_CAP).join(""), status: status(m.status), at, seq });
+      items.push({ kind: "result", text: words(m.text), status: status(m.status), at, seq });
     } else if (m.role === "declined") {
       items.push({ kind: "declined", name: toolName(line(m.name, NAME_CAP) || "tool"), at, seq });
     } else if (m.role === "tool" && anId(m.call_id)) {
@@ -348,7 +368,7 @@ export function cleanTranscript(raw: unknown, sid: string): SubTranscript | null
       } else items.push({ kind: "tools", group: { role: "tool", text: "", turn_id: sid, calls: [call] }, at });
     }
   }
-  const brief = typeof raw.brief === "string" ? Array.from(raw.brief).slice(0, TEXT_CAP).join("") : "";
+  const brief = typeof raw.brief === "string" ? words(raw.brief) : "";
   return { subagent: cleanRow(raw.subagent), items, truncated: raw.truncated === true, brief };
 }
 

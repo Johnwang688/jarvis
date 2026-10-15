@@ -79,6 +79,7 @@ from .approvals import ApprovalRequest, DenyAll, clean_line, label, v1_request
 from .model import PermissionProfile, Project, Role, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
 from . import session_tools
+from .subagents import valid_sid as _valid_sid
 
 LOG = logging.getLogger(__name__)
 
@@ -814,8 +815,6 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
 SUBAGENT_LABEL_CAP = 40
 _SUBAGENT_UNSAFE = re.compile(r"[^A-Za-z0-9 _./-]+")
 _SUBAGENT_PROVIDERS = {"claude": "Claude", "codex": "Codex"}
-# A sub-agent's sid on a card (SV-3): exactly `subagents.SID`'s pattern.
-_SUBAGENT_SID = re.compile(r"(?:cl|cx):[A-Za-z0-9_-]{1,128}")
 
 
 def subagent_origin(ctx: PermitContext, subagent: str) -> str:
@@ -871,7 +870,8 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         label it decides nothing, and a value that is not a sid is dropped."""
         brief = brief if brief is not None else ctx.brief
         who = subagent_origin(ctx, subagent) if subagent is not None else None
-        sid = subagent_sid if subagent_sid is not None and _SUBAGENT_SID.fullmatch(str(subagent_sid)) else ""
+        # Exactly a sid (`subagents.SID`), else nothing.
+        sid = subagent_sid if _valid_sid(subagent_sid) else ""
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
         command = _command_of(args) if tool in COMMAND_TOOLS else ""

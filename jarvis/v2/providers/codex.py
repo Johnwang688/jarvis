@@ -63,7 +63,6 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 import hashlib
-import inspect
 import json
 import logging
 import os
@@ -80,7 +79,7 @@ from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, SteerRefused, Usage,
-                               UserMessage)
+                               UserMessage, takes_keyword as _takes_keyword)
 from ..approvals import clean_line
 from . import codex_cli, codex_config
 from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
@@ -198,19 +197,6 @@ def child_sid(thread_id) -> str:
     if _SID_ID.fullmatch(text):
         return "cx:" + text
     return "cx:h" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:32]
-
-
-def _takes_keyword(permit, name: str) -> bool:
-    """Whether `permit` takes the keyword `name` (or any keyword). Only such a
-    callback is handed the child's sid (SV-3): one that does not would raise,
-    and a raise denies — the sid must never change an answer."""
-    try:
-        params = inspect.signature(permit).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(q.kind is q.VAR_KEYWORD
-               or (q.name == name and q.kind in (q.KEYWORD_ONLY, q.POSITIONAL_OR_KEYWORD))
-               for q in params)
 
 
 def _child_text(value) -> str:

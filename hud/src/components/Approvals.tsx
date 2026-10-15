@@ -20,7 +20,7 @@ import { headlineLine } from "../lib/approval";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
-import { displayName, validSid, type SubagentRef } from "../lib/subagents";
+import { cardLabel, validSid, type SubagentRef } from "../lib/subagents";
 import { useRow, useWatch } from "../state/subagents";
 
 export function approvalChime(ctx?: AudioContext | null) {
@@ -47,7 +47,7 @@ export function approvalChime(ctx?: AudioContext | null) {
 export function ApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
-  onSubagent?: (ref: SubagentRef) => void;
+  onSubagent?: (ref: SubagentRef, reqId: string) => void;
 }) {
   return props.request.hud_only
     ? <BrowserApprovalCard request={props.request} onDecide={props.onDecide} onPresent={approvalChime} />
@@ -57,7 +57,9 @@ export function ApprovalCard(props: {
 /**
  * "from sub-agent ‹name›" on a card a native sub-agent's call raised (SV-3):
  * its sid comes with the card, its name from the owner's list route. It
- * decides nothing and, like AUTHORIZE, is out of the Tab order and never
+ * decides nothing. The name is the model's: on this authorization surface it
+ * is reduced as the daemon reduces a card's label (`cardLabel`, SV-1's
+ * `[A-Za-z0-9 _./-]` rule), so it cannot draw ‹ ›, · or a "REQUESTED BY". Like AUTHORIZE, is out of the Tab order and never
  * takes focus from a pointer; a click marks the child's row behind the card,
  * and once the card is answered takes the owner to it (App).
  */
@@ -71,7 +73,7 @@ function SubagentLink({ threadId, sid, onOpen }: {
       <button type="button" className="quiet" data-testid="approval-subagent" data-sid={sid} tabIndex={-1}
               onMouseDown={noPointerFocus} title="Show this sub-agent's row (its pane opens once this card is answered)"
               onClick={() => onOpen?.({ threadId, sid })}>
-        from sub-agent ‹{displayName(row)}›
+        from sub-agent ‹{cardLabel(row?.name)}›
       </button>
     </div>
   );
@@ -80,7 +82,7 @@ function SubagentLink({ threadId, sid, onOpen }: {
 function OrdinaryApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
-  onSubagent?: (ref: SubagentRef) => void;
+  onSubagent?: (ref: SubagentRef, reqId: string) => void;
 }) {
   const r = props.request;
   const [left, setLeft] = useState(r.timeout_s || 120);
@@ -119,7 +121,8 @@ function OrdinaryApprovalCard(props: {
         <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
       ) : null}
       {validSid(r.subagent) && r.thread_id ? (
-        <SubagentLink threadId={r.thread_id} sid={r.subagent} onOpen={props.onSubagent} />
+        <SubagentLink threadId={r.thread_id} sid={r.subagent}
+                      onOpen={(ref) => props.onSubagent?.(ref, r.req_id)} />
       ) : null}
       <div className="tool" data-testid="approval-tool">{r.tool}</div>
       {/* The entire command, never a summary. */}
@@ -194,8 +197,8 @@ export function behindTheCard(el: Element | null, card: Element | null = null): 
 export function ApprovalVeil(props: {
   requests: ApprovalRequest[];
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
-  /** A card's "from sub-agent ‹name›" (SV-3). */
-  onSubagent?: (ref: SubagentRef) => void;
+  /** A card's "from sub-agent ‹name›" (SV-3), with that card's request id. */
+  onSubagent?: (ref: SubagentRef, reqId: string) => void;
 }) {
   const top = props.requests[0];
   const up = !!top;

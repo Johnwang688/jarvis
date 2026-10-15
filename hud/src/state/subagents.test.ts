@@ -75,6 +75,25 @@ describe("the window's sub-agent store", () => {
     expect(s.rows("t1").find((r) => r.sid === "cl:new")!.name).toBe("name cl:new");
   });
 
+  it("a thread nothing shows any more takes no work, and is read whole when shown again", async () => {
+    const m = manual();
+    const s = createSubagentStore(m.fetchers);
+    const stop = s.watch("t1");
+    m.lists[0].resolve({ subagents: [listRow("cl:a")] });
+    await settle();
+    stop();
+    const heard: string[] = [];
+    s.subscribe("t:t1", () => heard.push("t"));
+    s.heard("t1", rec("cl:a", { status: "done", op: "finished", entries: 2 }));
+    s.heard("t1", rec("cl:new", { op: "started" }));
+    await vi.advanceTimersByTimeAsync(LAZY_MS * 2);
+    expect(heard).toEqual([]);
+    expect(m.lists.length).toBe(1);
+    expect(s.rows("t1").map((r) => r.status)).toEqual(["running"]);
+    s.watch("t1");
+    expect(m.lists.length).toBe(2);
+  });
+
   it("a tick redraws its own row only, and leaves the placement alone", async () => {
     const m = manual();
     const s = createSubagentStore(m.fetchers);
@@ -149,13 +168,22 @@ describe("the window's sub-agent store", () => {
     s.heard("t1", rec("cl:b", { entries: 1 }));
     s.heard("t1", rec("cl:a", { entries: 1 }));
     s.heard("t1", rec("cl:a", { entries: 2 }));
+    // Progress: at most every LAZY_MS (review of #212, LOW-3).
     await vi.advanceTimersByTimeAsync(SOON_MS);
+    expect(m.panes.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(LAZY_MS);
     expect(m.panes.map((p) => p.sid)).toEqual(["cl:a", "cl:a"]);
+    m.panes[1].resolve({ subagent: listRow("cl:a"), messages: [] });
+    await settle();
+    // An end: soon.
+    s.heard("t1", rec("cl:a", { op: "finished", status: "done", entries: 3, ended_at: at(9) }));
+    await vi.advanceTimersByTimeAsync(SOON_MS);
+    expect(m.panes.length).toBe(3);
     hide();
     expect(s.snapshot().panes).toEqual([]);
-    s.heard("t1", rec("cl:a", { entries: 3 }));
-    await vi.advanceTimersByTimeAsync(SOON_MS * 4);
-    expect(m.panes.length).toBe(2);
+    s.heard("t1", rec("cl:a", { entries: 4 }));
+    await vi.advanceTimersByTimeAsync(LAZY_MS * 2);
+    expect(m.panes.length).toBe(3);
   });
 
   it("is bounded: threads, and records waiting on a read", async () => {
