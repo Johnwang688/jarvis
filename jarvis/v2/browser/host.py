@@ -2754,7 +2754,7 @@ class BrowserHost:
             self._auth_pending = {
                 tab_id: session.navigation.id for tab_id, session in self._auth.sessions.items()
                 if self._auth.current(session) and session.navigation is not None
-                and session.prompt is not None}
+                and session.prompt is not None and not session.prompt.answering}
 
     def pane_tab(self, tab_id: str) -> dict | None:
         """A copied navigation identity, safe on the CDP loop or caller thread.

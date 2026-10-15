@@ -71,6 +71,63 @@ class Auth(unittest.IsolatedAsyncioTestCase):
         await self.answer(prompt);self.assertEqual(len(self.credentials()),1);self.assertEqual(self.host.activity.counts("private")[0],1)
         task=self.session.navigation.task;finished.set();await cleaning.wait();self.assertEqual(self.host.activity.counts("private")[0],1)
         release.set();await task;self.assertEqual(self.host.activity.counts("private")[0],0);self.assertIsNone(self.tab.pending_port)
+    async def test_a_superseded_prompt_is_never_republished_or_answered_while_it_stops(self):
+        # QA-LOAD review MED-1: cancel_navigation awaits Page.stopLoading (up to
+        # 2 s) before it finishes the prompt. A refresh in that window (HUD
+        # visible, approval_resolved, attach) republished it with a fresh nonce
+        # (session.epoch had moved) and an answer then sent ProvideCredentials.
+        cdp=self.cdp;real_send=cdp.send;stopping=asyncio.Event();release=asyncio.Event()
+        async def send(method,params=None):
+            if method=="Page.stopLoading" and not release.is_set():
+                stopping.set();await release.wait()
+            return await real_send(method,params)
+        cdp.send=send
+        entered=asyncio.Event();hold=asyncio.Event()
+        async def first():
+            entered.set();await hold.wait()
+        async def second():return None
+        parent=asyncio.create_task(self.auth.navigate(self.tab,first,owner=True,port=18761))
+        await entered.wait();prompt=await self.challenge();row=await parent
+        self.assertTrue(row["auth_pending"]);nonce=prompt.nonce
+        cards=lambda:[m for m in self.sock.sent if m.get("t")=="auth"]
+        self.assertEqual(len(cards()),1)
+        newer=asyncio.create_task(self.auth.navigate(self.tab,second,owner=True,port=18761))
+        await stopping.wait()
+        self.assertIs(self.session.prompt,prompt,"held before the prompt is finished")
+        self.auth.refresh(self.tab)
+        self.assertEqual(len(cards()),1,"a refresh republished the superseded prompt");self.assertEqual(prompt.nonce,nonce)
+        self.assertFalse(self.auth.receipt_current(self.tab,row["nav_id"]))
+        await self.auth.answer(self.tab,self.sock,1,0,{"id":prompt.nonce,"cancel":False,"username":"fixture","password":"synthetic"})
+        self.assertEqual(self.credentials(),[])
+        release.set();result=await newer;hold.set()
+        self.assertTrue(result["loaded"],result);self.assertIsNone(self.session.prompt)
+        self.assertEqual(self.credentials(),[]);self.assertEqual(len(cards()),1)
+        closed=[m for m in self.sock.sent if m.get("t")=="auth_closed"]
+        self.assertEqual([(m["id"],m["reason"]) for m in closed],[(nonce,"changed")])
+    async def test_a_caller_cancelled_during_the_stop_still_closes_the_prompt(self):
+        # Delta review LOW: cancelled while Page.stopLoading is awaited, the
+        # superseded prompt was never finished: answering, unanswerable and
+        # holding its request until it expired.
+        cdp=self.cdp;real_send=cdp.send;stopping=asyncio.Event()
+        async def send(method,params=None):
+            if method=="Page.stopLoading":
+                stopping.set();await asyncio.Event().wait()
+            return await real_send(method,params)
+        cdp.send=send
+        entered=asyncio.Event();hold=asyncio.Event()
+        async def first():
+            entered.set();await hold.wait()
+        async def second():return None
+        parent=asyncio.create_task(self.auth.navigate(self.tab,first,owner=True,port=18761))
+        await entered.wait();prompt=await self.challenge();await parent;nonce=prompt.nonce
+        newer=asyncio.create_task(self.auth.navigate(self.tab,second,owner=True,port=18761))
+        await stopping.wait();newer.cancel()
+        with self.assertRaises(asyncio.CancelledError):await newer
+        hold.set()
+        self.assertIsNone(self.session.prompt,"the superseded prompt was finished")
+        self.assertEqual(self.credentials(),[])
+        closed=[m for m in self.sock.sent if m.get("t")=="auth_closed"]
+        self.assertEqual([(m["id"],m["reason"]) for m in closed],[(nonce,"changed")])
     async def test_reconnect_rotates_nonce_without_resetting_budget(self):
         prompt=await self.challenge();nonce=prompt.nonce;started=self.session.budget.started
         self.tab.stream.gen=2;self.auth.refresh(self.tab)

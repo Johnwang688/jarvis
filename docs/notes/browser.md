@@ -1567,6 +1567,38 @@ screen as before; a page-mode notch is already the fitted view's height.
 Receipts: `tests/v2/browser_fit_check.py` (real Chrome), `remote.test.ts`
 and `hud_v2_remote_check` ("Fit:").
 
+## Superseding an auth prompt stops before it cancels (QA-LOAD, 2026-10-14)
+
+`OwnerAuth.cancel_navigation` used to answer a pending challenge with
+`CancelAuth` and only then send `Page.stopLoading`. `CancelAuth` lets Chrome
+go on to commit the 401 it was paused on; when the renderer committed it late
+(any busy machine), it interrupted the owner's newer navigation, which came
+back `{"loaded": false, "error": "navigation failed"}` ("Navigation to
+about:blank is interrupted by another navigation to …/superseded"). The lead's
+sweeps failed `test_new_navigation_cancels_pending_without_late_resurrection`
+five times on that line. The cancel now stops the navigation while it is still
+paused on its challenge, then finishes the prompt if the stop has not already
+settled it (reason `changed`, as before; no credential is sent either way).
+
+The prompt is superseded from the moment the cancel starts, before it awaits
+the stop (up to `_send`'s 2 s): it is marked `answering`, so a `refresh` in
+that window (HUD `visible`, `approval_resolved`, an attach) cannot republish
+it with a fresh nonce, no reply can answer it, and neither `receipt_current`
+nor the host's `auth_pending_current` cache adopts it; `_finish` still sends
+its `auth_closed`. Without that (review MED-1) a refresh republished the
+prompt as a second answerable card and an answer sent `ProvideCredentials`.
+
+Receipts: `browser_auth_check`'s
+`test_a_superseded_prompt_is_never_republished_or_answered_while_it_stops`
+holds the fake `Page.stopLoading`, refreshes and answers: one card, no
+credentials, no receipt (without the mark: two cards, a receipt and one
+`ProvideCredentials`). `browser_auth_matrix_real_check`'s
+`test_superseding_a_prompt_stops_its_401_before_it_can_commit` stalls that
+test's own renderers (its temp profile's Chrome tree only) for 0.5 s across the
+cancel, which makes the late commit happen every time, and checks the window's
+`auth_closed` (`changed`) and that no credential request reached the server:
+the old order failed 3 of 3, the new one passes.
+
 ## Sharp frames and a pointer that keeps up (2026-10-14)
 
 The owner reported soft Remote pages ("like 720p") and lag in pointer moves
