@@ -2255,13 +2255,18 @@ Plan §3.4, Q16 ("build it as a setting, off by default"). Stacked on V5 (`claud
 - **Browser check.** `tests/face/hud_v2_denoise_check.py` (real Chromium, real worker, mock daemon, synthetic
   audio only): sections `off_by_default`, `toggle_live`, `false_accepts`, `recorded_raw`, `fallbacks` (404, one
   byte changed, truncated, padded; each with Silero still scoring and a working retry).
-- **Counts.** After merging V5 at 57c7de8 (main with V12 and V4 included, V5's auto-retry stage): vitest 2621 tests /
-  161 files, `tsc` and `vite build` clean. Before that merge: 2444 / 153 (V5 then: 2385 / 151). Browser checks on the
-  merged build: `hud_v2_denoise_check` 72, `vad` 96, `chunks` 65, `syntax` 50 tree-sitter checks, all pass (earlier,
-  on the pre-merge build: `stt` 28, `csp` 44, `voice_diagnostics` 17). The syntax check needed no filter for
-  RNNoise's `.wasm`: with the switch off nothing loads it. The full `hud_v2_check` was not run.
-  The merge kept V5's `retrying`/`total`/`canRetry` stage and V12's Settings, and added the noise state to the
+- **Counts.** After merging V5 (57c7de8) and then main at 01c2422 (V9's self-voice gate and barge-in): vitest 2822
+  tests / 167 files, `tsc` and `vite build` clean. Before the merges: 2444 / 153 (V5 then: 2385 / 151). Browser checks
+  on the merged build: `hud_v2_denoise_check` 72, `vad` 96, `chunks` 65, `barge` 115, `syntax` 50 tree-sitter
+  checks, all pass (earlier, on a pre-merge build: `stt` 28, `csp` 44, `voice_diagnostics` 17). The syntax check needed
+  no filter for RNNoise's `.wasm`: with the switch off nothing loads it. The full `hud_v2_check` was not run.
+  The V5 merge kept V5's `retrying`/`total`/`canRetry` stage and V12's Settings, and added the noise state to the
   stage's status key; a Silero restart (`begin()`) re-asks the worker for noise suppression.
+- **V9's self-voice gate sees raw frames, as before V14.** `App.tsx` feeds `speech.selfVoice.push(frame)` and
+  `capture.onFrame(frame, ...)` from the stage's `deliver`, which is the frame the microphone pushed (the same object,
+  untouched), never the worker's denoised copy. `stage.test.ts` pins it: with suppression ready, the delivered frame
+  `toBe` the pushed one, bit for bit, after the worker zeroes its copy. The reference-correlation gate therefore
+  compares the playback reference with raw mic audio, which is what it was tuned on.
 - **Mutations that fail on purpose** (source restored afterwards): the switch on by default (2 vitest); the SHA-256
   not compared in `verifiedRnnoise` (1: "refused if one byte changed, truncated or padded"); review round, each failing the named test and restored: `SLOW_RUN=1` and `SLOW_FRAME_MS=2` (2 each), the export check removed (1), the heap re-view before a frame removed (1), after the call removed (1), the non-finite output check removed (2), the non-finite input check removed (1); no held-back block in
   the adapter (3: chunk invariance, delay, latency); RNNoise loaded when the worker starts instead of on the switch
