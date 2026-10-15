@@ -164,7 +164,7 @@ def peer(script_path, log_path, thread_name):
             if mode in ("approval", "flood", "deny", "approval_death", "file_approval"):
                 item = {"id": "cmd", "type": "commandExecution", "command": "echo ok", "cwd": os.getcwd(), "status": "inProgress"}
                 if mode == "file_approval":
-                    item = {"id": "cmd", "type": "fileChange", "changes": [{"path": "a.txt", "diff": "+hi"}], "status": "inProgress"}
+                    item = {"id": "cmd", "type": "fileChange", "changes": [{"path": "a.txt", "diff": "+hi", "kind": {"type": "add"}}], "status": "inProgress"}
                 event("item/started", item=item)
                 approval("item/fileChange/requestApproval" if mode == "file_approval" else "item/commandExecution/requestApproval")
                 continue
@@ -205,7 +205,7 @@ def peer(script_path, log_path, thread_name):
                 event("item/reasoning/textDelta", delta="More")
                 for item in [
                     {"id": "cmd", "type": "commandExecution", "command": "echo ok", "cwd": os.getcwd(), "status": "inProgress"},
-                    {"id": "patch", "type": "fileChange", "changes": [{"path": "ok.txt", "diff": "--- a\n+++ b\n-old\n+ok\n+yes"}], "status": "inProgress"},
+                    {"id": "patch", "type": "fileChange", "changes": [{"path": "ok.txt", "diff": "--- a\n+++ b\n-old\n+ok\n+yes", "kind": {"type": "update", "move_path": None}}], "status": "inProgress"},
                 ]:
                     event("item/started", item=item)
                     item = {**item, "status": "declined" if mode == "declined" else "failed" if mode == "tool_failed" else "completed"}
@@ -1394,6 +1394,75 @@ class Checks(unittest.TestCase):
         self.send(h)
         reply = next(m for m in h.native.rpc.replies if m["id"] == "special")
         self.assertEqual(reply["result"], {"decision": "decline"})
+
+    def rename(self, move, *, kind=None, path="notes.txt"):
+        """A fileChange item renaming `path` (generate-ts 0.161.0:
+        FileUpdateChange.kind = {type: update, move_path})."""
+        kind = kind if kind is not None else {"type": "update", "move_path": move}
+        return {"id": "patch", "type": "fileChange", "status": "inProgress",
+                "changes": [{"path": path, "diff": "@@\n-old\n+new", "kind": kind}]}
+
+    def test_file_rename_destination_is_judged_by_layer_1(self):
+        """A rename's destination is a file written: refused unasked when it
+        is a credential file or the gate's own state, in a chat and in a task
+        (whose plain file approvals no human sees under AUTO)."""
+        file_approval = "item/fileChange/requestApproval"
+        asker = RecordingAsker(Decision.ALLOW)
+        permit = self.real_permit(asker)
+        gate_state = str(config.ALLOWLIST_PATH)         # the hermetic allowlist real_permit set
+        for label, move in (("credential file", str(self.work / ".env")),
+                            ("credential file, relative", ".env.local"),
+                            ("gate state", gate_state)):
+            for brief in (self.chat(), self.brief):
+                with self.subTest(case=label, role=brief.role):
+                    _, events, reply = self.scripted(file_approval, {"itemId": "patch"}, permit,
+                                                     item=self.rename(move), brief=brief)
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+                    self.assertEqual(asker.seen, [], "refused by layer 1, never asked")
+                    asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+                    self.assertEqual(asked["args"]["paths"], ["notes.txt", move])
+                    self.assertEqual(events[-1].data, {"stop": "end"})
+        # A benign rename is asked with both of its paths on the card.
+        _, events, reply = self.scripted(file_approval, {"itemId": "patch"}, permit,
+                                         item=self.rename("docs/notes.md"), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(asker.seen[-1].args["paths"], ["notes.txt", "docs/notes.md"])
+        self.assertIn("docs/notes.md", json.dumps(asker.seen[-1].to_json()))
+
+    def test_file_change_kind_that_cannot_be_read_is_declined(self):
+        file_approval = "item/fileChange/requestApproval"
+        shapes = {
+            "no kind": self.rename(None, kind={}),
+            "kind not an object": self.rename(None, kind="update"),
+            "unknown kind": self.rename(None, kind={"type": "rename", "to": ".env"}),
+            "unknown kind type alone": self.rename(None, kind={"type": "copy"}),
+            "move_path not a string": self.rename(None, kind={"type": "update", "move_path": [".env"]}),
+            "move_path on an add": self.rename(None, kind={"type": "add", "move_path": ".env"}),
+            "unknown field on the kind": self.rename(None, kind={"type": "update", "move_path": None,
+                                                                 "copy_path": ".env"}),
+            "a change with no path": {"id": "patch", "type": "fileChange", "status": "inProgress",
+                                      "changes": [{"diff": "+x", "kind": {"type": "add"}}]},
+            "changes not a list": {"id": "patch", "type": "fileChange", "status": "inProgress",
+                                   "changes": {"path": ".env"}},
+        }
+        for label, item in shapes.items():
+            with self.subTest(shape=label):
+                if label == "no kind":
+                    item["changes"][0].pop("kind")
+                calls = []
+
+                def permit(*a, **k):
+                    calls.append(a)
+                    return Decision.ALLOW
+                _, events, reply = self.scripted(file_approval, {"itemId": "patch"}, permit,
+                                                 item=item, brief=self.chat())
+                self.assertEqual(reply["result"], {"decision": "decline"})
+                self.assertEqual(calls, [], "never put to the gate")
+                errors = [e.data for e in events if e.kind == K.ERROR]
+                self.assertEqual(len(errors), 1, errors)
+                self.assertFalse(errors[0]["fatal"])
+                self.assertTrue(errors[0]["message"].startswith("Codex approval request declined: "), errors)
+                self.assertEqual(events[-1].data, {"stop": "end"})
 
     def test_current_time_read_is_answered_not_fatal(self):
         before = int(time.time())
