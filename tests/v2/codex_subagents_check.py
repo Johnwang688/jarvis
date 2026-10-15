@@ -225,6 +225,42 @@ def played(name) -> Run:
     return replay(name)
 
 
+def inject(name, extra, at_kind="turn/completed"):
+    """`name` with `extra` messages ("$CHILD" is its first child's thread)
+    just before that child's first `at_kind`."""
+    child = next(iter(children(name)))
+
+    def edit(i, msgs):
+        at = next(k for k, m in enumerate(msgs) if m.get("method") == at_kind
+                  and m["params"]["threadId"] == child)
+        msgs[at:at] = [json.loads(json.dumps(m).replace("$CHILD", child)) for m in extra]
+        return msgs
+    return replay(name, edit=edit), sid(child)
+
+
+def tokens() -> dict:
+    """Credential-shaped placeholders, built by concatenation so none sits
+    whole in the repository: a Claude OAuth token, a jarvis-mcp caller
+    token, a JWT, and a GitHub token (a shape only `credential_patterns`
+    knows)."""
+    return {"oauth": "sk-" + "ant-oat01-" + "Q" * 40, "jmcp": "jmcp" + "_" + "z" * 24,
+            "jwt": "ey" + "J" + "h" * 16 + "." + "p" * 16 + "." + "s" * 12,
+            "github": "gh" + "p_" + "A1" * 18}
+
+
+@functools.cache
+def leaky() -> tuple:
+    """A Codex child that writes every placeholder (and an owned credential
+    value), and one that fails with them in Codex's reason."""
+    words = " ".join(tokens().values()) + " " + FAKE_SECRET
+    said, _ = inject("one", [{"method": "item/completed", "params": {
+        "threadId": "$CHILD", "turnId": "t", "item": {"type": "agentMessage", "id": "leak",
+                                                      "text": f"keys: {words} end"}}}])
+    failed = replay("fail", edit=lambda i, msgs: json.loads(
+        json.dumps(msgs).replace("SV0 synthetic child failure", f"SV0 synthetic child failure {words}")))
+    return said, failed
+
+
 def sid(thread_id):
     return "cx:" + thread_id
 
@@ -474,14 +510,7 @@ class Privacy(unittest.TestCase):
         self.assertEqual([e.kind for e in order], [K.SUBAGENT, K.SUBAGENT_EVENT])
 
     def inject(self, name, extra, at_kind="turn/completed"):
-        child = next(iter(children(name)))
-
-        def edit(i, msgs):
-            at = next(k for k, m in enumerate(msgs) if m.get("method") == at_kind
-                      and m["params"]["threadId"] == child)
-            msgs[at:at] = [json.loads(json.dumps(m).replace("$CHILD", child)) for m in extra]
-            return msgs
-        return replay(name, edit=edit), sid(child)
+        return inject(name, extra, at_kind)
 
     def test_deltas_reasoning_plans_and_the_brief_are_not_passed_on(self):
         p = {"threadId": "$CHILD", "turnId": "t"}
@@ -497,23 +526,6 @@ class Privacy(unittest.TestCase):
         ])
         everything = json.dumps([e.data for t in run.turns for e in t])
         self.assertNotIn("SV2", everything)
-
-    def test_a_childs_text_is_scrubbed(self):
-        from jarvis.tools import secrets
-        real = secrets.scrub
-        with patch.object(secrets, "scrub", side_effect=lambda t: real(t).replace(FAKE_SECRET, "[redacted]")):
-            run, child = self.inject("one", [{"method": "item/completed", "params": {
-                "threadId": "$CHILD", "turnId": "t", "item": {"type": "agentMessage", "id": "leak",
-                                                              "text": f"token {FAKE_SECRET} here"}}}])
-        texts = [e["data"]["text"] for e in run.inner(child, "text")]
-        self.assertIn("token [redacted] here", texts)
-        self.assertNotIn(FAKE_SECRET, json.dumps([e.data for t in run.turns for e in t]))
-        # A scrub that fails withholds the text.
-        with patch.object(secrets, "scrub", side_effect=RuntimeError("no")):
-            run, child = self.inject("one", [{"method": "item/completed", "params": {
-                "threadId": "$CHILD", "turnId": "t", "item": {"type": "agentMessage", "id": "leak",
-                                                              "text": f"token {FAKE_SECRET} here"}}}])
-        self.assertNotIn(FAKE_SECRET, json.dumps([e.data for t in run.turns for e in t]))
 
     def test_browser_act_arguments_never_ride_the_envelope(self):
         p = {"threadId": "$CHILD", "turnId": "t"}
@@ -571,7 +583,8 @@ class Bounds(unittest.TestCase):
             return msgs
         with patch.object(codex, "CHILD_CALL_LIMIT", 4):
             run = replay("one", edit=many)
-            self.assertLessEqual(len(run.handle.native.child_views[child].calls), 4)
+            # The oldest open calls go first: the four newest stay.
+            self.assertEqual(list(run.handle.native.child_views[child].calls), ["c8", "c9", "c10", "c11"])
         self.assertEqual(run.life(sid(child))[-1]["tool_uses"], 13)
 
     def test_a_childs_record_goes_with_its_registration(self):
@@ -833,6 +846,62 @@ class Routes(Daemon):
         self.assertEqual(roles, ["tool", "assistant"])
 
 
+class Scrub(Daemon):
+    """A child's words are scrubbed in one place, the record's `prepare`, the
+    same way for both providers: Jarvis's credential values, the known key
+    shapes, bearer tokens, JWTs, jarvis-mcp tokens (review of #199, LOW 1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        leaky()
+
+    def setUp(self):
+        super().setUp()
+        from jarvis.tools import secrets
+        real = secrets.scrub
+        # The owner's credential file is a fake value known to the scrub.
+        self.enterContext(patch.object(secrets, "scrub",
+                                       side_effect=lambda t: real(t).replace(FAKE_SECRET, "[redacted]")))
+
+    def assert_clean(self, text):
+        for name, value in {**tokens(), "owned": FAKE_SECRET}.items():
+            self.assertNotIn(value, text, name)
+
+    def test_a_codex_childs_message_and_failure_are_scrubbed(self):
+        said, failed = leaky()
+        for run, want in ((said, "keys: [redacted]"), (failed, "SV0 synthetic child failure [redacted]")):
+            with self.subTest(want=want):
+                self.play("x", turns=run.turns)
+                kept = self.daemon.stores.threads.path(self.chat.id).with_name(S.FILE).read_text()
+                self.assert_clean(kept)
+                child = run.of(K.SUBAGENT)[0].data["sid"]
+                got = self.owner("GET", self.sub(f"/{child}/transcript"))
+                self.assert_clean(json.dumps(got))
+                self.assertIn(want, json.dumps(got))
+                self.assert_clean(json.dumps(self.log()) + json.dumps(self.bus()))
+
+    def test_both_providers_children_are_scrubbed_alike(self):
+        words = " ".join(tokens().values()) + " " + FAKE_SECRET
+        out = {}
+        for sid_ in ("cl:toolu_a", "cx:01a140ca-aaaa"):
+            for kind, data in (("text", {"text": f"keys: {words}"}),
+                               ("result", {"text": f"keys: {words}", "status": "failed"})):
+                event = Event(K.SUBAGENT_EVENT, "t", {"sid": sid_, "event": {"kind": kind, "data": data}})
+                prepared = S.SubagentRecords.prepare(event, None)
+                self.assert_clean(json.dumps(prepared))
+                out[(sid_[:2], kind)] = prepared["data"]["text"]
+        self.assertEqual(out[("cl", "text")], out[("cx", "text")])
+        self.assertEqual(out[("cl", "result")], out[("cx", "result")])
+        self.assertEqual(out[("cx", "text")], "keys: " + " ".join(["[redacted]"] * 5))
+        # A scrub that fails withholds the words.
+        from jarvis.tools import secrets
+        with patch.object(secrets, "scrub", side_effect=RuntimeError("no")):
+            event = Event(K.SUBAGENT_EVENT, "t", {"sid": "cx:a", "event": {"kind": "text",
+                                                                            "data": {"text": words}}})
+            self.assertEqual(S.SubagentRecords.prepare(event, None)["data"]["text"], "[withheld]")
+
+
 class Revival(unittest.TestCase):
     """The record's half of a Codex child given another turn: its provider's
     own `started`, from the session that ran it, makes an ended child live
@@ -851,10 +920,10 @@ class Revival(unittest.TestCase):
                                      lambda _tid: "k1")
         self.thread = SimpleNamespace(id="t")
 
-    def put(self, key, **data):
-        event = Event(K.SUBAGENT, "t", {"sid": "cx:abc", **data})
+    def put(self, key, sid_="cx:abc", **data):
+        event = Event(K.SUBAGENT, "t", {"sid": sid_, **data})
         self.rec.record(self.thread, "turn", key, S.SubagentRecords.prepare(event, None))
-        return self.rec.list("t")[0]
+        return next(c for c in self.rec.list("t") if c["sid"] == sid_)
 
     def test_started_from_the_same_session_revives_and_nothing_else_does(self):
         self.put("k1", op="started", status="running")
@@ -868,11 +937,20 @@ class Revival(unittest.TestCase):
         self.assertNotIn("ended_at", row)
         self.assertEqual(self.put("k1", op="finished", status="done")["status"], "done")
 
+    def test_a_claude_child_is_never_revived(self):
+        """Claude has no second turn for a child: even its own session's
+        `started` after an end is a stale word (review of #199, LOW 2)."""
+        self.put("k1", "cl:toolu_a", op="started", status="running")
+        self.assertEqual(self.put("k1", "cl:toolu_a", op="finished", status="stopped")["status"], "stopped")
+        row = self.put("k1", "cl:toolu_a", op="started", status="running")
+        self.assertEqual(row["status"], "stopped")
+        self.assertIn("ended_at", row)
+
 
 def load_tests(loader, tests, pattern):
     """Only this module's tests (codex_provider_check's run on their own)."""
     suite = unittest.TestSuite()
-    for cls in (ProseIsolation, Lifecycle, Privacy, Bounds, Isolation, Routes, Revival):
+    for cls in (ProseIsolation, Lifecycle, Privacy, Bounds, Isolation, Routes, Scrub, Revival):
         suite.addTests(loader.loadTestsFromTestCase(cls))
     return suite
 

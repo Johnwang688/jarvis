@@ -178,11 +178,12 @@ def _from_child(child: str | None) -> str:
 # done/failed/stopped (the parent's `subAgentActivity` `completed` is absent
 # for a failed or externally interrupted child, so it is never read as the
 # end). Its tokens are its own thread's totals, never the session's
-# accounting. Deltas, reasoning, plans and its own brief are not passed on;
+# accounting. Its words are scrubbed by the record (`subagents.prepare`), as
+# Claude's are. Deltas, reasoning, plans and its own brief are not passed on;
 # a tool is its name and the arguments the daemon labels it from, then its
 # outcome — never a result. A child outlives the turn that spawned it, so
 # the turn's end never ends one; the daemon ends them with the session.
-CHILD_TEXT_CHARS = 4000      # a child's text or failure, before the daemon caps it again
+CHILD_TEXT_CHARS = 4000      # a child's text or failure, as the record keeps it
 CHILD_CALL_LIMIT = 256       # a child's tool calls started and not yet finished
 _SID_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _CHILD_END = {"completed": "done", "failed": "failed", "interrupted": "stopped"}
@@ -199,15 +200,12 @@ def child_sid(thread_id) -> str:
 
 
 def _child_text(value) -> str:
-    """A child's words bound for its record: scrubbed of credential values
-    (a scrub that fails withholds them), capped."""
-    if not isinstance(value, str):
-        return ""
-    from jarvis.tools import secrets
-    try:
-        return secrets.scrub(value[:CHILD_TEXT_CHARS * 2])[:CHILD_TEXT_CHARS]
-    except Exception:  # noqa: BLE001 — unscrubbable text is not shown
-        return "[withheld]"
+    """A child's words bound for its record, capped. They are scrubbed in one
+    place for both providers, `SubagentRecords.prepare` (`redact.scrub_text`),
+    before memory, the file or a route sees them; nothing else reads them."""
+    # Twice the record's cap: it scrubs before it cuts, so a credential is
+    # never halved here into a shape no layer knows.
+    return value[:CHILD_TEXT_CHARS * 2] if isinstance(value, str) else ""
 
 
 def _count(value) -> int | None:
@@ -230,7 +228,7 @@ class _ChildView:
     last_tool: str = ""
     stop_reason: str | None = None
     asked_to_stop: bool = False        # the orchestrator's interrupt_agent said so
-    calls: set = field(default_factory=set)   # its tool calls started and not finished
+    calls: dict = field(default_factory=dict)  # its open tool calls, oldest first
 
 
 def _mcp_approval(params, depth: int = 0) -> bool:
@@ -1494,7 +1492,11 @@ class CodexProvider:
                     # Forget the oldest child with no turn running; a busy
                     # one is never dropped, so with none the newcomer stays
                     # unknown and its requests fail closed.
-                    idle = next((c for c in s.children if c in s.idle_children), None)
+                    # Of those, one whose record has also ended first (SV-2):
+                    # its last turn's end has been handled, not just read.
+                    idle = next((c for c in s.children if c in s.idle_children
+                                 and getattr(s.child_views.get(c), "status", "done") != "running"),
+                                next((c for c in s.children if c in s.idle_children), None))
                     if idle is None:
                         return
                     del s.children[idle]
@@ -1699,9 +1701,9 @@ class CodexProvider:
         if method == "item/started":
             if call in view.calls:
                 return
-            if len(view.calls) >= CHILD_CALL_LIMIT:
-                view.calls.pop()
-            view.calls.add(call)
+            while len(view.calls) >= CHILD_CALL_LIMIT:
+                del view.calls[next(iter(view.calls))]     # the oldest open call
+            view.calls[call] = None
             view.tool_uses += 1
             view.last_tool = name
             yield self._inner(h, view, "tool_started", call_id=call, name=name, args=args)
@@ -1709,7 +1711,7 @@ class CodexProvider:
             return
         if call not in view.calls:
             return
-        view.calls.discard(call)
+        view.calls.pop(call, None)
         outcome = self._child_outcome(item)
         yield self._inner(h, view, "tool_finished", call_id=call, name=name,
                           ok=outcome == "ok", outcome=outcome)

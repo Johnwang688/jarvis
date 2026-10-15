@@ -780,7 +780,7 @@ child's `started` (whatever turn the item names) and notes an
   — `sendInput`, `followupTask` — is announced `started` again);
   `turn/completed` gives `done`/`failed`/`stopped` once per turn, with
   `duration_ms`, a stop reason, and for `failed` Codex's error message as a
-  `result` entry (scrubbed, 4000 characters). `thread/closed` stops a live
+  `result` entry. `thread/closed` stops a live
   one. The parent-side `completed` is never read (SV-0: absent for failed and
   externally interrupted children);
 - `thread/tokenUsage/updated`: the child's `tokens` (its thread's total) on
@@ -789,9 +789,10 @@ child's `started` (whatever turn the item names) and notes an
   reads (a command and folder; a patch's paths, at most 20, never its diff;
   MCP arguments, none for `hud_browser_act`), then `tool_finished` with an
   outcome (`denied` for `declined`), never a result. Open calls per child are
-  bounded (`CHILD_CALL_LIMIT`, 256);
-- a completed `agentMessage`: `text`, scrubbed (`secrets.scrub`; a scrub
-  that raises withholds it), capped at 4000;
+  bounded (`CHILD_CALL_LIMIT`, 256, oldest out);
+- a completed `agentMessage`: `text`, cut at 8000 (twice the record's cap,
+  so the record scrubs before it cuts and no credential is halved into an
+  unknown shape);
 - a reviewer's denial (`item/autoApprovalReview/completed`, tasks only):
   `reviewer_declined` with the tool's name alone;
 - anything else — deltas, reasoning, plans, its brief, `wait` calls, status
@@ -807,11 +808,25 @@ handling is unchanged.
 
 **The daemon** needed no new path: `_record_subagent`, `subagents.py`, the
 two owner routes, the bus record and `end_session` (close, archive, loss, a
-fatal send, restart) take Codex's events as they are. One rule changed in
-the record: an ended child is live again on a `started` from the session
-that ran it (its key), and only then; any other live word after an end
-stays stale, as SV-1 had it. Claude never sends `started` for a child it
-already knows, so its behaviour is unchanged.
+fatal send, restart) take Codex's events as they are. Two rules changed in
+the record (the second from the review of #199):
+
+- **Revival, Codex only.** An ended `cx:` child is live again on a
+  `started` from the session that ran it (its key), and only then; any other
+  live word after an end stays stale, as SV-1 had it. A `cl:` child is never
+  revived: Claude has no second turn for a child.
+- **One scrub for both providers.** `SubagentRecords.prepare` scrubs every
+  `text` and `result` entry with `redact.scrub_text` (outside the daemon's
+  lock): `secrets.scrub` (Jarvis's credential values), every
+  `credential_patterns.PATTERNS` shape, and the bearer, JWT and jarvis-mcp
+  shapes that were Claude's provider's own (moved to `jarvis/v2/redact.py`;
+  `claude._safe` imports them and is otherwise unchanged). A scrub that
+  raises keeps `[withheld]`. Before the review, a Codex child's text had
+  `secrets.scrub` alone, less than Claude's `_safe`.
+
+SV-2a's eviction at `CHILD_LIMIT` now prefers an idle child whose record has
+also ended (its `turn/completed` handled, not only read off the wire), then
+any idle child, as before.
 
 **Found while testing, not changed.** In the provider replay of
 `parent_interrupt`, the send after an interrupted orchestrator turn is fatal
@@ -835,17 +850,20 @@ told: no `subAgentActivity`, and its `wait_agent` times out (SV-0 finding
 12). Offer per-child Stop with "ends its turn; a running command may
 finish", or keep it absent.
 
-Checks (free, offline): `tests/v2/codex_subagents_check.py`, 32 tests:
+Checks (free, offline): `tests/v2/codex_subagents_check.py`, 34 tests:
 the 13 recordings (one, parallel, nested, fail, child_interrupt,
 close_agent, approval, approval_accept, patch_approval_child,
 one_multi_agent_v2, and no_wait, parent_interrupt, steer_parent over two
 sends) through the real `CodexProvider` over real pipes
 (`codex_provider_check`'s replaying peer), then those events through a real
 daemon: isolation (parent events, accounting, log, transcript route,
-Discord, titles, bus, ledger), lifecycle, privacy, bounds and the record's
-revival rule. On `main` 28 of the 32 fail; the four that pass pin
-unchanged behaviour (parent accounting, ledger, no deltas, malformed shapes
-not fatal) and are proven by mutants. 25 mutants, all killed: a child's
+Discord, titles, bus, ledger), lifecycle, privacy, the shared scrub (a
+Claude OAuth token, a jarvis-mcp token, a JWT, a GitHub token and an owned
+credential value in a Codex child's message and failure reason, and the
+same words in a Claude and a Codex record alike), bounds and the record's
+revival rule. On `main` 29 of the 34 fail; the five that pass pin unchanged behaviour
+(parent accounting, ledger, no deltas, malformed shapes not fatal, a Claude
+child never revived) and are proven by mutants. 30 mutants, all killed: a child's
 items as the parent's, its tokens into the accounting or as USAGE, its turn
 end ending the parent's, an unannounced thread recorded, the end read from
 the parent's notice, the parent's turn end stopping children, unscrubbed
@@ -855,7 +873,10 @@ word, no second `started`, interrupted read as done, a reviewer's rationale
 kept, a forgotten child keeping its record, unbounded open calls, a name on
 the bus, the daemon logging the kinds, `live_subagents` empty, a failure's
 reason dropped, a malformed turn fatal, `interrupt_agent` not told apart, a
-nested child's parent dropped. `codex_provider_check` (111),
+nested child's parent dropped; and from the review: no scrub in the record,
+the shared scrub without the bearer shapes or without `credential_patterns`,
+a scrub failure showing the words, a Claude child revived, the newest open
+call evicted first. `codex_provider_check` (111),
 `claude_subagents_check` (31), `subagent_routes_check` (28),
 `subagent_fixtures_check` (25) and `codex_session_mcp_check` (34) pass
 unchanged.

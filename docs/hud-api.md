@@ -3119,8 +3119,8 @@ What differs from Claude's, on the same record and routes:
   The orchestrator's `subAgentActivity` `completed` is not read: Codex sends
   none for a failed or externally interrupted child. A finished child that
   Codex gives another turn (`sendInput`, `followupTask`) is `running` again,
-  with a second `started`; only the provider's own `started` from the session
-  that ran it can do that, never a stale word. Jarvis ends one itself as for
+  with a second `started`; only Codex's own `started` from the session that
+  ran it can do that, never a stale word (a Claude child is never revived). Jarvis ends one itself as for
   Claude: the session gone (closed, archived, lost, a fatal error), or a
   restart.
 - **The thread's Stop interrupts the orchestrator's turn only**; its children
@@ -3133,7 +3133,7 @@ What differs from Claude's, on the same record and routes:
   `apply_patch`, an MCP tool), `duration_ms` is its last turn's. Never the
   ledger, `thread.tokens` or the session's accounting: the orchestrator's
   totals already exclude its children.
-- **Transcript.** `assistant`: a completed message, credential-scrubbed.
+- **Transcript.** `assistant`: a completed message, scrubbed as Claude's is.
   `tool`: a command (`shell`, labelled from its command), a file change
   (`apply_patch`, labelled from its paths, never its diff) or an MCP call
   (by name; `hud_browser_act` is "Browser action"), folded with its outcome
@@ -3204,7 +3204,11 @@ Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
 ```
 
 - `assistant`: a text the child wrote (whole: the CLI streams no child
-  deltas), at most 4000 characters. Claude's credential scrub has run.
+  deltas), at most 4000 characters. Scrubbed by the record the same way for
+  both providers (`redact.scrub_text`): Jarvis's own credential values, the
+  known key shapes (`credential_patterns`), bearer tokens, JWTs and
+  jarvis-mcp tokens become `[redacted]`; a scrub that fails shows
+  `[withheld]`.
 - `tool`: one call, folded with its outcome: `running`, `ok`, `failed`,
   `denied` (Jarvis's gate or Claude's reviewer refused it), or `stopped`
   (no outcome came and the child has ended). `label` is the daemon's
@@ -3212,7 +3216,7 @@ Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
   is always "Browser action". **Never `args` or a result summary.**
 - `result`: the CLI's closing word on the child (`task_notification.
   summary`): its final report when done, its description when stopped, the
-  error when failed. At most 4000 characters.
+  error when failed. At most 4000 characters, scrubbed as `assistant` is.
 - `declined`: `{"role": "declined", "name": "Bash", "seq", "at"}` — Claude's
   reviewer declined one of the child's calls (the call's own entry says
   `denied`). The tool's name only: never the command, its arguments or the
