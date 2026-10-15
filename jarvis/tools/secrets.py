@@ -1188,7 +1188,7 @@ _REPARSE = re.compile(
     r"|(?<!\S)-(?:exec|execdir|ok|okdir)(?![\w-])"
     r"|&[ \t]*\$(?i:env):"
     r"|(?<![\w.-])env[ \t]+(?:-[^\s;&|]+[ \t]+)*-S"
-    r"|(?:^|[\s;&|(`])\.[ \t]"
+    r"|(?:^|[;&|(\n`{]|\$\(|\bthen|\bdo|\belse)[ \t]*\.[ \t]"      # `.` as `source`, at a command's place
     r"|<\(|<<<"
     r"|\|[ \t&]*(?:(?:sudo|env|exec|command|nohup|time)[ \t]+)*(?:[^\s|;&]*/)?" + _RUNNERS + r"(?![\w.-])")
 _VAR_AT_COMMAND = re.compile(

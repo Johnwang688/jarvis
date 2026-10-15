@@ -402,6 +402,14 @@ FALSE_POSITIVES = [
     "aws configure set credential_process getcredentials",
 ]
 
+# Common lines whose values rule 3 must not show.
+STILL_REDACTED = [
+    ("export MY_TOKEN=plainvalue1 && find . -name x", f"export MY_TOKEN={R} && find . -name x"),
+    ("export MY_TOKEN=plainvalue1 && curl -H \"Authorization: Bearer $MY_TOKEN\" https://example.invalid",
+     f"export MY_TOKEN={R} && curl -H \"Authorization: Bearer $MY_TOKEN\" https://example.invalid"),
+    ("env MY_SECRET=plainsecretvalue sudo ./run", f"env MY_SECRET={R} sudo ./run"),
+]
+
 CHEAP_CATCHES = [
     ("TOKEN=$'plainvalue1'", f"TOKEN={R}"),
     ("docker login -u bob -p plainpass registry", f"docker login -u bob -p {R} registry"),
@@ -448,6 +456,11 @@ class ReviewFixes(unittest.TestCase):
         for shown in (secrets.for_display("psql postgresql://u:knownsecretvalue9@h/db"),
                       secrets.redact_command("psql postgresql://u:knownsecretvalue9@h/db")):
             self.assertEqual(shown, "psql postgresql://h/db")
+
+    def test_common_lines_stay_redacted(self):
+        for command, shown in STILL_REDACTED:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
 
     def test_cheap_catches(self):
         for command, shown in CHEAP_CATCHES:
@@ -534,7 +547,8 @@ NEVER_HIDDEN = [
     ("X_TOKEN='rmrf'; runuser -c \"$X_TOKEN\" bob", True, "rmrf"),
     ("X_TOKEN='rmrf'; script -c \"$X_TOKEN\"", True, "rmrf"),
     ("X_TOKEN='rmrf'; parallel ::: \"$X_TOKEN\"", True, "rmrf"),
-    ("X_TOKEN='rmrf'; find . -exec $X_TOKEN {} +", True, "rmrf"),
+    ("X_TOKEN='rmrf'; find /tmp -exec $X_TOKEN {} +", True, "rmrf"),
+    ("X_TOKEN='rmrf'; . ./env.sh", True, "rmrf"),
     ("alias X_TOKEN='rmrf'; X_TOKEN", True, "rmrf"),
     ("$env:X_TOKEN='rmrf'; & $env:X_TOKEN", True, "rmrf"),
     ("$env:X_TOKEN='rmrf'; Start-Process $env:X_TOKEN", True, "rmrf"),
@@ -705,7 +719,13 @@ class Cards(unittest.TestCase):
         text = bodies[0] if isinstance(bodies[0], str) else json.dumps(bodies[0], default=str)
         self.assertNotIn("plainvalue1", text)
         self.assertIn("MY_TOKEN=" + R, text)
-        self.assertIn("always", text.lower())       # judged on the typed request
+        self.assertIn("`/always ", text)            # judged on the typed request
+        # Not pending any more (answered meanwhile): never "always" from the card.
+        bodies.clear()
+        router._approval_channels = {request.req_id: "dm"}
+        router._post_approval(request.to_json())
+        late = bodies[0] if isinstance(bodies[0], str) else json.dumps(bodies[0], default=str)
+        self.assertNotIn("`/always ", late)
 
     def test_v1_cards(self):
         from jarvis.discord_approvals import _describe
