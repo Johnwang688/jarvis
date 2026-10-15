@@ -168,6 +168,15 @@ function describe(error: unknown, deadlineMs: number): string {
 
 class Cancelled extends Error {}
 
+/**
+ * What a recorded chunk tells `submit` about itself. `repeats` matters: a cut at a pause leads the
+ * next chunk with digital silence, not with words said twice, so the join must not look for an echo
+ * there ("it was very" + "very good indeed" keeps both "very"s). Left out, `submit` assumes a repeat.
+ */
+export function chunkSubmitOptions(chunk: { overlapMs: number; repeats: boolean; detector?: DetectorKind }, group: number) {
+  return { group, overlapMs: chunk.overlapMs, repeats: chunk.repeats, detector: chunk.detector };
+}
+
 export class SttAssembler<M = undefined> {
   private entries = new Map<number, Entry<M>>();
   private groups = new Map<number, Group<M>>();

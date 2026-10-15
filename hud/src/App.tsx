@@ -86,7 +86,7 @@ import { createSpeech, saveDuckBrowser, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./lib/capture";
-import { STT_MAX_IN_FLIGHT, SttAssembler, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
+import { STT_MAX_IN_FLIGHT, SttAssembler, chunkSubmitOptions, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
 import { startMicInput, type MicInput } from "./lib/micInput";
 import micWorkletUrl from "./lib/micWorklet.ts?worker&url";
 import { SttRetry } from "./components/SttRetry";
@@ -825,7 +825,7 @@ export default function App() {
       if (settingsNow.current) { refuse("suppressed:settings"); return; }
       if (!Number.isFinite(chunk.ms) || chunk.ms <= 0) { refuse("too_short"); return; }
       if (u.gid === null) u.gid = stt.beginGroup(chunk.source, u.meta);
-      const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, { group: u.gid, overlapMs: chunk.overlapMs, detector: chunk.detector });
+      const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, chunkSubmitOptions(chunk, u.gid));
       if (id === null) {
         sttSay({ orb: "error", status: "STT BACKLOG", error: "Too many clips are waiting to be transcribed, so part of this message was not kept. Wait for them to finish." });
       }
