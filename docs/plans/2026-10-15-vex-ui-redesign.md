@@ -50,6 +50,12 @@ The owner approved the layout ("your redesign layout is good") and answered §13
 6. **Stop cancels whatever VEX action is running** — pressing it during a
    download stops the download (likewise a running clean or build). It is not
    a "stop the program on the brain" control (no `vexcom --stop`).
+   Implementation (lead's default, VX-UI-1, #209): Stop takes a trusted mouse
+   click **or a trusted Enter/Space** on the focused button (it is in the Tab
+   order, since stopping is the safe direction); a script's `.click()` or a
+   dispatched event does nothing. A view's Stop acts on its own project only,
+   never another project's chain. What the slot holds after a mid-download
+   Stop is unknown (H9, H10 below), and the view says so.
 7. **Hover help never retires.** Every control keeps its hover explanation
    permanently (for refreshers months later, and for a teammate using the PC);
    the `?` mode stays too. The first-use counts in §2.6 / VX-UI-3 are dropped.
@@ -674,6 +680,8 @@ stays **UNRUN** until the owner's hardware session.
 | H6 | `--stop` stops it, over radio and on USB | 5 |
 | H7 | Exit codes/output: success, empty slot, no device | 5 |
 | H8 | Whether `--json`/`--programs` say which program is running | 5 (state text) |
+| H9 | Stop mid-download: does closing the download's terminal (SIGHUP, then SIGKILL of the WSL interop process) also end `vexcom.exe` on Windows, and is COM3 free for the next device action? | **Before relying on a mid-download Stop** (VX-UI-1) |
+| H10 | Stop mid-download: what the slot then holds (incomplete program, the previous one, nothing), whether the brain shows or runs it, and whether the brain or controller needs a power cycle before the next download | **Before relying on a mid-download Stop** (VX-UI-1) |
 
 ## 13. Open questions for the owner
 

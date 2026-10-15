@@ -356,8 +356,11 @@ function SlotChip(props: {
   useEffect(() => {
     if (!open) return;
     const away = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    // Escape closes it wherever focus is (the select is off while an action runs).
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { setOpen(false); chip.current?.focus(); } };
     window.addEventListener("mousedown", away, true);
-    return () => window.removeEventListener("mousedown", away, true);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("mousedown", away, true); window.removeEventListener("keydown", esc); };
   }, [open]);
   const close = () => { setOpen(false); chip.current?.focus(); };
   return (
@@ -416,7 +419,8 @@ function ActionBar(props: {
   const cpp = d.language === "cpp";
   const configured = !!vex.status?.configured;
   const active = !!run.startingBuild || run.build?.state === "running";
-  const buildOff = blocked || !configured || !d.builds || !!run.busy || active;
+  // Off while any project's chain runs (review MED-2), as Download is.
+  const buildOff = blocked || !configured || !d.builds || !!run.busy || active || !!vex.chain;
   // One chain per window: no second download while one runs, for any project.
   const other = vex.chain && vex.chain.projectId !== pid ? vex.chain : null;
   const downloadOff = blocked || !configured || !d.builds || !!run.busy || !!nameRefusal(name) || !!vex.chain;
@@ -502,8 +506,11 @@ function MoreMenu(props: { blocked: boolean; configured: boolean; tip: (id: Help
     if (!open) return;
     menu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
     const away = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    // Escape closes it wherever focus is (every item may be off, leaving focus on ⋯).
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { setOpen(false); btn.current?.focus(); } };
     window.addEventListener("mousedown", away, true);
-    return () => window.removeEventListener("mousedown", away, true);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("mousedown", away, true); window.removeEventListener("keydown", esc); };
   }, [open]);
   const items = () => Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
   const read = (r: "system" | "programs") => {
@@ -575,9 +582,10 @@ function StatusLine(props: { pane: number; pid: string | null; d: Detection | nu
           </li>
         ))}
       </ol>
-      {pct !== null ? <span className="vexel">{pct}%</span> : null}
+      {/* Ticking numbers stay out of the live region (review LOW-4): the progress bar carries them. */}
+      {pct !== null ? <span className="vexel" aria-hidden="true">{pct}%</span> : null}
       {crun.downloadStarted !== null
-        ? <span className="vexel" data-testid="vex-status-elapsed">{elapsedText(crun.downloadStarted, now)}</span> : null}
+        ? <span className="vexel" data-testid="vex-status-elapsed" aria-hidden="true">{elapsedText(crun.downloadStarted, now)}</span> : null}
     </span>;
   } else if (pid && run && props.d) {
     if (building) {
@@ -592,7 +600,7 @@ function StatusLine(props: { pane: number; pid: string | null; d: Detection | nu
               data-state={run.startingBuild ? "starting" : run.build?.state ?? "none"}>
           {following ? line.text : "Status checks stopped; the daemon last said it was running."}
         </span>
-        <span className="vexel" data-testid="vex-build-elapsed">{elapsedText(started, now)}</span>
+        <span className="vexel" data-testid="vex-build-elapsed" aria-hidden="true">{elapsedText(started, now)}</span>
         {run.build?.state === "running" && !following ? (
           <button type="button" className="quiet" data-testid="vex-build-recheck" disabled={blocked}
                   onClick={() => void vex.refreshBuild(pid)}>Check status</button>

@@ -604,10 +604,11 @@ def _card_checks(page, mock, check, until, fake):
     _finish(mock, fake, _latest_build(mock), "failed", ERRORS)
     until(lambda: page.locator(_view(V, _tid("vex-error-0"))).count() > 0, timeout=4)
     _slot_open(page)
-    before = len(mock.calls)
     _approval(mock, "vexcard2")
     until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
     time.sleep(0.3)
+    # Counted from once the card is up: a USB poll already on its way when it came is not behind it.
+    before = len(mock.calls)
     check("a card closes the slot popover", page.locator(_view(V, _tid("vex-slot-pop"))).count() == 0)
     controls = ["vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn", "vex-slot-chip", "vex-more",
                 "vex-out-tab-build", "vex-out-tab-download", "vex-out-tab-brain", "vex-out-tab-device",
@@ -808,11 +809,18 @@ def _one_chain_checks(page, mock, check, until, fake):
           bar3.count() > 0 and want in bar3.inner_text(), bar3.inner_text() if bar3.count() else "")
     other = page.locator(_view(3, _tid("vex-download-btn")))
     check("M1: another project's Download is off while it runs", other.is_disabled())
+    check("MED-2: and its Clean, Build and Rebuild too",
+          all(page.locator(_view(3, _tid(f"vex-{k}-btn"))).is_disabled() for k in ("clean", "build", "rebuild")))
+    check("MED-2: another project's view offers no Stop for this chain",
+          page.locator(_view(3, _tid("vex-stop"))).count() == 0
+          and page.locator(_view(2, _tid("vex-stop"))).count() == 1)
     page.locator(_view(3, _tid("vex-more"))).click()
     check("M1: so is device info",
           page.locator(_view(3, _tid("vex-info-btn"))).is_disabled()
           and page.locator(_view(3, _tid("vex-programs-btn"))).is_disabled())
     page.keyboard.press("Escape")
+    check("Escape closes ⋯ even with every item off and focus on ⋯",
+          bool(until(lambda: page.locator(_view(3, _tid("vex-more-menu"))).count() == 0, timeout=2)))
     _tab(page, "brain", 3)
     check("M1: and the brain terminal", page.locator(_view(3, _tid("vex-brain-btn"))).is_disabled())
     check("M1: and every VEX pane's project picker",
@@ -835,10 +843,24 @@ def _one_chain_checks(page, mock, check, until, fake):
           page.locator(_view(2)).get_attribute("data-project") == "p5" and bar2.count() > 0
           and want in bar2.inner_text())
     check("M1: and its Download is off", page.locator(_view(2, _tid("vex-download-btn"))).is_disabled())
-    # Stop, from the other view: the clean's program is stopped and nothing is sent.
+    check("MED-2: and it, showing p5 now, has no Stop for p3's chain", page.locator(_view(2, _tid("vex-stop"))).count() == 0)
+    for n in (2, 3):
+        try:
+            page.locator(_view(n, _tid("vex-build-btn"))).click(force=True, timeout=500)
+        except Exception:
+            pass
+    time.sleep(0.3)
+    check("MED-2: a forced click on p5's Build builds nothing",
+          not _posted_since(mock, base, "/projects/p5/vex/build")
+          and not [c for c in mock.calls[base:] if c[0] == "DELETE"])
+    # Back to p3 (through File, as above): Stop from the chain's own project.
+    _switch_view(page, 2, "file")
+    page.locator(_tid("pane-2-folder")).select_option("p3")
+    _switch_view(page, 2, "vex")
+    until(lambda: page.locator(_view(2)).get_attribute("data-project") == "p3", timeout=4)
     bid = _latest_build(mock)
     btid = v["builds"][bid]["terminal_id"]
-    page.locator(_view(3, _tid("vex-stop"))).click()
+    page.locator(_view(2, _tid("vex-stop"))).click()
     check("M1: Stop stops the clean's program (its terminal closed)",
           bool(until(lambda: any(c[0] == "DELETE" and c[1] == f"/terminals/{btid}" for c in mock.calls[base:]), timeout=4)))
     check("M1: the chain ends", bool(until(lambda: bar2.count() == 0 and bar3.count() == 0, timeout=6)))
@@ -848,8 +870,9 @@ def _one_chain_checks(page, mock, check, until, fake):
           and _posted_since(mock, base, "/projects/p3/vex/build") == [{"action": "clean"}], str(v["downloads"]))
     check("M1: the pickers come back", page.locator(_tid("pane-2-vex-project")).is_enabled()
           and page.locator(_tid("pane-3-vex-project")).is_enabled())
+    check("LOW-2: the stopped clean is said as stopped, not failed",
+          page.locator(_view(2, _tid("vex-mark-clean"))).get_attribute("aria-label") == "Clean: stopped")
     # p3's view says it was stopped.
-    page.locator(_tid("pane-2-vex-project")).select_option("p3")
     note = page.locator(_view(2, _tid("vex-note")))
     check("M1: the chain's project says it was stopped and nothing was sent",
           bool(until(lambda: note.count() > 0 and "Stopped: nothing was downloaded" in note.inner_text(), timeout=4)),
@@ -1112,6 +1135,9 @@ def _feedback_checks(page, mock, check, until, fake):
           chain.get_attribute("data-phase") == "download" and "72%" in chain.inner_text()
           and page.get_by_test_id("vex-chain-steps").locator("li").evaluate_all(
               "els => els.map(e => e.dataset.state)") == ["done", "done", "busy"])
+    check("LOW-4: the ticking elapsed time and percent stay out of the live region",
+          page.get_by_test_id("vex-status-elapsed").get_attribute("aria-hidden") == "true"
+          and chain.locator(".vexel[aria-hidden=true]").count() == 2)
     _shot(page, "04-downloading")
     rec.update(state="succeeded", exit_code=0, output="Finished <script>fixture</script>", ended="2026-10-13T12:00:02+00:00")
     assert until(lambda: page.get_by_test_id("vex-downloaded").count() == 1)

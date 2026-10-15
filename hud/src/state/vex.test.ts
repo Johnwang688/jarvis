@@ -340,14 +340,70 @@ describe("Stop stops the running VEX action (owner decision 6, 2026-10-15)", () 
     h.buildState = (id) => stopped ? { ...running(id, "clean"), state: "failed", exit_code: 129 } : running(id, "clean");
     const work = store.download("p3", 2, "override", "override");
     await vi.waitFor(() => expect(store.run("p3").build?.state).toBe("running"));
-    expect(store.stoppable("p5")).toBe(true);            // shown in every VEX view (M1)
+    // Another project's view never stops this chain (review MED-2).
+    expect(store.stoppable("p5")).toBe(false);
     store.stop("p5");
+    expect(h.closed).toEqual([]);
+    expect(store.chain?.cancelled).toBe(false);
+    expect(store.stoppable("p3")).toBe(true);
+    store.stop("p3");
     stopped = true;
     await work;
     expect(h.closed).toEqual(["a0000001"]);
     expect(h.downloads).toEqual([]);
     expect(store.run("p3").note).toBe("Stopped: nothing was downloaded.");
+    // Its clean is said as stopped, not failed (review LOW-2).
+    expect(store.run("p3").stoppedBuild).toBe("00000001");
     expect(store.chain).toBeNull();
+  });
+
+  it("another project's view stops neither the chain's download nor anything else (review MED-2)", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({ terminal_id: "b0000001" });
+    vi.spyOn(api, "vexDownloadState").mockResolvedValue({ id: "b0000001", project_id: "p3", slot: 3, state: "running",
+      terminal_id: "b0000001", exit_code: null, output: "", started: "", ended: null });
+    void store.download("p3", 3, "auton", "override");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(store.chain?.phase).toBe("download"));
+    expect(store.stoppable("p5")).toBe(false);
+    store.stop("p5");
+    store.stop(null);
+    expect(h.closed).toEqual([]);
+    expect(store.chain?.cancelled).toBe(false);
+  });
+
+  it("a stopped download stays stopped when a later Check status reads its end (review NIT-2)", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const rec = { id: "b0000001", project_id: "p3", slot: 3, state: "running" as const, terminal_id: "b0000001",
+      exit_code: null as number | null, output: "", started: "", ended: null as string | null };
+    const state = vi.spyOn(api, "vexDownloadState").mockImplementation(async () => ({ ...rec }));
+    const work = store.download("p3", 3, "auton", "override");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(store.chain?.phase).toBe("download"));
+    store.stop("p3");
+    // The record stays running past the follow's deadline: the outcome is not read.
+    await vi.advanceTimersByTimeAsync(4 * 60_000 + 1000);
+    await work;
+    expect(store.run("p3").downloaded).toMatchObject({ ok: false, stopped: true });
+    state.mockImplementation(async () => ({ ...rec, state: "failed", exit_code: 129, ended: "x" }));
+    await store.refreshDownload("p3");
+    expect(store.run("p3").downloaded).toMatchObject({ ok: false, stopped: true, code: 129 });
+    expect(store.run("p3").note).toMatch(/^Download stopped: slot 3/);
+  });
+
+  it("whether the brain terminal holds the port is asked after the build, not at the chain's start (review LOW-1)", async () => {
+    const store = new VexStore();
+    h.download = async () => ({ terminal_id: "b0000004" });
+    h.buildState = (id) => {
+      h.brain = "c0000009";                              // opened while the project built
+      return { id, project_id: "p3", action: "build", state: "succeeded", terminal_id: null, exit_code: 0,
+        errors: [], bin: null, started: "", ended: "" };
+    };
+    await store.download("p3", 3, "override", "override");
+    expect(h.order).toEqual(["clean", "build", "close c0000009", "download"]);
   });
 
   it("during the download: vexcom's terminal closed, and the slot is said to be unknown — never success", async () => {

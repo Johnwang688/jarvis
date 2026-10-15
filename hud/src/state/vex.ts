@@ -144,6 +144,8 @@ export class VexStore {
   /** The one download chain running in this window, whatever project it is for. */
   chain: Chain | null = null;
   private chainSeq = 0;
+  /** Downloads the owner's Stop cut off: said as stopped whenever their end is read. */
+  private stoppedDownloads = new Set<string>();
 
   private detections = new Map<string, Detected>();
   private runs = new Map<string, ProjectRun>();
@@ -522,7 +524,7 @@ export class VexStore {
       "info");
       const b = await this.runBuild(projectId, action, (tid) => {
         chain.buildTerminal = tid;
-        if (chain.cancelled && tid) void this.stopProgram(tid);
+        if (chain.cancelled && tid) this.stopBuildOf(projectId, tid);
       });
       chain.buildTerminal = null;
       if (!holds()) {
@@ -545,6 +547,10 @@ export class VexStore {
       await this.refreshStatus();
       if (!holds()) return dropped("before it started");
       if (!(await step("clean")) || !(await step("build"))) return;
+      if (!holds()) return dropped("before it downloaded");
+      // The build may have taken minutes: whether the brain terminal holds
+      // the port is asked now, not read from the chain's start.
+      await this.refreshStatus();
       if (!holds()) return dropped("before it downloaded");
       const brain = this.status?.brain;
       if (brain) {
@@ -600,8 +606,10 @@ export class VexStore {
       }
       chain.downloadTerminal = sent.terminal;
       // Stop pressed while the request was on its way: vexcom is closed at once.
-      if (chain.cancelled) void this.stopProgram(sent.terminal);
-      else void terminals.showProgram(sent.terminal);
+      if (chain.cancelled) {
+        this.stoppedDownloads.add(sent.id);
+        void this.stopProgram(sent.terminal);
+      } else void terminals.showProgram(sent.terminal);
       const seeded: DownloadView = {id: sent.id, project_id: projectId, slot, state: "running",
         terminal_id: sent.terminal, exit_code: null, output: "", started: new Date().toISOString(), ended: null};
       this.patchRun(projectId, {download: seeded});
@@ -628,6 +636,10 @@ export class VexStore {
   }
 
   private downloadEnded(projectId: string, slot: number, d: DownloadView | null, stopped = false) {
+    // A download Stop cut off stays "stopped" however its end is learned —
+    // the chain's own follow, or a later Check status (review NIT-2).
+    stopped = stopped || (!!d && this.stoppedDownloads.has(d.id))
+      || (!d && !!this.run(projectId).downloaded?.stopped);
     const ok = d ? d.state === "succeeded" : null;
     // Stop cut it off: the record's own end is the truth (a download that
     // finished before vexcom was closed is in the slot), else the slot's
@@ -646,8 +658,10 @@ export class VexStore {
 
   /** Whether Stop has something to stop for this view: the window's chain, or this project's own clean or build. */
   stoppable(projectId: string | null): boolean {
-    if (this.chain) return chainStoppable(this.chain);
     if (!projectId) return false;
+    // A view's Stop is for its own project only (review MED-2): another
+    // project's chain is said in every view, and stopped only from its own.
+    if (this.chain?.projectId === projectId) return chainStoppable(this.chain);
     const r = this.run(projectId);
     if (r.stopAsked) return false;
     return !!r.startingBuild || (r.build?.state === "running" && !!r.build.terminal_id);
@@ -655,24 +669,29 @@ export class VexStore {
 
   /**
    * The owner's **Stop** (owner decision 6, 2026-10-15; the view's handler
-   * asks `isTrustedPress`): the window's running chain — its clean or build
-   * stopped, **or its download cut off** — else this project's own running
-   * clean, build or rebuild. It closes the action's program terminal, as ×
+   * asks `isTrustedPress`), for **this view's project only** (review MED-2):
+   * its running chain — its clean or build stopped, **or its download cut
+   * off** — else its own running clean, build or rebuild. It closes the action's program terminal, as ×
    * does; the daemon's exit hook settles the record. Refused under a card or
    * after a crash. Never `vexcom --stop`: it never sends anything to the brain.
    */
   stop(projectId: string | null) {
-    if (this.blocked || this.crashed) return;
+    if (this.blocked || this.crashed || !projectId) return;
     const c = this.chain;
-    if (c) {
+    // Never another project's chain (review MED-2); this project's own build, if any, below.
+    if (c && c.projectId === projectId) {
       if (!chainStoppable(c)) return;
       c.cancelled = true;
       this.changed();
-      if (c.buildTerminal) void this.stopProgram(c.buildTerminal);
-      if (c.downloadTerminal) void this.stopProgram(c.downloadTerminal);
+      // Its running clean or build is said as stopped, not failed (review LOW-2).
+      if (c.buildTerminal) this.stopBuildOf(c.projectId, c.buildTerminal);
+      if (c.downloadTerminal) {
+        const id = this.run(c.projectId).download?.id;
+        if (id) this.stoppedDownloads.add(id);
+        void this.stopProgram(c.downloadTerminal);
+      }
       return;
     }
-    if (!projectId) return;
     const r = this.run(projectId);
     const tid = r.build?.state === "running" ? r.build.terminal_id : null;
     if (tid) this.stopBuildOf(projectId, tid);

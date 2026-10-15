@@ -387,9 +387,13 @@ that never touches it; `build_first` after the chain's build gets one rebuild,
 then `stillStale`. Every card/crash/chain guard is unchanged.
 
 **Stop** (decision 6) appears at the end of the status line while something
-runs: the window's chain at any step — **the download included**, replacing
-VX-2's "never cut off mid-write" Cancel — or this project's own clean, build or
-rebuild. It needs a trusted press (`isTrustedPress`: pointer or Enter/Space,
+runs, for **that view's own project only** (review MED-2: another project's
+chain is shown in every view but stopped only from its own; Clean, Build and
+Rebuild are off during any chain, as Download is): its chain at any step —
+**the download included**, replacing VX-2's "never cut off mid-write" Cancel —
+or its own clean, build or rebuild. A clean or build Stop cut off is marked
+"stopped", not "failed (exit 129)", and a stopped download stays "stopped" when
+a later Check status reads its end. It needs a trusted press (`isTrustedPress`: pointer or Enter/Space,
 never `el.click()` or a dispatched event), is off under a card, and only ever
 closes the action's program terminal (`DELETE /terminals/{id}`, as ×); one
 pressed while the download request is in flight closes vexcom as soon as its
@@ -417,7 +421,8 @@ one, or nothing. Download again before running it.", marks Download ✗
 Windows side — if it does not, a still-running vexcom could hold COM3 after
 Jarvis released its reservation, and the next device action would fail on the
 port; (H10) what the slot holds after an interrupted write, and whether the
-brain or controller needs a power cycle.
+brain or controller needs a power cycle. Both are in the plan's §12 as required
+before relying on a mid-download Stop.
 
 **Marks and help (VX-UI-2/3 parts).** `lib/vex.ts` `buildMark`/`downloadMark`
 are pure: idle (no mark), busy (`--accent` spinner), ✓ `--green`, ✗ `--red`,
@@ -444,6 +449,8 @@ daemon's exit hook does). Mutations that removed the trusted-press test, the
 stopped-download wording, the chain's clean, Stop during the download, the
 late brain pause, the tablist keys, the short Download label and the card's
 popover close each failed their checks (eight mutations; the store's five in
-vitest too). Receipts at merge time: `hud_v2_vex_check` 224/224,
-`hud_v2_vex_new_check` 66/66, vex vitests 47 + 30, `tests/v2` VEX suites
-148 + 13 + 11. Real VEX behaviour stays **UNRUN**.
+vitest too); so did the review round's seven (MED-2's two halves, LOW-1,
+LOW-2, NIT-2, LOW-4, and Escape closing ⋯ when every item is off). Receipts
+after the review round: `hud_v2_vex_check` 231/231, `hud_v2_vex_new_check`
+66/66, vex vitests 47 + 33 (full vitest 3031 passed, 6 skipped),
+`tests/v2/vex_check.py` 148. Real VEX behaviour stays **UNRUN**.

@@ -1750,7 +1750,7 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   If monitoring stops without a final status, Check status or a focus refresh
   resumes it. A forgotten build record clears the stale running state so the
   controls become available again.
-- Download: `POST …/vex/download {slot, name} **only from the Download
+- Download: `POST …/vex/download {slot, name}` **only from the Download
   button, on a trusted pointer click whose `detail` is exactly 1** (a double
   click is one download). **One chain per window**: no second download, for
   any project, while one runs. Since the 2026-10-15 redesign (owner decision
@@ -1764,8 +1764,9 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   (`DELETE /terminals/{id}`) and opened again afterwards (`POST /vex/brain`)
   — never after a chain a card, a crash or the owner's Stop dropped, nor after
   a card that came and went while the download ran. **Stop** (owner decision
-  6; a trusted pointer or key press, never a script's click) closes the
-  running clean's, build's **or download's** program terminal (`DELETE
+  6; a trusted pointer or key press, never a script's click; a view's Stop
+  acts on its own project only, and Clean/Build/Rebuild are off while any
+  chain runs) closes the running clean's, build's **or download's** program terminal (`DELETE
   /terminals/{id}`; one pressed while the download request is on its way
   closes vexcom as soon as its terminal is known). The daemon's exit hook
   settles the record (`failed`, exit 129 after the close's SIGHUP); the view
