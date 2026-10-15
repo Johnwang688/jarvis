@@ -719,6 +719,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   background: var(--bg-0); scrollbar-width: thin;
 }
 .edtab {
+  position: relative;
   display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; max-width: 220px;
   padding: 4px 6px 4px 10px; font-size: 12px; color: var(--text-2); cursor: pointer; user-select: none;
   border-right: 1px solid var(--border); border-top: 2px solid transparent;
@@ -728,7 +729,13 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .edtab.preview .edtab-name { font-style: italic; }
 .edtab.conflict .edtab-name { color: var(--amber); }
 .edtab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.edtab-mark { font-size: 10px; }
+/* The tab's file-type icon (components/FileIcon.tsx, the explorer's): 16px, never
+   shrunk when the name is ellipsized. An env file's words are for screen readers. */
+.edtab .ficon { flex: 0 0 16px; margin-right: -1px; }
+.edtab-mark {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
 /* The close slot, as VS Code draws it (the owner's ask): × on the active tab
    and under the pointer; on a dirty tab a light dot stands in ×'s place, and
    hovering or focusing the tab brings × back. The dot is a zero-width item
