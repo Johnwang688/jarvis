@@ -353,3 +353,104 @@ folder's `mkenv.mk` is taken without it). `HalfWritten`'s three delta-review
 tests fail on 9e1fcb6.
 
 <!-- claude-source:002231-002491:end -->
+
+## VEX view redesign, VX-UI-1 with parts of VX-UI-2/3 (2026-10-15)
+
+Plan: [`docs/plans/2026-10-15-vex-ui-redesign.md`](../plans/2026-10-15-vex-ui-redesign.md);
+its §0.1 (the owner's decisions) overrides the rest. `VexView.tsx` is now,
+top to bottom: unclaimed device notices (red, never folded); a one-line
+header (name, language with the SDK in its title, the slot chip `Slot N ·
+name ▾` whose popover holds the slot select, the name box and "Download to
+slot N: replaces whatever is in slot N on the brain", the Brain/Controller
+dots as a button to the Device tab, and `?`); the action bar **Clean ›
+Build, Rebuild › Download to slot N** plus ⋯ (Read device info, List
+programs), all visible (decision 3), each with a state mark beside it; one
+status line (`vex-status`: the running chain with its steps, progress and
+elapsed time in **every** VEX view, else the running build, else the last
+result in words, else Ready; **Held** in `--amber` under a card, amber's only
+use); refusals in the daemon's words on alert rows under it; the errors list
+(more than five behind "Show all"); and one output area with **Build /
+Download / Brain / Device** tabs (a real tablist, roving tabindex, arrows,
+Home/End), foldable (▾) and filling the pane (⤢), each tab with a badge. The
+selected tab, fold and fill are per pane for the window's life, not across a
+reload. An action the owner starts selects its tab; background events never
+do. The setup box replaces the action bar while `vex.json` is missing.
+
+**One Download button** (the build row's and the pickers' merged):
+`isExplicitClick`, `tabIndex=-1`, no pointer focus, no key or palette entry.
+Its text is "Download to slot N" (decision 2); the replace sentence is its
+`aria-describedby` help and the popover's warning. **One click is clean →
+build → download** (decision 3, `state/vex.ts` `download`): a failed clean or
+build stops it before anything is sent; the brain terminal is paused only once
+the build has succeeded (it used to pause first), and a chain dropped before
+that never touches it; `build_first` after the chain's build gets one rebuild,
+then `stillStale`. Every card/crash/chain guard is unchanged.
+
+**Stop** (decision 6) appears at the end of the status line while something
+runs, for **that view's own project only** (review MED-2: another project's
+chain is shown in every view but stopped only from its own; Clean, Build and
+Rebuild are off during any chain, as Download is): its chain at any step —
+**the download included**, replacing VX-2's "never cut off mid-write" Cancel —
+or its own clean, build or rebuild. A clean or build Stop cut off is marked
+"stopped", not "failed (exit 129)", and a stopped download stays "stopped" when
+a later Check status reads its end. It needs a trusted press (`isTrustedPress`: pointer or Enter/Space,
+never `el.click()` or a dispatched event), is off under a card, and only ever
+closes the action's program terminal (`DELETE /terminals/{id}`, as ×); one
+pressed while the download request is in flight closes vexcom as soon as its
+terminal id arrives. There is no `vexcom --stop` anywhere.
+
+**What a mid-download Stop does — findings (source inspection and Jarvis's own
+code; nothing run on hardware).** Jarvis side: `Terminals.close` SIGHUPs the
+session, waits up to `CLOSE_GRACE_S` (3 s), SIGKILLs what is left, and
+`finish` fires the download's `on_exit`, which settles the record `failed`
+(exit 129 for SIGHUP, 137 after SIGKILL), keeps its output tail and releases
+the device reservation and the build lock exactly once — the same path the
+3-minute timeout takes with SIGTERM. Vendor side (the same readable
+`vexrobotics.vexcode-0.8.2026020401/dist/extension.js`, SHA-256
+`df1207f9…32ab5`, inspected only): the extension **never cancels a program
+download** — its progress notification is `cancellable:!1` for V5 (offset
+≈94740) and EXP/IQ2 (≈99280); `_runVexcomCMD` (≈72321) spawns vexcom with no
+kill path; the only `.kill()` in the file (≈9289) is the UUU flasher's; and its
+exit-code table has no "interrupted" value. So nothing on record says what the
+brain keeps after an interrupted `--write`. The view therefore never claims
+success for a stopped download unless its record says it finished first: it
+says "Download stopped: slot N may hold an incomplete program, the previous
+one, or nothing. Download again before running it.", marks Download ✗
+"stopped", and does not reopen the brain terminal (L6). **HARDWARE-UNVERIFIED**:
+(H9) whether killing the WSL interop process also ends `vexcom.exe` on the
+Windows side — if it does not, a still-running vexcom could hold COM3 after
+Jarvis released its reservation, and the next device action would fail on the
+port; (H10) what the slot holds after an interrupted write, and whether the
+brain or controller needs a power cycle. Both are in the plan's §12 as required
+before relying on a mid-download Stop.
+
+**Marks and help (VX-UI-2/3 parts).** `lib/vex.ts` `buildMark`/`downloadMark`
+are pure: idle (no mark), busy (`--accent` spinner), ✓ `--green`, ✗ `--red`,
+stale (✓ at 0.6 opacity: a source saved through the editor's write path —
+`vex.edited`, the daemon's `SOURCE_SUFFIXES` — or a later clean; Download "from
+an older build" after a later build), unknown (? dashed: monitoring gave up, or
+a lost download outcome). Stale is advisory and disables nothing; the daemon's
+`_fresh` still decides. Text always goes with colour (`aria-label`, title).
+Every control has **permanent** hover help (decision 7; no counting), shown
+after a short hover or on `:focus-visible`, hidden while pressed and under a
+card, named by `aria-describedby`; `?` lists every sentence in the output
+area, Escape closes. **The Brain tab is a placeholder** until VX-UI-4a: it says
+the robot's output connects only when the owner clicks (decision 5, answered
+2026-10-15) and keeps today's "Open the brain terminal" (bottom panel).
+
+Checks (fakes only; nothing installed, no live daemon or device):
+`lib/vex.test.ts` and `state/vex.test.ts` (marks, tabs, help, chain order,
+stop at every phase, stopped-download honesty, in-flight stop, no reopen);
+`tests/face/hud_v2_vex_check.py` (new `_stop_checks`, `_tabs_checks`,
+`_help_checks`; `_quick_download_checks` merged into `_explicit_click_checks`;
+the mock's `download_live` keeps a download's row running so the HUD's Stop
+closes a live program, and `terminal_closing` settles its record as the
+daemon's exit hook does). Mutations that removed the trusted-press test, the
+stopped-download wording, the chain's clean, Stop during the download, the
+late brain pause, the tablist keys, the short Download label and the card's
+popover close each failed their checks (eight mutations; the store's five in
+vitest too); so did the review round's seven (MED-2's two halves, LOW-1,
+LOW-2, NIT-2, LOW-4, and Escape closing ⋯ when every item is off). Receipts
+after the review round: `hud_v2_vex_check` 231/231, `hud_v2_vex_new_check`
+66/66, vex vitests 47 + 33 (full vitest 3031 passed, 6 skipped),
+`tests/v2/vex_check.py` 148. Real VEX behaviour stays **UNRUN**.

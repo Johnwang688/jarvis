@@ -244,9 +244,19 @@ export function defaultName(projectName: string): string {
   return cleaned && DOWNLOAD_NAME.test(cleaned) ? cleaned : "program";
 }
 
-/** The Download button says what it does (plan §2.9). */
+/**
+ * What Download to slot N does to the brain (plan §2.9). Since the 2026-10-15
+ * redesign (owner decision 2) this sentence is the button's hover help, its
+ * screen-reader description and the slot popover's warning; the button's own
+ * text is the short `downloadButtonLabel`.
+ */
 export function downloadLabel(slot: number): string {
   return `Download to slot ${slot}: replaces whatever is in slot ${slot} on the brain`;
+}
+
+/** The Download button's visible text (owner decision 2, 2026-10-15). */
+export function downloadButtonLabel(slot: number): string {
+  return `Download to slot ${slot}`;
 }
 
 /**
@@ -291,6 +301,18 @@ export function isExplicitClick(e: { isTrusted: boolean; detail: number; button:
   return e.isTrusted === true && e.detail === 1 && e.button === 0;
 }
 
+/**
+ * Whether a press on **Stop** is the owner's own (VEX redesign, owner decision
+ * 6): a trusted event — a pointer click with the primary button, or Enter or
+ * Space on the focused button (stopping is the safe direction, so the
+ * keyboard counts) — and never a script's `el.click()` or a dispatched event
+ * (untrusted). Stop only ever stops this window's running clean, build or
+ * download; it never sends anything to the brain (no `vexcom --stop`).
+ */
+export function isTrustedPress(e: { isTrusted: boolean; button: number }): boolean {
+  return e.isTrusted === true && e.button === 0;
+}
+
 /** VX-1's code on the download's 409 when the program must be built first (`BuildFirst`). */
 export const BUILD_FIRST_CODE = "build_first";
 
@@ -304,33 +326,39 @@ export function needsBuildFirst(code: unknown): boolean {
   return code === BUILD_FIRST_CODE;
 }
 
-/**
- * What one click does on "Build first", in order (VX-2 delta review, MED-1):
- * a build; and if the daemon still says Build first — make found nothing to
- * do, while a header it does not list changed — one rebuild (make -B). Never
- * a third: the click's chain then stops and says so.
- */
-export const BUILD_FIRST_STEPS: readonly ("build" | "rebuild")[] = ["build", "rebuild"];
-
 /** What the view says when even a rebuild leaves "Build first": the daemon's own sentence, nothing sent. */
 export function stillStale(sentence: string): string {
   return `Nothing was downloaded: after a build and a rebuild the daemon still says “${sentence}”. `
     + "The build's terminal shows what make did.";
 }
 
+/**
+ * The steps of one click's download chain (owner decision 3, 2026-10-15):
+ * clean, build, then download — a failed clean or build stops it before
+ * anything reaches the robot. `rebuild` happens only when the daemon still
+ * says Build first after the build (MED-1); `pause` (the brain terminal let go
+ * of the port) is part of the download step.
+ */
+export type ChainStep = "clean" | "build" | "rebuild" | "download";
+
 /** One click's download chain, as every VEX view shows it (VX-2 review, M1: one per window). */
 export interface ChainView {
   label: string;
   slot: number;
-  phase: "start" | "pause" | "build" | "rebuild" | "download";
+  phase: "start" | "clean" | "build" | "pause" | "rebuild" | "download";
+  /** The owner pressed Stop. */
   cancelled: boolean;
+  /** The steps that have succeeded, in order. */
+  done?: ChainStep[];
 }
 
 /** The running chain's line, in every VEX view: what it is doing, on which project and slot. */
 export function chainLine(c: ChainView): string {
   const who = c.label || "this project";
-  if (c.cancelled) return `Cancelling the download of ${who}…`;
+  if (c.cancelled) return `Stopping the download of ${who}…`;
   switch (c.phase) {
+    case "clean":
+      return `Cleaning ${who}, then building and downloading to slot ${c.slot}`;
     case "pause":
       return `Pausing the brain terminal, then downloading ${who} to slot ${c.slot}…`;
     case "build":
@@ -342,9 +370,43 @@ export function chainLine(c: ChainView): string {
   }
 }
 
-/** Cancel stops a chain until its download has been sent; a download in flight is never cut off mid-write. */
-export function chainCancellable(c: ChainView): boolean {
-  return !c.cancelled && c.phase !== "download";
+/** Which step a chain phase belongs to. */
+export function chainStepOf(phase: ChainView["phase"]): ChainStep {
+  return phase === "start" || phase === "clean" ? "clean"
+    : phase === "build" ? "build" : phase === "rebuild" ? "rebuild" : "download";
+}
+
+/** The chain's steps as the status line lists them: done, running or still to come. */
+export function chainSteps(c: ChainView): { step: ChainStep; state: "done" | "busy" | "todo" }[] {
+  const done = c.done ?? [];
+  const now = chainStepOf(c.phase);
+  const order: ChainStep[] = done.includes("rebuild") || now === "rebuild"
+    ? ["clean", "build", "rebuild", "download"] : ["clean", "build", "download"];
+  return order.map((step) => ({
+    step,
+    state: done.includes(step) ? "done" : step === now ? "busy" : "todo",
+  }));
+}
+
+/**
+ * Stop is offered for the whole of a chain (owner decision 6, 2026-10-15): it
+ * stops a running clean or build, and **a download that is already being
+ * sent** — the owner's call, which replaces VX-2's "never cut off mid-write";
+ * the view then says the slot may hold an incomplete program.
+ */
+export function chainStoppable(c: ChainView): boolean {
+  return !c.cancelled;
+}
+
+/**
+ * What the view says after Stop cut a download off (owner decision 6). The
+ * vendor's own extension never cancels a program download (its progress is
+ * `cancellable: false`), so nothing says what the brain keeps: honest about
+ * not knowing, and what to do.
+ */
+export function stoppedDownloadNote(slot: number): string {
+  return `Download stopped: slot ${slot} may hold an incomplete program, the previous one, or nothing. `
+    + "Download again before running it.";
 }
 
 /**
@@ -379,9 +441,13 @@ function size(n: number): string {
   return n >= 1024 ? `${Math.round(n / 102.4) / 10} KB` : `${n} B`;
 }
 
-/** The one line under Build: ✓, or what went wrong, or that it is running. */
-export function buildLine(b: BuildView | null): BuildLine {
+/** The one line under Build: ✓, or what went wrong, or that it is running (or that Stop stopped it). */
+export function buildLine(b: BuildView | null, stopped = false): BuildLine {
   if (!b) return { tone: "none", text: "Not built in this window yet." };
+  const verb = b.action === "clean" ? "Clean" : b.action === "rebuild" ? "Rebuild" : "Build";
+  if (stopped && b.state !== "running" && b.state !== "succeeded") {
+    return { tone: "bad", text: `✗ ${verb} stopped. Its output so far is in the Build tab.` };
+  }
   const errs = b.errors.filter((e) => e.severity === "error").length;
   const warns = b.errors.length - errs;
   const counts = [errs ? `${errs} error${errs === 1 ? "" : "s"}` : "", warns ? `${warns} warning${warns === 1 ? "" : "s"}` : ""]
@@ -471,5 +537,146 @@ export function parseLastBuilds(raw: string | null): Record<string, string> {
     return out;
   } catch {
     return {};
+  }
+}
+
+// -- the redesign's state marks, output tabs and help (VX-UI-1..3, 2026-10-15) --
+
+/**
+ * A step's state mark (plan §3.1). Text always goes with the colour. **Amber
+ * is never a VEX result**: in Graphite it means an approval card holds the
+ * window, and only the status line's "Held" says that.
+ */
+export type MarkState = "idle" | "busy" | "ok" | "failed" | "stale" | "unknown";
+
+export interface Mark {
+  state: MarkState;
+  /** What a screen reader hears, and the mark's tooltip: "Build: failed (2 errors)". */
+  text: string;
+}
+
+/** The daemon's `SOURCE_SUFFIXES` and makefile names (`vex.is_source`): an edit to one makes a build stale. */
+const SOURCE_SUFFIXES = [".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++", ".inl",
+  ".ipp", ".tpp", ".inc", ".s", ".mk"];
+
+export function isSourcePath(path: string): boolean {
+  const name = (path.split("/").pop() || "").toLowerCase();
+  if (name === "makefile" || name === "gnumakefile") return true;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && SOURCE_SUFFIXES.includes(name.slice(dot));
+}
+
+const at = (iso: string | null | undefined): number => {
+  const t = Date.parse(iso ?? "");
+  return Number.isFinite(t) ? t : NaN;
+};
+
+/**
+ * Clean's, Build's or Rebuild's mark, from its own last record in this window.
+ * Stale is **advisory only** (never disables anything; the daemon's freshness
+ * rule decides a download): a build or rebuild that succeeded and was followed
+ * by a source edited in the editor, or by a clean. Unknown: still running by
+ * its last record, but no longer followed (status checks gave up).
+ */
+export function buildMark(kind: "clean" | "build" | "rebuild", o: {
+  record: BuildView | null; starting: boolean; following: boolean; stopped: boolean;
+  editedAt: number | null; cleanedAt: number | null;
+}): Mark {
+  const name = kind === "clean" ? "Clean" : kind === "rebuild" ? "Rebuild" : "Build";
+  const r = o.record;
+  if (o.starting || (r?.state === "running" && o.following)) return { state: "busy", text: `${name}: running` };
+  if (!r) return { state: "idle", text: `${name}: not run in this window` };
+  if (r.state === "running") return { state: "unknown", text: `${name}: outcome unknown, check status` };
+  const errs = r.errors.filter((e) => e.severity === "error").length;
+  if (r.state !== "succeeded") {
+    const why = o.stopped ? "stopped" : r.state === "timed_out" ? "timed out"
+      : `failed${errs ? ` (${errs} error${errs === 1 ? "" : "s"})` : ""}`;
+    return { state: "failed", text: `${name}: ${why}` };
+  }
+  const ended = at(r.ended);
+  if (kind !== "clean" && Number.isFinite(ended)) {
+    if (o.editedAt !== null && o.editedAt > ended) return { state: "stale", text: `${name}: succeeded, edited since` };
+    if (o.cleanedAt !== null && o.cleanedAt > ended) return { state: "stale", text: `${name}: succeeded, cleaned since` };
+  }
+  return { state: "ok", text: `${name}: succeeded` };
+}
+
+/**
+ * Download's mark: running while this project's chain runs; ✓ in the slot
+ * (stale — "older build" — once a later build succeeded); ✗ failed, timed out
+ * or stopped; ? when the outcome was lost.
+ */
+export function downloadMark(o: {
+  busy: boolean; downloaded: { slot: number; ok: boolean | null; stopped?: boolean } | null;
+  endedAt: number | null; builtAt: number | null;
+}): Mark {
+  if (o.busy) return { state: "busy", text: "Download: running" };
+  const d = o.downloaded;
+  if (!d) return { state: "idle", text: "Download: not run in this window" };
+  if (d.ok === null) return { state: "unknown", text: "Download: outcome unknown, check status" };
+  if (!d.ok) return { state: "failed", text: d.stopped ? `Download: stopped, slot ${d.slot} may be incomplete`
+    : "Download: failed" };
+  if (o.endedAt !== null && o.builtAt !== null && o.builtAt > o.endedAt) {
+    return { state: "stale", text: `Download: in slot ${d.slot}, from an older build` };
+  }
+  return { state: "ok", text: `Download: in slot ${d.slot}` };
+}
+
+/** The glyph a mark draws beside its words (never colour alone). */
+export function markGlyph(state: MarkState): string {
+  return state === "ok" || state === "stale" ? "✓" : state === "failed" ? "✗" : state === "unknown" ? "?" : "";
+}
+
+/** The output area's tabs (plan §2.5). The Brain tab is the placeholder VX-UI-4a fills. */
+export type OutputTab = "build" | "download" | "brain" | "device";
+export const OUTPUT_TABS: readonly OutputTab[] = ["build", "download", "brain", "device"];
+
+/** The tab an action the owner starts selects (background events never switch tabs). */
+export function outputTabFor(action: "clean" | "build" | "rebuild" | "download" | "info" | "programs" | "usb" | "brain"): OutputTab {
+  switch (action) {
+    case "clean": case "build": case "rebuild": return "build";
+    case "download": return "download";
+    case "brain": return "brain";
+    default: return "device";
+  }
+}
+
+/** Arrow keys, Home and End in a tablist. */
+export function nextTab(tabs: readonly OutputTab[], current: OutputTab, key: string): OutputTab | null {
+  const i = tabs.indexOf(current);
+  if (key === "ArrowRight") return tabs[(i + 1) % tabs.length];
+  if (key === "ArrowLeft") return tabs[(i - 1 + tabs.length) % tabs.length];
+  if (key === "Home") return tabs[0];
+  if (key === "End") return tabs[tabs.length - 1];
+  return null;
+}
+
+/** Every control's hover help (permanent: owner decision 7, 2026-10-15), and the `?` list's sentences. */
+export type HelpId = "clean" | "build" | "rebuild" | "download" | "stop" | "slot" | "more" | "usb" | "help"
+  | "tab-build" | "tab-download" | "tab-brain" | "tab-device" | "fold" | "max";
+
+export function helpText(id: HelpId, slot: number): string {
+  switch (id) {
+    case "clean": return "Deletes this project's build folder (make clean). The next Build compiles everything.";
+    case "build": return "Compiles the project (make). Errors appear under the status line; click one to open the file at that line.";
+    case "rebuild": return "Compiles every file again from scratch (make -B), even the ones make thinks are up to date.";
+    case "download": return `Cleans, builds, then sends the program to the brain, by USB or through the controller. `
+      + `${downloadLabel(slot)}. A failed clean or build stops before anything is sent. `
+      + "Starting the program stays at the robot. Mouse click only.";
+    case "stop": return "Stops the running clean, build or download. A download stopped part way can leave the slot "
+      + "incomplete. It never stops the program on the brain.";
+    case "slot": return `Which slot (1–8) and name the program gets on the brain. Download to slot ${slot} replaces `
+      + `whatever is in slot ${slot}.`;
+    case "more": return "Device reads: the brain's system info (vexcom --json) and the programs on it (vexcom --programs).";
+    case "usb": return "USB presence only: plugged in or not. Not the radio link, and not whether a program is running. "
+      + "Click for the Device tab.";
+    case "help": return "Lists what each control does. Escape or ? again closes it.";
+    case "tab-build": return "The latest clean or build's output, live.";
+    case "tab-download": return "The latest download's output and progress, live.";
+    case "tab-brain": return "What the program on the brain prints (printf / print). It connects only when you click "
+      + "to open it, never by itself.";
+    case "tab-device": return "USB status, its connection log, and what the device reads answered.";
+    case "fold": return "Folds the output away (the tabs and their marks stay).";
+    case "max": return "Gives the output the whole pane; again to restore.";
   }
 }

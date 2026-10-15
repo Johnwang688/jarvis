@@ -24,6 +24,11 @@ The world's `vex` section (`state(mock)`):
   - `download_refuse`: sentences the next downloads answer 409 with, in order
     (no `code`); `download_exit`: the download program's exit code;
     `download_delay`: seconds each download waits before it answers;
+    `download_auto`: false leaves the record running until the test ends it;
+    `download_live`: with it, the download's terminal row stays running too
+    (vexcom still writing), so a `DELETE /terminals/{id}` — the HUD's Stop —
+    lands on a live program and settles the record as the daemon's exit hook
+    does (`terminal_closing`);
   - `info` / `info_refuse`: what a device read answers (`text` and
     `exit_code`; the answer carries the `read` asked for); `info_reads`
     records each read asked (`system` or `programs`), as the daemon's
@@ -81,6 +86,7 @@ def state(mock) -> dict:
         "downloads": [],
         "download_records": {},
         "download_auto": True,
+        "download_live": False,
         "connection": {"brain": True, "controller": False, "checked_at": "2026-10-13T12:00:00+00:00",
                        "state": "ready", "message": "USB check complete.", "events": []},
         "info": {"text": "", "exit_code": 0},
@@ -144,14 +150,19 @@ def finish_build(mock, build_id: str, state_: str = "succeeded", errors=None, ex
 
 
 def terminal_closing(mock, path: str) -> None:
-    """`DELETE /terminals/{id}` of a running build's program: the daemon's exit
-    hook ends the build, as a killed make does (a Cancel in the HUD)."""
+    """`DELETE /terminals/{id}` of a running build's or download's program: the
+    daemon's exit hook ends its record, as a killed make or vexcom does (the
+    HUD's Stop). A program killed by the close's SIGHUP exits 129 (the shell's
+    128+n); the record keeps the output it had and is `failed`, never success."""
     parts = [p for p in path.split("/") if p]
     if len(parts) != 2 or parts[0] != "terminals" or "vex" not in mock.world:
         return
     for rec in state(mock)["builds"].values():
         if rec["terminal_id"] == parts[1] and rec["state"] == "running":
             rec.update(state="failed", exit_code=-1, ended="2026-10-11T12:00:09+00:00")
+    for rec in state(mock)["download_records"].values():
+        if rec["terminal_id"] == parts[1] and rec["state"] == "running":
+            rec.update(state="failed", exit_code=129, ended="2026-10-13T12:00:05+00:00")
     mock.__dict__.setdefault("closed_terminals", []).append(parts[1])
 
 
@@ -456,8 +467,9 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                 h._err(409, "A download is running. One device action at a time.")
                 return True
             code = v["download_exit"]
+            live = not v["download_auto"] and v.get("download_live")
             row = _program_row(mock, "vex-download", f"vex download · {det['name']} → slot {slot}", pid,
-                               exited=True, exit_code=code)
+                               exited=not live, exit_code=None if live else code)
             v["downloads"][-1]["terminal_id"] = row["id"]
             v["downloads"][-1]["sent"] = True
             mock.emit("vex_device", {"action": "download", "at": "2026-10-11T12:00:10+00:00"})
