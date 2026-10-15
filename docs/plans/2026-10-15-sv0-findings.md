@@ -166,8 +166,11 @@ Code references are to `main` at `cb62b66`.
      when the child finishes, and `kind: interrupted` when the model's own
      `interrupt_agent` tool stops it.
    - `collabAgentToolCall` appeared only for `wait` (`wait_agent`), with
-     empty `receiverThreadIds` and `agentsStates`. So the plan's
-     `agentsStates` coarse-status fallback has nothing to read.
+     empty `receiverThreadIds` and `agentsStates`. The emptiness is partly an
+     artifact of the scripted call (`wait_agent` with only `timeout_ms`, no
+     targets); a real model naming targets may fill them. So SV-2 must not
+     rely on the `agentsStates` fallback, nor assume it is always empty
+     (review of #193).
    - The same shapes were recorded with `features.multi_agent_v2 = true`
      (`one_multi_agent_v2`). `multi_agent` is stable and **on by default** in
      0.161 (`codex features list`), and production config does not change
@@ -192,8 +195,11 @@ Code references are to `main` at `cb62b66`.
     - The consequence in Jarvis is read from code, not run. The non-MCP
       server-request branch replies with an error and raises
       `RpcError("Codex server request identity mismatch")` when
-      `threadId != s.thread_id` (`codex.py:905-909`). Only the MCP-elicitation
-      branch above it is non-fatal.
+      `threadId != s.thread_id` (`codex.py:905-909`). The MCP-elicitation
+      (`codex.py:896-898`) and `currentTime/read` (`codex.py:886-887`)
+      branches do the same for a child's thread, so **any** server request
+      from a child thread, of any method, is fatal to the orchestrator's turn
+      today (review of #193); the fix must cover all three branches.
 12. **"`turn/interrupt` targets the parent only. Whether it accepts a child's
     thread" (L-X3).** **CONFIRMED that it does, NARROWED in effect.**
     - `turn/interrupt {threadId: child, turnId: child turn}` returns `{}`.
@@ -330,7 +336,8 @@ Code references are to `main` at `cb62b66`.
   - Register children on `subAgentActivity` `item/started`.
   - A child's status comes from its own `turn/completed`.
   - The non-fatal child request is the most urgent piece: today a single
-    child approval kills the orchestrator's turn. It could ship ahead of the
+    child server request (an approval, an MCP elicitation, `currentTime/read`)
+    kills the orchestrator's turn. It could ship ahead of the
     view as a small safety fix.
   - Because children outlive the parent turn, the RPC queue (4096,
     `codex_rpc.py`) fills with child traffic between turns. SV-6's Codex

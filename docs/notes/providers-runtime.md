@@ -370,7 +370,8 @@ likely to bite:
 - **Codex delivers every child notification** on the parent's connection
   under the child's `threadId`; a child is announced by a `subAgentActivity`
   item (not `collabAgentToolCall`, not `thread/started`). A child's approval
-  request arrives with the child's `threadId`, which `codex.py`'s non-MCP
-  server-request branch treats as a fatal identity mismatch today. Child
+  request arrives with the child's `threadId`, which every `codex.py`
+  server-request branch (approvals, MCP elicitation, `currentTime/read`)
+  treats as a fatal identity mismatch today. Child
   `turn/interrupt` ends only that child's turn and does not kill its running
   command; parent token totals exclude children.
