@@ -337,20 +337,35 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
     base = runtime.working_dir() or os.getcwd()
     roots = [str(root) for root in _credential_roots()]
     recursive, _follows = _search_modes(binary, tokens)
-    words = []
+    def place(text: str) -> str:
+        text = os.path.expanduser(text)
+        return text if os.path.isabs(text) else os.path.join(base, text)
+
+    words = []      # (as written, placed path) for an operand or a long option's value
+    attached = []   # the same for every path-like tail of a short-option cluster
     for word in tokens[1:]:
-        if word.startswith("-"):
-            if "=" not in word:
-                continue
-            word = word.split("=", 1)[1]
-        if word:
-            text = os.path.expanduser(word)
-            words.append((word, text if os.path.isabs(text) else os.path.join(base, text)))
+        if word.startswith("--"):
+            if "=" in word and word.split("=", 1)[1]:
+                words.append((word, place(word.split("=", 1)[1])))
+            continue
+        if word.startswith("-") and len(word) > 1:
+            # A value glued to a short option (`-f/abs`, `-nf/abs`) is never
+            # a word of its own (review 3 of PR #182: `file -f<key>`, `date
+            # -f<key>` and `ss -F<key>` printed it). No per-program table of
+            # which letters take a value: every tail of the cluster that
+            # looks like a path is judged. A `~` mid-word is literal to the
+            # shell, so judging it expanded only errs toward refusing.
+            for k in range(2, len(word)):
+                tail = word[k:]
+                if tail.startswith(("/", "~", ".")) or "/" in tail:
+                    attached.append((word, place(tail)))
+            continue
+        words.append((word, place(word)))
     if recursive and not any(os.path.exists(path) for _word, path in words):
         # `rg session`, `grep -r x`: no folder named, so the one they search
         # is the one they run in.
         words.append((".", base))
-    for word, path in words:
+    for word, path in words + attached:
         if glob.has_magic(path):
             found = []
             for match in glob.iglob(path):

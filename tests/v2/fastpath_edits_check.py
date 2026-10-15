@@ -516,13 +516,25 @@ class Gate(Base):
     ORDINARY = (("grep -rn foo src/", "TODO foo"), ("rg TODO", "TODO foo"),
                 ("grep -i 'x$' a.txt", "hello"), ("ls -la", "a.txt"), ("cat a.txt", "hello"),
                 # plain recursion does not follow a symlink below what it names
-                ("grep -r hello .", "hello"), ("rg hello .", "hello"))
+                ("grep -r hello .", "hello"), ("rg hello .", "hello"),
+                # short options with values glued on, none of them a path
+                ("head -n5 a.txt", "hello"), ("du -sh .", "."), ("ps -ef", "PID"),
+                ("tail -n+2 a.txt", "[exit 0]"), ("find . -name '*.py'", "m.py"),
+                ("date +%F", "20"))
+
+    def attached(self):
+        """Review 3 of PR #182: a path glued to a short option was never a
+        word of its own, so it was never judged. Absolute, because the shell
+        leaves a `~` inside a word alone."""
+        key = HOME / ".ssh" / "id_test"
+        return (f"file -f{key}", f"date -f{key}", f"ss -F{key}", f"file -bf{key}",
+                f"date -uf{key}")
 
     def test_run_readonly_bypasses_are_closed_with_nothing_bound(self):
         from jarvis.tools import shell
         self._read_fixture()
         os.chdir(self.project)
-        for command in self.BYPASSES:
+        for command in self.BYPASSES + self.attached():
             with self.subTest(command):
                 out = shell.run_readonly(command)
                 self.assertNotIn("FAKEKEY", out)
@@ -535,18 +547,20 @@ class Gate(Base):
 
     def test_run_readonly_bypasses_are_closed_on_a_desk_turn(self):
         self._read_fixture()
-        for command in self.BYPASSES:
+        for command in self.BYPASSES + self.attached():
             with self.subTest(command):
                 asker = Asker(Decision.ALLOW)   # an owner who would say yes
                 provider, handle = self.open(asker, tid=f"t-{len(self.handles)}")
                 script = Script(reply("", [("run_readonly", {"command": command})]))
                 self.turn(provider, handle, script)
                 self.assertNotIn("FAKEKEY", script.results[-1])
-        asker = Asker()
+        # rules' ALLOW runs them unasked; `du` and `ps` are rules' ASK (on
+        # every surface's run_command too), so the owner is asked — say yes.
+        asker = Asker(Decision.ALLOW, Decision.ALLOW)
         provider, handle = self.open(asker, tid="t-ordinary")
         script = Script(*[reply("", [("run_readonly", {"command": c})]) for c, _ in self.ORDINARY])
         self.turn(provider, handle, script)
-        self.assertEqual(asker.asked, [], "ordinary reads run unasked")
+        self.assertEqual([r.command for r in asker.asked], ["du -sh .", "ps -ef"])
         for (command, expected), result in zip(self.ORDINARY, script.results):
             with self.subTest(command):
                 self.assertIn(expected, result)

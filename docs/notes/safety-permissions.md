@@ -2240,6 +2240,10 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   refused outright (grep `-R`/`--dereference-recursive`, rg `-L`/`--follow`),
   since `link -> ~/.ssh` deep in a tree is not on the line to judge. Plain
   `grep -r` and `rg` follow only symlinks named on the line, which are judged.
+  Review 3: a value glued to a short option (`file -f<key>`, `date -f<key>`,
+  `ss -F<key>`, `-nf/abs`) is judged too — every tail of a short-option
+  cluster that looks like a path (starts with `/`, `~`, `.` or holds a `/`),
+  for every program, with no table of which letters take a value.
   **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
   reaches the same three forms, because the permit's `credentials-path` rule
   neither expands `$HOME` nor follows recursion.
