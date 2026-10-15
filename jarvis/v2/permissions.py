@@ -212,7 +212,17 @@ def log_decision(record: ApprovalRecord, path: Path | None = None) -> None:
     target = Path(path) if path is not None else Path(config.V2_DATA_DIR) / "decisions.jsonl"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record.to_json(), allow_nan=False) + "\n"
+        data = record.to_json()
+        for key in ("reason", "command"):
+            # A reason can quote the command (a rule's match, a reviewer's
+            # words); a command a caller did not pass through `_safe_command`
+            # is kept as that keeps it (idempotent when it did).
+            if data.get(key):
+                try:
+                    data[key] = v1_secrets.redact_command(str(data[key]))[:2000]
+                except Exception:
+                    data[key] = f"[unscrubbable {key} withheld]"
+        line = json.dumps(data, allow_nan=False) + "\n"
         with _log_lock:
             with open(target, "a", encoding="utf-8") as handle:
                 handle.write(line)
@@ -1102,12 +1112,12 @@ def _safe_command(command: str) -> str | None:
     capped. Layer 1 already refuses a command that names a credential file;
     this is the second half of the same rule for one that merely carries a
     value — a known one, a typed one (`MY_TOKEN=…`, `Authorization: …`,
-    `curl -u user:pass`: `redact_inline`) or a known shape. The log only:
+    `curl -u user:pass`: `redact_command`) or a known shape. The log only:
     what was judged and asked about is the command itself."""
     if not command:
         return None
     try:
-        scrubbed = v1_secrets.for_display(command)
+        scrubbed = v1_secrets.redact_command(command)
     except Exception:
         scrubbed = "[unscrubbable command withheld]"
     return scrubbed[:2000]

@@ -424,7 +424,10 @@ reviewer_declined(cmd)
 ```
 
 The DM and the card show the **entire command**, never a summary. The
-decision log records `reviewer-declined-owner-ran`. No allowlist entry is
+decision log records `reviewer-declined-owner-ran`. (Since 2026-10-15, the
+owner's decision, a card withholds typed credential values but never one
+the line may run: `docs/notes/safety-permissions.md`, "Credentials typed
+into a command".) No allowlist entry is
 minted from this path: a command the reviewer refused is not one to
 auto-approve next time.
 

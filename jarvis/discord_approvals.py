@@ -74,7 +74,13 @@ def _parse(text: str) -> tuple[str | None, str]:
 
 def _describe(item) -> str:
     lines = []
-    for key, value in item.args.items():
+    args = item.args
+    try:  # typed credentials withheld (owner, 2026-10-15), nothing that runs
+        from .tools.secrets import redact_value
+        args = redact_value(args)
+    except Exception:  # noqa: BLE001 — a card never hides code; shown as typed
+        pass
+    for key, value in args.items():
         text = value if isinstance(value, str) else str(value)
         if len(text) > MAX_ARG_CHARS:
             text = text[:MAX_ARG_CHARS] + f"… [+{len(text) - MAX_ARG_CHARS} chars]"

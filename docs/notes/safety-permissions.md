@@ -2269,58 +2269,130 @@ Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init
 `jarvis/protected_state.py` (default `cwd`). Each change only places a path,
 adds an ask or withholds more.
 
-## Credentials typed into a command are withheld from displays (2026-10-15)
+## Credentials typed into a command are withheld from displays, cards and logs (2026-10-15)
 
-Current rule, beside the preserved notes above. The scrub withholds values it
-*knows* (credential env files, the process's credential-named variables) and
-the tool-call label withholds the shapes `credential_patterns` knows; neither
-saw a credential a model typed inline whose value is neither. A reviewer
-probed `export MY_API_TOKEN=hunter2plainvalue && curl …`,
-`MY_PASSWORD=p4ssw0rd ./run` and `curl -H "Authorization: Bearer …"`: each
-reached the HUD's tool rows and the logs verbatim.
+Current rule, beside the preserved notes above. **The owner's decision of
+2026-10-15: approval cards and raw logs redact secrets too** (API keys,
+tokens, passwords, credential values), on the condition that a withheld
+value can never conceal code that runs. The gate keeps judging the command
+as typed, and an "Always" keeps saving the stem only.
 
-`secrets.redact_inline(text)` withholds the **value** and keeps the name
+**The gap.** The scrub withholds values it *knows* (credential env files,
+the process's credential-named variables) and the tool-call label withheld
+the shapes `credential_patterns` knows; neither saw a credential a model
+typed inline. A reviewer probed `export MY_API_TOKEN=hunter2plainvalue &&
+curl …`, `MY_PASSWORD=p4ssw0rd ./run` and `curl -H "Authorization: Bearer
+…"`: each reached the HUD's tool rows, the cards and the logs verbatim.
+
+**The rule** (`jarvis/tools/secrets.py`, "credentials typed into a command
+line"). `redact_inline(text)` withholds the **value** and keeps the name
 (`MY_API_TOKEN=[redacted]`), by the env files' own name rule, not a second
-list: a name `_secret_named(_key_parts(name))` reads as a credential's, with
-a value `_secret_entry` would withhold from a `.env` under it (so
-`AUTH_TOKEN_TTL=3600` and a value under 4 characters stay; `PWD`/`OLDPWD`
-are never names). It covers `NAME=value` wherever a word starts (`export`,
-`env`, cmd's `set "NAME=…"`, a command's prefix, `docker -e`, a form body),
-PowerShell's `$env:NAME = …`, fish's `set -gx NAME …`, credential-named long
-options (`--password=…`; the spaced `--api-key …` only when the name ends in
-a credential word, so never `--token-file`, `--password-stdin` or
-`--no-password`), `Authorization:`/`Proxy-Authorization:` values (the scheme
-word stays), any `-H`/`--header` with a credential name, a whole `Cookie:`
-header, a JSON body's credential-named keys, and, only in a segment that runs
-the program, curl's `-u`/`--user`/`-U`/`--proxy-user` password (the user
-stays), mysql's/mariadb's glued `-p…` (a spaced `-p db` is the database),
-sshpass's and mongosh's `-p` and redis-cli's `-a`. **A value the shell would
-expand stays visible** — unquoted or double-quoted with `$` or a backtick
-(`MY_TOKEN="$(…)"`, `Bearer $GITHUB_TOKEN`) — because it is not a literal
-credential and withholding a `$(…)` would hide what ran. It is not a shell
-parser: a value split across words by quoting, scheme-less `user:pass@host`
-and options this list does not name can still show.
+list: `credential_name` is `_secret_named(_key_parts(name))` or a
+credential-bearing setting part (AUTH, SESSION, COOKIE), with the value
+judged by `_secret_entry` as an env file's would be (so `AUTH_TOKEN_TTL=3600`,
+`SESSION_DRIVER=redis` and a value under 4 characters stay; `PWD`/`OLDPWD`
+are never names). File references stay: a name ending FILE/PATH/DIR
+(`PASSWORD_FILE=…`, `--token-file=…`) or a path-shaped value
+(`--key ./client-key.pem`). It covers:
 
-**Display and persistence only.** It runs in `tool_calls.label` (the
-parent's tool rows, Claude and Codex children's rows, history derived from
-`log.jsonl`), in the v2 decision log (`permissions._safe_command`, now
-`secrets.for_display`: scrub, `redact_inline`, `PATTERNS`), and in v1's tool
-lines through `secrets.tool_args_for_display` — the chat REPL (escaped for
-rich markup, which would otherwise swallow `[redacted]`), the face's `tool`
-event, a task's and a workflow's log and a goal's journal and status, which
-until now showed the raw JSON arguments with no scrub at all. A judge that
-fails withholds the arguments. Nothing that judges a command reads through
-it: rules, layer 1, the always-ask rules, the permit and the allowlist see
-the command as typed, and an **approval card still carries the whole
-command** (`ApprovalRequest.command`; Discord's DM keeps its existing
-`scrub`). `tests/v2/inline_credentials_check.py` pins every form above, the
-untouched settings, identical permit decisions and cards with and without the
-redaction, judges that never call it, and each v1 line; on `main` 144 label
-and child-row subtests and the task/workflow/REPL lines fail.
+- `NAME=value` wherever a word starts (`export`, `env`, cmd's
+  `set "NAME=…"`, a command's prefix, `docker -e`, a query's `&token=`; not
+  after `/` or `^`, so a sed program `s/TOKEN=.*/TOKEN=X/` stays),
+  PowerShell's `$env:NAME = …`, fish's `set -gx NAME …`, Windows' `setx NAME
+  …`, `npm|pnpm|yarn config set …:_authToken …`, and ANSI-C `$'…'` as a
+  literal;
+- credential-named long options (`--password=…`; the spaced `--api-key …`
+  only when the name ends in a credential word, never `--password-stdin`,
+  `--no-password x` or an option as the value);
+- `Authorization:`/`Proxy-Authorization:` values (the scheme word and a
+  quoted `"$TOKEN"` stay), any `-H`/`--header` with a credential name, a
+  `Cookie:` header, a JSON body's credential-named keys;
+- URL userinfo anywhere (`https://tok@host`, `https://x-access-token:…@`,
+  `postgresql://u:pw@h/db`; `strip_url_credentials`, now shared — the
+  label additionally drops query and fragment, as since TC-1);
+- program options, only where the segment runs that program (its command
+  word past assignments and wrappers, so `docker run --name mongo -p …`,
+  `kubectl … svc/mysql -p3306` and `--name redis-cli -a x` stay): curl's
+  `-u`/`--user`/`-U`/`--proxy-user` password (the user stays) and
+  `-b`/`--cookie name=value` (a bare `-b file` stays), mysql's/mariadb's
+  glued `-p…`, mongosh's `-p`, `docker|podman|nerdctl login -p`, `gh secret
+  set --body`, and among their own options only sshpass' `-p` and
+  redis-cli's `-a` (`sshpass -f pwfile ssh -p 2222` stays).
 
-Still raw, by design or for the owner: the approval card and its
-`approval_requested`/gate records, the `tool_started` record's `args` in
-`log.jsonl` (owner-only; `summary` and `args` never leave the transcript
-route) and the providers' own transcripts. File changed under SELF_PROTECTED,
-for the owner's review: `jarvis/tools/secrets.py` (the new functions only;
-nothing existing changed). It only withholds more.
+**A withheld value never hides code that runs** — three rules, each erring
+towards showing, pinned by `NEVER_HIDDEN` in the test:
+
+1. *Structure is never withheld.* Every replacement is checked against the
+   line's own quoting (`_Mask`): the span removed must start and end in the
+   same quoting and hold no unquoted blank, operator (`;&|()<>`), `$` or
+   backtick, and no `$` or backtick inside double quotes. So
+   `echo 'T="a' ; rm -rf ~ ; echo '"'`, `echo "T='$(rm -rf ~)'"`,
+   `curl https://h/x?a;rm -rf ~` and an unquoted `Cookie:a=1;rm -rf ~` keep
+   every character. A header value never runs past a blank, quote or
+   operator.
+2. *An expanding value stays*: unquoted or double-quoted with `$` or a
+   backtick (`MY_TOKEN="$(…)"`, `Bearer $GITHUB_TOKEN`).
+3. *A variable's value stays when the line may run it*, followed by
+   `[shown: this value may be run]`: **every** variable's when the line
+   re-parses text as code (`eval`, `source`/`.`, `exec`, `xargs`, `iex`,
+   `env -S`, `<(…)`, `<<<`, a pipe into a shell or interpreter, or a shell or
+   interpreter with a running option: `-c`, `-lc`, `-e`, `--eval`, `/c`) or
+   runs a variable as a command (`$X`, `${X}` at a command's place, after
+   `$(`, a backtick, `sudo`…) — which also covers `eval '$'X` and `${!R}`;
+   and the ones the line names (`$X`, `${X}`, `%X%`) when it writes a file
+   (`>`, `tee`) or starts a shell, an interpreter or a `./program`.
+
+**Where it applies.** All display and persistence; nothing that judges.
+
+- *Cards* (`approvals.card_text`/`card_args`, through
+  `secrets.redact_command`: rules 1-3, the known values without the scrub's
+  line dropping, the `PATTERNS` shapes, never truncated):
+  `ApprovalRequest.to_json`/`owner_json` (`command`, `args`, `reason`,
+  `headline`), so the HUD card, `GET /approvals`, the `approval_requested`
+  bus record and the Discord DM built from it, and `approval_resolved`'s
+  `command`. A card whose redaction fails shows the command as typed (a card
+  that hid code would be worse). `ApprovalRequest.command`/`args` stay as
+  typed: the permit judged them, `resolve(always=True)` mints the stem from
+  them, and Discord's "always" offer is now judged on the broker's own
+  pending request rather than the card. v1's face card, its decision list
+  and announcement (`face/approvals._for_display`) and v1's Discord DM
+  (`discord_approvals._describe`) take the same pass.
+- *Logs*: `log.jsonl` keeps `args`, `command`, `cmd`, `reason` and
+  `headline` of every recorded event (`tool_started`, `tool_finished`,
+  `gate_requested`/`gate_resolved`, `reviewer_declined`) through
+  `secrets.redact_value` (JSON structure kept; a credential-named key's
+  value withheld; a field whose redaction fails is withheld), computed
+  outside the daemon's lock. The **bus** keeps the event as it came: the
+  escape hatch runs a declined command from it, and the runner reads its
+  file paths. `decisions.jsonl` keeps `command` and `reason` through
+  `redact_command` (`_safe_command`, and `log_decision` for any caller).
+  v1's REPL, face `tool` event, task/workflow logs and goal journal show
+  `tool_args_for_display` (`for_display`, one line, JSON keys judged).
+- *Labels* (`tool_calls.label`): unchanged otherwise; now also rules 1-3.
+
+**Readers checked.** History (`transcript_tools`) reuses the stored label
+or derives one from the redacted args; titles, speech summaries and the
+Discord mirror read text and tool names only; the ledger reads usage and
+errors; subagent records keep labels only; activity keeps approval ids.
+Nothing re-derives a decision from stored text: the hatch, the broker and
+the allowlist hold the command as typed in memory.
+
+**Limits.** The CLIs' own transcripts (Claude Code's and Codex's session
+files, outside Jarvis's control) and v1/fast-path session files (the
+model's own transcript, which invariant 2 keeps verbatim) still hold the
+command as typed. The live bus carries it to in-process consumers and the
+owner's HUD socket, where nothing renders `args`. A program on the line can
+read a value from its environment, which no card shows. A value split
+across words by quoting, a scheme-less `user:pass@host` outside curl's
+`-u`, and options this list does not name can still show.
+
+`tests/v2/inline_credentials_check.py` pins every form above, the
+false-positive set byte for byte, `NEVER_HIDDEN`, the mask, identical permit
+decisions with and without the redaction, cards redacted while the request
+keeps the typed line, the always entry minted from it, Discord's DM, v1's
+cards and lines, and `log.jsonl` redacted with the bus raw.
+
+Files changed under SELF_PROTECTED, for the owner's review:
+`jarvis/tools/secrets.py` (new functions only; nothing existing changed)
+and `jarvis/face/approvals.py` (the card's display copy). Both only
+withhold more from a display, and never from a judge.

@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from jarvis.credential_patterns import PATTERNS
 
@@ -28,9 +26,6 @@ def _path(value: str, cwd: str) -> str:
 
 
 LABEL_SCAN = 4096
-# The scheme is bounded and must start a word: `[A-Za-z][…]*://` tried at
-# every letter of a long token is quadratic.
-_URL = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s'\"<>`]+")
 
 
 def _folder_chain(folder: Path) -> list[Path]:
@@ -69,22 +64,15 @@ def label(name, args, cwd) -> str:
         selected_key = key
         break
 
-    def safe_url(value: str) -> str:
-        try:
-            parts = urlsplit(value)
-            return parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1],
-                                  query="", fragment="").geturl()
-        except ValueError:
-            return "[redacted]"
-
     # A label shows 120 characters, so only the head of a long argument is
     # judged; every pass below is then bounded (delta review of PR #84: an
     # unbounded scheme match went quadratic on a 64K token and held the GIL).
     text = text[:LABEL_SCAN]
     if selected_key == "url":
-        text = safe_url(text)
-    # Also remove credentials from URLs embedded in commands or other fields.
-    text = _URL.sub(lambda match: safe_url(match.group()), text)
+        text = secrets.safe_url(text)
+    # Also remove credentials from URLs embedded in commands or other fields
+    # (the shared pass `redact_inline` and the logs' `for_display` run too).
+    text = secrets.strip_url_credentials(text, query=True)
     text = secrets.scrub(text)
     if cwd:
         values = {value for folder in _folder_chain(Path(cwd))

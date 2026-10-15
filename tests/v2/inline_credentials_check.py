@@ -5,7 +5,10 @@ The gap: a tool call's label, the v2 decision log and v1's tool lines scrubbed
 the values they *knew* (env files) and the shapes they *knew*
 (`credential_patterns`), so `export MY_API_TOKEN=hunter2plainvalue`,
 `curl -H "Authorization: Bearer …"` or `curl -u user:pass` showed verbatim.
-Every value below is a made-up placeholder; none is a real credential.
+Since the owner's decision of 2026-10-15 approval cards and `log.jsonl` take
+the same pass, and a withheld value must never conceal code that runs
+(`NEVER_HIDDEN`). Every value below is a made-up placeholder; none is a real
+credential.
 """
 from __future__ import annotations
 
@@ -356,6 +359,331 @@ class V1Lines(unittest.TestCase):
         GoalRunner._on_event(runner, "tool_start", ("run_command", raw))
         self.assertNotIn("p4ssw0rd", journal[0]["args"] + runner._last_activity)
         self.assertIn("MY_PASSWORD=" + R, journal[0]["args"])
+
+
+# -- review of #205 -----------------------------------------------------------
+
+URL_CREDENTIALS = [
+    ("git clone https://plaintok123@github.com/a/b", "git clone https://github.com/a/b"),
+    ("git push https://x-access-token:plaintok123@github.com/a/b.git", "git push https://github.com/a/b.git"),
+    ("curl https://user:plainpw123@host/x?page=2", "curl https://host/x?page=2"),
+    ("psql postgresql://u:plainpw123@h/db", "psql postgresql://h/db"),
+]
+
+# Readability: none of these holds a typed credential. Byte for byte.
+FALSE_POSITIVES = [
+    "docker run --name mongo -p 27017:27017 mongo",
+    "kubectl port-forward svc/mysql -p3306",
+    "sshpass -f pwfile ssh -p 2222 host",
+    "docker run --name redis-cli -a x img",
+    "curl -H 'Authorization: Bearer \"$TOKEN\"' https://example.invalid",
+    "sed -i 's/TOKEN=.*/TOKEN=X/' settings.example",
+    "app --key ./client-key.pem",
+    "PASSWORD_FILE=/run/secrets/x ./run",
+    "app --token-file=/tmp/t",
+    "curl -b cookies.txt https://example.invalid",
+    "SESSION_DRIVER=redis COOKIE_SECURE=true ./run",
+]
+
+CHEAP_CATCHES = [
+    ("TOKEN=$'plain\\nvalue1'", f"TOKEN={R}"),
+    ("docker login -u bob -p plainpass registry", f"docker login -u bob -p {R} registry"),
+    ("podman login -p plainpass registry", f"podman login -p {R} registry"),
+    ("curl -b 'session=plainv' https://example.invalid", f"curl -b {R} https://example.invalid"),
+    ("curl --cookie session=plainv https://example.invalid", f"curl --cookie {R} https://example.invalid"),
+    ("gh secret set X --body plainvalue", f"gh secret set X --body {R}"),
+    ("setx API_KEY plainvalue", f"setx API_KEY {R}"),
+    ("npm config set //registry.npmjs.org/:_authToken plainvalue",
+     f"npm config set //registry.npmjs.org/:_authToken {R}"),
+    ("SESSION_ID=a1b2c3d4e5 ./run", f"SESSION_ID={R} ./run"),
+    ("sudo MYSQL_HOME=/x mysql -u root -pPlainPass db", f"sudo MYSQL_HOME=/x mysql -u root -p{R} db"),
+]
+
+
+class ReviewFixes(unittest.TestCase):
+    def setUp(self):
+        self.root = _env_isolated(self)
+
+    def test_url_userinfo_leaves_every_display_and_log(self):
+        from jarvis.v2.permissions import _safe_command
+        for command, shown in URL_CREDENTIALS:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+                self.assertEqual(secrets.for_display(command), shown)
+                self.assertEqual(_safe_command(command), shown)
+                self.assertNotIn("plain", secrets.tool_args_for_display(json.dumps({"command": command})))
+                # The label keeps its own rule: the query goes too.
+                self.assertEqual(tool_calls.label("Bash", {"command": command}, ""),
+                                 shown.replace("?page=2", ""))
+
+    def test_false_positives_stay_byte_identical(self):
+        from jarvis.v2.approvals import clean_line
+        for command in FALSE_POSITIVES:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_inline(command), command)
+                self.assertEqual(secrets.redact_command(command), command)
+                self.assertEqual(tool_calls.label("Bash", {"command": command}, ""), clean_line(command, 120))
+
+    def test_cheap_catches(self):
+        for command, shown in CHEAP_CATCHES:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+
+    def test_setting_names_follow_the_env_rule(self):
+        for name in ("SESSION_ID", "AUTH", "COOKIE_VALUE", "X-Auth-Token"):
+            self.assertTrue(secrets.credential_name(name), name)
+        self.assertEqual(secrets.redact_inline("SESSION_DRIVER=redis AUTH_TYPE=basic ./x"),
+                         "SESSION_DRIVER=redis AUTH_TYPE=basic ./x")
+
+    def test_decision_log_reason_and_json_keys(self):
+        from jarvis.v2.permissions import ApprovalRecord, log_decision
+        path = self.root / "decisions.jsonl"
+        log_decision(ApprovalRecord(tool="Bash", args_digest="d", layer="ask", decision="allow",
+                                    reason="rule x matched: MY_TOKEN=plainvalue1 ./run",
+                                    command="MY_TOKEN=plainvalue1 ./run"), path)
+        entry = json.loads(path.read_text())
+        self.assertEqual(entry["reason"], f"rule x matched: MY_TOKEN={R} ./run")
+        self.assertNotIn("plainvalue1", path.read_text())
+        got = json.loads(secrets.tool_args_for_display(json.dumps({"password": "plainpass", "pin": 48291357,
+                                                                    "user": "bob"})))
+        self.assertEqual(got, {"password": R, "pin": R, "user": "bob"})
+        self.assertEqual(secrets.redact_value({"password": "plainpass", "n": [{"api_key": "plainvalue1"}], "ok": True}),
+                         {"password": R, "n": [{"api_key": R}], "ok": True})
+
+
+# -- the owner's decision, 2026-10-15: cards and raw logs ------------------------
+
+# Each line runs the value or hides structure; the card must show what runs.
+NEVER_HIDDEN = [
+    ("X_TOKEN='rm -rf ~'; eval $X_TOKEN", True),
+    ("X_TOKEN='rm -rf ~'; eval \"$X_TOKEN\"", True),
+    ("X_TOKEN='rm -rf ~'; bash -c \"$X_TOKEN\"", True),
+    ("X_TOKEN='rm -rf ~'; zsh -lc \"$X_TOKEN\"", True),
+    ("X_TOKEN='rm -rf ~'; $X_TOKEN", True),
+    ("X_TOKEN='rm -rf ~'; ${X_TOKEN}", True),
+    ("export X_TOKEN='rm -rf ~' && sudo $X_TOKEN", True),
+    ("X_TOKEN='rm -rf ~'; source <(echo $X_TOKEN)", True),
+    ("X_TOKEN='rm -rf ~'; . <(echo $X_TOKEN)", True),
+    ("X_TOKEN='import os; os.system(\"rm -rf ~\")'; python3 -c \"$X_TOKEN\"", True),
+    ("X_TOKEN='rm -rf ~'; perl -e \"system('$X_TOKEN')\"", True),
+    ("X_TOKEN='rm -rf ~'; echo \"$X_TOKEN\" | sh", True),
+    ("X_TOKEN='rm -rf ~'; echo \"$X_TOKEN\" | /bin/bash", True),
+    ("X_TOKEN='rm -rf ~'; echo $($X_TOKEN)", True),
+    ("X_TOKEN='rm -rf ~'; echo `$X_TOKEN`", True),
+    ("X_TOKEN='rm -rf ~'; eval '$'X_TOKEN", True),
+    ("R=X_TOKEN; X_TOKEN='rm -rf ~'; eval ${!R}", True),
+    ("X_TOKEN='rm -rf ~' bash -c '$X_TOKEN'", True),
+    ("X_TOKEN='rm -rf ~'; bash <<< \"$X_TOKEN\"", True),
+    ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" > /tmp/a.sh; sh /tmp/a.sh", True),
+    ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" | xargs -I{} sh -c {}", True),
+    ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" | tee run.sh", True),
+    ("X_TOKEN='rm -rf ~'; cmd /c %X_TOKEN%", True),
+    # Quoting: what looks like a value is not one in the line's own parse.
+    ("echo 'MY_TOKEN=\"abc' ; rm -rf ~ ; echo '\"'", False),
+    ("echo \"MY_TOKEN='$(rm -rf ~)'\"", False),
+    ("curl https://h/x?a;rm -rf ~", False),
+    ("curl https://u:p@h/x?a&rm -rf ~", False),
+    ("curl -H Authorization:abc;rm -rf ~", False),
+    ("curl -H Cookie:a=1;rm -rf ~", False),
+    ("curl -u 'u:a' ; rm -rf ~ ; echo ':b' https://x", False),
+    ("MY_TOKEN=abc;rm -rf ~", False),
+]
+
+
+class Cards(unittest.TestCase):
+    def setUp(self):
+        self.root = _env_isolated(self)
+        cfg = self.root / "home" / ".config" / "jarvis"
+        cfg.mkdir(parents=True)
+        p = patch.object(config, "ALLOWLIST_PATH", cfg / "allowlist.json")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_withheld_value_never_hides_code_that_runs(self):
+        for command, marked in NEVER_HIDDEN:
+            with self.subTest(command=command):
+                card = secrets.redact_command(command)
+                self.assertIn("rm -rf ~", card)
+                if marked:
+                    self.assertIn(secrets.RUN_MARKER, card)
+                    self.assertTrue(card.startswith(command.split("=", 1)[0]))
+                self.assertNotIn(R + R, card)
+
+    def test_structure_is_never_withheld(self):
+        # Rule 1, directly: a value's span with an unquoted operator, blank,
+        # `$` or backtick, or one that ends in other quoting, is kept.
+        mask = secrets._Mask("echo 'A=\"b' ; rm ; echo '\"'")
+        self.assertFalse(mask.safe(8, 25))
+        mask = secrets._Mask("A='b c' x")
+        self.assertTrue(mask.safe(2, 7))
+        self.assertFalse(mask.safe(2, 9))
+        mask = secrets._Mask('echo "A=$(rm)"')
+        self.assertFalse(mask.safe(8, 13))
+
+    def request(self, command):
+        from jarvis.v2.approvals import ApprovalRequest
+        return ApprovalRequest(tool="Bash", args={"command": command, "description": "MY_TOKEN=plainvalue1"},
+                               command=command, reason=f"always-ask: {command}",
+                               headline="MY_TOKEN=plainvalue1")
+
+    def test_card_shows_redacted_request_keeps_typed(self):
+        command = "MY_TOKEN=plainvalue1 curl -H 'Authorization: Bearer plainbearer9' https://example.invalid"
+        shown = f"MY_TOKEN={R} curl -H 'Authorization: Bearer {R}' https://example.invalid"
+        request = self.request(command)
+        for card in (request.to_json(), request.owner_json()):
+            self.assertEqual(card["command"], shown)
+            self.assertEqual(card["args"]["command"], shown)
+            self.assertEqual(card["reason"], "always-ask: " + shown)
+            self.assertEqual(card["headline"], f"MY_TOKEN={R}")
+            self.assertNotIn("plain", json.dumps(card))
+        self.assertEqual(request.command, command)
+        self.assertEqual(request.args["command"], command)
+
+    def test_card_redaction_failure_shows_the_command(self):
+        command = "MY_TOKEN=plainvalue1 ./run"
+        with patch.object(secrets, "redact_command", side_effect=RuntimeError), \
+                patch.object(secrets, "redact_value", side_effect=RuntimeError):
+            card = self.request(command).to_json()
+        self.assertEqual(card["command"], command)
+
+    def test_broker_publishes_the_card_and_always_mints_from_the_typed_line(self):
+        from jarvis.v2.approvals import PendingApprovals
+        from jarvis.v2.provider import Decision
+        published = []
+        broker = PendingApprovals(on_request=lambda r: published.append(r.to_json()))
+        command = "MY_TOKEN=plainvalue1 npm test"
+        request = self.request(command)
+        result = []
+        worker = threading.Thread(target=lambda: result.append(broker.ask(request)))
+        worker.start()
+        try:
+            for _ in range(3000):
+                if published:
+                    break
+                threading.Event().wait(0.01)
+            self.assertEqual(published[0]["command"], f"MY_TOKEN={R} npm test")
+            self.assertEqual(broker.pending()[0].command, command)
+            entry = broker.resolve(request.req_id, Decision.ALLOW, always=True)
+        finally:
+            worker.join(10)
+        self.assertEqual(result, [Decision.ALLOW])
+        self.assertEqual(entry, v1_permissions.entry_for("run_command", {"command": command}))
+        self.assertNotIn("redacted", config.ALLOWLIST_PATH.read_text())
+
+    def test_discord_dm_shows_the_card(self):
+        from jarvis.v2.approvals import PendingApprovals
+        from jarvis.v2.discord.gateway import DiscordRouter
+        broker = PendingApprovals()
+        command = "MY_TOKEN=plainvalue1 npm test"
+        request = self.request(command)
+        worker = threading.Thread(target=lambda: broker.ask(request))
+        worker.start()
+        try:
+            for _ in range(3000):
+                if broker.pending():
+                    break
+                threading.Event().wait(0.01)
+            router = object.__new__(DiscordRouter)
+            router._lock = threading.Lock()
+            router.approvals, router.mirror = broker, None
+            router._approval_channels, router._approval_messages = {request.req_id: "dm"}, {}
+            bodies = []
+            router._announce = lambda *_: None
+            router._owner_dm = lambda: "dm"
+            router._ask_in = lambda req_id, channel, body, code, **_: bodies.append(body) or ("dm", "m1")
+            router._save_posts = lambda: None
+            router._is_dm = lambda _c: True
+            router._post_approval(request.to_json())
+        finally:
+            broker.resolve(request.req_id, "deny")
+            worker.join(10)
+        text = bodies[0] if isinstance(bodies[0], str) else json.dumps(bodies[0], default=str)
+        self.assertNotIn("plainvalue1", text)
+        self.assertIn("MY_TOKEN=" + R, text)
+        self.assertIn("always", text.lower())       # judged on the typed request
+
+    def test_v1_cards(self):
+        from jarvis.discord_approvals import _describe
+        from jarvis.face.approvals import _for_display
+        args = {"command": "MY_TOKEN=plainvalue1 ./run", "password": "plainpass"}
+        self.assertEqual(_for_display(args), {"command": f"MY_TOKEN={R} ./run", "password": R})
+        described = _describe(SimpleNamespace(args=args))
+        self.assertNotIn("plain", described)
+        self.assertIn(f"MY_TOKEN={R} ./run", described)
+        run = {"command": "X_TOKEN='rm -rf ~'; eval $X_TOKEN"}
+        self.assertIn("rm -rf ~", _for_display(run)["command"])
+        self.assertIn("rm -rf ~", _describe(SimpleNamespace(args=run)))
+
+
+class RawLogs(unittest.TestCase):
+    """`log.jsonl` keeps typed credentials withheld; the bus keeps the event
+    as it came (the hatch runs a declined command from it)."""
+
+    def setUp(self):
+        import hud_backend_check as backend
+        backend.Backend.setUp(self)
+        self.backend = backend
+
+    def thread(self):
+        return self.backend.Backend.thread(self)
+
+    def events_all(self):
+        return self.backend.Backend.events_all(self)
+
+    def test_log_is_redacted_and_the_bus_is_not(self):
+        thread = self.thread()
+        session = self.daemon._sessions[thread.id]
+        session.turn_id = "turn"
+        command = "MY_TOKEN=plainvalue1 curl -u bob:plainpw https://x-access-token:plaintok@h/x"
+        shown = f"MY_TOKEN={R} curl -u bob:{R} https://h/x"
+        events = [
+            Event(K.TOOL_STARTED, thread.id, {"call_id": "c1", "name": "Bash", "args": {"command": command}}),
+            Event(K.TOOL_FINISHED, thread.id, {"call_id": "c1", "name": "Bash", "ok": True, "outcome": "ok",
+                                               "summary": "done", "args": {"command": command}}),
+            Event(K.APPROVAL_REQUESTED, thread.id, {"req_id": "g1", "tool": "Bash", "args": {"command": command},
+                                                    "command": command}),
+            Event(K.REVIEWER_DECLINED, thread.id, {"tool": "Bash", "args": {"command": command},
+                                                   "command": command, "reason": "declined: MY_TOKEN=plainvalue1"}),
+        ]
+        for event in events:
+            self.daemon._record(session, event)
+        log = self.stores.threads.read_log(thread.id)
+        logged = [r for r in log if r.get("kind") in ("tool_started", "tool_finished", "gate_requested",
+                                                     "reviewer_declined")]
+        self.assertEqual(len(logged), 4)
+        text = json.dumps(logged)
+        self.assertNotIn("plain", text)
+        for row in logged:
+            self.assertEqual(row["data"]["args"]["command"], shown)
+        self.assertEqual(logged[2]["data"]["command"], shown)
+        self.assertEqual(logged[3]["data"]["reason"], f"declined: MY_TOKEN={R}")
+        self.assertEqual(logged[0]["data"]["label"], f"MY_TOKEN={R} curl -u bob:{R} https://h/x")
+        bus = {r["kind"]: r for r in self.events_all()}
+        self.assertEqual(bus["reviewer_declined"]["data"]["command"], command)
+        self.assertEqual(bus["tool_started"]["data"]["args"]["command"], command)
+        # History reads the redacted record and stays whole.
+        from jarvis.v2.tool_calls import transcript_tools
+        rows = transcript_tools(log, None, None)
+        self.assertEqual(next(iter(rows.values()))["label"], logged[0]["data"]["label"])
+
+    def test_browser_actions_keep_their_empty_args(self):
+        thread = self.thread()
+        session = self.daemon._sessions[thread.id]
+        session.turn_id = "turn"
+        self.daemon._record(session, Event(K.TOOL_STARTED, thread.id, {
+            "call_id": "b1", "name": "hud_browser_act", "args": {"text": "MY_TOKEN=plainvalue1 private page"}}))
+        row = self.stores.threads.read_log(thread.id)[-1]
+        self.assertEqual(row["data"]["args"], {})
+
+    def test_a_failed_redaction_withholds_the_field(self):
+        thread = self.thread()
+        session = self.daemon._sessions[thread.id]
+        session.turn_id = "turn"
+        with patch.object(secrets, "redact_value", side_effect=RuntimeError):
+            self.daemon._record(session, Event(K.TOOL_STARTED, thread.id, {
+                "call_id": "c2", "name": "Bash", "args": {"command": "MY_TOKEN=plainvalue1 ./x"}}))
+        row = self.stores.threads.read_log(thread.id)[-1]
+        self.assertEqual(row["data"]["args"], "[withheld: could not be judged]")
 
 
 if __name__ == "__main__":

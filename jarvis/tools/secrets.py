@@ -1046,81 +1046,322 @@ def _secret_entry(key: str, value: str) -> bool:
 # --- credentials typed into a command line (2026-10-15) -----------------------
 #
 # A tool call's label (the HUD's tool rows, a Claude or Codex child's rows),
-# the v2 decision log and v1's tool lines show the command a model ran. The
-# scrub withholds values it *knows* (the env files above) and the label the
-# shapes `credential_patterns` knows; neither saw a credential typed inline
-# whose value is neither: `export MY_API_TOKEN=hunter2plain && …`,
+# an approval card (the HUD's and Discord's, v1's and v2's), the thread's
+# `log.jsonl`, the v2 decision log and v1's tool lines show or keep the
+# command a model ran. The scrub withholds values it *knows* (the env files
+# above) and the label the shapes `credential_patterns` knows; neither saw a
+# credential typed inline whose value is neither: `export MY_API_TOKEN=…`,
 # `curl -H "Authorization: Bearer …"`, `curl -u user:pass`, `--password=…`,
-# `mysql -pS3cret`. `redact_inline` withholds the **value** and keeps the name
-# (`MY_API_TOKEN=[redacted]`), by the env files' own name rule: a value
-# `_secret_entry` would withhold from a `.env` under a name `_secret_named`
-# reads as a credential is withheld from a command under it. `NODE_ENV=…`,
-# `PATH=…`, `CI=1`, `AUTH_TOKEN_TTL=3600` stay.
+# `mysql -pS3cret`, `https://tok@host`. `redact_inline` withholds the
+# **value** and keeps the name (`MY_API_TOKEN=[redacted]`), by the env files'
+# own name rule: a value `_secret_entry` would withhold from a `.env` under a
+# name the env rule reads as a credential's (or a credential-bearing
+# setting's: AUTH, SESSION, COOKIE) is withheld from a command under it.
+# `NODE_ENV=…`, `PATH=…`, `CI=1`, `AUTH_TOKEN_TTL=3600` stay.
 #
 # **Display and persistence only.** Nothing that judges a command (the rules,
-# layer 1, the permit, the allowlist) reads through this, and an approval card
-# still shows the command it asks about as it is.
+# layer 1, the permit, the allowlist, the escape hatch) reads through this:
+# they hold the command as typed, and an "Always" is minted from it.
 #
-# A value the shell would expand — unquoted or double-quoted and holding `$`
-# or a backtick — stays visible: it is not a literal credential, and a
-# withheld `$(…)` would hide what ran. Not a parser: a value split across
-# words by quoting can still show, as `scrub` and the label already say.
+# **A withheld value never hides code that runs** (the owner's condition for
+# redacting cards, 2026-10-15). Three rules, each erring towards showing:
+#
+# 1. Nothing is withheld that the shell would read as structure. Every
+#    replacement is checked against the line's own quoting (`_Mask`): the
+#    span removed must start and end in the same quoting, and hold no
+#    unquoted blank, operator (`;&|()<>`), `$` or backtick and no `$` or
+#    backtick inside double quotes. `echo 'T="a' ; rm -rf ~ ; echo '"'` and
+#    `echo "T='$(rm -rf ~)'"` keep every character.
+# 2. A value the shell would expand stays: unquoted or double-quoted with
+#    `$` or a backtick (`$'…'` is a literal).
+# 3. **A variable's value stays when the line may run it**, marked
+#    `[shown: this value may be run]`: every one when the line re-parses
+#    text as code (`eval`, `sh|bash|python … -c`, `-e`, `source`/`.`,
+#    `<(…)`, `<<<`, `xargs`, `exec`, a pipe into a shell or interpreter) or
+#    runs a variable as a command (`$X`, `${X}` at a command's place); the
+#    ones the line names (`$X`) when it also writes a file (`>`, `tee`),
+#    starts a shell or interpreter or a `./program`. A program on the line
+#    can still read the value from its environment, which no card shows.
+#
+# So does a file reference: a name ending FILE/PATH/DIR (`PASSWORD_FILE=…`,
+# `--token-file`) or a value shaped like a path (`--key ./client-key.pem`).
+# Not a parser: a value split across words by quoting can still show.
 INLINE_REDACTED = "[redacted]"
-# One shell word: quoted pieces and unquoted runs, glued. The unquoted run is
-# atomic, so the outer repetition cannot backtrack through it.
-_WORD = (r"(?:'[^'\n]*'|\"(?:[^\"\\\n]|\\.)*\""
-         r"|(?>(?:\\.|[^\s'\"`;&|<>()\\])+))+")
-_WORD_PIECE = re.compile(r"'([^'\n]*)'|\"((?:[^\"\\\n]|\\.)*)\"|((?:\\.|[^\s'\"`;&|<>()\\])+)")
+RUN_MARKER = "[shown: this value may be run]"
+# One shell word: quoted pieces (`$'…'` too) and unquoted runs, glued. The
+# unquoted run is atomic, so the outer repetition cannot backtrack through it.
+_UNQUOTED = r"(?:\\.|\$(?!')|[^\s'\"`;&|<>()\\$])+"
+_WORD = (r"(?:\$'(?:[^'\\\n]|\\.)*'|'[^'\n]*'|\"(?:[^\"\\\n]|\\.)*\"|(?>" + _UNQUOTED + "))+")
+_WORD_RE = re.compile(_WORD)
+_WORD_PIECE = re.compile(r"\$'((?:[^'\\\n]|\\.)*)'|'([^'\n]*)'|\"((?:[^\"\\\n]|\\.)*)\"|(" + _UNQUOTED + ")")
 # `NAME=value` anywhere a word starts: `export`, `env`, `set`, `declare -x`,
-# a command's prefix, `docker -e`, `--build-arg`, a form body's `&token=`.
-# Not after `-` (an option, below), `$` or an identifier character.
+# a command's prefix, `docker -e`, `--build-arg`, a query's `&token=`.
+# Not after `-` (an option, below), `$`, an identifier character, or a `/`
+# or `^` (a sed or regex program: `s/TOKEN=.*/TOKEN=x/`).
 _INLINE_ASSIGNMENT = re.compile(
-    r"(?<![A-Za-z0-9_$\-])(?P<name>[A-Za-z_][A-Za-z0-9_]*)\+?=(?P<value>" + _WORD + ")")
-# PowerShell's `$env:NAME = "value"`, fish's `set -gx NAME value`.
+    r"(?<![A-Za-z0-9_$\-/^])(?P<name>[A-Za-z_][A-Za-z0-9_]*)\+?=(?P<value>" + _WORD + ")")
+# PowerShell's `$env:NAME = "value"`; fish's `set -gx NAME value`; Windows'
+# `setx NAME value`; `npm|pnpm|yarn config set KEY value`.
 _INLINE_PS = re.compile(r"(?i)\$env:(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(?P<value>" + _WORD + ")")
-_INLINE_FISH = re.compile(
-    r"(?<![\w-])set(?:[ \t]+-[A-Za-z]+)*[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]+(?P<value>" + _WORD + ")")
+_INLINE_SET = re.compile(
+    r"(?<![\w-])(?:set(?:[ \t]+-[A-Za-z]+)*|setx)[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]+"
+    r"(?P<value>" + _WORD + ")")
+_INLINE_CONFIG = re.compile(
+    r"(?<![\w-])(?:npm|pnpm|yarn)[ \t]+config[ \t]+set[ \t]+(?P<name>[^\s=]+)[ \t]+(?P<value>" + _WORD + ")")
 # `--password=value`, `--api-key value`.
 _INLINE_OPTION = re.compile(
     r"(?<![\w-])--(?P<name>[A-Za-z][A-Za-z0-9_-]*)(?:=(?P<value>" + _WORD + r")|[ \t]+(?P<spaced>" + _WORD + "))")
+# A header's value never runs past a blank, a quote or an operator.
+_HEADER_VALUE = r"[^\s'\"\\;&|()<>$`]+"
 # `Authorization: Bearer value` wherever it is written (curl, wget, httpie);
-# the scheme word stays.
+# the scheme word stays, and so does a quoted expansion after it.
+_AUTH_SCHEMES = ("bearer", "basic", "token", "bot", "digest", "negotiate", "ntlm", "apikey")
 _INLINE_AUTH = re.compile(
     r"(?i)(?<![\w-])(?:proxy-)?authorization[ \t]*:[ \t]*['\"]?"
-    r"(?:(?:bearer|basic|token|bot|digest|negotiate|ntlm|apikey)[ \t]+)?(?P<value>[^\s'\"\\]+)")
-# Any other header a credential name: `-H 'X-Api-Key: value'`.
+    r"(?:(?:" + "|".join(_AUTH_SCHEMES) + r")[ \t]+(?:\\?['\"])?)?(?P<value>" + _HEADER_VALUE + ")")
+# Any other header with a credential name: `-H 'X-Api-Key: value'`.
 _INLINE_HEADER = re.compile(
     r"(?<![\w-])(?:-H|--header)[ \t]*=?[ \t]*['\"]?(?P<name>[A-Za-z][A-Za-z0-9_-]*)[ \t]*:[ \t]*"
-    r"(?P<value>[^\s'\"\\]+)")
-# A cookie header is a session: all of it, to the end of its quoting.
-_INLINE_COOKIE = re.compile(r"(?i)(?<![\w-])cookie[ \t]*:[ \t]*(?P<value>[^'\"\n\\]+)")
+    r"(?P<value>" + _HEADER_VALUE + ")")
+# A cookie header is a session: all of it, to the end of its quoting (rule 1
+# keeps it whole when unquoted operators would be inside).
+_INLINE_COOKIE = re.compile(r"(?i)(?<![\w-])cookie[ \t]*:[ \t]*(?P<value>[^'\"\n\\$`]+)")
 # `"password": "value"` in a JSON body.
 _INLINE_JSON = re.compile(
     r"\"(?P<name>[A-Za-z_][A-Za-z0-9_.\-]*)\"[ \t]*:[ \t]*\"(?P<value>(?:[^\"\\\n]|\\.)*)\"")
-# Options that take a password only for their own program, judged in a
-# segment that runs it, at its first occurrence after the program's name:
-# curl's `-u user:pass` (the user stays), mysql's glued `-pVALUE` (a spaced
-# `-p db` is the database), sshpass' and mongosh's `-p`, redis-cli's `-a`.
+# URLs anywhere in the text. The scheme is bounded and must start a word:
+# `[A-Za-z][…]*://` tried at every letter of a long token is quadratic
+# (delta review of PR #84).
+_URL_IN_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s'\"<>`]+")
+# Options that take a credential only for their own program, judged where
+# the segment runs it (its command word, past assignments and wrappers),
+# at the first occurrence: curl's `-u user:pass` (the user stays) and
+# `-b`/`--cookie name=value` (a bare `-b file` is a file), mysql's glued
+# `-pVALUE` (a spaced `-p db` is the database), mongosh's `-p`, `docker|
+# podman|nerdctl login -p`, `gh secret set --body`, and, among their own
+# options only (before what they run), sshpass' `-p` and redis-cli's `-a`.
 _SEGMENTS = re.compile(r"\|\||&&|[;|\n]")
-_USERPASS = "userpass"
+_USERPASS, _COOKIE_DATA = "userpass", "cookie"
+_MYSQL = frozenset({"mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mysqlshow",
+                    "mysqlslap", "mariadb", "mariadb-dump", "mariadb-admin"})
+# (programs, subcommand words, kind, pattern, option words that take the
+# next word — None: the whole rest of the segment is searched).
 _PROGRAM_FLAGS = (
-    (frozenset({"curl"}), _USERPASS,
-     re.compile(r"(?<![\w-])(?:-u|--user|-U|--proxy-user)(?:[ \t]+|=)?(?P<value>" + _WORD + ")")),
-    (frozenset({"mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mysqlshow",
-                "mysqlslap", "mariadb", "mariadb-dump", "mariadb-admin"}), "",
-     re.compile(r"(?<![\w-])-p(?P<value>" + _WORD + ")")),
-    (frozenset({"sshpass", "mongo", "mongosh"}), "",
-     re.compile(r"(?<![\w-])-p(?:[ \t]+)?(?P<value>" + _WORD + ")")),
-    (frozenset({"redis-cli"}), "",
-     re.compile(r"(?<![\w-])-a(?:[ \t]+)?(?P<value>" + _WORD + ")")),
+    (frozenset({"curl"}), (), _USERPASS,
+     re.compile(r"(?<![\w-])(?:-u|--user|-U|--proxy-user)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"curl"}), (), _COOKIE_DATA,
+     re.compile(r"(?<![\w-])(?:-b|--cookie)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (_MYSQL, (), "", re.compile(r"(?<![\w-])-p(?P<value>" + _WORD + ")"), None),
+    (frozenset({"mongo", "mongosh"}), (), "",
+     re.compile(r"(?<![\w-])-p(?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"docker", "podman", "nerdctl"}), ("login",), "",
+     re.compile(r"(?<![\w-])-p(?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"gh"}), ("secret", "set"), "",
+     re.compile(r"(?<![\w-])(?:--body|-b)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"sshpass"}), (), "",
+     re.compile(r"(?<![\w-])-p(?:[ \t]+)?(?P<value>" + _WORD + ")"),
+     frozenset({"-f", "-d", "-p", "-P"})),
+    (frozenset({"redis-cli"}), (), "",
+     re.compile(r"(?<![\w-])-a(?:[ \t]+)?(?P<value>" + _WORD + ")"),
+     frozenset({"-h", "-p", "-s", "-a", "-u", "-n", "-r", "-i", "-d", "-D", "-e",
+                "--user", "--pass", "--askpass", "--tls", "--cacert", "--cert", "--key"})),
 )
+_PROGRAM_WORD = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(
+    (re.escape(p) for programs, *_ in _PROGRAM_FLAGS for p in programs), key=len, reverse=True))
+    + r")(?![\w.-])")
+_FILE_PARTS = frozenset({"file", "files", "path", "dir"})
+# Rule 3. A line that re-parses text as code, or runs a variable as a
+# command: every variable's value stays.
+_RUNNERS = (r"(?:sh|bash|rbash|dash|zsh|ksh|mksh|ash|fish|csh|tcsh|busybox|python\d*(?:\.\d+)?|"
+            r"node|nodejs|deno|bun|perl|ruby|php|lua|pwsh|powershell|cmd|osascript|tclsh|Rscript)")
+# A runner's word: its name alone or after a path's `/`, never scanning a
+# prefix (`\S*/` before it, tried at every position, is quadratic).
+_RUNNER_WORD = re.compile(r"(?i)(?:(?<=/)|(?<![^\s;&|(`'\"]))" + _RUNNERS + r"(?![\w.-])")
+_EXEC_OPTION = re.compile(r"(?<![\w-])(?:-[A-Za-z]*[cCeE][A-Za-z]*|--eval|/[cCkK])(?![\w-])")
+_REPARSE = re.compile(
+    r"(?i)(?<![\w.-])(?:eval|source|exec|xargs|iex|invoke-expression)(?![\w-])"
+    r"|(?<![\w.-])env[ \t]+(?:-[^\s;&|]+[ \t]+)*-S"
+    r"|(?:^|[\s;&|(`])\.[ \t]"
+    r"|<\(|<<<"
+    r"|\|[ \t&]*(?:(?:sudo|env|exec|command|nohup|time)[ \t]+)*(?:[^\s|;&]*/)?" + _RUNNERS + r"(?![\w.-])")
+_VAR_AT_COMMAND = re.compile(
+    r"(?:^|[;&|(\n{`]|\$\()[ \t]*(?:(?:[A-Za-z_]\w*=[^\s;&|]*|sudo|env|exec|nohup|time|command|builtin|"
+    r"then|do|else|!|nice)[ \t]+)*[\"']?\$(?![Ee][Nn][Vv]:)")
+# The ones the line names, when it also writes a file or starts a program
+# that could read one back as code.
+_RUN_LATER = re.compile(r">|(?<![\w.-])tee(?![\w-])|(?:^|[\s;&|(`])\.?\.?/[^\s;&|]")
+
+
+def _runs_code(text: str) -> bool:
+    """A segment that starts a shell or interpreter with an option that runs
+    its argument (`bash -lc`, `python3 -c`, `perl -e`, `node --eval`, `cmd /c`).
+    Linear: each segment is searched once for each."""
+    last = 0
+    for sep in [*_SEGMENTS.finditer(text), None]:
+        end = sep.start() if sep is not None else len(text)
+        runner = _RUNNER_WORD.search(text, last, end)
+        if runner is not None and _EXEC_OPTION.search(text, runner.end(), end):
+            return True
+        if sep is not None:
+            last = sep.end()
+    return False
+
+
+_REFERENCE = re.compile(r"\$\{?!?([A-Za-z_][A-Za-z0-9_]*)|(?i:\$env:)([A-Za-z_][A-Za-z0-9_]*)"
+                        r"|%([A-Za-z_][A-Za-z0-9_]*)%")
+
+
+class _Mask:
+    """Rule 1: where the shell reads `text` as structure. `safe(a, b)` says
+    whether `text[a:b]` can be replaced without hiding any: it starts and
+    ends in the same quoting and holds nothing active."""
+
+    def __init__(self, text: str):
+        n = len(text)
+        state = bytearray(n + 1)          # quoting before each character
+        active = [0] * (n + 1)            # active characters in text[:i]
+        q = count = i = 0                 # q: 0 none, 1 '…', 2 "…", 3 $'…'
+        while i < n:
+            c = text[i]
+            state[i] = q
+            pair = (c == "\\" and q != 1) or (c == "$" and q == 0 and text[i + 1:i + 2] == "'")
+            if pair and i + 1 < n:
+                # An escape, or `$'` opening an ANSI-C quote: two characters
+                # of quoting, neither of them active.
+                if c == "$":
+                    q = 3
+                state[i + 1] = state[i]
+                active[i + 1] = active[i + 2] = count
+                i += 2
+                continue
+            hot = False
+            if q in (1, 3):
+                if c == "'":
+                    q = 0
+            elif q == 2:
+                if c == '"':
+                    q = 0
+                elif c in "$`":
+                    hot = True
+            elif c == "'":
+                q = 1
+            elif c == '"':
+                q = 2
+            elif c.isspace() or c in ";&|()<>$`":
+                hot = True
+            count += hot
+            active[i + 1] = count
+            i += 1
+        state[n] = q
+        self.state, self.active = state, active
+
+    def safe(self, a: int, b: int) -> bool:
+        return self.state[a] == self.state[b] and self.active[b] == self.active[a]
+
+
+def _masked_sub(pattern: re.Pattern, fn, text: str) -> str:
+    """`pattern.sub(fn, text)`, keeping any replacement rule 1 refuses."""
+    mask = None
+
+    def guarded(match: re.Match) -> str:
+        nonlocal mask
+        whole = match.group(0)
+        out = fn(match)
+        if out == whole:
+            return whole
+        p = 0
+        while p < len(whole) and p < len(out) and whole[p] == out[p]:
+            p += 1
+        s = 0
+        while s < len(whole) - p and s < len(out) - p and whole[-1 - s] == out[-1 - s]:
+            s += 1
+        if mask is None:
+            mask = _Mask(text)
+        a, b = match.start() + p, match.end() - s
+        if a < b and not mask.safe(a, b):
+            return whole
+        return out
+
+    return pattern.sub(guarded, text)
+
+
+def safe_url(value: str) -> str:
+    """A URL without userinfo, query or fragment: scheme, host, port, path."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(value)
+        return parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1],
+                              query="", fragment="").geturl()
+    except ValueError:
+        return "[redacted]"
+
+
+def strip_url_credentials(text: str, *, query: bool = False) -> str:
+    """Every URL in `text` without its userinfo (`https://tok@host`,
+    `postgresql://u:pw@h/db`) and, with `query`, its query and fragment (the
+    label's rule since TC-1). Each removal is a separate span, checked by
+    rule 1 (`https://h/x?a;rm -rf ~` keeps its query); a value the shell
+    expands stays."""
+    if not text:
+        return text
+    from urllib.parse import urlsplit
+
+    mask = None
+    out, last = [], 0
+    for match in _URL_IN_TEXT.finditer(text):
+        url, base = match.group(), match.start()
+        start = url.index("://") + 3
+        rest = len(url)
+        for sep in "/?#":
+            at = url.find(sep, start)
+            if at != -1:
+                rest = min(rest, at)
+        cuts = []
+        at_sign = url.rfind("@", start, rest)
+        if at_sign != -1:
+            cuts.append((start, at_sign + 1))
+        if query:
+            tail = [i for i in (url.find("?", rest), url.find("#", rest)) if i != -1]
+            if tail:
+                cuts.append((min(tail), len(url)))
+        if not cuts:
+            continue
+        try:
+            urlsplit(url)
+            broken = False
+        except ValueError:
+            broken = True
+        if mask is None:
+            mask = _Mask(text)
+        if broken:
+            if "$" not in url and "`" not in url and mask.safe(base, base + len(url)):
+                out.append(text[last:base] + "[redacted]")
+                last = match.end()
+            continue
+        pieces, pos = [], 0
+        for a, b in cuts:
+            if "$" in url[a:b] or "`" in url[a:b] or not mask.safe(base + a, base + b):
+                continue
+            pieces.append(url[pos:a])
+            pos = b
+        pieces.append(url[pos:])
+        out.append(text[last:base] + "".join(pieces))
+        last = match.end()
+    out.append(text[last:])
+    return "".join(out)
 
 
 def credential_name(name: str) -> bool:
-    """Does this variable, option or header name read as a credential's, by
-    the env files' rule (`MY_API_TOKEN`, `PGPASSWORD`, `client-secret`)?
-    `PWD`/`OLDPWD` are the shell's working folder, not a password."""
-    return name not in _SHELL_STATE and _secret_named(_key_parts(name))
+    """Does this variable, option or header name read as a credential's or
+    a credential-bearing setting's, by the env files' rule (`MY_API_TOKEN`,
+    `PGPASSWORD`, `client-secret`, `SESSION_ID`)? Whether its value is
+    withheld is `_secret_entry`'s call, as for an env file. `PWD`/`OLDPWD`
+    are the shell's working folder, not a password."""
+    if name in _SHELL_STATE:
+        return False
+    parts = _key_parts(name)
+    return _secret_named(parts) or bool(set(parts) & _SETTING_KEY_PARTS)
 
 
 def _literal(word: str) -> str | None:
@@ -1128,15 +1369,38 @@ def _literal(word: str) -> str | None:
     part of it (`$`, a backtick outside single quotes)."""
     out = []
     for match in _WORD_PIECE.finditer(word):
-        single, double, bare = match.groups()
-        if single is not None:
-            out.append(single)
+        ansi, single, double, bare = match.groups()
+        if ansi is not None or single is not None:
+            out.append(ansi if ansi is not None else single)
             continue
         piece = double if double is not None else bare
         if "$" in piece or "`" in piece:
             return None
         out.append(piece)
     return "".join(out)
+
+
+def _withheld(name: str, value: str | None) -> bool:
+    """Is `value`, typed under `name`, a credential to withhold? The env
+    files' rule, less file references (see above)."""
+    if value is None or not credential_name(name):
+        return False
+    parts = _key_parts(name)
+    if parts and parts[-1] in _FILE_PARTS:
+        return False                                # `PASSWORD_FILE=…`, `--token-file`
+    if "/" in value and _PATH.match(value):
+        return False                                # `--key ./client-key.pem`
+    return _secret_entry(name, value)
+
+
+def _run_names(text: str):
+    """Rule 3: the variables whose values the line may run — every one
+    (True), the ones it names (a set), or none."""
+    if _REPARSE.search(text) or _VAR_AT_COMMAND.search(text) or _runs_code(text):
+        return True
+    if _RUN_LATER.search(text) or _RUNNER_WORD.search(text):
+        return {next(g for g in m.groups() if g) for m in _REFERENCE.finditer(text)}
+    return frozenset()
 
 
 def _already(match: re.Match, group: str = "value") -> bool:
@@ -1149,13 +1413,17 @@ def _redact_group(match: re.Match, group: str = "value") -> str:
     return whole[:a - start] + INLINE_REDACTED + whole[b - start:]
 
 
-def _named_value(match: re.Match) -> str:
-    """`NAME=value`: the value goes when the env files would withhold it."""
-    value = _literal(match.group("value"))
-    if (_already(match) or value is None or not credential_name(match.group("name"))
-            or not _secret_entry(match.group("name"), value)):
-        return match.group(0)
-    return _redact_group(match)
+def _named_value(run):
+    """`NAME=value`: the value goes when the env files would withhold it,
+    unless the line may run it (rule 3), which it then says."""
+    def redact(match: re.Match) -> str:
+        name = match.group("name")
+        if _already(match) or not _withheld(name, _literal(match.group("value"))):
+            return match.group(0)
+        if run is True or name in run:
+            return match.group(0) + " " + RUN_MARKER
+        return _redact_group(match)
+    return redact
 
 
 def _option_value(match: re.Match) -> str:
@@ -1170,26 +1438,27 @@ def _option_value(match: re.Match) -> str:
         if word.startswith("-") or not parts or parts[0] == "no" \
                 or not _secret_named(parts[-1:]):
             return match.group(0)
-    value = _literal(word)
-    if (_already(match, group) or value is None or not credential_name(name)
-            or not _secret_entry(name, value)):
+    if _already(match, group) or not _withheld(name, _literal(word)):
         return match.group(0)
     return _redact_group(match, group)
 
 
 def _header_value(match: re.Match) -> str:
     value = match.group("value")
-    if _already(match) or value.startswith(("$", "`")):
+    if _already(match):
         return match.group(0)
-    if "name" in match.re.groupindex and not credential_name(match.group("name")):
-        return match.group(0)
+    if "name" in match.re.groupindex:
+        if not _withheld(match.group("name"), value):
+            return match.group(0)
+    elif value.casefold() in _AUTH_SCHEMES:
+        return match.group(0)                       # `Bearer` with its value elsewhere
     return _redact_group(match)
 
 
 def _json_value(match: re.Match) -> str:
     value = match.group("value")
-    if (_already(match) or not credential_name(match.group("name"))
-            or not _secret_entry(match.group("name"), value)):
+    if _already(match) or "$" in value or "`" in value \
+            or not _withheld(match.group("name"), value):
         return match.group(0)
     return _redact_group(match)
 
@@ -1206,58 +1475,153 @@ def _program_value(kind: str):
                 return match.group(0)               # curl asks for it
             start, a = match.start(0), match.start("value")
             return match.group(0)[:a - start] + user + ":" + INLINE_REDACTED
+        if kind == _COOKIE_DATA and "=" not in value:
+            return match.group(0)                   # `-b cookies.txt` is a file
         return _redact_group(match)
     return redact
 
 
 def _program_flags(text: str) -> str:
-    out, last = [], 0
-    for sep in [*_SEGMENTS.finditer(text), None]:
-        end = sep.start() if sep is not None else len(text)
-        segment = text[last:end]
-        for programs, kind, pattern in _PROGRAM_FLAGS:
-            for word in re.finditer(r"[^\s'\"]+", segment):
-                if os.path.basename(word.group()) in programs:
-                    head, tail = segment[:word.end()], segment[word.end():]
-                    segment = head + pattern.sub(_program_value(kind), tail, count=1)
+    """The `_PROGRAM_FLAGS` edits, each found where its segment runs that
+    program and each checked by rule 1 against the whole line."""
+    edits = []
+    if not _PROGRAM_WORD.search(text):
+        return text
+    bounds, last = [], 0
+    for sep in _SEGMENTS.finditer(text):
+        bounds.append((last, sep.start()))
+        last = sep.end()
+    bounds.append((last, len(text)))
+    for seg_start, seg_end in bounds:
+        if not _PROGRAM_WORD.search(text, seg_start, seg_end):
+            continue                    # no program here: nothing to place
+        words = list(_WORD_RE.finditer(text, seg_start, seg_end))
+        values = [_literal(w.group()) or w.group() for w in words]
+        at = _stem_at(values)
+        if at >= len(values):
+            continue
+        program = PurePosixPath(values[at]).name
+        for programs, subcommand, kind, pattern, value_options in _PROGRAM_FLAGS:
+            if program not in programs:
+                continue
+            i = at + 1
+            for sub in subcommand:
+                while i < len(values) and values[i].startswith("-"):
+                    i += 1
+                if i >= len(values) or values[i] != sub:
                     break
-        out.append(segment)
-        if sep is not None:
-            out.append(sep.group())
-            last = sep.end()
+                i += 1
+            else:
+                start, end = words[i - 1].end(), seg_end
+                if value_options is not None:
+                    # Only its own options: up to the first operand (what it runs).
+                    while i < len(values) and values[i].startswith("-"):
+                        i += 2 if values[i] in value_options else 1
+                    end = words[i].start() if i < len(words) else seg_end
+                match = pattern.search(text, start, end)
+                if match is not None:
+                    edits.append((match, _program_value(kind)(match)))
+    if not edits:
+        return text
+    mask = _Mask(text)
+    out, pos = [], 0
+    for match, replaced in sorted(edits, key=lambda e: e[0].start()):
+        whole = match.group(0)
+        if replaced == whole or match.start() < pos:
+            continue
+        p = 0
+        while p < min(len(whole), len(replaced)) and whole[p] == replaced[p]:
+            p += 1
+        s = 0
+        while s < min(len(whole), len(replaced)) - p and whole[-1 - s] == replaced[-1 - s]:
+            s += 1
+        if not mask.safe(match.start() + p, match.end() - s):
+            continue
+        out.append(text[pos:match.start()] + replaced)
+        pos = match.end()
+    out.append(text[pos:])
     return "".join(out)
 
 
 def redact_inline(text: str) -> str:
-    """`text` (a command line, a tool argument) with the value of every
-    credential typed into it withheld and its name kept (see above). For
-    display and persistence; never for anything that judges the command.
-    Linear in `text`: callers bound it (a label judges its first 4,096
-    characters)."""
+    """`text` (a command line, a tool argument) with URL userinfo and the
+    value of every credential typed into it withheld, its name kept, and
+    nothing withheld that runs (see above). For display and persistence;
+    never for anything that judges the command. Linear in `text`."""
     if not text:
         return text
-    text = _INLINE_AUTH.sub(_header_value, text)
-    text = _INLINE_COOKIE.sub(_header_value, text)
-    text = _INLINE_HEADER.sub(_header_value, text)
-    text = _INLINE_JSON.sub(_json_value, text)
-    text = _INLINE_PS.sub(_named_value, text)
-    text = _INLINE_FISH.sub(_named_value, text)
-    text = _INLINE_OPTION.sub(_option_value, text)
-    text = _INLINE_ASSIGNMENT.sub(_named_value, text)
+    run = _run_names(text)
+    text = strip_url_credentials(text)
+    named = _named_value(run)
+    for pattern, fn in ((_INLINE_AUTH, _header_value), (_INLINE_COOKIE, _header_value),
+                        (_INLINE_HEADER, _header_value), (_INLINE_JSON, _json_value),
+                        (_INLINE_PS, named), (_INLINE_SET, named), (_INLINE_CONFIG, named),
+                        (_INLINE_OPTION, _option_value), (_INLINE_ASSIGNMENT, named)):
+        text = _masked_sub(pattern, fn, text)
     return _program_flags(text)
+
+
+def _known_values(text: str) -> str:
+    """The scrub's known values (env files, the process's credential-named
+    variables), each occurrence replaced only where rule 1 allows, and no
+    line dropped: the faithful half of `scrub`, for a command."""
+    values = sorted(set(secret_values()) | set(_process_env_values()), key=len, reverse=True)
+    for value in values:
+        if value in text:
+            text = _masked_sub(re.compile(re.escape(value)), lambda m: REDACTED, text)
+    return text
+
+
+def redact_command(text) -> str:
+    """A command or tool argument as an approval card shows it and a log
+    keeps it: whole, never truncated or summarised, with the known values,
+    the credentials typed into it and the shapes `credential_patterns` knows
+    withheld — and nothing withheld that the shell reads as structure or the
+    line may run (rules 1-3). Never for a judge."""
+    from ..credential_patterns import PATTERNS
+
+    text = _known_values(redact_inline(str(text)))
+    for _, pattern in PATTERNS:
+        text = _masked_sub(pattern, lambda m: INLINE_REDACTED, text)
+    return text
+
+
+def redact_value(value, depth: int = 0):
+    """A JSON-shaped value (a tool call's arguments, an event's data) with
+    every string through `redact_command` and a credential-named key's value
+    withheld as an env file's would be. Structure, keys and non-strings
+    stay, so a record is still valid JSON."""
+    if isinstance(value, str):
+        return redact_command(value)
+    if depth >= 32:
+        return "[nested too deep to judge]"
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if isinstance(item, (str, int)) and not isinstance(item, bool) and isinstance(key, str) \
+                    and _withheld(key, str(item)):
+                out[key] = INLINE_REDACTED
+            else:
+                out[key] = redact_value(item, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [redact_value(item, depth + 1) for item in value]
+    return value
 
 
 DISPLAY_SCAN = 4096
 
 
 def for_display(text: str) -> str:
-    """Model-supplied text headed for a surface or a log rather than the
-    model: the known values (`scrub`), the credentials typed inline
+    """Model-supplied text headed for a one-line surface (v1's tool lines):
+    the known values (`scrub`), the credentials typed inline
     (`redact_inline`) and every shape in `credential_patterns`. Only the
     first `DISPLAY_SCAN` characters are judged and kept."""
     from ..credential_patterns import PATTERNS
 
-    text = redact_inline(scrub(str(text)[:DISPLAY_SCAN]))
+    # URLs first, as the label does: a known value inside a URL replaced by
+    # the scrub's marker would break the URL apart.
+    text = redact_inline(scrub(strip_url_credentials(str(text)[:DISPLAY_SCAN])))
     for _, pattern in PATTERNS:
         text = pattern.sub(INLINE_REDACTED, text)
     return text
@@ -1284,13 +1648,21 @@ def _tool_args_for_display(raw) -> str:
     if not isinstance(parsed, dict):
         return for_display(text)
 
+    def keyed(key, value, depth):
+        # `{"password": "v"}`: a value under a credential-named key goes as
+        # an env file's would (a number too: `{"pin": 48291357}`).
+        if isinstance(value, (str, int)) and not isinstance(value, bool) \
+                and _withheld(key, str(value)):
+            return INLINE_REDACTED
+        return walk(value, depth + 1)
+
     def walk(node, depth=0):
         if isinstance(node, str):
             return for_display(node)
         if depth >= 4:
             return "…"
         if isinstance(node, dict):
-            return {str(k): walk(v, depth + 1) for k, v in list(node.items())[:32]}
+            return {str(k): keyed(str(k), v, depth) for k, v in list(node.items())[:32]}
         if isinstance(node, list):
             return [walk(v, depth + 1) for v in node[:32]]
         return node

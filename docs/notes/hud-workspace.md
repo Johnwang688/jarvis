@@ -1251,11 +1251,15 @@ The approval page's CSP changed the same day (no `'wasm-unsafe-eval'` on
 approval page".
 
 
-## Tool-call labels withhold typed credentials (2026-10-15)
+## Tool-call labels and approval cards withhold typed credentials (2026-10-15)
 
 A label now also withholds the value of a credential typed into the command
 (`MY_API_TOKEN=[redacted]`, `Authorization: Bearer [redacted]`,
 `curl -u user:[redacted]`, `--password=[redacted]`), keeping the name;
 expanding values (`$X`, `$(…)`) stay. The archived TC-1 paragraph above still
-lists `curl -u user:pass` as visible; it no longer is. Rule and paths:
-`safety-permissions.md`, "Credentials typed into a command".
+lists `curl -u user:pass` as visible; it no longer is. **Approval cards** do
+the same (owner, 2026-10-15): the card's `command`, `args`, `reason` and
+`headline` are a redacted projection, a value the line may run is shown with
+`[shown: this value may be run]`, and the request behind the card keeps the
+command as typed. Rule and paths: `safety-permissions.md`, "Credentials typed
+into a command".
