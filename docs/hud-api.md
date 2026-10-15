@@ -3124,10 +3124,9 @@ What differs from Claude's, on the same record and routes:
   Claude: the session gone (closed, archived, lost, a fatal error), or a
   restart.
 - **The thread's Stop interrupts the orchestrator's turn only**; its children
-  run on (SV-0). Today the next message to that chat then fails the session
-  (Codex leaves an interrupted turn's accounting incomplete), which closes its
-  app-server and so ends its children: they read `stopped`, "the session that
-  ran it ended". A model switch rides the next `turn/start`, so it ends none.
+  run on (SV-0) and the chat continues (#200), so a child's later end lands
+  in its own record as usual, read by the next message. A model switch rides
+  the next `turn/start`, so it ends none either.
 - **Usage.** `tokens` is the child thread's own running total; `tool_uses`
   counts its tool items, `last_tool` names the newest (`shell`,
   `apply_patch`, an MCP tool), `duration_ms` is its last turn's. Never the

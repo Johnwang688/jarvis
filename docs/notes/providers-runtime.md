@@ -828,15 +828,14 @@ SV-2a's eviction at `CHILD_LIMIT` now prefers an idle child whose record has
 also ended (its `turn/completed` handled, not only read off the wire), then
 any idle child, as before.
 
-**Found while testing, not changed.** In the provider replay of
-`parent_interrupt`, the send after an interrupted orchestrator turn is fatal
-("Codex previous turn accounting incomplete"): `codex.py` marks an
-interrupted turn's accounting incomplete, and `codex_usage.Accounting`
-refuses to resume one. So after the owner's Stop on a Codex chat, its
-children run on only until the next message closes the session (and its
-app-server); the record then reads them `stopped`, "the session that ran it
-ended". Whether the Stop-then-continue path itself is right for Codex chats
-is outside SV-2.
+**The owner's Stop does not stop Codex children.** It interrupts the
+orchestrator's turn; its children run on (SV-0). Before #200 the next send
+was then fatal (an interrupted turn's accounting was left incomplete), which
+closed the app-server and the children with it; since #200 the chat
+continues, and in the replay of `parent_interrupt` the child's later
+`turn/completed` lands as `done` in its own record during the next send.
+SV-4 adds a per-child Stop. The fatal-send path (the session's end) is
+pinned with a turn that completes without token usage.
 
 **Between turns nobody reads the connection** (SV-6). Child traffic that
 arrives after the parent's turn is read by the next send, recorded under
@@ -863,7 +862,7 @@ credential value in a Codex child's message and failure reason, and the
 same words in a Claude and a Codex record alike), bounds and the record's
 revival rule. On `main` 29 of the 34 fail; the five that pass pin unchanged behaviour
 (parent accounting, ledger, no deltas, malformed shapes not fatal, a Claude
-child never revived) and are proven by mutants. 30 mutants, all killed: a child's
+child never revived) and are proven by mutants. 31 mutants, all killed: a child's
 items as the parent's, its tokens into the accounting or as USAGE, its turn
 end ending the parent's, an unannounced thread recorded, the end read from
 the parent's notice, the parent's turn end stopping children, unscrubbed
@@ -876,7 +875,8 @@ reason dropped, a malformed turn fatal, `interrupt_agent` not told apart, a
 nested child's parent dropped; and from the review: no scrub in the record,
 the shared scrub without the bearer shapes or without `credential_patterns`,
 a scrub failure showing the words, a Claude child revived, the newest open
-call evicted first. `codex_provider_check` (111),
+call evicted first; and after #200, the session's end leaving its children
+live. `codex_provider_check` (111),
 `claude_subagents_check` (31), `subagent_routes_check` (28),
 `subagent_fixtures_check` (25) and `codex_session_mcp_check` (34) pass
 unchanged.

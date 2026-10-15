@@ -249,6 +249,17 @@ def tokens() -> dict:
 
 
 @functools.cache
+def fatal() -> Run:
+    """`no_wait` with the orchestrator's usage notifications removed: its
+    turn completes without token usage, which `codex.py` refuses as a fatal
+    error (accounting incomplete) and closes the session, while its child
+    still runs."""
+    return replay("no_wait", turns=turns_of("no_wait")[:1], edit=lambda i, msgs: [
+        m for m in msgs if not (m.get("method") == "thread/tokenUsage/updated"
+                                and m["params"]["threadId"] == "$THREAD")])
+
+
+@functools.cache
 def leaky() -> tuple:
     """A Codex child that writes every placeholder (and an owned credential
     value), and one that fails with them in Codex's reason."""
@@ -278,9 +289,7 @@ class ProseIsolation(unittest.TestCase):
                 side = run.parent_side()
                 self.assertEqual([w for w in words | names if w in side], [], "a child's word as the parent's")
                 said = json.dumps([e.data for e in run.of(K.SUBAGENT_EVENT)])
-                # (parent_interrupt's child speaks only after the session that
-                # ran it is gone: see the test below.)
-                texts = {w for w in words if w.startswith("SV0 child")} if name != "parent_interrupt" else set()
+                texts = {w for w in words if w.startswith("SV0 child")}
                 self.assertEqual([w for w in texts if w not in said], [], "the child's words are its own")
                 self.assertTrue(run.of(K.SUBAGENT), name)
 
@@ -353,7 +362,8 @@ class Lifecycle(unittest.TestCase):
         want = {"one": ["done"], "parallel": ["done", "done"], "nested": ["done", "done"],
                 "fail": ["failed"], "child_interrupt": ["stopped"], "close_agent": ["stopped"],
                 "approval": ["done"], "approval_accept": ["done"], "patch_approval_child": ["done"],
-                "one_multi_agent_v2": ["done"], "no_wait": ["done"], "steer_parent": ["done"]}
+                "one_multi_agent_v2": ["done"], "no_wait": ["done"], "parent_interrupt": ["done"],
+                "steer_parent": ["done"]}
         for name, ends in want.items():
             with self.subTest(name=name):
                 run = played(name)
@@ -379,28 +389,36 @@ class Lifecycle(unittest.TestCase):
         self.assertIn("SV0 synthetic child failure", result[0]["data"]["text"])
         self.assertEqual(result[0]["data"]["status"], "failed")
 
-    def test_after_the_owners_stop_the_next_send_ends_the_session_and_its_children(self):
-        """`parent_interrupt`: the parent's turn ends interrupted while its
-        child runs on. Codex's accounting for that turn is incomplete, so
-        the next send closes the session (unchanged, codex.py) — the
-        app-server, and the child, with it. The provider never says it
-        finished; the daemon ends it with the session (`Routes`)."""
+    def test_after_the_owners_stop_the_child_runs_on_into_the_next_send(self):
+        """`parent_interrupt`: the owner's Stop interrupts the orchestrator's
+        turn while its child runs on. Since #200 the session survives it (an
+        interrupted turn closes its accounting), so the next send works, and
+        the child's later `turn/completed` lands as `done` in its own record —
+        never the parent's text, tools or turn. The Stop does not stop Codex
+        children (SV-4 adds a per-child Stop)."""
         run = played("parent_interrupt")
         child = sid(next(iter(children("parent_interrupt"))))
         self.assertEqual(run.turns[0][-1].data, {"stop": "interrupted"})
-        self.assertEqual([d["status"] for d in run.life(child)], ["running", "running"])
-        self.assertEqual([e.data.get("fatal") for e in run.turns[1]], [True])
-        self.assertNotIn("SV0 child", json.dumps([e.data for t in run.turns for e in t]))
+        first = [e.data for e in run.turns[0] if e.kind == K.SUBAGENT and e.data["sid"] == child]
+        self.assertEqual({d["status"] for d in first}, {"running"})
+        self.assertEqual([e.data for t in run.turns for e in t if e.kind == K.ERROR and e.data.get("fatal")], [])
+        self.assertEqual(run.turns[1][-1].data, {"stop": "end"})
+        second = [e.data for e in run.turns[1] if e.kind == K.SUBAGENT and e.data["sid"] == child]
+        self.assertEqual([d["status"] for d in second if d["op"] == "finished"], ["done"])
+        self.assertIn({"kind": "text", "data": {"text": "SV0 child child1: finished."}}, run.inner(child))
+        self.assertNotIn("SV0 child", run.parent_side())
+        self.assertEqual(run.live, set())
 
     def test_children_outlive_the_parents_turn(self):
-        for name in ("no_wait", "steer_parent"):
+        for name in ("no_wait", "parent_interrupt", "steer_parent"):
             with self.subTest(name=name):
                 run = played(name)
                 child = sid(next(iter(children(name))))
                 first = [e.data for e in run.turns[0] if e.kind == K.SUBAGENT and e.data["sid"] == child]
                 self.assertEqual([d["status"] for d in first if d["op"] == "finished"], [])
                 self.assertEqual(first[0]["status"], "running")
-                self.assertEqual(run.turns[0][-1].data, {"stop": "end"})
+                self.assertEqual(run.turns[0][-1].data,
+                                 {"stop": "interrupted" if name == "parent_interrupt" else "end"})
                 second = [e.data for e in run.turns[1] if e.kind == K.SUBAGENT and e.data["sid"] == child]
                 self.assertEqual([d["status"] for d in second if d["op"] == "finished"], ["done"])
                 self.assertIn({"kind": "text", "data": {"text": "SV0 child child1: finished."}},
@@ -659,6 +677,7 @@ class Daemon(Daemonised):
         # Replayed before any daemon runs: the replay patches config paths.
         for name in SCENARIOS:
             played(name)
+        fatal()
 
     def setUp(self):
         super().setUp()
@@ -826,8 +845,11 @@ class Routes(Daemon):
         self.assertEqual((row["status"], row["stop_reason"]), ("stopped", S.GONE))
 
     def test_a_fatal_send_ends_the_children_with_the_session(self):
-        self.play("parent_interrupt")
-        child = sid(next(iter(children("parent_interrupt"))))
+        run = fatal()
+        self.assertTrue(run.turns[0][-1].data.get("fatal"), run.turns[0][-1].data)
+        self.assertIn("without token usage", run.turns[0][-1].data["message"])
+        self.play("x", turns=run.turns)
+        child = sid(next(iter(children("no_wait"))))
         import time
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
