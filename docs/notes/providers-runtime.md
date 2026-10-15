@@ -383,26 +383,33 @@ Shipped ahead of the sub-agent view, from SV-2's non-fatal-request piece
 reads the wire (`_note_child`, before the early queue and the thread/turn
 filters): a `subAgentActivity` **`item/started`** of kind `started`, on the
 session's thread or a known child's (a grandchild is announced on its
-parent's), registers `agentThreadId` with its cleaned `agentPath` label for
-the session's life — children outlive the turn that spawned them. Nothing
-else registers one: not `item/completed`, `thread/started` or
-`collabAgentToolCall`. Past `CHILD_LIMIT` (256) a child stays unknown.
+parent's), registers `agentThreadId` with a label for the session's life —
+children outlive the turn that spawned them. The label is the model-chosen
+`agentPath` reduced to `[A-Za-z0-9_./-]` (anything else becomes `_`) and
+capped at 40, shown as `‹label›`: it cannot pose as the headline's own
+` · ` parts, and the child part of the headline is never cut. Nothing else
+registers one: not `item/completed`, `thread/started` or
+`collabAgentToolCall`. At `CHILD_LIMIT` (256) the oldest child whose turn
+has completed is forgotten (with its items) to make room. A child with a turn
+running is never dropped, so with none idle the newcomer stays unknown.
 
 A known child's server request never ends the orchestrator's turn, and its
 `turnId` never becomes the session's:
 
 - **command/file approval: the same `permit` gate, always as a widening.**
-  The headline leads with "Codex sub-agent <path> (not the orchestrator)
-  requests execution beyond its ordinary sandbox"; the owner decides on the
+  The headline leads with "Codex sub-agent ‹label› (not the orchestrator)
+  asks to run beyond its sandbox"; the owner decides on the
   usual card, Always is never offered, and deny-all, strict, a timeout or a
   callback without the widening keyword declines. This holds for tasks too
   (their own plain approvals keep `auto_review`'s fallback; a child's
   don't). Chosen over a decline-only fix because the identity needed is one
   map, and the plan's recommended answer to Q2 is this card. The approval is
-  judged on that child's own command/fileChange item (`child_items`,
-  bounded at 512): a file approval names no paths, so with no item it is
-  declined unasked, never asked blind. `APPROVAL_REQUESTED` carries
-  `subagent`.
+  judged on that child's own in-progress command/fileChange item
+  (`child_items`: id, type, command, cwd and changes only; dropped on
+  `item/completed`; bounded at 512, oldest out). A file approval names no
+  paths, so one whose item is unseen, belongs to another thread, cannot be
+  read or writes nothing is declined unasked, never asked blind.
+  `APPROVAL_REQUESTED` carries `subagent`.
 - **MCP elicitation:** declined, with the non-fatal `MCP_DECLINED` notice.
 - **`currentTime/read`:** answered, as for the session (a clock read).
 - **a question (`requestUserInput`):** refused with an error and a notice;
@@ -412,10 +419,18 @@ A known child's server request never ends the orchestrator's turn, and its
   notice. A child request naming no `turnId` is refused, not fatal.
 
 A request from any other thread is still a fatal identity mismatch.
-Child notifications are still skipped. Known limit, unchanged in kind: while
-the owner decides, the turn loop does not read, so parent and sibling
-traffic waits in the 4096-message RPC queue, as for the session's own
-approvals. Checks: `tests/v2/codex_provider_check.py` replays the SV-0
-recordings (`fixture_turn`, peer mode `replay`), eight tests; six fail on
-`main` with the identity mismatch, and the two that pin unchanged behavior
-(unknown thread, the session's own request) were checked with mutants.
+Child notifications are still skipped.
+
+**Known limit (MED-2 of the #195 review): a long wait on a child's card can
+close the session.** While the owner decides on any card, the turn loop does
+not read the transport. A child's card is the likelier case, because the
+orchestrator and sibling children keep running while it waits. Their traffic
+piles up in the RPC queue (`CODEX_RPC_QUEUE_LIMIT`, 4096 messages). On
+overflow the transport is marked failed, the approval is declined
+whatever the owner chose, and the session closes with a fatal error. That
+fails safe: nothing is approved. But the turn is lost. SV-6's between-turn reader/drain owns the
+real fix. Checks: `tests/v2/codex_provider_check.py` replays the SV-0
+recordings (`fixture_turn`, peer mode `replay`), twelve tests; ten fail on
+`main` with the identity mismatch. The two that pin unchanged behavior
+(unknown thread, the session's own request) pass on `main` as they should,
+so they were proven with mutants instead.

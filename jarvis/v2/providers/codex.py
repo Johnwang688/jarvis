@@ -132,14 +132,30 @@ _MCP_APPROVAL_MARKS = ("mcp_tool_call_approval", "codex_approval_kind")
 # a clock read is answered; a question is refused; anything else is refused
 # as for the session. A thread that is neither this session's nor a known
 # child stays a fatal identity mismatch.
-CHILD_LIMIT = 256           # past this, a new child is not registered (fails closed)
-CHILD_ITEM_LIMIT = 512      # the children's command/file items kept for their approvals
-CHILD_LABEL_CAP = 80
-CHILD_UNNAMED = "(unnamed)"
+# Past CHILD_LIMIT the oldest child whose turn has completed is forgotten to
+# make room; with none, a new child is not registered (it fails closed).
+CHILD_LIMIT = 256
+CHILD_ITEM_LIMIT = 512      # the children's in-progress command/file items
+# The label is the model-chosen `agentPath`, shown on an approval card: only
+# these characters survive (anything else becomes "_"), so it cannot mimic
+# the headline's own " · " parts, and it is capped so the child part of the
+# headline (PART_CAP) is never cut.
+CHILD_LABEL_CAP = 40
+_CHILD_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_./-]+")
+CHILD_UNNAMED = "unnamed"
+
+
+def _child_label(path) -> str:
+    if not isinstance(path, str):
+        return CHILD_UNNAMED
+    label = _CHILD_LABEL_UNSAFE.sub("_", path).strip("_")
+    if len(label) > CHILD_LABEL_CAP:
+        label = label[:CHILD_LABEL_CAP - 1] + "…"
+    return label or CHILD_UNNAMED
 
 
 def _from_child(child: str | None) -> str:
-    return f" (from Codex sub-agent {child})" if child else ""
+    return f" (from Codex sub-agent ‹{child}›)" if child else ""
 
 
 def _mcp_approval(params, depth: int = 0) -> bool:
@@ -408,12 +424,14 @@ class _Session:
     steers: dict = field(default_factory=dict)
     stale_steers: deque = field(default_factory=lambda: deque(maxlen=_STALE_STEERS))
     steer_unsupported: bool = False
-    # Sub-agents (SV-2a): child threadId -> its cleaned label (`agentPath`),
-    # for the session's life (children outlive the turn that spawned them);
-    # and their latest command/file items by item id -> (threadId, item), so
-    # a child's approval is judged on what its item really runs or writes.
-    # Written only by the turn loop that reads the transport.
+    # Sub-agents (SV-2a): child threadId -> its label (`agentPath`), oldest
+    # first, for the session's life (children outlive the turn that spawned
+    # them); which of them have no turn running (CHILD_LIMIT evicts those);
+    # and their in-progress command/file items by item id -> (threadId,
+    # item), so a child's approval is judged on what its item really runs or
+    # writes. Written only by the turn loop that reads the transport.
     children: dict[str, str] = field(default_factory=dict)
+    idle_children: set[str] = field(default_factory=set)
     child_items: dict[str, tuple[str, dict]] = field(default_factory=dict)
 
 
@@ -1269,6 +1287,13 @@ class CodexProvider:
         if not isinstance(p, dict) or not isinstance(p.get("threadId"), str):
             return
         tid = p["threadId"]
+        if method in ("turn/started", "turn/completed"):
+            if tid in s.children:
+                if method == "turn/started":
+                    s.idle_children.discard(tid)
+                else:
+                    s.idle_children.add(tid)
+            return
         if method == "item/fileChange/patchUpdated":
             item = {"id": p.get("itemId"), "type": "fileChange", "changes": p.get("changes", [])}
         elif method in ("item/started", "item/completed") and isinstance(p.get("item"), dict):
@@ -1280,16 +1305,29 @@ class CodexProvider:
             if (method == "item/started" and item.get("kind") == "started"
                     and (tid == s.thread_id or tid in s.children)
                     and isinstance(agent, str) and agent and agent != s.thread_id
-                    and agent not in s.children and len(s.children) < CHILD_LIMIT):
-                path = item.get("agentPath")
-                label = clean_line(path, CHILD_LABEL_CAP) if isinstance(path, str) else ""
-                s.children[agent] = label.strip() or CHILD_UNNAMED
+                    and agent not in s.children):
+                if len(s.children) >= CHILD_LIMIT:
+                    # Forget the oldest child with no turn running; a busy
+                    # one is never dropped, so with none the newcomer stays
+                    # unknown and its requests fail closed.
+                    idle = next((c for c in s.children if c in s.idle_children), None)
+                    if idle is None:
+                        return
+                    del s.children[idle]
+                    s.idle_children.discard(idle)
+                    for iid in [i for i, (owner, _) in s.child_items.items() if owner == idle]:
+                        del s.child_items[iid]
+                s.children[agent] = _child_label(item.get("agentPath"))
             return
         if (tid != s.thread_id and tid in s.children
                 and item.get("type") in ("commandExecution", "fileChange")
                 and isinstance(item.get("id"), str) and item["id"]):
             s.child_items.pop(item["id"], None)
-            s.child_items[item["id"]] = (tid, item)
+            if method == "item/completed":
+                return      # no approval follows a finished item
+            # Only what an approval is judged on is kept.
+            s.child_items[item["id"]] = (tid, {k: item[k] for k in ("id", "type", "command", "cwd", "changes")
+                                               if k in item})
             while len(s.child_items) > CHILD_ITEM_LIMIT:
                 s.child_items.pop(next(iter(s.child_items)))
 
@@ -1344,9 +1382,11 @@ class CodexProvider:
                 changes = item.get("changes", [])
                 if (item.get("type") != ("commandExecution" if shell else "fileChange")
                         or not isinstance(changes, list)
+                        or (not shell and not changes)
                         or not all(isinstance(c, dict) and isinstance(c.get("path"), str) for c in changes)):
-                    # A shape `_tool` cannot read would end the turn; a
-                    # child's is declined unasked instead.
+                    # A shape `_tool` cannot read would end the turn, and a
+                    # file approval naming no file has nothing for layer 1
+                    # to judge: a child's is declined unasked instead.
                     self._reply(s, request, {"decision": "decline"})
                     yield self._event(h, EventKind.ERROR, fatal=False,
                                       message=f"Codex approval request declined: its item cannot be read{note}")
@@ -1383,8 +1423,8 @@ class CodexProvider:
                 # Always, and declined with no human (deny-all, strict, a
                 # timeout). Never the AUTO fallback a task's own plain
                 # approvals keep.
-                parts.insert(0, f"Codex sub-agent {child} (not the orchestrator) requests "
-                                "execution beyond its ordinary sandbox; owner approval required")
+                parts.insert(0, f"Codex sub-agent ‹{child}› (not the orchestrator) "
+                                "asks to run beyond its sandbox")
             elif codex_config.approvals_reviewer(s.brief) == "user":
                 # With on-request/user, this callback may authorize a sandbox
                 # escape even without an explicit permissions overlay. Never

@@ -175,7 +175,7 @@ def peer(script_path, log_path, thread_name):
                 # Codex 0.161.0 sent, children's included, with the parent's
                 # ids and work folder as placeholders. A server request waits
                 # for its reply, as Codex does.
-                for out in script["replay"]:
+                for out in (script["replays"][count - 1] if "replays" in script else script["replay"]):
                     out = json.loads(json.dumps(out).replace("$THREAD", native).replace("$TURN", turn)
                                      .replace("$CWD", os.getcwd()))
                     if out.get("id") == "$START":
@@ -1537,7 +1537,8 @@ class Checks(unittest.TestCase):
                         # with no Always — even for a task's auto_review.
                         shown = asker.seen[-1]
                         self.assertTrue(shown.headline.startswith(
-                            f"SANDBOX WIDENING: Codex sub-agent {self.ASKER} (not the orchestrator)"),
+                            "SANDBOX WIDENING: Codex sub-agent ‹/root/sv0_asker› (not the orchestrator) "
+                            "asks to run beyond its sandbox"),
                             shown.headline)
                         self.assertFalse(shown.allowlistable)
         # A callback that would allow anything ordinary is not a gate for a
@@ -1569,7 +1570,7 @@ class Checks(unittest.TestCase):
         self.assert_parent_went_on(h, events)
         self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
         self.assertEqual(asker.seen, [])
-        self.assertIn(f"its item was not seen (from Codex sub-agent {self.ASKER})",
+        self.assertIn("its item was not seen (from Codex sub-agent ‹/root/sv0_asker›)",
                       [e.data["message"] for e in events if e.kind == K.ERROR][0])
 
         def env_write(msgs):
@@ -1604,6 +1605,7 @@ class Checks(unittest.TestCase):
                 return msgs
             return edit
         for label, edit in (("a command approval naming a file item", unreadable([])),
+                            ("a file approval whose item writes nothing", unreadable([], "item/fileChange/requestApproval")),
                             ("changes not a list", unreadable("x", "item/fileChange/requestApproval")),
                             ("a change with no path", unreadable([{"diff": "+x"}], "item/fileChange/requestApproval"))):
             with self.subTest(case=label):
@@ -1655,7 +1657,7 @@ class Checks(unittest.TestCase):
                 else:
                     self.assertEqual(len(errors), 1, errors)
                     self.assertIn(notice, errors[0])
-                    self.assertIn(f"(from Codex sub-agent {self.ASKER})", errors[0])
+                    self.assertIn("(from Codex sub-agent ‹/root/sv0_asker›)", errors[0])
 
     def test_unknown_thread_request_is_still_fatal(self):
         def retarget(method=None, drop_turn=False):
@@ -1743,19 +1745,158 @@ class Checks(unittest.TestCase):
         self.assertIn("error", self.answer_to(h))
         self.assertTrue(events[-1].data.get("fatal"))
 
-    def test_child_label_is_one_clean_capped_line(self):
-        asker = RecordingAsker(Decision.DENY)
+    def test_child_label_is_restricted_and_never_cut_from_the_headline(self):
+        """The label is the model's `agentPath`: only [A-Za-z0-9_./-] survive,
+        so it cannot pose as headline parts, and however long it is the
+        headline still says whose request it is."""
+        cases = {
+            # name -> (agentPath, label shown)
+            "mimics headline parts": ("/root/a · network off · read-only git status",
+                                      "/root/a_network_off_read-only_git_status"),
+            "control and bidi": ("/root/x`\n‮APPROVED", "/root/x_APPROVED"),
+            "eighty characters": ("/root/" + "y" * 74, "/root/" + "y" * 33 + "…"),
+            "nothing usable": ("···", "unnamed"),
+        }
+        for label, (path, shown) in cases.items():
+            with self.subTest(case=label):
+                asker = RecordingAsker(Decision.DENY)
 
-        def odd_name(msgs):
-            item = msgs[self.spawn_at(msgs, self.ASKER)]["params"]["item"]
-            item["agentPath"] = "/root/x`\n‮APPROVED " + "y" * 200
-            return msgs
-        h, events = self.replay("approval", self.real_permit(asker), edit=odd_name)
-        self.assert_parent_went_on(h, events)
-        label = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"]
-        self.assertTrue(label.startswith("/root/x APPROVED"), label)
-        self.assertLessEqual(len(label), codex.CHILD_LABEL_CAP)
-        self.assertNotIn("\n", asker.seen[-1].headline)
+                def rename(msgs):
+                    msgs[self.spawn_at(msgs, self.ASKER)]["params"]["item"]["agentPath"] = path
+                    return msgs
+                h, events = self.replay("approval", self.real_permit(asker), edit=rename)
+                self.assert_parent_went_on(h, events)
+                self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"], shown)
+                headline = asker.seen[-1].headline
+                self.assertIn(f"Codex sub-agent ‹{shown}› (not the orchestrator) asks to run beyond its sandbox",
+                              headline)
+                self.assertNotIn("·", headline.split("›")[0])
+
+    def test_child_approval_never_borrows_another_threads_item(self):
+        """A child's approval is judged only on an item that child started:
+        never a sibling's, never the session's."""
+        sibling = "01a140cb-0000-7000-8000-000000sibling"
+
+        def naming(owner):
+            def edit(msgs):
+                i = self.request_at(msgs)
+                spawn = msgs[self.spawn_at(msgs, self.ASKER)]
+                borrowed = {"type": "commandExecution", "id": "borrowed", "command": "echo harmless",
+                            "cwd": "$CWD", "status": "inProgress"}
+                if owner == "sibling":
+                    announce = json.loads(json.dumps(spawn))
+                    announce["params"]["item"].update(id="call_spawn_sibling", agentThreadId=sibling,
+                                                      agentPath="/root/sibling")
+                    msgs.insert(i, announce)
+                    i += 1
+                tid = sibling if owner == "sibling" else "$THREAD"
+                msgs.insert(i, {"method": "item/started", "params": {
+                    "item": borrowed, "threadId": tid, "turnId": "sibling-turn" if owner == "sibling" else "$TURN"}})
+                msgs[i + 1]["params"]["itemId"] = "borrowed"
+                msgs[i + 1]["params"]["command"] = "echo harmless"
+                return msgs
+            return edit
+        for owner in ("sibling", "session"):
+            with self.subTest(owner=owner):
+                asker = RecordingAsker(Decision.ALLOW)
+                h, events = self.replay("approval_accept", self.real_permit(asker), edit=naming(owner))
+                self.assert_parent_went_on(h, events)
+                self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [])
+                self.assertIn("its item was not seen", [e.data["message"] for e in events if e.kind == K.ERROR][0])
+
+    def test_child_items_are_bounded_and_dropped_when_finished(self):
+        def extra_items(n, *, complete_own=False):
+            def edit(msgs):
+                i = self.request_at(msgs)
+                req = msgs[i]["params"]
+                own = next(m for m in msgs if m.get("method") == "item/started"
+                           and m["params"]["item"].get("id") == req["itemId"])
+                added = []
+                for k in range(n):
+                    other = json.loads(json.dumps(own))
+                    other["params"]["item"]["id"] = f"later-{k}"
+                    added.append(other)
+                if complete_own:
+                    done = json.loads(json.dumps(own))
+                    done["method"] = "item/completed"
+                    added.append(done)
+                msgs[i:i] = added
+                return msgs
+            return edit
+        for label, edit, limit in (("pushed out past CHILD_ITEM_LIMIT", extra_items(2), 2),
+                                   ("its item completed", extra_items(0, complete_own=True), 512)):
+            with self.subTest(case=label), patch.object(codex, "CHILD_ITEM_LIMIT", limit):
+                asker = RecordingAsker(Decision.ALLOW)
+                h, events = self.replay("approval_accept", self.real_permit(asker), edit=edit)
+                self.assert_parent_went_on(h, events)
+                self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [])
+                self.assertLessEqual(len(h.native.child_items), limit)
+        # Within the limit, the item stays and the owner is asked.
+        with patch.object(codex, "CHILD_ITEM_LIMIT", 2):
+            asker = RecordingAsker(Decision.ALLOW)
+            h, events = self.replay("approval_accept", self.real_permit(asker), edit=extra_items(1))
+            self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
+            # Only what an approval is judged on is kept.
+            self.assertTrue(all(set(item) <= {"id", "type", "command", "cwd", "changes"}
+                                for _, item in h.native.child_items.values()))
+
+    def test_child_limit_forgets_the_oldest_finished_child_never_a_busy_one(self):
+        old = "01a140cb-0000-7000-8000-0000000000old"
+
+        def older_child(finished):
+            def edit(msgs):
+                at = self.spawn_at(msgs, self.ASKER)
+                announce = json.loads(json.dumps(msgs[at]))
+                announce["params"]["item"].update(id="call_spawn_old", agentThreadId=old, agentPath="/root/old")
+                added = [announce, {"method": "turn/started", "params": {"threadId": old, "turn": {"id": "old-turn"}}}]
+                if finished:
+                    added.append({"method": "turn/completed", "params": {
+                        "threadId": old, "turn": {"id": "old-turn", "status": "completed"}}})
+                msgs[at:at] = added
+                return msgs
+            return edit
+        with patch.object(codex, "CHILD_LIMIT", 1):
+            from jarvis.v2.permissions import deny_all
+            h, events = self.replay("approval", self.real_permit(deny_all("nobody")), edit=older_child(True))
+            self.assert_parent_went_on(h, events)
+            self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+            self.assertEqual(list(h.native.children), ["01a140cb-981d-7112-8ad9-7f893a0cde4b"])
+            # A child still running is never forgotten: the newcomer stays unknown.
+            h, events = self.replay("approval", self.real_permit(deny_all("nobody")), edit=older_child(False))
+            self.assertIn("error", self.answer_to(h))
+            self.assertTrue(events[-1].data.get("fatal"))
+
+    def test_child_request_in_a_later_turn_is_still_known(self):
+        """Children outlive the turn that spawned them (SV-0): a child
+        announced in turn 1 may ask in turn 2."""
+        from jarvis.v2.permissions import deny_all
+        first = fixture_turn("approval")
+        i = self.request_at(first)
+        request, item = first[i], first[i - 1]
+        self.assertEqual(item["params"]["item"]["id"], request["params"]["itemId"])
+        child = request["params"]["threadId"]
+        # Turn 1: everything but the child's item and request.
+        turn1 = [m for k, m in enumerate(first) if k not in (i - 1, i)]
+        usage = next(m for m in reversed(first) if m.get("method") == "thread/tokenUsage/updated"
+                     and m["params"]["threadId"] == "$THREAD")
+        more = json.loads(json.dumps(usage))
+        more["params"]["tokenUsage"]["total"].update(inputTokens=500, outputTokens=50, totalTokens=550)
+        turn2 = [{**first[0]}, item, request, more,
+                 {"method": "turn/completed", "params": {"threadId": "$THREAD",
+                                                        "turn": {"id": "$TURN", "status": "completed"}}}]
+        self.brain.script["replays"] = [turn1, turn2]
+        h = self.start("replay", self.real_permit(deny_all("nobody")),
+                       thread=replace(self.thread, id="later"), brief=self.chat())
+        events1 = self.send(h)
+        self.assertEqual(events1[-1].data, {"stop": "end"})
+        self.assertIn(child, h.native.children)
+        events2 = self.send(h)
+        self.assertEqual(events2[-1].data, {"stop": "end"})
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+        self.assertEqual(next(e.data for e in events2 if e.kind == K.APPROVAL_REQUESTED)["subagent"],
+                         "/root/sv0_asker")
 
     def test_a_request_is_never_answered_twice(self):
         """A failure after the reply went out (the peer died mid-approval)
