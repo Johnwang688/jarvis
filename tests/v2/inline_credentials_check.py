@@ -666,6 +666,16 @@ class RawLogs(unittest.TestCase):
         rows = transcript_tools(log, None, None)
         self.assertEqual(next(iter(rows.values()))["label"], logged[0]["data"]["label"])
 
+    def test_resolution_record_shows_the_card(self):
+        from jarvis.v2.approvals import ApprovalRequest
+        from jarvis.v2.provider import Decision
+        request = ApprovalRequest(tool="Bash", args={"command": "MY_TOKEN=plainvalue1 ./x"},
+                                  command="MY_TOKEN=plainvalue1 ./x", thread_id="t", req_id="r", code="abcd")
+        self.daemon._approval_resolved(request, Decision.DENY, "deny")
+        resolved = [r for r in self.events_all() if r["kind"] == "approval_resolved"][-1]
+        self.assertEqual(resolved["data"]["command"], f"MY_TOKEN={R} ./x")
+        self.assertEqual(request.command, "MY_TOKEN=plainvalue1 ./x")
+
     def test_browser_actions_keep_their_empty_args(self):
         thread = self.thread()
         session = self.daemon._sessions[thread.id]
