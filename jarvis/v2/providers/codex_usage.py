@@ -25,6 +25,10 @@ class Accounting:
         self.total = dict.fromkeys(KEYS, 0)
         self.reported = dict(self.total)
         self.turns = 0
+        # Turns Codex ended `interrupted` or `failed`. Their reported usage is
+        # counted like any other, but a request cut off mid-stream may never
+        # have been reported: these totals can be low by that much, unknown.
+        self.partial_turns = 0
         self.complete = True
         if resume:
             try:
@@ -36,6 +40,9 @@ class Accounting:
                 self.turns = saved["turns"]
                 if type(self.turns) is not int or self.turns < 0:
                     raise ValueError("turn count")
+                self.partial_turns = saved.get("partial_turns", 0)
+                if type(self.partial_turns) is not int or not 0 <= self.partial_turns <= self.turns:
+                    raise ValueError("partial turn count")
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 raise RpcError("Codex resume accounting missing, mismatched or incomplete") from exc
         self.baseline = None
@@ -44,7 +51,8 @@ class Accounting:
 
     def save(self):
         atomically_write(self.path, json.dumps(dict(thread_id=self.thread_id, total=self.total,
-                         reported=self.reported, turns=self.turns, complete=self.complete)) + "\n")
+                         reported=self.reported, turns=self.turns,
+                         partial_turns=self.partial_turns, complete=self.complete)) + "\n")
 
     def update(self, payload):
         raw, last = counters(payload["total"]), counters(payload["last"])

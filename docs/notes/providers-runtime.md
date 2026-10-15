@@ -755,3 +755,68 @@ children live; and for the label: none, a widening (stricter), an outright
 allow (looser), ignored by the card, uncleaned in permit or provider, forced
 on a permit without the keyword, riding in `args`, taken from the task's
 current activity.
+
+## A Stop does not end a Codex chat (2026-10-15)
+
+Until this fix, a Codex turn that ended `interrupted` or `failed` left
+`usage.json` at `complete: false` (WP4: "Failed/interrupted accounting is
+retained but cannot be reused/resumed as complete; start a fresh thread").
+Nothing started a fresh thread. Through the real daemon and `CodexProvider`
+over pipes, the owner's Stop followed by another message on `main` gave:
+
+1. The Stop: `turn_finished` `interrupted`.
+2. The next message: a fatal error ("Codex previous turn accounting
+   incomplete; start a fresh thread"), so the turn ended `error`. The daemon
+   dropped the session.
+3. Every later message, and every resume after a daemon restart: HTTP 409
+   `request failed (RpcError)`. The resume read `complete: false` and refused
+   ("Codex resume accounting missing, mismatched or incomplete").
+
+The chat stayed dead and its context could not be reached. A capacity
+failure (`failed`) did the same, so its cooldown never applied to that
+thread. The same session failed on the accounting check before reaching the
+cooldown check.
+
+`turn/completed` is Codex's last word on a turn, and its token counters are
+cumulative. In the SV-0 recording `parent_interrupt` (0.161.0), the stopped
+turn's last `thread/tokenUsage/updated` arrives before the `turn/interrupt`
+reply and `turn/completed` `interrupted` (seq 27–31). The refusal waited for
+numbers that never come: a later cumulative total adds anything Codex
+counted, and nothing can add what it never counted. So `interrupted` and
+`failed` now close the accounting, as `completed` does. Such a turn
+increments `partial_turns` in `usage.json`. A sampling request cut off
+mid-stream may never have been reported by Codex: whether it was is
+**unverified** (the SV-0 recordings' fake model answered before the
+interrupt), so these totals may be low by an unknown amount. Nothing is
+estimated or added for it. Older files without the field load as 0.
+
+What still fails closed, as before:
+
+- a turn that ended with no `turn/completed` (abandoned stream, transport
+  loss, interrupt deadline) leaves `complete: false`, and that thread does
+  not resume;
+- a `turn/completed` whose status is not `completed`, `interrupted` or
+  `failed` does the same;
+- a `completed` turn with no usage is fatal.
+
+A thread already saved at `complete: false` before this fix cannot be told
+apart from a lost transport, so it stays unresumable.
+
+Checks:
+
+- `tests/v2/codex_provider_check.py`:
+  - `test_a_stopped_turn_closes_its_accounting` uses the peer modes
+    `stop_once` (usage, then the reply, then `interrupted`, as recorded) and
+    `stop_once_quiet` (no usage). It checks the next send on the same
+    session, the totals, `partial_turns` and a resume.
+  - `test_a_failed_turn_leaves_the_session_to_its_cooldown`.
+  - `test_an_unfinished_turn_cannot_be_certified_by_later_success` covers an
+    abandoned turn and the `odd_status` peer mode.
+  - `test_a_saved_partial_turn_count_is_checked`.
+- `tests/v2/hud_backend_check.py`:
+  `test_a_stopped_codex_chat_takes_the_next_message` runs Stop, then a send,
+  then a close and a resume through the daemon.
+
+The first, second and daemon checks fail on `main`. Four mutants are killed:
+`main`'s rule, closing the accounting on any status, not counting partial
+turns, and closing it only on `interrupted`.
