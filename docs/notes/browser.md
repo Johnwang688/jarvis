@@ -1566,3 +1566,22 @@ The HUD divides pixel and line wheel deltas by the frame's placement scale
 screen as before; a page-mode notch is already the fitted view's height.
 Receipts: `tests/v2/browser_fit_check.py` (real Chrome), `remote.test.ts`
 and `hud_v2_remote_check` ("Fit:").
+
+## Superseding an auth prompt stops before it cancels (QA-LOAD, 2026-10-14)
+
+`OwnerAuth.cancel_navigation` used to answer a pending challenge with
+`CancelAuth` and only then send `Page.stopLoading`. `CancelAuth` lets Chrome
+go on to commit the 401 it was paused on; when the renderer committed it late
+(any busy machine), it interrupted the owner's newer navigation, which came
+back `{"loaded": false, "error": "navigation failed"}` ("Navigation to
+about:blank is interrupted by another navigation to …/superseded"). The lead's
+sweeps failed `test_new_navigation_cancels_pending_without_late_resurrection`
+five times on that line. The cancel now stops the navigation while it is still
+paused on its challenge, then finishes the prompt if the stop has not already
+settled it (reason `changed`, as before; no credential is sent either way).
+`browser_auth_matrix_real_check`'s
+`test_superseding_a_prompt_stops_its_401_before_it_can_commit` stalls that
+test's own renderers (its temp profile's Chrome tree only) for 0.5 s across the
+cancel, which made the late commit happen every time: the old order failed 3 of
+3, the new one passes; the six auth suites pass, and the matrix 3 of 3 under
+48 burner scopes.

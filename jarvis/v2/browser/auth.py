@@ -546,7 +546,15 @@ class OwnerAuth:
         if nav is not None:
             nav.refused = True
         if session.prompt is not None:
-            await self._finish(session.prompt, "changed", cancel=True)
+            # Stop the navigation while it is still paused on its challenge.
+            # CancelAuth first let Chrome go on to commit the 401 it held, and
+            # a renderer slow to commit it (any busy machine) interrupted the
+            # newer navigation this cancel makes way for ("navigation failed").
+            if (nav is not None and nav.task is not None
+                    and nav.task is not asyncio.current_task() and not nav.task.done()):
+                await self._send(session, "Page.stopLoading", {})
+            if session.prompt is not None:          # (the stop may have settled it)
+                await self._finish(session.prompt, "changed", cancel=True)
         if nav is not None and nav.task is not asyncio.current_task():
             try:
                 if not nav.task.done():
