@@ -25,6 +25,32 @@ Reads: `CLAUDE.md`, `docs/notes/vex.md` (all sections),
 - **Simulator**: should it use the Browser pane or get its own tab? Recommend one.
   Reworking the simulator itself is out of scope.
 
+## 0.1 Owner decisions on this plan (2026-10-15)
+
+The owner approved the layout ("your redesign layout is good") and answered §13:
+
+1. **No Run button.** The owner starts programs from the robot. VX-UI-5's Run
+   is dropped and V-3 stands ("starting stays at the robot").
+2. **The Download button's text shrinks** to "Download to slot N"; the
+   "replaces whatever is in slot N" sentence moves to the hover help, the
+   screen-reader description and the slot popover.
+3. **Explicit Clean, Build, Rebuild and Download buttons all stay visible** in
+   the action bar (Rebuild is not hidden in ⋯). **Download cleans and rebuilds
+   first**, then downloads, as one chain shown step by step in the status line
+   and the Build/Download tabs; a failed clean or build stops the chain before
+   anything reaches the robot.
+4. **Simulator: the existing Browser (Direct tab beside the VEX pane), no VEX
+   tab.** The simulator inherits every Browser feature as the Browser grows; no
+   VEX-specific copy of those features.
+5. Brain tab connection: pending the owner's answer to the clarified question
+   (connect on an explicit click vs. whenever the tab is shown).
+6. **Stop cancels whatever VEX action is running** — pressing it during a
+   download stops the download (likewise a running clean or build). It is not
+   a "stop the program on the brain" control (no `vexcom --stop`).
+7. **Hover help never retires.** Every control keeps its hover explanation
+   permanently (for refreshers months later, and for a teammate using the PC);
+   the `?` mode stays too. The first-use counts in §2.6 / VX-UI-3 are dropped.
+
 ## 1. The problem: what the view shows today
 
 From top to bottom, `VexView.tsx` draws 22 visible things before any output.
@@ -626,7 +652,7 @@ it. `rules` tests are unchanged.
 | **VX-UI-3** First-use help | Tooltip component; counts in `localStorage`; `?` toggle; sentences of §2.6; `_help_checks` | no | review |
 | **VX-UI-4a** Brain tab | `TerminalView` placed in the VEX pane (`vex-<pane>` place); Connect/Disconnect; paused state; panel "shown elsewhere"; `_brain_checks` updated | no | review |
 | **VX-UI-4b** Brain startup + `--quiet` | Only if H4 shows the hang: a one-shot `ESC[1;1R` reply for `vex-brain`'s first exact query, input path untouched; optionally `--quiet` on `brain_argv` (vendor-source evidence, so the same acceptance as Run's flags) | **yes**, terminals + vex | H1/H4 hardware check; independent review (terminal boundary) |
-| **VX-UI-5** Run / Stop | Argv tables, routes, reservation, announcements, fake vexcom, HUD Run (explicit click + confirm) and Stop (trusted) | **yes** | **Q1 (V-3 revised)**, `vexcom --help` or source-review acceptance, H5–H7, boundary review on Opus |
+| ~~**VX-UI-5** Run / Stop~~ — dropped (owner, 2026-10-15: no Run button). Stop is VX-UI-1's cancel of a running Clean/Build/Download instead. |
 | **VX-UI-6** Docs | `docs/notes/vex.md` section, `docs/hud-api.md` routes, decisions file (V-3 amendment) | no | with 5 |
 
 VX-UI-1 to VX-UI-3 and 4a can land with fakes alone. Real-device behaviour
