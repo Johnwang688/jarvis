@@ -27,7 +27,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { vex } from "../state/vex";
 import { terminals } from "./Terminal";
 import {
-  SETUP_COMMAND, SLOTS, buildLine, chainCancellable, chainLine, defaultName, downloadLabel, errorTarget, errorWhere,
+  SETUP_COMMAND, SLOTS, buildLine, chainCancellable, chainLine, defaultName, downloadLabel, downloadProgress, errorTarget, errorWhere,
   isExplicitClick, nameRefusal, setupNote, type BuildError, type Detection,
 } from "../lib/vex";
 
@@ -151,7 +151,7 @@ function Body(props: {
   const run = vex.run(pid);
   return (
     <>
-      <Card d={d} />
+      <Card d={d} usbOff={blocked || !!setup || !!vex.chain} />
       {setup ? (
         <div className="vexsetup" data-testid="vex-setup" role="status">
           <div>{setup.headline}</div>
@@ -168,8 +168,8 @@ function Body(props: {
       ) : vex.statusError ? (
         <div className="pad err small" data-testid="vex-status-error">{vex.statusError}</div>
       ) : null}
-      <BuildSection d={d} pid={pid} blocked={blocked} configured={!setup} onOpenError={props.onOpenError} />
-      <DownloadSection key={pid} d={d} pid={pid} label={props.name} blocked={blocked} configured={!setup} />
+      <BuildAndDownload key={pid} d={d} pid={pid} label={props.name} blocked={blocked} configured={!setup}
+                        onOpenError={props.onOpenError} />
       <DeviceSection blocked={blocked} configured={!setup} />
       {run.note ? (
         <div className={"vexnote " + run.noteTone} data-testid="vex-note" role="status">{run.note}</div>
@@ -185,15 +185,20 @@ function Body(props: {
   );
 }
 
-function Card(props: { d: Detection }) {
+function Card(props: { d: Detection; usbOff: boolean }) {
   const { d } = props;
   return (
     <div className="vexcard" data-testid="vex-card">
-      <div className="vexname" data-testid="vex-name">{d.name}</div>
-      <div className="vexfacts muted small">
-        <span data-testid="vex-language">{d.language === "cpp" ? "C++" : "Python"}</span>
-        <span> · slot <span data-testid="vex-slot">{d.slot}</span></span>
-        {d.sdk_version ? <span> · SDK {d.sdk_version}</span> : null}
+      <div className="vexcardtop">
+        <div>
+          <div className="vexname" data-testid="vex-name">{d.name}</div>
+          <div className="vexfacts muted small">
+            <span data-testid="vex-language">{d.language === "cpp" ? "C++" : "Python"}</span>
+            <span> · slot <span data-testid="vex-slot">{d.slot}</span></span>
+            {d.sdk_version ? <span> · SDK {d.sdk_version}</span> : null}
+          </div>
+        </div>
+        {vex.status?.configured ? <UsbBadges off={props.usbOff} /> : null}
       </div>
       {d.language === "cpp" && !d.on_windows_drive ? (
         <div className="vexnote bad small" data-testid="vex-not-windows">
@@ -204,9 +209,68 @@ function Card(props: { d: Detection }) {
   );
 }
 
+/** Build and Download for one project. The slot and name live here so the
+ * Download button in the build row and the one under the pickers send the
+ * same thing; `key={pid}` starts them afresh for another project. */
+function BuildAndDownload(props: {
+  d: Detection; pid: string; label: string; blocked: boolean; configured: boolean;
+  onOpenError: (path: string, line: number, col: number) => void;
+}) {
+  const { d } = props;
+  const [slot, setSlot] = useState<number>(d.slot ?? 1);
+  const [name, setName] = useState<string>(() => defaultName(d.name));
+  // A project whose settings change its slot: the picker starts from the new one.
+  useEffect(() => setSlot(d.slot ?? 1), [d.slot]);
+  const send: DownloadTarget = { d, pid: props.pid, label: props.label, blocked: props.blocked,
+                                 configured: props.configured, slot, name };
+  return <>
+    <BuildSection d={d} pid={props.pid} blocked={props.blocked} configured={props.configured}
+                  onOpenError={props.onOpenError} send={send} />
+    <DownloadSection {...send} setSlot={setSlot} setName={setName} />
+  </>;
+}
+
+type DownloadTarget = { d: Detection; pid: string; label: string; blocked: boolean; configured: boolean;
+                        slot: number; name: string };
+
+/**
+ * The Download button, in the build row (`compact`) or under the pickers.
+ * Both are the same button: out of the Tab order, never focused by a press,
+ * and only the owner's own first primary click sends (plan §2.9, L3: a
+ * keystroke or a script never sends code to a robot).
+ */
+function DownloadButton(props: DownloadTarget & { compact?: boolean }) {
+  const { d, pid, slot, name } = props;
+  const run = vex.run(pid);
+  // One chain per window: no second download while one runs, for any project.
+  const other = vex.chain && vex.chain.projectId !== pid ? vex.chain : null;
+  const off = props.blocked || !props.configured || !d.builds || !!run.busy || !!nameRefusal(name) || !!vex.chain;
+  const why = other ? `A download is running for ${other.label || "another project"}`
+    : "Builds first if the program is older than its sources. Starting it stays on the brain or the controller.";
+  return (
+    <button
+      type="button"
+      className={props.compact ? "" : "vexdownload"}
+      data-testid={props.compact ? "vex-download-quick" : "vex-download-btn"}
+      tabIndex={-1}
+      onMouseDown={noPointerFocus}
+      disabled={off}
+      title={props.compact ? `${downloadLabel(slot)} as "${name}". ${why}` : why}
+      onClick={(e) => {
+        if (!isExplicitClick({ isTrusted: e.nativeEvent.isTrusted, detail: e.detail, button: e.button })) return;
+        if (props.blocked) return;
+        void vex.download(pid, slot, name, props.label);
+      }}
+    >
+      {run.busy === "download" ? "Downloading…" : props.compact ? `Download to slot ${slot}` : downloadLabel(slot)}
+    </button>
+  );
+}
+
 function BuildSection(props: {
   d: Detection; pid: string; blocked: boolean; configured: boolean;
   onOpenError: (path: string, line: number, col: number) => void;
+  send: DownloadTarget;
 }) {
   const { d, pid, blocked } = props;
   const run = vex.run(pid);
@@ -245,6 +309,7 @@ function BuildSection(props: {
         <button type="button" data-testid="vex-clean-btn" disabled={off} onClick={() => void vex.build(pid, "clean")}>
           {action === "clean" ? "Cleaning…" : "Clean"}
         </button>
+        <DownloadButton {...props.send} compact />
         <span className={"vexstate " + line.tone} data-testid="vex-build-state"
               role="status" data-state={run.startingBuild ? "starting" : run.build?.state ?? "none"}>
           {active ? <span className="vexspinner" aria-hidden="true" /> : null}{line.text}
@@ -323,11 +388,9 @@ function ErrorRow(props: { e: BuildError; i: number; blocked: boolean; onOpen: (
   );
 }
 
-function DownloadSection(props: { d: Detection; pid: string; label: string; blocked: boolean; configured: boolean }) {
-  const { d, pid, blocked } = props;
+function DownloadSection(props: DownloadTarget & { setSlot: (slot: number) => void; setName: (name: string) => void }) {
+  const { d, pid, blocked, slot, name, setSlot, setName } = props;
   const run = vex.run(pid);
-  const [slot, setSlot] = useState<number>(d.slot ?? 1);
-  const [name, setName] = useState<string>(() => defaultName(d.name));
   const [now, setNow] = useState(Date.now());
   const active = run.busy === "download";
   useEffect(() => {
@@ -338,8 +401,9 @@ function DownloadSection(props: { d: Detection; pid: string; label: string; bloc
   const started = run.downloadStarted;
   const end = active ? now : Date.parse(run.download?.ended ?? "");
   const elapsed = started !== null && Number.isFinite(end) ? `${Math.max(0, Math.floor((end - started) / 1000))}s` : "";
-  // A project whose settings change its slot: the picker starts from the new one.
-  useEffect(() => setSlot(d.slot ?? 1), [d.slot]);
+  // vexcom's own progress line, while it runs; full once it has succeeded.
+  const progress = run.download?.state === "succeeded" ? 100
+    : active ? downloadProgress(run.download?.output ?? "") : null;
   if (d.language !== "cpp") {
     return (
       <section className="vexsec" data-testid="vex-download">
@@ -349,9 +413,6 @@ function DownloadSection(props: { d: Detection; pid: string; label: string; bloc
     );
   }
   const refusal = nameRefusal(name);
-  // One chain per window: no second download while one runs, for any project.
-  const other = vex.chain && vex.chain.projectId !== pid ? vex.chain : null;
-  const off = blocked || !props.configured || !d.builds || !!run.busy || !!refusal || !!vex.chain;
   return (
     <section className="vexsec" data-testid="vex-download">
       <h4>Download</h4>
@@ -370,25 +431,7 @@ function DownloadSection(props: { d: Detection; pid: string; label: string; bloc
         </label>
       </div>
       {refusal ? <div className="err small" data-testid="vex-name-refusal">{refusal}</div> : null}
-      <button
-        type="button"
-        className="vexdownload"
-        data-testid="vex-download-btn"
-        // Out of the Tab order and never focused by a press: no key ever
-        // lands on it (plan §2.9: a keystroke never sends code to a robot).
-        tabIndex={-1}
-        onMouseDown={noPointerFocus}
-        disabled={off}
-        title={other ? `A download is running for ${other.label || "another project"}`
-          : "Builds first if the program is older than its sources. Starting it stays on the brain or the controller."}
-        onClick={(e) => {
-          if (!isExplicitClick({ isTrusted: e.nativeEvent.isTrusted, detail: e.detail, button: e.button })) return;
-          if (props.blocked) return;
-          void vex.download(pid, slot, name, props.label);
-        }}
-      >
-        {run.busy === "download" ? "Downloading…" : downloadLabel(slot)}
-      </button>
+      <DownloadButton {...props} />
       <div className="vexrow" role="status" data-testid="vex-download-state" aria-busy={active}>
         {active ? <><span className="vexspinner" aria-hidden="true" /><span>Download in progress…</span></> : null}
         {elapsed ? <span className="muted small" data-testid="vex-download-elapsed">{elapsed}</span> : null}
@@ -397,6 +440,15 @@ function DownloadSection(props: { d: Detection; pid: string; label: string; bloc
         {run.download && run.download.state === "running" && !active ? <button type="button" className="quiet"
           disabled={blocked} data-testid="vex-download-recheck" onClick={() => void vex.refreshDownload(pid)}>Check status</button> : null}
       </div>
+      {progress !== null ? (
+        <div className="vexprogress" data-testid="vex-download-progress" role="progressbar" aria-label="Download progress"
+             aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+          <span className="vexprogress-track">
+            <span className={"vexprogress-fill" + (progress === 100 && !active ? " ok" : "")} style={{ width: `${progress}%` }} />
+          </span>
+          <span className="vexprogress-pct">{progress}%</span>
+        </div>
+      ) : null}
       {run.downloadNote ? <div className="err small" role="alert" data-testid="vex-download-note">{run.downloadNote}</div> : null}
       {active && !run.download?.output ? <div className="muted small">Waiting for Download output…</div> : null}
       {run.download?.output ? <BuildOutput output={run.download.output} download /> : null}
@@ -451,19 +503,47 @@ function DeviceSection(props: { blocked: boolean; configured: boolean }) {
   );
 }
 
-function ConnectionStatus(props: {blocked: boolean}) {
+/** The USB reading as both indicators show it: the last confirmed values, and
+ * whether they are stale (paused, older than 12 s, not "ready", or erroring). */
+function useUsbReading(off: boolean) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const c = vex.connection;
-  const paused = props.blocked || document.visibilityState !== "visible" || vex.blocked || vex.crashed || !!vex.chain;
+  const paused = off || document.visibilityState !== "visible" || vex.blocked || vex.crashed || !!vex.chain;
   const age = now - Date.parse(c?.checked_at ?? "");
   const stale = paused || !Number.isFinite(age) || age > 12_000 || c?.state !== "ready" || !!vex.connectionError;
   const label = (value: boolean | null | undefined) => value == null ? "Unknown" : value ? "Connected" : "Disconnected";
+  // Green connected, red disconnected, plain unknown; a stale reading keeps its
+  // colour, dimmed, beside "(last confirmed)".
+  const tone = (value: boolean | null | undefined) =>
+    "vexusb " + (value == null ? "muted" : value ? "ok" : "bad") + (stale && value != null ? " stale" : "");
+  return { c, paused, stale, label, tone };
+}
+
+/** The same reading, small, in the project card: no scrolling to the device
+ * section to see whether the brain or controller is plugged in. */
+function UsbBadges(props: { off: boolean }) {
+  const { c, stale, label, tone } = useUsbReading(props.off);
+  const at = c?.checked_at ? ` · checked ${new Date(c.checked_at).toLocaleTimeString()}` : "";
+  const badge = (name: string, testid: string, value: boolean | null | undefined) => {
+    const text = `${name}: ${label(value)}${stale && value != null ? " (last confirmed)" : ""}`;
+    return <span className={tone(value) + " vexbadge"} data-testid={testid} title={`${text} (USB)${at}`} aria-label={text}>
+      <span className="vexdot" aria-hidden="true" />{name}
+    </span>;
+  };
+  return <div className="vexbadges" role="status" data-testid="vex-usb-badges">
+    {badge("Brain", "vex-badge-brain", c?.brain)}
+    {badge("Controller", "vex-badge-controller", c?.controller)}
+  </div>;
+}
+
+function ConnectionStatus(props: {blocked: boolean}) {
+  const { c, paused, stale, label, tone } = useUsbReading(props.blocked);
   return <div data-testid="vex-connection">
     <div className="small" data-testid="vex-tooling">Tooling: {vex.status?.configured ? "Configured" : "Not configured"}</div>
     <div className="vexrow" role="status">
-      <span data-testid="vex-usb-brain" className={!stale && c?.brain ? "ok" : "muted"}>USB Brain: {label(c?.brain)}{stale && c?.brain != null ? " (last confirmed)" : ""}</span>
-      <span data-testid="vex-usb-controller" className={!stale && c?.controller ? "ok" : "muted"}>USB Controller: {label(c?.controller)}{stale && c?.controller != null ? " (last confirmed)" : ""}</span>
+      <span data-testid="vex-usb-brain" className={tone(c?.brain)}>Brain: {label(c?.brain)}{stale && c?.brain != null ? " (last confirmed)" : ""}</span>
+      <span data-testid="vex-usb-controller" className={tone(c?.controller)}>Controller: {label(c?.controller)}{stale && c?.controller != null ? " (last confirmed)" : ""}</span>
       <button type="button" className="quiet" disabled={props.blocked} data-testid="vex-connection-refresh"
         onClick={() => void vex.refreshConnection()}>Refresh USB status</button>
     </div>
@@ -472,7 +552,7 @@ function ConnectionStatus(props: {blocked: boolean}) {
     <div className="muted small">USB presence only; radio link and extension health are not measured.</div>
     {c?.events.length ? <details><summary className="small">Connection log</summary>
       <ul className="small" data-testid="vex-connection-log">{c.events.map((e, i) => <li key={i}>
-        <time dateTime={e.at}>{new Date(e.at).toLocaleTimeString()}</time>{` USB ${e.device === "brain" ? "Brain" : "Controller"} ${e.connected ? "connected" : "disconnected"}`}
+        <time dateTime={e.at}>{new Date(e.at).toLocaleTimeString()}</time>{` ${e.device === "brain" ? "Brain" : "Controller"} ${e.connected ? "connected" : "disconnected"}`}
       </li>)}</ul></details> : null}
   </div>;
 }

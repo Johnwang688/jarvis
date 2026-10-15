@@ -8,6 +8,7 @@ import { SpeechController } from "./controller";
 import { WebAudioPlayer } from "./player";
 import type { Clock } from "./queue";
 import { SAY_LOCAL_ONLY } from "./policy";
+import { DuckLease } from "./duck";
 import { SpeakerGate, bindFocus, browserLocks } from "./speaker";
 import { ThreadVoices } from "./voices";
 
@@ -30,6 +31,36 @@ export function saveReadAloud(on: boolean, storage?: Pick<Storage, "setItem">): 
   }
 }
 
+const DUCK_KEY = "jarvis.duckBrowser";
+
+/** "Lower Browser sound while Jarvis speaks" (V15): a per-window convenience in localStorage, default on. */
+export function loadDuckBrowser(storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    return (storage ?? window.localStorage).getItem(DUCK_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function saveDuckBrowser(on: boolean, storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? window.localStorage).setItem(DUCK_KEY, on ? "on" : "off");
+  } catch {
+    /* a window with storage blocked still works, it just forgets */
+  }
+}
+
+/** 32 lowercase hex characters, the daemon's lease token for one window. */
+export function newWindowToken(): string {
+  const bytes = new Uint8Array(16);
+  try {
+    crypto.getRandomValues(bytes);
+  } catch {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 const realClock: Clock = {
   now: () => Date.now(),
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
@@ -42,6 +73,8 @@ export interface Speech {
   player: WebAudioPlayer;
   /** Each chat's voice and mute (V7), kept by the daemon. */
   voices: ThreadVoices;
+  /** Holds the daemon's short lease that lowers the Remote Browser's sound while speech is active (V15). */
+  duck: DuckLease;
   dispose(): void;
 }
 
@@ -63,8 +96,22 @@ export function createSpeech(): Speech {
   void voices.load();
   controller.setEnabled(loadReadAloud());
   const unbind = bindFocus(gate, window, () => document.hasFocus());
+  // This window's own lease token: another window's `off` cannot end it, nor this one's end theirs.
+  const lease = newWindowToken();
+  const duck = new DuckLease({ send: (on, keepalive) => api.speechDuck(on, lease, keepalive), clock: realClock }, loadDuckBrowser());
+  // The switch is one choice for every window: another window changing it applies here too.
+  const onStorage = (e: StorageEvent) => { if (e.key === DUCK_KEY || e.key === null) duck.setEnabled(loadDuckBrowser()); };
+  window.addEventListener("storage", onStorage);
+  const unduck = controller.subscribe(() => duck.setSpeaking(controller.view().active));
+  // A window that is going away ends its lease at once; the daemon's expiry covers a crash.
+  const onHide = () => duck.release();
+  window.addEventListener("pagehide", onHide);
   return {
-    controller, gate, player, voices,
-    dispose: () => { unbind(); controller.dispose(); gate.dispose(); player.dispose(); },
+    controller, gate, player, voices, duck,
+    dispose: () => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("storage", onStorage);
+      unduck(); duck.dispose(); unbind(); controller.dispose(); gate.dispose(); player.dispose();
+    },
   };
 }

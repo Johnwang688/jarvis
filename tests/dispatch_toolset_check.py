@@ -1176,6 +1176,37 @@ def _binds_before_dispatch(source: str, rel: str, function: str) -> bool:
     return bool(binds and sites and min(binds) < min(sites))
 
 
+def _local_dispatch_callback(source: str, enclosing: str, *, asynchronous=False):
+    """Verify the conservative bare-name hit resolves to this exact local def."""
+    tree = ast.parse(source)
+    parents = [node for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name == enclosing]
+    assert len(parents) == 1, (enclosing, "ambiguous callback scope")
+    parent = parents[0]
+    callbacks = [node for node in parent.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name == "dispatch"]
+    assert len(callbacks) == 1, (enclosing, "missing exact local callback")
+    callback = callbacks[0]
+    assert isinstance(callback, ast.AsyncFunctionDef) == asynchronous
+    assert [node for node in ast.walk(parent)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == "dispatch"] == [callback], "nested dispatch binding shadows callback"
+    assert not any(isinstance(node, (ast.Global, ast.Nonlocal)) and "dispatch" in node.names
+                   for node in ast.walk(parent)), "dispatch lexical scope was widened"
+    # No assignment/import/parameter may replace the lexical callback binding.
+    assert not any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+                   and node.id == "dispatch" for node in ast.walk(parent))
+    assert not any(isinstance(node, ast.arg) and node.arg == "dispatch"
+                   for node in ast.walk(parent))
+    assert not any((alias.asname or alias.name) == "dispatch"
+                   for node in ast.walk(parent)
+                   if isinstance(node, (ast.Import, ast.ImportFrom))
+                   for alias in node.names)
+    return parent, callback
+
+
 def static_walk_checks() -> None:
     """Every reference to dispatch in the code (jarvis/ and the bench
     packages beside it), how Agent reaches it, that each other caller binds a
@@ -1203,15 +1234,53 @@ def static_walk_checks() -> None:
         # The daemon's jarvis-mcp bridge for Claude/Codex chat sessions
         # (WP-1, 2026-10-10): it binds the session's offered names first.
         ("jarvis/v2/bridge.py", "run", "dispatch"),
+        # The actual registry call moved inside a bound callback. The bare
+        # calls above/below are conservatively counted and verified locally.
+        ("jarvis/v2/bridge.py", "dispatch", "dispatch"),
     }
     assert sites == expected, f"dispatch callers changed: {sorted(sites ^ expected)}"
 
-    # jarvis-mcp's worker and the bridge, like `_run_turn`, bind their toolset
-    # before they dispatch.
-    for rel in ("jarvis/v2/mcp.py", "jarvis/v2/bridge.py"):
+    bridge_source = (REPO / "jarvis/v2/bridge.py").read_text(encoding="utf-8")
+    parent, callback = _local_dispatch_callback(bridge_source, "call")
+    runs = [node for node in parent.body
+            if isinstance(node, ast.FunctionDef) and node.name == "run"]
+    assert len(runs) == 1 and len(list(_calls_named(runs[0], "dispatch"))) == 1
+    registry = [node for node in _calls_named(callback, "dispatch")
+                if isinstance(node.func, ast.Attribute)
+                and _dotted(node.func.value) == "tools"]
+    assert len(registry) == 1, "bridge callback must retain its registry dispatch"
+    # Verify the actual registry sites, including the relocated bridge callback.
+    for rel, function in (("jarvis/v2/mcp.py", "run"),
+                          ("jarvis/v2/bridge.py", "dispatch")):
         source = (REPO / rel).read_text(encoding="utf-8")
-        assert _binds_before_dispatch(source, rel, "run"), \
-            f"{rel}: run must bind its toolset before it dispatches"
+        assert _binds_before_dispatch(source, rel, function), \
+            f"{rel}: {function} must bind its toolset before it dispatches"
+
+    # A nested local definition can preserve the conservative site's spelling
+    # while redirecting run() away from the verified callback: reject it.
+    shadowed = ast.parse(bridge_source)
+    shadow_run = next(node for node in ast.walk(shadowed)
+                      if isinstance(node, ast.FunctionDef) and node.name == "run")
+    shadow_run.body.insert(0, ast.parse("def dispatch():\n    return None\n").body[0])
+    try:
+        _local_dispatch_callback(ast.unparse(shadowed), "call")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("nested dispatch shadow escaped the callback audit")
+
+    # Mutation: losing the relocated actual tool_names bind must fail this
+    # audit, even though the outer local run() callback still exists.
+    mutated = ast.parse(bridge_source)
+    actual = next(node for node in ast.walk(mutated)
+                  if isinstance(node, ast.FunctionDef) and node.name == "dispatch")
+    binds = [node for node in _calls_named(actual, "bind")
+             if any(keyword.arg == "tool_names" for keyword in node.keywords)]
+    assert len(binds) == 1
+    binds[0].keywords = [keyword for keyword in binds[0].keywords
+                        if keyword.arg != "tool_names"]
+    assert not _binds_before_dispatch(ast.unparse(mutated), "jarvis/v2/bridge.py", "dispatch"), \
+        "removing relocated tool_names binding escaped the audit"
 
     agent_tree = ast.parse((REPO / "jarvis" / "agent.py").read_text(encoding="utf-8"))
     owner = _enclosing(agent_tree)

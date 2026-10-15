@@ -307,10 +307,12 @@ def _live_checks(page, mock, check, until, requests):
     check("…its model is the buffer's (file:), never a jarvis-diff: copy",
           any(u.startswith("jarvis-diff:") and "/calc.py?original" in u for u in models)
           and not any(u.startswith("jarvis-diff:") and "/calc.py?modified" in u for u in models), str(models))
-    # The File pane lets go of the buffer (its preview tab replaced): the
-    # registry disposes the model, and the diff reads the file again.
-    page.locator(_pane(2, _tid("file-notes.txt"))).click()
-    until(lambda: page.locator(_pane(2, _tid("file-path"))).inner_text() == "notes.txt", timeout=4)
+    # The File pane lets go of the buffer (its tab closed — a tree click now
+    # opens a new tab instead of replacing a preview, so the tab is closed
+    # explicitly with its ×): the registry disposes the model, and the diff
+    # reads the file again.
+    page.locator(_pane(2, _tid("editor-tab-close-calc.py"))).click()
+    until(lambda: page.locator(_pane(2, _tid("editor-tab-calc.py"))).count() == 0, timeout=4)
     until(lambda: page.locator(_in("scm-editor")).get_attribute("data-live") == "false", timeout=4)
     check("a buffer let go of falls back to a read, still diffed",
           page.locator(_in("scm-editor")).get_attribute("data-live") == "false"

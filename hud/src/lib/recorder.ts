@@ -12,8 +12,13 @@
 //
 //   - at a pause where there is one: once the chunk is CHUNK_SOFT_MS long, the
 //     first quiet run of CHUNK_GAP_MS ends it; past CHUNK_LATE_MS a shorter
-//     pause (CHUNK_LATE_GAP_MS) will do. Nothing is lost at such a cut, so the
-//     next chunk starts fresh (overlap 0);
+//     pause (CHUNK_LATE_GAP_MS) will do. Nothing is lost at such a cut; the
+//     next chunk starts with CHUNK_SOFT_OVERLAP_MS of digital silence;
+//   - the FIRST chunk is cut earlier (V5, plan §3.2's segment gap): at the first quiet run of
+//     CHUNK_GAP_MS once FIRST_CUT_SPEECH_MS of speech has been heard, whatever the chunk's
+//     length, so the opening of a long message is transcribing while the rest is still being
+//     said. Bounded: it happens once per message; every later chunk follows the rule above;
+//     and a final chunk with no speech in it is never uploaded;
 //   - failing that, hard at CHUNK_HARD_MS, in the middle of speech. The next
 //     chunk then starts CHUNK_OVERLAP_MS earlier, so a word the cut fell in is
 //     whole in one of them, and the transcripts are joined by the words the
@@ -26,12 +31,23 @@
 import { CAP_RATE, SEGMENT_GAP_MS, msToSamples, samplesToMs, wavBlob } from "./vad";
 
 export const CHUNK_SOFT_MS = 8_000;
+/** Speech heard (pre-roll not counted) before the first pause may cut the first chunk. */
+export const FIRST_CUT_SPEECH_MS = 350;
 export const CHUNK_GAP_MS = SEGMENT_GAP_MS; // the plan's segment gap (V5, vad.ts)
 export const CHUNK_LATE_MS = 18_000;
 export const CHUNK_LATE_GAP_MS = 300;
 export const CHUNK_HARD_MS = 25_000;
 export const CHUNK_OVERLAP_MS = 500;
+/** A cut at a pause starts the next chunk with this much digital silence, so the first phoneme after the pause is never at a chunk's edge. */
+export const CHUNK_SOFT_OVERLAP_MS = 200;
 export const UTTERANCE_LIMIT_MS = 15 * 60_000;
+/**
+ * A stopgap until speaker verification (V12): a message claimed by the follow-up
+ * window or as a continuation -- no wake word, no talk key -- ends here, so room
+ * speech cannot be transcribed for minutes under a window the owner opened by
+ * finishing a turn. A wake word or the talk key keeps the 15-minute ceiling.
+ */
+export const CLAIM_CAP_MS = 60_000;
 
 export interface RecordedChunk {
   /** The utterance this chunk belongs to (Capture's own counter). */
@@ -48,8 +64,14 @@ export interface RecordedChunk {
   wav: Blob;
   /** The chunk's length, overlap included. */
   ms: number;
-  /** How much of its start repeats the end of the previous chunk (0 after a cut at a pause). */
+  /** How much of its start is not new audio: 200 ms of digital silence after a cut at a pause, 500 ms repeating the previous chunk's speech after a hard cut. */
   overlapMs: number;
+  /**
+   * That overlap may hold words the previous chunk's transcript also ends with
+   * (a hard cut in speech), so the join looks for them. A cut at a pause repeats
+   * only quiet: the same word either side of it is speech, not an echo.
+   */
+  repeats: boolean;
   /** Where the chunk's first sample falls, from the start of the utterance. */
   startMs: number;
 }
@@ -60,14 +82,27 @@ export class UtteranceRecorder {
   private frames: Float32Array[] = [];
   private len = 0;             // samples in the current chunk, overlap included
   private overlap = 0;         // leading samples shared with the previous chunk
+  private overlapRepeats = false; // ... and they are speech (a hard cut)
   private voiced = 0;          // loud samples among the new ones
+  private heard = 0;           // loud samples pushed after the pre-roll (the first-cut rule)
   private quiet = 0;           // the trailing quiet run
   private index = 0;           // chunks flushed
   private total = 0;           // unique samples recorded (overlap counted once)
   private startedAt = 0;       // unique samples before the current chunk's first new sample
   private done = false;
+  /**
+   * Set by the caller before each frame: the audio so far is a message, not a click (the detector's
+   * `longEnough`). The first chunk is cut at a pause only while it is true; an energy-mode onset that
+   * has not cleared the minimum must not reach transcription.
+   */
+  cutOk = true;
 
-  constructor(readonly id: number, private onChunk: (chunk: RecordedChunk) => void) {}
+  /**
+   * `limitMs`: the message ends there (default: the 15-minute ceiling). Capture
+   * lowers it for a claim made without the wake word or the talk key, until
+   * speaker verification (V12), and raises it again when the key takes over.
+   */
+  constructor(readonly id: number, private onChunk: (chunk: RecordedChunk) => void, public limitMs = UTTERANCE_LIMIT_MS) {}
 
   /** Unique audio recorded so far, in ms. */
   get ms() { return samplesToMs(this.total); }
@@ -80,20 +115,25 @@ export class UtteranceRecorder {
   /** The pre-roll. It cannot be told apart quiet from loud, so it counts as speech. */
   start(preroll: Float32Array) {
     const step = 512;
-    for (let at = 0; at < preroll.length; at += step) this.push(preroll.subarray(at, Math.min(preroll.length, at + step)), true);
+    for (let at = 0; at < preroll.length; at += step) this.add(preroll.subarray(at, Math.min(preroll.length, at + step)), true, false);
   }
 
   /** One frame. Returns true when the message has reached its ceiling and must end. */
   push(frame: Float32Array, loud: boolean): boolean {
+    return this.add(frame, loud, true);
+  }
+
+  private add(frame: Float32Array, loud: boolean, live: boolean): boolean {
     if (this.done || !frame.length) return false;
     this.frames.push(frame.slice());
     this.len += frame.length;
     this.total += frame.length;
-    if (loud) { this.voiced += frame.length; this.quiet = 0; } else this.quiet += frame.length;
+    if (loud) { this.voiced += frame.length; this.quiet = 0; if (live) this.heard += frame.length; } else this.quiet += frame.length;
     const ms = samplesToMs(this.len);
     if (ms >= CHUNK_HARD_MS) this.cut(true);
     else if (ms >= CHUNK_SOFT_MS && this.quiet >= msToSamples(ms >= CHUNK_LATE_MS ? CHUNK_LATE_GAP_MS : CHUNK_GAP_MS)) this.cut(false);
-    return this.total >= msToSamples(UTTERANCE_LIMIT_MS);
+    else if (this.index === 0 && this.cutOk && this.heard >= msToSamples(FIRST_CUT_SPEECH_MS) && this.quiet >= msToSamples(CHUNK_GAP_MS)) this.cut(false);
+    return this.total >= msToSamples(this.limitMs);
   }
 
   /**
@@ -146,7 +186,7 @@ export class UtteranceRecorder {
     const samples = this.concat();
     const chunk: RecordedChunk = {
       utterance: this.id, index: this.index, samples, wav: wavBlob(samples, CAP_RATE),
-      ms: samplesToMs(samples.length), overlapMs: samplesToMs(this.overlap),
+      ms: samplesToMs(samples.length), overlapMs: samplesToMs(this.overlap), repeats: this.overlapRepeats,
       startMs: samplesToMs(this.startedAt - this.overlap),
     };
     this.index++;
@@ -159,16 +199,14 @@ export class UtteranceRecorder {
     const samples = this.flush();
     this.voiced = 0;
     this.quiet = 0;
-    if (hard) {
-      const keep = Math.min(samples.length, msToSamples(CHUNK_OVERLAP_MS));
-      const tail = samples.slice(samples.length - keep);
-      this.frames = [tail];
-      this.len = keep;
-      this.overlap = keep;
-    } else {
-      this.frames = [];
-      this.len = 0;
-      this.overlap = 0;
-    }
+    // A hard cut repeats real speech (the join looks for the echoed words). A cut at a
+    // pause pads the next chunk with digital silence instead of repeating the quiet
+    // before it: "quiet" is only below the detector's threshold, and a faint trailing
+    // word in the last 200 ms would otherwise be heard twice.
+    const keep = Math.min(samples.length, msToSamples(hard ? CHUNK_OVERLAP_MS : CHUNK_SOFT_OVERLAP_MS));
+    this.frames = [hard ? samples.slice(samples.length - keep) : new Float32Array(keep)];
+    this.len = keep;
+    this.overlap = keep;
+    this.overlapRepeats = hard;
   }
 }

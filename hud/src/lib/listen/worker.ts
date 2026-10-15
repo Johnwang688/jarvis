@@ -75,13 +75,15 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   } else if (m.type === "denoise") {
     if (m.on) suppressor.enable(); else suppressor.disable();
   } else if (m.type === "frame") {
+    const received = performance.now();
     chain = chain.then(async () => {
       if (!runner) return;
       try {
         const { samples, ms: dms } = suppressor.process(m.samples);
         const t0 = performance.now(); // the VAD's own time: suppression is reported apart (dms)
         const p = await runner.run(samples);
-        post({ type: "prob", seq: m.seq, p, ms: performance.now() - t0, dms });
+        const done = performance.now();
+        post({ type: "prob", seq: m.seq, p, ms: done - t0, total: done - received, dms });
       } catch {
         post({ type: "failed", code: "runtime" });
       }

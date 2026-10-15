@@ -20,6 +20,9 @@ import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./
 
 import type { CaptureIdentity } from "./lib/pageCapture";
 import { WINDOW_ID, isWindowId } from "./lib/windowId";
+import { parseProposal, parseReadingResult, parseSpeakerStatus } from "./lib/speaker";
+import { parseSttSettings, type SttChoice } from "./lib/sttSettings";
+import type { SttReply } from "./lib/stt";
 
 export class ApiError extends Error {
   status: number;
@@ -274,6 +277,13 @@ export const api = {
   /** Assign (no more keys), choose (`voice`; "" is automatic again) or mute one chat's voice. */
   speechVoice: (threadId: string, change: { voice?: string; muted?: boolean } = {}) =>
     req<{ thread_id: string; voice: string | null; muted: boolean }>("/speech/voices", json({ thread_id: threadId, ...change })),
+  /**
+   * Hold (`on`) or end the daemon's short lease that lowers the Remote Browser's sound while
+   * Jarvis speaks (V15). Renewed about once a second; the daemon restores by itself if it stops.
+   * `window` is this window's own lease token (32 hex): its `off` ends only its own lease.
+   */
+  speechDuck: (on: boolean, window: string, keepalive?: boolean) =>
+    req<{ on: boolean; ducked: number; lease_s: number }>("/speech/duck", { ...json({ on, window }), ...(keepalive ? { keepalive: true } : {}) }),
   /** The fast path's roster and its default (`models.describe()`). */
   models: () => req<RosterView>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),
@@ -368,8 +378,15 @@ export const api = {
 
   // --- speech -------------------------------------------------------------
   /** `utteranceId`/`seq` name the clip for the daemon, which echoes them; `budgetMs` is the deadline it must fit inside (V2). */
-  async stt(blob: Blob, opts: { signal?: AbortSignal; utteranceId?: number; seq?: number; budgetMs?: number } = {}): Promise<string> {
+  async stt(blob: Blob, opts: {
+    signal?: AbortSignal; utteranceId?: number; seq?: number; budgetMs?: number;
+    /** V12: accepted for clarity and now a no-op: the daemon asks whose voice it is on every clip (it skips that when nobody is enrolled or Guest voice is on). */
+    verify?: boolean;
+    /** What the daemon did about it ("matched", "skipped_guest", "skipped_unenrolled", "no_speech"). */
+    verified?: (kind: string) => void;
+  } = {}): Promise<SttReply> {
     const ids = new URLSearchParams();
+    if (opts.verify) ids.set("verify", "1");
     if (Number.isSafeInteger(opts.utteranceId) && opts.utteranceId! >= 0) ids.set("utterance_id", String(opts.utteranceId));
     if (Number.isSafeInteger(opts.seq) && opts.seq! >= 0) ids.set("seq", String(opts.seq));
     // The client's whole deadline for this attempt: the daemon fits its model chain inside it.
@@ -393,8 +410,29 @@ export const api = {
       throw new ApiError(res.status, message);
     }
     const body = await res.json();
-    return body.text || "";
+    if (opts.verified && typeof body.verify === "string") { try { opts.verified(body.verify); } catch { /* an observer */ } }
+    // V13: which backend heard the clip, for the diagnostics. `fallback` is the daemon's reason
+    // local did not serve it; only whether it fell back is kept.
+    return { text: body.text || "", backend: body.backend, fellBack: typeof body.fallback === "string" && body.fallback !== "" };
   },
+  /** The owner's speech-to-text switches (V13): backend and the cloud-fallback switch, plus what the local engine has. */
+  sttSettings: () => req<unknown>("/stt/settings").then(parseSttSettings),
+  setSttSettings: (change: { backend?: SttChoice; cloud_fallback?: boolean }) =>
+    req<unknown>("/stt/settings", json(change)).then(parseSttSettings),
+  // --- speaker enrollment and Guest voice (V12): the owner's, never audio or embeddings back ---
+  speaker: () => req<unknown>("/speaker").then(parseSpeakerStatus),
+  /** One prompted reading (16-bit mono WAV). The daemon judges it and answers whether it was kept. */
+  speakerReading: (wav: Blob, signal?: AbortSignal) =>
+    req<unknown>("/speaker/reading", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav, signal }).then(parseReadingResult),
+  /** Score the readings against each other and the built-in voices; nothing is stored. */
+  speakerPropose: () => req<unknown>("/speaker", json({ propose: true })).then(parseProposal),
+  /** Build the voiceprint and switch verification on (the threshold defaults to the proposal's). */
+  speakerAccept: (threshold?: number, anyway = false) =>
+    req<unknown>("/speaker", json({ accept: true, ...(threshold === undefined ? {} : { threshold }), ...(anyway ? { anyway: true } : {}) })).then(parseSpeakerStatus),
+  speakerThreshold: (threshold: number) => req<unknown>("/speaker", json({ threshold })).then(parseSpeakerStatus),
+  speakerGuest: (guest: boolean) => req<unknown>("/speaker", json({ guest })).then(parseSpeakerStatus),
+  /** Delete the readings, the voiceprint and the Guest switch. */
+  speakerDelete: () => req<unknown>("/speaker", { method: "DELETE" }).then(parseSpeakerStatus),
   /**
    * One chunk of speech as audio bytes (`POST /say`). Read-aloud asks
    * `localOnly`, so the daemon never sends the text to a cloud voice; a local

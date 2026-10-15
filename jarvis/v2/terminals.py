@@ -728,6 +728,12 @@ class _Takeover:
         self.event = threading.Event()
 
 
+# The input-disabled program terminals whose Windows program waits on
+# interop's initial cursor report (`Terminal._output`). The brain terminal
+# takes input, so the attached window answers it; it is not listed.
+STARTUP_REPLY_PROGRAMS = frozenset({"vex-build", "vex-download", "vex-connection", "vex-info"})
+
+
 class Terminal:
     def __init__(self, tid: str, *, shell: str, folder: str, project_id: str | None,
                  label: str, cols: int, rows: int, nonce: str, integration: str = "none",
@@ -744,9 +750,11 @@ class Terminal:
         self.program = program
         self.input_ok = input_ok
         # WSL Windows interop waits for an initial cursor report even with
-        # no HUD attached. Only this fresh, input-disabled build screen gets
-        # one fixed reply; later output and other terminals are untouched.
-        self._build_startup = b"" if program == "vex-build" and input_ok is False else None
+        # no HUD attached. Only a fresh, input-disabled VEX program screen
+        # (`STARTUP_REPLY_PROGRAMS`) gets one fixed reply; later output and
+        # other terminals are untouched.
+        self._build_startup = (b"" if program in STARTUP_REPLY_PROGRAMS and input_ok is False
+                               else None)
         self.title = title or f"{os.path.basename(shell)} · {label}"
         # Called once, with this terminal, after its program has exited and
         # its output has been read to the end (or on finish). vex.py's only.

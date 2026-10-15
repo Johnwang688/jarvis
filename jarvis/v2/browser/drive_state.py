@@ -36,6 +36,18 @@ class DriveTurn:
     attempted: bool = False
     pane: str = ""
     closed: bool = False
+    provider: str = "fast"
+    original_owner_words: str = field(default="", init=False, repr=False)
+
+    def __post_init__(self):
+        self.owner_words = self.owner_words[:500]
+        self.original_owner_words = self.owner_words
+
+    def accept_desk_steer(self, text: str):
+        """Keep original context and the latest accepted desk steer, memory-only."""
+        original = self.original_owner_words[:240]
+        marker = "\nLatest desk steer: "
+        self.owner_words = original + marker + text[:500-len(original)-len(marker)]
 
     @property
     def key(self):
@@ -56,9 +68,20 @@ def current_turn() -> DriveTurn | None:
     if (turn is None or turn.closed or type(turn.strict) is not bool
             or not turn.thread_id or not turn.turn_id
             or caller.get("thread_id") != turn.thread_id or caller.get("turn_id") != turn.turn_id
-            or caller.get("provider") != "fast"):
+            or turn.provider not in ("fast", "claude", "codex")
+            or caller.get("provider") != turn.provider):
         return None
     return turn
+
+
+@contextmanager
+def bind_turn(turn: DriveTurn | None):
+    """Bind one RPC; only the session lifecycle retires a native turn."""
+    token = _TURN.set(turn)
+    try:
+        yield turn
+    finally:
+        _TURN.reset(token)
 
 
 def mark_attempt(pane):

@@ -158,7 +158,7 @@ class Downloads:
                     digest=hashlib.sha256(("release_download:"+saved.download_id+":"+token.action_id).encode()).hexdigest()
                     log_decision(ApprovalRecord("hud_browser_act",digest,"browser-gate",
                         "allow" if answer is Decision.ALLOW else "deny",reason="executable_download:owner",
-                        thread_id=guard.turn.thread_id,provider="fast"))
+                        thread_id=guard.turn.thread_id,provider=token.guard.turn.provider))
                     if answer is not Decision.ALLOW:
                         self._delete_exact(saved);notices.append("Executable download was declined and deleted.");continue
                     _snapshot,row=guard(own_card=request,navigation=True);guard.hold_count=row['hold_count']
@@ -194,7 +194,7 @@ class Downloads:
                  'download':{'id':saved.download_id,'name':Path(saved.path).name,'size':saved.info.st_size}}
         return ApprovalRequest('hud_browser_act',args=args,command=json.dumps(args,ensure_ascii=False),
             reason='Release this one executable download to the owner? This does not run it.',
-            layer='browser-gate',thread_id=token.guard.turn.thread_id,provider='fast',allowlistable=False,
+            layer='browser-gate',thread_id=token.guard.turn.thread_id,provider=token.guard.turn.provider,allowlistable=False,
             headline='Browser action: release download',hud_only=True,browser=browser,max_wait_s=120)
 
     def authorized(self,download_id,path,info):

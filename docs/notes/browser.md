@@ -1501,3 +1501,68 @@ changing the product. These are synthetic local credentials and ephemeral daemon
 not real accounts, installation or physical-device evidence; final review and the
 combined release sweep remain separate.
 See [the focused interface plan](../plans/2026-10-13-browser-http-auth.md).
+
+
+## Native parent Browser driving (BR9d)
+
+Foreground Claude ASK/AUTO and Codex AUTO owner HUD chats now offer explicit
+`hud_browser_act` through the same `BrowserDrive.act` gate as the fast path.
+Tasks, Discord/scheduled turns, children and strict contexts cannot acquire it.
+Native calls retain the live global/pane/Private switches, visible attachment,
+owner quiet/input/auth holds, exact guarded look refs, 40 judged actions/turn,
+200 actions/tab/hour, private cards and in-flight cleanup ownership. Provider
+attribution uses the actual caller; no independent native gate exists.
+
+Only confirmed desk steering changes bounded in-memory owner words. Unknown
+Codex steer delivery keeps the existing no-requeue policy but grants no Browser
+authority. Off-desk text never becomes owner context. Native completion/Stop and
+carrier/session replacement retire the exact DriveTurn and its refs; relay
+abandonment cancels only its captured call/socket, preserving parallel calls.
+
+**For the owner:** pane Stop and Resume Jarvis work for both native providers.
+After Codex Chat Stop, start a fresh chat: its existing incomplete-accounting
+rule refuses continuation in that interrupted native thread. Normal resume of a
+completed session and pane Stop/Resume are separate supported operations.
+
+[Native acceptance](../plans/2026-10-13-browser-native-offline-cli.md) distinguishes
+actual local CLI/HUD/CDP tests, Claude child catalog omission plus hook tests,
+Codex actual child host denial, the raw-wire Codex socket limitation and the
+production Chat Stop entry point. Scripted local providers prove transport and
+guard composition; subscription authentication, paid-model quality and physical
+owner/device behavior remain unmeasured. No installation is claimed by these
+fixture receipts.
+
+## Remote pages wider than their pane (2026-10-14)
+
+Headless Chrome hides scrollbars, so a page with a CSS min-width (Spotify's
+body is 800 px) was cut off on the right of a narrow pane. `host.py` `_fit`
+now lays such a page out at its own width C and keeps the window's pane
+W × H at scale S as `stream.viewport`: the page gets C × round(H·C/W) at
+S·W/C (`stream.fitted`, read through `stream.page_viewport()`). The aspect
+and the frame's device pixels stay the pane's, and the HUD's `placeFrame`
+draws it at W/C; `clientToPage` already maps input through that scale. C is
+CDP `Page.getLayoutMetrics` `cssContentSize`, so no page code runs. A page
+can only make its own picture smaller. Bounds: overflow of 1% or less is
+left; C stops at 3 × W, `VIEW_MAX` (both ways) and the device-pixel cap.
+Triggers: a window `resize` and every new main-frame document (CDP
+`Page.frameNavigated` on the tab's own session, `_new_document`) **reset**
+to the pane and measure. A same-document navigation (an SPA's route
+change, `pushState`, a hash) is **not** a reset (lead review: each would
+cost three or four relayouts and likely a narrow-frame flash per click);
+narrowing after one waits for the next resize or real navigation.
+Screencast frames measure again (at most every 0.5 s, so an idle page
+costs nothing), which catches a min-width set after hydration or an SPA
+route. Between resets they only widen. A widening
+that the page answers by growing as much (`calc(100vw + 50px)`, Spotify's
+12 px past any width) is undone, and widening stops until the next reset,
+so nothing creeps or loops. Passes are serialized by `tab.view_lock`, each
+reading the newest `stream.viewport`, so the last resize wins. Readers of
+page geometry use the fitted viewport: `_view()` (screencast size, the
+agent action's centre point) and the owner cursor query's bounds. Look
+capture and agent scans read `innerWidth` from the page itself. No setting
+and no wire message was added; frame headers already carry the fitted size.
+The HUD divides pixel and line wheel deltas by the frame's placement scale
+(`normalizeWheel`'s `placeScale`), so a notch moves a fitted page as far on
+screen as before; a page-mode notch is already the fitted view's height.
+Receipts: `tests/v2/browser_fit_check.py` (real Chrome), `remote.test.ts`
+and `hud_v2_remote_check` ("Fit:").

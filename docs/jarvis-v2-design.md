@@ -2841,8 +2841,9 @@ model's alternative version id), so undoing back to the saved text reads
 clean. Each File pane has tabs (`PaneSpec.editors {paths, active, preview}`,
 stored with per-field fallback, re-read from disk after a reload; unsaved
 text is never stored, and `beforeunload` asks while anything is dirty): a
-single click opens an italic preview tab the next single click replaces, a
-double click or an edit pins it, middle-click or × closes, and the last tab
+click on a file in the tree opens a new pinned tab (2026-10-14; a saved pane
+spec can still carry an italic preview tab, which a double click or an edit
+pins), middle-click or × closes, and the last tab
 on an unsaved edit asks Save / Don't save / Cancel. One editor per pane, its
 model swapped. **Saving is guarded by content, not by mtime**: a read returns
 an `etag` (the first 128 bits of SHA-256), a save sends `expected_etag`

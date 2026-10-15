@@ -37,6 +37,10 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
         : "off"}
       {value.noiseState === "failed" && onRetryNoise ? <> <button type="button" data-testid="voice-noise-retry" onClick={onRetryNoise}>Try noise suppression again</button></> : null}
     </p>
+    {value.detectorLog.length > 0 ? <details data-testid="voice-detector-log">
+      <summary>Detector changes ({value.detectorLog.length})</summary>
+      <ol>{value.detectorLog.map((c, i) => <li key={i}>{(c.at / 1000).toFixed(1)} s after the window opened · {c.detector === "silero" ? "Silero" : "energy"} · {c.phase} · {c.note || "—"}</li>)}</ol>
+    </details> : null}
     <p data-testid="voice-end-pause">Message ends after {(meter.pause / 1000).toFixed(1)} s of quiet · segments are cut at {(SEGMENT_GAP_MS / 1000).toFixed(1)} s gaps · speech within {(CONTINUE_MS / 1000).toFixed(0)} s of a message continues it</p>
     <p data-testid="voice-capture-path">Capture: {value.path === "worklet" ? "AudioWorklet · 16 kHz mono, 512-sample frames" : value.path === "script_processor" ? `older ScriptProcessor path — ${value.pathNote || "AudioWorklet unavailable"}` : "not started"}</p>
     <p data-testid="voice-live-level">Level {muted ? "0.0000" : Number.isFinite(meter.rms) ? meter.rms.toFixed(4) : "—"} · Noise floor {Number.isFinite(meter.floor) ? meter.floor.toFixed(4) : "—"}</p>
@@ -45,7 +49,10 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
     {!value.rows.length ? <p>No utterances yet.</p> : <ol className="voice-diagnostic-rows" aria-label="Recent utterances">
       {[...value.rows].reverse().map(row => <li key={row.id} data-testid="voice-diagnostic-row">
         #{row.id} · {row.source.replace("_", " ")} · {(row.ms / 1000).toFixed(2)} s · {row.outcome.replaceAll("_", " ")}{row.latencyMs !== undefined ? ` · ${(row.latencyMs / 1000).toFixed(2)} s to outcome` : ""}
+        {row.backend ? ` · ${row.backend}${row.fellBack ? " (local failed)" : ""}` : ""}
         {row.kept ? " · audio kept" : row.outcome === "stt_failed" ? " · audio not kept" : ""}
+        {row.verify === "skipped_guest" ? " · verification skipped (guest voice)" : row.verify === "skipped_unenrolled" ? " · verification skipped (no voice enrolled)" : row.verify === "matched" ? " · voice matched" : row.verify === "no_speech" ? " · too little speech to check" : ""}
+        {row.rejected ? ` · ${row.rejected} part${row.rejected === 1 ? "" : "s"} not your voice` : ""}
         {clips.filter(c => c.diag === row.id).map(c => <span key={c.id}>{" "}
           <button type="button" data-testid="voice-clip-play" onClick={() => { const b = stt?.clip(c.id); if (b) void playClip(b).catch(() => {}); }}>Play</button>
           {c.state === "failed" ? <> <button type="button" data-testid="voice-clip-retry" onClick={() => stt?.retry(c.id)}>Retry</button></> : null}

@@ -190,7 +190,7 @@ class OwnerTools:
                 setattr(slot, "find" if kind.startswith("find") else "cursor", None)
                 return
             if kind == "cursor":
-                viewport = tab.stream.viewport
+                viewport = tab.stream.page_viewport()
                 if viewport is None or fields["x"] >= viewport[0] or fields["y"] >= viewport[1]:
                     return
             request = Request(binding, fields, slot.epoch)
