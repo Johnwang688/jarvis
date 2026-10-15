@@ -22,9 +22,13 @@ looser number. Two limits keep it honest:
   what it says) and never above `MAX_SLOWDOWN`: a machine slowed further than
   that cannot excuse more, so a run past three times its bound fails however
   busy the machine is.
-- The reference is timed three times and the median taken, so one pause
-  that hits the reference neither loosens nor tightens the bound; a pause
-  that hits the run is what the callers' best-of-N retries are for.
+- The reference is timed three times and the fastest taken, the same
+  estimate the callers make of their work (the best of up to three runs):
+  a pause that hits a reference run can only tighten the bound, never
+  loosen it, and a pause that hits the work is what the retries are for.
+  Precision, measured under 48 burner scopes: a regression costing 2.04 s
+  idle read 1.71-2.30 s at idle speed, so one within ~15% of its bound can
+  pass under load (it still fails alone); one past that fails either way.
 
 Only a run that misses the raw bound pays for the reference, so a check that
 passes alone costs nothing extra. These constants set the strength of every
@@ -67,8 +71,8 @@ def cpu(fn, *args, **kwargs):
 
 def slowdown() -> float:
     """How much slower than idle this machine runs `reference` now, in
-    [1, MAX_SLOWDOWN]: the median of three timings."""
-    took = sorted(cpu(reference)[0] for _ in range(3))[1]
+    [1, MAX_SLOWDOWN]: the fastest of three timings."""
+    took = min(cpu(reference)[0] for _ in range(3))
     return min(max(took / REFERENCE_IDLE_S, 1.0), MAX_SLOWDOWN)
 
 

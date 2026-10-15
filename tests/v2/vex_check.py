@@ -78,6 +78,7 @@ from jarvis.v2.daemon import Daemon  # noqa: E402
 from jarvis.v2.model import PermissionProfile as PP, ProviderName as PN, Role  # noqa: E402
 from jarvis.v2.provider import Brief, Decision, Event, EventKind as K, SessionHandle, Usage  # noqa: E402
 from jarvis.v2.stores import Stores  # noqa: E402
+from tests import loadclock  # noqa: E402
 
 FAKES = Path(__file__).resolve().parent / "vex_fake"
 FAKE_SHELL = Path(__file__).resolve().parent / "terminal_fake" / "sh"
@@ -2473,18 +2474,40 @@ class TooComplex(Base):
               "nested eval": "eval " * 3000 + "x",
               "here-documents": "cat <<E " * 15000 + "`x` " * 15000}
 
+    # One second of calling-thread CPU at this machine's idle speed
+    # (`tests/loadclock.py`); the slowest flood takes ~0.4 s idle. Pinned:
+    # it sets the guard's strength (MED 2's scans took 3.4 s and 14 s).
+    LIMIT_S = 1.0
+
+    def held(self, label, work):
+        """`work()`'s value, its CPU time judged by `loadclock` checked
+        against `LIMIT_S` (the best of three: a pause hits one run, a
+        regression every run), and its wall time against 20 s."""
+        best = value = None
+        for _ in range(3):
+            rules._runners_unsure_cached.cache_clear()
+            rules._vex_line_cached.cache_clear()
+            # Parser work is synchronous; also check elapsed wall time when it returns.
+            wall = time.perf_counter()
+            took, value = loadclock.cpu(work)
+            run = loadclock.judge(took, self.LIMIT_S)
+            self.assertLess(time.perf_counter() - wall, 20.0, f"{label}: elapsed wall limit")
+            best = run if best is None or run.idle < best.idle else best
+            if best.idle < self.LIMIT_S:
+                break
+        self.assertLess(best.idle, self.LIMIT_S, f"{label}: {best}")
+        return value
+
+    def test_the_bound_is_pinned(self):
+        self.assertEqual(self.LIMIT_S, 1.0)
+        loadclock.pinned()
+
     def test_a_flood_is_judged_fast_asked_and_never_covered(self):
         Path(config.ALLOWLIST_PATH).write_text(json.dumps([
             {"tool": "run_command", "prefix": p} for p in ("ls", "echo", "./v" + "[" * 20000)]))
         for label, line in self.FLOODS.items():
             with self.subTest(label):
-                # Parser work is synchronous; also check elapsed wall time when it returns.
-                wall = time.perf_counter()
-                started = time.thread_time()
-                verdict = rules.decide(line)
-                took = time.thread_time() - started
-                self.assertLess(time.perf_counter() - wall, 20.0, f"{label}: elapsed wall limit")
-                self.assertLess(took, 1.0, f"{label}: {took:.2f} CPU s")
+                verdict = self.held(label, lambda: rules.decide(line))
                 if label in ("${",):
                     continue                    # no glob in it: as on main
                 self.assertEqual(verdict.decision, rules.ASK, label)
@@ -2502,12 +2525,7 @@ class TooComplex(Base):
                             ("brackets that close", "x = " + "[ab]" * 20000 + "\n")):
             with self.subTest(label):
                 (folder / "vex" / "big.mk").write_text(text)
-                # Parser work is synchronous; also check elapsed wall time when it returns.
-                wall = time.perf_counter()
-                started = time.thread_time()
-                reason = vex.makefile_refusal(folder)
-                self.assertLess(time.thread_time() - started, 1.0, label)
-                self.assertLess(time.perf_counter() - wall, 20.0, f"{label}: elapsed wall limit")
+                reason = self.held(label, lambda: vex.makefile_refusal(folder))
                 self.assertIsNotNone(reason, label)
                 self.assertIn("too complex", reason)
         self.assertEqual(vex.cli(["build"], cwd=str(folder), out=io.StringIO()), 2)

@@ -46,6 +46,7 @@ from jarvis.v2.daemon import Daemon  # noqa: E402
 from jarvis.v2.model import ProviderName as PN  # noqa: E402
 from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, Usage  # noqa: E402
 from jarvis.v2.stores import Stores  # noqa: E402
+from tests import loadclock  # noqa: E402
 
 FAKE_SHELL = Path(__file__).resolve().parent / "terminal_fake" / "sh"
 LIVE_PORTS = {8402, 8403, 8405}
@@ -1842,8 +1843,13 @@ class DevUrls(Base):
         # ~14 MB/s; every flood must stay at twice that, through `_output`
         # with a synchronous fake socket that takes everything. Measure calling-thread
         # CPU throughput so concurrent suites cannot spend this budget by descheduling
-        # it; also check elapsed wall time when it returns. Best of two runs each.
+        # it, at this machine's idle speed (`tests/loadclock.py`: they slow its CPU
+        # too); also check elapsed wall time when it returns. Best of three runs each.
+        # With colour taken off the bulk path (`_PLAIN` without its SGR branch) the
+        # colour flood runs at ~7 MB/CPU-s, and fails here under load as alone.
         mb = 1 << 20
+        floor = 28.0                    # MB/CPU-s at idle speed: the guard's strength
+        loadclock.pinned()
         floods = {
             "network URLs": b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n",
             "plain logs": b"2026-10-12 10:00:00 INFO worker-3 processed job 12345 in 4.2 ms\r\n",
@@ -1856,7 +1862,9 @@ class DevUrls(Base):
         for name, line in floods.items():
             data = line * (12 * mb // len(line))
             best = 0.0
-            for _ in range(2):
+            for _ in range(3):
+                if best > floor:
+                    break
                 terminal = T.Terminal("0000000b", shell="/bin/sh", folder="/", project_id=None,
                                       label="~", cols=80, rows=24, nonce=NONCE, integration="none")
                 terminal._attachment = sock
@@ -1869,10 +1877,11 @@ class DevUrls(Base):
                 elapsed = time.thread_time() - started
                 self.assertGreater(elapsed, 0, "CPU clock must measure the 12 MB workload")
                 self.assertLess(time.perf_counter() - wall, 20.0, f"{name}: elapsed wall limit")
-                best = max(best, len(data) / mb / elapsed)
+                held = loadclock.judge(elapsed, len(data) / mb / floor)
+                best = max(best, len(data) / mb / held.idle)
                 terminal.finish()
             with self.subTest(flood=name):
-                self.assertGreater(best, 28.0, f"{name}: {best:.1f} MB/CPU-s")
+                self.assertGreater(best, floor, f"{name}: {best:.1f} MB/CPU-s at idle speed; last run {held}")
 
     def test_a_sniffer_that_fails_never_breaks_the_terminal(self):
         terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None, label="~",

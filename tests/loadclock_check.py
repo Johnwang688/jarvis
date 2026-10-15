@@ -34,14 +34,14 @@ class Judge(unittest.TestCase):
         self.assertEqual((held.cpu, held.slow, held.idle), (0.05, 1.0, 0.05))
 
     def test_a_miss_is_judged_at_the_present_speed(self):
-        with patch.object(L, "cpu", timings(0.02, 0.021, 0.019)):
+        with patch.object(L, "cpu", timings(0.021, 0.02, 0.022)):
             held = L.judge(0.15, 0.1)
-        self.assertAlmostEqual(held.slow, 2.0)          # the median, 20 ms against 10
+        self.assertAlmostEqual(held.slow, 2.0)          # the fastest, 20 ms against 10
         self.assertAlmostEqual(held.idle, 0.075)
         self.assertIn("2.00x slow", str(held))
 
-    def test_one_paused_reference_run_moves_nothing(self):
-        with patch.object(L, "cpu", timings(0.012, 0.5, 0.012)):
+    def test_a_paused_reference_run_never_loosens_the_bound(self):
+        with patch.object(L, "cpu", timings(0.5, 0.012, 0.3)):
             self.assertAlmostEqual(L.slowdown(), 1.2)
 
     def test_a_machine_slower_than_the_cap_excuses_no_more(self):

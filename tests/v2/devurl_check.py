@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jarvis import config  # noqa: E402
 from jarvis.v2 import devurl as D  # noqa: E402
 from jarvis.v2.browser import settings as S  # noqa: E402
+from tests import loadclock  # noqa: E402
 
 NONE: frozenset[int] = frozenset()
 
@@ -372,17 +373,30 @@ class Bounds(unittest.TestCase):
         network = b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n" * 160_000
         access = b"GET http://localhost:3000/api/items?page=2 200 12ms\r\n" * 180_000
         local = b"".join(b"  Local:   http://localhost:%d/\r\n" % (1024 + i) for i in range(280_000))
-        # Twice what xterm draws (~14 MB/s), best of two runs each.
+        # Twice what xterm draws (~14 MB/s), best of three runs each. The
+        # sniffer runs on the calling thread, so its own CPU time is the clock
+        # (a wall clock charged it for other suites: 15-25 MB/s under load),
+        # judged at this machine's idle speed (`tests/loadclock.py`). With
+        # colour off the bulk path (`_PLAIN` without its SGR branch) the colour
+        # flood runs at ~7 MB/s, and fails here under load as alone.
+        floor = 28.0                    # MB/CPU-s at idle speed: the guard's strength
+        loadclock.pinned()
         for data in (colour, lines, os.urandom(4_000_000), network, access, local):
+            mb = len(data) / (1 << 20)
             best = 0.0
-            for _ in range(2):
+            for _ in range(3):
+                if best > floor:
+                    break
                 sniffer = D.DevUrlSniffer(lambda: NONE)
-                started = time.perf_counter()
+                wall = time.perf_counter()
+                started = time.thread_time()
                 for i in range(0, len(data), 65536):
                     sniffer.feed(data[i:i + 65536])
-                best = max(best, len(data) / (1 << 20) / (time.perf_counter() - started))
+                held = loadclock.judge(time.thread_time() - started, mb / floor)
+                self.assertLess(time.perf_counter() - wall, 20.0, "elapsed wall limit")
+                best = max(best, mb / held.idle)
             with self.subTest(flood=data[:30]):
-                self.assertGreater(best, 28.0, f"{best:.1f} MB/s")
+                self.assertGreater(best, floor, f"{best:.1f} MB/CPU-s at idle speed; last run {held}")
 
     def test_a_chunk_matches_at_most_its_budget(self):
         lines = b"".join(b"  Local:   http://localhost:%d/\r\n" % (2000 + i) for i in range(200))
