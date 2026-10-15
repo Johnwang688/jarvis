@@ -53,6 +53,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import inspect
 import json
 import logging
 import os
@@ -62,7 +64,7 @@ import tempfile
 import threading
 import queue
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator
@@ -177,6 +179,31 @@ SUMMARY_CHARS = 200
 
 # Kept only to enrich a fatal error. Never emitted on its own, always scrubbed.
 STDERR_LINES = 40
+
+# --- native sub-agents (SV-1, 2026-10-15) ------------------------------------
+# Claude Code's Agent children, as CLI 2.1.295 shows them (SV-0 findings,
+# docs/plans/2026-10-15-sv0-findings.md). A child's messages arrive whole —
+# never as deltas — tagged with `parent_tool_use_id`, the id of the Agent call
+# that spawned it; its lifecycle is the `task_*` system messages, keyed by
+# `task_id`, which is also the `agent_id` its PreToolUse hooks carry. Each
+# child is a `sid` ("cl:<spawn call id>"), and everything it says or does is a
+# SUBAGENT_EVENT, never the parent's TEXT or TOOL_*: a child's prose is not
+# the orchestrator's answer. Background is the CLI's default, so a child
+# outlives its turn as a matter of course and is never stopped for it.
+CHILD_LIMIT = 256            # children remembered per session (oldest finished out)
+CHILD_TOOL_LIMIT = 1024      # their tool calls, for the results' names
+CHILD_LABEL_CAP = 40
+CHILD_UNNAMED = "unnamed"
+CHILD_NAME_CHARS = 200       # the lifecycle's name, before the daemon cleans it
+CHILD_RESULT_CHARS = 4000    # the CLI's closing summary of a child
+# A label on an approval card: only these characters survive (anything else
+# becomes "_"), so it cannot draw the card's own " · " parts or close its ‹ ›.
+_CHILD_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9 _./-]+")
+_SID_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# task_updated.patch.status and task_notification.status, to a row's status.
+_CHILD_TERMINAL = {"completed": "done", "failed": "failed", "killed": "stopped",
+                   "stopped": "stopped"}
+CHILD_LIVE = ("running", "backgrounded")
 
 # The exact text the CLI puts in a tool result when the auto-mode classifier
 # refuses a call — §6.1's `reviewer_declined` trigger. Verified 2026-09-15
@@ -604,6 +631,28 @@ class _Pending:
 
 
 @dataclass
+class _Child:
+    """One native sub-agent, as this session knows it (SV-1)."""
+
+    sid: str
+    status: str = "running"
+    task_id: str | None = None
+    parent_sid: str | None = None
+    depth: int = 1
+    background: bool = False
+    name: str = ""
+    kind: str = ""
+    last_tool: str = ""
+    tokens: int | None = None
+    tool_uses: int | None = None
+    duration_ms: int | None = None
+    stop_reason: str | None = None
+    # A status Jarvis inferred (a foreground child still live when its turn
+    # ended), which the CLI's own word, arriving later, replaces.
+    inferred: bool = False
+
+
+@dataclass
 class _Session:
     client: Any
     brief: Brief
@@ -656,12 +705,24 @@ class _Session:
     # The private file the brief's MCP servers are carried in (plan
     # 2026-10-10 §1.3), or None when the brief has none.
     mcp_config: Path | None = None
+    # Native sub-agents (SV-1). They outlive turns (background is the CLI's
+    # default), so none of this is cleared when a turn starts: `children` by
+    # sid, oldest first; `tasks` maps a task id (= a hook's `agent_id`) to its
+    # sid; `child_tools` names the children's calls for their results; and
+    # `child_denied` holds their calls the hook refused, whose results may
+    # come a turn later.
+    children: OrderedDict = field(default_factory=OrderedDict)
+    tasks: dict = field(default_factory=dict)
+    child_tools: OrderedDict = field(default_factory=OrderedDict)
+    child_denied: OrderedDict = field(default_factory=OrderedDict)
 
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
 
-        A hook can only fire inside a turn, so `events is None` means the
-        consumer already stopped reading — dropping is right, blocking is not.
+        `events is None` means no send is reading: the turn's consumer already
+        stopped, or nothing runs but a background sub-agent, whose hook can
+        fire between turns (SV-0 finding 6). Dropping is right, blocking is
+        not: the gate still asks `permit`, and the broker's card is its own.
         """
         events = self.events
         if events is not None:
@@ -884,14 +945,12 @@ class ClaudeProvider:
             name = str(data.get("tool_name") or "")
             args = data.get("tool_input")
             args = dict(args) if isinstance(args, dict) else {}
+            agent_id = data.get("agent_id")
             # A Jarvis session tool (`mcp__jarvis__<tool>`, plan 2026-10-10).
             from .. import session_tools
             jarvis = session_tools.claude_session_tool(session.brief, name)
             if jarvis is not None and jarvis.foreground_only and data.get("agent_id"):
-                if tool_use_id:
-                    session.denied_tools.add(tool_use_id)
-                else:
-                    session.denial_without_id = True
+                _note_denied(session, tool_use_id, agent_id)
                 # A sub-agent's call (the hook input names its agent): refused
                 # without asking `permit`, so no one is ever asked about it.
                 return {
@@ -907,14 +966,13 @@ class ClaudeProvider:
             if jarvis is not None and jarvis.owner_gated:
                 from ..browser.drive import admission_for_tool, OFF
                 if jarvis.name != "hud_browser_act" or not admission_for_tool():
-                    if tool_use_id:
-                        session.denied_tools.add(tool_use_id)
-                    else:
-                        session.denial_without_id = True
+                    _note_denied(session, tool_use_id, agent_id)
                     return {"hookSpecificOutput": {
                         "hookEventName": "PreToolUse", "permissionDecision": "deny",
                         "permissionDecisionReason": HOOK_REFUSAL_PREFIX + OFF}}
-            decision = await self._decide(session, name, args)
+            # A sub-agent's call is decided exactly as the orchestrator's
+            # would be; the card only says whose it is (SV-1).
+            decision = await self._decide(session, name, args, agent_id=agent_id)
             if decision is Decision.ALLOW and jarvis is not None:
                 # Explicit under both profiles (D-5): under ASK it pre-empts the
                 # CLI's own prompt, under AUTO it skips the classifier, whose
@@ -938,10 +996,7 @@ class ClaudeProvider:
                         "permissionDecisionReason": "approved by Jarvis",
                     }
                 }
-            if tool_use_id:
-                session.denied_tools.add(tool_use_id)
-            else:
-                session.denial_without_id = True
+            _note_denied(session, tool_use_id, agent_id)
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -960,20 +1015,25 @@ class ClaudeProvider:
     def _can_use_tool(self, session: _Session):
         async def can_use_tool(tool_name, input_data, context):  # noqa: ANN001
             args = dict(input_data) if isinstance(input_data, dict) else {}
-            decision = await self._decide(session, str(tool_name or ""), args)
+            agent_id = getattr(context, "agent_id", None)
+            decision = await self._decide(session, str(tool_name or ""), args, agent_id=agent_id)
             if decision is Decision.ALLOW:
                 return PermissionResultAllow()
-            tool_use_id = getattr(context, "tool_use_id", None)
-            if tool_use_id:
-                session.denied_tools.add(tool_use_id)
-            else:
-                session.denial_without_id = True
+            _note_denied(session, getattr(context, "tool_use_id", None), agent_id)
             return PermissionResultDeny(message=_safe(HOOK_DENIAL_MESSAGE))
 
         return can_use_tool
 
-    async def _decide(self, session: _Session, name: str, args: dict) -> Decision:
+    async def _decide(self, session: _Session, name: str, args: dict, *,
+                      agent_id: Any = None) -> Decision:
         """Ask `permit`, announcing the question so a stalled turn is visible.
+
+        A call from a sub-agent (`agent_id`, from the hook input or the
+        permission context) is asked about exactly as the orchestrator's
+        would be. Only the card changes: `permit` is told the child's label
+        (`subagent`, when it takes the keyword), and the logged question
+        names its sid. Nothing here can make a child's answer looser — or
+        stricter — than its parent's (SV-1, the plan's Q7).
 
         `permit` may block for minutes while a human is asked, and it is a
         *synchronous* callable, so it runs on a worker thread — blocking this
@@ -990,26 +1050,47 @@ class ClaudeProvider:
         with session.mutex:
             session.pending[req_id] = pending
         private_act = name in ("hud_browser_act", "mcp__jarvis__hud_browser_act")
+        sid, label = self._asker(session, agent_id)
         session.emit(
             EventKind.APPROVAL_REQUESTED,
             req_id=req_id,
             tool=name,
             args={} if private_act else args,
             command=None if private_act else _command(args),
+            **({"subagent": sid} if sid else {}),
         )
         try:
-            decision = await self._race(session, pending, name, args)
+            decision = await (self._race(session, pending, name, args) if label is None
+                              else self._race(session, pending, name, args, label))
         finally:
             with session.mutex:
                 session.pending.pop(req_id, None)
         session.emit(EventKind.APPROVAL_RESOLVED, req_id=req_id, decision=decision.value)
         return decision
 
+    @staticmethod
+    def _asker(session: _Session, agent_id: Any) -> tuple[str | None, str | None]:
+        """(sid, card label) of the sub-agent a call came from, or (None,
+        None) for the orchestrator's own. The hook's `agent_id` is the
+        child's `task_id`, whose `task_started` always comes first (SV-0
+        finding 3); one not seen yet is still a sub-agent's, unnamed."""
+        if not agent_id:
+            return None, None
+        with session.mutex:
+            sid = session.tasks.get(str(agent_id))
+            child = session.children.get(sid) if sid else None
+            name = child.name if child is not None else None
+        return sid, child_label(name)
+
     async def _race(
-        self, session: _Session, pending: _Pending, name: str, args: dict
+        self, session: _Session, pending: _Pending, name: str, args: dict,
+        label: str | None = None,
     ) -> Decision:
         def ask() -> Decision:
             try:
+                if label is not None and _takes_subagent(session.permit):
+                    return Decision(session.permit(name, dict(args), session.brief,
+                                                   subagent=label))
                 return Decision(session.permit(name, dict(args), session.brief))
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
                 return Decision.DENY
@@ -1116,6 +1197,8 @@ class ClaudeProvider:
                 held, full, resend = await self._read(session, events, prompt_uid)
                 if full:
                     held = await self._context_full(session, events, message, held, resend)
+                for event in self._end_foreground(session):
+                    events.put(event)
                 if held is not None:
                     events.put(held)
             except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
@@ -1351,7 +1434,10 @@ class ClaudeProvider:
                     turn_work = True               # a sub-agent's tools count too
                 if getattr(msg, "parent_tool_use_id", None) is None and _context_full_message(msg):
                     turn_full = True               # never a sub-agent's
-            if owner is None and isinstance(msg, (AssistantMessage, StreamEvent)):
+            if (owner is None and isinstance(msg, (AssistantMessage, StreamEvent))
+                    and not getattr(msg, "parent_tool_use_id", None)):
+                # A sub-agent's message (tagged) starts no CLI turn: a
+                # background child talks between turns as a matter of course.
                 owner = "unknown"                  # a turn whose start was not echoed
                 hold_began = None
                 # Once this CLI is known to echo the message that starts a
@@ -1570,50 +1656,35 @@ class ClaudeProvider:
         return finished
 
     def _translate(self, session: _Session, msg: Any) -> list[Event]:
-        """One SDK message becomes zero or more §5.2 events."""
+        """One SDK message becomes zero or more §5.2 events.
+
+        A message tagged with `parent_tool_use_id` is a sub-agent's: what it
+        says or does comes out only as SUBAGENT_EVENT (`_child`), never as the
+        parent's TEXT, THINKING or TOOL_* — the transcript the owner reads as
+        Jarvis's reply, Discord, a task's result and voice all read those. A
+        tagged stream event (CLI 2.1.295 sends none) is dropped."""
         out: list[Event] = []
         if isinstance(msg, SystemMessage):
             self._note_session_id(session, (msg.data or {}).get("session_id"))
-            return out
+            return self._task(session, msg)
         if isinstance(msg, StreamEvent):
             self._note_session_id(session, msg.session_id)
+            if getattr(msg, "parent_tool_use_id", None):
+                return out                         # never a sub-agent's delta
             text = _delta_text(msg.event)
             if text:
                 out.append(Event(EventKind.TEXT_DELTA, session.thread_id, {"text": text}))
             return out
+        if (isinstance(msg, (AssistantMessage, SdkUserMessage))
+                and getattr(msg, "parent_tool_use_id", None)):
+            return self._child(session, msg, msg.parent_tool_use_id)
         if isinstance(msg, AssistantMessage):
             self._note_session_id(session, msg.session_id)
             if _context_full_message(msg):
                 # "Prompt is too long" is the CLI's error, not a reply: the
                 # turn handles it (`_context_full`) and the owner is told.
                 return out
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    if block.text:
-                        out.append(
-                            Event(EventKind.TEXT, session.thread_id, {"text": _safe(block.text)})
-                        )
-                elif isinstance(block, ThinkingBlock):
-                    if block.thinking:
-                        out.append(
-                            Event(
-                                EventKind.THINKING,
-                                session.thread_id,
-                                {"text": _safe(block.thinking)},
-                            )
-                        )
-                elif isinstance(block, ToolUseBlock):
-                    args = dict(block.input) if isinstance(block.input, dict) else {}
-                    session.tools_seen[block.id] = (block.name, args)
-                    out.append(
-                        Event(
-                            EventKind.TOOL_STARTED,
-                            session.thread_id,
-                            {"call_id": block.id, "name": block.name,
-                             "args": {} if block.name in ("hud_browser_act", "mcp__jarvis__hud_browser_act") else args},
-                        )
-                    )
-            return out
+            return self._blocks(session, msg, session.tools_seen)
         if isinstance(msg, SdkUserMessage):
             content = msg.content
             if isinstance(content, list):
@@ -1633,6 +1704,220 @@ class ClaudeProvider:
             return out
         return out
 
+    def _blocks(self, session: _Session, msg: AssistantMessage, seen: dict) -> list[Event]:
+        """An assistant message's blocks as TEXT, THINKING and TOOL_STARTED,
+        each call's name and arguments kept in `seen` for its result."""
+        out: list[Event] = []
+        for block in msg.content:
+            if isinstance(block, TextBlock):
+                if block.text:
+                    out.append(
+                        Event(EventKind.TEXT, session.thread_id, {"text": _safe(block.text)})
+                    )
+            elif isinstance(block, ThinkingBlock):
+                if block.thinking:
+                    out.append(
+                        Event(
+                            EventKind.THINKING,
+                            session.thread_id,
+                            {"text": _safe(block.thinking)},
+                        )
+                    )
+            elif isinstance(block, ToolUseBlock):
+                args = dict(block.input) if isinstance(block.input, dict) else {}
+                seen[block.id] = (block.name, args)
+                out.append(
+                    Event(
+                        EventKind.TOOL_STARTED,
+                        session.thread_id,
+                        {"call_id": block.id, "name": block.name,
+                         "args": {} if block.name in ("hud_browser_act", "mcp__jarvis__hud_browser_act") else args},
+                    )
+                )
+        return out
+
+    # -- native sub-agents (SV-1)
+
+    def _child(self, session: _Session, msg: Any, parent_id: Any) -> list[Event]:
+        """A sub-agent's message: built exactly as the parent's would be
+        (`_safe`, the private summaries, the denial mapping), then each event
+        wrapped as SUBAGENT_EVENT under the child's sid. A sid not yet known
+        (its `task_started` lost to the bound, or a CLI that sends none) is
+        started here; past the bound it is not remembered, and its events
+        are still the child's, never the parent's."""
+        sid = child_sid(parent_id)
+        out: list[Event] = []
+        with session.mutex:
+            known = sid in session.children
+        if not known:
+            child = self._remember(session, _Child(sid=sid))
+            if child is not None:
+                out.append(self._lifecycle(session, child, "started"))
+        inner: list[Event] = []
+        if isinstance(msg, AssistantMessage):
+            self._note_session_id(session, msg.session_id)
+            if not _context_full_message(msg):
+                with session.mutex:
+                    inner = self._blocks(session, msg, session.child_tools)
+                    while len(session.child_tools) > CHILD_TOOL_LIMIT:
+                        session.child_tools.popitem(last=False)
+        elif isinstance(msg.content, list):
+            for block in msg.content:
+                inner.extend(self._tool_result(session, block, seen=session.child_tools))
+        for event in inner:
+            out.append(Event(EventKind.SUBAGENT_EVENT, session.thread_id,
+                             {"sid": sid, "event": {"kind": event.kind.value, "data": event.data}}))
+        return out
+
+    def _remember(self, session: _Session, child: _Child) -> _Child | None:
+        """Add a child, making room by forgetting the oldest finished one. With
+        CHILD_LIMIT children all live, the newcomer is not remembered."""
+        with session.mutex:
+            if len(session.children) >= CHILD_LIMIT:
+                done = next((sid for sid, c in session.children.items()
+                             if c.status not in CHILD_LIVE), None)
+                if done is None:
+                    LOG.warning("claude %s: %d sub-agents live; not tracking another",
+                                session.thread_id, len(session.children))
+                    return None
+                gone = session.children.pop(done)
+                if gone.task_id and session.tasks.get(gone.task_id) == done:
+                    del session.tasks[gone.task_id]
+            session.children[child.sid] = child
+            if child.task_id:
+                session.tasks[child.task_id] = child.sid
+            return child
+
+    def _lifecycle(self, session: _Session, child: _Child, op: str) -> Event:
+        data: dict[str, Any] = {"sid": child.sid, "op": op, "status": child.status,
+                                "depth": child.depth, "background": child.background}
+        for key in ("task_id", "parent_sid", "name", "kind", "last_tool", "tokens",
+                    "tool_uses", "duration_ms", "stop_reason"):
+            value = getattr(child, key)
+            if value not in (None, ""):
+                data[key] = value
+        return Event(EventKind.SUBAGENT, session.thread_id, data)
+
+    def _task(self, session: _Session, msg: Any) -> list[Event]:
+        """A `task_*` system message, read by `subtype` and its raw `data`
+        (so an SDK that does not model them still reads them). Only a
+        `local_agent` task is a sub-agent; a long Bash (`local_bash`, SV-0)
+        and anything else emits nothing."""
+        subtype = getattr(msg, "subtype", None)
+        data = msg.data if isinstance(getattr(msg, "data", None), dict) else {}
+        task_id = data.get("task_id")
+        task_id = str(task_id) if isinstance(task_id, str) and task_id else None
+        if subtype == "task_started":
+            spawn = data.get("tool_use_id")
+            if data.get("task_type") != "local_agent" or task_id is None or not spawn:
+                return []
+            sid = child_sid(spawn)
+            with session.mutex:
+                child = session.children.get(sid)
+                parent_sid = session.tasks.get(str(data.get("parent_task_id") or ""))
+                parent = session.children.get(parent_sid) if parent_sid else None
+            new = child is None
+            if new:
+                child = _Child(sid=sid)
+            child.task_id = task_id
+            child.parent_sid = parent_sid
+            depth = _count(data.get("spawn_depth"))
+            child.depth = depth if depth else (parent.depth + 1 if parent is not None else 1)
+            child.background = data.get("is_backgrounded") is True
+            child.name = _safe(data.get("description") or "")[:CHILD_NAME_CHARS]
+            child.kind = _safe(data.get("subagent_type") or "")[:CHILD_NAME_CHARS]
+            if child.status in CHILD_LIVE:
+                child.status = "backgrounded" if child.background else "running"
+            if new:
+                if self._remember(session, child) is None:
+                    return []
+            else:
+                with session.mutex:
+                    session.tasks[task_id] = sid
+            return [self._lifecycle(session, child, "started" if new else "progress")]
+        with session.mutex:
+            sid = session.tasks.get(task_id) if task_id else None
+            if sid is None and data.get("tool_use_id"):
+                candidate = child_sid(data.get("tool_use_id"))
+                if candidate in session.children:
+                    sid = candidate
+            child = session.children.get(sid) if sid else None
+        if child is None:
+            return []
+        if subtype == "task_progress":
+            self._usage(child, data.get("usage"))
+            tool = data.get("last_tool_name")
+            if isinstance(tool, str) and tool:
+                child.last_tool = _safe(tool)[:CHILD_NAME_CHARS]
+            if child.status not in CHILD_LIVE:
+                return []
+            return [self._lifecycle(session, child, "progress")]
+        if subtype == "task_updated":
+            patch = data.get("patch") if isinstance(data.get("patch"), dict) else {}
+            status = _CHILD_TERMINAL.get(str(patch.get("status") or ""))
+            if status is not None:
+                return self._finish(session, child, status)
+            if patch.get("is_backgrounded") is True and child.status == "running":
+                child.background, child.status = True, "backgrounded"
+                return [self._lifecycle(session, child, "progress")]
+            return []
+        if subtype == "task_notification":
+            self._usage(child, data.get("usage"))
+            status = _CHILD_TERMINAL.get(str(data.get("status") or ""))
+            if status is None:
+                return []
+            out = self._finish(session, child, status)
+            if not out:
+                # Already ended (task_updated said so first): the closing
+                # numbers still count.
+                out = [self._lifecycle(session, child, "progress")]
+            summary = data.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                # The CLI's closing word on the child (its final text, the
+                # spawn description when stopped, the error when it failed):
+                # the child's, so its transcript's, never the parent's.
+                out.append(Event(EventKind.SUBAGENT_EVENT, session.thread_id, {
+                    "sid": child.sid, "event": {"kind": "result", "data": {
+                        "text": _safe(summary)[:CHILD_RESULT_CHARS], "status": status}}}))
+            return out
+        return []
+
+    @staticmethod
+    def _usage(child: _Child, usage: Any) -> None:
+        if not isinstance(usage, dict):
+            return
+        for key, field_name in (("total_tokens", "tokens"), ("tool_uses", "tool_uses"),
+                                ("duration_ms", "duration_ms")):
+            value = _count(usage.get(key))
+            if value is not None:
+                setattr(child, field_name, value)
+
+    def _finish(self, session: _Session, child: _Child, status: str,
+                reason: str | None = None, *, inferred: bool = False) -> list[Event]:
+        """A child's end, said once. The CLI's word replaces one Jarvis
+        inferred; nothing replaces the CLI's."""
+        if child.status not in CHILD_LIVE and not child.inferred:
+            return []
+        if child.status not in CHILD_LIVE and inferred:
+            return []
+        child.status, child.inferred = status, inferred
+        child.stop_reason = reason if inferred else None
+        return [self._lifecycle(session, child, "finished")]
+
+    def _end_foreground(self, session: _Session) -> list[Event]:
+        """The message's turn is over: a top-level child that was not
+        backgrounded cannot still be running (the CLI waits for a foreground
+        Agent call, and its stop or interrupt says `stopped` first, SV-0).
+        One still live is stopped, inferred. Background children are left
+        alone: outliving the turn is what they are for."""
+        with session.mutex:
+            live = [c for c in session.children.values()
+                    if c.status == "running" and not c.background and c.parent_sid is None]
+        out: list[Event] = []
+        for child in live:
+            out.extend(self._finish(session, child, "stopped", "the turn ended", inferred=True))
+        return out
+
     @staticmethod
     def _tool_summary(name: str, text: str) -> str:
         canonical = name.removeprefix("mcp__jarvis__")
@@ -1641,13 +1926,15 @@ class ClaudeProvider:
             return tools.private_summary(canonical, text)
         return text[:SUMMARY_CHARS]
 
-    def _tool_result(self, session: _Session, block: Any) -> list[Event]:
+    def _tool_result(self, session: _Session, block: Any, *, seen: dict | None = None) -> list[Event]:
         if not isinstance(block, ToolResultBlock):
             return []
-        name, args = session.tools_seen.get(block.tool_use_id, ("", {}))
+        name, args = (session.tools_seen if seen is None else seen).get(block.tool_use_id, ("", {}))
         text = _safe(_result_text(block.content))
         declined = text.startswith(CLASSIFIER_DENIAL_PREFIX)
-        denied = declined or block.tool_use_id in session.denied_tools
+        child_denied = getattr(session, "child_denied", None)
+        denied = (declined or block.tool_use_id in session.denied_tools
+                  or (child_denied is not None and child_denied.pop(block.tool_use_id, None) is not None))
         # Older SDK contexts may omit the id. Only an error can then be a
         # hook refusal; successful output bearing those words stays success.
         if (session.denial_without_id and block.is_error
@@ -1800,11 +2087,16 @@ class ClaudeProvider:
                 return client
 
             # The old client's reader goes with it, and so does anything the old
-            # CLI process still held: a steer queued there dies with it.
+            # CLI process still held: a steer queued there dies with it, and
+            # so does every sub-agent it ran (SV-1): stopped here, so a dead
+            # child holds no CHILD_LIMIT slot (`live_subagents` tells the daemon).
             self._stop_pump(session)
             with session.mutex:
                 session.steering.clear()
                 session.stopped.clear()
+                for child in session.children.values():
+                    if child.status in CHILD_LIVE:
+                        child.status, child.stop_reason = "stopped", "the session restarted"
             try:
                 _await(session.loop, old_client.disconnect(), CONTROL_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — an old client that will not go quietly still goes
@@ -1832,6 +2124,15 @@ class ClaudeProvider:
             session.client = old_client
             self.close(h)
             raise SessionLost(reason + "; the session is closed and resumes with the next message")
+
+    def live_subagents(self, h: SessionHandle) -> set[str]:
+        """The sids of the sub-agents this session's CLI still runs, as far
+        as it has said (SV-1). A closed session runs none."""
+        session = h.native
+        if session is None or session.closed:
+            return set()
+        with session.mutex:
+            return {sid for sid, child in session.children.items() if child.status in CHILD_LIVE}
 
     def interrupt(self, h: SessionHandle) -> None:
         session = h.native
@@ -1881,6 +2182,20 @@ class ClaudeProvider:
 
 
 # --- helpers ----------------------------------------------------------------
+
+
+def _note_denied(session: _Session, tool_use_id: Any, agent_id: Any = None) -> None:
+    """A call the gate refused: its result reads as `denied`. A sub-agent's is
+    kept apart, across turns, since its result may come after its turn."""
+    if not tool_use_id:
+        session.denial_without_id = True
+        return
+    session.denied_tools.add(tool_use_id)
+    if agent_id:
+        with session.mutex:
+            session.child_denied[tool_use_id] = True
+            while len(session.child_denied) > CHILD_TOOL_LIMIT:
+                session.child_denied.popitem(last=False)
 
 
 def _native(h: SessionHandle) -> _Session:
@@ -1935,6 +2250,44 @@ def _stop_loop(loop: asyncio.AbstractEventLoop, runner: threading.Thread) -> Non
         loop.close()
     except RuntimeError:
         pass
+
+
+def child_sid(tool_use_id: Any) -> str:
+    """A sub-agent's id: "cl:" and the spawning Agent call's id. An id the
+    pattern does not fit is hashed, never dropped: a tagged message must
+    still land with a child, whatever its parent id looks like."""
+    text = str(tool_use_id or "")
+    if _SID_ID.fullmatch(text):
+        return "cl:" + text
+    return "cl:h" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def child_label(name: Any) -> str:
+    """The sub-agent's name as an approval card shows it: scrubbed, reduced to
+    `[A-Za-z0-9 _./-]` (anything else "_"), one space at a time, capped."""
+    if not isinstance(name, str):
+        return CHILD_UNNAMED
+    label = " ".join(_CHILD_LABEL_UNSAFE.sub("_", " ".join(_safe(name).split())).split()).strip(" _")
+    if len(label) > CHILD_LABEL_CAP:
+        label = label[:CHILD_LABEL_CAP - 1].rstrip() + "…"
+    return label or CHILD_UNNAMED
+
+
+def _takes_subagent(permit: Any) -> bool:
+    """Whether `permit` takes the `subagent` keyword. Only such a callback is
+    handed it: one that does not would raise, and a raise denies — the label
+    must never change an answer, either way."""
+    try:
+        params = inspect.signature(permit).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is p.VAR_KEYWORD
+               or (p.name == "subagent" and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
+               for p in params)
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _command(args: dict) -> str | None:

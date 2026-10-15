@@ -3058,3 +3058,152 @@ Pane Stop/Resume and native Chat Stop are distinct: Codex's pre-existing
 incomplete-accounting guard requires a fresh chat after Chat Stop. See
 [Browser owner guidance and evidence](notes/browser.md#native-parent-browser-driving-br9d)
 for supported profiles and the offline acceptance limits.
+
+## Native sub-agents (SV-1, 2026-10-15)
+
+A Claude chat's own Agent children (Claude Code 2.1.295; Codex's come with
+SV-2) are **not the orchestrator**. What a child says or does never becomes
+the thread's `text`, `tool_*` or `thinking`: not in the transcript route,
+the Discord mirror, a task's result, titles, the ledger or `/events`. It is
+kept apart, in the thread's own `subagents.jsonl`, and read only through the
+two routes below. Plan: `docs/plans/2026-10-13-subagent-view.md`; protocol:
+`docs/plans/2026-10-15-sv0-findings.md`; notes:
+`docs/notes/providers-runtime.md` ("Claude sub-agents are their own").
+
+A child is a **sid**, `cl:<the spawning Agent call's id>` (`cx:` is reserved
+for Codex), matching `^(cl|cx):[A-Za-z0-9_-]{1,128}$`. The parent's Agent
+call stays an ordinary `tool_started`/`tool_finished` pair with that same
+`call_id`, so a row can sit where it was spawned. Its `tool_finished` is the
+spawn's receipt; for a background child ("Async agent launched
+successfully") it is **not** the child's end.
+
+**Status**: `running` (foreground, live), `backgrounded` (live and not
+waited for: Claude Code's default, so a child outlives the turn that spawned
+it as a matter of course), `done`, `failed`, `stopped`. The CLI's own word
+decides an end. Jarvis infers one only when:
+
+- a top-level foreground child is still live when its turn ends (`stopped`,
+  `stop_reason: "the turn ended"`; a later word from the CLI replaces it);
+- the session that ran it is gone (closed, archived, lost, or reconnected
+  for a Claude model switch): `stopped`, `stop_reason: "the session that ran
+  it ended"` or `"the session restarted for a model switch"`;
+- after a daemon restart, a record still marked live is read back
+  `stopped` ("the session that ran it ended"): its CLI died with the daemon.
+
+**The thread's Stop also kills background children.** `POST
+/threads/{id}/interrupt` is Claude Code's interrupt, which stops every
+background agent of the session too, even between turns (SV-0 finding 6).
+There is no per-child Stop yet (SV-4).
+
+### `GET /threads/{id}/subagents`
+
+Owner-only (`projects.owner_only`, checked before the thread is looked up:
+the API listener, a request with no Origin and no same-origin fetch
+metadata, and any foreign Origin are 403, also for a thread that does not
+exist). Read-only: any other method is 405. No query.
+
+```json
+{"subagents": [{
+  "sid": "cl:toolu_01…", "status": "done", "depth": 1, "background": false,
+  "name": "Find the flaky test", "kind": "general-purpose",
+  "started_at": "2026-10-15T18:15:42.628Z", "ended_at": "…", "turn_id": "…",
+  "entries": 3,
+  "task_id": "a5fd86f028e49636f",
+  "tokens": 110, "tool_uses": 1, "duration_ms": 101, "last_tool": "Bash"
+}]}
+```
+
+Oldest first. Optional keys (`task_id`, `parent_sid`, `ended_at`,
+`stop_reason`, `tokens`, `tool_uses`, `duration_ms`, `last_tool`) are left
+out when unknown. `name` (the Agent
+call's `description`), `kind` (`subagent_type`) and `last_tool` are
+model-chosen: scrubbed of credential values, one line, at most 40
+characters — render as text. `depth`/`parent_sid`: Claude Code 2.1.295 lets a
+general-purpose child spawn its own (depth 2, `parent_sid` its parent); a
+grandchild's messages are not forwarded by the CLI, so its transcript holds
+only the CLI's closing summary. `tokens`/`tool_uses`/`duration_ms` are the
+CLI's `TaskUsage` for the child, never dollars and never in the ledger or
+`thread.tokens` (Claude's `total_cost_usd` already includes children).
+`entries` counts transcript entries ever made; `declined` (present when
+not 0) counts the child's calls a reviewer declined. Up to 64 children per
+thread are kept (the oldest finished one makes room; with 64 live, a
+newcomer is not listed).
+
+### `GET /threads/{id}/subagents/{sid}/transcript[?limit=N]`
+
+Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
+400 for a sid that does not match the pattern or a `limit` outside 1–300
+(default 300); 404 for an unknown thread (owner only) or sid.
+
+```json
+{"subagent": {…the list row…},
+ "messages": [
+   {"role": "tool", "call_id": "toolu_…", "name": "Bash", "label": "echo SV0-alpha",
+    "outcome": "ok", "seq": 1, "at": "…", "finished_at": "…"},
+   {"role": "assistant", "text": "…", "seq": 2, "at": "…"},
+   {"role": "result", "text": "…", "status": "done", "seq": 3, "at": "…"}],
+ "truncated": false}
+```
+
+- `assistant`: a text the child wrote (whole: the CLI streams no child
+  deltas), at most 4000 characters. Claude's credential scrub has run.
+- `tool`: one call, folded with its outcome: `running`, `ok`, `failed`,
+  `denied` (Jarvis's gate or Claude's reviewer refused it), or `stopped`
+  (no outcome came and the child has ended). `label` is the daemon's
+  `tool_calls.label`, computed as for the parent's calls; `hud_browser_act`
+  is always "Browser action". **Never `args` or a result summary.**
+- `result`: the CLI's closing word on the child (`task_notification.
+  summary`): its final report when done, its description when stopped, the
+  error when failed. At most 4000 characters.
+- `declined`: `{"role": "declined", "name": "Bash", "seq", "at"}` — Claude's
+  reviewer declined one of the child's calls (the call's own entry says
+  `denied`). The tool's name only: never the command, its arguments or the
+  reviewer's words.
+
+The newest `limit` entries, oldest first; at most 300 are kept per child,
+and a thread's entries together at most 1 MiB of their JSON (the oldest
+entry of any of its children goes first). `truncated` is true when older
+ones exist. `seq` numbers a child's entries from 1. Thinking is not kept.
+
+**A child's reviewer decline has no "run anyway" (decision, SV-1).** The
+escape hatch (`hatch.py`, design §6.1) offers the owner a command Claude's
+reviewer declined and feeds its output to the session as the next user
+message. For a child's call that would run the command for, and hand its
+output to, the orchestrator — not the child that wanted it — so a child's
+decline never reaches the hatch: no card, no run, no output in any
+transcript. It is shown instead as the child's `declined` entry and count
+(and on the row in SV-3). It is not also a line in the thread itself: an
+`error` record would read as the orchestrator failing (ledger, Discord
+footer, a task's result), and a new thread-level kind is HUD work (SV-3).
+
+**On disk** the record is the thread's own `subagents.jsonl`, created
+0600. Past 4 MiB it is rewritten (atomically, beside itself) as one snapshot
+line per child of what memory holds, at most about 1 MiB, so the file stays
+bounded and a cold read, which takes at most its last 4 MiB, rebuilds all
+of memory.
+
+### On `/events`
+
+```json
+{"kind": "subagent", "thread_id": "…", "project_id": "…", "turn_id": "…", "at": "…",
+ "data": {"sid": "cl:…", "op": "started|progress|finished", "status": "…",
+          "depth": 1, "background": true, "started_at": "…", "entries": 2,
+          "task_id": "…", "parent_sid": "cl:…", "ended_at": "…"}}
+```
+
+One per change (a start, a progress tick, a new or finished transcript
+entry, an end; `declined` when not 0). **Ids, a status, times and counts
+only**: never a name, a word a child wrote or a tool's arguments, since
+`/events` is open to any local client on the API listener. A client that
+wants more asks the owner routes. (The one place a child's name reaches
+`/events` is the broker's own `approval_requested` record for a card a
+child's call raised: its `origin`, below, carries the cleaned name, as a
+task's card carries the task's.) `turn_id` is the turn being read when it arrived — for a background
+child talking between turns, the next turn's (SV-6). Discord, the runner,
+titles and the voice queue ignore the kind.
+
+An approval card raised by a child's call is decided exactly as the
+orchestrator's would be (every layer, the same answer). Only its `origin`
+changes: "Claude sub-agent ‹name› (not the orchestrator)" (the name reduced
+to `[A-Za-z0-9 _./-]`, at most 40 characters), then " in task …" for a
+task's. The HUD shows it as "REQUESTED BY …", Discord as "Origin: …".

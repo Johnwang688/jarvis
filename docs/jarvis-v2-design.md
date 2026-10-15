@@ -210,6 +210,14 @@ and never reach the bus (2026-10-08): the daemon logs them as
 `gate_requested`/`gate_resolved`, and the bus's `approval_*` come from the
 broker alone.
 
+Since SV-1 (2026-10-15) a provider may also emit `subagent` (a native
+sub-agent's lifecycle: sid, op, status, usage) and `subagent_event` (one thing
+it said or did, wrapped: `{sid, event: {kind, data}}`). They are kinds of
+their own, never the kinds above with a tag, so a surface that does not know
+them ignores them and a child's words are never the orchestrator's. The
+daemon keeps them out of the thread's log and off the bus except as a
+words-free `subagent` record (`docs/hud-api.md`, "Native sub-agents").
+
 ### 5.3 ClaudeProvider
 
 - Built on the **Python `claude-agent-sdk`**, which spawns the installed

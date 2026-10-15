@@ -1875,6 +1875,41 @@ def _reporter_status(reporter) -> dict | None:
     }
 
 
+def subagent_route(handler, daemon, parts, query):
+    """`GET /threads/{id}/subagents` and `GET /threads/{id}/subagents/{sid}/
+    transcript[?limit=N]` (SV-1). A sub-agent's words are not the
+    orchestrator's reply, so they are kept apart from the thread's log and
+    served only here: to the owner, from the HUD (`owner_only`, before the
+    thread is looked up), never to the API listener every tool's HTTP client
+    uses. A transcript names each tool call's label and outcome, never its
+    arguments or result."""
+    from .daemon import _object
+    from .projects import owner_only
+    from .subagents import ENTRY_LIMIT, valid_sid
+    owner_only(handler, daemon)
+    if handler.command != "GET":
+        fail(405, "sub-agents are read-only here")
+    thread = daemon.require(daemon.stores.threads, parts[1])
+    if len(parts) == 3:
+        _object(query, ())
+        return 200, {"subagents": daemon.subagents.list(thread.id)}
+    if len(parts) == 5 and parts[4] == "transcript":
+        _object(query, ("limit",))
+        sid = unquote(parts[3])
+        if not valid_sid(sid):
+            fail(400, "not a sub-agent id")
+        limit = ENTRY_LIMIT
+        if "limit" in query:
+            if not re.fullmatch(r"[0-9]{1,4}", query["limit"]) or not 1 <= int(query["limit"]) <= ENTRY_LIMIT:
+                fail(400, f"limit must be 1 to {ENTRY_LIMIT}")
+            limit = int(query["limit"])
+        found = daemon.subagents.transcript(thread.id, sid, limit)
+        if found is None:
+            fail(404, "no such sub-agent on this thread")
+        return 200, found
+    fail(404, "not found")
+
+
 def route(handler, daemon, parts, query):
     """Return None for the existing daemon routes; never consume their bodies."""
     from .daemon import _object, safe_list
@@ -1931,6 +1966,10 @@ def route(handler, daemon, parts, query):
             project = daemon.require(stores.projects, parts[1])
             _object(query, ())
             return 200, editor_git.status(project)
+    # A chat's native sub-agents (SV-1, subagents.py): the owner's alone,
+    # checked before the thread is even looked up, and reads only.
+    if len(parts) >= 3 and parts[0] == "threads" and parts[2] == "subagents":
+        return subagent_route(handler, daemon, parts, query)
     # VEX V5 (VX-1): build, download, the brain terminal, new projects.
     # Owner-only, the HUD listener only; mounted before `/projects/...` so
     # `/projects/{id}/vex...` reaches it.
