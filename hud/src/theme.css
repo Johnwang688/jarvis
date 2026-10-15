@@ -68,6 +68,10 @@
   --veil: rgba(0, 0, 0, 0.62);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --radius: 6px;
+  /* Every button: a crisp rectangle with slightly softened corners (owner, 2026-10-15). One
+     token, so no button drifts back to a pill. True circles (.iconbtn, .railmark) and non-button
+     chips/badges keep their own shapes. */
+  --radius-btn: 4px;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
 
   /* The HUD's own zoom (lib/layout.ts), set by the window. Viewport units
@@ -97,7 +101,7 @@ button {
   color: var(--text);
   background: var(--bg-2);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
+  border-radius: var(--radius-btn);
   padding: 5px 10px;
   cursor: pointer;
 }
@@ -188,7 +192,7 @@ h2.bar {
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; margin: 0; padding: 0; flex: 0 0 22px;
   font-size: 15px; line-height: 1; color: var(--text-muted);
-  background: transparent; border-color: transparent; border-radius: 4px;
+  background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 .barrow #newproject:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
 
@@ -495,8 +499,8 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   padding: 4px 6px; border-radius: 0; margin-left: -1px;
   font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
 }
-:is(#dictation, .dictation) button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
-:is(#dictation, .dictation) button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+:is(#dictation, .dictation) button:first-child { border-radius: var(--radius-btn) 0 0 var(--radius-btn); margin-left: 0; }
+:is(#dictation, .dictation) button:last-child { border-radius: 0 var(--radius-btn) var(--radius-btn) 0; }
 :is(#dictation, .dictation) button.on { position: relative; z-index: 1; }
 :is(#dictation, .dictation) button.on.off { background: var(--red-soft); border-color: var(--red-line); color: var(--red); }
 
@@ -555,10 +559,10 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 #speechstrip button {
   padding: 2px 0; width: 36px; border-radius: 0; margin-left: -1px; font: 11px var(--mono);
 }
-#speechstrip button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
-#speechstrip button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+#speechstrip button:first-child { border-radius: var(--radius-btn) 0 0 var(--radius-btn); margin-left: 0; }
+#speechstrip button:last-child { border-radius: 0 var(--radius-btn) var(--radius-btn) 0; }
 #speechstrip.compact { position: fixed; left: 2px; bottom: 72px; width: 32px; display: block; z-index: 40; }
-#speechstrip.compact button { width: 32px; height: 20px; padding: 0; border-radius: var(--radius); margin: 0; }
+#speechstrip.compact button { width: 32px; height: 20px; padding: 0; border-radius: var(--radius-btn); margin: 0; }
 #shell.speech-on #sidebar { padding-bottom: 224px; }
 #shell.mic-tight.speech-on #sidebar { padding-bottom: 180px; }
 
@@ -800,7 +804,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 }
 .sidetabs button {
   font: 600 9.5px var(--mono); letter-spacing: 0.05em; text-transform: uppercase;
-  padding: 2px 7px; border: none; background: none; color: var(--text-muted); border-radius: 4px;
+  padding: 2px 7px; border: none; background: none; color: var(--text-muted); border-radius: var(--radius-btn);
 }
 .sidetabs button.on { color: var(--text); box-shadow: inset 0 -2px var(--accent); }
 .sidetabs button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
@@ -1054,7 +1058,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .tree-row.droptarget { outline: 1px dashed var(--accent-line); outline-offset: -1px; background: var(--accent-soft); }
 .tree-row .menu {
   margin-left: auto; flex: 0 0 auto; font: 11px var(--mono); color: var(--text-muted);
-  padding: 0 4px; border: none; background: none; border-radius: 3px;
+  padding: 0 4px; border: none; background: none; border-radius: var(--radius-btn);
 }
 .tree-row:hover .menu { color: var(--text); }
 .tree-row .menu:hover:not(:disabled) { background: var(--bg-3); }
@@ -1103,7 +1107,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 }
 .mpop .mlist { display: flex; flex-direction: column; }
 .mpop button.mopt {
-  text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px;
+  text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-btn);
   padding: 5px 8px; font: 12px var(--mono); color: var(--text-2);
 }
 .mpop button.mopt:hover:not(:disabled) { background: var(--hover); color: var(--text); }
@@ -1214,7 +1218,7 @@ button.collapse {
   display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; padding: 0; flex: 0 0 24px;
   font: 13px var(--mono); line-height: 1; color: var(--text-muted);
-  background: transparent; border-color: transparent; border-radius: 4px;
+  background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 button.collapse:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
 .sidetop button.collapse { height: 32px; }
@@ -1224,8 +1228,8 @@ button.collapse:hover:not(:disabled) { background: var(--bg-3); color: var(--tex
   padding: 0 6px; height: 22px; min-width: 22px; border-radius: 0; margin-left: -1px;
   font: 10px var(--mono); color: var(--text-2); background: var(--bg-2);
 }
-.zoomctl button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
-.zoomctl button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+.zoomctl button:first-child { border-radius: var(--radius-btn) 0 0 var(--radius-btn); margin-left: 0; }
+.zoomctl button:last-child { border-radius: 0 var(--radius-btn) var(--radius-btn) 0; }
 .zoomctl button.pct { min-width: 42px; color: var(--text); }
 
 /* The draggable edge: a 7px hit area over the 1px rule, taking no room. */
@@ -1255,7 +1259,7 @@ body.resizing iframe { pointer-events: none; }
 .rail .railbtn {
   width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   font: 13px var(--mono); line-height: 1; color: var(--text-muted);
-  background: transparent; border-color: transparent; border-radius: 4px;
+  background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 .rail .railbtn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
 .rail .railbtn.plus {
@@ -1289,7 +1293,7 @@ body.resizing iframe { pointer-events: none; }
 button.tb-icon {
   position: relative; width: 26px; height: 22px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  color: var(--text-muted); background: transparent; border-color: transparent; border-radius: 4px;
+  color: var(--text-muted); background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 button.tb-icon:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
 button.tb-icon[aria-expanded="true"] { color: var(--text); background: var(--bg-3); }
@@ -1421,9 +1425,9 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
   flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px;
   overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
-.paneltab { flex: 0 0 auto; display: inline-flex; align-items: center; border-radius: 4px; }
+.paneltab { flex: 0 0 auto; display: inline-flex; align-items: center; border-radius: var(--radius-btn); }
 .paneltab > button[role="tab"] {
-  display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: 4px 0 0 4px;
+  display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: var(--radius-btn) 0 0 var(--radius-btn);
   background: none; padding: 3px 4px 3px 8px; font-size: 11px; color: var(--text-muted);
 }
 .paneltab > button[role="tab"]:hover:not(:disabled) { background: var(--hover); color: var(--text); }
@@ -1433,7 +1437,7 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
 .paneltab-where { font: 10px var(--mono); color: var(--text-muted); }
 .paneltab-x {
   border: none; background: none; padding: 0 6px; height: 20px; font-size: 12px; line-height: 1;
-  color: var(--text-muted); border-radius: 0 4px 4px 0;
+  color: var(--text-muted); border-radius: 0 var(--radius-btn) var(--radius-btn) 0;
 }
 .paneltab-x:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .panelbody.termpanel { display: flex; flex-direction: column; overflow: hidden; }
@@ -1529,7 +1533,7 @@ button.termread { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; white-space
 .vexerrors { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: calc(40vh / var(--ui-zoom, 1)); overflow-y: auto; }
 .vexerr {
   display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; padding: 3px 6px;
-  font: 12px var(--mono); background: transparent; border: 1px solid transparent; border-radius: 4px; color: var(--text);
+  font: 12px var(--mono); background: transparent; border: 1px solid transparent; border-radius: var(--radius-btn); color: var(--text);
 }
 button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var(--border); cursor: pointer; }
 .vexerr.outside { color: var(--text-muted); }
@@ -1764,7 +1768,7 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 
 /* V10: Undo after a cancel word, and the send/cancel word lists in Settings -> Voice. */
 .voice-undo { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 6px; padding: 4px 8px; border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px; background: var(--bg-2); font-size: 11px; color: var(--text-muted); }
-.voice-undo button { font: inherit; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+.voice-undo button { font: inherit; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: var(--radius-btn); padding: 1px 8px; cursor: pointer; }
 .voice-words { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
 .voice-words h3 { font-size: 12px; }
 .voice-words p { color: var(--text-muted); font-size: 11px; }
@@ -1774,3 +1778,25 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .voice-words-add { display: flex; gap: 6px; align-items: center; }
 .voice-words-add input { width: 9em; }
 .voice-words-error { color: var(--red); font-size: 11px; min-height: 1em; }
+
+/* ---- binary click sparkle (lib/sparkle.ts, owner 2026-10-15) ----
+   A fixed overlay outside #root: it never takes a pointer event, focus or any
+   layout, and sits above the approval veil (z-index 100) so a burst from AUTHORIZE
+   is seen. The glyphs are tiny, monospace, glacier-cyan and gone in 0.5 s. */
+#sparkle-layer {
+  position: fixed; inset: 0; z-index: 2147483000; pointer-events: none; overflow: hidden;
+  contain: layout paint style;
+}
+#sparkle-layer .sparkle-bit {
+  position: absolute; pointer-events: none; user-select: none;
+  font: 600 10px/1 var(--mono); color: var(--accent); opacity: 0;
+  text-shadow: 0 0 4px var(--accent-soft);
+  transform: translate(-50%, -50%);
+  animation: sparkle-burst 500ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+@keyframes sparkle-burst {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.7); }
+  15% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, 0px))) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) { #sparkle-layer { display: none; } }

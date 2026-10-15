@@ -1277,3 +1277,45 @@ draws it.
 - Tests: `hud/src/lib/recentChats.test.ts` and
   `tests/face/hud_v2_recent_chats_check.py` (8 chats: 5 newest-first, "Show 3
   more", an old open chat kept, attention states kept, reload, keyboard).
+
+## Buttons: one rectangle, and the binary click sparkle (2026-10-15)
+
+Owner-approved cosmetic package. Not built into the owner's installed HUD, not
+deployed; branch `claude/buttons-sparkle`.
+
+- **One button shape.** `--radius-btn: 4px` in `hud/src/theme.css` `:root` is
+  the only source of a button's corner. The global `button` rule uses it, and so
+  do the icon/rail/titlebar buttons, the segmented groups (dictation, speech
+  strip, zoom: 4px outer corners, flush inner ones), the sidebar `⋯`, side tabs,
+  the model popover rows, the panel tab and the VEX error rows. A new button
+  rule uses the token, never a literal radius. The HUD had no pills to speak of:
+  the plain buttons were 6px (`--radius`), a few icon buttons 4px, the sidebar
+  `⋯` 3px; they are now all 4px. Colour, border, size, padding, hover, disabled,
+  `.on`, focus ring and Tab order are unchanged.
+- **Left as they were, deliberately:** the true circles `.iconbtn` (Attach, Send,
+  Stop) and `.railmark` (the folded rail's approval/error marks); non-button
+  chips and badges (`.chip`, `.phase`, `.badge`, `.termbadge`, `.tb-badge`,
+  `.discord-link .pill`, `.voice-words-chip`: spans, 10px/3px); inputs, selects,
+  cards, menus and the approval card (6px `--radius`, not buttons); flush tab
+  strips and menu rows (0).
+- **Binary click sparkle** (`hud/src/lib/sparkle.ts`, installed from `main.tsx`).
+  One capture-phase `click` listener on the document; for a click on a
+  `button`/`[role=button]` (not disabled) it draws 5–7 glacier-cyan monospace `1`
+  and `0` glyphs in one fixed `#sparkle-layer` (`pointer-events: none`,
+  `aria-hidden`, under `<body>` so the approval card's inert pass and the zoom do
+  not touch it, z-index above the veil) that fade over 0.5 s. It never calls
+  `preventDefault`/`stopPropagation`, never awaits and never touches focus or
+  layout; the draw happens in `requestAnimationFrame`. Keyboard activation (click
+  with `detail` 0) bursts from the button's centre, read before the action can
+  remove the button. At most 24 glyphs live at once (the oldest go first), each
+  removed on `animationend` or by a timer 120 ms after its life, so rapid
+  clicking cannot leak. It is off under `prefers-reduced-motion: reduce`
+  (checked at each click, and the layer is `display: none` there) and when the
+  switch is off. The approval card's explicit-click, no-pointer-focus and Tab
+  rules are untouched; the sparkle reads only the event's target and position.
+- **Preference.** Settings -> General -> "Click sparkle", on by default, in
+  localStorage `jarvis.hud.sparkle` (`"0"` is off; anything else, or blocked
+  storage, is on), behind try/catch like the other per-window HUD preferences.
+  Another window's change arrives by the `storage` event.
+- Tests: `hud/src/lib/sparkle.test.ts`, `hud/src/components/SparkleSetting.test.ts`
+  and `tests/face/hud_v2_buttons_check.py` (also part of `hud_v2_check.py`).

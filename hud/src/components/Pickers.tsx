@@ -13,6 +13,7 @@ import type { AvatarDesc, RouteView, VoiceEntry } from "../types";
 import type { Project, ProjectImpact } from "../types";
 import { DirPicker } from "./DirPicker";
 import { DiscordLink } from "./DiscordLink";
+import { SparkleSetting } from "./SparkleSetting";
 import { api } from "../api";
 import { INSTALL_MENU, type InstallStatus } from "../state/installApp";
 import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
@@ -47,14 +48,17 @@ export function GeneralSettings(props: {
   blocked: boolean; installStatus: InstallStatus; onInstall: () => Promise<void>;
 }) {
   return (
-    <div className="pad" data-testid="install-app">
-      {props.installStatus === "installed" ? <span>Installed</span>
-        : props.installStatus === "available" ? (
-          <button type="button" disabled={props.blocked} onClick={() => {
-            if (!props.blocked) void props.onInstall();
-          }}>Install as app</button>
-        ) : <span className="muted small">{INSTALL_MENU}</span>}
-    </div>
+    <>
+      <div className="pad" data-testid="install-app">
+        {props.installStatus === "installed" ? <span>Installed</span>
+          : props.installStatus === "available" ? (
+            <button type="button" disabled={props.blocked} onClick={() => {
+              if (!props.blocked) void props.onInstall();
+            }}>Install as app</button>
+          ) : <span className="muted small">{INSTALL_MENU}</span>}
+      </div>
+      <div className="pad"><SparkleSetting /></div>
+    </>
   );
 }
 
