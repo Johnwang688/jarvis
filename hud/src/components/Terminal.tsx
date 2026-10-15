@@ -58,7 +58,7 @@ import { api } from "../api";
 import {
   AttachLedger, HeldInput, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, continuationPrefix,
   continuesOn, counterZoom, encodeInput, fontSizeFor, hhmm, integrationNote, isTerminalId, judgeLink, loadMine,
-  loadPrefs, mayContinue, menuWidth, parseControl, parseRead, placeMenu, readableCarry, readNoteText,
+  loadPrefs, mayContinue, menuWidth, parseControl, parseRead, parseReadable, placeMenu, readableCarry, readNoteText,
   saveMine, savePrefs,
   SPECS_KEPT, type InSpec, type ReadNote, type TerminalRow,
 } from "../lib/terminal";
@@ -1854,6 +1854,20 @@ export class TermManager {
     this.changed();
   }
 
+  /**
+   * `terminal_readable` on the bus: the switch was changed, maybe in another
+   * window. Display only: a terminal this window does not list is left for the
+   * next listing, and the daemon's flag stays the truth.
+   */
+  heardReadable(data: unknown) {
+    const change = parseReadable(data);
+    if (!change) return;
+    const row = this.row(change.terminalId);
+    if (!row || row.readable === change.readable) return;
+    this.updateRow({ ...row, readable: change.readable });
+    this.changed();
+  }
+
   dismissNotice(key: number) {
     this.notices = this.notices.filter((n) => n.key !== key);
     this.changed();
@@ -1908,6 +1922,11 @@ export function terminalAttached(data: unknown) {
 /** The SSE `terminal_read` record (App's one event stream). */
 export function terminalRead(data: unknown) {
   terminals.heardRead(data);
+}
+
+/** The SSE `terminal_readable` record (App's one event stream). */
+export function terminalReadable(data: unknown) {
+  terminals.heardReadable(data);
 }
 
 if (typeof window !== "undefined") {

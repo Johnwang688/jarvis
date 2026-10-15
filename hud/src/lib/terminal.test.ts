@@ -3,7 +3,7 @@ import {
   AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, MINE_KEY, OUTPUT_HIGH_WATER, OutputPipe, attachUrl, chunk,
   clampSize, cleanPaste, cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, inheritMine,
   integrationNote, isCtrlC, judgeLink, loadMine, pageNonce, parseControl, parseMine, parsePrefs, parseRow, parseRows,
-  menuWidth, parseRead, parseSpec, placeMenu, placeTerminals, readNoteText, saveMine, terminalSpecFor,
+  menuWidth, parseRead, parseReadable, parseSpec, placeMenu, placeTerminals, readNoteText, saveMine, terminalSpecFor,
   terminalTakesKey,
 } from "./terminal";
 
@@ -616,5 +616,19 @@ describe("Jarvis's reads (terminal_read, WP-F)", () => {
     const note = parseRead({ ...ok, output: "SECRET", command: "printenv", reason: "rule 1" })!;
     expect(Object.keys(note).sort()).toEqual(["at", "lines", "refused", "terminalId"]);
     expect(parseRead({ ...ok, at: "x".repeat(500) })!.at.length).toBe(64);
+  });
+});
+
+describe("the switch changing (terminal_readable)", () => {
+  const ok = { terminal_id: "0a1b2c3d", readable: false, at: "2026-10-14T12:00:00+00:00" };
+
+  it("takes exactly {terminal_id, readable, at} and carries only an id and a boolean", () => {
+    expect(parseReadable(ok)).toEqual({ terminalId: "0a1b2c3d", readable: false });
+    expect(parseReadable({ ...ok, readable: true })).toEqual({ terminalId: "0a1b2c3d", readable: true });
+    expect(Object.keys(parseReadable({ ...ok, output: "SECRET" })!).sort()).toEqual(["readable", "terminalId"]);
+    for (const bad of [null, {}, { ...ok, terminal_id: "../etc" }, { ...ok, readable: "false" }, { ...ok, readable: 0 },
+                       { terminal_id: ok.terminal_id }]) {
+      expect(parseReadable(bad)).toBeNull();
+    }
   });
 });

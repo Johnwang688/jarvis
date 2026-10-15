@@ -44,3 +44,35 @@ describe("Settings covering terminals", () => {
     expect(mgr.visible("pane-terminal")).toBe(true);
   });
 });
+
+describe("the \"Jarvis can read\" switch across windows (terminal_readable)", () => {
+  const row = (readable: boolean) => parseRow({ id: "a0000002", title: "zsh", readable })!;
+  const event = (readable: unknown, extra: Record<string, unknown> = {}) =>
+    ({ terminal_id: "a0000002", readable, at: "2026-10-14T12:00:00+00:00", ...extra });
+
+  it("shows another window's change in this window's switch, and says so once", () => {
+    const mgr = new TermManager();
+    mgr.rows = [row(true)];
+    const changed = vi.spyOn(mgr, "changed");
+    mgr.heardReadable(event(false));
+    expect(mgr.row("a0000002")!.readable).toBe(false);
+    expect(mgr.readableOf("a0000002")).toBe(false);          // a split now carries the off switch
+    expect(changed).toHaveBeenCalledOnce();
+    mgr.heardReadable(event(true));
+    expect(mgr.row("a0000002")!.readable).toBe(true);
+    changed.mockClear();
+    mgr.heardReadable(event(true));                           // already shown: nothing to redraw
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("drops a record of the wrong shape and ignores a terminal it does not list", () => {
+    const mgr = new TermManager();
+    mgr.rows = [row(true)];
+    for (const bad of [null, {}, event("no"), event(0), event(undefined), { ...event(false), terminal_id: "../etc" }]) {
+      mgr.heardReadable(bad);
+      expect(mgr.row("a0000002")!.readable).toBe(true);
+    }
+    mgr.heardReadable({ ...event(false), terminal_id: "b0000009" });
+    expect(mgr.rows.map((r) => r.id)).toEqual(["a0000002"]);   // no row is made up from an event
+  });
+});

@@ -125,7 +125,8 @@ import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken
 import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, focusPaneElement, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
-import { terminalAttached, terminalRead, terminals } from "./components/Terminal";
+import { terminalAttached, terminalRead, terminalReadable, terminals } from "./components/Terminal";
+import { markAnswered } from "./lib/taskQuestions";
 import { inTerminal, terminalSpecFor } from "./lib/terminal";
 import { SPACE_HINT, SPACE_HINT_KEY, TalkHold, isTalkKey, isTypingTarget, wantsSpaceHint } from "./lib/talkkey";
 import { inMonaco, maxWidth } from "./lib/layout";
@@ -1796,6 +1797,11 @@ export default function App() {
           // "Jarvis read 200 lines · 15:42" (components/Terminal.tsx).
           terminalRead(data);
           break;
+        case "terminal_readable":
+          // `{terminal_id, readable, at}` only: another window's change to
+          // "Jarvis can read" shows in this one's switch (components/Terminal.tsx).
+          terminalReadable(data);
+          break;
         case "vex_device":
           // `{action, at}` only (VX-1): one this window did not start is said
           // in the VEX view (state/vex.ts).
@@ -1834,8 +1840,13 @@ export default function App() {
   // used to send `{question, answer}` and swallow the 400 (2026-10-11).
   const answerQuestion = useCallback(
     (taskId: string, index: number, text: string) =>
-      api.answerTask(taskId, index, text).then(() => { void refreshTasks(); }),
-    [refreshTasks],
+      api.answerTask(taskId, index, text).then(() => {
+        // Accepted (a refusal rejects before this): the row goes now, not at
+        // the refresh's reply. The refresh stays the truth.
+        dispatch({ type: "patch", patch: { tasks: markAnswered(live.current.tasks, taskId, index, text) } });
+        void refreshTasks();
+      }),
+    [refreshTasks, dispatch],
   );
   // Every TaskView and transcript Cancel share this guard. A task can be
   // drawn twice; a second surface cannot race a pending action on the first.

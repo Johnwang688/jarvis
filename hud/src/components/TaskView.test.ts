@@ -5,6 +5,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { TaskView } from "./TaskView";
+import { markAnswered } from "../lib/taskQuestions";
 import type { OpenQuestion, Task } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -84,6 +85,36 @@ describe("TaskView answers", () => {
       "Not answered: Task k1 is cancelled; it is not waiting on a question.");
     expect(($("answer-1") as HTMLInputElement).value).toBe("a branch");
     expect(($("answer-send-1") as HTMLButtonElement).disabled).toBe(false);   // can try again
+  });
+
+  // The parent's wiring (App's answerQuestion): the list is marked only once
+  // the daemon has accepted the answer, before any refresh replies.
+  it("an accepted answer's row goes at once; a refused one stays with its words", async () => {
+    let current = task("clarifying");
+    let accept = true;
+    const draw = () =>
+      act(() => {
+        root.render(createElement(TaskView, {
+          task: current, threads: [], onAnswer: wired,
+          onSteer: async () => {}, onCancel: async () => {}, onResume: async () => {}, onStart: async () => {},
+        }));
+      });
+    const wired = (id: string, index: number, text: string) =>
+      answer(id, index, text).then(() => {
+        current = markAnswered([current], id, index, text)[0];
+        draw();
+      });
+    answer = async () => { if (!accept) throw new Error("not waiting"); };
+    draw();
+    accept = false;
+    type("answer-1", "a branch");
+    await click("answer-send-1");
+    expect($("answer-1")).not.toBeNull();                       // refused: still asked, words kept
+    expect(($("answer-1") as HTMLInputElement).value).toBe("a branch");
+    accept = true;
+    await click("answer-send-1");
+    expect($("answer-1")).toBeNull();                           // accepted: gone before any refresh
+    expect($("answer-2")).not.toBeNull();                       // the other question is still open
   });
 
   it("a second try that is taken clears the sentence", async () => {
