@@ -749,7 +749,7 @@ class TabStream:
                 self.drop_blocked_input()
                 return
             self._blocked_notice = False
-            if len(self._queue) >= INPUT_QUEUE_MAX:
+            if len(self._queue) >= INPUT_QUEUE_MAX and _merged(self._queue[-1][2], msg) is None:
                 self.dropped += 1
                 self._send(sock, {"t": "input_dropped",
                                   "reason": "the page is not keeping up; this input was dropped"})

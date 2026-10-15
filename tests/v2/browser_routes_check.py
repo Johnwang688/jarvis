@@ -871,7 +871,7 @@ class BrowserStream(unittest.TestCase):
                          {"t": "agent", "kind": "paused", "paused": False, "by": None})
         self.assertEqual(window.last("agent", kind="list")["actions"], [])
         window.until(lambda w: w.frames, what="a frame")
-        fid, width, height, size = window.frames[0]
+        fid, width, height, size, *_ = window.frames[0]
         self.assertEqual((width, height), (1280, 800))
         self.assertGreater(size, 100)
         events = [r for r in self.records if r.get("kind") == "browser_attached"][before:]
@@ -997,7 +997,9 @@ class BrowserStream(unittest.TestCase):
         self.assertTrue(all(r["trusted"] for r in self.log(tab)))
         window.send(wheel(400, 500, 600))
         self.wait(lambda: (self.js(tab, "scrollY") or 0) > 0, what="the wheel scrolled")
-        self.assertEqual(self.log(tab, "wheel")[0]["dy"], 600)
+        # Chrome reports deltaY × its own scale ÷ the page's (measured; the
+        # scroll itself is the delta sent), so a 1× window reads 1.5×.
+        self.assertEqual(self.log(tab, "wheel")[0]["dy"], 600 * H.RASTER_SCALE / self.js(tab, "devicePixelRatio"))
         # A bad message is refused in words and reaches nothing.
         before = len(self.log(tab))
         window.send({"t": "key", "e": {"type": "char", "key": "x"}})

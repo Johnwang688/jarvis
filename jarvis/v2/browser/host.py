@@ -139,7 +139,7 @@ DIALOG_TEXT_CAP = 1000
 CHOOSER_TTL_S = 300.0               # an unanswered file chooser is forgotten
 DELIVER_WAIT_S = 5.0                # an input event's answer is waited for this long
 JPEG_QUALITY = 70
-RASTER_SCALE = 2                    # the scale Chrome draws at (`launch_args`)
+RASTER_SCALE = 1.5                  # the scale Chrome draws at (`launch_args`): the owner's display
 DEFAULT_VIEW = (1280, 800, 1.0)     # the launch viewport, until a window says otherwise
 # A page wider than its pane is laid out at its own width and drawn scaled
 # down (`_fit`).
@@ -254,11 +254,12 @@ def launch_args(user_data_dir: Path, gate_port: int, *, private: bool) -> list[s
         "--password-store=basic",
         # The screencast draws at the browser's own scale, never the
         # emulated one (`setDeviceMetricsOverride` changes the page's
-        # devicePixelRatio and screenshots, not the frames: measured, Chrome
-        # 155), so a pane at 150% got 1× frames stretched. Drawn at 2×, each
-        # frame is scaled down to the pane's device pixels (`_sync_screencast`'s
-        # maxWidth/maxHeight), sharp at any scale up to 200%. Layout, input
-        # and captures are unchanged.
+        # devicePixelRatio, not the frames: measured, Chrome 155), so the
+        # owner's 150% panes got 1× frames stretched. Drawn at RASTER_SCALE,
+        # each frame is scaled to the pane's device pixels (`_sync_screencast`'s
+        # maxWidth/maxHeight). Layout and input coordinates are unchanged;
+        # `fromSurface` screenshots (looks, captures) come at this scale too,
+        # and `masked_image` scales its masks to them.
         f"--force-device-scale-factor={RASTER_SCALE}",
         # A desktop pointer, so pages lay out for a mouse, not a touchscreen.
         "--blink-settings=primaryHoverType=2,availableHoverTypes=2,"
@@ -1223,7 +1224,9 @@ class BrowserHost:
                 artifacts_dir=str(artifacts), downloads_path=str(incoming),
                 accept_downloads=True, handle_sigint=False, handle_sigterm=False,
                 handle_sighup=False, timeout=LAUNCH_TIMEOUT_S * 1000,
-                viewport={"width": 1280, "height": 800})
+                # A page no window shows keeps devicePixelRatio 1, as before
+                # RASTER_SCALE (unset, it takes Chrome's own scale).
+                viewport={"width": 1280, "height": 800}, device_scale_factor=1)
         except Exception as exc:  # noqa: BLE001 - Playwright's message holds the command line
             LOG.warning("Chrome did not start for a Browser profile: %s", type(exc).__name__)
             await loop.run_in_executor(None, stop_pids, folder)
@@ -1683,7 +1686,8 @@ class BrowserHost:
                 ctx = self._new_id(instance.private_contexts)
                 context = await instance.browser.new_context(
                     proxy={"server": f"socks5://127.0.0.1:{self._gate.port}", "bypass": "<-loopback>"},
-                    accept_downloads=True, viewport={"width": 1280, "height": 800})
+                    accept_downloads=True, viewport={"width": 1280, "height": 800},
+                    device_scale_factor=1)
                 instance.private_contexts[ctx] = context
                 context.on("page", lambda page, c=ctx: self._adopt(instance, page, c))
             context = instance.private_contexts.get(ctx)

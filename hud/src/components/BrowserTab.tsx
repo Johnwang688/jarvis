@@ -254,9 +254,11 @@ function DirectTab(props: {
     if(!direct.ok){setAttempt(raw);setOpening(raw);}
     try {
       await props.control!.submit(props.pane as PaneNo,props.tab.id,raw);
+      // Normally this tab is Remote by now and gone; one still Direct says why.
+      setOpening(o=>o===raw?"":o);
       ownLoad(key);setStolen(false);setLoad(n=>n+1);
     }catch(e){
-      setOpening("");
+      setOpening(o=>o===raw?"":o);
       if(!direct.ok)props.onLoaded(props.tab.id,raw.length<=2048?raw:"");
       setOwnerError(cleanTitle(e instanceof Error?e.message:"The address could not be loaded.",300));
     }

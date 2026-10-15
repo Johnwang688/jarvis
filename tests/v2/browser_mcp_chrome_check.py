@@ -78,9 +78,10 @@ class RelayChrome(B.Real):
   self.assertEqual(block["mimeType"],"image/png")
   from PIL import Image
   with Image.open(BytesIO(base64.b64decode(block["data"]))) as image:
-   self.assertEqual(image.getpixel((120,170)),(255,0,170))
-   self.assertEqual(image.getpixel((300,90)),(24,26,29))
-   self.assertEqual(image.getpixel((300,190)),(24,26,29))
+   k=image.width/1280   # page CSS px → image px: Chrome draws at RASTER_SCALE, then the edge cap
+   self.assertEqual(image.getpixel((round(120*k),round(170*k))),(255,0,170))
+   self.assertEqual(image.getpixel((round(300*k),round(90*k))),(24,26,29))
+   self.assertEqual(image.getpixel((round(300*k),round(190*k))),(24,26,29))
   after=self.run_on(self.pg.evaluate("[changes.length,events.length,scrollX,scrollY,document.activeElement.tagName]"))
   self.assertEqual(after,before)
   serialized=json.dumps(self.records)+json.dumps(self.logs)

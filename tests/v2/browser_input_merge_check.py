@@ -95,6 +95,22 @@ class Merge(unittest.TestCase):
         self.send(mouse("mouseMoved", 3, 3))
         self.assertEqual([m.params["x"] for _, _, m in self.drain()], [3])
 
+    def test_a_full_queue_still_takes_a_move_that_merges(self):
+        from jarvis.v2.browser.stream import INPUT_QUEUE_MAX
+        sent = []
+        self.sock.send_text = lambda raw: sent.append(json.loads(raw))
+        for i in range(INPUT_QUEUE_MAX - 1):
+            self.send(key("rawKeyDown" if i % 2 == 0 else "keyUp"))
+        self.send(mouse("mouseMoved", 1, 1), mouse("mouseMoved", 2, 2))
+        self.assertFalse(sent, "the second move merged; nothing was dropped")
+        self.send(key())
+        self.assertEqual(self.stream.dropped, 1, "a key past the cap is still refused")
+        self.assertEqual(self.drain()[-1][2].params["x"], 2)
+
+    def test_wheels_with_other_modifiers_are_kept(self):
+        self.send(wheel(100), wheel(100, modifiers=2))
+        self.assertEqual(len(self.drain()), 2)
+
     def test_an_old_attachment_is_never_merged_into(self):
         self.send(wheel(100))
         self.stream.gen += 1
@@ -105,8 +121,8 @@ class Merge(unittest.TestCase):
 class Raster(unittest.TestCase):
     def test_chrome_draws_at_raster_scale(self):
         args = H.launch_args(Path("/tmp/fixture"), 1234, private=False)
-        self.assertEqual(H.RASTER_SCALE, 2)
-        self.assertIn("--force-device-scale-factor=2", args)
+        self.assertEqual(H.RASTER_SCALE, 1.5)
+        self.assertIn("--force-device-scale-factor=1.5", args)
 
 
 if __name__ == "__main__":
