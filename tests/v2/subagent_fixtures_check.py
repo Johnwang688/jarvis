@@ -209,6 +209,28 @@ class CodexFixtures(unittest.TestCase):
                         if r["data"]["params"]["item"].get("type") == "commandExecution")
             self.assertEqual(done["status"], status)  # accept ran it; / is not writable
 
+    def test_a_file_approval_follows_its_fileChange_item(self):
+        """The order the provider's fail-closed rule rests on: Codex starts
+        the fileChange item, carrying every path (a rename's `move_path`
+        included), before it asks to approve it — for the session and for a
+        child, whose request comes under the child's thread."""
+        for name, from_child in (("patch_approval", False), ("patch_approval_child", True)):
+            rs = rows("codex", name)
+            parent = self.parent(rs)
+            at, req = next((i, r["data"]) for i, r in enumerate(rs) if r["src"] == "rpc_in"
+                           and r["data"].get("method") == "item/fileChange/requestApproval")
+            self.assertEqual(req["params"]["threadId"] != parent, from_child, name)
+            self.assertNotIn("changes", req["params"])      # the request names no paths
+            started = [i for i, r in enumerate(rs) if r["src"] == "rpc_in"
+                       and r["data"].get("method") == "item/started"
+                       and r["data"]["params"]["item"].get("id") == req["params"]["itemId"]]
+            self.assertEqual(len(started), 1, name)
+            self.assertLess(started[0], at, name)
+            item = rs[started[0]]["data"]["params"]["item"]
+            self.assertEqual(item["type"], "fileChange")
+            self.assertEqual(rs[started[0]]["data"]["params"]["threadId"], req["params"]["threadId"])
+            self.assertEqual(item["changes"][0]["kind"], {"type": "update", "move_path": "/sv0-outside/notes.txt"})
+
     def test_turn_interrupt_on_a_child_ends_only_that_childs_turn(self):
         rs = rows("codex", "child_interrupt")
         parent = self.parent(rs)

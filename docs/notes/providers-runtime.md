@@ -372,7 +372,7 @@ likely to bite:
   item (not `collabAgentToolCall`, not `thread/started`). A child's approval
   request arrives with the child's `threadId`, which every `codex.py`
   server-request branch (approvals, MCP elicitation, `currentTime/read`)
-  treats as a fatal identity mismatch today. Child
+  treated as a fatal identity mismatch until SV-2a (below). Child
   `turn/interrupt` ends only that child's turn and does not kill its running
   command; parent token totals exclude children.
 
@@ -409,11 +409,9 @@ NotebookEdit) name one `file_path`/`notebook_path`, and it has no rename
 tool. A shell `mv`/`cp`/`git mv` onto `.env` or the allowlist is refused by
 `denied_command` (checked in-process).
 
-**Still open:** a session file approval whose `fileChange` item was never
-seen has no paths to judge. In a task it is accepted with no human (probe:
-deny-all asker gives `accept`). Whether Codex always sends `item/started`
-before `item/fileChange/requestApproval` is unrecorded; the SV-0 command
-fixtures do show item before approval.
+**Closed since (SV-2a, below):** a file approval whose `fileChange` item was
+never seen had no paths to judge, and in a task it was accepted with no
+human. It is now declined unasked.
 
 Checks: `tests/v2/codex_provider_check.py`:
 - `test_file_rename_destination_is_judged_by_layer_1` covers `.env`, a
@@ -423,3 +421,87 @@ Checks: `tests/v2/codex_provider_check.py`:
 
 Both fail on `main` (15 failures), and 5 of 5 mutants are killed. The fake
 peer's file items now carry the `kind` the schema requires.
+
+## Codex sub-agents' server requests are not fatal (SV-2a, 2026-10-15)
+
+Shipped ahead of the sub-agent view, from SV-2's non-fatal-request piece
+(plan D3, Q2; SV-0 findings 9–11). `codex.py` learns its children as it
+reads the wire (`_note_child`, before the early queue and the thread/turn
+filters): a `subAgentActivity` **`item/started`** of kind `started`, on the
+session's thread or a known child's (a grandchild is announced on its
+parent's), registers `agentThreadId` with a label for the session's life —
+children outlive the turn that spawned them. The label is the model-chosen
+`agentPath` reduced to `[A-Za-z0-9_./-]` (anything else becomes `_`) and
+capped at 40, shown as `‹label›`: it cannot pose as the headline's own
+` · ` parts, and the child part of the headline is never cut. Nothing else
+registers one: not `item/completed`, `thread/started` or
+`collabAgentToolCall`. At `CHILD_LIMIT` (256) the oldest child whose turn
+has completed is forgotten (with its items) to make room. A child with a turn
+running is never dropped, so with none idle the newcomer stays unknown.
+
+A known child's server request never ends the orchestrator's turn, and its
+`turnId` never becomes the session's:
+
+- **command/file approval: the same `permit` gate, always as a widening.**
+  The headline leads with "Codex sub-agent ‹label› (not the orchestrator)
+  asks to run beyond its sandbox"; the owner decides on the
+  usual card, Always is never offered, and deny-all, strict, a timeout or a
+  callback without the widening keyword declines. This holds for tasks too
+  (their own plain approvals keep `auto_review`'s fallback; a child's
+  don't). Chosen over a decline-only fix because the identity needed is one
+  map, and the plan's recommended answer to Q2 is this card. The approval is
+  judged on that child's own in-progress command/fileChange item
+  (`child_items`: id, type, command, cwd and changes only; dropped on
+  `item/completed`; bounded at 512, oldest out). A file approval names no
+  paths, so one whose item is unseen, belongs to another thread, cannot be
+  read or writes nothing is declined unasked, never asked blind.
+  `APPROVAL_REQUESTED` carries `subagent`.
+- **file approvals, session and child alike: no readable file item, no
+  ask.** A file approval names no paths; only its `fileChange` item says
+  what it writes. So in every profile it is declined unasked, with a
+  non-fatal notice, when:
+  - its item was never seen;
+  - the item is not a `fileChange` (for a command approval, an item that is
+    not a `commandExecution`, which would be judged as a patch);
+  - the item names no file (`changes: []`);
+  - a change cannot be read (#196's `_change_paths`: kind, `move_path`,
+    unknown field).
+
+  Before this, a task under AUTO accepted such an approval with nobody
+  asked (`paths: []`). A command approval whose item is unseen is unchanged:
+  it carries its own command, which is judged.
+
+  The ordering this rests on is now recorded, offline, with the SV-0
+  harness (`record_codex.py --only patch_approval patch_approval_child`):
+  `patch_approval.jsonl` and `patch_approval_child.jsonl`. In both, Codex
+  0.161.0 sends `item/started` for the `fileChange` item, under the asking
+  thread, before `item/fileChange/requestApproval`. The item carries `kind:
+  {type: update, move_path}`, and the request carries no paths
+  (`subagent_fixtures_check.py` pins this). A child's file approval routes
+  like its command approvals.
+- **MCP elicitation:** declined, with the non-fatal `MCP_DECLINED` notice.
+- **`currentTime/read`:** answered, as for the session (a clock read).
+- **a question (`requestUserInput`):** refused with an error and a notice;
+  the owner could not tell it from the orchestrator's until SV-3.
+- **permissions requests and anything else:** as for the session (empty
+  grant; unsupported method refused), with "(from Codex sub-agent …)" on the
+  notice. A child request naming no `turnId` is refused, not fatal.
+
+A request from any other thread is still a fatal identity mismatch.
+Child notifications are still skipped.
+
+**Known limit (MED-2 of the #195 review): a long wait on a child's card can
+close the session.** While the owner decides on any card, the turn loop does
+not read the transport. A child's card is the likelier case, because the
+orchestrator and sibling children keep running while it waits. Their traffic
+piles up in the RPC queue (`CODEX_RPC_QUEUE_LIMIT`, 4096 messages). On
+overflow the transport is marked failed, the approval is declined
+whatever the owner chose, and the session closes with a fatal error. That
+fails safe: nothing is approved. But the turn is lost. SV-6's between-turn reader/drain owns the
+real fix. Checks: `tests/v2/codex_provider_check.py` replays the SV-0
+recordings (`fixture_turn`, peer mode `replay`), thirteen tests, plus
+`test_file_approval_without_a_readable_file_item_is_declined_unasked` (16
+cases, all failing on `main`). The child tests fail on `main` with the
+identity mismatch. The two that pin unchanged behavior
+(unknown thread, the session's own request) pass on `main` as they should,
+so they were proven with mutants instead.

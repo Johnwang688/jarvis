@@ -17,8 +17,12 @@ warning. What keeps a newer version from loosening the gate is narrower than
   `approvalId` one (where a difference is expected) is a widening with both
   commands judged by layer 1 and shown;
 - a file approval is judged on every path its item's changes write, a
-  rename's destination (`kind.move_path`) included, and declined unasked
-  when a change's path or kind cannot be read (`_change_paths`);
+  rename's destination (`kind.move_path`) included, and declined unasked,
+  in every profile, when its item was never seen, is not a `fileChange`, or
+  names no file, or a change's path or kind cannot be read
+  (`_change_paths`): the request itself names no paths (Codex 0.161 starts
+  the item first, recorded in `patch_approval*.jsonl`). An approval naming
+  an item of the other kind is declined too;
 - every filesystem grant a widening opens is judged by layer 1 first: one
   that is or contains protected state or touches a credential directory is
   DENY, unasked; and the headline, built from Codex-supplied strings, is one
@@ -35,7 +39,13 @@ warning. What keeps a newer version from loosening the gate is narrower than
   fallback for plain approvals (design R8);
 - a non-null approval field outside the verified schema
   (`_KNOWN_APPROVAL_FIELDS`) counts as a widening — it may be a new grant —
-  so a human is asked, shown it, and offered no Always.
+  so a human is asked, shown it, and offered no Always;
+- a server request from another thread is handled only when a
+  `subAgentActivity` announcement on this session's thread (or a known
+  child's) named that thread as a sub-agent: then it is never fatal, and its
+  command/file approval is always an owner-asked widening naming the
+  sub-agent (CHILD_LIMIT). Any other thread's request is a fatal identity
+  mismatch.
 
 What is *not* covered: a field we know whose *meaning* a newer Codex
 broadens, and runtime behaviour the schema does not describe. Re-diff the
@@ -115,6 +125,44 @@ MCP_DECLINED = ("Codex asked to approve a Jarvis tool call; declined "
 # 0.161 binary: the question id `mcp_tool_call_approval…`, and the
 # `codex_approval_kind` metadata key).
 _MCP_APPROVAL_MARKS = ("mcp_tool_call_approval", "codex_approval_kind")
+
+
+# Codex sub-agents (SV-2a, 2026-10-15; SV-0 findings 8-11). A child thread
+# runs on this session's app-server connection, is announced only by a
+# `subAgentActivity` `item/started` (kind `started`, `agentThreadId`,
+# `agentPath`) on this session's thread or a known child's, and sends its
+# server requests here under its own `threadId`. A known child's request is
+# never fatal to the orchestrator's turn: a command/file approval goes
+# through the same `permit` gate as the session's own, always as an
+# owner-asked widening that names the sub-agent (no Always; deny-all,
+# strict, a timeout or no human declines); an MCP elicitation is declined;
+# a clock read is answered; a question is refused; anything else is refused
+# as for the session. A thread that is neither this session's nor a known
+# child stays a fatal identity mismatch.
+# Past CHILD_LIMIT the oldest child whose turn has completed is forgotten to
+# make room; with none, a new child is not registered (it fails closed).
+CHILD_LIMIT = 256
+CHILD_ITEM_LIMIT = 512      # the children's in-progress command/file items
+# The label is the model-chosen `agentPath`, shown on an approval card: only
+# these characters survive (anything else becomes "_"), so it cannot mimic
+# the headline's own " · " parts, and it is capped so the child part of the
+# headline (PART_CAP) is never cut.
+CHILD_LABEL_CAP = 40
+_CHILD_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_./-]+")
+CHILD_UNNAMED = "unnamed"
+
+
+def _child_label(path) -> str:
+    if not isinstance(path, str):
+        return CHILD_UNNAMED
+    label = _CHILD_LABEL_UNSAFE.sub("_", path).strip("_")
+    if len(label) > CHILD_LABEL_CAP:
+        label = label[:CHILD_LABEL_CAP - 1] + "…"
+    return label or CHILD_UNNAMED
+
+
+def _from_child(child: str | None) -> str:
+    return f" (from Codex sub-agent ‹{child}›)" if child else ""
 
 
 def _mcp_approval(params, depth: int = 0) -> bool:
@@ -424,6 +472,15 @@ class _Session:
     steers: dict = field(default_factory=dict)
     stale_steers: deque = field(default_factory=lambda: deque(maxlen=_STALE_STEERS))
     steer_unsupported: bool = False
+    # Sub-agents (SV-2a): child threadId -> its label (`agentPath`), oldest
+    # first, for the session's life (children outlive the turn that spawned
+    # them); which of them have no turn running (CHILD_LIMIT evicts those);
+    # and their in-progress command/file items by item id -> (threadId,
+    # item), so a child's approval is judged on what its item really runs or
+    # writes. Written only by the turn loop that reads the transport.
+    children: dict[str, str] = field(default_factory=dict)
+    idle_children: set[str] = field(default_factory=set)
+    child_items: dict[str, tuple[str, dict]] = field(default_factory=dict)
 
 
 class CodexProvider:
@@ -897,6 +954,11 @@ class CodexProvider:
                         msg = s.rpc.next_message(timeout=0.1)
                     except RpcTimeout:
                         continue
+                    if "method" in msg and "id" not in msg:
+                        # Read off the wire, before the early queue and the
+                        # thread/turn filters: a child's announcement and its
+                        # items count in the order Codex sent them (SV-2a).
+                        self._note_child(s, msg["method"], msg.get("params"))
                 if "method" not in msg:
                     if msg.get("id") == request:
                         if "error" in msg:
@@ -922,11 +984,15 @@ class CodexProvider:
                     if not isinstance(params, dict):
                         s.rpc.reply(msg["id"], error={"code": -32602, "message": "Malformed request params"})
                         raise RpcError("Codex server request params are not an object")
+                    # A known sub-agent's request (SV-2a) is never fatal; see
+                    # CHILD_LIMIT. Unknown threads still fail closed below.
+                    child = self._child(s, params)
                     if method == "currentTime/read":
                         # A side-effect-free clock read (experimental API). It
                         # carries a threadId and no turnId, so it is answered
                         # here rather than failing the turn-identity check.
-                        if params.get("threadId") != s.thread_id:
+                        # Purely informational, so a known child gets it too.
+                        if params.get("threadId") != s.thread_id and child is None:
                             s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
                             raise RpcError("Codex server request identity mismatch")
                         s.rpc.reply(msg["id"], {"currentTimeAt": int(time.time())})
@@ -937,28 +1003,31 @@ class CodexProvider:
                         # here, before the turn-identity check would kill the
                         # turn over it: declined, never a QUESTION, never an
                         # accept — Jarvis's own gate decides its tools.
-                        if params.get("threadId") not in (None, s.thread_id):
+                        # A known child's is declined the same way.
+                        if params.get("threadId") not in (None, s.thread_id) and child is None:
                             s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
                             raise RpcError("Codex server request identity mismatch")
                         s.rpc.reply(msg["id"], {"action": "decline", "content": None})
                         if not started:
                             started = True
                             yield self._event(h, EventKind.TURN_STARTED)
-                        yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED)
+                        yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED + _from_child(child))
                         continue
-                    if (params.get("threadId") != s.thread_id
-                            or not isinstance(params.get("turnId"), str) or not params["turnId"]
-                            or (s.turn_id and params.get("turnId") != s.turn_id)):
-                        s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
-                        raise RpcError("Codex server request identity mismatch")
-                    if s.turn_id is None:
-                        s.turn_id = params.get("turnId")
+                    if child is None:
+                        if (params.get("threadId") != s.thread_id
+                                or not isinstance(params.get("turnId"), str) or not params["turnId"]
+                                or (s.turn_id and params.get("turnId") != s.turn_id)):
+                            s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                            raise RpcError("Codex server request identity mismatch")
+                        if s.turn_id is None:
+                            s.turn_id = params.get("turnId")
+                    # A child's turnId is its own: it never becomes s.turn_id.
                     if not started:
                         started = True
                         yield self._event(h, EventKind.TURN_STARTED)
                     pending_request = _Request()
                     try:
-                        yield from self._server_request(h, msg, pending_request)
+                        yield from self._server_request(h, msg, pending_request, child=child)
                     except BaseException:
                         # Whatever broke — a shape we could not read, a dead
                         # transport, an abandoned generator — the request is
@@ -1245,11 +1314,89 @@ class CodexProvider:
         except Exception:
             pass  # the transport is already gone; closing the session refuses it
 
-    def _server_request(self, h, msg, request):
+    @staticmethod
+    def _child(s, params) -> str | None:
+        """The label of the known sub-agent whose thread sent `params`, or
+        None (this session's own thread, or one nobody announced)."""
+        tid = params.get("threadId")
+        if isinstance(tid, str) and tid != s.thread_id:
+            return s.children.get(tid)
+        return None
+
+    @staticmethod
+    def _note_child(s, method, p) -> None:
+        """Learn sub-agents from one notification, as it is read (SV-2a).
+
+        A child is registered only from a `subAgentActivity` `item/started`
+        of kind `started` on this session's thread or a known child's (a
+        grandchild is announced on its parent's thread) — never from
+        `thread/started` or `collabAgentToolCall` (SV-0 findings 9, 10). A
+        known child's command/file items are kept, bounded, so its approval
+        is judged on its real command or paths. Never raises: a shape it
+        cannot read registers nothing, and so leaves that thread unknown."""
+        if not isinstance(p, dict) or not isinstance(p.get("threadId"), str):
+            return
+        tid = p["threadId"]
+        if method in ("turn/started", "turn/completed"):
+            if tid in s.children:
+                if method == "turn/started":
+                    s.idle_children.discard(tid)
+                else:
+                    s.idle_children.add(tid)
+            return
+        if method == "item/fileChange/patchUpdated":
+            item = {"id": p.get("itemId"), "type": "fileChange", "changes": p.get("changes", [])}
+        elif method in ("item/started", "item/completed") and isinstance(p.get("item"), dict):
+            item = p["item"]
+        else:
+            return
+        if item.get("type") == "subAgentActivity":
+            agent = item.get("agentThreadId")
+            if (method == "item/started" and item.get("kind") == "started"
+                    and (tid == s.thread_id or tid in s.children)
+                    and isinstance(agent, str) and agent and agent != s.thread_id
+                    and agent not in s.children):
+                if len(s.children) >= CHILD_LIMIT:
+                    # Forget the oldest child with no turn running; a busy
+                    # one is never dropped, so with none the newcomer stays
+                    # unknown and its requests fail closed.
+                    idle = next((c for c in s.children if c in s.idle_children), None)
+                    if idle is None:
+                        return
+                    del s.children[idle]
+                    s.idle_children.discard(idle)
+                    for iid in [i for i, (owner, _) in s.child_items.items() if owner == idle]:
+                        del s.child_items[iid]
+                s.children[agent] = _child_label(item.get("agentPath"))
+            return
+        if (tid != s.thread_id and tid in s.children
+                and item.get("type") in ("commandExecution", "fileChange")
+                and isinstance(item.get("id"), str) and item["id"]):
+            s.child_items.pop(item["id"], None)
+            if method == "item/completed":
+                return      # no approval follows a finished item
+            # Only what an approval is judged on is kept.
+            s.child_items[item["id"]] = (tid, {k: item[k] for k in ("id", "type", "command", "cwd", "changes")
+                                               if k in item})
+            while len(s.child_items) > CHILD_ITEM_LIMIT:
+                s.child_items.pop(next(iter(s.child_items)))
+
+    def _server_request(self, h, msg, request, child: str | None = None):
+        """Answer one server request. `child` is the label of the known
+        sub-agent that sent it (SV-2a), or None for this session's own."""
         s = h.native
         method, p, rid = msg["method"], msg.get("params", {}), msg["id"]
         request.rid = rid
         req_id = str(rid)
+        note = _from_child(child)
+        if child is not None and (not isinstance(p.get("turnId"), str) or not p["turnId"]):
+            # Every approval or question names its turn (0.161 schema). A
+            # child's that does not is refused, not guessed at, and the
+            # orchestrator's turn goes on.
+            self._reply(s, request, error={"code": -32602, "message": "Request identity incomplete"})
+            yield self._event(h, EventKind.ERROR, fatal=False,
+                              message=f"Codex server request refused: it names no turn{note}")
+            return
         if method == "item/permissions/requestApproval":
             # An empty grant: a permissions expansion is never approved here.
             self._reply(s, request, {"permissions": {}, "scope": "turn"})
@@ -1261,25 +1408,51 @@ class CodexProvider:
                 # put a half-understood request in front of the owner.
                 self._reply(s, request, {"decision": "decline"})
                 yield self._event(h, EventKind.ERROR, fatal=False,
-                                  message=f"Codex approval request declined: {problem}")
+                                  message=f"Codex approval request declined: {problem}{note}")
                 return
             cwd = p.get("cwd") if isinstance(p.get("cwd"), str) and p["cwd"] else s.brief.cwd
             parts, grants, refusal = _widening(p, cwd)
             if refusal:
                 self._reply(s, request, {"decision": "decline"})
                 yield self._event(h, EventKind.ERROR, fatal=False,
-                                  message=f"Codex approval request declined: {refusal}")
+                                  message=f"Codex approval request declined: {refusal}{note}")
                 return
             shell = method == "item/commandExecution/requestApproval"
-            item = s.items.get(p.get("itemId"), {})
-            if not shell and item:
-                unreadable = _change_paths(item.get("changes", []))[1]
-                if unreadable:
-                    # Every path a patch writes, a rename's destination
-                    # included, or none of it is approved.
+            want = "commandExecution" if shell else "fileChange"
+            if child is None:
+                item = s.items.get(p.get("itemId"), {})
+                item = item if isinstance(item, dict) else {}
+            else:
+                # Only that child's own item: a sibling's or the session's
+                # would judge the wrong command or files.
+                owner_tid, item = s.child_items.get(p["itemId"], (None, {}))
+                if owner_tid != p.get("threadId") or not isinstance(item, dict) or not item:
                     self._reply(s, request, {"decision": "decline"})
                     yield self._event(h, EventKind.ERROR, fatal=False,
-                                      message=f"Codex approval request declined: {unreadable}")
+                                      message=f"Codex approval request declined: its item was not seen{note}")
+                    return
+            if item and item.get("type") != want:
+                # An approval naming an item of the other kind would be
+                # judged as that item (a command as a patch, or a patch as a
+                # command): never, for the session or a child.
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: its item is not a {want}{note}")
+                return
+            if not shell:
+                # A file approval carries no paths: only its item says what it
+                # writes. Unseen, unreadable (a rename's destination
+                # included) or naming no file, there is nothing for layer 1
+                # to judge, so it is declined unasked in every profile
+                # (owner rule: unknown approvals fail closed). A command
+                # approval carries its own command and is judged on it.
+                paths, unreadable = _change_paths(item.get("changes", [])) if item else ([], None)
+                why = ("its item was not seen" if not item else unreadable
+                       or (None if paths else "its item names no file"))
+                if why:
+                    self._reply(s, request, {"decision": "decline"})
+                    yield self._event(h, EventKind.ERROR, fatal=False,
+                                      message=f"Codex approval request declined: {why}{note}")
                     return
             name, args = self._tool(item if item else {"type": "commandExecution" if shell else "fileChange"})
             # Only non-null values: a `command: null` must not erase the item's
@@ -1305,9 +1478,17 @@ class CodexProvider:
             if declined:
                 self._reply(s, request, {"decision": "decline"})
                 yield self._event(h, EventKind.ERROR, fatal=False,
-                                  message=f"Codex approval request declined: {declined}")
+                                  message=f"Codex approval request declined: {declined}{note}")
                 return
-            if codex_config.approvals_reviewer(s.brief) == "user":
+            if child is not None:
+                # A sub-agent's approval is always a widening, whatever the
+                # reviewer: a human every time, told whose request it is, no
+                # Always, and declined with no human (deny-all, strict, a
+                # timeout). Never the AUTO fallback a task's own plain
+                # approvals keep.
+                parts.insert(0, f"Codex sub-agent ‹{child}› (not the orchestrator) "
+                                "asks to run beyond its sandbox")
+            elif codex_config.approvals_reviewer(s.brief) == "user":
                 # With on-request/user, this callback may authorize a sandbox
                 # escape even without an explicit permissions overlay. Never
                 # let AUTO's "native reviewer decides" fallback answer it:
@@ -1322,7 +1503,8 @@ class CodexProvider:
                 if req_id in s.pending:
                     raise RpcError("Duplicate Codex request id")
                 s.pending[req_id] = pending
-            yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args, command=args.get("command"))
+            yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args,
+                              command=args.get("command"), **({"subagent": child} if child else {}))
             try:
                 # Deliberately on the send caller's thread: broker context survives.
                 # A widening goes as a keyword the model cannot reach; a
@@ -1352,7 +1534,15 @@ class CodexProvider:
             # an error answer, so nothing reads as the owner's choice — never
             # put to the owner as a QUESTION and never accepted.
             self._reply(s, request, error={"code": -32603, "message": "Jarvis declines MCP tool approvals"})
-            yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED)
+            yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED + note)
+            return
+        if method in ("item/tool/requestUserInput", "tool/requestUserInput") and child is not None:
+            # A sub-agent's question is not put to the owner, who could not
+            # tell it from the orchestrator's (SV-3 has no view yet). Refused
+            # with an error, as an MCP approval in a question is.
+            self._reply(s, request, error={"code": -32603, "message": "Jarvis does not relay sub-agent questions"})
+            yield self._event(h, EventKind.ERROR, fatal=False,
+                              message=f"A Codex sub-agent's question was not shown and was refused{note}")
             return
         if method in ("item/tool/requestUserInput", "tool/requestUserInput"):
             answers = {}
@@ -1380,7 +1570,7 @@ class CodexProvider:
         # Anything else — including an approval- or permission-shaped method a
         # newer Codex adds — is refused with an error, never approved.
         self._reply(s, request, error={"code": -32601, "message": "Unsupported server request"})
-        yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request refused: {str(method)[:80]}",
+        yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request refused: {str(method)[:80]}{note}",
                           fatal=False)
 
     def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
