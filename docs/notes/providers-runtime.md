@@ -522,8 +522,27 @@ path any version reported (`item/started`, each `patchUpdated`,
 A file approval is judged on that union, and it is declined unasked if any
 version was unreadable; the latest version's kind checks still apply.
 
-`args["paths"]` is set from the union *after* the request's own fields are
-merged. A request carrying a `paths` field can no longer replace what layer
+**Bounded cost (review MED).** `_remember` runs on the turn loop's thread
+for every update. The first version of this union scanned a list on every
+update, which is cubic over a streamed patch that resends every change each
+time: measured at 0.7 s for 1k files, 5.4 s for 2k and 42.7 s for 4k. That
+stalls the reader and overflows the RPC queue. The union is now an
+insertion-ordered dict, with two caps per item:
+- `CHANGE_PATH_CAP`, 4096 distinct paths;
+- `CHANGE_WORK_CAP`, 1,000,000 changes listed across all of an item's
+  versions.
+
+Past either cap the item is marked past judging, later updates are not
+read, and its approval is declined unasked ("names more than 4096 files" /
+"updates are too large to judge"). On the owner's machine, 5000 cumulative
+updates cost 183 CPU ms and 5000 one-file updates cost 3.
+`test_the_union_of_an_items_versions_is_bounded_work` runs them in a child
+process with a 30 s deadline and a 0.4 CPU-s `loadclock` bound. The old
+list scan costs 1.72 s there and no work cap 1.46 s, both past the 3x the
+bound may be excused under load.
+
+`args["paths"]` and `args["changes"]` are set from the stored item *after*
+the request's own fields are merged. A request carrying a `paths` field can no longer replace what layer
 1 judges: before this, such a field (an unknown field, so a widening) became
 the judged paths.
 
@@ -539,3 +558,15 @@ and pass on `main`; the union, sticky-unreadable and request-`paths` cases
 fail there. Six mutants are killed: `patchUpdated` ignored on the session's
 early path, on its later path and on the child's; latest version only; an
 unreadable version forgotten; the request's `paths` kept.
+
+**When does `patchUpdated` occur?** Recorded offline with the SV-0 harness:
+`record_codex.py --only patch_multi --enable apply_patch_streaming_events`
+gives `codex/patch_multi.jsonl`. A four-file patch (three adds and a
+rename out of the workspace) arrives whole in one `item/started`, before
+the approval, with **no** `item/fileChange/patchUpdated`, even with that
+feature on. In 0.161.0's code mode (`code_mode_host`, stable and on),
+`apply_patch` runs inside `exec`, so its input is not streamed.
+`apply_patch_streaming_events` is "under development" and off by default.
+The union and caps are defence for a Codex that does stream patches.
+`subagent_fixtures_check.test_a_multi_file_patch_arrives_whole` pins the
+recording, so a newer CLI that starts streaming fails there, by name.

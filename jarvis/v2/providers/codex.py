@@ -18,10 +18,11 @@ warning. What keeps a newer version from loosening the gate is narrower than
   commands judged by layer 1 and shown;
 - a file approval is judged on every path its item's changes write, in
   every version the item reported (`_remember`: `item/started` and each
-  `patchUpdated`), a rename's destination (`kind.move_path`) included, never
-  on a `paths` the request supplies, and declined unasked,
-  in every profile, when its item was never seen, is not a `fileChange`, or
-  names no file, or a change's path or kind cannot be read
+  `patchUpdated`, bounded by CHANGE_PATH_CAP/CHANGE_WORK_CAP), a rename's
+  destination (`kind.move_path`) included, never on a `paths` or `changes`
+  the request supplies, and declined unasked, in every profile, when its
+  item was never seen, is not a `fileChange`, names no file or is past
+  those caps, or a change's path or kind cannot be read
   (`_change_paths`): the request itself names no paths (Codex 0.161 starts
   the item first, recorded in `patch_approval*.jsonl`). An approval naming
   an item of the other kind is declined too;
@@ -303,20 +304,51 @@ def _change_paths(changes) -> tuple[list[str], str | None]:
 # later, partial update cannot hide an earlier destination from layer 1, and
 # an unreadable version is not forgotten when a readable one follows.
 _PATHS_SEEN = "_jarvis_paths_seen"
+# This runs on the turn loop's thread for every update, so its cost is
+# bounded per item: past CHANGE_PATH_CAP distinct paths, or once its
+# updates have listed CHANGE_WORK_CAP changes in all (a streamed patch may
+# resend every change each time), the item is past judging: it is marked so,
+# later updates are not read, and its approval is declined unasked.
+CHANGE_PATH_CAP = 4096
+CHANGE_WORK_CAP = 1_000_000
+TOO_MANY_PATHS = f"its item names more than {CHANGE_PATH_CAP} files"
+TOO_MUCH_WORK = "its item's updates are too large to judge"
+
+
+class _Seen:
+    """Every path an item reported, in order (a dict as an ordered set),
+    the first reason one of its versions could not be read, and how many
+    changes its versions listed."""
+    __slots__ = ("paths", "problem", "work", "full")
+
+    def __init__(self):
+        self.paths: dict[str, None] = {}
+        self.problem: str | None = None
+        self.work = 0
+        self.full = False
 
 
 def _remember(prev, item: dict) -> dict:
-    """`item` to store, carrying the union of its paths with `prev`'s (the
-    version stored before it, if any)."""
+    """`item` to store, carrying what every version of it reported (`prev`
+    is the version stored before it, if any). Linear in this version's
+    changes, and nothing once the item is past judging."""
     if item.get("type") != "fileChange":
         return item
-    paths, problem = _change_paths(item.get("changes", []))
-    before = prev.get(_PATHS_SEEN) if isinstance(prev, dict) and prev.get("type") == "fileChange" else None
-    if before:
-        seen, seen_problem = before
-        paths = seen + [x for x in paths if x not in seen]
-        problem = seen_problem or problem
-    return {**item, _PATHS_SEEN: (paths, problem)}
+    seen = prev.get(_PATHS_SEEN) if isinstance(prev, dict) and prev.get("type") == "fileChange" else None
+    if not isinstance(seen, _Seen):
+        seen = _Seen()
+    if not seen.full:
+        changes = item.get("changes", [])
+        seen.work += len(changes) if isinstance(changes, list) else 1
+        if seen.work > CHANGE_WORK_CAP:
+            seen.problem, seen.full = seen.problem or TOO_MUCH_WORK, True
+        else:
+            paths, problem = _change_paths(changes)
+            seen.problem = seen.problem or problem
+            seen.paths.update(dict.fromkeys(paths))
+            if len(seen.paths) > CHANGE_PATH_CAP:
+                seen.problem, seen.full = seen.problem or TOO_MANY_PATHS, True
+    return {**item, _PATHS_SEEN: seen}
 
 
 def _content(value) -> bool:
@@ -1474,7 +1506,9 @@ class CodexProvider:
                 # Judged on every path the item ever reported (`_remember`),
                 # and declined if any version of it could not be read.
                 paths, unreadable = _change_paths(item.get("changes", [])) if item else ([], None)
-                paths, unreadable = item.get(_PATHS_SEEN, (paths, unreadable)) if item else (paths, unreadable)
+                seen = item.get(_PATHS_SEEN) if item else None
+                if isinstance(seen, _Seen):
+                    paths, unreadable = list(seen.paths), seen.problem
                 why = ("its item was not seen" if not item else unreadable
                        or (None if paths else "its item names no file"))
                 if why:
@@ -1488,8 +1522,10 @@ class CodexProvider:
             args.update({k: v for k, v in p.items() if v is not None})
             if not shell:
                 # What layer 1 judges and the card shows: every path the item
-                # ever reported — and never a `paths` the request supplied.
+                # ever reported and its latest changes — never a `paths` or
+                # `changes` the request supplied.
                 args["paths"] = list(paths)
+                args["changes"] = item.get("changes", [])
             declined, also = None, []
             item_command = item.get("command") if isinstance(item.get("command"), str) else None
             if shell and (not isinstance(args.get("command"), str) or not args["command"].strip()):

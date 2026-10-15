@@ -1851,6 +1851,96 @@ class Checks(unittest.TestCase):
         self.assertEqual(asked["args"]["paths"], [str(self.work / "notes.txt"), "/sv0-outside/notes.txt",
                                                   str(self.work / ".env")])
 
+    UNION_PROBE = """
+import json, sys, time
+from jarvis.v2.providers import codex
+n = int(sys.argv[1])
+changes = [{"path": f"src/f{i}.txt", "diff": "+x", "kind": {"type": "add"}} for i in range(n)]
+out = {}
+for shape in ("cumulative", "one file each"):
+    prev = None
+    started = time.thread_time()
+    for k in range(1, n + 1):
+        version = changes[:k] if shape == "cumulative" else changes[k - 1:k]
+        prev = codex._remember(prev, {"id": "p", "type": "fileChange", "changes": version})
+    seen = prev[codex._PATHS_SEEN]
+    out[shape] = {"cpu": time.thread_time() - started, "paths": len(seen.paths), "problem": seen.problem}
+print(json.dumps(out))
+"""
+
+    def test_the_union_of_an_items_versions_is_bounded_work(self):
+        """5000 updates to one item, each resending every change so far (a
+        streamed patch may), or adding one file each: `_remember` runs on the
+        turn loop's thread, so the whole series must cost under 0.4 CPU s,
+        and it ends past judging. Run in a child process with an
+        active deadline: a quadratic-per-update union never returns in time."""
+        from tests import loadclock
+        loadclock.pinned()
+        self.assertEqual((codex.CHANGE_PATH_CAP, codex.CHANGE_WORK_CAP), (4096, 1_000_000))
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
+        try:
+            run = subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[2]); "
+                                  "exec(sys.argv[3])", "5000", env["PYTHONPATH"], self.UNION_PROBE],
+                                 capture_output=True, text=True, timeout=30, env=env)
+        except subprocess.TimeoutExpired:
+            self.fail("5000 updates to one item took over 30 s on the turn loop's thread")
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        out = json.loads(run.stdout)
+        cumulative, single = out["cumulative"], out["one file each"]
+        self.assertEqual(cumulative["problem"], codex.TOO_MUCH_WORK)
+        self.assertEqual((single["paths"], single["problem"]), (4097, codex.TOO_MANY_PATHS))
+        # Idle on the owner's machine (2026-10-15): 183 CPU ms cumulative, 3
+        # one file each. The old list-scan union cost 1.72 s here (4.3x the
+        # bound) and no work cap 1.46 s (3.6x): both past loadclock's 3x, so
+        # caught under any load.
+        for shape, result in out.items():
+            held = loadclock.judge(result["cpu"], 0.4)
+            self.assertLess(held.idle, 0.4, f"{shape}: {held}")
+
+    def test_a_file_item_past_judging_is_declined_unasked(self):
+        file_approval = "item/fileChange/requestApproval"
+        many = lambda n: [self.change(f"src/f{i}.txt") for i in range(n)]
+        # At the cap: judged and asked. One past it: declined, nobody asked.
+        asker = RecordingAsker(Decision.ALLOW)
+        _, _, reply = self.scripted(file_approval, {"itemId": "patch"}, self.real_permit(asker),
+                                    item={"id": "patch", "type": "fileChange", "status": "inProgress",
+                                          "changes": many(4096)}, brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(len(asker.seen[-1].args["paths"]), 4096)
+        for label, item, updates in (
+                ("one version past the cap", many(4097), None),
+                # 5000 files arriving in 50 incremental updates through the
+                # transport, under an active deadline. (5000 one-file updates
+                # are timed in-process above: a burst of that many messages
+                # races the 4096-message RPC queue, the known limit SV-6 owns.)
+                ("5000 files in 50 incremental updates", many(100),
+                 [many(5000)[k:k + 100] for k in range(100, 5000, 100)])):
+            for brief in (self.chat(), self.brief):
+                with self.subTest(case=label, role=brief.role):
+                    asker = RecordingAsker(Decision.ALLOW)
+                    with ThreadPoolExecutor(1) as pool:
+                        future = pool.submit(self.scripted, file_approval, {"itemId": "patch"},
+                                             self.real_permit(asker), brief=brief, updates=updates,
+                                             item={"id": "patch", "type": "fileChange",
+                                                   "status": "inProgress", "changes": item})
+                        _, events, reply = future.result(timeout=60)
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+                    self.assertEqual(asker.seen, [])
+                    self.assertEqual([e.data["message"] for e in events if e.kind == K.ERROR],
+                                     [f"Codex approval request declined: {codex.TOO_MANY_PATHS}"])
+                    self.assertEqual(events[-1].data, {"stop": "end"})
+
+    def test_the_card_shows_the_items_changes_never_the_requests(self):
+        asker = RecordingAsker(Decision.ALLOW)
+        item = {"id": "patch", "type": "fileChange", "status": "inProgress",
+                "changes": [self.change("docs/real.md")]}
+        _, _, reply = self.scripted("item/fileChange/requestApproval",
+                                    {"itemId": "patch", "changes": [{"path": "harmless.txt", "diff": "+fake"}]},
+                                    self.real_permit(asker), item=item, brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(asker.seen[-1].args["changes"], item["changes"])
+        self.assertEqual(asker.seen[-1].args["paths"], ["docs/real.md"])
+
     def test_child_file_approval_is_judged_on_every_version_of_its_item(self):
         """The same for a child: its `patchUpdated` counts, the union of its
         item's paths is judged, and an unreadable version is not forgotten."""

@@ -231,6 +231,25 @@ class CodexFixtures(unittest.TestCase):
             self.assertEqual(rs[started[0]]["data"]["params"]["threadId"], req["params"]["threadId"])
             self.assertEqual(item["changes"][0]["kind"], {"type": "update", "move_path": "/sv0-outside/notes.txt"})
 
+    def test_a_multi_file_patch_arrives_whole(self):
+        """A four-file patch (three adds, one rename), recorded with
+        `features.apply_patch_streaming_events` on: in 0.161.0's code mode
+        `apply_patch` runs inside `exec`, and its fileChange item arrives
+        whole in `item/started`, before the approval, with no
+        `item/fileChange/patchUpdated` at all."""
+        rs = rows("codex", "patch_multi")
+        self.assertEqual(self.notes(rs, "item/fileChange/patchUpdated"), [])
+        started = [r["data"]["params"]["item"] for r in self.notes(rs, "item/started")
+                   if r["data"]["params"]["item"].get("type") == "fileChange"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual([c["kind"] for c in started[0]["changes"]],
+                         [{"type": "add"}] * 3 + [{"type": "update", "move_path": "/sv0-outside/notes.txt"}])
+        at = next(i for i, r in enumerate(rs) if r["src"] == "rpc_in"
+                  and r["data"].get("method") == "item/fileChange/requestApproval")
+        first = next(i for i, r in enumerate(rs) if r["src"] == "rpc_in" and r["data"].get("method") == "item/started"
+                     and r["data"]["params"]["item"].get("type") == "fileChange")
+        self.assertLess(first, at)
+
     def test_turn_interrupt_on_a_child_ends_only_that_childs_turn(self):
         rs = rows("codex", "child_interrupt")
         parent = self.parent(rs)
