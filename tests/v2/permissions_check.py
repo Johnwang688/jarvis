@@ -24,6 +24,8 @@ import time
 from jarvis import config, permissions as v1_permissions, rules
 
 CHECKS = 0
+# `python permissions_check.py merge_gate_checks` runs only the named sections.
+ONLY = frozenset(a for a in __import__("sys").argv[1:] if a.endswith("_checks"))
 FAILURES: list[str] = []
 
 
@@ -2034,6 +2036,366 @@ def discord_checks():
         ok(not config.ALLOWLIST_PATH.exists(), "checking allowlistability writes nothing")
 
 
+# --------------------------------------------------------------------------
+# owner-only repository operations (owner decision 2026-10-15, after GIT-LIVE)
+#
+# Jarvis chats match Claude Code's auto mode: pushing a branch and opening a
+# pull request proceed unasked; merging or closing one — and the pushes that
+# amount to a merge or a close — always reach the owner, with no Always.
+
+_MERGE = ("gh-pr-merge", "merges a pull request")
+_CLOSE = ("gh-pr-close", "closes a pull request")
+_MAIN = ("git-push-protected", "pushes to main")
+_EVERY = ("git-push-protected", "pushes to every")
+_TO = ("git-push-protected", "pushes to the")
+_DELETE = ("git-push-delete", "deletes a branch")
+_FORCE = ("git-push-force", "force-pushes")
+_PR_UNSURE = ("pr-merge-unsure", "may merge or close a pull request")
+_PUSH_UNSURE = ("git-push-unsure", "may push to main")
+
+MERGE_GATE_ASK = (
+    ("gh pr merge 5 --squash", _MERGE), ("gh pr merge --auto --squash 5", _MERGE),
+    ("gh pr merge --admin --merge 5", _MERGE), ("gh pr merge", _MERGE),
+    ("gh pr merge 5 --delete-branch", _MERGE), ("gh -R o/r pr merge 7", _MERGE),
+    ("gh pr --repo o/r merge 7", _MERGE), ("gh pr close 5", _CLOSE),
+    ("gh pr close 5 --delete-branch -c done", _CLOSE),
+    ("gh api -X PUT repos/o/r/pulls/5/merge", _MERGE),
+    ("gh api --method=PUT 'repos/{owner}/{repo}/pulls/5/merge' -f merge_method=squash", _MERGE),
+    ("gh api repos/o/r/pulls/5/merge -f merge_method=squash", _MERGE),
+    ("gh api https://api.github.com/repos/o/r/pulls/5/merge -XPUT", _MERGE),
+    ("gh api -XPATCH /repos/o/r/pulls/5 -f state=closed", _CLOSE),
+    ("gh api repos/o/r/issues/5 -X PATCH -f state=closed", _CLOSE),
+    ("gh api repos/o/r/merges -f base=main -f head=topic", _MERGE),
+    ("gh api graphql -f query='mutation($id:ID!){mergePullRequest(input:{pullRequestId:$id})"
+     "{clientMutationId}}' -f id=X", _MERGE),
+    ("gh api graphql -f query='mutation{closePullRequest(input:{pullRequestId:\"X\"})"
+     "{clientMutationId}}'", _CLOSE),
+    ("gh api graphql -f query='mutation{enablePullRequestAutoMerge(input:{pullRequestId:\"X\"})"
+     "{clientMutationId}}'", _MERGE),
+    ("gh api graphql -F query=@merge.graphql", _PR_UNSURE),
+    ("gh api graphql --input body.json", _PR_UNSURE),
+    ("gh api -X DELETE repos/o/r/git/refs/heads/topic", _DELETE),
+    ("gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc", _MAIN),
+    ("gh api -X PUT repos/o/r/contents/README.md -f message=x -f content=eA==", _TO),
+    ("gh repo sync o/fork", _TO),
+    ("gh pr-shipper 5", _PR_UNSURE),
+    ("git push origin main", _MAIN), ("git push origin HEAD:main", _MAIN),
+    ("git push origin x:refs/heads/main", _MAIN),
+    ("git push origin HEAD:refs/heads/master", ("git-push-protected", "pushes to master")),
+    ("git push upstream topic:main", _MAIN), ("git push origin Main", ("git-push-protected", "pushes to Main")),
+    ("git push origin release-2", ("git-push-protected", "pushes to release-2")),
+    ("git push origin 'refs/heads/*:refs/heads/*'", _MAIN), ("git push --all origin", _EVERY),
+    ("git push --branches origin", _EVERY),
+    ("git push origin --delete topic", _DELETE), ("git push -d origin topic", _DELETE),
+    ("git push --del origin topic", _DELETE), ("git push origin :topic", _DELETE),
+    ("git push --prune origin 'refs/heads/topic*:refs/heads/topic*'", _DELETE),
+    ("git push --force origin topic", _FORCE), ("git push -f origin topic", _FORCE),
+    ("git push -uf origin topic", _FORCE), ("git push --force-with-lease origin topic", _FORCE),
+    ("git push --force-with-lease=topic:abc123 origin topic", _FORCE),
+    ("git push --force-if-includes --force-with-lease origin topic", _FORCE),
+    ("git push --forc origin topic", _FORCE), ("git push origin +topic", _FORCE),
+    ("git push origin +HEAD:topic", _FORCE), ("git push --mirror", _FORCE),
+    ("git -C . -c user.name=x push origin main", _MAIN), ("git-push origin main", _MAIN),
+    ("git.exe push origin main", _MAIN), ("/usr/bin/git push origin main", _MAIN),
+    # every wrapper, runner and shell, and every segment
+    ("uv run gh pr merge 5", _MERGE), ("npx gh pr merge 5", _MERGE),
+    ("env GH_REPO=o/r gh pr close 3", _CLOSE), ("env -i gh pr merge 5", _MERGE),
+    ("bash -c 'gh pr merge 5'", _MERGE), ("sh -lc 'git push origin main'", _MAIN),
+    ("/bin/bash -lc 'gh pr merge 5 --squash'", _MERGE),
+    ("/bin/bash -lc 'cd sub && git push --force origin topic'", _FORCE),
+    ("zsh -c \"git push origin HEAD:main\"", _MAIN),
+    ("uv run --with x bash -c 'git push origin main'", _MAIN),
+    ("git status && gh pr merge 5", _MERGE), ("npm test; gh pr close 5", _CLOSE),
+    ("true || git push origin main", _MAIN), ("ls | gh pr merge 5", _MERGE),
+    ("if true; then gh pr merge 5; fi", _MERGE), ("(gh pr merge 5)", _MERGE),
+    ("{ gh pr close 5; }", _CLOSE), ("echo $(gh pr merge 5)", _MERGE),
+    ("echo \"`gh pr merge 5`\"", _MERGE), ("timeout 60 gh pr merge 5", _MERGE),
+    ("nohup git push -f origin topic &", _FORCE), ("xargs gh pr merge < prs.txt", _MERGE),
+    ("echo 5 | xargs -I{} gh pr merge {}", _MERGE), ("eval 'gh pr close 5'", _CLOSE),
+    ("find . -maxdepth 0 -exec gh pr merge 5 \\;", _MERGE),
+    ("bash <<'EOF'\ngh pr merge 5\nEOF", _MERGE),
+    ("python3 -c \"import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])\"", _MERGE),
+    ("node -e \"require('child_process').execSync('git push origin main')\"", _MAIN),
+    ("git -c alias.ship=push ship origin main", _MAIN),
+    ("git -c alias.sm='!gh pr merge' sm 5", _MERGE),
+    ("git submodule foreach 'git push origin main'", _MAIN),
+    ("git rebase -x 'gh pr merge 5' HEAD~1", _MERGE),
+    ("$GH pr merge 5", _MERGE), ("\"$HOME/bin/gh\" pr close 5", _CLOSE),
+    ("git push origin \"$BRANCH\"", _PUSH_UNSURE), ("echo main | xargs git push origin", _PUSH_UNSURE),
+    ("git -c remote.origin.push=HEAD:main push", _PUSH_UNSURE),
+    ("GIT_DIR=/elsewhere/.git git push", _PUSH_UNSURE),
+)
+
+MERGE_GATE_ORDINARY = (
+    "gh pr create --draft --title 'Add x' --body 'merge after review, then close #4'",
+    "gh pr create --fill", "gh pr new --fill", "gh pr view 5", "gh pr list", "gh pr ls --state merged",
+    "gh pr status", "gh pr checks 5", "gh pr diff 5", "gh pr checkout 5", "gh co 5",
+    "gh pr comment 5 --body 'please merge'", "gh pr edit 5 --title 'close the gap'",
+    "gh pr ready 5", "gh pr review 5 --approve", "gh pr reopen 5", "gh issue view 4",
+    "gh api repos/o/r/pulls/5", "gh api repos/o/r/pulls/5/merge",
+    "gh api graphql -f query='query { viewer { login } }'",
+    "gh api repos/o/r/pulls -f title=x -f head=topic -f base=main",
+    "gh api repos/o/r/issues/5/comments -f body='will close later'",
+    "gh repo sync", "gh repo sync --source o/upstream -b main", "gh run list",
+    "git -c alias.st=status push -u origin topic",
+    "git push origin topic", "git push -u origin topic", "git push --set-upstream origin my-branch",
+    "git push origin HEAD", "git push -u origin HEAD", "git push", "git push origin",
+    "git push -u origin HEAD:topic", "git push origin topic:topic", "git push origin main:topic",
+    "git push --tags origin", "git push origin tag v1.0", "git push -o ci.skip origin topic",
+    "git push --no-force-with-lease origin topic", "git push --follow-tags origin topic",
+    "git push -u origin \"$(git branch --show-current)\"",
+    "git commit -m 'gh pr merge later'", "git log --grep merge", "git merge topic",
+    "git branch -d old", "git fetch origin main", "git pull origin main", "git checkout main",
+    "uv run git push origin topic", "bash -c 'git push -u origin topic'",
+    "cd sub && git push -u origin HEAD", "npx vite", "$EDITOR notes.txt", "\"$PYTHON\" script.py",
+    "python3 -c \"print('hello')\"",
+)
+
+
+def _fake_repo(root: Path, name: str, branch: str, *, remote_head: str | None = None,
+               config: str = "", worktree: bool = False) -> Path:
+    """A folder git would call a repository on `branch`, written by hand: the
+    check reads `.git` and never runs git, and neither does this."""
+    folder = root / name
+    folder.mkdir(parents=True)
+    if worktree:
+        common = root / f"{name}-common"
+        gitdir = common / "worktrees" / name
+        gitdir.mkdir(parents=True)
+        (folder / ".git").write_text(f"gitdir: {gitdir}\n")
+        (gitdir / "commondir").write_text("../..\n")
+    else:
+        gitdir = common = folder / ".git"
+        gitdir.mkdir()
+    (gitdir / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+    if remote_head:
+        (common / "refs" / "remotes" / "origin").mkdir(parents=True, exist_ok=True)
+        (common / "refs" / "remotes" / "origin" / "HEAD").write_text(
+            f"ref: refs/remotes/origin/{remote_head}\n")
+    (common / "config").write_text(config)
+    return folder
+
+
+def _permit_once(provider, profile, asker, tool, args, cwd, **kw):
+    from jarvis.v2.permissions import PermitContext, build_permit
+    brief = brief_for(profile, cwd=cwd)
+    permit = build_permit(PermitContext(thread_id="mg000000", brief=brief, provider=provider), asker)
+    return permit(tool, args, brief, **kw)
+
+
+def merge_gate_checks():
+    """The owner-only gate at the permit, every profile × provider × asker ×
+    command; the must-not-ask set unchanged; no Always and no allowlist entry
+    can answer it; where a push with no refspec runs; bounded cost."""
+    from jarvis.v2 import merge_gate
+    from jarvis.v2.approvals import PendingApprovals
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import deny_all
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        topic = _fake_repo(box.root, "topic-repo", "topic")
+        main = _fake_repo(box.root, "main-repo", "main")
+        tools = {"claude": "Bash", "codex": "shell"}
+
+        # 1. the matrix: asked in every profile, a no or no human denies.
+        for provider, tool in tools.items():
+            for profile in (P.STRICT, P.ASK, P.AUTO):
+                for asker_kind in ("yes", "no", "deny-all"):
+                    for command, (rule, words) in MERGE_GATE_ASK:
+                        asker = (Asker(Decision.ALLOW) if asker_kind == "yes" else
+                                 Asker(Decision.DENY) if asker_kind == "no" else deny_all())
+                        tag = f"[{provider}/{profile.value}/{asker_kind}] {command!r}"
+                        decision = _permit_once(provider, profile, asker, tool,
+                                                {"command": command}, topic)
+                        eq(decision, Decision.ALLOW if asker_kind == "yes" else Decision.DENY,
+                           f"{tag}: the owner's answer is the answer")
+                        record = box.decisions[-1]
+                        eq(record["layer"], "always-ask", f"{tag}: answered at layer 2")
+                        ok(rule in record["reason"], f"{tag}: names rule {rule} ({record['reason'][:90]})")
+                        if asker_kind == "deny-all":
+                            continue
+                        eq(len(asker.seen), 1, f"{tag}: put to the owner once")
+                        if asker.seen:
+                            request = asker.seen[0]
+                            eq(request.allowlistable, False, f"{tag}: no Always is offered")
+                            ok(words in request.headline,
+                               f"{tag}: the card says {words!r} (headline {request.headline!r})")
+                            eq(request.command, command, f"{tag}: the whole command travels")
+
+        # 2. the must-not-ask set: nothing new, in the topic repository.
+        for provider, tool in tools.items():
+            for command in MERGE_GATE_ORDINARY:
+                eq(merge_gate.judge(command, str(topic)), None, f"{command!r} is not owner-only")
+                asker = Asker(Decision.ALLOW)
+                _permit_once(provider, P.AUTO, asker, tool, {"command": command}, topic)
+                ok(not any(r.headline for r in asker.seen),
+                   f"[{provider}] {command!r} carries no owner-only headline")
+                ok(box.decisions[-1]["layer"] != "always-ask" or "too-complex" in box.decisions[-1]["reason"]
+                   or "vex" in box.decisions[-1]["reason"],
+                   f"[{provider}] {command!r} is not an always-ask ({box.decisions[-1]['reason'][:80]})")
+        # The GIT-LIVE pair, exactly: still the reviewer's, unasked, under AUTO.
+        for command in ("git push -u origin claude/live-check", "gh pr create --draft --fill"):
+            asker = Asker(Decision.ALLOW)
+            _permit_once("claude", P.AUTO, asker, "Bash", {"command": command}, topic)
+            eq(len(asker.seen), 0, f"{command!r}: no card under AUTO, as GIT-LIVE saw")
+
+        # 3. Codex: a widening keeps its ask, its no-Always and strict's no,
+        #    and leads with what the command does.
+        widening = "Codex chat requests execution beyond its ordinary sandbox; owner approval required"
+        for command, (rule, words) in (("gh pr merge 5", _MERGE), ("gh pr close 5", _CLOSE),
+                                       ("/bin/bash -lc 'git push origin HEAD:main'", _MAIN)):
+            for profile in (P.ASK, P.AUTO):
+                asker = Asker(Decision.ALLOW)
+                _permit_once("codex", profile, asker, "shell", {"command": command}, topic,
+                             widening=widening)
+                eq(len(asker.seen), 1, f"[codex widening/{profile.value}] {command!r} is asked")
+                if asker.seen:
+                    request = asker.seen[0]
+                    ok(request.headline.startswith(words),
+                       f"the widening card leads with {words!r}: {request.headline!r}")
+                    ok(widening in request.headline, "and still says it widens the sandbox")
+                    eq(request.allowlistable, False, "and offers no Always")
+                    eq(box.decisions[-1]["layer"], "sandbox-widening", "the widening layer answers")
+                    ok(rule in box.decisions[-1]["reason"], "and the log names the rule")
+            asker = Asker(Decision.ALLOW)
+            eq(_permit_once("codex", P.STRICT, asker, "shell", {"command": command}, topic,
+                            widening=widening), Decision.DENY, "strict still refuses a widening")
+            eq(len(asker.seen), 0, "unasked")
+        asker = Asker(Decision.ALLOW)
+        _permit_once("codex", P.AUTO, asker, "shell", {"command": "git push -u origin topic"}, topic,
+                     widening=widening)
+        eq([r.headline for r in asker.seen], [widening],
+           "a Codex branch push still asks as a widening, and only as one (unchanged)")
+
+        # A dangerous Jarvis tool carrying a command (the bridge) says so too.
+        asker = Asker(Decision.ALLOW)
+        _permit_once("claude", P.AUTO, asker, "run_command", {"command": "gh pr merge 5"}, topic,
+                     dangerous_tool=True)
+        ok(asker.seen and asker.seen[0].headline == "merges a pull request",
+           "a dangerous-tool card names the merge")
+
+        # 4. Nothing the owner can edit, and no standing yes, answers it.
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": p} for p in ("gh", "git", "gh pr merge", "git push")]))
+        asker = Asker(Decision.ALLOW)
+        _permit_once("claude", P.AUTO, asker, "Bash", {"command": "gh pr view 5"}, topic)
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "precondition: the allowlist entries work")
+        for command, (rule, _words) in MERGE_GATE_ASK[:12]:
+            asker = Asker(Decision.DENY)
+            eq(_permit_once("claude", P.AUTO, asker, "Bash", {"command": command}, topic),
+               Decision.DENY, f"an allowlist entry does not answer {command!r}")
+            eq(len(asker.seen), 1, f"{command!r} is still asked with entries for gh and git")
+        config.ALLOWLIST_PATH.unlink()
+        config.V2_ALWAYS_ASK.write_text("[]")
+        saved = list(config.V2_ALWAYS_ASK_DEFAULTS)
+        config.V2_ALWAYS_ASK_DEFAULTS[:] = []
+        try:
+            for command, (rule, _words) in MERGE_GATE_ASK[:12]:
+                asker = Asker(Decision.ALLOW)
+                _permit_once("claude", P.AUTO, asker, "Bash", {"command": command}, topic)
+                eq(len(asker.seen), 1, f"{command!r} asks with no always-ask list at all")
+        finally:
+            config.V2_ALWAYS_ASK_DEFAULTS[:] = saved
+            config.V2_ALWAYS_ASK.unlink()
+        # An Always on the card mints nothing.
+        broker = PendingApprovals(on_request=lambda r: None)
+        answers = []
+        worker = threading.Thread(target=lambda: answers.append(_permit_once(
+            "claude", P.AUTO, broker, "Bash", {"command": "gh pr merge 5"}, topic)))
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not broker.pending() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        pending = broker.pending()
+        eq(len(pending), 1, "the merge waits on the owner")
+        if pending:
+            broker.resolve(pending[0].req_id, Decision.ALLOW, always=True)
+        worker.join(5)
+        eq(answers, [Decision.ALLOW], "the owner's yes runs it once")
+        ok(not config.ALLOWLIST_PATH.exists() or "gh" not in config.ALLOWLIST_PATH.read_text(),
+           "an Always on a merge writes no allowlist entry")
+        asker = Asker(Decision.DENY)
+        _permit_once("claude", P.AUTO, asker, "Bash", {"command": "gh pr merge 5"}, topic)
+        eq(len(asker.seen), 1, "and the next merge is asked again")
+
+        # 5. A push with no refspec is judged where it runs.
+        trunk = _fake_repo(box.root, "trunk-repo", "trunk", remote_head="trunk")
+        tracked = _fake_repo(box.root, "tracked-repo", "topic", config=(
+            "[push]\n\tdefault = upstream\n[branch \"topic\"]\n\tmerge = refs/heads/main\n"))
+        matching = _fake_repo(box.root, "matching-repo", "topic", config="[push]\n\tdefault = matching\n")
+        mirrored = _fake_repo(box.root, "mirror-repo", "topic",
+                              config="[remote \"origin\"]\n\tmirror = true\n")
+        aliased = _fake_repo(box.root, "alias-repo", "topic", config=(
+            "[alias]\n\tship = push origin main\n\tsm = \"!gh pr merge\"\n\tst = status\n"))
+        linked = _fake_repo(box.root, "linked", "main", worktree=True)
+        # The remote HEAD lives in the common dir a linked worktree points at.
+        linked_trunk = _fake_repo(box.root, "linked-trunk", "trunk", remote_head="trunk", worktree=True)
+        where = (
+            ("git push", main, "pushes to main"), ("git push", topic, None),
+            ("git push -u origin HEAD", main, "pushes to main"), ("git push origin @", main, "pushes to main"),
+            ("git push", trunk, "pushes to trunk"), ("git push origin trunk", trunk, "pushes to trunk"),
+            ("git push origin trunk", topic, None), ("git push", tracked, "pushes to main"),
+            ("git push", matching, "pushes to every matching branch"),
+            ("git push", mirrored, "may push to main"), ("git ship", aliased, "pushes to main"),
+            ("git sm 5", aliased, "merges a pull request"), ("git st", aliased, None),
+            ("git push", linked, "pushes to main"), ("git push", linked_trunk, "pushes to trunk"),
+            (f"cd {main} && git push", topic, "pushes to main"), (f"cd {topic} && git push", topic, None),
+            # From a shell in the main checkout, `cd` into a worktree is where
+            # the push runs; a subshell's `cd` ends with it; a missing folder
+            # leaves the line where it was.
+            (f"cd {topic} && git push -u origin HEAD", main, None), (f"cd {topic}; git push", main, None),
+            (f"(cd {topic} && git push -u origin HEAD); git push", main, "pushes to main"),
+            (f"cd {box.root}/no-such && git push", main, "pushes to main"),
+            (f"cd {box.root} && cd main-repo && git push", topic, "pushes to main"),
+            (f"git -C {main} push", topic, "pushes to main"), (f"env -C {main} git push", topic, "pushes to main"),
+            (f"uv run --directory {main} git push", topic, "pushes to main"),
+            (f"(cd {main}; git push -u origin HEAD)", topic, "pushes to main"),
+            ("cd \"$WT\" && git push", topic, "may push to main"), ("cd - && git push", topic, "may push to main"),
+            ("git -C \"$WT\" push", topic, "may push to main"), ("git push", None, "may push to main"),
+            ("git push -u origin \"$(git branch --show-current)\"", main, "pushes to main"),
+            ("git push -u origin \"$(git branch --show-current)\"", topic, None),
+        )
+        for command, cwd, words in where:
+            hit = merge_gate.judge(command, str(cwd) if cwd else None)
+            if words is None:
+                eq(hit, None, f"{command!r} in {cwd.name if cwd else None} asks nothing")
+            else:
+                ok(hit is not None and words in hit.headline,
+                   f"{command!r} in {cwd.name if cwd else None}: {words!r} (got {hit})")
+        # The shell's own folder (Claude's hook `cwd`), not the brief's;
+        # Codex's item `cwd`; never a `cwd` the model put in the arguments.
+        for provider, tool, args, kw, brief_cwd, asked in (
+                ("claude", "Bash", {"command": "git push"}, {"shell_cwd": str(main)}, topic, True),
+                ("claude", "Bash", {"command": "git push"}, {"shell_cwd": str(topic)}, main, False),
+                ("claude", "Bash", {"command": "git push"}, {}, main, True),
+                ("claude", "Bash", {"command": "git push", "cwd": str(topic)}, {}, main, True),
+                ("codex", "shell", {"command": "git push", "cwd": str(main)}, {}, topic, True),
+                ("codex", "shell", {"command": "git push", "cwd": str(topic)}, {}, main, False)):
+            asker = Asker(Decision.ALLOW)
+            _permit_once(provider, P.AUTO, asker, tool, args, brief_cwd, **kw)
+            eq(bool(asker.seen), asked,
+               f"[{provider}] {args} {kw} in {brief_cwd.name}: asked={asked}")
+
+        # 6. Bounded: pathological lines are judged quickly (thread CPU time,
+        #    the judge runs on the calling thread) and ask rather than hang.
+        heavy = (
+            "gh pr view 5; " * 3000,
+            "git push origin " + "topic " * 20000,
+            "eval " * 40 + "gh pr merge 5",
+            "cd a && " * 200 + "git push",
+            "gh api graphql -f query='" + "query { x } " * 20000 + "'",
+            "x" * 200_000,
+        )
+        for line in heavy:
+            started = time.thread_time()
+            merge_gate.judge(line, str(topic))
+            spent = time.thread_time() - started
+            ok(spent < 3.0, f"judged in {spent:.2f}s CPU: {line[:40]!r}…")
+        ok(merge_gate.judge("eval " * 40 + "gh pr merge 5", str(topic)) is not None,
+           "a line nested past the walk's depth still asks")
+
+
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
@@ -2041,7 +2403,9 @@ def main():
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
                     review_48_round2_checks, review_48_delta_checks, runner_checks,
                     third_delta_75_checks, daemon_checks,
-                    auto_quiet_checks, hatch_checks, discord_checks):
+                    auto_quiet_checks, hatch_checks, discord_checks, merge_gate_checks):
+        if ONLY and section.__name__ not in ONLY:
+            continue
         print(f"-- {section.__name__}")
         section()
     print()

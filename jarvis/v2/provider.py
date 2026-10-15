@@ -190,6 +190,9 @@ class UserMessage:
 # Claude passes `subagent="<label>"` (keyword-only, SV-1) for a call one of its
 # Agent children makes: it names the child on the card and decides nothing. It
 # is passed only to a callback that takes it, so the answer never depends on it.
+# Claude also passes `shell_cwd="<dir>"` (keyword-only, 2026-10-15): its hook
+# input's `cwd`, the folder its shell is in, where `merge_gate` reads the
+# current branch of a push with no refspec. Only to a callback that takes it.
 PermissionCallback = Callable[[str, dict, Brief], Decision]   # (tool_name, args, brief)
 
 

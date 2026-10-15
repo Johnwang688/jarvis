@@ -971,7 +971,11 @@ class ClaudeProvider:
                         "permissionDecisionReason": HOOK_REFUSAL_PREFIX + OFF}}
             # A sub-agent's call is decided exactly as the orchestrator's
             # would be; the card only says whose it is (SV-1).
-            decision = await self._decide(session, name, args, agent_id=agent_id)
+            # The hook input's `cwd` is the shell's folder, from the CLI and
+            # not the model: where a push with no refspec is judged.
+            shell_cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else None
+            decision = await self._decide(session, name, args, agent_id=agent_id,
+                                          shell_cwd=shell_cwd)
             if decision is Decision.ALLOW and jarvis is not None:
                 # Explicit under both profiles (D-5): under ASK it pre-empts the
                 # CLI's own prompt, under AUTO it skips the classifier, whose
@@ -1024,7 +1028,7 @@ class ClaudeProvider:
         return can_use_tool
 
     async def _decide(self, session: _Session, name: str, args: dict, *,
-                      agent_id: Any = None) -> Decision:
+                      agent_id: Any = None, shell_cwd: str | None = None) -> Decision:
         """Ask `permit`, announcing the question so a stalled turn is visible.
 
         A call from a sub-agent (`agent_id`, from the hook input or the
@@ -1059,8 +1063,9 @@ class ClaudeProvider:
             **({"subagent": sid} if sid else {}),
         )
         try:
-            decision = await (self._race(session, pending, name, args) if label is None
-                              else self._race(session, pending, name, args, label))
+            extra = {"shell_cwd": shell_cwd} if shell_cwd is not None else {}
+            decision = await (self._race(session, pending, name, args, **extra) if label is None
+                              else self._race(session, pending, name, args, label, **extra))
         finally:
             with session.mutex:
                 session.pending.pop(req_id, None)
@@ -1083,14 +1088,18 @@ class ClaudeProvider:
 
     async def _race(
         self, session: _Session, pending: _Pending, name: str, args: dict,
-        label: str | None = None,
+        label: str | None = None, shell_cwd: str | None = None,
     ) -> Decision:
         def ask() -> Decision:
             try:
+                # Each keyword only to a callback that takes it: one that does
+                # not would raise, and a raise denies.
+                extra: dict = {}
                 if label is not None and _takes_subagent(session.permit):
-                    return Decision(session.permit(name, dict(args), session.brief,
-                                                   subagent=label))
-                return Decision(session.permit(name, dict(args), session.brief))
+                    extra["subagent"] = label
+                if shell_cwd is not None and _takes_keyword(session.permit, "shell_cwd"):
+                    extra["shell_cwd"] = shell_cwd
+                return Decision(session.permit(name, dict(args), session.brief, **extra))
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
                 return Decision.DENY
 
@@ -2282,6 +2291,17 @@ def _takes_subagent(permit: Any) -> bool:
         return False
     return any(p.kind is p.VAR_KEYWORD
                or (p.name == "subagent" and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
+               for p in params)
+
+
+def _takes_keyword(permit: Any, name: str) -> bool:
+    """Whether `permit` takes the keyword `name` (`_takes_subagent`'s rule)."""
+    try:
+        params = inspect.signature(permit).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is p.VAR_KEYWORD
+               or (p.name == name and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
                for p in params)
 
 

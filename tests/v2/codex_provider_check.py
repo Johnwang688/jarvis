@@ -1341,6 +1341,42 @@ class Checks(unittest.TestCase):
                 _, _, reply = self.scripted(method, params, lambda *a: Decision.ALLOW, brief=brief)
                 self.assertEqual(reply["result"], {"decision": "decline"})
 
+    def test_owner_only_merge_card_says_what_it_does(self):
+        """Owner decision 2026-10-15: a Codex merge or close reaches the owner
+        with a card that leads with it, not only "sandbox widening" — as a
+        chat's widening, or as a task's plain approval at layer 2 — with no
+        Always, and declined with no human. A branch push is unchanged: a
+        chat's still asks as a widening; a task's is still the reviewer's."""
+        from jarvis.v2.permissions import L_ALWAYS_ASK, L_WIDENING, deny_all
+        cases = (("/bin/bash -lc 'gh pr merge 5 --squash'", "merges a pull request"),
+                 ("/bin/bash -lc 'gh pr close 5'", "closes a pull request"),
+                 ("/bin/bash -lc 'git push origin HEAD:main'", "pushes to main"),
+                 ("/bin/bash -lc 'git push --force origin topic'", "force-pushes"))
+        for command, words in cases:
+            for brief, layer in ((self.chat(), L_WIDENING), (self.brief, L_ALWAYS_ASK)):
+                with self.subTest(command=command, role=brief.role):
+                    params = {"itemId": "c", "command": command}
+                    asker = RecordingAsker(Decision.ALLOW)
+                    _, _, reply = self.scripted(CMD, params, self.real_permit(asker), brief=brief)
+                    self.assertEqual(reply["result"], {"decision": "accept"})
+                    self.assertEqual(len(asker.seen), 1)
+                    self.assertTrue(asker.seen[0].headline.startswith(words), asker.seen[0].headline)
+                    self.assertEqual(asker.seen[0].layer, layer)
+                    self.assertFalse(asker.seen[0].allowlistable)
+                    _, _, reply = self.scripted(CMD, params, self.real_permit(deny_all("nobody")),
+                                                brief=brief)
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+        push = {"itemId": "c", "command": "/bin/bash -lc 'git push -u origin topic'"}
+        asker = RecordingAsker(Decision.ALLOW)
+        self.scripted(CMD, push, self.real_permit(asker), brief=self.chat())
+        self.assertEqual(len(asker.seen), 1)
+        self.assertNotIn("pushes to", asker.seen[0].headline)
+        self.assertIn("owner approval required", asker.seen[0].headline)
+        asker = RecordingAsker(Decision.ALLOW)
+        _, _, reply = self.scripted(CMD, push, self.real_permit(asker), brief=self.brief)
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(asker.seen, [])
+
     def test_chat_explicit_network_and_unknown_grants_still_require_owner(self):
         for extra in ({"networkApprovalContext": {"host": "example.invalid", "protocol": "https"}},
                       {"additionalPermissions": {"network": {"enabled": True}}},

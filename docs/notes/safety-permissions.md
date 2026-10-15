@@ -2268,3 +2268,50 @@ Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init
 `jarvis/tools/secrets.py` (search folders, process-environment values),
 `jarvis/protected_state.py` (default `cwd`). Each change only places a path,
 adds an ask or withholds more.
+
+## Pull-request merges and closes are the owner's (2026-10-15)
+
+Current rule, beside the preserved notes above (decisions M-1..M-10,
+`docs/plans/2026-10-15-pr-merge-close-decisions.md`). The owner, after
+GIT-LIVE: Jarvis chats match Claude Code's auto mode, so pushing a branch and
+opening a pull request proceed unasked, and **merging or closing a pull request
+always needs the owner's yes**, as do the pushes that amount to one: a push to
+the default branch, a branch deletion, a force push.
+
+- **Where it is checked.** `jarvis/v2/merge_gate.py`, asked by
+  `permissions.build_permit` for every command tool at layer 2, before the
+  always-ask list: code, not an entry in `always-ask.json`, so no file,
+  project or brief can remove it. In every profile, for Claude and Codex,
+  chats and tasks: a human-backed asker is asked; deny-all, strict without a
+  human, a timeout or no surface declines. The allowlist (layer 4), rules'
+  ALLOW and the provider's reviewer (layer 5) never answer it. The card is
+  `allowlistable=False` (no Always; one sent anyway mints nothing) and
+  leads with a plain headline: "merges a pull request", "closes a pull
+  request", "pushes to main", "deletes a branch", "force-pushes", or "may …"
+  when it cannot tell.
+- **Codex.** A Codex owner chat's command approval is still a sandbox
+  widening (networking is off by design) and is asked as one, strict refusing
+  it as before; the headline now leads with the operation, then the widening.
+  A Codex task's plain approval reaches layer 2 like Claude's. A Codex push
+  of a branch still asks as a widening, unchanged.
+- **What it reads.** Every program the line runs, through `rules._Walk`
+  (segments, `bash -lc`, `eval`, substitutions, `find -exec`, and every
+  wrapper and runner from rules' one table), `gh pr merge|close`, `gh api`
+  writes and GraphQL mutations that merge or close, `git push` destinations,
+  deletions and forces in every refspec and option spelling, git aliases,
+  and inline interpreter code as text. A push with no refspec is judged by
+  the current branch where it runs: Claude's hook input `cwd` (the
+  `shell_cwd` keyword, which the model cannot reach), Codex's item `cwd`,
+  else the brief's, then each `cd`, `git -C` and wrapper folder option on
+  the line. `.git` is read; git is never run.
+- **Pinned by** `tests/v2/permissions_check.py merge_gate_checks` (the
+  profile × provider × asker × command matrix, the must-not-ask set, no
+  Always, no allowlist, no always-ask list, where a push runs, cost),
+  `codex_provider_check.py` (`test_owner_only_merge_card_says_what_it_does`),
+  `claude_provider_check.py` (the hook's `cwd`), and the mutants in
+  `tests/v2/merge_gate_mutants.py`, each of which must fail a check.
+- **Open.** An accident guard, not an adversarial boundary: script files,
+  an alias in a folder that cannot be told, `include`d git config, `curl` to
+  the API and `gh issue close` on a pull request are not read (decisions,
+  "Known gaps"). Under Claude AUTO the owner's yes still returns `{}`, so the
+  classifier runs after it and may ask again.

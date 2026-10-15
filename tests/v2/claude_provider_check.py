@@ -96,10 +96,12 @@ def eq(got, want, label: str) -> None:
 class Hook:
     """A scripted point where the CLI would call the PreToolUse hook."""
 
-    def __init__(self, tool_name: str, tool_input: dict, tool_use_id: str = "call-1"):
+    def __init__(self, tool_name: str, tool_input: dict, tool_use_id: str = "call-1",
+                 extra: dict | None = None):
         self.tool_name = tool_name
         self.tool_input = tool_input
         self.tool_use_id = tool_use_id
+        self.extra = dict(extra or {})      # more hook-input fields (the CLI's `cwd`)
 
 
 class Permission:
@@ -173,6 +175,7 @@ class FakeClient:
                     "tool_name": item.tool_name,
                     "tool_input": item.tool_input,
                     "tool_use_id": item.tool_use_id,
+                    **item.extra,
                 }
                 self.hook_results.append(
                     await matcher.hooks[0](data, item.tool_use_id, {"signal": None})
@@ -1123,6 +1126,45 @@ def hook_checks() -> None:
         drain(provider, handle)
         out = FakeClient.instances[0].hook_results[0]["hookSpecificOutput"]
         eq(out["permissionDecision"], "deny", "an unreachable broker denies, as everywhere")
+        provider.close(handle)
+
+
+def hook_cwd_checks() -> None:
+    """The hook input's `cwd` (the CLI's shell folder) reaches a permit that
+    takes `shell_cwd` — where merge_gate reads the current branch — and is
+    never handed to one that does not (that would raise, and a raise denies).
+    A `cwd` the model writes into the tool input stays in `args`."""
+    print("\n-- the hook's cwd reaches permit as shell_cwd (owner-only pushes, 2026-10-15)")
+    provider = claude.ClaudeProvider()
+    seen: list = []
+
+    def permit(name, args, b, *, shell_cwd=None):
+        seen.append((name, dict(args), shell_cwd))
+        return Decision.ALLOW
+
+    script = [Hook("Bash", {"command": "git push"}, "c1", extra={"cwd": "/work/main-checkout"}),
+              Hook("Bash", {"command": "git push", "cwd": "/model/said"}, "c2"),
+              result_message()]
+    with fake(script):
+        handle = provider.start(thread(), brief(), permit)
+        drain(provider, handle)
+        eq(seen[0][2], "/work/main-checkout", "the CLI's cwd arrives as shell_cwd")
+        eq(seen[1][2], None, "a model-written cwd is not the shell's folder")
+        eq(seen[1][1].get("cwd"), "/model/said", "it stays an argument, judged as one")
+        provider.close(handle)
+
+    plain: list = []
+
+    def old_permit(name, args, b):
+        plain.append(name)
+        return Decision.ALLOW
+
+    with fake([Hook("Bash", {"command": "ls"}, "c3", extra={"cwd": "/work"}), result_message()]):
+        handle = provider.start(thread(), brief(), old_permit)
+        drain(provider, handle)
+        client = FakeClient.instances[0]
+        eq(plain, ["Bash"], "a permit without the keyword is still asked")
+        eq(client.hook_results[0], {}, "and its ALLOW stands (no TypeError denial)")
         provider.close(handle)
 
 
@@ -3045,6 +3087,7 @@ def main() -> int:
     options_checks()
     sequence_checks()
     hook_checks()
+    hook_cwd_checks()
     env_hook_checks()
     answer_checks()
     daemon_answer_route_checks()
