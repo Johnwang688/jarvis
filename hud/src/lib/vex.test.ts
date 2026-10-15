@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUILD_FIRST_CODE, BUILD_FIRST_STEPS, DOWNLOAD_NAME, DeviceLedger, SETUP_COMMAND, buildLine, chainCancellable, chainLine,
-  stillStale,
+  BUILD_FIRST_CODE, DOWNLOAD_NAME, DeviceLedger, OUTPUT_TABS, SETUP_COMMAND, buildLine, buildMark, chainLine,
+  chainStepOf, chainSteps, chainStoppable, downloadButtonLabel, downloadMark, helpText, isSourcePath, isTrustedPress,
+  markGlyph, nextTab, outputTabFor, stillStale, stoppedDownloadNote,
   defaultName, downloadLabel, downloadProgress, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
   parseStatus, parseDownload, parseConnection, setupNote, slotRefusal, type BuildError, type BuildView,
 } from "./vex";
@@ -72,8 +73,12 @@ describe("download is the owner's click", () => {
     expect(isExplicitClick({ isTrusted: true, detail: 1, button: 1 })).toBe(false);
   });
 
-  it("the button says what it does", () => {
+  it("the button says where it goes; what it replaces is its help (owner decision 2)", () => {
+    expect(downloadButtonLabel(3)).toBe("Download to slot 3");
     expect(downloadLabel(3)).toBe("Download to slot 3: replaces whatever is in slot 3 on the brain");
+    expect(helpText("download", 3)).toContain("replaces whatever is in slot 3 on the brain");
+    expect(helpText("download", 3)).toMatch(/Mouse click only/);
+    expect(helpText("slot", 5)).toContain("replaces whatever is in slot 5");
   });
 
   it("chains a build only on the daemon's build_first code, never on wording", () => {
@@ -86,34 +91,134 @@ describe("download is the owner's click", () => {
     expect(needsBuildFirst("Build_First")).toBe(false);
   });
 
-  it("Build first is a build, then one rebuild — never a third (delta review MED-1)", () => {
-    expect(BUILD_FIRST_STEPS).toEqual(["build", "rebuild"]);
+  it("still Build first after a build and a rebuild is said, never looped (delta review MED-1)", () => {
     const said = stillStale("build/override.bin is older than the sources; Build first, then download");
     expect(said).toMatch(/^Nothing was downloaded/);
     expect(said).toContain("older than the sources; Build first, then download");
   });
 });
 
-describe("one chain per window (M1)", () => {
+describe("one chain per window (M1): clean, build, download (owner decision 3)", () => {
   const c = (over = {}) => ({ label: "override", slot: 3, phase: "build" as const, cancelled: false, ...over });
 
   it("says what the running chain does, on which project and slot", () => {
+    expect(chainLine(c({ phase: "clean" }))).toBe("Cleaning override, then building and downloading to slot 3");
     expect(chainLine(c())).toBe("Building override, then downloading to slot 3");
     expect(chainLine(c({ phase: "download" }))).toBe("Downloading override to slot 3…");
     expect(chainLine(c({ phase: "start" }))).toBe("Downloading override to slot 3…");
     expect(chainLine(c({ phase: "pause" }))).toMatch(/^Pausing the brain terminal, then downloading override to slot 3/);
-    expect(chainLine(c({ cancelled: true }))).toMatch(/^Cancelling/);
+    expect(chainLine(c({ cancelled: true }))).toMatch(/^Stopping/);
     expect(chainLine(c({ label: "" }))).toBe("Building this project, then downloading to slot 3");
     expect(chainLine(c({ phase: "rebuild" }))).toBe("Rebuilding override from scratch, then downloading to slot 3");
-    expect(chainCancellable(c({ phase: "rebuild" }))).toBe(true);
   });
 
-  it("cancels until the download is sent, never mid-write", () => {
-    expect(chainCancellable(c())).toBe(true);
-    expect(chainCancellable(c({ phase: "start" }))).toBe(true);
-    expect(chainCancellable(c({ phase: "pause" }))).toBe(true);
-    expect(chainCancellable(c({ phase: "download" }))).toBe(false);
-    expect(chainCancellable(c({ cancelled: true }))).toBe(false);
+  it("lists its steps: done, running, to come; a rebuild only once it happens", () => {
+    expect(chainSteps(c({ phase: "clean", done: [] }))).toEqual([
+      { step: "clean", state: "busy" }, { step: "build", state: "todo" }, { step: "download", state: "todo" }]);
+    expect(chainSteps(c({ phase: "build", done: ["clean"] })).map((s) => s.state)).toEqual(["done", "busy", "todo"]);
+    expect(chainSteps(c({ phase: "pause", done: ["clean", "build"] })).map((s) => s.state)).toEqual(["done", "done", "busy"]);
+    expect(chainSteps(c({ phase: "rebuild", done: ["clean", "build"] })).map((s) => s.step))
+      .toEqual(["clean", "build", "rebuild", "download"]);
+    expect(chainStepOf("start")).toBe("clean");
+    expect(chainStepOf("pause")).toBe("download");
+  });
+
+  it("Stop is offered for the whole chain, the download included (owner decision 6)", () => {
+    for (const phase of ["start", "clean", "build", "pause", "rebuild", "download"] as const) {
+      expect(chainStoppable(c({ phase }))).toBe(true);
+    }
+    expect(chainStoppable(c({ cancelled: true }))).toBe(false);
+  });
+
+  it("a stopped download says the slot is not known, and what to do", () => {
+    const said = stoppedDownloadNote(4);
+    expect(said).toMatch(/^Download stopped: slot 4 may hold an incomplete program/);
+    expect(said).toContain("Download again before running it");
+  });
+});
+
+describe("Stop is a trusted press (owner decision 6)", () => {
+  it("takes a pointer click or Enter/Space on the button, never a script's or a dispatched click", () => {
+    expect(isTrustedPress({ isTrusted: true, button: 0 })).toBe(true);
+    expect(isTrustedPress({ isTrusted: false, button: 0 })).toBe(false);
+    expect(isTrustedPress({ isTrusted: true, button: 2 })).toBe(false);
+  });
+});
+
+describe("state marks (VX-UI-2)", () => {
+  const base = { starting: false, following: true, stopped: false, editedAt: null, cleanedAt: null };
+  const ended = Date.parse("2026-10-11T12:00:09+00:00");
+
+  it("idle, running, ✓ and ✗ with words", () => {
+    expect(buildMark("build", { ...base, record: null })).toEqual({ state: "idle", text: "Build: not run in this window" });
+    expect(buildMark("clean", { ...base, record: null, starting: true }).state).toBe("busy");
+    expect(buildMark("build", { ...base, record: build({ state: "running" }) }).state).toBe("busy");
+    expect(buildMark("build", { ...base, record: build() })).toEqual({ state: "ok", text: "Build: succeeded" });
+    const failed = buildMark("build", { ...base, record: build({ state: "failed", errors: [err(), err()] }) });
+    expect(failed).toEqual({ state: "failed", text: "Build: failed (2 errors)" });
+    expect(buildMark("rebuild", { ...base, record: build({ action: "rebuild", state: "timed_out" }) }).text)
+      .toBe("Rebuild: timed out");
+    expect(buildMark("build", { ...base, stopped: true, record: build({ state: "failed" }) }).text).toBe("Build: stopped");
+  });
+
+  it("stale after an edit or a clean (advisory), never for Clean itself", () => {
+    expect(buildMark("build", { ...base, record: build(), editedAt: ended + 1 })).toEqual(
+      { state: "stale", text: "Build: succeeded, edited since" });
+    expect(buildMark("build", { ...base, record: build(), editedAt: ended - 1 }).state).toBe("ok");
+    expect(buildMark("rebuild", { ...base, record: build({ action: "rebuild" }), cleanedAt: ended + 5 }).text)
+      .toBe("Rebuild: succeeded, cleaned since");
+    expect(buildMark("clean", { ...base, record: build({ action: "clean" }), editedAt: ended + 1 }).state).toBe("ok");
+  });
+
+  it("unknown when a running record is no longer followed", () => {
+    expect(buildMark("build", { ...base, following: false, record: build({ state: "running" }) }).state).toBe("unknown");
+  });
+
+  it("Download: running, in the slot, older build, stopped, unknown", () => {
+    const d = { busy: false, endedAt: 100, builtAt: 50 };
+    expect(downloadMark({ ...d, downloaded: null }).state).toBe("idle");
+    expect(downloadMark({ ...d, busy: true, downloaded: null }).state).toBe("busy");
+    expect(downloadMark({ ...d, downloaded: { slot: 3, ok: true } })).toEqual({ state: "ok", text: "Download: in slot 3" });
+    expect(downloadMark({ ...d, builtAt: 150, downloaded: { slot: 3, ok: true } }).state).toBe("stale");
+    expect(downloadMark({ ...d, downloaded: { slot: 3, ok: false, stopped: true } }).text).toMatch(/stopped, slot 3 may be incomplete/);
+    expect(downloadMark({ ...d, downloaded: { slot: 3, ok: null } }).state).toBe("unknown");
+  });
+
+  it("never amber: no mark state means held, and each draws a glyph beside its colour", () => {
+    const states = ["idle", "busy", "ok", "failed", "stale", "unknown"] as const;
+    expect(states.map(markGlyph)).toEqual(["", "", "✓", "✗", "✓", "?"]);
+  });
+
+  it("an edit counts only for what a build compiles or obeys (the daemon's SOURCE_SUFFIXES)", () => {
+    for (const p of ["src/main.cpp", "include/pid.hpp", "makefile", "vex/mkrules.mk", "a/B.H"]) expect(isSourcePath(p)).toBe(true);
+    for (const p of ["notes.txt", "README.md", "src/main.cpp~", ".hpp", "sim/field.html"]) expect(isSourcePath(p)).toBe(false);
+  });
+});
+
+describe("output tabs", () => {
+  it("an action selects its tab", () => {
+    expect(outputTabFor("clean")).toBe("build");
+    expect(outputTabFor("rebuild")).toBe("build");
+    expect(outputTabFor("download")).toBe("download");
+    expect(outputTabFor("info")).toBe("device");
+    expect(outputTabFor("programs")).toBe("device");
+    expect(outputTabFor("usb")).toBe("device");
+    expect(outputTabFor("brain")).toBe("brain");
+  });
+
+  it("arrow keys, Home and End move along the tablist", () => {
+    expect(OUTPUT_TABS).toEqual(["build", "download", "brain", "device"]);
+    expect(nextTab(OUTPUT_TABS, "build", "ArrowRight")).toBe("download");
+    expect(nextTab(OUTPUT_TABS, "build", "ArrowLeft")).toBe("device");
+    expect(nextTab(OUTPUT_TABS, "device", "ArrowRight")).toBe("build");
+    expect(nextTab(OUTPUT_TABS, "download", "Home")).toBe("build");
+    expect(nextTab(OUTPUT_TABS, "download", "End")).toBe("device");
+    expect(nextTab(OUTPUT_TABS, "download", "Enter")).toBeNull();
+  });
+
+  it("the Brain tab says it connects only on a click (owner's answer to §0.1 item 5)", () => {
+    expect(helpText("tab-brain", 1)).toMatch(/connects only when you click/);
+    expect(helpText("stop", 1)).toMatch(/never stops the program on the brain/);
   });
 });
 
@@ -177,6 +282,8 @@ describe("builds", () => {
     expect(buildLine(build({ state: "timed_out" })).text).toMatch(/5 minutes/);
     expect(buildLine(build({ action: "clean" })).text).toBe("✓ Cleaned");
     expect(buildLine(null).tone).toBe("none");
+    expect(buildLine(build({ state: "failed", exit_code: 129 }), true).text).toMatch(/^✗ Build stopped/);
+    expect(buildLine(build(), true).text).toMatch(/^✓ Built/);
   });
 
   it("opens only a file inside the project, by a plain relative path", () => {
