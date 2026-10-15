@@ -66,9 +66,10 @@ export function sttSummary(s: SttSettings): string {
     : "Dictation audio never leaves this computer. A local failure shows an error.";
 }
 
-/** The wake word is a different path (Chrome's recognizer, Google's service), so it gets its own sentence. */
-export function wakeNote(s: SttSettings): string {
-  return s.cloudFallback
-    ? "Wake word by voice uses Chrome's speech recognition, which streams the microphone to Google, whatever is chosen above."
-    : "Wake word by voice is off until local wake detection lands; use the talk key.";
+/**
+ * The wake word is a different path from dictation: heard on this computer by a small model (V11), so it is
+ * the same sentence whatever is chosen above. (Until V11 it was Chrome's recognizer, which streamed the room to Google.)
+ */
+export function wakeNote(_s: SttSettings): string {
+  return "Wake word by voice (\"Jarvis\") is heard on this computer by a small model; nothing is sent to Google for it, whatever is chosen above.";
 }

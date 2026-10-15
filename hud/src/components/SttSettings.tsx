@@ -49,7 +49,7 @@ export function SttSettingsPanel({ blocked = false }: { blocked?: boolean }) {
       </label>
       <p className="muted">
         On: HUD dictation audio may be sent to the cloud when Cloud is chosen, or when local speech-to-text fails or is slow.
-        Off: HUD dictation never uploads anything, a local failure shows an error, and wake word by voice is off.
+        Off: HUD dictation never uploads anything, and a local failure shows an error.
       </p>
       {value ? <p data-testid="stt-summary">{sttSummary(value)}</p> : null}
       {value ? <p data-testid="stt-wake-note">{wakeNote(value)}</p> : null}

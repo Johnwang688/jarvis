@@ -549,8 +549,8 @@ export class Capture {
 
   /**
    * A wake phrase was heard. Nothing starts recording here — the mic has been
-   * running all along. The recognizer reports a phrase several hundred ms
-   * after it was said, so the detector usually already has an utterance open:
+   * running all along. The wake word is reported several hundred ms after it
+   * was said (V11's local keyword spotter: ~0.35 s median, 0.64 s at p95), so the detector usually already has an utterance open:
    * claim that one, and back-date its start far enough to cover the lag.
    */
   onWake(): "claimed" | "armed" | "ignored" {

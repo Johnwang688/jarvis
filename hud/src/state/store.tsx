@@ -93,7 +93,6 @@ export interface State {
   schedules: Schedule[];
   route: RouteView | null;
   avatar: AvatarDesc | null;
-  wakePatterns: RegExp[];
   dictation: DictationMode;
   level: number;
   orb: OrbState;
@@ -123,7 +122,7 @@ export const initialState: State = {
   chats: emptyChats(), selectedChat: null, selectedOrder: [], home: defaultWorkspace().order[0], loose: {},
   drafts: {}, composeSeq: 0, taskId: null, taskFocus: false,
   approvals: [], usage: null, discord: null, schedules: [],
-  route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
+  route: null, avatar: null, dictation: DEFAULT_MODE,
   level: 0, orb: "idle", error: "", errorAt: 0, moveError: "", picker: null, archivedNames: [],
 };
 

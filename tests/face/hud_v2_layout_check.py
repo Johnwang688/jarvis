@@ -2776,8 +2776,8 @@ def _crash_checks(page, mock, check, until):
         page.evaluate("localStorage.setItem('jarvis.dictation', 'auto')")
         _reset_all(page, mock, until)
         errors.clear()
-        check("setup: AUTO, and the wake recognizer running",
-              page.evaluate("!!window.__hudRecog")
+        check("setup: AUTO, and the local wake word listening",
+              bool(until(lambda: page.evaluate("window.__hud.mic.wakeRunning()"), timeout=30))
               and page.locator('[data-testid="dictation-auto"]').get_attribute("aria-pressed") == "true")
         _crash(page, until)
         stt0, sends0 = len(mock.sent("POST", "/stt")), _sends(mock)
@@ -2788,7 +2788,7 @@ def _crash_checks(page, mock, check, until):
         check("after a crash, speech in the follow-up window or after a wake hit uploads nothing",
               len(mock.sent("POST", "/stt")) == stt0 and _sends(mock) == sends0,
               f"{len(mock.sent('POST', '/stt')) - stt0} uploads, {_sends(mock) - sends0} sends")
-        check("and the wake recognizer is stopped", page.evaluate("!window.__hudRecog"))
+        check("and the local wake word hears nothing", not page.evaluate("window.__hud.mic.wakeRunning()"))
         page.locator('[data-testid="hud-crashed-reload"]').focus()
         ptt: list[object] = []
         reloaded = _reload_to_window(page, mock, until, lambda: ptt.append(_ptt_on_space(page)))

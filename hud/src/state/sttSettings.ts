@@ -22,10 +22,3 @@ export const sttSettingsStore = {
     catch { /* keep what is known; unknown stays closed */ }
   },
 };
-
-/**
- * Chrome's wake-word recognizer (`webkitSpeechRecognition`) streams the microphone
- * to Google's speech service whatever the daemon's backend is, so it may run only
- * while uploading audio is allowed. Unknown is not allowed.
- */
-export const wakeRecognizerAllowed = (s: SttSettings | null): boolean => s !== null && s.cloudFallback === true;
