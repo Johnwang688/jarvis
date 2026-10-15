@@ -81,9 +81,11 @@ plan disagree, this file wins.**
 
 - **No WebAssembly in the approval page (the owner's decision).** This **overrides plan §2.7's one policy everywhere**
   (and the defaulted item that put `'wasm-unsafe-eval'` in it) for WebAssembly only. The HUD page that draws approval
-  cards, and every other document, JSON and asset response, sends `script-src 'self'`. Only the HUD's own JavaScript
-  under `/assets/` (`hud_api.wasm_script`) adds `'wasm-unsafe-eval'`: a worker runs under its own script's policy, and
-  WebAssembly runs only in the syntax, VAD and wake-word workers. `'unsafe-eval'` stays refused everywhere. Details in
+  cards, and every other document, JSON and asset response, sends `script-src 'self'`. Only a dedicated worker's fetch
+  of the HUD's own JavaScript under `/assets/` (`hud_api.wasm_script` for the file, `Sec-Fetch-Dest: worker` exactly
+  for the request, `hud_api.worker_fetch`) adds `'wasm-unsafe-eval'`: a worker runs under its own script's policy, and
+  WebAssembly runs only in the syntax, VAD and wake-word workers. Not by path alone: a popup of that script is a
+  same-origin document realm the page could drive (lead's review, 2026-10-15), so it gets the page's policy. `'unsafe-eval'` stays refused everywhere. Details in
   `docs/notes/editor.md`, "WebAssembly leaves the approval page".
 - **`jarvis hud rebuild` runs `npm ci --ignore-scripts` (the owner's decision).** Install scripts can be malicious;
   none of the 14 that install here (fsevents, macOS-only, is a 15th) is needed for the HUD build. If a dependency ever genuinely needs one, report which and why;

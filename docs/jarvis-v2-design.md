@@ -2733,9 +2733,10 @@ carries one full Content-Security-Policy (`hud_api.HUD_POLICY` with WP-E's
 script, no `eval`, no `blob:` worker, same-origin `connect-src` (the terminal
 socket included), loopback `frame-src`, and — since ED-5's tree-sitter, below
 — `'wasm-unsafe-eval'`: WebAssembly compiles, a string never becomes
-JavaScript (since 2026-10-15, the owner's decision, only on the HUD's
-`/assets/*.js` responses, the policy its workers run under — never on the
-page that draws approval cards). A response may only narrow it
+JavaScript (since 2026-10-15, the owner's decision, only on a worker's
+fetch of the HUD's `/assets/*.js` — `Sec-Fetch-Dest: worker` — the policy
+its workers run under; never on the page that draws approval cards, nor a
+popup of the script). A response may only narrow it
 (the avatar). The window that gates approvals is no longer served from the
 repo's agent-writable `hud/dist`: `jarvis hud install` — the owner's or the
 lead's, from their own shell; Jarvis is refused it in every spelling —
@@ -3029,7 +3030,7 @@ budget a file stays on Monarch and its editor says so in a corner: over 1 MB
 ("syntax: basic (large file)"), a first parse over 1 s, or reparses cancelled
 twice running. The grammars are code the worker runs, so the HUD's policy
 gained `'wasm-unsafe-eval'` (WebAssembly only; since 2026-10-15 on the
-worker scripts' responses only, never the page's) and the worker's loader fetches
+workers' own script fetches only, never the page's) and the worker's loader fetches
 only the runtime and the grammars built into its map, from the HUD's own
 `/assets/`, refusing any other URL before a request is made. Nothing loads
 until the first file of a covered language opens: first paint grows by 168 bytes,

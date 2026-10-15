@@ -1247,5 +1247,5 @@ esbuild's binary). The lock's integrity hashes and reviewing dependency
 bumps remain the guard for that.
 
 The approval page's CSP changed the same day (no `'wasm-unsafe-eval'` on
-`/`; only worker scripts carry it): see `editor.md`, "WebAssembly leaves the
+`/`; only a worker's fetch of its script carries it): see `editor.md`, "WebAssembly leaves the
 approval page".

@@ -109,7 +109,8 @@ desk window) but nothing may overflow horizontally at 1280 px.
   subset against the real daemon when WP12a has merged; write it, run it
   only if `jarvis daemon2` is already up on 8402, else print SKIPPED.
 
-Run: `cd hud && npm ci && npm run build && npm test`, then
+Run: `cd hud && npm ci --ignore-scripts && npm run build && npm test` (`--ignore-scripts` since 2026-10-15,
+the owner's decision: no install scripts), then
 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /home/johnw/projects/Jarvis/.venv/bin/python tests/face/hud_v2_check.py`.
 Playwright is installed in the venv (v1 uses it).
 

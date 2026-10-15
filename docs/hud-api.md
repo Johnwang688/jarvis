@@ -1844,12 +1844,13 @@ decision C-1 (the decisions file wins).
 script's response), JSON, SSE, errors and the terminal's `101`. No inline
 script, no script from another origin, no `eval`, no `blob:` worker, no
 plugin, no `<base>`, no form posted anywhere, and no WebAssembly in any
-document (2026-10-15, below). **The one widening:** the HUD's own JavaScript
-under `/assets/` (`hud_api.wasm_script`: a `.js` file directly under
-`assets/`) is served with `script-src 'self' 'wasm-unsafe-eval'` and the
-rest of the policy unchanged — a worker's policy is its own script's
-response, so WebAssembly compiles in the HUD's workers and nowhere else;
-JavaScript from a string still does not. `connect-src 'self'`
+document (2026-10-15, below). **The one widening:** a dedicated worker's
+fetch of the HUD's own JavaScript under `/assets/` — the file by
+`hud_api.wasm_script` (a `.js` directly under `assets/`) and the request by
+`hud_api.worker_fetch` (`Sec-Fetch-Dest: worker`, exactly) — is served with
+`script-src 'self' 'wasm-unsafe-eval'` and the rest of the policy unchanged;
+a worker's policy is its own script's response, so WebAssembly compiles in
+the HUD's workers and nowhere else. JavaScript from a string still does not. `connect-src 'self'`
 covers the same-origin `ws://` terminal socket in Chromium (CSP3). A CSP host
 source cannot name an IPv6 literal or a 127/8 address other than 127.0.0.1,
 so the Browser judge refuses `[::1]` and `127.0.0.2` with a sentence naming
@@ -2075,15 +2076,23 @@ from before this change) is trusted as before.
 Editor plan `docs/plans/2026-10-09-hud-editor-plan.md` §2.6. No new route;
 two things change on the wire.
 
-**`'wasm-unsafe-eval'` rides on worker scripts only** (amended 2026-10-15,
-the owner's decision; ED-5 first put it in every response's `script-src`).
-The page — `/`, which draws approval cards — and every other document,
-JSON, SSE, error and `.wasm` response carry `script-src 'self'`: WebAssembly
-never compiles in the window's own document. The HUD's `/assets/*.js`
-responses carry `script-src 'self' 'wasm-unsafe-eval'`, which is the policy
-a dedicated worker runs under (its own script's response, not the page's);
-a module the page imports runs under the page's policy, and a `.js` opened
-as a document runs nothing (`nosniff`). WebAssembly runs only in three
+**`'wasm-unsafe-eval'` rides on a worker's fetch of its script only**
+(amended 2026-10-15, the owner's decision; ED-5 first put it in every
+response's `script-src`). The page — `/`, which draws approval cards — and
+every other document, JSON, SSE, error and `.wasm` response carry
+`script-src 'self'`: WebAssembly never compiles in the window's own
+document. A HUD `/assets/*.js` response carries `script-src 'self'
+'wasm-unsafe-eval'` only when the request's one `Sec-Fetch-Dest` is exactly
+`worker` — the policy that dedicated worker runs under (its own script's
+response, not the page's) — and every such response sends `Vary:
+Sec-Fetch-Dest`. **Not by path alone:** a `.js` opened in a popup runs no
+script of its own (`nosniff`), but it is a same-origin Window whose realm
+carries its response's policy, and the opener can call its `WebAssembly`
+(review of 2026-10-15); that fetch is `document`, so it gets the page's
+policy. `script` (the page's imports), `audioworklet`, `sharedworker`,
+`serviceworker` and a missing header get it too: fail closed, and visibly
+(highlighting, the VAD and the wake word stop) should a browser omit the
+header, which Chrome sends since 80. WebAssembly runs only in three
 workers: the syntax worker (tree-sitter's runtime and grammars), the VAD
 worker (onnxruntime-web and RNNoise) and the wake-word worker
 (onnxruntime-web). Nothing else is widened: `eval`, `new Function` and a

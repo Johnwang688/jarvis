@@ -32,6 +32,9 @@ Approvals (card + queue), Usage, Schedules, Route, and the three pickers.
 | tabs, files, diff, preview, usage, schedules, route | — | new |
 
 ## Tests
+(Historical run, as recorded. Since 2026-10-15 the HUD installs with `npm ci --ignore-scripts`: the owner's
+decision, no install scripts.)
+
 ```
 cd hud && npm ci && npm run build && npm test
    Test Files  7 passed (7) · Tests  68 passed (68)

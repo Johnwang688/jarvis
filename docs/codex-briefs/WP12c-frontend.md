@@ -52,8 +52,8 @@ dialog's presets produce the expected cron and the preview text and times
 render from the mock; Escape/Enter behave. All previous checks still pass.
 
 Rules: stay inside `hud/`, `tests/face/hud_v2*.py`,
-`docs/codex-briefs/WP12c-frontend-notes.md`. Run `cd hud && npm ci && npm
-run build && npm test` then
+`docs/codex-briefs/WP12c-frontend-notes.md`. Run `cd hud && npm ci --ignore-scripts && npm
+run build && npm test` (`--ignore-scripts` since 2026-10-15, the owner's decision) then
 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. /home/johnw/projects/Jarvis/.venv/bin/python tests/face/hud_v2_check.py`.
 Commit with a message starting `v2 WP12c frontend:` ending with
 `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. Do not push or
