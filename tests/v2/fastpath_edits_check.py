@@ -568,6 +568,17 @@ class Gate(Base):
         self.assertIn("OPENROUTER_API_KEY=", script.results[-1])
         self.assertNotIn(key, script.results[-1])
         self.assertIn("PATH=", script.results[-1], "ordinary settings are not withheld")
+        # PWD's name reads as "password"; its value, the working folder, is a
+        # path and must never be withheld from output.
+        from jarvis.tools import secrets
+        os.environ["PWD"] = str(self.project)
+        os.environ["SOME_PASSWORD_DIR"] = "/srv/data/plain/path"
+        self.addCleanup(os.environ.pop, "SOME_PASSWORD_DIR", None)
+        withheld = secrets._process_env_values()
+        self.assertNotIn(str(self.project), withheld)
+        self.assertNotIn("/srv/data/plain/path", withheld)
+        self.assertIn(key, withheld)
+        self.assertEqual(secrets.scrub(f"cwd {self.project}"), f"cwd {self.project}")
 
     def test_a_rules_allow_command_runs_unasked_in_the_project_folder(self):
         asker = Asker()

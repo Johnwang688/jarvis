@@ -1106,7 +1106,8 @@ def env_files_in(directory: Path) -> tuple[Path, ...]:
 
 
 def _process_env_values() -> tuple[str, ...]:
-    """Credential values in this process's own environment, by name.
+    """Credential values in this process's own environment, by name, for
+    `scrub` (never `secret_values`).
 
     `run_readonly("env")` (or `cat /proc/self/environ`) prints the process
     environment, and in the daemon that holds the provider keys it was
@@ -1118,9 +1119,18 @@ def _process_env_values() -> tuple[str, ...]:
     unnamed values would catch."""
     found = []
     for key, value in os.environ.items():
+        # `PWD`/`OLDPWD` read as "password" to the name rule, and their value
+        # is the working folder — withholding it blanked every path in every
+        # tool's output. A plain value (a path, a number, a host) is a
+        # setting under any name.
+        if key in _SHELL_STATE or _plain(value):
+            continue
         if len(value) >= 8 and _secret_named(_key_parts(key)) and _secret_entry(key, value):
             found.append(value)
     return tuple(found)
+
+
+_SHELL_STATE = frozenset({"PWD", "OLDPWD"})
 
 
 def secret_values() -> list[str]:
@@ -1133,7 +1143,6 @@ def secret_values() -> list[str]:
     for directory in _search_dirs():
         for path in env_files_in(directory):
             values.update(_values_in(path))
-    values.update(_process_env_values())
     values.update(_json_values(config.GOOGLE_TOKEN_PATH))
     values.update(_json_values(config.ONSHAPE_TOKEN_PATH))
     values.update(_json_values(config.DISCORD_TOKEN_PATH))
@@ -1206,7 +1215,10 @@ def scrub(text: str) -> str:
     if not text:
         return text
     out = _drop_attributed_lines(text)
-    for value in secret_values():
+    # The process's own credential-named environment values too, here only:
+    # a tool's output is what `env` reaches. `secret_values()` — the
+    # Browser's, gitops' and the action reviewer's list — stays the files'.
+    for value in sorted(set(secret_values()) | set(_process_env_values()), key=len, reverse=True):
         if value in out:
             out = out.replace(value, REDACTED)
     return out

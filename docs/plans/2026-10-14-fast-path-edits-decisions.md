@@ -53,3 +53,15 @@ Lead's defaults (not asked; open to amendment):
   `delegate`), the `git*` tools, `task_start` and the v1 task/workflow verbs,
   `load_tools`, `skill_write`, `memory_delete`, and the `browser_`/`desktop_`/
   `cad_`/`gmail_`/`discord_` prefixes.
+
+Owner's answer after review (2026-10-14):
+
+- **F-8. One Always covers every write, outside the project folder included.**
+  The review (L2) pointed out that an Always on an edit card adds a
+  whole-tool allowlist entry, so later desk-turn writes go through without a
+  card. That includes files outside the project, such as `~/.bashrc`, the
+  daemon's systemd unit and `~/.local/bin/jarvis`, as long as nothing refuses
+  them outright. The owner chose to keep that: "edits outside the project
+  folder should be allowed always after one 'Always' reply". It is the same as
+  an Always on Claude's Write. Protected state, credential, `.git` and
+  SELF_PROTECTED refusals still hold, since they come before the allowlist.
