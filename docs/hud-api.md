@@ -1755,18 +1755,27 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
 - Download: `POST …/vex/download {slot, name}` **only from the Download
   button, on a trusted pointer click whose `detail` is exactly 1** (a double
   click is one download). **One chain per window**: no second download, for
-  any project, while one runs. A 409 with `code: "build_first"` starts a
-  build and, when it succeeds and no approval card has come up since the
-  click (nor while the 409 was on its way), sends the download again; if that
-  is `build_first` again (make found nothing to do, a header it does not list
-  changed), one `rebuild` and the download again; a third `build_first`
-  stops the chain with the daemon's sentence. While the brain terminal holds
-  the port it is closed first (`DELETE /terminals/{id}`) and opened again
-  afterwards (`POST /vex/brain`) — never after a chain a card, a crash or the
-  owner's Cancel dropped, nor after a card that came and went while the
-  download ran. **Cancel** (until the download is sent) closes the
-  build's program terminal (`DELETE /terminals/{id}`, which ends the build)
-  and sends nothing. The returned `download_id` is polled every 0.6 seconds;
+  any project, while one runs. Since the 2026-10-15 redesign (owner decision
+  3) **one click is `clean`, then `build`, then the download**: a failed clean
+  or build stops the chain before anything is sent, and an approval card that
+  comes up at any step (or comes and goes) drops the rest. A 409 with `code:
+  "build_first"` after that build (a source edited while it ran, or a header
+  the makefile does not list) runs one `rebuild` and sends again; a second
+  `build_first` stops the chain with the daemon's sentence. Only once the
+  build has succeeded, while the brain terminal holds the port, it is closed
+  (`DELETE /terminals/{id}`) and opened again afterwards (`POST /vex/brain`)
+  — never after a chain a card, a crash or the owner's Stop dropped, nor after
+  a card that came and went while the download ran. **Stop** (owner decision
+  6; a trusted pointer or key press, never a script's click; a view's Stop
+  acts on its own project only, and Clean/Build/Rebuild are off while any
+  chain runs) closes the running clean's, build's **or download's** program terminal (`DELETE
+  /terminals/{id}`; one pressed while the download request is on its way
+  closes vexcom as soon as its terminal is known). The daemon's exit hook
+  settles the record (`failed`, exit 129 after the close's SIGHUP); the view
+  then says "Download stopped: slot N may hold an incomplete program, the
+  previous one, or nothing" — unless the record shows the download finished
+  first. Stop sends nothing to the brain (there is no `vexcom --stop` route).
+  The returned `download_id` is polled every 0.6 seconds;
   Download immediately shows elapsed progress, its program terminal and a
   bounded inline output tail, then retains the actual final outcome/output.
   Failed reads retry visibly for at most four minutes. Check status can recover

@@ -175,7 +175,11 @@ const BUFFER_POLL_MS = 2000;
 // the save path stays reachable.
 buffers.configure({
   read: (projectId, path) => api.readFile(projectId, path),
-  write: (projectId, body, signal) => api.writeFile(projectId, body, signal),
+  // A saved source file makes the VEX view's last build "edited since" (advisory, VX-UI-2).
+  write: (projectId, body, signal) => api.writeFile(projectId, body, signal).then((r) => {
+    vex.edited(projectId, body.path);
+    return r;
+  }),
   stat: (projectId, paths) => api.statFiles(projectId, paths),
   makeModel: (text, abs, kind) => makeModel(text, abs, kind).catch(() => new PlainModel(text)),
   now: () => Date.now(),
@@ -3953,7 +3957,7 @@ export default function App() {
             // Off while a download's chain runs (review M1): the chain never
             // goes on to a robot this pane no longer shows.
             disabled={blocked || !!vex.chain}
-            title={vex.chain ? "A download is running: wait for it, or Cancel it, first"
+            title={vex.chain ? "A download is running: wait for it, or Stop it, first"
               : "The VEX project this pane builds and downloads"}
             onChange={(e) => e.target.value && view.pin(n, e.target.value)}
           >
