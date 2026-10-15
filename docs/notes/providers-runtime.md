@@ -349,3 +349,28 @@ design §2 D2 and §8.1 carry the amendment. Code: `jarvis/v2/providers/fastpath
 Free suites: `tests/v2/fastpath_edits_check.py` (see the PR for the
 mutation evidence),
 `tests/v2/fastpath_check.py`, `tests/prompt_tools_check.py`.
+
+## Native sub-agent protocol, recorded (SV-0, 2026-10-15)
+
+Offline recordings of Claude Code 2.1.295 and Codex 0.161.0 sub-agents
+(scripted local model, rootless netns, temporary config, $0) are in
+`tests/v2/fixtures/subagents/`, pinned by `tests/v2/subagent_fixtures_check.py`;
+the verdicts are in `docs/plans/2026-10-15-sv0-findings.md`. The facts most
+likely to bite:
+
+- **Claude agents run in the background by default** (`run_in_background`
+  omitted), and a finished background agent makes the CLI start a whole
+  orchestrator turn on its own (`result.origin.kind == "task-notification"`)
+  between Jarvis's sends. Unread, such a turn's stream events overrun the
+  SDK's 100-message buffer and stall other background agents' hooks — the
+  2026-10-12 stall, reproduced in `background_flood`.
+- **Claude never streams sub-agent deltas**; tagged whole messages only, and
+  depth-2 (nested) agents' messages not at all. `stop_task` stops one agent
+  and the turn continues; `client.interrupt()` also kills background agents.
+- **Codex delivers every child notification** on the parent's connection
+  under the child's `threadId`; a child is announced by a `subAgentActivity`
+  item (not `collabAgentToolCall`, not `thread/started`). A child's approval
+  request arrives with the child's `threadId`, which `codex.py`'s non-MCP
+  server-request branch treats as a fatal identity mismatch today. Child
+  `turn/interrupt` ends only that child's turn and does not kill its running
+  command; parent token totals exclude children.
