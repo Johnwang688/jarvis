@@ -2256,11 +2256,18 @@ Plan decision V-1, §3.3 phase 1, the owner's answer to Q1. Stacked on V5 (`clau
   removing the `selfInRec` test fails 3 of its tests. The `CommandRouter` runs first and takes only whole "Jarvis ..."
   utterances; the word steps run on what is left, and a cancelled message tells the barge-in it was dropped
   (`bargeEnd("dropped")`) while a word-sent one reports `sent`.
-- **Counts** (after merging main at 01c2422). vitest 2837 tests / 168 files, `tsc` and `vite build` clean. Browser checks
-  on the merged build: `hud_v2_words_check` 84, `chunks` 65, `stt` 28, `steer` 46, `vad` 96, `barge` 115, `speech` 56, all
-  pass (`multichat` passed at 343 on the build before the V5 and main merges and was not rerun). The `vad` suite's
-  "2.4 s pause continues" checks are load-sensitive (they failed at load 10-25 before, passed at load 4-7). The full
-  `hud_v2_check` was not run.
+- **Counts** (after merging main at 52bd073, with V9 and V14). vitest 2898 tests / 170 files, `tsc` and `vite build`
+  clean. Browser checks on the merged build: `hud_v2_words_check` 84, `chunks` 65, `stt` 28, `steer` 46, `vad` 96,
+  `barge` 115, `speech` 56, `denoise` 72, `multichat` 343, all pass. The `vad` suite's "2.4 s pause continues" checks are
+  load-sensitive (they failed at load 10-25 earlier, passed at load 4-7). "over" over an empty box ends the barge-in as
+  `dropped` (`sendWordOutcome`, unit-tested; the one call in `sendByWord` is not browser-tested), so he resumes.
+- **A sweep failure that was not reproduced.** The lead's full `hud_v2_check` sweep of cd7c000 failed 2 of 3252 checks in
+  its dictation section ("REVIEW transcribes the utterance", "REVIEW puts the transcript in the box": no `/stt` upload
+  within `until`'s timeout after `openFollowUp()` and 1.6 s of scripted speech). That check fails before any V10 code
+  runs: the upload is made by `Capture`/`onChunk`, and V10 only reads `tailMs` and the transcript after the reply, so a
+  word step cannot swallow it; `selfInRec` only zeroes `tailMs`. The section (the same main-world sequence, window through
+  dictation, 114 checks) was run four times on this branch, twice on each of two builds, and passed every time. Verdict: a
+  load flake of the sweep, not reproduced and not V10's as far as can be shown. The full `hud_v2_check` was not rerun.
 - **Mutations that fail on purpose** (source restored afterwards): dropping the quiet test (6 vitest tests);
   ignoring the card in `planWords` (1 vitest test); the App passing `card: false` (2 browser checks); the ledger matching inside words (4 vitest tests); `UndoHold.take` without its expiry guard (1); the typing guard disabled (5 browser checks).
 - **Not done / not claimed.** A real person's voice, a physical microphone, and how Parakeet transcribes a spoken "over"
