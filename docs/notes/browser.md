@@ -1566,3 +1566,46 @@ The HUD divides pixel and line wheel deltas by the frame's placement scale
 screen as before; a page-mode notch is already the fitted view's height.
 Receipts: `tests/v2/browser_fit_check.py` (real Chrome), `remote.test.ts`
 and `hud_v2_remote_check` ("Fit:").
+
+## Sharp frames and a pointer that keeps up (2026-10-14)
+
+The owner reported soft Remote pages ("like 720p") and lag in pointer moves
+and clicks. Both measured on Chrome 155 headless, raw CDP, before any change:
+
+- **The screencast ignores the emulated scale.** `setDeviceMetricsOverride`
+  at 1.5 or 2 changes the page's devicePixelRatio and `captureScreenshot`
+  (1440 × 900 for a 960 × 600 view at 1.5), but every screencast frame was
+  960 × 600: Chrome draws frames at its own device scale. The owner's
+  display is 4K at 150% (AppliedDPI 144), so the HUD stretched 1× frames by
+  1.5. Chrome now launches with `--force-device-scale-factor=RASTER_SCALE`
+  (2), and `_sync_screencast`'s maxWidth/maxHeight (the pane's device
+  pixels, unchanged) scales each frame down to the pane: a 1.5× pane gets
+  1.5× pixels. Layout, input coordinates, `captureScreenshot` (looks,
+  captures) and the fitted width are unchanged: measured, a click at CSS
+  (600, 400) lands at clientX/Y (600, 400) under every scale. The cost, on a
+  full page of text at 1200 × 800 CSS: press → changed frame p50/p95 17/18 ms
+  at 1× against 42/51 ms at 2× sent at 1.5×, 338 against 606 KB a frame,
+  nearly all of it JPEG encoding of 2.25× the pixels; Chrome's summed RSS
+  after scrolling that page at 1600 × 1000 rose from 1529 to 1656 MB. Quality stays 70 (85
+  cost another 6 ms and 40% bytes). `browser_routes_check` test 04 asserts a
+  640 × 400 pane at 1.5 receives 960 × 600 JPEG pixels.
+- **Pointer moves arrived faster than they could go out.** Chrome answers
+  `Input.dispatchMouseEvent` for a move, a drag or a wheel only at its next
+  frame (p50 16.7 ms; a key 0.5 ms), and the pump sends one event at a time
+  and waits for each answer, so at most 61 moves a second went out. The
+  owner's display refreshes at 160 Hz and the HUD sends every `mousemove`,
+  so moves queued (up to INPUT_QUEUE_MAX) and every click and key waited
+  behind them. `TabStream.enqueue` now merges a still-queued move into the
+  next move with the same button, buttons and modifiers, and a still-queued
+  wheel into the next wheel at the same point (deltas summed, within
+  WHEEL_MAX); `merged` counts them. Only an untaken event of the same
+  attachment is merged, so a page that keeps up sees every event, a press,
+  release, key or text is never merged or crossed, and the hold's
+  `_drop_through` still drops a merged event. `browser_input_merge_check`
+  covers each rule; five mutants (no type, buttons, point, attachment or
+  bound check) each fail it.
+
+The Direct tab no longer shows "the Browser only loads local servers" while
+the owner's typed external address opens in Remote: `DirectTab.ownerGo`
+marks the address `opening` until the submit settles, shows "Opening…"
+instead, and a failed submit shows its own error as before.
