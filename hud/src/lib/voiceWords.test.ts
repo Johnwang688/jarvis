@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CANCELLED_STATUS, DEFAULT_WORDS, DictationLedger, MAX_WORDS, MAX_WORD_LENGTH, SEND_WORD_SILENCE_MS, UNDO_MS, UndoHold,
-  TYPING_GUARD_MS, inertUnderCard, loadWords, normalizeList, normalizeWords, parseWord, planWords, readWord, refusal, saveWords, typedRecently, wordMaySend, type Words,
+  TYPING_GUARD_MS, inertUnderCard, loadWords, sendWordOutcome, normalizeList, normalizeWords, parseWord, planWords, readWord, refusal, saveWords, typedRecently, wordMaySend, type Words,
 } from "./voiceWords";
 import type { SttCapture, SttLanding } from "./stt";
 
@@ -237,6 +237,15 @@ describe("planWords", () => {
     const batch = [item("send it over")];
     planWords(batch, ctx);
     expect(batch[0].text).toBe("send it over");
+  });
+});
+
+describe("sendWordOutcome: what 'over' tells the barge-in", () => {
+  it("something went out: sent; nothing to send: dropped, so he resumes", () => {
+    expect(sendWordOutcome("do the thing", 0)).toBe("sent");
+    expect(sendWordOutcome("", 2)).toBe("sent");              // staged files alone are a message
+    expect(sendWordOutcome("", 0)).toBe("dropped");
+    expect(sendWordOutcome("   ", 0)).toBe("dropped");
   });
 });
 

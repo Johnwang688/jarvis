@@ -177,6 +177,15 @@ export function planWords<T extends WordItem>(batch: readonly T[], ctx: { words:
 }
 
 /**
+ * What a send word tells the barge-in (V9) it did: "sent" if something went out, "dropped" if
+ * there was nothing to send ("over" over an empty box), so he resumes what he was saying
+ * instead of skipping it for a message that does not exist.
+ */
+export function sendWordOutcome(body: string, fileCount: number): "sent" | "dropped" {
+  return body.trim() || fileCount > 0 ? "sent" : "dropped";
+}
+
+/**
  * A card that rose after the plan was made (an earlier step awaited a send) makes
  * the step inert: send and cancel steps become plain runs of the words as they
  * were said (`originals`, by id), so nothing is stripped, sent as a command or

@@ -99,8 +99,10 @@ import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReas
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
 import { VoiceWordsSetting } from "./components/VoiceWords";
-import { CANCELLED_STATUS, DictationLedger, UndoHold, inertUnderCard, loadWords, normalizeWords, planWords, saveWords, typedRecently, wordMaySend, type Words } from "./lib/voiceWords";
-import { VadStage } from "./lib/listen/stage";
+import { CANCELLED_STATUS, DictationLedger, UndoHold, inertUnderCard, loadWords, sendWordOutcome, normalizeWords, planWords, saveWords, typedRecently, wordMaySend, type Words } from "./lib/voiceWords";
+import { NoiseSuppressionSetting } from "./components/NoiseSuppression";
+import { loadNoiseSuppression, saveNoiseSuppression } from "./lib/listen/pref";
+import { VadStage, type StageOptions } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
@@ -1053,12 +1055,13 @@ export default function App() {
         if (reviewBox && typedRecently(typedAt.current[n] ?? 0, Date.now())) { stillTyping = true; return false; }
         done("send_word", [step.word]);
         done("handed_to_chat", step.items);
-        bargeEnd("sent", step.items);
         const spoken = step.items.map((i) => i.text).filter(Boolean);
         // REVIEW: the box is the message. AUTO sends only what was said, as always.
         const boxed = landing.mode === "review" || step.items.some((i) => i.meta.mode === "review");
         const body = (boxed ? [c.input.trim(), c.pendingTranscript.trim(), ...spoken] : spoken).filter(Boolean).join(" ");
         const files = boxed ? c.files : [];
+        // Nothing to send ("over" over an empty box) is not a message: the barge-in ends as dropped.
+        bargeEnd(sendWordOutcome(body, files.length), step.items);
         if (!body && !files.length) {
           if (!c.busy) chatPatch(n, { orb: "idle", status: "NOTHING TO SEND" });
           return true;
@@ -3108,9 +3111,16 @@ export default function App() {
     // An automatic restart of the worker waits for a quiet moment: nothing being
     // said or recorded, and Settings (where the owner reads the detector) closed.
     canRetry: () => !capture.vad.open && !capture.recording() && !settingsNow.current,
-    onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
+    // V14: off unless the owner switched it on (this window's setting); nothing loads until then.
+    noiseSuppression: loadNoiseSuppression(),
+    onStatus: (s) => {
+      voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs);
+      voiceDiagnostics.noise(s.noise.wanted, s.noise.state, s.noise.note, s.noise.frameMs);
+    },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [capture, voiceDiagnostics, speech]);
+  const [noiseOn, setNoiseOn] = useState(() => loadNoiseSuppression());
+  useEffect(() => { vadStage.setNoiseSuppression(noiseOn); }, [vadStage, noiseOn]);
   // Back in the foreground (or woken from sleep): the detector's timing history is stale, not failed.
   useEffect(() => {
     const visible = () => { if (document.visibilityState === "visible") vadStage.rearm(); };
@@ -3259,6 +3269,12 @@ export default function App() {
         // The ML VAD stage (V5): what it is, and (for tests) a way to start it again.
         detector: () => vadStage.status(),
         retryDetector: () => vadStage.retry(),
+        // V14: noise suppression's state (wanted, off|waiting|loading|ready|failed, code, ms per frame), and a retry.
+        noise: () => vadStage.status().noise,
+        retryNoise: () => vadStage.retryNoise(),
+        // For checks only: a second, separate stage (its own worker) the caller feeds by hand and reads the
+        // probabilities of, so a fixture can be scored with noise suppression off and on without a microphone.
+        makeStage: (o: StageOptions) => new VadStage(o),
         endPause: () => capture.endPauseMs,
         state: () => ({
           open: capture.vad.open,
@@ -4379,7 +4395,7 @@ export default function App() {
               <DuckBrowserSetting on={duckBrowser}
                 onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} />
                 <SpeakerSettings store={speaker} blocked={blocked}
-                  listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><SelfVoiceSetting gate={speech.selfVoice} onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceWordsSetting words={words} onChange={(next) => { saveWords(next); setWords(normalizeWords(next)); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
+                  listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><SelfVoiceSetting gate={speech.selfVoice} onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceWordsSetting words={words} onChange={(next) => { saveWords(next); setWords(normalizeWords(next)); }} /><NoiseSuppressionSetting on={noiseOn} diagnostics={voiceDiagnostics} onChange={(on) => { saveNoiseSuppression(on); setNoiseOn(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} onRetryNoise={() => vadStage.retryNoise()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

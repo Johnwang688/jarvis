@@ -19,7 +19,7 @@ class FakeWorker implements WorkerLike {
 
 const frame = (v: number) => new Float32Array(512).fill(v);
 
-function rig(opts: { active?: () => boolean; canRetry?: () => boolean; denoise?: (f: Float32Array) => Float32Array; throwOnCreate?: boolean } = {}) {
+function rig(opts: { active?: () => boolean; canRetry?: () => boolean; denoise?: (f: Float32Array) => Float32Array; throwOnCreate?: boolean; noise?: boolean } = {}) {
   let clock = 1000;
   const out: { v: number; p: number | null }[] = [];
   const statuses: DetectorStatus[] = [];
@@ -34,6 +34,7 @@ function rig(opts: { active?: () => boolean; canRetry?: () => boolean; denoise?:
     active: opts.active,
     canRetry: opts.canRetry,
     denoise: opts.denoise,
+    noiseSuppression: opts.noise,
     onStatus: (s) => statuses.push(s),
   });
   return { stage, out, statuses, workers, w: () => workers[workers.length - 1], tick: (ms: number) => (clock += ms) };
@@ -549,5 +550,153 @@ describe("stop", () => {
     expect(r.stage.status().state).toBe("idle");
     r.w().say({ type: "prob", seq: 1, p: 0.9, ms: 1 }); // a late verdict from a dead worker
     expect(r.out).toEqual([]);
+  });
+});
+
+const denoiseMsgs = (w: FakeWorker) => w.posted.filter((m) => m.type === "denoise");
+
+describe("noise suppression (V14): off by default, and nothing loads", () => {
+  it("is off, and the worker is never told about it, unless the switch is on", () => {
+    const r = rig();
+    ready(r);
+    r.stage.push(frame(1));
+    expect(r.stage.status().noise).toMatchObject({ wanted: false, state: "off", code: null, frameMs: 0, loadMs: 0 });
+    expect(denoiseMsgs(r.w())).toEqual([]);
+    expect(r.w().posted.map((m) => m.type)).toEqual(["init", "frame"]);
+  });
+
+  it("switching on after the worker is up tells it, and the state follows the worker's reports", () => {
+    const r = rig();
+    ready(r);
+    r.stage.setNoiseSuppression(true);
+    expect(denoiseMsgs(r.w())).toEqual([{ type: "denoise", on: true }]);
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "loading" });
+    r.w().say({ type: "denoise", state: "ready", loadMs: 120 });
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "ready", loadMs: 120, code: null });
+    r.stage.push(frame(1));
+    r.w().say({ type: "prob", seq: 1, p: 0.3, ms: 0.5, dms: 0.4 });
+    expect(r.stage.status().noise.frameMs).toBeCloseTo(0.4, 5);
+    expect(r.stage.status().frameMs).toBeCloseTo(0.5, 5); // the VAD's own time stays apart
+  });
+
+  it("switching off tells the worker and says off at once", () => {
+    const r = rig({ noise: true });
+    ready(r);
+    r.w().say({ type: "denoise", state: "ready", loadMs: 100 });
+    r.stage.setNoiseSuppression(false);
+    expect(denoiseMsgs(r.w()).at(-1)).toEqual({ type: "denoise", on: false });
+    expect(r.stage.status().noise).toMatchObject({ wanted: false, state: "off" });
+    r.w().say({ type: "denoise", state: "ready", loadMs: 100 }); // a report from before the switch went off
+    expect(r.stage.status().noise.state).toBe("off");
+  });
+
+  it("switched on before the worker exists: it reads closed (the mic is not open), then asks as soon as the worker starts", () => {
+    const r = rig();
+    r.stage.setNoiseSuppression(true);
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed" });
+    r.stage.start();
+    expect(r.w().posted.map((m) => m.type)).toEqual(["init", "denoise"]);
+    expect(r.stage.status().noise.state).toBe("loading");
+  });
+
+  it("an initial switch position of on behaves the same", () => {
+    const r = rig({ noise: true });
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed" });
+    r.stage.start();
+    expect(denoiseMsgs(r.w())).toEqual([{ type: "denoise", on: true }]);
+  });
+});
+
+describe("noise suppression falls back to raw, visibly, and the VAD keeps working", () => {
+  it.each([["fetch"], ["hash"], ["runtime"], ["slow"]] as const)("a '%s' failure is named, Silero stays the detector, frames still flow", (code) => {
+    const r = rig({ noise: true });
+    ready(r);
+    r.w().say({ type: "denoise", state: "failed", code });
+    const st = r.stage.status();
+    expect(st.noise).toMatchObject({ wanted: true, state: "failed", code });
+    expect(st.noise.note).toMatch(/noise-suppression|noise suppression/);
+    expect(st.detector).toBe("silero");
+    r.stage.push(frame(5));
+    r.w().say({ type: "prob", seq: 1, p: 0.8, ms: 1, dms: 0 });
+    expect(r.out).toEqual([{ v: 5, p: 0.8 }]);
+    expect(st.noise.note).not.toMatch(/http|\.wasm|rnnoise_/);
+  });
+
+  it("an unknown failure code shows as a runtime failure", () => {
+    const r = rig({ noise: true });
+    ready(r);
+    r.w().say({ type: "denoise", state: "failed", code: "weird" as never });
+    expect(r.stage.status().noise.code).toBe("runtime");
+  });
+
+  it("retryNoise asks the worker again; the switch off and on does too", () => {
+    const r = rig({ noise: true });
+    ready(r);
+    r.w().say({ type: "denoise", state: "failed", code: "fetch" });
+    r.stage.retryNoise();
+    expect(denoiseMsgs(r.w()).length).toBe(2);
+    expect(r.stage.status().noise.state).toBe("loading");
+    r.w().say({ type: "denoise", state: "failed", code: "fetch" });
+    r.stage.setNoiseSuppression(false);
+    r.stage.setNoiseSuppression(true);
+    expect(denoiseMsgs(r.w()).map((m) => (m as { on: boolean }).on)).toEqual([true, true, false, true]);
+  });
+
+  it("when Silero itself fails, noise suppression is waiting, not running; a retry starts both", () => {
+    const r = rig({ noise: true });
+    ready(r);
+    r.w().say({ type: "denoise", state: "ready", loadMs: 50 });
+    r.w().say({ type: "failed", code: "runtime" });
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "waiting" });
+    r.stage.retry();
+    expect(denoiseMsgs(r.w()).at(-1)).toEqual({ type: "denoise", on: true });
+    expect(r.stage.status().noise.state).toBe("loading");
+  });
+
+  it("whatever it does, the capture gets the raw frame (recorded audio is not denoised)", () => {
+    const r = rig({ noise: true });
+    ready(r);
+    r.w().say({ type: "denoise", state: "ready", loadMs: 50 });
+    const mine = frame(0.25);
+    const copy = mine.slice();
+    r.stage.push(mine);
+    const sent = r.w().frames()[0].samples;
+    sent.fill(0); // the worker rewrites what it was given
+    r.w().say({ type: "prob", seq: 1, p: 0.6, ms: 1, dms: 0.3 });
+    expect(r.out).toHaveLength(1);
+    expect(r.out[0].v).toBe(0.25);
+    expect(Array.from(mine)).toEqual(Array.from(copy));
+  });
+
+  it("a stopped stage (mic closed) forgets the noise stage but keeps the switch, and says the mic is closed", () => {
+    const r = rig({ noise: true });
+    ready(r);
+    r.w().say({ type: "denoise", state: "ready", loadMs: 50 });
+    r.stage.stop();
+    expect(r.stage.status().noise).toMatchObject({ wanted: true, state: "closed", note: "the microphone is closed" });
+  });
+});
+
+describe("what the self-voice gate and the capture are handed (V9 x V14)", () => {
+  it("is the very frame the microphone pushed, bit for bit, with noise suppression ready: the gate compares raw mic frames, as before V14", () => {
+    const got: Float32Array[] = [];
+    const workers: FakeWorker[] = [];
+    const stage = new VadStage({
+      deliver: (f) => got.push(f),
+      createWorker: () => { const w = new FakeWorker(); workers.push(w); return w; },
+      noiseSuppression: true,
+    });
+    stage.start();
+    const w = workers[0];
+    w.say({ type: "ready", loadMs: 1 });
+    w.say({ type: "denoise", state: "ready", loadMs: 1 });
+    const mine = Float32Array.from({ length: 512 }, (_, i) => Math.sin(i / 5) * 0.3);
+    const copy = Array.from(mine);
+    stage.push(mine);
+    w.frames()[0].samples.fill(0); // the worker's denoised result lands in ITS copy
+    w.say({ type: "prob", seq: 1, p: 0.7, ms: 1, dms: 0.4 });
+    expect(got).toHaveLength(1);
+    expect(got[0]).toBe(mine);
+    expect(Array.from(got[0])).toEqual(copy);
   });
 });

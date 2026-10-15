@@ -9,6 +9,8 @@ export type CapturePathName = "unknown" | "worklet" | "script_processor";
 /** V5: which detector judged the frames: Silero (ML, in a worker) or the energy fallback. */
 export type DetectorKind = "energy" | "silero";
 export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
+/** V14: the noise-suppression switch and the state of the RNNoise stage behind it. */
+export type NoisePhase = "off" | "closed" | "waiting" | "loading" | "ready" | "failed";
 /** One switch of the speech detector (V5), kept in memory with the rows: when, to what, and why. */
 export interface DetectorChange { at: number; detector: DetectorKind; phase: DetectorPhase; note: string }
 /** What the daemon did about whose voice a clip was (V12): the score itself is never kept here. */
@@ -45,6 +47,8 @@ export class VoiceDiagnostics {
   private rows: readonly VoiceDiagnostic[] = [];
   private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "",
     detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0,
+    noiseWanted: false, noiseState: "off" as NoisePhase, noiseNote: "off", noiseMs: 0,
+
     detectorLog: [] as readonly DetectorChange[] };
   constructor(private now: () => number = () => performance.now()) {}
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
@@ -70,6 +74,17 @@ export class VoiceDiagnostics {
     if (before.detector !== detector || before.detectorPhase !== ph || before.detectorNote !== text)
       log = [...log, { at: bounded(this.now(), Number.MAX_SAFE_INTEGER), detector, phase: ph, note: text }].slice(-20);
     this.value = { ...before, detector, detectorPhase: ph, detectorNote: text, detectorMs: bounded(frameMs * 100, 1_000_000) / 100, detectorLog: log };
+    this.publish();
+  }
+  /** The Noise suppression switch and its stage (V14). A sentence from a closed set, never engine text. */
+  noise(wanted: boolean, phase: NoisePhase, note = "", frameMs = 0) {
+    this.value = {
+      ...this.value,
+      noiseWanted: !!wanted,
+      noiseState: ["off", "closed", "waiting", "loading", "ready", "failed"].includes(phase) ? phase : "off",
+      noiseNote: String(note).slice(0, 200),
+      noiseMs: bounded(frameMs * 100, 1_000_000) / 100,
+    };
     this.publish();
   }
   /** `detector`: the one that judged the utterance (Capture knows; default: the one live now). */
