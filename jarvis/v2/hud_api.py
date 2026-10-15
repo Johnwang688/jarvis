@@ -1043,21 +1043,32 @@ _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 #     503 pages, JSON, errors (the owner's decision of 2026-10-15, which
 #     overrides plan §2.7's one-policy-everywhere for WebAssembly): no
 #     WebAssembly compiles in the window that gates approvals.
-#   - `script-src 'self' 'wasm-unsafe-eval'` on the HUD's own JavaScript
-#     files under `/assets/` only (`wasm_script`, `binary(wasm=True)`), the
-#     one widening this module makes. WebAssembly runs only in dedicated
-#     module workers — tree-sitter's syntax worker (ED-5), the VAD/RNNoise
-#     `listen` worker and the wake-word worker (onnxruntime-web) — and a
-#     worker takes its policy from **its own script's response**, not the
-#     page's, so the grant rides on those responses alone. A `.js` response
-#     is never a document that runs script (`nosniff`, `text/javascript`),
-#     and a module the page itself imports runs under the page's policy, so
-#     the grant on every `/assets/*.js` reaches workers and nothing else.
+#   - `script-src 'self' 'wasm-unsafe-eval'` on a **worker's fetch** of the
+#     HUD's own JavaScript under `/assets/` only — the file by `wasm_script`
+#     AND the request by `worker_fetch` (`Sec-Fetch-Dest: worker`, exactly),
+#     through `binary(wasm=True)`: the one widening this module makes.
+#     WebAssembly runs only in dedicated module workers — tree-sitter's
+#     syntax worker (ED-5), the VAD/RNNoise `listen` worker and the
+#     wake-word worker (onnxruntime-web) — and a worker takes its policy
+#     from **its own script's response**, not the page's. **The path alone
+#     is not enough** (PR review, 2026-10-15): a `.js` opened as a document
+#     runs no script of its own (`nosniff`), but `window.open('/assets/x.js')`
+#     is a same-origin Window whose realm carries that response's policy,
+#     and the opener drives it — `p.WebAssembly.compile(…)` compiled there
+#     while the page's own was refused. So a popup, a navigation, a module
+#     the page imports (`script`), a shared or service worker, and a request
+#     with no Sec-Fetch-Dest at all get the page's policy; responses vary on
+#     the header (`Vary: Sec-Fetch-Dest`, and `no-store` anyway). Fetch
+#     Metadata is standard in Chrome since 80 and is sent to localhost, so a
+#     browser that omitted it would fail closed and visibly (highlighting,
+#     the VAD and the wake word stop), never open. No `sandbox` directive on
+#     the script: it breaks module workers' same-origin fetches and imports.
 #     The syntax worker fetches grammars only from the map built into it
 #     (`hud/src/lib/syntax/assets.ts` refuses any other URL before a request
 #     is made) and compiles from bytes. tests/face/hud_v2_syntax_check.py
 #     loads every grammar under it; tests/face/hud_v2_csp_check.py proves
-#     the page itself cannot compile WebAssembly.
+#     the page itself cannot compile WebAssembly, nor through a popup of a
+#     worker script.
 #   - `worker-src 'self'`: Monaco's `editor.worker` and the syntax worker
 #     (ED-5), module workers Vite emits under `/assets/` (no `blob:` worker).
 #   - `connect-src 'self'`: `fetch`, the `/events` stream, the `/stt` upload
@@ -1097,8 +1108,8 @@ HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("object-src", ("'none'",)),
 )
 # The one widening of `HUD_POLICY` (owner, 2026-10-15): `script-src` on a
-# worker script's response, so WebAssembly compiles in a worker and never in
-# the page. Only `wasm_script` decides which responses carry it.
+# worker's fetch of a HUD script, so WebAssembly compiles in a worker and never
+# in a document. Only `wasm_script` and `worker_fetch` together grant it.
 WASM_SCRIPT_SRC: tuple[str, ...] = ("'self'", "'wasm-unsafe-eval'")
 
 
@@ -1110,6 +1121,22 @@ def wasm_script(name: str) -> bool:
     policy does not govern the worker that compiles it)."""
     parts = name.split("/")
     return len(parts) == 2 and parts[0] == "assets" and parts[1].endswith(".js") and parts[1] != ".js"
+
+
+def worker_fetch(headers) -> bool:
+    """Whether a request is a dedicated worker's fetch of its script: exactly
+    one `Sec-Fetch-Dest` header, exactly `worker`. Absent, repeated, `document`
+    (a popup or a navigation), `script`, `sharedworker`, `serviceworker` or
+    anything else is not — fail closed (review of 2026-10-15: a popup of a
+    granted script was a document realm that could compile WebAssembly)."""
+    if headers is None:
+        return False
+    try:
+        values = headers.get_all("Sec-Fetch-Dest") or []
+    except AttributeError:
+        value = headers.get("Sec-Fetch-Dest")
+        values = [value] if value is not None else []
+    return values == ["worker"]
 
 
 # The avatar SVG's own lockdown (`GET /avatar.svg`): nothing but its own
@@ -1341,9 +1368,12 @@ def hud_files(handler, parts):
                 fail(404, "file not found")
     mime = "application/manifest+json" if name.endswith(".webmanifest") else (
         mimetypes.guess_type(name)[0] or "application/octet-stream")
-    # A worker script's response carries `'wasm-unsafe-eval'`; the page never
-    # does (owner, 2026-10-15). `parts == [""]` is `index.html` by name only.
-    return binary(handler, data, mime, wasm=parts != [""] and wasm_script(name))
+    # A worker's fetch of a HUD script carries `'wasm-unsafe-eval'`; the page,
+    # a popup of the same script and every other request never do (owner,
+    # 2026-10-15; `worker_fetch`). `parts == [""]` is `index.html` by name only.
+    script = parts != [""] and wasm_script(name)
+    return binary(handler, data, mime, wasm=script and worker_fetch(getattr(handler, "headers", None)),
+                  headers={"Vary": "Sec-Fetch-Dest"} if script else None)
 
 
 # The routes whose body is audio, not JSON: an explicit set, never a prefix (plan 3.13).

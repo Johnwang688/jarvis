@@ -554,7 +554,7 @@ class NpmCi(Base):
 
     def test_a_failed_npm_ci_refuses(self):
         self.world(npm_rc=1)
-        with self.assertRaisesRegex(O.OpsRefused, r"`npm ci` failed \(exit 1\); nothing was installed"):
+        with self.assertRaisesRegex(O.OpsRefused, r"`npm ci --ignore-scripts` failed \(exit 1\); nothing was installed"):
             O.npm_ci(self.hud())
 
     def test_a_hung_npm_ci_refuses(self):
@@ -763,7 +763,7 @@ class Rebuild(RebuildWorld):
         self.assertEqual(self.rebuild(clean=True), O.FAILED)
         self.assertEqual(self.builds, 0)
         self.assertEqual(hud_install.builds(self.root), [])
-        self.assertIn("`npm ci` failed", self.said())
+        self.assertIn("`npm ci --ignore-scripts` failed", self.said())
 
     def test_dirty_hud_is_refused_unless_allowed(self):
         self.world(self.daemon())

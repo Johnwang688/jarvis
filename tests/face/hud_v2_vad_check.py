@@ -224,16 +224,21 @@ def main(argv=None):
                       and all(u.startswith(base + "/assets/silero_vad") for u in models), str(models))
                 check("so is the onnxruntime WebAssembly, as application/wasm", len(wasms) >= 1
                       and all(u.startswith(base + "/assets/") and ct.startswith("application/wasm") for u, ct in wasms), str(wasms))
-                # The worker's own script response carries 'wasm-unsafe-eval' (the policy a
-                # worker runs under); the model and the .wasm carry the page's, which never
-                # does (owner, 2026-10-15; hud_api.wasm_script).
+                # Grant rule (owner, 2026-10-15; review of the same day): 'wasm-unsafe-eval'
+                # only on a worker's own fetch of a HUD script (Sec-Fetch-Dest: worker), the
+                # policy that worker runs under; the page's import of the `?worker` wrapper,
+                # the model and the .wasm carry the page's. Playwright hides a worker
+                # request's headers, so the server's record (`mock.script_fetches`) says
+                # which fetches were a worker's.
                 from jarvis.v2 import hud_api as H
+                page_csp, grant = H.content_security_policy(), H.content_security_policy(wasm=True)
                 path = lambda u: u.split("?")[0][len(base):].lstrip("/")
-                bad = [(u, p) for u, _, _, p in seen if p != H.content_security_policy(wasm=H.wasm_script(path(u)))]
-                scripts = [u for u, *_ in seen if H.wasm_script(path(u))]
-                check("each carries the policy the daemon gives it: wasm-unsafe-eval on the worker's script only, never unsafe-eval",
-                      bool(scripts) and not bad and all(" 'unsafe-eval'" not in p and "worker-src 'self'" in p for *_, p in seen),
-                      f"scripts={scripts} bad={bad[:2]}")
+                bad = [(u, p) for u, *_, p in seen if p not in (page_csp, grant) or (p == grant and not H.wasm_script(path(u)))]
+                bad += [f for f in list(mock.script_fetches) if f[2] != (f[1] == "worker")]
+                granted = [u for u, *_, p in seen if p == grant]
+                check("each carries the policy the daemon gives it: wasm-unsafe-eval on a worker's fetch of its script only, never unsafe-eval",
+                      bool(granted) and not bad and all(" 'unsafe-eval'" not in p and "worker-src 'self'" in p for *_, p in seen),
+                      f"granted={granted} bad={bad[:2]}")
                 served = (REPO / "hud" / "vendor" / "silero-vad" / "silero_vad_v5.1.2.onnx").read_bytes()
                 fetched = page.evaluate("""async (u) => { if (!u) return ''; const b = new Uint8Array(await (await fetch(u)).arrayBuffer());
                   const d = await crypto.subtle.digest('SHA-256', b); return Array.from(new Uint8Array(d), x => x.toString(16).padStart(2, '0')).join(''); }""", models[0] if models else "")

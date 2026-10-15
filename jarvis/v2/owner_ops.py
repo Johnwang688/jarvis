@@ -698,11 +698,12 @@ def npm_ci(hud: Path, timeout: float = NPM_CI_TIMEOUT) -> None:
     try:
         result = subprocess.run([npm, *NPM_CI_ARGS], cwd=str(hud), stdin=subprocess.DEVNULL, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise OpsRefused(f"`npm ci` did not finish within {timeout:g} s; nothing was installed") from None
+        raise OpsRefused(f"`npm ci --ignore-scripts` did not finish within {timeout:g} s; "
+                         "nothing was installed") from None
     except OSError as exc:
         raise OpsRefused(f"could not run npm: {exc.strerror or type(exc).__name__}") from None
     if result.returncode != 0:
-        raise OpsRefused(f"`npm ci` failed (exit {result.returncode}); nothing was installed")
+        raise OpsRefused(f"`npm ci --ignore-scripts` failed (exit {result.returncode}); nothing was installed")
 
 
 def _head() -> str | None:

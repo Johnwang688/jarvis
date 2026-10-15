@@ -480,7 +480,9 @@ class FrameHeaders(Base):
             for listener in ("hud", "api"):
                 for path in ("/", "/assets/app.js"):
                     with self.subTest(listener=listener, path=path):
-                        status, got, content = self.ask(listener, "GET", path)
+                        # A worker's fetch (Sec-Fetch-Dest: worker) is the only grant.
+                        status, got, content = self.ask(listener, "GET", path,
+                                                        headers={"Sec-Fetch-Dest": "worker"})
                         self.assertEqual(status, 200)
                         self.assertTrue(content)
                         self.assert_hardened(got, f"{listener} {path}", wasm=path.endswith(".js"))
@@ -515,7 +517,7 @@ class FrameHeaders(Base):
                                ("/icons/orb-16.png", "image/png"),
                                ("/status", "application/json")):
                 with self.subTest(listener=listener, path=path):
-                    status, got, content = self.ask(listener, "GET", path)
+                    status, got, content = self.ask(listener, "GET", path, headers={"Sec-Fetch-Dest": "worker"})
                     self.assertEqual(status, 200, content)
                     self.assertIn(mime, dict(got)["Content-Type"])
                     self.assert_hardened(got, f"{listener} installed {path}", wasm=path.endswith(".js"))
@@ -548,23 +550,34 @@ class FrameHeaders(Base):
         for dev, where in ((True, dist), (False, root)):
             with patch.object(config, "HUD_DIST", where), patch.object(config, "HUD_DEV", dev):
                 for listener in ("hud", "api"):
-                    for path, status, wasm in (("/", 200, False), ("/index.html", 404, False),
-                                               ("/assets/index.html", 200, False),
-                                               ("/assets/worker-9a8b.js", 200, True),
-                                               ("/assets/index-7c6d.js", 200, True),
-                                               ("/assets/worker-9a8b.js?v=1", 200, True),
-                                               ("/assets/tree-sitter-cpp-5e6f.wasm", 200, False),
-                                               ("/assets/absent.js", 404, False),
-                                               ("/manifest.webmanifest", 200, False),
-                                               ("/status", 200, False)):
-                        with self.subTest(dev=dev, listener=listener, path=path):
-                            got_status, got, content = self.ask(listener, "GET", path)
-                            self.assertEqual(got_status, status, content[:200])
-                            self.assert_hardened(got, f"{listener} {path} dev={dev}", wasm=wasm)
-                            csp = dict((n.lower(), v) for n, v in got)[CSP.lower()]
-                            if path == "/":
-                                self.assertIn("script-src 'self';", csp)
-                                self.assertNotIn("wasm", csp)
+                    for path, status, script in (("/", 200, False), ("/index.html", 404, False),
+                                                 ("/assets/index.html", 200, False),
+                                                 ("/assets/worker-9a8b.js", 200, True),
+                                                 ("/assets/index-7c6d.js", 200, True),
+                                                 ("/assets/worker-9a8b.js?v=1", 200, True),
+                                                 ("/assets/tree-sitter-cpp-5e6f.wasm", 200, False),
+                                                 ("/assets/absent.js", 404, False),
+                                                 ("/manifest.webmanifest", 200, False),
+                                                 ("/status", 200, False)):
+                        # Only a dedicated worker's fetch of a script is granted
+                        # (review of 2026-10-15): a popup of the same script
+                        # (`document`), an import (`script`), shared and service
+                        # workers, a near miss and no header at all are not.
+                        for dest in ("worker", None, "document", "script", "sharedworker", "serviceworker",
+                                     "Worker", "worker, document", "iframe", ""):
+                            wasm = script and status == 200 and dest == "worker"
+                            with self.subTest(dev=dev, listener=listener, path=path, dest=dest):
+                                headers = {} if dest is None else {"Sec-Fetch-Dest": dest}
+                                got_status, got, content = self.ask(listener, "GET", path, headers=headers)
+                                self.assertEqual(got_status, status, content[:200])
+                                self.assert_hardened(got, f"{listener} {path} dev={dev} dest={dest}", wasm=wasm)
+                                csp = dict((n.lower(), v) for n, v in got)[CSP.lower()]
+                                if path == "/":
+                                    self.assertIn("script-src 'self';", csp)
+                                    self.assertNotIn("wasm", csp)
+                                if script and status == 200:
+                                    self.assertEqual(dict((n.lower(), v) for n, v in got).get("vary"),
+                                                     "Sec-Fetch-Dest", "a script's policy varies on the header")
 
     def test_only_a_script_under_assets_is_a_worker_script(self):
         for name, want in (("assets/worker-9a8b.js", True), ("assets/editor.worker-3c4d.js", True),
@@ -575,6 +588,21 @@ class FrameHeaders(Base):
                            ("manifest.webmanifest", False), ("../assets/x.js", False)):
             with self.subTest(name=name):
                 self.assertIs(H.wasm_script(name), want)
+        # The request: exactly one Sec-Fetch-Dest, exactly `worker`.
+        from email.message import Message
+        def msg(*values):
+            m = Message()
+            for v in values:
+                m["Sec-Fetch-Dest"] = v
+            return m
+        self.assertTrue(H.worker_fetch(msg("worker")))
+        for values in ((), ("document",), ("worker", "worker"), ("worker", "document"), ("sharedworker",),
+                       ("serviceworker",), ("script",), ("WORKER",), (" worker",), ("",)):
+            with self.subTest(values=values):
+                self.assertFalse(H.worker_fetch(msg(*values)))
+        self.assertFalse(H.worker_fetch(None))
+        self.assertTrue(H.worker_fetch({"Sec-Fetch-Dest": "worker"}))
+        self.assertFalse(H.worker_fetch({}))
         # The preview listener never takes the grant, even when asked.
         preview = SimpleNamespace(server=SimpleNamespace(preview_only=True))
         self.assertNotIn("wasm", dict(H.frame_headers(preview, wasm=True))["Content-Security-Policy"])
