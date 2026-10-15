@@ -29,6 +29,8 @@ The world's `vex` section (`state(mock)`):
     (vexcom still writing), so a `DELETE /terminals/{id}` — the HUD's Stop —
     lands on a live program and settles the record as the daemon's exit hook
     does (`terminal_closing`);
+  - `brain_refuse`: a sentence the next `POST /vex/brain` answers 409 with
+    (once), as the daemon's one-device reservation does;
   - `info` / `info_refuse`: what a device read answers (`text` and
     `exit_code`; the answer carries the `read` asked for); `info_reads`
     records each read asked (`system` or `programs`), as the daemon's
@@ -93,6 +95,7 @@ def state(mock) -> dict:
         "info_refuse": None,
         "info_reads": [],
         "brain": None,
+        "brain_refuse": None,
     })
 
 
@@ -509,6 +512,10 @@ def handle(h, mock, method: str, path: str, body) -> bool:
             return True
         if device:
             h._err(409, "A download is running. One device action at a time.")
+            return True
+        if v.get("brain_refuse"):
+            h._err(409, v["brain_refuse"])
+            v["brain_refuse"] = None
             return True
         row = _program_row(mock, "vex-brain", "vex brain", None)
         v["brain"] = row["id"]

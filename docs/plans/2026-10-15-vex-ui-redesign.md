@@ -437,6 +437,10 @@ machine:
   Brain tab badge says `paused` and the body says "Paused for the download;
   reconnects after". When a dropped chain leaves it closed, it says so, as
   today.
+  - **As built (VX-UI-4a, 2026-10-15, the lead's direction):** no chain
+    reconnects it. After any download the tab says it was closed for the
+    download and offers Connect, so the link opens only on the owner's
+    Connect (decision 5). See `docs/notes/vex.md`, "Brain tab, VX-UI-4a".
 - **Later, out of scope here.** A "Save CSV block" helper for the owner's
   `$BEGIN…$END` telemetry blocks, mirroring `serial-monitor.ps1 -Csv`.
 

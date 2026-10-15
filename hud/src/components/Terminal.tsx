@@ -211,6 +211,8 @@ export class TermSession {
   }, { onOverflow: (dropped) => this.overflowed(dropped) });
   /** Output skipped because it came faster than xterm could draw it (bytes; the notice). */
   skipped = 0;
+  /** Any output has arrived in this window (replayed or live): the Brain tab's "nothing printed yet". */
+  printed = false;
   /** The current socket's generation (OutputPipe). */
   private gen = 0;
   /**
@@ -635,7 +637,12 @@ export class TermSession {
   private onMessage(ws: WebSocket, gen: number, ev: MessageEvent) {
     if (ws !== this.ws || gen !== this.gen) return;
     if (typeof ev.data !== "string") {
-      this.out.data(gen, new Uint8Array(ev.data as ArrayBuffer));
+      const bytes = new Uint8Array(ev.data as ArrayBuffer);
+      this.out.data(gen, bytes);
+      if (!this.printed && bytes.length > 0) {
+        this.printed = true;
+        this.mgr.changed();
+      }
       return;
     }
     const msg = parseControl(ev.data);
@@ -1171,6 +1178,12 @@ export class TermManager {
   prefs = loadPrefs();
   /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals): pane ids. */
   place = new Map<string, number>();
+  /**
+   * Which VEX pane's Brain tab shows which program terminal (VX-UI-4a, the
+   * `vex-<pane>` place): pane ids. A terminal pane holding it wins (`place`);
+   * the Brain tab wins over the panel. One place at a time (W-1).
+   */
+  vexPlace = new Map<string, number>();
   /** Each pane id's slot, the number the owner reads ("in pane 2"): ids are not slots (WP-G1). */
   private slots = new Map<number, number>();
   /** Exited while nobody could see it: the dot on ⬓. */
@@ -1273,7 +1286,32 @@ export class TermManager {
 
   /** Whether a terminal is in view: a drawn pane holds it, or it is the open panel's tab. */
   visible(id: string): boolean {
-    return !this.covered && (this.place.has(id) || (this.panelOpen && this.panelActive() === id));
+    return !this.covered && (this.place.has(id) || this.vexPlace.has(id)
+      || (this.panelOpen && this.panelActive() === id));
+  }
+
+  /** Where terminal `id` is drawn other than the panel: a terminal pane, else a VEX pane's Brain tab. */
+  shownIn(id: string): { kind: "pane" | "vex"; pane: number } | null {
+    const p = this.place.get(id);
+    if (p) return { kind: "pane", pane: p };
+    const v = this.vexPlace.get(id);
+    return v ? { kind: "vex", pane: v } : null;
+  }
+
+  /**
+   * VEX pane `pane`'s Brain tab shows terminal `id` (VX-UI-4a), or — `id`
+   * null — shows none. Never takes it from a terminal pane or from another
+   * VEX pane already showing it: the caller asks `shownIn` first.
+   */
+  holdInVex(pane: number, id: string | null) {
+    const next = new Map([...this.vexPlace].filter(([, n]) => n !== pane));
+    if (id && !this.place.has(id) && !next.has(id)) next.set(id, pane);
+    const same = next.size === this.vexPlace.size && [...next].every(([k, v]) => this.vexPlace.get(k) === v);
+    if (same) return;
+    this.vexPlace = next;
+    for (const k of next.keys()) this.unseenExits.delete(k);
+    this.dropHiddenHolds();
+    this.changed();
   }
 
   /**
@@ -1302,8 +1340,8 @@ export class TermManager {
     const tabs = this.tabs();
     const a = this.prefs.active;
     if (a && tabs.some((r) => r.id === a)) return a;
-    const free = tabs.find((r) => !this.place.has(r.id) && !this.elsewhere(r.id))
-      ?? tabs.find((r) => !this.place.has(r.id));
+    const free = tabs.find((r) => !this.shownIn(r.id) && !this.elsewhere(r.id))
+      ?? tabs.find((r) => !this.shownIn(r.id));
     return (free ?? tabs[0])?.id ?? null;
   }
 
@@ -1374,6 +1412,22 @@ export class TermManager {
     }
     this.selectTab(id);
     this.showPanel();
+  }
+
+  /**
+   * A program terminal the daemon just started for this window's own click,
+   * to be drawn where the click was (VX-UI-4a: the brain terminal in the VEX
+   * pane's Brain tab): listed now and held as this window's (`claim`), and
+   * nothing opened for it — not the panel. False when it is not listed (or a
+   * card is up).
+   */
+  async adoptProgram(id: string): Promise<boolean> {
+    if (!isTerminalId(id)) return false;
+    await this.freshList();
+    if (this.blocked || !this.rows.some((r) => r.id === id)) return false;
+    this.claim(id);
+    this.changed();
+    return true;
   }
 
   /** A program terminal (VX-1): it ends with its program, so Restart would open a shell instead. */
@@ -1687,6 +1741,10 @@ export class TermManager {
     }
     this.viewKeys.delete(id);
     this.ranks.delete(id);
+    if (this.vexPlace.has(id)) {
+      this.vexPlace = new Map(this.vexPlace);
+      this.vexPlace.delete(id);
+    }
     this.changed();
   }
 
@@ -1941,6 +1999,11 @@ if (typeof window !== "undefined") {
     backlog: (id: string) => terminals.sessions.get(id)?.backlog ?? null,
     // Whether input is held for a card (App drives it, above the boundary).
     blocked: () => terminals.blocked,
+    // Where a terminal is drawn other than the panel: `pane-N` or `vex-N` (VX-UI-4a), else null.
+    shownIn: (id: string) => {
+      const w = terminals.shownIn(id);
+      return w ? `${w.kind}-${w.pane}` : null;
+    },
   };
 }
 
@@ -2274,6 +2337,8 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
   const where = (r: TerminalRow) => {
     const n = mgr.place.get(r.id);
     if (n) return `in pane ${mgr.slotOf(n)}`;
+    const v = mgr.vexPlace.get(r.id);
+    if (v) return `in the VEX view, pane ${mgr.slotOf(v)}`;
     if (r.exited) return "exited";
     if (mgr.elsewhere(r.id)) return "in another window";
     return "in the panel";
@@ -2353,7 +2418,12 @@ export function TerminalPanel(props: {
         <span className="paneltitle">Terminal</span>
         <div className="paneltabs" role="tablist" aria-label="Terminals" data-testid="panel-tabs">
           {tabs.map((r) => {
-            const pane = mgr.place.get(r.id);
+            const shown = mgr.shownIn(r.id);
+            const pane = shown?.pane;
+            const where = shown ? (shown.kind === "vex" ? `vex-${shown.pane}` : `pane-${shown.pane}`) : "panel";
+            const whereText = shown
+              ? (shown.kind === "vex" ? `in the VEX view, pane ${mgr.slotOf(shown.pane)}` : `in pane ${mgr.slotOf(shown.pane)}`)
+              : "";
             const s = mgr.sessions.get(r.id);
             const exited = r.exited || s?.state === "exited";
             const ended = s?.state === "ended" || s?.state === "lost";
@@ -2365,14 +2435,14 @@ export function TerminalPanel(props: {
                   role="tab"
                   aria-selected={r.id === active && !pane}
                   data-testid={`panel-tab-${r.id}`}
-                  data-place={pane ? `pane-${pane}` : "panel"}
+                  data-place={where}
                   data-program={r.program ?? undefined}
-                  title={pane ? `${r.title} — shown in pane ${mgr.slotOf(pane)}; click to go there` : r.title}
+                  title={pane ? `${r.title} — shown ${whereText}; click to go there` : r.title}
                   disabled={props.blocked}
                   onClick={() => (pane ? mgr.focusPane(pane as PaneNo) : mgr.selectTab(r.id))}
                 >
                   <span className="paneltab-name">{r.title || r.id}</span>
-                  {pane ? <span className="paneltab-where">in pane {mgr.slotOf(pane)}</span> : null}
+                  {pane ? <span className="paneltab-where">{whereText}</span> : null}
                   {s?.state === "continuing" ? <span className="paneltab-where">starting…</span>
                     : ended ? <span className="paneltab-where">ended</span>
                     : exited ? <span className="paneltab-where">exited</span>
@@ -2485,11 +2555,14 @@ export function TerminalPanel(props: {
               New terminal
             </button>
           </div>
-        ) : mgr.place.has(active) ? (
-          <div className="pad muted" data-testid="panel-elsewhere">
-            This terminal is shown in pane {mgr.slotOf(mgr.place.get(active)!)}.{" "}
+        ) : mgr.shownIn(active) ? (
+          <div className="pad muted" data-testid="panel-elsewhere"
+               data-place={mgr.shownIn(active)!.kind === "vex" ? `vex-${mgr.shownIn(active)!.pane}` : `pane-${mgr.shownIn(active)!.pane}`}>
+            {mgr.shownIn(active)!.kind === "vex"
+              ? `This terminal is shown in the VEX view, pane ${mgr.slotOf(mgr.shownIn(active)!.pane)} (its Brain tab).`
+              : `This terminal is shown in pane ${mgr.slotOf(mgr.shownIn(active)!.pane)}.`}{" "}
             <button type="button" className="quiet" data-testid="panel-jump"
-                    onClick={() => mgr.focusPane(mgr.place.get(active) as PaneNo)}>
+                    onClick={() => mgr.focusPane(mgr.shownIn(active)!.pane as PaneNo)}>
               Go there
             </button>
           </div>

@@ -13,7 +13,9 @@
 //     refusals in the daemon's words on alert lines under it;
 //   - the errors list (click opens the file at its line);
 //   - one output area with Build / Download / Brain / Device tabs, foldable
-//     and maximisable.
+//     and maximisable. The Brain tab (VX-UI-4a) draws the brain terminal
+//     itself — the same `vexcom --user` session, "Jarvis can read" switch and
+//     Ctrl-C rule as in the panel — at the `vex-<pane>` place.
 //
 // Every control has permanent hover help (owner decision 7), shown on hover
 // and on keyboard focus and named by `aria-describedby`; `?` lists them all.
@@ -30,6 +32,10 @@
 //     download — only on a trusted press (`isTrustedPress`: a pointer, or
 //     Enter/Space; never a script). It closes the action's program terminal
 //     and never sends anything to the brain (no `vexcom --stop`).
+//   - **The brain's link opens only on Connect** (owner decision 5): a
+//     trusted press, as Stop's; never the Brain tab being shown, a reload or
+//     the end of a download. Off under a card, during a download and while a
+//     device read holds the port. Disconnect closes it (the port is freed).
 //   - **Under an approval card every control here is disabled** (and inert
 //     behind the veil), menus and popovers close, the status line says Held
 //     in amber, and the store refuses too.
@@ -42,13 +48,14 @@
 
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { vex } from "../state/vex";
-import { terminals } from "./Terminal";
+import { TerminalView, terminals, useTerminals } from "./Terminal";
 import {
-  OUTPUT_TABS, SETUP_COMMAND, SLOTS, buildLine, buildMark, chainLine, chainSteps, defaultName, downloadButtonLabel,
+  OUTPUT_TABS, SETUP_COMMAND, SLOTS, brainView, buildLine, buildMark, chainLine, chainSteps, defaultName, downloadButtonLabel,
   downloadLabel, downloadMark, downloadProgress, errorTarget, errorWhere, helpText, isExplicitClick, isTrustedPress,
-  markGlyph, nameRefusal, nextTab, outputTabFor, setupNote, type BuildError, type Detection, type HelpId, type Mark,
-  type OutputTab,
+  markGlyph, nameRefusal, nextTab, outputTabFor, setupNote, type BrainView, type BuildError, type Detection, type HelpId,
+  type Mark, type OutputTab,
 } from "../lib/vex";
+import type { PaneNo } from "../lib/workspace";
 
 /** A press on a button whose second press matters never takes focus from a pointer. */
 const noPointerFocus = (e: React.MouseEvent) => e.preventDefault();
@@ -158,7 +165,7 @@ export function VexView(props: {
   }
   return (
     <Body key={pid} pane={props.pane} d={d} pid={pid} name={props.projectName} blocked={blocked}
-          onOpenError={props.onOpenError} />
+          drawn={props.drawn !== false} onOpenError={props.onOpenError} />
   );
 }
 
@@ -176,7 +183,7 @@ function Notices(props: { blocked: boolean }) {
 }
 
 function Body(props: {
-  pane: number; d: Detection; pid: string; name: string; blocked: boolean;
+  pane: number; d: Detection; pid: string; name: string; blocked: boolean; drawn: boolean;
   onOpenError: (path: string, line: number, col: number) => void;
 }) {
   const { d, pid, blocked, pane } = props;
@@ -261,7 +268,7 @@ function Body(props: {
     <Alerts pid={pid} />
     <ErrorsList pid={pid} blocked={blocked} onOpen={props.onOpenError} />
     <Output pane={pane} d={d} pid={pid} blocked={blocked} configured={!setup} ui={ui} setUi={setUi} help={help}
-            slot={slot} name={name} tip={tip} />
+            slot={slot} name={name} tip={tip} drawn={props.drawn} />
   </>);
 }
 
@@ -293,6 +300,7 @@ const HELP_ORDER: { id: HelpId; label: string }[] = [
   { id: "download", label: "Download" }, { id: "stop", label: "Stop" }, { id: "slot", label: "Slot and name" },
   { id: "more", label: "⋯" }, { id: "usb", label: "Brain · Controller" }, { id: "tab-build", label: "Build tab" },
   { id: "tab-download", label: "Download tab" }, { id: "tab-brain", label: "Brain tab" },
+  { id: "connect", label: "Connect (Brain tab)" }, { id: "disconnect", label: "Disconnect (Brain tab)" },
   { id: "tab-device", label: "Device tab" }, { id: "fold", label: "▾" }, { id: "max", label: "⤢" },
 ];
 
@@ -671,9 +679,12 @@ function Alerts(props: { pid: string }) {
     ["vex-brain-note", vex.brainNote],
     ["vex-info-note", vex.infoNote],
   ] as [string, string][]).filter(([, text]) => !!text && text !== run.note);
-  if (!lines.length) return null;
+  // Said in words wherever the owner is looking (not an alert: nothing failed).
+  const closed = vex.brainClosed && !vex.brainTerminal ? vex.brainClosed : "";
+  if (!lines.length && !closed) return null;
   return <div className="vexalerts">
     {lines.map(([id, text]) => <div key={id} className="err small" role="alert" data-testid={id}>{text}</div>)}
+    {closed ? <div className="muted small" role="status" data-testid="vex-brain-closed">{closed}</div> : null}
   </div>;
 }
 
@@ -734,11 +745,13 @@ const TAB_NAME: Record<OutputTab, string> = { build: "Build", download: "Downloa
 function Output(props: {
   pane: number; d: Detection; pid: string; blocked: boolean; configured: boolean; ui: PaneUi;
   setUi: (p: Partial<PaneUi>) => void; help: boolean; slot: number; name: string; tip: (id: HelpId) => string;
+  drawn: boolean;
 }) {
   const { pane, pid, blocked, ui, setUi, tip } = props;
   const tabRefs = useRef<Partial<Record<OutputTab, HTMLButtonElement | null>>>({});
   const run = vex.run(pid);
   const usb = useUsbReading(blocked || !props.configured || !!vex.chain);
+  const brain = useBrain(pane, blocked, props.configured);
   const badge = (tab: OutputTab): Mark => {
     if (tab === "build") {
       const b = run.build;
@@ -751,9 +764,7 @@ function Output(props: {
       const m = downloadMark({ busy: run.busy === "download", downloaded: run.downloaded, endedAt: null, builtAt: null });
       return { state: m.state, text: m.state === "idle" ? "nothing yet" : m.text.replace(/^Download: /, "") };
     }
-    if (tab === "brain") {
-      return vex.status?.brain ? { state: "ok", text: "open" } : { state: "idle", text: "not connected" };
-    }
+    if (tab === "brain") return brain.view.badge;
     const c = usb.c;
     if (!c || (c.brain == null && c.controller == null)) return { state: "unknown", text: "USB unknown" };
     const worst = c.brain === false && c.controller === false ? "failed" : "ok";
@@ -786,7 +797,8 @@ function Output(props: {
                 <span className={"vexbadgemark " + b.state} data-testid={`vex-out-badge-${tab}`} aria-hidden="true">
                   {b.state === "busy" ? <span className="vexspinner" />
                     : tab === "device" && b.state !== "unknown" ? "●"
-                      : tab === "brain" ? (b.state === "ok" ? "●" : "") : markGlyph(b.state)}
+                      : tab === "brain" ? (b.state === "ok" ? "●" : b.state === "unknown" ? "◌" : markGlyph(b.state))
+                        : markGlyph(b.state)}
                 </span>
                 <span className="vextip" role="tooltip" id={tid} aria-hidden="true">{helpText(`tab-${tab}` as HelpId, props.slot)}</span>
               </button>
@@ -813,7 +825,8 @@ function Output(props: {
           {props.help ? <HelpList slot={props.slot} />
             : ui.tab === "build" ? <BuildTab d={props.d} pid={pid} blocked={blocked} />
               : ui.tab === "download" ? <DownloadTab d={props.d} pid={pid} blocked={blocked} name={props.name} />
-                : ui.tab === "brain" ? <BrainTab blocked={blocked} configured={props.configured} />
+                : ui.tab === "brain" ? <BrainTab pane={pane} drawn={props.drawn} blocked={blocked} brain={brain}
+                                                 tip={tip} slot={props.slot} />
                   : <DeviceTab blocked={blocked} configured={props.configured} />}
         </div>
       )}
@@ -892,28 +905,115 @@ function DownloadTab(props: { d: Detection; pid: string; blocked: boolean; name:
   </>;
 }
 
+/** The Brain tab's reading of the brain terminal, for its body and its badge (lib/vex.ts `brainView`). */
+interface BrainNow {
+  view: BrainView;
+  /** The brain terminal this window shows, while it exists here. */
+  tid: string | null;
+  /** Another place shows it: a terminal pane or another VEX pane (pane ids). */
+  other: { kind: "pane" | "vex"; pane: number } | null;
+  /** This pane's Brain tab holds it (`vex-<pane>`): the terminal is drawn here. */
+  here: boolean;
+  /** Nothing has been printed in it yet in this window. */
+  silent: boolean;
+}
+
+function useBrain(pane: number, blocked: boolean, configured: boolean): BrainNow {
+  const mgr = useTerminals();
+  const id = vex.brainTerminal;
+  // While it exists here: listed, a session in this window, or the daemon says it holds the port.
+  const tid = id && (mgr.row(id) || mgr.sessions.has(id) || vex.status?.brain === id) ? mgr.resolve(id) : null;
+  const s = tid ? mgr.sessions.get(tid) : undefined;
+  const shown = tid ? mgr.shownIn(tid) : null;
+  const here = shown?.kind === "vex" && shown.pane === pane;
+  const other = shown && !here ? shown : null;
+  const row = tid ? mgr.row(tid) : null;
+  const view = brainView({
+    configured, blocked, chain: vex.chain ? { paused: vex.chain.brainPaused } : null,
+    terminal: tid, asking: vex.brainBusy,
+    session: s ? s.state : row?.exited ? "exited" : null,
+    exitCode: s?.exitCode ?? row?.exit_code ?? null,
+    shownIn: other ? { kind: other.kind, slot: mgr.slotOf(other.pane) } : tid && mgr.elsewhere(tid) ? { kind: "window" } : null,
+    error: vex.brainNote, closed: vex.brainClosed, device: vex.status?.device ?? null, reading: !!vex.infoBusy,
+  });
+  return { view, tid, other, here, silent: !s?.printed };
+}
+
 /**
- * The Brain tab's placeholder until VX-UI-4a puts the brain's output here
- * (the owner's answer to §0.1 item 5: it **connects only on the owner's
- * click**, never when the tab is shown). For now the click opens today's
- * brain terminal in the bottom panel.
+ * The Brain tab (VX-UI-4a, plan §5.5): the brain terminal drawn here, at the
+ * `vex-<pane>` place — the same session, "Jarvis can read" switch and Ctrl-C
+ * rule as in the panel; xterm draws its bytes as characters. **Connect is the
+ * only way it opens** (owner decision 5), on a trusted press; showing this tab
+ * opens nothing, and a reload only shows a link the daemon already holds.
+ * Switching to another tab keeps the session attached (its ring keeps the
+ * output); Disconnect closes it.
  */
-function BrainTab(props: { blocked: boolean; configured: boolean }) {
-  const brain = vex.status?.brain ?? null;
-  // A download's chain holds the device: no brain terminal meanwhile.
-  const off = props.blocked || !props.configured || !!vex.chain;
-  return <div className="vexobody vexdev" data-testid="vex-brain-tab">
-    <div className="small">
-      What the program on the brain prints (printf / print). It connects only when you click, never by itself
-      and never just because this tab is shown. For now it opens in the bottom panel; it moves here in the next update.
+function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain: BrainNow; tip: (id: HelpId) => string;
+                           slot: number }) {
+  const mgr = useTerminals();
+  const { pane, blocked, tip } = props;
+  const { view, tid, other, here, silent } = props.brain;
+  // Held here while this tab is drawn and its terminal is not shown elsewhere in this window.
+  const want = props.drawn && !!tid && view.terminal && !other;
+  useEffect(() => {
+    if (!want || !tid) return;
+    terminals.holdInVex(pane, tid);
+    return () => terminals.holdInVex(pane, null);
+  }, [want, tid, pane]);
+  const connectHelp = view.connect.off ? `${view.connect.off} ${helpText("connect", props.slot)}` : helpText("connect", props.slot);
+  return <div className="vexbrain" data-testid="vex-brain-tab" data-state={view.state}>
+    <div className="vexobar">
+      <span>vexcom --user</span>
+      <span className={"vexbrain-state " + view.badge.state} data-testid="vex-brain-state">{view.badge.text}</span>
+      <span className="vexobar-r">
+        {other ? (
+          <button type="button" className="quiet" data-testid="vex-brain-goto" disabled={blocked}
+                  onClick={() => mgr.focusPane(other.pane as PaneNo)}>Go there</button>
+        ) : null}
+        {view.connect.shown ? (
+          <Tip id={tip("connect")} text={connectHelp} end>
+            <button type="button" className="vexconnect" data-testid="vex-brain-connect"
+                    disabled={blocked || !!view.connect.off} aria-describedby={tip("connect")}
+                    onClick={(e) => {
+                      // The owner's own press only: a pointer, or Enter/Space on it — never a script's click.
+                      if (!isTrustedPress({ isTrusted: e.nativeEvent.isTrusted, button: e.button })) return;
+                      if (blocked) return;
+                      void vex.connectBrain();
+                    }}>
+              Connect
+            </button>
+          </Tip>
+        ) : null}
+        {view.disconnect.shown ? (
+          <Tip id={tip("disconnect")} text={helpText("disconnect", props.slot)} end>
+            <button type="button" className="quiet" data-testid="vex-brain-disconnect" disabled={blocked}
+                    aria-describedby={tip("disconnect")}
+                    onClick={(e) => {
+                      if (!isTrustedPress({ isTrusted: e.nativeEvent.isTrusted, button: e.button })) return;
+                      if (blocked) return;
+                      void vex.disconnectBrain();
+                    }}>
+              {view.disconnect.close ? "Close" : "Disconnect"}
+            </button>
+          </Tip>
+        ) : null}
+      </span>
     </div>
-    <div className="vexrow">
-      <button type="button" data-testid="vex-brain-btn" disabled={off || vex.brainBusy}
-              title="The brain's user port: printf and print output, and what you type goes to the program"
-              onClick={() => void vex.openBrain()}>
-        {brain ? "Show the brain terminal" : "Open the brain terminal"}
-      </button>
+    <div className={"vexbrain-text small" + (view.state === "error" ? " err" : view.state === "ended" ? "" : " muted")}
+         role="status" data-testid="vex-brain-text">
+      {view.text}
+      {view.state === "connected" && silent ? (
+        <span data-testid="vex-brain-silent">
+          {" "}Nothing printed yet: output appears here as the program prints. Not yet checked on the real robot:
+          whether this link starts through WSL (hardware check H4). If nothing ever appears, Disconnect, then Connect.
+        </span>
+      ) : null}
     </div>
+    {here && tid && view.terminal ? (
+      <div className="vexbrain-term">
+        <TerminalView id={tid} where={`vex-${pane}`} />
+      </div>
+    ) : null}
   </div>;
 }
 

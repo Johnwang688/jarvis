@@ -42,9 +42,17 @@ What it pins:
   - the output area: an action selects its tab, background events do not;
     tab badges follow state; fold, fill and a keyboard tablist; every control
     keeps its hover help (owner decision 7) and `?` lists them all;
-  - the brain terminal opens (Brain tab, on a click only) in the panel,
-    **reattaches after a reload**, and is paused for a download — only once
-    its build has succeeded — and opened again after it;
+  - **the Brain tab** (VX-UI-4a) draws the brain terminal in the VEX pane
+    (`vex-<pane>`), the same session with its "Jarvis can read" switch,
+    input and Ctrl-C; **it connects only on a trusted Connect** (pointer or
+    Enter/Space; owner decision 5) — never when the tab is shown, on a reload
+    or after a download, and never on a script's click or behind a card; it
+    says not connected, refused (the daemon's words), connected, paused for a
+    download (Connect off, with the reason), ended (exit code, Connect
+    again) and shown elsewhere (another VEX pane, a terminal pane; the panel
+    says it is in the VEX view); Disconnect closes it; a reload reattaches a
+    link already open; a download closes it only once its build has
+    succeeded, and **never reopens it**;
   - device info (`vexcom --json`) and the programs list (`vexcom --programs`)
     each ask their own read (⋯) and are drawn as text in the Device tab:
     markup in them is characters;
@@ -58,7 +66,8 @@ What it pins:
     download (L2); only a click's first click counts (L3); a project that
     becomes a VEX project is offered the view on focus (L4); a lone VEX pane
     survives a reload (L5); a dropped or stopped chain never reopens the
-    brain terminal (L6, in `_stop_checks`); a VEX pane whose project is gone
+    brain terminal (L6, in `_stop_checks`; since VX-UI-4a no chain does,
+    `_brain_checks`); a VEX pane whose project is gone
     says "Pick a project" (L7).
 
 Run (after `cd hud && npm ci --ignore-scripts && npm run build`):
@@ -259,7 +268,7 @@ def _offer_checks(page, mock, check, until, fake):
 
 
 def _setup_checks(page, mock, check, until, fake):
-    # Earlier sections (feedback) legitimately POST /vex/brain on a resume, and
+    # Earlier sections legitimately POST /vex/brain (their Connect), and
     # mock.calls is the whole run's: judge only what this section asked for.
     base = len(mock.calls)
     _reset(page, mock, until, configured=False)
@@ -656,40 +665,195 @@ def _card_checks(page, mock, check, until, fake):
     until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
 
 
+def _brain(page, n: int = V, sel: str = "") -> str:
+    """Inside pane `n`'s Brain tab."""
+    return _view(n, _tid("vex-brain-tab") + (f" {sel}" if sel else ""))
+
+
+def _brain_state(page, n: int = V) -> str | None:
+    tab = page.locator(_brain(page, n))
+    return tab.get_attribute("data-state") if tab.count() else None
+
+
+def _socks(fake, tid: str) -> int:
+    return len([s for s in fake.sockets if s["tid"] == tid])
+
+
+def _connect(page, mock, until, n: int = V) -> str:
+    """The owner's Connect in pane `n`'s Brain tab: the brain terminal's id, attached there."""
+    _tab(page, "brain", n)
+    page.locator(_brain(page, n, _tid("vex-brain-connect"))).click()
+    assert until(lambda: mock_vex.state(mock)["brain"], timeout=4), "Connect opened nothing"
+    brain = mock_vex.state(mock)["brain"]
+    until(lambda: page.evaluate(f"window.__hudTerminals.state('{brain}')") == "attached", timeout=6)
+    return brain
+
+
 def _brain_checks(page, mock, check, until, fake):
+    """VX-UI-4a: the brain terminal in the VEX pane's Brain tab. It connects only
+    on the owner's trusted Connect (owner decision 5) — never when the tab is
+    shown, on a reload or after a download — and is the same session (its
+    "Jarvis can read" switch, input and Ctrl-C) wherever it is drawn."""
     _reset(page, mock, until)
+    base = len(mock.calls)
     check("setup: the view draws", _ready(page, until))
     _tab(page, "brain")
-    placeholder = page.locator(_view(V, _tid("vex-brain-tab")))
-    check("the Brain tab says it connects only on a click (owner, §0.1 item 5)",
-          placeholder.count() == 1 and "connects only when you click" in placeholder.inner_text()
-          and "never just because this tab is shown" in placeholder.inner_text())
+    tab = page.locator(_brain(page))
+    connect = page.locator(_brain(page, V, _tid("vex-brain-connect")))
+    check("the Brain tab says it is not connected and never connects by itself",
+          tab.count() == 1 and _brain_state(page) == "off"
+          and "never connects by itself" in page.locator(_brain(page, V, _tid("vex-brain-text"))).inner_text())
+    check("its Connect is offered, enabled, in the Tab order, with hover help on the port and the download",
+          connect.count() == 1 and connect.is_enabled() and connect.get_attribute("tabindex") != "-1"
+          and "holds the robot's port" in _described(page, _brain(page, V, _tid("vex-brain-connect")))
+          and "never opens by itself" in _described(page, _brain(page, V, _tid("vex-brain-connect"))))
+    time.sleep(0.6)
+    check("showing the tab connects nothing (no POST /vex/brain)", not _posted_since(mock, base, "/vex/brain"))
+    _tab(page, "build")
+    page.locator(_view(V, _tid("vex-out-tab-build"))).focus()
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("ArrowRight")
     time.sleep(0.4)
-    check("showing the tab connects nothing", not _posted(mock, "/vex/brain"))
-    page.locator(_view(V, _tid("vex-brain-btn"))).click()
-    check("the brain terminal is asked for with {}", bool(until(lambda: _posted(mock, "/vex/brain"), timeout=4))
-          and _posted(mock, "/vex/brain")[-1] == {})
+    check("nor does showing it again, or reaching it with the keyboard",
+          not _posted_since(mock, base, "/vex/brain") and _brain_state(page) == "off")
+    _shot(page, "13-brain-not-connected")
+    connect.evaluate("e => e.click()")
+    connect.dispatch_event("click")
+    connect.evaluate("e => e.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}))")
+    time.sleep(0.5)
+    check("a script's click, an untrusted click event or a made-up Enter connects nothing",
+          not _posted_since(mock, base, "/vex/brain") and _brain_state(page) == "off")
+
+    # Under a card: Connect is off and a click does nothing.
+    _approval(mock, "vexbrain1")
+    until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
+    time.sleep(0.2)
+    check("under a card Connect is disabled", connect.is_disabled())
+    try:
+        connect.click(force=True, timeout=500)
+    except Exception:
+        pass
+    time.sleep(0.3)
+    check("and a click behind the card connects nothing", not _posted_since(mock, base, "/vex/brain"))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
+    until(lambda: connect.is_enabled(), timeout=3)
+
+    # The daemon refuses: said in its words, and Connect again.
+    mock_vex.state(mock)["brain_refuse"] = "A device-info read is running. One device action at a time."
+    connect.click()
+    text = page.locator(_brain(page, V, _tid("vex-brain-text")))
+    check("a refusal is said in the daemon's words, with Connect again (error state)",
+          bool(until(lambda: _brain_state(page) == "error", timeout=4))
+          and "One device action at a time" in text.inner_text() and connect.is_enabled())
+    _shot(page, "14-brain-refused")
+
+    # A trusted key press connects (the same rule as Stop).
+    connect.focus()
+    page.keyboard.press("Enter")
+    check("a trusted Enter on Connect connects: POST /vex/brain with {}",
+          bool(until(lambda: len(_posted_since(mock, base, "/vex/brain")) == 2, timeout=4))
+          and _posted_since(mock, base, "/vex/brain")[-1] == {})
     brain = mock_vex.state(mock)["brain"]
-    tab = page.locator(_tid(f"panel-tab-{brain}"))
-    check("it opens in the panel", bool(until(lambda: tab.count() > 0, timeout=4))
-          and tab.get_attribute("data-program") == "vex-brain")
     fake.ring[brain] = bytearray(b"battery 87%\r\n")
-    until(lambda: page.evaluate(f"window.__hudTerminals.state('{brain}')") == "attached", timeout=4)
-    socks = len([s for s in fake.sockets if s["tid"] == brain])
+    term = page.locator(_brain(page, V, f'[data-testid="terminal-{brain}"]'))
+    check("the brain terminal is drawn in the VEX pane (data-where vex-2), not the panel",
+          bool(until(lambda: term.count() == 1 and term.get_attribute("data-where") == f"vex-{V}", timeout=6))
+          and page.evaluate(f"window.__hudTerminals.shownIn('{brain}')") == f"vex-{V}"
+          and not page.locator(_tid("panel-tabs")).is_visible())
+    check("connected: it attaches and shows what the program prints",
+          bool(until(lambda: _brain_state(page) == "connected", timeout=6))
+          and bool(until(lambda: "battery 87%" in page.evaluate(f"window.__hudTerminals.text('{brain}')"), timeout=4)))
+    check("the tab's badge says live", page.locator(_view(V, _tid("vex-out-tab-brain"))).get_attribute("data-state") == "ok"
+          and "live" in (page.locator(_view(V, _tid("vex-out-tab-brain"))).get_attribute("aria-label") or ""))
+    check("the same session's \u201cJarvis can read\u201d switch is in its bar",
+          term.locator(_tid("term-readable")).count() == 1)
+    socks = _socks(fake, brain)
+    term.locator(".termslot").click()
+    page.keyboard.type("go")
+    page.keyboard.press("Control+c")
+    sock = next(s for s in reversed(fake.sockets) if s["tid"] == brain)
+    check("typing goes to the program, and Ctrl-C too",
+          bool(until(lambda: b"g" in b"".join(sock["frames"]) and b"\x03" in sock["frames"], timeout=4)),
+          str(sock["frames"][-4:]))
+    _shot(page, "15-brain-connected")
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+
+    # Another tab keeps it attached; the panel says where it is.
+    _tab(page, "build")
+    time.sleep(0.4)
+    check("switching to another tab keeps the session attached (no new socket)",
+          page.evaluate(f"window.__hudTerminals.state('{brain}')") == "attached" and _socks(fake, brain) == socks
+          and page.evaluate(f"window.__hudTerminals.shownIn('{brain}')") is None)
+    _tab(page, "brain")
+    until(lambda: term.count() == 1, timeout=4)
+    page.locator(_tid("toggle-panel")).click()
+    ptab = page.locator(_tid(f"panel-tab-{brain}"))
+    check("the panel's tab for it says it is shown in the VEX view",
+          bool(until(lambda: ptab.count() == 1 and ptab.get_attribute("data-place") == f"vex-{V}", timeout=4))
+          and "VEX view" in ptab.inner_text())
+    pel = page.locator(_tid("panel-elsewhere"))
+    check("and the panel draws it nowhere: \u201cshown in the VEX view\u201d with Go there",
+          bool(until(lambda: pel.count() == 1, timeout=4)) and "VEX view" in pel.inner_text()
+          and page.locator(f'[data-testid="terminal-{brain}"]').count() == 1
+          and _socks(fake, brain) == socks)
+    page.locator(_tid("toggle-panel")).click()
+
+    # A reload re-shows the open link — it never asks for one.
+    asked = len(_posted_since(mock, base, "/vex/brain"))
     page.reload()
     page.wait_for_selector('[data-testid="sidebar"]', state="attached")
-    tab = page.locator(_tid(f"panel-tab-{brain}"))
-    check("after a reload its panel tab is back", bool(until(lambda: tab.count() > 0, timeout=6)))
-    check("and it reattaches, its ring replayed",
-          bool(until(lambda: page.evaluate(f"window.__hudTerminals.state('{brain}')") == "attached", timeout=6))
-          and len([s for s in fake.sockets if s["tid"] == brain]) > socks
-          and "battery 87%" in page.evaluate(f"window.__hudTerminals.text('{brain}')"))
-    # A download pauses it — only once its build has succeeded — and opens it again after.
     _ready(page, until)
+    time.sleep(0.6)
+    check("a reload connects nothing", len(_posted_since(mock, base, "/vex/brain")) == asked)
+    _tab(page, "brain")
+    check("its Brain tab shows the link the daemon holds, reattached with its ring replayed",
+          bool(until(lambda: _brain_state(page) == "connected", timeout=6))
+          and _socks(fake, brain) > socks
+          and "battery 87%" in page.evaluate(f"window.__hudTerminals.text('{brain}')")
+          and len(_posted_since(mock, base, "/vex/brain")) == asked)
+
+    # Disconnect: a script's click does nothing; the owner's closes it and frees the port.
+    disc = page.locator(_brain(page, V, _tid("vex-brain-disconnect")))
+    check("Disconnect is offered, with its hover help", disc.count() == 1
+          and "frees the robot's port" in _described(page, _brain(page, V, _tid("vex-brain-disconnect"))))
+    disc.evaluate("e => e.click()")
+    time.sleep(0.4)
+    deletes = lambda: [c for c in mock.calls[base:] if c[0] == "DELETE" and c[1] == f"/terminals/{brain}"]  # noqa: E731
+    check("a script's click on Disconnect closes nothing", not deletes())
+    disc.click()
+    check("Disconnect closes the brain terminal (DELETE /terminals/{id})", bool(until(lambda: deletes(), timeout=4)))
+    check("and the tab is not connected again, with Connect",
+          bool(until(lambda: _brain_state(page) == "off", timeout=4)) and connect.is_enabled()
+          and page.locator(f'[data-testid="terminal-{brain}"]').count() == 0)
+    check("Disconnect opened nothing new", len(_posted_since(mock, base, "/vex/brain")) == asked)
+
+    # The program ends by itself: said, with its last output, and Connect again.
+    brain = _connect(page, mock, until)
+    fake.output(brain, b"vexcom: no V5 device found\r\n")
+    fake.exit(brain, 3)
+    check("a link whose program ended says so, with its exit code and its last output",
+          bool(until(lambda: _brain_state(page) == "ended", timeout=4))
+          and "exited with code 3" in page.locator(_brain(page, V, _tid("vex-brain-text"))).inner_text()
+          and "no V5 device found" in page.evaluate(f"window.__hudTerminals.text('{brain}')"))
+    check("and offers Connect again and Close", connect.is_enabled()
+          and page.locator(_brain(page, V, _tid("vex-brain-disconnect"))).inner_text().strip() == "Close")
+    _shot(page, "16-brain-ended")
+    asked = len(_posted_since(mock, base, "/vex/brain"))
+    connect.click()
+    check("Connect again opens a new link", bool(until(lambda: len(_posted_since(mock, base, "/vex/brain")) == asked + 1,
+                                                       timeout=4))
+          and bool(until(lambda: mock_vex.state(mock)["brain"] not in (None, brain), timeout=4)))
+    brain = mock_vex.state(mock)["brain"]
+    until(lambda: _brain_state(page) == "connected", timeout=6)
+
+    # A download pauses it — only once its build has succeeded — and never reopens it.
     base = len(mock.calls)
+    v = mock_vex.state(mock)
+    v["download_auto"] = False
     _auto(mock)
     page.locator(_view(V, _tid("vex-download-btn"))).click()
-    check("a download while it is open pauses it (closed for the download)",
+    check("a download while it is open closes it for the download",
           bool(until(lambda: _sent_downloads(mock), timeout=8))
           and any(c[0] == "DELETE" and c[1] == f"/terminals/{brain}" for c in mock.calls[base:]))
     calls = mock.calls[base:]
@@ -697,8 +861,65 @@ def _brain_checks(page, mock, check, until, fake):
     built_at = max(i for i, c in enumerate(calls) if c[0] == "POST" and c[1] == "/projects/p3/vex/build")
     check("only after the clean and the build: its output runs on while the project builds",
           closed_at > built_at, f"close at {closed_at}, last build POST at {built_at}")
-    check("and opens it again after", bool(until(lambda: mock_vex.state(mock)["brain"] not in (None, brain), timeout=6)),
-          str(mock_vex.state(mock)["brain"]))
+    _tab(page, "brain")
+    check("while the download runs the Brain tab says paused, and Connect is off with the reason",
+          bool(until(lambda: _brain_state(page) == "paused", timeout=4))
+          and "Paused for the download" in page.locator(_brain(page, V, _tid("vex-brain-text"))).inner_text()
+          and connect.is_disabled() and "download holds the robot's port" in _described(page, _brain(page, V, _tid("vex-brain-connect")))
+          and page.locator(_view(V, _tid("vex-out-tab-brain"))).get_attribute("data-state") == "unknown")
+    _shot(page, "17-brain-paused")
+    rec = next(iter(v["download_records"].values()))
+    rec.update(state="succeeded", exit_code=0, output="Finished", ended="2026-10-13T12:00:02+00:00")
+    until(lambda: page.evaluate("window.__hudVex.chain()") is None, timeout=6)
+    time.sleep(2.0)
+    check("after the download it is never opened again by itself (no POST /vex/brain)",
+          not _posted_since(mock, base, "/vex/brain") and mock_vex.state(mock)["brain"] is None)
+    closed = page.locator(_view(V, _tid("vex-brain-closed")))
+    check("the tab offers Connect again and says why it is closed (also under the status line)",
+          _brain_state(page) == "off" and connect.is_enabled()
+          and "closed for the download" in page.locator(_brain(page, V, _tid("vex-brain-text"))).inner_text()
+          and closed.count() == 1 and "Click Connect" in closed.inner_text())
+    _shot(page, "18-brain-after-download")
+    v["download_auto"] = True
+
+    # Shown elsewhere: a second VEX pane, then a terminal pane.
+    _reset(page, mock, until, {"preset": "cols3", "focused": 2,
+                               "panes": [{"view": "chat"}, {"view": "vex", "projectId": "p3"},
+                                         {"view": "vex", "projectId": "p5"}],
+                               "panel": {"open": False, "height": 260}})
+    ebase = len(mock.calls)
+    check("elsewhere setup: both views draw", _ready(page, until)
+          and bool(until(lambda: page.locator(_view(3, _tid("vex-card"))).count() > 0, timeout=5)))
+    brain = _connect(page, mock, until, 2)
+    silent = page.locator(_brain(page, 2, _tid("vex-brain-silent")))
+    check("connected with nothing printed yet: says so honestly, naming the unrun hardware check (H4)",
+          bool(until(lambda: _brain_state(page, 2) == "connected" and silent.count() == 1, timeout=4))
+          and "H4" in silent.inner_text() and "Nothing printed yet" in silent.inner_text())
+    fake.output(brain, b"$BEGIN,odom,x\r\n")
+    check("and stops saying it once the program prints",
+          bool(until(lambda: silent.count() == 0, timeout=4)))
+    _tab(page, "brain", 3)
+    check("another VEX pane's Brain tab says the terminal is shown in pane 2, and draws it nowhere",
+          bool(until(lambda: _brain_state(page, 3) == "elsewhere", timeout=4))
+          and "VEX view in pane 2" in page.locator(_brain(page, 3, _tid("vex-brain-text"))).inner_text()
+          and page.locator(_brain(page, 3, f'[data-testid="terminal-{brain}"]')).count() == 0
+          and page.locator(_brain(page, 2, f'[data-testid="terminal-{brain}"]')).count() == 1
+          and page.locator(_brain(page, 3, _tid("vex-brain-goto"))).count() == 1
+          and page.locator(_brain(page, 3, _tid("vex-brain-connect"))).count() == 0)
+    _shot(page, "19-brain-elsewhere", n=3)
+    _tab(page, "build", 2)
+    check("once pane 2 shows another tab, pane 3's Brain tab draws it",
+          bool(until(lambda: page.locator(_brain(page, 3, f'[data-testid="terminal-{brain}"]')).count() == 1, timeout=4))
+          and page.evaluate(f"window.__hudTerminals.shownIn('{brain}')") == "vex-3")
+    _switch_view(page, 2, "terminal")
+    page.locator(_tid(f"pane-2-pick-{brain}")).click()
+    check("a terminal pane showing it wins: the Brain tab says \u201cshown in pane 2\u201d",
+          bool(until(lambda: _brain_state(page, 3) == "elsewhere", timeout=4))
+          and "shown in pane 2" in page.locator(_brain(page, 3, _tid("vex-brain-text"))).inner_text()
+          and page.evaluate(f"window.__hudTerminals.shownIn('{brain}')") == "pane-2"
+          and page.locator(f'[data-testid="terminal-{brain}"]').count() == 1)
+    check("and nothing but the one Connect asked for a link",
+          len(_posted_since(mock, ebase, "/vex/brain")) == 1 and mock_vex.state(mock)["brain"] == brain)
 
 
 def _info_checks(page, mock, check, until, fake):
@@ -822,7 +1043,7 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("Escape closes ⋯ even with every item off and focus on ⋯",
           bool(until(lambda: page.locator(_view(3, _tid("vex-more-menu"))).count() == 0, timeout=2)))
     _tab(page, "brain", 3)
-    check("M1: and the brain terminal", page.locator(_view(3, _tid("vex-brain-btn"))).is_disabled())
+    check("M1: and the brain terminal's Connect", page.locator(_view(3, _tid("vex-brain-connect"))).is_disabled())
     check("M1: and every VEX pane's project picker",
           page.locator(_tid("pane-2-vex-project")).is_disabled()
           and page.locator(_tid("pane-3-vex-project")).is_disabled())
@@ -957,10 +1178,7 @@ def _passing_card_checks(page, mock, check, until, fake):
     _reset(page, mock, until)
     base = len(mock.calls)
     check("L2 setup: the view draws", _ready(page, until))
-    _tab(page, "brain")
-    page.locator(_view(V, _tid("vex-brain-btn"))).click()
-    until(lambda: mock_vex.state(mock)["brain"], timeout=4)
-    brain = mock_vex.state(mock)["brain"]
+    brain = _connect(page, mock, until)
     v = mock_vex.state(mock)
     page.locator(_view(V, _tid("vex-download-btn"))).click()
     until(lambda: _posted_since(mock, base, "/projects/p3/vex/build"), timeout=6)
@@ -1226,10 +1444,7 @@ def _stop_checks(page, mock, check, until, fake):
     _reset(page, mock, until)
     check("Stop setup: the view draws", _ready(page, until))
     check("nothing runs: no Stop", page.locator(_view(V, _tid("vex-stop"))).count() == 0)
-    _tab(page, "brain")
-    page.locator(_view(V, _tid("vex-brain-btn"))).click()
-    until(lambda: mock_vex.state(mock)["brain"], timeout=4)
-    brain = mock_vex.state(mock)["brain"]
+    brain = _connect(page, mock, until)
     base = len(mock.calls)
     v = mock_vex.state(mock)
     v["download_auto"] = False
@@ -1278,7 +1493,7 @@ def _stop_checks(page, mock, check, until, fake):
           and [c[1] for c in sent if c[0] == "DELETE"] == [f"/terminals/{brain}", f"/terminals/{dtid}"],
           str([(c[0], c[1]) for c in sent]))
     check("nothing is retried", len(v["downloads"]) == 1, str(v["downloads"]))
-    bnote = page.locator(_view(V, _tid("vex-brain-note")))
+    bnote = page.locator(_view(V, _tid("vex-brain-closed")))
     check("L6: a stopped chain never opens the brain terminal again, and says so",
           len(_posted_since(mock, base, "/vex/brain")) == 0
           and bnote.count() == 1 and "not opened again, since the download was stopped" in bnote.inner_text(),
