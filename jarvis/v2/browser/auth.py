@@ -557,11 +557,16 @@ class OwnerAuth:
             # adopts it; `_finish` still sends its `auth_closed`.
             prompt.answering = True
             self.host._publish_pane_tabs()
-            if (nav is not None and nav.task is not None
-                    and nav.task is not asyncio.current_task() and not nav.task.done()):
-                await self._send(session, "Page.stopLoading", {})
-            if session.prompt is prompt:            # (the stop may have settled it)
-                await self._finish(prompt, "changed", cancel=True)
+            try:
+                if (nav is not None and nav.task is not None
+                        and nav.task is not asyncio.current_task() and not nav.task.done()):
+                    await self._send(session, "Page.stopLoading", {})
+            finally:
+                # Also when this caller is cancelled during the stop: the
+                # prompt never lingers answering, unanswerable, holding its
+                # request until it expires (delta review LOW).
+                if session.prompt is prompt:        # (the stop may have settled it)
+                    await self._finish(prompt, "changed", cancel=True)
         if nav is not None and nav.task is not asyncio.current_task():
             try:
                 if not nav.task.done():

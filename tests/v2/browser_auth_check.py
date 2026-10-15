@@ -104,6 +104,30 @@ class Auth(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.credentials(),[]);self.assertEqual(len(cards()),1)
         closed=[m for m in self.sock.sent if m.get("t")=="auth_closed"]
         self.assertEqual([(m["id"],m["reason"]) for m in closed],[(nonce,"changed")])
+    async def test_a_caller_cancelled_during_the_stop_still_closes_the_prompt(self):
+        # Delta review LOW: cancelled while Page.stopLoading is awaited, the
+        # superseded prompt was never finished: answering, unanswerable and
+        # holding its request until it expired.
+        cdp=self.cdp;real_send=cdp.send;stopping=asyncio.Event()
+        async def send(method,params=None):
+            if method=="Page.stopLoading":
+                stopping.set();await asyncio.Event().wait()
+            return await real_send(method,params)
+        cdp.send=send
+        entered=asyncio.Event();hold=asyncio.Event()
+        async def first():
+            entered.set();await hold.wait()
+        async def second():return None
+        parent=asyncio.create_task(self.auth.navigate(self.tab,first,owner=True,port=18761))
+        await entered.wait();prompt=await self.challenge();await parent;nonce=prompt.nonce
+        newer=asyncio.create_task(self.auth.navigate(self.tab,second,owner=True,port=18761))
+        await stopping.wait();newer.cancel()
+        with self.assertRaises(asyncio.CancelledError):await newer
+        hold.set()
+        self.assertIsNone(self.session.prompt,"the superseded prompt was finished")
+        self.assertEqual(self.credentials(),[])
+        closed=[m for m in self.sock.sent if m.get("t")=="auth_closed"]
+        self.assertEqual([(m["id"],m["reason"]) for m in closed],[(nonce,"changed")])
     async def test_reconnect_rotates_nonce_without_resetting_budget(self):
         prompt=await self.challenge();nonce=prompt.nonce;started=self.session.budget.started
         self.tab.stream.gen=2;self.auth.refresh(self.tab)
