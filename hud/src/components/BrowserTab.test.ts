@@ -88,3 +88,31 @@ it.each(["mouse","touch","pen"])("cancels the entire outside dismissal pointer g
   await act(async()=>host.querySelector('[data-testid="remote-status"]')!.dispatchEvent(event));
   expect(event.defaultPrevented).toBe(true);expect(panel().hidden).toBe(true);
 });
+it("a Direct tab hides its localhost refusal while an external address opens in Remote",async()=>{
+  let fail:(e:Error)=>void=()=>{};
+  vi.mocked(control.submit).mockImplementation(()=>new Promise((_resolve,reject)=>{fail=reject;}));
+  await show({browser:{tabs:[{id:"page01",url:"",mode:"direct"}],active:"page01"}});
+  const input=host.querySelector<HTMLInputElement>('[data-testid="browser-url"]')!;
+  const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value")!.set!;
+  await act(async()=>{setter.call(input,"https://example.test/");input.dispatchEvent(new Event("input",{bubbles:true}));});
+  await act(async()=>host.querySelector<HTMLButtonElement>('[data-testid="browser-go"]')!.click());
+  expect(control.submit).toHaveBeenCalledExactlyOnceWith(1,"page01","https://example.test/");
+  expect(host.querySelector('[data-testid="browser-refused"]')).toBeNull();
+  expect(host.querySelector('[data-testid="browser-opening"]')?.textContent).toBe("Opening…");
+  await act(async()=>fail(new Error("The address could not be loaded.")));
+  expect(host.querySelector('[data-testid="browser-opening"]')).toBeNull();
+  expect(host.querySelector('[data-testid="browser-refused"]')?.textContent).toBe("The address could not be loaded.");
+});
+it("a submit that leaves the tab Direct ends Opening… and says why",async()=>{
+  let done:()=>void=()=>{};
+  vi.mocked(control.submit).mockImplementation(()=>new Promise<any>(resolve=>{done=()=>resolve(undefined);}));
+  await show({browser:{tabs:[{id:"page01",url:"",mode:"direct"}],active:"page01"}});
+  const input=host.querySelector<HTMLInputElement>('[data-testid="browser-url"]')!;
+  const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value")!.set!;
+  await act(async()=>{setter.call(input,"https://example.test/");input.dispatchEvent(new Event("input",{bubbles:true}));});
+  await act(async()=>host.querySelector<HTMLButtonElement>('[data-testid="browser-go"]')!.click());
+  expect(host.querySelector('[data-testid="browser-opening"]')).not.toBeNull();
+  await act(async()=>done());
+  expect(host.querySelector('[data-testid="browser-opening"]')).toBeNull();
+  expect(host.querySelector('[data-testid="browser-refused"]')?.textContent).toContain("only loads local servers");
+});

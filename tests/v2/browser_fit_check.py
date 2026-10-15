@@ -79,6 +79,14 @@ class Fit(B.BrowserStream):
                 f"{window.frames[-1][1:3] if window.frames else None}, fit {tab.stream.fitted} "
                 f"from {tab.fit_from} stuck {tab.fit_stuck}, calls {tab.calls}") from None
 
+    def assert_view(self, tid, view):
+        """The page's [innerWidth, innerHeight, devicePixelRatio]: the ratio
+        to float32 (Chrome divides the emulated scale by its own RASTER_SCALE,
+        so 1 reads 1.0000000298)."""
+        got = self.js(tid, PAGE_VIEW)
+        self.assertEqual(got[:2], view[:2])
+        self.assertAlmostEqual(got[2], view[2], delta=1e-6)
+
     def measured_more(self, tab, window, n):
         """Read frames until the fit has measured `n` more times."""
         start = tab.calls["Page.getLayoutMetrics"]
@@ -109,7 +117,7 @@ class Fit(B.BrowserStream):
         overrides = tab.calls["Emulation.setDeviceMetricsOverride"]
         self.measured_more(tab, window, 3)
         self.assertEqual(tab.calls["Emulation.setDeviceMetricsOverride"], overrides)
-        self.assertEqual(self.js(tid, PAGE_VIEW), [800, 960, 0.625])
+        self.assert_view(tid, [800, 960, 0.625])
         # Page points past the pane's width are the page's (the window's
         # `clientToPage` gives them): a click and the owner's cursor query.
         B.click(window, 780, 20)
@@ -140,7 +148,7 @@ class Fit(B.BrowserStream):
         self.measured_more(tab, window, 2)
         elapsed = time.monotonic() - began
         self.assertIsNone(tab.stream.fitted)
-        self.assertEqual(self.js(tid, PAGE_VIEW), [500, 600, 1])
+        self.assert_view(tid, [500, 600, 1])
         # Repaints are measured at most twice a second.
         self.assertLessEqual(tab.calls["Page.getLayoutMetrics"] - start, 2 * elapsed + 1.5)
 
@@ -154,7 +162,7 @@ class Fit(B.BrowserStream):
         overrides = tab.calls["Emulation.setDeviceMetricsOverride"]
         self.frames(window, 15)
         self.assertEqual(tab.calls["Emulation.setDeviceMetricsOverride"], overrides)
-        self.assertEqual(self.js(tid, PAGE_VIEW), [500, 600, 1])
+        self.assert_view(tid, [500, 600, 1])
         # An 800 px minimum that also runs 12 px past any width settles at
         # 800 + 12 instead of creeping 12 px a repaint.
         self.owner("POST", f"/browser/tabs/{tid}/navigate", {"url": self.url("/spot")})
@@ -200,7 +208,7 @@ class Fit(B.BrowserStream):
         self.measured_more(tab, window, 3)
         self.assertEqual(tab.calls["Emulation.setDeviceMetricsOverride"], overrides,
                          "a same-document navigation sets no viewport")
-        self.assertEqual(self.js(tid, PAGE_VIEW), [800, 960, 0.625])
+        self.assert_view(tid, [800, 960, 0.625])
         self.assertEqual(tab.stream.page_viewport(), (800, 960, 0.625))
         self.assertTrue(all(f[1:3] == (800, 960) for f in window.frames[-5:]))
         # A new document is: page-initiated, then the owner's.
