@@ -535,9 +535,22 @@ class NpmCi(Base):
         hud = self.hud()
         O.npm_ci(hud)
         (argv, kwargs), = programs.calls
-        self.assertEqual(argv, ["/usr/bin/npm", "ci"])
+        self.assertEqual(argv, ["/usr/bin/npm", "ci", "--ignore-scripts"])
         self.assertEqual(kwargs["cwd"], str(hud))
         self.assertEqual(kwargs["timeout"], O.NPM_CI_TIMEOUT)
+
+    def test_it_never_runs_install_scripts(self):
+        # The owner's decision of 2026-10-15: no package's install script runs.
+        # On the command line, where no .npmrc can override it, and nothing on
+        # it turns scripts back on.
+        _, programs = self.world()
+        O.npm_ci(self.hud())
+        (argv, _), = programs.calls
+        self.assertEqual(argv[1], "ci")
+        self.assertIn("--ignore-scripts", argv)
+        self.assertFalse([a for a in argv if a.startswith("--ignore-scripts=") or "foreground-scripts" in a
+                          or a in ("--no-ignore-scripts", "--scripts")], argv)
+        self.assertEqual(O.NPM_CI_ARGS, ("ci", "--ignore-scripts"))
 
     def test_a_failed_npm_ci_refuses(self):
         self.world(npm_rc=1)
@@ -734,13 +747,16 @@ class Rebuild(RebuildWorld):
         marker = (self.repo / "hud" / "node_modules" / ".package-lock.json").stat().st_mtime
         os.utime(self.repo / "hud" / "package-lock.json", (marker + 10, marker + 10))
         self.assertEqual(self.rebuild(), O.OK, self.said())
-        self.assertEqual(programs.events[:2], ["npm ci", "build"])
+        self.assertEqual(programs.events[:2], ["npm ci --ignore-scripts", "build"])
+        self.assertIn("Running `npm ci --ignore-scripts`", self.said())
         self.assertIn("package-lock.json is newer than node_modules", self.said())
 
     def test_clean_forces_npm_ci(self):
         _, programs = self.world(self.daemon())
         self.assertEqual(self.rebuild(clean=True), O.OK, self.said())
         self.assertEqual(programs.verbs("npm"), ["ci"])
+        (argv, _), = [c for c in programs.calls if os.path.basename(c[0][0]) == "npm"]
+        self.assertEqual(argv[1:], ["ci", "--ignore-scripts"], "rebuild --clean runs no install scripts")
 
     def test_a_failed_npm_ci_installs_nothing(self):
         self.world(self.daemon(), npm_rc=1)
