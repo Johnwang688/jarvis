@@ -241,9 +241,16 @@ def main(argv=None):
                 models = {u: (ct, s, p) for u, ct, s, p in list(served) if u.endswith(".onnx") and "silero" not in u}
                 check("the keyword model files are served by the HUD's own origin under /assets",
                       len(models) >= 3 and all(u.startswith(base + "/assets/") for u in models), str(list(models)))
-                policies = {p for u, ct, s, p in list(served) if p}
-                check("every wake asset carries the HUD's CSP: worker-src 'self', wasm-unsafe-eval, never unsafe-eval",
-                      bool(policies) and all("worker-src 'self'" in p and "'wasm-unsafe-eval'" in p and " 'unsafe-eval'" not in p for p in policies), str(policies))
+                # 'wasm-unsafe-eval' rides on the worker's own script response only; the
+                # model files and the .wasm carry the page's policy (owner, 2026-10-15).
+                from jarvis.v2 import hud_api as H
+                path = lambda u: u.split("?")[0][len(base):].lstrip("/")
+                bad = [(u, p) for u, ct, s, p in list(served) if p != H.content_security_policy(wasm=H.wasm_script(path(u)))]
+                scripts = [u for u, *_ in list(served) if H.wasm_script(path(u))]
+                check("every wake asset carries the policy the daemon gives it: worker-src 'self', wasm-unsafe-eval "
+                      "on the worker's script only, never unsafe-eval",
+                      bool(scripts) and not bad and all("worker-src 'self'" in p and " 'unsafe-eval'" not in p for *_, p in list(served)),
+                      f"scripts={scripts} bad={bad[:2]}")
                 sha = lambda u: page.evaluate("""async (u) => { const b = new Uint8Array(await (await fetch(u)).arrayBuffer());
                   const d = await crypto.subtle.digest('SHA-256', b); return Array.from(new Uint8Array(d), x => x.toString(16).padStart(2, '0')).join(''); }""", u)
                 tokens_urls = {u for u, *_ in list(served) if u.endswith(".txt")}     # (a snapshot: fetching them adds to `served`)

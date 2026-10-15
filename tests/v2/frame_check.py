@@ -240,14 +240,17 @@ class Base(unittest.TestCase):
         self.seen.append((listener, method, path, status))
         return status, got, content
 
-    def assert_hardened(self, got, what, own=None):
+    def assert_hardened(self, got, what, own=None, wasm=False):
         """One CSP header, and it is the whole HUD policy (ED-4) with the frame
         rule (WP-E) — narrowed only where the response states its own
-        directives (`own`: the avatar's) — plus `X-Frame-Options: DENY`."""
+        directives (`own`: the avatar's), widened by `'wasm-unsafe-eval'`
+        only on a worker script's response (`wasm`, owner 2026-10-15) — plus
+        `X-Frame-Options: DENY`."""
         csp = [v for n, v in got if n.lower() == CSP.lower()]
         xfo = [v for n, v in got if n.lower() == XFO.lower()]
         self.assertEqual(len(csp), 1, f"{what}: exactly one CSP header, got {csp}")
-        self.assertEqual(csp[0], H.content_security_policy(own), what)
+        self.assertEqual(csp[0], H.content_security_policy(own, wasm=wasm), what)
+        self.assertEqual("'wasm-unsafe-eval'" in csp[0], wasm, f"{what}: WebAssembly only on a script")
         self.assertTrue(csp[0].endswith("; frame-ancestors 'none'"), what)
         self.assertEqual(csp[0].count("frame-ancestors"), 1, what)
         self.assertEqual(xfo, ["DENY"], f"{what}: X-Frame-Options")
@@ -480,7 +483,7 @@ class FrameHeaders(Base):
                         status, got, content = self.ask(listener, "GET", path)
                         self.assertEqual(status, 200)
                         self.assertTrue(content)
-                        self.assert_hardened(got, f"{listener} {path}")
+                        self.assert_hardened(got, f"{listener} {path}", wasm=path.endswith(".js"))
 
     def test_the_installed_hud_and_its_assets_carry_the_policy(self):
         # C-1: what the owner's daemon serves is an installed build. The page,
@@ -515,7 +518,7 @@ class FrameHeaders(Base):
                     status, got, content = self.ask(listener, "GET", path)
                     self.assertEqual(status, 200, content)
                     self.assertIn(mime, dict(got)["Content-Type"])
-                    self.assert_hardened(got, f"{listener} installed {path}")
+                    self.assert_hardened(got, f"{listener} installed {path}", wasm=path.endswith(".js"))
             # The manifest's type is set explicitly, not left to the platform's
             # mimetypes table (review of PR #83: Python 3.14 knows .webmanifest).
             with patch("jarvis.v2.hud_api.mimetypes.guess_type", return_value=(None, None)):
@@ -525,6 +528,56 @@ class FrameHeaders(Base):
             status, got, _ = self.ask(listener, "GET", "/assets/absent.js")
             self.assertEqual(status, 404)
             self.assert_hardened(got, f"{listener} absent asset")
+
+    def test_the_approval_page_never_allows_webassembly(self):
+        # The owner's decision of 2026-10-15: the document that draws approval
+        # cards carries no 'wasm-unsafe-eval'. WebAssembly runs only in
+        # workers, whose policy is their own script's response — the one
+        # response that carries it. Installed and HUD_DEV alike, both listeners.
+        from jarvis.v2 import hud_install
+        dist = self.root / "wasm-built"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
+        (dist / "assets" / "worker-9a8b.js").write_text("self.onmessage = () => {}")
+        (dist / "assets" / "index-7c6d.js").write_text("console.log('HUD')")
+        (dist / "assets" / "tree-sitter-cpp-5e6f.wasm").write_bytes(b"\0asm\1\0\0\0")
+        (dist / "assets" / "index.html").write_text("<!doctype html><title>not the page</title>")
+        (dist / "manifest.webmanifest").write_text('{"id":"/"}')
+        root = self.root / "wasm-installed"
+        hud_install.install(dist, root)
+        for dev, where in ((True, dist), (False, root)):
+            with patch.object(config, "HUD_DIST", where), patch.object(config, "HUD_DEV", dev):
+                for listener in ("hud", "api"):
+                    for path, status, wasm in (("/", 200, False), ("/index.html", 404, False),
+                                               ("/assets/index.html", 200, False),
+                                               ("/assets/worker-9a8b.js", 200, True),
+                                               ("/assets/index-7c6d.js", 200, True),
+                                               ("/assets/worker-9a8b.js?v=1", 200, True),
+                                               ("/assets/tree-sitter-cpp-5e6f.wasm", 200, False),
+                                               ("/assets/absent.js", 404, False),
+                                               ("/manifest.webmanifest", 200, False),
+                                               ("/status", 200, False)):
+                        with self.subTest(dev=dev, listener=listener, path=path):
+                            got_status, got, content = self.ask(listener, "GET", path)
+                            self.assertEqual(got_status, status, content[:200])
+                            self.assert_hardened(got, f"{listener} {path} dev={dev}", wasm=wasm)
+                            csp = dict((n.lower(), v) for n, v in got)[CSP.lower()]
+                            if path == "/":
+                                self.assertIn("script-src 'self';", csp)
+                                self.assertNotIn("wasm", csp)
+
+    def test_only_a_script_under_assets_is_a_worker_script(self):
+        for name, want in (("assets/worker-9a8b.js", True), ("assets/editor.worker-3c4d.js", True),
+                           ("assets/index-7c6d.js", True), ("index.html", False), ("", False),
+                           ("assets/index.html", False), ("assets/x.wasm", False), ("assets/x.js.map", False),
+                           ("assets/sub/x.js", False), ("icons/x.js", False), ("x.js", False),
+                           ("assets/.js", False), ("assets/", False), ("assets/x.mjs", False),
+                           ("manifest.webmanifest", False), ("../assets/x.js", False)):
+            with self.subTest(name=name):
+                self.assertIs(H.wasm_script(name), want)
+        # The preview listener never takes the grant, even when asked.
+        preview = SimpleNamespace(server=SimpleNamespace(preview_only=True))
+        self.assertNotIn("wasm", dict(H.frame_headers(preview, wasm=True))["Content-Security-Policy"])
 
     def test_a_response_with_its_own_policy_keeps_both_halves_in_one_header(self):
         # The avatar's SVG locks itself down further; the frame rule rides in
@@ -548,8 +601,8 @@ class FrameHeaders(Base):
         self.assertEqual(len(names), len(set(names)), "no directive twice")
         got = {d[0]: d[1:] for d in directives}
         self.assertEqual(got["default-src"], ["'none'"])
-        self.assertEqual(got["script-src"], ["'self'", "'wasm-unsafe-eval'"],
-                         "no inline, no eval; WebAssembly compiles (ED-5's tree-sitter)")
+        self.assertEqual(got["script-src"], ["'self'"],
+                         "no inline, no eval, and no WebAssembly in a document (owner, 2026-10-15)")
         self.assertEqual(got["worker-src"], ["'self'"])
         self.assertEqual(got["connect-src"], ["'self'"])
         self.assertEqual(got["style-src"], ["'self'", "'unsafe-inline'"])
@@ -562,9 +615,14 @@ class FrameHeaders(Base):
         for name in ("base-uri", "form-action", "object-src", "frame-ancestors"):
             self.assertEqual(got[name], ["'none'"], name)
         self.assertEqual(names[-1], "frame-ancestors")
-        for word in ("'unsafe-eval'", "'unsafe-hashes'", "blob:", " * ", "https:"):
+        for word in ("'unsafe-eval'", "'unsafe-hashes'", "blob:", " * ", "https:", "'wasm-unsafe-eval'"):
             self.assertNotIn(word, f" {policy} ", word)
-        self.assertEqual(policy.count("'wasm-unsafe-eval'"), 1, "WebAssembly in script-src only")
+        # A worker script's response (ED-5's tree-sitter, the VAD and wake-word
+        # workers): the same policy with WebAssembly in script-src, and only there.
+        worker = H.content_security_policy(wasm=True)
+        self.assertEqual(worker, policy.replace("script-src 'self';", "script-src 'self' 'wasm-unsafe-eval';"))
+        self.assertEqual(worker.count("'wasm-unsafe-eval'"), 1, "WebAssembly in script-src only")
+        self.assertNotIn("'unsafe-eval'", worker.replace("'wasm-unsafe-eval'", ""))
 
     def test_a_response_may_only_narrow_the_policy(self):
         base = H.content_security_policy()
@@ -574,17 +632,23 @@ class FrameHeaders(Base):
                          base.replace("manifest-src 'self'", "manifest-src 'none'"))
         self.assertNotIn("manifest-src", H.content_security_policy("default-src 'none'"),
                          "manifest-src is a fetch directive: default-src can narrow it away")
-        self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF' 'WASM-UNSAFE-EVAL'"), base,
-                         "keywords fold case")
+        self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF'"), base, "keywords fold case")
         self.assertEqual(H.content_security_policy("script-src 'none'"),
-                         base.replace("script-src 'self' 'wasm-unsafe-eval'", "script-src 'none'"))
-        # A response may drop WebAssembly (ED-5) and keep its script.
-        self.assertEqual(H.content_security_policy("script-src 'self'"),
-                         base.replace("script-src 'self' 'wasm-unsafe-eval'", "script-src 'self'"))
+                         base.replace("script-src 'self'", "script-src 'none'"))
+        # A worker script's response may narrow its own grant, folding case,
+        # and drop WebAssembly again; it may not loosen anything else.
+        worker = H.content_security_policy(wasm=True)
+        self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF' 'WASM-UNSAFE-EVAL'", wasm=True), worker)
+        self.assertEqual(H.content_security_policy("script-src 'self'", wasm=True), base)
+        for loosening in ("script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'", "worker-src blob:", "script-src *"):
+            with self.subTest(loosening=loosening, wasm=True), self.assertRaises(ValueError):
+                H.content_security_policy(loosening, wasm=True)
         self.assertEqual(H.content_security_policy("connect-src 'none'; img-src 'none'"),
                          base.replace("connect-src 'self'", "connect-src 'none'")
                              .replace("img-src 'self' data:", "img-src 'none'"))
         for loosening in ("script-src 'self' 'unsafe-eval'", "script-src 'self' 'unsafe-inline'",
+                          "script-src 'self' 'wasm-unsafe-eval'",          # a document cannot grant itself WebAssembly
+                          "SCRIPT-SRC 'SELF' 'WASM-UNSAFE-EVAL'", "script-src 'wasm-unsafe-eval'",
                           "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'",
                           "script-src 'wasm-unsafe-eval' 'unsafe-hashes'", "script-src *", "script-src https:",
                           "connect-src https://example.com", "connect-src ws:", "img-src 'self' blob:",

@@ -3,7 +3,8 @@ and the three timers (plan §3.2, decision V-1).
 
 What it proves, in a real Chromium against the mock daemon:
   - the Silero worker really loads under the HUD's CSP (same-origin worker, WASM and
-    model, `wasm-unsafe-eval` only, no `unsafe-eval`, no CSP violation), the model
+    model; `wasm-unsafe-eval` only on the worker script's own response, never the page's
+    or the model's (owner, 2026-10-15); no `unsafe-eval`, no CSP violation), the model
     served is the pinned file, and Settings -> Voice names the detector in use;
   - synthetic Kokoro speech played through Chrome's fake microphone
     (`--use-file-for-fake-audio-capture`, never a real voice) is detected by Silero:
@@ -223,9 +224,16 @@ def main(argv=None):
                       and all(u.startswith(base + "/assets/silero_vad") for u in models), str(models))
                 check("so is the onnxruntime WebAssembly, as application/wasm", len(wasms) >= 1
                       and all(u.startswith(base + "/assets/") and ct.startswith("application/wasm") for u, ct in wasms), str(wasms))
-                policies = {p for *_, p in seen if p}
-                check("every one of them carries the HUD's CSP: wasm-unsafe-eval, never unsafe-eval",
-                      bool(policies) and all("'wasm-unsafe-eval'" in p and " 'unsafe-eval'" not in p and "worker-src 'self'" in p for p in policies), str(policies))
+                # The worker's own script response carries 'wasm-unsafe-eval' (the policy a
+                # worker runs under); the model and the .wasm carry the page's, which never
+                # does (owner, 2026-10-15; hud_api.wasm_script).
+                from jarvis.v2 import hud_api as H
+                path = lambda u: u.split("?")[0][len(base):].lstrip("/")
+                bad = [(u, p) for u, _, _, p in seen if p != H.content_security_policy(wasm=H.wasm_script(path(u)))]
+                scripts = [u for u, *_ in seen if H.wasm_script(path(u))]
+                check("each carries the policy the daemon gives it: wasm-unsafe-eval on the worker's script only, never unsafe-eval",
+                      bool(scripts) and not bad and all(" 'unsafe-eval'" not in p and "worker-src 'self'" in p for *_, p in seen),
+                      f"scripts={scripts} bad={bad[:2]}")
                 served = (REPO / "hud" / "vendor" / "silero-vad" / "silero_vad_v5.1.2.onnx").read_bytes()
                 fetched = page.evaluate("""async (u) => { if (!u) return ''; const b = new Uint8Array(await (await fetch(u)).arrayBuffer());
                   const d = await crypto.subtle.digest('SHA-256', b); return Array.from(new Uint8Array(d), x => x.toString(16).padStart(2, '0')).join(''); }""", models[0] if models else "")

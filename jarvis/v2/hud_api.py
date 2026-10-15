@@ -1036,16 +1036,28 @@ _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 # time runs in the window that gates approvals: no inline script, no script
 # from another origin, no `eval`, no plugin, no `<base>`, no form posting
 # anywhere. Why each line:
-#   - `script-src 'self' 'wasm-unsafe-eval'`: the bundle only. **No
-#     `'unsafe-eval'`**: no string becomes JavaScript (`eval`, `new
-#     Function` and a string `setTimeout` stay refused).
-#     `'wasm-unsafe-eval'` (ED-5) lets WebAssembly compile, and nothing else:
-#     tree-sitter's runtime and grammars, which the syntax worker fetches
-#     only from the map built into it (`hud/src/lib/syntax/assets.ts` refuses
-#     any other URL before a request is made) and compiles from bytes. A
-#     worker takes its policy from its own script's response, so the worker
-#     needs it on `/assets/*` — and every response carries this one policy.
-#     tests/face/hud_v2_syntax_check.py loads every grammar under it.
+#   - `script-src 'self'`: the bundle only. **No `'unsafe-eval'`**: no
+#     string becomes JavaScript (`eval`, `new Function` and a string
+#     `setTimeout` stay refused). **No `'wasm-unsafe-eval'` either** on any
+#     document — the HUD page that draws approval cards, `index.html`, the
+#     503 pages, JSON, errors (the owner's decision of 2026-10-15, which
+#     overrides plan §2.7's one-policy-everywhere for WebAssembly): no
+#     WebAssembly compiles in the window that gates approvals.
+#   - `script-src 'self' 'wasm-unsafe-eval'` on the HUD's own JavaScript
+#     files under `/assets/` only (`wasm_script`, `binary(wasm=True)`), the
+#     one widening this module makes. WebAssembly runs only in dedicated
+#     module workers — tree-sitter's syntax worker (ED-5), the VAD/RNNoise
+#     `listen` worker and the wake-word worker (onnxruntime-web) — and a
+#     worker takes its policy from **its own script's response**, not the
+#     page's, so the grant rides on those responses alone. A `.js` response
+#     is never a document that runs script (`nosniff`, `text/javascript`),
+#     and a module the page itself imports runs under the page's policy, so
+#     the grant on every `/assets/*.js` reaches workers and nothing else.
+#     The syntax worker fetches grammars only from the map built into it
+#     (`hud/src/lib/syntax/assets.ts` refuses any other URL before a request
+#     is made) and compiles from bytes. tests/face/hud_v2_syntax_check.py
+#     loads every grammar under it; tests/face/hud_v2_csp_check.py proves
+#     the page itself cannot compile WebAssembly.
 #   - `worker-src 'self'`: Monaco's `editor.worker` and the syntax worker
 #     (ED-5), module workers Vite emits under `/assets/` (no `blob:` worker).
 #   - `connect-src 'self'`: `fetch`, the `/events` stream, the `/stt` upload
@@ -1070,7 +1082,7 @@ _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 #   - `base-uri`, `form-action`, `object-src 'none'`: nothing to allow.
 HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("default-src", ("'none'",)),
-    ("script-src", ("'self'", "'wasm-unsafe-eval'")),
+    ("script-src", ("'self'",)),
     ("worker-src", ("'self'",)),
     ("connect-src", ("'self'",)),
     ("style-src", ("'self'", "'unsafe-inline'")),
@@ -1084,6 +1096,22 @@ HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("form-action", ("'none'",)),
     ("object-src", ("'none'",)),
 )
+# The one widening of `HUD_POLICY` (owner, 2026-10-15): `script-src` on a
+# worker script's response, so WebAssembly compiles in a worker and never in
+# the page. Only `wasm_script` decides which responses carry it.
+WASM_SCRIPT_SRC: tuple[str, ...] = ("'self'", "'wasm-unsafe-eval'")
+
+
+def wasm_script(name: str) -> bool:
+    """Whether the HUD file `name` (relative to the build, `assets/x.js`) is
+    served with `WASM_SCRIPT_SRC`: a JavaScript file directly under `assets/`
+    — Vite's chunks, the worker scripts among them — and nothing else. Never
+    `index.html`, never a document, never a `.wasm` (its own response's
+    policy does not govern the worker that compiles it)."""
+    parts = name.split("/")
+    return len(parts) == 2 and parts[0] == "assets" and parts[1].endswith(".js") and parts[1] != ".js"
+
+
 # The avatar SVG's own lockdown (`GET /avatar.svg`): nothing but its own
 # inline styles, should the file ever be opened as a document.
 AVATAR_CSP = "default-src 'none'; style-src 'unsafe-inline'"
@@ -1128,7 +1156,15 @@ def _source(token: str) -> str:
     return token.lower() if token.startswith("'") or token.endswith(":") else token
 
 
-def _narrowed(own: list[str]) -> list[tuple[str, tuple[str, ...]]]:
+def _policy(wasm: bool) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """`HUD_POLICY`, or — for a worker script's response — the same with
+    `script-src` widened to `WASM_SCRIPT_SRC`."""
+    if not wasm:
+        return HUD_POLICY
+    return tuple((name, WASM_SCRIPT_SRC if name == "script-src" else sources) for name, sources in HUD_POLICY)
+
+
+def _narrowed(own: list[str], wasm: bool = False) -> list[tuple[str, tuple[str, ...]]]:
     """`HUD_POLICY` with a response's own directives folded in — narrowing only.
 
     A response may restate a directive the policy sets, with a subset of its
@@ -1138,8 +1174,10 @@ def _narrowed(own: list[str]) -> list[tuple[str, tuple[str, ...]]]:
     `default-src` (necessarily `'none'`) also drops every fetch directive of
     the policy it does not restate, so they fall back to its `'none'` — the
     avatar's `default-src 'none'; style-src 'unsafe-inline'` keeps exactly the
-    lockdown it had before the policy existed."""
-    base = dict(HUD_POLICY)
+    lockdown it had before the policy existed. `wasm` starts from the worker
+    script's policy (`_policy`) instead; the narrowing rule is the same."""
+    policy = _policy(wasm)
+    base = dict(policy)
     stated: dict[str, tuple[str, ...]] = {}
     for directive in own:
         name, *sources = directive.split()
@@ -1154,7 +1192,7 @@ def _narrowed(own: list[str]) -> list[tuple[str, tuple[str, ...]]]:
             raise ValueError(f"a response's own {name!r} may only narrow the HUD policy's")
         stated[name] = wanted
     merged = []
-    for name, sources in HUD_POLICY:
+    for name, sources in policy:
         if name in stated:
             merged.append((name, stated[name]))
         elif "default-src" in stated and name in _FETCH:
@@ -1164,15 +1202,17 @@ def _narrowed(own: list[str]) -> list[tuple[str, tuple[str, ...]]]:
     return merged
 
 
-def content_security_policy(*extra: str | None) -> str:
+def content_security_policy(*extra: str | None, wasm: bool = False) -> str:
     """The one `Content-Security-Policy` the HUD and API listeners send.
 
     `HUD_POLICY` (ED-4) and `frame-ancestors 'none'` (WP-E), in one header; a
     response may add directives of its own (an avatar's SVG locks itself
     down further), checked by `_own_directives` (no comma, printable ASCII,
     nothing reserved) and by `_narrowed` (they may only narrow the policy).
-    One builder, so no response ever sends a second, conflicting policy."""
-    merged = _narrowed(_own_directives(extra))
+    One builder, so no response ever sends a second, conflicting policy.
+    `wasm=True` is a worker script's response (`wasm_script`): `script-src`
+    also allows `'wasm-unsafe-eval'`; never a document's."""
+    merged = _narrowed(_own_directives(extra), wasm=bool(wasm))
     return "; ".join([*(f"{name} {' '.join(sources)}" for name, sources in merged), FRAME_ANCESTORS])
 
 
@@ -1183,22 +1223,23 @@ def workshop_security_policy(*extra: str | None) -> str:
     return "; ".join([*_own_directives(extra), WORKSHOP_SANDBOX])
 
 
-def frame_headers(handler, csp: str | None = None) -> list[tuple[str, str]]:
+def frame_headers(handler, csp: str | None = None, *, wasm: bool = False) -> list[tuple[str, str]]:
     """The headers every response on `handler`'s listener carries.
 
-    The HUD and API listeners: the CSP (with `csp`'s directives, if any) and
+    The HUD and API listeners: the CSP (with `csp`'s directives, if any;
+    `wasm` for a worker script's response, `wasm_script`) and
     `X-Frame-Options: DENY`. The preview listener: no frame rule (the HUD
     frames it), but one CSP that sandboxes every document it serves, with
-    `csp`'s directives merged in."""
+    `csp`'s directives merged in — and never `wasm`."""
     if getattr(getattr(handler, "server", None), "preview_only", False):
         return [("Content-Security-Policy", workshop_security_policy(csp))]
-    return [("Content-Security-Policy", content_security_policy(csp)), ("X-Frame-Options", "DENY")]
+    return [("Content-Security-Policy", content_security_policy(csp, wasm=wasm)), ("X-Frame-Options", "DENY")]
 
 
-def binary(handler, data, mime, *, csp=None, status=200, headers=None):
+def binary(handler, data, mime, *, csp=None, wasm=False, status=200, headers=None):
     # Checked before a byte is written: a bad policy is one 400 (the
     # dispatcher's answer to a ValueError), never half a response.
-    frame_headers(handler, csp)
+    frame_headers(handler, csp, wasm=wasm)
     handler.send_response(status)
     handler.send_header("Content-Type", mime)
     handler.send_header("Content-Length", str(len(data)))
@@ -1208,6 +1249,7 @@ def binary(handler, data, mime, *, csp=None, status=200, headers=None):
         handler.send_header(name, value)
     # Folded into the one policy by the handler's `end_headers` (`frame_headers`).
     handler._csp = csp
+    handler._wasm = bool(wasm)
     handler.end_headers()
     handler._streaming = True
     handler.wfile.write(data)
@@ -1299,7 +1341,9 @@ def hud_files(handler, parts):
                 fail(404, "file not found")
     mime = "application/manifest+json" if name.endswith(".webmanifest") else (
         mimetypes.guess_type(name)[0] or "application/octet-stream")
-    return binary(handler, data, mime)
+    # A worker script's response carries `'wasm-unsafe-eval'`; the page never
+    # does (owner, 2026-10-15). `parts == [""]` is `index.html` by name only.
+    return binary(handler, data, mime, wasm=parts != [""] and wasm_script(name))
 
 
 # The routes whose body is audio, not JSON: an explicit set, never a prefix (plan 3.13).

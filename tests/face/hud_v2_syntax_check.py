@@ -20,12 +20,14 @@ read-only test hooks). The checks, each written to bite:
     and the paragraph's `**bold**` comes from the inline grammar;
   - a 1.2 MB file stays on Monarch and its editor says "syntax: basic (large
     file)";
-  - **every grammar loads under the HUD's CSP** (ED-4's policy plus ED-5's
-    `'wasm-unsafe-eval'`): a Markdown file with a fence per language makes
-    the worker compile all thirteen, each `.wasm` and the runtime's come from
-    `/assets/` on the HUD's origin as `application/wasm` under the one
-    policy, the worker reports every grammar compiled, and no
-    `securitypolicyviolation` is raised anywhere;
+  - **every grammar loads under the HUD's CSP** (ED-4's policy; ED-5's
+    `'wasm-unsafe-eval'` only on the worker script's own response, never the
+    page's — the owner's decision of 2026-10-15): a Markdown file with a
+    fence per language makes the worker compile all thirteen, each `.wasm`
+    and the runtime's come from `/assets/` on the HUD's origin as
+    `application/wasm` under the page's policy, the worker reports every
+    grammar compiled, the worker's script carried the grant and `/` did
+    not, and no `securitypolicyviolation` is raised anywhere;
   - the loader refuses a URL outside its map (another origin, another path on
     this one, `data:`, `blob:`), and passes one it ships;
   - **folding from the tree (ED-6)**, read off the margin's fold controls as
@@ -38,7 +40,7 @@ read-only test hooks). The checks, each written to bite:
     budget folds by indentation (its unindented top-level list, which folds
     from the tree in a small file, does not).
 
-Run alone (after `cd hud && npm ci && npm run build`):
+Run alone (after `cd hud && npm ci --ignore-scripts && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_syntax_check.py
 It also runs inside `hud_v2_check.py`, after the editor-scheme section.
 """
@@ -135,6 +137,11 @@ def syntax_checks(browser, mock, base, check, until, guard_live, init_script):
     ctx.add_init_script(init_script)
     wasm: list = []
     ctx.on("response", lambda r: wasm.append(r) if r.url.split("?")[0].endswith(".wasm") else None)
+    # Every response's policy by URL: the page's and the worker scripts' (owner,
+    # 2026-10-15: only a worker script's response carries 'wasm-unsafe-eval').
+    served: dict[str, list[str]] = {}
+    ctx.on("response", lambda r: served.setdefault(r.url.split("?")[0], [
+        h["value"] for h in r.headers_array() if h["name"].lower() == "content-security-policy"]))
     page = ctx.new_page()
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)))
@@ -161,7 +168,7 @@ def syntax_checks(browser, mock, base, check, until, guard_live, init_script):
         for section in (_every_grammar_checks, _cpp_checks, _fence_checks, _large_checks, _loader_checks,
                         _fold_checks):
             try:
-                section(page, mock, base, check, until, wasm=wasm, workers=workers)
+                section(page, mock, base, check, until, wasm=wasm, workers=workers, served=served)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
                 check(f"{section.__name__.strip('_')} ran to the end", False, str(e).splitlines()[0][:200])
                 try:
@@ -256,7 +263,7 @@ def _expect(check, tokens, lines, label, text, token, bold=None, italic=None, nt
 # ---------------------------------------------------------------------------
 # sections
 
-def _every_grammar_checks(page, mock, base, check, until, wasm, workers):
+def _every_grammar_checks(page, mock, base, check, until, wasm, workers, served):
     """Every grammar compiles in the syntax worker under the HUD's CSP."""
     wasm.clear()
     if not _open(page, mock, until, "fences.md"):
@@ -293,8 +300,18 @@ def _every_grammar_checks(page, mock, base, check, until, wasm, workers):
             bad.append(f"{r.url} {r.status} {headers.get('content-type')} {csp}")
     check("each came from /assets on the HUD's origin, 200 application/wasm, under the one policy",
           bool(wasm) and not bad, "; ".join(bad[:3]) or "no .wasm response seen")
-    check("the policy that let them compile is 'wasm-unsafe-eval' in script-src, and never 'unsafe-eval'",
-          "script-src 'self' 'wasm-unsafe-eval';" in policy and " 'unsafe-eval'" not in policy, policy)
+    # The owner's decision of 2026-10-15: WebAssembly compiles in the worker,
+    # under its own script's policy, and the page that draws approval cards
+    # never allows it.
+    grant = H.content_security_policy(wasm=True)
+    scripts = {u: c for u, c in served.items() if u in workers}
+    check("the policy that let them compile is the worker script's own: 'wasm-unsafe-eval' in script-src, "
+          "never 'unsafe-eval'",
+          bool(scripts) and all(c == [grant] for c in scripts.values())
+          and "script-src 'self' 'wasm-unsafe-eval';" in grant and " 'unsafe-eval'" not in grant, str(scripts))
+    page_csp = served.get(base + "/", [])
+    check("the page itself (`/`, which draws approval cards) never allows WebAssembly",
+          page_csp == [policy] and "wasm-unsafe-eval" not in policy and "script-src 'self';" in policy, str(page_csp))
     tokens = _tokens(page)
     lines = _settle(page, until, [("in-javascript", "--syn-string", None, None, 0),
                                   ("in-toml", "--syn-string", None, None, 0)])
@@ -528,7 +545,7 @@ def main():
     from tests.face import hud_v2_check as v2
     from tests.face.hud_v2_mock import DIST
     if not (DIST / "index.html").exists():
-        print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
         return 2
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
