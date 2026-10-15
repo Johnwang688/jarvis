@@ -1386,6 +1386,12 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
     so it passes nothing and the process cwd is used; a v2 worker runs in its
     brief's folder, which is not the daemon's, and relative names have to be
     resolved there or `echo hi > models.json` means a different file.
+
+    Passing nothing inside a run that bound a working folder
+    (`runtime.working_dir()`: the v2 fast path's project, decision F-6 of
+    2026-10-14) means that folder — `shell._run` starts the command there, so
+    v1's `static_verdict`, the allowlist's `allows` and `run_command`'s own
+    refusal judge the line where it runs.
     """
     if not command or not command.strip():
         return []
@@ -1394,6 +1400,10 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
         # too complex to judge, never a ValueError out of the gate.
         return [_opaque("the line holds a NUL byte, which no shell can be handed")]
     protected = protected_paths()
+    if cwd is None:
+        from . import runtime
+
+        cwd = runtime.working_dir()
     if cwd is None:
         try:
             base: Path | None = Path.cwd()

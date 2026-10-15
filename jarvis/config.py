@@ -1169,8 +1169,83 @@ WORKFLOW_GIT_PARAGRAPH = (
 FAST_DRIVE_PARAGRAPH = "On a desk turn, `hud_browser_act` can perform a short requested action in a\nvisible Remote Browser pane after a fresh look. The owner's global and pane\nswitches, Private opt-in, five quiet seconds and action gate must all permit it.\nSensitive actions ask on the owner's private card. Never drive off desk."
 
 
+# The v2 fast path's step budgets (design §8.1, amended 2026-10-14: decision
+# F-4 of docs/plans/2026-10-14-fast-path-edits-decisions.md). A turn holding
+# the owner-desk edit tools gets FAST_EDIT_STEPS; every other turn keeps
+# FAST_STEPS. Here rather than in the provider because the paragraphs below
+# state them.
+FAST_STEPS = 8
+FAST_EDIT_STEPS = 30
+
+# The tools the owner's own chat turn at the HUD gains on the fast path
+# (decisions F-1, F-2). `jarvis/v2/providers/fastpath.py` holds the boundary
+# (EDIT_TOOLS is this set); the prompt paragraphs below are written for a turn
+# holding all four and narrowed for every other turn.
+FAST_EDIT_TOOLS = ("write_file", "edit_file", "run_command", "run_readonly")
+
+# The fast path's own paragraphs that change with those tools (decision F-5).
+# Each is written for a desk turn that holds them; PROMPT_TOOL_PARAGRAPHS
+# narrows it for every other turn to the read-only wording the fast path had
+# before 2026-10-14 (byte for byte: tests/v2/fastpath_check.py), or drops it.
+FAST_LIMITS_PARAGRAPH = (
+    "You are answering on Jarvis's conversation fast path: cheap, quick, and\n"
+    "deliberately limited. The owner is at the desk, so this turn holds write_file,\n"
+    "edit_file, run_command and run_readonly but nothing that spawns, and you have\n"
+    f"a budget of {FAST_EDIT_STEPS} steps for this turn. That is not a mistake in your\n"
+    "toolset — it is the design."
+)
+FAST_READ_ONLY_LIMITS = (
+    "You are answering on Jarvis's conversation fast path: cheap, quick, and\n"
+    "deliberately limited. You have no tool that writes a file,\n"
+    "runs a command or spawns anything, and you have a budget of "
+    f"{FAST_STEPS} steps for this turn. That is not a mistake in your toolset — it is the design."
+)
+FAST_DIRECT_PARAGRAPH = (
+    "**Do small, direct work yourself** when the owner asks for it: a fix, a\n"
+    "rename, a setting, a command to run. Read a file before you change it, prefer\n"
+    "edit_file to rewriting a whole file with write_file, and check your work with\n"
+    "run_readonly or run_command when that is cheap. Relative paths and commands\n"
+    "start in your project folder. An edit or command that is not already allowed\n"
+    "is put to the owner; if one is declined or refused, do not look for another\n"
+    "way to do it — say what you wanted and let the owner decide.\n"
+    "Keep the owner's uncommitted changes intact: change only what the request\n"
+    "needs, and never revert, reset, stash or discard work you did not make. Do not\n"
+    "commit, push or deploy unless the owner asked for exactly that."
+)
+FAST_PROPOSE_PARAGRAPH = (
+    "**Propose a task** with `task_propose` when the request needs any one of:\n"
+    "a large or multi-file change, work that should be reviewed or land as a pull\n"
+    "request, more than one page fetched, a browser task beyond the guarded desk\n"
+    "tools, a deliverable beyond a small change (a PR, a report), or more than your\n"
+    "step budget. Any one is\n"
+    "sufficient. Do not attempt such a request here and do not apologise for the\n"
+    "limit — say in one line what you opened and that it will ask if anything is\n"
+    "unclear."
+)
+FAST_READ_ONLY_PROPOSE = (
+    "**Propose a task** with `task_propose` when the request needs any one of:\n"
+    "editing a file, running a command, more than one page fetched, a browser task "
+    "beyond the guarded desk tools, a\n"
+    "deliverable (a file, a PR, a report), or more than your step budget. Any one is\n"
+    "sufficient. Do not attempt such a request here and do not apologise for the\n"
+    "limit — say in one line what you opened and that it will ask if anything is\n"
+    "unclear."
+)
+
+
 PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]] = {
     "On a desk turn, `hud_browser_act`": ((("hud_browser_act",), None),),
+    # The v2 fast path's own (decision F-5, 2026-10-14): written for the
+    # owner's desk turn holding the edit tools, read-only everywhere else.
+    "You are answering on Jarvis's conversation fast path": (
+        (FAST_EDIT_TOOLS, None),
+        ((), FAST_READ_ONLY_LIMITS),
+    ),
+    "**Do small, direct work yourself**": ((FAST_EDIT_TOOLS, None),),
+    "**Propose a task** with `task_propose`": (
+        (FAST_EDIT_TOOLS + ("task_propose",), None),
+        (("task_propose",), FAST_READ_ONLY_PROPOSE),
+    ),
     "To change a file that already exists": (
         (("edit_file", "write_file", "read_file"), None),
         (("read_file",),
@@ -1261,7 +1336,8 @@ PROMPT_TOOL_PARAGRAPHS: dict[str, tuple[tuple[tuple[str, ...], str | None], ...]
 def _original_prompt_rules() -> dict:
     """Index only our exact canonical paragraphs, never caller prefix matches."""
     paragraphs = [p.strip("\n") for p in SYSTEM_PROMPT.split("\n\n")]
-    paragraphs.extend((WORKFLOW_GIT_PARAGRAPH, FAST_DRIVE_PARAGRAPH))
+    paragraphs.extend((WORKFLOW_GIT_PARAGRAPH, FAST_DRIVE_PARAGRAPH, FAST_LIMITS_PARAGRAPH,
+                       FAST_DIRECT_PARAGRAPH, FAST_PROPOSE_PARAGRAPH))
     result = {}
     for opening, versions in PROMPT_TOOL_PARAGRAPHS.items():
         matches = [p for p in paragraphs if p.startswith(opening)]

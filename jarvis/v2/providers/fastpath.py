@@ -4,22 +4,40 @@ Design §2 D2, §5.5 and §8.1. v1's OpenRouter loop survives as exactly one
 thing: the conversation fast path. Voice turns, Discord chat that is not a task
 verb, quick questions. A CLI session costs seconds to start and subscription
 quota per turn, and the voice surface's whole budget is latency — so chat keeps
-the cheap loop and everything that resembles *work* is handed to a task.
+the cheap loop and everything that resembles *large* work is handed to a task.
 
-Two rules make that split safe, and both are mechanical rather than prompted:
+Amended 2026-10-14 (owner, fast-path-edits decisions F-1..F-7,
+docs/plans/2026-10-14-fast-path-edits-decisions.md): the owner's own chat turn
+at the HUD also holds `EDIT_TOOLS` — `write_file`, `edit_file`, `run_command`
+and `run_readonly` — so small, direct work is done in place, in the thread's
+project folder, instead of being proposed. Every other turn is read-only, as
+before.
+
+Three rules make that split safe, and all are mechanical rather than prompted:
 
 **The structural boundary (§8.1).** `FAST_TOOLS` has no generic write, shell,
 desktop or spawn tool. Its typed Browser action exception is independently
 gated by the owner's global and pane switches. Read-only Browser looks require
-the live desk and pane permission. Toolset and per-tool gates enforce this;
-prompts do not authorize an action. The prompt carries the
-escalation *test*, but the toolset is what makes a misjudgement harmless.
+the live desk and pane permission. `EDIT_TOOLS` are added only for a turn
+where the owner is at the desk (`_owners_chat` and `UserMessage.desk`, the
+`DESK_TOOLS` rule); any other turn's request carries no schema for them and
+dispatch refuses them by name (invariant 10). A steer from anywhere else takes
+the turn off the desk, and the toolset with it, at the next step boundary.
+Toolset and per-tool gates enforce this; prompts do not authorize an action.
+The prompt carries the escalation *test*, but the toolset is what makes a
+misjudgement harmless.
 
-**The budget rule (§8.1).** A fast-path turn that burns its eight steps with
-the request unmet does not report "stopped". v1 already spends one tool-free
-call at the wall to write a handoff (`Agent._handoff`); here that handoff
-becomes the brief of a proposed task. The v1 exhaustion handoff, pointed at a
-task instead of at the owner.
+**The gate (§6, decision F-3).** An edit or a command goes through the
+daemon's §6 permit, the one every provider is handed: layer 1 refusals
+(protected state, credentials, env files, owner ops), the always-ask rules,
+the owner's allowlist and rules' ALLOW for a human-backed asker (layer 4),
+and otherwise the owner, through the broker. See `_approver`.
+
+**The budget rule (§8.1).** A fast-path turn that burns its steps (eight;
+thirty on a turn holding the edit tools) with the request unmet does not
+report "stopped". v1 already spends one tool-free call at the wall to write a
+handoff (`Agent._handoff`); here that handoff becomes the brief of a proposed
+task. The v1 exhaustion handoff, pointed at a task instead of at the owner.
 
 Everything else here is translation: one v1 `Agent` per handle, its `on_event`
 callbacks turned into the `Event` stream every v2 surface reads.
@@ -33,10 +51,10 @@ import queue
 import re
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterator
 
-from ... import config, models, permissions, sessions, tools
+from ... import config, models, sessions, tools
 from ...agent import Agent
 from ..desk import desk_message as _at_desk
 from ..model import PermissionProfile, ProviderName, Role, Thread
@@ -62,7 +80,11 @@ from ..tools import terminal_read as _terminal_read  # noqa: F401  (registers te
 # more than eight rounds of read-and-think is work, and work goes to a task.
 # Small enough that exhaustion happens early and cheaply, which is the point,
 # because exhaustion here produces a proposal rather than a failure.
-FAST_MAX_STEPS = 8
+FAST_MAX_STEPS = config.FAST_STEPS
+# A turn holding the edit tools (decision F-4, 2026-10-14): read, edit, check
+# and fix a small change takes more rounds than answering a question does.
+# Exhaustion still becomes a proposal. Chosen per turn in `_run`.
+FAST_EDIT_MAX_STEPS = config.FAST_EDIT_STEPS
 
 # How much of a tool result goes into TOOL_FINISHED.summary. A surface renders
 # this in a ticker; the transcript already holds the whole thing.
@@ -76,33 +98,25 @@ _DENIAL_PREFIXES = ("Refused: ", "The user declined to run this.")
 _RAW_CONTENT_TOOLS = frozenset(("memory_read", "session_summary", "session_read",
                                "read_file", "fetch_page", "skill_read"))
 
-FAST_PROMPT = """
-
-## This conversation is the fast path
-
-You are answering on Jarvis's conversation fast path: cheap, quick, and
-deliberately limited. You have no tool that writes a file,
-runs a command or spawns anything, and you have a budget of \
-%(steps)d steps for this turn. That is not a mistake in your toolset — it is the \
-design.
-
-**Propose a task** with `task_propose` when the request needs any one of:
-editing a file, running a command, more than one page fetched, a browser task beyond the guarded desk tools, a
-deliverable (a file, a PR, a report), or more than your step budget. Any one is
-sufficient. Do not attempt such a request here and do not apologise for the
-limit — say in one line what you opened and that it will ask if anything is
-unclear.
-
-%(drive)s
-
-**Answer directly** when the request is a question you can settle from memory,
+# Written for the owner's desk turn holding the edit tools (decision F-5,
+# 2026-10-14). `config.narrow_prompt` — which `Agent.__init__` and
+# `_turn_tools` apply — turns it into the read-only wording every other turn
+# had before, byte for byte, by `config.PROMPT_TOOL_PARAGRAPHS`.
+FAST_PROMPT = (
+    "\n\n## This conversation is the fast path\n\n"
+    + config.FAST_LIMITS_PARAGRAPH + "\n\n"
+    + config.FAST_DIRECT_PARAGRAPH + "\n\n"
+    + config.FAST_PROPOSE_PARAGRAPH + "\n\n"
+    + config.FAST_DRIVE_PARAGRAPH + "\n\n"
+    + """**Answer directly** when the request is a question you can settle from memory,
 this transcript, one read or one fetch; a control request (mute, avatar,
 music); or ordinary conversation. Most turns are this.
 
 When you are unsure, propose. A task that turns out to be small costs a little;
 a real job answered as if it were chat costs the owner their trust in the
 answer.
-""" % {"steps": FAST_MAX_STEPS, "drive": config.FAST_DRIVE_PARAGRAPH}
+"""
+)
 
 
 # --- the toolset ------------------------------------------------------------
@@ -165,16 +179,29 @@ FAST_TOOLS: frozenset[str] = frozenset(
 # the desk takes the turn off the desk for the rest of it.
 DESK_TOOLS: frozenset[str] = frozenset({"terminal_read", "hud_browser_view"}) | DRIVE_TOOLS
 
-# Names that must never be in FAST_TOOLS, asserted below and again in the
-# suite. Kept as data rather than left to a reader's eye because the failure
-# mode is silent: a mutating tool that slipped in here would not raise, it
-# would simply let a chat turn edit a file.
+# The tools the owner's own chat turn at the HUD gains (decisions F-1, F-2,
+# 2026-10-14): small, direct work done in place. Held exactly as `DESK_TOOLS`
+# are — an owner's chat brief, a message typed or spoken at the HUD, and not
+# steered from anywhere else since — and never in `FAST_TOOLS`, so every other
+# turn (Discord, the DM, a schedule, the escape hatch, a task's thread) stays
+# read-only. The only dangerous tools the fast path may ever hold.
+EDIT_TOOLS: frozenset[str] = frozenset(config.FAST_EDIT_TOOLS)
+
+# Of those, the ones v1's registry marks safe but the fast path still puts to
+# its gate (decision F-3: "the tools ... go through the existing gate"): an
+# edit reaches the daemon's §6 permit as a command does (`runtime.ask_tools`).
+# `run_readonly` is not here: its own allowlist of read-only programs is its
+# gate, on every surface.
+ASKED_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file"})
+
+# Names that must never be in FAST_TOOLS or EDIT_TOOLS, asserted below and
+# again in the suite. Kept as data rather than left to a reader's eye because
+# the failure mode is silent: a tool that slipped in here would not raise, it
+# would simply let a chat turn spawn, commit or push. (The four edit tools
+# left this list on 2026-10-14 for `EDIT_TOOLS`, decision F-7; nothing else
+# did.)
 FORBIDDEN_TOOLS: frozenset[str] = frozenset(
     {
-        "write_file",
-        "edit_file",
-        "run_command",
-        "run_readonly",
         "run_subagent",
         "run_fleet",
         "git",
@@ -213,19 +240,30 @@ def _validate_toolset() -> None:
     A renamed or removed v1 tool must stop the process rather than leave the
     fast path one capability short with nothing said.
     """
-    missing = sorted(name for name in FAST_TOOLS if name not in tools.REGISTRY)
+    every = FAST_TOOLS | EDIT_TOOLS
+    missing = sorted(name for name in every if name not in tools.REGISTRY)
     if missing:
         raise RuntimeError(
-            "FAST_TOOLS names tools that are not registered: "
+            "FAST_TOOLS or EDIT_TOOLS names tools that are not registered: "
             + ", ".join(missing)
             + ". Either the tool was renamed or its module is no longer imported."
         )
-    unsafe = sorted(name for name in FAST_TOOLS if tools.REGISTRY[name].dangerous)
+    # A dangerous tool only by name, in EDIT_TOOLS — held only at the desk.
+    unsafe = sorted(name for name in every
+                    if tools.REGISTRY[name].dangerous and name not in EDIT_TOOLS)
     if unsafe:
         raise RuntimeError(f"FAST_TOOLS contains dangerous tools: {', '.join(unsafe)}")
+    # The edit tools are the desk turn's additions, never the base set every
+    # turn holds; and a desk turn asks for exactly the edits it holds.
+    based = sorted(FAST_TOOLS & EDIT_TOOLS)
+    if based:
+        raise RuntimeError(f"FAST_TOOLS contains desk-only edit tools: {', '.join(based)}")
+    if not ASKED_TOOLS <= EDIT_TOOLS:
+        raise RuntimeError("ASKED_TOOLS names tools outside EDIT_TOOLS: "
+                           + ", ".join(sorted(ASKED_TOOLS - EDIT_TOOLS)))
     leaked = sorted(
         name
-        for name in FAST_TOOLS
+        for name in every
         if name in FORBIDDEN_TOOLS or name.startswith(FORBIDDEN_PREFIXES)
     )
     if leaked:
@@ -256,9 +294,21 @@ def _owners_chat(brief: Brief) -> bool:
     return brief.role == Role.CHAT and brief.task_id is None
 
 
-# Compatibility alias: one predicate for the fast path and session bridge.
+# Held only on a turn where the owner is at the desk.
+_DESK_ONLY: frozenset[str] = DESK_TOOLS | EDIT_TOOLS
 
 
+def _project_folder(brief: Brief) -> str | None:
+    """The thread's project folder, where its edits land and its commands
+    start (decision F-6), or None. The daemon makes every brief's `cwd`
+    absolute (`Daemon.make_brief`); one that is not, or that holds a
+    character a prompt line cannot show as written, binds nothing."""
+    cwd = brief.cwd if isinstance(brief.cwd, str) else ""
+    if not cwd or not os.path.isabs(cwd):
+        return None
+    if any(ch in cwd for ch in "\n\r\x00`") or not cwd.isprintable():
+        return None
+    return os.path.normpath(cwd)
 
 
 def _summary(name: str, text: str) -> str:
@@ -312,6 +362,9 @@ class _Native:
     # The thread's project, for `runtime.caller()` (the peers plan's Phase 0).
     project_id: str | None = None
     pristine_system: str = ""
+    # The project folder every turn works in (`runtime.working_dir()`,
+    # decision F-6), or None: the daemon's own directory, as before.
+    workdir: str | None = None
 
 
 # --- the provider -----------------------------------------------------------
@@ -370,14 +423,20 @@ class FastPathProvider:
         session: sessions.Session,
     ) -> SessionHandle:
         tool_names = self._toolset(brief)
-        pristine_system = config.SYSTEM_PROMPT + FAST_PROMPT + (brief.system_append or "")
+        workdir = _project_folder(brief)
+        # The folder is stated on every turn, desk or not: relative reads land
+        # there too. It names no tool, so no narrowing touches it.
+        folder = (f"\n\nYour project folder is `{workdir}`. Relative paths resolve there."
+                  if workdir else "")
+        pristine_system = (config.SYSTEM_PROMPT + FAST_PROMPT + folder
+                           + (brief.system_append or ""))
         native = _Native(
             pristine_system=pristine_system,
             agent=Agent(
                 model=brief.model or models.tier("orchestrator"),
                 system=pristine_system,
                 # Off the desk until a turn says otherwise (`_turn_tools`).
-                tool_names=[name for name in tool_names if name not in DESK_TOOLS],
+                tool_names=[name for name in tool_names if name not in _DESK_ONLY],
                 max_steps=FAST_MAX_STEPS,
                 approve=self._approver(brief, permit),
                 on_event=lambda kind, data: None,  # replaced per turn by send()
@@ -390,6 +449,7 @@ class FastPathProvider:
             effort=brief.effort,
             tool_names=list(tool_names),
             project_id=thread.project_id,
+            workdir=workdir,
         )
         native.agent.should_stop = native.stop.is_set
         native.agent.take_steering = lambda: self._take_steering(native)
@@ -410,6 +470,10 @@ class FastPathProvider:
 
         A brief asking for a *subset* is honoured: narrowing further is always
         safe, and it is how a caller pins a minimal chat agent.
+
+        `DESK_TOOLS` and `EDIT_TOOLS` are an owner's chat brief's only: any
+        other brief naming one is refused, and one naming none never holds
+        them. Which turns of an owner's chat hold them is `_turn_tools`'.
         """
         if brief.profile is PermissionProfile.STRICT:
             raise BriefRefused(
@@ -418,64 +482,109 @@ class FastPathProvider:
             )
         if brief.mcp_servers:
             raise BriefRefused("the fast path cannot load MCP servers; use a CLI provider")
-        allowed = _available_tools(FAST_TOOLS)
+        allowed = _available_tools(FAST_TOOLS | EDIT_TOOLS)
         if not _owners_chat(brief):
-            # A task's thread (or any role but chat) never holds a desk tool.
+            # A task's thread (or any role but chat) never holds a desk tool,
+            # nor an edit tool (decision F-2).
             if brief.allowed_tools is not None and DESK_TOOLS & set(brief.allowed_tools):
                 raise BriefRefused(
                     "desk tools are for the owner's own chat at the HUD, never a task's thread")
-            allowed = [name for name in allowed if name not in DESK_TOOLS]
+            if brief.allowed_tools is not None and EDIT_TOOLS & set(brief.allowed_tools):
+                raise BriefRefused(
+                    "the fast path's edit tools are for the owner's own chat at the HUD, "
+                    "never a task's thread or another role")
+            allowed = [name for name in allowed if name not in _DESK_ONLY]
         if brief.allowed_tools is None:
             return allowed
         asked = set(brief.allowed_tools)
-        widened = sorted(asked - FAST_TOOLS)
+        widened = sorted(asked - FAST_TOOLS - EDIT_TOOLS)
         if widened:
             raise BriefRefused(
                 "the fast path may not hold "
                 + ", ".join(widened)
-                + " — it has no tool that can change anything (design §8.1). "
-                "Open a task instead."
+                + " — beyond the owner's desk edits it has no tool that can change "
+                "anything (design §8.1). Open a task instead."
             )
         return sorted(asked & set(allowed))
 
     @staticmethod
-    def _turn_tools(native: _Native, at_desk: bool) -> None:
-        """This turn's toolset: the brief's, without `DESK_TOOLS` unless the
-        owner is at the desk. Rebuilt only when it changes (the tools are part
-        of the cached prefix)."""
-        names = [n for n in native.tool_names if at_desk or n not in DESK_TOOLS]
+    def _turn_tools(native: _Native, at_desk: bool) -> list[str]:
+        """This turn's toolset: the brief's, without `DESK_TOOLS` and
+        `EDIT_TOOLS` unless the owner is at the desk. Rebuilt only when it
+        changes (the tools are part of the cached prefix), and the prompt is
+        narrowed with it, so the edit wording follows the edit tools.
+        Returns the names, which `_take_steering` binds for dispatch."""
+        names = [n for n in native.tool_names if at_desk or n not in _DESK_ONLY]
         agent = native.agent
         if names != list(agent._base_tool_names):
             agent._base_tool_names = names
             agent.tool_specs = tools.specs(names)
             agent._base_system = config.narrow_prompt(native.pristine_system, set(names))
+        return names
 
     @staticmethod
     def _approver(brief: Brief, permit: PermissionCallback):
         """v1's `approve(tool, args) -> bool` over v2's `permit(name, args, brief)`.
 
-        Wrapped in `permissions.gate`, which is what carries v1's
-        `jarvis_human_backed` flag — the flag `dispatch()` checks before it
-        honours an ALLOW verdict from `rules.py`. Calling `permit` directly
-        would strip it, and stripping it is the "second copy of an idea drifts"
-        failure v1 already paid for once with attended tasks.
+        Reached by `dispatch()` for `run_command` (dangerous) and for the
+        `ASKED_TOOLS` edits (`runtime.ask_tools`), which only an owner's desk
+        turn holds (decision F-3, 2026-10-14). Everything is decided by the
+        daemon's §6 permit, the one every provider is handed — so the gate is
+        the same gate and the route is the same route:
 
-        In practice no `FAST_TOOLS` entry is dangerous, so `dispatch()` never
-        reaches an approver here. It is built anyway because `Agent` must never
-        be constructed with `approve=None` — that is the one forbidden mistake,
-        and leaving a hole open because today's toolset does not walk through it
-        is how tomorrow's does.
+        - layer 1 refuses protected state, the allowlist, credential and env
+          files, SELF_PROTECTED code and the owner ops outright (dispatch's own
+          `command_verdict` DENY and v1's tool-level refusals still run too);
+        - layer 2's always-ask rules (prod deploys, pushes to protected
+          branches, payments, credentials) ask whatever the allowlist says;
+        - layer 4 honours the owner's allowlist and rules' ALLOW **only for a
+          human-backed asker** — the daemon's broker (`PendingApprovals`) is;
+          a `DenyAll` is not and never auto-approves;
+        - layer 5 asks the owner through the broker: a HUD card (and the
+          Discord DM when attached), answered by `POST /approvals/{id}`, which
+          resolves the broker itself — never `answer()`. Unanswered, timed
+          out, shut down or unreadable is a denial.
+
+        **No `jarvis_human_backed` flag here, deliberately** (until
+        2026-10-14 this was `permissions.gate(ask)`). With the flag,
+        `dispatch()` auto-runs a rules-ALLOW command and `gate` an allowlisted
+        one *before* the permit is asked — skipping the always-ask rules, and
+        auto-running for a `DenyAll` asker too, since `gate` sets the flag
+        whoever stands behind it. Without it every call reaches the permit,
+        which applies the allowlist and rules' ALLOW itself at layer 4 with
+        the asker's real `human_backed`, judged in the thread's folder. The
+        jarvis-mcp bridge's approver omits the flag for the same reason.
+
+        **AUTO means ASK here.** Under AUTO, layer 5 answers "the provider's
+        own reviewer decides" — Claude's classifier, Codex's reviewer. The
+        fast path has no reviewer, so that ALLOW would run an unlisted command
+        with nobody asked. Its permit is asked with an ASK copy of the brief:
+        what no layer allows, the owner decides.
+
+        **Only at the desk.** An edit tool's call is denied when the turn is
+        no longer at the desk — before the permit is asked, and again after,
+        since an approval can wait out a steer from elsewhere.
+
+        Built for every handle, desk or not, because `Agent` must never be
+        constructed with `approve=None` — `dispatch()` runs a dangerous tool
+        unguarded with no approver, which is the one forbidden mistake.
         """
+        from ... import runtime
 
-        def ask(tool: Any, args: dict) -> bool:
+        asked = (replace(brief, profile=PermissionProfile.ASK)
+                 if brief.profile == PermissionProfile.AUTO else brief)
+
+        def approve(tool: Any, args: dict) -> bool:
             name = getattr(tool, "name", str(tool))
+            if name in EDIT_TOOLS and not runtime.at_desk():
+                return False
             try:
-                decision = Decision(permit(name, dict(args), brief))
-            except (ValueError, TypeError):
-                return False  # an unreadable answer is a denial, as everywhere
-            return decision is Decision.ALLOW
+                decision = Decision(permit(name, dict(args), asked))
+            except Exception:  # noqa: BLE001 — an unreadable answer is a denial
+                return False
+            return decision is Decision.ALLOW and (name not in EDIT_TOOLS or runtime.at_desk())
 
-        return permissions.gate(ask)
+        return approve
 
     def close(self, h: SessionHandle) -> None:
         """Drop the agent and stop writing to the session. Idempotent."""
@@ -541,18 +650,35 @@ class FastPathProvider:
             out, native.leftover = native.leftover, []
         return [message for message, _text, _images in out]
 
-    @staticmethod
-    def _take_steering(native: _Native) -> list:
+    @classmethod
+    def _take_steering(cls, native: _Native) -> list:
         """v1's `Agent.take_steering`: everything steered in since the last
-        step, as `(text, images)`. Called on the turn's worker thread."""
+        step, as `(text, images)`. Called on the turn's worker thread, at the
+        step boundary, before the next request is built.
+
+        A turn a steer took off the desk loses `DESK_TOOLS` and `EDIT_TOOLS`
+        here, for the rest of the turn: the next request carries neither
+        their schemas nor the edit wording, and the toolset dispatch enforces
+        is re-bound (invariant 10; `_sync_tools` re-binds only on a group
+        load, which the fast path never makes). The step budget the turn
+        started with stands — the loop's range is fixed — so the read-only
+        wording may state fewer steps than the loop allows."""
         with native.inbox_lock:
             taken, native.inbox = native.inbox, []
+        if (native.desk.get("present") is not True
+                and _DESK_ONLY & set(native.agent._base_tool_names)):
+            from ... import runtime
+
+            names = cls._turn_tools(native, False)
+            runtime.bind(tool_names=set(names), ask_tools=frozenset())
         return [(text, images or None) for _message, text, images in taken]
 
     def answer(self, h: SessionHandle, req_id: str, decision: Decision | str) -> None:
         raise ValueError(
-            "the fast path raises no approvals and asks no questions — none of "
-            "its tools is dangerous (design §8.1), so there is nothing to answer"
+            "the fast path asks no questions, and its approvals are the broker's: "
+            "an edit or command it asks about is answered on the approval card "
+            "(POST /approvals/{id}), which resolves the daemon's PendingApprovals "
+            "directly — there is nothing for answer() to deliver"
         )
 
     def usage(self, h: SessionHandle) -> Usage:
@@ -646,7 +772,13 @@ class FastPathProvider:
         desk = {"present": _at_desk(native.brief, message),
                 "images": bool(model_info is not None and model_info.vision)}
         native.desk = desk
-        self._turn_tools(native, desk["present"])
+        names = self._turn_tools(native, desk["present"])
+        # Decision F-4: a turn holding the edit tools gets the larger budget.
+        # Set per turn, before `run_turn` reads it; exhaustion still proposes.
+        native.agent.max_steps = (FAST_EDIT_MAX_STEPS if EDIT_TOOLS & set(names)
+                                  else FAST_MAX_STEPS)
+        # Edits reach the gate as commands do (decision F-3), on this turn only.
+        asked_tools = ASKED_TOOLS & set(names)
 
         result: dict[str, Any] = {}
 
@@ -671,8 +803,10 @@ class FastPathProvider:
         def work() -> None:
             previous_ending=getattr(native.agent,"exhaustion_message",None)
             try:
-                runtime.bind(proposal=proposal, caller=caller)
-                native.agent.exhaustion_message=driving.exhaustion
+                runtime.bind(proposal=proposal, caller=caller, ask_tools=asked_tools)
+                if native.workdir is not None:
+                    runtime.bind(workdir=native.workdir)
+                native.agent.exhaustion_message=_drive_ending(driving,native.agent.max_steps)
                 with runtime.turn_scope(desk=desk), drive_scope(driving,retire_turn):
                     result["turn"] = native.agent.run_turn(
                         text, images=list(message.images) or None
@@ -724,6 +858,23 @@ class FastPathProvider:
             thread_id,
             {"stop": _stop_reason(turn), "proposal": _proposal(proposal, turn, driving=driving.attempted)},
         )
+
+
+# The driving ending (`DriveTurn.exhaustion`, BR9b) says "eight steps": true
+# of every turn until a desk turn held the edit tools and their larger budget
+# (decision F-4). Said in the same words for whichever budget the turn had.
+_STEP_WORDS = {FAST_MAX_STEPS: "eight", FAST_EDIT_MAX_STEPS: "thirty"}
+
+
+def _drive_ending(driving, steps: int):
+    """`driving.exhaustion`, stating this turn's own step budget."""
+    def ending():
+        text = driving.exhaustion()
+        if text and steps != FAST_MAX_STEPS:
+            text = text.replace("after eight steps",
+                                f"after {_STEP_WORDS.get(steps, str(steps))} steps", 1)
+        return text
+    return ending
 
 
 def _turn_text(message: UserMessage) -> str:

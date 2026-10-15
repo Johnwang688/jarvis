@@ -65,9 +65,17 @@ TIMEOUT_S = 60
 
 
 def _run(command: str) -> str:
+    # Started in the run's working folder: the v2 fast path's project
+    # (`runtime.working_dir()`, decision F-6 of 2026-10-14). The gate-state
+    # check judged the line in that same folder (`protected_state`), so what
+    # was judged is what runs. Unbound — every v1 surface — is None, which
+    # inherits the process's directory, as before.
+    from .. import runtime
+
     try:
         proc = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=TIMEOUT_S
+            command, shell=True, capture_output=True, text=True, timeout=TIMEOUT_S,
+            cwd=runtime.working_dir(),
         )
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {TIMEOUT_S}s."

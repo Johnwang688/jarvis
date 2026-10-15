@@ -51,35 +51,40 @@ class Integration(unittest.TestCase):
             self.assertEqual(native.agent._base_system,H.config.narrow_prompt(native.pristine_system,held))
 
     def test_actual_worker_scope_exhaustion_has_no_handoff_and_consistent_transcript(self):
-        provider=H.FastPathProvider();handle=provider.start(H.thread('drive-turn'),H.brief(),H.allow_all)
-        self.addCleanup(provider.close,handle)
-        runtime.bind_caller('drive-turn','p1','fast','trusted-turn')
-        calls=[];turns=[]
-        def act(**kwargs):
-            turn=current_turn();self.assertIsNotNone(turn)
-            self.assertEqual(turn.key,('drive-turn','trusted-turn'))
-            self.assertEqual(turn.owner_words,'original owner request')
-            self.assertEqual(turn.project_root,H.CWD)
-            turns.append(turn);turn.attempted=True;turn.pane='2'
-            return 'Stopped: scripted action'
-        def fake(model,messages,tools=None,**kw):
-            self.assertIsNotNone(tools,'driving exhaustion must not call the handoff model')
-            calls.append(1)
-            return H.reply('',[('hud_browser_act',json.dumps({'action':'type','target':'e1','text':'PRIVATE-TYPED-MARKER'}))])
-        with patch.object(tools.REGISTRY['hud_browser_act'],'func',side_effect=act),H.scripted(fake):
-            events=list(provider.send(handle,UserMessage(text='original owner request',desk=True)))
-        self.assertEqual(len(calls),8)
-        final=H.one(events,EventKind.TEXT).data['text']
-        self.assertEqual(final,"Stopped after eight steps in Browser pane 2. Say 'go on' to continue.")
-        self.assertEqual(handle.native.agent.messages[-1]['content'],final)
-        self.assertIsNone(H.one(events,EventKind.TURN_FINISHED).data['proposal'])
-        self.assertTrue(all(t.closed for t in turns));self.assertIsNone(current_turn())
-        self.assertIsNone(handle.native.agent.exhaustion_message)
-        starts=[e for e in events if e.kind==EventKind.TOOL_STARTED]
-        self.assertTrue(starts);self.assertTrue(all(e.data['args']=={} for e in starts))
-        self.assertNotIn('PRIVATE-TYPED-MARKER',json.dumps([e.data for e in events]))
-        # The chat's own model transcript still receives the original argument.
-        self.assertIn('PRIVATE-TYPED-MARKER',json.dumps(handle.native.agent.messages))
+        # The ending states the turn's own budget: thirty on a desk turn holding
+        # the edit tools (2026-10-14, decision F-4), eight on one without them.
+        for kw,steps,word in (({},fastpath.FAST_EDIT_MAX_STEPS,'thirty'),
+                              ({'allowed_tools':sorted(fastpath.FAST_TOOLS)},fastpath.FAST_MAX_STEPS,'eight')):
+          with self.subTest(steps=steps):
+            provider=H.FastPathProvider();handle=provider.start(H.thread('drive-turn'),H.brief(**kw),H.allow_all)
+            self.addCleanup(provider.close,handle)
+            runtime.bind_caller('drive-turn','p1','fast','trusted-turn')
+            calls=[];turns=[]
+            def act(**kwargs):
+                turn=current_turn();self.assertIsNotNone(turn)
+                self.assertEqual(turn.key,('drive-turn','trusted-turn'))
+                self.assertEqual(turn.owner_words,'original owner request')
+                self.assertEqual(turn.project_root,H.CWD)
+                turns.append(turn);turn.attempted=True;turn.pane='2'
+                return 'Stopped: scripted action'
+            def fake(model,messages,tools=None,**kw):
+                self.assertIsNotNone(tools,'driving exhaustion must not call the handoff model')
+                calls.append(1)
+                return H.reply('',[('hud_browser_act',json.dumps({'action':'type','target':'e1','text':'PRIVATE-TYPED-MARKER'}))])
+            with patch.object(tools.REGISTRY['hud_browser_act'],'func',side_effect=act),H.scripted(fake):
+                events=list(provider.send(handle,UserMessage(text='original owner request',desk=True)))
+            self.assertEqual(len(calls),steps)
+            final=H.one(events,EventKind.TEXT).data['text']
+            self.assertEqual(final,f"Stopped after {word} steps in Browser pane 2. Say 'go on' to continue.")
+            self.assertEqual(handle.native.agent.messages[-1]['content'],final)
+            self.assertIsNone(H.one(events,EventKind.TURN_FINISHED).data['proposal'])
+            self.assertTrue(all(t.closed for t in turns));self.assertIsNone(current_turn())
+            self.assertIsNone(handle.native.agent.exhaustion_message)
+            starts=[e for e in events if e.kind==EventKind.TOOL_STARTED]
+            self.assertTrue(starts);self.assertTrue(all(e.data['args']=={} for e in starts))
+            self.assertNotIn('PRIVATE-TYPED-MARKER',json.dumps([e.data for e in events]))
+            # The chat's own model transcript still receives the original argument.
+            self.assertIn('PRIVATE-TYPED-MARKER',json.dumps(handle.native.agent.messages))
 
     def test_explicit_unrelated_task_proposal_is_preserved(self):
         turn=SimpleNamespace(stopped_early=True,text='unused')

@@ -2,10 +2,12 @@
 
 Three things are under test, in descending order of how badly they fail:
 
-  **The structural boundary (§8.1).** The fast path must hold no tool that can
-  change anything. A mutating tool slipping into `FAST_TOOLS` does not raise —
-  it just lets a chat turn edit a file — so the exclusions are asserted by name
-  and by prefix, and a `Brief` may narrow the set but never widen it.
+  **The structural boundary (§8.1).** `FAST_TOOLS`, what every turn holds, has
+  no tool that can change anything. A mutating tool slipping into it does not
+  raise — it just lets a chat turn edit a file — so the exclusions are asserted
+  by name and by prefix, and a `Brief` may narrow the set but never widen it.
+  (Since 2026-10-14 the owner's own desk turn also holds `EDIT_TOOLS`; who
+  holds them, and how they are gated, is tests/v2/fastpath_edits_check.py.)
 
   **The proposal channel (§8.1).** A turn that needs real work must come out
   the other end as a proposal: explicitly through `task_propose`, or implicitly
@@ -214,10 +216,12 @@ def brief_checks() -> None:
         raise AssertionError("an MCP brief was accepted")
 
     # The one that matters: a brief may narrow the fast path, never widen it.
+    # (`run_command` is an owner's chat brief's to ask for since 2026-10-14 —
+    # an edit tool, held on desk turns only; `run_subagent` never is.)
     try:
-        provider.start(thread(), brief(allowed_tools=["read_file", "run_command"]), allow_all)
+        provider.start(thread(), brief(allowed_tools=["read_file", "run_subagent"]), allow_all)
     except BriefRefused as exc:
-        assert "run_command" in str(exc), exc
+        assert "run_subagent" in str(exc), exc
     else:
         raise AssertionError("a Brief widened the fast path")
 
@@ -671,7 +675,9 @@ def resume_checks() -> None:
 def approver_checks() -> None:
     """No FAST_TOOLS entry is dangerous, so the adapter is exercised through a
     test-only widening: the boundary and the gate are separate properties, and
-    the gate has to be right for the day a dangerous tool is added."""
+    the gate has to be right for any dangerous tool, not only the desk turn's
+    `run_command` (tests/v2/fastpath_edits_check.py drives that one through
+    the real §6 permit)."""
     ran = {"n": 0}
 
     def boom() -> str:
@@ -704,8 +710,12 @@ def approver_checks() -> None:
     try:
         provider = Widened()
         handle = provider.start(thread("gate"), brief(), permit)
-        assert getattr(handle.native.agent.approve, "jarvis_human_backed", False), (
-            "the approver must keep v1's human-backed flag"
+        # Since 2026-10-14: no v1 human-backed flag, so neither dispatch's
+        # rules-ALLOW shortcut nor `permissions.gate`'s allowlist can answer
+        # before the permit — which applies both itself, at layer 4, with the
+        # asker's real `human_backed`, after the always-ask rules.
+        assert not getattr(handle.native.agent.approve, "jarvis_human_backed", False), (
+            "the approver must leave the allowlist and rules ALLOW to the permit"
         )
         with scripted(fake):
             events = drain(provider, handle)
@@ -721,7 +731,7 @@ def approver_checks() -> None:
         assert ran["n"] == 1, "ALLOW must let it run"
     finally:
         tools.REGISTRY.pop("fastpath_test_danger", None)
-    print("ok  approver: permit sees the tool name, DENY refuses, ALLOW runs, flag kept")
+    print("ok  approver: permit sees the tool name, DENY refuses, ALLOW runs, no v1 flag")
 
 
 def answer_checks() -> None:
@@ -732,9 +742,9 @@ def answer_checks() -> None:
     except ValueError:
         pass
     else:
-        raise AssertionError("answer() must refuse — the fast path asks nothing")
+        raise AssertionError("answer() must refuse — the broker resolves the fast path's cards")
     provider.close(handle)
-    print("ok  answer: refused, because the fast path raises no approvals")
+    print("ok  answer: refused, because the broker resolves the fast path's approvals")
 
 
 def usage_checks() -> None:

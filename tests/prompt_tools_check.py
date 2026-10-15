@@ -11,8 +11,9 @@ mention is a refused step (owner's answer 5, 2026-10-11: "fix it").
 What must hold:
 
   * every surface — the CLI, Discord, the face's voice agent and designer, the
-    v2 fast path, a workflow (and one started inside agent-bench's sandbox,
-    whose toolset has no git tools), an attended task, a goal, every sub-agent type
+    v2 fast path (off the desk, and at it with its edit tools), a workflow (and
+    one started inside agent-bench's sandbox, whose toolset has no git tools),
+    an attended task, a goal, every sub-agent type
     under every parent that can spawn one (a type that would lose a tool its
     brief names is not sent, and says so), agent-bench's five tasks, cad-bench,
     long-bench (shell and no-shell) and vocab-bench — names in its system
@@ -217,6 +218,13 @@ def surfaces() -> dict[str, agent_mod.Agent]:
     handle = FastPathProvider().start(thread, Brief(role=Role.CHAT, cwd=str(TMP)),
                                       lambda name, args, brief: Decision.ALLOW)
     found["v2 fast path"] = handle.native.agent
+    # The owner's own turn at the HUD (2026-10-14): the desk tools and the
+    # edit tools, and the prompt narrowed to them.
+    desk_handle = FastPathProvider().start(
+        Thread(id="pt2", project_id="p1", role=Role.CHAT, provider=ProviderName.FAST),
+        Brief(role=Role.CHAT, cwd=str(TMP)), lambda name, args, brief: Decision.ALLOW)
+    FastPathProvider._turn_tools(desk_handle.native, True)
+    found["v2 fast path at the desk"] = desk_handle.native.agent
 
     def workflow():
         wf = workflows.start("[prompt] a workflow")
@@ -352,6 +360,15 @@ def owner_case_checks(found) -> None:
                                      "run_subagent", "write_file"})
     check("the fast path names none of task_start, workflow_start, plan_write, "
           "run_subagent, write_file", not named, f"names {named}")
+    desk = prompt_of(found["v2 fast path at the desk"])
+    named = sorted(mentions(desk) & {"task_start", "workflow_start", "plan_write", "run_subagent"})
+    check("the fast path at the desk names none of task_start, workflow_start, plan_write, "
+          "run_subagent", not named, f"names {named}")
+    check("the fast path at the desk holds and is told about its edit tools",
+          {"write_file", "edit_file", "run_command", "run_readonly"}
+          <= held_by(found["v2 fast path at the desk"])
+          and "**Do small, direct work yourself**" in desk
+          and "**Do small, direct work yourself**" not in fast)
     for label in ("attended task", "goal", "workflow"):
         check(f"{label} does not name task_start",
               "task_start" not in mentions(prompt_of(found[label])))
@@ -499,6 +516,22 @@ REWORDED = {
     ("Content fetched from the web", ("fetch_page",)): [
         ("fetch_page, web_search and the browser return page text",
          "fetch_page returns page text"),
+    ],
+    # The v2 fast path's own (2026-10-14, decision F-5): written for the
+    # owner's desk turn holding the edit tools; every other turn reads the
+    # read-only wording it had before, which tests/v2/fastpath_edits_check.py
+    # pins byte for byte.
+    ("You are answering on Jarvis's conversation fast path", ()): [
+        ("The owner is at the desk, so this turn holds write_file, edit_file, run_command and "
+         "run_readonly but nothing that spawns, and you have a budget of 30 steps for this turn.",
+         "You have no tool that writes a file, runs a command or spawns anything, and you have a "
+         "budget of 8 steps for this turn."),
+    ],
+    ("**Propose a task** with `task_propose`", ("task_propose",)): [
+        ("a large or multi-file change, work that should be reviewed or land as a pull request,",
+         "editing a file, running a command,"),
+        ("a deliverable beyond a small change (a PR, a report)",
+         "a deliverable (a file, a PR, a report)"),
     ],
 }
 

@@ -848,11 +848,18 @@ def _search_dirs() -> list[Path]:
     except OSError:
         here = _JARVIS_ROOT
 
+    # The run's working folder first, when one is bound (the v2 fast path's
+    # project, decision F-6 of 2026-10-14): its commands run there, so its
+    # `.env` is the one whose values a command's output could carry.
+    from .. import runtime
+
+    bound = runtime.working_dir()
     home = Path.home()
-    for directory in [here, *here.parents][:12]:
-        add(directory)
-        if directory == home:
-            break
+    for start in ([Path(bound)] if bound else []) + [here]:
+        for directory in [start, *start.parents][:12]:
+            add(directory)
+            if directory == home:
+                break
     add(home)
     add(_JARVIS_ROOT)
     return found

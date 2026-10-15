@@ -499,7 +499,11 @@ def _dispatch(
     if missing:
         return ToolResult(f"Error: missing required argument(s): {', '.join(missing)}")
 
-    if entry.dangerous and approve is not None:
+    # `runtime.ask_tools()`: tools this agent's approver must pass although
+    # the registry marks them safe — the v2 fast path's `write_file` and
+    # `edit_file` on an owner's desk turn (2026-10-14, decision F-3). Empty for
+    # every other agent, so it can only add an ask, never remove one.
+    if (entry.dangerous or entry.name in runtime.ask_tools()) and approve is not None:
         # Three verdicts, decided here rather than inside the approver so the
         # fetch-execute review runs exactly once (it costs a network round trip
         # and a model call). See jarvis/rules.py.
