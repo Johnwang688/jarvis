@@ -2221,13 +2221,25 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
 - **AUTO is ASK on the fast path.** Layer 5's AUTO answer means "the
   provider's reviewer decides"; the fast path has none, so its permit is asked
   with an ASK copy of the brief.
-- **Edits are asked too.** `write_file`/`edit_file` are not `dangerous` in v1
-  (they never asked on the v1 surfaces); the fast path names them in
+- **Edits and reads are asked too.** `write_file`, `edit_file` and
+  `run_readonly` are not `dangerous` in v1; the fast path names them in
   `runtime.ask_tools()`, which makes `dispatch` send them to the approver as it
-  does a dangerous tool. Binding it can only add asks. An Always on an edit
+  does a dangerous tool. Binding it can only add asks. `run_readonly` joined
+  after review (H1: on a desk turn it read `~/.config/gh/hosts.yml`, the
+  Browser profile and an ssh key behind a project symlink unasked); rules'
+  ALLOW still runs an ordinary read unasked.
+- **`run_readonly` judges what it reads, on every surface** (review H1). Each
+  operand is placed where the shell finds it (`~`, the working folder, globs,
+  symlinks) and judged by the read tools' own credential-folder judge; a
+  recursive grep/rg of a folder holding a credential folder is refused too.
+  The `.env` scrubber also withholds credential-named values from the
+  process's own environment, so `env` cannot print the daemon's keys. An Always on an edit
   card is a standing `{"tool": "write_file"}` grant, as an Always on Claude's
   Write is for `Write`.
-- **Where it runs is where it is judged.** With `runtime.working_dir()` bound,
+- **Where it runs is where it is judged.** The bound folder is the project's
+  physical one (`realpath`, review M1: `cd ..` from a symlinked project
+  leaves the physical parent). Open, for every provider: the permit's layer 1
+  judges at the brief's raw `cwd`. With `runtime.working_dir()` bound,
   v1's file tools absolutize a relative path before every check,
   `protected_state.command_touches` judges a line there (so v1's
   `static_verdict`, `allows` and `run_command`'s own refusal agree with the
@@ -2238,5 +2250,6 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
 
 Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init__.py`
 (one condition in dispatch), `jarvis/tools/files.py` (`in_working_dir`),
-`jarvis/tools/secrets.py` (search folders), `jarvis/protected_state.py`
-(default `cwd`). Each change only places a path or adds an ask.
+`jarvis/tools/secrets.py` (search folders, process-environment values),
+`jarvis/protected_state.py` (default `cwd`). Each change only places a path,
+adds an ask or withholds more.

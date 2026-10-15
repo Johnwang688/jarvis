@@ -1105,6 +1105,24 @@ def env_files_in(directory: Path) -> tuple[Path, ...]:
         return ()
 
 
+def _process_env_values() -> tuple[str, ...]:
+    """Credential values in this process's own environment, by name.
+
+    `run_readonly("env")` (or `cat /proc/self/environ`) prints the process
+    environment, and in the daemon that holds the provider keys it was
+    started with (review of PR #182: the fast path's desk turn could print
+    OPENROUTER_API_KEY; the same read was open on v1's surfaces before). Only
+    a variable whose *name* reads as a credential (`*_API_KEY`, `*_TOKEN`,
+    `*SECRET*` …) and whose value is at least 8 characters and not a plain
+    setting is withheld — never PATH or LS_COLORS, which the length rule for
+    unnamed values would catch."""
+    found = []
+    for key, value in os.environ.items():
+        if len(value) >= 8 and _secret_named(_key_parts(key)) and _secret_entry(key, value):
+            found.append(value)
+    return tuple(found)
+
+
 def secret_values() -> list[str]:
     """Every credential-looking value in a reachable protected file: every
     credential env file in the working folder, its parents up to home, home
@@ -1115,6 +1133,7 @@ def secret_values() -> list[str]:
     for directory in _search_dirs():
         for path in env_files_in(directory):
             values.update(_values_in(path))
+    values.update(_process_env_values())
     values.update(_json_values(config.GOOGLE_TOKEN_PATH))
     values.update(_json_values(config.ONSHAPE_TOKEN_PATH))
     values.update(_json_values(config.DISCORD_TOKEN_PATH))

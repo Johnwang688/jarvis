@@ -188,11 +188,17 @@ DESK_TOOLS: frozenset[str] = frozenset({"terminal_read", "hud_browser_view"}) | 
 EDIT_TOOLS: frozenset[str] = frozenset(config.FAST_EDIT_TOOLS)
 
 # Of those, the ones v1's registry marks safe but the fast path still puts to
-# its gate (decision F-3: "the tools ... go through the existing gate"): an
-# edit reaches the daemon's §6 permit as a command does (`runtime.ask_tools`).
-# `run_readonly` is not here: its own allowlist of read-only programs is its
-# gate, on every surface.
-ASKED_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file"})
+# its gate (decision F-3: "the tools ... go through the existing gate"): each
+# reaches the daemon's §6 permit as `run_command` does (`runtime.ask_tools`).
+# `run_readonly` is here too (review of PR #182, H1): its own allowlist of
+# read-only programs says nothing about *what* they read, so on a desk turn
+# `cat ~/.config/gh/hosts.yml`, a grep of the Browser profile, or `cat` of a
+# project symlink into ~/.ssh returned credentials with nobody asked — and
+# `fetch_page` could carry them out. Through the permit, rules' ALLOW still
+# runs an ordinary read (`ls`, `cat src/app.py`) unasked for a human-backed
+# asker, the always-ask `credentials-path` rule asks, and the approver's desk
+# check covers it.
+ASKED_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_readonly"})
 
 # Names that must never be in FAST_TOOLS or EDIT_TOOLS, asserted below and
 # again in the suite. Kept as data rather than left to a reader's eye because
@@ -302,13 +308,23 @@ def _project_folder(brief: Brief) -> str | None:
     """The thread's project folder, where its edits land and its commands
     start (decision F-6), or None. The daemon makes every brief's `cwd`
     absolute (`Daemon.make_brief`); one that is not, or that holds a
-    character a prompt line cannot show as written, binds nothing."""
+    character a prompt line cannot show as written, or that is not an
+    existing folder, binds nothing — and a handle with no folder holds no
+    edit tools (`_open`).
+
+    The *physical* folder (`realpath`, review of PR #182, M1): the shell
+    runs there, and `cd ..` from a symlinked project leaves the physical
+    parent. Judged on the logical path, `cd .. && echo x > jarvis/allowlist.json`
+    from a project linked into ~/.config looked harmless and overwrote the
+    allowlist."""
     cwd = brief.cwd if isinstance(brief.cwd, str) else ""
     if not cwd or not os.path.isabs(cwd):
         return None
     if any(ch in cwd for ch in "\n\r\x00`") or not cwd.isprintable():
         return None
-    return os.path.normpath(cwd)
+    real = os.path.realpath(cwd)
+    # A folder that is not there binds nothing: an edit would create it.
+    return real if os.path.isdir(real) else None
 
 
 def _summary(name: str, text: str) -> str:
@@ -424,6 +440,10 @@ class FastPathProvider:
     ) -> SessionHandle:
         tool_names = self._toolset(brief)
         workdir = _project_folder(brief)
+        if workdir is None:
+            # Fail closed (review of PR #182, M2): with no folder bound, a
+            # relative edit would land in the daemon's own directory.
+            tool_names = [name for name in tool_names if name not in EDIT_TOOLS]
         # The folder is stated on every turn, desk or not: relative reads land
         # there too. It names no tool, so no narrowing touches it.
         folder = (f"\n\nYour project folder is `{workdir}`. Relative paths resolve there."
@@ -497,6 +517,14 @@ class FastPathProvider:
         if brief.allowed_tools is None:
             return allowed
         asked = set(brief.allowed_tools)
+        if asked & EDIT_TOOLS and not EDIT_TOOLS <= asked:
+            # The edit tools come as a set: the desk wording, the 30-step
+            # budget and "small direct work" describe all four, and a turn
+            # holding `run_command` under "you have no tool that runs a
+            # command" would be told something false (review of PR #182, L4).
+            raise BriefRefused(
+                "the fast path's edit tools are pinned all together or not at all: "
+                + ", ".join(sorted(EDIT_TOOLS)))
         widened = sorted(asked - FAST_TOOLS - EDIT_TOOLS)
         if widened:
             raise BriefRefused(
@@ -561,9 +589,13 @@ class FastPathProvider:
         with nobody asked. Its permit is asked with an ASK copy of the brief:
         what no layer allows, the owner decides.
 
-        **Only at the desk.** An edit tool's call is denied when the turn is
-        no longer at the desk — before the permit is asked, and again after,
-        since an approval can wait out a steer from elsewhere.
+        **Only at the desk, and only while the turn runs.** An edit tool's
+        call is denied when the turn is no longer at the desk — before the
+        permit is asked, and again after, since an approval can wait out a
+        steer from elsewhere. And a yes that lands after the owner pressed
+        Stop is a denial (review of PR #182, L1): the card is still answered
+        or times out in the broker — the permit takes no cancel — but what it
+        approved never runs.
 
         Built for every handle, desk or not, because `Agent` must never be
         constructed with `approve=None` — `dispatch()` runs a dangerous tool
@@ -582,7 +614,9 @@ class FastPathProvider:
                 decision = Decision(permit(name, dict(args), asked))
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
                 return False
-            return decision is Decision.ALLOW and (name not in EDIT_TOOLS or runtime.at_desk())
+            return (decision is Decision.ALLOW
+                    and (name not in EDIT_TOOLS or runtime.at_desk())
+                    and not runtime.should_stop()())
 
         return approve
 
@@ -775,7 +809,7 @@ class FastPathProvider:
         names = self._turn_tools(native, desk["present"])
         # Decision F-4: a turn holding the edit tools gets the larger budget.
         # Set per turn, before `run_turn` reads it; exhaustion still proposes.
-        native.agent.max_steps = (FAST_EDIT_MAX_STEPS if EDIT_TOOLS & set(names)
+        native.agent.max_steps = (FAST_EDIT_MAX_STEPS if EDIT_TOOLS <= set(names)
                                   else FAST_MAX_STEPS)
         # Edits reach the gate as commands do (decision F-3), on this turn only.
         asked_tools = ASKED_TOOLS & set(names)

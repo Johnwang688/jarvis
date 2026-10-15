@@ -247,7 +247,8 @@ class Base(unittest.TestCase):
 class Boundary(Base):
     def test_edit_tools_are_named_disjoint_and_the_only_dangerous_ones(self):
         self.assertEqual(fastpath.EDIT_TOOLS, frozenset(EDIT))
-        self.assertEqual(fastpath.ASKED_TOOLS, frozenset({"write_file", "edit_file"}))
+        self.assertEqual(fastpath.ASKED_TOOLS,
+                         frozenset({"write_file", "edit_file", "run_readonly"}))
         self.assertFalse(fastpath.FAST_TOOLS & fastpath.EDIT_TOOLS, "never in the base set")
         self.assertEqual(fastpath.FORBIDDEN_TOOLS, FORBIDDEN_AFTER)
         dangerous = {n for n, t in tools.REGISTRY.items() if t.dangerous}
@@ -295,13 +296,18 @@ class Boundary(Base):
                     with self.assertRaises(BriefRefused):
                         provider._toolset(Brief(role=brief.role, cwd=brief.cwd, task_id=brief.task_id,
                                                 allowed_tools=["read_file", name]))
-        # An owner's chat may narrow to them, never past them.
+        # An owner's chat may pin them — all four together, or none — and
+        # never anything past them. A partial pin would be told the
+        # read-only wording while holding a tool it denies having (L4).
         self.assertEqual(provider._toolset(Brief(role=Role.CHAT, cwd=str(self.project),
-                                                 allowed_tools=["read_file", "run_command"])),
-                         ["read_file", "run_command"])
+                                                 allowed_tools=["read_file", *sorted(EDIT)])),
+                         sorted({"read_file"} | EDIT))
+        for partial in (["run_readonly"], ["read_file", "run_command"], ["write_file", "edit_file"]):
+            with self.subTest(partial=partial), self.assertRaises(BriefRefused):
+                provider._toolset(Brief(role=Role.CHAT, cwd=str(self.project), allowed_tools=partial))
         with self.assertRaises(BriefRefused):
             provider._toolset(Brief(role=Role.CHAT, cwd=str(self.project),
-                                    allowed_tools=["run_command", "run_subagent"]))
+                                    allowed_tools=[*sorted(EDIT), "run_subagent"]))
 
 
 class Turns(Base):
@@ -343,6 +349,25 @@ class Turns(Base):
                 self.assertFalse(target.exists())
                 self.assertFalse((self.project / "ran.txt").exists())
                 self.assertTrue(all(e.data["outcome"] != "ok" for e in self.finished(events)))
+
+    def test_no_project_folder_means_no_edit_tools(self):
+        # Review of PR #182, M2: a folder the prompt cannot show (a backtick,
+        # a control character) binds nothing, so the handle holds no edit
+        # tool — a relative edit would otherwise land in the daemon's cwd.
+        # A folder that does not exist binds nothing either.
+        odd = self.tmp / "my`proj"
+        odd.mkdir()
+        for folder in (odd, self.tmp / "missing"):
+            with self.subTest(folder=folder.name):
+                provider, handle = self.open(cwd=folder, tid=f"t-{len(self.handles)}")
+                script = Script(reply("", [("write_file", {"path": "notes.txt", "content": "hi"})]))
+                self.turn(provider, handle, script, desk())
+                self.assertFalse(EDIT & script.tools[0], script.tools[0])
+                self.assertEqual(handle.native.agent.max_steps, fastpath.FAST_MAX_STEPS)
+                self.assertIn("not available to this agent", script.results[-1])
+                self.assertFalse((self.elsewhere / "notes.txt").exists())
+                self.assertFalse((folder / "notes.txt").exists())
+                self.assertNotIn("Your project folder", script.systems[0])
 
     def test_a_task_thread_never_holds_them_even_from_the_desk(self):
         provider, handle = self.open(task_id="task1")
@@ -400,6 +425,88 @@ class Gate(Base):
         self.assertEqual(asker.asked, [])
         self.assertIn("[exit 0]", result)
         self.assertFalse((self.project / "stale.txt").exists())
+
+    def test_run_readonly_cannot_read_credentials_unasked(self):
+        # Review of PR #182, H1: on a desk turn `run_readonly` read a gh
+        # token, the Browser profile and an ssh key behind a project symlink
+        # with no card. Each now asks (the owner says no here) or is refused;
+        # nothing of the credential comes back.
+        (HOME / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+        (HOME / ".config" / "gh" / "hosts.yml").write_text(
+            "github.com:\n    oauth_token: gho_FAKEFAKEFAKEFAKEFAKEFAKE1234567890\n")
+        profile = HOME / ".local" / "share" / "jarvis" / "browser" / "Default"
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / "History").write_text("visited https://bank.example/?session=SESSIONSECRET\n")
+        (HOME / ".ssh").mkdir(exist_ok=True)
+        (HOME / ".ssh" / "id_ed25519").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nKEYMATERIAL\n")
+        (self.project / "notes").symlink_to(HOME / ".ssh" / "id_ed25519")
+        for command, marker in (("cat ~/.config/gh/hosts.yml", "gho_FAKE"),
+                                (f"grep -ra session {profile.parent}", "SESSIONSECRET"),
+                                ("cat notes", "KEYMATERIAL"),
+                                ("cat note?", "KEYMATERIAL"),
+                                ("grep -r oauth ~/.config", "gho_FAKE"),
+                                ("head -5 ./notes", "KEYMATERIAL")):
+            with self.subTest(command):
+                asker = Asker(Decision.DENY)
+                provider, handle = self.open(asker, tid=f"t-{len(self.handles)}")
+                script = Script(reply("", [("run_readonly", {"command": command})]))
+                events = self.turn(provider, handle, script)
+                result = script.results[-1]
+                self.assertNotIn(marker, result)
+                self.assertNotEqual(self.finished(events)[0].data["outcome"], "ok", result)
+                self.assertLessEqual(len(asker.asked), 1)
+
+    def test_ordinary_reads_still_run_unasked(self):
+        # `ls` and `cat` are rules' ALLOW. `git status` is rules' ASK (git is
+        # not a read-only program here), so it runs unasked once the owner's
+        # allowlist covers `git`, as on every other surface.
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        (self.project / "app.py").write_text("print('hi')\n")
+        self.allowlist({"tool": "run_command", "prefix": "git"})
+        asker = Asker()
+        provider, handle = self.open(asker)
+        script = Script(reply("", [("run_readonly", {"command": "ls"})]),
+                        reply("", [("run_readonly", {"command": "cat app.py"})]),
+                        reply("", [("run_command", {"command": "git status --short",
+                                                    "reason": "look"})]))
+        self.turn(provider, handle, script)
+        self.assertEqual(asker.asked, [])
+        ls, cat, status = script.results[:3]
+        self.assertIn("app.py", ls)
+        self.assertIn("print('hi')", cat)
+        self.assertIn("app.py", status)
+
+    def test_run_readonly_judges_what_it_reads_on_every_surface(self):
+        # The same judge with nothing bound (v1's surfaces): the process's
+        # own folder places a relative word.
+        from jarvis.tools import shell
+        (HOME / ".ssh").mkdir(exist_ok=True)
+        (HOME / ".ssh" / "id_ed25519").write_text("KEYMATERIAL\n")
+        (self.elsewhere / "k").symlink_to(HOME / ".ssh" / "id_ed25519")
+        (self.elsewhere / "plain.txt").write_text("fine\n")
+        for command in ("cat ~/.ssh/id_ed25519", "cat k", "ls ~/.ssh", "grep -r x ~"):
+            with self.subTest(command):
+                self.assertIn("credential folder", shell.run_readonly(command))
+        self.assertIn("fine", shell.run_readonly("cat plain.txt"))
+        self.assertIn("fine", shell.run_readonly("grep -r fine ."))
+
+    def test_the_daemons_own_keys_are_scrubbed_from_a_read(self):
+        # `run_readonly env` prints the process environment, which in the
+        # daemon holds its provider keys (open on v1 too before this PR).
+        key = "sk-or-v1-" + "a1b2c3d4" * 8
+        saved = os.environ.get("OPENROUTER_API_KEY")
+        os.environ["OPENROUTER_API_KEY"] = key
+        self.addCleanup(os.environ.__setitem__, "OPENROUTER_API_KEY", saved)
+        # `env` is not rules' ALLOW, so it is put to the owner; say yes.
+        asker = Asker(Decision.ALLOW)
+        provider, handle = self.open(asker)
+        script = Script(reply("", [("run_readonly", {"command": "env"})]))
+        self.turn(provider, handle, script)
+        self.assertEqual([r.command for r in asker.asked], ["env"])
+        self.assertIn("OPENROUTER_API_KEY=", script.results[-1])
+        self.assertNotIn(key, script.results[-1])
+        self.assertIn("PATH=", script.results[-1], "ordinary settings are not withheld")
 
     def test_a_rules_allow_command_runs_unasked_in_the_project_folder(self):
         asker = Asker()
@@ -573,6 +680,53 @@ class Gate(Base):
         self.assertTrue(result.startswith("Refused:"), result)
         self.assertEqual(config.ALLOWLIST_PATH.read_text(), before)
 
+    def test_a_symlinked_project_is_judged_where_it_really_is(self):
+        # Review of PR #182, M1: a project folder that is a symlink into the
+        # gate's own folder. `cd ..` leaves the *physical* parent, so a line
+        # judged on the logical path (`<link>/../jarvis/allowlist.json`)
+        # looked harmless and overwrote the allowlist.
+        cfg = config.ALLOWLIST_PATH.parent
+        link = self.tmp / "linked-project"
+        link.symlink_to(cfg)
+        evil = self.tmp / "evil.json"
+        evil.write_text('[{"tool": "run_command", "prefix": "rm"}]\n')
+        before = config.ALLOWLIST_PATH.read_text()
+        asker = Asker(*([Decision.ALLOW] * 3))
+        provider, handle = self.open(asker, cwd=link)
+        self.assertEqual(handle.native.workdir, os.path.realpath(link))
+        for command in (f"cd .. && cp {evil} {cfg.name}/allowlist.json",
+                        f"cd .. && echo x > {cfg.name}/allowlist.json"):
+            with self.subTest(command):
+                script = Script(reply("", [("run_command", {"command": command, "reason": "t"})]))
+                self.turn(provider, handle, script)
+                self.assertEqual(config.ALLOWLIST_PATH.read_text(), before, script.results[-1])
+
+    def test_a_yes_after_stop_does_not_run(self):
+        # Review of PR #182, L1: the owner presses Stop, then approves the
+        # card. The broker's wait takes no cancel, so the card is answered;
+        # what it approved must still not run.
+        class StopThenAllow(PendingApprovals):
+            def __init__(self):
+                super().__init__(timeout_s=5, on_request=self.announced)
+                self.asked = []
+
+            def announced(self, request):
+                self.asked.append(request)
+                self.provider.interrupt(self.handle)
+                self.resolve(request.req_id, Decision.ALLOW)
+
+        asker = StopThenAllow()
+        provider, handle = self.open(asker)
+        asker.provider, asker.handle = provider, handle
+        script = Script(reply("", [("run_command", {"command": "sed -i s/a/b/ f.txt",
+                                                    "reason": "t"})]))
+        (self.project / "f.txt").write_text("a\n")
+        events = self.turn(provider, handle, script)
+        self.assertEqual(len(asker.asked), 1)
+        self.assertEqual((self.project / "f.txt").read_text(), "a\n")
+        done = [e for e in events if e.kind is EventKind.TURN_FINISHED][0]
+        self.assertEqual(done.data["stop"], "interrupted")
+
     def test_the_approver_denies_off_the_desk_before_asking(self):
         seen = []
 
@@ -633,6 +787,19 @@ class Workdir(Base):
         self.assertIn("notes/", listing)
         self.assertEqual(pwd.splitlines()[0], str(self.project))
         self.assertIn("a.txt", ls)
+
+    def test_a_relative_read_of_a_credential_symlink_is_refused(self):
+        # Review of PR #182, L3: the read tools place a relative path in the
+        # project before judging it, so a symlink inside the project that
+        # points into ~/.ssh is refused as the credential it is.
+        (HOME / ".ssh").mkdir(exist_ok=True)
+        (HOME / ".ssh" / "id_ed25519").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nKEYMATERIAL\n")
+        (self.project / "notes").symlink_to(HOME / ".ssh" / "id_ed25519")
+        provider, handle = self.open()
+        script = Script(reply("", [("read_file", {"path": "notes"})]))
+        self.turn(provider, handle, script)
+        self.assertNotIn("KEYMATERIAL", script.results[-1])
+        self.assertIn("credential folder", script.results[-1])
 
     def test_with_nothing_bound_every_path_is_as_written(self):
         self.assertIsNone(runtime.working_dir())

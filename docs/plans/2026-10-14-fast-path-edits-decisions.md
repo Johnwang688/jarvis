@@ -23,6 +23,20 @@ anything"). The owner chose, from the options offered:
   else asks the owner. Deny wins. Protected state, credential and owner-op
   refusals are unchanged.
 
+  *Amended by review, 2026-10-14 (PR #182, the build and its independent
+  review):* the route as built is not `permissions.gate`. The fast path's
+  approver asks the daemon's §6 permit directly, with no v1 human-backed
+  flag, because `gate` marks any approver human-backed and would let the
+  allowlist and rules' ALLOW answer before the always-ask rules and behind a
+  `DenyAll` asker. The permit applies the allowlist and rules' ALLOW itself
+  (layer 4, human-backed asker only). Under the AUTO profile the permit is
+  asked with an ASK copy of the brief, because the fast path has no reviewer
+  for layer 5 to defer to. `write_file`, `edit_file` and `run_readonly` are
+  not `dangerous` in v1 and are put to the same permit through
+  `runtime.ask_tools()`; ordinary reads still run unasked through rules'
+  ALLOW. A yes that lands after Stop, or after the turn left the desk, does
+  not run.
+
 Lead's defaults (not asked; open to amendment):
 
 - **F-4.** A turn that holds the edit tools gets a larger step budget (30).

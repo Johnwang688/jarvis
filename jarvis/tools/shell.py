@@ -204,8 +204,81 @@ def run_readonly(
             f"Error: {binary} {writing}, so it is not a read. Use run_command if "
             "this really needs to change things."
         )
+    # What it reads, judged as `read_file` judges it (review of PR #182, H1):
+    # the allowlist above says which *program* runs, never which files, so
+    # `cat ~/.config/gh/hosts.yml`, a grep of the Browser profile and `cat`
+    # of a symlink into ~/.ssh were all a read. Not overridable by approval.
+    reached = _credential_operand(binary, tokens)
+    if reached:
+        return (f"Error: {reached} is in a credential folder (SSH, cloud and Git logins, "
+                "Jarvis's own credentials or the owner's Browser profile), which Jarvis does "
+                "not read. Ask the owner for what you need instead.")
 
     return _run(command)
+
+
+# How many files one operand's glob may name before the line is refused as
+# too broad to judge, rather than judged in part.
+_GLOB_CAP = 2000
+
+
+def _credential_operand(binary: str, tokens: list[str]) -> str | None:
+    """The first operand of a `run_readonly` line that is, or reaches into, a
+    credential folder (`config.credential_dirs()`), or None.
+
+    Every word after the program is judged as a path where the shell would
+    find it: `~` expanded, a relative word placed in the run's working folder
+    (`runtime.working_dir()`, else the process's own), a glob expanded, and a
+    symlink followed (`files.credential_folder_judge`, the read tools' own
+    judge). Patterns and other non-paths simply judge as nothing. A recursive
+    search (`grep -r`, `rg`) of a folder that *holds* a credential folder
+    reads it too, so that is refused as well. A glob too broad to judge is
+    refused rather than judged in part.
+    """
+    import glob
+    import os
+
+    from .. import runtime
+    from .files import _credential_roots, credential_folder_judge
+
+    judge = credential_folder_judge()
+    base = runtime.working_dir() or os.getcwd()
+    roots = [str(root) for root in _credential_roots()]
+    recursive = binary == "rg" or (binary == "grep" and any(
+        word in ("-r", "-R", "--recursive", "--dereference-recursive")
+        or (word.startswith("-") and not word.startswith("--") and ("r" in word or "R" in word))
+        for word in tokens[1:]))
+    words = []
+    for word in tokens[1:]:
+        if word.startswith("-"):
+            if "=" not in word:
+                continue
+            word = word.split("=", 1)[1]
+        if word:
+            text = os.path.expanduser(word)
+            words.append((word, text if os.path.isabs(text) else os.path.join(base, text)))
+    if recursive and not any(os.path.exists(path) for _word, path in words):
+        # `rg session`, `grep -r x`: no folder named, so the one they search
+        # is the one they run in.
+        words.append((".", base))
+    for word, path in words:
+        if glob.has_magic(path):
+            found = []
+            for match in glob.iglob(path):
+                found.append(match)
+                if len(found) > _GLOB_CAP:
+                    return word
+        else:
+            found = [path]
+        for candidate in found:
+            if judge(candidate):
+                return word
+            if recursive:
+                real = os.path.realpath(candidate)
+                if any(root == real or root.startswith(real.rstrip(os.sep) + os.sep)
+                       for root in roots):
+                    return word
+    return None
 
 
 @tool(dangerous=True)

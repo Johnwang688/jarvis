@@ -306,16 +306,21 @@ design §2 D2 and §8.1 carry the amendment. Code: `jarvis/v2/providers/fastpath
   itself is unchanged and still holds nothing dangerous; `_validate_toolset`
   allows a dangerous tool only in `EDIT_TOOLS`.
 - **The gate.** `_approver` sends `run_command` and the `ASKED_TOOLS` edits
-  (`write_file`, `edit_file`, through `runtime.ask_tools()`) to the daemon's
+  (`write_file`, `edit_file`, `run_readonly`, through `runtime.ask_tools()`) to the daemon's
   §6 permit, with **no v1 `jarvis_human_backed` flag** and **AUTO asked as
   ASK** (the fast path has no reviewer). The permit applies layer 1, the
   always-ask rules, then the allowlist and rules' ALLOW at layer 4 only for a
   human-backed asker. Cards go through the broker and are answered by
   `POST /approvals/{id}`; `answer()` still raises. An edit tool is denied
-  off the desk, before and after the permit. `run_readonly` is not asked: its
-  own read-only allowlist is its gate.
+  off the desk, before and after the permit, and a yes that lands after Stop
+  never runs. `run_readonly` is asked too (review H1): rules' ALLOW still runs
+  an ordinary read unasked, and `run_readonly` itself now refuses an operand
+  that is or reaches a credential folder (symlinks and globs followed, a
+  recursive grep of a folder holding one), on every surface.
 - **Where.** `runtime.working_dir()` is bound per turn to the brief's `cwd`
-  (the project folder, stated in the prompt). `files.in_working_dir` places a
+  resolved to its physical folder (`realpath`, review M1; the prompt states
+  it). A brief whose folder cannot be bound (not absolute, not an existing
+  folder, or a backtick/control character) gets no edit tools (review M2). `files.in_working_dir` places a
   relative path before any check; `shell._run` starts there; grep_files'
   root, `protected_state.command_touches(cwd=None)` and the `.env` scrubber's
   search folders use it. Unbound, everything is as before.
@@ -327,10 +332,17 @@ design §2 D2 and §8.1 carry the amendment. Code: `jarvis/v2/providers/fastpath
   `PROMPT_TOOL_PARAGRAPHS` rules; without the edit tools the fast path's
   prompt is the pre-change text byte for byte.
 - **Known limits.** A desk turn steered off mid-turn keeps the budget it
-  started with while its prompt states eight; `run_readonly` already in the
-  batch in flight when the steer lands still runs (it reads). A pending card
-  is not released by Stop; it waits out its timeout and denies.
+  started with while its prompt states eight. A card still pending at Stop
+  stays open until answered or timed out (the permit takes no cancel), but
+  the turn's approver turns a late yes into a denial. A brief may pin the
+  four edit tools together or not at all. The permit's layer 1 judges
+  commands at the brief's raw `cwd`, not its physical folder (every
+  provider; v1's check beneath it uses the physical one here).
+- **Environment.** The `.env` scrubber also withholds this process's own
+  credential-named environment values (`*_API_KEY`, `*_TOKEN` …), so
+  `run_readonly env` cannot print the daemon's provider keys (open on v1
+  before).
 
-Free suites: `tests/v2/fastpath_edits_check.py` (31 checks; 24 fail and 7
-error against 07a152f, and each of 12 targeted mutations fails at least one),
+Free suites: `tests/v2/fastpath_edits_check.py` (see the PR for the
+mutation evidence),
 `tests/v2/fastpath_check.py`, `tests/prompt_tools_check.py`.

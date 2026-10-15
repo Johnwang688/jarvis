@@ -7,6 +7,12 @@ file edit, a command, a browser, more than one page, or a deliverable, the model
 says so in the transcript by calling this, and the Router opens a task on a CLI
 provider.
 
+Amended 2026-10-14 (owner, fast-path-edits decisions F-1..F-7): the owner's
+own desk turn holds the edit tools and does small, direct edits and commands
+itself, through the §6 gate. There the door is for large or multi-file work,
+anything that wants review or a pull request, and work past its budget. The
+schema below is sent on both kinds of turn, so it says both.
+
 It is an act *in* the transcript rather than prose the provider greps for. That
 is the v1 `goal_report` lesson (and the step-budget one behind it): state the
 harness reads out of free text is state the model will confabulate, and state
@@ -52,11 +58,13 @@ def task_propose(
 ) -> str:
     """Hand this request to a real task instead of answering it here.
 
-    Call this when the request needs any one of: editing a file, running a
-    command, a browser, more than one page fetched, or producing a deliverable
-    (a file, a PR, a report) — and also when it simply will not fit in this
-    conversation's short step budget. Any one of those is enough; you do not
-    need all of them.
+    Call this when the request needs any one of: editing a file or running a
+    command when this turn holds no tool for it — or, when it does, a large or
+    multi-file change or work that should be reviewed or land as a pull
+    request; a browser; more than one page fetched; or a deliverable (a file,
+    a PR, a report) — and also when it simply will not fit in this
+    conversation's step budget. Any one of those is enough; you do not need
+    all of them.
 
     Do not call it for a question you can answer from memory, the transcript,
     one read or one fetch, for a control request (mute, avatar, music), or for
