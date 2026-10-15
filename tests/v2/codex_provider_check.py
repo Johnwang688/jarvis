@@ -232,6 +232,8 @@ def peer(script_path, log_path, thread_name):
                 # its reply arrives (the `method is None` branch below).
                 if script.get("item"):
                     event("item/started", item=script["item"])
+                for changes in script.get("updates") or []:
+                    event("item/fileChange/patchUpdated", itemId=script["item"]["id"], changes=changes)
                 identity = {"threadId": native} if script.get("no_turn") else {"threadId": native, "turnId": turn}
                 emit({"id": "special", "method": script["method"], "params": {**identity, **script["params"]}})
                 continue
@@ -1105,7 +1107,7 @@ class Checks(unittest.TestCase):
             self.stack.enter_context(patch.object(config, name, value))
         return build_permit(PermitContext("abcd1234", self.brief, provider="codex"), asker)
 
-    def scripted(self, method, params, permit, *, item=SEEN, no_turn=False, brief=None):
+    def scripted(self, method, params, permit, *, item=SEEN, no_turn=False, brief=None, updates=None):
         if item is SEEN:
             # A file approval names no paths: Codex first starts the
             # fileChange item it is about (a benign one here) or it is
@@ -1113,7 +1115,7 @@ class Checks(unittest.TestCase):
             item = ({"id": params.get("itemId"), "type": "fileChange", "status": "inProgress",
                      "changes": [{"path": "notes.txt", "diff": "+x", "kind": {"type": "add"}}]}
                     if method == "item/fileChange/requestApproval" and isinstance(params, dict) else None)
-        self.brain.script.update(method=method, params=params, item=item, no_turn=no_turn)
+        self.brain.script.update(method=method, params=params, item=item, no_turn=no_turn, updates=updates)
         name = f"s{len(self.brain.rpcs)}"
         h = self.start("scripted", permit, thread=replace(self.thread, id=name), brief=brief)
         events = self.send(h)
@@ -1485,6 +1487,60 @@ class Checks(unittest.TestCase):
         self.assertEqual(asker.seen[-1].args["paths"], ["notes.txt", "docs/notes.md"])
         self.assertIn("docs/notes.md", json.dumps(asker.seen[-1].to_json()))
 
+    @staticmethod
+    def change(path, kind=None, move=None):
+        kind = kind or ({"type": "update", "move_path": move} if move else {"type": "add"})
+        return {"path": path, "diff": "+x", "kind": kind}
+
+    def test_file_approval_is_judged_on_every_version_of_its_item(self):
+        """`item/fileChange/patchUpdated` (session path): an approval is
+        judged on the item as updated, on the union of every path any version
+        reported (a later, partial update cannot hide an earlier destination),
+        and declined if any version could not be read. A request's own
+        `paths` never replaces them."""
+        file_approval = "item/fileChange/requestApproval"
+        start = lambda *changes: {"id": "patch", "type": "fileChange", "status": "inProgress",
+                                  "changes": list(changes)}
+        refused = [
+            ("a destination added by an update", start(self.change("notes.txt")),
+             [[self.change("notes.txt", move=".env")]], {"itemId": "patch"}),
+            ("a destination an update later drops", start(self.change("notes.txt", move=".env")),
+             [[self.change("notes.txt")]], {"itemId": "patch"}),
+            ("a request naming its own paths", start(self.change("notes.txt", move=".env")),
+             [], {"itemId": "patch", "paths": ["notes.txt"]}),
+        ]
+        for label, item, updates, params in refused:
+            for brief in (self.chat(), self.brief):
+                with self.subTest(case=label, role=brief.role):
+                    asker = RecordingAsker(Decision.ALLOW)
+                    _, events, reply = self.scripted(file_approval, params, self.real_permit(asker),
+                                                     item=item, updates=updates, brief=brief)
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+                    self.assertEqual(asker.seen, [], "refused by layer 1, never asked")
+                    asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+                    self.assertEqual(asked["args"]["paths"], ["notes.txt", ".env"])
+        # An unreadable version is not forgotten when a readable one follows.
+        for brief in (self.chat(), self.brief):
+            with self.subTest(case="an unreadable version, then a readable one", role=brief.role):
+                asker = RecordingAsker(Decision.ALLOW)
+                _, events, reply = self.scripted(
+                    file_approval, {"itemId": "patch"}, self.real_permit(asker),
+                    item=start(self.change("notes.txt", kind={"type": "copy"})),
+                    updates=[[self.change("notes.txt")]], brief=brief)
+                self.assertEqual(reply["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [])
+                self.assertEqual([e.data["message"] for e in events if e.kind == K.ERROR],
+                                 ["Codex approval request declined: a change's kind cannot be read"])
+        # A benign item that grew: asked, with every file on the card.
+        asker = RecordingAsker(Decision.ALLOW)
+        _, events, reply = self.scripted(file_approval, {"itemId": "patch"}, self.real_permit(asker),
+                                         item=start(self.change("docs/a.md")),
+                                         updates=[[self.change("docs/a.md"), self.change("docs/b.md")],
+                                                  [self.change("docs/b.md", move="docs/c.md")]],
+                                         brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(asker.seen[-1].args["paths"], ["docs/a.md", "docs/b.md", "docs/c.md"])
+
     def test_file_change_kind_that_cannot_be_read_is_declined(self):
         file_approval = "item/fileChange/requestApproval"
         shapes = {
@@ -1772,6 +1828,161 @@ class Checks(unittest.TestCase):
                 if child:
                     self.assertIn(f"Codex sub-agent ‹{child}› (not the orchestrator)", shown.headline)
 
+    def test_file_approval_before_the_turn_start_reply_sees_every_version(self):
+        """The recorded session file approval (patch_approval, Codex 0.161.0)
+        with an update that adds a credential destination, all of it arriving
+        before the turn/start reply: the early path keeps the update too."""
+        def early_update(msgs):
+            i = self.request_at(msgs)
+            req = msgs[i]["params"]
+            update = {"method": "item/fileChange/patchUpdated", "params": {
+                "threadId": req["threadId"], "turnId": req["turnId"], "itemId": req["itemId"],
+                "changes": [self.change("$CWD/notes.txt", move="$CWD/.env")]}}
+            msgs.insert(i, update)
+            start = msgs.pop(0)
+            msgs.insert(self.request_at(msgs) + 1, start)
+            return msgs
+        asker = RecordingAsker(Decision.ALLOW)
+        h, events = self.replay("patch_approval", self.real_permit(asker), edit=early_update)
+        self.assertEqual(events[-1].data, {"stop": "end"})
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+        self.assertEqual(asker.seen, [], "the update's .env destination is refused unasked")
+        asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+        self.assertEqual(asked["args"]["paths"], [str(self.work / "notes.txt"), "/sv0-outside/notes.txt",
+                                                  str(self.work / ".env")])
+
+    UNION_PROBE = """
+import json, sys, time
+from jarvis.v2.providers import codex
+n = int(sys.argv[1])
+changes = [{"path": f"src/f{i}.txt", "diff": "+x", "kind": {"type": "add"}} for i in range(n)]
+out = {}
+for shape in ("cumulative", "one file each"):
+    prev = None
+    started = time.thread_time()
+    for k in range(1, n + 1):
+        version = changes[:k] if shape == "cumulative" else changes[k - 1:k]
+        prev = codex._remember(prev, {"id": "p", "type": "fileChange", "changes": version})
+    seen = prev[codex._PATHS_SEEN]
+    out[shape] = {"cpu": time.thread_time() - started, "paths": len(seen.paths), "problem": seen.problem}
+print(json.dumps(out))
+"""
+
+    def test_the_union_of_an_items_versions_is_bounded_work(self):
+        """5000 updates to one item, each resending every change so far (a
+        streamed patch may), or adding one file each: `_remember` runs on the
+        turn loop's thread, so the whole series must cost under 0.4 CPU s,
+        and it ends past judging. Run in a child process with an
+        active deadline: a quadratic-per-update union never returns in time."""
+        from tests import loadclock
+        loadclock.pinned()
+        self.assertEqual((codex.CHANGE_PATH_CAP, codex.CHANGE_WORK_CAP), (4096, 1_000_000))
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
+        try:
+            run = subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[2]); "
+                                  "exec(sys.argv[3])", "5000", env["PYTHONPATH"], self.UNION_PROBE],
+                                 capture_output=True, text=True, timeout=30, env=env)
+        except subprocess.TimeoutExpired:
+            self.fail("5000 updates to one item took over 30 s on the turn loop's thread")
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        out = json.loads(run.stdout)
+        cumulative, single = out["cumulative"], out["one file each"]
+        self.assertEqual(cumulative["problem"], codex.TOO_MUCH_WORK)
+        self.assertEqual((single["paths"], single["problem"]), (4097, codex.TOO_MANY_PATHS))
+        # Idle on the owner's machine (2026-10-15): 183 CPU ms cumulative, 3
+        # one file each. The old list-scan union cost 1.72 s here (4.3x the
+        # bound) and no work cap 1.46 s (3.6x): both past loadclock's 3x, so
+        # caught under any load.
+        for shape, result in out.items():
+            held = loadclock.judge(result["cpu"], 0.4)
+            self.assertLess(held.idle, 0.4, f"{shape}: {held}")
+
+    def test_a_file_item_past_judging_is_declined_unasked(self):
+        file_approval = "item/fileChange/requestApproval"
+        many = lambda n: [self.change(f"src/f{i}.txt") for i in range(n)]
+        # At the cap: judged and asked. One past it: declined, nobody asked.
+        asker = RecordingAsker(Decision.ALLOW)
+        _, _, reply = self.scripted(file_approval, {"itemId": "patch"}, self.real_permit(asker),
+                                    item={"id": "patch", "type": "fileChange", "status": "inProgress",
+                                          "changes": many(4096)}, brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(len(asker.seen[-1].args["paths"]), 4096)
+        for label, item, updates in (
+                ("one version past the cap", many(4097), None),
+                # 5000 files arriving in 50 incremental updates through the
+                # transport, under an active deadline. (5000 one-file updates
+                # are timed in-process above: a burst of that many messages
+                # races the 4096-message RPC queue, the known limit SV-6 owns.)
+                ("5000 files in 50 incremental updates", many(100),
+                 [many(5000)[k:k + 100] for k in range(100, 5000, 100)])):
+            for brief in (self.chat(), self.brief):
+                with self.subTest(case=label, role=brief.role):
+                    asker = RecordingAsker(Decision.ALLOW)
+                    with ThreadPoolExecutor(1) as pool:
+                        future = pool.submit(self.scripted, file_approval, {"itemId": "patch"},
+                                             self.real_permit(asker), brief=brief, updates=updates,
+                                             item={"id": "patch", "type": "fileChange",
+                                                   "status": "inProgress", "changes": item})
+                        _, events, reply = future.result(timeout=60)
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+                    self.assertEqual(asker.seen, [])
+                    self.assertEqual([e.data["message"] for e in events if e.kind == K.ERROR],
+                                     [f"Codex approval request declined: {codex.TOO_MANY_PATHS}"])
+                    self.assertEqual(events[-1].data, {"stop": "end"})
+
+    def test_the_card_shows_the_items_changes_never_the_requests(self):
+        asker = RecordingAsker(Decision.ALLOW)
+        item = {"id": "patch", "type": "fileChange", "status": "inProgress",
+                "changes": [self.change("docs/real.md")]}
+        _, _, reply = self.scripted("item/fileChange/requestApproval",
+                                    {"itemId": "patch", "changes": [{"path": "harmless.txt", "diff": "+fake"}]},
+                                    self.real_permit(asker), item=item, brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(asker.seen[-1].args["changes"], item["changes"])
+        self.assertEqual(asker.seen[-1].args["paths"], ["docs/real.md"])
+
+    def test_child_file_approval_is_judged_on_every_version_of_its_item(self):
+        """The same for a child: its `patchUpdated` counts, the union of its
+        item's paths is judged, and an unreadable version is not forgotten."""
+        def file_item(started, updates):
+            def edit(msgs):
+                i = self.request_at(msgs)
+                req = msgs[i]
+                at = next(j for j, m in enumerate(msgs) if m.get("method") == "item/started"
+                          and m["params"]["item"].get("id") == req["params"]["itemId"])
+                ids = {k: req["params"][k] for k in ("threadId", "turnId")}
+                msgs[at]["params"]["item"] = {"type": "fileChange", "id": req["params"]["itemId"],
+                                              "status": "inProgress", "changes": started}
+                msgs[i] = {"method": "item/fileChange/requestApproval", "id": 0,
+                           "params": {**ids, "itemId": req["params"]["itemId"]}}
+                msgs[at + 1:at + 1] = [{"method": "item/fileChange/patchUpdated", "params": {
+                    **ids, "itemId": req["params"]["itemId"], "changes": changes}} for changes in updates]
+                return msgs
+            return edit
+        cases = [
+            ("a destination added by an update", [self.change("notes.txt")],
+             [[self.change("notes.txt", move=".env")]], None),
+            ("a destination an update later drops", [self.change("notes.txt", move=".env")],
+             [[self.change("notes.txt")]], None),
+            ("an unreadable version, then a readable one", [self.change("notes.txt", kind={"type": "copy"})],
+             [[self.change("notes.txt")]], "a change's kind cannot be read"),
+        ]
+        for label, started, updates, why in cases:
+            with self.subTest(case=label):
+                asker = RecordingAsker(Decision.ALLOW)
+                h, events = self.replay("approval_accept", self.real_permit(asker), edit=file_item(started, updates))
+                self.assert_parent_went_on(h, events)
+                self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [])
+                errors = [e.data["message"] for e in events if e.kind == K.ERROR]
+                if why:
+                    self.assertEqual(errors, [f"Codex approval request declined: {why} "
+                                              "(from Codex sub-agent ‹/root/sv0_asker›)"])
+                else:
+                    self.assertEqual(errors, [])
+                    asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+                    self.assertEqual(asked["args"]["paths"], ["notes.txt", ".env"])
+
     def test_child_elicitation_clock_question_and_others_are_never_fatal(self):
         def swap(method, params):
             def edit(msgs):
@@ -1995,7 +2206,7 @@ class Checks(unittest.TestCase):
             h, events = self.replay("approval_accept", self.real_permit(asker), edit=extra_items(1))
             self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
             # Only what an approval is judged on is kept.
-            self.assertTrue(all(set(item) <= {"id", "type", "command", "cwd", "changes"}
+            self.assertTrue(all(set(item) <= {"id", "type", "command", "cwd", "changes", codex._PATHS_SEEN}
                                 for _, item in h.native.child_items.values()))
 
     def test_child_limit_forgets_the_oldest_finished_child_never_a_busy_one(self):

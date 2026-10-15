@@ -93,10 +93,12 @@ def shell(cmd, call_id, escalate=False):
     return exec_call(code, call_id)
 
 
-def patch_call(call_id):
+def patch_call(call_id, multi=False):
     """A rename out of the workspace through code mode's freeform
-    `apply_patch`: outside the writable roots, so Codex asks first."""
-    patch = ("*** Begin Patch\n*** Update File: notes.txt\n*** Move to: /sv0-outside/notes.txt\n"
+    `apply_patch`: outside the writable roots, so Codex asks first. `multi`
+    adds three new files ahead of it, to see how a multi-file patch streams."""
+    adds = "".join(f"*** Add File: added{i}.txt\n+line {i}\n" for i in range(3)) if multi else ""
+    patch = (f"*** Begin Patch\n{adds}*** Update File: notes.txt\n*** Move to: /sv0-outside/notes.txt\n"
              "@@\n-old\n+new\n*** End Patch\n")
     code = f"text(JSON.stringify(await tools.apply_patch({json.dumps(patch)})));"
     return exec_call(code, call_id)
@@ -218,9 +220,9 @@ class Model:
         steer = any("SV0_STEER" in json.dumps(i) for i in items[-3:] if isinstance(i, dict)
                     and i.get("type") == "message" and i.get("role") == "user")
         if name == "parent":
-            if scenario == "patch_approval":
+            if scenario in ("patch_approval", "patch_multi"):
                 if step == 0:
-                    return {"items": [patch_call("call_parent_patch")]}
+                    return {"items": [patch_call("call_parent_patch", multi=scenario == "patch_multi")]}
                 return {"items": [message(f"SV0 parent: {scenario} done at step {step}.")]}
             if steer and scenario == "steer_parent" and step >= 1:
                 return {"items": [message("SV0 parent: steer acknowledged.")]}
@@ -412,7 +414,7 @@ def run(scenario, temp, model, approval_reply):
     home = pathlib.Path(temp) / "codex"
     work = pathlib.Path(temp) / f"work-{scenario}"
     work.mkdir()
-    if scenario.startswith("patch_approval"):
+    if scenario.startswith(("patch_approval", "patch_multi")):
         (work / "notes.txt").write_text("old\n")
     env = {"PATH": "/usr/bin:/bin", "HOME": temp, "CODEX_HOME": str(home), "XDG_CONFIG_HOME": temp + "/config",
            "XDG_DATA_HOME": temp + "/data", "XDG_CACHE_HOME": temp + "/cache", "OPENAI_API_KEY": "dummy-sv0-offline"}
