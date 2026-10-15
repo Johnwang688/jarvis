@@ -387,6 +387,26 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         time.sleep(0.3)
         check("with another card queued behind it, the link does nothing once both are answered",
               not page.evaluate(focus_in_rows) and sub_panes().count() == panes_before)
+        # …nor, with the child's pane open, move the window's focus while the next card is up.
+        rows(2).first.locator("button").click()
+        until(lambda: page.locator('[data-testid="sa-pane"][data-sid="cx:019a-fixer"]').count() == 1)
+        _box(page, 1).click()
+        focused = page.evaluate("window.__hud.workspace().ws.focused")
+        panes_before = sub_panes().count()
+        card_for("queued-c", "cx:019a-fixer", "x1")
+        card_for("queued-d", None, "c1")
+        until(lambda: card.count() == 1 and card.get_attribute("data-req") == "queued-c")
+        card.locator('[data-testid="approval-subagent"]').click()
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.get_attribute("data-req") == "queued-d" if card.count() else False)
+        time.sleep(0.3)
+        moved_under_card = page.evaluate("window.__hud.workspace().ws.focused") != focused
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.count() == 0)
+        time.sleep(0.3)
+        check("with the child's pane open and a card queued behind, focus stays where it was",
+              not moved_under_card and page.evaluate("window.__hud.workspace().ws.focused") == focused
+              and not page.evaluate(focus_in_rows))
         card_for("withdrawn", "cx:019a-fixer", "x1")
         until(lambda: card.count() == 1)
         card.locator('[data-testid="approval-subagent"]').click()

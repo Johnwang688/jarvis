@@ -2424,15 +2424,15 @@ export default function App() {
     const pend = revealAfterCard.current;
     if (!pend) return;
     const approvals = state.approvals;
-    if (approvals.some((r) => r.req_id === pend.reqId)) {
-      // Still up: kept only while it is the card on top.
-      if (approvals[0]?.req_id !== pend.reqId) revealAfterCard.current = null;
-      return;
-    }
+    // Still up: wait. (Cards queue oldest first and only the top one has a
+    // link to click, so no other card can come on top of it.)
+    if (approvals.some((r) => r.req_id === pend.reqId)) return;
     revealAfterCard.current = null;
-    if (!pend.decided || approvals.length) return;
+    // Gone: only if this window answered it…
+    if (!pend.decided) return;
     const ref = pend.ref;
-    // After the veil's own focus restore (its layout effect's cleanup).
+    // …after the veil's own focus restore (its layout effect's cleanup), and
+    // only with no other card up then: one queued behind it drops it.
     requestAnimationFrame(() => {
       if (blockedNow.current) return;
       const lay = layoutNow.current;
