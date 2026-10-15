@@ -73,6 +73,9 @@ describe("the bus and the list, folded", () => {
   });
 
   it("a stale record never takes a row back: fewer entries, or a live word after the end", () => {
+    // A live row is not taken back to an older live word either (a read newer than the record).
+    const live = [row("cl:a", { status: "backgrounded", entries: 5, background: true })];
+    expect(applyBus(live, bus("cl:a", { entries: 3, status: "running" }))).toBe(live);
     const ended = [row("cl:a", { status: "done", entries: 5, ended_at: at(9), stop_reason: undefined })];
     expect(applyBus(ended, bus("cl:a", { entries: 4, status: "running" }))).toBe(ended);
     expect(applyBus(ended, bus("cl:a", { entries: 5, status: "running" }))).toBe(ended);

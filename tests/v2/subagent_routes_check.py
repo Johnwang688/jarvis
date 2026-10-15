@@ -359,6 +359,28 @@ class Record(Base):
         self.put(subagent(sid="cl:toolu_b", name="plain"))
         self.assertNotIn("brief", self.owner("GET", self.sub("/cl:toolu_b/transcript")))
 
+    def test_the_brief_through_the_daemon_reaches_neither_the_log_nor_the_bus(self):
+        """The same, on the daemon's own path (`_record`, a provider's turn),
+        not the record alone."""
+        brief = "DAEMON-BRIEF-9 " + FAKE_SECRET
+        self.provider.turns = [[
+            Event(K.SUBAGENT, self.chat.id, {"sid": "cl:toolu_d", "op": "started", "status": "running",
+                                             "name": "via daemon", "brief": brief}),
+            Event(K.SUBAGENT_EVENT, self.chat.id, {"sid": "cl:toolu_d", "event": {
+                "kind": "text", "data": {"text": "child said"}}}),
+            Event(K.TURN_FINISHED, self.chat.id, {"stop": "end"})]]
+        with self.assertLogs("jarvis", level="DEBUG") as logs:
+            __import__("logging").getLogger("jarvis.v2.subagents").debug("probe")
+            self.daemon.send(self.chat.id, R.UserMessage(text="go"))
+            self.idle()
+        got = self.owner("GET", self.sub("/cl:toolu_d/transcript"))
+        self.assertTrue(got["brief"].startswith("DAEMON-BRIEF-9 "))
+        self.assertNotIn(FAKE_SECRET, got["brief"])
+        self.assertNotIn("DAEMON-BRIEF-9", json.dumps(self.log()))
+        self.assertNotIn("DAEMON-BRIEF-9", json.dumps(self.bus()))
+        self.assertNotIn("DAEMON-BRIEF-9", "\n".join(logs.output))
+        self.assertNotIn("DAEMON-BRIEF-9", json.dumps(self.owner("GET", self.sub())))
+
     def test_a_brief_survives_compaction_and_is_held_to_its_bytes(self):
         wide = "\u0001" * 5000                 # each escapes to six bytes of JSON
         self.put(subagent(brief=wide))
