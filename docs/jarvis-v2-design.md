@@ -48,7 +48,7 @@ agent internals. It did that. Three problems have not gone away with tuning:
 | # | Decision | Alternatives considered | Why |
 |---|---|---|---|
 | D1 | **Jarvis becomes a control plane; Claude Code and Codex are the brains.** Every unit of real work is a CLI session Jarvis spawns, watches, reports on. | CLIs as tools inside the v1 loop; full replacement by one CLI. | The thing deciding what to do next must be the strongest model available. A weak orchestrator spawning strong workers keeps the weakest model in charge. |
-| D2 | **The OpenRouter loop survives only as the conversation fast path.** Chat, voice, quick questions. Anything resembling work is handed to a CLI thread. | Retire it; keep it as a third provider. | A CLI session costs seconds to start and subscription quota per turn; the voice surface's whole budget is latency. |
+| D2 | **The OpenRouter loop survives only as the conversation fast path.** Chat, voice, quick questions. Anything resembling work is handed to a CLI thread. *Amended 2026-10-14 (owner, fast-path-edits decisions F-1..F-7): the owner's own chat turn at the HUD may do small, direct work itself — edit files and run commands in the thread's project folder, through the §6 gate. Large or multi-file work, anything wanting review or a PR, and work past its budget is still handed to a task (§8.1).* | Retire it; keep it as a third provider. | A CLI session costs seconds to start and subscription quota per turn; the voice surface's whole budget is latency. The owner, 2026-10-14: "I'm only telling it to work when the work is pretty direct anyways." |
 | D3 | **HUD is rebuilt as a proper frontend.** The orb, wake word, mic capture and theme are carried over as components. | Evolve `jarvis.html`. | v1 HUD is a prototype with features taped on. Projects, threads, diff panes and an approval queue are an application. |
 | D4 | **Discord: one channel per project, one thread per task.** DMs remain for cross-project and intake. | DM-only; one channel for everything. | Scope. A reply in a thread steers that task; an approval in a thread belongs to that task. |
 | D5 | **Workers run under the CLIs' own sandboxes and permission systems (B), one git worktree per task (D).** Firm-style full bwrap confinement is an optional *strict* profile, not the default. | A: firm-style tools-off bwrap. C: whole CLI inside our bwrap. | A throws away the native capability we are buying and forbids network. C must allow network anyway and nests Landlock inside bwrap on WSL2. |
@@ -479,20 +479,47 @@ it cannot input, navigate the owner page or grant a local port. It cannot edit,
 run a command, browse interactively, or spawn a task. So a fast-path turn that
 misjudges a request as chat can only *answer badly*; it cannot half-do work.
 
+*Amended 2026-10-14 (owner, fast-path-edits decisions F-1..F-7,
+`docs/plans/2026-10-14-fast-path-edits-decisions.md`).* The paragraph above
+stays true of every turn but one: **the owner's own chat turn at the HUD**
+(an owner's chat thread, not a task's; a message typed or spoken in the HUD
+window; not steered from anywhere else since — the `DESK_TOOLS` rule) also
+holds `write_file`, `edit_file`, `run_command` and `run_readonly`
+(`fastpath.EDIT_TOOLS`), so it does small, direct work in place instead of
+proposing it. Discord, the DM, schedules, the escape hatch, API sends and task
+threads stay read-only: their requests carry no schema for those tools and
+dispatch refuses them by name; a steer from elsewhere drops them at the next
+step boundary. Every edit and command goes through the same §6 permit and
+broker as a CLI thread's (layer 1 refusals, always-ask, the allowlist and
+rules' ALLOW for a human-backed asker, otherwise the owner; AUTO is asked as
+ASK because the fast path has no reviewer), and lands in the thread's project
+folder (`runtime.working_dir()`). Spawning, the git tools, `task_start` and
+the v1 task/workflow verbs, `load_tools`, `skill_write`, `memory_delete` and
+the `browser_`/`desktop_`/`cad_`/`gmail_`/`discord_` prefixes stay forbidden
+(F-7). The misjudgement this admits is bounded by the gate, not the toolset:
+a desk turn can half-do *small* work the owner was asked about.
+
 The fast path's prompt carries the escalation test, and the loop enforces the
 budget half of it:
 
 - **Propose a task when** the request needs a file edit, a command, more than
   one page fetched, a browser, a deliverable (a file, a PR, a report), or
   cannot be finished in the fast path's step budget (8 steps). Any one of
-  those is sufficient.
+  those is sufficient. *Amended 2026-10-14 (F-4, F-5): on the owner's desk
+  turn, which holds the edit tools, small direct edits and commands are done
+  in place within a 30-step budget; it proposes a task for large or
+  multi-file work, anything that wants review or a pull request, more than
+  one page fetched, a browser task beyond the guarded desk tools, or work
+  past its budget, keeps the owner's uncommitted changes intact, and does not
+  commit, push or deploy unless asked. Every other turn reads as before.*
 - **Answer directly when** it is a question answerable from memory, the
   transcript, one read or one fetch; a control request (mute, avatar, music);
   or conversation.
 - **Budget rule:** a fast-path turn that exhausts its steps with the request
   unmet does not report "stopped"; the loop makes the proposal itself from
   the transcript. The v1 exhaustion handoff, pointed at a task instead of at
-  the owner.
+  the owner. (Since 2026-10-14 at either budget: 8 steps, or 30 on a turn
+  holding the edit tools.)
 
 `task_propose(brief, project=None, provider=None)` returns a task id. The
 Router places it: explicit `project` → that one; otherwise the thread's
@@ -515,7 +542,12 @@ counterpart and are ignored by this provider — `effort` (v1 resolves it per
 model), `max_turns` (the budget here is steps) and **`cwd`** (v1 file tools
 resolve against the process directory, so a chat thread reads the daemon's
 tree, never a task worktree; read-only, so the cost is a wrong answer, not
-a wrong write). `usage()` reports dollars only: v1 keeps no token total, and
+a wrong write). *Amended 2026-10-14 (F-6): `cwd` is no longer ignored. The
+fast path binds the thread's project folder for each turn
+(`runtime.working_dir()`); v1's file tools place a relative path there before
+any check, `run_command` and `run_readonly` start there, and the gate-state
+check and the `.env` scrubber judge there. Unbound, every v1 surface keeps the
+process directory.* `usage()` reports dollars only: v1 keeps no token total, and
 a wrong count is worse than none (the BYOK lesson). WP9's ledger must
 therefore not require tokens from the fast path.
 

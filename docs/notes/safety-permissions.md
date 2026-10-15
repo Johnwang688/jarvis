@@ -2197,3 +2197,46 @@ regression cases live at the end of `READONLY_MUST_REFUSE` in
 verified to fail against the intermediate version.
 
 <!-- claude-source:008944-009194:end -->
+
+## Fast-path desk edits and the gate (2026-10-14)
+
+Current rule, beside the preserved notes above (decisions F-1..F-7,
+`docs/plans/2026-10-14-fast-path-edits-decisions.md`). The fast path's §8.1
+"no tool can change anything" now holds for every turn **except the owner's
+own chat turn at the HUD**, which holds `write_file`, `edit_file`,
+`run_command` and `run_readonly`. What keeps that safe:
+
+- **Toolset.** Desk-only, like the desk tools. Every other turn's request
+  carries no schema for them and dispatch refuses them as text; an off-desk
+  steer re-binds the toolset at the next step boundary. Everything F-7 lists
+  (spawning, git tools, task/workflow verbs, `load_tools`, `skill_write`,
+  `memory_delete`, the forbidden prefixes) stays out, asserted at import.
+- **One gate, the permit's.** The fast path's approver is the daemon's §6
+  permit with no v1 human-backed flag. Before 2026-10-14 it was
+  `permissions.gate(ask)`, which marks *any* approver human-backed: had the
+  fast path held a dangerous tool, dispatch would have auto-run a rules-ALLOW
+  command and `gate` an allowlisted one before the permit — past the
+  always-ask rules, and for a `DenyAll` asker too. The permit's layer 4 does
+  both itself, with the asker's real `human_backed`, after layer 2.
+- **AUTO is ASK on the fast path.** Layer 5's AUTO answer means "the
+  provider's reviewer decides"; the fast path has none, so its permit is asked
+  with an ASK copy of the brief.
+- **Edits are asked too.** `write_file`/`edit_file` are not `dangerous` in v1
+  (they never asked on the v1 surfaces); the fast path names them in
+  `runtime.ask_tools()`, which makes `dispatch` send them to the approver as it
+  does a dangerous tool. Binding it can only add asks. An Always on an edit
+  card is a standing `{"tool": "write_file"}` grant, as an Always on Claude's
+  Write is for `Write`.
+- **Where it runs is where it is judged.** With `runtime.working_dir()` bound,
+  v1's file tools absolutize a relative path before every check,
+  `protected_state.command_touches` judges a line there (so v1's
+  `static_verdict`, `allows` and `run_command`'s own refusal agree with the
+  permit's layer 1, which uses the brief's `cwd`), and the scrubber reads that
+  folder's `.env` values. A write into a credential folder is put to the owner
+  by the permit's `credentials-path` always-ask rule and then refused by v1's
+  write tool whatever the answer.
+
+Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init__.py`
+(one condition in dispatch), `jarvis/tools/files.py` (`in_working_dir`),
+`jarvis/tools/secrets.py` (search folders), `jarvis/protected_state.py`
+(default `cwd`). Each change only places a path or adds an ask.

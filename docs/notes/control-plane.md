@@ -313,3 +313,16 @@ waits. Relay notifications validate typed cancellation parameters, bind the exac
 socket before request bytes, and cannot let captured cleanup cancel a reused-ID
 successor. Private gate labels/records omit arguments; native tool results still
 enter that provider's conversation. See [contract and measured scope](browser.md#native-parent-browser-driving-br9d).
+
+## Fast-path approvals (2026-10-14)
+
+The fast path's desk-turn edits and commands (decisions F-1..F-7) ask through
+the route every provider uses: `dispatch` → the provider's approver → the
+daemon's `PermitContext`/`build_permit` permit → `PendingApprovals.ask`,
+which publishes `approval_requested` for the thread and blocks the turn's
+worker. The owner's card answer (`POST /approvals/{id}`, owner-only) or a
+Discord reply resolves the broker directly; `Daemon.answer` →
+`provider.answer` is for provider questions and the fast path still refuses
+it. A timeout, shutdown or unreadable answer denies. The fast path asks with
+an ASK copy of an AUTO brief, so layer 5 never hands its call to a reviewer it
+does not have.
