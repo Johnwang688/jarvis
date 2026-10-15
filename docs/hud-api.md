@@ -3124,9 +3124,10 @@ grandchild's messages are not forwarded by the CLI, so its transcript holds
 only the CLI's closing summary. `tokens`/`tool_uses`/`duration_ms` are the
 CLI's `TaskUsage` for the child, never dollars and never in the ledger or
 `thread.tokens` (Claude's `total_cost_usd` already includes children).
-`entries` counts transcript entries ever made. Up to 64 children per thread
-are kept (the oldest finished one makes room; with 64 live, a newcomer is
-not listed).
+`entries` counts transcript entries ever made; `declined` (present when
+not 0) counts the child's calls a reviewer declined. Up to 64 children per
+thread are kept (the oldest finished one makes room; with 64 live, a
+newcomer is not listed).
 
 ### `GET /threads/{id}/subagents/{sid}/transcript[?limit=N]`
 
@@ -3154,10 +3155,32 @@ Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
 - `result`: the CLI's closing word on the child (`task_notification.
   summary`): its final report when done, its description when stopped, the
   error when failed. At most 4000 characters.
+- `declined`: `{"role": "declined", "name": "Bash", "seq", "at"}` — Claude's
+  reviewer declined one of the child's calls (the call's own entry says
+  `denied`). The tool's name only: never the command, its arguments or the
+  reviewer's words.
 
-The newest `limit` entries, oldest first; at most 300 are kept per child.
-`truncated` is true when older ones exist. `seq` numbers a child's entries
-from 1. Thinking and the reviewer's decline text are not kept.
+The newest `limit` entries, oldest first; at most 300 are kept per child,
+and a thread's entries together at most 1 MiB of their JSON (the oldest
+entry of any of its children goes first). `truncated` is true when older
+ones exist. `seq` numbers a child's entries from 1. Thinking is not kept.
+
+**A child's reviewer decline has no "run anyway" (decision, SV-1).** The
+escape hatch (`hatch.py`, design §6.1) offers the owner a command Claude's
+reviewer declined and feeds its output to the session as the next user
+message. For a child's call that would run the command for, and hand its
+output to, the orchestrator — not the child that wanted it — so a child's
+decline never reaches the hatch: no card, no run, no output in any
+transcript. It is shown instead as the child's `declined` entry and count
+(and on the row in SV-3). It is not also a line in the thread itself: an
+`error` record would read as the orchestrator failing (ledger, Discord
+footer, a task's result), and a new thread-level kind is HUD work (SV-3).
+
+**On disk** the record is the thread's own `subagents.jsonl`, created
+0600. Past 4 MiB it is rewritten (atomically, beside itself) as one snapshot
+line per child of what memory holds, at most about 1 MiB, so the file stays
+bounded and a cold read, which takes at most its last 4 MiB, rebuilds all
+of memory.
 
 ### On `/events`
 
@@ -3169,10 +3192,13 @@ from 1. Thinking and the reviewer's decline text are not kept.
 ```
 
 One per change (a start, a progress tick, a new or finished transcript
-entry, an end). **Ids, a status, times and a count only**: never a name, a
-word a child wrote or a tool's arguments, since `/events` is open to any
-local client on the API listener. A client that wants more asks the owner
-routes. `turn_id` is the turn being read when it arrived — for a background
+entry, an end; `declined` when not 0). **Ids, a status, times and counts
+only**: never a name, a word a child wrote or a tool's arguments, since
+`/events` is open to any local client on the API listener. A client that
+wants more asks the owner routes. (The one place a child's name reaches
+`/events` is the broker's own `approval_requested` record for a card a
+child's call raised: its `origin`, below, carries the cleaned name, as a
+task's card carries the task's.) `turn_id` is the turn being read when it arrived — for a background
 child talking between turns, the next turn's (SV-6). Discord, the runner,
 titles and the voice queue ignore the kind.
 

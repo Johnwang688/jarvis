@@ -440,6 +440,22 @@ class Bounds(unittest.TestCase):
         self.assertEqual(len(session.child_denied), claude.CHILD_TOOL_LIMIT)
         self.assertNotIn("c0", session.child_tools)
 
+    def test_a_model_switch_stops_the_old_clis_children(self):
+        from jarvis.v2.provider import UserMessage
+        provider = claude.ClaudeProvider()
+        with R.replaying("one_default"):
+            handle = provider.start(R.thread(), R.brief(), R.Permit())
+            try:
+                list(provider.send(handle, UserMessage(text="go")))
+                self.assertEqual(provider.live_subagents(handle), {"cl:toolu_sv0_alpha"})
+                provider.set_model(handle, "claude-other", None)
+                self.assertEqual(provider.live_subagents(handle), set())
+                child = handle.native.children["cl:toolu_sv0_alpha"]
+                self.assertEqual((child.status, child.stop_reason), ("stopped", "the session restarted"))
+            finally:
+                provider.close(handle)
+        self.assertEqual(provider.live_subagents(handle), set(), "a closed session runs none")
+
     def test_a_turn_start_forgets_no_child(self):
         got, provider, session, *_ = R.run("one_default", 2)
         self.assertIn("cl:toolu_sv0_alpha", session.children)

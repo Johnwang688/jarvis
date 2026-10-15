@@ -635,6 +635,41 @@ status, times and a count only. Routes: owner-only `GET
 (`docs/hud-api.md`, "Native sub-agents"). The runner, Discord and titles
 needed no change: they read `text`/`tool_*`, which children no longer are.
 
+**Bounds in bytes, and on disk (review of #198, M1).** A count alone let a
+thread hold 64 × 300 × 4000 characters. Each entry now carries its JSON size,
+and a thread's entries together are held to `THREAD_BYTES` (1 MiB, a quarter
+of `LOAD_BYTES`): past it, the oldest entry of any of its children goes
+first, so an idle child's old words go before a busy child's new ones; rows
+are never dropped for bytes. The file was unbounded like `log.jsonl`; now,
+past `FILE_CAP` (4 MiB), it is rewritten as one `snapshot` line per child of
+what memory holds — written beside it (0600, `O_EXCL`), fsynced and renamed
+over it, under the record's lock — so it stays under the cap and a cold read
+(at most its last 4 MiB) rebuilds memory exactly. The file is created 0600
+(L6), and every append happens under the record's lock, so the file's order
+is memory's (L3: a restart could otherwise replay updates out of order).
+
+**A child's reviewer decline has no "run anyway" (decision, review of #198,
+M2).** Claude's reviewer declining a child's call is kept as the child's
+`declined` entry (the tool's name only) and a `declined` count on its row
+and bus record. It never reaches the escape hatch: the hatch runs the
+declined command and feeds its output to the session's next user message,
+which for a child's call would hand a child's command output to the
+orchestrator. The hatch subscribes to `reviewer_declined` on the bus, which
+children no longer produce. No thread-level notice: an `error` line would
+read as the orchestrator failing (ledger, Discord footer, a task's result),
+and a new kind needs SV-3's HUD.
+
+**Ends are said once, even out of memory (L2, L4).** A model switch is
+reconciled with the provider whether or not it was refused:
+`ClaudeProvider.set_model` marks every live child stopped once the old CLI is
+disconnected (so dead children hold no `CHILD_LIMIT` slot), `live_subagents`
+says which still run, and `Daemon._switch_ended_subagents` ends the rest in
+the record (a switch refused before the disconnect, such as "a turn is
+running", keeps them). A thread read back from disk with a child marked live
+and no session of its key ends it with a written and published `finished`
+record, so `end_session` on a thread out of memory and a restart both say it
+once.
+
 **Did SV-1 make the between-turn stall worse? No.** It changes only how a
 message already read is translated. It adds no read, no buffering and no work
 on the SDK's reader task; the stall's cause — nobody reads the CLI between
@@ -705,7 +740,9 @@ Checks (free, offline): `tests/v2/claude_subagents_check.py` (provider, from
 the recordings via `tests/v2/claude_replay.py`: one, parallel, background,
 nested, failed, stopped, interrupted, labels, privacy, bounds) and
 `tests/v2/subagent_routes_check.py` (daemon, routes, readers, permit
-matrix): 30 and 20 tests. On `main` 26 of the 30 and 19 of the 20 fail; the
+matrix): 30 and 20 tests at first (31 and 28 after the review of #198, whose
+nine new tests all fail on the commit before it, and whose 13 mutants are
+all killed). On `main` 26 of the 30 and 19 of the 20 fail; the
 five that pass there pin unchanged behaviour (the gate's answer, a permit
 without the keyword, the ledger) and are proven by mutants instead. 24
 mutants, all killed: tagged messages as the parent's, a child's text before

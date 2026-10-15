@@ -719,8 +719,10 @@ class _Session:
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
 
-        A hook can only fire inside a turn, so `events is None` means the
-        consumer already stopped reading — dropping is right, blocking is not.
+        `events is None` means no send is reading: the turn's consumer already
+        stopped, or nothing runs but a background sub-agent, whose hook can
+        fire between turns (SV-0 finding 6). Dropping is right, blocking is
+        not: the gate still asks `permit`, and the broker's card is its own.
         """
         events = self.events
         if events is not None:
@@ -2085,11 +2087,16 @@ class ClaudeProvider:
                 return client
 
             # The old client's reader goes with it, and so does anything the old
-            # CLI process still held: a steer queued there dies with it.
+            # CLI process still held: a steer queued there dies with it, and
+            # so does every sub-agent it ran (SV-1): stopped here, so a dead
+            # child holds no CHILD_LIMIT slot (`live_subagents` tells the daemon).
             self._stop_pump(session)
             with session.mutex:
                 session.steering.clear()
                 session.stopped.clear()
+                for child in session.children.values():
+                    if child.status in CHILD_LIVE:
+                        child.status, child.stop_reason = "stopped", "the session restarted"
             try:
                 _await(session.loop, old_client.disconnect(), CONTROL_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — an old client that will not go quietly still goes
@@ -2117,6 +2124,15 @@ class ClaudeProvider:
             session.client = old_client
             self.close(h)
             raise SessionLost(reason + "; the session is closed and resumes with the next message")
+
+    def live_subagents(self, h: SessionHandle) -> set[str]:
+        """The sids of the sub-agents this session's CLI still runs, as far
+        as it has said (SV-1). A closed session runs none."""
+        session = h.native
+        if session is None or session.closed:
+            return set()
+        with session.mutex:
+            return {sid for sid, child in session.children.items() if child.status in CHILD_LIVE}
 
     def interrupt(self, h: SessionHandle) -> None:
         session = h.native

@@ -7,29 +7,40 @@ this module is where they land instead of the thread's `log.jsonl`:
 
 - **memory**: per thread, the children (`CHILD_LIMIT`, oldest finished out)
   and, per child, its last `ENTRY_LIMIT` transcript entries — a text, a tool
-  call folded with its outcome, the CLI's closing summary — each text capped
-  at `TEXT_CAP`. At most `THREAD_LIMIT` threads are held; an older one is
-  read back from disk when it is asked for.
-- **disk**: the same records in the thread's own `subagents.jsonl`, beside
-  its log, so a restart keeps them. A cold read takes at most the file's last
-  `LOAD_BYTES`. Nothing that reads `log.jsonl` — the transcript route, the
-  Discord mirror, titles, a task's result, the raw `/threads/{id}/log` route
-  on the API listener — ever sees a child's words.
+  call folded with its outcome, a reviewer's decline, the CLI's closing
+  summary — each text capped at `TEXT_CAP`. A thread's entries together are
+  held to `THREAD_BYTES` of their JSON (the oldest entry of any of its
+  children goes first), so a thread costs bytes, not just a count. At most
+  `THREAD_LIMIT` threads are held; an older one is read back from disk when
+  it is asked for.
+- **disk**: the same records in the thread's own `subagents.jsonl` (0600),
+  beside its log, so a restart keeps them. Past `FILE_CAP` the file is
+  rewritten as a snapshot of what memory holds (atomically, under the
+  record's lock), and since memory is held to `THREAD_BYTES`, a quarter of
+  the cold read's `LOAD_BYTES`, a cold read always rebuilds all of it.
+  Nothing that reads `log.jsonl` — the transcript route, the Discord mirror,
+  titles, a task's result, the raw `/threads/{id}/log` route on the API
+  listener — ever sees a child's words.
 - **the bus**: one `subagent` record per change, with ids, a status, times
-  and a count, never a word a child wrote or a name the model chose
+  and counts, never a word a child wrote or a name the model chose
   (`/events` is open to any local client on the API listener).
 - **routes** (`hud_api`): the owner's alone, `GET /threads/{id}/subagents`
   and `GET /threads/{id}/subagents/{sid}/transcript`.
 
 A tool entry carries its label (computed by the daemon outside its lock, as
 for the parent's calls) and outcome, never its arguments or result summary
-(T-4/T-9). `hud_browser_act` is "Browser action" here too.
+(T-4/T-9). `hud_browser_act` is "Browser action" here too. A reviewer's
+decline of a child's call is kept as the tool's name alone: it never reaches
+the escape hatch (`hatch.py`), which offers the owner to run a declined
+command and feeds its output to the orchestrator — the wrong session for a
+child's command (SV-1, recorded in `docs/hud-api.md`).
 
 A child is live (`running`, or `backgrounded`: the CLI's default, a child
 that outlives its turn) until the CLI says otherwise. Jarvis ends one itself
 only when the session that ran it is gone (`end_session`: closed, lost,
 reconnected for a model switch) or, read back from disk, when no session with
 its key is live — a restart, after which the CLI that ran it is gone too.
+Either way the end is written and published once.
 """
 from __future__ import annotations
 
@@ -40,6 +51,7 @@ import logging
 import os
 import re
 import threading
+import uuid
 from typing import Any, Callable
 
 from .approvals import clean_line
@@ -53,7 +65,10 @@ THREAD_LIMIT = 32
 CHILD_LIMIT = 64
 ENTRY_LIMIT = 300
 TEXT_CAP = 4000
-LOAD_BYTES = 4 << 20
+LOAD_BYTES = 4 << 20                 # a cold read takes at most the file's last 4 MiB
+THREAD_BYTES = LOAD_BYTES // 4       # one thread's entries in memory (and so in a snapshot)
+FILE_CAP = LOAD_BYTES                # past this the file is rewritten as a snapshot
+ENTRY_OVERHEAD = 64                  # an entry's later fields (outcome, finished_at)
 NAME_CAP = 40
 REASON_CAP = 80
 SID = re.compile(r"(?:cl|cx):[A-Za-z0-9_-]{1,128}")
@@ -64,6 +79,9 @@ OPS = ("started", "progress", "finished")
 OUTCOMES = ("ok", "failed", "denied")
 GONE = "the session that ran it ended"
 _BROWSER_ACT = ("hud_browser_act", "mcp__jarvis__hud_browser_act")
+_CHILD_FIELDS = ("key", "turn_id", "status", "task_id", "parent_sid", "depth", "background",
+                 "name", "kind", "last_tool", "tokens", "tool_uses", "duration_ms",
+                 "stop_reason", "started_at", "ended_at", "total", "declined")
 
 
 def valid_sid(value: Any) -> bool:
@@ -91,6 +109,10 @@ def _clean(value: Any, cap: int) -> str:
     return clean_line(value, cap)
 
 
+def _public(entry: dict) -> dict:
+    return {k: v for k, v in entry.items() if not k.startswith("_")}
+
+
 @dataclass
 class _Child:
     sid: str
@@ -110,8 +132,9 @@ class _Child:
     stop_reason: str | None = None
     started_at: str = ""
     ended_at: str | None = None
-    entries: deque = field(default_factory=lambda: deque(maxlen=ENTRY_LIMIT))
+    entries: deque = field(default_factory=deque)
     total: int = 0                     # entries ever made (the deque keeps the last)
+    declined: int = 0                  # calls a reviewer declined
     calls: dict = field(default_factory=dict)   # call_id -> its entry, while kept
 
     def summary(self) -> dict:
@@ -126,6 +149,8 @@ class _Child:
                 out[key] = value
         if self.last_tool:
             out["last_tool"] = self.last_tool
+        if self.declined:
+            out["declined"] = self.declined
         return out
 
     def bus(self, op: str) -> dict:
@@ -137,7 +162,16 @@ class _Child:
             value = getattr(self, key)
             if value is not None:
                 out[key] = value
+        if self.declined:
+            out["declined"] = self.declined
         return out
+
+
+@dataclass
+class _Thread:
+    children: OrderedDict = field(default_factory=OrderedDict)
+    size: int = 0                      # bytes of every kept entry
+    n: int = 0                         # entries ever appended, across its children
 
 
 class SubagentRecords:
@@ -148,8 +182,11 @@ class SubagentRecords:
         # The key of the live session on a thread (None: none is): what tells
         # a child read back from disk whether anything can still be running it.
         self.live_key = live_key
+        # One lock for memory and the file: a line is written in the order
+        # memory took it, and a snapshot never races an append.
         self._lock = threading.RLock()
-        self._threads: OrderedDict[str, OrderedDict[str, _Child]] = OrderedDict()
+        self._threads: OrderedDict[str, _Thread] = OrderedDict()
+        self._outbox: list[tuple[str, dict]] = []   # bus records, sent outside the lock
 
     # -- writing ---------------------------------------------------------------
 
@@ -216,51 +253,78 @@ class SubagentRecords:
             outcome = body.get("outcome")
             entry = {"role": "tool_finished", "call_id": call_id,
                      "outcome": outcome if outcome in OUTCOMES else ("ok" if body.get("ok") is True else "failed")}
+        elif kind == "reviewer_declined":
+            # The tool's name only: never its command, arguments or the
+            # reviewer's words about them. Never the escape hatch's either.
+            tool = body.get("tool") if isinstance(body.get("tool"), str) else ""
+            entry = {"role": "declined",
+                     "name": "hud_browser_act" if tool in _BROWSER_ACT else clean_line(tool, NAME_CAP)}
         else:
-            # Thinking, a reviewer's decline (its tool's outcome says denied)
-            # and anything newer: not kept.
+            # Thinking and anything newer: not kept.
             return None
         return {"kind": "subagent_event", "sid": sid, "data": entry}
 
     def record(self, thread, turn_id: str | None, key: str | None, prepared: dict) -> None:
         """Keep one prepared record: memory, the thread's file, the bus."""
-        at = utcnow()
-        line = {**prepared, "turn_id": turn_id, "key": key, "at": at}
         with self._lock:
-            children = self._children(thread.id)
-            child, op = self._apply(children, line)
-            if child is None:
-                return
-            bus = child.bus(op)
-        try:
-            self.stores.threads._append(thread.id, FILE, line)
-        except Exception:  # noqa: BLE001 — the view is not worth a failed turn
-            LOG.warning("Cannot keep a sub-agent record for %s", thread.id, exc_info=True)
-        self.publish({"kind": "subagent", "thread_id": thread.id, "project_id": thread.project_id,
-                      "turn_id": turn_id, "at": at, "data": bus})
+            self._keep(thread.id, turn_id, key, prepared)
+        self._flush()
 
-    def end_session(self, thread, key: str | None, reason: str = GONE) -> None:
+    def end_session(self, thread, key: str | None, reason: str = GONE,
+                    keep: frozenset | set = frozenset()) -> None:
         """The session `key` is gone, and with it its CLI: its live children
-        are stopped (said once, on the bus and on disk)."""
+        (but those in `keep`, which the provider still runs) are stopped,
+        said once, on the bus and on disk."""
         with self._lock:
-            children = self._children(thread.id)
-            live = [c for c in children.values() if c.status in LIVE and c.key == key]
-        for child in live:
-            self.record(thread, None, key, {"kind": "subagent", "sid": child.sid, "data": {
-                "sid": child.sid, "op": "finished", "status": "stopped",
-                "stop_reason": clean_line(reason, REASON_CAP)}})
+            state = self._state(thread.id)
+            live = [c.sid for c in state.children.values()
+                    if c.status in LIVE and c.key == key and c.sid not in keep]
+            for sid in live:
+                self._keep(thread.id, None, key, {"kind": "subagent", "sid": sid, "data": {
+                    "sid": sid, "op": "finished", "status": "stopped",
+                    "stop_reason": clean_line(reason, REASON_CAP)}})
+        self._flush()
 
-    def _apply(self, children: OrderedDict, line: dict) -> tuple[_Child | None, str]:
+    def _keep(self, thread_id: str, turn_id, key, prepared: dict) -> None:
+        """Under `_lock`: apply, write, and queue the bus record."""
+        line = {**prepared, "turn_id": turn_id, "key": key, "at": utcnow()}
+        state = self._state(thread_id)
+        child, op = self._apply(state, line)
+        if child is None:
+            return
+        self._write(thread_id, state, line)
+        self._outbox.append((thread_id, {"turn_id": turn_id, "at": line["at"],
+                                         "data": child.bus(op)}))
+
+    def _flush(self) -> None:
+        """Publish what was queued, outside the lock."""
+        with self._lock:
+            out, self._outbox = self._outbox, []
+        for thread_id, record in out:
+            try:
+                thread = self.stores.threads.get(thread_id)
+                project_id = getattr(thread, "project_id", None)
+            except Exception:  # noqa: BLE001
+                project_id = None
+            self.publish({"kind": "subagent", "thread_id": thread_id, "project_id": project_id,
+                          **record})
+
+    # -- memory ----------------------------------------------------------------
+
+    def _apply(self, state: _Thread, line: dict) -> tuple[_Child | None, str]:
         sid, data, at = line.get("sid"), line.get("data") or {}, line.get("at") or ""
         if not valid_sid(sid):
             return None, ""
+        children = state.children
+        if line.get("kind") == "snapshot":
+            return self._restore(state, sid, data), "progress"
         child = children.get(sid)
         if child is None:
             if len(children) >= CHILD_LIMIT:
                 done = next((s for s, c in children.items() if c.status not in LIVE), None)
                 if done is None:
                     return None, ""
-                del children[done]
+                self._forget(state, done)
             child = children[sid] = _Child(sid=sid, key=line.get("key"),
                                            turn_id=line.get("turn_id"), started_at=at)
         if line.get("kind") == "subagent":
@@ -295,46 +359,143 @@ class SubagentRecords:
             start["outcome"] = entry.get("outcome")
             start["finished_at"] = at
             return child, "progress"
+        if entry.get("role") == "declined":
+            child.declined += 1
         child.total += 1
         entry["seq"] = child.total
         entry["at"] = at
-        if len(child.entries) == child.entries.maxlen:
-            gone = child.entries[0]
-            if gone.get("role") == "tool":
-                child.calls.pop(gone.get("call_id"), None)
-        child.entries.append(entry)
-        if entry.get("role") == "tool":
-            child.calls[entry["call_id"]] = entry
+        self._append(state, child, entry)
         return child, "progress"
+
+    def _append(self, state: _Thread, child: _Child, entry: dict) -> None:
+        """An entry, inside both bounds: `ENTRY_LIMIT` for its child, then
+        `THREAD_BYTES` for its thread (the oldest entry of any child first)."""
+        state.n += 1
+        entry["_n"] = state.n
+        entry["_bytes"] = len(json.dumps(_public(entry), ensure_ascii=False).encode()) + ENTRY_OVERHEAD
+        if len(child.entries) >= ENTRY_LIMIT:
+            self._drop(state, child)
+        child.entries.append(entry)
+        state.size += entry["_bytes"]
+        if entry.get("role") == "tool" and entry.get("outcome") == "running":
+            child.calls[entry["call_id"]] = entry
+        while state.size > THREAD_BYTES:
+            oldest = min((c for c in state.children.values() if c.entries),
+                         key=lambda c: c.entries[0]["_n"], default=None)
+            if oldest is None:
+                break
+            self._drop(state, oldest)
+
+    @staticmethod
+    def _drop(state: _Thread, child: _Child) -> None:
+        gone = child.entries.popleft()
+        state.size -= gone.get("_bytes", 0)
+        if gone.get("role") == "tool":
+            child.calls.pop(gone.get("call_id"), None)
+
+    @staticmethod
+    def _forget(state: _Thread, sid: str) -> None:
+        child = state.children.pop(sid)
+        state.size -= sum(e.get("_bytes", 0) for e in child.entries)
+
+    def _restore(self, state: _Thread, sid: str, data: dict) -> _Child | None:
+        """A snapshot line: the child exactly as memory held it."""
+        if sid in state.children:
+            self._forget(state, sid)
+        elif len(state.children) >= CHILD_LIMIT:
+            return None
+        child = _Child(sid=sid)
+        for name in _CHILD_FIELDS:
+            if name in data:
+                setattr(child, name, data[name])
+        if child.status not in STATUSES:
+            child.status = "stopped"
+        state.children[sid] = child
+        for entry in data.get("entries") or ():
+            if isinstance(entry, dict):
+                self._append(state, child, dict(entry))
+        return child
+
+    # -- the file --------------------------------------------------------------
+
+    def _path(self, thread_id: str):
+        return self.stores.threads.path(thread_id).with_name(FILE)
+
+    def _write(self, thread_id: str, state: _Thread, line: dict) -> None:
+        """Under `_lock`: append one line (the file created 0600); past
+        `FILE_CAP`, rewrite the file as a snapshot of memory."""
+        try:
+            path = self._path(thread_id)
+            if not path.parent.is_dir():
+                return                     # the thread is gone
+            data = (json.dumps(line, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(fd, data)
+                size = os.fstat(fd).st_size
+            finally:
+                os.close(fd)
+            if size > FILE_CAP:
+                self._compact(path, state)
+        except Exception:  # noqa: BLE001 — the view is not worth a failed turn
+            LOG.warning("Cannot keep a sub-agent record for %s", thread_id, exc_info=True)
+
+    def _compact(self, path, state: _Thread) -> None:
+        """Replace the file with one snapshot line per child: what memory
+        holds, which is at most `THREAD_BYTES` of entries. Written beside it
+        (0600) and renamed over it, so a reader sees the old file or the
+        new one, never half of either."""
+        tmp = path.with_name(f".{FILE}.{uuid.uuid4().hex}.tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                for child in state.children.values():
+                    data = {name: getattr(child, name) for name in _CHILD_FIELDS}
+                    data["entries"] = [_public(e) for e in child.entries]
+                    line = {"kind": "snapshot", "sid": child.sid, "at": child.started_at,
+                            "data": data}
+                    os.write(fd, (json.dumps(line, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            LOG.warning("Cannot compact %s", path, exc_info=True)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     # -- reading ---------------------------------------------------------------
 
-    def _children(self, thread_id: str) -> OrderedDict:
-        """Under `_lock`: the thread's children, read back from its file on
-        first use. An older thread makes room (least recently used)."""
-        children = self._threads.get(thread_id)
-        if children is not None:
+    def _state(self, thread_id: str) -> _Thread:
+        """Under `_lock`: the thread's record, read back from its file on
+        first use; an older thread makes room (least recently used). A child
+        read back live with no session of its key left to run it is stopped,
+        and that is written and published like any other end."""
+        state = self._threads.get(thread_id)
+        if state is not None:
             self._threads.move_to_end(thread_id)
-            return children
-        children = OrderedDict()
+            return state
+        state = _Thread()
         for line in self._read(thread_id):
-            self._apply(children, line)
-        key = self.live_key(thread_id)
-        for child in children.values():
-            if child.status in LIVE and (key is None or child.key != key):
-                # Read back with nothing left to run it: the CLI that did is
-                # gone (a restart, or a session closed without a word).
-                child.status, child.stop_reason = "stopped", GONE
-                child.ended_at = child.ended_at or child.started_at
-        self._threads[thread_id] = children
+            self._apply(state, line)
+        self._threads[thread_id] = state
         while len(self._threads) > THREAD_LIMIT:
             self._threads.popitem(last=False)
-        return children
+        key = self.live_key(thread_id)
+        stale = [c for c in state.children.values()
+                 if c.status in LIVE and (key is None or c.key != key)]
+        for child in stale:
+            # The CLI that ran it is gone (a restart, or a session closed
+            # while this thread was out of memory).
+            self._keep(thread_id, None, child.key, {"kind": "subagent", "sid": child.sid, "data": {
+                "sid": child.sid, "op": "finished", "status": "stopped", "stop_reason": GONE}})
+        return state
 
     def _read(self, thread_id: str) -> list[dict]:
         try:
-            path = self.stores.threads.path(thread_id).with_name(FILE)
-            with path.open("rb") as handle:
+            with self._path(thread_id).open("rb") as handle:
                 size = handle.seek(0, os.SEEK_END)
                 start = max(0, size - LOAD_BYTES)
                 handle.seek(start)
@@ -359,21 +520,26 @@ class SubagentRecords:
 
     def list(self, thread_id: str) -> list[dict]:
         with self._lock:
-            return [child.summary() for child in self._children(thread_id).values()]
+            out = [child.summary() for child in self._state(thread_id).children.values()]
+        self._flush()
+        return out
 
     def transcript(self, thread_id: str, sid: str, limit: int = ENTRY_LIMIT) -> dict | None:
         with self._lock:
-            child = self._children(thread_id).get(sid)
-            if child is None:
-                return None
-            entries = list(child.entries)[-max(1, min(limit, ENTRY_LIMIT)):]
-            messages = []
-            for entry in entries:
-                message = {k: v for k, v in entry.items() if k != "status" or entry.get("role") == "result"}
-                if message.get("role") == "tool" and message.get("outcome") == "running" \
-                        and child.status not in LIVE:
-                    message["outcome"] = "stopped"
-                messages.append(message)
-            first = messages[0]["seq"] if messages else child.total + 1
-            return {"subagent": child.summary(), "messages": messages,
-                    "truncated": first > 1}
+            child = self._state(thread_id).children.get(sid)
+            found = None
+            if child is not None:
+                entries = list(child.entries)[-max(1, min(limit, ENTRY_LIMIT)):]
+                messages = []
+                for entry in entries:
+                    message = {k: v for k, v in _public(entry).items()
+                               if k != "status" or entry.get("role") == "result"}
+                    if message.get("role") == "tool" and message.get("outcome") == "running" \
+                            and child.status not in LIVE:
+                        message["outcome"] = "stopped"
+                    messages.append(message)
+                first = messages[0]["seq"] if messages else child.total + 1
+                found = {"subagent": child.summary(), "messages": messages,
+                         "truncated": first > 1}
+        self._flush()
+        return found

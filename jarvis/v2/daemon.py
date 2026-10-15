@@ -815,19 +815,36 @@ class Daemon:
                                  "model mid-thread")
             setter(session.handle, *want)
         except Exception as exc:
+            # A refused switch may already have disconnected the old CLI
+            # (Claude reconnects the old model then): its children are gone.
+            self._switch_ended_subagents(session)
             self._switch_refused(session, want, exc)
             return
-        if session.thread.provider == ProviderName.CLAUDE:
-            # Claude switches by reconnecting: the old CLI, and every
-            # sub-agent it was running, is gone (SV-1).
-            self.subagents.end_session(session.thread, session.subagent_key,
-                                       "the session restarted for a model switch")
+        self._switch_ended_subagents(session)
         with self._lock:
             session.applied = want
             session.applied_record = (session.thread.model, session.thread.effort)
             if want != session.announced:
                 session.announced = want
                 self._model_line(session.thread, want, "follows the default")
+
+    def _switch_ended_subagents(self, session):
+        """After a model switch, refused or not: a child the provider no
+        longer runs (Claude switches by reconnecting, and the old CLI takes
+        its sub-agents with it) is stopped in the record (SV-1). A provider
+        that cannot say which run (`live_subagents`) is left alone."""
+        live = getattr(session.provider, "live_subagents", None)
+        if not callable(live) or session.handle is None:
+            return
+        try:
+            keep = frozenset(live(session.handle))
+        except Exception:  # noqa: BLE001 — a closed session runs none
+            keep = frozenset()
+        try:
+            self.subagents.end_session(session.thread, session.subagent_key,
+                                       "the session restarted for a model switch", keep=keep)
+        except Exception:
+            LOG.warning("Cannot end the sub-agents of %s", session.thread.id, exc_info=True)
 
     def _switch_refused(self, session, want, exc):
         """A provider refused to move a thread onto `want`. The record goes

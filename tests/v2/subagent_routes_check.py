@@ -341,8 +341,7 @@ class Record(Base):
         for event in (Event(K.SUBAGENT, "t", {"sid": "toolu_a"}),
                       Event(K.SUBAGENT_EVENT, "t", {"sid": "cl:a b", "event": {"kind": "text", "data": {"text": "x"}}}),
                       inner("text", text=""), inner("thinking", text="private thought"),
-                      inner("tool_started", call_id="bad id", name="Bash"),
-                      inner("reviewer_declined", tool="Bash", reason="x")):
+                      inner("tool_started", call_id="bad id", name="Bash")):
             self.assertIsNone(S.SubagentRecords.prepare(event, None))
 
     def test_children_entries_and_texts_are_bounded(self):
@@ -356,20 +355,21 @@ class Record(Base):
         sids = [c["sid"] for c in records.list(self.chat.id)]
         self.assertNotIn("cl:toolu_3", sids)
         self.assertIn("cl:toolu_over", sids)
+        self.put(inner("text", sid="cl:toolu_2", text="long " + "y" * (S.TEXT_CAP + 100)))
+        self.assertEqual(len(records.transcript(self.chat.id, "cl:toolu_2")["messages"][0]["text"]), 4000)
         for n in range(S.ENTRY_LIMIT + 20):
-            self.put(inner("text", sid="cl:toolu_0", text=f"line {n} " + "y" * (S.TEXT_CAP + 100)))
+            self.put(inner("text", sid="cl:toolu_0", text=f"line {n}"))
         got = records.transcript(self.chat.id, "cl:toolu_0")
-        self.assertEqual(len(got["messages"]), S.ENTRY_LIMIT)
+        self.assertEqual(len(got["messages"]), 300)
         self.assertTrue(got["truncated"])
         self.assertEqual(got["messages"][0]["seq"], 21)
-        self.assertTrue(all(len(m["text"]) == S.TEXT_CAP for m in got["messages"]))
         self.assertEqual(got["subagent"]["entries"], S.ENTRY_LIMIT + 20)
-        kept = records._threads[self.chat.id]["cl:toolu_0"]
+        kept = records._threads[self.chat.id].children["cl:toolu_0"]
         self.assertEqual(len(kept.entries), S.ENTRY_LIMIT, "memory, not just the page, is bounded")
         for n in range(S.ENTRY_LIMIT + 20):
             self.put(inner("tool_started", sid="cl:toolu_1", call_id=f"c{n}", name="Bash",
                            args={"command": "ls"}))
-        kept = records._threads[self.chat.id]["cl:toolu_1"]
+        kept = records._threads[self.chat.id].children["cl:toolu_1"]
         self.assertEqual((len(kept.entries), len(kept.calls)), (S.ENTRY_LIMIT, S.ENTRY_LIMIT))
         self.assertNotIn("c0", kept.calls)
 
@@ -417,11 +417,17 @@ class Record(Base):
         self.daemon.send(self.chat.id, R.UserMessage(text="one"))
         self.idle()
         key = self.daemon._sessions[self.chat.id].subagent_key
-        fresh = S.SubagentRecords(self.daemon.stores, lambda _r: None, lambda _t: None)
-        child = fresh.list(self.chat.id)[0]
-        self.assertEqual((child["status"], child["stop_reason"]), ("stopped", S.GONE))
         same = S.SubagentRecords(self.daemon.stores, lambda _r: None, lambda _t: key)
         self.assertEqual(same.list(self.chat.id)[0]["status"], "backgrounded")
+        published = []
+        fresh = S.SubagentRecords(self.daemon.stores, published.append, lambda _t: None)
+        child = fresh.list(self.chat.id)[0]
+        self.assertEqual((child["status"], child["stop_reason"]), ("stopped", S.GONE))
+        self.assertEqual([r["data"]["status"] for r in published], ["stopped"], "said, once")
+        # Written too: even a reader whose session key matches now reads it ended.
+        again = S.SubagentRecords(self.daemon.stores, published.append, lambda _t: key)
+        self.assertEqual(again.list(self.chat.id)[0]["status"], "stopped")
+        self.assertEqual(len(published), 1)
 
     def test_a_cli_finish_replaces_an_inferred_stop_and_a_stale_word_does_not_revive(self):
         self.put(subagent())
@@ -434,6 +440,196 @@ class Record(Base):
         child = self.daemon.subagents.list(self.chat.id)[0]
         self.assertEqual(child["status"], "done")
         self.assertNotIn("stop_reason", child)
+
+    # -- bytes, the file, the lock (review of #198) ----------------------------
+
+    def path(self):
+        return self.daemon.stores.threads.path(self.chat.id).with_name(S.FILE)
+
+    def test_the_bounds_are_these_numbers(self):
+        self.assertEqual((S.LOAD_BYTES, S.THREAD_BYTES, S.FILE_CAP, S.ENTRY_LIMIT, S.TEXT_CAP,
+                          S.CHILD_LIMIT, S.THREAD_LIMIT, S.NAME_CAP),
+                         (4194304, 1048576, 4194304, 300, 4000, 64, 32, 40))
+
+    def test_a_threads_entries_are_held_to_a_byte_budget_oldest_first(self):
+        records = self.daemon.subagents
+        for c in range(4):
+            self.put(subagent(f"cl:toolu_{c}"))
+        # 4 children x 120 entries of 4000 characters: about 1.9 MiB of text.
+        for n in range(120):
+            for c in range(4):
+                self.put(inner("text", sid=f"cl:toolu_{c}", text=f"{c}:{n} " + "y" * 4000))
+        state = records._threads[self.chat.id]
+        held = sum(e["_bytes"] for ch in state.children.values() for e in ch.entries)
+        self.assertEqual(held, state.size)
+        self.assertLessEqual(state.size, 1048576)
+        self.assertGreater(state.size, 1048576 - 5000, "the budget is used, not undershot")
+        kept = {sid: [m["text"].split(" ")[0] for m in records.transcript(self.chat.id, sid)["messages"]]
+                for sid in state.children}
+        # The oldest went first, from every child alike: each keeps its newest.
+        for c in range(4):
+            texts = kept[f"cl:toolu_{c}"]
+            self.assertEqual(texts[-1], f"{c}:119")
+            self.assertLess(len(texts), 120)
+        self.assertLessEqual(max(len(t) for t in kept.values()) - min(len(t) for t in kept.values()), 1)
+        # The children themselves (their rows) are never dropped for bytes.
+        self.assertEqual(len(records.list(self.chat.id)), 4)
+
+    def test_the_byte_budget_takes_an_idle_childs_old_entries_before_a_busy_childs_new_ones(self):
+        records = self.daemon.subagents
+        for n in range(150):            # about 0.6 MiB, written first
+            self.put(inner("text", sid="cl:toolu_old", text=f"old:{n} " + "y" * 4000))
+        for n in range(200):            # about 0.8 MiB, written after
+            self.put(inner("text", sid="cl:toolu_new", text=f"new:{n} " + "y" * 4000))
+        new = records.transcript(self.chat.id, "cl:toolu_new")["messages"]
+        old = records.transcript(self.chat.id, "cl:toolu_old")["messages"]
+        self.assertEqual(len(new), 200, "the newest entries are all kept")
+        self.assertTrue(old and old[0]["seq"] > 1 and old[-1]["text"].startswith("old:149 "))
+        self.assertLessEqual(records._threads[self.chat.id].size, 1048576)
+
+    def test_the_file_is_0600_and_compacted_to_what_memory_holds(self):
+        self.put(subagent(name="watched"))
+        self.assertEqual(self.path().stat().st_mode & 0o777, 0o600)
+        biggest = 0
+        for n in range(1100):           # about 4.6 MB of lines
+            self.put(inner("text", text=f"{n} " + "z" * 4000))
+            biggest = max(biggest, self.path().stat().st_size)
+        self.assertLessEqual(biggest, 4194304, "never left past the cap")
+        lines = self.path().read_text().splitlines()
+        self.assertEqual(json.loads(lines[0])["kind"], "snapshot", "it was compacted")
+        self.assertEqual(self.path().stat().st_mode & 0o777, 0o600)
+        self.assertFalse(list(self.path().parent.glob(".subagents.jsonl.*")), "no temp file left")
+        before = (self.daemon.subagents.list(self.chat.id),
+                  self.daemon.subagents.transcript(self.chat.id, "cl:toolu_a"))
+        key = "key"
+        cold = S.SubagentRecords(self.daemon.stores, lambda _r: None, lambda _t: key)
+        self.assertEqual((cold.list(self.chat.id), cold.transcript(self.chat.id, "cl:toolu_a")), before,
+                         "a cold read rebuilds memory exactly")
+
+    def test_appends_are_written_in_the_order_memory_took_them(self):
+        import random
+        import time as _time
+        real = S.os.write
+
+        def slow(fd, data):
+            _time.sleep(random.random() / 2000)
+            return real(fd, data)
+        for c in range(6):
+            self.put(subagent(f"cl:toolu_{c}"))
+
+        def work(c):
+            for n in range(60):
+                self.put(inner("text", sid=f"cl:toolu_{c % 3}", text=f"{c}-{n}"))
+        with patch.object(S.os, "write", slow):
+            workers = [threading.Thread(target=work, args=(c,)) for c in range(6)]
+            for w in workers:
+                w.start()
+            for w in workers:
+                w.join(30)
+        warm = [self.daemon.subagents.transcript(self.chat.id, f"cl:toolu_{c}")["messages"] for c in range(3)]
+        cold = S.SubagentRecords(self.daemon.stores, lambda _r: None, lambda _t: "key")
+        self.assertEqual([cold.transcript(self.chat.id, f"cl:toolu_{c}")["messages"] for c in range(3)], warm)
+
+    def test_ending_a_session_on_a_thread_out_of_memory_is_written_and_published(self):
+        self.put(subagent(background=True, status="backgrounded"))
+        self.daemon.subagents._threads.clear()
+        self.bus()
+        self.daemon.subagents.end_session(self.chat, "key")
+        records = [r for r in self.bus() if r.get("kind") == "subagent"]
+        self.assertEqual([(r["data"]["sid"], r["data"]["status"]) for r in records],
+                         [("cl:toolu_a", "stopped")])
+        last = json.loads(self.path().read_text().splitlines()[-1])
+        self.assertEqual((last["data"]["op"], last["data"]["status"]), ("finished", "stopped"))
+        # Said once: a later cold read has nothing left to end.
+        self.daemon.subagents._threads.clear()
+        self.daemon.subagents.list(self.chat.id)
+        self.assertFalse([r for r in self.bus() if r.get("kind") == "subagent"])
+
+    def test_a_model_switch_stops_what_the_provider_no_longer_runs(self):
+        from jarvis.v2 import thread_model
+        from jarvis.v2.provider import BriefRefused
+        for failure, live, want in ((None, set(), "stopped"),
+                                    (BriefRefused("could not switch"), set(), "stopped"),
+                                    (ValueError("a turn is running"), {"cl:toolu_a"}, "backgrounded")):
+            with self.subTest(failure=failure):
+                self.daemon.subagents._threads.clear()
+                self.path().unlink(missing_ok=True)
+                with self.daemon._lock:
+                    session = self.daemon._sessions[self.chat.id]
+                    session.applied = ("old", None)
+                self.daemon.subagents.record(self.chat, "t", session.subagent_key, S.SubagentRecords.prepare(
+                    subagent(background=True, status="backgrounded"), None))
+
+                def set_model(handle, model, effort, failure=failure):
+                    if failure is not None:
+                        raise failure
+                self.provider.set_model = set_model
+                self.provider.live_subagents = lambda handle, live=live: live
+                with patch.object(thread_model, "is_chat", lambda _t: True), \
+                        patch.object(thread_model, "effective", lambda _t: ("new", None)):
+                    self.daemon._apply_choice(session)
+                child = self.daemon.subagents.list(self.chat.id)[0]
+                self.assertEqual(child["status"], want)
+                if want == "stopped":
+                    self.assertEqual(child["stop_reason"], "the session restarted for a model switch")
+
+
+class ReviewerDecline(Base):
+    """A child's reviewer decline never reaches the escape hatch (decision,
+    SV-1): no card, no run, no output to the orchestrator."""
+
+    def test_a_childs_decline_reaches_neither_the_hatch_nor_the_bus(self):
+        from jarvis.v2.hatch import EscapeHatch
+        from jarvis.v2.providers import claude
+
+        class Approvals:
+            def __init__(self):
+                self.asked = []
+
+            def ask(self, request, **_kw):
+                self.asked.append(request)
+                from jarvis.v2.provider import Decision
+                return Decision.DENY
+
+        def declined(rs):
+            for r in rs:
+                content = ((r["data"].get("message") or {}).get("content"))
+                if r["src"] == "cli" and r["data"].get("parent_tool_use_id") and isinstance(content, list):
+                    for block in content:
+                        if block.get("type") == "tool_result" and block.get("tool_use_id") == "toolu_sv0_alpha_bash":
+                            block["content"] = (claude.CLASSIFIER_DENIAL_PREFIX + ". Reason: "
+                                                "it reads PRIVATE-REASON-TEXT. If you have other tasks")
+                            block["is_error"] = True
+            return rs
+        approvals = Approvals()
+        hatch = EscapeHatch(self.daemon, approvals)
+        hatch.start()
+        self.addCleanup(hatch.stop)
+        got, *_ = R.run("one_fg", edit=declined)
+        inner_kinds = [e.data["event"]["kind"] for t in got for e in t if e.kind == K.SUBAGENT_EVENT]
+        self.assertIn("reviewer_declined", inner_kinds, "the provider saw the decline")
+        self.provider.turns = [list(got[0])]
+        self.daemon.send(self.chat.id, R.UserMessage(text="go"))
+        self.idle()
+        import time
+        time.sleep(0.5)                 # the hatch's pump polls every 0.2 s
+        self.assertEqual(approvals.asked, [], "the hatch offered a child's declined command")
+        self.assertEqual(hatch.results, [])
+        bus = self.bus()
+        self.assertFalse([r for r in bus if r.get("kind") == "reviewer_declined"])
+        self.assertNotIn("PRIVATE-REASON-TEXT", json.dumps(bus))
+        self.assertNotIn("PRIVATE-REASON-TEXT", self.path_text())
+        child = self.owner("GET", self.sub())["subagents"][0]
+        self.assertEqual(child["declined"], 1)
+        messages = self.owner("GET", self.sub("/cl:toolu_sv0_alpha/transcript"))["messages"]
+        self.assertIn({"role": "declined", "name": "Bash"},
+                      [{k: m[k] for k in ("role", "name")} for m in messages if m["role"] == "declined"])
+        self.assertEqual([m["outcome"] for m in messages if m["role"] == "tool"], ["denied"])
+        self.assertTrue([r for r in bus if r.get("kind") == "subagent" and r["data"].get("declined") == 1])
+
+    def path_text(self):
+        return self.daemon.stores.threads.path(self.chat.id).with_name(S.FILE).read_text()
+
 
 
 class PermitLabel(Daemonised):
@@ -511,6 +707,9 @@ class PermitLabel(Daemonised):
                                        subagent="a · b\n‹x› " + "n" * 80)
         origin = asker.seen[0].origin
         self.assertTrue(origin.startswith("Claude sub-agent ‹a _ b _x_ nnn"), origin)
+        name = origin[origin.index("‹") + 1:origin.index("›")]
+        self.assertEqual(len(name), 40, "the label is capped at exactly 40")
+        self.assertTrue(name.endswith("…"))
         self.assertTrue(origin.endswith("› (not the orchestrator) in task task42"), origin)
         self.assertNotIn("·", origin)
         self.assertNotIn("\n", origin)
