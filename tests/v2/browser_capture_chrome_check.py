@@ -39,7 +39,10 @@ class RealCaptures(RegistryReal):
         self.assertFalse(result["whole"])
         with Image.open(BytesIO(base64.b64decode(result["image"]["data_b64"]))) as image:
             self.assertEqual(image.size,(result["image"]["width"],result["image"]["height"]))
-            self.assertEqual(image.getpixel((80,70)),(24,26,29))
+            k=image.width/1280   # page CSS px → image px (RASTER_SCALE, then the edge cap)
+            self.assertEqual(image.getpixel((round(80*k),round(70*k))),(24,26,29))
+            # The far corner: covered only by a mask scaled with the image.
+            self.assertEqual(image.getpixel((round(265*k),round(85*k))),(24,26,29))
         whole=self.capture(True)
         self.assertTrue(whole["whole"])
         self.assertIn("Whole-page chosen text",self.daemon.browser_captures.resolve(whole["capture_id"],owner=True))

@@ -209,12 +209,27 @@ def eventually(step, timeout, what):
         time.sleep(0.02)
 
 
+def jpeg_size(data: bytes) -> tuple[int, int]:
+    """A JPEG's pixel width and height, from its start-of-frame marker."""
+    i = 2
+    while i + 9 <= len(data):
+        if data[i] != 0xFF:
+            raise AssertionError("a frame's JPEG markers are malformed")
+        marker, length = data[i + 1], struct.unpack("!H", data[i + 2:i + 4])[0]
+        if marker in (0xC0, 0xC1, 0xC2):
+            height, width = struct.unpack("!HH", data[i + 5:i + 9])
+            return width, height
+        i += 2 + length
+    raise AssertionError("a frame has no JPEG size")
+
+
 class Window:
-    """A HUD window's socket to one tab: keeps every frame and message."""
+    """A HUD window's socket to one tab: keeps every frame (id, CSS width and
+    height, bytes, JPEG pixel width and height) and message."""
 
     def __init__(self, conn):
         self.conn = conn
-        self.frames: list[tuple[int, int, int, int]] = []
+        self.frames: list[tuple[int, int, int, int, int, int]] = []
         self.messages: list[dict] = []
         self.closed = None
         conn.settimeout(0.05)
@@ -229,9 +244,9 @@ class Window:
             return
         if opcode == websocket.ABNF.OPCODE_BINARY:
             fid, width, height = struct.unpack("!IHH", data[:8])
-            self.frames.append((fid, width, height, len(data) - 8))
             if data[8:10] != b"\xff\xd8":
                 raise AssertionError("a frame is not a JPEG")
+            self.frames.append((fid, width, height, len(data) - 8, *jpeg_size(data[8:])))
         elif opcode == websocket.ABNF.OPCODE_TEXT:
             self.messages.append(json.loads(data))
         elif opcode == websocket.ABNF.OPCODE_CLOSE:
@@ -856,7 +871,7 @@ class BrowserStream(unittest.TestCase):
                          {"t": "agent", "kind": "paused", "paused": False, "by": None})
         self.assertEqual(window.last("agent", kind="list")["actions"], [])
         window.until(lambda w: w.frames, what="a frame")
-        fid, width, height, size = window.frames[0]
+        fid, width, height, size, *_ = window.frames[0]
         self.assertEqual((width, height), (1280, 800))
         self.assertGreater(size, 100)
         events = [r for r in self.records if r.get("kind") == "browser_attached"][before:]
@@ -947,6 +962,9 @@ class BrowserStream(unittest.TestCase):
         self.stream_until(window, lambda w: any(f[1:3] == (640, 400) for f in w.frames),
                           "a frame at the new viewport")
         self.assertEqual(self.js(tab, "[innerWidth, innerHeight, devicePixelRatio]"), [640, 400, 1.5])
+        # In the window's device pixels, not stretched from 1× (RASTER_SCALE).
+        self.stream_until(window, lambda w: w.frames[-1][1:3] == (640, 400), "a newest frame at 640 × 400")
+        self.assertEqual(window.frames[-1][4:6], (960, 600), "a 1.5× pane gets 1.5× pixels")
         window.send({"t": "resize", "width": 1280, "height": 800, "deviceScaleFactor": 1})
         self.measure("frames")
         window.close()
@@ -979,7 +997,10 @@ class BrowserStream(unittest.TestCase):
         self.assertTrue(all(r["trusted"] for r in self.log(tab)))
         window.send(wheel(400, 500, 600))
         self.wait(lambda: (self.js(tab, "scrollY") or 0) > 0, what="the wheel scrolled")
-        self.assertEqual(self.log(tab, "wheel")[0]["dy"], 600)
+        # Chrome reports deltaY × its own scale ÷ the page's (measured; the
+        # scroll itself is the delta sent), so a 1× window reads 1.5×.
+        self.assertAlmostEqual(self.log(tab, "wheel")[0]["dy"],
+                               600 * H.RASTER_SCALE / self.js(tab, "devicePixelRatio"), delta=1e-3)
         # A bad message is refused in words and reaches nothing.
         before = len(self.log(tab))
         window.send({"t": "key", "e": {"type": "char", "key": "x"}})
