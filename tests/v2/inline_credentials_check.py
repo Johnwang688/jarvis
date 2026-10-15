@@ -381,6 +381,7 @@ FALSE_POSITIVES = [
     "app --key ./client-key.pem",
     "PASSWORD_FILE=/run/secrets/x ./run",
     "app --token-file=/tmp/t",
+    "PASSWORD_FILE=secret.txt app --token-file=token.txt",
     "curl -b cookies.txt https://example.invalid",
     "SESSION_DRIVER=redis COOKIE_SECURE=true ./run",
 ]
@@ -423,6 +424,14 @@ class ReviewFixes(unittest.TestCase):
                 self.assertEqual(secrets.redact_inline(command), command)
                 self.assertEqual(secrets.redact_command(command), command)
                 self.assertEqual(tool_calls.label("Bash", {"command": command}, ""), clean_line(command, 120))
+
+    def test_known_value_inside_a_url(self):
+        # URLs go first, as in the label: the scrub's marker inside a URL
+        # would break it apart.
+        (self.root / "proc" / ".env").write_text("DB_PASSWORD=knownsecretvalue9\n")
+        for shown in (secrets.for_display("psql postgresql://u:knownsecretvalue9@h/db"),
+                      secrets.redact_command("psql postgresql://u:knownsecretvalue9@h/db")):
+            self.assertEqual(shown, "psql postgresql://h/db")
 
     def test_cheap_catches(self):
         for command, shown in CHEAP_CATCHES:
@@ -478,6 +487,7 @@ NEVER_HIDDEN = [
     ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" | xargs -I{} sh -c {}", True),
     ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" | tee run.sh", True),
     ("X_TOKEN='rm -rf ~'; cmd /c %X_TOKEN%", True),
+    ("X_TOKEN='rm -rf ~' python3 -c 'import os; os.system(os.environ[\"X_TOKEN\"])'", True),
     # Quoting: what looks like a value is not one in the line's own parse.
     ("echo 'MY_TOKEN=\"abc' ; rm -rf ~ ; echo '\"'", False),
     ("echo \"MY_TOKEN='$(rm -rf ~)'\"", False),
@@ -508,6 +518,10 @@ class Cards(unittest.TestCase):
                     self.assertIn(secrets.RUN_MARKER, card)
                     self.assertTrue(card.startswith(command.split("=", 1)[0]))
                 self.assertNotIn(R + R, card)
+                if not marked:
+                    # The label (which also drops a URL's query) never hides
+                    # structure either.
+                    self.assertIn("rm -rf ~", tool_calls.label("Bash", {"command": command}, ""))
 
     def test_structure_is_never_withheld(self):
         # Rule 1, directly: a value's span with an unquoted operator, blank,
@@ -519,6 +533,9 @@ class Cards(unittest.TestCase):
         self.assertFalse(mask.safe(2, 9))
         mask = secrets._Mask('echo "A=$(rm)"')
         self.assertFalse(mask.safe(8, 13))
+        # No active character, but the span ends inside other quoting.
+        self.assertFalse(secrets._Mask("a'b'c").safe(1, 3))
+        self.assertTrue(secrets._Mask("a'b'c").safe(1, 4))
 
     def request(self, command):
         from jarvis.v2.approvals import ApprovalRequest
@@ -563,7 +580,12 @@ class Cards(unittest.TestCase):
                 threading.Event().wait(0.01)
             self.assertEqual(published[0]["command"], f"MY_TOKEN={R} npm test")
             self.assertEqual(broker.pending()[0].command, command)
-            entry = broker.resolve(request.req_id, Decision.ALLOW, always=True)
+            minted = []
+            real_add = v1_permissions.add_allow
+            with patch.object(v1_permissions, "add_allow",
+                              side_effect=lambda tool, args: minted.append(args) or real_add(tool, args)):
+                entry = broker.resolve(request.req_id, Decision.ALLOW, always=True)
+            self.assertEqual(minted, [{"command": command}])
         finally:
             worker.join(10)
         self.assertEqual(result, [Decision.ALLOW])
