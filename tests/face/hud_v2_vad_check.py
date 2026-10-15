@@ -213,7 +213,7 @@ def main(argv=None):
                 page = open_page(ctx, wait_detector="ready")
                 st = detector(page)
                 check("Silero is the live detector once the worker is ready", st["detector"] == "silero" and st["state"] == "ready", str(st))
-                models = [u for u, *_ in seen if u.endswith(".onnx")]
+                models = [u for u, *_ in seen if u.endswith(".onnx") and "/assets/silero_vad" in u]   # (V11's wake-word model files load beside it)
                 wasms = [(u, ct) for u, ct, *_ in seen if u.endswith(".wasm") and "ort-wasm" in u]
                 check("the model is served by the HUD's own origin under /assets", len(models) >= 1
                       and all(u.startswith(base + "/assets/silero_vad") for u in models), str(models))

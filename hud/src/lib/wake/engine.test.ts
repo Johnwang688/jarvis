@@ -131,12 +131,13 @@ describe("the pinned files", () => {
       if (r instanceof Error) throw r;
       return r ?? good[file];
     };
-    await expect(verifiedFiles(serve())).resolves.toBeTruthy();
-    const flip = (file: string, b: Uint8Array) => { const c = b.slice(); c[c.length >> 1] ^= 1; return file === "joiner" ? c : b; };
-    await expect(verifiedFiles(serve(flip))).rejects.toMatchObject({ code: "hash" });
-    await expect(verifiedFiles(serve((f, b) => (f === "encoder" ? b.slice(0, b.length - 1) : b)))).rejects.toMatchObject({ code: "hash" });
-    await expect(verifiedFiles(serve((f, b) => (f === "tokens" ? new TextEncoder().encode(new TextDecoder().decode(b) + " ") : b)))).rejects.toMatchObject({ code: "hash" });
-    await expect(verifiedFiles(serve((f) => (f === "decoder" ? new Error("404") : undefined as never)))).rejects.toBeInstanceOf(FailError);
-    await expect(verifiedFiles(serve((f) => (f === "decoder" ? new Error("404") : undefined as never)))).rejects.toMatchObject({ code: "fetch" });
+    // (Outcomes are compared as short strings: a resolved 5 MB file in a failed assertion would be printed whole.)
+    const outcome = (t?: (file: string, b: Uint8Array) => Uint8Array | Error) =>
+      verifiedFiles(serve(t)).then(() => "accepted", (e: unknown) => (e instanceof FailError ? e.code : "other"));
+    expect(await outcome()).toBe("accepted");
+    expect(await outcome((file, b) => { const c = b.slice(); c[c.length >> 1] ^= 1; return file === "joiner" ? c : b; })).toBe("hash");
+    expect(await outcome((f, b) => (f === "encoder" ? b.slice(0, b.length - 1) : b))).toBe("hash");
+    expect(await outcome((f, b) => (f === "tokens" ? new TextEncoder().encode(new TextDecoder().decode(b) + " ") : b))).toBe("hash");
+    expect(await outcome((f, b) => (f === "decoder" ? new Error("404") : b))).toBe("fetch");
   });
 });
