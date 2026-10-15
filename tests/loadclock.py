@@ -10,25 +10,38 @@ beside the check, `rules_check`'s slowest cost line went from 52-69 to
 
 So a bound that a run misses is judged again at the machine's present
 speed: a fixed reference workload (`reference`, plain Python string, regex
-and dict work like the code these bounds time, and none of Jarvis's code,
-so no mutation of it can slow the yardstick) is timed right after the run,
-and the run's CPU time is divided by how much slower the reference ran than
-it does on this machine idle (`REFERENCE_IDLE_S`). In idle-speed seconds a
-regression costs the same under load as alone, so the bound stays as tight
-as it was: the check is "under 100 ms at this machine's idle speed", not a
-looser number. Two limits keep it honest:
+and dict work, and none of Jarvis's code, so no mutation of it can slow the
+yardstick) is timed right after the run, and the run's CPU time is divided
+by how much slower the reference ran than it does on this machine idle
+(`REFERENCE_IDLE_S`).
 
-- The slowdown is never below 1 (a fast moment never tightens a bound past
-  what it says) and never above `MAX_SLOWDOWN`: a machine slowed further than
-  that cannot excuse more, so a run past three times its bound fails however
-  busy the machine is.
+What that buys, and what it costs (be exact about it):
+
+- **Idle, the bound is exact.** A run under its bound is never rescaled, and
+  on an idle machine the slowdown is 1, so the check is the bound as written.
+- **Under load the bound is looser, by up to ~30%.** The reference does not
+  slow exactly as the work does. Measured by the QA-LOAD review under 24 and
+  48 busy loops, the reference slowed 1.29-1.44x while the real work slowed
+  1.06-1.27x, so dividing by the reference excused ~10-30% more than the load
+  cost (the sniffer flood ~29%). The best of three runs then keeps the most
+  favourable ratio. So under load a regression up to ~30% past its bound can
+  pass; it still fails alone.
+- **Never more than 3x.** The slowdown is clamped to [1, `MAX_SLOWDOWN`]: a
+  fast moment never tightens a bound past what it says, and no load excuses
+  more than 3x, so work costing over three times its bound idle fails however
+  busy the machine is. The pinned mutants and their idle cost against their
+  bounds: `rules_check`, `charge()` a no-op, 531 ms against 100 ms (5.3x);
+  `terminal_check` and `devurl_check`, colour off the bulk path (`_PLAIN`
+  without its SGR branch), 7.3 against 28 MB/CPU-s (3.8x): both past the cap,
+  so caught under any load. `vex_check`'s synthetic mutant (`decide()`
+  judging a line eight times), 2.04 s against 1 s (2.0x), is inside the cap:
+  it read 1.71-2.30 s at idle speed under 48 burner scopes and failed every
+  run there, but a load that slowed the reference twice as much as the work
+  could excuse it.
 - The reference is timed three times and the fastest taken, the same
-  estimate the callers make of their work (the best of up to three runs):
-  a pause that hits a reference run can only tighten the bound, never
-  loosen it, and a pause that hits the work is what the retries are for.
-  Precision, measured under 48 burner scopes: a regression costing 2.04 s
-  idle read 1.71-2.30 s at idle speed, so one within ~15% of its bound can
-  pass under load (it still fails alone); one past that fails either way.
+  estimate the callers make of their work: a pause that hits a reference run
+  can only tighten the bound, and a pause that hits the work is what the
+  callers' retries are for.
 
 Only a run that misses the raw bound pays for the reference, so a check that
 passes alone costs nothing extra. These constants set the strength of every

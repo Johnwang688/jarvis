@@ -1124,8 +1124,17 @@ nothing: `+` is a quantifier); `timeout` is the backstop.
   at the machine's present speed: a fixed reference workload (none of
   Jarvis's code) is timed right after the run, fastest of three, against its
   idle cost (`REFERENCE_IDLE_S`, 10 ms here), and the run's CPU time divided by
-  that slowdown, never below 1x, never above 3x. The bound stays the idle-speed
-  bound; a regression past it by ~15% or more fails under load as alone.
+  that slowdown, never below 1x, never above 3x. Idle, that is the exact
+  bound. Under load it is looser: the QA-LOAD review measured the reference
+  slowing 1.29-1.44x under 24/48 busy loops while the real work slowed
+  1.06-1.27x, so a bound is relaxed by ~10-30% (the sniffer flood ~29%), and
+  the best of three keeps the most favourable ratio. A regression up to ~30%
+  past its bound can pass under load (it fails alone). Past 3x nothing is
+  excused (work over 3x its bound fails under any load): the pinned mutants `charge()` a no-op (5.3x its 100 ms bound) and
+  colour off the sniffer's bulk path (3.8x below its 28 MB/CPU-s floor) fail
+  under any load; `vex_check`'s synthetic 8x `decide()` (2.0x its 1 s bound)
+  is inside the cap and failed every run under 48 burner scopes, but is not
+  guaranteed to.
   `rules_check` (cost), `vex_check` (floods), `terminal_check` and
   `devurl_check` (throughput) use it and pin their limits and its constants;
   `tests/loadclock_check.py` pins the clamps. Recalibrate with
