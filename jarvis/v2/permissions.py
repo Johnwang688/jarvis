@@ -814,6 +814,8 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
 SUBAGENT_LABEL_CAP = 40
 _SUBAGENT_UNSAFE = re.compile(r"[^A-Za-z0-9 _./-]+")
 _SUBAGENT_PROVIDERS = {"claude": "Claude", "codex": "Codex"}
+# A sub-agent's sid on a card (SV-3): exactly `subagents.SID`'s pattern.
+_SUBAGENT_SID = re.compile(r"(?:cl|cx):[A-Za-z0-9_-]{1,128}")
 
 
 def subagent_origin(ctx: PermitContext, subagent: str) -> str:
@@ -835,7 +837,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
     def permit(tool: str, args: dict, brief: Brief | None = None, *,
                widening: str | None = None, grants: Iterable[tuple[str, str]] = (),
                also_commands: Iterable[str] = (), dangerous_tool: bool = False,
-               subagent: str | None = None) -> Decision:
+               subagent: str | None = None, subagent_sid: str | None = None) -> Decision:
         """`widening` is set only by a provider whose approval would widen
         its own sandbox if accepted (Codex: extra permissions, network, a
         grant root, terminal input). Such a call is asked of a human every
@@ -860,9 +862,16 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         call (Claude, SV-1): its name, for the card's "requested by" line.
         It decides nothing — every layer below reads exactly what it reads
         without it, so a child is never answered more loosely (or more
-        strictly) than its orchestrator would be."""
+        strictly) than its orchestrator would be.
+
+        `subagent_sid` is the same child's sid (`cl:…`/`cx:…`, SV-3), set by
+        Claude beside `subagent` and by Codex for its children's widenings
+        (whose headline already names them). It rides on the owner's card
+        only, so the HUD can link the card to the child's row; like the
+        label it decides nothing, and a value that is not a sid is dropped."""
         brief = brief if brief is not None else ctx.brief
         who = subagent_origin(ctx, subagent) if subagent is not None else None
+        sid = subagent_sid if subagent_sid is not None and _SUBAGENT_SID.fullmatch(str(subagent_sid)) else ""
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
         command = _command_of(args) if tool in COMMAND_TOOLS else ""
@@ -926,7 +935,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             match = always_ask_match(tool, args, brief, ctx.project)
             reason = widening + (f" (also always-ask rule {match[0]})" if match else "")
             decision = _ask(asker, ctx, tool, args, command, reason, L_WIDENING,
-                            allowlistable=False, headline=widening, origin=who)
+                            allowlistable=False, headline=widening, origin=who, subagent=sid)
             return finish(decision, L_WIDENING, reason)
 
         # --- a dangerous Jarvis tool from a chat's jarvis-mcp: the owner ----
@@ -945,7 +954,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             reason = ("a dangerous Jarvis tool: the owner decides every call"
                       + (f" (also always-ask rule {match[0]})" if match else ""))
             decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN,
-                            allowlistable=False, origin=who)
+                            allowlistable=False, origin=who, subagent=sid)
             return finish(decision, L_HUMAN, reason)
 
         # A native hook's exact offered Jarvis call delegates to this
@@ -1015,7 +1024,8 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 # or owner text leave through the generic approval surface.
                 decision = _ask_owner_delegation(asker, ctx, delegated.name, origin=who)
                 return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
-            decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK, origin=who)
+            decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK, origin=who,
+                            subagent=sid)
             return finish(decision, L_ALWAYS_ASK, reason)
 
         # --- jarvis-tool: a read-only Jarvis session tool --------------------
@@ -1053,7 +1063,8 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                           "already allowlisted")
         if profile == PermissionProfile.ASK:
             reason = "ask profile: every gated call reaches the owner"
-            decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN, origin=who)
+            decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN, origin=who,
+                            subagent=sid)
             return finish(decision, L_HUMAN, reason)
         return finish(Decision.ALLOW, L_REVIEWER,
                       "no opinion; the provider's own reviewer decides")
@@ -1084,12 +1095,13 @@ def _ask_owner_delegation(asker, ctx: PermitContext, tool: str, *,
 
 def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
          reason: str, layer: str, *, allowlistable: bool = True,
-         headline: str = "", origin: str | None = None) -> Decision:
+         headline: str = "", origin: str | None = None, subagent: str = "") -> Decision:
     request = ApprovalRequest(
         tool=tool, args=args, command=command or None, reason=reason, layer=layer,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
         provider=ctx.provider or None, origin=origin if origin is not None else ctx.origin(),
-        allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "")
+        allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "",
+        subagent=subagent)
     try:
         return Decision(asker.ask(request))
     except Exception:       # an asker that raises has not approved anything

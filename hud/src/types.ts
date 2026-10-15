@@ -440,6 +440,8 @@ export interface ApprovalRequest {
   headline?: string;
   timeout_s?: number;
   remote?: boolean;
+  /** The native sub-agent whose call raised it (SV-3): its sid, for the card's link to its row. */
+  subagent?: string;
 }
 
 export interface AvatarDesc {

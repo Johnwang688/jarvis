@@ -20,6 +20,8 @@ import { headlineLine } from "../lib/approval";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
+import { displayName, validSid, type SubagentRef } from "../lib/subagents";
+import { useRow, useWatch } from "../state/subagents";
 
 export function approvalChime(ctx?: AudioContext | null) {
   try {
@@ -45,13 +47,40 @@ export function approvalChime(ctx?: AudioContext | null) {
 export function ApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
+  onSubagent?: (ref: SubagentRef) => void;
 }) {
-  return props.request.hud_only ? <BrowserApprovalCard {...props} onPresent={approvalChime} /> : <OrdinaryApprovalCard {...props} />;
+  return props.request.hud_only
+    ? <BrowserApprovalCard request={props.request} onDecide={props.onDecide} onPresent={approvalChime} />
+    : <OrdinaryApprovalCard {...props} />;
+}
+
+/**
+ * "from sub-agent ‹name›" on a card a native sub-agent's call raised (SV-3):
+ * its sid comes with the card, its name from the owner's list route. It
+ * decides nothing and, like AUTHORIZE, is out of the Tab order and never
+ * takes focus from a pointer; a click marks the child's row behind the card,
+ * and once the card is answered takes the owner to it (App).
+ */
+function SubagentLink({ threadId, sid, onOpen }: {
+  threadId: string; sid: string; onOpen?: (ref: SubagentRef) => void;
+}) {
+  useWatch(threadId);
+  const row = useRow(threadId, sid);
+  return (
+    <div className="sa-cardlink">
+      <button type="button" className="quiet" data-testid="approval-subagent" data-sid={sid} tabIndex={-1}
+              onMouseDown={noPointerFocus} title="Show this sub-agent's row (its pane opens once this card is answered)"
+              onClick={() => onOpen?.({ threadId, sid })}>
+        from sub-agent ‹{displayName(row)}›
+      </button>
+    </div>
+  );
 }
 
 function OrdinaryApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
+  onSubagent?: (ref: SubagentRef) => void;
 }) {
   const r = props.request;
   const [left, setLeft] = useState(r.timeout_s || 120);
@@ -88,6 +117,9 @@ function OrdinaryApprovalCard(props: {
       ) : null}
       {r.origin ? (
         <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
+      ) : null}
+      {validSid(r.subagent) && r.thread_id ? (
+        <SubagentLink threadId={r.thread_id} sid={r.subagent} onOpen={props.onSubagent} />
       ) : null}
       <div className="tool" data-testid="approval-tool">{r.tool}</div>
       {/* The entire command, never a summary. */}
@@ -162,6 +194,8 @@ export function behindTheCard(el: Element | null, card: Element | null = null): 
 export function ApprovalVeil(props: {
   requests: ApprovalRequest[];
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
+  /** A card's "from sub-agent ‹name›" (SV-3). */
+  onSubagent?: (ref: SubagentRef) => void;
 }) {
   const top = props.requests[0];
   const up = !!top;
@@ -264,7 +298,7 @@ export function ApprovalVeil(props: {
       {/* Keyed by its request: the next queued card is a new card, with its
           own countdown and live buttons — not the answered card's busy state
           (re-review of PR #27; main had the same bug). */}
-      <ApprovalCard key={top.req_id} request={top} onDecide={props.onDecide} />
+      <ApprovalCard key={top.req_id} request={top} onDecide={props.onDecide} onSubagent={props.onSubagent} />
     </div>
   );
 }

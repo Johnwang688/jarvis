@@ -3145,6 +3145,17 @@ def main():
             finally:
                 toolcalls_mock.stop()
 
+            # A chat's native sub-agents (SV-3): rows, the read-only pane and
+            # the card's link — a context and a mock of their own (it splits,
+            # reloads and drops the event stream).
+            from tests.face.hud_v2_subagents_check import subagents_checks
+            subagents_mock = MockDaemon(0).start()
+            try:
+                subagents_checks(browser, subagents_mock, f"http://127.0.0.1:{subagents_mock.port}", check, until,
+                                 guard, FAKE_RECOGNIZER)
+            finally:
+                subagents_mock.stop()
+
             # The sidebar's five most recent chats per project (2026-10-15): a
             # context and a mock of their own — it opens threads and reloads.
             from tests.face.hud_v2_recent_chats_check import recent_chats_checks

@@ -63,6 +63,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -197,6 +198,19 @@ def child_sid(thread_id) -> str:
     if _SID_ID.fullmatch(text):
         return "cx:" + text
     return "cx:h" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def _takes_keyword(permit, name: str) -> bool:
+    """Whether `permit` takes the keyword `name` (or any keyword). Only such a
+    callback is handed the child's sid (SV-3): one that does not would raise,
+    and a raise denies — the sid must never change an answer."""
+    try:
+        params = inspect.signature(permit).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(q.kind is q.VAR_KEYWORD
+               or (q.name == name and q.kind in (q.KEYWORD_ONLY, q.POSITIONAL_OR_KEYWORD))
+               for q in params)
 
 
 def _child_text(value) -> str:
@@ -1884,14 +1898,21 @@ class CodexProvider:
                 if req_id in s.pending:
                     raise RpcError("Duplicate Codex request id")
                 s.pending[req_id] = pending
+            # A child's approval names its sid (the owner's SV-3 decision,
+            # as Claude's do): on the logged gate question and, when the
+            # callback takes it, on the owner's card, so the HUD can link
+            # the card to the child's row. It decides nothing.
+            sid = child_sid(p.get("threadId")) if child is not None else None
             yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args,
-                              command=args.get("command"), **({"subagent": child} if child else {}))
+                              command=args.get("command"), **({"subagent": sid} if sid else {}))
             try:
                 # Deliberately on the send caller's thread: broker context survives.
                 # A widening goes as a keyword the model cannot reach; a
                 # callback that does not take it raises, and that denies.
+                extra = ({"subagent_sid": sid}
+                         if sid and line and _takes_keyword(s.permit, "subagent_sid") else {})
                 decision = (s.permit(name, args, s.brief, widening=line, grants=tuple(grants),
-                                     also_commands=tuple(also)) if line
+                                     also_commands=tuple(also), **extra) if line
                             else s.permit(name, args, s.brief))
                 decision = Decision(decision)
             except Exception:

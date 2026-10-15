@@ -6,7 +6,8 @@ import {
   defaultPane, defaultWorkspace, dropColumn, dropRow, setFilePath, splitPane, splitTitle, splitVerdict,
   equalSplit, fitWorkspace, focusPane, forgetTerminal, gridTemplate, loadWorkspace, maxPanelHeight, moveColEdge,
   inWorkspace, orderOf, paneAt, paneSequence, parseWorkspace, pinPane, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
-  setBrowserUrl, setEditors, setPanel, setPreset, setSplit, setView, show, slotOf, slotWidths, unpinProject, VIEW_LABEL,
+  setBrowserUrl, setEditors, setPanel, setPreset, setSplit, setSubagent, setView, show, slotOf, slotWidths, subagentSpec,
+  unpinProject, VIEW_LABEL,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 import LEGACY_FITS from "./workspace.legacy-fits.json";
@@ -397,7 +398,8 @@ describe("the rename: Preview is the Browser, File reads as the editor (BR-3a)",
   it("names every view the owner can pick, and no view by its old name", () => {
     expect(Object.keys(VIEW_LABEL).sort()).toEqual([...PANE_VIEWS].sort());
     expect(VIEW_LABEL).toEqual({
-      chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex" });
+      chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex",
+      subagent: "sub-agent" });
     const labels = Object.values(VIEW_LABEL);
     expect(new Set(labels).size).toBe(labels.length);
     expect(labels).not.toContain("file");
@@ -1402,5 +1404,51 @@ describe("fitting: the mutants WP-G1's review left alive (U4, U34, U35)", () => 
     const f = fitWorkspace(DEFAULT_LAYOUT, w, 1366, 300);
     expect(f).toMatchObject({ drawn: "cols2", panes: [4, 5] });
     expect(f.sides).toMatchObject({ leftFolded: false, rightFolded: false });
+  });
+});
+
+
+describe("the sub-agent view (SV-3)", () => {
+  const ref = { threadId: "t1", sid: "cl:toolu_a" };
+  it("is stored as ids only, and a bad reference shows the pane's default view", () => {
+    const mem = memory();
+    const ws = setSubagent(defaultWorkspace(), 1, ref);
+    expect(ws.panes[0]).toEqual({ view: "subagent", projectId: null, terminalId: null, subagent: ref });
+    expect(ws.focused).toBe(1);
+    saveWorkspace(ws, mem);
+    expect(JSON.parse(mem.map.get(WORKSPACE_KEY)!).panes[0]).toEqual({ view: "subagent", projectId: null,
+      terminalId: null, subagent: ref });
+    expect(loadWorkspace(mem).panes[0].subagent).toEqual(ref);
+    for (const bad of [undefined, null, {}, { threadId: "t1" }, { threadId: "t1", sid: "toolu_a" },
+      { threadId: "t1", sid: "cl:a/b" }, { threadId: "t 1", sid: "cl:a" }, { threadId: "t1", sid: "cl:" + "a".repeat(129) }]) {
+      const raw = JSON.parse(JSON.stringify(ws));
+      raw.panes[0].subagent = bad;
+      const back = parseWorkspace(JSON.stringify(raw)).panes[0];
+      expect(back.view).toBe("chat");
+      expect(back.subagent).toBeUndefined();
+    }
+    // A ref on another view is dropped.
+    const raw = JSON.parse(JSON.stringify(ws));
+    raw.panes[0].view = "file";
+    expect(parseWorkspace(JSON.stringify(raw)).panes[0].subagent).toBeUndefined();
+  });
+
+  it("is never switched to without a sub-agent, and leaving it forgets which", () => {
+    const ws = defaultWorkspace();
+    expect(setView(ws, 1, "subagent")).toBe(ws);
+    const shown = setSubagent(ws, 1, ref);
+    const left = setView(shown, 1, "chat");
+    expect(left.panes[0].view).toBe("chat");
+    expect(left.panes[0].subagent).toBeUndefined();
+    expect(setView(shown, 1, "subagent").panes[0].subagent).toEqual(ref);
+    expect(setSubagent(ws, 1, { threadId: "t1", sid: "nope" })).toBe(ws);
+  });
+
+  it("a split from it is a new chat (one sub-agent per pane), and a split opens one beside its chat", () => {
+    expect(copySpec(subagentSpec(ref))).toEqual({ view: "chat", projectId: null, terminalId: null });
+    const ws = splitPane(defaultWorkspace(), 1, 2, subagentSpec(ref));
+    expect(orderOf(ws)).toEqual([1, 2]);
+    expect(ws.panes[1]).toEqual({ view: "subagent", projectId: null, terminalId: null, subagent: ref });
+    expect(ws.focused).toBe(2);
   });
 });

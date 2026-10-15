@@ -431,6 +431,49 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .tc-status, .tc-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .tc-status.running { color: var(--amber); }
 
+/* ---- native sub-agents (SV-3) ---- */
+/* A row where the chat spawned it; a status is always a word: amber live
+   (as a running call), green done, red failed, muted stopped. */
+/* The rows at one spot are one block, indented as a tool group is. */
+.subagent-rows {
+  margin: 0 20px; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  font: 11px var(--mono); color: var(--text-muted);
+}
+.subagent-row { min-width: 0; }
+.subagent-row .sa-open, .sa-toggle {
+  display: flex; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; white-space: nowrap;
+  border: 0; background: transparent; padding: 3px 0; text-align: left; color: inherit; font: inherit;
+}
+/* A narrow pane wraps the numbers under the name rather than squeezing the name away. */
+.subagent-row .sa-open { flex-wrap: wrap; }
+.subagent-row .sa-open:hover:not(:disabled) { color: var(--text-2); background: transparent; }
+.subagent-row .sa-open:focus-visible, .sa-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.sa-mark { color: var(--text-muted); flex: 0 0 auto; }
+.sa-name { color: var(--text-2); min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sa-kind, .sa-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sa-status, .sa-time, .sa-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.sa-status.live { color: var(--amber); }
+.sa-status.done { color: var(--green); }
+.sa-status.failed { color: var(--red); }
+.sa-status.stopped { color: var(--text-muted); }
+.sa-list { max-height: 300px; overflow: auto; }
+.sa-list { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; }
+.subagent-row.sa-flash { outline: 1px solid var(--accent-line); outline-offset: 2px; border-radius: 3px; }
+.sa-pane { display: flex; flex-direction: column; min-height: 0; }
+.sa-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 20px;
+  border-bottom: 1px solid var(--border); font: 11px var(--mono); color: var(--text-muted);
+}
+.sa-head .sa-of { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 80px; }
+.sa-brief { padding: 6px 20px 0; font: 11px var(--mono); color: var(--text-muted); }
+.sa-brief-text {
+  margin: 4px 0 6px; padding: 8px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); color: var(--text-2);
+  font: 12px var(--mono);
+}
+.sa-cardlink { margin: -4px 0 8px; }
+.sa-cardlink button.quiet { padding: 0; font: 10px var(--mono); letter-spacing: 0.04em; color: var(--text-2); }
+
 
 /* ---- input bar ---- */
 :is(#inputbar, .inputbar) {
