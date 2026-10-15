@@ -1082,3 +1082,15 @@ of each script fetch. Old page-policy pins in
 `hud_v2_browser_check` (168) and the voice suites were updated with it.
 Run `hud_v2_csp_check` with the usual HOME: under a temporary HOME its three
 manifest checks (`Page.getAppManifest`) fail, on `origin/main` too.
+
+**An invariant this rests on (delta review, 2026-10-15).** CSP checks
+compiling WebAssembly from bytes, not instantiating a `WebAssembly.Module`
+that already exists: a Module compiled in a granted worker and
+`postMessage`d to the page instantiates there despite the page's
+`script-src 'self'` (measured, Chromium 149). So **a HUD worker never posts
+a `WebAssembly.Module`, and never compiles bytes it received in a
+message.** Today none does: the syntax, VAD and wake-word workers post plain
+objects, the syntax worker loads only the grammars in its built-in map, and
+the ONNX and RNNoise files are fixed imports checked against pinned hashes.
+A change that breaks either half hands the approval page WebAssembly without
+it compiling anything.
