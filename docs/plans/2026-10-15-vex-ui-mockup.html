@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VEX view mockup</title>
+<!-- Static mockup for docs/plans/2026-10-15-vex-ui-redesign.md. No scripts.
+     Colour tokens are copied verbatim from hud/src/theme.css (Graphite). -->
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  color-scheme: dark;
+  --bg-inset: #0f0f0e;
+  --bg-0: #141413;
+  --bg-1: #1a1a19;
+  --bg-2: #222221;
+  --bg-3: #2c2c2a;
+  --hover: rgba(255, 255, 255, 0.045);
+  --selected: rgba(255, 255, 255, 0.08);
+  --border: #2f2f2c;
+  --border-strong: #46453f;
+  --text: #e2dfd7;
+  --text-2: #b4b0a8;
+  --text-muted: #98948b;
+  --accent: #6fc3df;
+  --accent-hi: #9ad6ea;
+  --accent-soft: rgba(111, 195, 223, 0.14);
+  --accent-line: rgba(111, 195, 223, 0.45);
+  --amber: #fbbf24;
+  --amber-soft: rgba(251, 191, 36, 0.10);
+  --red: #f87171;
+  --red-soft: rgba(248, 113, 113, 0.12);
+  --red-line: rgba(248, 113, 113, 0.5);
+  --green: #6dd08f;
+  --syn-type: #a8b5c2;
+  --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
+  --radius: 6px;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+body { font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; background: var(--bg-0); color: var(--text); padding: 24px 16px 48px; }
+h1 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+.lede { color: var(--text-2); max-width: 1000px; line-height: 1.5; margin-bottom: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--text-2); font-size: 12px; margin: 10px 0 22px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.grid { display: flex; flex-wrap: wrap; gap: 28px 24px; }
+figure { width: 600px; max-width: 100%; }
+figcaption { font-size: 12px; color: var(--text-2); margin-top: 8px; line-height: 1.5; }
+figcaption b { color: var(--text); font-weight: 600; }
+
+/* ---- the pane ---- */
+.pane { width: 600px; max-width: 100%; height: 640px; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+button { font: inherit; font-size: 12px; color: var(--text); background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 5px 10px; cursor: pointer; }
+button:disabled { opacity: 0.4; cursor: default; }
+button.quiet { background: none; border: none; color: var(--text-muted); padding: 2px 6px; font-size: 11px; }
+.tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--border); flex: 0 0 auto; align-items: stretch; }
+.viewstrip { display: flex; }
+.viewstrip > span { border-bottom: 2px solid transparent; padding: 10px 14px; color: var(--text-muted); font-size: 12px; }
+.viewstrip > span.on { color: var(--text); border-bottom-color: var(--accent); }
+.paneextras { margin-left: auto; display: flex; align-items: center; padding: 4px 8px; }
+.picker { font-size: 12px; background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 3px 8px; color: var(--text); }
+
+.vexview { padding: 10px 12px; display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; position: relative; }
+
+/* header */
+.vhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.vname { font-weight: 600; font-size: 14px; }
+.vfacts { color: var(--text-muted); font-size: 12px; }
+.vhead .chip { align-self: center; }
+.vright { margin-left: auto; display: flex; align-items: center; gap: 10px; position: relative; }
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.ok { color: var(--green); }
+.bad { color: var(--red); }
+.busy { color: var(--accent); }
+.muted { color: var(--text-muted); }
+.badge.muted .dot { background: transparent; border: 1px solid currentColor; }
+.stale { opacity: 0.6; }
+.help { width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; color: var(--text-muted); background: none; }
+.help.on { color: var(--text); background: var(--accent-soft); border-color: var(--accent-line); }
+
+/* action bar */
+.actbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 6px; }
+.sep { color: var(--text-muted); font-size: 12px; }
+.step { position: relative; }
+.mk { position: absolute; top: -7px; right: -7px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg-1); border: 1px solid currentColor; display: grid; place-items: center; font-size: 10px; line-height: 1; font-weight: 700; }
+.mk.unk { border-style: dashed; }
+.spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; vertical-align: -1px; }
+.mk .spin { width: 8px; height: 8px; border-width: 1.5px; }
+.pending { border-style: dashed; }
+.stop { color: var(--text); position: relative; }
+.stepw { position: relative; display: inline-flex; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: 999px; padding: 4px 10px; color: var(--text-2); }
+.chip b { color: var(--text); font-weight: 600; }
+.more { padding: 4px 9px; }
+.grow { margin-left: auto; }
+
+/* status line */
+.status { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 5px 10px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; flex-wrap: wrap; }
+.status.chain { border-color: var(--accent-line); }
+.status.failed { border-color: var(--red-line); }
+.status .el { color: var(--text-muted); font: 11px var(--mono); }
+.status .right { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+.prog { display: inline-flex; align-items: center; gap: 8px; flex: 1 1 140px; max-width: 220px; }
+.track { flex: 1; height: 7px; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+.fill { display: block; height: 100%; background: var(--accent); }
+.fill.ok { background: var(--green); }
+.pct { font: 11px var(--mono); color: var(--text-2); width: 32px; text-align: right; }
+.hint { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+
+/* errors */
+.errs { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.err { display: flex; gap: 8px; align-items: baseline; font: 12px var(--mono); padding: 3px 6px; border: 1px solid transparent; border-radius: 4px; }
+.err:hover, .err.hov { background: var(--hover); border-color: var(--border); }
+.sev { min-width: 52px; flex: none; }
+.sev.error { color: var(--red); } .sev.warning { color: var(--text-2); }
+.where { color: var(--syn-type); flex: none; }
+.msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.outside { color: var(--text-muted); }
+
+/* output */
+.out { flex: 1; min-height: 120px; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg-inset); position: relative; }
+.otabs { display: flex; align-items: stretch; background: var(--bg-1); border-bottom: 1px solid var(--border); }
+.otab { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; font-size: 11px; color: var(--text-muted); border-bottom: 2px solid transparent; }
+.otab.on { color: var(--text); border-bottom-color: var(--accent); }
+.otab .g { font-size: 11px; font-weight: 700; }
+.otab .tag { font-size: 10px; letter-spacing: .02em; }
+.otools { margin-left: auto; display: flex; align-items: center; gap: 2px; padding-right: 4px; }
+.obody { flex: 1; overflow: hidden; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre-wrap; color: var(--text-2); }
+.obar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--border); background: var(--bg-1); font-size: 11px; color: var(--text-muted); }
+.obar .r { margin-left: auto; display: flex; gap: 2px; }
+.cursor { display: inline-block; width: 7px; height: 14px; background: var(--text-2); vertical-align: -2px; }
+.check { display: inline-block; width: 11px; height: 11px; border: 1px solid var(--accent-line); background: var(--accent-soft); border-radius: 2px; vertical-align: -1px; }
+.dev { padding: 10px 12px; font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; color: var(--text); display: flex; flex-direction: column; gap: 7px; overflow: hidden; }
+.dev .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.dev ul { list-style: none; font: 11px var(--mono); color: var(--text-2); display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--border); padding-top: 6px; }
+.dev time { color: var(--text-muted); margin-right: 8px; }
+.dev h5 { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); }
+
+/* tooltips (first-use help, shown as visible callouts) */
+.tip { position: absolute; z-index: 5; width: 210px; background: var(--bg-3); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-pop); padding: 7px 9px; font-size: 11.5px; line-height: 1.45; color: var(--text); font-weight: 400; text-align: left; white-space: normal; }
+.tip::before { content: ""; position: absolute; top: -5px; left: 14px; width: 8px; height: 8px; background: var(--bg-3); border-left: 1px solid var(--border-strong); border-top: 1px solid var(--border-strong); transform: rotate(45deg); }
+.tip.r::before { left: auto; right: 14px; }
+.tip.side::before { top: 10px; left: auto; right: -5px; transform: rotate(135deg); }
+.tip small { display: block; color: var(--text-muted); margin-top: 3px; font-size: 10.5px; }
+.tipwrap { position: relative; display: inline-flex; }
+
+/* popover (slot chip) and confirm */
+.pop { position: absolute; z-index: 5; right: 0; top: calc(100% + 6px); width: 260px; background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-pop); padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.pop label { display: flex; align-items: center; gap: 8px; color: var(--text-2); }
+.field { flex: 1; background: var(--bg-1); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 4px 8px; color: var(--text); font-size: 12px; }
+.field.focus { box-shadow: 0 0 0 2px #6fc3df; }
+.pop .warn { color: var(--text-2); font-size: 11.5px; line-height: 1.4; }
+.chipwrap { position: relative; display: inline-flex; }
+.note { font-size: 11px; color: var(--text-muted); }
+.num { position: absolute; top: -8px; left: -8px; width: 16px; height: 16px; border-radius: 50%; background: var(--accent-soft); border: 1px solid var(--accent-line); color: var(--accent-hi); font-size: 10px; font-weight: 700; display: grid; place-items: center; line-height: 1; z-index: 2; }
+.helplist { margin: 0; padding: 10px 14px 10px 34px; font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; line-height: 1.45; color: var(--text-2); display: flex; flex-direction: column; gap: 5px; overflow: hidden; }
+.helplist li::marker { color: var(--accent-hi); font-weight: 700; }
+.helplist b { color: var(--text); font-weight: 600; }
+.helplist i { color: var(--text-muted); font-style: normal; }
+.pop { left: 0; right: auto; }
+</style>
+</head>
+<body>
+<h1>VEX view mockup</h1>
+<p class="lede">This is a static mockup for <code>docs/plans/2026-10-15-vex-ui-redesign.md</code>. Each pane is drawn
+at a typical split size, 600&times;640, and shows the pane header, then the VEX view. It uses Graphite tokens copied from
+<code>hud/src/theme.css</code>. <b>Run</b> and <b>Stop</b> have dashed outlines because they belong to package VX-UI-5.
+That package waits on the owner revising decision V-3 and on hardware checks H0 and H5&ndash;H7. Brain output over radio
+has not been tested on hardware (H1&ndash;H4).</p>
+<div class="legend">
+  <span><span class="spin"></span> busy (<code>--accent</code>)</span>
+  <span class="ok">✓ succeeded (<code>--green</code>)</span>
+  <span class="bad">✗ failed (<code>--red</code>)</span>
+  <span class="ok stale">✓ stale, dimmed + words</span>
+  <span class="muted">? unknown (<code>--text-muted</code>, dashed ring)</span>
+  <span style="color:var(--amber)">amber only: held by an approval card</span>
+</div>
+
+<div class="grid">
+
+<!-- ============ 1. IDLE, with the ? help mode on ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span>
+      <span class="chip" style="position:relative">Slot <b>3</b> · override ▾<span class="num">6</span></span>
+      <div class="vright">
+        <span class="badge muted" style="position:relative"><span class="num">7</span><span class="dot"></span>Brain</span>
+        <span class="badge ok"><span class="dot"></span>Controller</span>
+        <button class="help on" aria-pressed="true" title="Show what each control does">?</button>
+      </div>
+    </div>
+    <div class="actbar">
+      <button class="step">Clean<span class="num">1</span></button><span class="sep">›</span>
+      <button class="step">Build<span class="num">2</span></button><span class="sep">›</span>
+      <button class="step" title="Download to slot 3: replaces whatever is in slot 3 on the brain">Download to slot 3<span class="num">3</span></button><span class="sep">›</span>
+      <button class="step pending">Run slot 3<span class="num">4</span></button>
+      <button class="stop pending">■ Stop<span class="num">5</span></button>
+      <button class="more grow" title="Rebuild, device info, programs">⋯</button>
+    </div>
+    <div class="status"><span class="muted">Ready. Edit, then Clean › Build › Download.</span></div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab on">Build</span>
+        <span class="otab">Download</span>
+        <span class="otab" style="position:relative">Brain <span class="tag muted">off</span><span class="num" style="top:-1px;left:-3px">8</span></span>
+        <span class="otab">Device <span class="g ok">●</span></span>
+        <span class="otools"><button class="quiet" title="Fill the pane">⤢</button><button class="quiet" title="Fold the output" aria-expanded="true">▾</button></span>
+      </div>
+      <ol class="helplist" aria-label="What each control does">
+        <li><b>Clean</b> deletes this project's build folder (make clean). The next Build compiles everything.</li>
+        <li><b>Build</b> compiles the project (make). Errors appear under the status line; click one to open the file at that line.</li>
+        <li><b>Download</b> sends the built program to the brain, by USB or through the controller. <b>Replaces whatever is in slot 3.</b> Builds first if the program is older than its sources. <i>Mouse click only.</i></li>
+        <li><b>Run</b> starts the program in slot 3 on the brain. <b>The robot may move.</b> Asks once more. <i>Mouse click only.</i></li>
+        <li><b>Stop</b> stops the program running on the brain.</li>
+        <li><b>Slot and name</b> the program gets on the brain (slot 1&ndash;8).</li>
+        <li><b>Brain · Controller</b>: plugged in by USB? Green yes, red no, hollow unknown. USB only: not radio link, not whether a program runs.</li>
+        <li><b>Brain</b> tab: what the program prints (printf / print), live. Typing goes to the program. Connecting holds the device port.</li>
+      </ol>
+    </div>
+  </div>
+</div>
+<figcaption><b>1 · Idle, help mode on (<code>?</code>).</b> Each control gets a number and the output area lists what each
+one does, so nothing overlaps. Ordinary first-use help is one tooltip per control on its first three hovers (state 5
+shows one). The view has one Download button. The slot chip moved up to the header.</figcaption>
+</figure>
+
+<!-- ============ 2. BUILDING ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chip">Slot <b>3</b> · override ▾</span>
+      <div class="vright"><span class="badge muted"><span class="dot"></span>Brain</span><span class="badge ok"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step" disabled>Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step" disabled>Building…</button><span class="mk busy"><span class="spin"></span></span></span><span class="sep">›</span>
+      <button class="step" disabled>Download to slot 3</button><span class="sep">›</span>
+      <button class="step pending" disabled>Run slot 3</button>
+      <button class="stop pending">■ Stop</button>
+      <button class="more grow">⋯</button>
+    </div>
+    <div class="status" role="status"><span class="spin"></span><span class="busy">Building override…</span><span class="el">12s</span>
+      <span class="right note">stopped automatically after 5 min</span></div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab on">Build <span class="spin"></span></span>
+        <span class="otab">Download</span>
+        <span class="otab">Brain <span class="tag muted">off</span></span>
+        <span class="otab">Device <span class="g ok">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="obar">make · build<span class="r"><button class="quiet">Show terminal</button></span></div>
+      <div class="obody">"CXX src/main.cpp"
+"CXX src/odometry.cpp"
+"CXX src/movement.cpp"
+"CXX src/pure-pursuit.cpp"
+"CXX src/auton-routines.cpp"
+"CXX src/auton-helpers.cpp"
+"CXX src/mechanisms.cpp"
+"CXX src/telemetry.cpp"
+"LINK build/override.elf"</div>
+    </div>
+  </div>
+</div>
+<figcaption><b>2 · Building.</b> The Build step shows a spinner and the status line counts the time. The Build tab is
+selected because the owner started a build. Clean keeps its ✓ from a moment ago. Download stays off during the build.
+Stop stays on because it acts on the brain, not on the build.</figcaption>
+</figure>
+
+<!-- ============ 3. BUILD FAILED ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chip">Slot <b>3</b> · override ▾</span>
+      <div class="vright"><span class="badge muted"><span class="dot"></span>Brain</span><span class="badge ok"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step">Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Build</button><span class="mk bad">✗</span></span><span class="sep">›</span>
+      <button class="step">Download to slot 3</button><span class="sep">›</span>
+      <button class="step pending">Run slot 3</button>
+      <button class="stop pending">■ Stop</button>
+      <button class="more grow">⋯</button>
+    </div>
+    <div class="status failed" role="status"><span class="bad">✗ Build failed (exit 2): 2 errors, 1 warning</span><span class="el">14:02 · 18s</span></div>
+    <ul class="errs" aria-label="Build errors">
+      <li class="err hov"><span class="sev error">error</span><span class="where">src/auton-routines.cpp:42:7</span><span class="msg">use of undeclared identifier 'chassis'</span></li>
+      <li class="err"><span class="sev error">error</span><span class="where">src/auton-routines.cpp:58:3</span><span class="msg">no matching function for call to 'followPath'</span></li>
+      <li class="err"><span class="sev warning">warning</span><span class="where">include/pid.hpp:12:9</span><span class="msg">unused variable 'kDerivLimit'</span></li>
+    </ul>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab on">Build <span class="g bad">✗</span></span>
+        <span class="otab">Download</span>
+        <span class="otab">Brain <span class="tag muted">off</span></span>
+        <span class="otab">Device <span class="g ok">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="obar">make · build · exit 2<span class="r"><button class="quiet">Show terminal</button></span></div>
+      <div class="obody">"CXX src/auton-routines.cpp"
+src/auton-routines.cpp:42:7: error: use of undeclared identifier 'chassis'
+   42 |       chassis.turnTo(90);
+      |       ^
+src/auton-routines.cpp:58:3: error: no matching function for call to 'followPath'
+include/pid.hpp:12:9: warning: unused variable 'kDerivLimit'
+2 errors generated.
+make: *** [vex/mkrules.mk:18: build/src/auton-routines.o] Error 1</div>
+    </div>
+  </div>
+</div>
+<figcaption><b>3 · Build failed.</b> The status line gives the result in words. The errors list sits right under it, and
+clicking a row opens the file at that line, as today. Errors outside the project show as text only. The Build tab badge
+turns red, and the raw output stays one glance away.</figcaption>
+</figure>
+
+<!-- ============ 4. DOWNLOADING 70% ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chip">Slot <b>3</b> · override ▾</span>
+      <div class="vright"><span class="badge muted stale"><span class="dot"></span>Brain</span><span class="badge ok stale"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step" disabled>Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step" disabled>Build</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step" disabled>Downloading…</button><span class="mk busy"><span class="spin"></span></span></span><span class="sep">›</span>
+      <button class="step pending" disabled>Run slot 3</button>
+      <button class="stop pending" disabled>■ Stop</button>
+      <button class="more grow" disabled>⋯</button>
+    </div>
+    <div class="status chain" role="status"><span class="spin"></span><span>Downloading override to slot 3…</span>
+      <span class="prog" role="progressbar" aria-valuenow="70"><span class="track"><span class="fill" style="width:70%"></span></span><span class="pct">70%</span></span>
+      <span class="el">9s</span></div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab">Build <span class="g ok">✓</span></span>
+        <span class="otab on">Download <span class="spin"></span></span>
+        <span class="otab">Brain <span class="tag busy">paused</span></span>
+        <span class="otab">Device <span class="g ok stale">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="obar">vexcom · download to slot 3 as "override"<span class="r"><button class="quiet">Show terminal</button></span></div>
+      <div class="obody">Device: COM3
+vexcom utility V1.0.2b2
+download :
+0....10....20....30....40....50....60....70</div>
+    </div>
+  </div>
+</div>
+<figcaption><b>4 · Downloading, 70%.</b> The download chain lives in the status line, which every VEX view shows. Its
+Cancel is gone because the download has been sent (<code>chainCancellable</code>). Progress comes from vexcom's own
+dot line. The brain output is paused while the download holds the port. The USB readings are dimmed while polling
+pauses for the chain. Every control is off until the chain ends.</figcaption>
+</figure>
+
+<!-- ============ 5. DOWNLOADED ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chip">Slot <b>3</b> · override ▾</span>
+      <div class="vright"><span class="badge muted"><span class="dot"></span>Brain</span><span class="badge ok"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step">Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Build</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Download to slot 3</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="tipwrap"><button class="step pending" style="background:var(--bg-3)">Run slot 3</button>
+        <div class="tip" style="left:0; top:calc(100% + 9px); width:220px"><b>Run</b> starts the program in slot 3 on
+          the brain. <b>The robot may move.</b><small>Asks once more before it runs. Mouse click only. Shown on the
+          first three hovers.</small></div></span>
+      <button class="stop pending">■ Stop</button>
+      <button class="more grow">⋯</button>
+    </div>
+    <div class="status" role="status"><span class="ok">✓ In slot 3 as "override"</span><span class="el">14:03 · 21s</span>
+      </div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab">Build <span class="g ok">✓</span></span>
+        <span class="otab on">Download <span class="g ok">✓</span></span>
+        <span class="otab">Brain <span class="tag busy">● live</span></span>
+        <span class="otab">Device <span class="g ok">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="obar"><span class="prog" style="max-width:200px"><span class="track"><span class="fill ok" style="width:100%"></span></span><span class="pct">100%</span></span>
+        exit 0<span class="r"><button class="quiet">Show terminal</button></span></div>
+      <div class="obody">Device: COM3
+vexcom utility V1.0.2b2
+download :
+0....10....20....30....40....50....60....70....80....90....100
+Finished</div>
+    </div>
+  </div>
+</div>
+<figcaption><b>5 · Downloaded.</b> All three steps show ✓. The status line keeps the result and its time. The brain
+output reconnected after the chain, as today. Run is enabled but never starts on its own: there is still no run after
+download (V-3). The pointer is over Run, showing its first-use tooltip.</figcaption>
+</figure>
+
+<!-- ============ 6. BRAIN OUTPUT STREAMING ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chip">Slot <b>3</b> · override ▾</span>
+      <div class="vright"><span class="badge muted"><span class="dot"></span>Brain</span><span class="badge ok"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step">Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step" title="Built 14:02 · edited since">Build</button><span class="mk ok stale">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Download to slot 3</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step pending">Run slot 3</button><span class="mk ok">✓</span></span>
+      <button class="stop pending">■ Stop</button>
+      <button class="more grow">⋯</button>
+    </div>
+    <div class="status" role="status"><span class="ok">✓ Started slot 3</span><span class="el">14:05</span>
+      <span class="right note">Build: <span class="ok stale">✓</span> edited since 14:04</span></div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab">Build <span class="g ok stale">✓</span></span>
+        <span class="otab">Download <span class="g ok">✓</span></span>
+        <span class="otab on">Brain <span class="tag busy">● live</span></span>
+        <span class="otab">Device <span class="g ok">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="obar">vex brain · user port <span><span class="check"></span> Jarvis can read</span>
+        <span class="r"><button class="quiet">Clear</button><button class="quiet">Disconnect</button></span></div>
+      <div class="obody" style="color:var(--text)">[odom] calibrating inertial… done (2.04 s)
+[auton] AwpRight start
+pose x=  0.00 y=  0.00 h=  0.0
+pose x=  0.41 y= 11.87 h=  0.6
+pose x=  0.93 y= 23.62 h=  1.1
+[drive_for] 24.0 in · err 0.31 in · 1.42 s
+$BEGIN,odom,awp-right
+t_ms,x,y,h
+0,0.00,0.00,0.0
+20,0.02,0.48,0.0
+40,0.05,1.21,0.1
+$END
+[hook] toggle red · budget 600 ms
+pose x= 12.08 y= 30.44 h= 89.7
+<span class="cursor"></span></div>
+    </div>
+  </div>
+</div>
+<figcaption><b>6 · Brain output streaming.</b> The Brain tab hosts the existing brain program terminal: the same session,
+the same "Jarvis can read" switch and Ctrl-C rule. It is xterm, so output is drawn as characters, and typing goes to
+the program. The panel's tab says it is shown in the VEX pane. Build is <span class="ok stale">✓</span> dimmed and says
+"edited since", which is advisory only. Untested on hardware: output through the controller over radio (H1), the line
+rate (H2) and starting under interop (H4).</figcaption>
+</figure>
+
+<!-- ============ 7. CONTROLLER DISCONNECTED ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chip">Slot <b>3</b> · override ▾</span>
+      <div class="vright"><span class="badge bad" aria-label="Brain: Disconnected"><span class="dot"></span>Brain</span><span class="badge bad" aria-label="Controller: Disconnected"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step">Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Build</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Download to slot 3</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <button class="step pending">Run slot 3</button>
+      <button class="stop pending">■ Stop</button>
+      <button class="more grow">⋯</button>
+    </div>
+    <div class="status" role="status"><span class="ok">✓ In slot 3 as "override"</span><span class="el">14:03</span>
+      <span class="right hint"><span class="bad">●</span> No brain or controller on USB · checked 14:07</span></div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab">Build <span class="g ok">✓</span></span>
+        <span class="otab">Download <span class="g ok">✓</span></span>
+        <span class="otab">Brain <span class="tag bad">✗ ended</span></span>
+        <span class="otab on">Device <span class="g bad">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="dev">
+        <div class="row"><span>Tooling: Configured</span><span class="muted">vexcom 1.0.2b2</span></div>
+        <div class="row"><span class="bad">Brain: Disconnected</span><span class="bad">Controller: Disconnected</span>
+          <button class="quiet">Refresh USB status</button></div>
+        <div class="note">USB check complete. Last confirmed: 14:07:12. USB presence only; radio link and extension health are not measured.</div>
+        <div class="row"><button>Read device info</button><button>List programs</button></div>
+        <h5>Connection log</h5>
+        <ul>
+          <li><time>14:07:12</time><span class="bad">Controller disconnected</span></li>
+          <li><time>14:03:40</time><span class="ok">Controller connected</span></li>
+          <li><time>13:58:02</time><span class="bad">Controller disconnected</span></li>
+          <li><time>13:41:19</time><span class="ok">Controller connected</span></li>
+          <li><time>13:41:19</time><span class="bad">Brain disconnected</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+<figcaption><b>7 · Controller disconnected.</b> Both badges are red, and the status line adds a hint in words. Nothing
+is turned off, because USB presence never decides whether a download may go: vexcom's own answer does. The Device tab
+shows the log without a <code>&lt;details&gt;</code> click, and the device reads live here. The brain output ended
+when the port went away. Background events never switch tabs: here the owner clicked the badges.</figcaption>
+</figure>
+
+<!-- ============ 8. RUN ARMED ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chip">Slot <b>3</b> · override ▾</span>
+      <div class="vright"><span class="badge muted"><span class="dot"></span>Brain</span><span class="badge ok"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step">Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Build</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Download to slot 3</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <button class="step pending" style="border-color:var(--accent-line)">Run slot 3</button>
+      <button class="stop pending">■ Stop</button>
+      <button class="more grow">⋯</button>
+    </div>
+    <div class="status chain" role="status"><span>Run slot 3 on the brain? <b>The robot may move.</b></span>
+      <span class="right"><button class="pending" style="border-color:var(--accent-line)">Run now</button><button class="quiet">Cancel</button><span class="el">4s</span></span></div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab">Build <span class="g ok">✓</span></span>
+        <span class="otab on">Download <span class="g ok">✓</span></span>
+        <span class="otab">Brain <span class="tag busy">● live</span></span>
+        <span class="otab">Device <span class="g ok">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="obody">Device: COM3
+vexcom utility V1.0.2b2
+download :
+0....10....20....30....40....50....60....70....80....90....100
+Finished</div>
+    </div>
+  </div>
+</div>
+<figcaption><b>8 · Run armed (VX-UI-5).</b> Run's first explicit click arms an inline confirmation in the status
+line. Run now also takes a mouse click only. It disarms after 5 seconds and is dropped by an approval card. Run is never
+chained to Download. Whether this confirmation stays is open question Q1.</figcaption>
+</figure>
+
+<!-- ============ 9. SLOT CHIP OPEN ============ -->
+<figure>
+<div class="pane">
+  <div class="tabs"><div class="viewstrip"><span>Chat</span><span>Files</span><span>Browser</span><span>Terminal</span><span class="on">VEX</span></div>
+    <div class="paneextras"><span class="picker">override-jarvis ▾</span></div></div>
+  <div class="vexview">
+    <div class="vhead">
+      <span class="vname">override-jarvis</span><span class="vfacts" title="SDK V5_20240802">C++</span><span class="chipwrap"><span class="chip" style="border-color:var(--accent-line)">Slot <b>3</b> · override ▴</span>
+        <div class="pop" role="group" aria-label="Slot and name">
+          <label>Slot <span class="field focus" style="flex:0 0 64px">3 ▾</span></label>
+          <label>Name <span class="field">override</span></label>
+          <div class="warn">Download to slot 3 replaces whatever is in slot 3 on the brain.</div>
+          <div class="note">Escape closes. Off under an approval card.</div>
+        </div></span>
+      <div class="vright"><span class="badge muted"><span class="dot"></span>Brain</span><span class="badge ok"><span class="dot"></span>Controller</span><button class="help">?</button></div>
+    </div>
+    <div class="actbar">
+      <span class="stepw"><button class="step">Clean</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Build</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <span class="stepw"><button class="step">Download to slot 3</button><span class="mk ok">✓</span></span><span class="sep">›</span>
+      <button class="step pending">Run slot 3</button>
+      <button class="stop pending">■ Stop</button>
+      <button class="more grow">⋯</button>
+    </div>
+    <div class="status" role="status"><span class="ok">✓ In slot 3 as "override"</span><span class="el">14:03</span></div>
+    <div class="out">
+      <div class="otabs">
+        <span class="otab">Build <span class="g ok">✓</span></span>
+        <span class="otab on">Download <span class="g ok">✓</span></span>
+        <span class="otab">Brain <span class="tag busy">● live</span></span>
+        <span class="otab">Device <span class="g ok">●</span></span>
+        <span class="otools"><button class="quiet">⤢</button><button class="quiet">▾</button></span>
+      </div>
+      <div class="obody">Device: COM3
+vexcom utility V1.0.2b2
+download :
+0....10....20....30....40....50....60....70....80....90....100
+Finished</div>
+    </div>
+  </div>
+</div>
+<figcaption><b>9 · Slot chip open.</b> The header chip opens a small popover holding today's slot select and name
+box, plus the sentence "replaces whatever is in slot 3". Focus goes to the slot select and Escape returns it to the chip.
+A name the daemon would refuse turns the chip red even while the popover is closed. An approval card closes the
+popover and turns it off.</figcaption>
+</figure>
+
+</div>
+</body>
+</html>
