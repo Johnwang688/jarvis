@@ -29,7 +29,7 @@ import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # The daemon's own headers (WP-E, ED-4), never a copy: the HUD under test is
 # always rendered under exactly what 8402 sends — the whole Content-Security-
@@ -37,7 +37,7 @@ from urllib.parse import parse_qs, urlparse
 # headless suite runs under the CSP; the mock workshop runs under the
 # workshop's sandbox.
 from tests.face import hud_v2_mock_browser as mock_browser
-from jarvis.v2.hud_api import AVATAR_CSP, frame_headers  # noqa: E402
+from jarvis.v2.hud_api import AVATAR_CSP, frame_headers, wasm_script, worker_fetch  # noqa: E402
 
 _HUD_LISTENER = SimpleNamespace(server=SimpleNamespace())
 _PREVIEW_LISTENER = SimpleNamespace(server=SimpleNamespace(preview_only=True))
@@ -715,6 +715,10 @@ class MockDaemon:
 
     def start(self):
         mock = self
+        # Every HUD script fetch, as the server saw it: (path, Sec-Fetch-Dest,
+        # granted 'wasm-unsafe-eval'). Playwright does not report a worker's
+        # request headers, so the CSP suite reads the server's side here.
+        self.script_fetches: list[tuple[str, str | None, bool]] = []
 
         class Handler(SimpleHTTPRequestHandler):
             def __init__(self, *a, **kw):
@@ -726,8 +730,18 @@ class MockDaemon:
             _csp = None             # a response's own directives (the avatar's)
 
             def end_headers(self):
-                for name, value in frame_headers(_HUD_LISTENER, self._csp):
+                # A worker's fetch of a HUD script carries `'wasm-unsafe-eval'`,
+                # as the daemon's `hud_files` sends it (`wasm_script` and
+                # `worker_fetch`, owner 2026-10-15); the page, a popup of the
+                # same script and everything else never do.
+                script = self.command == "GET" and wasm_script(unquote(urlparse(self.path).path).lstrip("/"))
+                wasm = script and worker_fetch(self.headers)
+                if script:
+                    mock.script_fetches.append((urlparse(self.path).path, self.headers.get("Sec-Fetch-Dest"), bool(wasm)))
+                for name, value in frame_headers(_HUD_LISTENER, self._csp, wasm=wasm):
                     self.send_header(name, value)
+                if script:
+                    self.send_header("Vary", "Sec-Fetch-Dest")
                 self._csp = None
                 super().end_headers()
 

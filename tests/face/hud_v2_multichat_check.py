@@ -2331,7 +2331,7 @@ def main():
     from tests.face.hud_v2_mock import DIST, MockDaemon
 
     if not (DIST / "index.html").exists():
-        print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
         return 2
     mock = MockDaemon(0).start()
     try:

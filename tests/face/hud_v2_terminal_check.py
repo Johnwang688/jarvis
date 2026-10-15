@@ -75,7 +75,7 @@ The checks worth keeping, each written to bite:
     holds every terminal: nothing reaches a shell, not even xterm's answers
     to a program's queries.
 
-Run (after `cd hud && npm ci && npm run build`):
+Run (after `cd hud && npm ci --ignore-scripts && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_terminal_check.py
 """
 from __future__ import annotations
@@ -2784,7 +2784,7 @@ def main():
     from tests.face import hud_v2_check as v2
     from tests.face.hud_v2_mock import DIST, MockDaemon
     if not (DIST / "index.html").exists():
-        print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
         return 2
     mock = MockDaemon(0).start()
     try:

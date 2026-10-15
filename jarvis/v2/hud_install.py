@@ -551,7 +551,7 @@ def npm_build(timeout: float = NPM_BUILD_TIMEOUT) -> None:
     """`npm run build` in the repo's `hud/` (type check, then Vite)."""
     hud = Path(config.REPO_ROOT) / "hud"
     if not (hud / "node_modules").is_dir():
-        raise InstallRefused(f"{hud}/node_modules is missing; run `npm ci` in {hud} first "
+        raise InstallRefused(f"{hud}/node_modules is missing; run `npm ci --ignore-scripts` in {hud} first "
                              "(or `jarvis hud rebuild`, which does)")
     npm = npm_path()
     try:

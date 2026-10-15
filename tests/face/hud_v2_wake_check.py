@@ -241,9 +241,22 @@ def main(argv=None):
                 models = {u: (ct, s, p) for u, ct, s, p in list(served) if u.endswith(".onnx") and "silero" not in u}
                 check("the keyword model files are served by the HUD's own origin under /assets",
                       len(models) >= 3 and all(u.startswith(base + "/assets/") for u in models), str(list(models)))
-                policies = {p for u, ct, s, p in list(served) if p}
-                check("every wake asset carries the HUD's CSP: worker-src 'self', wasm-unsafe-eval, never unsafe-eval",
-                      bool(policies) and all("worker-src 'self'" in p and "'wasm-unsafe-eval'" in p and " 'unsafe-eval'" not in p for p in policies), str(policies))
+                # Grant rule (owner, 2026-10-15; review of the same day): 'wasm-unsafe-eval'
+                # only on a worker's own fetch of a HUD script (Sec-Fetch-Dest: worker), the
+                # policy that worker runs under; the page's import of the `?worker` wrapper,
+                # the model and the .wasm carry the page's. Playwright hides a worker
+                # request's headers, so the server's record (`mock.script_fetches`) says
+                # which fetches were a worker's.
+                from jarvis.v2 import hud_api as H
+                page_csp, grant = H.content_security_policy(), H.content_security_policy(wasm=True)
+                path = lambda u: u.split("?")[0][len(base):].lstrip("/")
+                bad = [(u, p) for u, *_, p in list(served) if p not in (page_csp, grant) or (p == grant and not H.wasm_script(path(u)))]
+                bad += [f for f in list(mock.script_fetches) if f[2] != (f[1] == "worker")]
+                granted = [u for u, *_, p in list(served) if p == grant]
+                check("every wake asset carries the policy the daemon gives it: worker-src 'self', wasm-unsafe-eval "
+                      "on a worker's fetch of its script only, never unsafe-eval",
+                      bool(granted) and not bad and all("worker-src 'self'" in p and " 'unsafe-eval'" not in p for *_, p in list(served)),
+                      f"granted={granted} bad={bad[:2]}")
                 sha = lambda u: page.evaluate("""async (u) => { const b = new Uint8Array(await (await fetch(u)).arrayBuffer());
                   const d = await crypto.subtle.digest('SHA-256', b); return Array.from(new Uint8Array(d), x => x.toString(16).padStart(2, '0')).join(''); }""", u)
                 tokens_urls = {u for u, *_ in list(served) if u.endswith(".txt")}     # (a snapshot: fetching them adds to `served`)

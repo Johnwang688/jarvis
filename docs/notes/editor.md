@@ -999,3 +999,98 @@ strip's double-click pin), so a saved pane spec can still carry an italic
 preview tab, which the tab's double click or an edit pins. Pinned-tab opening
 in a narrow pane (the tree folding at once), middle-click or × closing and the
 Save / Don't save / Cancel prompt on the last unsaved tab are unchanged.
+
+## WebAssembly leaves the approval page (2026-10-15)
+
+**The owner's decision of 2026-10-15 overrides plan §2.7's one policy
+everywhere, for WebAssembly only.** ED-5 (above, archived) put
+`'wasm-unsafe-eval'` in `hud_api.HUD_POLICY`, so every response — the HUD
+page that draws approval cards included — allowed WebAssembly. The PR #54
+review had noted the page itself never needs it. Now:
+
+- **Where WebAssembly runs.** Only in three dedicated module workers, each
+  its own `/assets/worker-<hash>.js`: the syntax worker (`lib/syntax/worker.ts`:
+  web-tree-sitter's runtime and the 13 grammars), the VAD worker
+  (`lib/listen/worker.ts`: onnxruntime-web for Silero, and RNNoise) and the
+  wake-word worker (`lib/wake/worker.ts`: onnxruntime-web). The main
+  document compiles none: its chunks mention `WebAssembly` only in error
+  strings, and the mic's AudioWorklet (which would inherit the page's
+  policy) runs no WebAssembly.
+- **The split.** `HUD_POLICY`'s `script-src` is `'self'`. The one widening,
+  `WASM_SCRIPT_SRC` (`'self' 'wasm-unsafe-eval'`), goes only on a **worker's
+  fetch of a HUD script**: the file by `hud_api.wasm_script(name)` (a `.js`
+  directly under `assets/`) **and** the request by `hud_api.worker_fetch`
+  (exactly one `Sec-Fetch-Dest`, exactly `worker`), through
+  `binary(wasm=True)` from `hud_files`, `frame_headers(wasm=)` and
+  `content_security_policy(wasm=)`. A dedicated worker runs under its own
+  script response's policy (CSP3; Chromium does), so the grant reaches the
+  workers. Every such script response sends `Vary: Sec-Fetch-Dest` (and is
+  `no-store` anyway). `/`, `index.html`, the 503 pages, JSON, SSE, errors,
+  `.wasm`, the manifest and icons carry the page's policy. A response's own
+  directives still only narrow and cannot grant themselves WebAssembly; the
+  preview listener never takes the grant. The daemon's handler resets
+  `_wasm` with `_csp` on every `send_response`; the headless mock decides by
+  the same two functions and records each script fetch
+  (`mock.script_fetches`: Playwright does not report a worker request's
+  headers).
+- **Why the path alone was wrong (PR review, 2026-10-15).** The first cut
+  granted every `/assets/*.js` by path, reasoning that a `.js` opened as a
+  document runs nothing (`nosniff`). It runs no script of its own, but
+  `p = window.open('/assets/<worker>.js')` is a same-origin Window whose
+  realm carries that response's policy, and the opener drives it:
+  `p.WebAssembly.compile(bytes)` and `new p.WebAssembly.Instance(m)`
+  succeeded while the page's own compile was refused (Chromium 149). Frames
+  were already blocked (`frame-ancestors`, `X-Frame-Options`). The popup's
+  fetch is `Sec-Fetch-Dest: document`, the page's module imports are
+  `script`, the mic's worklet `audioworklet`, shared and service workers
+  `sharedworker`/`serviceworker`: none is granted, nor a request without
+  the header. A `sandbox` directive on the script was rejected: it breaks
+  module workers' same-origin fetches and imports.
+- **Browsers.** Fetch Metadata (`Sec-Fetch-Dest`) is standard in Chrome
+  since 80 and is sent to `localhost`/`127.0.0.1`; the headless suites show
+  Chromium sending `worker` for the HUD's module workers. Windows Chrome in
+  the HUD's app mode could not be tested from here. A browser that omitted
+  the header fails closed and visibly — tree-sitter colour falls back to
+  Monarch, the VAD to energy, the wake word stops — never open.
+- **No restructure was needed:** the code already kept WebAssembly off the
+  window's thread for V5/V14's own reasons.
+
+Checks, each shown to bite: `tests/v2/frame_check.py` (20 tests; new: the
+approval page installed and under `HUD_DEV` on both listeners — `/`,
+`/index.html`, `/assets/index.html`, a `.wasm`, the manifest and `/status`
+never granted; `/assets/*.js` granted only with `Sec-Fetch-Dest: worker`, not
+with `document`, `script`, `sharedworker`, `serviceworker`, `Worker`, a list,
+`iframe`, empty or no header, each with `Vary: Sec-Fetch-Dest` — and
+`wasm_script`'s and `worker_fetch`'s cases). The mutations, measured before
+the header rule: putting `'wasm-unsafe-eval'` back in `HUD_POLICY` failed
+336 subtests across 11 tests; granting every HUD file, the page included,
+26. With the header rule, a path-only grant (`worker_fetch` always true)
+fails 119 subtests. `hud_v2_csp_check` (51 checks): the page's own
+`WebAssembly.compile` rejects (`CompileError`, a `script-src` violation);
+**a popup of a worker's own script** (`window.open`, then
+`p.WebAssembly.compile`) rejects too, its response carrying the page's
+policy and `Vary`; the syntax worker still compiles Python's grammar; every
+worker's script was fetched as `worker` and granted, nothing else was. The
+path-only mutation fails 4 of them, the popup's `compiled` among them.
+`hud_v2_syntax_check` (51): the worker script's response carried the grant
+and `/` did not. With the grant never given (`worker_fetch` always false),
+20 of 51 fail and all 13 grammars with them, which proves the workers
+compile under their own script's policy, granted by the header, and not
+the page's. The VAD (96), wake-word (88) and denoise (72) suites check
+every response's policy against the daemon's rule, by the server's record
+of each script fetch. Old page-policy pins in
+`hud_v2_browser_check` (168) and the voice suites were updated with it.
+Run `hud_v2_csp_check` with the usual HOME: under a temporary HOME its three
+manifest checks (`Page.getAppManifest`) fail, on `origin/main` too.
+
+**An invariant this rests on (delta review, 2026-10-15).** CSP checks
+compiling WebAssembly from bytes, not instantiating a `WebAssembly.Module`
+that already exists: a Module compiled in a granted worker and
+`postMessage`d to the page instantiates there despite the page's
+`script-src 'self'` (measured, Chromium 149). So **a HUD worker never posts
+a `WebAssembly.Module`, and never compiles bytes it received in a
+message.** Today none does: the syntax, VAD and wake-word workers post plain
+objects, the syntax worker loads only the grammars in its built-in map, and
+the ONNX and RNNoise files are fixed imports checked against pinned hashes.
+A change that breaks either half hands the approval page WebAssembly without
+it compiling anything.

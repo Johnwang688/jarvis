@@ -28,7 +28,7 @@ What it pins:
     sends anything, and Escape is the card's (it denies; the dialog stays);
   - with no `vex.json` the dialog names `jarvis vex setup` and creates nothing.
 
-Run (after `cd hud && npm ci && npm run build`):
+Run (after `cd hud && npm ci --ignore-scripts && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_vex_new_check.py
 """
 from __future__ import annotations
@@ -420,7 +420,7 @@ def main():
     from tests.face import hud_v2_check as v2
     from tests.face.hud_v2_mock import DIST, MockDaemon
     if not (DIST / "index.html").exists():
-        print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
         return 2
     mock = MockDaemon(0).start()
     try:

@@ -20,14 +20,17 @@ every response. Two halves, and the second is the one that matters:
    `javascript:` URL, `eval`/`new Function`/a string `setTimeout`, a `blob:`
    worker, a `fetch` or an image from another origin, `<object>`, `<base>`,
    a form posted elsewhere, and a frame that is not loopback. WebAssembly
-   *does* compile since ED-5 (`'wasm-unsafe-eval'`, tree-sitter's grammars)
-   while `eval` and `new Function` stay refused — the one thing the policy
-   gained is shown not to bring JavaScript-from-strings with it. Each is shown not to have run *and* to have
+   does **not** compile in the page (the owner's decision of 2026-10-15: no
+   `'wasm-unsafe-eval'` on the document that draws approval cards); it
+   compiles only in a worker, whose own script's response alone carries
+   `'wasm-unsafe-eval'` (ED-5's tree-sitter grammars, shown here by the
+   syntax worker compiling Python's), and `eval` and `new Function` stay
+   refused there too. Each is shown not to have run *and* to have
    raised a violation naming the directive that stopped it — which is also
    the proof that the watch in (1) bites. The "evil" origin is a server of
    this suite's own on another ephemeral port; it must see no request.
 
-Run alone (after `cd hud && npm ci && npm run build`):
+Run alone (after `cd hud && npm ci --ignore-scripts && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_csp_check.py
 It also runs inside `hud_v2_check.py`, after the browser section.
 """
@@ -137,19 +140,47 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
                   for r in manifest_responses))
 
         # -- 1. the policy is on everything the window loaded --------------------
+        # The one policy everywhere, except a worker's fetch of the HUD's own
+        # JavaScript under /assets/, which adds 'wasm-unsafe-eval' for the
+        # workers that compile WebAssembly (owner, 2026-10-15;
+        # `hud_api.wasm_script` and `worker_fetch`, by the request's own
+        # Sec-Fetch-Dest — the page's module imports are `script`).
+        grant = H.content_security_policy(wasm=True)
+
+        def judged(rs):
+            """Each response's policy: the page's, or — only a HUD script, never
+            a navigation — the worker grant. Which fetches were a worker's is the
+            server's record (`mock.script_fetches`: Playwright does not report
+            a worker request's headers), held to `worker_fetch`'s rule."""
+            bad, scripts, granted = [], 0, []
+            for r in rs:
+                csp = [h["value"] for h in r.headers_array() if h["name"].lower() == "content-security-policy"]
+                path = r.url.split("?")[0][len(base):].lstrip("/")
+                scripts += H.wasm_script(path)
+                if csp == [grant] and H.wasm_script(path) and not r.request.is_navigation_request():
+                    granted.append(r.url)
+                elif csp != [want]:
+                    bad.append(f"{r.url}: {csp}")
+            for path, dest, wasm in list(mock.script_fetches):
+                if wasm != (dest == "worker"):
+                    bad.append(f"server: {path} Sec-Fetch-Dest={dest} granted={wasm}")
+            return bad, scripts, granted
+
         own = [r for r in responses if not r.url.split("?")[0].endswith("/avatar.svg")]
         policies = {r.url: r.headers_array() for r in own}
-        bad = []
-        for url, headers in policies.items():
-            csp = [h["value"] for h in headers if h["name"].lower() == "content-security-policy"]
-            if csp != [want]:
-                bad.append(f"{url}: {csp}")
-        check("the page and every asset it loaded carry the one full policy",
-              own and not bad, "; ".join(bad[:3]) or "no responses seen")
-        check("the policy forbids inline and remote script, eval and plugins (WebAssembly only, ED-5)",
-              "script-src 'self' 'wasm-unsafe-eval';" in want
+        bad, scripts, _ = judged(own)
+        check("the page and every asset it loaded carry the one full policy (a worker's script: plus WebAssembly)",
+              own and scripts and not bad, "; ".join(bad[:3]) or f"{len(own)} responses, {scripts} scripts")
+        page_csp = [h["value"] for h in policies.get(base + "/", []) if h["name"].lower() == "content-security-policy"]
+        check("the page that draws approval cards never allows WebAssembly",
+              page_csp == [want] and "wasm-unsafe-eval" not in want, str(page_csp))
+        check("the policy forbids inline and remote script, eval, WebAssembly and plugins",
+              "script-src 'self';" in want
               and "'unsafe-inline'" not in want.split("script-src")[1].split(";")[0]
               and " 'unsafe-eval'" not in want and "object-src 'none'" in want and "default-src 'none'" in want)
+        check("a worker script's policy adds 'wasm-unsafe-eval' to script-src and nothing else",
+              grant == want.replace("script-src 'self';", "script-src 'self' 'wasm-unsafe-eval';")
+              and " 'unsafe-eval'" not in grant, grant)
         check("no <meta> policy: the header is the only one",
               page.evaluate("document.querySelectorAll('meta[http-equiv]').length") == 0)
 
@@ -234,6 +265,24 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
         check("Monaco never fell back to running its worker on the main thread",
               not [c for c in console if "Could not create web worker" in c],
               "; ".join(c for c in console if "worker" in c.lower())[:300])
+        # The syntax worker compiled calc.py's grammar: WebAssembly runs in the
+        # worker, under its own script's policy, while the page refuses it (2.).
+        loaded: list = []
+
+        def python_loaded():
+            loaded[:] = page.evaluate("() => window.__hudSyntax ? window.__hudSyntax.loaded() : []")
+            return "python" in loaded
+        until(python_loaded, timeout=15)
+        check("the syntax worker compiles WebAssembly (Python's grammar) under its own script's policy",
+              "python" in loaded, str(loaded))
+        own = [r for r in responses if not r.url.split("?")[0].endswith("/avatar.svg")]
+        bad, _, granted = judged(own)
+        syntax = [w.url for w in workers if "/assets/worker-" in w.url]
+        fetched = {(p, d) for p, d, w in mock.script_fetches if w}
+        check("every worker's script was fetched as Sec-Fetch-Dest: worker and granted, and nothing else was",
+              bool(syntax) and set(syntax) <= set(granted) and not bad
+              and all((u[len(base):], "worker") in fetched for u in syntax),
+              f"workers={syntax} granted={granted} bad={bad[:2]}")
 
         # -- a loopback Preview frame (frame-src) ------------------------------------
         loaded = page.evaluate("""port => new Promise(done => {
@@ -303,14 +352,43 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
                          " setTimeout(() => done('silent'), 2000) } catch (e) { done(e.name) } })",
                          "", "worker-src")
         check("a blob: worker never runs", thrown in ("error", "SecurityError"), repr(thrown))
-        # WebAssembly compiles since ED-5 ('wasm-unsafe-eval'): from a timer,
-        # like eval above, so it is the page's own code that compiles it.
-        before = len(violations)
-        wasm = page.evaluate(f"""() => new Promise(done => setTimeout(() =>
+        # WebAssembly does not compile in the page (owner, 2026-10-15): from a
+        # timer, like eval above, so it is the page's own code that tries.
+        wasm = blocked("WebAssembly compiled by the page",
+                       f"""() => new Promise(done => setTimeout(() =>
             WebAssembly.compile(new Uint8Array({WASM})).then(m => WebAssembly.instantiate(m))
-              .then(() => done('compiled'), e => done(e.name)), 0))""")
-        check("WebAssembly compiles and instantiates under 'wasm-unsafe-eval' (ED-5), with no violation",
-              wasm == "compiled" and len(violations) == before, f"{wasm}; {violations[before:][:2]}")
+              .then(() => done('compiled'), e => done(e.name)), 0))""", "", "script-src")
+        check("WebAssembly.compile rejects in the page (CompileError)", wasm == "CompileError", repr(wasm))
+        # Nor through a popup of a worker's own script (review of 2026-10-15):
+        # the popup runs none of its own script, but it is a same-origin
+        # Window whose realm carries its response's policy, and the opener
+        # drives it. Its fetch is `Sec-Fetch-Dest: document`, so it gets the
+        # page's policy; with the grant by path alone this compiled.
+        target = next((w.url for w in workers if "/assets/worker-" in w.url), "")
+        before = len(violations)
+        popup = page.evaluate(f"""u => new Promise(done => {{
+            const p = window.open(u);
+            if (!p) return done('no popup');
+            window.__cspPopup = p;
+            const t0 = Date.now(), path = new URL(u, location.href).pathname;
+            const t = setInterval(() => {{ try {{
+                if (p.location.pathname !== path || p.document.readyState !== 'complete') {{
+                    if (Date.now() - t0 > 5000) {{ clearInterval(t); done('timeout') }} return; }}
+                clearInterval(t);
+                p.WebAssembly.compile(new Uint8Array({WASM}))
+                  .then(m => {{ try {{ new p.WebAssembly.Instance(m); done('compiled') }} catch (e) {{ done('instance ' + e.name) }} }},
+                        e => done(e.name));
+            }} catch (e) {{ clearInterval(t); done('err ' + e.name) }} }}, 50);
+        }})""", target)
+        page.wait_for_timeout(250)
+        check("a popup of a worker's own script cannot compile WebAssembly for the page (CompileError)",
+              bool(target) and popup == "CompileError", f"{target}: {popup!r}")
+        opened = [r for r in responses if r.url == target and r.request.is_navigation_request()]
+        check("the popup's own response is the page's policy, varying on Sec-Fetch-Dest",
+              bool(opened) and all([h["value"] for h in r.headers_array() if h["name"].lower() == "content-security-policy"] == [want]
+                                   and r.headers.get("vary") == "Sec-Fetch-Dest" for r in opened)
+              and (target[len(base):], "document", False) in mock.script_fetches, str(len(opened)))
+        page.evaluate("() => window.__cspPopup && window.__cspPopup.close()")
         fetched = blocked("a fetch to another origin",
                           "u => fetch(u).then(() => 'fetched', e => e.name)", "", "connect-src",
                           f"http://127.0.0.1:{evil.port}/exfiltrate")
@@ -349,7 +427,7 @@ def main():
     from tests.face import hud_v2_check as v2
     from tests.face.hud_v2_mock import DIST, MockDaemon
     if not (DIST / "index.html").exists():
-        print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
         return 2
     mock = MockDaemon(0).start()
     try:
