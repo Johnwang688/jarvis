@@ -1022,6 +1022,20 @@ export function parseRead(data: unknown): ReadNote | null {
            refused: d.refused };
 }
 
+/**
+ * `terminal_readable` on the bus: the owner's "Jarvis can read" switch changed
+ * (here or in another window). Exactly `{terminal_id, readable, at}` — an id and
+ * a boolean; a record of any other shape is dropped whole. It only lets this
+ * window's switch catch up: the daemon's flag is the truth and is never read
+ * from here.
+ */
+export function parseReadable(data: unknown): { terminalId: string; readable: boolean } | null {
+  const d = (data ?? {}) as Record<string, unknown>;
+  if (!isTerminalId(d.terminal_id)) return null;
+  if (typeof d.readable !== "boolean") return null;
+  return { terminalId: d.terminal_id, readable: d.readable };
+}
+
 /** The terminal bar's note: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42". */
 export function readNoteText(note: ReadNote, time: string): string {
   if (note.refused) return `refused a read · ${time}`;

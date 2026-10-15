@@ -1598,3 +1598,74 @@ test's own renderers (its temp profile's Chrome tree only) for 0.5 s across the
 cancel, which makes the late commit happen every time, and checks the window's
 `auth_closed` (`changed`) and that no credential request reached the server:
 the old order failed 3 of 3, the new one passes.
+
+## Sharp frames and a pointer that keeps up (2026-10-14)
+
+The owner reported soft Remote pages ("like 720p") and lag in pointer moves
+and clicks. Both measured on Chrome 155 headless, raw CDP, before any change:
+
+- **The screencast ignores the emulated scale.** `setDeviceMetricsOverride`
+  at 1.5 or 2 changes the page's devicePixelRatio, but every screencast
+  frame of a 960 × 600 view was 960 × 600: Chrome draws frames at its own
+  device scale. The owner's display is 4K at 150% (AppliedDPI 144), so the
+  HUD stretched 1× frames by 1.5. Chrome now launches with
+  `--force-device-scale-factor=RASTER_SCALE` (1.5, the owner's display), and
+  `_sync_screencast`'s maxWidth/maxHeight (the pane's device pixels,
+  unchanged) scales each frame to the pane: a 1.5× pane gets 1.5× pixels,
+  drawn natively. 2 was tried first and dropped: it pushed
+  `hud_browser_view_check`'s 1.5 GiB Chrome bound to 1.62 GB, rastered 78%
+  more pixels than the owner's panes use, and its wheel `deltaY` (below) was
+  off at 150%. A pane at more than 1.5 (another display, HUD zoom) is
+  upscaled from 1.5, which is still sharper than before.
+- **What else follows Chrome's own scale** (measured): `fromSurface`
+  screenshots (looks, captures) come at RASTER_SCALE, then the edge cap;
+  `masked_image` scales each mask by the image's own size, so masks still
+  cover their fields; the two mask tests place their probe pixels by that
+  scale, one of them near each field's far corner, where an unscaled mask
+  would not reach. Layout and input coordinates do not change: a click at CSS
+  (600, 400) lands at clientX/Y (600, 400) under every scale. A page no
+  window shows keeps devicePixelRatio 1: Playwright emulates its context's
+  `viewport` at `deviceScaleFactor || 1`. Chrome divides the emulated scale by its own in
+  float32, so a page's devicePixelRatio can read 1.0000000298 for 1 or
+  0.62499998 for 0.625 (`browser_fit_check` compares it to 1e-6); a page
+  choosing `srcset` candidates may then take the next one up. A wheel scrolls by the delta sent under every scale,
+  but the WheelEvent's `deltaY` reads delta × Chrome's scale ÷ the page's
+  (it read 400 for 600 at 150% before this change, 600 now by that rule; a 1× window now
+  reads 900 for 600), which matters only to pages with their own wheel handlers.
+- **The cost**, on a full page of text at 1200 × 800 CSS: press → changed
+  frame p50/p95 17/18 ms at 1× against 38/45 ms at 1.5×, 338 against 638 KB
+  a frame, nearly all of it JPEG encoding of 2.25× the pixels. Quality stays
+  70 (85 cost another 6 ms and 40% bytes). Chrome rasters CSS size × 1.5
+  whatever the emulated scale, so a fitted page at VIEW_MAX (4096 × 2304
+  CSS, `_fitted`) rasters 6144 × 3456, about 21M px; MAX_DEVICE_PIXELS bounds
+  only the frame Chrome sends, and a look of such a page at 1.5× can pass
+  `masked_image`'s PIXEL_CAP and be refused (fails closed). Unmeasured. A
+  full-screen 4K frame of noisy content nearer FRAME_MAX_BYTES (8 MB) is
+  dropped and counted (`frames_dropped`), as any over-size frame was.
+  `browser_routes_check` test 04 asserts a 640 × 400 pane at 1.5 receives
+  960 × 600 JPEG pixels.
+- **Pointer moves arrived faster than they could go out.** Chrome answers
+  `Input.dispatchMouseEvent` for a move, a drag or a wheel only at its next
+  frame (p50 16.7 ms; a key 0.5 ms), and the pump sends one event at a time
+  and waits for each answer, so at most 61 moves a second went out. The
+  owner's display refreshes at 160 Hz and the HUD sends every `mousemove`,
+  so moves queued (up to INPUT_QUEUE_MAX) and every click and key waited
+  behind them. `TabStream.enqueue` now merges a still-queued move into the
+  next move with the same button, buttons and modifiers, and a still-queued
+  wheel into the next wheel at the same point with the same modifiers
+  (deltas summed, within WHEEL_MAX); `merged` counts them, and a full queue
+  still takes an event that merges into its tail. Only an untaken event of
+  the same attachment is merged, so a page that keeps up sees every event, a
+  press, release, key or text is never merged or crossed, and the hold's
+  `_drop_through` still drops a merged event (every place that raises it
+  clears the queue). A drag on a page that falls behind reaches it as fewer
+  points (CDP has no coalesced-events list), accepted.
+  `browser_input_merge_check` covers each rule; five mutants (no type,
+  buttons, point, attachment or bound check) each fail it, and the cap rule's
+  test fails against the version that checked the cap before merging.
+
+The Direct tab no longer shows "the Browser only loads local servers" while
+the owner's typed external address opens in Remote: `DirectTab.ownerGo`
+marks the address `opening` until its own submit settles and shows
+"Opening…" instead; a failed submit shows its own error as before, and only
+the submit that set the mark clears it.

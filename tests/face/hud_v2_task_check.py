@@ -86,7 +86,7 @@ def task_answer_checks(browser, mock, base, check, until, guard, init_script):
         page.locator('[data-testid="tab-task"]').click()
         until(lambda: page.locator('[data-testid="task-view"]').count() > 0)
         view = page.locator('[data-testid="task-view"]').first
-        for section in (_answer_checks, _refusal_checks, _not_clarifying_checks, _action_checks, _shared_action_checks):
+        for section in (_lingering_checks, _answer_checks, _refusal_checks, _not_clarifying_checks, _action_checks, _shared_action_checks):
             try:
                 section(page, view, mock, k1, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -100,6 +100,39 @@ def task_answer_checks(browser, mock, base, check, until, guard, init_script):
 
 def _answers(mock) -> list[dict]:
     return mock.sent("POST", "/tasks/k1/answer")
+
+
+def _lingering_checks(page, view, mock, k1, check, until):
+    """The answered question's row goes when the daemon accepts the answer, not
+    when the task listing is read again (2026-10-15): the listing is cut off
+    here, so only the window's own mark can clear the row."""
+    pattern = re.compile(r"/tasks(\?.*)?$")
+    cut: list[str] = []
+
+    def refuse(route):
+        cut.append(route.request.url)
+        route.abort()
+
+    until(lambda: _row(view, RUNNER).count() > 0)
+    page.route(pattern, refuse)
+    try:
+        n = len(_answers(mock))
+        row = _row(view, RUNNER)
+        row.locator("input").fill("unittest")
+        row.locator("button", has_text="Answer").click()
+        until(lambda: len(_answers(mock)) > n)
+        check("the daemon took the answer",
+              until(lambda: k1["spec"]["questions"][2]["answer"] == "unittest") is True)
+        check("the answered row clears although the task listing could not be read",
+              until(lambda: _row(view, RUNNER).count() == 0) is True)
+        check("the listing really was cut off", until(lambda: len(cut) > 0) is True)
+        check("the other question is still asked", _row(view, BRANCH).count() == 1)
+    finally:
+        page.unroute(pattern)
+    # Back to the shape the next sections expect, and the window told so.
+    _clarifying(mock)
+    mock.emit("task_status_changed", {"task_id": "k1", "state": "clarifying"}, task_id="k1")
+    until(lambda: _row(view, RUNNER).count() > 0)
 
 
 def _answer_checks(page, view, mock, k1, check, until):

@@ -20,7 +20,7 @@ from unittest.mock import patch
 from jarvis import config, models
 from jarvis.v2 import roles, runner as R, worktrees
 from jarvis.v2.control import ControlError, answer_refusal
-from jarvis.v2.daemon import Daemon
+from jarvis.v2.daemon import Daemon, DaemonError
 from jarvis.v2.ledger import UsageLedger
 from jarvis.v2.model import (PermissionProfile, ProviderName as P, Role, TaskState as S,
                              to_json)
@@ -194,8 +194,10 @@ class Fixture(unittest.TestCase):
         return f"did it: {text.strip().splitlines()[-1][:40]}"
 
     def next_instruction(self, text):
-        done = sum(1 for _t, role, sent, _o in self.claude.sent + self.codex.sent
-                   if role == Role.IMPLEMENTER)
+        # A step done is an instruction relayed; an escape-hatch `owner-ran`
+        # result on the worker's thread is not one.
+        done = sum(1 for _t, role, sent, origin in self.claude.sent + self.codex.sent
+                   if role == Role.IMPLEMENTER and origin != "owner-ran")
         if done >= len(PLAN["steps"]):
             return block({"next": None, "done": True})
         return block({"next": PLAN["steps"][done], "done": False})
@@ -607,30 +609,58 @@ class OrchestratorRestart(Fixture):
 class EscapeHatchInterop(Fixture):
     def test_a_reviewer_declined_mid_run_does_not_break_the_step_loop(self):
         """The hatch (WP5) answers a decline by sending an `owner-ran` message on
-        the worker's own thread. The runner must ride that out, not collide."""
-        hatch_done = threading.Event()
+        the worker's own thread. The runner must ride that out, not collide.
+
+        Ordered by state, not by a sleep (QA-LOAD): it used to send the result
+        50 ms after the decline, which on an idle machine landed after the
+        whole task had finished (so no collision was ever tested) and under
+        load landed mid-run, where the fake orchestrator counted it as a step
+        done (2 != 3) or the finished task's thread refused it (no `owner-ran`).
+        Now the result is sent while the orchestrator decides the next step,
+        and its turn is held open until the runner's relay of that step has
+        been refused at least once, so the collision always happens."""
+        worker: list[str] = []
+        sent = threading.Event()
+        collided = threading.Event()
+        real_send = self.daemon.send
+
+        def send(thread_id, message):
+            try:
+                return real_send(thread_id, message)
+            except DaemonError as exc:
+                if worker and thread_id == worker[0] and "already running" in str(exc):
+                    collided.set()
+                raise
+        patcher = patch.object(self.daemon, "send", send)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         def declining(role, text, thread_id):
-            # Fire the decline, then let the hatch send its result while the
-            # runner is trying to relay the next instruction.
-            def owner_ran():
-                time.sleep(0.05)
-                try:
-                    self.daemon.send(thread_id, UserMessage(
-                        text="[owner ran: npm test]\nall green", origin="owner-ran"))
-                except Exception:
-                    pass
-                hatch_done.set()
-
-            threading.Thread(target=owner_ran, daemon=True).start()
+            worker.append(thread_id)
             return [Event(K.REVIEWER_DECLINED, "", {"tool": "Bash", "args": {},
                                                     "command": "npm test",
                                                     "reason": "network"}),
                     Event(K.TEXT, "", {"text": "wrote the handler; npm test was declined"})]
 
+        def next_step(role, text, thread_id):
+            # The worker's thread is idle while the orchestrator decides: the
+            # owner's answer lands now, as the hatch delivers it.
+            if worker and not sent.is_set():
+                self.daemon.send(worker[0], UserMessage(
+                    text="[owner ran: npm test]\nall green", origin="owner-ran"))
+                sent.set()
+            return self.next_instruction(text)
+
+        def owner_ran(role, text, thread_id):
+            # Held open until the runner has tried to relay the next step.
+            return [lambda stop: collided.wait(10), Event(K.TEXT, "", {"text": "noted"})]
+
         self.script["Do step 1 now"] = declining
+        self.script["[owner ran: npm test]"] = owner_ran
+        self.script["What next?"] = next_step
         task = self.run_to_done()
-        self.assertTrue(hatch_done.wait(5))
+        self.assertTrue(sent.is_set(), "the owner-ran result was never sent")
+        self.assertTrue(collided.is_set(), "the runner's relay never met the owner-ran turn")
         self.assertEqual(task.state, S.DONE)
         self.assertEqual(len(self.journal(task.id, "instruction")), len(PLAN["steps"]))
         origins = [origin for _t, role, _text, origin in self.codex.sent

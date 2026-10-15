@@ -139,6 +139,7 @@ DIALOG_TEXT_CAP = 1000
 CHOOSER_TTL_S = 300.0               # an unanswered file chooser is forgotten
 DELIVER_WAIT_S = 5.0                # an input event's answer is waited for this long
 JPEG_QUALITY = 70
+RASTER_SCALE = 1.5                  # the scale Chrome draws at (`launch_args`): the owner's display
 DEFAULT_VIEW = (1280, 800, 1.0)     # the launch viewport, until a window says otherwise
 # A page wider than its pane is laid out at its own width and drawn scaled
 # down (`_fit`).
@@ -251,6 +252,15 @@ def launch_args(user_data_dir: Path, gate_port: int, *, private: bool) -> list[s
         "--no-default-browser-check",
         "--disable-search-engine-choice-screen",
         "--password-store=basic",
+        # The screencast draws at the browser's own scale, never the
+        # emulated one (`setDeviceMetricsOverride` changes the page's
+        # devicePixelRatio, not the frames: measured, Chrome 155), so the
+        # owner's 150% panes got 1× frames stretched. Drawn at RASTER_SCALE,
+        # each frame is scaled to the pane's device pixels (`_sync_screencast`'s
+        # maxWidth/maxHeight). Layout and input coordinates are unchanged;
+        # `fromSurface` screenshots (looks, captures) come at this scale too,
+        # and `masked_image` scales its masks to them.
+        f"--force-device-scale-factor={RASTER_SCALE}",
         # A desktop pointer, so pages lay out for a mouse, not a touchscreen.
         "--blink-settings=primaryHoverType=2,availableHoverTypes=2,"
         "primaryPointerType=4,availablePointerTypes=4",

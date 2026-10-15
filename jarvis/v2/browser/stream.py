@@ -40,6 +40,17 @@ in the queue until after the card went (`_drop_through`). The window hears
 `{t:"held"}`. Frames keep streaming, view-only. This is the daemon's twin of
 BR-2's client hold, and the real layer: the HUD's is a courtesy.
 
+**A page that falls behind gets the newest pointer, not a backlog**
+(2026-10-14). Chrome answers a pointer move, a drag or a wheel only at its
+next frame (16.7 ms, measured, Chrome 155), and the pump sends one event at
+a time, so a window on a 160 Hz display queued moves faster than they went
+out and every click waited behind them. A move or a wheel still in the
+queue is merged with the next one of the same kind (`_merged`): a move by
+the newer position, a wheel at the same point by its summed deltas, within
+WHEEL_MAX. Only an event nobody has taken yet is merged, so a page that
+keeps up sees every event, and nothing else is ever reordered or merged —
+a press, a release, a key or text between two moves keeps both.
+
 **The owner's input pauses an agent** (amendment §B.9): every input that
 counts as taking over (keys but a lone modifier, text, the wheel, a pointer
 press or release, a drag, a dialog or file-chooser answer — never a plain
@@ -222,6 +233,26 @@ def takes_over(method: str, params: dict) -> bool:
     if method == "Input.dispatchMouseEvent" and params.get("type") == "mouseMoved":
         return params.get("buttons", 0) != 0
     return True
+
+
+def _merged(older: "Msg", newer: "Msg") -> "Msg | None":
+    """`newer` taking the place of a still-queued `older` (the module's
+    "newest pointer, not a backlog"), or None: a pointer move by a move with
+    the same buttons and modifiers, a wheel by a wheel at the same point
+    whose summed deltas stay within WHEEL_MAX."""
+    if older.method != "Input.dispatchMouseEvent" or newer.method != older.method:
+        return None
+    a, b = older.params, newer.params
+    if a["type"] != b["type"] or any(a.get(k) != b.get(k) for k in ("button", "buttons", "modifiers")):
+        return None
+    if b["type"] == "mouseMoved":
+        return newer
+    if b["type"] != "mouseWheel" or (a["x"], a["y"]) != (b["x"], b["y"]):
+        return None
+    dx, dy = a["deltaX"] + b["deltaX"], a["deltaY"] + b["deltaY"]
+    if abs(dx) > WHEEL_MAX or abs(dy) > WHEEL_MAX:
+        return None
+    return Msg(newer.t, newer.method, {**b, "deltaX": dx, "deltaY": dy}, **newer.fields)
 
 
 class Msg:
@@ -429,6 +460,7 @@ class TabStream:
         self._queue: deque = deque()
         self._held_notice = -math.inf
         self.dropped = 0
+        self.merged = 0                         # moves and wheels merged into a newer one
         # How many holds this tab has seen: a press delivered before one is
         # "cut off", and its release is never a click (host `_deliver`).
         self.hold_count = 0
@@ -717,7 +749,7 @@ class TabStream:
                 self.drop_blocked_input()
                 return
             self._blocked_notice = False
-            if len(self._queue) >= INPUT_QUEUE_MAX:
+            if len(self._queue) >= INPUT_QUEUE_MAX and _merged(self._queue[-1][2], msg) is None:
                 self.dropped += 1
                 self._send(sock, {"t": "input_dropped",
                                   "reason": "the page is not keeping up; this input was dropped"})
@@ -728,7 +760,13 @@ class TabStream:
         with self._lock:
             if sock is not self._sock or entry[1] != self.gen or entry[0] <= self._drop_through:
                 return
-            self._queue.append(entry)
+            last = self._queue[-1] if self._queue else None
+            merged = _merged(last[2], msg) if last is not None and last[1] == entry[1] else None
+            if merged is not None:
+                self._queue[-1] = (entry[0], entry[1], merged)
+                self.merged += 1
+            else:
+                self._queue.append(entry)
         self.wake()
 
     def take(self):

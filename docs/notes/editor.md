@@ -130,12 +130,9 @@ dirty buffer** (`buffers.paneLoses`; split-panes plan G-3): a view another
 pane still shows may switch away, re-pin or close without asking. **Tabs** (`PaneSpec.editors {paths, active, preview}`, relative to the
 pinned project, per-field fallback, only with a pin; `pinPane`/`unpinProject`
 drop them; `setEditors` pins and sets in one step; a WP-G2 `filePath` with no
-tabs reads as one): a click on a file in the tree opens a new, normal (pinned) tab
-and re-clicking an open file just activates its tab (2026-10-14, the owner's
-request: a click in the tree opens a new tab; preview tabs no longer open from
-the tree). The preview machinery stays in `buffers.ts`, so a saved pane spec
-can still carry an italic preview tab, which the tab's double click or an edit
-pins (a narrow pane also folds its tree at once), middle-click or × closes, the last
+tabs reads as one): a single click opens an italic preview tab the next one
+replaces, a double click or an edit pins it (a narrow pane opens every file
+pinned and folds its tree at once), middle-click or × closes, the last
 tab on an unsaved edit asks Save / Don't save / Cancel. Past 40 tabs the
 oldest **clean** one closes; with every other tab dirty nothing opens and the
 pane says why (a dirty tab is never closed unasked). Reload over an edit
@@ -989,3 +986,16 @@ the last diff 4.14 s late), no abort (the clicked-away request completes),
 the rounded `clientHeight` (End clips 0.812 px at 160%).
 
 <!-- claude-source:003658-004278:end -->
+
+## Current: a click in the tree opens a normal tab (2026-10-14)
+
+Amends the **Tabs** paragraph in the archived lines 2955–3301 above, which
+still describes the earlier tree behavior. Per the owner's request (2026-10-14),
+a click on a file in the tree opens a new, normal (pinned) tab, and re-clicking
+an open file just activates its tab; preview tabs no longer open from the tree
+(PR #178, `docs/plans/2026-10-09-hud-editor-decisions.md`). The preview
+machinery stays in `buffers.ts` (`openTab`/`pinTab`, `Tabs.preview`, the tab
+strip's double-click pin), so a saved pane spec can still carry an italic
+preview tab, which the tab's double click or an edit pins. Pinned-tab opening
+in a narrow pane (the tree folding at once), middle-click or × closing and the
+Save / Don't save / Cancel prompt on the last unsaved tab are unchanged.

@@ -46,6 +46,7 @@ from jarvis.v2.daemon import Daemon  # noqa: E402
 from jarvis.v2.model import ProviderName as PN  # noqa: E402
 from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, Usage  # noqa: E402
 from jarvis.v2.stores import Stores  # noqa: E402
+from tests import loadclock  # noqa: E402
 
 FAKE_SHELL = Path(__file__).resolve().parent / "terminal_fake" / "sh"
 LIVE_PORTS = {8402, 8403, 8405}
@@ -708,6 +709,35 @@ class Lifecycle(Base):
         self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
         self.assertTrue(self.open_terminal()["readable"])
 
+    def test_changing_the_switch_publishes_exactly_an_id_a_boolean_and_a_time(self):
+        # Another HUD window's switch catches up from this record (the daemon's
+        # flag stays the truth): only on a change, never output.
+        events = self.daemon.bus.subscribe()
+        tid = self.open_terminal()["id"]
+
+        def drained():
+            out = []
+            while True:
+                try:
+                    out.append(events.get_nowait())
+                except Exception:
+                    return [r for r in out if r["kind"] == "terminal_readable"]
+
+        self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
+        self.owner("PATCH", f"/terminals/{tid}", {"readable": False})   # no change, no record
+        self.owner("PATCH", f"/terminals/{tid}", {"readable": True})
+        # A refused PATCH changes nothing and publishes nothing.
+        self.request("PATCH", f"/terminals/{tid}", {"readable": False}, port=self.daemon.port, status=403)
+        self.request("PATCH", f"/terminals/{tid}", {"readable": "yes"}, status=400)
+        records = drained()
+        self.assertEqual([r["data"]["readable"] for r in records], [False, True], records)
+        for record in records:
+            self.assertEqual(set(record), {"kind", "data"})
+            self.assertEqual(set(record["data"]), {"terminal_id", "readable", "at"})
+            self.assertEqual(record["data"]["terminal_id"], tid)
+            self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertTrue(self.term(tid).readable)
+
     def test_a_terminal_can_be_made_unreadable_from_its_first_byte(self):
         # WP-G2: a split's copy of a terminal Jarvis may not read is created
         # with the switch off, never readable for the round trip a PATCH takes.
@@ -1246,11 +1276,12 @@ class Leaks(Base):
         # (two here), each exactly {terminal_id, at} — and one `terminal_read`
         # for the read, exactly {terminal_id, lines, at, refused}.
         self.assertEqual(sorted(r["kind"] for r in drained),
-                         ["terminal_attached"] * 2 + ["terminal_read"], drained)
+                         ["terminal_attached"] * 2 + ["terminal_read", "terminal_readable"], drained)
         for record in drained:
             self.assertEqual(set(record), {"kind", "data"})
-            keys = ({"terminal_id", "at"} if record["kind"] == "terminal_attached"
-                    else {"terminal_id", "lines", "at", "refused"})
+            keys = {"terminal_attached": {"terminal_id", "at"},
+                    "terminal_readable": {"terminal_id", "readable", "at"},
+                    }.get(record["kind"], {"terminal_id", "lines", "at", "refused"})
             self.assertEqual(set(record["data"]), keys)
             self.assertEqual(record["data"]["terminal_id"], tid)
             self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
@@ -1842,8 +1873,13 @@ class DevUrls(Base):
         # ~14 MB/s; every flood must stay at twice that, through `_output`
         # with a synchronous fake socket that takes everything. Measure calling-thread
         # CPU throughput so concurrent suites cannot spend this budget by descheduling
-        # it; also check elapsed wall time when it returns. Best of two runs each.
+        # it, at this machine's idle speed (`tests/loadclock.py`: they slow its CPU
+        # too); also check elapsed wall time when it returns. Best of three runs each.
+        # With colour taken off the bulk path (`_PLAIN` without its SGR branch) the
+        # colour flood runs at ~7 MB/CPU-s, and fails here under load as alone.
         mb = 1 << 20
+        floor = 28.0                    # MB/CPU-s at idle speed: the guard's strength
+        loadclock.pinned()
         floods = {
             "network URLs": b"  Network: http://192.168.1.20:5173/assets/app.js 200 OK\r\n",
             "plain logs": b"2026-10-12 10:00:00 INFO worker-3 processed job 12345 in 4.2 ms\r\n",
@@ -1856,7 +1892,9 @@ class DevUrls(Base):
         for name, line in floods.items():
             data = line * (12 * mb // len(line))
             best = 0.0
-            for _ in range(2):
+            for _ in range(3):
+                if best > floor:
+                    break
                 terminal = T.Terminal("0000000b", shell="/bin/sh", folder="/", project_id=None,
                                       label="~", cols=80, rows=24, nonce=NONCE, integration="none")
                 terminal._attachment = sock
@@ -1869,10 +1907,11 @@ class DevUrls(Base):
                 elapsed = time.thread_time() - started
                 self.assertGreater(elapsed, 0, "CPU clock must measure the 12 MB workload")
                 self.assertLess(time.perf_counter() - wall, 20.0, f"{name}: elapsed wall limit")
-                best = max(best, len(data) / mb / elapsed)
+                held = loadclock.judge(elapsed, len(data) / mb / floor)
+                best = max(best, len(data) / mb / held.idle)
                 terminal.finish()
             with self.subTest(flood=name):
-                self.assertGreater(best, 28.0, f"{name}: {best:.1f} MB/CPU-s")
+                self.assertGreater(best, floor, f"{name}: {best:.1f} MB/CPU-s at idle speed; last run {held}")
 
     def test_a_sniffer_that_fails_never_breaks_the_terminal(self):
         terminal = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None, label="~",
