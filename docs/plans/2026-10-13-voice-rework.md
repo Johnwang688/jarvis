@@ -135,6 +135,7 @@ markdown.
 | V-13 | **Spoken summaries default to Haiku 5.5** (`anthropic/claude-haiku-5.5`) and stay under the 90k-token threshold, as compaction does now (`JARVIS_COMPACT_AT_TOKENS`). The owner reports Haiku at about 100–200 tokens/s, fast enough for speech. |
 | V-14 | **A switch turns speaker verification off ("Guest voice")** so a friend can demo or use Jarvis by voice. It does not change ML VAD, noise suppression or any approval rule (§3.4.1). It **stays on until the owner turns it off**, surviving HUD reloads and daemon restarts. |
 | V-12a | **The speech-to-text settings file `stt.json` stays in the protected-path set** (owner, 2026-10-14, on V13's review; this does not change V-12, which is about the speaker store). Reason: a flip toward upload cannot be undone once audio has been sent, so no agent write, grant or shell command may change it; only the owner, in Settings > Voice. |
+| V-15 | **"Jarvis" wakes every avatar** (owner, 2026-10-14, on V11's review). The local wake-word spotter hears only "Jarvis"; avatars' own wake phrases are no longer spoken wake words. Spotting them locally would need per-phrase measurement first and is not planned. |
 
 ## 3. Design
 
