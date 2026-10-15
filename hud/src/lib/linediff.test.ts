@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  DIFF_BUDGET, diffLines, gutterDecorations, gutterMarks, marksKey, splitLines, type Hunk,
+  DIFF_BUDGET, RULER_LANE_LEFT, diffLines, gutterDecorations, gutterMarks, marksKey, rulerColors, splitLines, type Hunk,
 } from "./linediff";
 
 /** A seeded generator, so a failure names the case that broke. */
@@ -183,5 +183,24 @@ describe("what the gutter draws", () => {
     expect(d[0].range).toEqual({ startLineNumber: 3, startColumn: 1, endLineNumber: 4, endColumn: 1 });
     for (const x of d) expect(Object.keys(x.options).sort()).toEqual(["description", "isWholeLine", "linesDecorationsClassName"]);
     expect(marksKey([{ kind: "added", start: 3, end: 4 }])).not.toBe(marksKey([{ kind: "modified", start: 3, end: 4 }]));
+  });
+
+  it("overview ruler: given colours, each mark also draws on the ruler's left lane, from the same marks", () => {
+    const marks = [
+      { kind: "added" as const, start: 3, end: 4 }, { kind: "modified" as const, start: 6, end: 6 },
+      { kind: "deleted" as const, start: 1, end: 1, top: true },
+    ];
+    const ruler = rulerColors({ "--syn-string": "#8fbf9f", "--syn-fn": "#7fb0c8", "--red": "#e5736b" });
+    expect(ruler).toEqual({ added: "#8fbf9f", modified: "#7fb0c8", deleted: "#e5736b99" });
+    const d = gutterDecorations(marks, ruler);
+    expect(d.map((x) => (x.options as any).overviewRuler)).toEqual([
+      { color: "#8fbf9f", position: RULER_LANE_LEFT },
+      { color: "#7fb0c8", position: RULER_LANE_LEFT },
+      { color: "#e5736b99", position: RULER_LANE_LEFT },
+    ]);
+    // the gutter half is untouched, and the ruler is absent when no colours are given
+    expect(d.map((x) => x.options.linesDecorationsClassName)).toEqual(gutterDecorations(marks).map((x) => x.options.linesDecorationsClassName));
+    for (const x of gutterDecorations(marks)) expect("overviewRuler" in x.options).toBe(false);
+    expect(RULER_LANE_LEFT).toBe(1);
   });
 });

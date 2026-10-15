@@ -31,7 +31,8 @@ import {
 import { reapplyEditorConfig } from "../state/editorconfig";
 import { attachVim, type VimHandle } from "../state/vim";
 import { gitGutter } from "../state/gitGutter";
-import { gutterDecorations } from "../lib/linediff";
+import { gutterDecorations, rulerColors, type RulerColors } from "../lib/linediff";
+import { cssPalette } from "../lib/editorTheme";
 
 /**
  * Every File pane's live editor (ED-7): the palette lists the actions of the
@@ -281,8 +282,16 @@ export function PaneEditor(props: {
     const shown = ed.getModel();
     if (shown !== model) return;
     const coll = ed.createDecorationsCollection();
+    // The same marks along the overview ruler (the scrollbar): this editor
+    // only — a diff or Compare view draws no gutter and so no ruler marks.
+    let ruler: RulerColors | null = null;
+    try {
+      ruler = rulerColors(cssPalette());
+    } catch {
+      /* tokens unreadable: the gutter alone */
+    }
     const stop = gitGutter.watch({ abs, projectId: gitProject, path: gitPath }, model as any, (marks) => {
-      if (ed.getModel() === model) coll.set(gutterDecorations(marks));
+      if (ed.getModel() === model) coll.set(gutterDecorations(marks, ruler));
     });
     return () => {
       stop();
