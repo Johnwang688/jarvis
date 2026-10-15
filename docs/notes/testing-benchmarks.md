@@ -1107,3 +1107,36 @@ list wants the loop to act on. The measurement now exists; the loop still does
 nothing with it.
 
 <!-- claude-source:009195-009286:end -->
+
+## Load-proof bounds, round two (QA-LOAD, 2026-10-14)
+
+Reproduce with load you own, and give it the shape of a sweep: each suite runs
+in its own `systemd-run` scope, and cgroup fairness gives every scope an equal
+share, so 24 busy loops in **one** scope barely deschedule a test in another.
+48 single-process scopes (36 spinning, 12 copying 48 MB buffers), each a
+`systemd-run --user --scope -p MemoryMax=… timeout N python3 -c '<loop>'`, did.
+Kill them by a pattern that is not a regex trap (`pkill -f "x += 1"` matches
+nothing: `+` is a quantifier); `timeout` is the backstop.
+
+- **Thread CPU time still slows under load.** A busy SMT sibling and shared
+  caches slow every instruction: `rules_check`'s cost line went 52-69 → 100-104
+  CPU ms against 100 ms. `tests/loadclock.py` judges a missed CPU bound again
+  at the machine's present speed: a fixed reference workload (none of
+  Jarvis's code) is timed right after the run, fastest of three, against its
+  idle cost (`REFERENCE_IDLE_S`, 10 ms here), and the run's CPU time divided by
+  that slowdown, never below 1x, never above 3x. The bound stays the idle-speed
+  bound; a regression past it by ~15% or more fails under load as alone.
+  `rules_check` (cost), `vex_check` (floods), `terminal_check` and
+  `devurl_check` (throughput) use it and pin their limits and its constants;
+  `tests/loadclock_check.py` pins the clamps. Recalibrate with
+  `python tests/loadclock.py` on an idle machine, rounding down.
+- `devurl_check`'s flood still timed the wall: 15-25 MB/s against 28 under
+  load, every run. It times the calling thread now, like `terminal_check`.
+- `runner_check`'s escape-hatch collision was ordered by a 50 ms sleep: idle
+  it never collided (the no-retry mutant passed), loaded it failed 7 of 10.
+  It is ordered by state now and asserts the collision happened.
+- Checked under that load and already fixed on main: `hud_backend_check`'s
+  Claude quota (2da054d), `discord_mirror_check`'s create back-off (4b50ce3),
+  `web_hygiene_check`'s error-page commit (62856fe), `hud_v2_editor_check`'s
+  `_kinds_checks` and the `.editorconfig` vitests (ED-8), and the full vitest
+  suite (2 of 2).
