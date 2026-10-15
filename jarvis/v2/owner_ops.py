@@ -49,10 +49,11 @@ serve it":
   1. `--pull`: fast-forward `main` from `origin/main` — refused off `main` or
      with uncommitted tracked changes; never stashes, resets or forces;
   2. the install root and the clean-`hud/` check **before** `npm ci` (review
-     of PR #48, M3: `npm ci` runs package.json's scripts and obeys
-     `hud/.npmrc`, so an edited one ran before the refusal);
-  3. `npm ci` in `hud/` when `node_modules` is missing, or older than
-     `package-lock.json`, or `--clean` says so;
+     of PR #48, M3: `npm ci` obeys `hud/.npmrc` — and ran package.json's
+     scripts until 2026-10-15 — so an edited one ran before the refusal);
+  3. `npm ci --ignore-scripts` in `hud/` (no package's install script runs:
+     the owner's decision of 2026-10-15, `NPM_CI_ARGS`) when `node_modules`
+     is missing, or older than `package-lock.json`, or `--clean` says so;
   4. `jarvis hud install`'s own path (`hud_install.install_checkout`: the
      clean-`hud/` refusal again, `npm run build`, the read-only install);
   5. `--restart`: `restart()`'s own path, refusals included (checked before
@@ -677,20 +678,32 @@ def npm_ci_reason(hud: Path, clean: bool = False) -> str | None:
     return None
 
 
+# `npm ci` never runs a package's install scripts (the owner's decision of
+# 2026-10-15: an install script is code from the registry that runs at install
+# time with the owner's rights). The flag, not an .npmrc: a command-line option
+# outranks every npm config file, so no `.npmrc` can turn the scripts back on.
+# The HUD needs none of them — the 14 that install here (node-gyp-build for tree-sitter's
+# native Node bindings, which the browser build never loads; esbuild's
+# install.js, whose binary arrives as its optional @esbuild/* package anyway;
+# protobufjs's version notice) — see docs/notes/hud-workspace.md.
+NPM_CI_ARGS = ("ci", "--ignore-scripts")
+
+
 def npm_ci(hud: Path, timeout: float = NPM_CI_TIMEOUT) -> None:
-    """`npm ci` in `hud`, its output on the owner's terminal."""
+    """`npm ci --ignore-scripts` in `hud`, its output on the owner's terminal."""
     try:
         npm = hud_install.npm_path()
     except hud_install.InstallRefused as exc:
         raise OpsRefused(str(exc)) from None
     try:
-        result = subprocess.run([npm, "ci"], cwd=str(hud), stdin=subprocess.DEVNULL, timeout=timeout)
+        result = subprocess.run([npm, *NPM_CI_ARGS], cwd=str(hud), stdin=subprocess.DEVNULL, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise OpsRefused(f"`npm ci` did not finish within {timeout:g} s; nothing was installed") from None
+        raise OpsRefused(f"`npm ci --ignore-scripts` did not finish within {timeout:g} s; "
+                         "nothing was installed") from None
     except OSError as exc:
         raise OpsRefused(f"could not run npm: {exc.strerror or type(exc).__name__}") from None
     if result.returncode != 0:
-        raise OpsRefused(f"`npm ci` failed (exit {result.returncode}); nothing was installed")
+        raise OpsRefused(f"`npm ci --ignore-scripts` failed (exit {result.returncode}); nothing was installed")
 
 
 def _head() -> str | None:
@@ -839,15 +852,16 @@ def rebuild(*, pull_first: bool = False, restart_after: bool = False, clean: boo
         moved: list[str] = []
         if pull_first:
             moved = python_changed(*pull(out))
-        # The install root and a clean hud/ before `npm ci`, which runs
-        # package.json's scripts and obeys hud/.npmrc (review of PR #48, M3).
+        # The install root and a clean hud/ before `npm ci`, which obeys
+        # hud/.npmrc (review of PR #48, M3); it runs no install scripts
+        # (`NPM_CI_ARGS`, owner 2026-10-15).
         why = hud_install.root_refusal(Path(config.HUD_DIR))
         if why:
             raise hud_install.InstallRefused(why)
         hud_install._clean_enough(hud_install.hud_dirty(), allow_dirty)
         reason = npm_ci_reason(hud, clean)
         if reason:
-            out(f"Running `npm ci` in {hud} ({reason}) …")
+            out(f"Running `npm ci --ignore-scripts` in {hud} ({reason}) …")
             npm_ci(hud)
         out(f"Building and installing {hud} …")
         kwargs = {"allow_dirty": allow_dirty}

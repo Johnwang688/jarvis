@@ -357,7 +357,7 @@ def _served_under_checks(page, mock, check, until):
     from jarvis.v2.hud_api import content_security_policy
     check("the mock HUD sends the daemon's frame headers (hud_api.frame_headers): DENY and the full CSP",
           got == ["DENY", content_security_policy()] and got[1].endswith("frame-ancestors 'none'")
-          and "script-src 'self' 'wasm-unsafe-eval';" in got[1], str(got))
+          and "script-src 'self';" in got[1] and "wasm-unsafe-eval" not in got[1], str(got))
 
 
 def _card_checks(page, mock, check, until):
@@ -1360,7 +1360,7 @@ def main():
     from tests.face import hud_v2_check as v2
     from tests.face.hud_v2_mock import DIST, MockDaemon
     if not (DIST / "index.html").exists():
-        print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
         return 2
     mock = MockDaemon(0).start()
     try:

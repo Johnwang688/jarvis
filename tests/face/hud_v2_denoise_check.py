@@ -6,7 +6,8 @@ under the daemon's own CSP):
   - off_by_default: a fresh window has the switch off, the stage reports "off", and
     NOTHING is requested, fetched or compiled for RNNoise, however long it listens;
   - toggle_live: switching it on loads the pinned binary from the HUD's own origin
-    (served as application/wasm under the CSP, `wasm-unsafe-eval`, never `unsafe-eval`),
+    (served as application/wasm under the page's CSP, never `unsafe-eval`; the worker
+    that compiles it runs under its own script's `wasm-unsafe-eval`, owner 2026-10-15),
     without a reload; Settings and the diagnostics say so; switching it off and on again
     works; the choice survives a reload (and "off" survives one without loading anything);
     Silero keeps scoring the whole time;
@@ -250,8 +251,12 @@ def main(argv=None):
                       len(responses) == 1 and responses[0]["url"].startswith(base + "/assets/rnnoise_0.2"), str(responses))
                 check("as application/wasm with HTTP 200", responses and responses[0]["status"] == 200 and responses[0]["type"].startswith("application/wasm"), str(responses))
                 policy = responses[0]["csp"] if responses else ""
-                check("under the HUD's CSP: wasm-unsafe-eval and worker-src 'self', never unsafe-eval",
-                      "'wasm-unsafe-eval'" in policy and " 'unsafe-eval'" not in policy and "worker-src 'self'" in policy, policy)
+                # The binary's own response carries the page's policy; the worker that
+                # compiles it runs under its script's, which adds 'wasm-unsafe-eval'
+                # (owner, 2026-10-15; hud_api.wasm_script).
+                from jarvis.v2 import hud_api as H
+                check("under the HUD's CSP: worker-src 'self', never unsafe-eval (the grant is the worker script's)",
+                      policy == H.content_security_policy() and " 'unsafe-eval'" not in policy and "worker-src 'self'" in policy, policy)
                 fetched = page.evaluate("""async (u) => { const b = new Uint8Array(await (await fetch(u)).arrayBuffer());
                   const d = await crypto.subtle.digest('SHA-256', b);
                   return { n: b.length, h: Array.from(new Uint8Array(d), x => x.toString(16).padStart(2, '0')).join('') }; }""",

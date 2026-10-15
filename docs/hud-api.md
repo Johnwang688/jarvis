@@ -1833,7 +1833,7 @@ decision C-1 (the decisions file wins).
 `Content-Security-Policy` header WP-E's frame rule rides in
 (`hud_api.content_security_policy`, `hud_api.HUD_POLICY`):
 
-    default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';
+    default-src 'none'; script-src 'self'; worker-src 'self';
     connect-src 'self'; style-src 'self' 'unsafe-inline';
     img-src 'self' data:; font-src 'self' data:; media-src 'self'; manifest-src 'self';
     frame-src http://localhost:* http://*.localhost:* http://127.0.0.1:* http://0.0.0.0:*;
@@ -1843,9 +1843,14 @@ decision C-1 (the decisions file wins).
 — the page, every `/assets/*` file (a worker takes its policy from its own
 script's response), JSON, SSE, errors and the terminal's `101`. No inline
 script, no script from another origin, no `eval`, no `blob:` worker, no
-plugin, no `<base>`, no form posted anywhere. `'wasm-unsafe-eval'` came
-with ED-5 (below): WebAssembly compiles, JavaScript from a string still does
-not. `connect-src 'self'`
+plugin, no `<base>`, no form posted anywhere, and no WebAssembly in any
+document (2026-10-15, below). **The one widening:** a dedicated worker's
+fetch of the HUD's own JavaScript under `/assets/` — the file by
+`hud_api.wasm_script` (a `.js` directly under `assets/`) and the request by
+`hud_api.worker_fetch` (`Sec-Fetch-Dest: worker`, exactly) — is served with
+`script-src 'self' 'wasm-unsafe-eval'` and the rest of the policy unchanged;
+a worker's policy is its own script's response, so WebAssembly compiles in
+the HUD's workers and nowhere else. JavaScript from a string still does not. `connect-src 'self'`
 covers the same-origin `ws://` terminal socket in Chromium (CSP3). A CSP host
 source cannot name an IPv6 literal or a 127/8 address other than 127.0.0.1,
 so the Browser judge refuses `[::1]` and `127.0.0.2` with a sentence naming
@@ -1857,7 +1862,8 @@ restate a directive the policy sets, with a subset of its sources (`'none'`
 always qualifies); a response that states `default-src` (necessarily
 `'none'`) drops every fetch directive it does not restate. Anything else —
 a new directive, a source the policy lacks, a directive twice — raises
-`ValueError` (a 400 before a byte is written). `/avatar.svg` sends
+`ValueError` (a 400 before a byte is written). A response cannot grant
+itself `'wasm-unsafe-eval'` this way; only `hud_files` does, for a script. `/avatar.svg` sends
 `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action
 'none'; frame-ancestors 'none'`.
 
@@ -2070,20 +2076,35 @@ from before this change) is trusted as before.
 Editor plan `docs/plans/2026-10-09-hud-editor-plan.md` §2.6. No new route;
 two things change on the wire.
 
-**The policy's `script-src` is `'self' 'wasm-unsafe-eval'`** (one header,
-`hud_api.content_security_policy`, as ED-4 set out): WebAssembly may compile
-in the page and in a worker — a worker takes its policy from its own
-script's `/assets/*` response — and nothing else is widened: `eval`, `new
-Function` and a string `setTimeout` are still refused, and a response may
-narrow it away (`script-src 'self'`). The syntax worker is the only code
-that compiles WebAssembly, and only the runtime and the grammars its loader's
-map names (`hud/src/lib/syntax/assets.ts`), fetched from `/assets/` on the
-HUD's origin; any other URL is refused before a request is made.
+**`'wasm-unsafe-eval'` rides on a worker's fetch of its script only**
+(amended 2026-10-15, the owner's decision; ED-5 first put it in every
+response's `script-src`). The page — `/`, which draws approval cards — and
+every other document, JSON, SSE, error and `.wasm` response carry
+`script-src 'self'`: WebAssembly never compiles in the window's own
+document. A HUD `/assets/*.js` response carries `script-src 'self'
+'wasm-unsafe-eval'` only when the request's one `Sec-Fetch-Dest` is exactly
+`worker` — the policy that dedicated worker runs under (its own script's
+response, not the page's) — and every such response sends `Vary:
+Sec-Fetch-Dest`. **Not by path alone:** a `.js` opened in a popup runs no
+script of its own (`nosniff`), but it is a same-origin Window whose realm
+carries its response's policy, and the opener can call its `WebAssembly`
+(review of 2026-10-15); that fetch is `document`, so it gets the page's
+policy. `script` (the page's imports), `audioworklet`, `sharedworker`,
+`serviceworker` and a missing header get it too: fail closed, and visibly
+(highlighting, the VAD and the wake word stop) should a browser omit the
+header, which Chrome sends since 80. WebAssembly runs only in three
+workers: the syntax worker (tree-sitter's runtime and grammars), the VAD
+worker (onnxruntime-web and RNNoise) and the wake-word worker
+(onnxruntime-web). Nothing else is widened: `eval`, `new Function` and a
+string `setTimeout` are still refused everywhere. The syntax worker
+compiles only the runtime and the grammars its loader's map names
+(`hud/src/lib/syntax/assets.ts`), fetched from `/assets/` on the HUD's
+origin; any other URL is refused before a request is made.
 
 **`/assets/*.wasm`** — the tree-sitter runtime and thirteen grammars, under
 their Vite content-hashed names — are served like every other installed
 asset (hash-checked on every read, `jarvis hud install`), as
-`application/wasm` with the full policy. They are fetched only when a file of
+`application/wasm` with the full (page) policy. They are fetched only when a file of
 their language first opens.
 
 The HUD's test hooks for it are read-only and not an API:

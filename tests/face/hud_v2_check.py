@@ -32,7 +32,7 @@ The safety checks are the ones to keep, and each is written to bite:
     basic", every grammar compiled under the CSP with no violation, and the
     loader refusing a URL outside its map (tests/face/hud_v2_syntax_check.py).
 
-Build first:  cd hud && npm ci && npm run build
+Build first:  cd hud && npm ci --ignore-scripts && npm run build
 Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
                   tests/face/hud_v2_check.py
 """
@@ -3064,7 +3064,7 @@ def guard(ctx):
 
 def main():
     if not (DIST / "index.html").exists():
-        print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
         return 2
 
     mock = MockDaemon(PORT).start()

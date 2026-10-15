@@ -2011,9 +2011,11 @@ def _handler(daemon):
             self.connection.settimeout(2)
             self._streaming = False
             self._csp = None
+            self._wasm = False
 
         def send_response(self, code, message=None):
             self._csp = None        # a response's own CSP directives (hud_api.binary)
+            self._wasm = False      # a worker script's `'wasm-unsafe-eval'` (hud_api.binary)
             # A request too malformed for http.server to learn its version
             # (a garbage line, HTTP/9.9) — or a real HTTP/0.9 one, which the
             # Host check refuses — is answered HTTP/0.9-style: a body with no
@@ -2025,7 +2027,7 @@ def _handler(daemon):
 
         def end_headers(self):
             from .hud_api import frame_headers
-            for name, value in frame_headers(self, self._csp):
+            for name, value in frame_headers(self, self._csp, wasm=self._wasm):
                 self.send_header(name, value)
             super().end_headers()
 

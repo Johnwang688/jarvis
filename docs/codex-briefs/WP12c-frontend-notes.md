@@ -33,6 +33,9 @@
   then be refused, and what stops a pointless PATCH.
 
 ## Tests
+(Historical run, as recorded. Since 2026-10-15 the HUD installs with `npm ci --ignore-scripts`: the owner's
+decision, no install scripts.)
+
 ```
 cd hud && npm ci && npm run build && npm test
    Test Files 10 passed (10) · Tests 99 passed (99) · ✓ built in 3.60s

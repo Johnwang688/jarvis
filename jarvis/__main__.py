@@ -371,7 +371,7 @@ def cmd_hud(args) -> int:
 
     `jarvis hud install` builds `hud/` and installs it where the daemon serves
     it from (decision C-1, ED-4): a human or lead step, never a tool. `jarvis
-    hud rebuild` is the same install with `npm ci` first when it is needed,
+    hud rebuild` is the same install with `npm ci --ignore-scripts` first when it is needed,
     and optionally a pull before and a restart after (`v2/owner_ops.py`)."""
     import subprocess
     import time
@@ -951,10 +951,11 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "open     open the HUD window, starting the daemon if needed\n"
             "install  build hud/ and install it where the daemon serves it from\n"
-            "rebuild  install with the latest changes: `npm ci` first when node_modules is\n"
-            "         missing or older than package-lock.json (or --clean), a fast-forward\n"
-            "         of main before (--pull) and a daemon restart after (--restart) if\n"
-            "         asked, then check the daemon serves the new build\n\n"
+            "rebuild  install with the latest changes: `npm ci --ignore-scripts` (no install\n"
+            "         scripts run) first when node_modules is missing or older than\n"
+            "         package-lock.json (or --clean), a fast-forward of main before\n"
+            "         (--pull) and a daemon restart after (--restart) if asked, then\n"
+            "         check the daemon serves the new build\n\n"
             "A HUD-only change needs only a reload of the window (Ctrl+R); restart the\n"
             "daemon only when Python changed."),
         epilog=(
@@ -964,7 +965,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Owner-only: Jarvis is refused install and rebuild in every spelling."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     hud.add_argument("action", nargs="?", choices=["open", "install", "rebuild"], default="open",
-                     help="install: build hud/ and install it; rebuild: npm ci when needed, "
+                     help="install: build hud/ and install it; rebuild: npm ci --ignore-scripts when needed, "
                           "then install, then verify")
     hud.add_argument("--no-window", action="store_true", help="start the daemon without opening a browser")
     hud.add_argument("--allow-dirty", action="store_true",
@@ -975,7 +976,7 @@ def build_parser() -> argparse.ArgumentParser:
     hud.add_argument("--restart", action="store_true",
                      help="rebuild: restart the daemon afterwards (as `jarvis restart`)")
     hud.add_argument("--clean", action="store_true",
-                     help="rebuild: run `npm ci` even when node_modules looks current")
+                     help="rebuild: run `npm ci --ignore-scripts` even when node_modules looks current")
     hud.add_argument("--force", action="store_true",
                      help="rebuild --restart: restart even while a turn is running")
     # No option of `hud` (or `daemon2`) takes a value: the owner-op detector

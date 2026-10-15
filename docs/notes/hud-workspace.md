@@ -1197,3 +1197,55 @@ hostile TeX commands, macro/size/source bounds and delimiter floods.
 hud_v2_math_check.py runs actual chat under the CSP on MockDaemon(0), verifying
 MathML, local font loads, fraction geometry, stream completion, hostile
 commands and narrow-viewport scrolling. It is part of hud_v2_check.py.
+
+
+## `jarvis hud rebuild` runs no install scripts (2026-10-15)
+
+**The owner's decision of 2026-10-15: install scripts can be malicious, so
+`jarvis hud rebuild` runs `npm ci --ignore-scripts`** (`owner_ops.NPM_CI_ARGS`;
+the archived paragraph above still says `npm ci`). The flag is on the command
+line, which outranks every npm config file, so no `.npmrc` can turn scripts
+back on (the clean-`hud/` refusal still runs first). `npm run build` is
+unchanged: it runs `hud/package.json`'s own reviewed `build` script. The CLI
+help, `hud_install.npm_build`'s refusal and every face suite's "build first"
+hint now say `npm ci --ignore-scripts` too. `tests/v2/owner_ops_check.py`
+pins the argv (`test_it_never_runs_install_scripts`, and `rebuild --clean`'s
+own call); the old `[npm, "ci"]` fails four tests.
+
+**The install scripts that no longer run** — the lock's whole list
+(`npm query ':attr(scripts, [install])'`, `[postinstall]`; no `preinstall`,
+and `hud/package.json` has none of its own):
+
+- `node-gyp-build` (`install`) in 12 tree-sitter packages:
+  `tree-sitter-{bash,c,cpp,css,html,javascript,json,python,typescript}`,
+  `tree-sitter-typescript/node_modules/tree-sitter-javascript` and
+  `@tree-sitter-grammars/tree-sitter-{toml,yaml}`. It loads or compiles each
+  grammar's **native Node binding**, which the HUD never uses: the browser
+  build imports each package's shipped `.wasm`, and vitest's syntax kit
+  uses web-tree-sitter on those same files.
+- `esbuild`'s `node install.js` (`postinstall`): it checks the platform
+  package and swaps `bin/esbuild`'s JS shim for the native binary. Without
+  it the shim runs `@esbuild/linux-x64`'s binary (an optional dependency
+  npm installs either way); Vite works unchanged.
+- `protobufjs`'s `node scripts/postinstall` (`postinstall`; onnxruntime-web
+  pulls it in): a version notice for its CLI.
+- `fsevents` (macOS only) is never installed here.
+
+None is needed. A clean `npm ci --ignore-scripts` in a fresh worktree
+(`rm -rf node_modules` first, 196 packages) followed by `npm run build`
+produced a `hud/dist` **byte-identical** (`diff -rq`) to the main
+checkout's build of the same commit, whose `node_modules` had run every
+script (its `bin/esbuild` is the ELF binary): all 16 `.wasm` (web-tree-sitter,
+13 grammars, onnxruntime, RNNoise) and the four `worker-*.js`. The syntax,
+CSP, VAD, wake-word and denoise suites passed on that build (counts in
+`editor.md`'s 2026-10-15 section). If a dependency ever needs its script,
+name it and run that one script by hand; never drop the flag.
+
+Ignoring install scripts closes one route only: a malicious package's code
+still runs when the build or the tests import it (Vite, its plugins, tsc,
+esbuild's binary). The lock's integrity hashes and reviewing dependency
+bumps remain the guard for that.
+
+The approval page's CSP changed the same day (no `'wasm-unsafe-eval'` on
+`/`; only a worker's fetch of its script carries it): see `editor.md`, "WebAssembly leaves the
+approval page".
