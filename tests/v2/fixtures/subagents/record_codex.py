@@ -93,6 +93,15 @@ def shell(cmd, call_id, escalate=False):
     return exec_call(code, call_id)
 
 
+def patch_call(call_id):
+    """A rename out of the workspace through code mode's freeform
+    `apply_patch`: outside the writable roots, so Codex asks first."""
+    patch = ("*** Begin Patch\n*** Update File: notes.txt\n*** Move to: /sv0-outside/notes.txt\n"
+             "@@\n-old\n+new\n*** End Patch\n")
+    code = f"text(JSON.stringify(await tools.apply_patch({json.dumps(patch)})));"
+    return exec_call(code, call_id)
+
+
 class Model:
     def __init__(self, scenario_ref):
         self.scenario_ref = scenario_ref
@@ -209,13 +218,18 @@ class Model:
         steer = any("SV0_STEER" in json.dumps(i) for i in items[-3:] if isinstance(i, dict)
                     and i.get("type") == "message" and i.get("role") == "user")
         if name == "parent":
+            if scenario == "patch_approval":
+                if step == 0:
+                    return {"items": [patch_call("call_parent_patch")]}
+                return {"items": [message(f"SV0 parent: {scenario} done at step {step}.")]}
             if steer and scenario == "steer_parent" and step >= 1:
                 return {"items": [message("SV0 parent: steer acknowledged.")]}
             if step == 0:
                 spawns = {"one": ["alpha"], "parallel": ["alpha", "beta"], "approval": ["asker"],
                           "child_interrupt": ["sleeper"], "parent_interrupt": ["sleeper"],
                           "nested": ["outer"], "fail": ["failer"], "steer_parent": ["sleeper_short"],
-                          "close_agent": ["sleeper"], "no_wait": ["slowpoke"]}[scenario]
+                          "close_agent": ["sleeper"], "no_wait": ["slowpoke"],
+                          "patch_approval_child": ["patcher"]}[scenario]
                 return {"items": [fn_call("spawn_agent", {"task_name": f"sv0_{s}",
                                                           "message": f"SV0_CHILD:{s} do the fixture step."},
                                           f"call_spawn_{s}", "collaboration") for s in spawns]}
@@ -234,7 +248,7 @@ class Model:
         role = {"one": "quick", "parallel": "quick", "approval": "asker", "child_interrupt": "sleeper",
                 "parent_interrupt": "sleeper", "nested": "outer" if name == "child1" else "quick",
                 "fail": "failer", "steer_parent": "napper", "close_agent": "sleeper",
-                "no_wait": "napper"}[scenario]
+                "no_wait": "napper", "patch_approval_child": "patcher"}[scenario]
         if role == "failer":
             return {"error": 400}
         if step == 0:
@@ -244,6 +258,8 @@ class Model:
                 return {"items": [shell("sleep 25", f"call_{name}_sh")]}
             if role == "napper":
                 return {"items": [shell("sleep 4", f"call_{name}_sh")]}
+            if role == "patcher":
+                return {"items": [patch_call(f"call_{name}_patch")]}
             if role == "asker":
                 return {"items": [shell("touch /sv0-outside-workspace", f"call_{name}_sh", escalate=True)]}
             if role == "outer":
@@ -396,6 +412,8 @@ def run(scenario, temp, model, approval_reply):
     home = pathlib.Path(temp) / "codex"
     work = pathlib.Path(temp) / f"work-{scenario}"
     work.mkdir()
+    if scenario.startswith("patch_approval"):
+        (work / "notes.txt").write_text("old\n")
     env = {"PATH": "/usr/bin:/bin", "HOME": temp, "CODEX_HOME": str(home), "XDG_CONFIG_HOME": temp + "/config",
            "XDG_DATA_HOME": temp + "/data", "XDG_CACHE_HOME": temp + "/cache", "OPENAI_API_KEY": "dummy-sv0-offline"}
     rpc = Rpc([str(CODEX), "--strict-config", "app-server", "--stdio"], env, str(work))

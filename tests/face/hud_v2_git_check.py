@@ -11,6 +11,10 @@ What it pins:
     "added" bar in `--syn-string`; undoing it back to HEAD's text clears the
     gutter; a changed line is "modified" in `--syn-fn`; a removed one a
     wedge in `--red` at 60%; a clean file has none;
+  - **the overview ruler** (the scrollbar) shows the same marks: a modified
+    line in `--syn-fn`, an added one in `--syn-string`, a removed one in
+    `--red` at 60%, drawn on the ruler canvas from the gutter's own data,
+    and gone with the gutter when the edit is undone;
   - **HEAD moving** (a new commit id on the status poll) reads HEAD's text
     again, and the gutter follows it;
   - **never for an env file**: no HEAD text is asked for, no gutter drawn;
@@ -154,6 +158,12 @@ def _gutter_checks(page, mock, check, until):
     check("the gutter follows the unsaved edit: an added bar", _count(page, add) == 1
           and page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "true")
     check("…in --syn-string", _rgb(_before(page, add, "backgroundColor")) == _token_rgb(page, "--syn-string"))
+    green = _token_rgb(page, "--syn-string")
+    until(lambda: _ruler_rows(page, 2, green)["rows"] >= 4, timeout=3)
+    r = _ruler_rows(page, 2, green)
+    check("the overview ruler (scrollbar) shows the added line in --syn-string", r["rows"] >= 4, str(r))
+    if os.environ.get("HUD_GIT_SHOTS"):
+        page.locator(_pane(2)).screenshot(path=str(Path(os.environ["HUD_GIT_SHOTS"]) / "ruler-added.png"))
     if os.environ.get("HUD_GIT_SHOTS"):
         page.locator(_pane(2)).screenshot(path=str(Path(os.environ["HUD_GIT_SHOTS"]) / "added.png"))
     # No redraw of the tree per keystroke: the file is already dirty.
@@ -172,12 +182,19 @@ def _gutter_checks(page, mock, check, until):
     until(lambda: _count(page, _git(2)) == 0, timeout=3)
     check("undo back to HEAD's text: the gutter is clean again",
           page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "false" and _count(page, _git(2)) == 0)
+    until(lambda: _ruler_rows(page, 2, green)["rows"] == 0, timeout=3)
+    check("…and the ruler's mark goes with it", _ruler_rows(page, 2, green)["rows"] == 0, str(_ruler_rows(page, 2, green)))
 
     check("setup: README.md opens in pane 2", _open(page, until, 2, "README.md"))
     until(lambda: _count(page, _git(2, "mod")) > 0, timeout=3)
     mod = _git(2, "mod")
     check("a line changed since HEAD is modified, in --syn-fn, on its own line",
           _count(page, mod) == 1 and _rgb(_before(page, mod, "backgroundColor")) == _token_rgb(page, "--syn-fn"))
+    blue = _token_rgb(page, "--syn-fn")
+    until(lambda: _ruler_rows(page, 2, blue)["rows"] >= 4, timeout=3)
+    r = _ruler_rows(page, 2, blue)
+    # (the cursor paints a 1-row mark in a near colour; a git mark is a taller band)
+    check("the ruler shows the modified line in --syn-fn", r["rows"] >= 4, str(r))
     # Remove the first line: a deletion marker, --red at 60%.
     page.locator(_lines(2)).click()
     page.keyboard.press("Control+Home")
@@ -191,9 +208,42 @@ def _gutter_checks(page, mock, check, until):
     check("a removed line is a wedge in --red at 60%",
           _count(page, dele) == 1 and _rgb(_before(page, dele, "borderLeftColor")) == _token_rgb(page, "--red")
           and abs(float(_before(page, dele, "opacity")) - 0.6) < 0.01)
+    red = _token_rgb(page, "--red")
+    until(lambda: _ruler_rows(page, 2, red)["rows"] > 0, timeout=3)
+    r = _ruler_rows(page, 2, red)
+    check("the ruler shows the removed line in --red at 60%", r["rows"] > 0 and abs(r["alpha"] - 153) <= 8, str(r))
+    if shots:
+        page.locator(_pane(2)).screenshot(path=str(Path(shots) / "ruler-deleted.png"))
     check("nothing in the gutter is amber", all(
         not _warm_amber(_rgb(page.locator(s).first.evaluate("e => getComputedStyle(e, '::before').backgroundColor")))
         for s in (mod,) if _count(page, s)))
+
+
+# The overview ruler is a canvas: its marks are pixels. Scan it for opaque-ish
+# pixels near a colour and report how many rows hold one.
+_RULER_JS = """([sel, rgb, tol]) => {
+  const c = document.querySelector(sel);
+  if (!c || !c.width || !c.height) return { rows: -1, w: 0, h: 0 };
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const rows = new Set(); let alphaMax = 0;
+  for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+    const i = (y * c.width + x) * 4, a = d[i + 3];
+    if (a < 40) continue;
+    // the ruler paints with alpha: un-premultiply against the colour it was given
+    if (Math.abs(d[i] - rgb[0]) <= tol && Math.abs(d[i + 1] - rgb[1]) <= tol && Math.abs(d[i + 2] - rgb[2]) <= tol) {
+      rows.add(y); alphaMax = Math.max(alphaMax, a);
+    }
+  }
+  return { rows: rows.size, w: c.width, h: c.height, alpha: alphaMax };
+}"""
+
+
+def _ruler(n: int) -> str:
+    return _pane(n, '[data-testid="editor"] canvas.decorationsOverviewRuler')
+
+
+def _ruler_rows(page, n: int, rgb) -> dict:
+    return page.evaluate(_RULER_JS, [_ruler(n), list(rgb), 6])
 
 
 def _warm_amber(rgb) -> bool:

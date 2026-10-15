@@ -11,6 +11,10 @@ What it pins:
     before its name, vertically centred, `aria-hidden`, drawn in one of the
     theme's quiet tokens and never a warm hue — `.cpp`, `.h`, `.json`, `.py`,
     `.md`, `.env` each its own; a folder row is its chevron and no icon;
+  - **tab icons**: each editor tab starts with the very icon (glyph and
+    colour) its tree row wears — one component, one rule — 16px, before the
+    name, centred, `aria-hidden`; a long name still ellipsizes, and at a
+    narrow window and at 160% / 200% zoom the icon keeps its size;
   - **the dot**: typing marks the file's tree row and its tab (the dot stands
     where × is; hovering or focusing the tab brings × back), with the name
     "unsaved changes" and a tooltip, in `--text-2`; while a slow save is
@@ -46,10 +50,12 @@ from tests.face.hud_v2_layout_check import _approval, _boot, _pane  # noqa: E402
 
 CPP = "src/robot/drive.cpp"
 HDR = "src/robot/drive.h"
+LONG = "a-rather-long-file-name-for-the-tab-ellipsis-check.cpp"
 FILES = {
     CPP: {"content": "#include \"drive.h\"\n\nvoid drive(int speed) {\n  motor(speed);\n}\n", "mtime": 1757900030},
     HDR: {"content": "#pragma once\nvoid drive(int speed);\n", "mtime": 1757900031},
     "config.json": {"content": "{\n  \"port\": 3\n}\n", "mtime": 1757900032},
+    LONG: {"content": "int x;\n", "mtime": 1757900033},
 }
 TOKENS = ("--syn-fn", "--syn-string", "--syn-const", "--syn-type", "--text-2", "--text-muted")
 
@@ -135,6 +141,7 @@ def marks_checks(browser, mock, base, check, until, guard, init_script):
                               "root_real": p1["root"], "inbox": False})
         w["files"].update({k: dict(v) for k, v in FILES.items()})
         w["tree"][""].append({"name": "config.json", "kind": "file", "size": 18, "mtime": 1757900032})
+        w["tree"][""].append({"name": LONG, "kind": "file", "size": 8, "mtime": 1757900033})
         w["tree"]["src"].insert(0, {"name": "robot", "kind": "dir", "size": 0, "mtime": 1757900029})
         w["tree"]["src/robot"] = [
             {"name": "drive.cpp", "kind": "file", "size": 60, "mtime": 1757900030},
@@ -142,7 +149,7 @@ def marks_checks(browser, mock, base, check, until, guard, init_script):
         ]
         keep = {k: dict(v) for k, v in w["files"].items()}
         _boot(page, mock, base, until)
-        for section, ws in ((_icon_checks, TWO), (_dirty_checks, TWO), (_two_pane_checks, TWO),
+        for section, ws in ((_icon_checks, TWO), (_tab_icon_checks, TWO), (_dirty_checks, TWO), (_two_pane_checks, TWO),
                             (_linked_root_checks, LINKED), (_card_checks, TWO)):
             _fresh(page, mock, until, ws=ws, keep_files=keep)
             try:
@@ -205,6 +212,81 @@ def _icon_checks(page, mock, check, until):
     shots = os.environ.get("HUD_MARKS_SHOTS")
     if shots:
         page.locator(_pane(2, '[data-testid="filetree"]')).screenshot(path=str(Path(shots) / "tree-icons.png"))
+
+
+def _tab_icon_checks(page, mock, check, until):
+    """The editor's tabs wear the explorer's icon (one component, one rule)."""
+    _expand(page, until, 2, "src", "src/robot")
+    paths = (CPP, HDR, "config.json", "calc.py", "README.md", ".env", LONG)
+    for p in paths:
+        check(f"setup: {p} opens in pane 2", _open(page, until, 2, p))
+    svg = "e => e.querySelector('svg').outerHTML"
+    bad = []
+    for p in paths:
+        tab, row = _tab(2, p) + " .ficon", _row(2, "file", p) + " .ficon"
+        if _count(page, tab) != 1:
+            bad.append(f"{p}: {_count(page, tab)} tab icons")
+            continue
+        t, r = page.locator(tab).first, page.locator(row).first
+        if t.get_attribute("data-icon") != r.get_attribute("data-icon") or t.evaluate(svg) != r.evaluate(svg):
+            bad.append(f"{p}: tab {t.get_attribute('data-icon')} vs tree {r.get_attribute('data-icon')}")
+        if _rgb(t.evaluate("e => getComputedStyle(e).color")) != _rgb(r.evaluate("e => getComputedStyle(e).color")):
+            bad.append(f"{p}: colour differs")
+    check("each tab wears the very icon (glyph and colour) its tree row does", not bad, "; ".join(bad))
+    check("…cpp, h, json, python, markdown, env and the long name's cpp",
+          [page.locator(_tab(2, p) + " .ficon").first.get_attribute("data-icon") for p in paths]
+          == ["cpp", "h", "json", "python", "markdown", "env", "cpp"])
+
+    def geometry():
+        out = []
+        for p in paths:
+            tb = _tab(2, p)
+            icon, name = _box(page, tb + " .ficon"), _box(page, tb + " .edtab-name")
+            tab = _box(page, tb)
+            info = page.locator(tb + " .ficon").first.evaluate(
+                "e => ({ hidden: e.getAttribute('aria-hidden'), tab: e.querySelector('[tabindex]') !== null,"
+                " first: e.parentElement.firstElementChild === e })")
+            cut = page.locator(tb + " .edtab-name").first.evaluate(
+                "e => ({ over: e.scrollWidth > e.clientWidth, ell: getComputedStyle(e).textOverflow })")
+            # computed sizes are in zoomed px and rects on screen: compare in screen px
+            z = page.evaluate("parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1")
+            if abs(icon["width"] - 16 * z) > 0.6 or abs(icon["height"] - 16 * z) > 0.6:
+                out.append(f"{p}: icon {icon['width']:.1f}x{icon['height']:.1f} at zoom {z}")
+            if not (icon["x"] + icon["width"] <= name["x"] + 0.6 and icon["x"] >= tab["x"] - 0.6):
+                out.append(f"{p}: icon not before the name inside the tab")
+            if abs((icon["y"] + icon["height"] / 2) - (name["y"] + name["height"] / 2)) > 2 * z:
+                out.append(f"{p}: icon not centred on the name")
+            if info["hidden"] != "true" or info["tab"] or not info["first"]:
+                out.append(f"{p}: {info}")
+            if tab["width"] > 220 * z + 0.6:
+                out.append(f"{p}: tab {tab['width']:.0f}px wider than 220")
+            if p == LONG and not (cut["over"] and cut["ell"] == "ellipsis"):
+                out.append(f"{p}: name not ellipsized {cut}")
+        return out
+    shots = os.environ.get("HUD_MARKS_SHOTS")
+    check("every tab: the icon is 16px, before the name, aria-hidden, unfocusable; the long name ellipsizes",
+          not geometry(), "; ".join(geometry()))
+    if shots:
+        page.locator(_pane(2, '[data-testid="editor-tabs"]')).screenshot(path=str(Path(shots) / "tabs-100.png"))
+    for z, vp in ((1.0, (900, 700)), (1.6, (1500, 800)), (2.0, (1500, 800))):
+        page.set_viewport_size({"width": vp[0], "height": vp[1]})
+        page.evaluate("z => document.documentElement.style.setProperty('--ui-zoom', String(z))", z)
+        time.sleep(0.4)
+        g = geometry()
+        check(f"narrow/zoomed (zoom {z}, {vp[0]}px wide): icons keep 16px, order and centring", not g, "; ".join(g))
+        if shots and z == 1.6:
+            page.locator(_pane(2, '[data-testid="editor-tabs"]')).screenshot(path=str(Path(shots) / "tabs-160.png"))
+    page.evaluate("document.documentElement.style.setProperty('--ui-zoom', '1')")
+    page.set_viewport_size({"width": WIDE[0], "height": WIDE[1]})
+    # The tab's other parts are where they were.
+    tab = _tab(2, "README.md")
+    check("a tab still has its dot slot and its close button after the icon",
+          page.locator(tab).evaluate("e => [...e.children].map(c => c.className.split(' ')[0]).join()")
+          == "ficon,edtab-name,edtab-dot,edtab-x")
+    env_tab = page.locator(_tab(2, ".env"))
+    check("the env tab keeps its words for assistive technology (the lock is its icon)",
+          env_tab.locator(".edtab-mark").count() == 1 and "Jarvis can't read this file" in env_tab.inner_text()
+          and env_tab.locator(".ficon").get_attribute("data-icon") == "env")
 
 
 def _dirty_checks(page, mock, check, until):

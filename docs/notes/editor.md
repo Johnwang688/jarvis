@@ -1094,3 +1094,43 @@ objects, the syntax worker loads only the grammars in its built-in map, and
 the ONNX and RNNoise files are fixed imports checked against pinned hashes.
 A change that breaks either half hands the approval page WebAssembly without
 it compiling anything.
+
+## Git marks on the overview ruler and file icons on tabs (2026-10-15)
+
+Two small editor additions, both reusing what ED-9 and PR #50 built.
+
+**The overview ruler (the scrollbar) shows the gutter's marks.**
+`gutterDecorations(marks, ruler)` in `lib/linediff.ts` adds
+`overviewRuler: {color, position}` to the same decorations the gutter uses,
+so there is no second git query and no second diff: `state/gitGutter.ts` still
+produces one set of marks per buffer and `PaneEditor` (Editor.tsx) sets them
+once. The marks sit in the ruler's left lane (`RULER_LANE_LEFT`), clear of the
+errors and find matches in the others. The ruler is a canvas and cannot take
+a CSS variable, so `rulerColors(cssPalette())` reads the gutter's own tokens
+off `:root`: added `--syn-string`, modified `--syn-fn`, deleted `--red` at 60%
+(`#rrggbb99`, the wedge's opacity). If the tokens cannot be read the gutter
+draws alone. Only a File pane's single editor wires it: the diff and Compare
+editors draw no gutter, so no ruler marks and nothing doubled. ED-8's
+`displayOptions` carry nothing the gutter or ruler follow (font, size, sticky
+scroll, whitespace, brackets, cursor), so no setting changes them; a minimap
+on or off leaves the ruler alone. Verified in `hud_v2_git_check` (31 checks):
+the ruler canvas holds a band of the added, modified or removed colour for each
+case, the removed one at alpha 153, and the added one goes when the edit is
+undone. The cursor also paints a one-row mark in a near-glacier colour, so the
+check wants at least four rows of a colour, not one.
+
+**Editor tabs wear the explorer's icon.** `EditorTabs` renders
+`<FileIcon name={base(path)} policy={mark === "env" ? "env" : null}/>` first
+in each tab: the same component and `lib/fileIcons.ts` rule as the tree rows
+(one source of truth), decorative (`aria-hidden`, no focus). It goes by the
+file's name, not the label, so two `util.py` tabs shown as `a/util.py` and
+`b/util.py` both wear the Python icon. The env tab's separate lock emoji is
+gone: the env icon is already the lock, and its words ("Jarvis can't read this
+file") stay in the tab as visually hidden text (`.edtab-mark`), so the
+accessible name is unchanged. The icon is `flex: 0 0 16px` and the name still
+shrinks and ellipsizes; the tab's 220px cap, the dirty dot / saving ring, the
+preview italic and the close button are untouched (`tabs: icon, name, dot,
+close` in that order). `hud_v2_editor_marks_check` (57 checks) compares each
+tab's icon glyph and colour to its tree row's, and measures 16px, order and
+centring at a narrow window and at 100%, 160% and 200% zoom, with a long name
+that ellipsizes.

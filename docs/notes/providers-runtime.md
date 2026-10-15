@@ -376,6 +376,52 @@ likely to bite:
   `turn/interrupt` ends only that child's turn and does not kill its running
   command; parent token totals exclude children.
 
+## A Codex rename's destination is judged (2026-10-15)
+
+Until this fix, `codex.py`'s `_tool` built an `apply_patch` call's `paths`
+from `changes[].path` alone, and `permissions.file_targets` never reads
+`changes`. Codex 0.161's `FileUpdateChange.kind` is `add`, `delete` or
+`{type: update, move_path}` (generate-ts v2 schema; `move_path` is its only
+destination field). So a patch renaming `notes.txt` to `.env`, or into the
+gate's own state, showed layer 1 only `notes.txt`. In an owner chat the card
+named only the source. In a task (`auto_review`, AUTO profile), the session's
+own file approval was **accepted with no human**: the probe with a deny-all
+asker on `main` replied `accept`.
+
+Now `_change_paths` lists every path a change writes, the `move_path`
+destination included. Layer 1 judges them all and the card shows them all. A
+file approval is **declined unasked**, with a non-fatal notice, when any of
+these holds:
+
+- `changes` is not a list;
+- a change has no path;
+- a change's `kind` is not an object of type `add`, `delete` or `update`;
+- a `move_path` is not a string or rides a kind other than `update`;
+- the kind carries a field the schema does not have (it might be another
+  destination).
+
+The legacy v1 `applyPatchApproval` request, whose `FileChange` also has
+`move_path`, is not handled at all: it is refused as an unsupported method,
+as before.
+
+Claude has no analogous gap. Its file tools (Write, Edit, MultiEdit,
+NotebookEdit) name one `file_path`/`notebook_path`, and it has no rename
+tool. A shell `mv`/`cp`/`git mv` onto `.env` or the allowlist is refused by
+`denied_command` (checked in-process).
+
+**Closed since (SV-2a, below):** a file approval whose `fileChange` item was
+never seen had no paths to judge, and in a task it was accepted with no
+human. It is now declined unasked.
+
+Checks: `tests/v2/codex_provider_check.py`:
+- `test_file_rename_destination_is_judged_by_layer_1` covers `.env`, a
+  relative `.env.local` and the allowlist, each in a chat and in a task, plus
+  a benign rename that shows both paths;
+- `test_file_change_kind_that_cannot_be_read_is_declined` covers nine shapes.
+
+Both fail on `main` (15 failures), and 5 of 5 mutants are killed. The fake
+peer's file items now carry the `kind` the schema requires.
+
 ## Codex sub-agents' server requests are not fatal (SV-2a, 2026-10-15)
 
 Shipped ahead of the sub-agent view, from SV-2's non-fatal-request piece
@@ -410,6 +456,29 @@ A known child's server request never ends the orchestrator's turn, and its
   paths, so one whose item is unseen, belongs to another thread, cannot be
   read or writes nothing is declined unasked, never asked blind.
   `APPROVAL_REQUESTED` carries `subagent`.
+- **file approvals, session and child alike: no readable file item, no
+  ask.** A file approval names no paths; only its `fileChange` item says
+  what it writes. So in every profile it is declined unasked, with a
+  non-fatal notice, when:
+  - its item was never seen;
+  - the item is not a `fileChange` (for a command approval, an item that is
+    not a `commandExecution`, which would be judged as a patch);
+  - the item names no file (`changes: []`);
+  - a change cannot be read (#196's `_change_paths`: kind, `move_path`,
+    unknown field).
+
+  Before this, a task under AUTO accepted such an approval with nobody
+  asked (`paths: []`). A command approval whose item is unseen is unchanged:
+  it carries its own command, which is judged.
+
+  The ordering this rests on is now recorded, offline, with the SV-0
+  harness (`record_codex.py --only patch_approval patch_approval_child`):
+  `patch_approval.jsonl` and `patch_approval_child.jsonl`. In both, Codex
+  0.161.0 sends `item/started` for the `fileChange` item, under the asking
+  thread, before `item/fileChange/requestApproval`. The item carries `kind:
+  {type: update, move_path}`, and the request carries no paths
+  (`subagent_fixtures_check.py` pins this). A child's file approval routes
+  like its command approvals.
 - **MCP elicitation:** declined, with the non-fatal `MCP_DECLINED` notice.
 - **`currentTime/read`:** answered, as for the session (a clock read).
 - **a question (`requestUserInput`):** refused with an error and a notice;
@@ -430,7 +499,9 @@ overflow the transport is marked failed, the approval is declined
 whatever the owner chose, and the session closes with a fatal error. That
 fails safe: nothing is approved. But the turn is lost. SV-6's between-turn reader/drain owns the
 real fix. Checks: `tests/v2/codex_provider_check.py` replays the SV-0
-recordings (`fixture_turn`, peer mode `replay`), twelve tests; ten fail on
-`main` with the identity mismatch. The two that pin unchanged behavior
+recordings (`fixture_turn`, peer mode `replay`), thirteen tests, plus
+`test_file_approval_without_a_readable_file_item_is_declined_unasked` (16
+cases, all failing on `main`). The child tests fail on `main` with the
+identity mismatch. The two that pin unchanged behavior
 (unknown thread, the session's own request) pass on `main` as they should,
 so they were proven with mutants instead.

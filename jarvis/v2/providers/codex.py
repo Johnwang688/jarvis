@@ -16,6 +16,13 @@ warning. What keeps a newer version from loosening the gate is narrower than
   different command from its item is declined, while a `writeStdin` or
   `approvalId` one (where a difference is expected) is a widening with both
   commands judged by layer 1 and shown;
+- a file approval is judged on every path its item's changes write, a
+  rename's destination (`kind.move_path`) included, and declined unasked,
+  in every profile, when its item was never seen, is not a `fileChange`, or
+  names no file, or a change's path or kind cannot be read
+  (`_change_paths`): the request itself names no paths (Codex 0.161 starts
+  the item first, recorded in `patch_approval*.jsonl`). An approval naming
+  an item of the other kind is declined too;
 - every filesystem grant a widening opens is judged by layer 1 first: one
   that is or contains protected state or touches a credential directory is
   DENY, unasked; and the headline, built from Codex-supplied strings, is one
@@ -245,6 +252,47 @@ _KNOWN_APPROVAL_FIELDS = frozenset({
     # they apply only on an acceptWith…Amendment answer, which we never send.
     "grantRoot",
 })
+
+
+# The kinds a file change may have (generate-ts, 0.161.0 `PatchChangeKind`):
+# `add` and `delete` touch `path`; `update` touches `path` and, when it
+# renames, `move_path` as well. The destination is a file written like any
+# other, so layer 1 must judge it and the owner must see it.
+_CHANGE_KINDS = ("add", "delete", "update")
+
+
+def _change_paths(changes) -> tuple[list[str], str | None]:
+    """Every path a fileChange item's `changes` would write, rename
+    destinations included, and why they cannot be read, or None.
+
+    Lenient for display (whatever can be read is listed) and strict for an
+    approval, which is declined on any problem: a destination we cannot
+    find is one layer 1 cannot protect."""
+    if not isinstance(changes, list):
+        return [], "changes is not a list"
+    paths: list[str] = []
+    problem = None
+    for change in changes:
+        if not isinstance(change, dict) or not isinstance(change.get("path"), str) or not change["path"]:
+            problem = problem or "a change names no path"
+            continue
+        paths.append(change["path"])
+        kind = change.get("kind")
+        if not isinstance(kind, dict) or kind.get("type") not in _CHANGE_KINDS:
+            problem = problem or "a change's kind cannot be read"
+            continue
+        move = kind.get("move_path")
+        if kind["type"] == "update" and isinstance(move, str) and move:
+            paths.append(move)
+        elif move is not None and (kind["type"] != "update" or not isinstance(move, str)):
+            # A destination on a kind that has none, or one that is not a
+            # path: something we do not understand is being moved.
+            problem = problem or "a change's move_path cannot be read"
+        if set(kind) - {"type", "move_path"}:
+            # A field a newer Codex added to the kind may be another
+            # destination (the schema has none): not guessed at.
+            problem = problem or "a change's kind has an unknown field"
+    return paths, problem
 
 
 def _content(value) -> bool:
@@ -1073,7 +1121,9 @@ class CodexProvider:
     def _tool(self, item):
         if item.get("type") == "commandExecution":
             return "shell", {"command": item.get("command"), "cwd": item.get("cwd")}
-        return "apply_patch", {"paths": [c["path"] for c in item.get("changes", [])],
+        # Rename destinations (`kind.move_path`) are paths too: layer 1
+        # judges every one, and the card shows them.
+        return "apply_patch", {"paths": _change_paths(item.get("changes", []))[0],
                                "changes": item.get("changes", [])}
 
     def _notification(self, h, method, p):
@@ -1368,28 +1418,41 @@ class CodexProvider:
                                   message=f"Codex approval request declined: {refusal}{note}")
                 return
             shell = method == "item/commandExecution/requestApproval"
+            want = "commandExecution" if shell else "fileChange"
             if child is None:
                 item = s.items.get(p.get("itemId"), {})
+                item = item if isinstance(item, dict) else {}
             else:
-                # Only that child's own item: a file approval carries no
-                # paths, so without it layer 1 would have nothing to judge.
+                # Only that child's own item: a sibling's or the session's
+                # would judge the wrong command or files.
                 owner_tid, item = s.child_items.get(p["itemId"], (None, {}))
                 if owner_tid != p.get("threadId") or not isinstance(item, dict) or not item:
                     self._reply(s, request, {"decision": "decline"})
                     yield self._event(h, EventKind.ERROR, fatal=False,
                                       message=f"Codex approval request declined: its item was not seen{note}")
                     return
-                changes = item.get("changes", [])
-                if (item.get("type") != ("commandExecution" if shell else "fileChange")
-                        or not isinstance(changes, list)
-                        or (not shell and not changes)
-                        or not all(isinstance(c, dict) and isinstance(c.get("path"), str) for c in changes)):
-                    # A shape `_tool` cannot read would end the turn, and a
-                    # file approval naming no file has nothing for layer 1
-                    # to judge: a child's is declined unasked instead.
+            if item and item.get("type") != want:
+                # An approval naming an item of the other kind would be
+                # judged as that item (a command as a patch, or a patch as a
+                # command): never, for the session or a child.
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: its item is not a {want}{note}")
+                return
+            if not shell:
+                # A file approval carries no paths: only its item says what it
+                # writes. Unseen, unreadable (a rename's destination
+                # included) or naming no file, there is nothing for layer 1
+                # to judge, so it is declined unasked in every profile
+                # (owner rule: unknown approvals fail closed). A command
+                # approval carries its own command and is judged on it.
+                paths, unreadable = _change_paths(item.get("changes", [])) if item else ([], None)
+                why = ("its item was not seen" if not item else unreadable
+                       or (None if paths else "its item names no file"))
+                if why:
                     self._reply(s, request, {"decision": "decline"})
                     yield self._event(h, EventKind.ERROR, fatal=False,
-                                      message=f"Codex approval request declined: its item cannot be read{note}")
+                                      message=f"Codex approval request declined: {why}{note}")
                     return
             name, args = self._tool(item if item else {"type": "commandExecution" if shell else "fileChange"})
             # Only non-null values: a `command: null` must not erase the item's

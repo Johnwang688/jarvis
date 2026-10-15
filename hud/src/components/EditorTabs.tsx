@@ -5,6 +5,7 @@
 // a tab; closing the last tab on an unsaved edit asks first (FileTab).
 
 import type { Tabs } from "../lib/buffers";
+import { FileIcon } from "./FileIcon";
 
 export interface TabInfo {
   dirty: boolean;
@@ -69,7 +70,11 @@ export function EditorTabs(props: {
               }
             }}
           >
-            {i.mark === "env" ? <span className="edtab-mark" aria-label="Jarvis can't read this file">🔒</span> : null}
+            {/* The explorer's own icon (components/FileIcon.tsx, lib/fileIcons.ts:
+                one source of truth), decorative; an env file wears the lock
+                there, so its words are for assistive technology only. */}
+            <FileIcon name={base(path)} policy={i.mark === "env" ? "env" : null} />
+            {i.mark === "env" ? <span className="edtab-mark">Jarvis can't read this file</span> : null}
             <span className="edtab-name">{label}</span>
             {/* Dirty: the dot stands where × is, and hovering or focusing the
                 tab brings × back (VS Code's; theme.css swaps them). Saving

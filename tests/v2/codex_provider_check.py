@@ -48,6 +48,7 @@ FAIL_CLOSED = {
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "subagents" / "codex"
+SEEN = object()     # `Checks.scripted`: start the item a file approval is about
 
 
 def fixture_turn(name):
@@ -212,7 +213,7 @@ def peer(script_path, log_path, thread_name):
             if mode in ("approval", "flood", "deny", "approval_death", "file_approval"):
                 item = {"id": "cmd", "type": "commandExecution", "command": "echo ok", "cwd": os.getcwd(), "status": "inProgress"}
                 if mode == "file_approval":
-                    item = {"id": "cmd", "type": "fileChange", "changes": [{"path": "a.txt", "diff": "+hi"}], "status": "inProgress"}
+                    item = {"id": "cmd", "type": "fileChange", "changes": [{"path": "a.txt", "diff": "+hi", "kind": {"type": "add"}}], "status": "inProgress"}
                 event("item/started", item=item)
                 approval("item/fileChange/requestApproval" if mode == "file_approval" else "item/commandExecution/requestApproval")
                 continue
@@ -253,7 +254,7 @@ def peer(script_path, log_path, thread_name):
                 event("item/reasoning/textDelta", delta="More")
                 for item in [
                     {"id": "cmd", "type": "commandExecution", "command": "echo ok", "cwd": os.getcwd(), "status": "inProgress"},
-                    {"id": "patch", "type": "fileChange", "changes": [{"path": "ok.txt", "diff": "--- a\n+++ b\n-old\n+ok\n+yes"}], "status": "inProgress"},
+                    {"id": "patch", "type": "fileChange", "changes": [{"path": "ok.txt", "diff": "--- a\n+++ b\n-old\n+ok\n+yes", "kind": {"type": "update", "move_path": None}}], "status": "inProgress"},
                 ]:
                     event("item/started", item=item)
                     item = {**item, "status": "declined" if mode == "declined" else "failed" if mode == "tool_failed" else "completed"}
@@ -1104,7 +1105,14 @@ class Checks(unittest.TestCase):
             self.stack.enter_context(patch.object(config, name, value))
         return build_permit(PermitContext("abcd1234", self.brief, provider="codex"), asker)
 
-    def scripted(self, method, params, permit, *, item=None, no_turn=False, brief=None):
+    def scripted(self, method, params, permit, *, item=SEEN, no_turn=False, brief=None):
+        if item is SEEN:
+            # A file approval names no paths: Codex first starts the
+            # fileChange item it is about (a benign one here) or it is
+            # declined unasked. Pass item=None for an unseen item.
+            item = ({"id": params.get("itemId"), "type": "fileChange", "status": "inProgress",
+                     "changes": [{"path": "notes.txt", "diff": "+x", "kind": {"type": "add"}}]}
+                    if method == "item/fileChange/requestApproval" and isinstance(params, dict) else None)
         self.brain.script.update(method=method, params=params, item=item, no_turn=no_turn)
         name = f"s{len(self.brain.rpcs)}"
         h = self.start("scripted", permit, thread=replace(self.thread, id=name), brief=brief)
@@ -1443,6 +1451,116 @@ class Checks(unittest.TestCase):
         reply = next(m for m in h.native.rpc.replies if m["id"] == "special")
         self.assertEqual(reply["result"], {"decision": "decline"})
 
+    def rename(self, move, *, kind=None, path="notes.txt"):
+        """A fileChange item renaming `path` (generate-ts 0.161.0:
+        FileUpdateChange.kind = {type: update, move_path})."""
+        kind = kind if kind is not None else {"type": "update", "move_path": move}
+        return {"id": "patch", "type": "fileChange", "status": "inProgress",
+                "changes": [{"path": path, "diff": "@@\n-old\n+new", "kind": kind}]}
+
+    def test_file_rename_destination_is_judged_by_layer_1(self):
+        """A rename's destination is a file written: refused unasked when it
+        is a credential file or the gate's own state, in a chat and in a task
+        (whose plain file approvals no human sees under AUTO)."""
+        file_approval = "item/fileChange/requestApproval"
+        asker = RecordingAsker(Decision.ALLOW)
+        permit = self.real_permit(asker)
+        gate_state = str(config.ALLOWLIST_PATH)         # the hermetic allowlist real_permit set
+        for label, move in (("credential file", str(self.work / ".env")),
+                            ("credential file, relative", ".env.local"),
+                            ("gate state", gate_state)):
+            for brief in (self.chat(), self.brief):
+                with self.subTest(case=label, role=brief.role):
+                    _, events, reply = self.scripted(file_approval, {"itemId": "patch"}, permit,
+                                                     item=self.rename(move), brief=brief)
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+                    self.assertEqual(asker.seen, [], "refused by layer 1, never asked")
+                    asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+                    self.assertEqual(asked["args"]["paths"], ["notes.txt", move])
+                    self.assertEqual(events[-1].data, {"stop": "end"})
+        # A benign rename is asked with both of its paths on the card.
+        _, events, reply = self.scripted(file_approval, {"itemId": "patch"}, permit,
+                                         item=self.rename("docs/notes.md"), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(asker.seen[-1].args["paths"], ["notes.txt", "docs/notes.md"])
+        self.assertIn("docs/notes.md", json.dumps(asker.seen[-1].to_json()))
+
+    def test_file_change_kind_that_cannot_be_read_is_declined(self):
+        file_approval = "item/fileChange/requestApproval"
+        shapes = {
+            "no kind": self.rename(None, kind={}),
+            "kind not an object": self.rename(None, kind="update"),
+            "unknown kind": self.rename(None, kind={"type": "rename", "to": ".env"}),
+            "unknown kind type alone": self.rename(None, kind={"type": "copy"}),
+            "move_path not a string": self.rename(None, kind={"type": "update", "move_path": [".env"]}),
+            "move_path on an add": self.rename(None, kind={"type": "add", "move_path": ".env"}),
+            "unknown field on the kind": self.rename(None, kind={"type": "update", "move_path": None,
+                                                                 "copy_path": ".env"}),
+            "a change with no path": {"id": "patch", "type": "fileChange", "status": "inProgress",
+                                      "changes": [{"diff": "+x", "kind": {"type": "add"}}]},
+            "changes not a list": {"id": "patch", "type": "fileChange", "status": "inProgress",
+                                   "changes": {"path": ".env"}},
+        }
+        for label, item in shapes.items():
+            with self.subTest(shape=label):
+                if label == "no kind":
+                    item["changes"][0].pop("kind")
+                calls = []
+
+                def permit(*a, **k):
+                    calls.append(a)
+                    return Decision.ALLOW
+                _, events, reply = self.scripted(file_approval, {"itemId": "patch"}, permit,
+                                                 item=item, brief=self.chat())
+                self.assertEqual(reply["result"], {"decision": "decline"})
+                self.assertEqual(calls, [], "never put to the gate")
+                errors = [e.data for e in events if e.kind == K.ERROR]
+                self.assertEqual(len(errors), 1, errors)
+                self.assertFalse(errors[0]["fatal"])
+                self.assertTrue(errors[0]["message"].startswith("Codex approval request declined: "), errors)
+                self.assertEqual(events[-1].data, {"stop": "end"})
+
+    def test_file_approval_without_a_readable_file_item_is_declined_unasked(self):
+        """Owner rule: unknown approvals fail closed. A file approval carries
+        no paths, so with no fileChange item naming a file there is nothing
+        for layer 1 to judge: declined unasked, in a chat and in a task (whose
+        AUTO fallback once accepted it with nobody asked), with a notice."""
+        from jarvis.v2.permissions import deny_all
+        file_approval = "item/fileChange/requestApproval"
+        command_item = {"id": "patch", "type": "commandExecution", "command": "echo ok",
+                        "cwd": str(self.work), "status": "inProgress"}
+        empty = {"id": "patch", "type": "fileChange", "status": "inProgress", "changes": []}
+        cases = [("unseen item", file_approval, None, "its item was not seen"),
+                 ("a command item", file_approval, command_item, "its item is not a fileChange"),
+                 ("no changes", file_approval, empty, "its item names no file"),
+                 # The other way round: a command approval naming a patch
+                 # would be judged as apply_patch, never as its command.
+                 ("a command approval naming a file item", CMD, self.rename("docs/x.md"),
+                  "its item is not a commandExecution")]
+        for label, method, item, why in cases:
+            for brief in (self.chat(), self.brief):
+                for asker in (deny_all("nobody"), RecordingAsker(Decision.ALLOW)):
+                    with self.subTest(case=label, role=brief.role, asker=type(asker).__name__):
+                        params = {"itemId": "patch"} if method == file_approval else {
+                            "itemId": "patch", "command": "echo ok"}
+                        _, events, reply = self.scripted(method, params, self.real_permit(asker),
+                                                         item=item, brief=brief)
+                        self.assertEqual(reply["result"], {"decision": "decline"})
+                        if isinstance(asker, RecordingAsker):
+                            self.assertEqual(asker.seen, [])
+                        self.assertNotIn(K.APPROVAL_REQUESTED, [e.kind for e in events])
+                        errors = [e.data for e in events if e.kind == K.ERROR]
+                        self.assertEqual(errors, [{"fatal": False,
+                                                   "message": f"Codex approval request declined: {why}"}])
+                        self.assertEqual(events[-1].data, {"stop": "end"})
+        # A command approval with an unseen item is unchanged: it carries its
+        # command, which is judged and put to the owner.
+        asker = RecordingAsker(Decision.ALLOW)
+        _, events, reply = self.scripted(CMD, {"itemId": "unseen", "command": "echo ok"},
+                                         self.real_permit(asker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(asker.seen[-1].command, "echo ok")
+
     def test_current_time_read_is_answered_not_fatal(self):
         before = int(time.time())
         _, events, reply = self.scripted("currentTime/read", {}, lambda *a: Decision.DENY, no_turn=True)
@@ -1573,16 +1691,17 @@ class Checks(unittest.TestCase):
         self.assertIn("its item was not seen (from Codex sub-agent ‹/root/sv0_asker›)",
                       [e.data["message"] for e in events if e.kind == K.ERROR][0])
 
-        def env_write(msgs):
+        def env_write(msgs, change=None):
             # The child's item becomes a write to a credential file: a file
             # approval names no paths, so only the item tells layer 1.
+            change = change or {"path": "$CWD/.env", "diff": "+TOKEN=x", "kind": {"type": "add"}}
             i = self.request_at(msgs)
             req = msgs[i]
             item_at = next(j for j, m in enumerate(msgs) if m.get("method") == "item/started"
                            and m["params"]["item"].get("id") == req["params"]["itemId"])
             msgs[item_at]["params"]["item"] = {"type": "fileChange", "id": req["params"]["itemId"],
                                                "status": "inProgress",
-                                               "changes": [{"path": "$CWD/.env", "diff": "+TOKEN=x"}]}
+                                               "changes": [change]}
             msgs[i] = {"method": "item/fileChange/requestApproval", "id": 0, "params": {
                 k: req["params"][k] for k in ("threadId", "turnId", "itemId", "reason")}}
             return msgs
@@ -1594,6 +1713,17 @@ class Checks(unittest.TestCase):
         asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
         self.assertEqual(asked["args"]["paths"], [str(self.work / ".env")])
 
+        # A child's rename onto a credential file (#196's move_path, on the
+        # child path): the destination is judged, refused unasked.
+        rename = {"path": "notes.txt", "diff": "@@\n-a\n+b", "kind": {"type": "update", "move_path": ".env"}}
+        h, events = self.replay("approval_accept", self.real_permit(asker),
+                                edit=lambda msgs: env_write(msgs, rename))
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+        self.assertEqual(asker.seen, [], "a rename onto .env is refused unasked")
+        self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["args"]["paths"],
+                         ["notes.txt", ".env"])
+
         def unreadable(changes, method=CMD):
             def edit(msgs):
                 msgs = env_write(msgs)
@@ -1604,17 +1734,43 @@ class Checks(unittest.TestCase):
                 item["params"]["item"]["changes"] = changes
                 return msgs
             return edit
-        for label, edit in (("a command approval naming a file item", unreadable([])),
-                            ("a file approval whose item writes nothing", unreadable([], "item/fileChange/requestApproval")),
-                            ("changes not a list", unreadable("x", "item/fileChange/requestApproval")),
-                            ("a change with no path", unreadable([{"diff": "+x"}], "item/fileChange/requestApproval"))):
+        file_approval = "item/fileChange/requestApproval"
+        for label, edit, why in (
+                ("a command approval naming a file item", unreadable([]), "its item is not a commandExecution"),
+                ("a file approval whose item writes nothing", unreadable([], file_approval), "its item names no file"),
+                ("changes not a list", unreadable("x", file_approval), "changes is not a list"),
+                ("a change with no path", unreadable([{"diff": "+x", "kind": {"type": "add"}}], file_approval),
+                 "a change names no path"),
+                ("an unreadable kind", unreadable([{"path": "a.txt", "diff": "+x", "kind": {"type": "copy"}}],
+                                                  file_approval), "a change's kind cannot be read"),
+                ("a move_path that is not a path", unreadable(
+                    [{"path": "a.txt", "diff": "+x", "kind": {"type": "update", "move_path": [".env"]}}],
+                    file_approval), "a change's move_path cannot be read")):
             with self.subTest(case=label):
                 h, events = self.replay("approval_accept", self.real_permit(asker), edit=edit)
                 self.assert_parent_went_on(h, events)
                 self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
                 self.assertEqual(asker.seen, [])
-                self.assertIn("its item cannot be read",
-                              [e.data["message"] for e in events if e.kind == K.ERROR][0])
+                self.assertEqual([e.data["message"] for e in events if e.kind == K.ERROR],
+                                 [f"Codex approval request declined: {why} (from Codex sub-agent ‹/root/sv0_asker›)"])
+
+    def test_recorded_file_approvals_show_the_rename_destination(self):
+        """Codex 0.161.0's own file approvals (SV-2a recordings): a rename out
+        of the workspace, by the session and by a child. Both are asked, with
+        the destination on the card; the child's names the sub-agent."""
+        for name, child in (("patch_approval", None), ("patch_approval_child", "/root/sv0_patcher")):
+            with self.subTest(fixture=name):
+                asker = RecordingAsker(Decision.DENY)
+                h, events = self.replay(name, self.real_permit(asker))
+                self.assertEqual(events[-1].data, {"stop": "end"})
+                self.assertEqual([e for e in events if e.kind == K.ERROR], [])
+                self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+                shown = asker.seen[-1]
+                self.assertEqual(shown.args["paths"], [str(self.work / "notes.txt"), "/sv0-outside/notes.txt"])
+                asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+                self.assertEqual(asked.get("subagent"), child)
+                if child:
+                    self.assertIn(f"Codex sub-agent ‹{child}› (not the orchestrator)", shown.headline)
 
     def test_child_elicitation_clock_question_and_others_are_never_fatal(self):
         def swap(method, params):

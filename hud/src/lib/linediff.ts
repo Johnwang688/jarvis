@@ -228,14 +228,34 @@ export const GUTTER_CLASS: Record<GutterKind, string> = {
   deleted: "jgit jgit-del",
 };
 
-/** Monaco decorations for the marks: line decorations only, never the text. */
-export function gutterDecorations(marks: readonly GutterMark[]) {
+/** Monaco's `OverviewRulerLane.Left`: the git marks' own lane, clear of the errors and finds drawn in the others. */
+export const RULER_LANE_LEFT = 1;
+
+/**
+ * The overview ruler's colour for each kind: the gutter's own tokens
+ * (`--syn-string`, `--syn-fn`, `--red` at 60%), read from the palette
+ * (`cssPalette()`), since the ruler is a canvas and cannot take a CSS
+ * variable. `#rrggbb` + alpha, as Monaco takes it.
+ */
+export type RulerColors = Readonly<Record<GutterKind, string>>;
+export function rulerColors(p: { readonly [token: string]: string }): RulerColors {
+  const red = p["--red"].slice(0, 7);
+  return { added: p["--syn-string"], modified: p["--syn-fn"], deleted: `${red}99` };
+}
+
+/**
+ * Monaco decorations for the marks: line decorations (the gutter) and, given
+ * `ruler`, the same marks along the overview ruler (the scrollbar) — never
+ * the text. One data path: the same marks draw both.
+ */
+export function gutterDecorations(marks: readonly GutterMark[], ruler?: RulerColors | null) {
   return marks.map((m) => ({
     range: { startLineNumber: m.start, startColumn: 1, endLineNumber: m.end, endColumn: 1 },
     options: {
       description: `jarvis-git-${m.kind}`,
       isWholeLine: true,
       linesDecorationsClassName: GUTTER_CLASS[m.kind] + (m.top ? " jgit-top" : ""),
+      ...(ruler ? { overviewRuler: { color: ruler[m.kind], position: RULER_LANE_LEFT } } : {}),
     },
   }));
 }
