@@ -52,6 +52,16 @@ export const STT_AUTO_RETRIES = 1;
 /** Chunks uploading at once (plan §3.5). The class itself is unbounded unless told; the HUD passes this. */
 export const STT_MAX_IN_FLIGHT = 2;
 
+/** What the daemon answers (HTTP 422) to a clip it refused as not the enrolled speaker's (V12). */
+export const NOT_OWNER_MESSAGE = "not the enrolled speaker";
+
+/** The daemon refused this voice: not a failure to retry, and nothing of it is kept. */
+export function isNotOwner(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const e = error as { status?: unknown; message?: unknown };
+  return e.status === 422 && e.message === NOT_OWNER_MESSAGE;
+}
+
 export const sttDeadlineMs = (clipMs: number) =>
   Math.max(STT_MIN_DEADLINE_MS, 2 * (Number.isFinite(clipMs) ? Math.max(0, clipMs) : 0));
 
@@ -97,6 +107,8 @@ export type SttEvent =
   | { kind: "retrying" }
   | { kind: "failed"; id: number; message: string; kept: boolean }
   | { kind: "empty" }
+  /** V12: `parts` chunk(s) of this message were refused as not the owner's voice. Their audio is gone. */
+  | { kind: "rejected"; parts: number }
   | { kind: "blocked"; message: string };
 
 /** What the daemon says about a transcript (V13): the text and which backend heard it. */
@@ -104,7 +116,11 @@ export interface SttReply { text: string; backend?: unknown; /** Present when lo
 
 export interface SttOptions<M> {
   /** `budgetMs` is this attempt's whole client deadline: the daemon fits its model chain inside it. */
-  transcribe: (blob: Blob, o: { signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number }) => Promise<string | SttReply>;
+  transcribe: (blob: Blob, o: {
+    signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number;
+    /** Report what speaker verification did for this clip (its answer's `verify`), for the diagnostics row. */
+    verified: (kind: string) => void;
+  }) => Promise<string | SttReply>;
   /** Called in `seq` order with every text that is ready to be placed. */
   place: (batch: SttPlaced<M>[]) => void | Promise<void>;
   diagnostics: VoiceDiagnostics;
@@ -144,6 +160,8 @@ interface Group<M> {
   placed: Set<number>;
   lastAt: number;
   hadFailure: boolean;
+  /** V12: chunks the daemon refused as not the owner's voice (their audio was dropped, not kept for Retry). */
+  rejected: number;
   /** The message is not all of what was said (it was cut short): never sent on its own. */
   partial: boolean;
   /** Handed to `place`, which has not returned yet. */
@@ -294,7 +312,7 @@ export class SttAssembler<M = undefined> {
     const key = ++this.groupSeq;
     this.groups.set(key, {
       key, uid: 0, source, meta, diag: 0, open: true, members: [], parts: new Map(), placed: new Set(),
-      lastAt: this.now(), hadFailure: false, partial: false, placing: 0,
+      lastAt: this.now(), hadFailure: false, rejected: 0, partial: false, placing: 0,
     });
     return key;
   }
@@ -342,7 +360,7 @@ export class SttAssembler<M = undefined> {
     if (!g) {
       g = {
         key: ++this.groupSeq, uid: 0, source, meta, diag: 0, open: false, members: [], parts: new Map(), placed: new Set(),
-        lastAt: this.now(), hadFailure: false, partial: false, placing: 0,
+        lastAt: this.now(), hadFailure: false, rejected: 0, partial: false, placing: 0,
       };
       this.groups.set(g.key, g);
     }
@@ -401,12 +419,16 @@ export class SttAssembler<M = undefined> {
     let failure: unknown = null;
     let served: SttReply | null = null;
     try {
-      const reply = await Promise.race([this.o.transcribe(blob, { signal: ac.signal, utteranceId: g?.uid ?? e.id, seq: e.seq, budgetMs: deadline }), expired, cancelled]);
+      const reply = await Promise.race([this.o.transcribe(blob, {
+        signal: ac.signal, utteranceId: g?.uid ?? e.id, seq: e.seq, budgetMs: deadline,
+        verified: kind => this.o.diagnostics.verified(g?.diag ?? e.diag, kind),
+      }), expired, cancelled]);
       if (reply && typeof reply === "object") { served = reply; text = reply.text; } else text = reply;
     } catch (error) { failure = error ?? new Error("transcription failed"); }
     clearTimeout(timer);
     e.cancel = null;
     if (e.cancelled || failure instanceof Cancelled) return;
+    if (failure && isNotOwner(failure)) { this.rejectOwner(e); return; }
     if (failure) {
       if (!explicit && e.autoRetries < STT_AUTO_RETRIES && retryable(failure)) {
         e.autoRetries++; e.state = "waiting"; e.error = describe(failure, deadline);
@@ -434,6 +456,25 @@ export class SttAssembler<M = undefined> {
     e.state = "ready"; e.error = ""; e.blob = null;
     this.syncKept(g);
     this.emit(); this.release();
+  }
+
+  /**
+   * The daemon refused this chunk as not the owner's voice (V12). It was never
+   * transcribed or uploaded; here its audio is dropped at once -- it may be
+   * someone else's, so it is not kept for Retry either. Like a chunk that failed,
+   * it leaves a hole, so the rest of its message (if any) is placed as `late`:
+   * boxed for review, never sent as if it were the whole of what was said.
+   */
+  private rejectOwner(e: Entry<M>) {
+    const g = this.groups.get(e.gid);
+    e.cancelled = true; e.state = "failed"; e.error = NOT_OWNER_MESSAGE; e.hadFailure = true;
+    this.drop(e);
+    if (g) { g.hadFailure = true; g.rejected++; this.o.diagnostics.rejected(g.diag, g.rejected); }
+    this.emit();
+    this.event({ kind: "rejected", parts: g?.rejected ?? 1 });
+    this.settle(e.id);
+    this.release();
+    if (g) this.settleGroup(g);
   }
 
   private fail(e: Entry<M>, message: string) {
@@ -553,7 +594,12 @@ export class SttAssembler<M = undefined> {
       const live = g.members.map(id => this.entries.get(id)).filter((e): e is Entry<M> => !!e);
       if (live.some(e => e.state === "transcribing" || e.state === "waiting")) break;
       const ready = live.filter(e => e.state === "ready");
-      if (!ready.length) continue; // failed for good, or nothing left
+      if (!ready.length) {
+        // Failed for good, or nothing left. A message every chunk of which was refused as not
+        // the owner's is over: the row says so (it is a no-op if a failure already closed it).
+        if (g.rejected) this.o.diagnostics.finish(g.diag, "not_owner", this.now() - g.lastAt);
+        continue;
+      }
       const text = this.joined(g, ready);
       if (!text) {
         // Every chunk that answered was blank.

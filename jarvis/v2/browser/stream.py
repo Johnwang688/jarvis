@@ -419,6 +419,10 @@ class TabStream:
         self.frames_replaced = 0
         self.frames_dropped = 0
         self.viewport: tuple[int, int, float] | None = None
+        # (viewport, wider one) while the host lays the page out wider than
+        # the window's viewport (host.py `_fit`); one assignment, so the
+        # reader thread never sees half of it.
+        self.fitted: tuple | None = None
         # Input.
         self._seq = 0
         self._drop_through = 0
@@ -594,6 +598,15 @@ class TabStream:
         self._inflight = fid
         self.frames_sent += 1
         sock.send_binary(FRAME_HEADER.pack(fid, width, height) + jpeg)
+
+    def page_viewport(self) -> tuple[int, int, float] | None:
+        """The viewport the page is laid out at, in page CSS px: the
+        window's, or the fitted one while it is for that same window
+        viewport (a resize not yet applied reads as the new size)."""
+        viewport, fitted = self.viewport, self.fitted
+        if fitted is not None and fitted[0] == viewport:
+            return fitted[1]
+        return viewport
 
     def forget_picture(self) -> None:
         """The screencast stopped: the newest picture may no longer be the

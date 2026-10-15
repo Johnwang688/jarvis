@@ -77,6 +77,17 @@ wins) and is full once the record has succeeded. Checks: `lib/vex.test.ts`
 and `_feedback_checks` in `tests/face/hud_v2_vex_check.py` (labels, computed
 colours against `--green`/`--red`, the bar at 34%, 70%, 100%).
 
+**Card badges and a build-row Download (same day, owner's request).** The
+project card carries `● Brain ● Controller` (`UsbBadges`), the same reading
+and staleness as the device section (`useUsbReading`, one helper for both),
+with the full state in its label and title, shown only when the tooling is
+configured. The build row has a second Download (`vex-download-quick`, "Download
+to slot N") beside Clean. It is the same `DownloadButton` as the one under the
+pickers: the slot and name live in `BuildAndDownload` and both send them; out
+of the Tab order, no pointer focus, `isExplicitClick` only, and off under the
+same conditions. `_quick_download_checks` repeats the key, script, untrusted
+and later-click refusals for it.
+
 ## Original CLAUDE.md lines 2231–2491
 
 <!-- claude-source:002231-002491:begin -->

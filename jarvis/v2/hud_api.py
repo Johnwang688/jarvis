@@ -1302,6 +1302,11 @@ def hud_files(handler, parts):
     return binary(handler, data, mime)
 
 
+# The routes whose body is audio, not JSON: an explicit set, never a prefix (plan 3.13).
+# `/speaker/reading` is the owner's enrollment reading (V12); it checks the owner itself.
+AUDIO_ROUTES = frozenset({"/stt", "/speaker/reading"})
+
+
 def check_origin(handler, *, preview=False):
     host = handler.headers.get("Host", "")
     port = handler.server.server_address[1]
@@ -1313,7 +1318,7 @@ def check_origin(handler, *, preview=False):
             fail(403, "cross-origin request refused")
         if handler.headers.get("Sec-Fetch-Site") == "cross-site":
             fail(403, "cross-site request refused")
-        if handler.command in ("POST", "PUT", "PATCH") and urlsplit(handler.path).path != "/stt":
+        if handler.command in ("POST", "PUT", "PATCH") and urlsplit(handler.path).path not in AUDIO_ROUTES:
             # CLI clients omit Content-Type in older tests; browsers' simple
             # form/text types must never reach a mutation without preflight.
             content_type = handler.headers.get("Content-Type", "").split(";", 1)[0]
@@ -1538,7 +1543,11 @@ def pickers(handler, daemon, parts, query):
             fail(400, "expected audio/*")
         # V2: the client names each clip so a delayed reply can be placed in
         # capture order; both are echoed back verbatim (non-negative ints).
-        _object(query, ("utterance_id", "seq", "budget_ms"))
+        _object(query, ("utterance_id", "seq", "budget_ms", "verify"))
+        # V12: `verify=1` asks whose voice this is BEFORE anything is transcribed.
+        verify = query.pop("verify", None)
+        if verify not in (None, "1"):
+            fail(400, "verify must be 1")
         ids = {}
         for key, raw in query.items():
             if not (raw.isascii() and raw.isdigit() and len(raw) <= 15):
@@ -1552,17 +1561,41 @@ def pickers(handler, daemon, parts, query):
         data = handler._raw_body()
         if not data:
             fail(400, "audio is empty")
+        # V12: whose voice is it, BEFORE anything is transcribed or uploaded. Always asked (M1, the
+        # lead's decision): a client that leaves `verify` out gets no way around it, and `verify=1`
+        # is accepted as a no-op. The daemon skips it itself when nobody is enrolled or Guest voice
+        # is on, and says which in the reply. A refusal is a fixed sentence: no score, no audio, no
+        # library text. A change in the observed mode (a file edited by hand, a voiceprint deleted)
+        # is published on the bus so every window's label follows (M3).
+        from jarvis import speaker
+        from . import speaker_routes
+        try:
+            kind = speaker.verify(data, mime)
+        except speaker.NotOwner as exc:
+            fail(422, str(exc))
+        except speaker.VerifyUnsupported as exc:
+            fail(415, str(exc))
+        except speaker.SpeakerError as exc:
+            fail(503, str(exc))
+        finally:
+            speaker_routes.watch(daemon)
+        if kind == "no_speech":
+            # Too little speech to judge (L2): an empty answer, like a silent clip; nothing is sent anywhere.
+            return 200, {"text": "", **ids, "verify": kind}
+        # Unenrolled and not asked: the reply is what it always was.
+        verdict = {} if (kind == "skipped_unenrolled" and verify is None) else {"verify": kind}
         try:
             # Dictation is bounded tighter than the library default (V-11).
             # The HUD is the caller that opts in to the local engine (V13); the
-            # reply says which backend served the clip, for the diagnostics.
+            # reply says which backend served the clip, for the diagnostics. Whose voice it is was
+            # decided above, before this: a refusal never gets here, nor does a clip with no speech.
             got = voice.stt_result(data, mime=mime, timeout=config.STT_DICTATION_TIMEOUT_S,
                                    max_retries=config.STT_DICTATION_ATTEMPTS, budget=budget,
                                    prefer_local=True)
             served = {"backend": got.backend, "model": got.model}
             if got.fallback:
                 served["fallback"] = got.fallback
-            return 200, {"text": got.text, **served, **ids}
+            return 200, {"text": got.text, **served, **ids, **verdict}
         except llm.LLMError as exc:
             # A provider outage is a sentence for the HUD, not a traceback in
             # the daemon log. STTUnavailable's message is model ids and HTTP
@@ -1597,7 +1630,10 @@ def pickers(handler, daemon, parts, query):
     if name == "voice":
         payload = {"voice": voice.set_voice(str(body.get("voice", "")))}
         daemon.bus.publish({"kind": "voice", "data": payload})
-        return 200, payload
+        # V12 (L3): a voice that sounds like the enrolled owner is said so, never silently chosen.
+        from jarvis import speaker
+        warning = speaker.voice_warning(payload["voice"])
+        return 200, ({**payload, "speaker_warning": warning} if warning else payload)
     if name not in ("model", "models"):
         return None
     try:
@@ -1775,6 +1811,12 @@ def route(handler, daemon, parts, query):
         return stt_settings_route(handler, daemon, query)
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt", "speech/summary"):
         return pickers(handler, daemon, parts, query)
+    if parts[0] == "speaker":
+        # The owner's voiceprint, enrollment and Guest voice (V12): owner-only.
+        from . import speaker_routes as _speaker_routes
+        mounted = _speaker_routes.route(handler, daemon, parts, query)
+        if mounted is not None:
+            return mounted
     if parts[0] == "speech":
         # Read-aloud's per-thread voices and mutes (V7): owner-only.
         from . import speech_voices as _speech_voices

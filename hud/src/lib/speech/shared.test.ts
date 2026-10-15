@@ -599,3 +599,32 @@ describe("ThreadVoices", () => {
     expect(voiceLabel(null)).toBe("auto");
   });
 });
+
+describe("a voice that could pass for the enrolled owner (V12, L3)", () => {
+  const api = (answer: Record<string, unknown>): VoicesApi => ({
+    list: async () => ({ threads: {}, pool: [] }),
+    change: async (thread: string) => ({ thread_id: thread, voice: "af_twin", muted: false, ...answer }) as any,
+  });
+  it("is said once per voice, however often the daemon repeats it", async () => {
+    const said: string[] = [];
+    const voices = new ThreadVoices(api({ speaker_warning: "af_twin sounds like you" }));
+    voices.onWarning = (m) => said.push(m);
+    await voices.choose("t1", "af_twin");
+    await voices.choose("t2", "af_twin");
+    voices.apply({ thread_id: "t3", voice: "af_twin", speaker_warning: "af_twin sounds like you" });
+    expect(said).toEqual(["af_twin sounds like you"]);
+    voices.apply({ thread_id: "t4", voice: "af_other", speaker_warning: "af_other sounds like you" });
+    expect(said).toHaveLength(2);
+  });
+  it("is nothing when the daemon says nothing, and a failing listener never breaks the voice", async () => {
+    const quiet = new ThreadVoices(api({}));
+    let called = 0;
+    quiet.onWarning = () => { called++; };
+    await quiet.choose("t1", "af_twin");
+    expect(called).toBe(0);
+    const loud = new ThreadVoices(api({ speaker_warning: "x" }));
+    loud.onWarning = () => { throw new Error("listener"); };
+    await loud.choose("t1", "af_twin");
+    expect(loud.info("t1").voice).toBe("af_twin");
+  });
+});

@@ -326,7 +326,18 @@ every one of these routes asks (`kind`):
   local did not serve a clip meant for it). With the owner's backend `local` or
   `auto` the clip is decoded in the daemon first (`jarvis/stt_local.py`); with
   `cloud_fallback` off nothing is uploaded: a local failure is a **502** and a
-  path that would need the cloud is a **409** (`STTBlocked`, not retried).
+  path that would need the cloud is a **409** (`STTBlocked`, not retried). V12:
+  whose voice the clip is (`jarvis/speaker.py`, local only) is asked FIRST, on every
+  request and every listener, **before any transcription, local or cloud, or upload**;
+  `verify=1` is accepted and does nothing more (anything else for `verify` is a 400).
+  Nobody enrolled, or Guest voice on, skips it, and the reply adds `"verify":
+  "matched" | "skipped_guest" | "skipped_unenrolled" | "no_speech"` (the last: under
+  350 ms of speech, a 200 with `text: ""` and nothing transcribed; `skipped_unenrolled`
+  is left out when `verify=1` was not sent, so older callers see what they always saw).
+  A voice that is not the enrolled one is a **422** `not the enrolled speaker` (no score,
+  nothing transcribed); enrolled but unable to judge the clip (damaged or other-model
+  voiceprint, no engine, audio that is not 16-bit PCM WAV, a busy engine) fails closed,
+  a **503** or **415** with a sentence.
 - `GET /stt/settings` → `{backend, cloud_fallback, error, backends, local:
   {installed, reason, loaded, threads, idle_unload_min, model, fetch}}`;
   `POST /stt/settings {backend?: "cloud"|"local"|"auto", cloud_fallback?: bool}`
@@ -334,6 +345,22 @@ every one of these routes asks (`kind`):
   listener. `stt.json` is protected state. A read never loads the model. After each
   successful POST, and when a read finds the resolved value changed by itself, the
   daemon publishes `{kind: "stt_settings", data: <the GET body>}` on `/events`.
+- `GET /speaker` · `POST /speaker/reading` (body `audio/wav`, at most 4 MiB, one
+  prompted reading; `{accepted, problems, metrics, readings}`) · `POST /speaker`
+  with exactly one of `{propose: true}` (score the readings against each other
+  and every built-in voice; stores nothing; `confirm` says to record them again),
+  `{accept: true, threshold?, anyway?}` (build the voiceprint, verification on; 409
+  "record the readings again" when the proposal needs confirming and `anyway` is not
+  true), `{threshold}` (tune), `{guest: bool}` (Guest voice) · `DELETE /speaker` (the
+  readings, the voiceprint, the Guest switch). **Owner-only**, the HUD listener:
+  another listener, a foreign or missing Origin is a 403 before anything is read. The
+  status carries counts, the threshold and the last score, never audio or an embedding.
+  Every state change, and every change `/stt` or `GET /speaker` observes (a file edited
+  by hand), publishes `{kind: "speaker_guest", data: {guest, enrolled, mode}}` on
+  `/events`, so every window shows GUEST VOICE (or VOICE CHECK OFF / BLOCKED) at once.
+  `voiceprint.json` and `guest.json` are protected state (V-12b). Audio bodies are
+  allowed on an explicit set of routes (`hud_api.AUDIO_ROUTES`: `/stt`,
+  `/speaker/reading`), never a prefix.
 - `POST /say` `{text, voice?, instructions?, local_only?}` → audio bytes
   (`RIFF` or MP3; the client sniffs), `X-Speech-Ms` = synthesis time. Unknown
   keys are a 400. A `voice` must be one `GET /voices` lists, else **400**.

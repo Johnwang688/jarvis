@@ -183,7 +183,8 @@ def _offer_checks(page, mock, check, until, fake):
     check("a malformed settings file is reported, never guessed around",
           bad.count() == 1 and "version 2" in bad.inner_text(), bad.inner_text() if bad.count() else "")
     check("and it offers no Build or Download", page.locator(_view(2, _tid("vex-build-btn"))).count() == 0
-          and page.locator(_view(2, _tid("vex-download-btn"))).count() == 0)
+          and page.locator(_view(2, _tid("vex-download-btn"))).count() == 0
+          and page.locator(_view(2, _tid("vex-download-quick"))).count() == 0)
 
 
 def _setup_checks(page, mock, check, until, fake):
@@ -199,7 +200,8 @@ def _setup_checks(page, mock, check, until, fake):
           cmd.count() == 1 and cmd.inner_text().strip() == "jarvis vex setup", note.inner_text() if note.count() else "")
     check("and every Build and Download button is off",
           all(page.locator(_view(V, _tid(t))).is_disabled()
-              for t in ("vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn")))
+              for t in ("vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn",
+                        "vex-download-quick")))
     check("and nothing was asked of the daemon but its status",
           not _posted_since(mock, base, "/projects/p3/vex/build")
           and not _posted_since(mock, base, "/projects/p3/vex/download")
@@ -368,6 +370,54 @@ def _explicit_click_checks(page, mock, check, until, fake):
         "document.activeElement && document.activeElement.getAttribute('data-testid')") != "vex-download-btn")
 
 
+def _quick_download_checks(page, mock, check, until, fake):
+    """The build row's Download (2026-10-14, the owner's ask): the same button
+    as the one under the pickers, sending their slot and name, under every
+    guard that one has."""
+    _reset(page, mock, until)
+    before = len(mock.calls)
+    check("quick: the view draws", _ready(page, until))
+    quick = page.locator(_view(V, _tid("vex-download-quick")))
+    check("the build row has a Download beside Clean",
+          page.locator(_view(V, _tid("vex-build"))).locator(_tid("vex-download-quick")).count() == 1
+          and quick.inner_text().strip() == "Download to slot 1", quick.inner_text() if quick.count() else "")
+    page.locator(_view(V, _tid("vex-slot-pick"))).select_option("4")
+    page.locator(_view(V, _tid("vex-name-input"))).fill("quick")
+    check("it follows the slot and name picked below",
+          quick.inner_text().strip() == "Download to slot 4"
+          and "replaces whatever is in slot 4" in (quick.get_attribute("title") or "")
+          and '"quick"' in (quick.get_attribute("title") or ""))
+    check("it is out of the Tab order", quick.get_attribute("tabindex") == "-1")
+    quick.focus()
+    for key in ("Enter", "Space", "Control+Enter"):
+        page.keyboard.press(key)
+    quick.evaluate("e => e.click()")
+    quick.dispatch_event("click")
+    box = quick.bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    for count in (2, 3):
+        page.mouse.down(click_count=count)
+        page.mouse.up(click_count=count)
+    time.sleep(0.5)
+    check("no key, script click, untrusted event or later click of a run downloads",
+          not mock_vex.state(mock)["downloads"] and not _posted_since(mock, before, "/projects/p3/vex/download"),
+          str(mock_vex.state(mock)["downloads"]))
+    page.locator(_view(V, _tid("vex-name-input"))).fill("-x")
+    check("a refused name turns it off too", quick.is_disabled())
+    page.locator(_view(V, _tid("vex-name-input"))).fill("quick")
+    quick.click()
+    check("the owner's click sends exactly the slot and name picked below",
+          bool(until(lambda: _sent_downloads(mock), timeout=4))
+          and _posted(mock, "/projects/p3/vex/download")[-1] == {"slot": 4, "name": "quick"},
+          str(_posted(mock, "/projects/p3/vex/download")))
+    done = page.locator(_view(V, _tid("vex-downloaded")))
+    check("and the Download section reports it", bool(until(lambda: done.count() > 0 and "slot 4" in done.inner_text(),
+                                                          timeout=6)))
+    check("one click, one download", len(mock_vex.state(mock)["downloads"]) == 1, str(mock_vex.state(mock)["downloads"]))
+    check("the click left no focus on it", page.evaluate(
+        "document.activeElement && document.activeElement.getAttribute('data-testid')") != "vex-download-quick")
+
+
 def _chain_checks(page, mock, check, until, fake):
     _reset(page, mock, until)
     check("setup: the view draws", _ready(page, until))
@@ -416,7 +466,7 @@ def _card_checks(page, mock, check, until, fake):
     _approval(mock, "vexcard2")
     until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
     time.sleep(0.3)
-    controls = ["vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn", "vex-slot-pick",
+    controls = ["vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn", "vex-download-quick", "vex-slot-pick",
                 "vex-name-input", "vex-brain-btn", "vex-info-btn", "vex-programs-btn", "vex-error-0"]
     off = {t: page.locator(_view(V, _tid(t))).is_disabled() for t in controls}
     check("under a card every VEX control is disabled", all(off.values()), str(off))
@@ -424,7 +474,7 @@ def _card_checks(page, mock, check, until, fake):
     check("and the pane's project picker too", picker.is_disabled())
     inert = page.evaluate("() => !!document.querySelector('[data-testid=\"vex-view-2\"]').closest('[inert]')")
     check("and inert behind the veil", inert)
-    for t in ("vex-build-btn", "vex-download-btn", "vex-brain-btn", "vex-error-0"):
+    for t in ("vex-build-btn", "vex-download-btn", "vex-download-quick", "vex-brain-btn", "vex-error-0"):
         try:
             page.locator(_view(V, _tid(t))).click(force=True, timeout=500)
         except Exception:
@@ -563,7 +613,8 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("M1: and in every other VEX view, whatever project it shows",
           bar3.count() > 0 and want in bar3.inner_text(), bar3.inner_text() if bar3.count() else "")
     other = page.locator(_view(3, _tid("vex-download-btn")))
-    check("M1: another project's Download is off while it runs", other.is_disabled())
+    other_quick = page.locator(_view(3, _tid("vex-download-quick")))
+    check("M1: another project's Download is off while it runs", other.is_disabled() and other_quick.is_disabled())
     check("M1: so are the brain terminal and device info",
           page.locator(_view(3, _tid("vex-brain-btn"))).is_disabled()
           and page.locator(_view(3, _tid("vex-info-btn"))).is_disabled()
@@ -571,12 +622,13 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("M1: and every VEX pane's project picker",
           page.locator(_tid("pane-2-vex-project")).is_disabled()
           and page.locator(_tid("pane-3-vex-project")).is_disabled())
-    try:
-        other.click(force=True, timeout=500)
-    except Exception:
-        pass
+    for button in (other, other_quick):
+        try:
+            button.click(force=True, timeout=500)
+        except Exception:
+            pass
     time.sleep(0.3)
-    check("M1: a click on it sends nothing", not _posted_since(mock, base, "/projects/p5/vex/download")
+    check("M1: a click on either sends nothing", not _posted_since(mock, base, "/projects/p5/vex/download")
           and not [d for d in v["downloads"] if d["project_id"] == "p5"], str(v["downloads"]))
     # The reviewer's path: the chain's own pane moved to another project mid-build
     # (to File, its project picked there, back to VEX).
@@ -587,7 +639,8 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("M1: a pane moved to another project mid-build still says what is running",
           page.locator(_view(2)).get_attribute("data-project") == "p5" and bar2.count() > 0
           and want in bar2.inner_text())
-    check("M1: and its Download is off", page.locator(_view(2, _tid("vex-download-btn"))).is_disabled())
+    check("M1: and its Download is off", page.locator(_view(2, _tid("vex-download-btn"))).is_disabled()
+          and page.locator(_view(2, _tid("vex-download-quick"))).is_disabled())
     # Cancel: the build's program is stopped and nothing is sent.
     bid = _latest_build(mock)
     btid = v["builds"][bid]["terminal_id"]
@@ -868,15 +921,29 @@ def _feedback_checks(page, mock, check, until, fake):
     css = lambda name: page.evaluate(f"() => {{ const e = document.createElement('span'); e.style.color = 'var({name})'; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; }}")
     check("connected is green and disconnected red", color("vex-usb-brain") == css("--green")
           and color("vex-usb-controller") == css("--red"), f"{color('vex-usb-brain')} {color('vex-usb-controller')}")
+    badges = page.get_by_test_id("vex-usb-badges")
+    check("the project card shows both, small, without scrolling",
+          page.get_by_test_id("vex-card").locator(_tid("vex-usb-badges")).count() == 1 and badges.is_visible()
+          and page.get_by_test_id("vex-badge-brain").inner_text() == "Brain"
+          and page.get_by_test_id("vex-badge-controller").inner_text() == "Controller"
+          and page.get_by_test_id("vex-badge-brain").get_attribute("aria-label") == "Brain: Connected"
+          and page.get_by_test_id("vex-badge-controller").get_attribute("aria-label") == "Controller: Disconnected")
+    check("the card's dots match the panel's colours", color("vex-badge-brain") == css("--green")
+          and color("vex-badge-controller") == css("--red"))
     page.get_by_test_id("vex-connection").locator("summary").click()
     check("connection log contains timestamps and confirmed transitions", page.get_by_test_id("vex-connection-log").locator("time").count() == 2)
     v["connection"].update(state="error", message="Unsupported USB response; retained.")
     assert until(lambda: "last confirmed" in page.get_by_test_id("vex-usb-brain").inner_text())
+    check("the card says a stale reading is the last confirmed one too",
+          page.get_by_test_id("vex-badge-brain").get_attribute("aria-label") == "Brain: Connected (last confirmed)"
+          and "stale" in (page.get_by_test_id("vex-badge-brain").get_attribute("class") or ""))
     check("USB errors preserve last confirmed hardware state", "Connected (last confirmed)" in page.get_by_test_id("vex-usb-brain").inner_text()
           and "Unsupported" in page.get_by_test_id("vex-connection-note").inner_text())
     v["connection"].update(state="ready", brain=False, checked_at=at,
         events=[*v["connection"]["events"], {"device": "brain", "connected": False, "at": at}])
     assert until(lambda: page.get_by_test_id("vex-usb-brain").inner_text() == "Brain: Disconnected")
+    check("and the card follows a confirmed disconnect", color("vex-badge-brain") == css("--red")
+          and page.get_by_test_id("vex-badge-brain").get_attribute("aria-label") == "Brain: Disconnected")
     check("confirmed disconnect has a timestamped log entry", page.get_by_test_id("vex-connection-log").locator("time").count() == 3)
     page.set_viewport_size({"width": 375, "height": 812})
     try:
@@ -902,7 +969,7 @@ def _feedback_checks(page, mock, check, until, fake):
 
 
 SECTIONS = (
-    _feedback_checks, _offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks, _chain_checks, _card_checks,
+    _feedback_checks, _offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks, _quick_download_checks, _chain_checks, _card_checks,
             _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _header_rebuild_checks,
             _still_stale_checks,
             _answer_card_checks, _passing_card_checks, _first_click_checks, _detect_again_checks,

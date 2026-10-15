@@ -114,3 +114,27 @@ describe("dictation mode", () => {
     expect([...seen].sort()).toEqual([...DICTATION_MODES].sort());
   });
 });
+
+
+describe("orbLine and the voice-check label (V-14, M3)", () => {
+  it("adds the label to every line, so it is never absent while the check is not judging", () => {
+    const cases: Parameters<typeof orbLine>[0][] = [
+      { mode: "auto", approvals: 0, orb: "idle" },
+      { mode: "auto", approvals: 0, orb: "listening" },
+      { mode: "off", approvals: 0, orb: "idle" },
+      { mode: "auto", approvals: 1, orb: "idle" },
+      { mode: "auto", approvals: 0, orb: "idle", status: "TRANSCRIBING" },
+      { mode: "auto", approvals: 0, orb: "idle", status: "RESPONDING", speech: { state: "playing", label: "chat" } },
+    ];
+    for (const c of cases) {
+      const plain = orbLine(c);
+      expect(orbLine({ ...c, voiceLabel: "" })).toBe(plain);
+      expect(orbLine({ ...c, voiceLabel: "GUEST VOICE" })).toBe(plain ? `${plain} · GUEST VOICE` : "GUEST VOICE");
+      expect(orbLine({ ...c, voiceLabel: "VOICE CHECK OFF (not enrolled)" })).toContain("VOICE CHECK OFF (not enrolled)");
+    }
+  });
+  it("does not change what the rest of the line means", () => {
+    expect(orbLine({ mode: "off", approvals: 0, orb: "idle", voiceLabel: "GUEST VOICE" })).toMatch(/^MIC MUTED/);
+    expect(orbLine({ mode: "auto", approvals: 1, orb: "idle", voiceLabel: "GUEST VOICE" })).toMatch(/^ANSWER THE AUTHORIZATION/);
+  });
+});

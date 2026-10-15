@@ -277,7 +277,9 @@ def _every_grammar_checks(page, mock, base, check, until, wasm, workers):
           sorted(loaded) == sorted(GRAMMARS), f"missing {sorted(set(GRAMMARS) - set(loaded))}; got {loaded}")
     check("the syntax worker started from /assets under worker-src 'self'",
           any(u.startswith(base + "/assets/") and "worker" in u for u in workers), str(workers))
-    names = sorted({r.url.split("?")[0].rsplit("/", 1)[-1].rsplit("-", 1)[0] for r in wasm})
+    # The Silero VAD worker (V5) loads onnxruntime's own .wasm beside tree-sitter's. It is judged by
+    # the CSP and header loop below like every .wasm, but it is not a tree-sitter name.
+    names = sorted({r.url.split("?")[0].rsplit("/", 1)[-1].rsplit("-", 1)[0] for r in wasm} - {"ort-wasm-simd-threaded"})
     want = sorted({"web-tree-sitter", *(f"tree-sitter-{g}" for g in GRAMMARS)})
     check("the runtime's .wasm and each grammar's were fetched (one name each)", names == want,
           f"missing {sorted(set(want) - set(names))}; extra {sorted(set(names) - set(want))}")

@@ -156,6 +156,8 @@ class Base(unittest.TestCase):
                                 V2_ALWAYS_ASK=self.root / "always-ask.json",
                                 AVATAR_STATE_PATH=self.root / "avatar.json", AVATARS_DIR=self.root / "avatars",
                                 AVATAR_ENV="",
+                                # The speaker routes (V12) write here, never the owner's voiceprint.
+                                SPEAKER_DIR=self.root / "speaker",
                                 SPEECH_DUCK_PATH=self.root / "speech_duck.json",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
@@ -339,6 +341,11 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
         ("POST", "/speech/summary", {}), ("POST", "/speech/summary", {"bogus": 1}),
         ("GET", "/speech/voices", None), ("POST", "/speech/voices", {"bogus": 1}),
+        # The owner's voiceprint (V12): a status, a refusal, a switch, a delete, and a reading
+        # sent as JSON (refused: the audio route wants audio).
+        ("GET", "/speaker", None), ("POST", "/speaker", {"bogus": 1}), ("POST", "/speaker", {"guest": True}),
+        ("POST", "/speaker", {"propose": True}), ("POST", "/speaker/reading", {"bogus": 1}),
+        ("GET", "/speaker/reading", None), ("DELETE", "/speaker", None),
         ("GET", "/stt/settings", None), ("POST", "/stt/settings", {"bogus": 1}),
         ("GET", "/speech/duck", None), ("POST", "/speech/duck", {"on": False}), ("POST", "/speech/duck", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
