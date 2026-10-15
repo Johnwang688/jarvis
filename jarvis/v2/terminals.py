@@ -76,8 +76,9 @@ with the daemon** (`Daemon.stop` closes them all); there is no tmux.
 
 **Output stays in memory unless Jarvis reads it.** It exists in two places:
 this ring and the owner's browser. It never goes to the bus (the records
-there are `terminal_attached`, ids and a time, and `terminal_read`, ids, a
-line count, a time and whether it was refused), a log (the daemon log gets
+there are `terminal_attached`, ids and a time, `terminal_read`, ids, a
+line count, a time and whether it was refused, and `terminal_readable`, an id,
+the switch's new boolean and a time), a log (the daemon log gets
 lifecycle lines only: opened, attached, read, exited, closed, with the folder
 as a project name or `~`), a thread log, Discord, or disk. **What a
 `terminal_read` returns is the exception, and it goes where any tool result
@@ -1360,8 +1361,9 @@ class Terminals:
     """The daemon's terminals, their tickets, and the attach sessions.
 
     `publish` is the daemon bus's: the records it is ever handed are
-    `terminal_attached` (the terminal's id and the time) and `terminal_read`
-    (ids, a count, a time, whether it was refused).
+    `terminal_attached` (the terminal's id and the time), `terminal_read`
+    (ids, a count, a time, whether it was refused) and `terminal_readable`
+    (an id, the switch's new boolean, a time).
 
     `auto_open` (BR-8a) is the owner's "open dev servers automatically"
     switch, read per chunk of output (`BrowserSettings.auto_open`); None
@@ -1590,6 +1592,23 @@ class Terminals:
                                     "at": utcnow(), "refused": bool(refused)}})
         except Exception as exc:  # noqa: BLE001 — a bus problem never fails a read
             LOG.warning("terminal %s: read not published (%s)", terminal.id, type(exc).__name__)
+
+    def set_readable(self, terminal: Terminal, readable: bool) -> None:
+        """The owner's "Jarvis can read" switch. When it actually changes,
+        `terminal_readable` (`{terminal_id, readable, at}`: an id, a boolean
+        and a time, never output) lets another HUD window's switch catch up.
+        The daemon's flag stays the only truth; the record only informs a
+        display and no reader consults it."""
+        changed = terminal.readable != readable
+        terminal.readable = readable
+        if not changed or self._publish is None:
+            return
+        try:
+            self._publish({"kind": "terminal_readable",
+                           "data": {"terminal_id": terminal.id, "readable": bool(readable),
+                                    "at": utcnow()}})
+        except Exception as exc:  # noqa: BLE001 — a bus problem never fails the switch
+            LOG.warning("terminal %s: switch not published (%s)", terminal.id, type(exc).__name__)
 
     def readable_source(self, terminal_id: str) -> bool:
         """BR5 provenance check only: no text, title, folder or mutable handle."""
@@ -1947,7 +1966,7 @@ def route(handler, daemon, parts, query):
             body = _object(handler._body(), ("readable",), ("readable",))
             if not isinstance(body["readable"], bool):
                 _fail(400, "readable must be a boolean")
-            terminal.readable = body["readable"]
+            terminals.set_readable(terminal, body["readable"])
             return 200, terminal.row()
         if parts[2:] == ["ticket"] and method == "POST":
             _object(query, ())
