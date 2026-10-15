@@ -75,7 +75,8 @@ from typing import Callable, Iterable
 
 from jarvis import config, permissions as v1_permissions, protected_state, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
-from .approvals import ApprovalRequest, DenyAll, clean_line, label, v1_request
+from .approvals import (ApprovalRequest, DenyAll, V2_COMMAND_TOOLS, clean_line, command_text,
+                        is_command_tool, label, v1_request)
 from .model import PermissionProfile, Project, Role, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
 from . import session_tools
@@ -95,12 +96,11 @@ L_JARVIS_TOOL = "jarvis-tool"
 L_JARVIS_DELEGATE = "jarvis-session-delegate"
 L_JARVIS_GATED = "jarvis-gated"
 
-# Tools that carry a shell command line, per provider.
-COMMAND_TOOLS = frozenset({
-    "Bash", "BashOutput",       # Claude
-    "shell", "local_shell",     # Codex
-    "run_command", "run_readonly",   # fast path / jarvis-mcp
-})
+# Tools that carry a shell command line, per provider (`approvals`' one
+# list, Claude's Monitor included). Membership is not the test: every check
+# here asks `is_command_tool`, which also counts any tool whose arguments
+# carry a `command`/`cmd`/`script` line (fail closed, 2026-10-15).
+COMMAND_TOOLS = V2_COMMAND_TOOLS
 
 # Tools that write a file. The argument holding the target differs per
 # provider, so every plausible spelling is read rather than one guessed key:
@@ -488,15 +488,9 @@ def denied_grant(target: str, access: str = "write",
 
 
 def _command_of(args: dict) -> str:
-    """The command line in a tool's arguments, whatever the provider calls it."""
-    for key in ("command", "cmd", "script"):
-        value = args.get(key)
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
-            # Codex hands an argv array; join it so the rules see one line.
-            return " ".join(value)
-    return ""
+    """The command line in a tool's arguments, whatever the provider calls it
+    (`approvals.command_text`: one reading for the permit and the allowlist)."""
+    return command_text(args)
 
 
 def denied_command(command: str, cwd: str | None = None) -> str | None:
@@ -774,7 +768,7 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
 def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
                      project: Project | None = None) -> tuple[str, str] | None:
     """(rule id, reason) if this call is on the always-ask list, else None."""
-    command = _command_of(args) if tool in COMMAND_TOOLS else ""
+    command = _command_of(args) if is_command_tool(tool, args) else ""
     segments: list[tuple[str, list[str], list[str]]] = []
     for segment in rules.segments(command) if command.strip() else []:
         tokens = _tokens_of(segment)
@@ -865,7 +859,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         who = subagent_origin(ctx, subagent) if subagent is not None else None
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
-        command = _command_of(args) if tool in COMMAND_TOOLS else ""
+        command = _command_of(args) if is_command_tool(tool, args) else ""
         # Where the command will run: the brief's folder, never the daemon's
         # own cwd, or a relative `models.json` names the wrong file.
         cwd = (brief.cwd or None) if brief is not None else None
@@ -879,7 +873,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             return decision
 
         # --- layer 1: never approvable, never asked of anyone --------------
-        if tool in COMMAND_TOOLS and command.strip():
+        if command.strip():
             refusal = denied_command(command, cwd)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)

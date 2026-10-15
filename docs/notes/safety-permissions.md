@@ -2268,3 +2268,38 @@ Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init
 `jarvis/tools/secrets.py` (search folders, process-environment values),
 `jarvis/protected_state.py` (default `cwd`). Each change only places a path,
 adds an ask or withholds more.
+
+## Command-bearing tools are command tools (2026-10-15)
+
+Found in the boundary review of PR #208: Claude's `Monitor` tool runs a shell
+command (its stdout lines are events) but was not in the permit's
+`COMMAND_TOOLS`, so the permit read no command from it. Under AUTO,
+`Monitor {command: "cat .env"}` and a daemon kill reached the provider's
+reviewer at layer 5, past layer 1's credential, owner-op and daemon-kill
+DENY. An Always on a Monitor card minted `{"tool": "Monitor"}`, a whole-tool
+grant over every later Monitor command.
+
+- **Fail closed.** `approvals.is_command_tool(tool, args)` is the test
+  everywhere: a known command tool (`approvals.V2_COMMAND_TOOLS`: Bash,
+  BashOutput, Monitor, PowerShell; Codex's shell, local_shell, exec_command;
+  run_command, run_readonly), **or any tool whose arguments carry a command
+  line** under `command`, `cmd` or `script` (text or an argv array). A tool a
+  newer CLI adds is judged as a command from its first call. More than one
+  such key is judged as every one of them. A non-text value under the key is
+  not read as a line.
+- **Every layer reads it.** Layer 1 (never-approvable, secrets, protected
+  state), the always-ask rules, the allowlist and rules' ALLOW at layer 4,
+  and `v1_request`, so an Always mints a stem entry (`run_command` +
+  prefix), never a whole-tool one. An old `{"tool": "Monitor"}` entry no
+  longer matches anything.
+- **Codex.** Its command approvals are always named `shell` by the provider
+  (`CodexProvider._tool`), so nothing new reached it this way; its
+  `exec_command` name is listed for completeness.
+- **Exposure.** Jarvis does not remove Monitor. Chat and implementer briefs
+  pass `tools=None` (the CLI's full native set) and only the orchestrator,
+  reviewer and researcher roles name their tools. The recorded 2.1.295 SDK
+  tool catalog (`tests/v2/fixtures/subagents/claude/catalog.json`) does not
+  list Monitor, so it is feature-gated in the CLI. It has not been observed
+  offered to a Jarvis session, and nothing keeps a later CLI from offering it.
+- **Pinned by** `tests/v2/permissions_check.py command_tool_checks` and the
+  mutants in `tests/v2/command_tool_mutants.py`.

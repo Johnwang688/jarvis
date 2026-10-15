@@ -85,8 +85,55 @@ def label(origin_id: str, name: str = "") -> str:
     return f'task {origin_id} "{clean}"' if clean else f"task {origin_id}"
 
 
-# v2 command tools, by the name each provider uses. See `v1_request`.
-_V2_COMMAND_TOOLS = ("Bash", "BashOutput", "shell", "local_shell", "run_command")
+# v2 command tools, by the name each provider uses. See `v1_request` and
+# `is_command_tool`. Claude's `Monitor` runs a shell command too (a watch
+# whose stdout lines are events) and `PowerShell` is its Windows shell; both
+# were missing until 2026-10-15, so a Monitor `cat .env` reached the reviewer
+# with layer 1 never reading it.
+V2_COMMAND_TOOLS = frozenset({
+    "Bash", "BashOutput", "Monitor", "PowerShell",     # Claude
+    "shell", "local_shell", "exec_command",             # Codex
+    "run_command", "run_readonly",                      # fast path / jarvis-mcp
+})
+_V2_COMMAND_TOOLS = V2_COMMAND_TOOLS
+# The argument keys a command line travels in, whatever the tool.
+COMMAND_KEYS = ("command", "cmd", "script")
+
+
+def _command_value(value) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)) and value and all(isinstance(v, str) for v in value):
+        return " ".join(value)       # Codex hands an argv array
+    return None
+
+
+def is_command_tool(tool: str, args: dict | None) -> bool:
+    """Whether this call is judged as a shell command (2026-10-15, fail
+    closed): a known command tool, or **any** tool whose arguments carry a
+    command line under a command key — a tool a newer CLI adds (Monitor was
+    one) is a command tool from its first call, not a reviewer's guess. A
+    non-text value under such a key is not a line and is not read as one."""
+    if tool in V2_COMMAND_TOOLS:
+        return True
+    if not isinstance(args, dict):
+        return False
+    for key in COMMAND_KEYS:
+        text = _command_value(args.get(key))
+        if text is not None and text.strip():
+            return True
+    return False
+
+
+def command_text(args: dict | None) -> str:
+    """The command line in a tool's arguments, whatever the provider calls
+    it. More than one command key with text (only an unknown tool could send
+    that) is every one of them, one per line, so none goes unjudged."""
+    if not isinstance(args, dict):
+        return ""
+    texts = [text for key in COMMAND_KEYS
+             if (text := _command_value(args.get(key))) is not None and text.strip()]
+    return "\n".join(dict.fromkeys(texts))
 
 
 def v1_request(tool: str, args: dict) -> tuple[str, dict]:
@@ -106,12 +153,11 @@ def v1_request(tool: str, args: dict) -> tuple[str, dict]:
     The command is normalised too, because Codex hands an argv array where
     Claude hands a string and v1 reads `args["command"]` as text.
     """
-    if tool not in _V2_COMMAND_TOOLS:
+    if not is_command_tool(tool, args):
         return tool, dict(args)
-    value = args.get("command", args.get("cmd", args.get("script", "")))
-    if isinstance(value, (list, tuple)):
-        value = " ".join(str(part) for part in value)
-    return "run_command", {"command": str(value or "")}
+    # Any command-bearing tool (Monitor included) mints a stem entry, never
+    # a whole-tool `{"tool": "Monitor"}` grant over every later command.
+    return "run_command", {"command": command_text(args)}
 
 
 @dataclass
