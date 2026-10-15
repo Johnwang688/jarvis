@@ -2293,7 +2293,10 @@ judged by `_secret_entry` as an env file's would be (so `AUTH_TOKEN_TTL=3600`,
 `SESSION_DRIVER=redis` and a value under 4 characters stay; `PWD`/`OLDPWD`
 are never names). File references stay: a name ending FILE/PATH/DIR
 (`PASSWORD_FILE=…`, `--token-file=…`) or a path-shaped value
-(`--key ./client-key.pem`). It covers:
+(`--key ./client-key.pem`). So does a program to run: a name ending in
+askpass, command, cmd, helper, process, program, exec, hook or script
+(`GIT_ASKPASS`, `SUDO_ASKPASS`, `BORG_PASSCOMMAND`, `CREDENTIAL_HELPER`,
+`aws configure set credential_process …`). It covers:
 
 - `NAME=value` wherever a word starts (`export`, `env`, cmd's
   `set "NAME=…"`, a command's prefix, `docker -e`, a query's `&token=`; not
@@ -2319,26 +2322,44 @@ are never names). File references stay: a name ending FILE/PATH/DIR
   set --body`, and among their own options only sshpass' `-p` and
   redis-cli's `-a` (`sshpass -f pwfile ssh -p 2222` stays).
 
-**A withheld value never hides code that runs** — three rules, each erring
-towards showing, pinned by `NEVER_HIDDEN` in the test:
+**A withheld value never hides code that runs** — rules erring towards
+showing, pinned by `NEVER_HIDDEN` in the test (every case through
+`redact_command`, the v2 card, the escape hatch's card, `redact_value`, v1's
+face card and Discord DM, and the label):
 
+0. *The character rule* (delta review of #205, HIGH): **a value holding a
+   blank or newline, any of `;&|<>()`, `$`, a backtick, any of `{}*?[`, or
+   a leading `~` is never withheld**, whatever the quoting looks like
+   (`_UNSAFE_VALUE`, checked on the span removed and on the value's
+   literal). Every real command needs one of these, so a value the quoting
+   model misread can never swallow one. The cost: `MY_TOKEN='two words'`
+   and `curl --user 'bob:two words'` stay visible. An ANSI-C `$'…'` value
+   with a backslash escape stays visible too.
 1. *Structure is never withheld.* Every replacement is checked against the
    line's own quoting (`_Mask`): the span removed must start and end in the
    same quoting and hold no unquoted blank, operator (`;&|()<>`), `$` or
-   backtick, and no `$` or backtick inside double quotes. So
-   `echo 'T="a' ; rm -rf ~ ; echo '"'`, `echo "T='$(rm -rf ~)'"`,
-   `curl https://h/x?a;rm -rf ~` and an unquoted `Cookie:a=1;rm -rf ~` keep
-   every character. A header value never runs past a blank, quote or
-   operator.
+   backtick, and no `$` or backtick inside double quotes. Where the model
+   is unsure it fails closed: a word-start `#` comment is all held to the
+   end of its line, and everything after a here-document's `<<` (not
+   `<<<`), a backtick or a `$(` inside double quotes is held (the review's
+   repros: a `'` in a comment or a heredoc desynced the mask, and
+   `echo 'x API_KEY='abcd; rm -rf ~; echo 'y'` showed as one quoted
+   value). So `echo 'T="a' ; rm -rf ~ ; echo '"'`,
+   `echo "T='$(rm -rf ~)'"`, `curl https://h/x?a;rm -rf ~` and an unquoted
+   `Cookie:a=1;rm -rf ~` keep every character. A header or cookie value
+   never runs past a blank, quote or operator (a cookie's first pair only).
 2. *An expanding value stays*: unquoted or double-quoted with `$` or a
    backtick (`MY_TOKEN="$(…)"`, `Bearer $GITHUB_TOKEN`).
 3. *A variable's value stays when the line may run it*, followed by
    `[shown: this value may be run]`: **every** variable's when the line
    re-parses text as code (`eval`, `source`/`.`, `exec`, `xargs`, `iex`,
    `env -S`, `<(…)`, `<<<`, a pipe into a shell or interpreter, or a shell or
-   interpreter with a running option: `-c`, `-lc`, `-e`, `--eval`, `/c`) or
-   runs a variable as a command (`$X`, `${X}` at a command's place, after
-   `$(`, a backtick, `sudo`…) — which also covers `eval '$'X` and `${!R}`;
+   interpreter with a running option: `-c`, `-lc`, `-e`, `--eval`, `/c`;
+   `trap`, `watch`, `ssh`/`autossh`/`mosh`, `su`/`runuser`, `script`,
+   `parallel`, `find -exec`, `alias`, PowerShell's `& $env:X` and
+   `Start-Process`) or runs a variable as a command (`$X`, `${X}` at a
+   command's place, after `$(`, a backtick, `sudo`…) — which also covers
+   `eval '$'X` and `${!R}`;
    and the ones the line names (`$X`, `${X}`, `%X%`) when it writes a file
    (`>`, `tee`) or starts a shell, an interpreter or a `./program`.
 
@@ -2350,11 +2371,14 @@ towards showing, pinned by `NEVER_HIDDEN` in the test:
   `ApprovalRequest.to_json`/`owner_json` (`command`, `args`, `reason`,
   `headline`), so the HUD card, `GET /approvals`, the `approval_requested`
   bus record and the Discord DM built from it, and `approval_resolved`'s
-  `command`. A card whose redaction fails shows the command as typed (a card
-  that hid code would be worse). `ApprovalRequest.command`/`args` stay as
+  `command`. The projection is computed once per request
+  (`ApprovalRequest.card()`). A card whose redaction fails shows the command
+  as typed (a card that hid code would be worse). The escape hatch's card
+  matters most: the hatch runs the raw command with `bash -c` after a yes. `ApprovalRequest.command`/`args` stay as
   typed: the permit judged them, `resolve(always=True)` mints the stem from
   them, and Discord's "always" offer is now judged on the broker's own
-  pending request rather than the card. v1's face card, its decision list
+  pending request rather than the card (no "always" is offered when the
+  request is no longer pending). v1's face card, its decision list
   and announcement (`face/approvals._for_display`) and v1's Discord DM
   (`discord_approvals._describe`) take the same pass.
 - *Logs*: `log.jsonl` keeps `args`, `command`, `cmd`, `reason` and

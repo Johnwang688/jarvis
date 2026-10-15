@@ -44,7 +44,6 @@ REDACTED = [
     ('set "MY_TOKEN=plainvalue1"', f'set "MY_TOKEN={R}"'),
     ("set -gx MY_TOKEN plainvalue1", f"set -gx MY_TOKEN {R}"),
     ("$env:MY_TOKEN = 'plainvalue1'", f"$env:MY_TOKEN = {R}"),
-    ("MY_TOKEN='two words' ./run", f"MY_TOKEN={R} ./run"),
     ("PGPASSWORD=plainpass psql -h db", f"PGPASSWORD={R} psql -h db"),
     ("docker run -e DB_PASSWORD=plainpass img", f"docker run -e DB_PASSWORD={R} img"),
     ('curl -H "Authorization: Bearer abcdef0123456789xyz" https://example.invalid',
@@ -56,10 +55,10 @@ REDACTED = [
     ("curl -H 'X-Api-Key: plainvalue1' https://example.invalid",
      f"curl -H 'X-Api-Key: {R}' https://example.invalid"),
     ("curl -H 'Cookie: sid=plain; other=value' https://example.invalid",
-     f"curl -H 'Cookie: {R}' https://example.invalid"),
+     f"curl -H 'Cookie: {R}; other=value' https://example.invalid"),
     ("curl -u user:plainpass https://example.invalid", f"curl -u user:{R} https://example.invalid"),
     ("curl -uuser:plainpass https://example.invalid", f"curl -uuser:{R} https://example.invalid"),
-    ("curl --user 'bob:two words' https://example.invalid", f"curl --user bob:{R} https://example.invalid"),
+    ("curl --user 'bob:plainpass' https://example.invalid", f"curl --user bob:{R} https://example.invalid"),
     ("mysql -u root -pPlainPass db", f"mysql -u root -p{R} db"),
     ("mysql --password=PlainPass db", f"mysql --password={R} db"),
     ("wget --http-password=plainpass https://example.invalid",
@@ -73,6 +72,16 @@ REDACTED = [
 
 # Not a typed credential: untouched, byte for byte.
 UNTOUCHED = [
+    # A value with a blank, operator, expansion, glob or leading `~` is never
+    # withheld (delta review of #205): the accepted cost of a quoting model
+    # that can be wrong.
+    "MY_TOKEN='two words' ./run",
+    "curl --user 'bob:two words' https://example.invalid",
+    "MY_PASSWORD='a;b' ./run",
+    "MY_TOKEN=~/plain ./run",
+    "TOKEN=$'plain\\nvalue1' ./run",
+    "API_KEY=abcd* ls",
+    "rm -rf API_KEY=abcd{,/../../..}",
     "PATH=/usr/local/bin:/usr/bin NODE_ENV=production CI=1 make",
     "AUTH_TOKEN_TTL=3600 SESSION_DRIVER=redis ./run",
     "MY_TOKEN=$OTHER ./run",
@@ -384,10 +393,17 @@ FALSE_POSITIVES = [
     "PASSWORD_FILE=secret.txt app --token-file=token.txt",
     "curl -b cookies.txt https://example.invalid",
     "SESSION_DRIVER=redis COOKIE_SECURE=true ./run",
+    # A program to run is not a secret.
+    "GIT_ASKPASS=evilhelper git push",
+    "SSH_ASKPASS=askhelper ssh host",
+    "SUDO_ASKPASS=askhelper sudo -A true",
+    "BORG_PASSCOMMAND=getpassword borg list",
+    "CREDENTIAL_HELPER=storehelper git fetch",
+    "aws configure set credential_process getcredentials",
 ]
 
 CHEAP_CATCHES = [
-    ("TOKEN=$'plain\\nvalue1'", f"TOKEN={R}"),
+    ("TOKEN=$'plainvalue1'", f"TOKEN={R}"),
     ("docker login -u bob -p plainpass registry", f"docker login -u bob -p {R} registry"),
     ("podman login -p plainpass registry", f"podman login -p {R} registry"),
     ("curl -b 'session=plainv' https://example.invalid", f"curl -b {R} https://example.invalid"),
@@ -463,31 +479,34 @@ class ReviewFixes(unittest.TestCase):
 # -- the owner's decision, 2026-10-15: cards and raw logs ------------------------
 
 # Each line runs the value or hides structure; the card must show what runs.
+# (command, a value the line may run is marked, what must show). A value with
+# a blank is never withheld at all, so rule 3's cases use one without.
 NEVER_HIDDEN = [
-    ("X_TOKEN='rm -rf ~'; eval $X_TOKEN", True),
-    ("X_TOKEN='rm -rf ~'; eval \"$X_TOKEN\"", True),
-    ("X_TOKEN='rm -rf ~'; bash -c \"$X_TOKEN\"", True),
-    ("X_TOKEN='rm -rf ~'; zsh -lc \"$X_TOKEN\"", True),
-    ("X_TOKEN='rm -rf ~'; $X_TOKEN", True),
-    ("X_TOKEN='rm -rf ~'; ${X_TOKEN}", True),
-    ("export X_TOKEN='rm -rf ~' && sudo $X_TOKEN", True),
-    ("X_TOKEN='rm -rf ~'; source <(echo $X_TOKEN)", True),
-    ("X_TOKEN='rm -rf ~'; . <(echo $X_TOKEN)", True),
-    ("X_TOKEN='import os; os.system(\"rm -rf ~\")'; python3 -c \"$X_TOKEN\"", True),
-    ("X_TOKEN='rm -rf ~'; perl -e \"system('$X_TOKEN')\"", True),
-    ("X_TOKEN='rm -rf ~'; echo \"$X_TOKEN\" | sh", True),
-    ("X_TOKEN='rm -rf ~'; echo \"$X_TOKEN\" | /bin/bash", True),
-    ("X_TOKEN='rm -rf ~'; echo $($X_TOKEN)", True),
-    ("X_TOKEN='rm -rf ~'; echo `$X_TOKEN`", True),
-    ("X_TOKEN='rm -rf ~'; eval '$'X_TOKEN", True),
-    ("R=X_TOKEN; X_TOKEN='rm -rf ~'; eval ${!R}", True),
-    ("X_TOKEN='rm -rf ~' bash -c '$X_TOKEN'", True),
-    ("X_TOKEN='rm -rf ~'; bash <<< \"$X_TOKEN\"", True),
-    ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" > /tmp/a.sh; sh /tmp/a.sh", True),
-    ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" | xargs -I{} sh -c {}", True),
-    ("X_TOKEN='rm -rf ~'; printf %s \"$X_TOKEN\" | tee run.sh", True),
-    ("X_TOKEN='rm -rf ~'; cmd /c %X_TOKEN%", True),
-    ("X_TOKEN='rm -rf ~' python3 -c 'import os; os.system(os.environ[\"X_TOKEN\"])'", True),
+    ("X_TOKEN='rmrf~'; eval $X_TOKEN", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; eval \"$X_TOKEN\"", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; bash -c \"$X_TOKEN\"", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; zsh -lc \"$X_TOKEN\"", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; $X_TOKEN", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; ${X_TOKEN}", True, "rmrf~"),
+    ("export X_TOKEN='rmrf~' && sudo $X_TOKEN", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; source <(echo $X_TOKEN)", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; . <(echo $X_TOKEN)", True, "rmrf~"),
+    ("X_TOKEN='import os; os.system(\"rm -rf ~\")'; python3 -c \"$X_TOKEN\"", False),
+    ("X_TOKEN=rmrfhome python3 -c 'import os; os.system(os.environ[\"X_TOKEN\"])'", True, "rmrfhome"),
+    ("X_TOKEN='rmrf~'; perl -e \"system('$X_TOKEN')\"", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; echo \"$X_TOKEN\" | sh", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; echo \"$X_TOKEN\" | /bin/bash", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; echo $($X_TOKEN)", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; echo `$X_TOKEN`", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; eval '$'X_TOKEN", True, "rmrf~"),
+    ("R=X_TOKEN; X_TOKEN='rmrf~'; eval ${!R}", True, "rmrf~"),
+    ("X_TOKEN='rmrf~' bash -c '$X_TOKEN'", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; bash <<< \"$X_TOKEN\"", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; printf %s \"$X_TOKEN\" > /tmp/a.sh; sh /tmp/a.sh", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; printf %s \"$X_TOKEN\" | xargs -I{} sh -c {}", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; printf %s \"$X_TOKEN\" | tee run.sh", True, "rmrf~"),
+    ("X_TOKEN='rmrf~'; cmd /c %X_TOKEN%", True, "rmrf~"),
+    ("X_TOKEN='rmrf~' python3 -c 'import os; os.system(os.environ[\"X_TOKEN\"])'", True, "rmrf~"),
     # Quoting: what looks like a value is not one in the line's own parse.
     ("echo 'MY_TOKEN=\"abc' ; rm -rf ~ ; echo '\"'", False),
     ("echo \"MY_TOKEN='$(rm -rf ~)'\"", False),
@@ -497,6 +516,28 @@ NEVER_HIDDEN = [
     ("curl -H Cookie:a=1;rm -rf ~", False),
     ("curl -u 'u:a' ; rm -rf ~ ; echo ':b' https://x", False),
     ("MY_TOKEN=abc;rm -rf ~", False),
+    # Delta review of #205: a `'` in a comment or a here-document desynced
+    # the quoting model, and the value swallowed a command.
+    ("# it's fine\necho 'x API_KEY='abcd; rm -rf ~; echo 'y' # it's", False),
+    ("cat <<'EOF' >/dev/null\nit's\nEOF\necho 'x API_KEY='abcd; rm -rf ~; echo 'y'", False),
+    ("# it's\necho '{\"password\": \"'abc; rm -rf ~; '\"}' # '", False),
+    ("echo \"$(echo 'a\"b')\" API_KEY='abcd;rm -rf ~'", False),
+    ("echo `echo #'` ; API_KEY='x;rm -rf ~' ok", False),
+    ("rm -rf API_KEY=abcd{,/../../..}", False, "{,/../../..}"),
+    ("API_KEY=abcd* ls", False, "abcd*"),
+    # Rule 3 additions.
+    ("X_TOKEN='rmrf~'; trap \"$X_TOKEN\" EXIT", True, "rmrf~"),
+    ("X_TOKEN='rmrf'; watch \"$X_TOKEN\"", True, "rmrf"),
+    ("X_TOKEN='rmrf'; ssh host \"$X_TOKEN\"", True, "rmrf"),
+    ("X_TOKEN='rmrf'; autossh host \"$X_TOKEN\"", True, "rmrf"),
+    ("X_TOKEN='rmrf'; su -c \"$X_TOKEN\"", True, "rmrf"),
+    ("X_TOKEN='rmrf'; runuser -c \"$X_TOKEN\" bob", True, "rmrf"),
+    ("X_TOKEN='rmrf'; script -c \"$X_TOKEN\"", True, "rmrf"),
+    ("X_TOKEN='rmrf'; parallel ::: \"$X_TOKEN\"", True, "rmrf"),
+    ("X_TOKEN='rmrf'; find . -exec $X_TOKEN {} +", True, "rmrf"),
+    ("alias X_TOKEN='rmrf'; X_TOKEN", True, "rmrf"),
+    ("$env:X_TOKEN='rmrf'; & $env:X_TOKEN", True, "rmrf"),
+    ("$env:X_TOKEN='rmrf'; Start-Process $env:X_TOKEN", True, "rmrf"),
 ]
 
 
@@ -510,18 +551,25 @@ class Cards(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_a_withheld_value_never_hides_code_that_runs(self):
-        for command, marked in NEVER_HIDDEN:
+        from jarvis.v2.approvals import ApprovalRequest, clean_line
+        for command, marked, *shows in NEVER_HIDDEN:
+            shows = shows[0] if shows else "rm -rf ~"
             with self.subTest(command=command):
                 card = secrets.redact_command(command)
-                self.assertIn("rm -rf ~", card)
+                self.assertIn(shows, card)
+                self.assertEqual(card.count(secrets.RUN_MARKER), 1 if marked else 0)
                 if marked:
-                    self.assertIn(secrets.RUN_MARKER, card)
                     self.assertTrue(card.startswith(command.split("=", 1)[0]))
                 self.assertNotIn(R + R, card)
+                shown = ApprovalRequest(tool="Bash", args={"command": command}, command=command).to_json()
+                self.assertEqual(shown["command"], card)
+                self.assertEqual(shown["args"]["command"], card)
+                self.assertEqual(secrets.redact_value({"command": command}), {"command": card})
                 if not marked:
-                    # The label (which also drops a URL's query) never hides
-                    # structure either.
-                    self.assertIn("rm -rf ~", tool_calls.label("Bash", {"command": command}, ""))
+                    # Nothing withheld at all when the line only looks like
+                    # values; and the label (which also drops a URL's
+                    # query) never hides structure either.
+                    self.assertIn(clean_line(shows, 120), tool_calls.label("Bash", {"command": command}, ""))
 
     def test_structure_is_never_withheld(self):
         # Rule 1, directly: a value's span with an unquoted operator, blank,
@@ -529,13 +577,29 @@ class Cards(unittest.TestCase):
         mask = secrets._Mask("echo 'A=\"b' ; rm ; echo '\"'")
         self.assertFalse(mask.safe(8, 25))
         mask = secrets._Mask("A='b c' x")
-        self.assertTrue(mask.safe(2, 7))
-        self.assertFalse(mask.safe(2, 9))
+        self.assertTrue(mask.safe(2, 7, value=False))      # quoting alone: fine
+        self.assertFalse(mask.safe(2, 7))                   # a value with a blank: never
+        self.assertFalse(mask.safe(2, 9, value=False))
+        self.assertTrue(secrets._Mask("A='bc' x").safe(2, 6))
         mask = secrets._Mask('echo "A=$(rm)"')
         self.assertFalse(mask.safe(8, 13))
         # No active character, but the span ends inside other quoting.
         self.assertFalse(secrets._Mask("a'b'c").safe(1, 3))
         self.assertTrue(secrets._Mask("a'b'c").safe(1, 4))
+        # The character rule holds even where the quoting looks right.
+        self.assertFalse(secrets._Mask("A='b;c'").safe(2, 7))
+        self.assertFalse(secrets._Mask("A=~b").safe(2, 4))
+        self.assertTrue(secrets._Mask("A=b;c").safe(2, 3))
+        # Fail closed: a comment to its line's end, everything after a
+        # here-document, a backtick, or a `$(` inside double quotes.
+        text = "# it's x\nA=bcd"
+        mask = secrets._Mask(text)
+        self.assertFalse(mask.safe(2, 4))
+        self.assertTrue(mask.safe(text.index("bcd"), len(text)))
+        for text in ("cat <<E\nx\nE\nA=bcd", "echo `x` A=bcd", 'echo "$(x)" A=bcd'):
+            self.assertFalse(secrets._Mask(text).safe(text.index("bcd"), len(text)), text)
+        text = "echo a#b A=bcd"                 # not a word-start `#`
+        self.assertTrue(secrets._Mask(text).safe(text.index("bcd"), len(text)))
 
     def request(self, command):
         from jarvis.v2.approvals import ApprovalRequest
@@ -555,6 +619,25 @@ class Cards(unittest.TestCase):
             self.assertNotIn("plain", json.dumps(card))
         self.assertEqual(request.command, command)
         self.assertEqual(request.args["command"], command)
+
+    def test_the_escape_hatch_card_shows_what_bash_will_run(self):
+        # The hatch asks with this card, then runs the raw command with
+        # `bash -c` (hatch.py): the card must show every command in it.
+        from jarvis.v2.approvals import ApprovalRequest
+        for command, _marked, *shows in NEVER_HIDDEN:
+            shows = shows[0] if shows else "rm -rf ~"
+            card = ApprovalRequest(tool="Bash", args={"command": command}, command=command,
+                                   allowlistable=False, layer="escape-hatch").to_json()
+            self.assertIn(shows, card["command"], command)
+
+    def test_card_projection_is_computed_once(self):
+        request = self.request("MY_TOKEN=plainvalue1 ./run")
+        with patch.object(secrets, "redact_command", wraps=secrets.redact_command) as judge:
+            first = request.to_json()
+            for _ in range(5):
+                self.assertEqual(request.to_json(), first)
+                request.owner_json()
+        self.assertEqual(judge.call_count, 5)     # command, two args, reason, headline
 
     def test_card_redaction_failure_shows_the_command(self):
         command = "MY_TOKEN=plainvalue1 ./run"
@@ -632,9 +715,11 @@ class Cards(unittest.TestCase):
         described = _describe(SimpleNamespace(args=args))
         self.assertNotIn("plain", described)
         self.assertIn(f"MY_TOKEN={R} ./run", described)
-        run = {"command": "X_TOKEN='rm -rf ~'; eval $X_TOKEN"}
-        self.assertIn("rm -rf ~", _for_display(run)["command"])
-        self.assertIn("rm -rf ~", _describe(SimpleNamespace(args=run)))
+        for command, _marked, *shows in NEVER_HIDDEN:
+            shows = shows[0] if shows else "rm -rf ~"
+            run = {"command": command}
+            self.assertIn(shows, _for_display(run)["command"], command)
+            self.assertIn(shows, _describe(SimpleNamespace(args=run)), command)
 
 
 class RawLogs(unittest.TestCase):

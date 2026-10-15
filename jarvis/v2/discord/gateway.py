@@ -760,6 +760,9 @@ class DiscordRouter:
         if typed is not None:
             request = _Asked(tool=typed.tool, args=dict(typed.args or {}),
                              allowlistable=getattr(typed, "allowlistable", True) is not False)
+        else:
+            # Not pending (answered meanwhile): never judge "always" on the card.
+            request = _Asked(tool=tool, args=args, allowlistable=False)
         # The whole command is shown, minus any secret value pasted into it:
         # the transcript scrub runs over the text Discord receives.
         headline = str(data.get("headline") or "")

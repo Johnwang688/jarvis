@@ -1123,9 +1123,9 @@ _INLINE_AUTH = re.compile(
 _INLINE_HEADER = re.compile(
     r"(?<![\w-])(?:-H|--header)[ \t]*=?[ \t]*['\"]?(?P<name>[A-Za-z][A-Za-z0-9_-]*)[ \t]*:[ \t]*"
     r"(?P<value>" + _HEADER_VALUE + ")")
-# A cookie header is a session: all of it, to the end of its quoting (rule 1
-# keeps it whole when unquoted operators would be inside).
-_INLINE_COOKIE = re.compile(r"(?i)(?<![\w-])cookie[ \t]*:[ \t]*(?P<value>[^'\"\n\\$`]+)")
+# A cookie header is a session: its first pair (the rest are named pairs
+# the assignment rule judges; a value never holds a `;`).
+_INLINE_COOKIE = re.compile(r"(?i)(?<![\w-])cookie[ \t]*:[ \t]*(?P<value>" + _HEADER_VALUE + ")")
 # `"password": "value"` in a JSON body.
 _INLINE_JSON = re.compile(
     r"\"(?P<name>[A-Za-z_][A-Za-z0-9_.\-]*)\"[ \t]*:[ \t]*\"(?P<value>(?:[^\"\\\n]|\\.)*)\"")
@@ -1170,6 +1170,10 @@ _PROGRAM_WORD = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(
     (re.escape(p) for programs, *_ in _PROGRAM_FLAGS for p in programs), key=len, reverse=True))
     + r")(?![\w.-])")
 _FILE_PARTS = frozenset({"file", "files", "path", "dir"})
+# A name for a program to run, not a secret: its value stays, as a file's
+# does (`GIT_ASKPASS`, `SUDO_ASKPASS`, `BORG_PASSCOMMAND`,
+# `CREDENTIAL_HELPER`, `credential_process`).
+_EXEC_ENDINGS = ("askpass", "command", "cmd", "helper", "process", "program", "exec", "hook", "script")
 # Rule 3. A line that re-parses text as code, or runs a variable as a
 # command: every variable's value stays.
 _RUNNERS = (r"(?:sh|bash|rbash|dash|zsh|ksh|mksh|ash|fish|csh|tcsh|busybox|python\d*(?:\.\d+)?|"
@@ -1179,7 +1183,10 @@ _RUNNERS = (r"(?:sh|bash|rbash|dash|zsh|ksh|mksh|ash|fish|csh|tcsh|busybox|pytho
 _RUNNER_WORD = re.compile(r"(?i)(?:(?<=/)|(?<![^\s;&|(`'\"]))" + _RUNNERS + r"(?![\w.-])")
 _EXEC_OPTION = re.compile(r"(?<![\w-])(?:-[A-Za-z]*[cCeE][A-Za-z]*|--eval|/[cCkK])(?![\w-])")
 _REPARSE = re.compile(
-    r"(?i)(?<![\w.-])(?:eval|source|exec|xargs|iex|invoke-expression)(?![\w-])"
+    r"(?i)(?<![\w.-])(?:eval|source|exec|xargs|iex|invoke-expression|start-process|trap|watch|parallel"
+    r"|alias|ssh|autossh|mosh|su|runuser|script)(?![\w-])"
+    r"|(?<!\S)-(?:exec|execdir|ok|okdir)(?![\w-])"
+    r"|&[ \t]*\$(?i:env):"
     r"|(?<![\w.-])env[ \t]+(?:-[^\s;&|]+[ \t]+)*-S"
     r"|(?:^|[\s;&|(`])\.[ \t]"
     r"|<\(|<<<"
@@ -1211,19 +1218,53 @@ _REFERENCE = re.compile(r"\$\{?!?([A-Za-z_][A-Za-z0-9_]*)|(?i:\$env:)([A-Za-z_][
                         r"|%([A-Za-z_][A-Za-z0-9_]*)%")
 
 
+# Never withheld, whatever the quoting looks like (delta review of #205,
+# HIGH): a value holding a blank, an operator, an expansion, a glob or a
+# leading `~`. Every real command needs one of these to be a command, so a
+# value the quoting model misread can never swallow one.
+_UNSAFE_VALUE = re.compile(r"[\s;&|<>()$`{}*?\[]")
+
+
+def _unsafe_literal(value: str) -> bool:
+    return bool(_UNSAFE_VALUE.search(value)) or value.startswith("~")
+
+
 class _Mask:
     """Rule 1: where the shell reads `text` as structure. `safe(a, b)` says
     whether `text[a:b]` can be replaced without hiding any: it starts and
-    ends in the same quoting and holds nothing active."""
+    ends in the same quoting, holds nothing active and, for a value, no
+    character `_UNSAFE_VALUE` names. Where the model stops being sure, it
+    fails closed: a comment (a word-start `#`, to the end of its line) is
+    all active, and so is everything after a here-document's `<<`, a
+    backtick, or a `$(` inside double quotes (whose inner quoting nests)."""
 
     def __init__(self, text: str):
         n = len(text)
         state = bytearray(n + 1)          # quoting before each character
         active = [0] * (n + 1)            # active characters in text[:i]
         q = count = i = 0                 # q: 0 none, 1 '…', 2 "…", 3 $'…'
+        lost = False                      # from here on, nothing is withheld
         while i < n:
             c = text[i]
             state[i] = q
+            if not lost:
+                if q == 0 and c == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|()"):
+                    end = text.find("\n", i)
+                    end = n if end == -1 else end
+                    for k in range(i, end):
+                        state[k] = 0
+                        count += 1
+                        active[k + 1] = count
+                    i = end
+                    continue
+                if c == "`" and q in (0, 2) or (q == 2 and c == "$" and text[i + 1:i + 2] == "(") \
+                        or (q == 0 and text.startswith("<<", i) and not text.startswith("<<<", i)):
+                    lost = True
+            if lost:
+                count += 1
+                active[i + 1] = count
+                i += 1
+                continue
             pair = (c == "\\" and q != 1) or (c == "$" and q == 0 and text[i + 1:i + 2] == "'")
             if pair and i + 1 < n:
                 # An escape, or `$'` opening an ANSI-C quote: two characters
@@ -1253,9 +1294,14 @@ class _Mask:
             active[i + 1] = count
             i += 1
         state[n] = q
-        self.state, self.active = state, active
+        self.text, self.state, self.active = text, state, active
 
-    def safe(self, a: int, b: int) -> bool:
+    def safe(self, a: int, b: int, *, value: bool = True) -> bool:
+        if a >= b:
+            return True
+        # `$'` opens a quote, not an expansion; the rest is judged as typed.
+        if value and _unsafe_literal(self.text[a:b].replace("$'", "'")):
+            return False
         return self.state[a] == self.state[b] and self.active[b] == self.active[a]
 
 
@@ -1278,7 +1324,7 @@ def _masked_sub(pattern: re.Pattern, fn, text: str) -> str:
         if mask is None:
             mask = _Mask(text)
         a, b = match.start() + p, match.end() - s
-        if a < b and not mask.safe(a, b):
+        if not mask.safe(a, b):
             return whole
         return out
 
@@ -1335,13 +1381,16 @@ def strip_url_credentials(text: str, *, query: bool = False) -> str:
         if mask is None:
             mask = _Mask(text)
         if broken:
-            if "$" not in url and "`" not in url and mask.safe(base, base + len(url)):
+            if "$" not in url and "`" not in url and mask.safe(base, base + len(url), value=False):
                 out.append(text[last:base] + "[redacted]")
                 last = match.end()
             continue
         pieces, pos = [], 0
         for a, b in cuts:
-            if "$" in url[a:b] or "`" in url[a:b] or not mask.safe(base + a, base + b):
+            # Userinfo is a value (`_UNSAFE_VALUE`); a query the label drops
+            # is judged by the quoting alone.
+            if "$" in url[a:b] or "`" in url[a:b] \
+                    or not mask.safe(base + a, base + b, value=url[a] != "?" and url[a] != "#"):
                 continue
             pieces.append(url[pos:a])
             pos = b
@@ -1370,6 +1419,8 @@ def _literal(word: str) -> str | None:
     out = []
     for match in _WORD_PIECE.finditer(word):
         ansi, single, double, bare = match.groups()
+        if ansi is not None and "\\" in ansi:
+            return None             # `$'a\nb'` decodes to what we cannot see
         if ansi is not None or single is not None:
             out.append(ansi if ansi is not None else single)
             continue
@@ -1383,11 +1434,11 @@ def _literal(word: str) -> str | None:
 def _withheld(name: str, value: str | None) -> bool:
     """Is `value`, typed under `name`, a credential to withhold? The env
     files' rule, less file references (see above)."""
-    if value is None or not credential_name(name):
+    if value is None or not credential_name(name) or _unsafe_literal(value):
         return False
     parts = _key_parts(name)
-    if parts and parts[-1] in _FILE_PARTS:
-        return False                                # `PASSWORD_FILE=…`, `--token-file`
+    if parts and (parts[-1] in _FILE_PARTS or parts[-1].endswith(_EXEC_ENDINGS)):
+        return False                                # `PASSWORD_FILE=…`, `GIT_ASKPASS=…`
     if "/" in value and _PATH.match(value):
         return False                                # `--key ./client-key.pem`
     return _secret_entry(name, value)
@@ -1418,7 +1469,8 @@ def _named_value(run):
     unless the line may run it (rule 3), which it then says."""
     def redact(match: re.Match) -> str:
         name = match.group("name")
-        if _already(match) or not _withheld(name, _literal(match.group("value"))):
+        if _already(match) or not _withheld(name, _literal(match.group("value"))) \
+                or match.string.startswith(" " + RUN_MARKER, match.end()):
             return match.group(0)
         if run is True or name in run:
             return match.group(0) + " " + RUN_MARKER
@@ -1467,7 +1519,8 @@ def _program_value(kind: str):
     def redact(match: re.Match) -> str:
         word = match.group("value")
         value = _literal(word)
-        if _already(match) or value is None or not value or word.startswith("-"):
+        if _already(match) or value is None or not value or word.startswith("-") \
+                or _unsafe_literal(value):
             return match.group(0)
         if kind == _USERPASS:
             user, colon, password = value.partition(":")

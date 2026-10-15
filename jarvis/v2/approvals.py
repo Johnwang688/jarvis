@@ -175,6 +175,16 @@ class ApprovalRequest:
     browser: dict[str, Any] | None = field(default=None, repr=False)
     max_wait_s: float | None = None
     _hud_private: bool = field(default=False, init=False, repr=False)
+    _card: dict | None = field(default=None, init=False, repr=False, compare=False)
+
+    def card(self) -> dict:
+        """The redacted projection a card shows (`card_text`/`card_args`),
+        computed once per request: every publish and `GET /approvals`
+        reuses it."""
+        if self._card is None:
+            self._card = {"args": card_args(self.args), "command": card_text(self.command),
+                          "reason": card_text(self.reason), "headline": card_text(self.headline)}
+        return self._card
 
     @property
     def private(self) -> bool:
@@ -191,13 +201,13 @@ class ApprovalRequest:
             }
         return {
             "req_id": self.req_id, "code": self.code, "tool": self.tool,
-            "args": card_args(self.args), "command": card_text(self.command),
-            "reason": card_text(self.reason),
+            "args": self.card()["args"], "command": self.card()["command"],
+            "reason": self.card()["reason"],
             "layer": self.layer, "thread_id": self.thread_id,
             "task_id": self.task_id, "provider": self.provider,
             "origin": self.origin, "asked_at": self.asked_at,
             "allowlistable": self.allowlistable, "timeout_s": self.timeout_s,
-            "headline": card_text(self.headline),
+            "headline": self.card()["headline"],
             "discord_channel_id": self.discord_channel_id,
         }
 
@@ -205,9 +215,7 @@ class ApprovalRequest:
         """Private detail projection; call only behind the owner HUD boundary."""
         if not self.private:
             return self.to_json()
-        return {**self.to_json(), "args": card_args(self.args), "command": card_text(self.command),
-                "reason": card_text(self.reason), "headline": card_text(self.headline),
-                "browser": self.browser}
+        return {**self.to_json(), **self.card(), "browser": self.browser}
 
 
 @dataclass
