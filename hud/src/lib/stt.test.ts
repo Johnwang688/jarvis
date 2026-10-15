@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  SttAssembler, STT_MAX_CLIPS, STT_RETRY_DELAY_MS, placementFor, retryable, sttDeadlineMs,
+  NOT_OWNER_MESSAGE, SttAssembler, STT_MAX_CLIPS, STT_RETRY_DELAY_MS, isNotOwner, placementFor, retryable, sttDeadlineMs,
   type SttEvent, type SttPlaced,
 } from "./stt";
 import { VoiceDiagnostics } from "./voiceDiagnostics";
 
-type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number;
+type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number; verified: (kind: string) => void;
   resolve: (t: string) => void; reject: (e: unknown) => void };
 
 function harness(over: { canUpload?: (explicit: boolean) => boolean; maxInFlight?: number } = {}) {
@@ -743,6 +743,124 @@ describe("chunked messages (V4)", () => {
     expect(h.texts()).toEqual(["rest"]);
     expect(h.stt.clip(b)).toBeNull();
     expect(h.diagnostics.snapshot().rows[0].outcome).not.toBe("cancelled");
+  });
+});
+
+
+// V12: a voice the daemon refused as not the owner's (HTTP 422) uploads nothing, keeps nothing and is never retried.
+describe("a clip refused as not the owner's voice (V12)", () => {
+  const notOwner = () => Object.assign(new Error(NOT_OWNER_MESSAGE), { status: 422 });
+  const sub = (h: ReturnType<typeof harness>, g: number, ms = 8000) => h.stt.submit(h.clip(), ms, "wake", "meta", { group: g })!;
+
+  it("recognises only the daemon's refusal", () => {
+    expect(isNotOwner(notOwner())).toBe(true);
+    expect(isNotOwner(Object.assign(new Error("something else"), { status: 422 }))).toBe(false);
+    expect(isNotOwner(Object.assign(new Error(NOT_OWNER_MESSAGE), { status: 502 }))).toBe(false);
+    expect(isNotOwner(null)).toBe(false);
+    expect(isNotOwner("not the enrolled speaker")).toBe(false);
+    expect(retryable(notOwner())).toBe(false);
+  });
+
+  it("is never retried, never kept for Retry, and ends the message as not_owner", async () => {
+    const h = harness();
+    const id = h.stt.submit(h.clip(), 3000, "wake", "m")!;
+    h.calls[0].reject(notOwner());
+    await flush();
+    await vi.advanceTimersByTimeAsync(STT_RETRY_DELAY_MS * 3);
+    expect(h.calls).toHaveLength(1);                           // no automatic retry
+    expect(h.stt.clip(id)).toBeNull();                         // the audio is gone
+    expect(h.stt.snapshot().clips).toEqual([]);                // so there is nothing to Retry or Play
+    expect(h.stt.retry(id)).toBe(false);
+    expect(h.events).toEqual([{ kind: "busy", pending: 1 }, { kind: "rejected", parts: 1 }]);
+    expect(h.texts()).toEqual([]);                             // nothing placed
+    const rows = h.diagnostics.snapshot().rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ outcome: "not_owner", rejected: 1 });
+    expect(rows[0].kept).toBeFalsy();
+    await h.stt.whenSettled(id);                               // and its fate is known: barge-in does not wait on it
+  });
+
+  it("another 422 is an ordinary failure with Retry", async () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 3000, "wake", "m");
+    h.calls[0].reject(Object.assign(new Error("unprocessable"), { status: 422 }));
+    await flush();
+    expect(h.events.some(e => e.kind === "failed")).toBe(true);
+    expect(h.stt.snapshot().clips[0].state).toBe("failed");
+  });
+
+  it("a message whose every chunk is refused is over: not_owner, nothing placed, settled", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g);
+    h.calls[0].reject(notOwner()); h.calls[1].reject(notOwner());
+    await flush();
+    h.stt.closeGroup(g);
+    await h.stt.whenGroupSettled(g);
+    expect(h.texts()).toEqual([]);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ outcome: "not_owner", rejected: 2 });
+    expect(h.stt.snapshot().clips).toEqual([]);
+  });
+
+  it("a refused chunk leaves a hole: the rest is placed late, for review, and its audio is gone", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g); sub(h, g);
+    h.calls[0].resolve("send the report");
+    h.calls[1].reject(notOwner());
+    h.calls[2].resolve("to the team");
+    await flush();
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["send the report to the team"]);
+    expect(h.placed[0][0]).toMatchObject({ late: true, parts: 2 });       // boxed for review, never sent as the whole message
+    expect(h.placed[0][0].meta).toBe("m");
+    expect(h.stt.snapshot().clips).toEqual([]);                           // the refused chunk's audio is not kept
+    expect(h.diagnostics.snapshot().rows[0].rejected).toBe(1);
+    expect(h.diagnostics.snapshot().rows[0].outcome).toBe("transcribing"); // the placer settles it with the real outcome
+  });
+
+  it("the refused chunk does not hold up the others while the message is still being spoken", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g);
+    h.calls[0].reject(notOwner());
+    await flush();
+    expect(h.texts()).toEqual([]);                      // still open: nothing is placed early
+    h.calls[1].resolve("hello");
+    await flush();
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["hello"]);
+    expect(h.placed[0][0].late).toBe(true);
+  });
+
+  it("a chunk waiting for a slot is still refused one by one, and the queue moves on", async () => {
+    const h = harness({ maxInFlight: 1 });
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g);
+    expect(h.calls).toHaveLength(1);
+    h.calls[0].reject(notOwner());
+    await flush();
+    expect(h.calls).toHaveLength(2);
+    h.calls[1].resolve("ok");
+    await flush();
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["ok"]);
+  });
+
+  it("what the daemon did about verification reaches the diagnostics row, not a score", async () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 3000, "wake", "m");
+    h.calls[0].verified("skipped_guest");
+    h.calls[0].resolve("hi");
+    await flush();
+    expect(h.diagnostics.snapshot().rows[0].verify).toBe("skipped_guest");
+    h.diagnostics.verified(1, "matched");
+    expect(h.diagnostics.snapshot().rows[0].verify).toBe("matched");
+    h.diagnostics.verified(1, "a score of 0.93");
+    expect(h.diagnostics.snapshot().rows[0].verify).toBe("matched");     // anything else is ignored
   });
 });
 

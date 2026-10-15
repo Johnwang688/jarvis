@@ -29,6 +29,8 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt }: { di
         #{row.id} · {row.source.replace("_", " ")} · {(row.ms / 1000).toFixed(2)} s · {row.outcome.replaceAll("_", " ")}{row.latencyMs !== undefined ? ` · ${(row.latencyMs / 1000).toFixed(2)} s to outcome` : ""}
         {row.backend ? ` · ${row.backend}${row.fellBack ? " (local failed)" : ""}` : ""}
         {row.kept ? " · audio kept" : row.outcome === "stt_failed" ? " · audio not kept" : ""}
+        {row.verify === "skipped_guest" ? " · verification skipped (guest voice)" : row.verify === "skipped_unenrolled" ? " · verification skipped (no voice enrolled)" : row.verify === "matched" ? " · voice matched" : row.verify === "no_speech" ? " · too little speech to check" : ""}
+        {row.rejected ? ` · ${row.rejected} part${row.rejected === 1 ? "" : "s"} not your voice` : ""}
         {clips.filter(c => c.diag === row.id).map(c => <span key={c.id}>{" "}
           <button type="button" data-testid="voice-clip-play" onClick={() => { const b = stt?.clip(c.id); if (b) void playClip(b).catch(() => {}); }}>Play</button>
           {c.state === "failed" ? <> <button type="button" data-testid="voice-clip-retry" onClick={() => stt?.retry(c.id)}>Retry</button></> : null}

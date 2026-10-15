@@ -60,6 +60,7 @@ class Sandbox:
             "DISCORD_GUILD_PATH": config.DISCORD_GUILD_PATH,
             "ROUTING_PATH": config.ROUTING_PATH,
             "CODEX_CATALOG_PATH": config.CODEX_CATALOG_PATH,
+            "SPEAKER_DIR": config.SPEAKER_DIR,
         }
         self._home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
@@ -71,6 +72,7 @@ class Sandbox:
         config.DISCORD_GUILD_PATH = self.home / ".config" / "jarvis" / "discord_guild.json"
         config.ROUTING_PATH = self.home / ".config" / "jarvis" / "routing.json"
         config.CODEX_CATALOG_PATH = self.home / ".local" / "share" / "jarvis" / "codex-models.json"
+        config.SPEAKER_DIR = self.home / ".local" / "share" / "jarvis" / "speaker"
         return self
 
     def __exit__(self, *exc):
@@ -368,6 +370,10 @@ def file_deny_checks():
             str(config.DISCORD_GUILD_PATH),
             str(config.ALLOWLIST_PATH.with_name("discord_guild.json")),
             "~/.config/jarvis/discord_guild.json",
+            # V12 (V-12b, owner 2026-10-14): the files that switch the voice check off.
+            str(config.SPEAKER_DIR / "voiceprint.json"),
+            str(config.SPEAKER_DIR / "guest.json"),
+            "~/.local/share/jarvis/speaker/guest.json",
             # V13 (owner, 2026-10-14: keep it protected): the speech-to-text switches
             # decide whether the owner's voice may leave the machine.
             str(config.STT_SETTINGS_PATH),
@@ -448,6 +454,8 @@ def file_deny_checks():
                         "D=~/.config/jarvis; cp /tmp/x $D/models.json",
                         "cp -t ~/.config/jarvis /tmp/routing.json",
                         "sh -c 'cp /tmp/x ~/.config/jarvis/provider_defaults.json'",
+                        "echo '{\"guest\": true}' > ~/.local/share/jarvis/speaker/guest.json",
+                        "rm ~/.local/share/jarvis/speaker/voiceprint.json",
                         "cp /tmp/x $HOME/.config/jarvis/stt.json",
                         "sh -c 'echo {} > ~/.config/jarvis/stt.json'",
                         "env -C ~/.config/jarvis cp /tmp/x allowlist.json",
@@ -465,6 +473,8 @@ def file_deny_checks():
         human = build_permit(context(brief), owner)
         for command in ("rsync -a /tmp/evil/ ~/.config/jarvis/",
                         "mkdir -p ~/.config/jarvis",
+                        # V-12b: the speaker folder holds two protected files, so deleting it is asked, never auto-run.
+                        "rm -rf ~/.local/share/jarvis/speaker",
                         "echo ~/.config/jarvis/allowlist.json | xargs cp /tmp/x",
                         "cp /tmp/x $UNSET_DIR/models.json"):
             seen = len(owner.seen)

@@ -537,6 +537,13 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;
 }
 #speechstrip[data-state="playing"] .note { color: var(--accent); }
+/* GUEST VOICE (V-14): always visible while on. Neutral text with a rule round it, so it is
+   never mistaken for the amber of a pending card or the red of an error. */
+#speechstrip .guestnote {
+  font: 600 9px var(--mono); letter-spacing: 0.1em; color: var(--text); text-align: center;
+  border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 1px 4px; align-self: center;
+}
+#speechstrip[data-guest="true"] button[data-testid="guest-toggle"] { color: var(--text); border-color: var(--border-strong); }
 #speechstrip .btns { display: flex; justify-content: center; }
 #speechstrip button {
   padding: 2px 0; width: 36px; border-radius: 0; margin-left: -1px; font: 11px var(--mono);
@@ -1725,3 +1732,18 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 
 /* Catch Direct dismissal on a stable HUD host before any iframe event. */
 .browserbody[data-options-open=true] .framehost::after { content: ""; position: absolute; inset: 0; z-index: 2; background: transparent; }
+
+/* Settings -> Voice -> Your voice (V12) */
+.speaker-settings { margin-top: 18px; }
+.speaker-settings h4 { margin: 12px 0 4px; font-size: 12px; }
+.speaker-settings .speaker-prompt { font-size: 14px; line-height: 1.5; padding: 8px 10px; border-left: 2px solid var(--border-strong); }
+.speaker-settings .speaker-meter { height: 6px; background: var(--surface-2, var(--border)); border-radius: var(--radius); overflow: hidden; margin: 6px 0; max-width: 360px; }
+.speaker-settings .speaker-meter > span { display: block; height: 100%; background: var(--accent); transition: width 80ms linear; }
+.speaker-settings ul.err { margin: 4px 0; padding-left: 18px; }
+.speaker-settings .spk-dist { display: flex; gap: 16px; flex-wrap: wrap; margin: 6px 0; }
+.speaker-settings .spk-hist { display: flex; align-items: flex-end; gap: 1px; height: 44px; width: 200px; border-bottom: 1px solid var(--border-strong); }
+.speaker-settings .spk-hist span { flex: 1; min-height: 1px; background: var(--text-muted); }
+.speaker-settings .spk-hist.own span { background: var(--accent); }
+.speaker-settings .speaker-delete { margin-top: 14px; }
+.speaker-settings .speaker-guest { display: block; margin-top: 10px; }
+.speaker-settings input[type="number"] { width: 72px; }

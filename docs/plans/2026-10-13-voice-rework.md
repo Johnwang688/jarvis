@@ -130,7 +130,8 @@ markdown.
 | V-9 | **Distinct voice per chat**, auto-assigned from local Kokoro and Pocket voices, sticky per thread, changeable from the chat header. |
 | V-10 | **Dictating into a busy chat steers** the running turn. |
 | V-11 | **STT robustness:** timeouts, retries, errors surfaced, audio kept for retry. Local STT and local keyword spotting are evaluated with a recommendation. |
-| V-12 | **The speaker store is not added to the protected-path detector** (owner, 2026-10-13, answering this plan's sign-off request). It is non-destructive configuration the owner can easily put back, so it does not need another agent-blocked path. It stays local, mode 0700, and is never uploaded. |
+| V-12 | **The speaker store is not added to the protected-path detector** (owner, 2026-10-13, answering this plan's sign-off request). It is non-destructive configuration the owner can easily put back, so it does not need another agent-blocked path. It stays local, mode 0700, and is never uploaded. (Amended by V-12b below for the two files that switch verification off.) |
+| V-12b | **`voiceprint.json` and `guest.json` in the speaker store join the protected-state set** (owner, 2026-10-14, on V12's review; the readings and `impostors.json` stay unprotected, so V-12 otherwise stands). Reason: these two files turn the voice check off (an enrolled voiceprint that is deleted or damaged, or Guest voice switched on, lets another person's voice reach the cloud), so no agent write, grant or shell command may change them; only the owner, in Settings > Voice. Their folder is an ancestor, so deleting it is covered by the same check (asked, never auto-run). |
 | V-13 | **Spoken summaries default to Haiku 5.5** (`anthropic/claude-haiku-5.5`) and stay under the 90k-token threshold, as compaction does now (`JARVIS_COMPACT_AT_TOKENS`). The owner reports Haiku at about 100–200 tokens/s, fast enough for speech. |
 | V-14 | **A switch turns speaker verification off ("Guest voice")** so a friend can demo or use Jarvis by voice. It does not change ML VAD, noise suppression or any approval rule (§3.4.1). It **stays on until the owner turns it off**, surviving HUD reloads and daemon restarts. |
 | V-12a | **The speech-to-text settings file `stt.json` stays in the protected-path set** (owner, 2026-10-14, on V13's review; this does not change V-12, which is about the speaker store). Reason: a flip toward upload cannot be undone once audio has been sent, so no agent write, grant or shell command may change it; only the owner, in Settings > Voice. |
@@ -246,7 +247,7 @@ Capture (main): claim (PTT | wake | follow-up | continuation) → UtteranceRecor
   Pocket voice store.
   - It holds the centroid, threshold, model id and reference clips (open
     question 12).
-  - **It is not added to the protected/credential path detector (V-12).**
+  - **Only the two files that switch verification off, `voiceprint.json` and `guest.json`, are protected state (V-12b); the readings and the rest are not (V-12).**
     The owner judged it non-destructive configuration that is easy to put
     back. The worst an agent edit can do is make verification reject the
     owner or accept another voice. Either is visible in diagnostics and

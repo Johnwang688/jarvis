@@ -869,6 +869,53 @@ STT_LOCAL_TIMEOUT_S = 30.0
 STT_LOCAL_BUDGET_SHARE = 0.45
 
 
+# Speaker verification (voice rework V12, plan 3.4, decisions V-2, V-12, V-14,
+# answered Q7 and Q12): NeMo TitaNet-small through sherpa-onnx, inside the
+# daemon (jarvis/speaker.py), so another person's voice is refused BEFORE any
+# cloud speech-to-text call. Measured in V0 (docs/notes/voice-face.md): 34 ms
+# for 3 s of audio on one thread, about 80 MB resident.
+#
+# The store is the owner's enrollment: the readings (kept so a model upgrade can
+# re-derive the voiceprint, Q12), the voiceprint and the Guest voice switch. Mode
+# 0700 like the Pocket voice store, never uploaded, no route returns its audio or
+# embeddings. Two of its files are protected state (V-12b, owner 2026-10-14):
+# `voiceprint.json` and `guest.json` switch the voice check off, so no agent write,
+# grant or shell command may change them, and their folder is an ancestor, so
+# deleting it is asked, never auto-run (jarvis/tools/files.py). The readings and
+# `impostors.json` are not protected (V-12): the worst an agent edit there can do is
+# lower a future proposal, and never below the proposal floor. Nothing here can
+# authorize anything (speech never answers an approval card).
+SPEAKER_DIR = Path(
+    os.environ.get("JARVIS_SPEAKER_DIR", Path.home() / ".local" / "share" / "jarvis" / "speaker")
+)
+SPEAKER_MODEL_NAME = "nemo_en_titanet_small"
+SPEAKER_MODEL_PATH = Path(os.environ.get(
+    "JARVIS_SPEAKER_MODEL", Path.home() / ".cache" / "jarvis-speaker" / "nemo_en_titanet_small.onnx"))
+# One thread: V0 measured 34 ms per 3 s at 1 thread and 19 ms at 4, and an
+# utterance is verified once, so the cores are better left to everything else.
+SPEAKER_THREADS = int(_env_number("JARVIS_SPEAKER_THREADS", 1, 1, 4))
+# Unload the model (80 MB) after this many idle minutes.
+SPEAKER_IDLE_MIN = _env_number("JARVIS_SPEAKER_IDLE_MIN", 5, 1, 24 * 60)
+# Cosine-similarity threshold. The owner's enrollment PROPOSES one (V0: the
+# equal-error threshold alone ranged 0.51 to 0.71 across conditions, so it is
+# never hard-coded); this is what the proposal starts from when there is nothing
+# to fit, and the bounds anything saved or typed must stay inside.
+SPEAKER_THRESHOLD_DEFAULT = _env_number("JARVIS_SPEAKER_THRESHOLD", 0.60, 0.30, 0.90)
+SPEAKER_THRESHOLD_MIN = 0.30
+SPEAKER_THRESHOLD_MAX = 0.90
+# What the owner's enrollment is held to. A PROPOSED threshold is never below the floor, and
+# readings whose weakest 10 % score below the genuine floor against each other cannot tell the
+# owner's voice from a stranger's with any confidence: that proposal needs an explicit "accept
+# anyway" and says "record the readings again". A threshold the owner types may still go down to
+# SPEAKER_THRESHOLD_MIN, with a warning.
+SPEAKER_PROPOSAL_FLOOR = 0.50
+SPEAKER_GENUINE_FLOOR = 0.60
+# A clip under this is a command ("Jarvis pause"), whose embedding is noisier and
+# which only controls playback (plan 3.4): its threshold is lowered by this much.
+SPEAKER_SHORT_CLIP_S = 1.2
+SPEAKER_SHORT_RELAX = _env_number("JARVIS_SPEAKER_SHORT_RELAX", 0.08, 0.0, 0.25)
+
+
 def _load_dotenv() -> None:
     env_file = REPO_ROOT / ".env"
     if not env_file.exists():

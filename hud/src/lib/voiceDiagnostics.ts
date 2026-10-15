@@ -6,7 +6,10 @@ export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_c
 export type MicCapability = "unknown" | "available" | "unavailable";
 /** How the microphone reaches the capture (V4): the AudioWorklet, or the older ScriptProcessor fallback. */
 export type CapturePathName = "unknown" | "worklet" | "script_processor";
-export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
+/** What the daemon did about whose voice a clip was (V12): the score itself is never kept here. */
+export type VerifyResult = "matched" | "skipped_guest" | "skipped_unenrolled" | "no_speech";
+const verifyResults: VerifyResult[] = ["matched", "skipped_guest", "skipped_unenrolled", "no_speech"];
+export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V12: speaker verification's answer for the message. */ verify?: VerifyResult; /** V12: how many chunks of the message the daemon refused as not the owner's. */ rejected?: number; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
 export type SttBackend = "local" | "cloud";
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
@@ -86,7 +89,22 @@ export class VoiceDiagnostics {
   reopen(id: number) {
     const row = this.rows.find(x => x.id === id);
     if (!row || row.outcome !== "stt_failed") return;
-    this.rows = this.rows.map(x => x.id === id ? { id: x.id, at: x.at, ms: x.ms, source: x.source, detector: x.detector, outcome: "transcribing" as const, kept: x.kept } : x);
+    this.rows = this.rows.map(x => x.id === id ? { id: x.id, at: x.at, ms: x.ms, source: x.source, detector: x.detector, outcome: "transcribing" as const, kept: x.kept, verify: x.verify, rejected: x.rejected } : x);
+    this.publish();
+  }
+  /** V12: what speaker verification did for this message ("verify_skipped_guest" is recorded, not a score). */
+  verified(id: number, kind: string) {
+    if (!verifyResults.includes(kind as VerifyResult)) return;
+    const row = this.rows.find(x => x.id === id);
+    if (!row || row.verify === kind) return;
+    this.rows = this.rows.map(x => x.id === id ? { ...x, verify: kind as VerifyResult } : x);
+    this.publish();
+  }
+  /** V12: `count` chunks of the message were refused as not the owner's voice. */
+  rejected(id: number, count: number) {
+    const row = this.rows.find(x => x.id === id);
+    if (!row) return;
+    this.rows = this.rows.map(x => x.id === id ? { ...x, rejected: bounded(count, 999) } : x);
     this.publish();
   }
   /** Whether a clip's audio is still held (memory only). Never audio itself. */

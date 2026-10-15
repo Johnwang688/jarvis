@@ -81,8 +81,8 @@ def main():
             check("failure is visible in the Status pane", "Couldn't transcribe" in page.locator('[data-testid="stt-retry"]').inner_text())
             check("failure is said under the orb", "STT FAILED" in page.locator('[data-testid="orb-status"]').inner_text())
             first = stts()[0]
-            check("the clip is named for the daemon and its deadline sent (utterance_id, seq, budget_ms)",
-                  first["query"] == {"utterance_id": "1", "seq": "1", "budget_ms": "15000"})
+            check("the clip is named for the daemon, its deadline sent, and verification asked (utterance_id, seq, budget_ms, verify)",
+                  first["query"] == {"verify": "1", "utterance_id": "1", "seq": "1", "budget_ms": "15000"})
             check("both attempts sent the same bytes", stts()[1]["bytes"] == first["bytes"])
             check("nothing was sent to a chat", not any(p.endswith("/send") for m, p, b in mock.calls))
             check("diagnostics say the audio is kept", page.evaluate(
