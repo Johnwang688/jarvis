@@ -387,6 +387,7 @@ FALSE_POSITIVES = [
     "docker run --name redis-cli -a x img",
     "curl -H 'Authorization: Bearer \"$TOKEN\"' https://example.invalid",
     "sed -i 's/TOKEN=.*/TOKEN=X/' settings.example",
+    "sed -i 's/API_TOKEN=abcd/API_TOKEN=efgh/' settings.example",
     "app --key ./client-key.pem",
     "PASSWORD_FILE=/run/secrets/x ./run",
     "app --token-file=/tmp/t",
