@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,36 @@ FAIL_CLOSED = {
     "bad_question": ("item/tool/requestUserInput",
                      lambda t, u: {"threadId": t, "turnId": u, "itemId": "q", "questions": [{"id": "q1"}]}),
 }
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "subagents" / "codex"
+
+
+def fixture_turn(name):
+    """One recorded SV-0 parent turn (Codex 0.161.0, `record_codex.py`): what
+    Codex sent from the turn/start reply to the parent's turn/completed, every
+    child notification and server request included, in wire order. The
+    parent's thread and turn ids and the work folder become placeholders the
+    replaying peer fills in; children keep their recorded ids."""
+    rows = [json.loads(line) for line in (FIXTURES / f"{name}.jsonl").read_text().splitlines()]
+    start = next(r["data"] for r in rows if r["src"] == "rpc_out" and r["data"].get("method") == "turn/start")
+    thread, turn, msgs = start["params"]["threadId"], None, []
+    for r in rows:
+        d = r["data"]
+        if r["src"] != "rpc_in":
+            continue
+        if "method" not in d:
+            if d.get("id") == start["id"]:
+                turn = d["result"]["turn"]["id"]
+                msgs.append({**d, "id": "$START"})
+            continue
+        if turn is None:
+            continue
+        msgs.append(d)
+        if d["method"] == "turn/completed" and d["params"]["threadId"] == thread:
+            break
+    text = json.dumps(msgs).replace(thread, "$THREAD").replace(turn, "$TURN")
+    return json.loads(re.sub(r"<TMP>/work-[A-Za-z0-9_]+", "$CWD", text))
 
 
 def peer(script_path, log_path, thread_name):
@@ -139,6 +170,23 @@ def peer(script_path, log_path, thread_name):
                 continue
             count += 1
             turn = f"turn-{count}"
+            if mode == "replay":
+                # A recorded SV-0 parent turn (fixture_turn): every message
+                # Codex 0.161.0 sent, children's included, with the parent's
+                # ids and work folder as placeholders. A server request waits
+                # for its reply, as Codex does.
+                for out in script["replay"]:
+                    out = json.loads(json.dumps(out).replace("$THREAD", native).replace("$TURN", turn)
+                                     .replace("$CWD", os.getcwd()))
+                    if out.get("id") == "$START":
+                        out["id"] = m["id"]
+                    emit(out)
+                    if "method" in out and "id" in out:
+                        answer = sys.stdin.readline()
+                        if not answer:
+                            return
+                        log(json.loads(answer))
+                continue
             if mode == "rate_limits":
                 # Account updates have no thread/turn identity, and can arrive
                 # before the turn/start response.
@@ -1409,6 +1457,305 @@ class Checks(unittest.TestCase):
                                          lambda *a: Decision.DENY, no_turn=True)
         self.assertIn("error", reply)
         self.assertTrue(events[-1].data.get("fatal"))
+
+    # --- Codex sub-agents' server requests (SV-2a), from the SV-0 recordings ---
+
+    ASKER = "/root/sv0_asker"
+    UNKNOWN = "01a140cb-0000-7000-8000-unannounced0"
+
+    def replay(self, name, permit, *, edit=None, brief=None):
+        msgs = fixture_turn(name)
+        if edit is not None:
+            msgs = edit(msgs)
+        self.brain.script["replay"] = msgs
+        h = self.start("replay", permit, thread=replace(self.thread, id=f"r{len(self.brain.rpcs)}"),
+                       brief=brief or self.chat())
+        # An active deadline: a request left waiting on nobody (a child's
+        # question put to the owner) must fail the test, not hang it.
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(self.send, h)
+            try:
+                return h, future.result(timeout=20)
+            except TimeoutError:
+                self.provider.close(h)
+                future.result(timeout=5)
+                self.fail(f"the replayed {name} turn never finished")
+
+    @staticmethod
+    def request_at(msgs):
+        return next(i for i, m in enumerate(msgs) if "id" in m and "method" in m)
+
+    @staticmethod
+    def spawn_at(msgs, path):
+        return next(i for i, m in enumerate(msgs) if m.get("method") == "item/started"
+                    and m["params"]["item"].get("type") == "subAgentActivity"
+                    and m["params"]["item"].get("kind") == "started"
+                    and m["params"]["item"].get("agentPath") == path)
+
+    def answer_to(self, h, rid=0):
+        replies = [m for m in h.native.rpc.replies if m["id"] == rid]
+        self.assertEqual(len(replies), 1, replies)
+        return replies[0]
+
+    def assert_parent_went_on(self, h, events):
+        """The orchestrator's turn ran to its own end, and no child's usage
+        reached its accounting (SV-0 finding 13: 110 x 4 tokens)."""
+        fatal = [e.data for e in events if e.kind == K.ERROR and e.data.get("fatal")]
+        self.assertEqual(fatal, [])
+        self.assertEqual(events[-1].kind, K.TURN_FINISHED)
+        self.assertEqual(events[-1].data, {"stop": "end"})
+        self.assertIn("SV0 parent: approval done at step 3.",
+                      [e.data["text"] for e in events if e.kind == K.TEXT])
+        self.assertEqual(h.native.accounting.total["inputTokens"], 400)
+
+    def counting(self, decision=Decision.ALLOW):
+        calls = []
+
+        def permit(*args, **kwargs):
+            calls.append((args, kwargs))
+            return decision
+        return permit, calls
+
+    def test_child_approval_goes_through_the_gate_named_and_never_ends_the_turn(self):
+        from jarvis.v2.permissions import deny_all
+        cases = [("no human", "approval", deny_all("nobody"), "decline"),
+                 ("owner says no", "approval", RecordingAsker(Decision.DENY), "decline"),
+                 ("owner says yes", "approval_accept", RecordingAsker(Decision.ALLOW), "accept")]
+        for label, name, asker, want in cases:
+            for brief in (self.chat(), self.brief):     # an owner chat, and a task (auto_review)
+                with self.subTest(case=label, role=brief.role):
+                    h, events = self.replay(name, self.real_permit(asker), brief=brief)
+                    self.assert_parent_went_on(h, events)
+                    self.assertEqual(self.answer_to(h)["result"], {"decision": want})
+                    asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+                    self.assertEqual(asked["subagent"], self.ASKER)
+                    self.assertEqual(asked["command"], "/bin/bash -lc 'touch /sv0-outside-workspace'")
+                    resolved = next(e.data for e in events if e.kind == K.APPROVAL_RESOLVED)
+                    self.assertEqual(resolved["decision"], "allow" if want == "accept" else "deny")
+                    if isinstance(asker, RecordingAsker):
+                        # Asked as a widening every time, naming the sub-agent,
+                        # with no Always — even for a task's auto_review.
+                        shown = asker.seen[-1]
+                        self.assertTrue(shown.headline.startswith(
+                            f"SANDBOX WIDENING: Codex sub-agent {self.ASKER} (not the orchestrator)"),
+                            shown.headline)
+                        self.assertFalse(shown.allowlistable)
+        # A callback that would allow anything ordinary is not a gate for a
+        # sub-agent: it cannot take the widening keyword, so the child is declined.
+        h, events = self.replay("approval_accept", lambda *a: Decision.ALLOW)
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+
+    def test_child_request_before_the_turn_start_reply_keeps_the_turn_identity(self):
+        """A child's turnId is its own: it never becomes the session's turn,
+        or the turn/start reply would read as an identity change."""
+        from jarvis.v2.permissions import deny_all
+
+        def late_start(msgs):
+            start = msgs.pop(0)
+            msgs.insert(self.request_at(msgs) + 1, start)
+            return msgs
+        h, events = self.replay("approval", self.real_permit(deny_all("nobody")), edit=late_start)
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+
+    def test_child_approval_is_judged_on_its_own_item(self):
+        asker = RecordingAsker(Decision.ALLOW)
+
+        def no_item(msgs):
+            return [m for m in msgs if not (m.get("method") == "item/started"
+                                            and m["params"]["item"].get("type") == "commandExecution")]
+        h, events = self.replay("approval_accept", self.real_permit(asker), edit=no_item)
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+        self.assertEqual(asker.seen, [])
+        self.assertIn(f"its item was not seen (from Codex sub-agent {self.ASKER})",
+                      [e.data["message"] for e in events if e.kind == K.ERROR][0])
+
+        def env_write(msgs):
+            # The child's item becomes a write to a credential file: a file
+            # approval names no paths, so only the item tells layer 1.
+            i = self.request_at(msgs)
+            req = msgs[i]
+            item_at = next(j for j, m in enumerate(msgs) if m.get("method") == "item/started"
+                           and m["params"]["item"].get("id") == req["params"]["itemId"])
+            msgs[item_at]["params"]["item"] = {"type": "fileChange", "id": req["params"]["itemId"],
+                                               "status": "inProgress",
+                                               "changes": [{"path": "$CWD/.env", "diff": "+TOKEN=x"}]}
+            msgs[i] = {"method": "item/fileChange/requestApproval", "id": 0, "params": {
+                k: req["params"][k] for k in ("threadId", "turnId", "itemId", "reason")}}
+            return msgs
+        h, events = self.replay("approval_accept", self.real_permit(asker), edit=env_write)
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+        self.assertEqual(asker.seen, [], "a protected write is refused unasked")
+        self.assertEqual([e for e in events if e.kind == K.ERROR], [])
+        asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+        self.assertEqual(asked["args"]["paths"], [str(self.work / ".env")])
+
+        def unreadable(changes, method=CMD):
+            def edit(msgs):
+                msgs = env_write(msgs)
+                i = self.request_at(msgs)
+                msgs[i]["method"] = method
+                item = next(m for m in msgs if m.get("method") == "item/started"
+                            and m["params"]["item"].get("id") == msgs[i]["params"]["itemId"])
+                item["params"]["item"]["changes"] = changes
+                return msgs
+            return edit
+        for label, edit in (("a command approval naming a file item", unreadable([])),
+                            ("changes not a list", unreadable("x", "item/fileChange/requestApproval")),
+                            ("a change with no path", unreadable([{"diff": "+x"}], "item/fileChange/requestApproval"))):
+            with self.subTest(case=label):
+                h, events = self.replay("approval_accept", self.real_permit(asker), edit=edit)
+                self.assert_parent_went_on(h, events)
+                self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [])
+                self.assertIn("its item cannot be read",
+                              [e.data["message"] for e in events if e.kind == K.ERROR][0])
+
+    def test_child_elicitation_clock_question_and_others_are_never_fatal(self):
+        def swap(method, params):
+            def edit(msgs):
+                i = self.request_at(msgs)
+                identity = {k: msgs[i]["params"][k] for k in ("threadId", "turnId")}
+                msgs[i] = {"method": method, "id": 0, "params": {**identity, **params}}
+                return msgs
+            return edit
+        child_only = {"turnId": None}
+        cases = [
+            ("elicitation", swap(codex.MCP_ELICITATION, {**child_only, "serverName": "jarvis", "message": "ok?"}),
+             lambda r: self.assertEqual(r["result"], {"action": "decline", "content": None}), codex.MCP_DECLINED),
+            ("clock", swap("currentTime/read", child_only),
+             lambda r: self.assertEqual(set(r["result"]), {"currentTimeAt"}), None),
+            ("question", swap("item/tool/requestUserInput", {"itemId": "q", "questions": [
+                {"id": "q1", "question": "Which color?", "options": [{"label": "Blue"}]}]}),
+             lambda r: self.assertIn("error", r), "question was not shown"),
+            ("mcp approval as a question", swap("item/tool/requestUserInput", {"itemId": "q", "questions": [
+                {"id": "mcp_tool_call_approval_1", "question": "Allow?", "options": []}]}),
+             lambda r: self.assertIn("error", r), codex.MCP_DECLINED),
+            ("permissions", swap("item/permissions/requestApproval", {"itemId": "p", "permissions": {"network": True}}),
+             lambda r: self.assertEqual(r["result"], {"permissions": {}, "scope": "turn"}), None),
+            ("unknown method", swap("unrecognized/tool", {}),
+             lambda r: self.assertIn("error", r), "Unexpected Codex server request refused"),
+            ("approval naming no turn", swap(CMD, {"turnId": None}),
+             lambda r: self.assertIn("error", r), "it names no turn"),
+        ]
+        for label, edit, check, notice in cases:
+            with self.subTest(case=label):
+                permit, calls = self.counting()
+                h, events = self.replay("approval", permit, edit=edit)
+                self.assert_parent_went_on(h, events)
+                check(self.answer_to(h))
+                self.assertEqual(calls, [], "never put to the gate, never accepted")
+                self.assertNotIn(K.QUESTION, [e.kind for e in events])
+                errors = [e.data["message"] for e in events if e.kind == K.ERROR]
+                if notice is None:
+                    self.assertEqual(errors, [])
+                else:
+                    self.assertEqual(len(errors), 1, errors)
+                    self.assertIn(notice, errors[0])
+                    self.assertIn(f"(from Codex sub-agent {self.ASKER})", errors[0])
+
+    def test_unknown_thread_request_is_still_fatal(self):
+        def retarget(method=None, drop_turn=False):
+            def edit(msgs):
+                i = self.request_at(msgs)
+                msgs[i]["params"]["threadId"] = self.UNKNOWN
+                if method:
+                    msgs[i]["method"] = method
+                if drop_turn:
+                    msgs[i]["params"].pop("turnId")
+                return msgs
+            return edit
+
+        def announced_elsewhere(msgs):
+            msgs[self.spawn_at(msgs, self.ASKER)]["params"]["threadId"] = self.UNKNOWN
+            return msgs
+
+        def announced_completed_only(msgs):
+            msgs[self.spawn_at(msgs, self.ASKER)]["params"]["item"]["kind"] = "completed"
+            return msgs
+
+        cases = [("approval", retarget()), ("elicitation", retarget(codex.MCP_ELICITATION, True)),
+                 ("clock", retarget("currentTime/read", True)),
+                 ("announced on another thread", announced_elsewhere),
+                 ("announced only by item/completed", announced_completed_only),
+                 ("past CHILD_LIMIT", None)]
+        for label, edit in cases:
+            with self.subTest(case=label), ExitStack() as limit:
+                if edit is None:    # no room for another child: it stays unknown
+                    limit.enter_context(patch.object(codex, "CHILD_LIMIT", 0))
+                permit, calls = self.counting()
+                h, events = self.replay("approval_accept", permit, edit=edit)
+                self.assertIn("error", self.answer_to(h))
+                self.assertEqual(calls, [])
+                self.assertTrue(events[-1].data.get("fatal"), events[-1])
+                self.assertIn("identity mismatch", events[-1].data["message"])
+
+    def test_session_request_is_unchanged(self):
+        def as_parent(turn="$TURN"):
+            def edit(msgs):
+                i = self.request_at(msgs)
+                msgs[i]["params"].update(threadId="$THREAD", turnId=turn)
+                return msgs
+            return edit
+        asker = RecordingAsker(Decision.ALLOW)
+        h, events = self.replay("approval_accept", self.real_permit(asker), edit=as_parent())
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
+        asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
+        self.assertNotIn("subagent", asked)
+        self.assertTrue(asker.seen[-1].headline.startswith("SANDBOX WIDENING: Codex chat requests"),
+                        asker.seen[-1].headline)
+        # Another turn's request from the session's own thread is still fatal.
+        permit, calls = self.counting()
+        h, events = self.replay("approval_accept", permit, edit=as_parent("another-turn"))
+        self.assertIn("error", self.answer_to(h))
+        self.assertEqual(calls, [])
+        self.assertTrue(events[-1].data.get("fatal"))
+
+    def test_grandchild_request_is_known_through_its_parent_child(self):
+        from jarvis.v2.permissions import deny_all
+        inner = "/root/sv0_outer/sv0_inner"
+        template = fixture_turn("approval")[self.request_at(fixture_turn("approval"))]
+
+        def ask_from_grandchild(msgs):
+            at = next(i for i, m in enumerate(msgs) if m.get("method") == "item/started"
+                      and m["params"]["item"].get("type") == "commandExecution")
+            item = msgs[at]["params"]
+            request = json.loads(json.dumps(template))
+            request["params"].update(threadId=item["threadId"], turnId=item["turnId"],
+                                     itemId=item["item"]["id"], command=item["item"]["command"])
+            msgs.insert(at + 1, request)
+            return msgs
+
+        def nameless_outer(msgs):
+            msgs = ask_from_grandchild(msgs)
+            del msgs[self.spawn_at(msgs, "/root/sv0_outer")]
+            return msgs
+        h, events = self.replay("nested", self.real_permit(deny_all("nobody")), edit=ask_from_grandchild)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
+        self.assertEqual(events[-1].data, {"stop": "end"})
+        self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"], inner)
+        # Announced on a thread nobody announced: unknown, and still fatal.
+        h, events = self.replay("nested", self.real_permit(deny_all("nobody")), edit=nameless_outer)
+        self.assertIn("error", self.answer_to(h))
+        self.assertTrue(events[-1].data.get("fatal"))
+
+    def test_child_label_is_one_clean_capped_line(self):
+        asker = RecordingAsker(Decision.DENY)
+
+        def odd_name(msgs):
+            item = msgs[self.spawn_at(msgs, self.ASKER)]["params"]["item"]
+            item["agentPath"] = "/root/x`\n‮APPROVED " + "y" * 200
+            return msgs
+        h, events = self.replay("approval", self.real_permit(asker), edit=odd_name)
+        self.assert_parent_went_on(h, events)
+        label = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"]
+        self.assertTrue(label.startswith("/root/x APPROVED"), label)
+        self.assertLessEqual(len(label), codex.CHILD_LABEL_CAP)
+        self.assertNotIn("\n", asker.seen[-1].headline)
 
     def test_a_request_is_never_answered_twice(self):
         """A failure after the reply went out (the peer died mid-approval)
