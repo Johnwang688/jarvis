@@ -1178,6 +1178,58 @@ class Backend(unittest.TestCase):
         self.refreshed()
         self.assertEqual(len(calls), 1)
 
+    def test_a_stopped_codex_chat_takes_the_next_message(self):
+        """The owner's Stop on a Codex chat, then another message, through
+        the real daemon and the real CodexProvider over pipes to the fake
+        app-server (`codex_provider_check.peer`, mode `stop_once`: Codex
+        0.161.0's answer to `turn/interrupt`). Until 2026-10-15 an
+        interrupted turn left the accounting "incomplete" for good: the next
+        message failed ("previous turn accounting incomplete"), the session
+        was dropped, and every resume after it was refused, a restart's
+        included — the chat was dead."""
+        import codex_provider_check as CP
+        from jarvis.v2.providers import codex, codex_config
+        brain = CP.Brain(self.root)
+        auth = self.root / "codex-owner"
+        (auth / "skills").mkdir(parents=True)
+        (auth / "auth.json").write_text("FAKE AUTH: never read")
+        for patcher in (patch.object(codex_config, "owner_home", return_value=auth),
+                        patch.object(codex, "RpcProcess", brain.rpc),
+                        patch.object(config, "CHAT_WORKTREES_DIR", self.root / "chat-worktrees"),
+                        patch.object(codex.CodexProvider, "_probe", return_value=("/fake/codex", "fake"))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        def idle(thread):
+            # A dropped session is idle too: the bug dropped it.
+            eventually(lambda: getattr(self.daemon._sessions.get(thread.id), "worker", None) is None)
+
+        def said(thread):
+            records = [e for e in self.events_all() if e.get("thread_id") == thread.id]
+            return ([e["data"].get("message") for e in records if e["kind"] == "error"],
+                    [e["data"]["stop"] for e in records if e["kind"] == "turn_finished"])
+
+        for mode in ("stop_once", "stop_once_quiet"):
+            brain.script["mode"] = mode
+            self.daemon.providers[P.CODEX] = codex.CodexProvider()
+            thread = self.thread(P.CODEX)
+            started = len(brain.calls("turn/start"))
+            self.request("POST", f"/threads/{thread.id}/send", {"text": "start"}, status=202)
+            brain.wait_call("turn/start", started + 1)
+            self.daemon.interrupt(thread.id)
+            idle(thread)
+            self.assertEqual(said(thread), ([], ["interrupted"]), mode)
+            self.request("POST", f"/threads/{thread.id}/send", {"text": "and now"}, status=202)
+            idle(thread)
+            self.assertEqual(said(thread), ([], ["end"]), mode)
+            self.assertIn(thread.id, self.daemon._sessions, "the session was not dropped")
+            self.assertEqual(len(brain.calls("turn/start")), started + 2, mode)
+            # And it resumes, as after a daemon restart.
+            self.daemon.close_thread(thread.id)
+            self.request("POST", f"/threads/{thread.id}/send", {"text": "after restart"}, status=202)
+            idle(thread)
+            self.assertEqual(said(thread), ([], ["end"]), mode)
+            self.daemon.close_thread(thread.id)
+
     def test_a_busy_codex_backs_off_briefly(self):
         from jarvis.v2.providers.codex import MetadataBusy
         ledger = self.daemon.router.ledger

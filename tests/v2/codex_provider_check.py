@@ -208,7 +208,7 @@ def peer(script_path, log_path, thread_name):
                 continue
             if (mode in ("hold", "interrupt_stall", "steer", "steer_unsupported", "steer_errors",
                          "steer_silent")
-                    or (mode == "steer_late" and count == 1)):
+                    or (mode in ("steer_late", "stop_once", "stop_once_quiet") and count == 1)):
                 continue
             if mode in ("approval", "flood", "deny", "approval_death", "file_approval"):
                 item = {"id": "cmd", "type": "commandExecution", "command": "echo ok", "cwd": os.getcwd(), "status": "inProgress"}
@@ -274,7 +274,7 @@ def peer(script_path, log_path, thread_name):
                 event("thread/tokenUsage/updated", tokenUsage={"total": {k: v * 2 for k, v in UNIT.items()}, "last": UNIT})
             if mode == "duplicate_usage":
                 event("thread/tokenUsage/updated", tokenUsage={"total": raw, "last": UNIT})
-            finish()
+            finish("paused" if mode == "odd_status" else "completed")   # `odd_status`: no such TurnStatus
             continue
         elif method == "turn/steer":
             # The 0.153.4/0.161.0 shape: {threadId, input, expectedTurnId} ->
@@ -313,6 +313,17 @@ def peer(script_path, log_path, thread_name):
             continue
         elif method == "turn/interrupt":
             if mode == "interrupt_stall":
+                continue
+            if mode in ("stop_once", "stop_once_quiet"):
+                # The owner's Stop as Codex 0.161.0 answers it (SV-0's
+                # `parent_interrupt`, seq 26-31): the usage of a sampling
+                # request that finished is reported, then the reply, then
+                # `turn/completed` `interrupted`. `_quiet`: stopped before
+                # any request finished, so no usage at all for the turn.
+                if mode == "stop_once":
+                    usage()
+                emit({"id": m["id"], "result": {}})
+                finish("interrupted")
                 continue
             emit({"id": m["id"], "result": {}})
             usage()
@@ -2628,14 +2639,90 @@ print(json.dumps(out))
             self.start(brief=replace(self.brief, model="other"))
         self.assertEqual((h.native.home / "config.toml").read_text(), before)
 
-    def test_incomplete_turn_cannot_be_certified_by_later_success(self):
-        h = self.start("hold")
+    def saved_usage(self, h):
+        return json.loads((h.native.home / "usage.json").read_text())
+
+    def test_a_stopped_turn_closes_its_accounting(self):
+        """The owner's Stop, then another message (2026-10-15). Codex 0.161.0
+        ends a stopped turn with `turn/completed` `interrupted`, after the
+        usage it counted (`stop_once`) or with none (`stop_once_quiet`). The
+        next send runs on the same session, and the thread still resumes:
+        it used to answer "previous turn accounting incomplete", and every
+        resume after that was refused."""
+        for mode, units in (("stop_once", 2), ("stop_once_quiet", 1)):
+            thread = replace(self.thread, id=mode)
+            h = self.start(mode, thread=thread)
+            before = len(self.brain.calls("turn/start"))
+            stream = self.provider.send(h, UserMessage("Go"))
+            self.assertEqual(next(stream).kind, K.TURN_STARTED)
+            self.provider.interrupt(h)
+            self.assertEqual(list(stream)[-1].data, {"stop": "interrupted"}, mode)
+            saved = self.saved_usage(h)
+            self.assertEqual((saved["complete"], saved["turns"], saved["partial_turns"]), (True, 1, 1), mode)
+            events = self.send(h)
+            self.assertFalse([e for e in events if e.kind == K.ERROR], (mode, events))
+            self.assertEqual(events[-1].data, {"stop": "end"}, mode)
+            self.assertFalse(h.native.closed.is_set())
+            self.assertEqual(len(self.brain.calls("turn/start")), before + 2, mode)
+            # Only what Codex reported, nothing made up for the stopped turn.
+            self.assertEqual(self.provider.usage(h).input_tokens, 100 * units, mode)
+            saved = self.saved_usage(h)
+            self.assertEqual((saved["complete"], saved["turns"], saved["partial_turns"]), (True, 2, 1), mode)
+            self.provider.close(h)
+            thread = replace(thread, provider_session_id=h.provider_session_id)
+            self.brain.script["mode"] = "normal"
+            resumed = self.provider.resume(thread, self.brief, lambda *_: Decision.ALLOW)
+            self.handles.append(resumed)
+            self.assertEqual(resumed.native.accounting.partial_turns, 1)
+            self.assertEqual(self.send(resumed)[-1].data, {"stop": "end"}, mode)
+            self.assertEqual(self.provider.usage(resumed).input_tokens, 100 * (units + 1), mode)
+
+    def test_a_failed_turn_leaves_the_session_to_its_cooldown(self):
+        """A capacity failure ends `failed`, and its cooldown is what the next
+        send on that session meets: "model cooling", not a fatal error."""
+        h = self.start("capacity")
+        self.assertEqual(self.send(h)[-1].data, {"stop": "error"})
+        self.assertEqual(self.saved_usage(h)["partial_turns"], 1)
+        events = self.send(h)
+        self.assertEqual(events[0].data["message"], "Codex model cooling")
+        self.assertFalse(events[0].data["fatal"])
+        self.assertEqual(events[-1].data, {"stop": "error"})
+        self.assertFalse(h.native.closed.is_set())
+        self.assertEqual(len(self.brain.calls("turn/start")), 1)
+
+    def test_an_unfinished_turn_cannot_be_certified_by_later_success(self):
+        """What still fails closed: a turn Jarvis never saw end (the stream
+        abandoned, the transport lost) or one ending in a status Codex does
+        not define. Usage Codex sent may have been missed, so the session
+        takes no further turn and the thread does not resume."""
+        h = self.start("hold", thread=replace(self.thread, id="abandoned"))
         stream = self.provider.send(h, UserMessage("Go"))
         next(stream)
-        self.provider.interrupt(h)
-        self.assertEqual(list(stream)[-1].data, {"stop": "interrupted"})
-        self.assertTrue(self.send(h)[-1].data["fatal"])
-        self.assertEqual(len(self.brain.calls("turn/start")), 1)
+        stream.close()
+        self.assertTrue(h.native.closed.is_set())
+        self.assertFalse(self.saved_usage(h)["complete"])
+        thread = replace(self.thread, id="abandoned", provider_session_id=h.provider_session_id)
+        with self.assertRaisesRegex(RpcError, "resume accounting"):
+            self.provider.resume(thread, self.brief, lambda *_: Decision.ALLOW)
+        h = self.start("odd_status", thread=replace(self.thread, id="odd"))
+        self.assertEqual(self.send(h)[-1].data, {"stop": "error"})
+        self.assertFalse(self.saved_usage(h)["complete"])
+        events = self.send(h)
+        self.assertTrue(events[-1].data["fatal"])
+        self.assertIn("previous turn accounting incomplete", events[-1].data["message"])
+        self.assertEqual(len(self.brain.calls("turn/start")), 2)
+
+    def test_a_saved_partial_turn_count_is_checked(self):
+        from jarvis.v2.providers.codex_usage import Accounting
+        path = self.root / "usage.json"
+        zero = dict.fromkeys(("inputTokens", "outputTokens", "cachedInputTokens"), 0)
+        base = dict(thread_id="t", total=zero, reported=zero, turns=2, complete=True)
+        path.write_text(json.dumps(base))
+        self.assertEqual(Accounting(path, "t", True).partial_turns, 0, "files from before it")
+        for bad in (-1, 3, True, "1", None):
+            path.write_text(json.dumps({**base, "partial_turns": bad}))
+            with self.assertRaises(RpcError, msg=bad):
+                Accounting(path, "t", True)
 
 
 class TransportChecks(unittest.TestCase):
