@@ -654,6 +654,12 @@ export interface SttCapture {
   boxOnly?: boolean;
   /** The continuation window this message armed (`Capture`'s token), settled when it is placed. */
   continuation?: number | null;
+  /**
+   * V10: how long it was quiet after the last word when the message ended
+   * (`UtteranceEnd.tailMs`; 0 when it was cut short). A trailing send or cancel
+   * word counts only when this is at least `SEND_WORD_SILENCE_MS`.
+   */
+  tailMs?: number;
   /** The capture's utterance id: what a barge-in that this message began is called (V9). */
   utterance?: number;
 }

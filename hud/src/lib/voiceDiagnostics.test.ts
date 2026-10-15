@@ -90,6 +90,28 @@ describe("the detector line (V5)", () => {
   });
 });
 
+describe("the noise-suppression line (V14)", () => {
+  it("starts off, follows the stage, and never carries more than a sentence", async () => {
+    const { VoiceDiagnostics } = await import("./voiceDiagnostics");
+    const d = new VoiceDiagnostics();
+    expect(d.snapshot()).toMatchObject({ noiseWanted: false, noiseState: "off", noiseMs: 0 });
+    d.noise(true, "ready", "RNNoise, running in the VAD worker", 0.9);
+    expect(d.snapshot()).toMatchObject({ noiseWanted: true, noiseState: "ready", noiseMs: 0.9 });
+    d.noise(true, "failed", "the noise-suppression model did not match its pinned checksum");
+    expect(d.snapshot()).toMatchObject({ noiseWanted: true, noiseState: "failed" });
+    d.noise("yes" as never, "bogus" as never, "x".repeat(900), Infinity);
+    expect(d.snapshot()).toMatchObject({ noiseState: "off", noiseMs: 0 });
+    expect(d.snapshot().noiseNote.length).toBe(200);
+  });
+  it("is separate from the detector line", async () => {
+    const { VoiceDiagnostics } = await import("./voiceDiagnostics");
+    const d = new VoiceDiagnostics();
+    d.noise(true, "loading", "x");
+    d.detector("silero", "ready", "y", 0.5);
+    expect(d.snapshot()).toMatchObject({ noiseState: "loading", detector: "silero" });
+  });
+});
+
 describe("V13 served-by metadata", () => {
   it("keeps only the two known backends and clears them when the row is retried", () => {
     const d = new VoiceDiagnostics(() => 1);

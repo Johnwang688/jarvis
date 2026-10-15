@@ -18,3 +18,20 @@ export const SILERO_FRAME = 512;
 export const SILERO_CONTEXT = 64;
 /** The recurrent state, [2, 1, 128]. */
 export const SILERO_STATE = 2 * 128;
+
+// RNNoise (voice rework V14, plan §3.4): the noise-suppression stage, off by
+// default. The WebAssembly binary is vendored (`hud/vendor/rnnoise/`, BSD-3-Clause
+// for RNNoise, Apache-2.0 for Jitsi's build; both licences travel with it) and
+// built into `dist/assets/` with a content hash. It is the binary inside
+// `@jitsi/rnnoise-wasm` 0.2.1's `rnnoise-sync.js`, decoded unchanged
+// (`hud/vendor/rnnoise/extract_wasm.py`); that tarball is
+// `npm-jitsi-rnnoise-wasm-0.2.1` in tests/voice_v0/models.json. The worker checks
+// the fetched bytes' length and SHA-256 before compiling them.
+
+export const RNNOISE_VERSION = "xiph/rnnoise 0.2 via @jitsi/rnnoise-wasm 0.2.1";
+export const RNNOISE_SHA256 = "4f513a50613de74378331237886138eab52fa2650e8b1a41eb587d932d9b8850";
+export const RNNOISE_BYTES = 1440118;
+/** RNNoise runs on 48 kHz audio in frames of 480 samples (10 ms)... */
+export const RNNOISE_FRAME = 480;
+/** ...which is this many samples (10 ms) at the HUD's 16 kHz. */
+export const RNNOISE_FRAME_16K = 160;

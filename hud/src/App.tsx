@@ -98,7 +98,11 @@ import { SttRetry } from "./components/SttRetry";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReason } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
 import { EndPauseSetting } from "./components/EndPause";
-import { VadStage } from "./lib/listen/stage";
+import { VoiceWordsSetting } from "./components/VoiceWords";
+import { CANCELLED_STATUS, DictationLedger, UndoHold, inertUnderCard, loadWords, sendWordOutcome, normalizeWords, planWords, saveWords, typedRecently, wordMaySend, type Words } from "./lib/voiceWords";
+import { NoiseSuppressionSetting } from "./components/NoiseSuppression";
+import { loadNoiseSuppression, saveNoiseSuppression } from "./lib/listen/pref";
+import { VadStage, type StageOptions } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeStage, WAKE_LAG_MS } from "./lib/wake/stage";
@@ -805,6 +809,37 @@ export default function App() {
   // chat as it is when it is delivered, and there was none).
   const unplaced = useRef<string[]>([]);
 
+  // V10: send and cancel words. The list is a per-window setting; the ledger
+  // knows which words in a REVIEW box were dictated since the last send, and
+  // the hold keeps what a cancel discarded for ten seconds so Undo can put it
+  // back. Memory only.
+  const [words, setWords] = useState<Words>(() => loadWords());
+  const wordsNow = useRef(words);
+  wordsNow.current = words;
+  // When the owner last typed in each pane's box (Date.now(); 0 never): a send word does not send a box still being written.
+  const typedAt = useRef<Record<number, number>>({});
+  const ledger = useMemo(() => new DictationLedger(), []);
+  const undoHold = useMemo(() => new UndoHold(), []);
+  const heldCancel = useSyncExternalStore(undoHold.subscribe, undoHold.snapshot);
+  // Undo: what a cancel discarded goes back into the box of the chat it was
+  // said to, unsent (even from AUTO: Undo never sends).
+  const undoCancel = (pane: PaneNo) => {
+    const c = live.current.chats[pane];
+    const key = draftKey(c, pane);
+    const text = key ? undoHold.take(key) : null;
+    if (!key || !text) return;
+    ledger.add(key, text);
+    chatPatch(pane, { pendingTranscript: [c.pendingTranscript, text].filter(Boolean).join(" "), ...(c.status === CANCELLED_STATUS ? { status: "" } : {}) });
+  };
+  // The line goes when the hold does (used, replaced by nothing, or ten seconds).
+  useEffect(() => {
+    for (const p of PANE_NOS) {
+      const c = live.current.chats[p];
+      if (c.status === CANCELLED_STATUS && (!heldCancel || heldCancel.key !== draftKey(c, p))) chatPatch(p, { status: "" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heldCancel]);
+
   // V2: STT with deadlines, one automatic retry, kept clips for an explicit
   // Retry, and text placed in capture order (lib/stt.ts). The words go to the
   // selected chat as it is when each transcript lands (W-6).
@@ -914,6 +949,7 @@ export default function App() {
       // Not a message after all (V5): a chunk left, then it proved too short. Nothing is placed.
       if (end.discard) { stt.cancelGroup(u.gid, "too_short"); refuse(); finish(); return; }
       u.meta.continuation = end.continuation;
+      u.meta.tailMs = end.tailMs;
       // Cut short (OFF, a card, a crash) or partly refused: what is placed is not all
       // of what was said, so it is marked late and AUTO boxes it instead of sending it.
       stt.closeGroup(u.gid, { late: end.truncated || u.refused });
@@ -936,7 +972,7 @@ export default function App() {
   // the words in the box instead. A busy chat's own turn is steered (V3).
   const placeTranscripts = useCallback(
     async (placed: SttPlaced<SttCapture>[]) => {
-      const done = (outcome: "suppressed:crash" | "unplaced" | "review" | "handed_to_chat" | "command" | "suppressed:card" | "cancelled", items = placed) =>
+      const done = (outcome: "suppressed:crash" | "unplaced" | "review" | "handed_to_chat" | "command" | "suppressed:card" | "cancelled" | "send_word" | "cancel_word", items = placed) =>
         items.forEach((i) => voiceDiagnostics.finish(i.diag, outcome, i.latencyMs));
       // Whatever becomes of an utterance's words, the barge-in it began (V-7) hears of it: a message that went out
       // skips the message he was in the middle of; anything else lets him resume (`onUtteranceEnd` is the net).
@@ -973,31 +1009,117 @@ export default function App() {
         });
         return;
       }
-      // The message goes out (to a box or a chat): its continuation window stays.
-      for (const i of batch) if (i.meta.continuation) placedWindows.current.add(i.meta.continuation);
-      const chat = at.chats[n];
-      const landing = {
-        mode: at.dictation, chat: draftKey(chat, n), busy: chat.busy, card: at.approvals.length > 0,
-        // `send` steers exactly when the running turn is this thread's own
-        // (the box offers Stop and Steer on the same test).
-        steers: runningHere(chat),
+      // Where each message landed is judged when it is placed. V10: a message
+      // that ends with a send or cancel word (lib/voiceWords) splits the batch;
+      // with no such word the plan is one plain run, placed exactly as before.
+      const landingNow = () => {
+        const now = live.current;
+        const c = now.chats[n];
+        return {
+          mode: now.dictation, chat: draftKey(c, n), busy: c.busy, card: now.approvals.length > 0,
+          // `send` steers exactly when the running turn is this thread's own
+          // (the box offers Stop and Steer on the same test).
+          steers: runningHere(c),
+        };
       };
-      // One spoken order: if any item must wait in the box, they all do.
-      const sends = batch.every((i) => placementFor(i.meta, landing, i) === "send");
-      if (!sends) {
-        done("review", batch);
-        bargeEnd("boxed", batch);
-        // Words spoken in one chat that landed in another say so.
-        const moved = batch.some((i) => i.meta.chat !== landing.chat);
-        // A chat running a turn keeps its own orb and status line.
-        chatPatch(n, { ...(chat.busy ? {} : { orb: "idle" as const, status: moved ? "SPOKEN IN ANOTHER CHAT · IN THE BOX" : "" }), pendingTranscript: batch.map((i) => i.text).join(" ") });
-        if (moved && chat.busy) dispatch({ type: "patch", patch: { error: "What you said was spoken in another chat. It is in this chat's box, unsent." } });
-        return;
+      // A run of messages: AUTO sends only when nothing moved; otherwise the box.
+      const placeRun = async (items: SttPlaced<SttCapture>[], forceBox: boolean) => {
+        const c = live.current.chats[n];
+        const landing = landingNow();
+        // One spoken order: if any item must wait in the box, they all do.
+        const sends = !forceBox && items.every((i) => placementFor(i.meta, landing, i) === "send");
+        if (!sends) {
+          done("review", items);
+          bargeEnd("boxed", items);
+          // Words spoken in one chat that landed in another say so.
+          const moved = items.some((i) => i.meta.chat !== landing.chat);
+          const piece = items.map((i) => i.text).join(" ");
+          if (landing.chat) ledger.add(landing.chat, piece);
+          // A chat running a turn keeps its own orb and status line.
+          chatPatch(n, { ...(c.busy ? {} : { orb: "idle" as const, status: moved ? "SPOKEN IN ANOTHER CHAT · IN THE BOX" : "" }), pendingTranscript: piece });
+          if (moved && c.busy) dispatch({ type: "patch", patch: { error: "What you said was spoken in another chat. It is in this chat's box, unsent." } });
+          return;
+        }
+        // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
+        done("handed_to_chat", items);
+        bargeEnd("sent", items);
+        await send(n, items.map((i) => i.text).join(" "), [], true);
+      };
+      // A send word: the words go out now, in REVIEW too (it sends the box).
+      // False when something moved since they were said -- another chat, a
+      // card, a late text -- and they wait in the box instead.
+      let afterSend = false;
+      let stillTyping = false;
+      const sendByWord = async (step: { items: SttPlaced<SttCapture>[]; word: SttPlaced<SttCapture> }): Promise<boolean> => {
+        const c = live.current.chats[n];
+        const landing = landingNow();
+        if (!step.items.every((i) => wordMaySend(i.meta, landing, i))) return false;
+        // REVIEW sends the box, so a box the owner is still typing in is not sent: the words go in beside it.
+        const reviewBox = landing.mode === "review" || step.items.some((i) => i.meta.mode === "review");
+        if (reviewBox && typedRecently(typedAt.current[n] ?? 0, Date.now())) { stillTyping = true; return false; }
+        done("send_word", [step.word]);
+        done("handed_to_chat", step.items);
+        const spoken = step.items.map((i) => i.text).filter(Boolean);
+        // REVIEW: the box is the message. AUTO sends only what was said, as always.
+        const boxed = landing.mode === "review" || step.items.some((i) => i.meta.mode === "review");
+        const body = (boxed ? [c.input.trim(), c.pendingTranscript.trim(), ...spoken] : spoken).filter(Boolean).join(" ");
+        const files = boxed ? c.files : [];
+        // Nothing to send ("over" over an empty box) is not a message: the barge-in ends as dropped.
+        bargeEnd(sendWordOutcome(body, files.length), step.items);
+        if (!body && !files.length) {
+          if (!c.busy) chatPatch(n, { orb: "idle", status: "NOTHING TO SEND" });
+          return true;
+        }
+        if (boxed) { dispatch({ type: "input", pane: n, text: "", files: [] }); chatPatch(n, { pendingTranscript: "" }); }
+        afterSend = true;
+        await send(n, body, files, true);
+        return true;
+      };
+      // A cancel word: everything dictated since the last send goes -- these
+      // words and the dictated pieces in the box where they were said -- and
+      // is held for Undo. What the owner typed stays; so does a piece edited
+      // past recognition. A cancelled message does not keep a continuation window.
+      const cancelByWord = (step: { items: SttPlaced<SttCapture>[]; word: SttPlaced<SttCapture> }) => {
+        const now = live.current;
+        const home = step.word.meta.chat;
+        const pane = home ? PANE_NOS.find((p) => draftKey(now.chats[p], p) === home) : undefined;
+        let removed: string[] = [];
+        let kept = 0;
+        if (home && pane !== undefined) {
+          const c = now.chats[pane];
+          const r = ledger.take(home, c.input, c.pendingTranscript);
+          removed = r.removed; kept = r.kept;
+          if (removed.length) { dispatch({ type: "input", pane, text: r.input }); chatPatch(pane, { pendingTranscript: "" }); }
+        }
+        done("cancel_word", step.items);
+        bargeEnd("dropped", step.items);       // nothing went out: he resumes what he was saying
+        const text = [...removed, ...step.items.map((i) => i.text).filter(Boolean)].join(" ").trim();
+        const shows = pane ?? n;
+        if (text) undoHold.hold(home ?? draftKey(now.chats[n], n) ?? "", text);
+        if (!now.chats[shows].busy) chatPatch(shows, { orb: "idle", status: text ? CANCELLED_STATUS : "NOTHING TO CANCEL" });
+        if (kept) dispatch({ type: "patch", patch: { error: "Part of what you dictated was edited, or matches words you typed, so it stayed in the box." } });
+      };
+      const spoken = new Map(batch.map((i) => [i.id, i]));
+      for (let step of planWords(batch, { words: wordsNow.current, card: at.approvals.length > 0 })) {
+        // A card that came up since the plan was made (an earlier step awaited a send): the words are inert, placed as said.
+        step = inertUnderCard(step, spoken, live.current.approvals.length > 0);
+        if (step.kind === "cancel") { cancelByWord(step); continue; }
+        // The message goes out (to a box or a chat): its continuation window stays.
+        for (const i of step.items) if (i.meta.continuation) placedWindows.current.add(i.meta.continuation);
+        if (step.kind === "send" && await sendByWord(step)) continue;
+        // Once a word has sent, the chat's state has moved on: what follows waits in the box.
+        const items = step.kind === "run" ? step.items : step.items.filter((i) => i.text);
+        if (step.kind === "send") done("review", step.items.filter((i) => !i.text));
+        if (items.length) await placeRun(items, afterSend);
+        if (stillTyping) {
+          stillTyping = false;
+          if (live.current.chats[n].busy) {
+            const said = step.items.some((i) => i.text);
+            dispatch({ type: "patch", patch: { error: said ? "You are still typing in the box, so it was not sent. What you said is in the box." : "Not sent: you were still typing." } });
+          }
+          else chatPatch(n, { orb: "idle", status: "STILL TYPING · NOT SENT" });
+        }
       }
-      // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
-      done("handed_to_chat", batch);
-      bargeEnd("sent", batch);
-      await send(n, batch.map((i) => i.text).join(" "), [], true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -1020,6 +1142,9 @@ export default function App() {
       let threadId = chat.threadId;
       const compose = chat.compose;
       const local = `local-${++localSeq.current}`;
+      // Whatever was dictated into this box has gone out (V10): a later cancel
+      // discards only what is dictated after it.
+      { const key = draftKey(chat, pane); if (key) ledger.forget(key); }
       // A turn already running in this thread: the message steers it
       // (2026-10-08) — drawn at once, marked, and the box clears. The pane's
       // turn state is left alone: that turn is still the one running, and
@@ -2932,7 +3057,12 @@ export default function App() {
     // An automatic restart of the worker waits for a quiet moment: nothing being
     // said or recorded, and Settings (where the owner reads the detector) closed.
     canRetry: () => !capture.vad.open && !capture.recording() && !settingsNow.current,
-    onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
+    // V14: off unless the owner switched it on (this window's setting); nothing loads until then.
+    noiseSuppression: loadNoiseSuppression(),
+    onStatus: (s) => {
+      voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs);
+      voiceDiagnostics.noise(s.noise.wanted, s.noise.state, s.noise.note, s.noise.frameMs);
+    },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [capture, voiceDiagnostics, speech, ownerOverHim]);
   // V11: the local wake word. The same frames the VAD stage gets also go to a keyword worker, whose only
@@ -2961,6 +3091,8 @@ export default function App() {
     wakeStage.setCommands(cardCommands && state.approvals.length > 0);
   }, [commands, wakeStage, cardCommands, state.approvals.length]);
   const pushMicFrame = useCallback((frame: Float32Array) => { vadStage.push(frame); wakeStage.push(frame); }, [vadStage, wakeStage]);
+  const [noiseOn, setNoiseOn] = useState(() => loadNoiseSuppression());
+  useEffect(() => { vadStage.setNoiseSuppression(noiseOn); }, [vadStage, noiseOn]);
   // Back in the foreground (or woken from sleep): the detector's timing history is stale, not failed.
   useEffect(() => {
     const visible = () => { if (document.visibilityState === "visible") vadStage.rearm(); };
@@ -2979,6 +3111,7 @@ export default function App() {
     let gone = false;
     // This run's token for the VAD stage: a stale run's cleanup cannot stop the live one.
     let vadRun: number | null = null;
+    let wakeRun: number | null = null; // (the same token for the wake worker: a stale run's cleanup cannot stop the live one)
     (async () => {
       try {
         stream = await openMicrophone(constraints => navigator.mediaDevices.getUserMedia(constraints));
@@ -2997,18 +3130,18 @@ export default function App() {
         };
         if (gone) { stream.getTracks().forEach((t) => t.stop()); return; }
         vadRun = vadStage.start();
-        wakeStage.start();
+        wakeRun = wakeStage.start();
         input = await startMicInput({
           stream, onFrame: pushMicFrame, workletUrl: micWorkletUrl,
           onPathChange: (path, why) => { if (!gone) fellBack(path, why); },
         });
-        if (gone) { input.stop(); vadStage.stop(vadRun); wakeStage.stop(); return; }
+        if (gone) { input.stop(); vadStage.stop(vadRun); wakeStage.stop(wakeRun); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
         if (input.path !== "worklet") fellBack(input.path, input.fallbackReason);
       } catch {
         if (vadRun !== null) vadStage.stop(vadRun);
-        wakeStage.stop(); // (started above, before startMicInput could throw: no worker is left listening to nothing)
+        if (wakeRun !== null) wakeStage.stop(wakeRun); // (started above, before startMicInput could throw: no worker is left listening to nothing)
         voiceDiagnostics.microphone("unavailable");
         // A window without a mic grant still types; every other affordance
         // stays exactly as it was.
@@ -3020,7 +3153,7 @@ export default function App() {
       stream?.getTracks().forEach((t) => t.stop());
       input?.stop();
       if (vadRun !== null) vadStage.stop(vadRun);
-      wakeStage.stop();
+      if (wakeRun !== null) wakeStage.stop(wakeRun);
     };
   }, [capture, vadStage, wakeStage, pushMicFrame]);
 
@@ -3089,6 +3222,8 @@ export default function App() {
       capture,
       followUpFor: (pane: PaneNo) => openFollowUpFor(pane),
       voiceDiagnostics: () => voiceDiagnostics.snapshot(),
+      // V10 (read-only): the send/cancel word lists in force, and whether Undo is held (never its text).
+      voiceWords: () => ({ ...wordsNow.current, undo: undoHold.snapshot() ? { key: undoHold.snapshot()!.key } : null }),
       // Speaker verification as this window shows it (V12): the label's source, read-only.
       speaker: () => speaker.snapshot(),
       // Jarvis's voice, read-only: the strip's view, the queue's live and past
@@ -3119,6 +3254,12 @@ export default function App() {
         wakeEngine: () => wakeStage.status(),
         wakeRunning: () => wakeStage.running(),
         retryWake: () => wakeStage.retry(),
+        // V14: noise suppression's state (wanted, off|waiting|loading|ready|failed, code, ms per frame), and a retry.
+        noise: () => vadStage.status().noise,
+        retryNoise: () => vadStage.retryNoise(),
+        // For checks only: a second, separate stage (its own worker) the caller feeds by hand and reads the
+        // probabilities of, so a fixture can be scored with noise suppression off and on without a microphone.
+        makeStage: (o: StageOptions) => new VadStage(o),
         endPause: () => capture.endPauseMs,
         state: () => ({
           open: capture.vad.open,
@@ -3558,6 +3699,8 @@ export default function App() {
           imageNote={threadModel.imageNoteFor(n)}
           onSend={(text, files) => void send(n, text, files)}
           onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}
+          undo={heldCancel && heldCancel.key === draftKey(chat, n) ? () => undoCancel(n) : null}
+          onTyped={() => { typedAt.current[n] = Date.now(); }}
           running={runningHere(chat)}
           // A compose row's first send in flight has no thread to steer yet,
           // but it can be stopped: the stop waits for the acknowledgement
@@ -4239,7 +4382,7 @@ export default function App() {
                 <SpeakerSettings store={speaker} blocked={blocked}
                   listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><SelfVoiceSetting gate={speech.selfVoice} onChange={(on) => { saveSelfVoiceGate(on); speech.selfVoice.setEnabled(on); }} /><WakeWordSetting stage={wakeStage} muted={isMuted(state.dictation)} sensitivity={wakeSensitivity}
                   onSensitivity={(s) => { saveSensitivity(s); setWakeSensitivity(s); }}
-                  cardCommands={cardCommands} onCardCommands={(on) => { saveCardCommands(on); setCardCommands(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
+                  cardCommands={cardCommands} onCardCommands={(on) => { saveCardCommands(on); setCardCommands(on); }} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceWordsSetting words={words} onChange={(next) => { saveWords(next); setWords(normalizeWords(next)); }} /><NoiseSuppressionSetting on={noiseOn} diagnostics={voiceDiagnostics} onChange={(on) => { saveNoiseSuppression(on); setNoiseOn(on); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} onRetryNoise={() => vadStage.retryNoise()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

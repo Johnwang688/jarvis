@@ -2,13 +2,15 @@
 export type SuppressionReason = "card" | "picker" | "settings" | "crash" | "speaking" | "no_chat";
 export type DropReason = "unclaimed" | "too_short" | "muted" | "self_voice" | "not_owner" | "cancelled" | "empty_transcript" | "stt_failed" | `suppressed:${SuppressionReason}`;
 export type ClaimSource = "wake" | "follow_up" | "continuation" | "ptt" | "unclaimed";
-export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_chat" | "unplaced" | "command";
+export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_chat" | "unplaced" | "command" | "send_word" | "cancel_word";
 export type MicCapability = "unknown" | "available" | "unavailable";
 /** How the microphone reaches the capture (V4): the AudioWorklet, or the older ScriptProcessor fallback. */
 export type CapturePathName = "unknown" | "worklet" | "script_processor";
 /** V5: which detector judged the frames: Silero (ML, in a worker) or the energy fallback. */
 export type DetectorKind = "energy" | "silero";
 export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
+/** V14: the noise-suppression switch and the state of the RNNoise stage behind it. */
+export type NoisePhase = "off" | "closed" | "waiting" | "loading" | "ready" | "failed";
 /** One switch of the speech detector (V5), kept in memory with the rows: when, to what, and why. */
 export interface DetectorChange { at: number; detector: DetectorKind; phase: DetectorPhase; note: string }
 /** What the daemon did about whose voice a clip was (V12): the score itself is never kept here. */
@@ -19,7 +21,7 @@ export type SttBackend = "local" | "cloud";
 export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
-const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", "command", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
+const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", "command", "send_word", "cancel_word", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
 const bounded = (n: number, max: number) => Number.isFinite(n) ? Math.max(0, Math.min(max, Math.round(n))) : 0;
 export const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 /** Old/limited browsers may reject constraints; preserve the existing audio:true path. */
@@ -45,6 +47,8 @@ export class VoiceDiagnostics {
   private rows: readonly VoiceDiagnostic[] = [];
   private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "",
     detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0,
+    noiseWanted: false, noiseState: "off" as NoisePhase, noiseNote: "off", noiseMs: 0,
+
     detectorLog: [] as readonly DetectorChange[] };
   constructor(private now: () => number = () => performance.now()) {}
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
@@ -70,6 +74,17 @@ export class VoiceDiagnostics {
     if (before.detector !== detector || before.detectorPhase !== ph || before.detectorNote !== text)
       log = [...log, { at: bounded(this.now(), Number.MAX_SAFE_INTEGER), detector, phase: ph, note: text }].slice(-20);
     this.value = { ...before, detector, detectorPhase: ph, detectorNote: text, detectorMs: bounded(frameMs * 100, 1_000_000) / 100, detectorLog: log };
+    this.publish();
+  }
+  /** The Noise suppression switch and its stage (V14). A sentence from a closed set, never engine text. */
+  noise(wanted: boolean, phase: NoisePhase, note = "", frameMs = 0) {
+    this.value = {
+      ...this.value,
+      noiseWanted: !!wanted,
+      noiseState: ["off", "closed", "waiting", "loading", "ready", "failed"].includes(phase) ? phase : "off",
+      noiseNote: String(note).slice(0, 200),
+      noiseMs: bounded(frameMs * 100, 1_000_000) / 100,
+    };
     this.publish();
   }
   /** `detector`: the one that judged the utterance (Capture knows; default: the one live now). */

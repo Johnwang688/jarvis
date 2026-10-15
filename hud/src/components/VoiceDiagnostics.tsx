@@ -8,7 +8,7 @@ const noSubscribe = () => () => {};
 const emptyClips = { clips: [], pending: 0 };
 const noClips = () => emptyClips;
 
-export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetryDetector }: { diagnostics: VoiceDiagnostics; capture: Capture; muted: boolean; stt?: SttAssembler<SttCapture>; onRetryDetector?: () => void }) {
+export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetryDetector, onRetryNoise }: { diagnostics: VoiceDiagnostics; capture: Capture; muted: boolean; stt?: SttAssembler<SttCapture>; onRetryDetector?: () => void; onRetryNoise?: () => void }) {
   const value = useSyncExternalStore(diagnostics.subscribe, diagnostics.snapshot);
   const clips = useSyncExternalStore(stt?.subscribe ?? noSubscribe, stt?.snapshot ?? noClips).clips;
   const [meter, setMeter] = useState({ rms: 0, floor: 0, pause: capture.endPauseMs });
@@ -26,6 +26,16 @@ export function VoiceDiagnosticsPanel({ diagnostics, capture, muted, stt, onRetr
         ? `Silero VAD (ML) · ${value.detectorMs ? value.detectorMs.toFixed(1) : "0.0"} ms per 32 ms frame`
         : `energy fallback — ${value.detectorNote || "not started"}`}
       {value.detectorPhase === "failed" && onRetryDetector ? <> <button type="button" data-testid="voice-detector-retry" onClick={onRetryDetector}>Try the Silero VAD again</button></> : null}
+    </p>
+    <p data-testid="voice-noise-suppression" data-state={value.noiseState} data-wanted={value.noiseWanted ? "1" : "0"}>
+      Noise suppression: {value.noiseState === "ready"
+        ? `on (RNNoise) · ${value.noiseMs ? value.noiseMs.toFixed(1) : "0.0"} ms per 32 ms frame · the detector hears the denoised signal, recordings stay raw`
+        : value.noiseState === "loading" ? "on, loading"
+        : value.noiseState === "closed" ? "off (mic closed)"
+        : value.noiseState === "waiting" ? "on, waiting for the Silero VAD (the energy detector hears the raw signal)"
+        : value.noiseState === "failed" ? `off, fell back to the raw signal — ${value.noiseNote}`
+        : "off"}
+      {value.noiseState === "failed" && onRetryNoise ? <> <button type="button" data-testid="voice-noise-retry" onClick={onRetryNoise}>Try noise suppression again</button></> : null}
     </p>
     {value.detectorLog.length > 0 ? <details data-testid="voice-detector-log">
       <summary>Detector changes ({value.detectorLog.length})</summary>

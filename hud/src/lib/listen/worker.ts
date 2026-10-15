@@ -8,22 +8,43 @@
 // session is built (runner.ts).
 //
 // It speaks only the protocol in protocol.ts: `init` -> `ready` | `failed`;
-// `frame` -> `prob` (in order); `reset`. It holds no audio past the 64-sample
-// context Silero needs, posts none back, and fails with a code, never a message.
+// `frame` -> `prob` (in order); `reset`; `denoise` on|off -> `denoise` events.
+// It holds no audio past the 64-sample context Silero needs and RNNoise's own
+// ~30 ms of filter state, posts none back, and fails with a code, never a message.
+//
+// Noise suppression (V14) lives here so its WebAssembly never runs on the
+// window's thread. It does nothing, and loads nothing, until `denoise on`: the
+// 1.4 MB binary is fetched, checked against its pinned SHA-256 and compiled then.
+// It rewrites only the copy this worker scores; the stage keeps the raw frame.
 
 import * as ort from "onnxruntime-web/wasm";
 import wasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.wasm?url";
 import modelUrl from "../../../vendor/silero-vad/silero_vad_v5.1.2.onnx?url";
+// V14: only fetched when the owner switches Noise suppression on (the URL is a string until then).
+import rnnoiseUrl from "../../../vendor/rnnoise/rnnoise_0.2.wasm?url";
 
 import { FailError } from "./fail";
 import type { FromWorker, ToWorker } from "./protocol";
 import { SileroRunner, verifiedModel, type OrtLike } from "./runner";
+import { Suppressor } from "./denoise";
+import { createRnnoise, verifiedRnnoise } from "./rnnoise";
 
 declare const self: DedicatedWorkerGlobalScope;
 
 const post = (m: FromWorker) => self.postMessage(m);
 
 let runner: SileroRunner | null = null;
+const suppressor = new Suppressor({
+  load: async () => {
+    const bytes = await verifiedRnnoise(async () => {
+      const r = await fetch(rnnoiseUrl, { credentials: "same-origin", cache: "force-cache" });
+      if (!r.ok) throw new Error("status");
+      return new Uint8Array(await r.arrayBuffer());
+    });
+    return createRnnoise(bytes);
+  },
+  notify: (e) => post({ type: "denoise", ...e }),
+});
 let chain: Promise<void> = Promise.resolve();
 
 async function init() {
@@ -50,16 +71,19 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   if (m.type === "init") {
     chain = chain.then(init);
   } else if (m.type === "reset") {
-    chain = chain.then(() => { runner?.reset(); });
+    chain = chain.then(() => { runner?.reset(); suppressor.reset(); });
+  } else if (m.type === "denoise") {
+    if (m.on) suppressor.enable(); else suppressor.disable();
   } else if (m.type === "frame") {
     const received = performance.now();
     chain = chain.then(async () => {
       if (!runner) return;
-      const t0 = performance.now();
       try {
-        const p = await runner.run(m.samples);
+        const { samples, ms: dms } = suppressor.process(m.samples);
+        const t0 = performance.now(); // the VAD's own time: suppression is reported apart (dms)
+        const p = await runner.run(samples);
         const done = performance.now();
-        post({ type: "prob", seq: m.seq, p, ms: done - t0, total: done - received });
+        post({ type: "prob", seq: m.seq, p, ms: done - t0, total: done - received, dms });
       } catch {
         post({ type: "failed", code: "runtime" });
       }

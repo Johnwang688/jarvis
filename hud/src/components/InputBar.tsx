@@ -97,6 +97,10 @@ export function InputBar(props: {
   imageNote?: string | null;
   onSend: (text: string, attachments: Attachment[]) => void;
   onTranscriptTaken: () => void;
+  /** V10: a cancel word just discarded dictated words; Undo puts them back in this box (for ten seconds). Null: nothing to undo. */
+  undo?: (() => void) | null;
+  /** The owner typed or pasted in the box (not a dictated or handed-back change): V10's send words wait while they are still writing. */
+  onTyped?: () => void;
   /** A turn is running in the open thread (2026-10-08): Enter steers it, and
    * a Stop button ends it. */
   running?: boolean;
@@ -305,6 +309,12 @@ export function InputBar(props: {
           ) : null}
         </div>
       ) : null}
+      {props.undo ? (
+        <div className="voice-undo" data-testid="voice-undo-bar" role="status">
+          <span>Cancelled what you dictated.</span>
+          <button type="button" data-testid="voice-undo" onClick={props.undo}>Undo</button>
+        </div>
+      ) : null}
       <div className="inputrow">
         <label className="iconbtn attach" title="Attach files" aria-label="Attach files">
           <ClipIcon />
@@ -327,7 +337,7 @@ export function InputBar(props: {
             (props.running ? "Steer him while he works · Enter sends, Stop ends the turn" : "Message, or @path to attach")
           }
           disabled={props.disabled}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => { props.onTyped?.(); setText(e.target.value); }}
           onPaste={(e) => {
             const fl = Array.from(e.clipboardData?.files || []);
             if (fl.length) {

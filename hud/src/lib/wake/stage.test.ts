@@ -219,6 +219,37 @@ describe("when the wake word cannot run", () => {
     expect(w.onmessage).toBeNull();
   });
 
+  it("run tokens: a stale run's stop cannot stop a newer run's worker", () => {
+    const r = rig();
+    const first = r.stage.start();           // the mic effect's first run
+    const second = r.stage.start();          // the effect ran again before the first one's cleanup
+    expect(second).toBeGreaterThan(first);
+    r.w().say({ type: "ready", loadMs: 1 });
+    const live = r.w();
+    r.stage.stop(first);                     // the stale run's cleanup / catch
+    expect(r.stage.status().state).toBe("ready");
+    expect(live.terminated).toBe(false);
+    r.stage.stop(second);                    // the live run's own
+    expect(r.stage.status().state).toBe("idle");
+    expect(live.terminated).toBe(true);
+  });
+
+  it("a stop with no token (the old call) still stops", () => {
+    const r = rig(); r.stage.start(); r.w().say({ type: "ready", loadMs: 1 });
+    r.stage.stop();
+    expect(r.stage.status().state).toBe("idle");
+  });
+
+  it("a retry is not a new run: it keeps the live run's token", () => {
+    const r = rig();
+    const run = r.stage.start();
+    r.w().say({ type: "failed", code: "fetch" });
+    r.stage.retry();
+    r.w().say({ type: "ready", loadMs: 1 });
+    r.stage.stop(run);                       // the run that was live when it failed still owns the stage
+    expect(r.stage.status().state).toBe("idle");
+  });
+
   it("a throwing onWake cannot wedge the stage", () => {
     const stage = new WakeStage({ onWake: () => { throw new Error("capture"); }, createWorker: () => (w = new FakeWorker()) });
     let w!: FakeWorker;

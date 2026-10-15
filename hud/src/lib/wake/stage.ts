@@ -93,6 +93,7 @@ export class WakeStage {
   private wakeHits = 0;
   private commandHits = 0;
   private lastStatus = "";
+  private gen = 0;
 
   constructor(private o: WakeStageOptions) {
     this.sensitivity = o.sensitivity?.() ?? "normal";
@@ -131,8 +132,17 @@ export class WakeStage {
     try { this.o.onStatus?.(s); } catch { /* an observer cannot change listening */ }
   }
 
-  /** Begin loading the worker (the microphone opened, or a retry). It does nothing while loading or listening. */
-  start() {
+  /**
+   * Begin loading the worker (the microphone opened, or a retry); does nothing while loading or listening. Returns this
+   * run's token: pass it to `stop` so a stale run's cleanup cannot stop a newer run's worker (as VadStage's `start`).
+   */
+  start(): number {
+    const gen = ++this.gen;
+    this.begin();
+    return gen;
+  }
+
+  private begin() {
     if (this.state === "loading" || this.state === "ready") return;
     this.code = null;
     this.startedAt = this.now();
@@ -155,11 +165,12 @@ export class WakeStage {
 
   /** Try again after a failure (Settings -> Voice offers it). */
   retry() {
-    if (this.state === "failed") this.start();
+    if (this.state === "failed") this.begin(); // (not `start`: a retry is not a new microphone run, so it keeps the run's token)
   }
 
-  /** The window closed the microphone: stop listening and release the worker. */
-  stop() {
+  /** The window closed the microphone: stop listening and release the worker. `gen` is `start()`'s token; a stale one does nothing. */
+  stop(gen?: number) {
+    if (gen !== undefined && gen !== this.gen) return;
     this.release();
     this.state = "idle";
     this.code = null;
