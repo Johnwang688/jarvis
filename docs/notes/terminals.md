@@ -86,11 +86,7 @@ command only — so WP-F's text-pattern refusals apply to every read.
 `terminal_check`'s no-tool test allows exactly `terminal_read`, whose module
 may hold one line naming this one — `from ..terminals import read_for_tool`
 — and call it once. Each terminal has the owner's `readable` switch, **on by
-default**. When a `PATCH` actually changes it, the daemon publishes
-`terminal_readable` with exactly `{terminal_id, readable, at}` (an id, a
-boolean and a time: never output) so another HUD window's switch catches up;
-the daemon's flag stays the only truth, nothing reads that record, and the
-HUD applies it to its display only.
+default**.
 Follow-ups from the re-review (with WP-D): `integration` is what was
 *configured*, **`marked`** (listing, attach row, one `{"type": "marked"}`) is
 what *took* — a profile that `exec`s another shell reads "bash" but never
@@ -285,3 +281,12 @@ words counted on input lines, a bare `ENV`, `env:`/`environ`, a prose
 source, a pending source never judged, a verb's options skipped.
 
 <!-- claude-source:001556-001731:end -->
+
+## Current: the "Jarvis can read" switch follows every window (2026-10-15)
+
+Amends the archived `readable` switch paragraph above. When a `PATCH
+/terminals/{id}` actually changes the switch (`Terminals.set_readable`), the
+daemon publishes `terminal_readable` with exactly `{terminal_id, readable, at}`
+(an id, a boolean and a time: never output), so another HUD window's switch
+catches up (PR #187). The daemon's flag stays the only truth, nothing reads
+that record, and the HUD applies it to its display only.
