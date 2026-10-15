@@ -1,0 +1,356 @@
+{
+ "cli": "codex-cli 0.161.0",
+ "config": "model = \"gpt-6.1-sol\"\nmodel_provider = \"fixture\"\napproval_policy = \"on-request\"\napprovals_reviewer = \"user\"\nsandbox_mode = \"workspace-write\"\nweb_search = \"disabled\"\ncheck_for_update_on_startup = false\n[model_providers.fixture]\nname = \"SV0 offline fixture\"\nbase_url = \"http://127.0.0.1:35881/v1\"\nwire_api = \"responses\"\nenv_key = \"OPENAI_API_KEY\"\n[sandbox_workspace_write]\nnetwork_access = false\n",
+ "approval_reply": {
+  "approval": "decline",
+  "approval_accept": "accept"
+ },
+ "scenarios": {
+  "one": {
+   "status": "ran",
+   "rows": 56,
+   "seconds": 36.6
+  },
+  "parallel": {
+   "status": "ran",
+   "rows": 70,
+   "seconds": 6.5
+  },
+  "nested": {
+   "status": "ran",
+   "rows": 78,
+   "seconds": 36.6
+  },
+  "fail": {
+   "status": "ran",
+   "rows": 46,
+   "seconds": 36.4
+  },
+  "approval": {
+   "status": "ran",
+   "rows": 61,
+   "seconds": 36.4
+  },
+  "child_interrupt": {
+   "status": "ran",
+   "rows": 52,
+   "seconds": 66.4
+  },
+  "parent_interrupt": {
+   "status": "ran",
+   "rows": 47,
+   "seconds": 18.7
+  },
+  "steer_parent": {
+   "status": "ran",
+   "rows": 56,
+   "seconds": 10.5
+  },
+  "close_agent": {
+   "status": "ran",
+   "rows": 45,
+   "seconds": 36.4
+  },
+  "no_wait": {
+   "status": "ran",
+   "rows": 46,
+   "seconds": 18.5
+  },
+  "approval_accept": {
+   "status": "ran",
+   "rows": 61,
+   "seconds": 36.5
+  },
+  "one_multi_agent_v2": {
+   "status": "ran",
+   "rows": 56,
+   "seconds": 36.5,
+   "config_extra": "[features] multi_agent_v2 = true"
+  }
+ },
+ "tools_offered": {
+  "parent": {
+   "functions": [
+    {
+     "name": "exec"
+    },
+    {
+     "name": "wait"
+    },
+    {
+     "name": "request_user_input"
+    },
+    {
+     "name": "request_user_input_async"
+    }
+   ],
+   "clock": [
+    {
+     "name": "sleep"
+    }
+   ],
+   "collaboration": [
+    {
+     "name": "followup_task",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "message": {
+        "type": "string",
+        "description": "Message text to send to the target agent.",
+        "encrypted": true
+       },
+       "target": {
+        "type": "string",
+        "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+       }
+      },
+      "required": [
+       "target",
+       "message"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "interrupt_agent",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "target": {
+        "type": "string",
+        "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+       }
+      },
+      "required": [
+       "target"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "list_agents",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path_prefix": {
+        "type": "string",
+        "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+       }
+      },
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "send_message",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "message": {
+        "type": "string",
+        "description": "Message text to queue on the target agent.",
+        "encrypted": true
+       },
+       "target": {
+        "type": "string",
+        "description": "Relative or canonical task name to message (from spawn_agent)."
+       }
+      },
+      "required": [
+       "target",
+       "message"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "spawn_agent",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "fork_turns": {
+        "type": "string",
+        "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+       },
+       "message": {
+        "type": "string",
+        "description": "Initial plain-text task for the new agent.",
+        "encrypted": true
+       },
+       "model": {
+        "type": "string",
+        "description": "Model override for the new agent. Omit unless an explicit override is needed."
+       },
+       "reasoning_effort": {
+        "type": "string",
+        "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+       },
+       "task_name": {
+        "type": "string",
+        "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+       }
+      },
+      "required": [
+       "task_name",
+       "message"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "wait_agent",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "timeout_ms": {
+        "type": "number",
+        "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+       }
+      },
+      "additionalProperties": false
+     }
+    }
+   ]
+  },
+  "child": {
+   "functions": [
+    {
+     "name": "exec"
+    },
+    {
+     "name": "wait"
+    },
+    {
+     "name": "request_user_input"
+    }
+   ],
+   "clock": [
+    {
+     "name": "sleep"
+    }
+   ],
+   "collaboration": [
+    {
+     "name": "followup_task",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "message": {
+        "type": "string",
+        "description": "Message text to send to the target agent.",
+        "encrypted": true
+       },
+       "target": {
+        "type": "string",
+        "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+       }
+      },
+      "required": [
+       "target",
+       "message"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "interrupt_agent",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "target": {
+        "type": "string",
+        "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+       }
+      },
+      "required": [
+       "target"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "list_agents",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "path_prefix": {
+        "type": "string",
+        "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+       }
+      },
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "send_message",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "message": {
+        "type": "string",
+        "description": "Message text to queue on the target agent.",
+        "encrypted": true
+       },
+       "target": {
+        "type": "string",
+        "description": "Relative or canonical task name to message (from spawn_agent)."
+       }
+      },
+      "required": [
+       "target",
+       "message"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "spawn_agent",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "fork_turns": {
+        "type": "string",
+        "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+       },
+       "message": {
+        "type": "string",
+        "description": "Initial plain-text task for the new agent.",
+        "encrypted": true
+       },
+       "model": {
+        "type": "string",
+        "description": "Model override for the new agent. Omit unless an explicit override is needed."
+       },
+       "reasoning_effort": {
+        "type": "string",
+        "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+       },
+       "task_name": {
+        "type": "string",
+        "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+       }
+      },
+      "required": [
+       "task_name",
+       "message"
+      ],
+      "additionalProperties": false
+     }
+    },
+    {
+     "name": "wait_agent",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "timeout_ms": {
+        "type": "number",
+        "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+       }
+      },
+      "additionalProperties": false
+     }
+    }
+   ]
+  }
+ }
+}
