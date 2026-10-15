@@ -196,6 +196,21 @@ class UserMessage:
 PermissionCallback = Callable[[str, dict, Brief], Decision]   # (tool_name, args, brief)
 
 
+def takes_keyword(callback: Any, name: str) -> bool:
+    """Whether `callback` takes the keyword `name` (or any keyword). A
+    provider hands a permission callback an optional keyword (`subagent`,
+    `subagent_sid`) only when it does: one that does not would raise, and a
+    raise denies — such metadata must never change an answer."""
+    import inspect
+    try:
+        params = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is p.VAR_KEYWORD
+               or (p.name == name and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
+               for p in params)
+
+
 class Provider(Protocol):
     name: ProviderName
 

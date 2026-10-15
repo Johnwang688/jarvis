@@ -1680,6 +1680,12 @@ class Checks(unittest.TestCase):
                     and m["params"]["item"].get("kind") == "started"
                     and m["params"]["item"].get("agentPath") == path)
 
+    @staticmethod
+    def sid_of(h, path):
+        """The sid of the known child whose label is `path` (SV-3: a child's
+        approval names its sid, not its label)."""
+        return "cx:" + next(tid for tid, label in h.native.children.items() if label == path)
+
     def answer_to(self, h, rid=0):
         replies = [m for m in h.native.rpc.replies if m["id"] == rid]
         self.assertEqual(len(replies), 1, replies)
@@ -1716,7 +1722,13 @@ class Checks(unittest.TestCase):
                     self.assert_parent_went_on(h, events)
                     self.assertEqual(self.answer_to(h)["result"], {"decision": want})
                     asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
-                    self.assertEqual(asked["subagent"], self.ASKER)
+                    # The child's sid (the owner's SV-3 decision), never its label.
+                    self.assertEqual(asked["subagent"], self.sid_of(h, self.ASKER))
+                    self.assertRegex(asked["subagent"], r"^cx:[A-Za-z0-9_-]{1,128}$")
+                    if isinstance(asker, RecordingAsker):
+                        # The owner's card carries it too, for the HUD's link.
+                        self.assertEqual(asker.seen[-1].subagent, asked["subagent"])
+                        self.assertEqual(asker.seen[-1].to_json()["subagent"], asked["subagent"])
                     self.assertEqual(asked["command"], "/bin/bash -lc 'touch /sv0-outside-workspace'")
                     resolved = next(e.data for e in events if e.kind == K.APPROVAL_RESOLVED)
                     self.assertEqual(resolved["decision"], "allow" if want == "accept" else "deny")
@@ -1838,7 +1850,9 @@ class Checks(unittest.TestCase):
                 shown = asker.seen[-1]
                 self.assertEqual(shown.args["paths"], [str(self.work / "notes.txt"), "/sv0-outside/notes.txt"])
                 asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
-                self.assertEqual(asked.get("subagent"), child)
+                self.assertEqual(asked.get("subagent"), self.sid_of(h, child) if child else None)
+                self.assertEqual(shown.subagent, self.sid_of(h, child) if child else "")
+                self.assertEqual("subagent" in shown.to_json(), bool(child))
                 if child:
                     self.assertIn(f"Codex sub-agent ‹{child}› (not the orchestrator)", shown.headline)
 
@@ -2089,6 +2103,8 @@ print(json.dumps(out))
         self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
         asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
         self.assertNotIn("subagent", asked)
+        self.assertEqual(asker.seen[-1].subagent, "")
+        self.assertNotIn("subagent", asker.seen[-1].to_json())
         self.assertTrue(asker.seen[-1].headline.startswith("SANDBOX WIDENING: Codex chat requests"),
                         asker.seen[-1].headline)
         # Another turn's request from the session's own thread is still fatal.
@@ -2097,6 +2113,25 @@ print(json.dumps(out))
         self.assertIn("error", self.answer_to(h))
         self.assertEqual(calls, [])
         self.assertTrue(events[-1].data.get("fatal"))
+
+    def test_child_sid_reaches_only_a_callback_that_takes_it(self):
+        """SV-3: the sid is handed only to a permit that takes `subagent_sid`.
+        One that does not is called exactly as before (a raise would deny),
+        so the sid never changes an answer."""
+        seen = []
+
+        def narrow(tool, args, brief, *, widening=None, grants=(), also_commands=()):
+            seen.append(widening)
+            return Decision.ALLOW
+        h, events = self.replay("approval_accept", narrow)
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
+        self.assertEqual(len(seen), 1)
+        self.assertIn(self.ASKER, seen[0])
+        permit, calls = self.counting()
+        h, events = self.replay("approval_accept", permit)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
+        self.assertEqual(calls[-1][1]["subagent_sid"], self.sid_of(h, self.ASKER))
 
     def test_grandchild_request_is_known_through_its_parent_child(self):
         from jarvis.v2.permissions import deny_all
@@ -2120,7 +2155,8 @@ print(json.dumps(out))
         h, events = self.replay("nested", self.real_permit(deny_all("nobody")), edit=ask_from_grandchild)
         self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
         self.assertEqual(events[-1].data, {"stop": "end"})
-        self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"], inner)
+        self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"],
+                         self.sid_of(h, inner))
         # Announced on a thread nobody announced: unknown, and still fatal.
         h, events = self.replay("nested", self.real_permit(deny_all("nobody")), edit=nameless_outer)
         self.assertIn("error", self.answer_to(h))
@@ -2147,7 +2183,9 @@ print(json.dumps(out))
                     return msgs
                 h, events = self.replay("approval", self.real_permit(asker), edit=rename)
                 self.assert_parent_went_on(h, events)
-                self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"], shown)
+                self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"],
+                                 self.sid_of(h, shown))
+                self.assertEqual(asker.seen[-1].subagent, self.sid_of(h, shown))
                 headline = asker.seen[-1].headline
                 self.assertIn(f"Codex sub-agent ‹{shown}› (not the orchestrator) asks to run beyond its sandbox",
                               headline)
@@ -2277,7 +2315,7 @@ print(json.dumps(out))
         self.assertEqual(events2[-1].data, {"stop": "end"})
         self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
         self.assertEqual(next(e.data for e in events2 if e.kind == K.APPROVAL_REQUESTED)["subagent"],
-                         "/root/sv0_asker")
+                         self.sid_of(h, "/root/sv0_asker"))
 
     def test_a_request_is_never_answered_twice(self):
         """A failure after the reply went out (the peer died mid-approval)

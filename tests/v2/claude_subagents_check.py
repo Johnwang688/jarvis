@@ -266,6 +266,47 @@ class Lifecycle(unittest.TestCase):
                          ("done", 110, 1, "Bash"), "the notification's closing numbers")
         self.assertEqual(len(of(got, K.USAGE)), 1, "the parent's result only")
 
+    def test_the_brief_rides_the_task_started_lifecycle_alone(self):
+        """SV-3 (the owner's decision: the brief, collapsed, at the top of
+        the pane): `task_started.prompt` goes to the record on that one
+        lifecycle event, through `_safe`, and on no other event."""
+        for name, (turns, sids) in SCENARIOS.items():
+            with self.subTest(name=name):
+                got, *_ = R.run(name, turns)
+                prompts = {"cl:" + r["data"]["tool_use_id"]: r["data"]["prompt"] for r in R.rows(name)
+                           if r["src"] == "cli" and r["data"].get("subtype") == "task_started"
+                           and r["data"].get("task_type") == "local_agent"}
+                for sid in sids:
+                    carried = [d["brief"] for d in life(got, sid) if "brief" in d]
+                    self.assertEqual(carried, [prompts[sid]], sid)
+                # (A nested spawn's own Agent call carries it as arguments,
+                # which the record reads for a label only and never keeps.)
+                inner = json.dumps([e.data for e in of(got, K.SUBAGENT_EVENT)
+                                    if e.data["event"]["kind"] != "tool_started"])
+                for prompt in prompts.values():
+                    self.assertNotIn(json.dumps(prompt)[1:-1], inner)
+
+    def test_the_brief_is_scrubbed_and_bounded(self):
+        def secret(rs):
+            for r in rs:
+                if r["src"] == "cli" and r["data"].get("subtype") == "task_started":
+                    r["data"]["prompt"] = f"use {FAKE_TOKEN} " + "x" * 20000
+            return rs
+        got, *_ = R.run("one_fg", edit=secret)
+        brief = next(d["brief"] for d in life(got, "cl:toolu_sv0_alpha") if "brief" in d)
+        self.assertNotIn(FAKE_TOKEN, brief)
+        self.assertLessEqual(len(brief), claude.CHILD_BRIEF_CHARS)
+        # Scrubbed whole, then cut: a token across the cut leaves no part of
+        # itself behind (review of #212, LOW-5).
+        def straddle(rs):
+            for r in rs:
+                if r["src"] == "cli" and r["data"].get("subtype") == "task_started":
+                    r["data"]["prompt"] = "y" * (claude.CHILD_BRIEF_CHARS - 13) + " " + FAKE_TOKEN
+            return rs
+        got, *_ = R.run("one_fg", edit=straddle)
+        brief = next(d["brief"] for d in life(got, "cl:toolu_sv0_alpha") if "brief" in d)
+        self.assertNotIn(FAKE_TOKEN[:12], brief)
+
     def test_stop_and_its_name_never_reach_the_parents_text(self):
         got, *_ = R.run("stop_fg")
         self.assertEqual([e.data["text"] for e in of(got, K.TEXT)], ["SV0 parent: stop_fg step 1 done."])
@@ -345,6 +386,41 @@ class ApprovalLabels(unittest.TestCase):
         ):
             with self.subTest(raw=raw):
                 self.assertEqual(claude.child_label(raw), want)
+
+    def test_a_childs_card_carries_its_sid_and_the_orchestrators_none(self):
+        """SV-3: beside its label, a child's question names its sid
+        (`agent_id` -> `task_id` -> the spawn's id), for the HUD's link from
+        the card to the child's row; the orchestrator's names none."""
+        for name, (turns, _sids) in SCENARIOS.items():
+            with self.subTest(name=name):
+                seen = []
+
+                def permit(tool, args, brief=None, *, subagent=None, subagent_sid=None):
+                    seen.append((subagent, subagent_sid))
+                    return Decision.ALLOW
+                got, _p, _session, client, _ = R.run(name, turns, permit=permit)
+                spawns = {r["data"]["task_id"]: r["data"]["tool_use_id"] for r in R.rows(name)
+                          if r["src"] == "cli" and r["data"].get("subtype") == "task_started"}
+                agents = [agent for _t, agent, _ in client.hooks]
+                self.assertEqual(len(seen), len(agents))
+                for agent, (label, sid) in zip(agents, seen):
+                    if agent:
+                        self.assertEqual(sid, "cl:" + spawns[agent])
+                    else:
+                        self.assertEqual((label, sid), (None, None))
+                # The logged gate question names the same sid.
+                self.assertEqual([e.data.get("subagent") for e in of(got, K.APPROVAL_REQUESTED)],
+                                 [sid for _label, sid in seen])
+
+    def test_a_permit_taking_only_the_label_is_asked_without_the_sid(self):
+        asked = []
+
+        def permit(tool, args, brief=None, *, subagent=None):
+            asked.append((tool, subagent))
+            return Decision.ALLOW
+        _, _, _, client, _ = R.run("one_fg", permit=permit)
+        self.assertEqual(asked, [("Agent", None), ("Bash", "SV0 alpha probe")])
+        self.assertEqual([got for _t, agent, got in client.hooks if agent], [{}])
 
     def test_the_label_never_reaches_args_or_the_command(self):
         permit = R.Permit()

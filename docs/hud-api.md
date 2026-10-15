@@ -3157,15 +3157,19 @@ What differs from Claude's, on the same record and routes:
   (by name; `hud_browser_act` is "Browser action"), folded with its outcome
   (`denied` when it was declined). `result`: only for a failed child.
   `declined`: a reviewer's denial (a task's `auto_review`), the tool's name.
-  Not kept: deltas, reasoning, plans, the child's own brief, its `wait`
-  calls.
+  Not kept: deltas, reasoning, plans, its `wait` calls — and no brief:
+  Codex 0.161 sends none to the app-server client (no prompt on the
+  `subAgentActivity` item, no user message on the child's thread; SV-0's
+  recordings), so the transcript route has no `brief` for a `cx:` child.
 - **Between turns nobody reads the connection** (SV-6). A child that talks
   after the orchestrator's turn is recorded when the next message is sent,
   under that turn's `turn_id`.
 - **Approval cards** are SV-2a's: a child's command or file approval is
   always an owner-asked widening naming it ("Codex sub-agent ‹name› (not the
-  orchestrator)"). The gate question carries `subagent` as that name, not
-  the sid.
+  orchestrator)"). Since SV-3 (owner, 2026-10-15) the gate question and the
+  owner's card carry the child's **sid** as `subagent`, as Claude's do (see
+  "On `/events`" below); the name stays in the headline. Nothing decides on
+  it.
 - **No per-child Stop** (SV-4). Codex's `turn/interrupt` on a child's thread
   ends that child's turn (`stopped`), but a command it is running runs to its
   end, and the orchestrator's model is not told (SV-0 finding 12). Whether
@@ -3218,8 +3222,18 @@ Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
     "outcome": "ok", "seq": 1, "at": "…", "finished_at": "…"},
    {"role": "assistant", "text": "…", "seq": 2, "at": "…"},
    {"role": "result", "text": "…", "status": "done", "seq": 3, "at": "…"}],
- "truncated": false}
+ "truncated": false,
+ "brief": "…"}
 ```
+
+- `brief` (SV-3; present only when one was recorded): the orchestrator's
+  brief to the child — Claude's `task_started.prompt` — shown collapsed at
+  the top of the HUD's pane (owner, 2026-10-15). At most 4000 characters
+  and 16 KiB of JSON, scrubbed as `assistant` is. It is served **here
+  only**: never in the list route, the bus record, the thread's log or a log
+  line (`tests/v2/subagent_routes_check.py`). Codex sends none (see "Codex
+  children"). The parent's own Agent call still carries the same words in
+  its arguments, as any parent call's arguments are carried today.
 
 - `assistant`: a text the child wrote (whole: the CLI streams no child
   deltas), at most 4000 characters. Scrubbed by the record the same way for
@@ -3287,3 +3301,13 @@ orchestrator's would be (every layer, the same answer). Only its `origin`
 changes: "Claude sub-agent ‹name› (not the orchestrator)" (the name reduced
 to `[A-Za-z0-9 _./-]`, at most 40 characters), then " in task …" for a
 task's. The HUD shows it as "REQUESTED BY …", Discord as "Origin: …".
+
+**The card names the child's sid (SV-3).** A card a native sub-agent's call
+raised carries `"subagent": "<sid>"` in its public JSON (the bus's
+`approval_requested`, `GET /approvals`), for Claude's and Codex's children
+alike, so the HUD can draw "from sub-agent ‹name›" on it as a link to the
+child's row (the name from the list route, reduced on the card by the same
+`[A-Za-z0-9 _./-]` rule, at most 40 characters). The provider hands the sid to the permit callback beside the
+label (`subagent_sid`, only to a callback that takes the keyword); it is an
+id matching the sid pattern or nothing, never a word the model chose, and
+no layer reads it. A private (Browser) card's projection leaves it out.
