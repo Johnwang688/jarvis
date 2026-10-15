@@ -1209,7 +1209,21 @@ class CodexProvider:
                         yield self._event(h, EventKind.ERROR, message="Codex model cooling", fatal=False, **retry)
                     elif status == "completed":
                         self._cooldown(s.brief.model, success=True)
-                    s.accounting.complete = status == "completed"
+                    # `turn/completed` is Codex's last word on a turn, and its
+                    # usage counters are cumulative: whatever it counted for
+                    # this turn has been reported by now (0.161.0 sends a
+                    # stopped turn's usage before its `turn/completed`, SV-0
+                    # `parent_interrupt`), and nothing later can add what it
+                    # never counted. So an interrupted or failed turn closes
+                    # the accounting as a completed one does: refusing the
+                    # next send waited for numbers that never come, and left
+                    # the owner's chat dead after a Stop (2026-10-15). Such a
+                    # turn is counted in `partial_turns`, because a request
+                    # cut off mid-stream may never have been reported at
+                    # all. Any other status is unknown, and stays incomplete.
+                    s.accounting.complete = status in ("completed", "interrupted", "failed")
+                    if status in ("interrupted", "failed"):
+                        s.accounting.partial_turns += 1
                     s.accounting.save()
                     completed = True
                     yield from self._mcp_unfinished(h)

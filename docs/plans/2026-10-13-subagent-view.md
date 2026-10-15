@@ -326,6 +326,31 @@ So separation fixes today's transcript, Discord and task-report misattribution, 
   - reload and `jarvis restart` with a pane open;
   - with voice V7, only finished and failed lines are spoken.
 
+## Decisions recorded (owner, 2026-10-15, after SV-0/SV-1/SV-2)
+
+These answer the open questions below where they overlap, and the SV-0 findings
+(`2026-10-15-sv0-findings.md`) where those asked for an owner call.
+
+- **Codex per-child Stop (SV-4): offered, with the caveat shown.** Stop ends the
+  child's turn; the UI says a command the child is already running may still
+  finish, and the orchestrator's model is not told.
+- **The main Stop also kills Claude's background sub-agents: keep it**, and the
+  UI says so.
+- **Show the sub-agent's brief in its pane: yes** (open question 3; collapsed,
+  scrubbed, at most 4,000 characters).
+- **No interim mitigation for the background-agent stall.** Wait for SV-6, which
+  drains the stream between turns and records an injected CLI turn as its own
+  system-originated turn.
+- **Turns the CLI starts by itself after a background sub-agent finishes are
+  neither posted to Discord nor spoken.** Sub-agents are spawned to do a task
+  and go away; their completion turns stay quiet (SV-4 voice rule extended).
+- **Claude per-child Stop: enable it** on the SV-0 offline evidence for CLI
+  2.1.295 (`CLAUDE_STOP_VERIFIED`); no separate live run is required first.
+- **Sub-agent thinking and the reviewer's decline reason are not kept** in the
+  child record: accepted.
+- **Codex child approval cards carry the child's sid** (as Claude's do), so the
+  HUD can link a card to its row; added with SV-3.
+
 ## Open questions for the owner
 
 1. **Inline rows or a strip under the transcript?** Recommend **inline at the spawn point**, collapsing above six. The row sits beside the words that launched it, and history reads the same.
