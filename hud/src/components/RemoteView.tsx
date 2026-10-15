@@ -251,7 +251,7 @@ export function RemoteView(props:RemoteViewProps) {
       onPointerDown={e=>{if(canInput()&&!owner.consumesMouse(e))e.currentTarget.setPointerCapture(e.pointerId);}}
       onPointerCancel={()=>release()} onLostPointerCapture={()=>release()}
       onContextMenu={owner.context}
-      onWheel={e=>{if(owner.menu)return;if(!canInput())return;const at=point(e);if(!at.inside)return;const event=cdpWheel(e,at,props.zoom,geometry.current.view.height);if(event){e.preventDefault();send({t:"mouse",e:event},true);}}}>
+      onWheel={e=>{if(owner.menu)return;if(!canInput())return;const at=point(e);if(!at.inside)return;const event=cdpWheel(e,at,props.zoom,geometry.current.view.height,geometry.current.place.scale);if(event){e.preventDefault();send({t:"mouse",e:event},true);}}}>
       <canvas ref={canvas} role="img" aria-label="Remote page image" />
       <textarea ref={input} className="remoteinput" data-remote-input data-testid="remote-input" aria-label="Type into the Remote page" spellCheck={false} autoComplete="off"
         disabled={!connected||props.blocked||!!auth} onBlur={()=>{release();send({t:"blur"},true);}}

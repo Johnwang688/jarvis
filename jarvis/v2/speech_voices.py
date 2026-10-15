@@ -276,4 +276,10 @@ def route(handler, daemon, parts, query):
             record, _ = assign(daemon, thread_id)
     except LookupError as exc:
         raise APIError(400, str(exc)) from exc
+    # V12 (L3): a voice that could pass for the enrolled owner is said so (only when one is enrolled and the check is on).
+    if record.get("voice") and "muted" not in body:
+        from jarvis import speaker
+        warning = speaker.voice_warning(record["voice"])
+        if warning:
+            record = {**record, "speaker_warning": warning}
     return 200, record

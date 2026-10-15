@@ -14,7 +14,7 @@ export function EndPauseSetting(props: { ms: number; onChange: (ms: number) => v
       </label>
       <p>
         A longer pause lets you stop and think mid-sentence; a shorter one sends sooner. Speech that starts again
-        within six seconds after a message went out continues it. Takes effect from the next message.
+        within six seconds after a message went out continues it. Takes effect at once, even in a message already being said. The choices run from 1.5 to 4 s; the detector accepts 1 to 6 s.
       </p>
     </section>
   );

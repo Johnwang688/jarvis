@@ -87,6 +87,7 @@ from functools import wraps
 from .audio import InstanceAudio
 import json
 import logging
+import math
 import os
 import pwd
 import re
@@ -109,7 +110,8 @@ from . import policy
 from .profiles import ProfileStore
 from .gate import Gate
 from .settings import BrowserSettings
-from .stream import TICKET_TTL_S, TabStream, Tickets, serve as _serve_stream
+from .stream import (MAX_DEVICE_PIXELS, TICKET_TTL_S, VIEW_MAX, TabStream, Tickets,
+                     serve as _serve_stream)
 
 LOG = logging.getLogger("jarvis.v2.browser")
 
@@ -138,6 +140,13 @@ CHOOSER_TTL_S = 300.0               # an unanswered file chooser is forgotten
 DELIVER_WAIT_S = 5.0                # an input event's answer is waited for this long
 JPEG_QUALITY = 70
 DEFAULT_VIEW = (1280, 800, 1.0)     # the launch viewport, until a window says otherwise
+# A page wider than its pane is laid out at its own width and drawn scaled
+# down (`_fit`).
+FIT_SLACK = 0.01                    # overflow this small is left cut off
+FIT_MAX = 3                         # never wider than 3 × the pane (drawn at ≥ 1/3)
+FIT_STEPS = 4                       # widenings in one pass, at most
+FIT_EVERY_S = 0.5                   # a repainting page is measured this often, at most
+FIT_WAIT_S = 2.0                    # a measurement is waited for this long
 SELECTION_MAX = 256 * 1024
 DIALOG_KINDS = ("alert", "confirm", "prompt", "beforeunload")
 HELD = "an approval card is waiting for you; nothing reaches the Browser until it is answered"
@@ -560,6 +569,19 @@ def _clean(text, cap: int) -> str:
     return clean_line(text if isinstance(text, str) else "", cap)
 
 
+def _fitted(view: tuple, content: int) -> tuple[int, int, float]:
+    """The window's viewport `view` (W, H, S) widened toward `content` CSS
+    px (`BrowserHost._fit`): the pane's aspect and device pixels kept, within
+    FIT_MAX × W, VIEW_MAX each way and the device-pixel cap."""
+    width, height, scale = view
+    wide = max(width, min(content, FIT_MAX * width, VIEW_MAX, VIEW_MAX * width // height))
+    high = min(VIEW_MAX, max(1, round(height * wide / width)))
+    ratio = scale * width / wide
+    if wide * high * ratio * ratio > MAX_DEVICE_PIXELS:
+        ratio = math.sqrt(MAX_DEVICE_PIXELS / (wide * high))
+    return wide, high, ratio
+
+
 # -- state ---------------------------------------------------------------------------------
 
 @dataclass
@@ -597,6 +619,13 @@ class _Tab:
     pump: object = None                 # the input task
     casting: tuple | None = None        # the screencast's size, while it runs
     cast_lock: object = None
+    # The fit (`_fit`): its overrides one at a time, and what it last saw.
+    view_lock: object = field(default_factory=asyncio.Lock)
+    fit_for: tuple | None = None        # the window viewport the last reset laid out
+    fit_from: tuple | None = None       # (width, content width) before the last widening
+    fit_stuck: bool = False             # the page grows with its viewport: widen no more
+    fit_due: float = 0.0                # loop time of the next repaint's measurement
+    fit_task: object = None
     security: str | None = None
     location: tuple | None = None
     dialogs: dict = field(default_factory=dict)
@@ -1016,14 +1045,16 @@ class BrowserHost:
                 pass
             return ActResult("stopped", "Stopped: the Browser action timed out; look again.")
 
-    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text):
+    def drive_notice(self, tab_id, thread_id, action_id, action, outcome, prepared, text, *, provider="fast"):
         tab = self.require_tab(tab_id)
         target = "" if prepared.context_flagged or prepared.target is None else prepared.target.name
         rect = None
         if prepared.rect and not prepared.context_flagged:
             left, top, right, bottom = prepared.rect
             rect = {"x": left, "y": top, "width": right-left, "height": bottom-top}
-        tab.stream.agent_driver(thread_id, "fast")
+        if provider not in ("fast", "claude", "codex"):
+            raise ValueError("invalid Browser driver provider")
+        tab.stream.agent_driver(thread_id, provider)
         tab.stream.agent_action({"id": action_id, "at": datetime.now(timezone.utc).isoformat(), "action": action,
             "target": target, "text": text if action in ("type", "select") else "",
             "outcome": outcome, "rect": rect, "page_identity": tab.page_identity,
@@ -1044,6 +1075,11 @@ class BrowserHost:
         return ("<!doctype html><meta charset=utf-8><title>Browser restored</title>"
                 "<body><p>This page was left blank after the sound setting changed. "
                 "Enter an address or use Sign in to open it again.</p>")
+
+    def duck_owners(self):
+        """Pinned Chrome roots that Jarvis's speech may lower (V15); `[]` when
+        nothing is audible. Never starts Chrome."""
+        return self._sound.duck_owners()
 
     def set_sound(self, tab_id, on):
         self._refuse_if_held()
@@ -2110,12 +2146,32 @@ class BrowserHost:
                 cdp = await tab.page.context.new_cdp_session(tab.page)
                 cdp.on("Page.screencastFrame", lambda params: self._frame(tab, cdp, params))
                 cdp.on("Security.visibleSecurityStateChanged", lambda params: self._secured(tab, params))
+                cdp.on("Page.frameNavigated", lambda params: self._new_document(tab, params))
                 try:
                     await cdp.send("Security.enable")
                 except Exception:  # noqa: BLE001 - the security state is a courtesy
                     pass
+                try:
+                    await cdp.send("Page.enable")
+                except Exception:  # noqa: BLE001 - unfitted on navigation, never a lost tab
+                    pass
                 tab.cdp = cdp
         return tab.cdp
+
+    def _new_document(self, tab: _Tab, params) -> None:
+        """CDP `Page.frameNavigated`: a new document (never a same-document
+        change, which is `navigatedWithinDocument`). In the main frame it
+        starts at the window's viewport (`_fit`). An SPA's in-app route
+        changes are not resets: each would relayout the page three or four
+        times; repaints still widen, and narrowing waits for a resize or a
+        real navigation."""
+        if self._tabs.get(tab.id) is not tab or self._stopped:
+            return
+        frame = (params or {}).get("frame") or {}
+        if frame.get("parentId") is not None:
+            return
+        if tab.stream is not None and tab.stream.viewport is not None:
+            asyncio.ensure_future(self._quietly(self._refit(tab, reset=True)))
 
     def _secured(self, tab: _Tab, params) -> None:
         if self._tabs.get(tab.id) is not tab or self._stopped:
@@ -2128,7 +2184,9 @@ class BrowserHost:
     # -- frames ----------------------------------------------------------------------------
 
     def _view(self, tab: _Tab) -> tuple[int, int, float]:
-        return tab.stream.viewport or DEFAULT_VIEW
+        """The viewport the page is laid out at, in page CSS px (what frames
+        show and input means): the window's, or the fitted one (`_fit`)."""
+        return tab.stream.page_viewport() or DEFAULT_VIEW
 
     async def _sync_screencast(self, tab: _Tab) -> None:
         """Start, restart (a new size) or stop the tab's screencast to match
@@ -2156,18 +2214,121 @@ class BrowserHost:
     @_tab_activity
     async def _set_viewport(self, tab: _Tab) -> None:
         """The window's canvas size at its DPR × the HUD's zoom (BR-2's
-        `viewportFor`), so frames map one to one onto its pixels."""
+        `viewportFor`), so frames map one to one onto its pixels; then fitted
+        to the page's width (`_fit`)."""
         cdp = await self._ensure_cdp(tab)
         if cdp is None:
             return
-        width, height, scale = self._view(tab)
+        await self._fit(tab, cdp, reset=True)
+
+    @_tab_activity
+    async def _refit(self, tab: _Tab, *, reset: bool) -> None:
+        """`_fit` for a new document (a reset) or a repaint (widening only),
+        on the CDP session a window already made; none without a window's
+        viewport."""
+        cdp = tab.cdp
+        if cdp is None or tab.stream is None or tab.stream.viewport is None:
+            return
+        await self._fit(tab, cdp, reset=reset)
+
+    def _fit_soon(self, tab: _Tab) -> None:
+        """A repaint: measure again (a page that sets its min-width after
+        it loads), at most every FIT_EVERY_S and never two at once. An idle
+        page paints nothing, so costs nothing."""
+        viewport = tab.stream.viewport
+        if viewport is None or tab.fit_for != viewport or tab.fit_stuck:
+            return
+        if tab.fit_task is not None and not tab.fit_task.done():
+            return
+        now = asyncio.get_running_loop().time()
+        if now < tab.fit_due:
+            return
+        tab.fit_due = now + FIT_EVERY_S
+        tab.fit_task = asyncio.ensure_future(self._quietly(self._refit(tab, reset=False)))
+
+    async def _fit(self, tab: _Tab, cdp, *, reset: bool) -> None:
+        """Lay a page wider than the window's viewport out at its own width,
+        for the window to draw scaled down. A CSS min-width (Spotify's body
+        is 800 px) otherwise runs past a narrow pane, and headless Chrome
+        draws no scrollbar, so the rest is simply cut off. Content width C
+        over the window's W × H at scale S becomes C × H·C/W at S·W/C: the
+        pane's aspect and the same device pixels, so a frame costs what it
+        did and the window's `placeFrame` shrinks it to the canvas.
+
+        C is CDP's `Page.getLayoutMetrics`, which runs no page code: a page
+        that lies can only make its own picture smaller. A reset (a resize,
+        a new main-frame document: `_new_document`, never a same-document
+        route change) lays the page out at the window's viewport
+        and measures from there; a repaint (`_fit_soon`) only widens, so the
+        layout never oscillates; narrowing waits for the next reset.
+        Overflow within FIT_SLACK is left; widening stops at FIT_MAX × W,
+        VIEW_MAX and the device-pixel cap (`_fitted`), and once the page is
+        seen to grow with its viewport (`calc(100vw + 50px)`, or Spotify's
+        12 px past any width): that last widening is undone, since it
+        cannot help, and none follows until the next reset. One pass at a
+        time (`view_lock`), each reading the window's newest viewport: the
+        last resize wins."""
+        async with tab.view_lock:
+            stream = tab.stream
+            want = stream.viewport
+            if want is None or self._tabs.get(tab.id) is not tab or self._stopped:
+                return
+            if reset:
+                stream.fitted = None
+                tab.fit_for, tab.fit_from, tab.fit_stuck = want, None, False
+                if not await self._override(tab, cdp, want):
+                    return
+            elif tab.fit_for != want or tab.fit_stuck:
+                return                  # a resize not yet applied resets it anyway
+            changed = reset
+            for _ in range(FIT_STEPS):
+                width = (stream.page_viewport() or want)[0]
+                content = await self._content_width(cdp)
+                if content is None or stream.viewport != want or content <= width * (1 + FIT_SLACK):
+                    break
+                if tab.fit_from is not None:
+                    was_width, was_content = tab.fit_from
+                    if content - was_content >= 0.9 * (width - was_width):
+                        # The page grew as much as its viewport did: that
+                        # widening bought nothing. Undo it, and no more.
+                        tab.fit_stuck = True
+                        view = want if was_width <= want[0] else _fitted(want, was_width)
+                        if await self._override(tab, cdp, view):
+                            stream.fitted = None if view == want else (want, view)
+                            changed = True
+                        break
+                view = _fitted(want, content)
+                if view[0] <= width:
+                    break               # at a cap
+                tab.fit_from = (width, content)
+                if not await self._override(tab, cdp, view):
+                    break
+                stream.fitted = (want, view)
+                changed = True
+            if changed:
+                await self._sync_screencast(tab)
+
+    async def _override(self, tab: _Tab, cdp, view: tuple) -> bool:
+        width, height, scale = view
         try:
             await cdp.send("Emulation.setDeviceMetricsOverride", {
                 "width": width, "height": height, "deviceScaleFactor": scale, "mobile": False})
         except Exception as exc:  # noqa: BLE001
             LOG.info("browser tab %s: viewport not changed (%s)", tab.id, type(exc).__name__)
-            return
-        await self._sync_screencast(tab)
+            return False
+        return True
+
+    @staticmethod
+    async def _content_width(cdp) -> int | None:
+        """The page's laid-out width in CSS px (`cssContentSize`), or None."""
+        try:
+            metrics = await asyncio.wait_for(cdp.send("Page.getLayoutMetrics"), FIT_WAIT_S)
+            width = metrics["cssContentSize"]["width"]
+        except Exception:  # noqa: BLE001 - unmeasured is unfitted
+            return None
+        if isinstance(width, bool) or not isinstance(width, (int, float)) or not math.isfinite(width):
+            return None
+        return math.ceil(width - 0.01) if width > 0 else None
 
     def _frame(self, tab: _Tab, cdp, params) -> None:
         """A screencast frame: acked to Chrome at once (it keeps capturing;
@@ -2194,6 +2355,7 @@ class BrowserHost:
             return round(value) if isinstance(value, (int, float)) and value == value else 0
 
         tab.stream.offer_frame(jpeg, size("deviceWidth"), size("deviceHeight"))
+        self._fit_soon(tab)
 
     # -- input -------------------------------------------------------------------------------
 

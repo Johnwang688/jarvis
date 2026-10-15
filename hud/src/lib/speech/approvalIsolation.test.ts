@@ -38,7 +38,7 @@ describe("nothing that hears or acts on speech can reach an approval", () => {
     expect(touching).toEqual(["./index.ts"]);
     const index = strip(speechModules["./index.ts"]);
     const used = [...index.matchAll(/\bapi\.(\w+)/g)].map((m) => m[1]).sort();
-    expect(used).toEqual(["say", "speechSummary", "speechVoice", "speechVoices"]);
+    expect(used).toEqual(["say", "speechDuck", "speechSummary", "speechVoice", "speechVoices"]);   // speechDuck: V15, the Remote Browser lease (no approval route)
   });
 });
 

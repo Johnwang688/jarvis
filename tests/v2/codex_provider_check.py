@@ -1472,7 +1472,7 @@ class Checks(unittest.TestCase):
         with ThreadPoolExecutor(1) as pool:
             running = pool.submit(self.send, h)
             self._running(h)
-            self.provider.steer(h, UserMessage("use the other file", [{"b64": "YWJj", "mime": "image/png"}]))
+            self.assertIs(self.provider.steer(h, UserMessage("use the other file", [{"b64": "YWJj", "mime": "image/png"}])), True)
             events = running.result(5)
         params = self.brain.calls("turn/steer")[0]["params"]
         self.assertEqual(params, {"threadId": "native-0", "expectedTurnId": "turn-1", "input": [
@@ -1572,7 +1572,7 @@ class Checks(unittest.TestCase):
             self._running(h)
             with self.assertLogs(codex.LOG, level="WARNING") as logged:
                 try:
-                    self.assertIsNone(self.provider.steer(h, UserMessage("maybe taken")))
+                    self.assertIs(self.provider.steer(h, UserMessage("maybe taken")), False)
                 finally:
                     self.provider.interrupt(h)      # whatever happened, the held turn ends
                 events = running.result(5)
@@ -1582,6 +1582,31 @@ class Checks(unittest.TestCase):
             self.assertFalse(h.native.steer_unsupported)
             self.assertEqual(events[-1].data, {"stop": "interrupted"})
         self.assertEqual(len(self.brain.calls("turn/steer")), 1)
+
+    def test_unconfirmed_steer_late_answers_do_not_change_the_returned_receipt(self):
+        for refused in (False, True):
+            with self.subTest(refused=refused):
+                h = self.start("steer_silent", thread=replace(self.thread, id="late-"+str(refused)))
+                with patch.object(codex, "STEER_TIMEOUT", 0.05), ThreadPoolExecutor(1) as pool:
+                    running = pool.submit(self.send, h)
+                    self._running(h)
+                    try:
+                        receipt = self.provider.steer(h, UserMessage("unconfirmed owner words"))
+                        self.assertIs(receipt, False)
+                        rid, waiter = next(iter(h.native.steers.items()))
+                        self.assertTrue(waiter.abandoned)
+                        answer = {"id": rid, "error": {"code": -32600, "message": "no active turn to steer"}} if refused else {"id": rid, "result": {"turnId": h.native.turn_id}}
+                        self.assertTrue(self.provider._steer_answered(h.native, answer))
+                        self.assertTrue(waiter.ready.is_set())
+                        self.assertEqual(waiter.ok, not refused)
+                        self.assertIs(receipt, False)  # no later callback can grant Browser authority
+                        self.assertNotIn(rid, h.native.steers)
+                        self.assertFalse(h.native.steer_unsupported)
+                    finally:
+                        self.provider.interrupt(h)
+                    events = running.result(5)
+                self.assertEqual(events[-1].data, {"stop": "interrupted"})
+                self.assertFalse(any(e.kind == K.ERROR for e in events), events)
 
     def test_a_late_steer_refusal_never_fails_the_next_turn(self):
         """The turn completes before Codex answers the steer: the waiter is

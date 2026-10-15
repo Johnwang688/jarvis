@@ -446,6 +446,31 @@ describe("coordinates under the HUD's zoom and the window's DPR", () => {
       .toEqual({ x: 200, y: 100, inside: true });
   });
 
+  // The daemon lays a page with a min-width out wider than the pane (host.py
+  // `_fit`): an 800 × 960 frame at the pane's device pixels in a 500 × 600
+  // canvas. It is drawn at 500/800 and fills the backing store; a pointer
+  // anywhere on it, its right edge included, is a point of the wider page.
+  it("a fitted frame wider than the canvas fills it and maps input to the wider page", () => {
+    const css = { width: 500, height: 600 };
+    const view = { width: 800, height: 960 };
+    const place = placeFrame(css, view);
+    expect(place).toEqual({ x: 0, y: 0, scale: 0.625 });
+    for (const [zoom, dpr] of [[100, 1], [160, 1.5]]) {
+      const dest = frameDest(place, view, zoom, dpr);
+      const back = backingSize(css, zoom, dpr);
+      expect(dest.width).toBeCloseTo(back.width, 6);
+      expect(dest.height).toBeCloseTo(back.height, 6);
+    }
+    const box = { left: 10, top: 20 };
+    expect(clientToPage({ x: 10 + 487.5, y: 20 + 12.5 }, box, 100, place, view)).toEqual({ x: 780, y: 20, inside: true });
+    expect(clientToPage({ x: 10 + 250, y: 20 + 300 }, box, 100, place, view)).toEqual({ x: 400, y: 480, inside: true });
+    // At 160% the same canvas point is 1.6 × as far into the screen.
+    expect(clientToPage({ x: 10 + 487.5 * 1.6, y: 20 + 12.5 * 1.6 }, box, 160, place, view))
+      .toEqual({ x: 780, y: 20, inside: true });
+    // Past the canvas's right edge: clamped to the page's, not the pane's.
+    expect(clientToPage({ x: 10 + 520, y: 20 }, box, 100, place, view)).toEqual({ x: 800, y: 0, inside: false });
+  });
+
   it("off the frame is clamped and marked", () => {
     const view = { width: 400, height: 300 };
     const place = placeFrame({ width: 800, height: 600 }, view);
@@ -482,6 +507,26 @@ describe("the wheel", () => {
     expect(normalizeWheel({ deltaX: 0, deltaY: 0, deltaMode: 0 }, 100, 600)).toBeNull();
     expect(normalizeWheel({ deltaX: NaN, deltaY: NaN, deltaMode: 0 }, 100, 600)).toBeNull();
     expect(normalizeWheel({ deltaX: 0, deltaY: 1e9, deltaMode: 0 }, 100, 600)).toEqual({ deltaX: 0, deltaY: WHEEL_MAX });
+  });
+
+  // A fitted page (host.py `_fit`) is drawn at its placement scale: pixels
+  // and lines are divided by it, so a notch moves the picture as far on
+  // screen as on a page drawn 1:1; a page is the fitted view's own height.
+  it("a frame drawn smaller scrolls by its placement scale", () => {
+    expect(normalizeWheel({ deltaX: 0, deltaY: 100, deltaMode: 0 }, 100, 960, 0.625)).toEqual({ deltaX: 0, deltaY: 160 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: 160, deltaMode: 0 }, 160, 960, 0.625)).toEqual({ deltaX: 0, deltaY: 160 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: 100, deltaMode: 0, shiftKey: true }, 100, 960, 0.625)).toEqual({ deltaX: 160, deltaY: 0 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: 3, deltaMode: 1 }, 100, 960, 0.625)).toEqual({ deltaX: 0, deltaY: 3 * LINE_PX * 1.6 });
+    expect(normalizeWheel({ deltaX: 0, deltaY: -1, deltaMode: 2 }, 100, 960, 0.625)).toEqual({ deltaX: 0, deltaY: -960 });
+    // 1 changes nothing; zero, negative or nonfinite reads as 1.
+    for (const scale of [1, 0, -2, NaN, Infinity]) {
+      expect(normalizeWheel({ deltaX: 0, deltaY: 100, deltaMode: 0 }, 100, 600, scale)).toEqual({ deltaX: 0, deltaY: 100 });
+      expect(normalizeWheel({ deltaX: 0, deltaY: 3, deltaMode: 1 }, 100, 600, scale)).toEqual({ deltaX: 0, deltaY: 3 * LINE_PX });
+    }
+    // Still clamped.
+    expect(normalizeWheel({ deltaX: 0, deltaY: 4000, deltaMode: 0 }, 100, 960, 0.5)).toEqual({ deltaX: 0, deltaY: WHEEL_MAX });
+    expect(cdpWheel({ deltaX: 0, deltaY: 100, deltaMode: 0, button: 0, buttons: 0 }, { x: 780, y: 20 }, 100, 960, 0.625)!.deltaY)
+      .toBe(160);
   });
 
   it("goes as a mouseWheel event at the pointer", () => {
