@@ -274,7 +274,9 @@ def peer(script_path, log_path, thread_name):
                 event("thread/tokenUsage/updated", tokenUsage={"total": {k: v * 2 for k, v in UNIT.items()}, "last": UNIT})
             if mode == "duplicate_usage":
                 event("thread/tokenUsage/updated", tokenUsage={"total": raw, "last": UNIT})
-            finish("paused" if mode == "odd_status" else "completed")   # `odd_status`: no such TurnStatus
+            # `odd_status`: a TurnStatus that is not an ending (`inProgress`)
+            # or one 0.161.0 does not define (`paused`).
+            finish(script.get("odd_status", "paused") if mode == "odd_status" else "completed")
             continue
         elif method == "turn/steer":
             # The 0.153.4/0.161.0 shape: {threadId, input, expectedTurnId} ->
@@ -819,6 +821,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0].kind, K.USAGE)
         self.assertEqual(reports[0].data["provider_reported"]["rate_limits"]["primary"]["usedPercent"], 42)
+        self.assertEqual(reports[0].data["partial_turns"], 0)
         self.assertEqual(events[-1].data["stop"], "end")
         self.assertEqual(self.provider.usage(h).work_tokens, 80)
 
@@ -1003,7 +1006,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(events[8].data["plan"], [{"step": "write", "status": "completed"}])
         self.assertEqual(events[9].data["reason"], "declined")
         self.assertEqual(events[-2].data, {"input": 100, "output": 20, "cached": 40, "cost_usd": None,
-                                         "provider_reported": {"total": UNIT, "last": UNIT}})
+                                         "provider_reported": {"total": UNIT, "last": UNIT}, "partial_turns": 0})
         self.assertEqual(events[-1].data, {"stop": "end"})
         self.assertEqual(self.provider.usage(h).work_tokens, 80)
 
@@ -2656,10 +2659,19 @@ print(json.dumps(out))
             stream = self.provider.send(h, UserMessage("Go"))
             self.assertEqual(next(stream).kind, K.TURN_STARTED)
             self.provider.interrupt(h)
-            self.assertEqual(list(stream)[-1].data, {"stop": "interrupted"}, mode)
+            stopped = list(stream)
+            self.assertEqual(stopped[-1].data, {"stop": "interrupted"}, mode)
+            # The ledger hears of it at once, with the totals already reported.
+            usage = [e.data for e in stopped if e.kind == K.USAGE]
+            self.assertEqual(usage[-1], dict(input=100 * (units - 1), output=20 * (units - 1),
+                                             cached=40 * (units - 1), cost_usd=None,
+                                             provider_reported={}, partial_turns=1), mode)
+            self.assertTrue(all(u["partial_turns"] == 0 for u in usage[:-1]), (mode, usage))
+            self.assertIs(stopped[-2], [e for e in stopped if e.kind == K.USAGE][-1], mode)
             saved = self.saved_usage(h)
             self.assertEqual((saved["complete"], saved["turns"], saved["partial_turns"]), (True, 1, 1), mode)
             events = self.send(h)
+            self.assertTrue(all(e.data["partial_turns"] == 1 for e in events if e.kind == K.USAGE), mode)
             self.assertFalse([e for e in events if e.kind == K.ERROR], (mode, events))
             self.assertEqual(events[-1].data, {"stop": "end"}, mode)
             self.assertFalse(h.native.closed.is_set())
@@ -2681,7 +2693,9 @@ print(json.dumps(out))
         """A capacity failure ends `failed`, and its cooldown is what the next
         send on that session meets: "model cooling", not a fatal error."""
         h = self.start("capacity")
-        self.assertEqual(self.send(h)[-1].data, {"stop": "error"})
+        failed = self.send(h)
+        self.assertEqual(failed[-1].data, {"stop": "error"})
+        self.assertEqual([e.data["partial_turns"] for e in failed if e.kind == K.USAGE], [1])
         self.assertEqual(self.saved_usage(h)["partial_turns"], 1)
         events = self.send(h)
         self.assertEqual(events[0].data["message"], "Codex model cooling")
@@ -2704,13 +2718,16 @@ print(json.dumps(out))
         thread = replace(self.thread, id="abandoned", provider_session_id=h.provider_session_id)
         with self.assertRaisesRegex(RpcError, "resume accounting"):
             self.provider.resume(thread, self.brief, lambda *_: Decision.ALLOW)
-        h = self.start("odd_status", thread=replace(self.thread, id="odd"))
-        self.assertEqual(self.send(h)[-1].data, {"stop": "error"})
-        self.assertFalse(self.saved_usage(h)["complete"])
-        events = self.send(h)
-        self.assertTrue(events[-1].data["fatal"])
-        self.assertIn("previous turn accounting incomplete", events[-1].data["message"])
-        self.assertEqual(len(self.brain.calls("turn/start")), 2)
+        for n, status in enumerate(("inProgress", "paused"), 1):
+            self.brain.script["odd_status"] = status
+            h = self.start("odd_status", thread=replace(self.thread, id=f"odd-{status}"))
+            self.assertEqual(self.send(h)[-1].data, {"stop": "error"}, status)
+            self.assertFalse(self.saved_usage(h)["complete"], status)
+            self.assertEqual(self.saved_usage(h)["partial_turns"], 0, status)
+            events = self.send(h)
+            self.assertTrue(events[-1].data["fatal"], status)
+            self.assertIn("previous turn accounting incomplete", events[-1].data["message"])
+            self.assertEqual(len(self.brain.calls("turn/start")), 1 + n, status)
 
     def test_a_saved_partial_turn_count_is_checked(self):
         from jarvis.v2.providers.codex_usage import Accounting

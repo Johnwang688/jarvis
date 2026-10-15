@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import type { BackfillResult, DiscordStatus, Project, RouteView, Usage } from "../types";
-import { meterFor, type Bar } from "../lib/quota";
+import { meterFor, partialNote, partialTurns, type Bar } from "../lib/quota";
 import { backfillTargets, discordLight, guildConfigured } from "../lib/discord";
 
 function ClaudeMark() {
@@ -46,6 +46,7 @@ export function UsagePanel(props: { usage: Usage | null }) {
   const providers = props.usage.providers || {};
   const claude = providers.claude;
   const codex = providers.codex;
+  const partial = partialTurns(codex);
   return (
     <div className="block usage-meters" data-testid="usage">
       <div className="meter-row" data-testid="usage-claude">
@@ -63,6 +64,13 @@ export function UsagePanel(props: { usage: Usage | null }) {
           <Meter name="week" bar={meterFor(codex, "weekly")} testid="quota-bar-codex-weekly" />
         </div>
       </div>
+      {partial ? (
+        // Codex's own weekly meter above is its report and unaffected; this
+        // qualifies Jarvis's local token count (ledger, task ceilings).
+        <div className="muted small" data-testid="usage-codex-partial" title={partialNote(partial)}>
+          tokens may be low (≥)
+        </div>
+      ) : null}
     </div>
   );
 }

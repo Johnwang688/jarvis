@@ -230,14 +230,15 @@ def _world() -> dict:
             "providers": {
                 "claude": {
                     "state": "available", "reason": "",
-                    "today": {"work_tokens": 412000, "spend_usd": 0.0, "equivalent_usd": 9.42},
+                    "today": {"work_tokens": 412000, "spend_usd": 0.0, "equivalent_usd": 9.42, "partial_turns": 0},
                     "allowance": {"work_tokens": 2000000},
                     # Never computed: absent means the provider did not report one.
                     "quota": None,
                 },
                 "codex": {
                     "state": "over_threshold", "reason": "weekly window at 82%",
-                    "today": {"work_tokens": 220000, "spend_usd": 0.0, "equivalent_usd": 0.0},
+                    "today": {"work_tokens": 220000, "spend_usd": 0.0, "equivalent_usd": 0.0,
+                              "partial_turns": 0},
                     "allowance": {"work_tokens": 1000000},
                     "quota": {"windows": [
                         {"name": "5h", "used_percent": 41, "resets_at": "2026-09-15T04:00:00Z"},
@@ -246,7 +247,7 @@ def _world() -> dict:
                 },
                 "fast": {
                     "state": "available", "reason": "",
-                    "today": {"work_tokens": 9100, "spend_usd": 0.0121, "equivalent_usd": 0.0121},
+                    "today": {"work_tokens": 9100, "spend_usd": 0.0121, "equivalent_usd": 0.0121, "partial_turns": 0},
                     "allowance": None, "quota": None,
                 },
             }

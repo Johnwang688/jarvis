@@ -282,8 +282,10 @@ every one of these routes asks (`kind`):
 - `GET /usage` → `{"providers": {"claude": {...}, "codex": {...}, "fast":
   {...}}}` where each is `{"state": "available"|"over_threshold"|"cooling"|
   "unavailable", "reason", "today": {"work_tokens", "spend_usd",
-  "equivalent_usd"}, "allowance": {...}, "quota": null | {"windows": [
-  {"name", "used_percent", "resets_at"}]}}`. `quota` is filled only from
+  "equivalent_usd", "partial_turns"}, "allowance": {...}, "quota": null | {"windows": [
+  {"name", "used_percent", "resets_at"}]}}`. `partial_turns` (2026-10-15)
+  is today's Codex turns that ended interrupted or failed. When it is
+  nonzero, `work_tokens` is a lower bound. It is 0 for other providers. `quota` is filled only from
   a provider's own report, never computed: Codex rate-limit updates
   (5h and weekly), and Claude's 5h and week windows from Claude Code's
   own usage endpoint when a subscription login is present. The login

@@ -796,8 +796,19 @@ What still fails closed, as before:
   loss, interrupt deadline) leaves `complete: false`, and that thread does
   not resume;
 - a `turn/completed` whose status is not `completed`, `interrupted` or
-  `failed` does the same;
-- a `completed` turn with no usage is fatal.
+  `failed` does the same. That includes `inProgress`, the one defined
+  TurnStatus that is not an ending;
+- a `completed` turn with no usage is fatal;
+- a `thread/tokenUsage/updated` for a turn, read after that turn's
+  `turn/completed`, is dropped as a replay. The SV-0 recordings show none, so
+  0.161.0 is not known to send one. If one came and the session closed before
+  the next turn's usage caught `reported` up, a later resume of a thread
+  whose counters Codex retained would find its baseline mismatched. It would
+  then fail closed ("resume usage baseline unknown").
+
+Stop does not stop a Codex sub-agent. `turn/interrupt` ends only the
+parent's turn, and a running child goes on in the surviving session (SV-0
+`parent_interrupt`). SV-4 adds per-child Stop.
 
 A thread already saved at `complete: false` before this fix cannot be told
 apart from a lost transport, so it stays unresumable.
@@ -820,3 +831,53 @@ Checks:
 The first, second and daemon checks fail on `main`. Four mutants are killed:
 `main`'s rule, closing the accounting on any status, not counting partial
 turns, and closing it only on `interrupted`.
+
+### Partial turns are disclosed (2026-10-15 follow-up)
+
+A Codex `usage` event carries `partial_turns`, the session's count from
+`usage.json`. A turn that ends `interrupted` or `failed` yields one more
+`usage` event before its `turn_finished`, with the totals already reported
+and `partial_turns` raised. Its `provider_reported` is `{}`. The event is
+logged in the thread's `log.jsonl`. The ledger takes the count as a
+high-water delta per thread, as it takes the tokens:
+
+- a row's `partial_turns` is the delta;
+- its `partial_mark` is restored on reload.
+
+`UsageLedger.partial_turns()` sums the deltas. `state()` puts the day's count
+in `totals`, so `GET /usage` has `today.partial_turns` for every provider.
+When the count is nonzero, `state()`'s reason reads
+`local daily work_tokens: ≥N/limit`. The daemon publishes `usage_updated`
+when the count changes, even if no total did.
+
+The HUD's Usage panel shows "tokens may be low (≥)" under Codex while the
+day's count is nonzero. Its title names the count. Codex's own weekly meter
+is its report and is unaffected. `allowanceBar` (not drawn on the rail)
+writes "≥ N / limit tok (may be low)". No number is added or estimated
+anywhere.
+
+A task's `tokens` ceiling (`ceiling_hit`) and the daily allowance compare
+these same counts, so with partial turns they are lower bounds: a ceiling
+can be passed by what Codex never reported.
+
+Checks:
+
+- `ledger_check.test_codex_partial_turns_are_a_highwater_count_and_a_lower_bound`;
+- `codex_provider_check`: the stopped-turn event in
+  `test_a_stopped_turn_closes_its_accounting`, the failed turn's event, and
+  `odd_status` as both `inProgress` and `paused`;
+- `hud_backend_check`: `/usage`, `usage_updated` and the log in the daemon
+  test;
+- `hud/src/lib/quota.test.ts`;
+- the face check's `quota_checks`.
+
+Ten mutants are killed:
+
+- no stopped-turn event;
+- `inProgress` closing the accounting;
+- no high-water;
+- no "≥" in the reason;
+- no `usage_updated`;
+- the mark not restored on reload;
+- three in `quota.ts`;
+- the panel's qualifier not drawn (face check).
