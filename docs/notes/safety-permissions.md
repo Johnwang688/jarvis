@@ -2232,6 +2232,17 @@ own chat turn at the HUD**, which holds `write_file`, `edit_file`,
   operand is placed where the shell finds it (`~`, the working folder, globs,
   symlinks) and judged by the read tools' own credential-folder judge; a
   recursive grep/rg of a folder holding a credential folder is refused too.
+  Review 2 closed three ways past it: no `$` bash would expand is run
+  (`cat $HOME/.ssh/…`; single-quote a literal `$`); grep's every spelling of
+  recursion counts (`-d recurse`, `-drecurse`, `--directories=recurse`, any
+  unambiguous prefix of `--recursive`/`--dereference-recursive`/
+  `--directories`); and the modes that follow every nested symlink are
+  refused outright (grep `-R`/`--dereference-recursive`, rg `-L`/`--follow`),
+  since `link -> ~/.ssh` deep in a tree is not on the line to judge. Plain
+  `grep -r` and `rg` follow only symlinks named on the line, which are judged.
+  **Open, every provider:** `run_command` with an allowlisted `grep`/`cat`
+  reaches the same three forms, because the permit's `credentials-path` rule
+  neither expands `$HOME` nor follows recursion.
   The `.env` scrubber also withholds credential-named values from the
   process's own environment, so `env` cannot print the daemon's keys. An Always on an edit
   card is a standing `{"tool": "write_file"}` grant, as an Always on Claude's

@@ -316,7 +316,10 @@ design §2 D2 and §8.1 carry the amendment. Code: `jarvis/v2/providers/fastpath
   never runs. `run_readonly` is asked too (review H1): rules' ALLOW still runs
   an ordinary read unasked, and `run_readonly` itself now refuses an operand
   that is or reaches a credential folder (symlinks and globs followed, a
-  recursive grep of a folder holding one), on every surface.
+  recursive grep of a folder holding one, any expandable `$`, grep's other
+  recursion spellings, and the symlink-following grep `-R`/rg `-L` modes),
+  on every surface. Commands get an empty stdin, so `rg TODO` with no folder
+  searches its folder instead of waiting on a pipe.
 - **Where.** `runtime.working_dir()` is bound per turn to the brief's `cwd`
   resolved to its physical folder (`realpath`, review M1; the prompt states
   it). A brief whose folder cannot be bound (not absolute, not an existing
