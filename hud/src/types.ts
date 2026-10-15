@@ -306,7 +306,10 @@ export interface Diff {
 export interface ProviderUsage {
   state: "available" | "over_threshold" | "cooling" | "unavailable";
   reason: string;
-  today: { work_tokens: number; spend_usd: number; equivalent_usd: number };
+  /** `partial_turns`: today's Codex turns that ended interrupted or failed.
+   * Nonzero: `work_tokens` is a lower bound (a request cut off mid-stream may
+   * never have been reported). Absent from an older daemon. */
+  today: { work_tokens: number; spend_usd: number; equivalent_usd: number; partial_turns?: number };
   allowance: Record<string, number> | null;
   quota: null | { windows: { name: string; used_percent: number; resets_at: string | number }[] };
 }

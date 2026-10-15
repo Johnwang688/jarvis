@@ -199,6 +199,13 @@ h2.bar {
   overflow: hidden; text-overflow: ellipsis;
 }
 .tree-row:hover { background: var(--hover); }
+/* "Show N more" under a project's chats: a button that reads as one more row. */
+button.tree-row.morechats {
+  width: 100%; box-sizing: border-box; border: 0; border-radius: 0; background: none;
+  text-align: left; font-size: 12px; color: var(--text-muted);
+}
+button.tree-row.morechats:hover:not(:disabled) { background: var(--hover); color: var(--text-2); }
+button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
 .tree-row.sel { background: var(--selected); color: var(--text); box-shadow: inset 2px 0 var(--accent); }
 .tree-row .tw { flex: 0 0 10px; color: var(--text-muted); font: 10px var(--mono); }
 

@@ -45,6 +45,9 @@ class UsageLedger:
         self._lock = threading.RLock()
         self._rows = []
         self._baselines = {}
+        # Per Codex thread, the highest `partial_turns` seen: a cumulative
+        # count, taken as a high-water delta like its tokens.
+        self._partial_marks = {}
         self._seen = set()
         self._health = {}
         # Historical rows retain lifetime task ceilings and cumulative offsets;
@@ -62,6 +65,8 @@ class UsageLedger:
             self._seen.add(row["event_id"])
         if "baseline" in row:
             self._baselines[row["thread_id"]] = row["baseline"]
+        if "partial_mark" in row:
+            self._partial_marks[row["thread_id"]] = row["partial_mark"]
 
     def _append(self, row):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -108,6 +113,16 @@ class UsageLedger:
                     row["baseline"] = max(old, tokens)
                     tokens = max(0, tokens - old)
                 row["work_tokens"] = tokens
+                partial = data.get("partial_turns")
+                if provider == ProviderName.CODEX and partial is not None:
+                    # Turns Codex ended interrupted or failed: their usage
+                    # may be under-reported, so a total they are part of is
+                    # a lower bound (2026-10-15).
+                    if isinstance(partial, bool) or not isinstance(partial, int) or partial < 0:
+                        raise ValueError("partial_turns must be a nonnegative integer")
+                    if thread_id and partial > self._partial_marks.get(thread_id, 0):
+                        row["partial_turns"] = partial - self._partial_marks.get(thread_id, 0)
+                        row["partial_mark"] = partial
                 if provider != ProviderName.CODEX and usage.cost_usd is not None:
                     key = "equivalent_usd" if provider == ProviderName.CLAUDE else "spend_usd"
                     row[key] = _number(usage.cost_usd)
@@ -130,6 +145,16 @@ class UsageLedger:
                 for key in result:
                     result[key] += row.get(key, 0)
         return result
+
+    def partial_turns(self, *, provider=None, task_id=None, day=None):
+        """How many Codex turns that ended interrupted or failed are in the
+        rows selected as `totals` selects them. Nonzero: their work_tokens
+        are a lower bound, by an unknown amount."""
+        with self._lock:
+            return sum(row.get("partial_turns", 0) for row in self._rows
+                       if (provider is None or row["provider"] == provider)
+                       and (task_id is None or row["task_id"] == task_id)
+                       and (day is None or row["day"] == day))
 
     def set_health(self, provider, ok, reason):
         with self._lock:
@@ -155,6 +180,7 @@ class UsageLedger:
         provider = ProviderName(provider).value
         with self._lock:
             totals = self.totals(provider=provider, day=self._day())
+            totals["partial_turns"] = self.partial_turns(provider=provider, day=self._day())
             ok, reason = self._health.get(provider, (True, "health not yet checked"))
             state = "available"
             cooling = [r for r in self._rows if r["provider"] == provider and
@@ -175,7 +201,8 @@ class UsageLedger:
                 _number(limit)
                 if used >= limit * no_new_work:
                     state = "over_threshold"
-                reason = f"{label}: {used:g}/{limit:g}; no_new_work={no_new_work:g}"
+                low = "≥" if visible_window is None and key == "work_tokens" and totals["partial_turns"] else ""
+                reason = f"{label}: {low}{used:g}/{limit:g}; no_new_work={no_new_work:g}"
             return {"state": state, "reason": reason, "totals": totals}
 
     def ceiling_hit(self, task):
