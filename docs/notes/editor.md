@@ -999,3 +999,56 @@ strip's double-click pin), so a saved pane spec can still carry an italic
 preview tab, which the tab's double click or an edit pins. Pinned-tab opening
 in a narrow pane (the tree folding at once), middle-click or × closing and the
 Save / Don't save / Cancel prompt on the last unsaved tab are unchanged.
+
+## WebAssembly leaves the approval page (2026-10-15)
+
+**The owner's decision of 2026-10-15 overrides plan §2.7's one policy
+everywhere, for WebAssembly only.** ED-5 (above, archived) put
+`'wasm-unsafe-eval'` in `hud_api.HUD_POLICY`, so every response — the HUD
+page that draws approval cards included — allowed WebAssembly. The PR #54
+review had noted the page itself never needs it. Now:
+
+- **Where WebAssembly runs.** Only in three dedicated module workers, each
+  its own `/assets/worker-<hash>.js`: the syntax worker (`lib/syntax/worker.ts`:
+  web-tree-sitter's runtime and the 13 grammars), the VAD worker
+  (`lib/listen/worker.ts`: onnxruntime-web for Silero, and RNNoise) and the
+  wake-word worker (`lib/wake/worker.ts`: onnxruntime-web). The main
+  document compiles none: its chunks mention `WebAssembly` only in error
+  strings, and the mic's AudioWorklet (which would inherit the page's
+  policy) runs no WebAssembly.
+- **The split.** `HUD_POLICY`'s `script-src` is `'self'`. The one widening,
+  `WASM_SCRIPT_SRC` (`'self' 'wasm-unsafe-eval'`), goes only on responses
+  `hud_api.wasm_script(name)` names — a `.js` file directly under `assets/` —
+  through `binary(wasm=True)` from `hud_files`, `frame_headers(wasm=)` and
+  `content_security_policy(wasm=)`. A dedicated worker runs under its own
+  script response's policy (CSP3; Chromium does), so the grant reaches the
+  workers. A module the page imports runs under the page's policy, and a
+  `.js` opened as a document runs nothing (`nosniff`), so granting every
+  `/assets/*.js` is no wider than granting the worker entries alone, without
+  coupling the daemon to Vite's chunk names. `/`, `index.html`, the 503
+  pages, JSON, SSE, errors, `.wasm`, the manifest and icons carry the page's
+  policy. A response's own directives still only narrow and cannot grant
+  themselves WebAssembly; the preview listener never takes the grant. The
+  daemon's handler resets `_wasm` with `_csp` on every `send_response`; the
+  headless mock decides by the same `wasm_script`.
+- **No restructure was needed:** the code already kept WebAssembly off the
+  window's thread for V5/V14's own reasons.
+
+Checks, each shown to bite: `tests/v2/frame_check.py` (20 tests; new: the
+approval page installed and under `HUD_DEV` on both listeners — `/`,
+`/index.html`, `/assets/index.html`, a `.wasm`, the manifest and `/status`
+without the grant, `/assets/*.js` with it — and `wasm_script`'s cases).
+Putting `'wasm-unsafe-eval'` back in `HUD_POLICY` fails 336 subtests across
+11 tests; granting it to every HUD file, the page included, fails 26.
+`hud_v2_csp_check` (48 checks): the page's own `WebAssembly.compile` now
+rejects (`CompileError`, a `script-src` violation) while the syntax worker
+compiles Python's grammar; the page/asset loop expects the grant on scripts
+only. `hud_v2_syntax_check` (51): the worker script's response carried the
+grant and `/` did not. With the page narrowed and the grant also taken off
+the worker scripts, all 13 grammars fail ("grammar failed"), which proves the
+workers compile under their own script's policy and not the page's. The
+VAD (96), wake-word (88) and denoise (72) suites check every response's
+policy against the daemon's rule. Old page-policy pins in
+`hud_v2_browser_check` (168) and the voice suites were updated with it.
+Run `hud_v2_csp_check` with the usual HOME: under a temporary HOME its three
+manifest checks (`Page.getAppManifest`) fail, on `origin/main` too.

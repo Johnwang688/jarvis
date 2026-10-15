@@ -682,7 +682,7 @@ def npm_ci_reason(hud: Path, clean: bool = False) -> str | None:
 # 2026-10-15: an install script is code from the registry that runs at install
 # time with the owner's rights). The flag, not an .npmrc: a command-line option
 # outranks every npm config file, so no `.npmrc` can turn the scripts back on.
-# The HUD needs none of them — the lock's 14 (node-gyp-build for tree-sitter's
+# The HUD needs none of them — the 14 that install here (node-gyp-build for tree-sitter's
 # native Node bindings, which the browser build never loads; esbuild's
 # install.js, whose binary arrives as its optional @esbuild/* package anyway;
 # protobufjs's version notice) — see docs/notes/hud-workspace.md.

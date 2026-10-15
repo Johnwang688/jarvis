@@ -76,3 +76,16 @@ plan disagree, this file wins.**
   file." This **amends plan §2.3**: a single click on a tree file now opens a normal (pinned) tab, re-clicking an open
   file activates its tab, and the tree no longer creates italic preview tabs. The preview machinery (`openTab`/`pinTab`,
   `Tabs.preview`, the tab strip's double-click pin) stays for saved pane specs.
+
+## Added 2026-10-15
+
+- **No WebAssembly in the approval page (the owner's decision).** This **overrides plan §2.7's one policy everywhere**
+  (and the defaulted item that put `'wasm-unsafe-eval'` in it) for WebAssembly only. The HUD page that draws approval
+  cards, and every other document, JSON and asset response, sends `script-src 'self'`. Only the HUD's own JavaScript
+  under `/assets/` (`hud_api.wasm_script`) adds `'wasm-unsafe-eval'`: a worker runs under its own script's policy, and
+  WebAssembly runs only in the syntax, VAD and wake-word workers. `'unsafe-eval'` stays refused everywhere. Details in
+  `docs/notes/editor.md`, "WebAssembly leaves the approval page".
+- **`jarvis hud rebuild` runs `npm ci --ignore-scripts` (the owner's decision).** Install scripts can be malicious;
+  none of the 14 that install here (fsevents, macOS-only, is a 15th) is needed for the HUD build. If a dependency ever genuinely needs one, report which and why;
+  do not turn scripts back on globally. Details in `docs/notes/hud-workspace.md`, "`jarvis hud rebuild` runs no install
+  scripts".
