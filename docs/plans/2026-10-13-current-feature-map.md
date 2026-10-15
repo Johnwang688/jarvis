@@ -1,6 +1,6 @@
 # Jarvis current feature map and team ownership
 
-Updated 2026-10-13 (America/Chicago). This is the shared coordination map for the
+Updated 2026-10-15 (America/Chicago). This is the shared coordination map for the
 2026-10-12 checkpoint, the five plans merged in [PR #125](https://github.com/Johnwang688/jarvis/pull/125),
 and John's subsequent VEX, LaTeX and Browser-controls requests. It is a working
 registry: update the relevant row when claiming, handing off, opening a PR,
@@ -15,6 +15,17 @@ A saved draft alone is not an active claim.
 
 **Voice packages owned by the Claude team (2026-10-13):** all of V0–V15. As of 2026-10-15 all sixteen are merged and installed (V0 as measurements only); follow-ups in [2026-10-15-voice-followups.md](2026-10-15-voice-followups.md). No package has physical-mic, speaker or Windows Chrome acceptance; every receipt is synthetic or fake-device audio.
 Slot1 is reserved for that team under the shared limit below.
+
+**2026-10-14/15 landings (all merged to main and installed unless noted):** the
+three owner-reported Browser bugs ([#186](https://github.com/Johnwang688/jarvis/pull/186)),
+the small HUD follow-ups ([#187](https://github.com/Johnwang688/jarvis/pull/187)),
+load-proof test bounds QA-LOAD ([#188](https://github.com/Johnwang688/jarvis/pull/188)),
+the HTTP-auth navigate-away fix ([#190](https://github.com/Johnwang688/jarvis/pull/190)),
+the HUD hardening decisions ([#191](https://github.com/Johnwang688/jarvis/pull/191)) and two
+archived-notes payload restores ([#185](https://github.com/Johnwang688/jarvis/pull/185),
+[#189](https://github.com/Johnwang688/jarvis/pull/189)). The Claude lead team started SV-0 and
+two editor items on 2026-10-15 (rows below). The Browser freeze still holds: only
+Browser bug fixes ship.
 
 ## How teams coordinate
 
@@ -197,7 +208,8 @@ QUEUED, not available to claim. Bug fixes in progress:
 
 | ID | Bug | Status |
 |---|---|---|
-| B-BUGS-1014 | Soft Remote frames (1× stretched on a 150% display); pointer/click lag (moves queued behind a 61/s Chrome ceiling at 160 Hz); "only loads local servers" flashing while an external address opens | **IN REVIEW — Claude lead, branch `claude/browser-sharp-input`.** Measurements and limits in `docs/notes/browser.md` ("Sharp frames and a pointer that keeps up"). |
+| B-BUGS-1014 | Soft Remote frames (1× stretched on a 150% display); pointer/click lag (moves queued behind a 61/s Chrome ceiling at 160 Hz); "only loads local servers" flashing while an external address opens | **INSTALLED — [#186](https://github.com/Johnwang688/jarvis/pull/186), merged 2026-10-15; Claude lead, branch `claude/browser-sharp-input`. Owner visual confirmation pending.** | Remote frames are sharp at `RASTER_SCALE` 1.5 (Chrome launches with `--force-device-scale-factor=1.5`; scale 2 was tried and dropped for memory); a still-queued pointer move or wheel merges into the next one, so a page that keeps up sees every event; a Direct tab shows "Opening…" instead of the refusal flash. Cost on a text-heavy page: press to changed frame 17 to 38 ms p50, a frame 338 to 638 KB. Synthetic and real-Chrome suites pass; nobody has looked at it on the owner's 4K display yet. Measurements and limits in `docs/notes/browser.md` ("Sharp frames and a pointer that keeps up"). |
+| B-AUTH follow-up | Superseding an HTTP auth prompt (owner navigates away) | **INSTALLED — [#190](https://github.com/Johnwang688/jarvis/pull/190), merged 2026-10-15; Claude lead, `claude/browser-auth-navigate-away`.** A Browser bug fix, allowed under the freeze. | Found by QA-LOAD. The old load is now stopped (`Page.stopLoading`) while it is still paused on its challenge, and the prompt is finished (CancelAuth, reason `changed`) only if the stop has not settled it. Before, cancelling first let Chrome commit the held 401 page late and interrupt the new navigation ("navigation failed"). Review MED-1: while the stop is awaited the prompt is marked `answering`, so a refresh cannot republish it and an answer cannot be sent. New fake test plus a real-Chrome test (old order failed 3 of 3, new order passed 3 of 3). Split from #188 so it reverts alone. No real-account acceptance claim. |
 
 | ID | Feature | Status / owner | Dependencies / definition of done |
 |---|---|---|---|
@@ -251,13 +263,20 @@ apart from queued finish/failure notices. Existing child-tool restrictions remai
 
 | ID | Feature | Status / owner | Dependencies / acceptance |
 |---|---|---|---|
-| SV-0 | Capture actual native Claude/Codex child protocol and lifecycle fixtures | **READY — unclaimed** | Synthetic one/parallel/background/nested/interrupted children; Claude stop_task, Codex experimental schema and child notifications/interrupt/token totals. Sanitized fixture recordings, no invented event shapes. Coordinate native processes and test slots. |
+| SV-0 | Capture actual native Claude/Codex child protocol and lifecycle fixtures | **TAKEN — Claude lead team, started 2026-10-15** | Synthetic one/parallel/background/nested/interrupted children; Claude stop_task, Codex experimental schema and child notifications/interrupt/token totals. Sanitized fixture recordings, no invented event shapes. Coordinate native processes and test slots. |
 | SV-1 | Claude child tagging/events, daemon record/routes/runner and API docs | **WAIT — unclaimed** | SV-0 Claude evidence. Keep child prose out of parent/Discord answer and preserve approval identity. |
 | SV-2 | Codex child set/routing, spawn events and non-fatal child approval handling | **WAIT — unclaimed** | SV-0 Codex + SV-1. High-overlap with B-NATIVE provider identity filters; agree shared hunks. If CLI lacks child notifications, explicitly narrow support. |
 | SV-3 | HUD child store, inline spawn rows and read-only transcript pane | **WAIT — unclaimed** | SV-1 merged event/route shapes; includes workspace migration, reducer, mock and browser checks. |
 | SV-4 | Stop one child via owner route and button | **WAIT — unclaimed** | SV-1 + SV-3 + actual L-C3/L-X3 stop-one proof; parent and siblings must survive. |
 | SV-5 | Coalesced child finished/failed speech notices | **WAIT — unclaimed** | SV-1 + V7; no reading child prose aloud or speaking owner-initiated Stop. |
 | SV-6 | Read child activity between orchestrator turns | **DEFERRED — decision after SV-0** | SV-1/2 and evidence background work needs it (L-C7/Q6). High-risk reader lifecycle change; do not silently absorb into SV-1. |
+
+## HUD editor polish — started 2026-10-15
+
+| ID | Feature | Status / owner | Definition of done |
+|---|---|---|---|
+| ED-MARKS | Git marks (added, modified, deleted) in the editor's overview ruler | **TAKEN — Claude lead team, started 2026-10-15; being built now.** | Scope and acceptance are set by the lead team's PR; this row records the claim only. The accepted limit on owner global git filters in editor status (HUD-FOLLOWUPS below) is unchanged. |
+| ED-ICONS | File-type icons on editor tabs | **TAKEN — Claude lead team, started 2026-10-15.** | Scope and acceptance are set by the lead team's PR; this row records the claim only. Owner decisions on editor and tab dimensions and input behavior still apply. |
 
 ## Original checkpoint and requested fixes already landed
 
@@ -287,17 +306,25 @@ PR #125 itself adds plans, not the features those plans describe.
 
 | ID | Scope | Status / next step |
 |---|---|---|
-| QA-LOAD | Remaining load-sensitive tests and reliable sweep reporting | **READY — unclaimed.** Reproduce unchanged VEX/terminal throughput bounds; retain performance assertions and distinguish regression from scheduler noise. Preserve per-suite output and real exit codes: an old lead wrapper could exit0 with failed suites. Audit old quota flake against current waits before editing. |
+| QA-LOAD | Load-sensitive tests and reliable sweep reporting | **INSTALLED — [#188](https://github.com/Johnwang688/jarvis/pull/188), merged 2026-10-15; Claude lead, `claude/qa-load`.** | `tests/loadclock.py` judges load-sensitive bounds at idle speed; the `rules`, VEX, terminal and devurl bounds use it, and the runner collision test is fixed. Honest limit: under load a bound can be about 30% looser than at idle, so a machine under load can pass a regression that an idle machine would fail. An idle judge is exact. A failing bound is still a failure; none was removed. Per-suite output and real exit codes stay required. The navigate-away auth race it found shipped separately as #190. |
 | GIT-LIVE | Positive end-to-end native Git flow under the final approval policy | **VERIFY — unclaimed.** Local worktree/edit/commit and denied/resumed pushes were checked. Use a disposable authorized repo/branch and actual owner approval for the final positive flow; do not reuse old fixture-helper evidence as native proof. |
-| HUD-FOLLOWUPS | Reconcile the checkpoint's old `hud-open-followups` list | **VERIFY — unclaimed.** Most named input/draft/editor issues already merged above; recover the original list and close by evidence before making new edits. |
+| HUD-FOLLOWUPS | Reconcile the checkpoint's old `hud-open-followups` list | **DONE — audited 2026-10-14; [#187](https://github.com/Johnwang688/jarvis/pull/187) merged 2026-10-15.** The "Jarvis can read" switch now follows other windows and an answered task question clears at once. | The old accepted-at-merge list is closed by evidence. Remaining small item: git marks in the editor overview ruler (ED-MARKS above, being built). **Accepted limits, not tasks:** `terminal_guard` over-refuses a command with `> `; the AST walker has an `importlib` blind spot; the fence tier is keyed on `fetch_page`/`web_search`; a leftover `.tmp` can remain after a hard crash; `/mnt/c` delete by path; owner global git filters apply to editor status; the Browser gate is shared across profiles (Browser frozen). |
+| NOTES-CHECK | `slim_claude --check` failing on the archived notes | **INSTALLED — [#185](https://github.com/Johnwang688/jarvis/pull/185) (`editor.md`) and [#189](https://github.com/Johnwang688/jarvis/pull/189) (`terminals.md`), merged 2026-10-15; docs and tooling only.** | Each restored the archived `claude-source` payload byte for byte and moved the current text outside it (the terminals readable-switch note moved out of the archive). `python scripts/slim_claude.py --check` passes again. |
+| HUD-HARDENING | Owner hardening decisions of 2026-10-15 | **INSTALLED — [#191](https://github.com/Johnwang688/jarvis/pull/191), merged 2026-10-15.** | The approval page's CSP has no `'wasm-unsafe-eval'`. Only a `Sec-Fetch-Dest: worker` fetch of a `.js` directly under `/assets/` gets it, and those responses send `Vary: Sec-Fetch-Dest`; a path-only grant was rejected in review because a same-origin popup gained a realm that could compile WebAssembly. The three WebAssembly users (syntax, VAD, wake word) run in module workers. `jarvis hud rebuild` runs `npm ci --ignore-scripts`; this closes only the install-time route. Decisions in [the editor decisions](2026-10-09-hud-editor-decisions.md) under "Added 2026-10-15"; worker invariant in `docs/notes/editor.md`. |
 | VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **INSTALLED — [#158](https://github.com/Johnwang688/jarvis/pull/158); Codex lead / `browser_auth`; verified build above.** Branch `codex/vex-download-device-status`, runtime `70dfd6c`, [contract/verified gates](2026-10-13-vex-download-device-status.md). Stable actual-PTY Download output/final records; shared source-verified USB-only Brain/Controller checks with unknown/busy/stale preservation and bounded timestamped history. PASS: 38 focused Python, 50 targeted HUD units, production build, 49 selected actual-HUD checks, 9 feedback/narrow checks and 7 Build/Clean output regressions. Merged at `f26848d1` and installed by the normal guarded rebuild/restart above. Real VEX tools/devices and robot Download acceptance **UNRUN**; no radio-link or extension-host health claim. |
 | VEX-UI | Broad VEX view redesign | **DEFERRED.** The urgent Clean/Build fix is installed. The narrow bug request does not itself expand into a full redesign or authorize real robot operations. |
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 
-Good starting points for another team, after claiming: **SV-0** or **QA-LOAD**
-(Claude voice ownership/status is recorded in the individual rows above).
-B-NATIVE, B-AUTH and B-FIND are installed; their implementation reservations are complete. Choose
-other unclaimed packages or coordinate a handoff with the named lead.
+Starting points for another team: **GIT-LIVE** (needs a disposable repo and the
+owner), or the unclaimed items in the voice follow-ups. SV-0 is taken and
+QA-LOAD is installed. B-NATIVE, B-AUTH and B-FIND are installed; their
+implementation reservations are complete. Choose other unclaimed packages or
+coordinate a handoff with the named lead.
+
+**Remaining:** voice follow-ups are listed in
+[2026-10-15-voice-followups.md](2026-10-15-voice-followups.md). The one that touches a
+boundary is the `/stt` and `/say` routes, which have no `owner_only` check; the gap is
+older than V2 and is not closed by any merged package.
 
 ## Shared test, review and release contract
 
